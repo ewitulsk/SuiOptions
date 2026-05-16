@@ -1,0 +1,23 @@
+# Market-maker bot config.
+#
+# `MM_QUOTE_KEY` env var holds the 32-byte Ed25519 secret the bot uses to
+# sign Quotes. Quoting tx fees come from the configured Sui wallet
+# (`SUI_PRIVATE_KEY_TESTNET`).
+
+quoting_url   = "ws://127.0.0.1:9002/"
+
+# Pricing inputs. With the SUI/SUI test deployment these numbers express
+# "1 SUI ≈ 1 SUI", so any positive vol gives a small premium. Replace with
+# real model outputs once test tokens land.
+spot_price       = 1_000_000_000   # in settlement-asset smallest-units (1 SUI in MIST)
+vol              = 0.6
+rate             = 0.05
+days_to_expiry   = 30.0
+quote_ttl_ms     = 30_000
+
+# Both roles by default; a single MM Account can serve writer + trader.
+roles = ["trader_mm", "writer_mm"]
+
+# Where call tokens / position NFTs minted to us should land.
+# Leave unset to derive from SUI_PRIVATE_KEY_TESTNET.
+# token_recipient = "0xabc..."

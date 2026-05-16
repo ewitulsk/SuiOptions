@@ -1325,6 +1325,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "clients"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bcs",
+ "chrono",
+ "clap",
+ "config",
+ "ed25519-dalek",
+ "futures",
+ "futures-util",
+ "hex",
+ "move-core-types",
+ "protocol-types",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "shared-crypto",
+ "sui-json",
+ "sui-json-rpc-types",
+ "sui-keys",
+ "sui-sdk",
+ "sui-transaction-builder",
+ "sui-types",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

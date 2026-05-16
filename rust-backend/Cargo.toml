@@ -5,6 +5,7 @@ members = [
     "crates/indexer",
     "crates/quoting-service",
     "crates/deployment-manager",
+    "crates/clients",
     "tests",
 ]
 
