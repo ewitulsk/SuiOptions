@@ -1,0 +1,28 @@
+# Cargo build artefacts — workspace-wide, all crates share one target/.
+/target/
+**/target/
+
+# Lockfile policy: keep `Cargo.lock` for workspaces that produce binaries
+# (we do — `indexer` and `quoting-service`). NOT ignored.
+
+# Local config overrides — commit the templated *.toml files under
+# `crates/<svc>/config/`, but anything ending in `.local.toml` is
+# developer-only (credentials, ephemeral ports, etc).
+**/config/*.local.toml
+
+# Env files in case anything ever reaches for one (we use TOML, not .env,
+# but ignore them defensively).
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise.
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Coverage / profiling outputs.
+*.profraw
+tarpaulin-report.html
