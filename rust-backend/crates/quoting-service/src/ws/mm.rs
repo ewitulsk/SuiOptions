@@ -1,0 +1,171 @@
+//! Connected market maker handler.
+//!
+//! 1. Auth: issue `AuthChallenge`, expect `AuthResponse`, verify against the
+//!    pubkey the indexer holds for the claimed Account.
+//! 2. On success, register an [`MmConnection`] in the [`MmRegistry`] so the
+//!    RFQ orchestrator can broadcast to it.
+//! 3. Read loop: route `Quote` and `Decline` frames to whichever RFQ matcher
+//!    holds the matching `request_id`. Ignore frames after the auth phase
+//!    that aren't routable.
+//! 4. Write loop: drain the per-connection outbound mpsc into the WS sink.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use anyhow::{anyhow, Result};
+use futures_util::{SinkExt, StreamExt};
+use parking_lot::RwLock;
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
+use tracing::{debug, warn};
+
+use protocol_types::messages::{
+    AuthAckPayload, AuthChallengePayload, MmHelloPayload, MmToService, ServiceToMm,
+};
+
+use crate::state::{MmConnection, MmResponse};
+use crate::ws::auth::{random_challenge, verify_challenge_response};
+use crate::{AppState, Config};
+
+pub async fn handle(
+    ws: WebSocketStream<TcpStream>,
+    _peer: SocketAddr,
+    state: Arc<AppState>,
+    _cfg: Arc<Config>,
+    hello: MmHelloPayload,
+) -> Result<()> {
+    let (mut sink, mut stream) = ws.split();
+
+    // -- Auth -------------------------------------------------------------
+    let challenge = random_challenge();
+    let chal_frame = ServiceToMm::AuthChallenge {
+        payload: AuthChallengePayload {
+            challenge: challenge.clone(),
+        },
+    };
+    sink.send(Message::Text(serde_json::to_string(&chal_frame)?))
+        .await?;
+
+    let next = stream
+        .next()
+        .await
+        .ok_or_else(|| anyhow!("client closed before AuthResponse"))??;
+    let text = msg_to_text(next)?;
+    let resp: MmToService = serde_json::from_str(&text)?;
+    let signature = match resp {
+        MmToService::AuthResponse { payload } => payload.signature,
+        other => return Err(anyhow!("expected AuthResponse, got {:?}", other)),
+    };
+
+    // The indexer's pubkey is authoritative; supplied must agree.
+    let indexer_key = state
+        .accounts
+        .snapshot(&hello.account_id)
+        .map(|m| m.signing_pubkey)
+        .unwrap_or_default();
+    if verify_challenge_response(&indexer_key, &hello.signing_pubkey, &challenge, &signature)
+        .is_err()
+    {
+        sink.send(Message::Text(serde_json::to_string(&ServiceToMm::Error {
+            request_id: None,
+            payload: protocol_types::messages::ErrorPayload {
+                code: "auth_failed".into(),
+                message: "challenge verification failed".into(),
+            },
+        })?))
+        .await
+        .ok();
+        return Err(anyhow!("mm auth failed for {}", hello.account_id));
+    }
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    sink.send(Message::Text(serde_json::to_string(&ServiceToMm::AuthAck {
+        payload: AuthAckPayload {
+            session_id: session_id.clone(),
+        },
+    })?))
+    .await?;
+    debug!(account = %hello.account_id, session_id, "mm authed");
+
+    // -- Register + start write loop --------------------------------------
+    let (out_tx, mut out_rx) = mpsc::channel::<ServiceToMm>(64);
+    let conn = MmConnection {
+        account_id: hello.account_id,
+        roles: Arc::new(RwLock::new(hello.roles.clone())),
+        tx: out_tx,
+    };
+    state.mms.insert(conn);
+
+    // Write loop.
+    let write_task = tokio::spawn(async move {
+        while let Some(msg) = out_rx.recv().await {
+            let text = match serde_json::to_string(&msg) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!(error = %e, "failed to encode outbound mm frame");
+                    continue;
+                }
+            };
+            if let Err(e) = sink.send(Message::Text(text)).await {
+                debug!(error = %e, "mm sink closed");
+                break;
+            }
+        }
+    });
+
+    // -- Read loop --------------------------------------------------------
+    let read_state = Arc::clone(&state);
+    let account_id = hello.account_id;
+    let read_result: Result<()> = async {
+        while let Some(frame) = stream.next().await {
+            let frame = frame?;
+            let text = match frame {
+                Message::Text(t) => t,
+                Message::Binary(b) => String::from_utf8(b)?,
+                Message::Close(_) => break,
+                _ => continue,
+            };
+            let msg: MmToService = match serde_json::from_str(&text) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(error = %e, "bad mm frame");
+                    continue;
+                }
+            };
+            match msg {
+                MmToService::Quote { request_id, payload } => {
+                    if let Some(tx) = read_state.pending_rfqs.get(&request_id) {
+                        let _ = tx.send(MmResponse::Quote(account_id, payload)).await;
+                    } else {
+                        debug!(request_id, "quote arrived after rfq closed");
+                    }
+                }
+                MmToService::Decline { request_id, .. } => {
+                    if let Some(tx) = read_state.pending_rfqs.get(&request_id) {
+                        let _ = tx.send(MmResponse::Decline(account_id)).await;
+                    }
+                }
+                MmToService::Pong => {}
+                MmToService::Hello { .. } | MmToService::AuthResponse { .. } => {
+                    debug!("ignored after-auth control frame");
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    state.mms.remove(&account_id);
+    write_task.abort();
+    read_result
+}
+
+fn msg_to_text(m: Message) -> Result<String> {
+    Ok(match m {
+        Message::Text(t) => t,
+        Message::Binary(b) => String::from_utf8(b)?,
+        other => return Err(anyhow!("unexpected frame: {:?}", other)),
+    })
+}
