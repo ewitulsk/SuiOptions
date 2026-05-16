@@ -14,10 +14,10 @@ path = "src/main.rs"
 [dependencies]
 protocol-types = { workspace = true }
 
-# Sui checkpoint ingestion framework. Same git deps Pismo uses in production —
-# pulls in sui-types + a chunk of the Sui workspace, so first build is slow.
-sui-data-ingestion-core = { git = "https://github.com/mystenlabs/sui", package = "sui-data-ingestion-core" }
-sui-types = { git = "https://github.com/mystenlabs/sui", package = "sui-types" }
+# Sui checkpoint ingestion framework. Pinned at workspace level so the
+# indexer and deployment-manager share one resolved ABI.
+sui-data-ingestion-core = { workspace = true }
+sui-types = { workspace = true }
 
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
@@ -29,7 +29,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 bcs = { workspace = true }
 
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { workspace = true }
 config = { version = "0.14", features = ["toml"] }
 
 thiserror = { workspace = true }
