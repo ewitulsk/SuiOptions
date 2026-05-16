@@ -23,6 +23,32 @@ pub struct NetworkDeployment {
     pub deployer: String,
     pub deployed_at: String, // RFC 3339
     pub network: String,
+    /// Set when the test-tokens package was published alongside this
+    /// deployment (via `--deploy-tokens`). Overwritten on each rerun.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_tokens: Option<TestTokensRecord>,
+}
+
+/// The published test-tokens package + the four shared faucets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestTokensRecord {
+    pub package_id: String,
+    pub upgrade_cap_id: String,
+    pub publish_digest: String,
+    pub deployed_at: String,
+    /// Keyed by token symbol (e.g. "TUSDC"). Sorted for clean diffs.
+    pub tokens: BTreeMap<String, TestTokenRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestTokenRecord {
+    /// Full move type tag, e.g. "0x<pkg>::tusdc::TUSDC".
+    pub coin_type: String,
+    /// Shared Faucet<T> object ID.
+    pub faucet_id: String,
+    pub decimals: u8,
 }
 
 /// On-disk shape: `{ "mainnet": {...}, "testnet": {...}, "devnet": {...} }`.
@@ -34,16 +60,28 @@ pub struct Deployments {
 }
 
 impl Deployments {
-    /// Reads the file if it exists; returns an empty store if not.
+    /// Reads the file if it exists; returns an empty store if not. Tolerates
+    /// `null` entries for un-deployed networks (the shape we ourselves write
+    /// on save), so a round-trip from an empty file works.
     pub fn load_or_default(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let store = serde_json::from_slice(&bytes)
+        let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&bytes)
             .with_context(|| format!("parsing {}", path.display()))?;
-        Ok(store)
+
+        let mut networks = BTreeMap::new();
+        for (key, value) in raw {
+            if value.is_null() {
+                continue;
+            }
+            let record: NetworkDeployment = serde_json::from_value(value)
+                .with_context(|| format!("parsing {} entry in {}", key, path.display()))?;
+            networks.insert(key, record);
+        }
+        Ok(Self { networks })
     }
 
     pub fn upsert(&mut self, network: Network, deployment: NetworkDeployment) {
