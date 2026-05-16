@@ -18,10 +18,13 @@ use clap::Parser;
 use std::path::PathBuf;
 use sui_sdk::SuiClientBuilder;
 
-use crate::deploy::{create_and_share_treasury, publish_package};
-use crate::json_store::{Deployments, NetworkDeployment};
+use crate::deploy::{create_and_share_treasury, publish_package, publish_test_tokens};
+use crate::json_store::{
+    Deployments, NetworkDeployment, TestTokenRecord, TestTokensRecord,
+};
 use crate::network::Network;
 use crate::signer::Signer;
+use std::collections::BTreeMap;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -51,6 +54,16 @@ struct Cli {
     /// re-publishing for testing and you don't need a fresh Treasury.
     #[arg(long)]
     skip_init: bool,
+
+    /// Also publish the test-tokens package (TUSDC/TBTC/TWAL/TDEEP) and
+    /// record the faucet IDs in deployments.json. Each run publishes a
+    /// fresh package and overwrites the previous testTokens block.
+    #[arg(long)]
+    deploy_tokens: bool,
+
+    /// Path to the test-tokens Move package.
+    #[arg(long, default_value = "../test-tokens")]
+    test_tokens: PathBuf,
 }
 
 #[tokio::main]
@@ -67,6 +80,15 @@ async fn main() -> Result<()> {
         .contracts
         .canonicalize()
         .with_context(|| format!("resolving contracts path {}", cli.contracts.display()))?;
+    let test_tokens_path = if cli.deploy_tokens {
+        Some(
+            cli.test_tokens.canonicalize().with_context(|| {
+                format!("resolving test-tokens path {}", cli.test_tokens.display())
+            })?,
+        )
+    } else {
+        None
+    };
     let output_path = cli.output;
 
     let targets: Vec<Network> = match cli.network {
@@ -78,7 +100,15 @@ async fn main() -> Result<()> {
 
     let mut failures: Vec<(Network, anyhow::Error)> = Vec::new();
     for net in &targets {
-        match deploy_one(*net, &contracts_path, cli.gas_budget, cli.skip_init).await {
+        match deploy_one(
+            *net,
+            &contracts_path,
+            test_tokens_path.as_deref(),
+            cli.gas_budget,
+            cli.skip_init,
+        )
+        .await
+        {
             Ok(record) => {
                 tracing::info!(network = %net, package = %record.package_id, "deployment recorded");
                 store.upsert(*net, record);
@@ -108,6 +138,7 @@ async fn main() -> Result<()> {
 async fn deploy_one(
     network: Network,
     contracts_path: &std::path::Path,
+    test_tokens_path: Option<&std::path::Path>,
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
@@ -148,6 +179,37 @@ async fn deploy_one(
         (Some(init.treasury_id.to_string()), Some(init.digest))
     };
 
+    let test_tokens = if let Some(path) = test_tokens_path {
+        let outcome = publish_test_tokens(&client, &signer, path, gas_budget)
+            .await
+            .with_context(|| format!("publishing test-tokens to {network}"))?;
+        tracing::info!(
+            package = %outcome.package_id,
+            count = outcome.tokens.len(),
+            "test-tokens published"
+        );
+        let mut tokens = BTreeMap::new();
+        for t in outcome.tokens {
+            tokens.insert(
+                t.symbol,
+                TestTokenRecord {
+                    coin_type: t.coin_type,
+                    faucet_id: t.faucet_id.to_string(),
+                    decimals: t.decimals,
+                },
+            );
+        }
+        Some(TestTokensRecord {
+            package_id: outcome.package_id.to_string(),
+            upgrade_cap_id: outcome.upgrade_cap_id.to_string(),
+            publish_digest: outcome.digest,
+            deployed_at: chrono::Utc::now().to_rfc3339(),
+            tokens,
+        })
+    } else {
+        None
+    };
+
     Ok(NetworkDeployment {
         package_id: publish.package_id.to_string(),
         admin_cap_id: publish.admin_cap_id.to_string(),
@@ -159,5 +221,6 @@ async fn deploy_one(
         deployer: signer.address.to_string(),
         deployed_at: chrono::Utc::now().to_rfc3339(),
         network: network.as_str().to_owned(),
+        test_tokens,
     })
 }
