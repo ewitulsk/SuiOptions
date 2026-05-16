@@ -1,0 +1,16 @@
+{
+  "mainnet": null,
+  "testnet": {
+    "packageId": "0x59fa88e2a647975902dce0274fcacf2b36ff2aa771d43ac2238826a26404fb66",
+    "adminCapId": "0x99d7e9578236f49aee74b1d673a0e349bca8b92c680e0b9cff9ae27bca331925",
+    "protocolConfigId": "0x0d1c31a41c4ac2461077cfc89b1f7b7526157c717b4ba6a0bece1bea90b819b3",
+    "upgradeCapId": "0xe911a396b78086986ca9e847d9071c5cdc0f7f9d67730b06ae4eae189d9cd2d0",
+    "treasuryId": "0xc3c6670c7c1fc7610c470e21b7a3cff0b02bdab1a6e76b0c8ec1c134c606ec82",
+    "publishDigest": "gH5VygREa22Gt88mhwUakQSh9QnPbnDRWncJhCeSpjb",
+    "initDigest": "H4cWtr6BYjx7qmijPL8pijwn22ZirsPj2SEag4pqQAg2",
+    "deployer": "0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865",
+    "deployedAt": "2026-05-16T04:51:12.304229+00:00",
+    "network": "testnet"
+  },
+  "devnet": null
+}

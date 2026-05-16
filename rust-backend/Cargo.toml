@@ -4,6 +4,7 @@ members = [
     "crates/protocol-types",
     "crates/indexer",
     "crates/quoting-service",
+    "crates/deployment-manager",
     "tests",
 ]
 
@@ -15,7 +16,8 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 protocol-types = { path = "crates/protocol-types" }
 
-tokio = { version = "1.40", features = ["full"] }
+# Pinned to match sui-keys's exact requirement on the framework/mainnet branch.
+tokio = { version = "=1.49.0", features = ["full"] }
 tokio-tungstenite = { version = "0.24" }
 futures = "0.3"
 futures-util = "0.3"
@@ -40,3 +42,20 @@ dashmap = "6"
 uuid = { version = "1", features = ["v4"] }
 url = "2"
 parking_lot = "0.12"
+
+# Sui Rust crates. Pinned to the framework/mainnet branch — same code path
+# the production Sui mainnet validators run. Indexer and deployment-manager
+# share a single resolved ABI by going through the workspace.
+sui-sdk = { git = "https://github.com/mystenlabs/sui", package = "sui-sdk", branch = "framework/mainnet" }
+sui-types = { git = "https://github.com/mystenlabs/sui", package = "sui-types", branch = "framework/mainnet" }
+sui-keys = { git = "https://github.com/mystenlabs/sui", package = "sui-keys", branch = "framework/mainnet" }
+sui-move-build = { git = "https://github.com/mystenlabs/sui", package = "sui-move-build", branch = "framework/mainnet" }
+sui-json = { git = "https://github.com/mystenlabs/sui", package = "sui-json", branch = "framework/mainnet" }
+sui-json-rpc-types = { git = "https://github.com/mystenlabs/sui", package = "sui-json-rpc-types", branch = "framework/mainnet" }
+sui-transaction-builder = { git = "https://github.com/mystenlabs/sui", package = "sui-transaction-builder", branch = "framework/mainnet" }
+sui-data-ingestion-core = { git = "https://github.com/mystenlabs/sui", package = "sui-data-ingestion-core", branch = "framework/mainnet" }
+shared-crypto = { git = "https://github.com/mystenlabs/sui", package = "shared-crypto", branch = "framework/mainnet" }
+move-core-types = { git = "https://github.com/mystenlabs/sui", package = "move-core-types", branch = "framework/mainnet" }
+
+clap = { version = "4", features = ["derive", "env"] }
+chrono = { version = "0.4", features = ["serde"] }
