@@ -62,3 +62,9 @@ move-core-types = { git = "https://github.com/mystenlabs/sui", package = "move-c
 
 clap = { version = "4", features = ["derive", "env"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+# Postgres persistence for the indexer.
+diesel = { version = "2.2", features = ["postgres", "r2d2", "chrono", "numeric", "serde_json"] }
+diesel_migrations = { version = "2", features = ["postgres"] }
+r2d2 = "0.8"
+bigdecimal = { version = "0.4", features = ["serde"] }

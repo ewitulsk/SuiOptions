@@ -12,6 +12,13 @@ concurrency             = 5
 fanout_addr             = "127.0.0.1:9001"
 heartbeat_interval_secs = 5
 
+# Postgres persistence. The docker-compose at services/indexer/docker-compose.yml
+# stands up a matching DB on port 7654. Migrations are embedded in the binary
+# and run on boot.
+database_url            = "postgresql://postgres:postgres@localhost:7654/indexer"
+db_pool_size            = 8
+recent_log_capacity     = 1024
+
 # Checkpoint to start ingesting from. Leave commented out to tail from the
 # current tip (the indexer asks `sui_getLatestCheckpointSequenceNumber` at
 # boot). Set to a specific number to backfill from there — `0` is genesis.

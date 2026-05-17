@@ -54,6 +54,22 @@ pub struct Config {
     /// How often the fanout publishes a `Heartbeat` frame.
     #[serde(default = "default_heartbeat_secs", rename = "heartbeat_interval_secs")]
     heartbeat_interval_secs: u64,
+
+    /// Postgres connection string for the persistence layer. Standard libpq
+    /// URL form, e.g. `postgresql://postgres:postgres@localhost:7654/indexer`.
+    pub database_url: String,
+
+    /// r2d2 pool size for Postgres connections. The worker holds at most one
+    /// connection at a time; the fanout's cold path (history older than the
+    /// in-memory tail) can hold additional ones briefly.
+    #[serde(default = "default_db_pool_size")]
+    pub db_pool_size: u32,
+
+    /// How many of the most recent persisted events to keep in the in-memory
+    /// log on boot. The fanout serves snapshots from this tail; anything
+    /// older is served from Postgres via [`crate::db::Repo::events_after`].
+    #[serde(default = "default_recent_log_capacity")]
+    pub recent_log_capacity: usize,
 }
 
 fn default_deployments_path() -> PathBuf {
@@ -116,6 +132,14 @@ fn default_heartbeat_secs() -> u64 {
     5
 }
 
+fn default_db_pool_size() -> u32 {
+    8
+}
+
+fn default_recent_log_capacity() -> usize {
+    1024
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +160,7 @@ network = "testnet"
 remote_store_url = "https://checkpoints.testnet.sui.io"
 concurrency = 5
 fanout_addr = "127.0.0.1:9001"
+database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
 "#,
         );
         let cfg = Config::load(&p).unwrap();
@@ -153,6 +178,7 @@ remote_store_url = "https://checkpoints.testnet.sui.io"
 start_checkpoint = 12345
 concurrency = 5
 fanout_addr = "127.0.0.1:9001"
+database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
 "#,
         );
         let cfg = Config::load(&p).unwrap();
@@ -169,6 +195,7 @@ network = "testnet"
 remote_store_url = "https://checkpoints.testnet.sui.io"
 concurrency = 5
 fanout_addr = "127.0.0.1:9001"
+database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
 "#,
         );
         let cfg = Config::load(&p).unwrap();
@@ -186,6 +213,7 @@ remote_store_url = "https://checkpoints.testnet.sui.io"
 rpc_url = "https://my-private-fullnode.example.com:443"
 concurrency = 5
 fanout_addr = "127.0.0.1:9001"
+database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
 "#,
         );
         let cfg = Config::load(&p).unwrap();

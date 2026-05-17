@@ -42,5 +42,11 @@ tracing-subscriber = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
 
+# Postgres persistence.
+diesel = { workspace = true }
+diesel_migrations = { workspace = true }
+r2d2 = { workspace = true }
+bigdecimal = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true }

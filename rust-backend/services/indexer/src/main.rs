@@ -16,7 +16,7 @@ use sui_data_ingestion_core::setup_single_workflow;
 use sui_sdk::SuiClientBuilder;
 use tracing::{error, info};
 
-use indexer::{Config, ProtocolEventWorker, Store};
+use indexer::{establish_pool, run_migrations, Config, ProtocolEventWorker, Repo, Store};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -49,37 +49,71 @@ async fn main() -> Result<()> {
         "resolved package id from deployments"
     );
 
-    let store = Arc::new(Store::new(1024));
+    // Stand up the DB pool and apply pending migrations before anything else
+    // touches Postgres — migrations are embedded in the binary.
+    let pool = Arc::new(
+        establish_pool(&cfg.database_url, cfg.db_pool_size).context("establish_pool")?,
+    );
+    run_migrations(&pool).context("run_migrations")?;
+    let repo = Repo::new(Arc::clone(&pool));
+    info!(pool_size = cfg.db_pool_size, "postgres pool ready");
 
-    // Resolve the starting checkpoint. If the operator didn't pin one, ask
-    // a fullnode for the latest checkpoint and tail from there. The lookup
-    // is one-shot (only at boot); we don't keep the RPC client around.
-    let start_checkpoint = match cfg.start_checkpoint {
-        Some(s) => {
-            info!(start_checkpoint = s, "starting from pinned checkpoint");
-            s
-        }
-        None => {
-            let rpc = cfg.resolve_rpc_url()?;
-            info!(rpc = %rpc, "no start_checkpoint pinned; querying tip");
-            let client = SuiClientBuilder::default()
-                .build(&rpc)
-                .await
-                .with_context(|| format!("connecting to {rpc}"))?;
-            let latest = client
-                .read_api()
-                .get_latest_checkpoint_sequence_number()
-                .await
-                .context("querying latest checkpoint")?;
-            info!(start_checkpoint = latest, "tailing from current tip");
-            latest
+    let store = Arc::new(Store::new(cfg.recent_log_capacity));
+
+    // Hydrate the in-memory views from Postgres. After this call the store
+    // looks identical to the one we'd have built by replaying every event
+    // through `Store::ingest` — `bucket()` / `account()` work immediately.
+    let progress = repo.load_progress().context("load_progress")?;
+    let recent_log = repo
+        .recent_events(cfg.recent_log_capacity as i64)
+        .context("recent_events")?;
+    let views = repo.hydrate().context("hydrate views")?;
+    let last_persisted_sequence = progress.as_ref().map(|p| p.last_sequence as u64).unwrap_or(0);
+    store.hydrate(views, last_persisted_sequence, recent_log);
+    info!(
+        accounts = store.account_count(),
+        buckets = store.bucket_count(),
+        positions = store.position_count(),
+        last_sequence = last_persisted_sequence,
+        "hydrated in-memory views from postgres"
+    );
+
+    // Resolve the starting checkpoint. Priority:
+    //   1. Persisted progress (resume where we left off).
+    //   2. Pinned config value.
+    //   3. Current tip via RPC.
+    let start_checkpoint = if let Some(p) = progress {
+        let resume = (p.last_checkpoint as u64) + 1;
+        info!(resume, "resuming from persisted progress");
+        resume
+    } else {
+        match cfg.start_checkpoint {
+            Some(s) => {
+                info!(start_checkpoint = s, "starting from pinned checkpoint");
+                s
+            }
+            None => {
+                let rpc = cfg.resolve_rpc_url()?;
+                info!(rpc = %rpc, "no start_checkpoint pinned; querying tip");
+                let client = SuiClientBuilder::default()
+                    .build(&rpc)
+                    .await
+                    .with_context(|| format!("connecting to {rpc}"))?;
+                let latest = client
+                    .read_api()
+                    .get_latest_checkpoint_sequence_number()
+                    .await
+                    .context("querying latest checkpoint")?;
+                info!(start_checkpoint = latest, "tailing from current tip");
+                latest
+            }
         }
     };
 
     // Sui checkpoint ingestion. `setup_single_workflow` returns
     // `(ExecutorProgress future, termination Sender)` — we drive the future
     // alongside the fanout.
-    let worker = ProtocolEventWorker::new(Arc::clone(&store), &package_id);
+    let worker = ProtocolEventWorker::new(Arc::clone(&store), repo.clone(), &package_id);
     let (executor, _term_sender) = setup_single_workflow(
         worker,
         cfg.remote_store_url.clone(),

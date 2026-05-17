@@ -14,12 +14,14 @@
 //!   broadcast.
 
 pub mod config;
+pub mod db;
 pub mod event_types;
 pub mod fanout;
 pub mod store;
 pub mod worker;
 
 pub use config::Config;
+pub use db::{establish_pool, run_migrations, Repo};
 pub use event_types::EventTypes;
 pub use store::{AccountState, BucketState, PositionState, Store};
 pub use worker::ProtocolEventWorker;

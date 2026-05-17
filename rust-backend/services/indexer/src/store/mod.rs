@@ -24,6 +24,11 @@ use shared::protocol_types::events::{
 };
 use shared::protocol_types::ids::{ObjectId, SuiAddress};
 
+use crate::db::models::{
+    u128_to_bigdecimal, u64_to_bigdecimal, AccountBalanceRow, AccountRow, BucketRow, PositionRow,
+};
+use crate::db::{CheckpointBatch, EventBuild, HydratedViews};
+
 /// What we keep per Account: balances per asset type, plus the registered
 /// signing pubkey (so the quoting service can verify quotes locally as
 /// defense-in-depth even while it lazy-loads its own copy).
@@ -61,6 +66,14 @@ pub struct PositionState {
 pub struct Snapshot {
     pub latest_sequence: u64,
     pub events: Vec<IndexedEvent>,
+}
+
+/// Output of [`Store::stage_batch`]. The `indexed` events are already in the
+/// in-memory log and just await broadcast; `db_batch` is what
+/// [`crate::db::Repo::apply_checkpoint`] writes.
+pub struct StagedBatch {
+    pub indexed: Vec<IndexedEvent>,
+    pub db_batch: CheckpointBatch,
 }
 
 #[derive(Debug)]
@@ -133,6 +146,84 @@ impl Store {
         indexed
     }
 
+    /// Stage every event from a checkpoint under a single lock: apply each
+    /// to in-memory state, assign sequences, build the [`CheckpointBatch`]
+    /// the [`crate::db::Repo`] will persist in one transaction, and append
+    /// to the in-memory log. Returns the `IndexedEvent`s in order so the
+    /// caller can broadcast them *after* the DB write succeeds — this keeps
+    /// the invariant "what's on the wire is durable in Postgres".
+    ///
+    /// `events` is `(ChainEvent, tx_digest_base58, event_index_within_tx)`.
+    pub fn stage_batch(
+        &self,
+        checkpoint: u64,
+        timestamp_ms: u64,
+        events: Vec<(ChainEvent, String, i32)>,
+    ) -> anyhow::Result<StagedBatch> {
+        let mut inner = self.inner.write();
+
+        // Empty checkpoint: still emit a batch so the worker can advance
+        // `indexer_progress` and resume past it on restart.
+        if events.is_empty() {
+            let last_sequence = inner.log.last().map(|e| e.sequence as i64).unwrap_or(0);
+            return Ok(StagedBatch {
+                indexed: Vec::new(),
+                db_batch: CheckpointBatch::empty(checkpoint as i64, last_sequence),
+            });
+        }
+
+        let mut indexed = Vec::with_capacity(events.len());
+        let mut db_batch = CheckpointBatch::empty(checkpoint as i64, 0);
+
+        for (event, tx_digest, event_index) in events {
+            let sequence = inner.next_sequence;
+            inner.next_sequence += 1;
+            apply_event(&mut inner, &event);
+            // Snapshot whatever views the event touched into the DB batch.
+            stage_event_into_batch(&inner, &event, sequence as i64, &mut db_batch);
+            db_batch.events.push(EventBuild::new_event_row(
+                sequence as i64,
+                checkpoint as i64,
+                tx_digest,
+                event_index,
+                timestamp_ms as i64,
+                &event,
+            )?);
+            let ev = IndexedEvent {
+                sequence,
+                timestamp_ms,
+                event,
+            };
+            inner.log.push(ev.clone());
+            indexed.push(ev);
+        }
+
+        db_batch.last_sequence = (inner.next_sequence - 1) as i64;
+        Ok(StagedBatch { indexed, db_batch })
+    }
+
+    /// Push staged events to the broadcast channel. Called by the worker
+    /// after `Repo::apply_checkpoint` returns Ok.
+    pub fn broadcast_staged(&self, indexed: &[IndexedEvent]) {
+        for ev in indexed {
+            // It's fine if no subscribers are listening.
+            let _ = self.tx.send(ev.clone());
+        }
+    }
+
+    /// Replace the in-memory views with the contents of a [`HydratedViews`]
+    /// loaded from Postgres at boot. Also bumps `next_sequence` to one past
+    /// the highest persisted sequence so newly ingested events stay
+    /// monotonic across restarts.
+    pub fn hydrate(&self, views: HydratedViews, last_sequence: u64, recent_log: Vec<IndexedEvent>) {
+        let mut inner = self.inner.write();
+        inner.accounts = views.accounts;
+        inner.buckets = views.buckets;
+        inner.positions = views.positions;
+        inner.log = recent_log;
+        inner.next_sequence = last_sequence + 1;
+    }
+
     /// Every event strictly after `after_sequence`. `0` means "from the
     /// beginning"; callers that have caught up should pass the last sequence
     /// they observed.
@@ -192,6 +283,157 @@ impl Store {
             .iter()
             .map(|(k, v)| (*k, v.clone()))
             .collect()
+    }
+
+    pub fn account_count(&self) -> usize {
+        self.inner.read().accounts.len()
+    }
+
+    pub fn bucket_count(&self) -> usize {
+        self.inner.read().buckets.len()
+    }
+
+    pub fn position_count(&self) -> usize {
+        self.inner.read().positions.len()
+    }
+}
+
+/// Read the post-apply state of whatever entity `event` touched and push
+/// the appropriate rows into `batch`. Called immediately after `apply_event`
+/// so `inner` reflects the new values.
+fn stage_event_into_batch(
+    inner: &Inner,
+    event: &ChainEvent,
+    sequence: i64,
+    batch: &mut CheckpointBatch,
+) {
+    match event {
+        ChainEvent::BucketCreated(b) => {
+            if let Some(state) = inner.buckets.get(&b.bucket_id) {
+                batch.buckets.push(bucket_row(b.bucket_id, state, sequence));
+            }
+        }
+        ChainEvent::WriteExecuted(w) => {
+            if let Some(state) = inner.buckets.get(&w.bucket_id) {
+                batch.buckets.push(bucket_row(w.bucket_id, state, sequence));
+            }
+            if let Some(state) = inner.positions.get(&(w.bucket_id, w.range_start)) {
+                batch
+                    .position_upserts
+                    .push(position_row(state, sequence));
+            }
+        }
+        ChainEvent::Exercised(e) => {
+            if let Some(state) = inner.buckets.get(&e.bucket_id) {
+                batch.buckets.push(bucket_row(e.bucket_id, state, sequence));
+            }
+        }
+        ChainEvent::Redeemed(r) => {
+            // The position was removed by apply_event; tell the repo to delete.
+            batch
+                .position_deletes
+                .push((r.bucket_id.to_hex(), u128_to_bigdecimal(r.range_start)));
+        }
+        ChainEvent::BucketCleaned(c) => {
+            if let Some(state) = inner.buckets.get(&c.bucket_id) {
+                batch.buckets.push(bucket_row(c.bucket_id, state, sequence));
+            }
+        }
+        ChainEvent::AccountCreated(a) => {
+            if let Some(state) = inner.accounts.get(&a.account_id) {
+                batch.accounts.push(account_row(a.account_id, state, sequence));
+            }
+        }
+        ChainEvent::AccountDeposit(d) => {
+            if let Some(state) = inner.accounts.get(&d.account_id) {
+                // Deposit may also create the row if the account was never
+                // seen via AccountCreated (defensive — apply_account_delta
+                // calls .entry().or_default()).
+                batch
+                    .accounts
+                    .push(account_row(d.account_id, state, sequence));
+                if let Some(bal) = state.balances.get(&d.asset_type) {
+                    batch.account_balances.push(balance_row(
+                        d.account_id,
+                        &d.asset_type,
+                        *bal,
+                        sequence,
+                    ));
+                }
+            }
+        }
+        ChainEvent::AccountWithdraw(w) => {
+            if let Some(state) = inner.accounts.get(&w.account_id) {
+                if let Some(bal) = state.balances.get(&w.asset_type) {
+                    batch.account_balances.push(balance_row(
+                        w.account_id,
+                        &w.asset_type,
+                        *bal,
+                        sequence,
+                    ));
+                }
+            }
+        }
+        ChainEvent::SigningKeyRotated(r) => {
+            if let Some(state) = inner.accounts.get(&r.account_id) {
+                batch
+                    .accounts
+                    .push(account_row(r.account_id, state, sequence));
+            }
+        }
+        ChainEvent::ExpiredOptionBurned(_)
+        | ChainEvent::FeeUpdated(_)
+        | ChainEvent::TreasuryWithdrawn(_) => {
+            // No materialised-view change. The event itself still lands in
+            // `indexed_events` via the caller.
+        }
+    }
+}
+
+fn bucket_row(id: ObjectId, state: &BucketState, sequence: i64) -> BucketRow {
+    BucketRow {
+        bucket_id: id.to_hex(),
+        asset_type: state.asset_type.as_str().to_string(),
+        settlement_type: state.settlement_type.as_str().to_string(),
+        strike: u64_to_bigdecimal(state.strike),
+        expiry_ms: state.expiry_ms as i64,
+        total_written: u128_to_bigdecimal(state.total_written),
+        exercise_cursor: u128_to_bigdecimal(state.exercise_cursor),
+        cleaned: state.cleaned,
+        updated_at_seq: sequence,
+    }
+}
+
+fn position_row(state: &PositionState, sequence: i64) -> PositionRow {
+    PositionRow {
+        bucket_id: state.bucket_id.to_hex(),
+        range_start: u128_to_bigdecimal(state.range_start),
+        range_end: u128_to_bigdecimal(state.range_end),
+        recipient: state.recipient.to_hex(),
+        updated_at_seq: sequence,
+    }
+}
+
+fn account_row(id: ObjectId, state: &AccountState, sequence: i64) -> AccountRow {
+    AccountRow {
+        account_id: id.to_hex(),
+        owner: state.owner.as_ref().map(|o| o.to_hex()),
+        signing_pubkey: state.signing_pubkey.clone(),
+        updated_at_seq: sequence,
+    }
+}
+
+fn balance_row(
+    account_id: ObjectId,
+    asset_type: &AssetType,
+    balance: u64,
+    sequence: i64,
+) -> AccountBalanceRow {
+    AccountBalanceRow {
+        account_id: account_id.to_hex(),
+        asset_type: asset_type.as_str().to_string(),
+        balance: u64_to_bigdecimal(balance),
+        updated_at_seq: sequence,
     }
 }
 
