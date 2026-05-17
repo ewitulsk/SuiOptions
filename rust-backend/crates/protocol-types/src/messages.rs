@@ -157,6 +157,10 @@ pub enum MmToService {
 pub struct MmHelloPayload {
     pub roles: Vec<MmRole>,
     pub account_id: ObjectId,
+    /// Tag for the signing scheme used by `signing_pubkey` (and every
+    /// signature this MM ships during the session). Must match the value
+    /// registered on the Account on chain.
+    pub signing_scheme: crate::SigningScheme,
     #[serde(with = "crate::coding::bytes_hex")]
     pub signing_pubkey: Vec<u8>,
 }
@@ -238,6 +242,15 @@ pub struct RfqBroadcastPayload {
     pub side: Side,
     #[serde(with = "u64_string")]
     pub deadline_ms: u64,
+    /// Bucket's on-chain strike — settlement raw-units per underlying
+    /// raw-unit. MMs price against this so they don't have to track
+    /// bucket state separately.
+    #[serde(with = "u64_string")]
+    pub strike: u64,
+    /// Bucket expiry as a Sui clock millisecond timestamp. The MM derives
+    /// time-to-expiry from this directly instead of guessing.
+    #[serde(with = "u64_string")]
+    pub expiry_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,6 +396,7 @@ mod tests {
             payload: MmHelloPayload {
                 roles: vec![MmRole::TraderMm, MmRole::WriterMm],
                 account_id: ObjectId::new([0x02; 32]),
+                signing_scheme: crate::SigningScheme::Ed25519,
                 signing_pubkey: vec![0xaa; 32],
             },
         };
@@ -390,6 +404,7 @@ mod tests {
         assert!(s.contains("\"type\":\"Hello\""));
         assert!(s.contains("\"trader_mm\""));
         assert!(s.contains("\"writer_mm\""));
+        assert!(s.contains("\"signing_scheme\":\"ed25519\""));
         let back: MmToService = serde_json::from_str(&s).unwrap();
         assert_eq!(back, msg);
     }
@@ -424,10 +439,14 @@ mod tests {
                 write_amount: 5,
                 side: Side::Writer,
                 deadline_ms: 1_748_534_400_000,
+                strike: 500,
+                expiry_ms: 1_900_000_000_000,
             },
         };
         let s = serde_json::to_string(&msg).unwrap();
         assert!(s.contains("\"deadline_ms\":\"1748534400000\""));
+        assert!(s.contains("\"strike\":\"500\""));
+        assert!(s.contains("\"expiry_ms\":\"1900000000000\""));
         let back: ServiceToMm = serde_json::from_str(&s).unwrap();
         assert_eq!(back, msg);
     }

@@ -1330,19 +1330,25 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "bcs",
  "chrono",
  "clap",
  "config",
+ "deployments",
  "ed25519-dalek",
  "futures",
  "futures-util",
  "hex",
+ "k256 0.13.4",
  "move-core-types",
+ "p256",
  "protocol-types",
  "rand 0.8.6",
+ "secrets",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "shared-crypto",
  "sui-json",
  "sui-json-rpc-types",
@@ -1904,6 +1910,7 @@ dependencies = [
  "chrono",
  "clap",
  "move-core-types",
+ "secrets",
  "serde",
  "serde_json",
  "shared-crypto",
@@ -1918,6 +1925,17 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "deployments"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "serde",
+ "serde_json",
+ "sui-types",
 ]
 
 [[package]]
@@ -3495,6 +3513,7 @@ dependencies = [
  "chrono",
  "config",
  "dashmap 6.1.0",
+ "deployments",
  "futures",
  "futures-util",
  "parking_lot 0.12.5",
@@ -3502,6 +3521,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sui-data-ingestion-core",
+ "sui-sdk",
  "sui-types",
  "thiserror 1.0.69",
  "tokio",
@@ -3981,7 +4001,9 @@ dependencies = [
  "cfg-if",
  "ecdsa 0.16.9",
  "elliptic-curve 0.13.8",
+ "once_cell",
  "sha2 0.10.9",
+ "signature 2.2.0",
 ]
 
 [[package]]
@@ -6429,9 +6451,12 @@ dependencies = [
  "bcs",
  "ed25519-dalek",
  "hex",
+ "k256 0.13.4",
+ "p256",
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 1.0.69",
 ]
 
@@ -6614,11 +6639,14 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
+ "k256 0.13.4",
+ "p256",
  "parking_lot 0.12.5",
  "protocol-types",
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.24.0",
@@ -7440,6 +7468,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4473013577ec77b4ee3668179ef1186df3146e2cf2d927bd200974c6fe60fd99"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "secrets"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "config",
+ "serde",
 ]
 
 [[package]]

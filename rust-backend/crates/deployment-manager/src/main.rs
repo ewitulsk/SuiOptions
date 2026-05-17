@@ -46,6 +46,12 @@ struct Cli {
     #[arg(short, long, default_value = "deployments.json")]
     output: PathBuf,
 
+    /// Path to the secrets TOML. Holds the Sui signing key. There is no
+    /// env-var fallback — if the file is missing or the key for the
+    /// targeted network is absent, deploy refuses to start.
+    #[arg(short = 's', long, default_value = "secrets.toml")]
+    secrets: PathBuf,
+
     /// Gas budget (MIST) per transaction.
     #[arg(long, default_value_t = 500_000_000)]
     gas_budget: u64,
@@ -91,6 +97,9 @@ async fn main() -> Result<()> {
     };
     let output_path = cli.output;
 
+    let secrets = secrets::Secrets::load(&cli.secrets)
+        .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
+
     let targets: Vec<Network> = match cli.network {
         Some(n) => vec![n],
         None => Network::ALL.to_vec(),
@@ -100,10 +109,18 @@ async fn main() -> Result<()> {
 
     let mut failures: Vec<(Network, anyhow::Error)> = Vec::new();
     for net in &targets {
+        // Carry forward the existing testTokens record so re-publishing the
+        // options package without `--deploy-tokens` doesn't wipe it.
+        let previous_tokens = store
+            .networks
+            .get(net.as_str())
+            .and_then(|d| d.test_tokens.clone());
         match deploy_one(
             *net,
+            &secrets,
             &contracts_path,
             test_tokens_path.as_deref(),
+            previous_tokens,
             cli.gas_budget,
             cli.skip_init,
         )
@@ -137,14 +154,16 @@ async fn main() -> Result<()> {
 
 async fn deploy_one(
     network: Network,
+    secrets: &secrets::Secrets,
     contracts_path: &std::path::Path,
     test_tokens_path: Option<&std::path::Path>,
+    previous_tokens: Option<TestTokensRecord>,
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
     tracing::info!(network = %network, rpc = network.rpc_url(), "starting deployment");
 
-    let signer = Signer::load(network).context("loading signer")?;
+    let signer = Signer::from_secrets(secrets, network).context("loading signer")?;
     tracing::info!(deployer = %signer.address, "signer loaded");
 
     let client = SuiClientBuilder::default()
@@ -206,6 +225,16 @@ async fn deploy_one(
             deployed_at: chrono::Utc::now().to_rfc3339(),
             tokens,
         })
+    } else if let Some(prev) = previous_tokens {
+        // No fresh tokens this run — preserve whatever the last deploy
+        // recorded so re-publishing the options package alone doesn't
+        // erase the faucets.
+        tracing::info!(
+            package = %prev.package_id,
+            count = prev.tokens.len(),
+            "preserving existing testTokens record (use --deploy-tokens to refresh)"
+        );
+        Some(prev)
     } else {
         None
     };

@@ -47,4 +47,7 @@ pub enum ProtocolError {
     UnknownAccount,
     #[error("bcs encoding error: {0}")]
     Bcs(String),
+
+    #[error("unknown signing scheme tag (expected 0/1/2)")]
+    InvalidSigningScheme,
 }

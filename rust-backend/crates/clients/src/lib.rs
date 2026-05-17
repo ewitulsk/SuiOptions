@@ -20,11 +20,16 @@
 //! - [`ws_client`] — minimal WS client for the quoting service.
 //! - [`pricing`] — Black-Scholes call valuation, used by the MM bot.
 
-pub mod deployments;
 pub mod pricing;
+pub mod quote_signer;
 pub mod sui_client;
 pub mod tx;
 pub mod ws_client;
 
-pub use deployments::{Deployments, NetworkDeployment};
+pub use quote_signer::QuoteSigner;
+
+// Deployments loader is its own crate now (so `indexer` can use it without
+// pulling all of `clients`'s deps). Re-export here so existing callers
+// keep working unchanged.
+pub use deployments::{self, Deployments, NetworkDeployment, TestTokens, TokenInfo};
 pub use sui_client::{Network, Signer, SuiClientWrapper};

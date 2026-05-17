@@ -21,9 +21,11 @@ pub mod ids;
 pub mod messages;
 pub mod quote;
 pub mod sides;
+pub mod signing_scheme;
 
 pub use asset::AssetType;
 pub use errors::ProtocolError;
 pub use ids::{ObjectId, SuiAddress};
 pub use quote::{Quote, SignedQuote};
 pub use sides::Side;
+pub use signing_scheme::{verify_signature, SigningScheme};

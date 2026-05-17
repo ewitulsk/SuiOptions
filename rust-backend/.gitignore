@@ -10,6 +10,14 @@
 # developer-only (credentials, ephemeral ports, etc).
 **/config/*.local.toml
 
+# Secrets file — every binary that signs anything reads its keys from
+# `secrets.toml` (default location, configurable per binary via `--secrets`).
+# Commit `secrets.example.toml`; never `secrets.toml`.
+secrets.toml
+**/secrets.toml
+!secrets.example.toml
+!**/secrets.example.toml
+
 # Env files in case anything ever reaches for one (we use TOML, not .env,
 # but ignore them defensively).
 .env

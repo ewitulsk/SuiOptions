@@ -9,6 +9,8 @@ name = "deploy"
 path = "src/main.rs"
 
 [dependencies]
+secrets = { workspace = true }
+
 sui-sdk = { workspace = true }
 sui-types = { workspace = true }
 sui-keys = { workspace = true }

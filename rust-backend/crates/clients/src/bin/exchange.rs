@@ -1,20 +1,22 @@
 //! Exchange / admin CLI.
 //!
-//! Drives the AdminCap-gated entrypoints of the on-chain protocol. All
-//! commands sign as the deployer (the address that holds `AdminCap` per
-//! `deployments.json`).
+//! Pulls every on-chain id (package, AdminCap, ProtocolConfig, Treasury,
+//! test-tokens package + per-symbol Faucet) out of `deployments.json` —
+//! nothing about tokens or addresses is hardcoded in this binary.
 //!
 //! ```text
-//!   exchange create-buckets --underlying 0x2::sui::SUI --settlement 0x2::sui::SUI \
-//!       --expiry-ms 1747500000000 --start-strike 1000000 \
-//!       --strike-interval 250000 --count 4
+//!   exchange create-buckets --underlying TBTC --settlement TUSDC \
+//!       --expiry-ms 1763251200000 --start-strike 50000000000 \
+//!       --strike-interval 5000000000 --count 4
+//!   exchange mint --token TUSDC --amount 1000000000
+//!   exchange fund-account --account 0x… --token TUSDC --amount 1000000000
 //!   exchange set-fee --bps 50
-//!   exchange withdraw-treasury --type 0x2::sui::SUI \
-//!       --amount 1000000 --recipient 0xabc...
+//!   exchange info
 //! ```
 //!
-//! Network defaults to testnet (matches the deployment we have). Reads the
-//! signing key from `SUI_PRIVATE_KEY_TESTNET` (or `SUI_PRIVATE_KEY`).
+//! `SUI_PRIVATE_KEY_TESTNET` (or `SUI_PRIVATE_KEY`) holds the deployer's
+//! key; the `info` subcommand confirms it matches the deployer recorded in
+//! `deployments.json` (the only address that holds AdminCap).
 
 use std::path::PathBuf;
 
@@ -22,24 +24,27 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use sui_types::base_types::SuiAddress;
 
-use clients::deployments::Deployments;
+use clients::deployments::{Deployments, NetworkDeployment};
 use clients::sui_client::{Network, SuiClientWrapper};
 use clients::tx::admin::{
     new_call_option, set_fee_bps, withdraw_treasury, NewCallOptionArgs,
 };
+use clients::tx::test_tokens::{mint_and_deposit_into_account, mint_to_sender};
 
 #[derive(Parser)]
 #[command(name = "exchange", about = "Admin CLI for the covered-call options protocol")]
 struct Cli {
-    /// Path to the deployments.json (defaults to the workspace copy).
     #[arg(short, long, default_value = "deployments.json")]
     deployments: PathBuf,
 
-    /// Target network.
+    /// Path to the secrets TOML. Holds the Sui signing key. No env-var
+    /// fallback — every binary reads its keys from here.
+    #[arg(short = 's', long, default_value = "secrets.toml")]
+    secrets: PathBuf,
+
     #[arg(short, long, value_enum, default_value_t = Network::Testnet)]
     network: Network,
 
-    /// Gas budget per transaction (MIST).
     #[arg(long, default_value_t = 200_000_000)]
     gas_budget: u64,
 
@@ -49,14 +54,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Call `bucket::new_call_option<U, S>`. Creates `count` shared buckets at
-    /// strikes `start_strike + i * strike_interval` for `i ∈ [0, count)`.
+    /// `bucket::new_call_option<U, S>` — creates `count` buckets at
+    /// `start_strike + i * strike_interval` for `i ∈ [0, count)`. Tokens
+    /// are looked up by symbol from `deployments.testTokens`.
     CreateBuckets {
-        #[arg(long, default_value = "0x2::sui::SUI")]
+        #[arg(long, default_value = "TBTC")]
         underlying: String,
-        #[arg(long, default_value = "0x2::sui::SUI")]
+        #[arg(long, default_value = "TUSDC")]
         settlement: String,
-        /// Expiry as a Sui clock millisecond timestamp.
         #[arg(long)]
         expiry_ms: u64,
         #[arg(long)]
@@ -66,22 +71,51 @@ enum Command {
         #[arg(long)]
         count: u64,
     },
-    /// Call `admin::set_fee_bps`. Caps at 1000 on chain.
+    /// Faucet-mint `amount` of a test token to the signer.
+    Mint {
+        #[arg(long)]
+        token: String,
+        #[arg(long)]
+        amount: u64,
+    },
+    /// Mint a test token and deposit it into the given Account in one PTB.
+    /// Use for fast-MM-bootstrap or any "give Account X some settlement
+    /// asset to quote with" workflow.
+    FundAccount {
+        #[arg(long)]
+        account: sui_types::base_types::ObjectID,
+        #[arg(long)]
+        token: String,
+        #[arg(long)]
+        amount: u64,
+    },
+    /// `admin::set_fee_bps`.
     SetFee {
         #[arg(long)]
         bps: u64,
     },
-    /// Call `treasury::withdraw<T>`.
+    /// `treasury::withdraw<T>`. `--token` accepts a symbol from
+    /// `deployments.testTokens` or any fully-qualified Move type.
     WithdrawTreasury {
-        #[arg(long, name = "type")]
-        asset_type: String,
+        #[arg(long)]
+        token: String,
         #[arg(long)]
         amount: u64,
         #[arg(long)]
         recipient: SuiAddress,
     },
-    /// Print the resolved package id, admin cap, protocol_id bytes.
+    /// Print every id resolvable from `deployments.json`.
     Info,
+}
+
+/// Resolves either an uppercase symbol (looked up via testTokens) or a
+/// fully-qualified Move type string. Lets every command that needs a type
+/// arg accept either form.
+fn resolve_coin_type(net: &NetworkDeployment, input: &str) -> Result<String> {
+    if input.contains("::") {
+        return Ok(input.to_owned());
+    }
+    Ok(net.token(input)?.coin_type.clone())
 }
 
 #[tokio::main]
@@ -96,7 +130,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let dep = Deployments::load(&cli.deployments)
         .with_context(|| format!("loading {}", cli.deployments.display()))?;
-    let net = dep.for_network(cli.network).with_context(|| {
+    let net = dep.for_network(cli.network.as_str()).with_context(|| {
         format!(
             "no deployment for {} in {}",
             cli.network,
@@ -107,9 +141,15 @@ async fn main() -> Result<()> {
     let admin_cap = net.admin_cap()?;
     let protocol_config = net.protocol_config()?;
 
-    let wrap = SuiClientWrapper::connect(cli.network).await?;
+    let secrets = secrets::Secrets::load(&cli.secrets)
+        .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
+    let wrap = SuiClientWrapper::connect(&secrets, cli.network).await?;
 
-    if wrap.signer.address != net.deployer_address()? {
+    let needs_admin = matches!(
+        cli.cmd,
+        Command::CreateBuckets { .. } | Command::SetFee { .. } | Command::WithdrawTreasury { .. }
+    );
+    if needs_admin && wrap.signer.address != net.deployer_address()? {
         return Err(anyhow!(
             "configured signer {} ≠ deployer {} from deployments.json — only the deployer holds AdminCap",
             wrap.signer.address,
@@ -126,14 +166,16 @@ async fn main() -> Result<()> {
             strike_interval,
             count,
         } => {
+            let u_type = resolve_coin_type(net, &underlying)?;
+            let s_type = resolve_coin_type(net, &settlement)?;
             let resp = new_call_option(
                 &wrap.client,
                 &wrap.signer,
                 &NewCallOptionArgs {
                     package,
                     admin_cap,
-                    underlying_type: &underlying,
-                    settlement_type: &settlement,
+                    underlying_type: &u_type,
+                    settlement_type: &s_type,
                     expiry_ms,
                     start_strike,
                     strike_interval,
@@ -160,6 +202,48 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Command::Mint { token, amount } => {
+            let tokens = net.test_tokens()?;
+            let info = tokens.get(&token)?;
+            let (pkg, module) = info.module_path()?;
+            let resp = mint_to_sender(
+                &wrap.client,
+                &wrap.signer,
+                pkg,
+                &module,
+                info.faucet()?,
+                amount,
+                cli.gas_budget,
+            )
+            .await?;
+            println!("✓ mint {amount} {token} digest: {}", resp.digest);
+        }
+        Command::FundAccount {
+            account,
+            token,
+            amount,
+        } => {
+            let tokens = net.test_tokens()?;
+            let info = tokens.get(&token)?;
+            let (pkg, module) = info.module_path()?;
+            let resp = mint_and_deposit_into_account(
+                &wrap.client,
+                &wrap.signer,
+                pkg,
+                &module,
+                info.faucet()?,
+                &info.coin_type,
+                account,
+                package,
+                amount,
+                cli.gas_budget,
+            )
+            .await?;
+            println!(
+                "✓ fund-account {account} {amount} {token} digest: {}",
+                resp.digest
+            );
+        }
         Command::SetFee { bps } => {
             let resp = set_fee_bps(
                 &wrap.client,
@@ -174,10 +258,11 @@ async fn main() -> Result<()> {
             println!("✓ set-fee {bps} bps digest: {}", resp.digest);
         }
         Command::WithdrawTreasury {
-            asset_type,
+            token,
             amount,
             recipient,
         } => {
+            let asset_type = resolve_coin_type(net, &token)?;
             let treasury = net.treasury().context("treasury_id missing")?;
             let resp = withdraw_treasury(
                 &wrap.client,
@@ -205,6 +290,17 @@ async fn main() -> Result<()> {
             );
             println!("deployer        : {}", net.deployer);
             println!("protocol_id     : 0x{}", hex::encode(&protocol_id_bytes));
+            println!("signer          : {}", wrap.signer.address);
+            if let Some(tt) = &net.test_tokens {
+                println!();
+                println!("test_tokens.package: {}", tt.package_id);
+                for (sym, info) in &tt.tokens {
+                    println!(
+                        "  {:5} dec={} faucet={} type={}",
+                        sym, info.decimals, info.faucet_id, info.coin_type
+                    );
+                }
+            }
         }
     }
     Ok(())

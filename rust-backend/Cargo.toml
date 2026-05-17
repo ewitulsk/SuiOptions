@@ -6,6 +6,8 @@ members = [
     "crates/quoting-service",
     "crates/deployment-manager",
     "crates/clients",
+    "crates/deployments",
+    "crates/secrets",
     "tests",
 ]
 
@@ -16,6 +18,8 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 protocol-types = { path = "crates/protocol-types" }
+deployments = { path = "crates/deployments" }
+secrets = { path = "crates/secrets" }
 
 # Pinned to match sui-keys's exact requirement on the framework/mainnet branch.
 tokio = { version = "=1.49.0", features = ["full"] }

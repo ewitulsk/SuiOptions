@@ -1,12 +1,23 @@
 # Indexer config for Sui testnet.
 #
-# `package_id` is the deployed options_protocol package. Set this once the
-# contracts in `../../../contracts/` are published. Until then the indexer
-# runs but sees no events to match.
+# The package id is NOT in this file — it's resolved at startup from
+# `deployments.json` using the `network` field below. A redeploy only
+# requires updating `deployments.json` (the `deployment-manager` writes
+# it automatically).
 
-package_id        = "0x0000000000000000000000000000000000000000000000000000000000000000"
-remote_store_url  = "https://checkpoints.testnet.sui.io"
-start_checkpoint  = 0
-concurrency       = 5
-fanout_addr       = "127.0.0.1:9001"
+network                 = "testnet"
+deployments_path        = "deployments.json"
+remote_store_url        = "https://checkpoints.testnet.sui.io"
+concurrency             = 5
+fanout_addr             = "127.0.0.1:9001"
 heartbeat_interval_secs = 5
+
+# Checkpoint to start ingesting from. Leave commented out to tail from the
+# current tip (the indexer asks `sui_getLatestCheckpointSequenceNumber` at
+# boot). Set to a specific number to backfill from there — `0` is genesis.
+# start_checkpoint = 0
+
+# Optional JSON-RPC override for the latest-checkpoint lookup. Defaults to
+# Sui's public fullnode for `network` (mainnet/testnet/devnet). Only used
+# when `start_checkpoint` is unset.
+# rpc_url = "https://your-fullnode.example.com:443"

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use sui_types::base_types::SuiAddress;
 use sui_types::crypto::SuiKeyPair;
 
@@ -10,21 +10,18 @@ pub struct Signer {
 }
 
 impl Signer {
-    /// Loads the signing keypair for `network`. Prefers the per-network env
-    /// var (e.g. `SUI_PRIVATE_KEY_TESTNET`), falling back to the shared
-    /// `SUI_PRIVATE_KEY` so single-key setups still work.
-    pub fn load(network: Network) -> Result<Self> {
-        let specific = network.priv_key_env();
-        let raw = std::env::var(specific)
-            .or_else(|_| std::env::var("SUI_PRIVATE_KEY"))
-            .with_context(|| {
-                format!("neither {specific} nor SUI_PRIVATE_KEY is set")
-            })?;
+    /// Load the signing keypair for `network` from the workspace secrets
+    /// file. There is no env-var fallback — every binary that signs reads
+    /// its key from the same TOML.
+    pub fn from_secrets(secrets: &secrets::Secrets, network: Network) -> Result<Self> {
+        let raw = secrets.sui_private_key(network.as_str())?;
+        Self::from_string(raw.trim())
+    }
 
-        let keypair = SuiKeyPair::decode(raw.trim())
+    pub fn from_string(s: &str) -> Result<Self> {
+        let keypair = SuiKeyPair::decode(s)
             .map_err(|e| anyhow!("failed to decode SUI private key: {e}"))?;
         let address = SuiAddress::from(&keypair.public());
-
         Ok(Self { keypair, address })
     }
 }

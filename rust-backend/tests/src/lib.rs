@@ -50,6 +50,7 @@ impl Harness {
             ChainEvent::AccountCreated(AccountCreated {
                 account_id: mm_account,
                 owner: SuiAddress::new([0x33; 32]),
+                signing_scheme: protocol_types::SigningScheme::Ed25519,
                 signing_pubkey: mm_sk.verifying_key().to_bytes().to_vec(),
             }),
             1,
@@ -269,6 +270,7 @@ pub async fn connect_mm(
         payload: MmHelloPayload {
             roles,
             account_id,
+            signing_scheme: protocol_types::SigningScheme::Ed25519,
             signing_pubkey: sk.verifying_key().to_bytes().to_vec(),
         },
     };

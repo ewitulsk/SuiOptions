@@ -59,25 +59,67 @@ pub async fn handle(
         other => return Err(anyhow!("expected AuthResponse, got {:?}", other)),
     };
 
-    // The indexer's pubkey is authoritative; supplied must agree.
-    let indexer_key = state
-        .accounts
-        .snapshot(&hello.account_id)
-        .map(|m| m.signing_pubkey)
+    // The indexer's `(scheme, pubkey)` is authoritative; supplied must agree.
+    let indexer_view = state.accounts.snapshot(&hello.account_id);
+    let indexer_scheme = indexer_view.as_ref().and_then(|m| m.signing_scheme);
+    let indexer_key = indexer_view
+        .as_ref()
+        .map(|m| m.signing_pubkey.clone())
         .unwrap_or_default();
-    if verify_challenge_response(&indexer_key, &hello.signing_pubkey, &challenge, &signature)
-        .is_err()
-    {
+    if let Err(reason) = verify_challenge_response(
+        indexer_scheme,
+        &indexer_key,
+        hello.signing_scheme,
+        &hello.signing_pubkey,
+        &challenge,
+        &signature,
+    ) {
+        // Surface which branch tripped so the operator can diagnose without
+        // grepping server logs. The message is safe to share (no secrets).
+        let (code, message): (&str, String) = match reason {
+            crate::ws::auth::AuthError::SchemeUnknown => (
+                "auth_scheme_unknown",
+                format!(
+                    "indexer has not yet ingested an AccountCreated event for {} — \
+                     check that the indexer is running against the current \
+                     deployments.json packageId and has caught up to the \
+                     checkpoint that created this Account",
+                    hello.account_id
+                ),
+            ),
+            crate::ws::auth::AuthError::PubkeyMismatch => (
+                "auth_pubkey_mismatch",
+                format!(
+                    "Hello's (scheme, pubkey) does not match what is on chain \
+                     for Account {} — verify mm-bot.toml signing_scheme + \
+                     secrets.toml mm_bot.quote_key match the registered key",
+                    hello.account_id
+                ),
+            ),
+            crate::ws::auth::AuthError::SignatureInvalid => (
+                "auth_signature_invalid",
+                "challenge signature did not verify against the registered key"
+                    .to_string(),
+            ),
+        };
+        tracing::warn!(
+            account = %hello.account_id,
+            reason = ?reason,
+            "mm auth rejected"
+        );
         sink.send(Message::Text(serde_json::to_string(&ServiceToMm::Error {
             request_id: None,
             payload: protocol_types::messages::ErrorPayload {
-                code: "auth_failed".into(),
-                message: "challenge verification failed".into(),
+                code: code.into(),
+                message,
             },
         })?))
         .await
         .ok();
-        return Err(anyhow!("mm auth failed for {}", hello.account_id));
+        return Err(anyhow!(
+            "mm auth failed for {} ({code})",
+            hello.account_id
+        ));
     }
 
     let session_id = uuid::Uuid::new_v4().to_string();

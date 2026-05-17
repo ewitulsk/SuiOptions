@@ -43,3 +43,6 @@ url = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+sha2 = { workspace = true }
+k256 = { version = "0.13", features = ["ecdsa"] }
+p256 = { version = "0.13", features = ["ecdsa"] }

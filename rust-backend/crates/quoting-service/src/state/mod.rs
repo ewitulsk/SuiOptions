@@ -91,7 +91,11 @@ impl AppState {
             ChainEvent::ExpiredOptionBurned(_) => {}
             ChainEvent::BucketCleaned(_) => {}
             ChainEvent::AccountCreated(a) => {
-                self.accounts.set_signing_key(a.account_id, a.signing_pubkey.clone());
+                self.accounts.set_signing_key(
+                    a.account_id,
+                    a.signing_scheme,
+                    a.signing_pubkey.clone(),
+                );
                 self.accounts.set_owner(a.account_id, a.owner);
             }
             ChainEvent::AccountDeposit(d) => {
@@ -105,7 +109,11 @@ impl AppState {
                 );
             }
             ChainEvent::SigningKeyRotated(r) => {
-                self.accounts.set_signing_key(r.account_id, r.new_pubkey.clone());
+                self.accounts.set_signing_key(
+                    r.account_id,
+                    r.new_scheme,
+                    r.new_pubkey.clone(),
+                );
             }
             ChainEvent::FeeUpdated(_) | ChainEvent::TreasuryWithdrawn(_) => {}
         }
@@ -161,6 +169,7 @@ mod tests {
             ChainEvent::AccountCreated(AccountCreated {
                 account_id: account,
                 owner: SuiAddress::ZERO,
+                signing_scheme: protocol_types::SigningScheme::Ed25519,
                 signing_pubkey: vec![0xab; 32],
             }),
         ));

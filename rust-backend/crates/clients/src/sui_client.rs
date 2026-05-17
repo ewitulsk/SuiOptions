@@ -1,9 +1,8 @@
 //! Sui RPC client + signer.
 //!
-//! Wraps `sui_sdk::SuiClient` for RPC, and a `Signer` loaded from env vars
-//! (`SUI_PRIVATE_KEY_TESTNET`, etc., with `SUI_PRIVATE_KEY` as a fallback).
-//! Identical pattern to `deployment-manager::signer` so the same env vars
-//! work across every binary in the workspace.
+//! Wraps `sui_sdk::SuiClient` for RPC, and a `Signer` loaded from the
+//! workspace secrets file (see `crates/secrets`). No env-var fallback —
+//! every binary reads its key from the same TOML.
 
 use anyhow::{anyhow, Context, Result};
 use clap::ValueEnum;
@@ -29,13 +28,6 @@ impl Network {
             Self::Devnet => sui_sdk::SUI_DEVNET_URL,
         }
     }
-    pub fn priv_key_env(self) -> &'static str {
-        match self {
-            Self::Mainnet => "SUI_PRIVATE_KEY_MAINNET",
-            Self::Testnet => "SUI_PRIVATE_KEY_TESTNET",
-            Self::Devnet => "SUI_PRIVATE_KEY_DEVNET",
-        }
-    }
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Mainnet => "mainnet",
@@ -57,14 +49,9 @@ pub struct Signer {
 }
 
 impl Signer {
-    /// Loads the keypair from an env var. Prefers per-network
-    /// (`SUI_PRIVATE_KEY_TESTNET`), falls back to the generic `SUI_PRIVATE_KEY`
-    /// so single-key setups still work.
-    pub fn from_env(network: Network) -> Result<Self> {
-        let specific = network.priv_key_env();
-        let raw = std::env::var(specific)
-            .or_else(|_| std::env::var("SUI_PRIVATE_KEY"))
-            .with_context(|| format!("neither {specific} nor SUI_PRIVATE_KEY is set"))?;
+    /// Load the keypair from the workspace secrets TOML.
+    pub fn from_secrets(secrets: &secrets::Secrets, network: Network) -> Result<Self> {
+        let raw = secrets.sui_private_key(network.as_str())?;
         Self::from_string(raw.trim())
     }
 
@@ -85,8 +72,8 @@ pub struct SuiClientWrapper {
 }
 
 impl SuiClientWrapper {
-    pub async fn connect(network: Network) -> Result<Self> {
-        let signer = Signer::from_env(network).context("loading signer")?;
+    pub async fn connect(secrets: &secrets::Secrets, network: Network) -> Result<Self> {
+        let signer = Signer::from_secrets(secrets, network).context("loading signer")?;
         let client = SuiClientBuilder::default()
             .build(network.rpc_url())
             .await

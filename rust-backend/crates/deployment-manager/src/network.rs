@@ -21,14 +21,6 @@ impl Network {
         }
     }
 
-    pub fn priv_key_env(self) -> &'static str {
-        match self {
-            Self::Mainnet => "SUI_PRIVATE_KEY_MAINNET",
-            Self::Testnet => "SUI_PRIVATE_KEY_TESTNET",
-            Self::Devnet => "SUI_PRIVATE_KEY_DEVNET",
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Mainnet => "mainnet",

@@ -1,19 +1,20 @@
-//! Retail writer CLI — the off-chain frontend stand-in.
+//! Retail writer CLI — stands in for the off-chain frontend.
 //!
-//! Walks through the full §8.1 writer flow:
+//! End-to-end §8.1 writer flow:
 //!
 //! 1. Connect to the quoting service WS as `RetailRole::Writer`.
 //! 2. `RFQRequest` for `(bucket_id, write_amount, side=Writer)`.
-//! 3. Pick the top quote (the service already sorted by best premium).
-//! 4. Build + sign + submit a writer-flow `execute_write` PTB. The PTB
-//!    splits `write_amount` of the underlying from gas (MVP assumes
-//!    `Underlying == 0x2::sui::SUI`), splices in the MM's signed Quote,
-//!    and lands the position NFT in our wallet.
+//! 3. Pick the top quote (service already sorted by best premium).
+//! 4. Submit a writer-flow `execute_write` PTB. The PTB itself mints the
+//!    underlying via the configured test-token faucet (no pre-mint step),
+//!    so a single tx covers the whole flow.
+//!
+//! Every on-chain id (package, ProtocolConfig, Treasury, test-tokens
+//! package, faucets, coin types) is resolved from `deployments.json`.
 //!
 //! ```text
-//!   writer --quoting-url ws://127.0.0.1:9002/ \
-//!          --bucket 0x… --write-amount 10000000 \
-//!          --underlying 0x2::sui::SUI --settlement 0x2::sui::SUI
+//!   writer --bucket 0x… --write-amount 100000
+//!          --underlying TBTC --settlement TUSDC
 //! ```
 
 use std::path::PathBuf;
@@ -38,15 +39,17 @@ use clients::ws_client;
 #[derive(Parser)]
 #[command(name = "writer", about = "Retail-writer test client for the options protocol")]
 struct Cli {
-    /// Path to deployments.json.
     #[arg(short, long, default_value = "deployments.json")]
     deployments: PathBuf,
 
-    /// Target network.
+    /// Path to the secrets TOML. Holds the Sui signing key. No env-var
+    /// fallback.
+    #[arg(short = 's', long, default_value = "secrets.toml")]
+    secrets: PathBuf,
+
     #[arg(short, long, value_enum, default_value_t = Network::Testnet)]
     network: Network,
 
-    /// Quoting-service WS endpoint.
     #[arg(short = 'q', long, default_value = "ws://127.0.0.1:9002/")]
     quoting_url: String,
 
@@ -54,24 +57,22 @@ struct Cli {
     #[arg(short, long)]
     bucket: ObjectID,
 
-    /// Underlying amount we're writing, in raw smallest-units.
+    /// Underlying amount we're writing, in raw smallest-units (see token
+    /// decimals in `deployments.json::testTokens`).
     #[arg(short = 'w', long)]
     write_amount: u64,
 
-    /// Underlying Move type. MVP requires `0x2::sui::SUI` so we can split
-    /// from gas; flag is exposed for forward compatibility.
-    #[arg(long, default_value = "0x2::sui::SUI")]
+    /// Symbol for the underlying token (TBTC, TDEEP, TUSDC, TWAL).
+    #[arg(long, default_value = "TBTC")]
     underlying: String,
 
-    /// Settlement Move type.
-    #[arg(long, default_value = "0x2::sui::SUI")]
+    /// Symbol for the settlement token.
+    #[arg(long, default_value = "TUSDC")]
     settlement: String,
 
-    /// Gas budget per PTB (MIST).
     #[arg(long, default_value_t = 200_000_000)]
     gas_budget: u64,
 
-    /// How long to wait for the service's RFQResponse.
     #[arg(long, default_value_t = 5)]
     rfq_timeout_secs: u64,
 }
@@ -88,16 +89,24 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let dep = Deployments::load(&cli.deployments)
         .with_context(|| format!("loading {}", cli.deployments.display()))?;
-    let net = dep.for_network(cli.network)?;
+    let net = dep.for_network(cli.network.as_str())?;
+
     let package = net.package()?;
     let protocol_config = net.protocol_config()?;
     let treasury = net.treasury().context("treasury_id missing from deployments")?;
 
-    let wrap = SuiClientWrapper::connect(cli.network).await?;
-    let writer_addr = wrap.signer.address;
-    tracing::info!(%writer_addr, "writer signer ready");
+    // Resolve underlying + settlement via testTokens.
+    let underlying = net.token(&cli.underlying)?;
+    let settlement = net.token(&cli.settlement)?;
+    let (tokens_pkg, underlying_module) = underlying.module_path()?;
 
-    // -- 1. Connect to quoting service ------------------------------------
+    let secrets = secrets::Secrets::load(&cli.secrets)
+        .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
+    let wrap = SuiClientWrapper::connect(&secrets, cli.network).await?;
+    let writer_addr = wrap.signer.address;
+    tracing::info!(%writer_addr, underlying = %cli.underlying, settlement = %cli.settlement, "writer ready");
+
+    // -- WS handshake -----------------------------------------------------
     let mut ws = ws_client::connect(&cli.quoting_url).await?;
     ws_client::send_json(
         &mut ws,
@@ -115,7 +124,7 @@ async fn main() -> Result<()> {
         other => return Err(anyhow!("expected HelloAck, got {:?}", other)),
     }
 
-    // -- 2. RFQ -----------------------------------------------------------
+    // -- RFQ --------------------------------------------------------------
     let request_id = uuid::Uuid::new_v4().to_string();
     let bucket_pt = pt_object_id_from_sui(cli.bucket);
     ws_client::send_json(
@@ -159,7 +168,7 @@ async fn main() -> Result<()> {
         "selected best quote"
     );
 
-    // -- 3. Execute write -------------------------------------------------
+    // -- Execute write ----------------------------------------------------
     let mm_account_id = sui_object_id_from_pt(best.mm_id)?;
     let bucket_id_bytes: [u8; 32] = *best.quote.bucket_id.as_bytes();
     let signer_account_id_bytes: [u8; 32] = *best.quote.signer_account_id.as_bytes();
@@ -168,8 +177,11 @@ async fn main() -> Result<()> {
 
     let params = ExecuteWriteParams {
         package,
-        underlying_type: &cli.underlying,
-        settlement_type: &cli.settlement,
+        underlying_type: &underlying.coin_type,
+        settlement_type: &settlement.coin_type,
+        tokens_package: tokens_pkg,
+        underlying_module: &underlying_module,
+        underlying_faucet_id: underlying.faucet()?,
         bucket_id: cli.bucket,
         protocol_config_id: protocol_config,
         treasury_id: treasury,
@@ -184,8 +196,7 @@ async fn main() -> Result<()> {
         nonce: best.quote.nonce,
         signature: best.signature.clone(),
         position_nft_recipient: writer_addr,
-        // Writer flow requires signer_token_recipient == call_token_recipient,
-        // so we pass the quote's value through.
+        // Writer flow requires signer_token_recipient == call_token_recipient.
         call_token_recipient: signer_token_recipient,
         gas_budget: cli.gas_budget,
     };
@@ -207,6 +218,8 @@ fn sui_object_id_from_pt(id: PtObjectId) -> Result<ObjectID> {
     ObjectID::from_str(&id.to_hex()).context("converting ObjectId to sui ObjectID")
 }
 
-fn sui_address_from_pt(addr: protocol_types::ids::SuiAddress) -> Result<sui_types::base_types::SuiAddress> {
+fn sui_address_from_pt(
+    addr: protocol_types::ids::SuiAddress,
+) -> Result<sui_types::base_types::SuiAddress> {
     sui_types::base_types::SuiAddress::from_str(&addr.to_hex()).context("converting SuiAddress")
 }

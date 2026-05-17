@@ -18,7 +18,6 @@
 //! JSON encoding (§4.3) is the human-readable variant: hex for byte arrays,
 //! decimal strings for u64.
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::coding::{bytes_hex, u64_string};
@@ -57,13 +56,19 @@ pub struct SignedQuote {
 }
 
 impl SignedQuote {
-    /// Verify the Ed25519 signature against the given pubkey, plus the
+    /// Verify the signature against the given pubkey + scheme, plus the
     /// surface-level invariants that don't need on-chain state (protocol_id
     /// match, expiry, signer account id). Nonce uniqueness and bucket
     /// existence are checked elsewhere (Account / state).
+    ///
+    /// For Ed25519 (`scheme == 0`) we sign/verify the raw BCS payload.
+    /// For Secp256k1 / Secp256r1 the verifier hashes the BCS payload with
+    /// SHA-256 internally — matching the on-chain `hash = 1` flag passed
+    /// to `ecdsa_k1::secp256k1_verify` / `ecdsa_r1::secp256r1_verify`.
     pub fn verify(
         &self,
-        signing_pubkey: &VerifyingKey,
+        scheme: crate::SigningScheme,
+        signing_pubkey: &[u8],
         expected_protocol_id: &[u8],
         expected_signer_account_id: ObjectId,
         now_ms: u64,
@@ -78,20 +83,17 @@ impl SignedQuote {
             return Err(ProtocolError::QuoteExpired);
         }
         let payload = self.quote.to_bcs_bytes()?;
-        let sig = Signature::from_slice(&self.signature)
-            .map_err(|_| ProtocolError::QuoteSignatureInvalid)?;
-        signing_pubkey
-            .verify(&payload, &sig)
-            .map_err(|_| ProtocolError::QuoteSignatureInvalid)?;
-        Ok(())
+        crate::signing_scheme::verify_signature(scheme, signing_pubkey, &payload, &self.signature)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SigningScheme;
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
+    use sha2::{Digest, Sha256};
 
     fn sample_quote() -> Quote {
         Quote {
@@ -161,75 +163,119 @@ mod tests {
         assert_eq!(back, signed);
     }
 
-    #[test]
-    fn verify_accepts_a_real_signature() {
+    fn sign_ed25519(q: &Quote) -> (SigningScheme, Vec<u8>, Vec<u8>) {
         let sk = SigningKey::generate(&mut OsRng);
-        let vk = sk.verifying_key();
-        let quote = sample_quote();
-        let payload = quote.to_bcs_bytes().unwrap();
-        let signature = sk.sign(&payload).to_bytes().to_vec();
-        let signed = SignedQuote { quote, signature };
-        signed
-            .verify(&vk, &[0xa1, 0xb2, 0xc3], ObjectId::new([0x11; 32]), 0)
-            .unwrap();
+        let pk = sk.verifying_key().to_bytes().to_vec();
+        let sig = sk.sign(&q.to_bcs_bytes().unwrap()).to_bytes().to_vec();
+        (SigningScheme::Ed25519, pk, sig)
+    }
+
+    fn sign_secp256k1(q: &Quote) -> (SigningScheme, Vec<u8>, Vec<u8>) {
+        use k256::ecdsa::signature::hazmat::PrehashSigner;
+        use k256::ecdsa::{Signature, SigningKey};
+        let sk = SigningKey::random(&mut OsRng);
+        let pk = sk.verifying_key().to_encoded_point(true).as_bytes().to_vec();
+        let digest = Sha256::digest(q.to_bcs_bytes().unwrap());
+        let (sig, _): (Signature, _) = sk.sign_prehash(&digest).unwrap();
+        (SigningScheme::Secp256k1, pk, sig.to_bytes().to_vec())
+    }
+
+    fn sign_secp256r1(q: &Quote) -> (SigningScheme, Vec<u8>, Vec<u8>) {
+        use p256::ecdsa::signature::hazmat::PrehashSigner;
+        use p256::ecdsa::{Signature, SigningKey};
+        let sk = SigningKey::random(&mut OsRng);
+        let pk = sk.verifying_key().to_encoded_point(true).as_bytes().to_vec();
+        let digest = Sha256::digest(q.to_bcs_bytes().unwrap());
+        let (sig, _): (Signature, _) = sk.sign_prehash(&digest).unwrap();
+        (SigningScheme::Secp256r1, pk, sig.to_bytes().to_vec())
+    }
+
+    #[test]
+    fn verify_accepts_each_scheme() {
+        for signer in [sign_ed25519, sign_secp256k1, sign_secp256r1] {
+            let quote = sample_quote();
+            let (scheme, pk, sig) = signer(&quote);
+            let signed = SignedQuote {
+                quote,
+                signature: sig,
+            };
+            signed
+                .verify(scheme, &pk, &[0xa1, 0xb2, 0xc3], ObjectId::new([0x11; 32]), 0)
+                .unwrap();
+        }
     }
 
     #[test]
     fn verify_rejects_tampering() {
-        let sk = SigningKey::generate(&mut OsRng);
-        let vk = sk.verifying_key();
         let quote = sample_quote();
-        let payload = quote.to_bcs_bytes().unwrap();
-        let signature = sk.sign(&payload).to_bytes().to_vec();
-        let mut signed = SignedQuote { quote, signature };
+        let (scheme, pk, sig) = sign_ed25519(&quote);
+        let mut signed = SignedQuote {
+            quote,
+            signature: sig,
+        };
         // Bump the premium — signature should no longer verify.
         signed.quote.premium += 1;
         assert_eq!(
-            signed.verify(&vk, &[0xa1, 0xb2, 0xc3], ObjectId::new([0x11; 32]), 0),
+            signed.verify(scheme, &pk, &[0xa1, 0xb2, 0xc3], ObjectId::new([0x11; 32]), 0),
             Err(ProtocolError::QuoteSignatureInvalid),
         );
     }
 
     #[test]
     fn verify_rejects_expired() {
-        let sk = SigningKey::generate(&mut OsRng);
-        let vk = sk.verifying_key();
         let quote = sample_quote();
-        let payload = quote.to_bcs_bytes().unwrap();
-        let signature = sk.sign(&payload).to_bytes().to_vec();
-        let signed = SignedQuote { quote, signature };
-        let now = signed.quote.valid_until_ms;
+        let valid_until = quote.valid_until_ms;
+        let (scheme, pk, sig) = sign_ed25519(&quote);
+        let signed = SignedQuote {
+            quote,
+            signature: sig,
+        };
         assert_eq!(
-            signed.verify(&vk, &[0xa1, 0xb2, 0xc3], ObjectId::new([0x11; 32]), now),
+            signed.verify(scheme, &pk, &[0xa1, 0xb2, 0xc3], ObjectId::new([0x11; 32]), valid_until),
             Err(ProtocolError::QuoteExpired),
         );
     }
 
     #[test]
     fn verify_rejects_wrong_protocol_id() {
-        let sk = SigningKey::generate(&mut OsRng);
-        let vk = sk.verifying_key();
         let quote = sample_quote();
-        let payload = quote.to_bcs_bytes().unwrap();
-        let signature = sk.sign(&payload).to_bytes().to_vec();
-        let signed = SignedQuote { quote, signature };
+        let (scheme, pk, sig) = sign_ed25519(&quote);
+        let signed = SignedQuote {
+            quote,
+            signature: sig,
+        };
         assert_eq!(
-            signed.verify(&vk, &[0x00], ObjectId::new([0x11; 32]), 0),
+            signed.verify(scheme, &pk, &[0x00], ObjectId::new([0x11; 32]), 0),
             Err(ProtocolError::QuoteProtocolMismatch),
         );
     }
 
     #[test]
     fn verify_rejects_wrong_account() {
-        let sk = SigningKey::generate(&mut OsRng);
-        let vk = sk.verifying_key();
         let quote = sample_quote();
-        let payload = quote.to_bcs_bytes().unwrap();
-        let signature = sk.sign(&payload).to_bytes().to_vec();
-        let signed = SignedQuote { quote, signature };
+        let (scheme, pk, sig) = sign_ed25519(&quote);
+        let signed = SignedQuote {
+            quote,
+            signature: sig,
+        };
         assert_eq!(
-            signed.verify(&vk, &[0xa1, 0xb2, 0xc3], ObjectId::new([0xaa; 32]), 0),
+            signed.verify(scheme, &pk, &[0xa1, 0xb2, 0xc3], ObjectId::new([0xaa; 32]), 0),
             Err(ProtocolError::QuoteAccountMismatch),
+        );
+    }
+
+    #[test]
+    fn verify_rejects_pubkey_for_wrong_scheme() {
+        // Sign with Ed25519, claim it's k1 — must reject (key length is wrong).
+        let quote = sample_quote();
+        let (_, pk, sig) = sign_ed25519(&quote);
+        let signed = SignedQuote {
+            quote,
+            signature: sig,
+        };
+        assert_eq!(
+            signed.verify(SigningScheme::Secp256k1, &pk, &[0xa1, 0xb2, 0xc3], ObjectId::new([0x11; 32]), 0),
+            Err(ProtocolError::QuoteSignatureInvalid),
         );
     }
 }

@@ -106,20 +106,18 @@ pub fn validate_and_reserve(
         return Err(QuoteRejection::SignatureInvalid);
     }
 
-    // Signature against the MM's registered pubkey.
+    // Signature against the MM's registered pubkey + scheme.
     let acct = state
         .accounts
         .snapshot(&mm_account_id)
         .ok_or(QuoteRejection::UnknownSigner)?;
-    let vk = acct
-        .verifying_key()
-        .ok_or(QuoteRejection::InvalidPubkey)?;
+    let scheme = acct.signing_scheme.ok_or(QuoteRejection::InvalidPubkey)?;
     let signed = protocol_types::quote::SignedQuote {
         quote: quote.clone(),
         signature: payload.signature.clone(),
     };
     signed
-        .verify(&vk, protocol_id, mm_account_id, now_ms)
+        .verify(scheme, &acct.signing_pubkey, protocol_id, mm_account_id, now_ms)
         .map_err(QuoteRejection::from)?;
 
     // Reservation feasibility.
@@ -204,6 +202,19 @@ pub async fn orchestrate(
     now_ms: u64,
 ) -> Vec<RfqQuoteEntry> {
     let deadline_ms = now_ms.saturating_add(rfq_window.as_millis() as u64);
+
+    // Resolve the bucket up-front so the broadcast can include the
+    // bucket's strike + expiry. MMs price against these instead of
+    // guessing — every quote that comes back already knows what option
+    // it's quoting.
+    let bucket = match state.buckets.get(&bucket_id) {
+        Some(b) => b,
+        None => {
+            debug!(%bucket_id, "rfq for unknown bucket — returning empty");
+            return Vec::new();
+        }
+    };
+
     let mm_role = side.counterparty_mm();
     let mms = state.mms.all_for_role(mm_role);
     debug!(?side, mms = mms.len(), request_id = %request_id, "rfq broadcast");
@@ -227,6 +238,8 @@ pub async fn orchestrate(
                 write_amount,
                 side,
                 deadline_ms,
+                strike: bucket.strike,
+                expiry_ms: bucket.expiry_ms,
             },
         };
         // Tell the matcher who we expect a response from so it can decide
@@ -288,6 +301,7 @@ mod tests {
             event: ChainEvent::AccountCreated(AccountCreated {
                 account_id: mm_account,
                 owner: SuiAddress::ZERO,
+                signing_scheme: protocol_types::SigningScheme::Ed25519,
                 signing_pubkey,
             }),
         });

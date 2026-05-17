@@ -16,6 +16,7 @@
 pub mod account;
 pub mod admin;
 pub mod execute_write;
+pub mod test_tokens;
 
 use anyhow::{anyhow, Result};
 use sui_types::base_types::ObjectID;

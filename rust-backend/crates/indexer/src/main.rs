@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use sui_data_ingestion_core::setup_single_workflow;
+use sui_sdk::SuiClientBuilder;
 use tracing::{error, info};
 
 use indexer::{Config, ProtocolEventWorker, Store};
@@ -31,16 +32,57 @@ async fn main() -> Result<()> {
     let cfg = Config::load(&cfg_path)
         .with_context(|| format!("loading config from {cfg_path}"))?;
 
+    // Resolve the deployed package id from deployments.json so a redeploy
+    // doesn't need an indexer config edit.
+    let package_id = cfg.resolve_package_id().with_context(|| {
+        format!(
+            "resolving package_id from {} (network={})",
+            cfg.deployments_path.display(),
+            cfg.network
+        )
+    })?;
+    info!(
+        network = %cfg.network,
+        package_id = %package_id,
+        deployments = %cfg.deployments_path.display(),
+        "resolved package id from deployments"
+    );
+
     let store = Arc::new(Store::new(1024));
+
+    // Resolve the starting checkpoint. If the operator didn't pin one, ask
+    // a fullnode for the latest checkpoint and tail from there. The lookup
+    // is one-shot (only at boot); we don't keep the RPC client around.
+    let start_checkpoint = match cfg.start_checkpoint {
+        Some(s) => {
+            info!(start_checkpoint = s, "starting from pinned checkpoint");
+            s
+        }
+        None => {
+            let rpc = cfg.resolve_rpc_url()?;
+            info!(rpc = %rpc, "no start_checkpoint pinned; querying tip");
+            let client = SuiClientBuilder::default()
+                .build(&rpc)
+                .await
+                .with_context(|| format!("connecting to {rpc}"))?;
+            let latest = client
+                .read_api()
+                .get_latest_checkpoint_sequence_number()
+                .await
+                .context("querying latest checkpoint")?;
+            info!(start_checkpoint = latest, "tailing from current tip");
+            latest
+        }
+    };
 
     // Sui checkpoint ingestion. `setup_single_workflow` returns
     // `(ExecutorProgress future, termination Sender)` — we drive the future
     // alongside the fanout.
-    let worker = ProtocolEventWorker::new(Arc::clone(&store), &cfg.package_id);
+    let worker = ProtocolEventWorker::new(Arc::clone(&store), &package_id);
     let (executor, _term_sender) = setup_single_workflow(
         worker,
         cfg.remote_store_url.clone(),
-        cfg.start_checkpoint,
+        start_checkpoint,
         cfg.concurrency,
         None,
     )
@@ -59,7 +101,7 @@ async fn main() -> Result<()> {
     info!(addr = %cfg.fanout_addr, "indexer fanout listening");
     info!(
         remote = %cfg.remote_store_url,
-        from = cfg.start_checkpoint,
+        from = start_checkpoint,
         concurrency = cfg.concurrency,
         "ingestion workflow running"
     );

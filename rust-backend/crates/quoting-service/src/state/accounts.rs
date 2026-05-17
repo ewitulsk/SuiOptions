@@ -9,32 +9,24 @@
 use std::collections::BTreeMap;
 
 use dashmap::DashMap;
-use ed25519_dalek::VerifyingKey;
 use parking_lot::RwLock;
 
 use protocol_types::asset::AssetType;
 use protocol_types::ids::{ObjectId, SuiAddress};
+use protocol_types::SigningScheme;
 
 use super::reservations::ReservationTable;
 
 #[derive(Clone, Debug, Default)]
 pub struct AccountMirror {
     pub owner: Option<SuiAddress>,
+    /// Tag the indexer observed in the most recent `AccountCreated` /
+    /// `SigningKeyRotated` event. `None` means the indexer hasn't seen one
+    /// yet (boot race) — quote/auth verification must fail closed in that
+    /// case.
+    pub signing_scheme: Option<SigningScheme>,
     pub signing_pubkey: Vec<u8>,
     pub balances: BTreeMap<AssetType, u64>,
-}
-
-impl AccountMirror {
-    /// Parse the stored bytes into an Ed25519 VerifyingKey. None if no key
-    /// is set or it's malformed.
-    pub fn verifying_key(&self) -> Option<VerifyingKey> {
-        if self.signing_pubkey.len() != 32 {
-            return None;
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&self.signing_pubkey);
-        VerifyingKey::from_bytes(&arr).ok()
-    }
 }
 
 #[derive(Default)]
@@ -67,12 +59,17 @@ impl AccountStore {
         g.balances.insert(asset, next);
     }
 
-    pub fn set_signing_key(&self, id: ObjectId, key: Vec<u8>) {
+    /// Set the registered signing scheme + pubkey for an Account.
+    /// `AccountCreated` and `SigningKeyRotated` both go through here so
+    /// they can't drift.
+    pub fn set_signing_key(&self, id: ObjectId, scheme: SigningScheme, key: Vec<u8>) {
         let entry = self
             .accounts
             .entry(id)
             .or_insert_with(|| RwLock::new(AccountMirror::default()));
-        entry.write().signing_pubkey = key;
+        let mut w = entry.write();
+        w.signing_scheme = Some(scheme);
+        w.signing_pubkey = key;
     }
 
     pub fn set_owner(&self, id: ObjectId, owner: SuiAddress) {

@@ -416,6 +416,7 @@ mod tests {
             ChainEvent::AccountCreated(AccountCreated {
                 account_id: acct,
                 owner: SuiAddress::new([0xcd; 32]),
+                signing_scheme: protocol_types::SigningScheme::Ed25519,
                 signing_pubkey: vec![0x01; 32],
             }),
             1,

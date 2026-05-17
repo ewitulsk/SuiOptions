@@ -94,6 +94,9 @@ pub struct BucketCleaned {
 pub struct AccountCreated {
     pub account_id: ObjectId,
     pub owner: SuiAddress,
+    /// Tag for the registered signing key. BCS-encodes as a single u8;
+    /// must match the on-chain struct field order in `events.move`.
+    pub signing_scheme: crate::SigningScheme,
     #[serde(with = "crate::coding::bytes_hex")]
     pub signing_pubkey: Vec<u8>,
 }
@@ -117,6 +120,7 @@ pub struct AccountWithdraw {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SigningKeyRotated {
     pub account_id: ObjectId,
+    pub new_scheme: crate::SigningScheme,
     #[serde(with = "crate::coding::bytes_hex")]
     pub new_pubkey: Vec<u8>,
 }

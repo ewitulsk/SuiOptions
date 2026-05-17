@@ -1,25 +1,29 @@
-//! MM auth via Ed25519 challenge-response.
+//! MM auth via signature challenge-response.
 //!
 //! Flow (§5.4.1, §5.4.5–§5.4.6):
 //!
-//! 1. MM connects and sends `Hello { account_id, signing_pubkey }`.
+//! 1. MM connects and sends
+//!    `Hello { account_id, signing_scheme, signing_pubkey }`.
 //! 2. Service issues `AuthChallenge { challenge }` — 32 random bytes.
-//! 3. MM signs the challenge bytes with its Account signing key and replies
+//! 3. MM signs those bytes with its Account signing key (using whichever of
+//!    Ed25519 / Secp256k1 / Secp256r1 it registered on chain) and replies
 //!    `AuthResponse { signature }`.
-//! 4. Service verifies the signature against the pubkey the indexer has on
-//!    file for that Account. If they match, session is authenticated. The
-//!    pubkey supplied in the Hello must agree with the indexer's record —
-//!    otherwise the MM is claiming an account it doesn't control.
+//! 4. Service verifies via [`protocol_types::verify_signature`]. The pubkey
+//!    + scheme supplied in the Hello must agree with what the indexer
+//!    holds on file for that Account — otherwise the MM is claiming an
+//!    account it doesn't control.
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use protocol_types::SigningScheme;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum AuthError {
-    /// `signing_pubkey` doesn't match the on-chain key the indexer reports.
+    /// `(scheme, signing_pubkey)` doesn't match the on-chain registration
+    /// the indexer reports.
     PubkeyMismatch,
-    /// Stored or supplied pubkey isn't a valid Ed25519 key.
-    PubkeyInvalid,
-    /// Signature isn't 64 bytes or doesn't verify.
+    /// The indexer hasn't recorded a scheme for this account yet.
+    SchemeUnknown,
+    /// Signature didn't verify (wrong size, wrong key, or tampered
+    /// challenge).
     SignatureInvalid,
 }
 
@@ -32,26 +36,22 @@ pub fn random_challenge() -> Vec<u8> {
 
 /// Verify a challenge response.
 ///
-/// `indexer_pubkey` is what the indexer reports for the claimed account;
-/// `supplied_pubkey` is what the MM put in its Hello. They must match —
-/// trusting the supplied key alone would let any MM claim any account.
+/// `indexer_*` come from `AccountMirror` (what the chain registered).
+/// `supplied_*` come from the MM's `Hello`. Both must match before we
+/// verify the signature so an MM can't claim an account it doesn't own.
 pub fn verify_challenge_response(
+    indexer_scheme: Option<SigningScheme>,
     indexer_pubkey: &[u8],
+    supplied_scheme: SigningScheme,
     supplied_pubkey: &[u8],
     challenge: &[u8],
     signature: &[u8],
 ) -> Result<(), AuthError> {
-    if indexer_pubkey != supplied_pubkey {
+    let indexer_scheme = indexer_scheme.ok_or(AuthError::SchemeUnknown)?;
+    if indexer_scheme != supplied_scheme || indexer_pubkey != supplied_pubkey {
         return Err(AuthError::PubkeyMismatch);
     }
-    if indexer_pubkey.len() != 32 {
-        return Err(AuthError::PubkeyInvalid);
-    }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(indexer_pubkey);
-    let vk = VerifyingKey::from_bytes(&key).map_err(|_| AuthError::PubkeyInvalid)?;
-    let sig = Signature::from_slice(signature).map_err(|_| AuthError::SignatureInvalid)?;
-    vk.verify(challenge, &sig)
+    protocol_types::verify_signature(indexer_scheme, indexer_pubkey, challenge, signature)
         .map_err(|_| AuthError::SignatureInvalid)
 }
 
@@ -60,14 +60,65 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
+    use sha2::{Digest, Sha256};
 
     #[test]
-    fn happy_path() {
+    fn happy_path_ed25519() {
         let sk = SigningKey::generate(&mut OsRng);
         let pk = sk.verifying_key().to_bytes().to_vec();
         let ch = random_challenge();
         let sig = sk.sign(&ch).to_bytes().to_vec();
-        verify_challenge_response(&pk, &pk, &ch, &sig).unwrap();
+        verify_challenge_response(
+            Some(SigningScheme::Ed25519),
+            &pk,
+            SigningScheme::Ed25519,
+            &pk,
+            &ch,
+            &sig,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn happy_path_secp256k1() {
+        use k256::ecdsa::signature::hazmat::PrehashSigner;
+        use k256::ecdsa::{Signature, SigningKey as K1Key};
+        let sk = K1Key::random(&mut OsRng);
+        let pk = sk.verifying_key().to_encoded_point(true).as_bytes().to_vec();
+        let ch = random_challenge();
+        let digest = Sha256::digest(&ch);
+        let (sig, _): (Signature, _) = sk.sign_prehash(&digest).unwrap();
+        let sig_bytes = sig.to_bytes().to_vec();
+        verify_challenge_response(
+            Some(SigningScheme::Secp256k1),
+            &pk,
+            SigningScheme::Secp256k1,
+            &pk,
+            &ch,
+            &sig_bytes,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn happy_path_secp256r1() {
+        use p256::ecdsa::signature::hazmat::PrehashSigner;
+        use p256::ecdsa::{Signature, SigningKey as R1Key};
+        let sk = R1Key::random(&mut OsRng);
+        let pk = sk.verifying_key().to_encoded_point(true).as_bytes().to_vec();
+        let ch = random_challenge();
+        let digest = Sha256::digest(&ch);
+        let (sig, _): (Signature, _) = sk.sign_prehash(&digest).unwrap();
+        let sig_bytes = sig.to_bytes().to_vec();
+        verify_challenge_response(
+            Some(SigningScheme::Secp256r1),
+            &pk,
+            SigningScheme::Secp256r1,
+            &pk,
+            &ch,
+            &sig_bytes,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -78,7 +129,35 @@ mod tests {
         let ch = random_challenge();
         let sig = sk.sign(&ch).to_bytes().to_vec();
         assert_eq!(
-            verify_challenge_response(&pk, &other, &ch, &sig),
+            verify_challenge_response(
+                Some(SigningScheme::Ed25519),
+                &pk,
+                SigningScheme::Ed25519,
+                &other,
+                &ch,
+                &sig,
+            ),
+            Err(AuthError::PubkeyMismatch),
+        );
+    }
+
+    #[test]
+    fn supplied_scheme_must_match_indexer() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let pk = sk.verifying_key().to_bytes().to_vec();
+        let ch = random_challenge();
+        let sig = sk.sign(&ch).to_bytes().to_vec();
+        // Indexer thinks the account is k1, MM claims Ed25519 with valid
+        // Ed25519 inputs. Must reject before signature verification.
+        assert_eq!(
+            verify_challenge_response(
+                Some(SigningScheme::Secp256k1),
+                &pk,
+                SigningScheme::Ed25519,
+                &pk,
+                &ch,
+                &sig,
+            ),
             Err(AuthError::PubkeyMismatch),
         );
     }
@@ -92,17 +171,23 @@ mod tests {
         let mut tampered = ch.clone();
         tampered[0] ^= 0x01;
         assert_eq!(
-            verify_challenge_response(&pk, &pk, &tampered, &sig),
+            verify_challenge_response(
+                Some(SigningScheme::Ed25519),
+                &pk,
+                SigningScheme::Ed25519,
+                &pk,
+                &tampered,
+                &sig,
+            ),
             Err(AuthError::SignatureInvalid),
         );
     }
 
     #[test]
-    fn rejects_short_pubkey() {
-        let sig = vec![0u8; 64];
+    fn indexer_with_unset_scheme_fails_closed() {
         assert_eq!(
-            verify_challenge_response(&[0; 16], &[0; 16], &[1, 2, 3], &sig),
-            Err(AuthError::PubkeyInvalid),
+            verify_challenge_response(None, &[0; 32], SigningScheme::Ed25519, &[0; 32], &[], &[]),
+            Err(AuthError::SchemeUnknown),
         );
     }
 }

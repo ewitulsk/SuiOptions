@@ -22,3 +22,5 @@ public fun nonce_still_valid(): u64 { 19 }
 public fun insufficient_treasury_balance(): u64 { 20 }
 public fun zero_amount(): u64 { 21 }
 public fun count_must_be_positive(): u64 { 22 }
+public fun invalid_signing_scheme(): u64 { 23 }
+public fun invalid_pubkey_length(): u64 { 24 }

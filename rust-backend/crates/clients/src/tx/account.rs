@@ -24,12 +24,13 @@ pub struct AccountCreated {
     pub digest: String,
 }
 
-/// Calls `account::create_and_share_account(pubkey, ctx)` and returns the
-/// shared Account's object id.
+/// Calls `account::create_and_share_account(scheme, pubkey, ctx)` and
+/// returns the shared Account's object id.
 pub async fn create_and_share_account(
     client: &SuiClient,
     signer: &Signer,
     package: ObjectID,
+    signing_scheme: protocol_types::SigningScheme,
     signing_pubkey: &[u8],
     gas_budget: u64,
 ) -> Result<AccountCreated> {
@@ -38,6 +39,9 @@ pub async fn create_and_share_account(
         .iter()
         .map(|b| serde_json::Value::Number((*b as u64).into()))
         .collect();
+    let scheme_arg = SuiJsonValue::new(serde_json::Value::Number(
+        (signing_scheme.as_u8() as u64).into(),
+    ))?;
 
     let tx_data = client
         .transaction_builder()
@@ -47,7 +51,7 @@ pub async fn create_and_share_account(
             "account",
             "create_and_share_account",
             vec![],
-            vec![SuiJsonValue::new(serde_json::Value::Array(pubkey_array))?],
+            vec![scheme_arg, SuiJsonValue::new(serde_json::Value::Array(pubkey_array))?],
             None,
             gas_budget,
             None,
