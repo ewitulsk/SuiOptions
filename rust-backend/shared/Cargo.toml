@@ -1,0 +1,49 @@
+[package]
+name = "shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bcs = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+config = { version = "0.14", features = ["toml"] }
+base64 = "0.22"
+
+# Crypto
+ed25519-dalek = { workspace = true }
+k256 = { version = "0.13", features = ["ecdsa"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+rand = { workspace = true }
+
+# Async / WS
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+async-trait = { workspace = true }
+
+# Sui SDK (transaction-building, RPC, types). Same pinned workspace versions
+# the deployment-manager and the indexer already use.
+sui-sdk = { workspace = true }
+sui-types = { workspace = true }
+sui-keys = { workspace = true }
+sui-json = { workspace = true }
+sui-json-rpc-types = { workspace = true }
+sui-transaction-builder = { workspace = true }
+shared-crypto = { workspace = true }
+move-core-types = { workspace = true }
+
+# Plumbing
+clap = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

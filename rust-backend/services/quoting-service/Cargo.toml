@@ -1,5 +1,5 @@
 [package]
-name = "integration-tests"
+name = "quoting-service"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,15 +7,20 @@ license.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "quoting-service"
+path = "src/main.rs"
+
 [dependencies]
 shared = { workspace = true }
-indexer = { path = "../services/indexer" }
-quoting-service = { path = "../services/quoting-service" }
+
+config = { version = "0.14", features = ["toml"] }
 
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
+async-trait = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -25,6 +30,19 @@ ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
 
+thiserror = { workspace = true }
 anyhow = { workspace = true }
+
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+sha2 = { workspace = true }
+k256 = { version = "0.13", features = ["ecdsa"] }
+p256 = { version = "0.13", features = ["ecdsa"] }

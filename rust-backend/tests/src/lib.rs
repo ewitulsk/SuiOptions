@@ -15,15 +15,15 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-use protocol_types::asset::AssetType;
-use protocol_types::events::{AccountCreated, AccountDeposit, BucketCreated, ChainEvent};
-use protocol_types::ids::{ObjectId, SuiAddress};
-use protocol_types::messages::{
+use shared::protocol_types::asset::AssetType;
+use shared::protocol_types::events::{AccountCreated, AccountDeposit, BucketCreated, ChainEvent};
+use shared::protocol_types::ids::{ObjectId, SuiAddress};
+use shared::protocol_types::messages::{
     AuthResponsePayload, MmHelloPayload, MmQuotePayload, MmToService, RetailHelloPayload,
     RetailToService, RfqRequestPayload, ServiceToMm, ServiceToRetail,
 };
-use protocol_types::quote::Quote;
-use protocol_types::sides::{MmRole, RetailRole, Side};
+use shared::protocol_types::quote::Quote;
+use shared::protocol_types::sides::{MmRole, RetailRole, Side};
 
 /// Test harness: in-process indexer + quoting service + a known MM
 /// keypair/account, all pre-seeded with the test bucket.
@@ -50,7 +50,7 @@ impl Harness {
             ChainEvent::AccountCreated(AccountCreated {
                 account_id: mm_account,
                 owner: SuiAddress::new([0x33; 32]),
-                signing_scheme: protocol_types::SigningScheme::Ed25519,
+                signing_scheme: shared::protocol_types::SigningScheme::Ed25519,
                 signing_pubkey: mm_sk.verifying_key().to_bytes().to_vec(),
             }),
             1,
@@ -175,7 +175,7 @@ where
     // Forward to the indexer's own connection handler logic by re-implementing
     // the small Snapshot+stream protocol. Kept tiny to avoid pulling the
     // indexer's internal `handle_connection`.
-    use protocol_types::messages::{IndexerSnapshotPayload, IndexerStream, IndexerSubscribe};
+    use shared::protocol_types::messages::{IndexerSnapshotPayload, IndexerStream, IndexerSubscribe};
     let (mut sink, mut stream) = ws.split();
     let first = match stream.next().await {
         Some(Ok(Message::Text(t))) => t,
@@ -270,7 +270,7 @@ pub async fn connect_mm(
         payload: MmHelloPayload {
             roles,
             account_id,
-            signing_scheme: protocol_types::SigningScheme::Ed25519,
+            signing_scheme: shared::protocol_types::SigningScheme::Ed25519,
             signing_pubkey: sk.verifying_key().to_bytes().to_vec(),
         },
     };

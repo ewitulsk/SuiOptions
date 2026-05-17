@@ -1325,46 +1325,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clients"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "bcs",
- "chrono",
- "clap",
- "config",
- "deployments",
- "ed25519-dalek",
- "futures",
- "futures-util",
- "hex",
- "k256 0.13.4",
- "move-core-types",
- "p256",
- "protocol-types",
- "rand 0.8.6",
- "secrets",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "shared-crypto",
- "sui-json",
- "sui-json-rpc-types",
- "sui-keys",
- "sui-sdk",
- "sui-transaction-builder",
- "sui-types",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite 0.24.0",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1910,9 +1870,9 @@ dependencies = [
  "chrono",
  "clap",
  "move-core-types",
- "secrets",
  "serde",
  "serde_json",
+ "shared",
  "shared-crypto",
  "sui-json",
  "sui-json-rpc-types",
@@ -1925,17 +1885,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "deployments"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hex",
- "serde",
- "serde_json",
- "sui-types",
 ]
 
 [[package]]
@@ -2399,6 +2348,23 @@ name = "ethnum"
 version = "1.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40404c3f5f511ec4da6fe866ddf6a717c309fdbb69fbbad7b0f3edab8f2e835f"
+
+[[package]]
+name = "exchange"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
+ "shared",
+ "sui-json-rpc-types",
+ "sui-types",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "eyre"
@@ -3513,13 +3479,12 @@ dependencies = [
  "chrono",
  "config",
  "dashmap 6.1.0",
- "deployments",
  "futures",
  "futures-util",
  "parking_lot 0.12.5",
- "protocol-types",
  "serde",
  "serde_json",
+ "shared",
  "sui-data-ingestion-core",
  "sui-sdk",
  "sui-types",
@@ -3631,11 +3596,11 @@ dependencies = [
  "futures-util",
  "hex",
  "indexer",
- "protocol-types",
  "quoting-service",
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "shared",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tracing",
@@ -4473,6 +4438,28 @@ dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mm-bot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bcs",
+ "chrono",
+ "clap",
+ "config",
+ "ed25519-dalek",
+ "futures",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "shared",
+ "sui-types",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -6445,22 +6432,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "protocol-types"
-version = "0.1.0"
-dependencies = [
- "bcs",
- "ed25519-dalek",
- "hex",
- "k256 0.13.4",
- "p256",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "protox"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6642,11 +6613,11 @@ dependencies = [
  "k256 0.13.4",
  "p256",
  "parking_lot 0.12.5",
- "protocol-types",
  "rand 0.8.6",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "shared",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.24.0",
@@ -7471,15 +7442,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "secrets"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "config",
- "serde",
-]
-
-[[package]]
 name = "security-framework"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7757,6 +7719,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
+]
+
+[[package]]
+name = "shared"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bcs",
+ "chrono",
+ "clap",
+ "config",
+ "ed25519-dalek",
+ "futures",
+ "futures-util",
+ "hex",
+ "k256 0.13.4",
+ "move-core-types",
+ "p256",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "shared-crypto",
+ "sui-json",
+ "sui-json-rpc-types",
+ "sui-keys",
+ "sui-sdk",
+ "sui-transaction-builder",
+ "sui-types",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
 ]
 
 [[package]]
@@ -10902,6 +10899,25 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+
+[[package]]
+name = "writer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "shared",
+ "sui-types",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
 
 [[package]]
 name = "wyz"

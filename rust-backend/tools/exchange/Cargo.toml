@@ -1,30 +1,27 @@
 [package]
-name = "integration-tests"
+name = "exchange"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[lib]
-path = "src/lib.rs"
+[[bin]]
+name = "exchange"
+path = "src/main.rs"
 
 [dependencies]
 shared = { workspace = true }
-indexer = { path = "../services/indexer" }
-quoting-service = { path = "../services/quoting-service" }
+
+sui-types = { workspace = true }
+sui-json-rpc-types = { workspace = true }
 
 tokio = { workspace = true }
-tokio-tungstenite = { workspace = true }
-futures = { workspace = true }
-futures-util = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
-bcs = { workspace = true }
 
-ed25519-dalek = { workspace = true }
-rand = { workspace = true }
 hex = { workspace = true }
 
+clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

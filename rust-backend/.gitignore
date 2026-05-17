@@ -5,18 +5,20 @@
 # Lockfile policy: keep `Cargo.lock` for workspaces that produce binaries
 # (we do — `indexer` and `quoting-service`). NOT ignored.
 
-# Local config overrides — commit the templated *.toml files under
-# `crates/<svc>/config/`, but anything ending in `.local.toml` is
-# developer-only (credentials, ephemeral ports, etc).
+# Local config overrides — commit the templated `config.toml` files under
+# `services/<svc>/config/` and `tools/<svc>/config/`, but anything ending
+# in `.local.toml` is developer-only (credentials, ephemeral ports, etc).
 **/config/*.local.toml
 
-# Secrets file — every binary that signs anything reads its keys from
-# `secrets.toml` (default location, configurable per binary via `--secrets`).
-# Commit `secrets.example.toml`; never `secrets.toml`.
-secrets.toml
-**/secrets.toml
+# Per-binary secrets files — every signing binary reads its keys from its
+# own `{services,tools}/<svc>/config/secrets.toml`. Commit the workspace-
+# root template only.
+**/config/secrets.toml
 !secrets.example.toml
-!**/secrets.example.toml
+
+# MM bot's persisted Account bootstrap state — written on first run and
+# read on subsequent runs. Re-creating it after a redeploy is fine.
+**/mm-bot.account.json
 
 # Env files in case anything ever reaches for one (we use TOML, not .env,
 # but ignore them defensively).

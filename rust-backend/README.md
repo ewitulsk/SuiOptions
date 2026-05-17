@@ -3,31 +3,35 @@
 Off-chain services for the Sui covered-call options protocol (see
 `../options-protocol-spec.md`).
 
-Two long-running services plus three CLIs / bots, all in one Cargo workspace:
+Organized into three buckets:
 
-- **`indexer`** (§6) — tails the Sui event stream for the protocol package
-  via `sui-data-ingestion-core`, BCS-decodes events that match
-  `{package_id}::events::*`, materializes per-account / per-bucket /
-  per-position views in memory, and exposes the stream over a WebSocket
-  fanout for the quoting service.
-
-- **`quoting-service`** (§5) — stateful WebSocket router between retail
-  frontends and market-maker bots. Authenticates MMs via a scheme-aware
-  signature challenge (`ed25519` / `secp256k1` / `secp256r1`), brokers
-  RFQs with a deadline window, validates signed quotes, tracks
-  reservations with TTL eviction, scores MM reputation. Consumes state
-  updates from the indexer; signs no transactions and holds no funds.
-
-- **`clients`** — three binaries that drive the protocol end-to-end:
-  - **`exchange`** — admin/operator CLI (create buckets, mint test tokens,
-    fund accounts, set fees, withdraw treasury).
-  - **`writer`** — retail-writer test client (RFQ → execute_write).
+- **`services/`** — long-running processes.
+  - **`indexer`** (§6) — tails Sui's checkpoint stream via
+    `sui-data-ingestion-core`, BCS-decodes `{package_id}::events::*`,
+    materializes per-account / per-bucket / per-position views in memory,
+    and exposes the stream over a WebSocket fanout for the quoting service.
+  - **`quoting-service`** (§5) — stateful WebSocket router between retail
+    frontends and market-maker bots. Authenticates MMs via a scheme-aware
+    signature challenge (`ed25519` / `secp256k1` / `secp256r1`), brokers
+    RFQs with a deadline window, validates signed quotes, tracks
+    reservations with TTL eviction, scores MM reputation. Consumes state
+    updates from the indexer; signs no transactions and holds no funds.
   - **`mm-bot`** — basic market-maker bot (auto-bootstraps an Account,
     prices RFQs with Black-Scholes, signs and ships Quotes).
 
-Shared types live in **`protocol-types`** — the canonical `Quote` /
-`SignedQuote` structs whose BCS encoding must byte-match the Move definition
-in §3.2.7, plus the WS message envelope and indexer event types.
+- **`tools/`** — one-shot operator binaries.
+  - **`deployment-manager`** (`deploy` binary) — compiles and publishes the
+    options-protocol Move package; records every important on-chain id
+    into `deployments.json`.
+  - **`exchange`** — admin/operator CLI (create buckets, mint test tokens,
+    fund accounts, set fees, withdraw treasury).
+  - **`writer`** — retail-writer test client (RFQ → `execute_write`).
+
+- **`shared/`** — single library crate. BCS-canonical `Quote` /
+  `SignedQuote` (which must byte-match §3.2.7 of the spec), the WS
+  message envelope, indexer event mirrors, the `Deployments` /
+  `Secrets` loaders, Black-Scholes pricing, scheme-aware quote signing,
+  Sui client + PTB builders.
 
 ## Layout
 
@@ -35,14 +39,23 @@ in §3.2.7, plus the WS message envelope and indexer event types.
 rust-backend/
 ├── Cargo.toml                      # workspace
 ├── deployments.json                # package + AdminCap + test-token ids
-├── crates/
-│   ├── protocol-types/             # shared (de)serializable types
-│   ├── indexer/                    # event indexer + WS fanout
-│   ├── quoting-service/            # WS RFQ broker
-│   ├── deployment-manager/         # `deploy` binary (publishes contracts)
-│   └── clients/                    # exchange / writer / mm-bot binaries
+├── secrets.example.toml            # committed template; per-binary copies are gitignored
+├── shared/                         # library crate (protocol_types, deployments, secrets, …)
+├── services/
+│   ├── indexer/         config/{config.toml}
+│   ├── quoting-service/ config/{config.toml}
+│   └── mm-bot/          config/{config.toml, secrets.toml, mm-bot.account.json}
+├── tools/
+│   ├── deployment-manager/  config/{secrets.toml}
+│   ├── exchange/            config/{secrets.toml}
+│   └── writer/              config/{secrets.toml}
 └── tests/                          # cross-crate integration tests
 ```
+
+Every binary that needs a config or a secrets file has its **own copy**
+under that binary's `config/` directory — even when two binaries share
+the same Sui key. CLI flags (`-c/--config`, `-s/--secrets`) override the
+per-binary defaults, but there is no env-var fallback for secrets.
 
 ## Build & test
 
@@ -53,9 +66,16 @@ cargo test --workspace
 
 ## Run locally
 
-Each service loads a TOML config from `CONFIG_PATH` (default
-`config/testnet.toml` resolved against the crate dir). Edit
-`crates/<service>/config/testnet.toml` or point `CONFIG_PATH` at your own.
+Each binary picks up its own config:
+
+| Binary | Config | Secrets |
+|---|---|---|
+| `indexer` | `services/indexer/config/config.toml` | — (read-only on chain) |
+| `quoting-service` | `services/quoting-service/config/config.toml` | — (signs nothing) |
+| `mm-bot` | `services/mm-bot/config/config.toml` | `services/mm-bot/config/secrets.toml` |
+| `deploy` | (CLI flags only) | `tools/deployment-manager/config/secrets.toml` |
+| `exchange` | (CLI flags only) | `tools/exchange/config/secrets.toml` |
+| `writer` | (CLI flags only) | `tools/writer/config/secrets.toml` |
 
 The indexer resolves the deployed `package_id` at startup from
 `deployments.json` using the `network` field in its TOML — a redeploy
@@ -78,28 +98,32 @@ Both honor `RUST_LOG` (e.g. `RUST_LOG=info,quoting_service=debug`).
 
 ## Clients
 
-All three binaries live in `crates/clients` and resolve every chain-side
-id (package, AdminCap, ProtocolConfig, Treasury, the test-tokens package
-and its per-symbol Faucets) from `deployments.json`. Nothing about tokens
-or addresses is hardcoded in the binaries — re-run `deploy` on a fresh
-network, update `deployments.json`, and the clients follow.
+The three clients (`exchange`, `writer`, `mm-bot`) and the
+`deployment-manager`'s `deploy` binary all resolve every chain-side id
+(package, AdminCap, ProtocolConfig, Treasury, the test-tokens package
+and its per-symbol Faucets) from `deployments.json`. Re-run `deploy` on
+a fresh network, update `deployments.json`, and everything else follows.
 
 ### Secrets
 
 Every binary that signs anything (`deploy`, `exchange`, `writer`,
-`mm-bot`) reads its keys from a single TOML file — `secrets.toml` in the
-working directory by default, or `--secrets <path>` to override. There
-is **no environment-variable fallback**: if a key is missing, the binary
+`mm-bot`) reads its keys from its own `config/secrets.toml`. There is
+**no environment-variable fallback**: if a key is missing, the binary
 refuses to start.
 
-Copy the committed template and fill in real keys:
+Workspace bootstrap:
 
 ```bash
-cp secrets.example.toml secrets.toml
-$EDITOR secrets.toml
+# One template at the workspace root; copy it into each binary's
+# config/ dir and fill in real keys. The same key can appear in
+# multiple files — each binary just reads its own.
+cp secrets.example.toml services/mm-bot/config/secrets.toml
+cp secrets.example.toml tools/deployment-manager/config/secrets.toml
+cp secrets.example.toml tools/exchange/config/secrets.toml
+cp secrets.example.toml tools/writer/config/secrets.toml
 ```
 
-Shape:
+Shape of any `secrets.toml`:
 
 ```toml
 [sui]
@@ -120,14 +144,18 @@ quote_key = "suiprivkey1..."
 # or: quote_key = "0xabcdef..."
 ```
 
-`secrets.toml` is in `.gitignore`; `secrets.example.toml` is committed.
+`config/secrets.toml` is gitignored everywhere; `secrets.example.toml`
+is the only committed copy.
 
 ### Building
 
 ```
-cargo build --release -p clients         # builds exchange, writer, mm-bot
-# or run directly without a release build:
-cargo run --release -p clients --bin exchange -- <args>
+# Build every binary in the workspace.
+cargo build --release --workspace
+# Or build a single one:
+cargo build --release -p exchange
+# Or run directly:
+cargo run --release -p exchange -- <args>
 ```
 
 The first build pulls a chunk of the Sui workspace and takes ~5 min;
@@ -158,14 +186,14 @@ treasury, derived `protocol_id` bytes, deployer, signer address, and the
 test-token table). Use this first to verify your env is wired up:
 
 ```
-cargo run --release -p clients --bin exchange -- info
+cargo run --release -p exchange -- info
 ```
 
 `create-buckets` — call `bucket::new_call_option<U, S>`. Creates `count`
 shared buckets at strikes `start_strike + i * strike_interval`:
 
 ```
-cargo run --release -p clients --bin exchange -- create-buckets \
+cargo run --release -p exchange -- create-buckets \
   --underlying TBTC                       \
   --settlement TUSDC                      \
   --expiry-ms     1769443200000           \
@@ -196,7 +224,7 @@ strikes $50 000 / $55 000 / $60 000 / $65 000 per BTC. Make the MM bot's
 `mint` — faucet-mint `--amount` of `--token` to the signer:
 
 ```
-cargo run --release -p clients --bin exchange -- mint \
+cargo run --release -p exchange -- mint \
   --token TUSDC --amount 1000000000
 ```
 
@@ -204,7 +232,7 @@ cargo run --release -p clients --bin exchange -- mint \
 PTB. Useful for topping up an MM Account or seeding a new tester:
 
 ```
-cargo run --release -p clients --bin exchange -- fund-account \
+cargo run --release -p exchange -- fund-account \
   --account 0xabc...        \
   --token   TUSDC           \
   --amount  1000000000000
@@ -213,14 +241,14 @@ cargo run --release -p clients --bin exchange -- fund-account \
 `set-fee` — `admin::set_fee_bps`. Capped at 1000 bps on chain:
 
 ```
-cargo run --release -p clients --bin exchange -- set-fee --bps 50
+cargo run --release -p exchange -- set-fee --bps 50
 ```
 
 `withdraw-treasury` — `treasury::withdraw<T>`. `--token` accepts a symbol
 or a Move type:
 
 ```
-cargo run --release -p clients --bin exchange -- withdraw-treasury \
+cargo run --release -p exchange -- withdraw-treasury \
   --token TUSDC --amount 1000000 --recipient 0xabc...
 ```
 
@@ -239,7 +267,7 @@ Walks the full §8.1 writer flow:
    wallet; the MM gets the call-option NFT.
 
 ```
-cargo run --release -p clients --bin writer -- \
+cargo run --release -p writer -- \
   --bucket 0xBUCKET_ID                         \
   --write-amount 100000                        \
   --underlying TBTC                            \
@@ -308,7 +336,7 @@ quote_key = "suiprivkey1..."
 # quote_key = "0xabcdef..."
 ```
 
-**Config** (`crates/clients/config/mm-bot.toml`):
+**Config** (`services/mm-bot/config/config.toml`):
 
 ```toml
 quoting_url        = "ws://127.0.0.1:9002/"
@@ -320,12 +348,12 @@ signing_scheme     = "ed25519"
 underlying_symbol  = "TBTC"
 settlement_symbol  = "TUSDC"
 
-# Black-Scholes inputs. spot_price is in settlement-asset smallest-units
-# (TUSDC has 6 decimals → 50_000 USD = 50_000_000_000).
-spot_price         = 50_000_000_000
+# spot_price is in the same units as the bucket's on-chain `strike`:
+# settlement smallest-units per underlying smallest-unit. For BTC at $50k
+# with TBTC (8 dec) and TUSDC (6 dec): 50_000 × 10^6 / 10^8 = 500.
+spot_price         = 500
 vol                = 0.6
 rate               = 0.05
-days_to_expiry     = 30.0
 quote_ttl_ms       = 30_000
 
 roles = ["trader_mm", "writer_mm"]
@@ -340,10 +368,12 @@ bootstrap_settlement_amount = 1_000_000_000_000
 **Run:**
 
 ```
-cargo run --release -p clients --bin mm-bot -- \
-  --config crates/clients/config/mm-bot.toml \
-  --account-state mm-bot.account.json
+cargo run --release -p mm-bot
 ```
+
+Defaults point at `services/mm-bot/config/{config,secrets}.toml` and
+persist Account state at `services/mm-bot/config/mm-bot.account.json`.
+Override any with `--config` / `--secrets` / `--account-state`.
 
 The bot logs its account id on bootstrap; that's what the quoting service
 and the writer will see in `RFQResponse.quotes[].mm_id`.
@@ -356,13 +386,18 @@ Five terminals walk through one writer transaction from cold start.
 
 ```bash
 cd rust-backend
-# One-time secret setup — fill in your Sui testnet bech32 key and a
-# fresh 32-byte hex value for `mm_bot.quote_key`.
-cp secrets.example.toml secrets.toml
-$EDITOR secrets.toml
+# One-time secret setup — copy the template into each signing binary's
+# config/ dir, then fill in real keys.
+for d in services/mm-bot tools/deployment-manager tools/exchange tools/writer; do
+  cp secrets.example.toml "$d/config/secrets.toml"
+done
+$EDITOR services/mm-bot/config/secrets.toml \
+        tools/deployment-manager/config/secrets.toml \
+        tools/exchange/config/secrets.toml \
+        tools/writer/config/secrets.toml
 ```
 
-`secrets.toml` is read by every signing binary; no env vars needed.
+Per-binary secrets — no env vars anywhere.
 
 **T1 — indexer** (tails Sui checkpoints, fans out events over WS):
 
@@ -379,8 +414,8 @@ cargo run --release -p quoting-service
 **T3 — operator: verify wiring and create a bucket** (one-shot):
 
 ```bash
-cargo run --release -p clients --bin exchange -- info
-cargo run --release -p clients --bin exchange -- create-buckets \
+cargo run --release -p exchange -- info
+cargo run --release -p exchange -- create-buckets \
   --underlying TBTC --settlement TUSDC \
   --expiry-ms 1769443200000 \
   --start-strike 500 \
@@ -396,13 +431,13 @@ Make sure `mm_bot.quote_key` in `secrets.toml` is set. For Ed25519 any
 order):
 
 ```bash
-cargo run --release -p clients --bin mm-bot
+cargo run --release -p mm-bot
 ```
 
 **T5 — writer** (one shot per option you write):
 
 ```bash
-cargo run --release -p clients --bin writer -- \
+cargo run --release -p writer -- \
   --bucket 0xBUCKET_ID_FROM_T3 \
   --write-amount 100000
 ```
