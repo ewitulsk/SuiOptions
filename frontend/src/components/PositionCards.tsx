@@ -1,0 +1,272 @@
+import type { OwnedPosition, WrittenPosition } from "../types";
+
+function AssetGlyph({ asset }: { asset: string }) {
+  if (asset === "BTC") return <span className="asset-glyph asset-glyph--btc">₿</span>;
+  if (asset === "SUI") return <span className="asset-glyph asset-glyph--sui">≈</span>;
+  return <span className="asset-glyph">{asset[0]}</span>;
+}
+
+function StatusPill({ status }: { status: string }) {
+  const map: Record<string, { label: string; cls: string }> = {
+    exercisable:         { label: "exercisable",         cls: "is-pos"  },
+    active_otm:          { label: "out of money",        cls: "is-mute" },
+    expired_itm:         { label: "expired · ITM",       cls: "is-warn" },
+    expired_otm:         { label: "expired · OTM",       cls: "is-mute" },
+    claimable:           { label: "claimable",           cls: "is-pos"  },
+    active:              { label: "active",              cls: "is-mute" },
+    partially_exercised: { label: "partial · exercised", cls: "is-info" },
+    fully_exercised:     { label: "fully exercised",     cls: "is-info" },
+  };
+  const m = map[status] ?? { label: status, cls: "" };
+  return <span className={"status-pill " + m.cls}>{m.label}</span>;
+}
+
+const fmtAmt = (asset: string, n: number) => (asset === "BTC" ? n.toFixed(4) : n.toFixed(0));
+const fmtStrike = (asset: string, n: number) =>
+  asset === "BTC" ? `$${(n / 1000).toFixed(0)}k` : `$${n.toFixed(2)}`;
+const fmtSpot = (asset: string, n: number) =>
+  asset === "BTC"
+    ? `$${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
+    : `$${n.toFixed(4)}`;
+
+export function OwnedCard({
+  p,
+  onExercise,
+}: {
+  p: OwnedPosition;
+  onExercise: (p: OwnedPosition) => void;
+}) {
+  const isItm = p.itm;
+  return (
+    <div className={"pos-card pos-card--owned " + (isItm ? "is-itm" : "is-otm")}>
+      <div className="pos-card__head">
+        <div className="pos-card__bucket">
+          <AssetGlyph asset={p.asset} />
+          <div className="pos-card__bucket-label">
+            <div className="pos-card__bucket-main">
+              {p.asset} <span className="dim">·</span> call <span className="dim">·</span>{" "}
+              {fmtStrike(p.asset, p.strike)}
+            </div>
+            <div className="pos-card__bucket-sub">
+              expires{" "}
+              <b>
+                {new Date(p.expiry).toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                })}
+              </b>{" "}
+              · {p.dte > 0 ? `in ${p.dte}d` : "today"} · token {p.rangeId}
+            </div>
+          </div>
+        </div>
+        <StatusPill status={p.status} />
+      </div>
+
+      <div className="pos-card__body">
+        <div className="pos-card__metric">
+          <div className="pos-card__metric-label">You own</div>
+          <div className="pos-card__metric-val">
+            {fmtAmt(p.asset, p.amount)}
+            <span className="pos-card__metric-unit"> {p.asset} call</span>
+          </div>
+          <div className="pos-card__metric-sub">
+            paid {p.premiumPaid.toFixed(2)} USDC · {p.boughtFrom}
+          </div>
+        </div>
+        <div className="pos-card__metric">
+          <div className="pos-card__metric-label">Spot now</div>
+          <div className="pos-card__metric-val">{fmtSpot(p.asset, p.spot)}</div>
+          <div className={"pos-card__metric-sub " + (isItm ? "is-pos" : "is-neg")}>
+            {isItm ? "+" : ""}
+            {p.moneyness.toFixed(2)}% vs strike
+          </div>
+        </div>
+        <div className="pos-card__metric">
+          <div className="pos-card__metric-label">
+            {isItm ? "If exercised now" : "If exercised today"}
+          </div>
+          <div className={"pos-card__metric-val " + (p.pnl >= 0 ? "is-pos" : "is-neg")}>
+            {p.pnl >= 0 ? "+" : "−"}
+            {Math.abs(p.pnl).toFixed(2)}
+            <span className="pos-card__metric-unit"> USDC</span>
+          </div>
+          <div className="pos-card__metric-sub">
+            {isItm
+              ? `intrinsic ${p.intrinsicNow.toFixed(2)} − premium ${p.premiumPaid.toFixed(2)}`
+              : `OTM · would lose premium`}
+          </div>
+        </div>
+      </div>
+
+      <div className="moneyness">
+        <div className="moneyness__track">
+          <div className="moneyness__strike" title={`strike ${fmtStrike(p.asset, p.strike)}`} />
+          <div
+            className="moneyness__spot"
+            style={{
+              left: `${Math.max(2, Math.min(98, 50 + Math.max(-30, Math.min(30, p.moneyness))))}%`,
+            }}
+          >
+            <div className="moneyness__spot-label">spot · {fmtSpot(p.asset, p.spot)}</div>
+          </div>
+        </div>
+        <div className="moneyness__legend">
+          <span>OTM</span>
+          <span className="moneyness__legend-mid">strike {fmtStrike(p.asset, p.strike)}</span>
+          <span>ITM →</span>
+        </div>
+      </div>
+
+      <div className="pos-card__foot">
+        {p.status === "exercisable" && (
+          <button
+            className="pos-card__cta pos-card__cta--primary"
+            onClick={() => onExercise(p)}
+          >
+            Exercise → receive {fmtAmt(p.asset, p.amount)} {p.asset}
+          </button>
+        )}
+        {p.status === "expired_itm" && (
+          <button
+            className="pos-card__cta pos-card__cta--primary"
+            onClick={() => onExercise(p)}
+          >
+            Auto-settle → +{p.pnl.toFixed(2)} USDC
+          </button>
+        )}
+        {p.status === "active_otm" && (
+          <button className="pos-card__cta pos-card__cta--ghost" disabled>
+            Hold · wait for BTC ≥ {fmtStrike(p.asset, p.strike)}
+          </button>
+        )}
+        {p.status === "expired_otm" && (
+          <button className="pos-card__cta pos-card__cta--ghost" disabled>
+            Expired worthless · no action
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function WrittenCard({
+  p,
+  onClaim,
+  onCloseEarly,
+}: {
+  p: WrittenPosition;
+  onClaim: (p: WrittenPosition) => void;
+  onCloseEarly: (p: WrittenPosition) => void;
+}) {
+  const exercisedPct = p.exercisedPct;
+  return (
+    <div className="pos-card pos-card--written">
+      <div className="pos-card__head">
+        <div className="pos-card__bucket">
+          <AssetGlyph asset={p.asset} />
+          <div className="pos-card__bucket-label">
+            <div className="pos-card__bucket-main">
+              {p.asset} <span className="dim">·</span> call <span className="dim">·</span>{" "}
+              {fmtStrike(p.asset, p.strike)}
+            </div>
+            <div className="pos-card__bucket-sub">
+              expires{" "}
+              <b>
+                {new Date(p.expiry).toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                })}
+              </b>{" "}
+              · {p.dte > 0 ? `in ${p.dte}d` : `${Math.abs(p.dte)}d ago`} · sold to {p.soldTo}
+            </div>
+          </div>
+        </div>
+        <StatusPill status={p.status} />
+      </div>
+
+      <div className="pos-card__body">
+        <div className="pos-card__metric">
+          <div className="pos-card__metric-label">You wrote</div>
+          <div className="pos-card__metric-val">
+            {fmtAmt(p.asset, p.amount)}
+            <span className="pos-card__metric-unit"> {p.asset}</span>
+          </div>
+          <div className="pos-card__metric-sub">collateral locked in bucket</div>
+        </div>
+        <div className="pos-card__metric">
+          <div className="pos-card__metric-label">Premium kept</div>
+          <div className="pos-card__metric-val is-pos">
+            +{p.premiumReceived.toFixed(2)}
+            <span className="pos-card__metric-unit"> USDC</span>
+          </div>
+          <div className="pos-card__metric-sub">yours regardless</div>
+        </div>
+        <div className="pos-card__metric">
+          <div className="pos-card__metric-label">Exercised against you</div>
+          <div className="pos-card__metric-val">
+            {exercisedPct.toFixed(0)}
+            <span className="pos-card__metric-unit">% of range</span>
+          </div>
+          <div className="pos-card__metric-sub">
+            {fmtAmt(p.asset, p.exercisedQty)} / {fmtAmt(p.asset, p.totalQty)} {p.asset}
+          </div>
+        </div>
+      </div>
+
+      <div className="rangebar">
+        <div className="rangebar__head">
+          <span className="rangebar__title">your range</span>
+          <span className="rangebar__caption">
+            [{p.rangeStart.toFixed(3)}, {p.rangeEnd.toFixed(3)})
+          </span>
+        </div>
+        <div className="rangebar__track">
+          <div className="rangebar__fill" style={{ width: `${exercisedPct}%` }}></div>
+          <div className="rangebar__cursor" style={{ left: `${exercisedPct}%` }}></div>
+        </div>
+        <div className="rangebar__legend">
+          <span>
+            {fmtAmt(p.asset, p.exercisedQty)} {p.asset} exercised
+          </span>
+          <span>
+            {fmtAmt(p.asset, p.totalQty - p.exercisedQty)} {p.asset} remaining
+          </span>
+        </div>
+      </div>
+
+      <div className="pos-card__foot">
+        {p.status === "claimable" && (
+          <button
+            className="pos-card__cta pos-card__cta--primary"
+            onClick={() => onClaim(p)}
+          >
+            Claim settlement → +
+            {(
+              p.exercisedQty * p.strike +
+              (p.totalQty - p.exercisedQty) * p.spot
+            ).toFixed(2)}{" "}
+            USD equivalent
+          </button>
+        )}
+        {(p.status === "active" || p.status === "partially_exercised") && (
+          <>
+            <button
+              className="pos-card__cta pos-card__cta--ghost"
+              onClick={() => onCloseEarly(p)}
+            >
+              Close early · MM buyback
+            </button>
+            <span className="pos-card__foot-note">
+              expires in {p.dte}d — claim eligible at expiry
+            </span>
+          </>
+        )}
+        {p.status === "fully_exercised" && (
+          <button className="pos-card__cta pos-card__cta--ghost" disabled>
+            Fully exercised · wait for expiry to claim USDC
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
