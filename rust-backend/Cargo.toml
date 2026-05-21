@@ -1,10 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/protocol-types",
-    "crates/indexer",
-    "crates/quoting-service",
-    "crates/deployment-manager",
+    "shared",
+    "services/indexer",
+    "services/quoting-service",
+    "services/mm-bot",
+    "tools/deployment-manager",
+    "tools/exchange",
+    "tools/writer",
+    "tools/control-panel",
     "tests",
 ]
 
@@ -14,7 +18,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-protocol-types = { path = "crates/protocol-types" }
+shared = { path = "shared" }
 
 # Pinned to match sui-keys's exact requirement on the framework/mainnet branch.
 tokio = { version = "=1.49.0", features = ["full"] }
@@ -44,8 +48,8 @@ url = "2"
 parking_lot = "0.12"
 
 # Sui Rust crates. Pinned to the framework/mainnet branch — same code path
-# the production Sui mainnet validators run. Indexer and deployment-manager
-# share a single resolved ABI by going through the workspace.
+# the production Sui mainnet validators run. Every binary in the workspace
+# resolves to a single ABI by going through this list.
 sui-sdk = { git = "https://github.com/mystenlabs/sui", package = "sui-sdk", branch = "framework/mainnet" }
 sui-types = { git = "https://github.com/mystenlabs/sui", package = "sui-types", branch = "framework/mainnet" }
 sui-keys = { git = "https://github.com/mystenlabs/sui", package = "sui-keys", branch = "framework/mainnet" }
@@ -59,3 +63,9 @@ move-core-types = { git = "https://github.com/mystenlabs/sui", package = "move-c
 
 clap = { version = "4", features = ["derive", "env"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+# Postgres persistence for the indexer.
+diesel = { version = "2.2", features = ["postgres", "r2d2", "chrono", "numeric", "serde_json"] }
+diesel_migrations = { version = "2", features = ["postgres"] }
+r2d2 = "0.8"
+bigdecimal = { version = "0.4", features = ["serde"] }

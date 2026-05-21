@@ -41,10 +41,26 @@ public fun init_protocol(scenario: &mut Scenario): Clock {
     clock::create_for_testing(scenario.ctx())
 }
 
-/// Create and share an Account owned by `owner` with the given signing pubkey.
+public fun scheme_ed25519(): u8 { 0 }
+public fun scheme_secp256k1(): u8 { 1 }
+public fun scheme_secp256r1(): u8 { 2 }
+
+/// Create and share an Account owned by `owner` with an Ed25519 signing key.
+/// Default for existing tests — see `create_account_with_scheme` for the
+/// per-scheme variant.
 public fun create_account(scenario: &mut Scenario, owner: address, pubkey: vector<u8>) {
+    create_account_with_scheme(scenario, owner, scheme_ed25519(), pubkey)
+}
+
+/// Create and share an Account using an explicit signing scheme byte.
+public fun create_account_with_scheme(
+    scenario: &mut Scenario,
+    owner: address,
+    scheme: u8,
+    pubkey: vector<u8>,
+) {
     ts::next_tx(scenario, owner);
-    account::create_and_share_account(pubkey, scenario.ctx());
+    account::create_and_share_account(scheme, pubkey, scenario.ctx());
 }
 
 public fun take_admin_cap(scenario: &Scenario): AdminCap {

@@ -1,0 +1,29 @@
+version: '3.8'
+
+# Postgres for the indexer's persistence layer. Standalone — the indexer
+# itself runs from `cargo run -p indexer` against this DB. Migrations are
+# embedded in the binary and applied on boot, so no separate migration
+# container is required.
+#
+# Connection string the indexer expects (matches `config/config.toml`):
+#   postgresql://postgres:postgres@localhost:7654/indexer
+services:
+  postgres:
+    image: postgres:16
+    container_name: options_indexer_db
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: indexer
+    ports:
+      - "7654:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d indexer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres_data:

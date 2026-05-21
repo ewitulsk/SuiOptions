@@ -85,7 +85,7 @@ fun test_set_signing_key_not_owner_aborts() {
 
     ts::next_tx(&mut scenario, th::stranger_addr());
     let mut acc = th::take_account(&scenario);
-    account::set_quote_signing_key(&mut acc, th::pubkey_b(), scenario.ctx());
+    account::set_quote_signing_key(&mut acc, th::scheme_ed25519(), th::pubkey_b(), scenario.ctx());
     ts::return_shared(acc);
     ts::end(scenario);
 }
@@ -97,9 +97,28 @@ fun test_set_signing_key_owner_succeeds() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut acc = th::take_account(&scenario);
-    account::set_quote_signing_key(&mut acc, th::pubkey_b(), scenario.ctx());
+    account::set_quote_signing_key(&mut acc, th::scheme_ed25519(), th::pubkey_b(), scenario.ctx());
     assert!(*account::signing_pubkey(&acc) == th::pubkey_b(), 0);
+    assert!(account::signing_scheme(&acc) == th::scheme_ed25519(), 0);
     ts::return_shared(acc);
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = 23, location = options_protocol::account)] // invalid_signing_scheme
+fun test_create_account_rejects_unknown_scheme() {
+    let mut scenario = ts::begin(th::writer_addr());
+    th::create_account_with_scheme(&mut scenario, th::writer_addr(), 9, th::pubkey_a());
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = 24, location = options_protocol::account)] // invalid_pubkey_length
+fun test_create_account_rejects_wrong_length() {
+    let mut scenario = ts::begin(th::writer_addr());
+    // Ed25519 scheme but 33-byte pubkey — should abort.
+    let bad = x"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511aff";
+    th::create_account_with_scheme(&mut scenario, th::writer_addr(), th::scheme_ed25519(), bad);
     ts::end(scenario);
 }
 

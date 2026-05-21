@@ -1,0 +1,376 @@
+//! The Postgres-facing repository.
+//!
+//! Three operations matter:
+//!
+//!   - [`Repo::apply_checkpoint`] — single transaction per Sui checkpoint.
+//!     Inserts the events into the log, upserts the materialised views, and
+//!     advances `indexer_progress`. Idempotent via the
+//!     `UNIQUE (checkpoint, tx_digest, event_index)` constraint, so re-running
+//!     a partially-processed checkpoint is safe.
+//!
+//!   - [`Repo::load_progress`] — at boot, returns the last fully processed
+//!     `(checkpoint, sequence)` so the worker can resume.
+//!
+//!   - [`Repo::hydrate`] — at boot, reloads accounts/buckets/positions into
+//!     in-memory state so `Store::bucket()` / `Store::account()` work without
+//!     replaying the log.
+//!
+//! A secondary [`Repo::events_after`] backs cold fanout snapshots — when a
+//! subscriber asks for a sequence older than what's in the in-memory log.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use bigdecimal::BigDecimal;
+use chrono::Utc;
+use diesel::pg::PgConnection;
+use diesel::prelude::*;
+use diesel::r2d2::{ConnectionManager, PooledConnection};
+
+use shared::protocol_types::events::{ChainEvent, IndexedEvent};
+use shared::protocol_types::ids::ObjectId;
+
+use crate::store::{AccountState, BucketState, PositionState};
+
+use super::models::{
+    account_row_into_state, bigdecimal_to_u128, event_type_tag, AccountBalanceRow, AccountRow,
+    BucketRow, IndexedEventRow, NewIndexedEventRow, PositionRow, ProgressRow,
+};
+use super::schema::{
+    account_balances, accounts, buckets, indexed_events, indexer_progress, positions,
+};
+use super::DbPool;
+
+/// What a worker accumulates for a single checkpoint before calling
+/// [`Repo::apply_checkpoint`].
+///
+/// All sequence numbers in `events` must be contiguous; `last_sequence` is
+/// the highest one. The worker is responsible for assigning these
+/// monotonically (the Store helps via `Store::ingest_batch`).
+#[derive(Debug, Clone)]
+pub struct CheckpointBatch {
+    pub checkpoint: i64,
+    pub last_sequence: i64,
+    pub events: Vec<NewIndexedEventRow>,
+    pub accounts: Vec<AccountRow>,
+    pub account_balances: Vec<AccountBalanceRow>,
+    pub buckets: Vec<BucketRow>,
+    pub position_upserts: Vec<PositionRow>,
+    /// Positions to drop (`Redeemed` removes them). Keyed `(bucket_id_hex, range_start)`.
+    pub position_deletes: Vec<(String, BigDecimal)>,
+}
+
+impl CheckpointBatch {
+    pub fn empty(checkpoint: i64, last_sequence: i64) -> Self {
+        Self {
+            checkpoint,
+            last_sequence,
+            events: Vec::new(),
+            accounts: Vec::new(),
+            account_balances: Vec::new(),
+            buckets: Vec::new(),
+            position_upserts: Vec::new(),
+            position_deletes: Vec::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+            && self.accounts.is_empty()
+            && self.account_balances.is_empty()
+            && self.buckets.is_empty()
+            && self.position_upserts.is_empty()
+            && self.position_deletes.is_empty()
+    }
+}
+
+/// Build helper used by `Store::ingest_batch` to turn a single `ChainEvent`
+/// into the rows it should produce. Kept here so all "ChainEvent → DB row"
+/// logic lives next to the Repo that consumes it.
+pub struct EventBuild;
+
+impl EventBuild {
+    pub fn new_event_row(
+        sequence: i64,
+        checkpoint: i64,
+        tx_digest: String,
+        event_index: i32,
+        timestamp_ms: i64,
+        event: &ChainEvent,
+    ) -> Result<NewIndexedEventRow> {
+        let payload = serde_json::to_value(event).context("encoding event payload")?;
+        Ok(NewIndexedEventRow {
+            sequence,
+            checkpoint,
+            tx_digest,
+            event_index,
+            timestamp_ms,
+            event_type: event_type_tag(event).to_string(),
+            payload,
+        })
+    }
+}
+
+/// In-memory result of `Repo::hydrate`. Same shape `Store` keeps internally,
+/// so the boot path can move it straight in.
+pub struct HydratedViews {
+    pub accounts: BTreeMap<ObjectId, AccountState>,
+    pub buckets: BTreeMap<ObjectId, BucketState>,
+    pub positions: BTreeMap<(ObjectId, u128), PositionState>,
+}
+
+#[derive(Clone)]
+pub struct Repo {
+    pool: Arc<DbPool>,
+}
+
+impl Repo {
+    pub fn new(pool: Arc<DbPool>) -> Self {
+        Self { pool }
+    }
+
+    fn conn(&self) -> Result<PooledConnection<ConnectionManager<PgConnection>>> {
+        self.pool.get().context("checking out DB connection")
+    }
+
+    /// One transaction: insert events, upsert materialised views, advance
+    /// progress. Empty batches are a no-op (the worker may see checkpoints
+    /// containing zero indexable events).
+    pub fn apply_checkpoint(&self, batch: &CheckpointBatch) -> Result<()> {
+        if batch.is_empty() {
+            // Still advance progress so we don't re-scan empty checkpoints
+            // forever after a restart.
+            return self.advance_progress(batch.checkpoint, batch.last_sequence);
+        }
+
+        let mut conn = self.conn()?;
+        conn.transaction::<_, anyhow::Error, _>(|conn| {
+            if !batch.events.is_empty() {
+                diesel::insert_into(indexed_events::table)
+                    .values(&batch.events)
+                    .on_conflict_do_nothing()
+                    .execute(conn)
+                    .context("inserting indexed_events")?;
+            }
+
+            for acct in &batch.accounts {
+                diesel::insert_into(accounts::table)
+                    .values(acct)
+                    .on_conflict(accounts::account_id)
+                    .do_update()
+                    .set((
+                        accounts::owner.eq(&acct.owner),
+                        accounts::signing_pubkey.eq(&acct.signing_pubkey),
+                        accounts::updated_at_seq.eq(acct.updated_at_seq),
+                    ))
+                    .execute(conn)
+                    .context("upserting accounts")?;
+            }
+
+            for bal in &batch.account_balances {
+                diesel::insert_into(account_balances::table)
+                    .values(bal)
+                    .on_conflict((
+                        account_balances::account_id,
+                        account_balances::asset_type,
+                    ))
+                    .do_update()
+                    .set((
+                        account_balances::balance.eq(&bal.balance),
+                        account_balances::updated_at_seq.eq(bal.updated_at_seq),
+                    ))
+                    .execute(conn)
+                    .context("upserting account_balances")?;
+            }
+
+            for bkt in &batch.buckets {
+                diesel::insert_into(buckets::table)
+                    .values(bkt)
+                    .on_conflict(buckets::bucket_id)
+                    .do_update()
+                    .set((
+                        buckets::total_written.eq(&bkt.total_written),
+                        buckets::exercise_cursor.eq(&bkt.exercise_cursor),
+                        buckets::cleaned.eq(bkt.cleaned),
+                        buckets::updated_at_seq.eq(bkt.updated_at_seq),
+                    ))
+                    .execute(conn)
+                    .context("upserting buckets")?;
+            }
+
+            for pos in &batch.position_upserts {
+                diesel::insert_into(positions::table)
+                    .values(pos)
+                    .on_conflict((positions::bucket_id, positions::range_start))
+                    .do_update()
+                    .set((
+                        positions::range_end.eq(&pos.range_end),
+                        positions::recipient.eq(&pos.recipient),
+                        positions::updated_at_seq.eq(pos.updated_at_seq),
+                    ))
+                    .execute(conn)
+                    .context("upserting positions")?;
+            }
+
+            for (bucket_hex, range_start) in &batch.position_deletes {
+                diesel::delete(
+                    positions::table.filter(
+                        positions::bucket_id
+                            .eq(bucket_hex)
+                            .and(positions::range_start.eq(range_start)),
+                    ),
+                )
+                .execute(conn)
+                .context("deleting positions")?;
+            }
+
+            // Singleton progress row. The first checkpoint creates it; later
+            // ones just update.
+            diesel::insert_into(indexer_progress::table)
+                .values(ProgressRow {
+                    id: 1,
+                    last_checkpoint: batch.checkpoint,
+                    last_sequence: batch.last_sequence,
+                    updated_at: Utc::now(),
+                })
+                .on_conflict(indexer_progress::id)
+                .do_update()
+                .set((
+                    indexer_progress::last_checkpoint.eq(batch.checkpoint),
+                    indexer_progress::last_sequence.eq(batch.last_sequence),
+                    indexer_progress::updated_at.eq(Utc::now()),
+                ))
+                .execute(conn)
+                .context("upserting indexer_progress")?;
+
+            Ok(())
+        })
+    }
+
+    fn advance_progress(&self, checkpoint: i64, last_sequence: i64) -> Result<()> {
+        let mut conn = self.conn()?;
+        diesel::insert_into(indexer_progress::table)
+            .values(ProgressRow {
+                id: 1,
+                last_checkpoint: checkpoint,
+                last_sequence,
+                updated_at: Utc::now(),
+            })
+            .on_conflict(indexer_progress::id)
+            .do_update()
+            .set((
+                indexer_progress::last_checkpoint.eq(checkpoint),
+                indexer_progress::last_sequence.eq(last_sequence),
+                indexer_progress::updated_at.eq(Utc::now()),
+            ))
+            .execute(&mut conn)
+            .context("advancing indexer_progress on empty checkpoint")?;
+        Ok(())
+    }
+
+    pub fn load_progress(&self) -> Result<Option<ProgressRow>> {
+        let mut conn = self.conn()?;
+        indexer_progress::table
+            .find(1i16)
+            .first::<ProgressRow>(&mut conn)
+            .optional()
+            .context("loading indexer_progress")
+    }
+
+    /// Reload the materialised views into memory. Called once at boot.
+    pub fn hydrate(&self) -> Result<HydratedViews> {
+        let mut conn = self.conn()?;
+
+        let mut acct_map: BTreeMap<ObjectId, AccountState> = BTreeMap::new();
+        for row in accounts::table
+            .load::<AccountRow>(&mut conn)
+            .context("loading accounts")?
+        {
+            let (id, state) = account_row_into_state(row)?;
+            acct_map.insert(id, state);
+        }
+
+        for row in account_balances::table
+            .load::<AccountBalanceRow>(&mut conn)
+            .context("loading account_balances")?
+        {
+            let id = ObjectId::from_hex(&row.account_id)
+                .map_err(|e| anyhow::anyhow!("balance account_id {}: {e}", row.account_id))?;
+            if let Some(acct) = acct_map.get_mut(&id) {
+                let bal = bigdecimal_to_u128(&row.balance)?;
+                // Balances are stored as NUMERIC for headroom but the in-memory
+                // shape uses u64 (mirroring Coin values). Truncate via u128 → u64
+                // — overflow would mean an on-chain balance > u64::MAX which
+                // can't happen.
+                let bal_u64 = bal.try_into().map_err(|_| {
+                    anyhow::anyhow!(
+                        "balance {bal} for account {} asset {} exceeds u64",
+                        row.account_id,
+                        row.asset_type
+                    )
+                })?;
+                acct.balances.insert(
+                    shared::protocol_types::asset::AssetType::new(row.asset_type),
+                    bal_u64,
+                );
+            }
+        }
+
+        let mut bucket_map: BTreeMap<ObjectId, BucketState> = BTreeMap::new();
+        for row in buckets::table
+            .load::<BucketRow>(&mut conn)
+            .context("loading buckets")?
+        {
+            let (id, state) = row.into_state()?;
+            bucket_map.insert(id, state);
+        }
+
+        let mut position_map: BTreeMap<(ObjectId, u128), PositionState> = BTreeMap::new();
+        for row in positions::table
+            .load::<PositionRow>(&mut conn)
+            .context("loading positions")?
+        {
+            let (key, state) = row.into_state()?;
+            position_map.insert(key, state);
+        }
+
+        Ok(HydratedViews {
+            accounts: acct_map,
+            buckets: bucket_map,
+            positions: position_map,
+        })
+    }
+
+    /// Pull events with `sequence > after_sequence`, ordered. Cold-path for
+    /// fanout subscribers asking for history older than the in-memory tail.
+    pub fn events_after(&self, after_sequence: i64, limit: i64) -> Result<Vec<IndexedEvent>> {
+        let mut conn = self.conn()?;
+        let rows: Vec<IndexedEventRow> = indexed_events::table
+            .filter(indexed_events::sequence.gt(after_sequence))
+            .order(indexed_events::sequence.asc())
+            .limit(limit)
+            .load(&mut conn)
+            .context("loading indexed_events tail")?;
+        rows.into_iter().map(|r| r.into_indexed_event()).collect()
+    }
+
+    /// Most-recent N events, in ascending sequence order. Used at boot to
+    /// repopulate the in-memory log so the broadcast tail isn't empty.
+    pub fn recent_events(&self, limit: i64) -> Result<Vec<IndexedEvent>> {
+        let mut conn = self.conn()?;
+        // ORDER BY DESC LIMIT N then reverse — equivalent to "last N in asc order".
+        let rows: Vec<IndexedEventRow> = indexed_events::table
+            .order(indexed_events::sequence.desc())
+            .limit(limit)
+            .load(&mut conn)
+            .context("loading recent indexed_events")?;
+        let mut events: Vec<IndexedEvent> = rows
+            .into_iter()
+            .map(|r| r.into_indexed_event())
+            .collect::<Result<_>>()?;
+        events.reverse();
+        Ok(events)
+    }
+}
+

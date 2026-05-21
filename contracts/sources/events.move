@@ -58,6 +58,7 @@ public struct BucketCleaned has copy, drop {
 public struct AccountCreated has copy, drop {
     account_id: ID,
     owner: address,
+    signing_scheme: u8,
     signing_pubkey: vector<u8>,
 }
 
@@ -75,6 +76,7 @@ public struct AccountWithdraw has copy, drop {
 
 public struct SigningKeyRotated has copy, drop {
     account_id: ID,
+    new_scheme: u8,
     new_pubkey: vector<u8>,
 }
 
@@ -176,9 +178,15 @@ public(package) fun emit_bucket_cleaned(bucket_id: ID) {
 public(package) fun emit_account_created(
     account_id: ID,
     owner: address,
+    signing_scheme: u8,
     signing_pubkey: vector<u8>,
 ) {
-    event::emit(AccountCreated { account_id, owner, signing_pubkey });
+    event::emit(AccountCreated {
+        account_id,
+        owner,
+        signing_scheme,
+        signing_pubkey,
+    });
 }
 
 public(package) fun emit_account_deposit(
@@ -199,9 +207,10 @@ public(package) fun emit_account_withdraw(
 
 public(package) fun emit_signing_key_rotated(
     account_id: ID,
+    new_scheme: u8,
     new_pubkey: vector<u8>,
 ) {
-    event::emit(SigningKeyRotated { account_id, new_pubkey });
+    event::emit(SigningKeyRotated { account_id, new_scheme, new_pubkey });
 }
 
 public(package) fun emit_fee_updated(old_bps: u64, new_bps: u64) {

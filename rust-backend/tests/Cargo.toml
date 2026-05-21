@@ -8,9 +8,9 @@ license.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-protocol-types = { workspace = true }
-indexer = { path = "../crates/indexer" }
-quoting-service = { path = "../crates/quoting-service" }
+shared = { workspace = true }
+indexer = { path = "../services/indexer" }
+quoting-service = { path = "../services/quoting-service" }
 
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }

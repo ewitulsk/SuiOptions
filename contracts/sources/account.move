@@ -9,10 +9,32 @@ use sui::dynamic_field as df;
 use options_protocol::errors;
 use options_protocol::events;
 
+/// Signature scheme tag stored alongside the pubkey. Verified against the
+/// allowed list in `assert_scheme_supported`. Tag values intentionally
+/// match `quote::SCHEME_*` so we never store one and dispatch on another.
 public struct Account has key {
     id: UID,
     owner: address,
+    signing_scheme: u8,
     signing_pubkey: vector<u8>,
+}
+
+const SCHEME_ED25519: u8 = 0;
+const SCHEME_SECP256K1: u8 = 1;
+const SCHEME_SECP256R1: u8 = 2;
+
+const ED25519_PUBKEY_LEN: u64 = 32;
+const SECP256_COMPRESSED_PUBKEY_LEN: u64 = 33;
+
+fun assert_scheme_pubkey(scheme: u8, pubkey: &vector<u8>) {
+    let expected_len = if (scheme == SCHEME_ED25519) {
+        ED25519_PUBKEY_LEN
+    } else if (scheme == SCHEME_SECP256K1 || scheme == SCHEME_SECP256R1) {
+        SECP256_COMPRESSED_PUBKEY_LEN
+    } else {
+        abort errors::invalid_signing_scheme()
+    };
+    assert!(pubkey.length() == expected_len, errors::invalid_pubkey_length());
 }
 
 public struct BalanceKey<phantom T> has copy, drop, store {}
@@ -21,18 +43,33 @@ public struct NonceKey has copy, drop, store {
     nonce: u64,
 }
 
-public fun create_account(signing_pubkey: vector<u8>, ctx: &mut TxContext): Account {
+public fun create_account(
+    signing_scheme: u8,
+    signing_pubkey: vector<u8>,
+    ctx: &mut TxContext,
+): Account {
+    assert_scheme_pubkey(signing_scheme, &signing_pubkey);
     let account = Account {
         id: object::new(ctx),
         owner: ctx.sender(),
+        signing_scheme,
         signing_pubkey,
     };
-    events::emit_account_created(object::id(&account), ctx.sender(), signing_pubkey);
+    events::emit_account_created(
+        object::id(&account),
+        ctx.sender(),
+        signing_scheme,
+        signing_pubkey,
+    );
     account
 }
 
-public fun create_and_share_account(signing_pubkey: vector<u8>, ctx: &mut TxContext) {
-    let account = create_account(signing_pubkey, ctx);
+public fun create_and_share_account(
+    signing_scheme: u8,
+    signing_pubkey: vector<u8>,
+    ctx: &mut TxContext,
+) {
+    let account = create_account(signing_scheme, signing_pubkey, ctx);
     transfer::share_object(account);
 }
 
@@ -82,12 +119,15 @@ public(package) fun deposit_balance<T>(account: &mut Account, bal_in: Balance<T>
 
 public fun set_quote_signing_key(
     account: &mut Account,
+    new_scheme: u8,
     new_pubkey: vector<u8>,
     ctx: &mut TxContext,
 ) {
     assert!(ctx.sender() == account.owner, errors::not_owner());
+    assert_scheme_pubkey(new_scheme, &new_pubkey);
+    account.signing_scheme = new_scheme;
     account.signing_pubkey = new_pubkey;
-    events::emit_signing_key_rotated(object::id(account), new_pubkey);
+    events::emit_signing_key_rotated(object::id(account), new_scheme, new_pubkey);
 }
 
 public(package) fun has_nonce(account: &Account, nonce: u64): bool {
@@ -110,6 +150,8 @@ public fun prune_nonce(account: &mut Account, nonce: u64, clock: &Clock) {
 public fun owner(account: &Account): address { account.owner }
 
 public fun signing_pubkey(account: &Account): &vector<u8> { &account.signing_pubkey }
+
+public fun signing_scheme(account: &Account): u8 { account.signing_scheme }
 
 public fun balance_of<T>(account: &Account): u64 {
     let key = BalanceKey<T> {};

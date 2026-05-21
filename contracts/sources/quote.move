@@ -2,11 +2,22 @@ module options_protocol::quote;
 
 use std::bcs;
 use sui::clock::Clock;
+use sui::ecdsa_k1;
+use sui::ecdsa_r1;
 use sui::ed25519;
 
 use options_protocol::account::{Self, Account};
 use options_protocol::admin::{Self, ProtocolConfig};
 use options_protocol::errors;
+
+const SCHEME_ED25519: u8 = 0;
+const SCHEME_SECP256K1: u8 = 1;
+const SCHEME_SECP256R1: u8 = 2;
+
+/// Hash flag for `ecdsa_k1::secp256k1_verify` /
+/// `ecdsa_r1::secp256r1_verify`. `1` = SHA-256. The MM bot must hash the
+/// BCS-encoded quote with SHA-256 before signing for the k1/r1 paths.
+const ECDSA_HASH_SHA256: u8 = 1;
 
 public struct Quote has copy, drop, store {
     protocol_id: vector<u8>,
@@ -72,7 +83,18 @@ public(package) fun verify_and_consume_quote(
     check_non_signature_fields(&q, account, config, clock);
 
     let msg = bcs::to_bytes(&q);
-    let valid = ed25519::ed25519_verify(&signed_quote.signature, account::signing_pubkey(account), &msg);
+    let scheme = account::signing_scheme(account);
+    let pubkey = account::signing_pubkey(account);
+    let sig = &signed_quote.signature;
+    let valid = if (scheme == SCHEME_ED25519) {
+        ed25519::ed25519_verify(sig, pubkey, &msg)
+    } else if (scheme == SCHEME_SECP256K1) {
+        ecdsa_k1::secp256k1_verify(sig, pubkey, &msg, ECDSA_HASH_SHA256)
+    } else if (scheme == SCHEME_SECP256R1) {
+        ecdsa_r1::secp256r1_verify(sig, pubkey, &msg, ECDSA_HASH_SHA256)
+    } else {
+        abort errors::invalid_signing_scheme()
+    };
     assert!(valid, errors::quote_signature_invalid());
 
     account::consume_nonce(account, q.nonce, q.valid_until_ms);

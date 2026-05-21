@@ -1,0 +1,49 @@
+# Market-maker bot config.
+#
+# Everything chain-side (package, ProtocolConfig, Treasury, test-token
+# package, per-symbol faucets, coin types) is resolved from
+# `deployments.json` at boot. This file controls the bot's *behaviour*:
+# what pair to quote on, its pricing inputs, and what it advertises to
+# the quoting service.
+#
+# Secrets live in `secrets.toml` ([sui] for gas, [mm_bot].quote_key for
+# the Quote signing key).
+
+quoting_url        = "ws://127.0.0.1:9002/"
+
+# Signature scheme this MM uses for both the WS auth challenge and every
+# Quote. The chain's `Account.signing_scheme` must hold the same tag; if
+# they diverge, every quote reverts with `quote_signature_invalid`.
+# One of: "ed25519" / "secp256k1" / "secp256r1".
+signing_scheme     = "ed25519"
+
+# Pair to make markets on. Must exist under
+# `deployments.testTokens.tokens.<SYMBOL>`.
+underlying_symbol  = "TBTC"
+settlement_symbol  = "TUSDC"
+
+# `spot_price` is in the SAME units as the bucket's on-chain `strike`:
+# settlement smallest-units per underlying smallest-unit. For BTC at $50k
+# with TUSDC (6 dec) and TBTC (8 dec):
+#   50_000 USD/BTC × 10^6 TUSDC-units/USD ÷ 10^8 TBTC-units/BTC = 500
+# Pick the bucket's strike to match if you want roughly ATM premium.
+spot_price         = 500
+
+# Annualized volatility (e.g., 0.6 = 60%).
+vol                = 0.6
+# Annualized risk-free rate.
+rate               = 0.05
+
+# How long the bot's signed quotes stay valid.
+quote_ttl_ms       = 30_000
+
+# Both roles by default; a single Account can serve writer + trader.
+roles = ["trader_mm", "writer_mm"]
+
+# Settlement deposited into the freshly-bootstrapped Account on first run
+# so it can pay premiums right away (writer flow). In TUSDC smallest-units.
+bootstrap_settlement_amount = 1_000_000_000_000
+
+# Optional: where minted call tokens / position NFTs should land. Leave
+# unset to derive from the Sui wallet key.
+# token_recipient = "0xabc..."
