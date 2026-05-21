@@ -136,12 +136,7 @@ export function Activity({ onNavigate }: Props) {
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
       <WaveHero />
-      <Header
-        screen="activity"
-        connected={true}
-        onConnect={() => {}}
-        onNavigate={onNavigate}
-      />
+      <Header screen="activity" onNavigate={onNavigate} />
 
       <div className="app__wrap">
         <div className="dash-hero">

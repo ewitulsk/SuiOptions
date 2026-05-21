@@ -44,8 +44,6 @@ export function Composer({ initialView, onNavigate }: Props) {
         screen="composer"
         view={s.view}
         setView={s.setView}
-        connected={s.connected}
-        onConnect={() => s.setConnected((c) => !c)}
         onNavigate={onNavigate}
       />
 
