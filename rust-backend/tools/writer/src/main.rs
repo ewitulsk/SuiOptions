@@ -17,7 +17,6 @@
 //!          --underlying TBTC --settlement TUSDC
 //! ```
 
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -32,50 +31,11 @@ use shared::protocol_types::messages::{
 use shared::protocol_types::sides::{RetailRole, Side};
 
 use shared::deployments::Deployments;
-use shared::sui_client::{Network, SuiClientWrapper};
+use shared::sui_client::SuiClientWrapper;
 use shared::tx::execute_write::{execute_writer_flow, ExecuteWriteParams};
 use shared::ws_client;
 
-#[derive(Parser)]
-#[command(name = "writer", about = "Retail-writer test client for the options protocol")]
-struct Cli {
-    #[arg(short, long, default_value = "deployments.json")]
-    deployments: PathBuf,
-
-    /// Per-binary secrets TOML. Holds the Sui signing key. No env-var
-    /// fallback.
-    #[arg(short = 's', long, default_value = "tools/writer/config/secrets.toml")]
-    secrets: PathBuf,
-
-    #[arg(short, long, value_enum, default_value_t = Network::Testnet)]
-    network: Network,
-
-    #[arg(short = 'q', long, default_value = "ws://127.0.0.1:9002/")]
-    quoting_url: String,
-
-    /// Bucket id we're writing into.
-    #[arg(short, long)]
-    bucket: ObjectID,
-
-    /// Underlying amount we're writing, in raw smallest-units (see token
-    /// decimals in `deployments.json::testTokens`).
-    #[arg(short = 'w', long)]
-    write_amount: u64,
-
-    /// Symbol for the underlying token (TBTC, TDEEP, TUSDC, TWAL).
-    #[arg(long, default_value = "TBTC")]
-    underlying: String,
-
-    /// Symbol for the settlement token.
-    #[arg(long, default_value = "TUSDC")]
-    settlement: String,
-
-    #[arg(long, default_value_t = 200_000_000)]
-    gas_budget: u64,
-
-    #[arg(long, default_value_t = 5)]
-    rfq_timeout_secs: u64,
-}
+use writer::Cli;
 
 #[tokio::main]
 async fn main() -> Result<()> {

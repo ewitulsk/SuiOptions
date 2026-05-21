@@ -26,6 +26,12 @@ Organized into three buckets:
   - **`exchange`** — admin/operator CLI (create buckets, mint test tokens,
     fund accounts, set fees, withdraw treasury).
   - **`writer`** — retail-writer test client (RFQ → `execute_write`).
+  - **`control-panel`** (`control` binary) — single-screen TUI that
+    start/stop/restarts every service, tool, and client; live-tails their
+    stdout/stderr; and edits their CLI flags inline. Flag metadata flows
+    directly from each binary's `clap` derive via the
+    `shared::define_program!` macro, so there's no second source of truth
+    to drift.
 
 - **`shared/`** — single library crate. BCS-canonical `Quote` /
   `SignedQuote` (which must byte-match §3.2.7 of the spec), the WS
@@ -48,7 +54,8 @@ rust-backend/
 ├── tools/
 │   ├── deployment-manager/  config/{secrets.toml}
 │   ├── exchange/            config/{secrets.toml}
-│   └── writer/              config/{secrets.toml}
+│   ├── writer/              config/{secrets.toml}
+│   └── control-panel/       # TUI: start/stop every binary, edit flags, tail logs
 └── tests/                          # cross-crate integration tests
 ```
 
@@ -95,6 +102,105 @@ cargo run -p quoting-service
 ```
 
 Both honor `RUST_LOG` (e.g. `RUST_LOG=info,quoting_service=debug`).
+
+## Control panel TUI
+
+Instead of juggling five terminals, run everything from a single TUI:
+
+```
+cargo run -p control-panel
+```
+
+The binary is named `control`, so once built you can also invoke it as
+`./target/debug/control` (or `./target/release/control`). It must be run
+from the workspace root (`rust-backend/`) — `cargo run` handles that
+automatically.
+
+### Layout
+
+```
+┌─Programs─────────────┬─ <selected program> ──────────────────────────┐
+│ ▶ indexer       RUN  │  indexer       RUNNING  pid=12345              │
+│   quoting-svc        │  cwd: .                                        │
+│   mm-bot     CRASHED │  $ cargo run -p indexer -- --config ...        │
+│   exchange           │  ─────────────────────────────────────────────│
+│   writer             │  │ Flags │ Logs │ Docs │                      │
+│   deploy             │  ─────────────────────────────────────────────│
+│                      │   --config           services/indexer/...      │
+│                      │   (more flags…)                                │
+└──────────────────────┴────────────────────────────────────────────────┘
+ [↑/↓] program  [→/←] panel  [Tab] tab  [j/k] flag  [e] edit  [r] run  [q] quit
+```
+
+- **Programs** (left) — every binary in the workspace plus its current
+  status (`STOPPED` / `RUNNING (pid=…)` / `DONE` / `CRASHED`).
+- **Header** — shows the exact `cargo run …` command that will be
+  invoked, including every overridden flag. Nothing is hidden.
+- **Flags tab** — every flag from the binary's `clap` derive, with
+  defaults, possible values (for `value_enum`), and one-line help. Edited
+  values are highlighted yellow. For programs with subcommands
+  (`exchange`), press `c` to pick which one to run.
+- **Logs tab** — live tail of the child process's stdout (white) and
+  stderr (red). `j` / `k` to scroll, `g` / `G` for top / bottom.
+- **Docs tab** — the long-form `#[command(about = …)]` and every flag's
+  help text.
+
+### Keybindings
+
+| Key | What it does |
+|---|---|
+| `↑` / `↓` | Move selection in the program list |
+| `←` / `→` | Switch focus between program list and content pane |
+| `Tab` / `Shift+Tab` | Cycle Flags / Logs / Docs |
+| `j` / `k` | Move within the focused list (flag row, log line) |
+| `e` or `Enter` | Edit the selected flag (`Enter` commits, `Esc` cancels). For bool flags, toggles directly. |
+| `Space` | Toggle bool flag or cycle through `possible_values` |
+| `R` | Revert the selected flag to its clap default |
+| `c` | Pick subcommand (programs that have them — `exchange`) |
+| `r` | Run the selected program |
+| `s` | Stop the selected program (SIGTERM) |
+| `Shift+R` | Restart (stop then run) |
+| `q` or `Ctrl+C` | Quit (kills any still-running children) |
+
+### Adding a new program
+
+Every binary registers itself once via one macro call in its `lib.rs`:
+
+```rust
+#[derive(clap::Parser)]
+pub struct Cli {
+    /// Help text shows up in the TUI's Docs tab and as the flag's hint.
+    #[arg(short, long, default_value = "deployments.json")]
+    pub deployments: std::path::PathBuf,
+
+    // …
+}
+
+shared::define_program! {
+    id          = "my-tool",
+    cargo_pkg   = "my-tool",              // matches `cargo run -p …`
+    working_dir = ".",                    // relative to the workspace root
+    description = "One-line summary shown in the TUI's program list.",
+    cli         = crate::Cli,
+}
+```
+
+That generates a `program_spec()` function which wraps the clap
+`CommandFactory`. Then add it to
+`tools/control-panel/src/programs.rs::all()` so the TUI knows about it:
+
+```rust
+pub fn all() -> Vec<ProgramSpec> {
+    vec![
+        // …
+        my_tool::program_spec(),
+    ]
+}
+```
+
+Defaults, help text, `value_enum` variants, and subcommands all come
+from the clap derive — there's nothing to keep in sync between the binary
+and the TUI.
 
 ## Clients
 

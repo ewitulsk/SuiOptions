@@ -8,27 +8,29 @@
 //! Run with `cargo run -p indexer`. Set `CONFIG_PATH` to override the
 //! default `services/indexer/config/config.toml`. Honors `RUST_LOG`.
 
-use std::env;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use sui_data_ingestion_core::setup_single_workflow;
 use sui_sdk::SuiClientBuilder;
 use tracing::{error, info};
 
-use indexer::{establish_pool, run_migrations, Config, ProtocolEventWorker, Repo, Store};
+use indexer::{establish_pool, run_migrations, Cli, Config, ProtocolEventWorker, Repo, Store};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new("info,sui_data_ingestion_core=off")
+                }),
         )
         .init();
 
-    let cfg_path = env::var("CONFIG_PATH")
-        .unwrap_or_else(|_| "services/indexer/config/config.toml".into());
+    let cli = Cli::parse();
+    let cfg_path = cli.config.to_string_lossy().into_owned();
     info!(cfg_path, "loading config");
     let cfg = Config::load(&cfg_path)
         .with_context(|| format!("loading config from {cfg_path}"))?;

@@ -63,6 +63,14 @@ impl Worker for ProtocolEventWorker {
                 let type_str = event.type_.to_string();
                 match event_types::dispatch(&self.types, &type_str, &event.contents) {
                     Ok(Some(parsed)) => {
+                        debug!(
+                            checkpoint = seq,
+                            tx = %tx_digest,
+                            event_idx = idx,
+                            event_type = %type_str,
+                            event = ?parsed,
+                            "picked up event"
+                        );
                         decoded.push((parsed, tx_digest.clone(), idx as i32));
                     }
                     Ok(None) => {}

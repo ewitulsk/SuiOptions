@@ -25,3 +25,28 @@ pub use db::{establish_pool, run_migrations, Repo};
 pub use event_types::EventTypes;
 pub use store::{AccountState, BucketState, PositionState, Store};
 pub use worker::ProtocolEventWorker;
+
+use std::path::PathBuf;
+
+use clap::Parser;
+
+/// CLI flags for the indexer. Mirrors what the binary historically read from
+/// the `CONFIG_PATH` environment variable so the control-panel TUI can drive
+/// the service the same way it drives any other binary.
+#[derive(Parser, Debug)]
+#[command(name = "indexer", about = "Tails the Sui checkpoint stream and serves an event WS fanout.")]
+pub struct Cli {
+    /// Path to the TOML config. Overrides the `CONFIG_PATH` env var.
+    #[arg(short, long, default_value = "services/indexer/config/config.toml")]
+    pub config: PathBuf,
+}
+
+shared::define_program! {
+    id          = "indexer",
+    cargo_pkg   = "indexer",
+    working_dir = ".",
+    description = "Tails Sui's checkpoint stream, BCS-decodes options-protocol events, \
+                   materializes per-account / per-bucket / per-position views, and exposes \
+                   the live stream over a WS fanout for the quoting service.",
+    cli         = crate::Cli,
+}

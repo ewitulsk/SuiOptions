@@ -15,6 +15,7 @@ path = "src/main.rs"
 shared = { workspace = true }
 
 config = { version = "0.14", features = ["toml"] }
+clap = { workspace = true }
 
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }

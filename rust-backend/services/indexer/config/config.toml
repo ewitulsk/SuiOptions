@@ -22,7 +22,7 @@ recent_log_capacity     = 1024
 # Checkpoint to start ingesting from. Leave commented out to tail from the
 # current tip (the indexer asks `sui_getLatestCheckpointSequenceNumber` at
 # boot). Set to a specific number to backfill from there — `0` is genesis.
-# start_checkpoint = 0
+start_checkpoint = 339373884
 
 # Optional JSON-RPC override for the latest-checkpoint lookup. Defaults to
 # Sui's public fullnode for `network` (mainnet/testnet/devnet). Only used

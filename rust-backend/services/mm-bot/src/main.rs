@@ -21,7 +21,7 @@
 //! call token). `roles` in the TOML controls advertised roles to the
 //! quoting service.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -44,6 +44,8 @@ use shared::sui_client::{Network, SuiClientWrapper};
 use shared::tx::account::create_and_share_account;
 use shared::tx::test_tokens::mint_and_deposit_into_account;
 use shared::ws_client;
+
+use mm_bot::Cli;
 
 // -- Config --------------------------------------------------------------
 
@@ -105,30 +107,6 @@ fn default_quote_ttl_ms() -> u64 {
 fn default_bootstrap_amount() -> u64 {
     1_000_000_000_000
 } // 1e12 raw — plenty of settlement to quote with
-
-#[derive(Parser)]
-#[command(name = "mm-bot", about = "Test market-maker bot for the options protocol")]
-struct Cli {
-    #[arg(short, long, default_value = "services/mm-bot/config/config.toml")]
-    config: PathBuf,
-
-    #[arg(long, default_value = "services/mm-bot/config/mm-bot.account.json")]
-    account_state: PathBuf,
-
-    #[arg(short, long, default_value = "deployments.json")]
-    deployments: PathBuf,
-
-    /// Per-binary secrets TOML. Holds the Sui signing key (`sui.testnet`)
-    /// and the quote-signing key (`mm_bot.quote_key`). No env-var fallback.
-    #[arg(short = 's', long, default_value = "services/mm-bot/config/secrets.toml")]
-    secrets: PathBuf,
-
-    #[arg(short, long, value_enum, default_value_t = Network::Testnet)]
-    network: Network,
-
-    #[arg(long, default_value_t = 200_000_000)]
-    gas_budget: u64,
-}
 
 // -- Persisted state -----------------------------------------------------
 

@@ -18,95 +18,15 @@
 //! key; the `info` subcommand confirms it matches the deployer recorded in
 //! `deployments.json` (the only address that holds AdminCap).
 
-use std::path::PathBuf;
-
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand};
-use sui_types::base_types::SuiAddress;
+use clap::Parser;
 
 use shared::deployments::{Deployments, NetworkDeployment};
-use shared::sui_client::{Network, SuiClientWrapper};
-use shared::tx::admin::{
-    new_call_option, set_fee_bps, withdraw_treasury, NewCallOptionArgs,
-};
+use shared::sui_client::SuiClientWrapper;
+use shared::tx::admin::{new_call_option, set_fee_bps, withdraw_treasury, NewCallOptionArgs};
 use shared::tx::test_tokens::{mint_and_deposit_into_account, mint_to_sender};
 
-#[derive(Parser)]
-#[command(name = "exchange", about = "Admin CLI for the covered-call options protocol")]
-struct Cli {
-    #[arg(short, long, default_value = "deployments.json")]
-    deployments: PathBuf,
-
-    /// Per-binary secrets TOML. Holds the Sui signing key. No env-var
-    /// fallback.
-    #[arg(short = 's', long, default_value = "tools/exchange/config/secrets.toml")]
-    secrets: PathBuf,
-
-    #[arg(short, long, value_enum, default_value_t = Network::Testnet)]
-    network: Network,
-
-    #[arg(long, default_value_t = 200_000_000)]
-    gas_budget: u64,
-
-    #[command(subcommand)]
-    cmd: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// `bucket::new_call_option<U, S>` — creates `count` buckets at
-    /// `start_strike + i * strike_interval` for `i ∈ [0, count)`. Tokens
-    /// are looked up by symbol from `deployments.testTokens`.
-    CreateBuckets {
-        #[arg(long, default_value = "TBTC")]
-        underlying: String,
-        #[arg(long, default_value = "TUSDC")]
-        settlement: String,
-        #[arg(long)]
-        expiry_ms: u64,
-        #[arg(long)]
-        start_strike: u64,
-        #[arg(long)]
-        strike_interval: u64,
-        #[arg(long)]
-        count: u64,
-    },
-    /// Faucet-mint `amount` of a test token to the signer.
-    Mint {
-        #[arg(long)]
-        token: String,
-        #[arg(long)]
-        amount: u64,
-    },
-    /// Mint a test token and deposit it into the given Account in one PTB.
-    /// Use for fast-MM-bootstrap or any "give Account X some settlement
-    /// asset to quote with" workflow.
-    FundAccount {
-        #[arg(long)]
-        account: sui_types::base_types::ObjectID,
-        #[arg(long)]
-        token: String,
-        #[arg(long)]
-        amount: u64,
-    },
-    /// `admin::set_fee_bps`.
-    SetFee {
-        #[arg(long)]
-        bps: u64,
-    },
-    /// `treasury::withdraw<T>`. `--token` accepts a symbol from
-    /// `deployments.testTokens` or any fully-qualified Move type.
-    WithdrawTreasury {
-        #[arg(long)]
-        token: String,
-        #[arg(long)]
-        amount: u64,
-        #[arg(long)]
-        recipient: SuiAddress,
-    },
-    /// Print every id resolvable from `deployments.json`.
-    Info,
-}
+use exchange::{Cli, Command};
 
 /// Resolves either an uppercase symbol (looked up via testTokens) or a
 /// fully-qualified Move type string. Lets every command that needs a type

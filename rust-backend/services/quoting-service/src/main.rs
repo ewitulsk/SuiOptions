@@ -1,11 +1,11 @@
-use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use tracing::info;
 
-use quoting_service::{indexer_client, state, AppState, Config};
+use quoting_service::{indexer_client, state, AppState, Cli, Config};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -16,8 +16,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let cfg_path = env::var("CONFIG_PATH")
-        .unwrap_or_else(|_| "services/quoting-service/config/config.toml".into());
+    let cli = Cli::parse();
+    let cfg_path = cli.config.to_string_lossy().into_owned();
     info!(cfg_path, "loading config");
     let cfg = Arc::new(
         Config::load(&cfg_path).with_context(|| format!("loading config from {cfg_path}"))?,

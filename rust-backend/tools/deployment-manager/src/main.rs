@@ -8,69 +8,20 @@
 //!   4. Call `treasury::create_and_share(&AdminCap)` and capture the Treasury ID
 //!   5. Merge into `deployments.json`, replacing only the targeted network's entry
 
-mod deploy;
-mod json_store;
-mod network;
-mod signer;
-
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::path::PathBuf;
 use sui_sdk::SuiClientBuilder;
 
-use crate::deploy::{create_and_share_treasury, publish_package, publish_test_tokens};
-use crate::json_store::{
+use deployment_manager::deploy::{
+    create_and_share_treasury, publish_package, publish_test_tokens,
+};
+use deployment_manager::json_store::{
     Deployments, NetworkDeployment, TestTokenRecord, TestTokensRecord,
 };
-use crate::network::Network;
-use crate::signer::Signer;
+use deployment_manager::network::Network;
+use deployment_manager::signer::Signer;
+use deployment_manager::Cli;
 use std::collections::BTreeMap;
-
-#[derive(Parser, Debug)]
-#[command(
-    name = "deploy",
-    version,
-    about = "Deploy options-protocol contracts to Sui networks and record addresses."
-)]
-struct Cli {
-    /// Network to deploy to. Omit to deploy to all three.
-    #[arg(short, long, value_enum)]
-    network: Option<Network>,
-
-    /// Path to the Move package containing the contracts.
-    /// Default assumes the manager is run from `rust-backend/`.
-    #[arg(short, long, default_value = "../contracts")]
-    contracts: PathBuf,
-
-    /// Path to the JSON file that tracks deployments per network.
-    #[arg(short, long, default_value = "deployments.json")]
-    output: PathBuf,
-
-    /// Per-binary secrets TOML. Holds the Sui signing key. There is no
-    /// env-var fallback — if the file is missing or the key for the
-    /// targeted network is absent, deploy refuses to start.
-    #[arg(short = 's', long, default_value = "tools/deployment-manager/config/secrets.toml")]
-    secrets: PathBuf,
-
-    /// Gas budget (MIST) per transaction.
-    #[arg(long, default_value_t = 500_000_000)]
-    gas_budget: u64,
-
-    /// Skip the post-publish `treasury::create_and_share` call. Use when
-    /// re-publishing for testing and you don't need a fresh Treasury.
-    #[arg(long)]
-    skip_init: bool,
-
-    /// Also publish the test-tokens package (TUSDC/TBTC/TWAL/TDEEP) and
-    /// record the faucet IDs in deployments.json. Each run publishes a
-    /// fresh package and overwrites the previous testTokens block.
-    #[arg(long)]
-    deploy_tokens: bool,
-
-    /// Path to the test-tokens Move package.
-    #[arg(long, default_value = "../test-tokens")]
-    test_tokens: PathBuf,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
