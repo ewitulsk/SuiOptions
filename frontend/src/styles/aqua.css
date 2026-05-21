@@ -147,6 +147,61 @@
   background: var(--aqua-glass-3); color: var(--aqua-ink-1);
   font-family: "JetBrains Mono", monospace; font-size: 12px;
   box-shadow: inset 0 0 0 1px var(--aqua-line);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+[data-theme="aqua"] .header__connect-caret {
+  font-family: inherit; font-size: 10px; color: var(--aqua-ink-3);
+}
+
+/* ---------- Wallet account dropdown ---------- */
+[data-theme="aqua"] .header__wallet { position: relative; }
+[data-theme="aqua"] .wallet-menu {
+  position: absolute; right: 0; top: calc(100% + 8px);
+  min-width: 240px; padding: 8px;
+  background: #ffffff;
+  border: 1px solid var(--aqua-line);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(11,37,69,0.18);
+  z-index: 100;
+  display: flex; flex-direction: column; gap: 2px;
+}
+[data-theme="aqua"] .wallet-menu__header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px 10px;
+  border-bottom: 1px solid var(--aqua-line-2);
+  margin-bottom: 4px;
+}
+[data-theme="aqua"] .wallet-menu__icon { width: 18px; height: 18px; border-radius: 4px; }
+[data-theme="aqua"] .wallet-menu__wallet-name {
+  font-size: 13px; font-weight: 600; color: var(--aqua-ink-1);
+}
+[data-theme="aqua"] .wallet-menu__section-label {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--aqua-ink-3);
+  padding: 4px 8px 2px;
+}
+[data-theme="aqua"] .wallet-menu__item {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; text-align: left;
+  font-family: inherit; font-size: 13px; color: var(--aqua-ink-1);
+  background: transparent; border: none; border-radius: 8px;
+  padding: 8px 10px; cursor: pointer;
+  transition: background 100ms ease;
+}
+[data-theme="aqua"] .wallet-menu__item:hover { background: rgba(77,162,255,0.10); }
+[data-theme="aqua"] .wallet-menu__item.is-active { background: rgba(77,162,255,0.14); }
+[data-theme="aqua"] .wallet-menu__item--danger { color: var(--aqua-coral); }
+[data-theme="aqua"] .wallet-menu__addr {
+  font-family: "JetBrains Mono", monospace; font-size: 12px;
+}
+[data-theme="aqua"] .wallet-menu__label {
+  font-size: 11px; color: var(--aqua-ink-3);
+}
+[data-theme="aqua"] .wallet-menu__check {
+  margin-left: auto; color: var(--aqua-sui-deep); font-weight: 700;
+}
+[data-theme="aqua"] .wallet-menu__divider {
+  height: 1px; background: var(--aqua-line-2); margin: 6px 0;
 }
 
 /* ---------- View toggle (writer / trader) ---------- */

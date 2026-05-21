@@ -1,5 +1,12 @@
-import { useState } from "react";
-import { ConnectModal, useCurrentAccount, useDisconnectWallet } from "@mysten/dapp-kit";
+import { useEffect, useRef, useState } from "react";
+import {
+  ConnectModal,
+  useAccounts,
+  useCurrentAccount,
+  useCurrentWallet,
+  useDisconnectWallet,
+  useSwitchAccount,
+} from "@mysten/dapp-kit";
 import type { View } from "../types";
 
 export type Screen = "composer" | "dashboard" | "activity";
@@ -16,11 +23,122 @@ function shortAddress(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
+// Radix Dialog (used internally by ConnectModal) needs a real, rendered trigger
+// element to attach handlers + refs to. Visually hiding it (vs `display:none`)
+// keeps the modal able to open via the controlled `open` prop.
+const hiddenTriggerStyle: React.CSSProperties = {
+  position: "absolute",
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: "hidden",
+  clip: "rect(0,0,0,0)",
+  border: 0,
+  pointerEvents: "none",
+};
+
+function WalletMenu() {
+  const account = useCurrentAccount();
+  const accounts = useAccounts();
+  const { currentWallet } = useCurrentWallet();
+  const { mutate: switchAccount } = useSwitchAccount();
+  const { mutate: disconnect } = useDisconnectWallet();
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onClick);
+    return () => window.removeEventListener("mousedown", onClick);
+  }, [open]);
+
+  if (!account) return null;
+
+  return (
+    <div className="header__wallet" ref={wrapRef}>
+      <button
+        className="header__connect is-connected"
+        onClick={() => setOpen((o) => !o)}
+        title={account.address}
+      >
+        {shortAddress(account.address)}
+        <span className="header__connect-caret" aria-hidden>▾</span>
+      </button>
+      {open && (
+        <div className="wallet-menu" role="menu">
+          {currentWallet && (
+            <div className="wallet-menu__header">
+              {currentWallet.icon && (
+                <img
+                  className="wallet-menu__icon"
+                  src={currentWallet.icon}
+                  alt=""
+                />
+              )}
+              <span className="wallet-menu__wallet-name">
+                {currentWallet.name}
+              </span>
+            </div>
+          )}
+
+          <div className="wallet-menu__section-label">Accounts</div>
+          {accounts.map((a) => {
+            const isActive = a.address === account.address;
+            return (
+              <button
+                key={a.address}
+                className={
+                  "wallet-menu__item" + (isActive ? " is-active" : "")
+                }
+                role="menuitemradio"
+                aria-checked={isActive}
+                onClick={() => {
+                  if (!isActive) switchAccount({ account: a });
+                  setOpen(false);
+                }}
+              >
+                <span className="wallet-menu__addr">
+                  {shortAddress(a.address)}
+                </span>
+                {a.label && (
+                  <span className="wallet-menu__label">{a.label}</span>
+                )}
+                {isActive && (
+                  <span className="wallet-menu__check" aria-hidden>
+                    ✓
+                  </span>
+                )}
+              </button>
+            );
+          })}
+
+          <div className="wallet-menu__divider" />
+          <button
+            className="wallet-menu__item wallet-menu__item--danger"
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              disconnect();
+            }}
+          >
+            Disconnect
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Header({ screen, view, setView, onNavigate }: Props) {
   const earnActive = screen === "composer" && view === "writer";
   const buyActive = screen === "composer" && view === "trader";
   const account = useCurrentAccount();
-  const { mutate: disconnect } = useDisconnectWallet();
   const [pickerOpen, setPickerOpen] = useState(false);
 
   return (
@@ -60,24 +178,21 @@ export function Header({ screen, view, setView, onNavigate }: Props) {
         <span className="dot"></span>WSS live
       </span>
       {account ? (
-        <button
-          className="header__connect is-connected"
-          onClick={() => disconnect()}
-          title={`${account.address} — click to disconnect`}
-        >
-          {shortAddress(account.address)}
-        </button>
+        <WalletMenu />
       ) : (
-        <ConnectModal
-          open={pickerOpen}
-          onOpenChange={setPickerOpen}
-          trigger={
-            <button className="header__connect" onClick={() => setPickerOpen(true)}>
-              Connect wallet
-            </button>
-          }
-        />
+        <button className="header__connect" onClick={() => setPickerOpen(true)}>
+          Connect wallet
+        </button>
       )}
+
+      {/* Single stable ConnectModal mount, controlled by `pickerOpen`.
+          Sharing one instance avoids unmount/remount across the menu's
+          open/close cycle. */}
+      <ConnectModal
+        open={pickerOpen}
+        onOpenChange={setPickerOpen}
+        trigger={<button type="button" aria-hidden="true" tabIndex={-1} style={hiddenTriggerStyle} />}
+      />
     </header>
   );
 }
