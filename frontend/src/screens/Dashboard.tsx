@@ -115,12 +115,7 @@ export function Dashboard({ onNavigate }: Props) {
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
       <WaveHero />
-      <Header
-        screen="dashboard"
-        connected={true}
-        onConnect={() => {}}
-        onNavigate={onNavigate}
-      />
+      <Header screen="dashboard" onNavigate={onNavigate} />
 
       <div className="app__wrap">
         <div className="dash-hero">

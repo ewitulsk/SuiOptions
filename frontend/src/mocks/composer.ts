@@ -2,6 +2,7 @@
 // Real implementation should keep the same return shape so UI components
 // don't need to change.
 import { useEffect, useMemo, useState } from "react";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 import type {
   Bucket,
   ConfirmStage,
@@ -45,7 +46,7 @@ export type ComposerState = {
   view: View;
   setView: (v: View) => void;
   connected: boolean;
-  setConnected: (fn: (c: boolean) => boolean) => void;
+  address: string | null;
   spot: number;
   amount: number;
   setAmount: (n: number) => void;
@@ -74,7 +75,8 @@ export function useComposerState({
   initialIdx = 2,
 }: ComposerStateOpts = {}): ComposerState {
   const [view, setView] = useState<View>(initialView);
-  const [connected, setConnectedRaw] = useState(true);
+  const account = useCurrentAccount();
+  const connected = !!account;
   const [spot, setSpot] = useState(79083.44);
   const [amount, setAmount] = useState(initialAmount);
   const [selectedIdx, setSelectedIdx] = useState(initialIdx);
@@ -188,7 +190,7 @@ export function useComposerState({
     view,
     setView,
     connected,
-    setConnected: setConnectedRaw,
+    address: account?.address ?? null,
     spot,
     amount,
     setAmount,

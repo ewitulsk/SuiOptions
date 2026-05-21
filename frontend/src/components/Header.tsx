@@ -1,19 +1,28 @@
+import { useState } from "react";
+import { ConnectModal, useCurrentAccount, useDisconnectWallet } from "@mysten/dapp-kit";
 import type { View } from "../types";
 
 export type Screen = "composer" | "dashboard" | "activity";
 
 type Props = {
-  connected: boolean;
-  onConnect: () => void;
   screen: Screen;
   view?: View;
   setView?: (v: View) => void;
   onNavigate: (target: string) => void;
 };
 
-export function Header({ connected, onConnect, screen, view, setView, onNavigate }: Props) {
+function shortAddress(addr: string): string {
+  if (addr.length <= 12) return addr;
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+}
+
+export function Header({ screen, view, setView, onNavigate }: Props) {
   const earnActive = screen === "composer" && view === "writer";
   const buyActive = screen === "composer" && view === "trader";
+  const account = useCurrentAccount();
+  const { mutate: disconnect } = useDisconnectWallet();
+  const [pickerOpen, setPickerOpen] = useState(false);
+
   return (
     <header className="header">
       <div className="header__brand">
@@ -50,12 +59,25 @@ export function Header({ connected, onConnect, screen, view, setView, onNavigate
       <span className="header__status">
         <span className="dot"></span>WSS live
       </span>
-      <button
-        className={"header__connect" + (connected ? " is-connected" : "")}
-        onClick={onConnect}
-      >
-        {connected ? "0x9f3a…42b1" : "Connect wallet"}
-      </button>
+      {account ? (
+        <button
+          className="header__connect is-connected"
+          onClick={() => disconnect()}
+          title={`${account.address} — click to disconnect`}
+        >
+          {shortAddress(account.address)}
+        </button>
+      ) : (
+        <ConnectModal
+          open={pickerOpen}
+          onOpenChange={setPickerOpen}
+          trigger={
+            <button className="header__connect" onClick={() => setPickerOpen(true)}>
+              Connect wallet
+            </button>
+          }
+        />
+      )}
     </header>
   );
 }
