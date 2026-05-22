@@ -115,7 +115,7 @@ variable "runner_root_volume_gb" {
 }
 
 variable "runner_version" {
-  description = "GitHub Actions runner version (arm64 binary). Pinned so bootstrap is deterministic; bump as new versions ship."
+  description = "GitHub Actions runner version (arm64 binary). Pinned so bootstrap is deterministic; bump as new versions ship. Stay on a version new enough for the node runtime actions require — node24 (>= 2.327.x) for current aws-actions/*."
   type        = string
-  default     = "2.319.1"
+  default     = "2.334.0"
 }

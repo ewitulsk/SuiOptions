@@ -35,7 +35,7 @@ resource "aws_spot_instance_request" "runner" {
   spot_price                     = var.runner_max_spot_price == "" ? null : var.runner_max_spot_price
 
   user_data                   = local.runner_user_data
-  user_data_replace_on_change = false
+  user_data_replace_on_change = true
 
   root_block_device {
     volume_size           = var.runner_root_volume_gb
