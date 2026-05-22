@@ -1,0 +1,47 @@
+# option-scheduler config.
+#
+# Chain-side ids (package, AdminCap, deployer address, test-token coin
+# types) come from `deployments.json`. This file controls which pairs the
+# bot rolls buckets for and how aggressively.
+
+# WS endpoint of the local indexer fanout. The scheduler subscribes here
+# to hydrate its in-memory family registry (BucketCreated / BucketCleaned).
+indexer_url       = "ws://127.0.0.1:9001/"
+
+# How often the tick loop wakes up. Cheap — just reads in-memory state +
+# maybe submits one tx.
+tick_secs         = 60
+
+# When the latest family for a pair is closer than this to expiry, roll
+# the next family. Default = 7 days (the typical bucket cadence).
+roll_threshold_ms = 604_800_000
+
+# Each pair gets its own roll cadence + strike grid + spot source.
+[[pairs]]
+underlying          = "TBTC"
+settlement          = "TUSDC"
+# Cadence between consecutive expiries this scheduler will create.
+expiry_interval_ms  = 604_800_000      # 1 week
+
+# Strike grid: spot ± `strikes_below`/`strikes_above` strikes, spaced
+# `interval_pct` apart. e.g. spot $50_000, ±4 strikes at 5% → ten strikes
+# from $40k to $60k, snapped down to the nearest grid step.
+strikes_below       = 4
+strikes_above       = 4
+interval_pct        = 5.0
+
+  [pairs.spot]
+  source = "static"
+  usd    = 50_000.0
+
+[[pairs]]
+underlying          = "TDEEP"
+settlement          = "TUSDC"
+expiry_interval_ms  = 604_800_000
+strikes_below       = 2
+strikes_above       = 2
+interval_pct        = 10.0
+
+  [pairs.spot]
+  source = "static"
+  usd    = 0.15

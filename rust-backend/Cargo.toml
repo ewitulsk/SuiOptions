@@ -5,6 +5,7 @@ members = [
     "services/indexer",
     "services/quoting-service",
     "services/mm-bot",
+    "services/option-scheduler",
     "tools/deployment-manager",
     "tools/exchange",
     "tools/writer",
