@@ -1,8 +1,11 @@
-name: Deploy prod
+name: Deploy lower envs
 
 on:
   push:
-    branches: [main]
+    branches: [staging]
+    paths:
+      - 'rust-backend/**'
+      - '.github/workflows/deploy-lower.yml'
   workflow_dispatch:
     inputs:
       image_tag:
@@ -12,13 +15,17 @@ on:
 
 permissions:
   contents: read
-  id-token: write
+  id-token: write   # for AWS OIDC
+
+defaults:
+  run:
+    working-directory: rust-backend
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
-  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}            # e.g. 1234.dkr.ecr.us-east-1.amazonaws.com
   EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
-  DEPLOY_ROLE_ARN: ${{ vars.DEPLOY_ROLE_ARN }}
+  DEPLOY_ROLE_ARN: ${{ vars.DEPLOY_ROLE_ARN }}      # gh-actions-deploy IAM role
   RDS_HOST: ${{ vars.RDS_HOST }}
 
 jobs:
@@ -43,6 +50,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
 
       - uses: docker/setup-qemu-action@v3
         with:
@@ -58,6 +66,10 @@ jobs:
 
   deploy:
     needs: build
+    strategy:
+      matrix:
+        env: [dev, staging]
+      fail-fast: false
     runs-on: ubuntu-latest
     steps:
       - uses: aws-actions/configure-aws-credentials@v4
@@ -65,24 +77,25 @@ jobs:
           role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: SSM deploy to EC2 (prod)
+      - name: SSM deploy to EC2
         run: |
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$EC2_INSTANCE_ID" \
             --document-name AWS-RunShellScript \
-            --comment "deploy prod @ ${{ needs.build.outputs.image_tag }}" \
+            --comment "deploy ${{ matrix.env }} @ ${{ needs.build.outputs.image_tag }}" \
             --parameters commands="[
               'export AWS_REGION=$AWS_REGION',
               'export ECR=$ECR_REGISTRY',
               'export IMAGE_TAG=${{ needs.build.outputs.image_tag }}',
               'export DB_HOST=$RDS_HOST',
-              'cd /opt/options/prod',
-              './deploy.sh prod'
+              'cd /opt/options/${{ matrix.env }}',
+              './deploy.sh ${{ matrix.env }}'
             ]" \
             --output-s3-bucket-name "${{ vars.SSM_OUTPUT_BUCKET }}" \
             --query Command.CommandId --output text)
           echo "ssm command: $CMD_ID"
 
+          # Wait for completion, fail the job if SSM reports failure.
           aws ssm wait command-executed \
             --command-id "$CMD_ID" \
             --instance-id "$EC2_INSTANCE_ID" || true
