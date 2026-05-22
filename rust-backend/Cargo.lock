@@ -5954,6 +5954,7 @@ dependencies = [
  "futures",
  "futures-util",
  "parking_lot 0.12.5",
+ "reqwest",
  "serde",
  "serde_json",
  "shared",
