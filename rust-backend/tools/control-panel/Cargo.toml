@@ -17,6 +17,7 @@ shared = { workspace = true }
 indexer            = { path = "../../services/indexer" }
 quoting-service    = { path = "../../services/quoting-service" }
 mm-bot             = { path = "../../services/mm-bot" }
+option-scheduler   = { path = "../../services/option-scheduler" }
 exchange           = { path = "../../tools/exchange" }
 writer             = { path = "../../tools/writer" }
 deployment-manager = { path = "../../tools/deployment-manager" }
