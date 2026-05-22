@@ -29,6 +29,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
+use tracing::{debug, info};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Secrets {
@@ -58,19 +59,30 @@ impl Secrets {
     /// Load and parse the secrets file at `path`. Errors if the file is
     /// missing — there's no env fallback by design.
     pub fn load(path: &Path) -> Result<Self> {
+        info!(path = %path.display(), "loading secrets file");
         let settings = config::Config::builder()
             .add_source(config::File::from(path).required(true))
             .build()
             .with_context(|| format!("loading secrets file {}", path.display()))?;
-        settings
+        let result = settings
             .try_deserialize::<Self>()
-            .with_context(|| format!("parsing secrets file {}", path.display()))
+            .with_context(|| format!("parsing secrets file {}", path.display()))?;
+        debug!(
+            has_testnet = result.sui.testnet.is_some(),
+            has_mainnet = result.sui.mainnet.is_some(),
+            has_devnet = result.sui.devnet.is_some(),
+            has_default = result.sui.default.is_some(),
+            has_quote_key = result.mm_bot.quote_key.is_some(),
+            "secrets loaded"
+        );
+        Ok(result)
     }
 
     /// Sui private key for `network` (case-insensitive: `mainnet` /
     /// `testnet` / `devnet`). Falls back to `sui.default` if the slot is
     /// unset. Returns an error — never reads env.
     pub fn sui_private_key(&self, network: &str) -> Result<&str> {
+        debug!(network, "resolving sui private key");
         let per_net = match network.to_ascii_lowercase().as_str() {
             "mainnet" => &self.sui.mainnet,
             "testnet" => &self.sui.testnet,

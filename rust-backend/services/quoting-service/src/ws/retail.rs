@@ -24,7 +24,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
-use tracing::{debug, warn};
+use tracing::{debug, info, trace, warn};
 
 use shared::protocol_types::messages::{
     BucketUpdatePayload, ErrorPayload, HelloAckPayload, RetailHelloPayload, RetailToService,
@@ -48,7 +48,7 @@ pub async fn handle(
         },
     })?))
     .await?;
-    debug!(session_id, "retail hello-acked");
+    info!(session_id, "retail hello-acked");
 
     let (out_tx, mut out_rx) = mpsc::channel::<ServiceToRetail>(64);
     let write_task = tokio::spawn(async move {
@@ -90,6 +90,7 @@ pub async fn handle(
         };
         match msg {
             RetailToService::SubscribeBuckets { payload } => {
+                debug!(buckets = payload.bucket_ids.len(), "retail subscribe buckets");
                 for id in payload.bucket_ids {
                     if let Some(b) = state.buckets.get(&id) {
                         let _ = out_tx
@@ -106,6 +107,13 @@ pub async fn handle(
                 }
             }
             RetailToService::RFQRequest { request_id, payload } => {
+                info!(
+                    request_id = %request_id,
+                    ?payload.side,
+                    %payload.bucket_id,
+                    write_amount = payload.write_amount,
+                    "retail rfq request"
+                );
                 // Spawn the RFQ so the retail read loop isn't blocked by the
                 // RFQ window — they may send more requests in the meantime.
                 let state = Arc::clone(&state);

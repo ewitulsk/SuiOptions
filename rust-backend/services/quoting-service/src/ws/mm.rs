@@ -19,7 +19,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
-use tracing::{debug, warn};
+use tracing::{debug, info, trace, warn};
 
 use shared::protocol_types::messages::{
     AuthAckPayload, AuthChallengePayload, MmHelloPayload, MmToService, ServiceToMm,
@@ -129,7 +129,7 @@ pub async fn handle(
         },
     })?))
     .await?;
-    debug!(account = %hello.account_id, session_id, "mm authed");
+    info!(account = %hello.account_id, session_id, roles = ?hello.roles, "mm authed");
 
     // -- Register + start write loop --------------------------------------
     let (out_tx, mut out_rx) = mpsc::channel::<ServiceToMm>(64);
@@ -178,6 +178,7 @@ pub async fn handle(
             };
             match msg {
                 MmToService::Quote { request_id, payload } => {
+                    trace!(mm = %account_id, request_id, premium = payload.quote.premium, nonce = payload.quote.nonce, "received mm quote");
                     if let Some(tx) = read_state.pending_rfqs.get(&request_id) {
                         let _ = tx.send(MmResponse::Quote(account_id, payload)).await;
                     } else {
@@ -185,6 +186,7 @@ pub async fn handle(
                     }
                 }
                 MmToService::Decline { request_id, .. } => {
+                    trace!(mm = %account_id, request_id, "mm declined");
                     if let Some(tx) = read_state.pending_rfqs.get(&request_id) {
                         let _ = tx.send(MmResponse::Decline(account_id)).await;
                     }

@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use shared::deployments::Deployments;
 use shared::sui_client::SuiClientWrapper;
@@ -222,6 +222,13 @@ async fn tick_once(
             None => true, // no family on chain yet — cold-start roll
             Some(t) => t.saturating_sub(now) < cfg.roll_threshold_ms,
         };
+        debug!(
+            pair = %pair_label,
+            latest_expiry = ?latest_expiry,
+            needs_roll,
+            time_to_expiry_ms = latest_expiry.map(|t| t.saturating_sub(now)),
+            "tick: evaluating pair"
+        );
         if !needs_roll {
             continue;
         }

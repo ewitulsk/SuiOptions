@@ -8,6 +8,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
+use tracing::{debug, info};
 
 /// Read a TOML file from disk, expand `${VAR}` references against
 /// `std::env::var`, and deserialize into `T`. Missing env vars are an
@@ -15,6 +16,7 @@ use serde::de::DeserializeOwned;
 /// `${VAR}` in a connection string.
 pub fn load_toml<T: DeserializeOwned, P: AsRef<Path>>(path: P) -> Result<T> {
     let path = path.as_ref();
+    info!(path = %path.display(), "loading toml config");
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
     let expanded = expand_env(&raw)
@@ -23,9 +25,13 @@ pub fn load_toml<T: DeserializeOwned, P: AsRef<Path>>(path: P) -> Result<T> {
         .add_source(config::File::from_str(&expanded, config::FileFormat::Toml))
         .build()
         .with_context(|| format!("loading config {}", path.display()))?;
-    settings
+    let result = settings
         .try_deserialize()
-        .with_context(|| format!("parsing config {}", path.display()))
+        .with_context(|| format!("parsing config {}", path.display()));
+    if result.is_ok() {
+        debug!(path = %path.display(), "config loaded successfully");
+    }
+    result
 }
 
 /// Substitute `${NAME}` with the value of the env var `NAME`. Treats a

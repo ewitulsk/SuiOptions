@@ -319,6 +319,13 @@ async fn main() -> Result<()> {
                 request_id,
                 payload,
             } => {
+                tracing::debug!(
+                    ?request_id,
+                    strike = payload.strike,
+                    expiry_ms = payload.expiry_ms,
+                    write_amount = payload.write_amount,
+                    "received rfq broadcast"
+                );
                 let now = now_ms();
                 // Time to expiry from the bucket's expiry_ms — saturates
                 // at zero so an already-expired bucket prices to intrinsic.
@@ -420,10 +427,14 @@ async fn main() -> Result<()> {
             ServiceToMm::Ping => {
                 ws_client::send_json(&mut ws, &MmToService::Pong).await?;
             }
-            ServiceToMm::AccountStateUpdate { .. }
-            | ServiceToMm::ReservationConfirmed { .. }
-            | ServiceToMm::ReservationReleased { .. } => {
-                // Observed-only for now.
+            ServiceToMm::AccountStateUpdate { .. } => {
+                tracing::trace!("received account state update");
+            }
+            ServiceToMm::ReservationConfirmed { .. } => {
+                tracing::trace!("received reservation confirmed");
+            }
+            ServiceToMm::ReservationReleased { .. } => {
+                tracing::trace!("received reservation released");
             }
             other => {
                 tracing::debug!(?other, "ignored frame");
@@ -440,9 +451,19 @@ fn load_config(path: &Path) -> Result<BotConfig> {
         .add_source(config::File::from(path).required(true))
         .build()
         .with_context(|| format!("loading {}", path.display()))?;
-    settings
-        .try_deserialize::<BotConfig>()
-        .with_context(|| format!("parsing {}", path.display()))
+    let cfg: BotConfig = settings
+        .try_deserialize()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    tracing::debug!(
+        underlying = %cfg.underlying_symbol,
+        settlement = %cfg.settlement_symbol,
+        scheme = ?cfg.signing_scheme,
+        roles = ?cfg.roles,
+        quote_ttl_ms = cfg.quote_ttl_ms,
+        rate = cfg.rate,
+        "bot config loaded"
+    );
+    Ok(cfg)
 }
 
 fn load_quote_signer(
@@ -544,8 +565,10 @@ fn resolve_token_recipient(
     network: Network,
 ) -> Result<PtSuiAddress> {
     if let Some(s) = &cfg.token_recipient {
+        tracing::debug!(recipient = %s, "using configured token recipient");
         return PtSuiAddress::from_hex(s).context("parsing token_recipient");
     }
+    tracing::debug!("deriving token recipient from sui key");
     // Derive the address from the same Sui key the bot signs gas with.
     let raw = secrets.sui_private_key(network.as_str())?;
     let kp = sui_types::crypto::SuiKeyPair::decode(raw.trim())
@@ -597,7 +620,9 @@ fn compute_spot(
     if !scaled.is_finite() || scaled < 0.0 || scaled > u64::MAX as f64 {
         return Err("scaled spot out of range");
     }
-    Ok(scaled.round() as u64)
+    let spot = scaled.round() as u64;
+    tracing::trace!(underlying_usd = u.price, settlement_usd = s.price, cross, spot, "computed spot");
+    Ok(spot)
 }
 
 /// Block until both feeds have at least one cached observation (ignoring

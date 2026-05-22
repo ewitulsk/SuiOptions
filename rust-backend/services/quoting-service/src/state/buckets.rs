@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use parking_lot::RwLock;
+use tracing::{debug, trace};
 
 use shared::protocol_types::asset::AssetType;
 use shared::protocol_types::ids::ObjectId;
@@ -29,12 +30,14 @@ impl BucketStore {
     }
 
     pub fn upsert(&self, id: ObjectId, view: BucketView) {
+        debug!(%id, strike = view.strike, expiry_ms = view.expiry_ms, "upserting bucket");
         self.by_id.write().insert(id, view);
     }
 
     pub fn set_cursor(&self, id: ObjectId, exercise_cursor: u128, total_written: u128) {
         let mut g = self.by_id.write();
         if let Some(v) = g.get_mut(&id) {
+            trace!(%id, exercise_cursor, total_written, "updating bucket cursor");
             v.exercise_cursor = exercise_cursor;
             v.total_written = total_written;
         }

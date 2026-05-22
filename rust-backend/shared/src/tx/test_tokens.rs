@@ -24,6 +24,7 @@ use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{Argument, Transaction, TransactionData};
 use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
+use tracing::{debug, info};
 
 use crate::sui_client::Signer;
 use crate::tx::shared_object_arg;
@@ -39,6 +40,7 @@ pub async fn mint_to_sender(
     amount: u64,
     gas_budget: u64,
 ) -> Result<SuiTransactionBlockResponse> {
+    info!(%tokens_package, module, amount, "minting tokens to sender");
     let mut pt = ProgrammableTransactionBuilder::new();
     let faucet = pt.obj(shared_object_arg(client, faucet_id, true).await?)?;
     let amount_arg = pt.pure(&amount)?;
@@ -70,6 +72,7 @@ pub async fn mint_and_deposit_into_account(
     amount: u64,
     gas_budget: u64,
 ) -> Result<SuiTransactionBlockResponse> {
+    info!(%tokens_package, module, %account_id, amount, "minting and depositing into account");
     use move_core_types::language_storage::TypeTag;
     use std::str::FromStr;
 
@@ -151,6 +154,7 @@ async fn submit(
     if effects.status().is_err() {
         anyhow::bail!("tx reverted: {:?}", effects.status());
     }
+    debug!(digest = %resp.digest, "test token tx succeeded");
     // `Argument` is unused at this scope but keeps the borrow checker
     // honest about move semantics in earlier builds; explicitly drop.
     let _ = std::marker::PhantomData::<Argument>;

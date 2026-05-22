@@ -13,6 +13,7 @@ use base64::Engine;
 use ed25519_dalek::Signer as EdSigner;
 use sha2::{Digest, Sha256};
 use sui_types::crypto::{EncodeDecodeBase64, SuiKeyPair};
+use tracing::{debug, trace};
 
 use crate::SigningScheme;
 
@@ -59,6 +60,7 @@ impl QuoteSigner {
     ///   per `expected_scheme`.
     pub fn from_secret_str(s: &str, expected_scheme: SigningScheme) -> Result<Self> {
         let s = s.trim();
+        debug!(scheme = ?expected_scheme, format = if s.starts_with("suiprivkey1") { "bech32" } else { "hex" }, "loading quote signer");
         if s.starts_with("suiprivkey1") {
             let kp = SuiKeyPair::decode(s)
                 .map_err(|e| anyhow!("decoding suiprivkey bech32 key: {e}"))?;
@@ -124,6 +126,7 @@ impl QuoteSigner {
     /// schemes we SHA-256 the input first so the on-chain
     /// `secp256(k1|r1)_verify(.., hash=1)` accepts it.
     pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>> {
+        trace!(scheme = ?self.scheme(), msg_len = msg.len(), "signing quote payload");
         Ok(match self {
             Self::Ed25519(sk) => sk.sign(msg).to_bytes().to_vec(),
             Self::Secp256k1(sk) => {

@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
+use tracing::{debug, trace};
 
 use shared::protocol_types::asset::AssetType;
 use shared::protocol_types::ids::{ObjectId, SuiAddress};
@@ -42,6 +43,7 @@ impl AccountStore {
     /// Replace the stored mirror — used when a fresh snapshot or
     /// `AccountCreated` arrives.
     pub fn upsert(&self, id: ObjectId, mirror: AccountMirror) {
+        debug!(%id, scheme = ?mirror.signing_scheme, balances = mirror.balances.len(), "upserting account mirror");
         self.accounts.insert(id, RwLock::new(mirror));
     }
 
@@ -56,6 +58,7 @@ impl AccountStore {
         let mut g = entry.write();
         let cur = *g.balances.get(&asset).unwrap_or(&0) as i128;
         let next = (cur + signed_amount).clamp(0, u64::MAX as i128) as u64;
+        trace!(%id, %asset, signed_amount, prev = cur, next, "applying balance delta");
         g.balances.insert(asset, next);
     }
 
@@ -63,6 +66,7 @@ impl AccountStore {
     /// `AccountCreated` and `SigningKeyRotated` both go through here so
     /// they can't drift.
     pub fn set_signing_key(&self, id: ObjectId, scheme: SigningScheme, key: Vec<u8>) {
+        debug!(%id, ?scheme, pubkey_len = key.len(), "setting signing key");
         let entry = self
             .accounts
             .entry(id)

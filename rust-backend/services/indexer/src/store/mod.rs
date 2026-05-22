@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
+use tracing::{debug, trace, warn};
 
 use shared::protocol_types::asset::AssetType;
 use shared::protocol_types::events::{
@@ -133,6 +134,7 @@ impl Store {
         let mut inner = self.inner.write();
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
+        trace!(sequence, timestamp_ms, event_type = ?std::mem::discriminant(&event), "ingesting event");
         apply_event(&mut inner, &event);
         let indexed = IndexedEvent {
             sequence,
@@ -165,12 +167,14 @@ impl Store {
         // Empty checkpoint: still emit a batch so the worker can advance
         // `indexer_progress` and resume past it on restart.
         if events.is_empty() {
+            trace!(checkpoint, "empty checkpoint; advancing progress only");
             let last_sequence = inner.log.last().map(|e| e.sequence as i64).unwrap_or(0);
             return Ok(StagedBatch {
                 indexed: Vec::new(),
                 db_batch: CheckpointBatch::empty(checkpoint as i64, last_sequence),
             });
         }
+        debug!(checkpoint, event_count = events.len(), "staging checkpoint batch");
 
         let mut indexed = Vec::with_capacity(events.len());
         let mut db_batch = CheckpointBatch::empty(checkpoint as i64, 0);
@@ -217,6 +221,14 @@ impl Store {
     /// monotonic across restarts.
     pub fn hydrate(&self, views: HydratedViews, last_sequence: u64, recent_log: Vec<IndexedEvent>) {
         let mut inner = self.inner.write();
+        debug!(
+            accounts = views.accounts.len(),
+            buckets = views.buckets.len(),
+            positions = views.positions.len(),
+            last_sequence,
+            log_events = recent_log.len(),
+            "hydrating store from postgres"
+        );
         inner.accounts = views.accounts;
         inner.buckets = views.buckets;
         inner.positions = views.positions;

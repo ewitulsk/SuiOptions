@@ -19,7 +19,7 @@ pub use matcher::{collect_with_deadline, MatcherInput, MatcherOutput};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::debug;
+use tracing::{debug, info, trace, warn};
 
 use shared::protocol_types::asset::AssetType;
 use shared::protocol_types::errors::ProtocolError;
@@ -89,6 +89,7 @@ pub fn validate_and_reserve(
     now_ms: u64,
 ) -> Result<RfqQuoteEntry, QuoteRejection> {
     let quote = &payload.quote;
+    trace!(mm = %mm_account_id, %bucket_id, nonce = quote.nonce, premium = quote.premium, "validating quote");
     // Cheap structural checks first.
     if quote.protocol_id != protocol_id {
         return Err(QuoteRejection::ProtocolMismatch);
@@ -252,6 +253,7 @@ pub async fn orchestrate(
     drop(input);
 
     let raw_responses = collector.await.unwrap_or(MatcherOutput::default()).responses;
+    debug!(request_id = %request_id, responses = raw_responses.len(), "rfq collection complete");
     // Once the deadline closes the receiver, remove the routing entry.
     state.pending_rfqs.remove(&request_id);
 
@@ -275,6 +277,13 @@ pub async fn orchestrate(
         }
     }
     sort_best_first(side, &mut accepted);
+    info!(
+        request_id = %request_id,
+        accepted = accepted.len(),
+        ?side,
+        %bucket_id,
+        "rfq orchestration complete"
+    );
     accepted
 }
 

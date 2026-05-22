@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use sui_json_rpc_types::{ObjectChange, SuiTransactionBlockResponse};
 use sui_types::base_types::ObjectID;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use shared::sui_client::SuiClientWrapper;
 use shared::tx::admin::{new_call_option, NewCallOptionArgs};
@@ -51,6 +51,15 @@ pub async fn submit(
     plan: &RollPlan,
     gas_budget: u64,
 ) -> Result<RollOutcome> {
+    debug!(
+        %package,
+        %admin_cap,
+        underlying = %plan.underlying_type,
+        settlement = %plan.settlement_type,
+        expiry_ms = plan.expiry_ms,
+        gas_budget,
+        "submitting roll"
+    );
     let resp = new_call_option(
         &wrap.client,
         &wrap.signer,
@@ -78,10 +87,16 @@ pub async fn submit(
              relying on indexer to fill in"
         );
     }
+    info!(
+        digest,
+        bucket_count = bucket_ids.len(),
+        "roll submitted"
+    );
     Ok(RollOutcome { digest, bucket_ids })
 }
 
 fn extract_bucket_ids(resp: &SuiTransactionBlockResponse) -> Vec<ObjectID> {
+    debug!("extracting bucket ids from object changes");
     let Some(changes) = resp.object_changes.as_ref() else {
         return vec![];
     };

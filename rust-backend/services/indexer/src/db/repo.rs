@@ -27,6 +27,7 @@ use chrono::Utc;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, PooledConnection};
+use tracing::{debug, info, trace};
 
 use shared::protocol_types::events::{ChainEvent, IndexedEvent};
 use shared::protocol_types::ids::ObjectId;
@@ -138,7 +139,17 @@ impl Repo {
     /// progress. Empty batches are a no-op (the worker may see checkpoints
     /// containing zero indexable events).
     pub fn apply_checkpoint(&self, batch: &CheckpointBatch) -> Result<()> {
+        debug!(
+            checkpoint = batch.checkpoint,
+            events = batch.events.len(),
+            accounts = batch.accounts.len(),
+            buckets = batch.buckets.len(),
+            position_upserts = batch.position_upserts.len(),
+            position_deletes = batch.position_deletes.len(),
+            "applying checkpoint to postgres"
+        );
         if batch.is_empty() {
+            trace!(checkpoint = batch.checkpoint, "empty checkpoint, advancing progress only");
             // Still advance progress so we don't re-scan empty checkpoints
             // forever after a restart.
             return self.advance_progress(batch.checkpoint, batch.last_sequence);
@@ -270,6 +281,7 @@ impl Repo {
     }
 
     pub fn load_progress(&self) -> Result<Option<ProgressRow>> {
+        debug!("loading indexer progress from postgres");
         let mut conn = self.conn()?;
         indexer_progress::table
             .find(1i16)
@@ -280,6 +292,7 @@ impl Repo {
 
     /// Reload the materialised views into memory. Called once at boot.
     pub fn hydrate(&self) -> Result<HydratedViews> {
+        info!("hydrating materialized views from postgres");
         let mut conn = self.conn()?;
 
         let mut acct_map: BTreeMap<ObjectId, AccountState> = BTreeMap::new();
@@ -335,6 +348,12 @@ impl Repo {
             position_map.insert(key, state);
         }
 
+        debug!(
+            accounts = acct_map.len(),
+            buckets = bucket_map.len(),
+            positions = position_map.len(),
+            "hydration complete"
+        );
         Ok(HydratedViews {
             accounts: acct_map,
             buckets: bucket_map,
