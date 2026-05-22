@@ -1,0 +1,28 @@
+# mm-bot config — dev env (testnet).
+# Secrets (sui_key, quote_key) come from /run/secrets/mm-bot.toml,
+# rendered at deploy time from Secrets Manager (options/dev/mm-bot).
+
+quoting_url        = "ws://quoting:9002/"
+
+signing_scheme     = "ed25519"
+
+underlying_symbol  = "TBTC"
+settlement_symbol  = "TUSDC"
+
+rate               = 0.05
+quote_ttl_ms       = 30_000
+
+roles = ["trader_mm", "writer_mm"]
+
+bootstrap_settlement_amount = 1_000_000_000_000
+
+[pyth]
+hermes_url             = "https://hermes.pyth.network"
+benchmarks_url         = "https://benchmarks.pyth.network"
+max_price_age_ms       = 5_000
+max_publish_lag_ms     = 10_000
+vol_window_hours       = 24
+vol_sample_interval_ms = 60_000
+bootstrap_samples      = 24
+bootstrap_interval_secs = 3_600
+fallback_vol           = 0.6

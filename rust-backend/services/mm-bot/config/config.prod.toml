@@ -1,0 +1,39 @@
+# mm-bot config — prod env (mainnet).
+#
+# WARNING: mm-bot's bootstrap step calls the test-token faucet to mint
+# settlement. There is no faucet on mainnet, so booting this against
+# mainnet will fail unless `bootstrap_settlement_amount` is zero AND the
+# bootstrap code path is changed to skip the faucet call (or the Account
+# is funded manually first and `mm-bot.account.json` is pre-seeded into
+# the named volume).
+#
+# Until that's resolved, the mm-bot service should be commented out of
+# docker-compose.prod.yml. The indexer + quoting-service deploy and run
+# normally on mainnet; mm-bot is the only one that needs the faucet.
+
+quoting_url        = "ws://quoting:9002/"
+
+signing_scheme     = "ed25519"
+
+# Replace these with the real mainnet pair you intend to make markets on.
+underlying_symbol  = "WBTC"
+settlement_symbol  = "USDC"
+
+rate               = 0.05
+quote_ttl_ms       = 30_000
+
+roles = ["trader_mm", "writer_mm"]
+
+# Mainnet: no auto-bootstrap. Pre-fund the Account out-of-band.
+bootstrap_settlement_amount = 0
+
+[pyth]
+hermes_url             = "https://hermes.pyth.network"
+benchmarks_url         = "https://benchmarks.pyth.network"
+max_price_age_ms       = 5_000
+max_publish_lag_ms     = 10_000
+vol_window_hours       = 24
+vol_sample_interval_ms = 60_000
+bootstrap_samples      = 24
+bootstrap_interval_secs = 3_600
+fallback_vol           = 0.6

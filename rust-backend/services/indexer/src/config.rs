@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use shared::config_load;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -78,15 +79,7 @@ fn default_deployments_path() -> PathBuf {
 
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref();
-        let builder = config::Config::builder()
-            .add_source(config::File::from(path).required(true));
-        let settings = builder
-            .build()
-            .with_context(|| format!("loading config {}", path.display()))?;
-        settings
-            .try_deserialize()
-            .with_context(|| format!("parsing config {}", path.display()))
+        config_load::load_toml(path)
     }
 
     pub fn heartbeat_interval(&self) -> Duration {

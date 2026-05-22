@@ -21,6 +21,7 @@
 //! - [`ws_client`] — minimal WS helpers used by retail/MM clients.
 //! - [`tx`] — PTB builders, one module per protocol entry point.
 
+pub mod config_load;
 pub mod deployments;
 pub mod logging;
 pub mod pricing;

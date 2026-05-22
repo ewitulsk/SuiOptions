@@ -1,0 +1,44 @@
+# Compose stack for the `dev` env (Sui testnet).
+# Variables come from /opt/options/dev/.env, written by deploy.sh.
+
+name: options-dev
+
+services:
+  indexer:
+    image: ${ECR}/options/indexer:${IMAGE_TAG}
+    environment:
+      APP_ENV: dev
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      RUST_LOG: info,indexer=debug
+    restart: unless-stopped
+    networks: [net]
+
+  quoting:
+    image: ${ECR}/options/quoting-service:${IMAGE_TAG}
+    environment:
+      APP_ENV: dev
+      RUST_LOG: info,quoting_service=debug
+    ports:
+      - "9012:9002"
+    depends_on: [indexer]
+    restart: unless-stopped
+    networks: [net]
+
+  mm-bot:
+    image: ${ECR}/options/mm-bot:${IMAGE_TAG}
+    environment:
+      APP_ENV: dev
+      RUST_LOG: info,mm_bot=debug
+    volumes:
+      - mm_bot_state:/app/state
+      - /opt/options/dev/secrets:/run/secrets:ro
+    depends_on: [quoting]
+    restart: unless-stopped
+    networks: [net]
+
+networks:
+  net:
+
+volumes:
+  mm_bot_state:

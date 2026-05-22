@@ -1,0 +1,29 @@
+# Copy to terraform.tfvars (gitignored) and fill in. Required vars have no
+# default; optional ones inherit from variables.tf if commented out.
+
+# ---- Required ---------------------------------------------------------------
+
+# Public hostname the ALB serves from. Must match the ACM cert's SAN.
+domain_name = "api.options.yourdomain.com"
+
+# owner/repo for the GH Actions OIDC trust policy.
+github_repo = "yourorg/options"
+
+# ---- Strongly recommended ---------------------------------------------------
+
+# Route 53 hosted zone for the parent domain. If your zone isn't in
+# Route 53, leave this empty — apply will pause at ACM validation until
+# you create the validation CNAME manually somewhere else.
+route53_zone_id = "Z01234567890ABCDEFGHI"
+
+# ---- Optional ---------------------------------------------------------------
+
+# aws_region              = "us-east-1"
+# project                 = "options"
+# vpc_cidr                = "10.40.0.0/16"
+# ec2_instance_type       = "t4g.medium"
+# rds_instance_class      = "db.t4g.micro"
+# rds_allocated_storage_gb = 20
+# rds_backup_retention_days = 7
+# ssh_pubkey              = "ssh-ed25519 AAAA... you@host"   # leave empty to disable SSH (SSM still works)
+# github_deploy_branches  = ["staging", "main"]
