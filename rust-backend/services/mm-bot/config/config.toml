@@ -18,20 +18,14 @@ quoting_url        = "ws://127.0.0.1:9002/"
 signing_scheme     = "ed25519"
 
 # Pair to make markets on. Must exist under
-# `deployments.testTokens.tokens.<SYMBOL>`.
+# `deployments.testTokens.tokens.<SYMBOL>`, and each entry there must
+# carry a `pythFeedId` — the bot pulls live USD prices for both legs and
+# computes the cross + scale into the bucket's on-chain units.
 underlying_symbol  = "TBTC"
 settlement_symbol  = "TUSDC"
 
-# `spot_price` is in the SAME units as the bucket's on-chain `strike`:
-# settlement smallest-units per underlying smallest-unit. For BTC at $50k
-# with TUSDC (6 dec) and TBTC (8 dec):
-#   50_000 USD/BTC × 10^6 TUSDC-units/USD ÷ 10^8 TBTC-units/BTC = 500
-# Pick the bucket's strike to match if you want roughly ATM premium.
-spot_price         = 500
-
-# Annualized volatility (e.g., 0.6 = 60%).
-vol                = 0.6
-# Annualized risk-free rate.
+# Annualized risk-free rate. Pyth doesn't model the curve; this stays a
+# config knob.
 rate               = 0.05
 
 # How long the bot's signed quotes stay valid.
@@ -47,3 +41,27 @@ bootstrap_settlement_amount = 1_000_000_000_000
 # Optional: where minted call tokens / position NFTs should land. Leave
 # unset to derive from the Sui wallet key.
 # token_recipient = "0xabc..."
+
+# Pyth Hermes/Benchmarks settings. All fields are optional — these are
+# the defaults from `PythConfig::default()` written out explicitly so the
+# knobs are discoverable.
+[pyth]
+hermes_url             = "https://hermes.pyth.network"
+benchmarks_url         = "https://benchmarks.pyth.network"
+# Reject an RFQ if our last *observation* of either price is older than
+# this. Catches a wedged or disconnected SSE stream.
+max_price_age_ms       = 5_000
+# Reject if Pyth's publisher timestamp is older than this. Catches the
+# case where the stream is alive but Pyth itself isn't publishing.
+max_publish_lag_ms     = 10_000
+# Rolling window for realized vol.
+vol_window_hours       = 24
+# Live-cache sample cadence into the vol buffer. Annualization follows
+# this cadence: sigma_year = stddev_log_returns * sqrt(samples_per_year).
+vol_sample_interval_ms = 60_000
+# Historical points pulled from Benchmarks at startup to seed the buffer.
+# Paced at one call per ~1.1s to respect the 10-req/10s rate cap.
+bootstrap_samples      = 24
+bootstrap_interval_secs = 3_600
+# Sigma used until the buffer has enough samples, then live takes over.
+fallback_vol           = 0.6

@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
         return Err(anyhow!(
             "configured signer {} ≠ deployer {} from deployments.json — only the deployer holds AdminCap",
             wrap.signer.address,
-            net.deployer
+            net.package_info.deployer
         ));
     }
 
@@ -200,24 +200,38 @@ async fn main() -> Result<()> {
         }
         Command::Info => {
             let protocol_id_bytes = net.protocol_id_bytes()?;
+            let pi = &net.package_info;
             println!("network         : {}", cli.network);
-            println!("package         : {}", net.package_id);
-            println!("admin_cap       : {}", net.admin_cap_id);
-            println!("protocol_config : {}", net.protocol_config_id);
+            println!("package         : {}", pi.package_id);
+            println!("admin_cap       : {}", pi.admin_cap_id);
+            println!("protocol_config : {}", pi.protocol_config_id);
             println!(
                 "treasury        : {}",
-                net.treasury_id.as_deref().unwrap_or("(missing)")
+                pi.treasury_id.as_deref().unwrap_or("(missing)")
             );
-            println!("deployer        : {}", net.deployer);
+            println!("deployer        : {}", pi.deployer);
             println!("protocol_id     : 0x{}", hex::encode(&protocol_id_bytes));
             println!("signer          : {}", wrap.signer.address);
-            if let Some(tt) = &net.test_tokens {
+            if let Some(tt) = net.maybe_test_tokens() {
                 println!();
                 println!("test_tokens.package: {}", tt.package_id);
                 for (sym, info) in &tt.tokens {
                     println!(
                         "  {:5} dec={} faucet={} type={}",
                         sym, info.decimals, info.faucet_id, info.coin_type
+                    );
+                }
+            }
+            if !net.token_info.is_empty() {
+                println!();
+                println!("token_info:");
+                for (sym, spec) in &net.token_info {
+                    println!(
+                        "  {:5} dec={} pyth={} type={}",
+                        sym,
+                        spec.decimals,
+                        spec.pyth_feed_id.as_deref().unwrap_or("(none)"),
+                        spec.coin_type
                     );
                 }
             }

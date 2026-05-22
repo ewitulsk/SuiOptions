@@ -20,14 +20,7 @@ use indexer::{establish_pool, run_migrations, Cli, Config, ProtocolEventWorker, 
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new("info,sui_data_ingestion_core=off")
-                }),
-        )
-        .init();
+    shared::logging::init_with(&["sui_data_ingestion_core=off"]);
 
     let cli = Cli::parse();
     let cfg_path = cli.config.to_string_lossy().into_owned();

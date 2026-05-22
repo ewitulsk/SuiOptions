@@ -5,12 +5,29 @@ use std::path::Path;
 
 use crate::network::Network;
 
-/// One network's deployment record. Fields are camelCase to match the JSON
-/// shape the TS reference produces, so other services already consuming
-/// that format don't need changes.
+/// One network's deployment record. Two halves:
+///   - `package_info` — everything that comes out of publishing Move
+///     packages (protocol object ids, the test-token catalog with
+///     faucets, deploy digests). Field names inside are camelCase to
+///     match the JSON the TS reference produces.
+///   - `token_info` — off-chain token catalog (coin type, decimals,
+///     optional Pyth feed id). One entry per supported ticker, on every
+///     network. On testnet we replicate addresses from `testTokens`; on
+///     mainnet the same block lists real assets while `testTokens` is
+///     absent.
+///
+/// The two container keys (`package_info`, `token_info`) are snake_case
+/// by intent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkDeployment {
+    pub package_info: PackageInfo,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub token_info: BTreeMap<String, TokenSpec>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NetworkDeployment {
+pub struct PackageInfo {
     pub package_id: String,
     pub admin_cap_id: String,
     pub protocol_config_id: String,
@@ -25,11 +42,12 @@ pub struct NetworkDeployment {
     pub network: String,
     /// Set when the test-tokens package was published alongside this
     /// deployment (via `--deploy-tokens`). Overwritten on each rerun.
+    /// Testnet-only; absent on mainnet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_tokens: Option<TestTokensRecord>,
 }
 
-/// The published test-tokens package + the four shared faucets.
+/// The published test-tokens package + the shared faucets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestTokensRecord {
@@ -49,6 +67,19 @@ pub struct TestTokenRecord {
     /// Shared Faucet<T> object ID.
     pub faucet_id: String,
     pub decimals: u8,
+}
+
+/// One entry of the off-chain `token_info` catalog. Carries everything
+/// off-chain pricers (mm-bot) need to source a USD spot for this ticker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenSpec {
+    pub coin_type: String,
+    pub decimals: u8,
+    /// Optional so tokens without a real-world Pyth feed (synthetic
+    /// test tokens) still appear in the catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pyth_feed_id: Option<String>,
 }
 
 /// On-disk shape: `{ "mainnet": {...}, "testnet": {...}, "devnet": {...} }`.

@@ -16,7 +16,7 @@ use deployment_manager::deploy::{
     create_and_share_treasury, publish_package, publish_test_tokens,
 };
 use deployment_manager::json_store::{
-    Deployments, NetworkDeployment, TestTokenRecord, TestTokensRecord,
+    Deployments, NetworkDeployment, PackageInfo, TestTokenRecord, TestTokensRecord, TokenSpec,
 };
 use deployment_manager::network::Network;
 use deployment_manager::signer::Signer;
@@ -65,20 +65,26 @@ async fn main() -> Result<()> {
         let previous_tokens = store
             .networks
             .get(net.as_str())
-            .and_then(|d| d.test_tokens.clone());
+            .and_then(|d| d.package_info.test_tokens.clone());
+        let previous_token_info = store
+            .networks
+            .get(net.as_str())
+            .map(|d| d.token_info.clone())
+            .unwrap_or_default();
         match deploy_one(
             *net,
             &secrets,
             &contracts_path,
             test_tokens_path.as_deref(),
             previous_tokens,
+            previous_token_info,
             cli.gas_budget,
             cli.skip_init,
         )
         .await
         {
             Ok(record) => {
-                tracing::info!(network = %net, package = %record.package_id, "deployment recorded");
+                tracing::info!(network = %net, package = %record.package_info.package_id, "deployment recorded");
                 store.upsert(*net, record);
                 // Persist after each network so a later failure doesn't lose
                 // an earlier success.
@@ -109,6 +115,7 @@ async fn deploy_one(
     contracts_path: &std::path::Path,
     test_tokens_path: Option<&std::path::Path>,
     previous_tokens: Option<TestTokensRecord>,
+    previous_token_info: BTreeMap<String, TokenSpec>,
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
@@ -190,17 +197,42 @@ async fn deploy_one(
         None
     };
 
+    // Build the off-chain catalog. If we deployed test tokens this run,
+    // mirror those addresses into token_info (preserving any pythFeedId
+    // that was already there). Otherwise carry the previous catalog
+    // forward — re-publishing the protocol alone shouldn't drop it.
+    let token_info = if let Some(tt) = test_tokens.as_ref() {
+        let mut out = previous_token_info;
+        for (sym, rec) in &tt.tokens {
+            let pyth = out.get(sym).and_then(|s| s.pyth_feed_id.clone());
+            out.insert(
+                sym.clone(),
+                TokenSpec {
+                    coin_type: rec.coin_type.clone(),
+                    decimals: rec.decimals,
+                    pyth_feed_id: pyth,
+                },
+            );
+        }
+        out
+    } else {
+        previous_token_info
+    };
+
     Ok(NetworkDeployment {
-        package_id: publish.package_id.to_string(),
-        admin_cap_id: publish.admin_cap_id.to_string(),
-        protocol_config_id: publish.protocol_config_id.to_string(),
-        upgrade_cap_id: publish.upgrade_cap_id.to_string(),
-        treasury_id,
-        publish_digest: publish.digest,
-        init_digest,
-        deployer: signer.address.to_string(),
-        deployed_at: chrono::Utc::now().to_rfc3339(),
-        network: network.as_str().to_owned(),
-        test_tokens,
+        package_info: PackageInfo {
+            package_id: publish.package_id.to_string(),
+            admin_cap_id: publish.admin_cap_id.to_string(),
+            protocol_config_id: publish.protocol_config_id.to_string(),
+            upgrade_cap_id: publish.upgrade_cap_id.to_string(),
+            treasury_id,
+            publish_digest: publish.digest,
+            init_digest,
+            deployer: signer.address.to_string(),
+            deployed_at: chrono::Utc::now().to_rfc3339(),
+            network: network.as_str().to_owned(),
+            test_tokens,
+        },
+        token_info,
     })
 }
