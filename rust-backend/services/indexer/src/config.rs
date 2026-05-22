@@ -124,7 +124,7 @@ impl Config {
                 self.deployments_path.display()
             )
         })?;
-        Ok(net.package_id.clone())
+        Ok(net.package_info.package_id.clone())
     }
 }
 

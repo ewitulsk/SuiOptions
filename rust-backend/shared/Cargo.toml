@@ -47,3 +47,9 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Pyth price feed client.
+reqwest = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }

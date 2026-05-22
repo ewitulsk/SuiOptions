@@ -4707,6 +4707,8 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
+ "parking_lot 0.12.5",
+ "reqwest",
  "serde",
  "serde_json",
  "shared",
@@ -8061,6 +8063,7 @@ dependencies = [
  "chrono",
  "clap",
  "config",
+ "dashmap 6.1.0",
  "ed25519-dalek",
  "futures",
  "futures-util",
@@ -8068,7 +8071,9 @@ dependencies = [
  "k256 0.13.4",
  "move-core-types",
  "p256",
+ "parking_lot 0.12.5",
  "rand 0.8.6",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -8083,6 +8088,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

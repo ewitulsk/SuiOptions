@@ -47,6 +47,9 @@ uuid = { version = "1", features = ["v4"] }
 url = "2"
 parking_lot = "0.12"
 
+# HTTP client (Pyth Hermes + Benchmarks).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+
 # Sui Rust crates. Pinned to the framework/mainnet branch — same code path
 # the production Sui mainnet validators run. Every binary in the workspace
 # resolves to a single ABI by going through this list.

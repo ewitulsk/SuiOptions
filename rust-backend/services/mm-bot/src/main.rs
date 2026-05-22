@@ -22,10 +22,12 @@
 //! quoting service.
 
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sui_types::base_types::ObjectID;
 
@@ -39,6 +41,7 @@ use shared::protocol_types::SigningScheme;
 
 use shared::deployments::Deployments;
 use shared::pricing::{call_price_per_unit, premium_for_write, CallInputs};
+use shared::pyth::{self, PriceCache, PriceFeedId, RollingVolBuffer};
 use shared::quote_signer::QuoteSigner;
 use shared::sui_client::{Network, SuiClientWrapper};
 use shared::tx::account::create_and_share_account;
@@ -60,18 +63,15 @@ struct BotConfig {
     signing_scheme: SigningScheme,
 
     /// Asset pair to quote on. Symbols are looked up in
-    /// `deployments.json::testTokens.tokens`.
+    /// `deployments.json::testTokens.tokens`, and each must carry a
+    /// `pythFeedId` so the bot can source live prices.
     #[serde(default = "default_underlying")]
     underlying_symbol: String,
     #[serde(default = "default_settlement")]
     settlement_symbol: String,
 
-    /// Pricing inputs. `spot_price` is in the **same units as the
-    /// bucket's `strike` on chain**: settlement smallest-units per
-    /// underlying smallest-unit. For BTC at $50k with TUSDC (6 dec) and
-    /// TBTC (8 dec), that's `50_000 * 10^6 / 10^8 = 500`.
-    spot_price: u64,
-    vol: f64,
+    /// Annualized risk-free rate. Pyth doesn't price the curve; this
+    /// stays a config knob.
     #[serde(default)]
     rate: f64,
     #[serde(default = "default_quote_ttl_ms")]
@@ -89,6 +89,55 @@ struct BotConfig {
     /// freshly-created Account so it can pay premiums.
     #[serde(default = "default_bootstrap_amount")]
     bootstrap_settlement_amount: u64,
+
+    /// Pyth Hermes/Benchmarks settings. All fields have defaults.
+    #[serde(default)]
+    pyth: PythConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct PythConfig {
+    /// Hermes base URL. Mainnet default; override for a private mirror.
+    hermes_url: String,
+    /// Benchmarks base URL. Used for the realized-vol cold-start sample.
+    benchmarks_url: String,
+    /// Reject an RFQ if our last *observation* of either price is older
+    /// than this. Catches a wedged or disconnected stream.
+    max_price_age_ms: u64,
+    /// Reject an RFQ if Pyth's publisher timestamp is older than this.
+    /// Catches the case where the stream is alive but Pyth itself isn't
+    /// publishing.
+    max_publish_lag_ms: u64,
+    /// Rolling window (in hours) used to compute realized vol.
+    vol_window_hours: u64,
+    /// How often the live SSE feed is sampled into the vol buffer. The
+    /// vol estimate annualizes from this cadence.
+    vol_sample_interval_ms: u64,
+    /// Number of historical points to fetch from Benchmarks at startup
+    /// to seed the vol buffer.
+    bootstrap_samples: u32,
+    /// Seconds between adjacent bootstrap samples.
+    bootstrap_interval_secs: u64,
+    /// Volatility used until the buffer has enough samples. Once it does,
+    /// the live estimate takes over.
+    fallback_vol: f64,
+}
+
+impl Default for PythConfig {
+    fn default() -> Self {
+        Self {
+            hermes_url: "https://hermes.pyth.network".into(),
+            benchmarks_url: "https://benchmarks.pyth.network".into(),
+            max_price_age_ms: 5_000,
+            max_publish_lag_ms: 10_000,
+            vol_window_hours: 24,
+            vol_sample_interval_ms: 60_000,
+            bootstrap_samples: 24,
+            bootstrap_interval_secs: 3_600,
+            fallback_vol: 0.6,
+        }
+    }
 }
 
 fn default_scheme() -> SigningScheme {
@@ -133,12 +182,7 @@ fn save_account_state(p: &Path, state: &AccountState) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    shared::logging::init();
 
     let cli = Cli::parse();
     let cfg = load_config(&cli.config)?;
@@ -148,19 +192,37 @@ async fn main() -> Result<()> {
         .with_context(|| format!("loading {}", cli.deployments.display()))?;
     let net = dep.for_network(cli.network.as_str())?;
 
-    // Token lookup so we fail fast on a typoed symbol.
-    let settlement = net.token(&cfg.settlement_symbol).with_context(|| {
+    // Off-chain token catalog lookup (coin type, decimals, pyth feed).
+    // This is the source the pricing path reads from; the bootstrap path
+    // separately looks up the test-token faucet via `net.token(symbol)`.
+    let underlying_spec = net.token_spec(&cfg.underlying_symbol).with_context(|| {
         format!(
-            "settlement symbol {} not in deployments.testTokens",
-            cfg.settlement_symbol
-        )
-    })?;
-    let _underlying = net.token(&cfg.underlying_symbol).with_context(|| {
-        format!(
-            "underlying symbol {} not in deployments.testTokens",
+            "underlying symbol {} not in deployments.token_info",
             cfg.underlying_symbol
         )
     })?;
+    let settlement_spec = net.token_spec(&cfg.settlement_symbol).with_context(|| {
+        format!(
+            "settlement symbol {} not in deployments.token_info",
+            cfg.settlement_symbol
+        )
+    })?;
+
+    let underlying_feed = underlying_spec.pyth_feed().with_context(|| {
+        format!("missing pythFeedId for underlying {}", cfg.underlying_symbol)
+    })?;
+    let settlement_feed = settlement_spec.pyth_feed().with_context(|| {
+        format!("missing pythFeedId for settlement {}", cfg.settlement_symbol)
+    })?;
+    let underlying_decimals = underlying_spec.decimals;
+    let settlement_decimals = settlement_spec.decimals;
+    tracing::info!(
+        underlying = %cfg.underlying_symbol,
+        underlying_feed = %underlying_feed,
+        settlement = %cfg.settlement_symbol,
+        settlement_feed = %settlement_feed,
+        "pyth feeds resolved"
+    );
 
     // Quote-signing key (scheme-aware) from the secrets TOML.
     let signer = load_quote_signer(&secrets_loaded, cfg.signing_scheme)?;
@@ -199,6 +261,47 @@ async fn main() -> Result<()> {
     expect_auth_ack(&mut ws).await?;
     tracing::info!("authenticated with quoting service");
 
+    // Pyth client + live price cache + rolling-vol buffer. The SSE task
+    // owns a tokio task that pushes into the cache; the bootstrap +
+    // sampler task seeds and maintains the vol buffer.
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("building reqwest client")?;
+    let price_cache = PriceCache::new();
+    let stream_rx = pyth::spawn_subscriber(
+        http_client.clone(),
+        cfg.pyth.hermes_url.clone(),
+        vec![underlying_feed, settlement_feed],
+    );
+    price_cache.spawn_updater(stream_rx);
+
+    // Vol buffer is keyed off the underlying's USD price. Annualization
+    // factor follows the sample cadence.
+    let samples_per_year =
+        (365.0 * 24.0 * 60.0 * 60.0 * 1000.0) / cfg.pyth.vol_sample_interval_ms as f64;
+    let vol_buf = Arc::new(RwLock::new(RollingVolBuffer::new(
+        cfg.pyth.vol_window_hours.saturating_mul(3_600_000),
+        samples_per_year,
+    )));
+    spawn_vol_task(
+        http_client.clone(),
+        cfg.pyth.clone(),
+        underlying_feed,
+        price_cache.clone(),
+        Arc::clone(&vol_buf),
+    );
+
+    // Don't enter the RFQ loop until both feeds have produced at least one
+    // observation. Otherwise every early RFQ gets declined for stale data.
+    wait_for_first_prices(
+        &price_cache,
+        underlying_feed,
+        settlement_feed,
+        Duration::from_secs(30),
+    )
+    .await?;
+
     // Quote loop.
     let token_recipient = resolve_token_recipient(&cfg, &secrets_loaded, cli.network)?;
     let protocol_id = net.protocol_id_bytes()?;
@@ -221,18 +324,48 @@ async fn main() -> Result<()> {
                 // at zero so an already-expired bucket prices to intrinsic.
                 let ms_to_expiry = payload.expiry_ms.saturating_sub(now);
                 let t_years = ms_to_expiry as f64 / 1000.0 / 86_400.0 / 365.0;
+
+                // Live spot from Pyth, scaled into the bucket's units
+                // (settlement smallest-units per underlying smallest-unit).
+                let spot_scaled = match compute_spot(
+                    &price_cache,
+                    underlying_feed,
+                    settlement_feed,
+                    underlying_decimals,
+                    settlement_decimals,
+                    &cfg.pyth,
+                ) {
+                    Ok(s) => s,
+                    Err(reason) => {
+                        tracing::debug!(?request_id, %reason, "declining: stale market data");
+                        ws_client::send_json(
+                            &mut ws,
+                            &MmToService::Decline {
+                                request_id,
+                                payload: shared::protocol_types::messages::DeclinePayload {
+                                    reason: format!("stale market data: {reason}"),
+                                },
+                            },
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let sigma = vol_buf.read().current_annualized().unwrap_or(cfg.pyth.fallback_vol);
+
                 let inputs = CallInputs {
-                    spot: cfg.spot_price as f64,
+                    spot: spot_scaled as f64,
                     strike: payload.strike as f64,
                     t_years,
                     r: cfg.rate,
-                    sigma: cfg.vol,
+                    sigma,
                 };
                 let per_unit = call_price_per_unit(inputs);
                 let premium = premium_for_write(per_unit, payload.write_amount);
 
                 tracing::debug!(
-                    spot = cfg.spot_price,
+                    spot = spot_scaled,
+                    sigma,
                     strike = payload.strike,
                     t_years,
                     per_unit,
@@ -297,9 +430,6 @@ async fn main() -> Result<()> {
             }
         }
     }
-    // Settlement is referenced through the bootstrap path; suppress
-    // unused-binding warning when bootstrap path didn't run.
-    let _ = settlement;
     Ok(())
 }
 
@@ -435,4 +565,121 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Live cross spot, scaled into the bucket's on-chain units:
+/// settlement smallest-units per underlying smallest-unit.
+///
+/// Formula: `(p_underlying_usd / p_settlement_usd) * 10^(settle_dec - under_dec)`.
+/// Errors out with the staleness reason so the caller can decline cleanly.
+fn compute_spot(
+    cache: &PriceCache,
+    underlying_feed: PriceFeedId,
+    settlement_feed: PriceFeedId,
+    underlying_decimals: u8,
+    settlement_decimals: u8,
+    cfg: &PythConfig,
+) -> Result<u64, &'static str> {
+    let local = Duration::from_millis(cfg.max_price_age_ms);
+    let publish = Duration::from_millis(cfg.max_publish_lag_ms);
+    let u = cache
+        .get_fresh(underlying_feed, local, publish)
+        .ok_or("underlying price stale or unseen")?;
+    let s = cache
+        .get_fresh(settlement_feed, local, publish)
+        .ok_or("settlement price stale or unseen")?;
+    if !(u.price.is_finite() && u.price > 0.0 && s.price.is_finite() && s.price > 0.0) {
+        return Err("non-positive or non-finite price");
+    }
+    let cross = u.price / s.price;
+    let scale = 10f64.powi(settlement_decimals as i32 - underlying_decimals as i32);
+    let scaled = cross * scale;
+    if !scaled.is_finite() || scaled < 0.0 || scaled > u64::MAX as f64 {
+        return Err("scaled spot out of range");
+    }
+    Ok(scaled.round() as u64)
+}
+
+/// Block until both feeds have at least one cached observation (ignoring
+/// the publish-lag bound). Times out so a misconfigured feed id surfaces
+/// quickly rather than hanging the bot forever.
+async fn wait_for_first_prices(
+    cache: &PriceCache,
+    a: PriceFeedId,
+    b: PriceFeedId,
+    timeout: Duration,
+) -> Result<()> {
+    let start = std::time::Instant::now();
+    loop {
+        if cache.peek(a).is_some() && cache.peek(b).is_some() {
+            tracing::info!("pyth: first prices observed for both feeds");
+            return Ok(());
+        }
+        if start.elapsed() > timeout {
+            return Err(anyhow!(
+                "pyth: no observation within {:?} for one of {a} / {b}",
+                timeout
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Bootstrap the vol buffer from Pyth Benchmarks (one historical sample
+/// per hour by default), then maintain it by sampling the live cache on
+/// the configured cadence. The whole thing lives in a single tokio task.
+fn spawn_vol_task(
+    client: reqwest::Client,
+    cfg: PythConfig,
+    underlying_feed: PriceFeedId,
+    cache: PriceCache,
+    buf: Arc<RwLock<RollingVolBuffer>>,
+) {
+    tokio::spawn(async move {
+        // --- bootstrap from Benchmarks --------------------------------------
+        // Walk back N points spaced by `bootstrap_interval_secs`. Pace at one
+        // call per second so we stay under the 10-req/10s ceiling.
+        let now_secs = (now_ms() / 1000) as i64;
+        for i in (0..cfg.bootstrap_samples).rev() {
+            let ts = now_secs - (i as i64) * cfg.bootstrap_interval_secs as i64;
+            match pyth::benchmark_at(&client, &cfg.benchmarks_url, underlying_feed, ts).await {
+                Ok(upd) => match upd.price.price_f64() {
+                    Ok(p) => {
+                        let ts_ms = (ts as u64).saturating_mul(1000);
+                        buf.write().push(ts_ms, p);
+                        tracing::debug!(ts, price = p, "vol bootstrap sample");
+                    }
+                    Err(e) => tracing::debug!(error = %e, "vol bootstrap parse failed"),
+                },
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), ts, "vol bootstrap fetch failed");
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1_100)).await;
+        }
+        if let Some(sigma) = buf.read().current_annualized() {
+            tracing::info!(sigma, "vol buffer bootstrapped");
+        } else {
+            tracing::warn!("vol bootstrap produced too few samples; using fallback until live data fills the window");
+        }
+
+        // --- maintain from the live cache -----------------------------------
+        let mut ticker = tokio::time::interval(Duration::from_millis(cfg.vol_sample_interval_ms));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            let Some(cp) = cache.peek(underlying_feed) else {
+                continue;
+            };
+            // Only sample if we recently observed something — avoid
+            // re-pushing a stale price during a stream outage.
+            if cp.observed_at.elapsed() > Duration::from_millis(cfg.max_price_age_ms) {
+                continue;
+            }
+            buf.write().push(now_ms(), cp.price);
+            if let Some(sigma) = buf.read().current_annualized() {
+                tracing::debug!(sigma, samples = buf.read().len(), "vol updated");
+            }
+        }
+    });
 }

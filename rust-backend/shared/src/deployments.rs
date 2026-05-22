@@ -1,5 +1,6 @@
 //! Loader for `deployments.json` — the single source of truth for every
-//! on-chain id our off-chain stack needs.
+//! on-chain id our off-chain stack needs, plus the off-chain token catalog
+//! used for pricing.
 //!
 //! Shape (matches `deployment-manager`'s output):
 //!
@@ -7,27 +8,36 @@
 //! {
 //!   "mainnet": null,
 //!   "testnet": {
-//!     "packageId":        "0x…",
-//!     "adminCapId":       "0x…",
-//!     "protocolConfigId": "0x…",
-//!     "treasuryId":       "0x…",
-//!     "deployer":         "0x…",
-//!     "testTokens": {
-//!       "packageId": "0x…",
-//!       "tokens": {
-//!         "TBTC":  { "coinType": "0x…::tbtc::TBTC",  "faucetId": "0x…", "decimals": 8 },
-//!         …
+//!     "package_info": {
+//!       "packageId":        "0x…",
+//!       "adminCapId":       "0x…",
+//!       "protocolConfigId": "0x…",
+//!       "treasuryId":       "0x…",
+//!       "deployer":         "0x…",
+//!       "testTokens": {
+//!         "packageId": "0x…",
+//!         "tokens": {
+//!           "TBTC":  { "coinType": "0x…::tbtc::TBTC", "faucetId": "0x…", "decimals": 8 },
+//!           …
+//!         }
 //!       }
+//!     },
+//!     "token_info": {
+//!       "TBTC":  { "coinType": "0x…::tbtc::TBTC", "decimals": 8, "pythFeedId": "0x…" },
+//!       …
 //!     }
 //!   },
 //!   "devnet": null
 //! }
 //! ```
 //!
-//! Consumers: `clients` (every CLI/bot), `indexer` (resolves `package_id`
-//! for event-type strings). Keeping this in its own tiny crate avoids
-//! pulling the `clients` workspace of Sui SDK + transaction-builder deps
-//! into the indexer.
+//! `package_info` collects everything that comes from publishing the Move
+//! package(s): protocol object ids, the test-token catalog with faucets,
+//! deploy digests. `token_info` is the off-chain catalog every consumer
+//! reads from for *pricing* — coin types, decimals, and an optional Pyth
+//! feed id. On testnet the addresses are replicated from the testTokens
+//! deploy outcome; on mainnet the same `token_info` block will list real
+//! assets, while `package_info.testTokens` is absent.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -39,6 +49,7 @@ use sui_types::base_types::{ObjectID, SuiAddress};
 
 /// One deployed test token: its `Coin<T>` Move type, the shared `Faucet`
 /// object id that wraps the TreasuryCap, and the coin's decimals.
+/// Test-token records are testnet-only; mainnet has no faucets.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenInfo {
@@ -107,11 +118,11 @@ impl TestTokens {
     }
 }
 
-/// Per-network deployment record. Field names match the camelCase JSON
-/// `deployment-manager` writes.
+/// On-chain artifacts from publishing the protocol Move package (and,
+/// on testnet, the test-tokens package).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NetworkDeployment {
+pub struct PackageInfo {
     pub package_id: String,
     pub admin_cap_id: String,
     pub protocol_config_id: String,
@@ -122,31 +133,72 @@ pub struct NetworkDeployment {
     pub deployer: String,
     pub deployed_at: String,
     pub network: String,
-    /// Test-token package + faucets. Optional so older deployment records
-    /// without test tokens still load.
+    /// Test-token package + faucets. Testnet-only; absent on mainnet.
     #[serde(default)]
     pub test_tokens: Option<TestTokens>,
 }
 
+/// Off-chain token catalog entry. One per supported ticker, replicated
+/// on testnet from the testTokens deploy and authored by hand on
+/// mainnet. Carries everything off-chain pricers (mm-bot) need to source
+/// a USD spot.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenSpec {
+    /// Fully-qualified Move type, e.g. `0xpkg::tbtc::TBTC`. On testnet,
+    /// must match the same symbol's entry under `package_info.testTokens.tokens`.
+    pub coin_type: String,
+    pub decimals: u8,
+    /// 32-byte hex (with or without `0x` prefix). Optional so tokens
+    /// without a real-world Pyth feed (synthetic test tokens) still
+    /// appear in the catalog; consumers that need it fail at startup
+    /// with a clear message if it's missing for a configured symbol.
+    #[serde(default)]
+    pub pyth_feed_id: Option<String>,
+}
+
+impl TokenSpec {
+    /// Typed Pyth feed id. Errors if `pyth_feed_id` is absent or malformed.
+    pub fn pyth_feed(&self) -> Result<crate::pyth::PriceFeedId> {
+        let raw = self
+            .pyth_feed_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("token has no pythFeedId in deployments.json"))?;
+        crate::pyth::PriceFeedId::from_hex(raw)
+    }
+}
+
+/// Per-network deployment record. `package_info` carries everything
+/// derived from publishing Move packages; `token_info` is the off-chain
+/// pricing catalog.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NetworkDeployment {
+    pub package_info: PackageInfo,
+    #[serde(default)]
+    pub token_info: BTreeMap<String, TokenSpec>,
+}
+
 impl NetworkDeployment {
     pub fn package(&self) -> Result<ObjectID> {
-        ObjectID::from_str(&self.package_id).context("parsing package_id")
+        ObjectID::from_str(&self.package_info.package_id).context("parsing package_id")
     }
     pub fn admin_cap(&self) -> Result<ObjectID> {
-        ObjectID::from_str(&self.admin_cap_id).context("parsing admin_cap_id")
+        ObjectID::from_str(&self.package_info.admin_cap_id).context("parsing admin_cap_id")
     }
     pub fn protocol_config(&self) -> Result<ObjectID> {
-        ObjectID::from_str(&self.protocol_config_id).context("parsing protocol_config_id")
+        ObjectID::from_str(&self.package_info.protocol_config_id)
+            .context("parsing protocol_config_id")
     }
     pub fn treasury(&self) -> Result<ObjectID> {
         let id = self
+            .package_info
             .treasury_id
             .as_deref()
             .ok_or_else(|| anyhow!("treasury_id missing from deployments"))?;
         ObjectID::from_str(id).context("parsing treasury_id")
     }
     pub fn deployer_address(&self) -> Result<SuiAddress> {
-        SuiAddress::from_str(&self.deployer).context("parsing deployer")
+        SuiAddress::from_str(&self.package_info.deployer).context("parsing deployer")
     }
 
     /// Raw bytes of the AdminCap id — the domain separator the chain
@@ -155,17 +207,42 @@ impl NetworkDeployment {
         Ok(self.admin_cap()?.into_bytes().to_vec())
     }
 
+    /// Test-token catalog (on-chain bootstrap data: faucets + coin types).
+    /// Testnet-only. Errors on mainnet.
     pub fn token(&self, symbol: &str) -> Result<&TokenInfo> {
-        self.test_tokens
+        self.package_info
+            .test_tokens
             .as_ref()
             .ok_or_else(|| anyhow!("no testTokens section in deployments.json"))?
             .get(symbol)
     }
 
+    /// `Result`-flavored access to the entire test-tokens block. Errors
+    /// if testTokens isn't present.
     pub fn test_tokens(&self) -> Result<&TestTokens> {
-        self.test_tokens
+        self.package_info
+            .test_tokens
             .as_ref()
             .ok_or_else(|| anyhow!("no testTokens section in deployments.json"))
+    }
+
+    /// `Option`-flavored access — call sites that already gracefully
+    /// handle "no test tokens deployed" (e.g. `info` printout) use this.
+    pub fn maybe_test_tokens(&self) -> Option<&TestTokens> {
+        self.package_info.test_tokens.as_ref()
+    }
+
+    /// Off-chain catalog lookup (coin type, decimals, optional Pyth feed
+    /// id). Available on every network — this is what mm-bot's pricing
+    /// reads.
+    pub fn token_spec(&self, symbol: &str) -> Result<&TokenSpec> {
+        let upper = symbol.to_ascii_uppercase();
+        self.token_info.get(&upper).ok_or_else(|| {
+            anyhow!(
+                "no token_info entry for {symbol} (have: {:?})",
+                self.token_info.keys().collect::<Vec<_>>()
+            )
+        })
     }
 }
 
@@ -206,19 +283,22 @@ mod tests {
     #[test]
     fn protocol_id_is_admin_cap_bytes() {
         let dep = NetworkDeployment {
-            package_id: "0x729944d713df56fb9adf6c11acdff215cf77942227834edeb6f44079784aa2aa"
-                .into(),
-            admin_cap_id: "0x3a094ab9d022f51ef18271e1226c32405df85b4fada60492383de59324b191c8"
-                .into(),
-            protocol_config_id: "0x0".into(),
-            upgrade_cap_id: "0x0".into(),
-            treasury_id: None,
-            publish_digest: "x".into(),
-            init_digest: None,
-            deployer: "0x0".into(),
-            deployed_at: "".into(),
-            network: "testnet".into(),
-            test_tokens: None,
+            package_info: PackageInfo {
+                package_id: "0x729944d713df56fb9adf6c11acdff215cf77942227834edeb6f44079784aa2aa"
+                    .into(),
+                admin_cap_id: "0x3a094ab9d022f51ef18271e1226c32405df85b4fada60492383de59324b191c8"
+                    .into(),
+                protocol_config_id: "0x0".into(),
+                upgrade_cap_id: "0x0".into(),
+                treasury_id: None,
+                publish_digest: "x".into(),
+                init_digest: None,
+                deployer: "0x0".into(),
+                deployed_at: "".into(),
+                network: "testnet".into(),
+                test_tokens: None,
+            },
+            token_info: BTreeMap::new(),
         };
         let bytes = dep.protocol_id_bytes().unwrap();
         assert_eq!(bytes.len(), 32);
@@ -268,8 +348,18 @@ mod tests {
             let (_pkg, module) = t.module_path().unwrap();
             assert_eq!(module, expected.to_ascii_lowercase());
             let _ = t.faucet().unwrap();
+            // Same set must also be present in token_info.
+            let spec = testnet.token_spec(expected).unwrap();
+            assert_eq!(spec.coin_type, t.coin_type);
+            assert_eq!(spec.decimals, t.decimals);
         }
-        assert!(tokens.get("tbtc").is_ok());
+        // Pyth feed ids land on the catalog side, not on TokenInfo.
+        assert!(testnet.token_spec("TBTC").unwrap().pyth_feed().is_ok());
+        assert!(testnet.token_spec("TUSDC").unwrap().pyth_feed().is_ok());
+        assert!(testnet.token_spec("TWAL").unwrap().pyth_feed().is_err());
+        assert!(testnet.token_spec("TDEEP").unwrap().pyth_feed().is_err());
+        // Case-insensitive symbol lookup.
+        assert!(testnet.token_spec("tbtc").is_ok());
 
         // Case-insensitive network slot lookup.
         assert!(d.for_network("TESTNET").is_ok());

@@ -22,9 +22,11 @@
 //! - [`tx`] — PTB builders, one module per protocol entry point.
 
 pub mod deployments;
+pub mod logging;
 pub mod pricing;
 pub mod program_spec;
 pub mod protocol_types;
+pub mod pyth;
 pub mod quote_signer;
 pub mod secrets;
 pub mod sui_client;
@@ -67,7 +69,9 @@ macro_rules! define_program {
 
 // -- Convenience re-exports ----------------------------------------------
 
-pub use deployments::{Deployments, NetworkDeployment, TestTokens, TokenInfo};
+pub use deployments::{
+    Deployments, NetworkDeployment, PackageInfo, TestTokens, TokenInfo, TokenSpec,
+};
 pub use protocol_types::{
     AssetType, ObjectId, ProtocolError, Quote, SignedQuote, SigningScheme, Side, SuiAddress,
 };
