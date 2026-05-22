@@ -78,10 +78,33 @@ validation while the DNS records propagate. That's normal.
    # repeat for staging
    ```
 
-4. **Trigger the first deploy** by pushing to `staging` (deploys dev +
+4. **Fill in the GH runner PAT.** Terraform created a `options/ci/github-runner-pat`
+   placeholder. Until it's filled the runner spot instance boots but its
+   systemd unit crash-loops on `register-runner.sh` (visible in
+   `journalctl -u gh-runner` via SSM).
+
+   Create a PAT with self-hosted-runner-management scope and upload:
+   - **Classic PAT**: `repo` scope.
+   - **Fine-grained PAT** (preferred): repository-scoped to this repo,
+     Repository permissions → **Administration: Read and write**.
+
+   ```bash
+   PAT=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   aws secretsmanager put-secret-value \
+     --secret-id options/ci/github-runner-pat \
+     --secret-string "{\"pat\":\"$PAT\"}"
+   ```
+
+   Within ~1 minute the runner appears under repo Settings → Actions →
+   Runners with labels `self-hosted, linux, arm64, options-ci`. If it
+   doesn't, SSM into `<project>-runner` and check
+   `journalctl -u gh-runner -n 200`.
+
+5. **Trigger the first deploy** by pushing to `staging` (deploys dev +
    staging) or by running the GH Actions workflow manually with
-   `workflow_dispatch`. The first build is ~10 min (ARM via QEMU emulation
-   on x86 runners).
+   `workflow_dispatch`. Build runs natively on the spot runner in
+   ~3–4 min (vs ~10 min for the old QEMU cross-build); deploy still
+   runs on GH-hosted and SSMs into the service EC2.
 
 ## Manual DNS note
 
