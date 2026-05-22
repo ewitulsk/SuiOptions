@@ -1,8 +1,8 @@
 # option-scheduler config.
 #
 # Chain-side ids (package, AdminCap, deployer address, test-token coin
-# types) come from `deployments.json`. This file controls which pairs the
-# bot rolls buckets for and how aggressively.
+# types, pyth feed ids) come from `deployments.json`. This file controls
+# which pairs the bot rolls buckets for and how aggressively.
 
 # WS endpoint of the local indexer fanout. The scheduler subscribes here
 # to hydrate its in-memory family registry (BucketCreated / BucketCleaned).
@@ -16,6 +16,12 @@ tick_secs         = 60
 # the next family. Default = 7 days (the typical bucket cadence).
 roll_threshold_ms = 604_800_000
 
+# Pyth Hermes endpoint. One HTTP `GET /v2/updates/price/latest` is issued
+# per pair per roll — no SSE, no long-lived connection. Override for a
+# private mirror.
+[pyth]
+hermes_url = "https://hermes.pyth.network"
+
 # Each pair gets its own roll cadence + strike grid + spot source.
 [[pairs]]
 underlying          = "TBTC"
@@ -24,16 +30,23 @@ settlement          = "TUSDC"
 expiry_interval_ms  = 604_800_000      # 1 week
 
 # Strike grid: spot ± `strikes_below`/`strikes_above` strikes, spaced
-# `interval_pct` apart. e.g. spot $50_000, ±4 strikes at 5% → ten strikes
+# `interval_pct` apart. e.g. spot $50_000, ±4 strikes at 5% → nine strikes
 # from $40k to $60k, snapped down to the nearest grid step.
 strikes_below       = 4
 strikes_above       = 4
 interval_pct        = 5.0
 
+  # Pyth pulls the cross of TBTC and TUSDC USD prices at roll time. Both
+  # legs go through Pyth uniformly (no special-casing TUSDC at 1.0); the
+  # `pythFeedId` for each ticker lives in `deployments.json::token_info`.
   [pairs.spot]
-  source = "static"
-  usd    = 50_000.0
+  source             = "pyth"
+  max_publish_lag_ms = 30_000   # decline a roll on prices > 30s stale
+  max_conf_bps       = 100      # decline a roll if conf/price > 1%
 
+# Synthetic test tokens without a real-world Pyth feed (TDEEP, TWAL) keep
+# using the static spot source — `pythFeedId` is absent for them in
+# deployments.json so the Pyth path would fail at boot.
 [[pairs]]
 underlying          = "TDEEP"
 settlement          = "TUSDC"

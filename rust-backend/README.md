@@ -543,6 +543,9 @@ indexer_url       = "ws://127.0.0.1:9001/"
 tick_secs         = 60
 roll_threshold_ms = 604_800_000        # 1 week
 
+[pyth]
+hermes_url = "https://hermes.pyth.network"
+
 [[pairs]]
 underlying          = "TBTC"
 settlement          = "TUSDC"
@@ -551,13 +554,22 @@ strikes_below       = 4
 strikes_above       = 4
 interval_pct        = 5.0
   [pairs.spot]
-  source = "static"
-  usd    = 50_000.0
+  source             = "pyth"
+  max_publish_lag_ms = 30_000
+  max_conf_bps       = 100
 ```
 
-`spot.source = "static"` is the only source for MVP — a future `http`
-source (Binance / Coingecko / Pyth) is documented in the ticket but
-out of scope here.
+**Spot sources.** Two `[pairs.spot].source` variants ship today:
+
+- `static` — hardcoded `usd` value. Use for tests, dry-runs, and synthetic
+  tickers without a real-world price feed (TDEEP, TWAL).
+- `pyth` — live cross of two USD prices pulled from Pyth Hermes at roll
+  time. Feed ids resolve from `deployments.json::token_info.<sym>.
+  pythFeedId` (the same source `mm-bot` uses); both the underlying and
+  settlement legs must carry a feed id or the scheduler refuses to
+  start. `max_publish_lag_ms` and `max_conf_bps` are guards — the roll
+  is skipped (not failed) on either, and the 1-week `roll_threshold_ms`
+  gives plenty of slack for a transient Hermes outage.
 
 **Run:**
 
@@ -586,7 +598,9 @@ cannot directly drain user funds"). Mitigations baked into MVP:
 
 - `cleanup_bucket` automation for drained, post-expiry buckets — needs
   a new `shared::tx::admin::cleanup_bucket` builder first.
-- Real spot oracle integration (Pyth / Switchboard).
+- Pyth Benchmarks-driven strike-grid backtesting.
+- Volatility-driven strike spacing (would couple the scheduler to the
+  mm-bot's vol estimate).
 - Non-test-token underlyings (production CoinType plumbed in directly
   by fully-qualified Move type instead of a symbol lookup).
 

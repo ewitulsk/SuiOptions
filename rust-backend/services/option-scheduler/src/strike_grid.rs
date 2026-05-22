@@ -54,25 +54,27 @@ pub fn spot_usd_to_chain_units(
     Ok(raw.floor() as u64)
 }
 
-/// Build a `(start, interval, count)` strike grid around the spot.
+/// Build a `(start, interval, count)` strike grid from a pre-scaled
+/// chain-unit spot.
 ///
-/// The interval is `spot_chain * interval_pct / 100`, floored to u64. The
-/// start strike is `strikes_below` steps below the spot, also floored to
-/// the chain grid. Total `count = strikes_below + strikes_above + 1` so
-/// the spot itself sits on the middle strike (subject to flooring).
-pub fn build_strike_grid(
-    spot_usd: f64,
-    underlying_decimals: u8,
-    settlement_decimals: u8,
+/// This is the kernel both the static and Pyth spot sources call into.
+/// Static computes `spot_chain` from `usd × 10^(settle - under)`; Pyth
+/// computes it from the cross of two live USD prices. Either way, this
+/// function only sees a u64.
+///
+/// The interval is `spot_chain * interval_pct / 100`, floored. The start
+/// strike sits `strikes_below` steps below spot; total `count =
+/// strikes_below + strikes_above + 1` so spot lands on the middle strike
+/// (subject to flooring).
+pub fn build_strike_grid_from_chain(
+    spot_chain: u64,
     strikes_below: u32,
     strikes_above: u32,
     interval_pct: f64,
 ) -> Result<StrikeGrid> {
-    let spot_chain = spot_usd_to_chain_units(spot_usd, underlying_decimals, settlement_decimals)?;
     if spot_chain == 0 {
         return Err(anyhow!(
-            "spot {spot_usd} rounds to 0 in chain units (u={underlying_decimals}, \
-             s={settlement_decimals}) — pick a settlement with more decimals or \
+            "spot is 0 in chain units — pick a settlement with more decimals or \
              a non-test underlying"
         ));
     }
@@ -103,6 +105,21 @@ pub fn build_strike_grid(
     })
 }
 
+/// Convenience wrapper for the static spot path: USD → chain units →
+/// grid. Pyth callers go through [`build_strike_grid_from_chain`]
+/// directly since they already have the chain-unit spot.
+pub fn build_strike_grid(
+    spot_usd: f64,
+    underlying_decimals: u8,
+    settlement_decimals: u8,
+    strikes_below: u32,
+    strikes_above: u32,
+    interval_pct: f64,
+) -> Result<StrikeGrid> {
+    let spot_chain = spot_usd_to_chain_units(spot_usd, underlying_decimals, settlement_decimals)?;
+    build_strike_grid_from_chain(spot_chain, strikes_below, strikes_above, interval_pct)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,7 +148,7 @@ mod tests {
 
         // build_strike_grid should error rather than silently submit a no-op.
         let err = build_strike_grid(0.15, 6, 6, 2, 2, 10.0).unwrap_err();
-        assert!(err.to_string().contains("rounds to 0"), "{err}");
+        assert!(err.to_string().contains("spot is 0 in chain units"), "{err}");
     }
 
     #[test]

@@ -33,8 +33,8 @@ use option_scheduler::config::{PairConfig, SchedulerConfig};
 use option_scheduler::families::{CanonicalType, PairKey, Registry, log_registry, run_subscriber};
 use option_scheduler::roller::{self, RollPlan};
 use option_scheduler::schedule::next_expiry_ms;
-use option_scheduler::spot::SpotSource;
-use option_scheduler::strike_grid::build_strike_grid;
+use option_scheduler::spot::ResolvedSpotSource;
+use option_scheduler::strike_grid::build_strike_grid_from_chain;
 use option_scheduler::Cli;
 
 #[tokio::main]
@@ -80,8 +80,18 @@ async fn main() -> Result<()> {
         ));
     }
 
-    // Resolve every configured pair against deployments.testTokens; canonicalise
-    // the type strings so live BucketCreated events match without re-parsing.
+    // HTTP client shared by every Pyth lookup. Pyth's public Hermes
+    // endpoint applies a 10-req-per-10-second cap per source IP, so a
+    // single shared client is the right move regardless of pair count.
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("building reqwest client")?;
+
+    // Resolve every configured pair against deployments. Both the
+    // testTokens entry (coin type, faucet, decimals) and the off-chain
+    // token catalog (pyth feed) are consulted; Pyth pairs without a feed
+    // id in deployments fail here, not at first tick.
     let mut pair_keys: Vec<PairKey> = Vec::with_capacity(cfg.pairs.len());
     let mut pair_meta: Vec<PairMeta> = Vec::with_capacity(cfg.pairs.len());
     for pair in &cfg.pairs {
@@ -97,6 +107,25 @@ async fn main() -> Result<()> {
                 pair.settlement
             )
         })?;
+        let u_spec = net.token_spec(&pair.underlying).with_context(|| {
+            format!(
+                "underlying {} not in deployments.token_info",
+                pair.underlying
+            )
+        })?;
+        let s_spec = net.token_spec(&pair.settlement).with_context(|| {
+            format!(
+                "settlement {} not in deployments.token_info",
+                pair.settlement
+            )
+        })?;
+        let spot = ResolvedSpotSource::from_config(&pair.spot, u_spec, s_spec)
+            .with_context(|| {
+                format!(
+                    "resolving spot source for {}/{}",
+                    pair.underlying, pair.settlement
+                )
+            })?;
         pair_keys.push(PairKey {
             underlying_symbol: pair.underlying.clone(),
             settlement_symbol: pair.settlement.clone(),
@@ -107,14 +136,13 @@ async fn main() -> Result<()> {
             cfg: pair.clone(),
             underlying_type: u.coin_type.clone(),
             settlement_type: s.coin_type.clone(),
-            underlying_decimals: u.decimals,
-            settlement_decimals: s.decimals,
-            spot: SpotSource::from_config(&pair.spot),
+            spot,
         });
         info!(
             underlying = %pair.underlying,
             settlement = %pair.settlement,
             expiry_interval_ms = pair.expiry_interval_ms,
+            spot = ?pair.spot,
             "pair configured"
         );
     }
@@ -148,7 +176,18 @@ async fn main() -> Result<()> {
     );
 
     loop {
-        if let Err(e) = tick_once(&cli, &cfg, &registry, &pair_meta, &wrap, package, admin_cap).await {
+        if let Err(e) = tick_once(
+            &cli,
+            &cfg,
+            &registry,
+            &pair_meta,
+            &http_client,
+            &wrap,
+            package,
+            admin_cap,
+        )
+        .await
+        {
             warn!(error = %e, "tick errored");
         }
         sleep(tick).await;
@@ -159,9 +198,7 @@ struct PairMeta {
     cfg: PairConfig,
     underlying_type: String,
     settlement_type: String,
-    underlying_decimals: u8,
-    settlement_decimals: u8,
-    spot: SpotSource,
+    spot: ResolvedSpotSource,
 }
 
 async fn tick_once(
@@ -169,12 +206,14 @@ async fn tick_once(
     cfg: &SchedulerConfig,
     registry: &Registry,
     pairs: &[PairMeta],
+    http_client: &reqwest::Client,
     wrap: &SuiClientWrapper,
     package: sui_types::base_types::ObjectID,
     admin_cap: sui_types::base_types::ObjectID,
 ) -> Result<()> {
     let now = now_ms();
     for (idx, meta) in pairs.iter().enumerate() {
+        let pair_label = format!("{}/{}", meta.cfg.underlying, meta.cfg.settlement);
         let latest = registry.latest_family(idx);
         let latest_expiry = latest.as_ref().map(|f| f.expiry_ms);
 
@@ -196,24 +235,26 @@ async fn tick_once(
             }
         }
 
-        let spot = match meta.spot.fetch_usd().await {
+        let spot_chain = match meta
+            .spot
+            .resolve_chain_units(http_client, &cfg.pyth.hermes_url)
+            .await
+        {
             Ok(s) => s,
             Err(e) => {
-                warn!(error = %e, pair = %format!("{}/{}", meta.cfg.underlying, meta.cfg.settlement), "spot fetch failed; skipping");
+                warn!(error = %e, pair = %pair_label, "spot resolve failed; skipping");
                 continue;
             }
         };
-        let grid = match build_strike_grid(
-            spot,
-            meta.underlying_decimals,
-            meta.settlement_decimals,
+        let grid = match build_strike_grid_from_chain(
+            spot_chain,
             meta.cfg.strikes_below,
             meta.cfg.strikes_above,
             meta.cfg.interval_pct,
         ) {
             Ok(g) => g,
             Err(e) => {
-                warn!(error = %e, pair = %format!("{}/{}", meta.cfg.underlying, meta.cfg.settlement), "strike grid invalid; skipping");
+                warn!(error = %e, pair = %pair_label, "strike grid invalid; skipping");
                 continue;
             }
         };
