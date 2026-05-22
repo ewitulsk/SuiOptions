@@ -14,7 +14,7 @@ use std::time::Duration;
 use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tokio::time::interval;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use shared::protocol_types::asset::AssetType;
 use shared::protocol_types::events::{ChainEvent, IndexedEvent};
@@ -57,6 +57,7 @@ impl AppState {
     /// store updates are themselves idempotent (re-applying a write to the
     /// same range_start is a no-op since we just set the same totals).
     pub fn ingest_event(&self, indexed: &IndexedEvent) {
+        trace!(sequence = indexed.sequence, event = ?std::mem::discriminant(&indexed.event), "ingesting indexer event");
         match &indexed.event {
             ChainEvent::BucketCreated(b) => {
                 self.buckets.upsert(

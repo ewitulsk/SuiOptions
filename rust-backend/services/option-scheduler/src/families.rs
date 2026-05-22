@@ -159,6 +159,7 @@ impl Registry {
     }
 
     fn apply_created(&self, pair_idx: usize, ev: &BucketCreated) {
+        debug!(pair_idx, %ev.bucket_id, strike = ev.strike, expiry_ms = ev.expiry_ms, "registering bucket in family");
         let mut g = self.inner.write();
         let key = (pair_idx, ev.expiry_ms);
         let entry = g.families.entry(key).or_default();
@@ -177,6 +178,7 @@ impl Registry {
     }
 
     fn apply_cleaned(&self, ev: &BucketCleaned) {
+        debug!(%ev.bucket_id, "cleaning bucket from registry");
         let mut g = self.inner.write();
         if let Some(key) = g.bucket_index.remove(&ev.bucket_id) {
             if let Some(strikes) = g.families.get_mut(&key) {

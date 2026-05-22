@@ -24,6 +24,7 @@
 //!   an error in that case so the bot doesn't silently submit a no-op.
 
 use anyhow::{anyhow, Result};
+use tracing::debug;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrikeGrid {
@@ -51,7 +52,9 @@ pub fn spot_usd_to_chain_units(
     if raw >= u64::MAX as f64 {
         return Err(anyhow!("spot conversion exceeds u64::MAX: {raw}"));
     }
-    Ok(raw.floor() as u64)
+    let chain = raw.floor() as u64;
+    debug!(spot_usd, underlying_decimals, settlement_decimals, chain, "spot usd to chain units");
+    Ok(chain)
 }
 
 /// Build a `(start, interval, count)` strike grid from a pre-scaled
@@ -98,6 +101,14 @@ pub fn build_strike_grid_from_chain(
         ));
     }
     let count = (strikes_below as u64) + (strikes_above as u64) + 1;
+    debug!(
+        spot_chain,
+        start_strike,
+        strike_interval,
+        count,
+        interval_pct,
+        "computed strike grid"
+    );
     Ok(StrikeGrid {
         start_strike: start_strike as u64,
         strike_interval,

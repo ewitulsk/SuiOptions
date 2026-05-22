@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+use tracing::{debug, trace};
 
 use shared::protocol_types::ids::ObjectId;
 use shared::protocol_types::messages::MmQuotePayload;
@@ -51,16 +52,24 @@ pub async fn collect_with_deadline(
     mut rx: mpsc::Receiver<MmResponse>,
     window: Duration,
 ) -> MatcherOutput {
+    debug!(window_ms = window.as_millis() as u64, "starting rfq collection");
     let mut out = MatcherOutput::default();
     let _ = timeout(window, async {
         while let Some(r) = rx.recv().await {
             match r {
-                MmResponse::Quote(mm, q) => out.responses.push((mm, q)),
-                MmResponse::Decline(mm) => out.declines.push(mm),
+                MmResponse::Quote(mm, q) => {
+                    trace!(mm = %mm, premium = q.quote.premium, "received mm quote");
+                    out.responses.push((mm, q));
+                }
+                MmResponse::Decline(mm) => {
+                    trace!(mm = %mm, "mm declined rfq");
+                    out.declines.push(mm);
+                }
             }
         }
     })
     .await;
+    debug!(quotes = out.responses.len(), declines = out.declines.len(), "rfq collection finished");
     out
 }
 

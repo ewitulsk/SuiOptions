@@ -35,6 +35,7 @@ use sui_types::transaction::{
 };
 use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
 use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION, SUI_FRAMEWORK_PACKAGE_ID};
+use tracing::{debug, info};
 
 use crate::sui_client::Signer;
 use crate::tx::shared_object_arg;
@@ -80,6 +81,14 @@ pub async fn execute_writer_flow(
     signer: &Signer,
     p: &ExecuteWriteParams<'_>,
 ) -> Result<SuiTransactionBlockResponse> {
+    info!(
+        %p.package,
+        %p.bucket_id,
+        write_amount = p.write_amount,
+        premium = p.premium,
+        nonce = p.nonce,
+        "building execute_write PTB"
+    );
     let mut pt = ProgrammableTransactionBuilder::new();
 
     // Shared object args.
@@ -242,5 +251,6 @@ pub async fn execute_writer_flow(
     if effects.status().is_err() {
         anyhow::bail!("execute_write reverted: {:?}", effects.status());
     }
+    debug!(digest = %resp.digest, "execute_write succeeded");
     Ok(resp)
 }

@@ -22,6 +22,7 @@ use anyhow::{anyhow, Result};
 use sui_types::base_types::ObjectID;
 use sui_types::object::Owner;
 use sui_types::transaction::{ObjectArg, SharedObjectMutability};
+use tracing::{debug, trace};
 
 use sui_sdk::SuiClient;
 use sui_json_rpc_types::SuiObjectDataOptions;
@@ -34,6 +35,7 @@ pub async fn shared_object_arg(
     id: ObjectID,
     mutable: bool,
 ) -> Result<ObjectArg> {
+    trace!(%id, mutable, "fetching shared object arg");
     let resp = client
         .read_api()
         .get_object_with_options(id, SuiObjectDataOptions::new().with_owner())
@@ -62,6 +64,7 @@ pub async fn shared_object_arg(
 
 /// Build an owned-object `ObjectArg` (e.g. an AdminCap held by the deployer).
 pub async fn owned_object_arg(client: &SuiClient, id: ObjectID) -> Result<ObjectArg> {
+    debug!(%id, "fetching owned object arg");
     let resp = client
         .read_api()
         .get_object_with_options(

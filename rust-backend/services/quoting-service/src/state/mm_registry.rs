@@ -9,6 +9,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
+use tracing::{debug, info};
 
 use shared::protocol_types::ids::ObjectId;
 use shared::protocol_types::messages::ServiceToMm;
@@ -38,10 +39,12 @@ impl MmRegistry {
     }
 
     pub fn insert(&self, conn: MmConnection) {
+        info!(account = %conn.account_id, "mm registered");
         self.by_account.insert(conn.account_id, conn);
     }
 
     pub fn remove(&self, account_id: &ObjectId) {
+        info!(%account_id, "mm disconnected");
         self.by_account.remove(account_id);
     }
 
@@ -50,11 +53,13 @@ impl MmRegistry {
     }
 
     pub fn all_for_role(&self, role: MmRole) -> Vec<MmConnection> {
-        self.by_account
+        let conns: Vec<_> = self.by_account
             .iter()
             .filter(|e| e.value().serves(role))
             .map(|e| e.value().clone())
-            .collect()
+            .collect();
+        debug!(?role, count = conns.len(), "queried mms for role");
+        conns
     }
 
     pub fn len(&self) -> usize {

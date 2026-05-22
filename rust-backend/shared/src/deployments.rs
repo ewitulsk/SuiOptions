@@ -46,6 +46,7 @@ use std::str::FromStr;
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use sui_types::base_types::{ObjectID, SuiAddress};
+use tracing::{debug, info};
 
 /// One deployed test token: its `Coin<T>` Move type, the shared `Faucet`
 /// object id that wraps the TreasuryCap, and the coin's decimals.
@@ -255,10 +256,17 @@ pub struct Deployments {
 
 impl Deployments {
     pub fn load(path: &Path) -> Result<Self> {
+        info!(path = %path.display(), "loading deployments");
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading deployments file {}", path.display()))?;
         let parsed: Self = serde_json::from_slice(&bytes)
             .with_context(|| format!("parsing deployments file {}", path.display()))?;
+        debug!(
+            has_mainnet = parsed.mainnet.is_some(),
+            has_testnet = parsed.testnet.is_some(),
+            has_devnet = parsed.devnet.is_some(),
+            "deployments loaded"
+        );
         Ok(parsed)
     }
 

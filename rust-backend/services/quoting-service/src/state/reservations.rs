@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
+use tracing::{debug, trace};
 
 use shared::protocol_types::asset::AssetType;
 use shared::protocol_types::ids::ObjectId;
@@ -57,8 +58,10 @@ impl ReservationTable {
         let mut g = self.inner.lock();
         let key = (r.account_id, r.nonce);
         if g.contains_key(&key) {
+            debug!(account = %r.account_id, nonce = r.nonce, "duplicate reservation rejected");
             return InsertOutcome::DuplicateKey;
         }
+        trace!(account = %r.account_id, nonce = r.nonce, amount = r.amount, %r.asset_type, valid_until_ms = r.valid_until_ms, "inserting reservation");
         g.insert(key, r);
         InsertOutcome::Inserted
     }
@@ -66,7 +69,11 @@ impl ReservationTable {
     /// Returns the removed reservation if it was present.
     pub fn release(&self, account_id: ObjectId, nonce: u64) -> Option<Reservation> {
         let mut g = self.inner.lock();
-        g.remove(&(account_id, nonce))
+        let removed = g.remove(&(account_id, nonce));
+        if removed.is_some() {
+            trace!(%account_id, nonce, "released reservation");
+        }
+        removed
     }
 
     /// Sum of `amount` over reservations matching `(account, asset)`. The
@@ -89,6 +96,9 @@ impl ReservationTable {
             .filter(|(_, r)| now_ms >= r.valid_until_ms)
             .map(|(k, _)| *k)
             .collect();
+        if !expired.is_empty() {
+            debug!(count = expired.len(), now_ms, "evicting expired reservations");
+        }
         expired
             .into_iter()
             .filter_map(|k| g.remove(&k))

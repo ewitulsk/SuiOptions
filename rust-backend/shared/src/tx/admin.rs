@@ -18,6 +18,7 @@ use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::transaction::Transaction;
 use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
 use sui_types::TypeTag;
+use tracing::{debug, info};
 
 use crate::sui_client::Signer;
 
@@ -32,6 +33,7 @@ async fn execute_move_call(
     args: Vec<SuiJsonValue>,
     gas_budget: u64,
 ) -> Result<SuiTransactionBlockResponse> {
+    info!(%package, module, function, gas_budget, "submitting move call");
     let type_args: Vec<SuiTypeTag> = type_args
         .into_iter()
         .map(|s| {
@@ -80,6 +82,7 @@ async fn execute_move_call(
     if effects.status().is_err() {
         anyhow::bail!("{module}::{function} reverted: {:?}", effects.status());
     }
+    debug!(digest = %resp.digest, module, function, "move call succeeded");
     Ok(resp)
 }
 

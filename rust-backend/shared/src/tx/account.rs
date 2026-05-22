@@ -16,6 +16,7 @@ use sui_sdk::SuiClient;
 use sui_types::base_types::ObjectID;
 use sui_types::transaction::Transaction;
 use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
+use tracing::{debug, info};
 
 use crate::sui_client::Signer;
 
@@ -34,6 +35,7 @@ pub async fn create_and_share_account(
     signing_pubkey: &[u8],
     gas_budget: u64,
 ) -> Result<AccountCreated> {
+    info!(%package, scheme = ?signing_scheme, pubkey_len = signing_pubkey.len(), "creating on-chain account");
     // `vector<u8>` rides as a JSON array of decimal-string-encoded bytes.
     let pubkey_array: Vec<serde_json::Value> = signing_pubkey
         .iter()
@@ -106,6 +108,7 @@ pub async fn create_and_share_account(
         })
         .ok_or_else(|| anyhow!("Account object not found in response"))?;
 
+    debug!(%account_id, digest = %resp.digest, "account created on-chain");
     Ok(AccountCreated {
         account_id,
         digest: resp.digest.to_string(),

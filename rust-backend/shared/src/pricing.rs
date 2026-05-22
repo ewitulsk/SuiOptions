@@ -16,6 +16,8 @@
 //! We use Abramowitz-Stegun 26.2.17 for the standard normal CDF — accurate to
 //! ~7e-8, plenty for a test bot.
 
+use tracing::trace;
+
 #[derive(Clone, Copy, Debug)]
 pub struct CallInputs {
     pub spot: f64,
@@ -27,6 +29,7 @@ pub struct CallInputs {
 
 /// Per-unit-of-underlying call price in the same units as `strike`/`spot`.
 pub fn call_price_per_unit(i: CallInputs) -> f64 {
+    trace!(spot = i.spot, strike = i.strike, t_years = i.t_years, r = i.r, sigma = i.sigma, "computing call price");
     if i.t_years <= 0.0 {
         return (i.spot - i.strike).max(0.0);
     }
@@ -40,7 +43,9 @@ pub fn call_price_per_unit(i: CallInputs) -> f64 {
     let d1 = ((i.spot / i.strike).ln() + (i.r + 0.5 * i.sigma * i.sigma) * i.t_years)
         / (i.sigma * sqrt_t);
     let d2 = d1 - i.sigma * sqrt_t;
-    i.spot * norm_cdf(d1) - i.strike * (-i.r * i.t_years).exp() * norm_cdf(d2)
+    let price = i.spot * norm_cdf(d1) - i.strike * (-i.r * i.t_years).exp() * norm_cdf(d2);
+    trace!(price, d1, d2, "call price computed");
+    price
 }
 
 /// Scale the per-unit price by the RFQ's `write_amount`, rounded down to a
