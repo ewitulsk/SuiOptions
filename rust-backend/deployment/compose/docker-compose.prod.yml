@@ -1,0 +1,48 @@
+# Compose stack for the `prod` env (Sui mainnet).
+# Variables come from /opt/options/prod/.env, written by deploy.sh.
+#
+# mm-bot is commented out until the faucet-less mainnet bootstrap path
+# is in place (see services/mm-bot/config/config.prod.toml). The indexer
+# and quoting-service deploy cleanly on mainnet on their own.
+
+name: options-prod
+
+services:
+  indexer:
+    image: ${ECR}/options/indexer:${IMAGE_TAG}
+    environment:
+      APP_ENV: prod
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      RUST_LOG: info,indexer=info
+    restart: unless-stopped
+    networks: [net]
+
+  quoting:
+    image: ${ECR}/options/quoting-service:${IMAGE_TAG}
+    environment:
+      APP_ENV: prod
+      RUST_LOG: info,quoting_service=info
+    ports:
+      - "9032:9002"
+    depends_on: [indexer]
+    restart: unless-stopped
+    networks: [net]
+
+  # mm-bot:
+  #   image: ${ECR}/options/mm-bot:${IMAGE_TAG}
+  #   environment:
+  #     APP_ENV: prod
+  #     RUST_LOG: info,mm_bot=info
+  #   volumes:
+  #     - mm_bot_state:/app/state
+  #     - /opt/options/prod/secrets:/run/secrets:ro
+  #   depends_on: [quoting]
+  #   restart: unless-stopped
+  #   networks: [net]
+
+networks:
+  net:
+
+volumes:
+  mm_bot_state:

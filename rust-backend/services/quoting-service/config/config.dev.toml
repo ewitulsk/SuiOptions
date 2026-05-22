@@ -1,0 +1,13 @@
+# Quoting service config — dev env (testnet).
+
+# Bind on all interfaces so the docker port mapping works. The compose
+# file publishes 9012:9002 on the host.
+bind_addr            = "0.0.0.0:9002"
+
+# Talk to the indexer over the env's compose-internal network.
+indexer_url          = "ws://indexer:9001/"
+
+rfq_window_ms        = 2000
+ping_interval_secs   = 15
+
+protocol_id          = "sui-options-protocol-v0"

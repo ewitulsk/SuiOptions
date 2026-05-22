@@ -1,0 +1,9 @@
+target
+.git
+.github
+deployment
+*.md
+secrets.example.toml
+services/*/config/secrets.toml
+services/mm-bot/config/mm-bot.account.json
+tools/*/config/secrets.toml

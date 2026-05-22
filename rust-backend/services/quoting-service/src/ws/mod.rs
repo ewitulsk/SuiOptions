@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
@@ -51,13 +52,77 @@ pub async fn serve_on(
 }
 
 async fn handle(
-    socket: TcpStream,
+    mut socket: TcpStream,
     peer: SocketAddr,
     state: Arc<AppState>,
     cfg: Arc<Config>,
 ) -> Result<()> {
+    // Peek the request preamble without consuming it. ALB health checks send
+    // a plain `GET /health HTTP/1.1` with no `Upgrade: websocket` header;
+    // tungstenite would reject those as malformed handshakes. WS upgrades
+    // pass through untouched.
+    if let Some(req) = peek_http_request(&socket).await? {
+        if !req.is_ws_upgrade {
+            return handle_plain_http(&mut socket, &req).await;
+        }
+    }
     let ws = tokio_tungstenite::accept_async(socket).await?;
     accept_handshake(ws, peer, state, cfg).await
+}
+
+struct PeekedRequest {
+    path: String,
+    is_ws_upgrade: bool,
+}
+
+/// Best-effort peek at the first ~1KB of the TCP stream to identify the
+/// HTTP request line and headers. Returns `None` if not enough data has
+/// arrived yet (the caller falls through to `accept_async`, which will
+/// block on its own read). Returns `Some` once we can see the request
+/// line and at least up to a blank-line terminator or 1KB worth of header.
+async fn peek_http_request(socket: &TcpStream) -> Result<Option<PeekedRequest>> {
+    let mut buf = [0u8; 1024];
+    let n = socket.peek(&mut buf).await?;
+    if n == 0 {
+        return Ok(None);
+    }
+    let text = match std::str::from_utf8(&buf[..n]) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let header_end = text.find("\r\n\r\n").map(|i| i + 4).unwrap_or(text.len());
+    let head = &text[..header_end];
+    let mut lines = head.split("\r\n");
+    let request_line = match lines.next() {
+        Some(l) if !l.is_empty() => l,
+        _ => return Ok(None),
+    };
+    let mut parts = request_line.split_whitespace();
+    let _method = parts.next();
+    let path = parts.next().unwrap_or("/").to_string();
+    let is_ws_upgrade = lines.any(|l| {
+        let lower = l.to_ascii_lowercase();
+        lower.starts_with("upgrade:") && lower.contains("websocket")
+    });
+    Ok(Some(PeekedRequest { path, is_ws_upgrade }))
+}
+
+async fn handle_plain_http(socket: &mut TcpStream, req: &PeekedRequest) -> Result<()> {
+    // Drain the request bytes we peeked. ALB sends them in one packet and
+    // doesn't expect us to read the body; reading 1KB is enough to clear
+    // the kernel buffer for the close.
+    let mut drain = [0u8; 1024];
+    let _ = socket.try_read(&mut drain);
+
+    let body = if req.path == "/health" || req.path.ends_with("/health") {
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+            .to_vec()
+    } else {
+        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
+    };
+    socket.write_all(&body).await?;
+    socket.shutdown().await.ok();
+    Ok(())
 }
 
 /// Public entry point that takes an already-upgraded `WebSocketStream` —

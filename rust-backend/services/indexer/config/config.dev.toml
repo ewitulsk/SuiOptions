@@ -1,0 +1,20 @@
+# Indexer config — dev env (Sui testnet).
+#
+# `${DB_PASSWORD}` is interpolated from process env at boot (rendered by
+# the deploy script from Secrets Manager). The host portion of
+# `database_url` is templated by `deploy.sh` against the Terraform RDS
+# output, then committed back by `terraform output` — see deployment.md §6.
+
+network                 = "testnet"
+deployments_path        = "/app/deployments.json"
+remote_store_url        = "https://checkpoints.testnet.sui.io"
+concurrency             = 5
+fanout_addr             = "0.0.0.0:9001"
+heartbeat_interval_secs = 5
+
+database_url            = "postgresql://indexer_dev:${DB_PASSWORD}@${DB_HOST}:5432/indexer_dev"
+db_pool_size            = 8
+recent_log_capacity     = 1024
+
+# Tail from current tip on first boot.
+# start_checkpoint = 339373884

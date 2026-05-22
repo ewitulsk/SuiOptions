@@ -1,0 +1,12 @@
+# Indexer config — staging env (Sui devnet).
+
+network                 = "devnet"
+deployments_path        = "/app/deployments.json"
+remote_store_url        = "https://checkpoints.devnet.sui.io"
+concurrency             = 5
+fanout_addr             = "0.0.0.0:9001"
+heartbeat_interval_secs = 5
+
+database_url            = "postgresql://indexer_staging:${DB_PASSWORD}@${DB_HOST}:5432/indexer_staging"
+db_pool_size            = 8
+recent_log_capacity     = 1024
