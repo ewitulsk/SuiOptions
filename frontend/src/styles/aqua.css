@@ -89,7 +89,7 @@
 [data-theme="aqua"] .header {
   position: sticky; top: 0; z-index: 20;
   display: flex; align-items: center; gap: 32px;
-  padding: 14px 32px; margin: 0 -32px;
+  padding: 14px max(16px, calc((100% - 1440px) / 2));
   background: rgba(var(--aqua-tint-rgb),0.78);
   backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
   border-bottom: 1px solid var(--aqua-line);
