@@ -5,6 +5,7 @@ import { SuiClientProvider, WalletProvider, createNetworkConfig } from "@mysten/
 import { getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import "@mysten/dapp-kit/dist/index.css";
 import { App } from "./App";
+import "./theme";
 import "./styles/aqua.css";
 import "./styles/global.css";
 
