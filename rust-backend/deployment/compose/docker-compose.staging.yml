@@ -1,4 +1,4 @@
-# Compose stack for the `staging` env (Sui devnet).
+# Compose stack for the `staging` env (Sui testnet).
 # Variables come from /opt/options/staging/.env, written by deploy.sh.
 
 name: options-staging

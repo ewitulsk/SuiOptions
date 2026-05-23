@@ -1,4 +1,6 @@
-# mm-bot config — staging env (devnet).
+# mm-bot config — staging env (testnet).
+
+network            = "testnet"
 
 quoting_url        = "ws://quoting:9002/"
 

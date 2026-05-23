@@ -54,6 +54,10 @@ use mm_bot::Cli;
 
 #[derive(Debug, Clone, Deserialize)]
 struct BotConfig {
+    /// Sui network the bot operates on. Selects the deployments.json
+    /// slot, the `[sui].<network>` secret slot, and the Sui RPC URL.
+    network: Network,
+
     quoting_url: String,
 
     /// Quote-signing scheme. Stored on chain alongside the pubkey; the
@@ -190,7 +194,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
     let dep = Deployments::load(&cli.deployments)
         .with_context(|| format!("loading {}", cli.deployments.display()))?;
-    let net = dep.for_network(cli.network.as_str())?;
+    let net = dep.for_network(cfg.network.as_str())?;
 
     // Off-chain token catalog lookup (coin type, decimals, pyth feed).
     // This is the source the pricing path reads from; the bootstrap path
@@ -303,7 +307,7 @@ async fn main() -> Result<()> {
     .await?;
 
     // Quote loop.
-    let token_recipient = resolve_token_recipient(&cfg, &secrets_loaded, cli.network)?;
+    let token_recipient = resolve_token_recipient(&cfg, &secrets_loaded)?;
     let protocol_id = net.protocol_id_bytes()?;
     let mut nonce_counter = now_ms();
     loop {
@@ -455,6 +459,7 @@ fn load_config(path: &Path) -> Result<BotConfig> {
         .try_deserialize()
         .with_context(|| format!("parsing {}", path.display()))?;
     tracing::debug!(
+        network = %cfg.network,
         underlying = %cfg.underlying_symbol,
         settlement = %cfg.settlement_symbol,
         scheme = ?cfg.signing_scheme,
@@ -495,7 +500,7 @@ async fn resolve_account(
     }
 
     tracing::info!("no account state — bootstrapping a fresh Account");
-    let wrap = SuiClientWrapper::connect(secrets, cli.network).await?;
+    let wrap = SuiClientWrapper::connect(secrets, cfg.network).await?;
     let created = create_and_share_account(
         &wrap.client,
         &wrap.signer,
@@ -562,7 +567,6 @@ async fn expect_auth_ack(ws: &mut ws_client::WsStream) -> Result<()> {
 fn resolve_token_recipient(
     cfg: &BotConfig,
     secrets: &shared::Secrets,
-    network: Network,
 ) -> Result<PtSuiAddress> {
     if let Some(s) = &cfg.token_recipient {
         tracing::debug!(recipient = %s, "using configured token recipient");
@@ -570,7 +574,7 @@ fn resolve_token_recipient(
     }
     tracing::debug!("deriving token recipient from sui key");
     // Derive the address from the same Sui key the bot signs gas with.
-    let raw = secrets.sui_private_key(network.as_str())?;
+    let raw = secrets.sui_private_key(cfg.network.as_str())?;
     let kp = sui_types::crypto::SuiKeyPair::decode(raw.trim())
         .map_err(|e| anyhow!("decoding sui key: {e}"))?;
     let addr = sui_types::base_types::SuiAddress::from(&kp.public());

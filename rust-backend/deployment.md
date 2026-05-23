@@ -11,8 +11,8 @@ publishes; scaling plans for the obvious next splits at the bottom.
 
 | Env | Sui network | Branch that ships it | DB name | Quoting host port |
 |---|---|---|---|---|
-| `dev` | testnet | `staging` | `indexer_dev` | 9012 |
-| `staging` | devnet | `staging` | `indexer_staging` | 9022 |
+| `dev` | devnet | `staging` | `indexer_dev` | 9012 |
+| `staging` | testnet | `staging` | `indexer_staging` | 9022 |
 | `prod` | mainnet | `main` | `indexer_prod` | 9032 |
 
 Branch → env mapping:
@@ -26,7 +26,8 @@ Branch → env mapping:
 Naming convention used everywhere in this doc and in code: `dev`,
 `staging`, `prod` for the environment; `testnet`, `devnet`, `mainnet`
 for the Sui network. They are not the same word — `dev` env runs against
-`testnet`, etc.
+`devnet`, `staging` runs against `testnet`, `prod` runs against
+`mainnet`.
 
 ---
 
@@ -149,20 +150,19 @@ binary and configs. The mm-bot entrypoint additionally passes
 `config.dev.toml` example for the indexer:
 
 ```toml
-network                 = "testnet"
+network                 = "devnet"
 deployments_path        = "/app/deployments.json"
-remote_store_url        = "https://checkpoints.testnet.sui.io"
+remote_store_url        = "https://checkpoints.devnet.sui.io"
 concurrency             = 5
 fanout_addr             = "0.0.0.0:9001"   # bind on all interfaces; only the compose net can reach it
 heartbeat_interval_secs = 5
 database_url            = "postgresql://indexer:${DB_PASSWORD}@<aurora-endpoint>:5432/indexer_dev"
 db_pool_size            = 8
 recent_log_capacity     = 1024
-start_checkpoint        = 339373884
 ```
 
-Diff from `config.staging.toml`: `network = "devnet"`, different
-`remote_store_url`, different `database_url`, different `start_checkpoint`.
+Diff from `config.staging.toml`: `network = "testnet"`, different
+`remote_store_url`, different `database_url`, optional `start_checkpoint`.
 Diff from `config.prod.toml`: `network = "mainnet"`, etc.
 
 > **Config loader note.** Two of the values above use `${VAR}`
@@ -299,8 +299,8 @@ aws secretsmanager get-secret-value \
 cat > /opt/options/$ENV/secrets/secrets.toml <<EOF
 [sui]
 $(case $ENV in
-  dev)      echo "testnet = \"$(cat /tmp/sui-key)\"" ;;
-  staging)  echo "devnet  = \"$(cat /tmp/sui-key)\"" ;;
+  dev)      echo "devnet  = \"$(cat /tmp/sui-key)\"" ;;
+  staging)  echo "testnet = \"$(cat /tmp/sui-key)\"" ;;
   prod)     echo "mainnet = \"$(cat /tmp/sui-key)\"" ;;
 esac)
 
@@ -343,7 +343,7 @@ export DB_PASSWORD=$(aws secretsmanager get-secret-value \
 1. Developer runs `cargo run -p deploy -- ...` locally targeting a
    specific network. The deploy tool writes `deployments.json`.
 2. Developer commits `deployments.json` + pushes to `staging` (for
-   testnet/devnet redeploys) or `main` (for mainnet).
+   devnet/testnet redeploys) or `main` (for mainnet).
 3. CI builds new images that bake the updated `deployments.json` in.
 4. Deploy step rolls services on the EC2.
 

@@ -18,8 +18,8 @@ set -euo pipefail
 
 ENV="${1:?usage: render-secrets.sh <dev|staging|prod>}"
 case "$ENV" in
-  dev)     NETWORK=testnet ;;
-  staging) NETWORK=devnet  ;;
+  dev)     NETWORK=devnet  ;;
+  staging) NETWORK=testnet ;;
   prod)    NETWORK=mainnet ;;
   *) echo "unknown env: $ENV" >&2; exit 1 ;;
 esac
