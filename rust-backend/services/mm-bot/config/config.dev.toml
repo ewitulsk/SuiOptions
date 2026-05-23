@@ -1,6 +1,8 @@
-# mm-bot config — dev env (testnet).
+# mm-bot config — dev env (devnet).
 # Secrets (sui_key, quote_key) come from /run/secrets/mm-bot.toml,
 # rendered at deploy time from Secrets Manager (options/dev/mm-bot).
+
+network            = "devnet"
 
 quoting_url        = "ws://quoting:9002/"
 

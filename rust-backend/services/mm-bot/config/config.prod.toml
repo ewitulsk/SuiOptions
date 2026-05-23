@@ -11,6 +11,8 @@
 # docker-compose.prod.yml. The indexer + quoting-service deploy and run
 # normally on mainnet; mm-bot is the only one that needs the faucet.
 
+network            = "mainnet"
+
 quoting_url        = "ws://quoting:9002/"
 
 signing_scheme     = "ed25519"

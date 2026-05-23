@@ -7,8 +7,6 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use shared::sui_client::Network;
-
 #[derive(Parser, Debug)]
 #[command(name = "mm-bot", about = "Test market-maker bot for the options protocol")]
 pub struct Cli {
@@ -21,13 +19,11 @@ pub struct Cli {
     #[arg(short, long, default_value = "deployments.json")]
     pub deployments: PathBuf,
 
-    /// Per-binary secrets TOML. Holds the Sui signing key (`sui.testnet`)
-    /// and the quote-signing key (`mm_bot.quote_key`). No env-var fallback.
+    /// Per-binary secrets TOML. Holds the Sui signing key (under the
+    /// network selected by `network` in the bot config) and the
+    /// quote-signing key (`mm_bot.quote_key`). No env-var fallback.
     #[arg(short = 's', long, default_value = "services/mm-bot/config/secrets.toml")]
     pub secrets: PathBuf,
-
-    #[arg(short, long, value_enum, default_value_t = Network::Testnet)]
-    pub network: Network,
 
     #[arg(long, default_value_t = 200_000_000)]
     pub gas_budget: u64,

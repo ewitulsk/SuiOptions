@@ -1,4 +1,4 @@
-# Quoting service config — staging env (devnet).
+# Quoting service config — staging env (testnet).
 
 bind_addr            = "0.0.0.0:9002"
 indexer_url          = "ws://indexer:9001/"

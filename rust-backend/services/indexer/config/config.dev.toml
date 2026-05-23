@@ -1,13 +1,13 @@
-# Indexer config — dev env (Sui testnet).
+# Indexer config — dev env (Sui devnet).
 #
 # `${DB_PASSWORD}` is interpolated from process env at boot (rendered by
 # the deploy script from Secrets Manager). The host portion of
 # `database_url` is templated by `deploy.sh` against the Terraform RDS
 # output, then committed back by `terraform output` — see deployment.md §6.
 
-network                 = "testnet"
+network                 = "devnet"
 deployments_path        = "/app/deployments.json"
-remote_store_url        = "https://checkpoints.testnet.sui.io"
+remote_store_url        = "https://checkpoints.devnet.sui.io"
 concurrency             = 5
 fanout_addr             = "0.0.0.0:9001"
 heartbeat_interval_secs = 5
@@ -17,4 +17,3 @@ db_pool_size            = 8
 recent_log_capacity     = 1024
 
 # Tail from current tip on first boot.
-# start_checkpoint = 339373884

@@ -1,4 +1,4 @@
-# Compose stack for the `dev` env (Sui testnet).
+# Compose stack for the `dev` env (Sui devnet).
 # Variables come from /opt/options/dev/.env, written by deploy.sh.
 
 name: options-dev

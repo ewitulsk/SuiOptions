@@ -9,6 +9,10 @@
 # Secrets live in `secrets.toml` ([sui] for gas, [mm_bot].quote_key for
 # the Quote signing key).
 
+# Sui network: selects the deployments.json slot, the [sui].<network>
+# secret slot, and the Sui RPC URL. One of: mainnet / testnet / devnet.
+network            = "testnet"
+
 quoting_url        = "ws://127.0.0.1:9002/"
 
 # Signature scheme this MM uses for both the WS auth challenge and every
