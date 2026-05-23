@@ -3,4 +3,5 @@ body {
   font-family: "Sora", -apple-system, system-ui, sans-serif;
   background: #DCEFFF;
 }
+html[data-mode="dark"] body { background: #06101F; }
 button { font: inherit; cursor: pointer; }
