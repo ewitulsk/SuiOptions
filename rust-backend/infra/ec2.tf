@@ -43,7 +43,9 @@ resource "aws_instance" "host" {
   associate_public_ip_address = true
   key_name                    = var.ssh_pubkey == "" ? null : aws_key_pair.host[0].key_name
 
-  user_data                   = local.bootstrap_user_data
+  # gzip+base64 to stay under EC2's 16 KB user_data limit (cloud-init
+  # transparently decompresses gzipped payloads).
+  user_data_base64            = base64gzip(local.bootstrap_user_data)
   user_data_replace_on_change = false
 
   root_block_device {
