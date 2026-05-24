@@ -60,7 +60,8 @@ REBUILD_ALL_GLOBS = [
 #                      pyth-client, pricing, deployments
 #   option-scheduler : protocol-types, runtime-config, cli-spec, sui-tx,
 #                      pyth-client, deployments
-#   api-service      : protocol-types, runtime-config, cli-spec, indexer-client
+#   api-service      : protocol-types, runtime-config, cli-spec, indexer-client,
+#                      deployments
 SERVICE_GLOBS: dict[str, list[str]] = {
     "indexer": [
         "rust-backend/services/indexer/**",
@@ -106,6 +107,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/runtime-config/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/indexer-client/**",
+        "rust-backend/crates/deployments/**",
     ],
 }
 

@@ -305,6 +305,7 @@ dependencies = [
  "clap",
  "cli-spec",
  "config",
+ "deployments",
  "futures-util",
  "indexer-client",
  "parking_lot 0.12.5",

@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
-use shared::deployments::Deployments;
+use deployments::Deployments;
 
 #[derive(Clone, Debug)]
 pub struct TokenMeta {
@@ -118,7 +118,7 @@ fn normalize_coin_type(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::deployments::{NetworkDeployment, PackageInfo, TestTokens, TokenInfo, TokenSpec};
+    use deployments::{NetworkDeployment, PackageInfo, TestTokens, TokenInfo, TokenSpec};
     use std::collections::BTreeMap;
 
     fn fixture_deployments() -> Deployments {
@@ -226,7 +226,7 @@ mod tests {
                     deployer: "0xd".into(),
                     deployed_at: "".into(),
                     network: "testnet".into(),
-                    test_tokens: Some(shared::deployments::TestTokens {
+                    test_tokens: Some(deployments::TestTokens {
                         package_id: "0xtp".into(),
                         upgrade_cap_id: "0xtu".into(),
                         publish_digest: "y".into(),
@@ -279,7 +279,7 @@ mod tests {
                     deployer: "0xd".into(),
                     deployed_at: "".into(),
                     network: "testnet".into(),
-                    test_tokens: Some(shared::deployments::TestTokens {
+                    test_tokens: Some(deployments::TestTokens {
                         package_id: "0xtp".into(),
                         upgrade_cap_id: "0xtu".into(),
                         publish_digest: "y".into(),
