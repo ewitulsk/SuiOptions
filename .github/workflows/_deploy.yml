@@ -155,6 +155,43 @@ jobs:
           role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Tag images for environment
+        env:
+          TAG: ${{ needs.affected.outputs.tag }}
+          SERVICES: ${{ needs.affected.outputs.services }}
+          DEPLOY_ENV: ${{ matrix.env }}
+        run: |
+          for svc in $(echo "$SERVICES" | jq -r '.[]'); do
+            repo="options/${svc}"
+            echo "Fetching manifest for ${repo}:${TAG}…"
+            manifest=$(aws ecr batch-get-image \
+              --repository-name "$repo" \
+              --image-ids imageTag="$TAG" \
+              --query 'images[0].imageManifest' \
+              --output text)
+
+            if [ -z "$manifest" ] || [ "$manifest" = "None" ]; then
+              echo "::warning::No image found for ${repo}:${TAG} — skipping env tags"
+              continue
+            fi
+
+            # Rolling "latest for this env" tag — moves on every deploy
+            aws ecr put-image \
+              --repository-name "$repo" \
+              --image-tag "$DEPLOY_ENV" \
+              --image-manifest "$manifest" 2>/dev/null || true
+
+            # Immutable env + build-id tag
+            aws ecr put-image \
+              --repository-name "$repo" \
+              --image-tag "${DEPLOY_ENV}_${TAG}" \
+              --image-manifest "$manifest" 2>/dev/null || true
+
+            echo "Tagged ${repo}: ${DEPLOY_ENV}, ${DEPLOY_ENV}_${TAG}"
+          done
+
       - name: Upload deploy bundle to S3
         env:
           TAG: ${{ needs.affected.outputs.tag }}
