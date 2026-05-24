@@ -5,6 +5,10 @@
 
 bind_addr        = "0.0.0.0:9003"
 
+# Sui network slot in deployments.json. Matches the scheduler/mm-bot
+# Dockerfile entry-point mapping: staging -> devnet.
+network          = "devnet"
+
 # Talk to the indexer over the env's compose-internal network.
 indexer_url      = "ws://indexer:9001/"
 

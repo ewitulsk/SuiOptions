@@ -19,8 +19,11 @@ COPY . .
 RUN cargo build --release -p indexer
 
 FROM debian:bookworm-slim
+# libpq5 is the runtime shared lib for the Postgres client (diesel/sqlx
+# link against it). Without it the indexer binary errors at startup with
+# `cannot open shared object file: libpq.so.5`.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 curl && rm -rf /var/lib/apt/lists/*
+    ca-certificates libssl3 libpq5 curl && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /src/target/release/indexer /usr/local/bin/indexer
 COPY services/indexer/config/ /app/config/
