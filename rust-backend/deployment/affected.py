@@ -34,7 +34,7 @@ from typing import Iterable
 
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -55,11 +55,12 @@ REBUILD_ALL_GLOBS = [
 #
 # Crate dependency map (must mirror each service's Cargo.toml):
 #   indexer          : protocol-types, runtime-config, cli-spec, deployments
-#   quoting-service  : protocol-types, runtime-config, cli-spec
+#   quoting-service  : protocol-types, runtime-config, cli-spec, indexer-client
 #   mm-bot           : protocol-types, runtime-config, cli-spec, sui-tx,
 #                      pyth-client, pricing, deployments
 #   option-scheduler : protocol-types, runtime-config, cli-spec, sui-tx,
 #                      pyth-client, deployments
+#   api-service      : protocol-types, runtime-config, cli-spec, indexer-client
 SERVICE_GLOBS: dict[str, list[str]] = {
     "indexer": [
         "rust-backend/services/indexer/**",
@@ -75,6 +76,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/protocol-types/**",
         "rust-backend/crates/runtime-config/**",
         "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/indexer-client/**",
     ],
     "mm-bot": [
         "rust-backend/services/mm-bot/**",
@@ -96,6 +98,14 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/sui-tx/**",
         "rust-backend/crates/pyth-client/**",
         "rust-backend/crates/deployments/**",
+    ],
+    "api-service": [
+        "rust-backend/services/api-service/**",
+        "rust-backend/Dockerfile.api-service",
+        "rust-backend/crates/protocol-types/**",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/indexer-client/**",
     ],
 }
 

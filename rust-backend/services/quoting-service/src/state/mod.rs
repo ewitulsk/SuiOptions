@@ -125,7 +125,7 @@ impl AppState {
     }
 }
 
-impl shared::indexer_client::EventSink for AppState {
+impl indexer_client::EventSink for AppState {
     fn ingest_event(&self, event: &IndexedEvent) {
         AppState::ingest_event(self, event);
     }

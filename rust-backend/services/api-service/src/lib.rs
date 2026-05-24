@@ -27,7 +27,7 @@ pub struct Cli {
     pub config: PathBuf,
 }
 
-shared::define_program! {
+cli_spec::define_program! {
     id          = "api-service",
     cargo_pkg   = "api-service",
     working_dir = ".",

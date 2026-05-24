@@ -302,12 +302,15 @@ dependencies = [
  "anyhow",
  "axum 0.7.9",
  "clap",
+ "cli-spec",
  "config",
  "futures-util",
+ "indexer-client",
  "parking_lot 0.12.5",
+ "protocol-types",
+ "runtime-config",
  "serde",
  "serde_json",
- "shared",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.24.0",
@@ -2107,6 +2110,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sui-types",
+ "tracing",
 ]
 
 [[package]]
@@ -3804,6 +3808,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "indexer-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "protocol-types",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+]
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3917,6 +3934,7 @@ dependencies = [
  "futures-util",
  "hex",
  "indexer",
+ "indexer-client",
  "protocol-types",
  "quoting-service",
  "rand 0.8.6",
@@ -6634,6 +6652,9 @@ dependencies = [
 [[package]]
 name = "pricing"
 version = "0.1.0"
+dependencies = [
+ "tracing",
+]
 
 [[package]]
 name = "primeorder"
@@ -7061,6 +7082,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
+ "indexer-client",
  "k256 0.13.4",
  "p256",
  "parking_lot 0.12.5",
@@ -7580,6 +7602,7 @@ dependencies = [
  "anyhow",
  "config",
  "serde",
+ "tracing",
  "tracing-subscriber",
 ]
 

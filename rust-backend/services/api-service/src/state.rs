@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use parking_lot::RwLock;
 use tracing::{debug, trace};
 
-use shared::protocol_types::events::{ChainEvent, IndexedEvent};
-use shared::protocol_types::ids::ObjectId;
+use protocol_types::events::{ChainEvent, IndexedEvent};
+use protocol_types::ids::ObjectId;
 
 use crate::bucket::Bucket;
 
@@ -30,7 +30,7 @@ impl AppState {
     }
 }
 
-impl shared::indexer_client::EventSink for AppState {
+impl indexer_client::EventSink for AppState {
     fn ingest_event(&self, indexed: &IndexedEvent) {
         trace!(sequence = indexed.sequence, "ingesting indexer event");
         match &indexed.event {
@@ -72,9 +72,9 @@ impl shared::indexer_client::EventSink for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::indexer_client::EventSink;
-    use shared::protocol_types::asset::AssetType;
-    use shared::protocol_types::events::{BucketCleaned, BucketCreated};
+    use indexer_client::EventSink;
+    use protocol_types::asset::AssetType;
+    use protocol_types::events::{BucketCleaned, BucketCreated};
 
     fn evt(seq: u64, ev: ChainEvent) -> IndexedEvent {
         IndexedEvent {

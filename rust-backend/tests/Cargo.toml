@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 protocol-types = { workspace = true }
+indexer-client = { workspace = true }
 indexer = { path = "../services/indexer" }
 quoting-service = { path = "../services/quoting-service" }
 

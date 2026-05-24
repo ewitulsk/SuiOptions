@@ -115,7 +115,7 @@ impl Harness {
         let app_clone = Arc::clone(&app);
         let url = cfg.indexer_url.clone();
         tokio::spawn(async move {
-            let _ = shared::indexer_client::run(url, app_clone).await;
+            let _ = indexer_client::run(url, app_clone).await;
         });
 
         // Quoting WS server: rebind on ephemeral.

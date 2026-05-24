@@ -11,4 +11,5 @@ path = "src/lib.rs"
 anyhow = { workspace = true }
 serde = { workspace = true }
 config = { version = "0.14", features = ["toml"] }
+tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
