@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# One-time setup on a fresh Ubuntu 22.04 ARM EC2 instance.
-# Idempotent — re-running is safe.
+# One-time setup on a fresh Ubuntu 22.04 EC2 instance.
+# Idempotent — re-running is safe. Arch-agnostic (works on t3.*/t4g.*).
 #
 # Terraform's `user_data` runs this on first boot; you can also re-run it
 # by hand via SSM Session Manager if you need to.
@@ -32,8 +32,16 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 # ---- AWS CLI v2 -------------------------------------------------------------
+# AWS publishes a separate zip per arch — pick by `uname -m` so this works
+# on both x86_64 (t3.*) and aarch64 (t4g.*) hosts. Hardcoding either one
+# leaves the binary unrunnable if the EC2 family changes.
 if ! command -v aws >/dev/null 2>&1; then
-  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" \
+  case "$(uname -m)" in
+    x86_64)  CLI_ARCH=x86_64 ;;
+    aarch64) CLI_ARCH=aarch64 ;;
+    *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+  esac
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${CLI_ARCH}.zip" \
     -o /tmp/awscliv2.zip
   unzip -q /tmp/awscliv2.zip -d /tmp
   /tmp/aws/install
