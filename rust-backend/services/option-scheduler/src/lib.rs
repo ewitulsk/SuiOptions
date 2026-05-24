@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use shared::sui_client::Network;
+use sui_tx::sui_client::Network;
 
 pub mod config;
 pub mod families;
@@ -52,7 +52,7 @@ pub struct Cli {
     pub dry_run: bool,
 }
 
-shared::define_program! {
+cli_spec::define_program! {
     id          = "option-scheduler",
     cargo_pkg   = "option-scheduler",
     working_dir = ".",

@@ -1,0 +1,237 @@
+# Reusable selective-deploy workflow.
+#
+# Called by deploy-lower.yml (push to staging → dev+staging) and
+# deploy-prod.yml (push to main → prod).
+#
+# Three jobs:
+#   1. affected — compute the set of services touched by this commit's
+#      changed files (via deployment/affected.py). Determines the matrix
+#      for build + deploy.
+#   2. build — one parallel job per affected service, runs `docker buildx
+#      bake --push <service>` against deployment/bake.hcl.
+#   3. deploy — one parallel job per env (per caller's `envs` input),
+#      uploads the deploy bundle (deploy.sh + render-secrets.sh +
+#      docker-compose.<env>.yml) to S3, then SSMs into the EC2 box to
+#      download the bundle and run deploy.sh with the affected-services
+#      list.
+#
+# Concurrency is scoped per env so two near-simultaneous pushes serialize
+# their deploys to each env independently. Build can fan out freely.
+
+name: _deploy (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      envs:
+        description: 'JSON array of envs to deploy to, e.g. ''["dev","staging"]''.'
+        required: true
+        type: string
+      image_tag:
+        description: 'Image tag to deploy. Empty = derive from current SHA and rebuild affected services. Non-empty = skip build and roll the given tag onto the affected services (rollback path).'
+        required: false
+        type: string
+        default: ''
+      force_all:
+        description: 'Bypass the changed-paths filter and treat every service as affected. Use for first deploy on a fresh box, or to redeploy everything after dep drift.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write   # OIDC to AWS
+
+env:
+  AWS_REGION:        ${{ vars.AWS_REGION }}
+  ECR_REGISTRY:      ${{ vars.ECR_REGISTRY }}
+  EC2_INSTANCE_ID:   ${{ vars.EC2_INSTANCE_ID }}
+  DEPLOY_ROLE_ARN:   ${{ vars.DEPLOY_ROLE_ARN }}
+  RDS_HOST:          ${{ vars.RDS_HOST }}
+  SSM_OUTPUT_BUCKET: ${{ vars.SSM_OUTPUT_BUCKET }}
+
+jobs:
+  affected:
+    runs-on: ubuntu-latest
+    outputs:
+      services:   ${{ steps.derive.outputs.services }}
+      tag:        ${{ steps.tag.outputs.tag }}
+      skip_build: ${{ steps.tag.outputs.skip_build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need history for the diff range
+
+      - id: tag
+        env:
+          OVERRIDE_TAG: ${{ inputs.image_tag }}
+        run: |
+          if [ -n "$OVERRIDE_TAG" ]; then
+            echo "tag=$OVERRIDE_TAG" >> "$GITHUB_OUTPUT"
+            echo "skip_build=true" >> "$GITHUB_OUTPUT"
+            echo "image_tag override → skipping build, deploying $OVERRIDE_TAG"
+          else
+            echo "tag=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: changed
+        if: ${{ !inputs.force_all && !inputs.image_tag }}
+        uses: tj-actions/changed-files@v44
+        with:
+          base_sha: ${{ github.event.before }}
+          separator: "\n"
+
+      - id: derive
+        env:
+          FORCE_ALL: ${{ inputs.force_all }}
+          OVERRIDE_TAG: ${{ inputs.image_tag }}
+          CHANGED_FILES: ${{ steps.changed.outputs.all_changed_files }}
+        run: |
+          if [ "$FORCE_ALL" = "true" ] || [ -n "$OVERRIDE_TAG" ]; then
+            # force_all OR a tag override (rollback) → roll every service.
+            # For rollbacks the user normally wants to bring the whole
+            # stack to a known-good tag; if they want one service only,
+            # they can use a hand-rolled SSM command.
+            services='["indexer","mm-bot","option-scheduler","quoting-service"]'
+            echo "force_all or image_tag override → rolling all services"
+          else
+            services=$(printf '%s\n' "$CHANGED_FILES" \
+              | python3 rust-backend/deployment/affected.py)
+          fi
+          echo "services=$services" >> "$GITHUB_OUTPUT"
+          echo "affected services: $services"
+
+  build:
+    needs: affected
+    if: needs.affected.outputs.skip_build == 'false' && needs.affected.outputs.services != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.affected.outputs.services) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build & push ${{ matrix.service }}
+        env:
+          ECR: ${{ env.ECR_REGISTRY }}
+          IMAGE_TAG: ${{ needs.affected.outputs.tag }}
+        working-directory: rust-backend
+        run: docker buildx bake -f deployment/bake.hcl --push ${{ matrix.service }}
+
+  deploy:
+    needs: [affected, build]
+    if: |
+      always()
+      && needs.affected.outputs.services != '[]'
+      && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: ${{ fromJson(inputs.envs) }}
+      fail-fast: false
+    concurrency:
+      group: deploy-${{ matrix.env }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload deploy bundle to S3
+        env:
+          TAG: ${{ needs.affected.outputs.tag }}
+        working-directory: rust-backend
+        run: |
+          # Bundle only the files the box needs to run deploy.sh for
+          # this env. Per-env compose files are split so prod deploys
+          # don't carry dev's compose.
+          mkdir -p /tmp/bundle
+          cp deployment/ec2/deploy.sh         /tmp/bundle/
+          cp deployment/ec2/render-secrets.sh /tmp/bundle/
+          cp deployment/compose/docker-compose.${{ matrix.env }}.yml /tmp/bundle/
+          tar czf /tmp/bundle.tgz -C /tmp/bundle .
+          aws s3 cp /tmp/bundle.tgz \
+            "s3://$SSM_OUTPUT_BUCKET/deploy-bundles/$TAG-${{ matrix.env }}.tgz"
+
+      - name: SSM deploy
+        env:
+          TAG: ${{ needs.affected.outputs.tag }}
+          SERVICES: ${{ needs.affected.outputs.services }}
+          DEPLOY_ENV: ${{ matrix.env }}
+        run: |
+          # Build the SSM parameter file with jq so JSON escaping is
+          # mechanical (the SERVICES variable contains double quotes).
+          jq -nc \
+            --arg region "$AWS_REGION" \
+            --arg ecr "$ECR_REGISTRY" \
+            --arg tag "$TAG" \
+            --arg dbhost "$RDS_HOST" \
+            --arg bucket "$SSM_OUTPUT_BUCKET" \
+            --arg env "$DEPLOY_ENV" \
+            --arg services "$SERVICES" '
+            {
+              commands: [
+                "set -euo pipefail",
+                "export AWS_REGION=\($region)",
+                "export ECR=\($ecr)",
+                "export IMAGE_TAG=\($tag)",
+                "export DB_HOST=\($dbhost)",
+                "aws s3 cp s3://\($bucket)/deploy-bundles/\($tag)-\($env).tgz /tmp/bundle.tgz",
+                "mkdir -p /opt/options/\($env)",
+                "tar xzf /tmp/bundle.tgz -C /opt/options/\($env)",
+                "chmod +x /opt/options/\($env)/deploy.sh /opt/options/\($env)/render-secrets.sh",
+                "rm /tmp/bundle.tgz",
+                "cd /opt/options/\($env)",
+                "./deploy.sh \($env) " + ($services|@sh)
+              ]
+            }' > /tmp/ssm-params.json
+
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy $DEPLOY_ENV @ $TAG -> $SERVICES" \
+            --parameters file:///tmp/ssm-params.json \
+            --output-s3-bucket-name "$SSM_OUTPUT_BUCKET" \
+            --query Command.CommandId --output text)
+          echo "ssm command: $CMD_ID"
+
+          aws ssm wait command-executed \
+            --command-id "$CMD_ID" \
+            --instance-id "$EC2_INSTANCE_ID" || true
+
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --query Status --output text)
+          echo "ssm status: $STATUS"
+
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --query StandardOutputContent --output text
+
+          if [ "$STATUS" != "Success" ]; then
+            aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --query StandardErrorContent --output text
+            exit 1
+          fi

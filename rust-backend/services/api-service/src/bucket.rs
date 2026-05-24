@@ -1,4 +1,4 @@
-use shared::protocol_types::asset::AssetType;
+use protocol_types::asset::AssetType;
 
 #[derive(Clone, Debug)]
 pub struct Bucket {

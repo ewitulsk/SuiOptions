@@ -31,22 +31,22 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sui_types::base_types::ObjectID;
 
-use shared::protocol_types::ids::{ObjectId as PtObjectId, SuiAddress as PtSuiAddress};
-use shared::protocol_types::messages::{
+use protocol_types::ids::{ObjectId as PtObjectId, SuiAddress as PtSuiAddress};
+use protocol_types::messages::{
     AuthResponsePayload, MmHelloPayload, MmQuotePayload, MmToService, ServiceToMm,
 };
-use shared::protocol_types::quote::Quote;
-use shared::protocol_types::sides::MmRole;
-use shared::protocol_types::SigningScheme;
+use protocol_types::quote::Quote;
+use protocol_types::sides::MmRole;
+use protocol_types::SigningScheme;
 
-use shared::deployments::Deployments;
-use shared::pricing::{call_price_per_unit, premium_for_write, CallInputs};
-use shared::pyth::{self, PriceCache, PriceFeedId, RollingVolBuffer};
-use shared::quote_signer::QuoteSigner;
-use shared::sui_client::{Network, SuiClientWrapper};
-use shared::tx::account::create_and_share_account;
-use shared::tx::test_tokens::mint_and_deposit_into_account;
-use shared::ws_client;
+use deployments::Deployments;
+use pricing::{call_price_per_unit, premium_for_write, CallInputs};
+use pyth_client::{self as pyth, PriceCache, PriceFeedId, RollingVolBuffer};
+use sui_tx::quote_signer::QuoteSigner;
+use sui_tx::sui_client::{Network, SuiClientWrapper};
+use sui_tx::tx::account::create_and_share_account;
+use sui_tx::tx::test_tokens::mint_and_deposit_into_account;
+use sui_tx::ws_client;
 
 use mm_bot::Cli;
 
@@ -186,11 +186,11 @@ fn save_account_state(p: &Path, state: &AccountState) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    shared::logging::init();
+    runtime_config::logging::init();
 
     let cli = Cli::parse();
     let cfg = load_config(&cli.config)?;
-    let secrets_loaded = shared::Secrets::load(&cli.secrets)
+    let secrets_loaded = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
     let dep = Deployments::load(&cli.deployments)
         .with_context(|| format!("loading {}", cli.deployments.display()))?;
@@ -353,7 +353,7 @@ async fn main() -> Result<()> {
                             &mut ws,
                             &MmToService::Decline {
                                 request_id,
-                                payload: shared::protocol_types::messages::DeclinePayload {
+                                payload: protocol_types::messages::DeclinePayload {
                                     reason: format!("stale market data: {reason}"),
                                 },
                             },
@@ -391,7 +391,7 @@ async fn main() -> Result<()> {
                         &mut ws,
                         &MmToService::Decline {
                             request_id,
-                            payload: shared::protocol_types::messages::DeclinePayload {
+                            payload: protocol_types::messages::DeclinePayload {
                                 reason: "priced to zero".into(),
                             },
                         },
@@ -472,7 +472,7 @@ fn load_config(path: &Path) -> Result<BotConfig> {
 }
 
 fn load_quote_signer(
-    secrets: &shared::Secrets,
+    secrets: &runtime_config::Secrets,
     scheme: SigningScheme,
 ) -> Result<QuoteSigner> {
     QuoteSigner::from_secret_str(secrets.mm_quote_key()?, scheme)
@@ -481,8 +481,8 @@ fn load_quote_signer(
 async fn resolve_account(
     cli: &Cli,
     cfg: &BotConfig,
-    net: &shared::deployments::NetworkDeployment,
-    secrets: &shared::Secrets,
+    net: &deployments::NetworkDeployment,
+    secrets: &runtime_config::Secrets,
     signer: &QuoteSigner,
     pubkey_bytes: &[u8],
 ) -> Result<ObjectID> {
@@ -566,7 +566,7 @@ async fn expect_auth_ack(ws: &mut ws_client::WsStream) -> Result<()> {
 
 fn resolve_token_recipient(
     cfg: &BotConfig,
-    secrets: &shared::Secrets,
+    secrets: &runtime_config::Secrets,
 ) -> Result<PtSuiAddress> {
     if let Some(s) = &cfg.token_recipient {
         tracing::debug!(recipient = %s, "using configured token recipient");

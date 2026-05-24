@@ -61,7 +61,7 @@ pub struct Cli {
     pub test_tokens: PathBuf,
 }
 
-shared::define_program! {
+cli_spec::define_program! {
     id          = "deploy",
     cargo_pkg   = "deployment-manager",
     working_dir = ".",

@@ -29,8 +29,8 @@ use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, PooledConnection};
 use tracing::{debug, info, trace};
 
-use shared::protocol_types::events::{ChainEvent, IndexedEvent};
-use shared::protocol_types::ids::ObjectId;
+use protocol_types::events::{ChainEvent, IndexedEvent};
+use protocol_types::ids::ObjectId;
 
 use crate::store::{AccountState, BucketState, PositionState};
 
@@ -324,7 +324,7 @@ impl Repo {
                     )
                 })?;
                 acct.balances.insert(
-                    shared::protocol_types::asset::AssetType::new(row.asset_type),
+                    protocol_types::asset::AssetType::new(row.asset_type),
                     bal_u64,
                 );
             }

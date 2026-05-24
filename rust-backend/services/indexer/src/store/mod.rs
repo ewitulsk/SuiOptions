@@ -18,12 +18,12 @@ use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use tracing::{debug, trace, warn};
 
-use shared::protocol_types::asset::AssetType;
-use shared::protocol_types::events::{
+use protocol_types::asset::AssetType;
+use protocol_types::events::{
     AccountDeposit, AccountWithdraw, BucketCreated, ChainEvent, Exercised, IndexedEvent, Redeemed,
     WriteExecuted,
 };
-use shared::protocol_types::ids::{ObjectId, SuiAddress};
+use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::db::models::{
     u128_to_bigdecimal, u64_to_bigdecimal, AccountBalanceRow, AccountRow, BucketRow, PositionRow,
@@ -581,7 +581,7 @@ impl AccountDelta for AccountWithdraw {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::protocol_types::events::{AccountCreated, AccountDeposit, BucketCreated};
+    use protocol_types::events::{AccountCreated, AccountDeposit, BucketCreated};
 
     fn bucket_evt(id: u8) -> ChainEvent {
         ChainEvent::BucketCreated(BucketCreated {
@@ -670,7 +670,7 @@ mod tests {
             ChainEvent::AccountCreated(AccountCreated {
                 account_id: acct,
                 owner: SuiAddress::new([0xcd; 32]),
-                signing_scheme: shared::protocol_types::SigningScheme::Ed25519,
+                signing_scheme: protocol_types::SigningScheme::Ed25519,
                 signing_pubkey: vec![0x01; 32],
             }),
             1,

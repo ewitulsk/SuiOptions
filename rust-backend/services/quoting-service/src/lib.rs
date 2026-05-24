@@ -45,7 +45,7 @@ pub struct Cli {
     pub config: PathBuf,
 }
 
-shared::define_program! {
+cli_spec::define_program! {
     id          = "quoting-service",
     cargo_pkg   = "quoting-service",
     working_dir = ".",

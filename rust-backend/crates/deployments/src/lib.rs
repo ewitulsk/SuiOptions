@@ -160,12 +160,12 @@ pub struct TokenSpec {
 
 impl TokenSpec {
     /// Typed Pyth feed id. Errors if `pyth_feed_id` is absent or malformed.
-    pub fn pyth_feed(&self) -> Result<crate::pyth::PriceFeedId> {
+    pub fn pyth_feed(&self) -> Result<protocol_types::PriceFeedId> {
         let raw = self
             .pyth_feed_id
             .as_deref()
             .ok_or_else(|| anyhow!("token has no pythFeedId in deployments.json"))?;
-        crate::pyth::PriceFeedId::from_hex(raw)
+        protocol_types::PriceFeedId::from_hex(raw)
     }
 }
 

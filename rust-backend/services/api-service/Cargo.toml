@@ -12,7 +12,10 @@ name = "api-service"
 path = "src/main.rs"
 
 [dependencies]
-shared = { workspace = true }
+protocol-types = { workspace = true }
+runtime-config = { workspace = true }
+cli-spec       = { workspace = true }
+indexer-client = { workspace = true }
 
 config = { version = "0.14", features = ["toml"] }
 clap = { workspace = true }

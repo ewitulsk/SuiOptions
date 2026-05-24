@@ -8,14 +8,14 @@
 //! Move source: `contracts/sources/events.move`.
 //!
 //! The struct layouts on the protocol-types side were defined to BCS-match
-//! the Move structs exactly (see `shared::protocol_types::quote::tests::
+//! the Move structs exactly (see `protocol_types::quote::tests::
 //! bcs_layout_is_byte_exact` for the canonical example), so we just call
 //! `bcs::from_bytes::<X>(...)` straight from event bytes — no field-by-field
 //! conversion needed.
 
 use anyhow::{Context, Result};
 
-use shared::protocol_types::events::{
+use protocol_types::events::{
     AccountCreated, AccountDeposit, AccountWithdraw, BucketCleaned, BucketCreated, ChainEvent,
     Exercised, ExpiredOptionBurned, FeeUpdated, Redeemed, SigningKeyRotated, TreasuryWithdrawn,
     WriteExecuted,
@@ -124,8 +124,8 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::protocol_types::asset::AssetType;
-    use shared::protocol_types::ids::{ObjectId, SuiAddress};
+    use protocol_types::asset::AssetType;
+    use protocol_types::ids::{ObjectId, SuiAddress};
 
     const PKG: &str = "0x9584b7c2890c52fc0f4c678cd96a219df8081dfa04d78428bf6c29213fb3f090";
 

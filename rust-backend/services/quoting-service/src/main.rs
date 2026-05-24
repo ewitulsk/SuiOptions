@@ -9,7 +9,7 @@ use quoting_service::{state, AppState, Cli, Config};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    shared::logging::init();
+    runtime_config::logging::init();
 
     let cli = Cli::parse();
     let cfg_path = cli.config.to_string_lossy().into_owned();
@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
     let url = cfg.indexer_url.clone();
     let app_for_indexer = Arc::clone(&app);
     tokio::spawn(async move {
-        if let Err(e) = shared::indexer_client::run(url, app_for_indexer).await {
+        if let Err(e) = indexer_client::run(url, app_for_indexer).await {
             tracing::error!(error = %e, "indexer subscriber exited");
         }
     });

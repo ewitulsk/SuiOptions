@@ -41,7 +41,7 @@ pub struct Cli {
     pub config: PathBuf,
 }
 
-shared::define_program! {
+cli_spec::define_program! {
     id          = "indexer",
     cargo_pkg   = "indexer",
     working_dir = ".",

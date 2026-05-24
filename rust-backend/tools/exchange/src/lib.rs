@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use sui_types::base_types::{ObjectID, SuiAddress};
 
-use shared::sui_client::Network;
+use sui_tx::sui_client::Network;
 
 #[derive(Parser, Debug)]
 #[command(name = "exchange", about = "Admin CLI for the covered-call options protocol")]
@@ -88,7 +88,7 @@ pub enum Command {
     Info,
 }
 
-shared::define_program! {
+cli_spec::define_program! {
     id          = "exchange",
     cargo_pkg   = "exchange",
     working_dir = ".",

@@ -26,8 +26,8 @@ use clap::Parser;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-use shared::deployments::Deployments;
-use shared::sui_client::SuiClientWrapper;
+use deployments::Deployments;
+use sui_tx::sui_client::SuiClientWrapper;
 
 use option_scheduler::config::{PairConfig, SchedulerConfig};
 use option_scheduler::families::{CanonicalType, PairKey, Registry, log_registry, run_subscriber};
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = SchedulerConfig::load(&cli.config)
         .with_context(|| format!("loading {}", cli.config.display()))?;
-    let secrets = shared::Secrets::load(&cli.secrets)
+    let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
     let dep = Deployments::load(&cli.deployments)
         .with_context(|| format!("loading {}", cli.deployments.display()))?;

@@ -1,5 +1,10 @@
 name: Deploy lower envs
 
+# Build + selective deploy to dev and/or staging. The actual build/deploy
+# logic lives in _deploy.yml; this file is the trigger + env list.
+# Manual-only (workflow_dispatch) — see SO-17. Choose which env(s) to
+# target via the `environment` input.
+
 on:
   workflow_dispatch:
     inputs:
@@ -13,112 +18,25 @@ on:
           - staging
         default: both
       image_tag:
-        description: 'Specific image tag to deploy (defaults to current SHA)'
+        description: 'Image tag to deploy. Empty = current SHA. Non-empty = skip build and roll the given tag (rollback).'
         required: false
         type: string
+        default: ''
+      force_all:
+        description: 'Bypass the affected-files filter and roll every service.'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
-  id-token: write   # for AWS OIDC
-
-defaults:
-  run:
-    working-directory: rust-backend
-
-env:
-  AWS_REGION: ${{ vars.AWS_REGION }}
-  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}            # e.g. 1234.dkr.ecr.us-east-1.amazonaws.com
-  EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
-  DEPLOY_ROLE_ARN: ${{ vars.DEPLOY_ROLE_ARN }}      # gh-actions-deploy IAM role
-  RDS_HOST: ${{ vars.RDS_HOST }}
+  id-token: write
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    outputs:
-      image_tag: ${{ steps.tag.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - id: tag
-        run: |
-          if [ -n "${{ inputs.image_tag }}" ]; then
-            echo "tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - uses: aws-actions/amazon-ecr-login@v2
-        id: ecr
-
-      - uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build & push (arm64)
-        env:
-          ECR: ${{ env.ECR_REGISTRY }}
-          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
-        run: docker buildx bake -f deployment/bake.hcl --push
-
   deploy:
-    needs: build
-    strategy:
-      matrix:
-        env: ${{ inputs.environment == 'both' && fromJSON('["dev","staging"]') || fromJSON(format('["{0}"]', inputs.environment)) }}
-      fail-fast: false
-    runs-on: ubuntu-latest
-    steps:
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: SSM deploy to EC2
-        run: |
-          CMD_ID=$(aws ssm send-command \
-            --instance-ids "$EC2_INSTANCE_ID" \
-            --document-name AWS-RunShellScript \
-            --comment "deploy ${{ matrix.env }} @ ${{ needs.build.outputs.image_tag }}" \
-            --parameters commands="[
-              'export AWS_REGION=$AWS_REGION',
-              'export ECR=$ECR_REGISTRY',
-              'export IMAGE_TAG=${{ needs.build.outputs.image_tag }}',
-              'export DB_HOST=$RDS_HOST',
-              'cd /opt/options/${{ matrix.env }}',
-              './deploy.sh ${{ matrix.env }}'
-            ]" \
-            --output-s3-bucket-name "${{ vars.SSM_OUTPUT_BUCKET }}" \
-            --query Command.CommandId --output text)
-          echo "ssm command: $CMD_ID"
-
-          # Wait for completion, fail the job if SSM reports failure.
-          aws ssm wait command-executed \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" || true
-
-          STATUS=$(aws ssm get-command-invocation \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" \
-            --query Status --output text)
-          echo "ssm status: $STATUS"
-
-          aws ssm get-command-invocation \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" \
-            --query StandardOutputContent --output text
-
-          if [ "$STATUS" != "Success" ]; then
-            aws ssm get-command-invocation \
-              --command-id "$CMD_ID" \
-              --instance-id "$EC2_INSTANCE_ID" \
-              --query StandardErrorContent --output text
-            exit 1
-          fi
+    uses: ./.github/workflows/_deploy.yml
+    secrets: inherit
+    with:
+      envs: ${{ inputs.environment == 'both' && '["dev","staging"]' || format('["{0}"]', inputs.environment) }}
+      image_tag: ${{ inputs.image_tag || '' }}
+      force_all: ${{ inputs.force_all == true }}

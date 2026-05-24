@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, info, trace, warn};
 
-use shared::protocol_types::messages::{
+use protocol_types::messages::{
     BucketUpdatePayload, ErrorPayload, HelloAckPayload, RetailHelloPayload, RetailToService,
     RfqResponsePayload, ServiceToRetail,
 };

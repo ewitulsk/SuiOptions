@@ -178,20 +178,33 @@ resource "aws_s3_bucket_lifecycle_configuration" "ssm_output" {
   }
 }
 
-# Let the EC2 role write into the SSM output bucket.
+# Let the EC2 role write SSM command output to the bucket, and read
+# deploy bundles (deploy.sh / render-secrets.sh / compose files) that
+# the GitHub Actions workflow uploads under `deploy-bundles/<sha>.tgz`.
+# The bundle sync runs at the top of every selective deploy so the box
+# always uses the scripts at the SHA being deployed.
 resource "aws_iam_role_policy" "ec2_ssm_output" {
   name = "${var.project}-ec2-ssm-output"
   role = aws_iam_role.ec2.id
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = ["s3:PutObject", "s3:GetEncryptionConfiguration"]
-      Resource = [
-        aws_s3_bucket.ssm_output.arn,
-        "${aws_s3_bucket.ssm_output.arn}/*",
-      ]
-    }]
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = ["s3:PutObject", "s3:GetEncryptionConfiguration"]
+        Resource = [
+          aws_s3_bucket.ssm_output.arn,
+          "${aws_s3_bucket.ssm_output.arn}/*",
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = ["s3:GetObject"]
+        Resource = [
+          "${aws_s3_bucket.ssm_output.arn}/deploy-bundles/*",
+        ]
+      },
+    ]
   })
 }

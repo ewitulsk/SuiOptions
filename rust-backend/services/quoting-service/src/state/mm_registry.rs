@@ -11,9 +11,9 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-use shared::protocol_types::ids::ObjectId;
-use shared::protocol_types::messages::ServiceToMm;
-use shared::protocol_types::sides::MmRole;
+use protocol_types::ids::ObjectId;
+use protocol_types::messages::ServiceToMm;
+use protocol_types::sides::MmRole;
 
 #[derive(Clone)]
 pub struct MmConnection {

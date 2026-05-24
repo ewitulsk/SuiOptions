@@ -12,7 +12,13 @@ name = "mm-bot"
 path = "src/main.rs"
 
 [dependencies]
-shared = { workspace = true }
+protocol-types = { workspace = true }
+runtime-config = { workspace = true }
+cli-spec       = { workspace = true }
+sui-tx         = { workspace = true }
+pyth-client    = { workspace = true }
+pricing        = { workspace = true }
+deployments    = { workspace = true }
 
 # Sui SDK (used directly for derive token recipient from secret key).
 sui-types = { workspace = true }

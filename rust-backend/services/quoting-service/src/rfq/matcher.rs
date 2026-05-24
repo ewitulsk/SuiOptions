@@ -13,8 +13,8 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{debug, trace};
 
-use shared::protocol_types::ids::ObjectId;
-use shared::protocol_types::messages::MmQuotePayload;
+use protocol_types::ids::ObjectId;
+use protocol_types::messages::MmQuotePayload;
 
 pub use crate::state::MmResponse;
 
@@ -76,8 +76,8 @@ pub async fn collect_with_deadline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::protocol_types::ids::SuiAddress;
-    use shared::protocol_types::quote::Quote;
+    use protocol_types::ids::SuiAddress;
+    use protocol_types::quote::Quote;
 
     fn fake_payload(nonce: u64, premium: u64) -> MmQuotePayload {
         MmQuotePayload {

@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use sui_types::crypto::{EncodeDecodeBase64, SuiKeyPair};
 use tracing::{debug, trace};
 
-use crate::SigningScheme;
+use protocol_types::SigningScheme;
 
 pub enum QuoteSigner {
     Ed25519(ed25519_dalek::SigningKey),
@@ -164,7 +164,7 @@ mod tests {
             let signer = QuoteSigner::from_secret(scheme, &secret).unwrap();
             let msg = b"some bcs-encoded quote payload";
             let sig = signer.sign(msg).unwrap();
-            crate::verify_signature(scheme, &signer.public_bytes(), msg, &sig)
+            protocol_types::verify_signature(scheme, &signer.public_bytes(), msg, &sig)
                 .unwrap_or_else(|e| panic!("verify failed for {scheme:?}: {e:?}"));
         }
     }

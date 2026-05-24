@@ -14,8 +14,8 @@ use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
-use crate::protocol_types::events::IndexedEvent;
-use crate::protocol_types::messages::{IndexerStream, IndexerSubscribe};
+use protocol_types::events::IndexedEvent;
+use protocol_types::messages::{IndexerStream, IndexerSubscribe};
 
 /// Trait implemented by any service's state that can ingest indexer events.
 pub trait EventSink: Send + Sync + 'static {

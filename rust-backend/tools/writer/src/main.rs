@@ -24,16 +24,16 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use sui_types::base_types::ObjectID;
 
-use shared::protocol_types::ids::ObjectId as PtObjectId;
-use shared::protocol_types::messages::{
+use protocol_types::ids::ObjectId as PtObjectId;
+use protocol_types::messages::{
     RetailHelloPayload, RetailToService, RfqRequestPayload, ServiceToRetail,
 };
-use shared::protocol_types::sides::{RetailRole, Side};
+use protocol_types::sides::{RetailRole, Side};
 
-use shared::deployments::Deployments;
-use shared::sui_client::SuiClientWrapper;
-use shared::tx::execute_write::{execute_writer_flow, ExecuteWriteParams};
-use shared::ws_client;
+use deployments::Deployments;
+use sui_tx::sui_client::SuiClientWrapper;
+use sui_tx::tx::execute_write::{execute_writer_flow, ExecuteWriteParams};
+use sui_tx::ws_client;
 
 use writer::Cli;
 
@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
     let settlement = net.token(&cli.settlement)?;
     let (tokens_pkg, underlying_module) = underlying.module_path()?;
 
-    let secrets = shared::Secrets::load(&cli.secrets)
+    let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
     let wrap = SuiClientWrapper::connect(&secrets, cli.network).await?;
     let writer_addr = wrap.signer.address;
@@ -179,7 +179,7 @@ fn sui_object_id_from_pt(id: PtObjectId) -> Result<ObjectID> {
 }
 
 fn sui_address_from_pt(
-    addr: shared::protocol_types::ids::SuiAddress,
+    addr: protocol_types::ids::SuiAddress,
 ) -> Result<sui_types::base_types::SuiAddress> {
     sui_types::base_types::SuiAddress::from_str(&addr.to_hex()).context("converting SuiAddress")
 }

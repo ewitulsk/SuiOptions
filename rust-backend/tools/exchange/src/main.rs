@@ -21,10 +21,10 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 
-use shared::deployments::{Deployments, NetworkDeployment};
-use shared::sui_client::SuiClientWrapper;
-use shared::tx::admin::{new_call_option, set_fee_bps, withdraw_treasury, NewCallOptionArgs};
-use shared::tx::test_tokens::{mint_and_deposit_into_account, mint_to_sender};
+use deployments::{Deployments, NetworkDeployment};
+use sui_tx::sui_client::SuiClientWrapper;
+use sui_tx::tx::admin::{new_call_option, set_fee_bps, withdraw_treasury, NewCallOptionArgs};
+use sui_tx::tx::test_tokens::{mint_and_deposit_into_account, mint_to_sender};
 
 use exchange::{Cli, Command};
 
@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
     let admin_cap = net.admin_cap()?;
     let protocol_config = net.protocol_config()?;
 
-    let secrets = shared::Secrets::load(&cli.secrets)
+    let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
     let wrap = SuiClientWrapper::connect(&secrets, cli.network).await?;
 

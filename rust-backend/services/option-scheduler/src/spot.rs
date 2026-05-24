@@ -21,8 +21,8 @@ use anyhow::{Context, Result};
 use thiserror::Error;
 use tracing::info;
 
-use shared::pyth::types::{PriceFeedId, PriceUpdate, PythPrice};
-use shared::pyth::{self};
+use pyth_client::types::{PriceFeedId, PriceUpdate, PythPrice};
+use pyth_client as pyth;
 
 use crate::config::SpotConfig;
 use crate::strike_grid::spot_usd_to_chain_units;
@@ -88,8 +88,8 @@ impl ResolvedSpotSource {
     /// boot.
     pub fn from_config(
         cfg: &SpotConfig,
-        underlying_spec: &shared::deployments::TokenSpec,
-        settlement_spec: &shared::deployments::TokenSpec,
+        underlying_spec: &deployments::TokenSpec,
+        settlement_spec: &deployments::TokenSpec,
     ) -> Result<Self> {
         match *cfg {
             SpotConfig::Static { usd } => {

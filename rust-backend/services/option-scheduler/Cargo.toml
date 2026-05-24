@@ -12,7 +12,12 @@ name = "option-scheduler"
 path = "src/main.rs"
 
 [dependencies]
-shared = { workspace = true }
+protocol-types = { workspace = true }
+runtime-config = { workspace = true }
+cli-spec       = { workspace = true }
+sui-tx         = { workspace = true }
+pyth-client    = { workspace = true }
+deployments    = { workspace = true }
 
 # Sui SDK (used to parse the rolled tx response and pull ObjectChanges).
 sui-types = { workspace = true }

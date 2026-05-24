@@ -302,12 +302,15 @@ dependencies = [
  "anyhow",
  "axum 0.7.9",
  "clap",
+ "cli-spec",
  "config",
  "futures-util",
+ "indexer-client",
  "parking_lot 0.12.5",
+ "protocol-types",
+ "runtime-config",
  "serde",
  "serde_json",
- "shared",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.24.0",
@@ -1427,6 +1430,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cli-spec"
+version = "0.1.0"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1626,6 +1636,7 @@ dependencies = [
  "anyhow",
  "api-service",
  "clap",
+ "cli-spec",
  "crossterm",
  "deployment-manager",
  "exchange",
@@ -1636,7 +1647,6 @@ dependencies = [
  "option-scheduler",
  "quoting-service",
  "ratatui",
- "shared",
  "tokio",
  "tracing",
  "writer",
@@ -2069,10 +2079,13 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "cli-spec",
+ "deployments",
  "move-core-types",
+ "protocol-types",
+ "runtime-config",
  "serde",
  "serde_json",
- "shared",
  "shared-crypto",
  "sui-json",
  "sui-json-rpc-types",
@@ -2080,11 +2093,24 @@ dependencies = [
  "sui-move-build",
  "sui-sdk",
  "sui-transaction-builder",
+ "sui-tx",
  "sui-types",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "deployments"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "protocol-types",
+ "serde",
+ "serde_json",
+ "sui-types",
+ "tracing",
 ]
 
 [[package]]
@@ -2629,11 +2655,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "cli-spec",
+ "deployments",
  "hex",
+ "protocol-types",
+ "runtime-config",
  "serde",
  "serde_json",
- "shared",
  "sui-json-rpc-types",
+ "sui-tx",
  "sui-types",
  "tokio",
  "tracing",
@@ -3753,17 +3783,20 @@ dependencies = [
  "bigdecimal",
  "chrono",
  "clap",
+ "cli-spec",
  "config",
  "dashmap 6.1.0",
+ "deployments",
  "diesel",
  "diesel_migrations",
  "futures",
  "futures-util",
  "parking_lot 0.12.5",
+ "protocol-types",
  "r2d2",
+ "runtime-config",
  "serde",
  "serde_json",
- "shared",
  "sui-data-ingestion-core",
  "sui-sdk",
  "sui-types",
@@ -3772,6 +3805,19 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "indexer-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "protocol-types",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
 ]
 
 [[package]]
@@ -3888,11 +3934,12 @@ dependencies = [
  "futures-util",
  "hex",
  "indexer",
+ "indexer-client",
+ "protocol-types",
  "quoting-service",
  "rand 0.8.6",
  "serde",
  "serde_json",
- "shared",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tracing",
@@ -4783,16 +4830,22 @@ dependencies = [
  "bcs",
  "chrono",
  "clap",
+ "cli-spec",
  "config",
+ "deployments",
  "ed25519-dalek",
  "futures",
  "futures-util",
  "hex",
  "parking_lot 0.12.5",
+ "pricing",
+ "protocol-types",
+ "pyth-client",
  "reqwest",
+ "runtime-config",
  "serde",
  "serde_json",
- "shared",
+ "sui-tx",
  "sui-types",
  "tokio",
  "tracing",
@@ -6030,15 +6083,20 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "cli-spec",
  "config",
+ "deployments",
  "futures",
  "futures-util",
  "parking_lot 0.12.5",
+ "protocol-types",
+ "pyth-client",
  "reqwest",
+ "runtime-config",
  "serde",
  "serde_json",
- "shared",
  "sui-json-rpc-types",
+ "sui-tx",
  "sui-types",
  "thiserror 1.0.69",
  "tokio",
@@ -6592,6 +6650,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pricing"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
 name = "primeorder"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6804,6 +6869,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "protocol-types"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bcs",
+ "ed25519-dalek",
+ "hex",
+ "k256 0.13.4",
+ "p256",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "protox"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6858,6 +6940,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50793def1b900256624a709439404384204a5dc3a6ec580281bfaac35e882e90"
 dependencies = [
  "pulldown-cmark",
+]
+
+[[package]]
+name = "pyth-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dashmap 6.1.0",
+ "futures",
+ "hex",
+ "protocol-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -6977,20 +7075,23 @@ dependencies = [
  "async-trait",
  "bcs",
  "clap",
+ "cli-spec",
  "config",
  "dashmap 6.1.0",
  "ed25519-dalek",
  "futures",
  "futures-util",
  "hex",
+ "indexer-client",
  "k256 0.13.4",
  "p256",
  "parking_lot 0.12.5",
+ "protocol-types",
  "rand 0.8.6",
+ "runtime-config",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "shared",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.24.0",
@@ -7492,6 +7593,17 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "runtime-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "config",
+ "serde",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -8155,45 +8267,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
-]
-
-[[package]]
-name = "shared"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "bcs",
- "chrono",
- "clap",
- "config",
- "dashmap 6.1.0",
- "ed25519-dalek",
- "futures",
- "futures-util",
- "hex",
- "k256 0.13.4",
- "move-core-types",
- "p256",
- "parking_lot 0.12.5",
- "rand 0.8.6",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "shared-crypto",
- "sui-json",
- "sui-json-rpc-types",
- "sui-keys",
- "sui-sdk",
- "sui-transaction-builder",
- "sui-types",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite 0.24.0",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -9491,6 +9564,37 @@ dependencies = [
  "sui-macros",
  "sui-protocol-config",
  "sui-types",
+ "tracing",
+]
+
+[[package]]
+name = "sui-tx"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "ed25519-dalek",
+ "futures",
+ "futures-util",
+ "hex",
+ "k256 0.13.4",
+ "move-core-types",
+ "p256",
+ "protocol-types",
+ "runtime-config",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "shared-crypto",
+ "sui-json",
+ "sui-json-rpc-types",
+ "sui-keys",
+ "sui-sdk",
+ "sui-transaction-builder",
+ "sui-types",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
  "tracing",
 ]
 
@@ -11429,11 +11533,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "cli-spec",
+ "deployments",
  "futures",
  "futures-util",
+ "protocol-types",
+ "runtime-config",
  "serde",
  "serde_json",
- "shared",
+ "sui-tx",
  "sui-types",
  "tokio",
  "tokio-tungstenite 0.24.0",

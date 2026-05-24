@@ -31,7 +31,7 @@ pub async fn create_and_share_account(
     client: &SuiClient,
     signer: &Signer,
     package: ObjectID,
-    signing_scheme: crate::SigningScheme,
+    signing_scheme: protocol_types::SigningScheme,
     signing_pubkey: &[u8],
     gas_budget: u64,
 ) -> Result<AccountCreated> {

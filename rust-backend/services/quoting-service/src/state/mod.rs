@@ -16,9 +16,9 @@ use tokio::sync::mpsc;
 use tokio::time::interval;
 use tracing::{debug, trace, warn};
 
-use shared::protocol_types::asset::AssetType;
-use shared::protocol_types::events::{ChainEvent, IndexedEvent};
-use shared::protocol_types::ids::ObjectId;
+use protocol_types::asset::AssetType;
+use protocol_types::events::{ChainEvent, IndexedEvent};
+use protocol_types::ids::ObjectId;
 
 pub use accounts::{AccountMirror, AccountStore};
 pub use buckets::{BucketStore, BucketView};
@@ -30,7 +30,7 @@ pub use reservations::{InsertOutcome, Reservation, ReservationTable};
 /// orchestrator's matcher.
 #[derive(Debug)]
 pub enum MmResponse {
-    Quote(ObjectId, shared::protocol_types::messages::MmQuotePayload),
+    Quote(ObjectId, protocol_types::messages::MmQuotePayload),
     Decline(ObjectId),
 }
 
@@ -125,7 +125,7 @@ impl AppState {
     }
 }
 
-impl shared::indexer_client::EventSink for AppState {
+impl indexer_client::EventSink for AppState {
     fn ingest_event(&self, event: &IndexedEvent) {
         AppState::ingest_event(self, event);
     }
@@ -152,11 +152,11 @@ pub fn spawn_reservation_evictor(state: Arc<AppState>, tick: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::protocol_types::asset::AssetType;
-    use shared::protocol_types::events::{
+    use protocol_types::asset::AssetType;
+    use protocol_types::events::{
         AccountCreated, AccountDeposit, BucketCreated, ChainEvent, IndexedEvent,
     };
-    use shared::protocol_types::ids::SuiAddress;
+    use protocol_types::ids::SuiAddress;
 
     fn evt(seq: u64, e: ChainEvent) -> IndexedEvent {
         IndexedEvent {
@@ -176,7 +176,7 @@ mod tests {
             ChainEvent::AccountCreated(AccountCreated {
                 account_id: account,
                 owner: SuiAddress::ZERO,
-                signing_scheme: shared::protocol_types::SigningScheme::Ed25519,
+                signing_scheme: protocol_types::SigningScheme::Ed25519,
                 signing_pubkey: vec![0xab; 32],
             }),
         ));

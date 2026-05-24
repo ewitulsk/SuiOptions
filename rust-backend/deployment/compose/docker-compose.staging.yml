@@ -1,11 +1,13 @@
 # Compose stack for the `staging` env (Sui testnet).
 # Variables come from /opt/options/staging/.env, written by deploy.sh.
+# Each service has its own _TAG variable so selective deploys only roll
+# the containers whose image moved.
 
 name: options-staging
 
 services:
   indexer:
-    image: ${ECR}/options/indexer:${IMAGE_TAG}
+    image: ${ECR}/options/indexer:${INDEXER_TAG}
     environment:
       APP_ENV: staging
       DB_PASSWORD: ${DB_PASSWORD}
@@ -15,7 +17,7 @@ services:
     networks: [net]
 
   quoting:
-    image: ${ECR}/options/quoting-service:${IMAGE_TAG}
+    image: ${ECR}/options/quoting-service:${QUOTING_TAG}
     environment:
       APP_ENV: staging
       RUST_LOG: info,quoting_service=debug
@@ -26,7 +28,7 @@ services:
     networks: [net]
 
   mm-bot:
-    image: ${ECR}/options/mm-bot:${IMAGE_TAG}
+    image: ${ECR}/options/mm-bot:${MM_BOT_TAG}
     environment:
       APP_ENV: staging
       RUST_LOG: info,mm_bot=debug
@@ -34,6 +36,28 @@ services:
       - mm_bot_state:/app/state
       - /opt/options/staging/secrets:/run/secrets:ro
     depends_on: [quoting]
+    restart: unless-stopped
+    networks: [net]
+
+  option-scheduler:
+    image: ${ECR}/options/option-scheduler:${SCHEDULER_TAG}
+    environment:
+      APP_ENV: staging
+      RUST_LOG: info,option_scheduler=debug
+    volumes:
+      - /opt/options/staging/secrets:/run/secrets:ro
+    depends_on: [indexer]
+    restart: unless-stopped
+    networks: [net]
+
+  api-service:
+    image: ${ECR}/options/api-service:${API_SERVICE_TAG}
+    environment:
+      APP_ENV: staging
+      RUST_LOG: info,api_service=debug
+    ports:
+      - "9023:9003"
+    depends_on: [indexer]
     restart: unless-stopped
     networks: [net]
 

@@ -5,12 +5,20 @@
 # /opt/options/<env>/secrets/.
 #
 # Secrets Manager layout (one JSON entry per service per env):
-#   options/<env>/indexer  -> {"db_password": "..."}
-#   options/<env>/mm-bot   -> {"sui_key": "suiprivkey1...", "quote_key": "..."}
+#   options/<env>/indexer    -> {"db_password": "..."}
+#   options/<env>/mm-bot     -> {"sui_key": "suiprivkey1...", "quote_key": "..."}
+#   options/<env>/scheduler  -> {"sui_key": "suiprivkey1..."}  (deployer key,
+#                                holds AdminCap; absent if scheduler isn't
+#                                deployed in this env)
 #
 # Outputs (consumed by docker-compose):
-#   /opt/options/<env>/secrets/mm-bot.toml   (read by mm-bot via /run/secrets)
-#   /opt/options/<env>/.env line: DB_PASSWORD=<indexer.db_password>
+#   /opt/options/<env>/secrets/mm-bot.toml       (read by mm-bot)
+#   /opt/options/<env>/secrets/scheduler.toml    (read by option-scheduler)
+#   /opt/options/<env>/secrets/.db_password      (sourced into .env by deploy.sh)
+#
+# Idempotent: re-running overwrites the rendered files. Services whose
+# AWS secret is absent are silently skipped — that's the supported way
+# to opt-out of a service in a given env (e.g. mm-bot in prod).
 #
 # Requires `jq` and `aws` (installed by ec2-bootstrap.sh).
 
@@ -45,7 +53,6 @@ echo "$DB_PASSWORD" > "$DIR/.db_password"
 chmod 600 "$DIR/.db_password"
 
 # ---- mm-bot secret -> rendered TOML --------------------------------------
-# Skip if the secret doesn't exist (prod intentionally has no mm-bot for now).
 if MM_JSON=$(fetch mm-bot 2>/dev/null); then
   SUI_KEY=$(echo "$MM_JSON" | jq -r '.sui_key')
   QUOTE_KEY=$(echo "$MM_JSON" | jq -r '.quote_key')
@@ -64,6 +71,22 @@ $NETWORK = "$SUI_KEY"
 
 [mm_bot]
 quote_key = "$QUOTE_KEY"
+EOF
+fi
+
+# ---- option-scheduler secret -> rendered TOML ----------------------------
+# The scheduler signs with the deployer key (AdminCap holder). One Sui
+# key per env; no quote key (scheduler doesn't sign quotes).
+if SCH_JSON=$(fetch scheduler 2>/dev/null); then
+  SUI_KEY=$(echo "$SCH_JSON" | jq -r '.sui_key')
+  if [ -z "$SUI_KEY" ] || [ "$SUI_KEY" = "null" ]; then
+    echo "missing sui_key in options/$ENV/scheduler" >&2
+    exit 1
+  fi
+  umask 077
+  cat > "$DIR/scheduler.toml" <<EOF
+[sui]
+$NETWORK = "$SUI_KEY"
 EOF
 fi
 

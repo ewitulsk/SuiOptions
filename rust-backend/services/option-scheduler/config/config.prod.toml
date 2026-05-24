@@ -1,0 +1,18 @@
+# option-scheduler config — prod env (Sui mainnet).
+# Chain-side ids (package, AdminCap, deployer address, token coin types,
+# pyth feed ids) come from `deployments.json::mainnet`.
+#
+# Pairs / cadence intentionally left empty until prod mm-bot bootstrap
+# (faucet-less mainnet flow) is resolved — the scheduler would create
+# bucket families that no MM is around to quote on. Keep the deploy
+# wiring in place but the [[pairs]] list empty so the binary boots and
+# exits cleanly with "no pairs configured" at startup.
+
+indexer_url       = "ws://indexer:9001/"
+tick_secs         = 60
+roll_threshold_ms = 604_800_000
+
+[pyth]
+hermes_url = "https://hermes.pyth.network"
+
+# No [[pairs]] entries — see header.

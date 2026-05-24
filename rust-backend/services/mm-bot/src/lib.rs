@@ -29,7 +29,7 @@ pub struct Cli {
     pub gas_budget: u64,
 }
 
-shared::define_program! {
+cli_spec::define_program! {
     id          = "mm-bot",
     cargo_pkg   = "mm-bot",
     working_dir = ".",

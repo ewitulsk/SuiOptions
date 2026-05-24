@@ -1,0 +1,15 @@
+[package]
+name = "runtime-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+config = { version = "0.14", features = ["toml"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

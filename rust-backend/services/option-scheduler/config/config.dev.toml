@@ -1,0 +1,37 @@
+# option-scheduler config — dev env (Sui testnet).
+# Chain-side ids (package, AdminCap, deployer address, test-token coin
+# types, pyth feed ids) come from `deployments.json::testnet`.
+
+# WS endpoint of the indexer fanout inside the compose stack.
+indexer_url       = "ws://indexer:9001/"
+
+tick_secs         = 60
+roll_threshold_ms = 604_800_000   # 1 week
+
+[pyth]
+hermes_url = "https://hermes.pyth.network"
+
+[[pairs]]
+underlying          = "TBTC"
+settlement          = "TUSDC"
+expiry_interval_ms  = 604_800_000
+strikes_below       = 4
+strikes_above       = 4
+interval_pct        = 5.0
+
+  [pairs.spot]
+  source             = "pyth"
+  max_publish_lag_ms = 30_000
+  max_conf_bps       = 100
+
+[[pairs]]
+underlying          = "TDEEP"
+settlement          = "TUSDC"
+expiry_interval_ms  = 604_800_000
+strikes_below       = 2
+strikes_above       = 2
+interval_pct        = 10.0
+
+  [pairs.spot]
+  source = "static"
+  usd    = 0.15

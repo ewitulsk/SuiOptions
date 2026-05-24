@@ -117,7 +117,7 @@ pub struct RfqResponsePayload {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RfqQuoteEntry {
     pub quote: Quote,
-    #[serde(with = "crate::protocol_types::coding::bytes_hex")]
+    #[serde(with = "crate::coding::bytes_hex")]
     pub signature: Vec<u8>,
     pub mm_id: ObjectId,
     pub mm_reputation: f64,
@@ -161,20 +161,20 @@ pub struct MmHelloPayload {
     /// signature this MM ships during the session). Must match the value
     /// registered on the Account on chain.
     pub signing_scheme: crate::SigningScheme,
-    #[serde(with = "crate::protocol_types::coding::bytes_hex")]
+    #[serde(with = "crate::coding::bytes_hex")]
     pub signing_pubkey: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthResponsePayload {
-    #[serde(with = "crate::protocol_types::coding::bytes_hex")]
+    #[serde(with = "crate::coding::bytes_hex")]
     pub signature: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MmQuotePayload {
     pub quote: Quote,
-    #[serde(with = "crate::protocol_types::coding::bytes_hex")]
+    #[serde(with = "crate::coding::bytes_hex")]
     pub signature: Vec<u8>,
 }
 
@@ -225,7 +225,7 @@ pub enum ServiceToMm {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthChallengePayload {
-    #[serde(with = "crate::protocol_types::coding::bytes_hex")]
+    #[serde(with = "crate::coding::bytes_hex")]
     pub challenge: Vec<u8>,
 }
 

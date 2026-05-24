@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use shared::config_load;
+use runtime_config::config_load;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -109,7 +109,7 @@ impl Config {
     /// `network`. Surfaced as `String` because that's the form the
     /// event-type builder needs (`{package_id}::events::EventName`).
     pub fn resolve_package_id(&self) -> Result<String> {
-        let dep = shared::deployments::Deployments::load(&self.deployments_path)?;
+        let dep = deployments::Deployments::load(&self.deployments_path)?;
         let net = dep.for_network(&self.network).with_context(|| {
             format!(
                 "resolving network {} in {}",
