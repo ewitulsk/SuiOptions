@@ -5,7 +5,7 @@ use clap::Parser;
 use tracing::info;
 
 use api_service::{catalog::TokenCatalog, router, AppState, Cli, Config};
-use shared::deployments::Deployments;
+use deployments::Deployments;
 
 #[tokio::main]
 async fn main() -> Result<()> {

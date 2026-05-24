@@ -118,7 +118,7 @@ type SeriesKey = (String, String, u64);
 
 /// Pure helper — split out so it's unit-testable without spinning up axum.
 fn group_into_series(
-    buckets: Vec<(shared::protocol_types::ids::ObjectId, Bucket)>,
+    buckets: Vec<(protocol_types::ids::ObjectId, Bucket)>,
     catalog: &TokenCatalog,
 ) -> Vec<SeriesDto> {
     let mut grouped: BTreeMap<SeriesKey, Vec<(String, Bucket)>> = BTreeMap::new();
@@ -210,11 +210,11 @@ fn iso_millis(ms: i64) -> String {
 mod tests {
     use super::*;
     use crate::bucket::Bucket;
-    use shared::deployments::{
+    use deployments::{
         Deployments, NetworkDeployment, PackageInfo, TestTokens, TokenInfo, TokenSpec,
     };
-    use shared::protocol_types::asset::AssetType;
-    use shared::protocol_types::ids::ObjectId;
+    use protocol_types::asset::AssetType;
+    use protocol_types::ids::ObjectId;
     use std::collections::BTreeMap;
 
     fn fixture_catalog() -> TokenCatalog {
