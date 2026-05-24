@@ -9,15 +9,19 @@ use protocol_types::events::{ChainEvent, IndexedEvent};
 use protocol_types::ids::ObjectId;
 
 use crate::bucket::Bucket;
+use crate::catalog::TokenCatalog;
 
-#[derive(Default)]
 pub struct AppState {
     buckets: RwLock<BTreeMap<ObjectId, Bucket>>,
+    pub catalog: TokenCatalog,
 }
 
 impl AppState {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(catalog: TokenCatalog) -> Self {
+        Self {
+            buckets: RwLock::new(BTreeMap::new()),
+            catalog,
+        }
     }
 
     pub fn active_buckets(&self) -> Vec<(ObjectId, Bucket)> {
@@ -35,7 +39,14 @@ impl indexer_client::EventSink for AppState {
         trace!(sequence = indexed.sequence, "ingesting indexer event");
         match &indexed.event {
             ChainEvent::BucketCreated(b) => {
-                debug!(bucket = %b.bucket_id, strike = b.strike, "BucketCreated");
+                debug!(
+                    bucket = %b.bucket_id,
+                    asset_type = %b.asset_type,
+                    settlement_type = %b.settlement_type,
+                    strike = b.strike,
+                    expiry_ms = b.expiry_ms,
+                    "BucketCreated"
+                );
                 self.buckets.write().insert(
                     b.bucket_id,
                     Bucket {
@@ -86,7 +97,7 @@ mod tests {
 
     #[test]
     fn bucket_lifecycle() {
-        let s = AppState::new();
+        let s = AppState::new(TokenCatalog::default());
         let id = ObjectId::new([0xaa; 32]);
         s.ingest_event(&evt(
             1,

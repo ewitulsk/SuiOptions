@@ -5,6 +5,7 @@
 //! Holds no funds, signs nothing — strictly a read/query layer.
 
 pub mod bucket;
+pub mod catalog;
 pub mod config;
 pub mod handlers;
 pub mod router;

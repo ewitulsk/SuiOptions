@@ -1,0 +1,14 @@
+# Tell the linker where to find Homebrew's keg-only libpq on Apple Silicon.
+# `pq-sys` (transitive through diesel → indexer → control-panel) links
+# against `-lpq`, which isn't on the default search path because Homebrew
+# doesn't symlink libpq into /opt/homebrew/lib (it conflicts with the
+# postgresql formula).
+#
+# If you're on Intel macOS, libpq lives at /usr/local/opt/libpq/lib.
+# If you're on Linux with libpq-dev installed system-wide, this block is
+# harmless — a missing path just gets ignored by the linker.
+[target.aarch64-apple-darwin]
+rustflags = ["-L", "/opt/homebrew/opt/libpq/lib"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-L", "/usr/local/opt/libpq/lib"]

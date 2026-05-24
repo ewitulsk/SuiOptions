@@ -10,7 +10,20 @@ import { WriterPanels, TraderPanels } from "../components/Panels";
 import { QuoteFeed } from "../components/QuoteFeed";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { Toast } from "../components/Toast";
+import { LiveBuckets } from "../components/LiveBuckets";
 import type { View } from "../types";
+import type { ComposerState } from "../mocks/composer";
+
+function assetLabel(s: ComposerState): string {
+  return s.series?.asset_symbol ?? "—";
+}
+
+function expiryLabel(s: ComposerState): string {
+  if (!s.series) return "—";
+  const d = new Date(s.series.expiry_iso);
+  if (Number.isNaN(d.getTime())) return s.series.expiry_iso;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
 
 type Props = {
   initialView: View;
@@ -48,19 +61,21 @@ export function Composer({ initialView, onNavigate }: Props) {
       />
 
       <div className="app__wrap">
+        <LiveBuckets />
+
         <BucketBar spot={s.spot} capPct={43} />
 
         <div className="question">
           {s.view === "writer" ? (
             <>
-              What strike are you happy to <b>sell</b> BTC at on Jun 26?
+              What strike are you happy to <b>sell</b> {assetLabel(s)} at on {expiryLabel(s)}?
               <span className="qsub">
                 Pick a tile. You earn the premium upfront either way.
               </span>
             </>
           ) : (
             <>
-              What strike do you want the right to <b>buy</b> BTC at, before Jun 26?
+              What strike do you want the right to <b>buy</b> {assetLabel(s)} at, before {expiryLabel(s)}?
               <span className="qsub">
                 Pick a tile. You pay the premium upfront, exercise anytime.
               </span>
@@ -68,12 +83,20 @@ export function Composer({ initialView, onNavigate }: Props) {
           )}
         </div>
 
-        <StrikeTiles
-          strikes={s.strikes}
-          selectedIdx={s.selectedIdx}
-          onSelect={s.setSelectedIdx}
-          view={s.view}
-        />
+        {s.bucketsLoading ? (
+          <div className="composer-status">loading strikes from indexer…</div>
+        ) : s.bucketsEmpty ? (
+          <div className="composer-status">
+            no buckets available yet — the option-scheduler hasn't created any for this series
+          </div>
+        ) : (
+          <StrikeTiles
+            strikes={s.strikes}
+            selectedIdx={s.selectedIdx}
+            onSelect={s.setSelectedIdx}
+            view={s.view}
+          />
+        )}
 
         <AmountInput
           amount={s.amount}
@@ -112,7 +135,13 @@ export function Composer({ initialView, onNavigate }: Props) {
         <button
           className="cta"
           onClick={s.submit}
-          disabled={!s.connected || s.insufficient || s.quotes.length === 0}
+          disabled={
+            !s.connected ||
+            s.insufficient ||
+            s.quotes.length === 0 ||
+            s.bucketsLoading ||
+            s.bucketsEmpty
+          }
         >
           {s.view === "writer" ? writerCtaLabel : traderCtaLabel}
         </button>
