@@ -1,0 +1,73 @@
+name: Deploy latest ECR build
+
+# Manual one-button redeploy of whatever's most recently in ECR — no
+# build phase, just pick up the latest tag and roll every service onto
+# it. Use when:
+#   - A build succeeded but the deploy step crashed and you want to
+#     retry without rebuilding.
+#   - You need to bring a fresh env online from already-built images.
+#
+# "Latest" is defined as the most recently-pushed tag in options/indexer.
+# That repo is the canonical reference because indexer rebuilds on most
+# changes (every service depends on protocol-types, which indexer also
+# depends on, and protocol-types churn forces a full rebuild). This works
+# cleanly when the latest build was a force_all run (all five services
+# share a tag). If the latest build was selective, the chosen tag may
+# only exist in some repos and deploy.sh will fail at the docker pull —
+# in that case fall back to deploy-image.yml with an explicit tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+        default: staging
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: tag
+        run: |
+          # Newest tagged image in options/indexer, by push timestamp.
+          # imageTags is null for images whose tags have been deleted —
+          # filter those out so we don't pick a ghost reference.
+          TAG=$(aws ecr describe-images \
+            --repository-name options/indexer \
+            --query 'sort_by(imageDetails[?imageTags != `null`],& imagePushedAt)[-1].imageTags[0]' \
+            --output text)
+          if [ -z "$TAG" ] || [ "$TAG" = "None" ]; then
+            echo "no tagged images in ECR options/indexer" >&2
+            exit 1
+          fi
+          echo "latest tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: discover
+    uses: ./.github/workflows/_deploy.yml
+    secrets: inherit
+    with:
+      envs: ${{ format('["{0}"]', inputs.environment) }}
+      # Setting image_tag here triggers _deploy.yml's override path:
+      # build is skipped and every service is rolled to this tag (see
+      # the force_all-or-image_tag branch in _deploy.yml's `affected`
+      # job).
+      image_tag: ${{ needs.discover.outputs.tag }}
