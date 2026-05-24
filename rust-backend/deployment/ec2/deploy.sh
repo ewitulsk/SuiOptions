@@ -186,8 +186,11 @@ docker compose -f "$COMPOSE_FILE" up -d nginx
 # /health endpoint and should be skipped.
 health_path_for() {
   case "$1" in
-    quoting-service) echo "/$ENV/quoting/health" ;;
-    api-service)     echo "/$ENV/api/health" ;;
+    quoting-service)  echo "/$ENV/quoting/health" ;;
+    api-service)      echo "/$ENV/api/health" ;;
+    indexer)          echo "/$ENV/indexer/health" ;;
+    option-scheduler) echo "/$ENV/scheduler/health" ;;
+    mm-bot)           echo "/$ENV/mm-bot/health" ;;
     *) return 1 ;;
   esac
 }
