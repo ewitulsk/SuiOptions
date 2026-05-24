@@ -1,10 +1,12 @@
-# Ubuntu 22.04 LTS ARM64 (the cheapest x86-equivalent in the t4g family).
+# Ubuntu 22.04 LTS amd64. Matches t3.* (Intel). Keep this filter in
+# sync with ec2_instance_type — switching the instance family without
+# switching the AMI architecture would fail to boot.
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
   filter {
     name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-arm64-server-*"]
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
   }
   filter {
     name   = "virtualization-type"
@@ -25,12 +27,12 @@ resource "aws_key_pair" "host" {
 
 locals {
   bootstrap_user_data = templatefile("${path.module}/templates/cloud-init.sh.tftpl", {
-    bootstrap_script    = file("${path.module}/../deployment/ec2/ec2-bootstrap.sh")
-    deploy_script       = file("${path.module}/../deployment/ec2/deploy.sh")
-    render_secrets_sh   = file("${path.module}/../deployment/ec2/render-secrets.sh")
-    compose_dev         = file("${path.module}/../deployment/compose/docker-compose.dev.yml")
-    compose_staging     = file("${path.module}/../deployment/compose/docker-compose.staging.yml")
-    compose_prod        = file("${path.module}/../deployment/compose/docker-compose.prod.yml")
+    bootstrap_script  = file("${path.module}/../deployment/ec2/ec2-bootstrap.sh")
+    deploy_script     = file("${path.module}/../deployment/ec2/deploy.sh")
+    render_secrets_sh = file("${path.module}/../deployment/ec2/render-secrets.sh")
+    compose_dev       = file("${path.module}/../deployment/compose/docker-compose.dev.yml")
+    compose_staging   = file("${path.module}/../deployment/compose/docker-compose.staging.yml")
+    compose_prod      = file("${path.module}/../deployment/compose/docker-compose.prod.yml")
   })
 }
 

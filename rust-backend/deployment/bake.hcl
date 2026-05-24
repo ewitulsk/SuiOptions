@@ -1,6 +1,8 @@
 # `docker buildx bake` config for the workspace's service images.
-# Targets linux/arm64 (Graviton EC2). On x86 GH runners the build goes
-# through QEMU emulation; ~2x slower than native, still under 10 minutes.
+# Targets linux/amd64 (t3.* Intel EC2). Builds native on x86 GH runners
+# — no QEMU emulation. Switching to ARM means: bump platforms below,
+# add setup-qemu-action back to _deploy.yml, swap the EC2 instance
+# family + AMI filter in infra/ to t4g.* + arm64-server.
 #
 # Typical invocation (CI): `docker buildx bake --push <target>` where
 # <target> is one of indexer / quoting-service / mm-bot / option-scheduler.
@@ -21,8 +23,8 @@ variable "IMAGE_TAG" {
 # another's compiled layers. The scope strings must be stable across
 # runs — keep them in sync with the target names.
 target "_common" {
-  context    = "."
-  platforms  = ["linux/arm64"]
+  context   = "."
+  platforms = ["linux/amd64"]
 }
 
 target "indexer" {
