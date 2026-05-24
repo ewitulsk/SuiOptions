@@ -19,7 +19,6 @@
 
 pub mod config;
 pub mod errors;
-pub mod indexer_client;
 pub mod rfq;
 pub mod state;
 pub mod ws;

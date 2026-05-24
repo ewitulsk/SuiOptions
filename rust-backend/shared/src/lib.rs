@@ -23,6 +23,7 @@
 
 pub mod config_load;
 pub mod deployments;
+pub mod indexer_client;
 pub mod logging;
 pub mod pricing;
 pub mod program_spec;

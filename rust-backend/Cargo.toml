@@ -6,6 +6,7 @@ members = [
     "services/quoting-service",
     "services/mm-bot",
     "services/option-scheduler",
+    "services/api-service",
     "tools/deployment-manager",
     "tools/exchange",
     "tools/writer",
@@ -67,6 +68,10 @@ move-core-types = { git = "https://github.com/mystenlabs/sui", package = "move-c
 
 clap = { version = "4", features = ["derive", "env"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+# HTTP server (api-service).
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Postgres persistence for the indexer.
 diesel = { version = "2.2", features = ["postgres", "r2d2", "chrono", "numeric", "serde_json"] }

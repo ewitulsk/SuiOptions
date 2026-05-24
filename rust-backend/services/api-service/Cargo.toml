@@ -1,0 +1,39 @@
+[package]
+name = "api-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "api-service"
+path = "src/main.rs"
+
+[dependencies]
+shared = { workspace = true }
+
+config = { version = "0.14", features = ["toml"] }
+clap = { workspace = true }
+
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+
+axum = { workspace = true }
+tower-http = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

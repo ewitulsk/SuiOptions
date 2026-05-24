@@ -1,0 +1,9 @@
+# api-service config (local dev).
+#
+# Subscribes to the indexer's WS fanout and serves HTTP to the frontend.
+
+bind_addr        = "127.0.0.1:9003"
+indexer_url      = "ws://127.0.0.1:9001/"
+
+# Frontend dev origins. Use ["*"] for permissive dev only.
+allowed_origins  = ["http://localhost:5173", "http://127.0.0.1:5173"]

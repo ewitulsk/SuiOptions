@@ -125,6 +125,12 @@ impl AppState {
     }
 }
 
+impl shared::indexer_client::EventSink for AppState {
+    fn ingest_event(&self, event: &IndexedEvent) {
+        AppState::ingest_event(self, event);
+    }
+}
+
 /// Background task: evict expired reservations every `tick`.
 pub fn spawn_reservation_evictor(state: Arc<AppState>, tick: Duration) {
     tokio::spawn(async move {
