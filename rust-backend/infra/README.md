@@ -1,7 +1,8 @@
 # infra/
 
 Terraform that stands up the whole stack: VPC, EC2, RDS Postgres, ECR,
-Secrets Manager, ALB + ACM + Route 53, and the GitHub Actions OIDC role.
+Secrets Manager, ALB + ACM + Route 53, the GitHub Actions OIDC role,
+and a Grafana + Loki monitoring stack for centralized log ingestion.
 
 See `../deployment.md` for what each piece does and why. This README is
 just the apply runbook.
@@ -184,10 +185,127 @@ the `alb_dns_name` output.
 terraform destroy
 ```
 
-Two things Terraform leaves behind on purpose:
+Three things Terraform leaves behind on purpose:
 - **ECR images**: the lifecycle policy keeps the last 20 tags. To wipe
   them, manually delete the repos before destroying, or set
   `force_delete = true` on each `aws_ecr_repository`.
 - **RDS final snapshot**: `skip_final_snapshot = true` for cheapness;
   destroy drops the DB cleanly with no snapshot left behind. Flip this
   for prod when you care.
+- **Loki S3 bucket + monitoring EBS volume**: log data and Grafana state
+  are intentionally preserved. Delete them manually if you truly want a
+  clean slate.
+
+---
+
+## Monitoring (Grafana + Loki)
+
+Grafana, Loki, and Promtail all run on the services EC2 alongside the
+per-env compose stacks. No dedicated monitoring instance needed.
+
+### What gets deployed
+
+```
+Services EC2
+┌──────────────────────────────────────────┐
+│  indexer           (dev / staging / prod) │
+│  quoting                  "              │
+│  mm-bot                   "              │
+│  option-scheduler         "              │
+│  api-service              "              │
+│  nginx (reverse proxy)    "              │
+│                                          │
+│  Promtail (:9080) ─── Loki (:3100)      │
+│                        S3-backed         │
+│  Grafana (:3000)                         │
+│    dashboards + auth                     │
+└──────────────────────────────────────────┘
+              ▲
+              │ /grafana/*
+         ALB (HTTPS)
+```
+
+### Persistence
+
+| Data | Storage | Survives redeploy? |
+|---|---|---|
+| Grafana (dashboards, users, alerts) | Bind mount on root EBS (`/opt/options/monitoring/grafana/`) | Yes — survives container restarts |
+| Loki log chunks + index | S3 bucket (`options-loki-*`) | Yes — `force_destroy = false` |
+| Promtail positions | Docker named volume | Yes |
+
+### After apply
+
+1. **Access Grafana** at the URL from `terraform output grafana_url`
+   (e.g. `https://api.<domain>/grafana/`).
+
+2. **Log in** with username `admin` and the password from:
+   ```bash
+   aws secretsmanager get-secret-value \
+     --secret-id options/monitoring/grafana-admin \
+     --query SecretString --output text
+   ```
+
+3. **Verify logs** are flowing: Explore → Loki → `{env="dev"}` should
+   show container logs within a minute of the services starting.
+
+### Deploying monitoring on an existing instance
+
+If the services EC2 was provisioned before this monitoring stack, the
+cloud-init block won't have run. Deploy the monitoring stack manually:
+
+```bash
+# On the services EC2 (via SSM Session Manager):
+cd /opt/options/monitoring
+
+# Copy deployment/monitoring/* files into the correct subdirs:
+#   loki-config.yml        → loki/config/
+#   grafana-datasources.yml → grafana/provisioning/datasources/datasources.yml
+#   promtail-config.yml    → promtail/config/
+#   docker-compose.monitoring.yml → .
+#   docker-compose.promtail.yml   → .
+
+# Create .env (fill in your values):
+cat > .env <<EOF
+DATA_DIR=/opt/options/monitoring
+LOKI_S3_BUCKET=<your-loki-bucket>
+AWS_REGION=us-east-1
+GRAFANA_DOMAIN=<your-domain>
+GRAFANA_ADMIN_PASSWORD=<from-secrets-manager>
+LOKI_URL=http://loki:3100
+EOF
+
+docker compose -f docker-compose.monitoring.yml -f docker-compose.promtail.yml up -d
+```
+
+### Log labels
+
+Promtail auto-discovers Docker containers and applies these labels:
+
+| Label | Source | Example |
+|---|---|---|
+| `env` | Compose project name (`options-<env>`) | `dev`, `staging`, `prod`, `monitoring` |
+| `service` | Compose service name | `indexer`, `quoting`, `mm-bot`, `option-scheduler`, `api-service`, `nginx` |
+| `container` | Docker container name | `options-dev-indexer-1` |
+| `level` | Parsed from JSON log lines | `INFO`, `ERROR`, `DEBUG` |
+
+### Useful LogQL queries
+
+```
+# All errors across all envs:
+{service=~".+"} |= "ERROR"
+
+# Indexer logs for prod only:
+{env="prod", service="indexer"}
+
+# All api-service logs in staging:
+{env="staging", service="api-service"}
+
+# mm-bot errors in dev:
+{env="dev", service="mm-bot"} | json | level = "ERROR"
+
+# option-scheduler across all envs:
+{service="option-scheduler"}
+
+# nginx access logs for prod:
+{env="prod", service="nginx"}
+```

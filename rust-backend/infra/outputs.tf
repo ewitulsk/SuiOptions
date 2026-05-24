@@ -69,6 +69,23 @@ output "secrets_to_fill" {
   )
 }
 
+# ---- Monitoring outputs ------------------------------------------------------
+
+output "grafana_url" {
+  description = "Grafana URL via the ALB."
+  value       = "https://${var.domain_name}/grafana/"
+}
+
+output "loki_bucket" {
+  description = "S3 bucket backing Loki chunk + index storage."
+  value       = aws_s3_bucket.loki.bucket
+}
+
+output "grafana_admin_secret" {
+  description = "Secrets Manager entry holding the Grafana admin password."
+  value       = aws_secretsmanager_secret.grafana_admin.name
+}
+
 output "tailscale_setup" {
   description = "One-time Tailscale wiring after apply. See infra/README.md for the full runbook."
   value = {

@@ -1,0 +1,51 @@
+# Promtail configuration — runs on the services EC2 instance.
+# Discovers all Docker containers and ships their logs to Loki
+# with env + service labels.
+#
+# LOKI_URL is expanded at runtime via -config.expand-env=true.
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: ${LOKI_URL}/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+    relabel_configs:
+      # Use the container name as the "container" label.
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/?(.*)"
+        target_label: "container"
+
+      # Extract the compose project name as the "env" label.
+      # Compose project names follow options-<env> convention.
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_project"]
+        regex: "options-(.*)"
+        target_label: "env"
+
+      # Use the compose service name as the "service" label.
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_service"]
+        target_label: "service"
+
+      # Drop containers that are not part of any compose project.
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_project"]
+        regex: ""
+        action: drop
+
+    pipeline_stages:
+      # Detect JSON-structured log lines (Rust tracing-subscriber JSON output).
+      - json:
+          expressions:
+            level: level
+            message: fields.message
+      - labels:
+          level:
+      # Fall through for plain-text logs; they get ingested as-is.

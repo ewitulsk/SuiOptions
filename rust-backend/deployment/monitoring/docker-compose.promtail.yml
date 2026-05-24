@@ -1,0 +1,26 @@
+# Promtail — runs on the services EC2 alongside Grafana and Loki.
+# Discovers all Docker containers via the Docker socket and ships their
+# logs to Loki over the shared monitoring Docker network.
+#
+# Started together with docker-compose.monitoring.yml:
+#   docker compose -f docker-compose.monitoring.yml -f docker-compose.promtail.yml up -d
+
+services:
+  promtail:
+    image: grafana/promtail:3.4.2
+    command: -config.file=/etc/promtail/promtail-config.yml -config.expand-env=true
+    environment:
+      LOKI_URL: ${LOKI_URL}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ${DATA_DIR}/promtail/config:/etc/promtail:ro
+      - promtail_positions:/tmp
+    restart: unless-stopped
+    networks: [monitoring]
+
+volumes:
+  promtail_positions:
+
+networks:
+  monitoring:

@@ -39,6 +39,65 @@ RENDER_EOF
   chmod +x "/opt/options/$env/render-secrets.sh"
 done
 
+# ---- Monitoring stack (Grafana + Loki + Promtail) ---------------------------
+# Everything runs on this same host. Promtail talks to Loki on localhost.
+
+MONITORING_DIR=/opt/options/monitoring
+
+mkdir -p "$MONITORING_DIR"/{loki/config,loki/data,loki/cache,loki/compactor,grafana/data,grafana/provisioning/datasources,promtail/config}
+
+# Loki config.
+cat > "$MONITORING_DIR/loki/config/loki-config.yml" <<'LOKI_CFG_EOF'
+${loki_config}
+LOKI_CFG_EOF
+
+# Grafana datasource provisioning.
+cat > "$MONITORING_DIR/grafana/provisioning/datasources/datasources.yml" <<'DS_EOF'
+${grafana_ds}
+DS_EOF
+
+# Promtail config.
+cat > "$MONITORING_DIR/promtail/config/promtail-config.yml" <<'PROMTAIL_CFG_EOF'
+${promtail_config}
+PROMTAIL_CFG_EOF
+
+# Docker compose: Grafana + Loki.
+cat > "$MONITORING_DIR/docker-compose.monitoring.yml" <<'MON_COMPOSE_EOF'
+${monitoring_compose}
+MON_COMPOSE_EOF
+
+# Docker compose: Promtail.
+cat > "$MONITORING_DIR/docker-compose.promtail.yml" <<'PROMTAIL_COMPOSE_EOF'
+${promtail_compose}
+PROMTAIL_COMPOSE_EOF
+
+# Fetch Grafana admin password from Secrets Manager.
+GRAFANA_ADMIN_PASSWORD=$(aws secretsmanager get-secret-value \
+  --secret-id "${grafana_secret}" \
+  --region "${aws_region}" \
+  --query SecretString --output text 2>/dev/null || echo "admin")
+
+# .env for the monitoring compose stack.
+cat > "$MONITORING_DIR/.env" <<EOF
+DATA_DIR=$MONITORING_DIR
+LOKI_S3_BUCKET=${loki_bucket}
+AWS_REGION=${aws_region}
+GRAFANA_DOMAIN=${domain_name}
+GRAFANA_ADMIN_PASSWORD=$GRAFANA_ADMIN_PASSWORD
+LOKI_URL=http://loki:3100
+EOF
+chmod 600 "$MONITORING_DIR/.env"
+
+# Fix ownership for bind-mounted data dirs.
+# Grafana runs as uid 472, Loki as uid 10001.
+chown -R 472:472 "$MONITORING_DIR/grafana"
+chown -R 10001:10001 "$MONITORING_DIR/loki/data" "$MONITORING_DIR/loki/cache" "$MONITORING_DIR/loki/compactor"
+
+# Start the full monitoring stack.
+cd "$MONITORING_DIR"
+docker compose -f docker-compose.monitoring.yml -f docker-compose.promtail.yml pull
+docker compose -f docker-compose.monitoring.yml -f docker-compose.promtail.yml up -d
+
 # ---- Tailscale subnet router ----------------------------------------------
 # Advertises the VPC CIDR onto the tailnet so teammates can reach in-VPC
 # resources (RDS, etc.) from their laptops. Auth key lives in Secrets
