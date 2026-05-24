@@ -18,6 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=builder /src/target/release/api-service /usr/local/bin/api-service
 COPY services/api-service/config/ /app/config/
+# api-service Config has `deployments_path = "deployments.json"` (relative
+# to WORKDIR /app). Without this COPY the service errors at startup:
+# `reading deployments file deployments.json: No such file or directory`.
+COPY deployments.json /app/deployments.json
 
 ENV APP_ENV=dev
 ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/api-service --config /app/config/config.${APP_ENV}.toml"]
