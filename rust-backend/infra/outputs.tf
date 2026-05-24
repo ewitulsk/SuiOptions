@@ -65,5 +65,16 @@ output "secrets_to_fill" {
   value = concat(
     [for env in local.envs : "options/${env}/indexer (auto-populated; rotate via random_password.indexer_db)"],
     [for env in ["dev", "staging"] : "options/${env}/mm-bot (REPLACE_ME — fill sui_key + quote_key)"],
+    ["options/_master/tailscale-auth-key (REPLACE_ME — fill auth_key from tailscale admin console)"],
   )
+}
+
+output "tailscale_setup" {
+  description = "One-time Tailscale wiring after apply. See infra/README.md for the full runbook."
+  value = {
+    auth_key_secret = aws_secretsmanager_secret.tailscale_auth_key.name
+    advertised_cidr = var.vpc_cidr
+    rds_endpoint    = aws_db_instance.main.address
+    admin_console   = "https://login.tailscale.com/admin/machines"
+  }
 }
