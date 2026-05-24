@@ -1,10 +1,11 @@
 # Multi-stage build for the option-scheduler.
 #
-# Target: linux/arm64 (Graviton EC2). The host build platform is set
-# via buildx in deployment/bake.hcl. Build deps mirror what the workspace
-# needs to compile the Sui git deps on a clean Debian image.
-FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
-ARG TARGETPLATFORM
+# Target: linux/arm64 (Graviton EC2). bake.hcl sets platforms=linux/arm64
+# and on x86 GH runners docker buildx emulates arm64 via QEMU for the
+# whole build. NO `--platform=$BUILDPLATFORM` on the builder — that
+# would native-compile to amd64 and leave the arm64 image with a binary
+# the Graviton kernel rejects with `Exec format error`.
+FROM rust:1-bookworm AS builder
 WORKDIR /src
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
