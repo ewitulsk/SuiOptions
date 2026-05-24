@@ -257,6 +257,53 @@
   color: #fff; font-weight: 700; font-size: 14px;
   display: flex; align-items: center; justify-content: center;
 }
+[data-theme="aqua"] .bbar__sel-icon--generic {
+  background: linear-gradient(135deg, var(--aqua-sui) 0%, var(--aqua-sui-deep) 100%);
+}
+[data-theme="aqua"] .bbar__sel--picker { position: relative; padding: 0; }
+[data-theme="aqua"] .bbar__sel-btn {
+  display: flex; align-items: center; gap: 10px;
+  padding: 16px 20px;
+  background: transparent; border: none; cursor: pointer;
+  font-family: inherit; color: inherit;
+  border-radius: 0;
+  transition: background 100ms ease;
+}
+[data-theme="aqua"] .bbar__sel-btn:hover:not(:disabled) {
+  background: rgba(77,162,255,0.06);
+}
+[data-theme="aqua"] .bbar__sel-btn:disabled { cursor: not-allowed; opacity: 0.6; }
+[data-theme="aqua"] .bbar-menu {
+  position: absolute; left: 0; top: calc(100% + 8px);
+  min-width: 220px; padding: 8px;
+  background: var(--aqua-solid-surface);
+  border: 1px solid var(--aqua-line);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(var(--aqua-shadow-rgb),0.18);
+  z-index: 100;
+}
+[data-theme="aqua"] .bbar-menu__list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 320px; overflow-y: auto;
+}
+[data-theme="aqua"] .bbar-menu__item {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; text-align: left;
+  font-family: inherit; font-size: 13px; color: var(--aqua-ink-1);
+  background: transparent; border: none; border-radius: 8px;
+  padding: 8px 10px; cursor: pointer;
+  transition: background 100ms ease;
+}
+[data-theme="aqua"] .bbar-menu__item:hover { background: rgba(77,162,255,0.10); }
+[data-theme="aqua"] .bbar-menu__item.is-active { background: rgba(77,162,255,0.14); }
+[data-theme="aqua"] .bbar-menu__item-label { font-weight: 600; }
+[data-theme="aqua"] .bbar-menu__item-sub {
+  font-size: 11px; color: var(--aqua-ink-3); margin-left: auto;
+}
+[data-theme="aqua"] .bbar-menu__item-check {
+  margin-left: 8px; color: var(--aqua-sui-deep); font-weight: 700;
+}
 [data-theme="aqua"] .bbar__sel-label {
   font-family: inherit; font-weight: 600; font-size: 14px; color: var(--aqua-ink-1);
 }
@@ -307,13 +354,28 @@
 }
 
 /* ---------- Strike tiles ---------- */
+/* Horizontal carousel: one row, scrolls sideways, fades at the edges
+   so a series with many buckets looks intentional rather than cramped. */
 [data-theme="aqua"] .tiles {
-  display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px;
+  display: flex; gap: 14px;
+  /* `safe center` centers when content fits, falls back to start when it
+     overflows so the leftmost tile isn't clipped off-screen. */
+  justify-content: safe center;
   margin-bottom: 36px;
+  padding: 4px 24px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
+          mask-image: linear-gradient(to right, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
 }
+[data-theme="aqua"] .tiles::-webkit-scrollbar { display: none; }
 [data-theme="aqua"] .tile {
   position: relative; display: flex; flex-direction: column; align-items: flex-start;
-  padding: 22px 16px 16px;
+  flex: 0 0 148px;
+  scroll-snap-align: center;
+  padding: 18px 16px 16px;
   background: var(--aqua-glass-2);
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
   border: 1px solid var(--aqua-line);
@@ -344,12 +406,6 @@
   border-color: var(--aqua-sui);
   box-shadow: 0 0 0 3px rgba(77,162,255,0.15), 0 12px 28px rgba(77,162,255,0.18);
   transform: translateY(-2px);
-}
-[data-theme="aqua"] .tile__tier {
-  font-family: "JetBrains Mono", monospace; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.10em; text-transform: uppercase;
-  color: var(--tier-ink, var(--aqua-t3));
-  margin-bottom: 4px;
 }
 [data-theme="aqua"] .tile__strike {
   font-family: "JetBrains Mono", monospace; font-size: 22px; font-weight: 700;

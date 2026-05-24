@@ -57,6 +57,16 @@ export type ComposerStateOpts = {
   initialIdx?: number;
 };
 
+export type AssetOption = {
+  symbol: string;
+  decimals: number | null;
+};
+
+export type ExpiryOption = {
+  ms: number;
+  iso: string;
+};
+
 export type ComposerState = {
   view: View;
   setView: (v: View) => void;
@@ -88,6 +98,16 @@ export type ComposerState = {
   bucketsLoading: boolean;
   /** Resolved /buckets fetch returned zero series. */
   bucketsEmpty: boolean;
+  /** Distinct assets across all returned series, sorted by symbol. */
+  assets: AssetOption[];
+  /** Currently selected asset symbol, or null until the first series arrives. */
+  selectedAsset: string | null;
+  selectAsset: (symbol: string) => void;
+  /** Expiries available for `selectedAsset`, sorted ascending by time. */
+  expiries: ExpiryOption[];
+  /** Currently selected expiry (unix ms), or null until a series is picked. */
+  selectedExpiryMs: number | null;
+  selectExpiry: (ms: number) => void;
 };
 
 export function useComposerState({
@@ -119,14 +139,66 @@ export function useComposerState({
     return () => clearInterval(t);
   }, []);
 
-  // Live strikes: take the first series the api-service returns, drop any
-  // buckets the api-service couldn't scale (decimals unknown), and use the
-  // resulting numeric strikes. Premiums stay mocked until the quoting
+  // Live strikes: user picks (asset, expiry); we look up the matching series
+  // from the api-service response. Premiums stay mocked until the quoting
   // service is wired in — we compute them from a parallel mock strike grid
   // indexed by position so they don't blow up when on-chain test strikes
   // happen to be tiny (e.g. $0.13).
   const bucketsQuery = useBuckets();
-  const series: Series | null = bucketsQuery.data?.[0] ?? null;
+  const seriesList: Series[] = useMemo(() => bucketsQuery.data ?? [], [bucketsQuery.data]);
+
+  const assets: AssetOption[] = useMemo(() => {
+    const seen = new Map<string, AssetOption>();
+    for (const s of seriesList) {
+      if (!seen.has(s.asset_symbol)) {
+        seen.set(s.asset_symbol, { symbol: s.asset_symbol, decimals: s.asset_decimals });
+      }
+    }
+    return Array.from(seen.values()).sort((a, b) => a.symbol.localeCompare(b.symbol));
+  }, [seriesList]);
+
+  const [selectedAsset, setSelectedAsset] = useState<string | null>(null);
+  const [selectedExpiryMs, setSelectedExpiryMs] = useState<number | null>(null);
+
+  // Default / clamp selectedAsset when the asset list changes.
+  useEffect(() => {
+    if (assets.length === 0) {
+      if (selectedAsset !== null) setSelectedAsset(null);
+      return;
+    }
+    if (!selectedAsset || !assets.some((a) => a.symbol === selectedAsset)) {
+      setSelectedAsset(assets[0].symbol);
+    }
+  }, [assets, selectedAsset]);
+
+  const expiries: ExpiryOption[] = useMemo(() => {
+    if (!selectedAsset) return [];
+    return seriesList
+      .filter((s) => s.asset_symbol === selectedAsset)
+      .map((s) => ({ ms: s.expiry_ms, iso: s.expiry_iso }))
+      .sort((a, b) => a.ms - b.ms);
+  }, [seriesList, selectedAsset]);
+
+  // Default / clamp selectedExpiryMs whenever the expiry list shifts.
+  useEffect(() => {
+    if (expiries.length === 0) {
+      if (selectedExpiryMs !== null) setSelectedExpiryMs(null);
+      return;
+    }
+    if (selectedExpiryMs === null || !expiries.some((e) => e.ms === selectedExpiryMs)) {
+      setSelectedExpiryMs(expiries[0].ms);
+    }
+  }, [expiries, selectedExpiryMs]);
+
+  const series: Series | null = useMemo(() => {
+    if (!selectedAsset || selectedExpiryMs === null) return null;
+    return (
+      seriesList.find(
+        (s) => s.asset_symbol === selectedAsset && s.expiry_ms === selectedExpiryMs,
+      ) ?? null
+    );
+  }, [seriesList, selectedAsset, selectedExpiryMs]);
+
   const settlementSymbol = series?.settlement_symbol ?? "USDC";
   const liveStrikes: number[] = useMemo(
     () =>
@@ -277,5 +349,11 @@ export function useComposerState({
     series,
     bucketsLoading,
     bucketsEmpty,
+    assets,
+    selectedAsset,
+    selectAsset: setSelectedAsset,
+    expiries,
+    selectedExpiryMs,
+    selectExpiry: setSelectedExpiryMs,
   };
 }
