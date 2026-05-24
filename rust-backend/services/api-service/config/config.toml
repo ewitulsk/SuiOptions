@@ -7,3 +7,8 @@ indexer_url      = "ws://127.0.0.1:9001/"
 
 # Frontend dev origins. Use ["*"] for permissive dev only.
 allowed_origins  = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+# Which Sui network slot in `deployments.json` to read from. Drives the
+# coin-type → {symbol, decimals} lookup used to enrich bucket payloads.
+network          = "testnet"
+deployments_path = "deployments.json"

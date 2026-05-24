@@ -1,8 +1,13 @@
-// Mock composer state — drop-in seam for live wallet + spot feed + MM quotes.
-// Real implementation should keep the same return shape so UI components
-// don't need to change.
+// Composer state.
+//
+// Strikes are now live (sourced from api-service /buckets via useBuckets()).
+// Everything else — wallet balances, spot price, MM quotes — is still mocked
+// pending real wiring. The hook keeps a single return shape so UI components
+// don't change as more pieces become live.
 import { useEffect, useMemo, useState } from "react";
 import { useCurrentAccount } from "@mysten/dapp-kit";
+import { useBuckets } from "../api/useBuckets";
+import type { Series } from "../api/client";
 import type {
   Bucket,
   ConfirmStage,
@@ -12,12 +17,22 @@ import type {
   View,
 } from "../types";
 
-export const STRIKE_GRID = [82000, 84000, 85000, 88000, 94000, 95000];
+// Used to compute mocked premiums by tile position. Real on-chain strikes
+// drive the tile labels; these drive the premium math so the displayed
+// premiums look the same as before this hook went live.
+const MOCK_PREMIUM_STRIKES = [82000, 84000, 85000, 88000, 94000, 95000];
 
 function mockPremiumPerUnit(spot: number, strike: number): number {
   const intrinsic = Math.max(0, spot - strike);
   const timeValue = Math.max(0, (1 - Math.abs(spot - strike) / spot) * spot * 0.025);
   return Math.max(intrinsic + timeValue, 0.001);
+}
+
+function formatExpiry(iso: string): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
 type MmFixture = {
@@ -67,6 +82,12 @@ export type ComposerState = {
   submit: () => void;
   closeConfirm: () => void;
   toast: string | null;
+  /** Series the strikes come from (asset/settlement/expiry). Null while loading or if none exist. */
+  series: Series | null;
+  /** True until the first /buckets fetch resolves. */
+  bucketsLoading: boolean;
+  /** Resolved /buckets fetch returned zero series. */
+  bucketsEmpty: boolean;
 };
 
 export function useComposerState({
@@ -98,25 +119,65 @@ export function useComposerState({
     return () => clearInterval(t);
   }, []);
 
+  // Live strikes: take the first series the api-service returns, drop any
+  // buckets the api-service couldn't scale (decimals unknown), and use the
+  // resulting numeric strikes. Premiums stay mocked until the quoting
+  // service is wired in — we compute them from a parallel mock strike grid
+  // indexed by position so they don't blow up when on-chain test strikes
+  // happen to be tiny (e.g. $0.13).
+  const bucketsQuery = useBuckets();
+  const series: Series | null = bucketsQuery.data?.[0] ?? null;
+  const settlementSymbol = series?.settlement_symbol ?? "USDC";
+  const liveStrikes: number[] = useMemo(
+    () =>
+      (series?.buckets ?? [])
+        .map((b) => b.strike)
+        .filter((s): s is number => s !== null),
+    [series],
+  );
+
   const strikes = useMemo<Strike[]>(
     () =>
-      STRIKE_GRID.map((strike) => {
-        const perUnit = mockPremiumPerUnit(spot, strike);
+      liveStrikes.map((strike, idx) => {
+        // Premium math is mocked — anchor it to a synthetic strike at this
+        // tile's position so values stay in the same range as before
+        // regardless of the real on-chain strike.
+        const mockStrike = MOCK_PREMIUM_STRIKES[idx % MOCK_PREMIUM_STRIKES.length];
+        const perUnit = mockPremiumPerUnit(spot, mockStrike);
         const total = perUnit * amount;
         return {
           strike,
           perUnit,
-          premiumDisplay: `${total.toFixed(2)} USDC`,
+          premiumDisplay: `${total.toFixed(2)} ${settlementSymbol}`,
           premium: total,
         };
       }),
-    [spot, amount],
+    [spot, amount, liveStrikes, settlementSymbol],
   );
 
-  const selected = strikes[selectedIdx];
+  // Clamp selection when the strike list shrinks/grows underneath us
+  // (e.g. first /buckets fetch resolves, or a new bucket appears).
+  useEffect(() => {
+    if (strikes.length === 0) return;
+    if (selectedIdx >= strikes.length) setSelectedIdx(strikes.length - 1);
+  }, [strikes.length, selectedIdx]);
+
+  // Placeholder used while strikes are loading or empty — keeps downstream
+  // components from crashing on `selected.strike` etc. Composer screen
+  // gates the interactive UI on bucketsLoading / bucketsEmpty instead.
+  const placeholderStrike: Strike = {
+    strike: 0,
+    perUnit: 0,
+    premium: 0,
+    premiumDisplay: `0.00 ${settlementSymbol}`,
+  };
+  const selected: Strike = strikes[selectedIdx] ?? strikes[0] ?? placeholderStrike;
   const insufficientBtc = amount > btcBalance;
   const insufficientUsdc = (selected?.premium ?? 0) > usdcBalance;
   const insufficient = view === "writer" ? insufficientBtc : insufficientUsdc;
+
+  const bucketsLoading = bucketsQuery.isLoading;
+  const bucketsEmpty = !bucketsLoading && strikes.length === 0;
 
   // Stream MM quotes whenever selection / amount / view changes
   useEffect(() => {
@@ -158,16 +219,18 @@ export function useComposerState({
     setTimeout(() => setConfirmStage("broadcast"), 1100);
     setTimeout(() => {
       const rangeStart = bucket.cursor + bucket.queued;
+      const asset = series?.asset_symbol ?? "BTC";
+      const expiry = series ? formatExpiry(series.expiry_iso) : "Jun 26th, 2026";
       setConfirmSummary({
         view,
         premium: bestPremium,
-        bucket: `BTC·jun_26·${selected.strike / 1000}k`,
+        bucket: `${asset}·${expiry}·${(selected.strike / 1000).toFixed(1)}k`,
         rangeStart,
         rangeEnd: rangeStart + amount,
         amount,
         strike: selected.strike,
-        asset: "BTC",
-        expiry: "Jun 26th, 2026",
+        asset,
+        expiry,
       });
       setConfirmStage("confirmed");
     }, 2400);
@@ -211,5 +274,8 @@ export function useComposerState({
     submit,
     closeConfirm,
     toast,
+    series,
+    bucketsLoading,
+    bucketsEmpty,
   };
 }

@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::info;
 
-use api_service::{router, AppState, Cli, Config};
+use api_service::{catalog::TokenCatalog, router, AppState, Cli, Config};
+use shared::deployments::Deployments;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -14,7 +15,14 @@ async fn main() -> Result<()> {
     let cfg_path = cli.config.to_string_lossy().into_owned();
     info!(cfg_path, "loading config");
     let cfg = Config::load(&cfg_path).with_context(|| format!("loading config from {cfg_path}"))?;
-    let state = Arc::new(AppState::new());
+
+    let deployments = Deployments::load(&cfg.deployments_path).with_context(|| {
+        format!("loading deployments from {}", cfg.deployments_path.display())
+    })?;
+    let catalog = TokenCatalog::from_deployments(&deployments, &cfg.network)
+        .with_context(|| format!("building token catalog for network {}", cfg.network))?;
+
+    let state = Arc::new(AppState::new(catalog));
 
     let url = cfg.indexer_url.clone();
     let state_for_indexer = Arc::clone(&state);

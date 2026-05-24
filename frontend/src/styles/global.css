@@ -5,3 +5,37 @@ body {
 }
 html[data-mode="dark"] body { background: #06101F; }
 button { font: inherit; cursor: pointer; }
+
+.live-buckets {
+  margin: 24px 0;
+  padding: 16px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.6);
+}
+html[data-mode="dark"] .live-buckets {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+}
+.live-buckets__title { margin: 0 0 12px; font-size: 14px; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.7; }
+.live-buckets__status { font-size: 13px; opacity: 0.7; }
+.live-buckets__status--error { color: #b00020; }
+.live-buckets__series + .live-buckets__series { margin-top: 20px; }
+.live-buckets__series-header { display: flex; gap: 12px; align-items: baseline; margin-bottom: 6px; }
+.live-buckets__pair { font-weight: 600; font-size: 14px; }
+.live-buckets__expiry { font-size: 12px; opacity: 0.65; }
+.live-buckets__table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.live-buckets__table th, .live-buckets__table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid rgba(0, 0, 0, 0.05); }
+html[data-mode="dark"] .live-buckets__table th, html[data-mode="dark"] .live-buckets__table td { border-bottom-color: rgba(255, 255, 255, 0.06); }
+.live-buckets__table th { opacity: 0.6; font-weight: 600; }
+
+.composer-status {
+  padding: 20px;
+  text-align: center;
+  font-size: 14px;
+  opacity: 0.7;
+  border: 1px dashed rgba(0, 0, 0, 0.15);
+  border-radius: 12px;
+  margin: 12px 0;
+}
+html[data-mode="dark"] .composer-status { border-color: rgba(255, 255, 255, 0.15); }
