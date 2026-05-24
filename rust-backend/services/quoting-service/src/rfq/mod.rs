@@ -215,6 +215,14 @@ pub async fn orchestrate(
             return Vec::new();
         }
     };
+    // Spec §5.8 step 1: drop RFQs against an expired bucket up front.
+    // Otherwise we'd still broadcast and an MM that signs an honest quote
+    // (with a future-dated TTL) would have its quote accepted by the
+    // service even though the on-chain write would revert.
+    if now_ms >= bucket.expiry_ms {
+        debug!(%bucket_id, now_ms, expiry_ms = bucket.expiry_ms, "rfq for expired bucket — returning empty");
+        return Vec::new();
+    }
 
     let mm_role = side.counterparty_mm();
     let mms = state.mms.all_for_role(mm_role);

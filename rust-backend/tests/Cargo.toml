@@ -7,6 +7,35 @@ license.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+# Layer 2 — full-chain e2e against a `sui-test-validator` localnet plus an
+# ephemeral Postgres. Off by default because it needs `sui` and Docker on
+# the machine and adds ~30s per test. Run with
+#   cargo test -p integration-tests --features chain --test chain_e2e
+default = []
+chain = [
+    "dep:testcontainers",
+    "dep:testcontainers-modules",
+    "dep:tempfile",
+    "dep:reqwest",
+    "dep:uuid",
+    "dep:sui-sdk",
+    "dep:sui-types",
+    "dep:sui-keys",
+    "dep:sui-json-rpc-types",
+    "dep:sui-data-ingestion-core",
+    "dep:shared-crypto",
+    "dep:move-core-types",
+    "dep:diesel",
+    "dep:diesel_migrations",
+    "dep:bigdecimal",
+    "dep:chrono",
+    "deployment-manager",
+    "mm-bot",
+    "writer",
+    "exchange",
+]
+
 [dependencies]
 shared = { workspace = true }
 indexer = { path = "../services/indexer" }
@@ -28,3 +57,29 @@ hex = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+# -- Chain-feature deps (optional) --------------------------------------------
+testcontainers = { version = "0.23", optional = true }
+testcontainers-modules = { version = "0.11", features = ["postgres"], optional = true }
+tempfile = { version = "3", optional = true }
+reqwest = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+sui-sdk = { workspace = true, optional = true }
+sui-types = { workspace = true, optional = true }
+sui-keys = { workspace = true, optional = true }
+sui-json-rpc-types = { workspace = true, optional = true }
+sui-data-ingestion-core = { workspace = true, optional = true }
+shared-crypto = { workspace = true, optional = true }
+move-core-types = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+diesel = { workspace = true, optional = true }
+diesel_migrations = { workspace = true, optional = true }
+bigdecimal = { workspace = true, optional = true }
+
+# In-process drivers for the actor wrappers. Path-only — these crates aren't
+# in our default tree, so making them optional keeps the default `cargo test`
+# build minimal.
+deployment-manager = { path = "../tools/deployment-manager", optional = true }
+mm-bot = { path = "../services/mm-bot", optional = true }
+writer = { path = "../tools/writer", optional = true }
+exchange = { path = "../tools/exchange", optional = true }
