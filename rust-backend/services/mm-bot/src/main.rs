@@ -52,8 +52,16 @@ use mm_bot::Cli;
 
 // -- Config --------------------------------------------------------------
 
+fn default_health_addr() -> std::net::SocketAddr {
+    "0.0.0.0:8084".parse().unwrap()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct BotConfig {
+    /// HTTP health-check bind address. Defaults to `0.0.0.0:8084`.
+    #[serde(default = "default_health_addr")]
+    health_addr: std::net::SocketAddr,
+
     /// Sui network the bot operates on. Selects the deployments.json
     /// slot, the `[sui].<network>` secret slot, and the Sui RPC URL.
     network: Network,
@@ -190,6 +198,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let cfg = load_config(&cli.config)?;
+    runtime_config::health::spawn(cfg.health_addr);
     let secrets_loaded = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
     let dep = Deployments::load(&cli.deployments)

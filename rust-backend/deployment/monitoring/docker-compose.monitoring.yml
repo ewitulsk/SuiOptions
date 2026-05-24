@@ -35,5 +35,22 @@ services:
     restart: unless-stopped
     networks: [monitoring]
 
+  gatus:
+    image: twinproduction/gatus:v5.17.0
+    volumes:
+      - ${DATA_DIR}/gatus/config:/config:ro
+      - ${DATA_DIR}/gatus/data:/data
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - monitoring
+      - options-dev_net
+      - options-staging_net
+
 networks:
   monitoring:
+  options-dev_net:
+    external: true
+  options-staging_net:
+    external: true

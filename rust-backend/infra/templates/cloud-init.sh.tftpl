@@ -44,7 +44,7 @@ done
 
 MONITORING_DIR=/opt/options/monitoring
 
-mkdir -p "$MONITORING_DIR"/{loki/config,loki/data,loki/cache,loki/compactor,grafana/data,grafana/provisioning/datasources,promtail/config}
+mkdir -p "$MONITORING_DIR"/{loki/config,loki/data,loki/cache,loki/compactor,grafana/data,grafana/provisioning/datasources,promtail/config,gatus/config,gatus/data}
 
 # Loki config.
 cat > "$MONITORING_DIR/loki/config/loki-config.yml" <<'LOKI_CFG_EOF'
@@ -61,7 +61,12 @@ cat > "$MONITORING_DIR/promtail/config/promtail-config.yml" <<'PROMTAIL_CFG_EOF'
 ${promtail_config}
 PROMTAIL_CFG_EOF
 
-# Docker compose: Grafana + Loki.
+# Gatus config (uptime dashboard).
+cat > "$MONITORING_DIR/gatus/config/config.yaml" <<'GATUS_CFG_EOF'
+${gatus_config}
+GATUS_CFG_EOF
+
+# Docker compose: Grafana + Loki + Gatus.
 cat > "$MONITORING_DIR/docker-compose.monitoring.yml" <<'MON_COMPOSE_EOF'
 ${monitoring_compose}
 MON_COMPOSE_EOF

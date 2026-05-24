@@ -38,8 +38,16 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+fn default_health_addr() -> std::net::SocketAddr {
+    "0.0.0.0:8083".parse().unwrap()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SchedulerConfig {
+    /// HTTP health-check bind address. Defaults to `0.0.0.0:8083`.
+    #[serde(default = "default_health_addr")]
+    pub health_addr: std::net::SocketAddr,
+
     /// WS endpoint of the indexer fanout.
     pub indexer_url: String,
 

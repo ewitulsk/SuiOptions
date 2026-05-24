@@ -119,6 +119,8 @@ async fn main() -> Result<()> {
     .await
     .context("setup_single_workflow")?;
 
+    runtime_config::health::spawn(cfg.health_addr);
+
     let fanout_store = Arc::clone(&store);
     let fanout_addr = cfg.fanout_addr;
     let heartbeat = cfg.heartbeat_interval();

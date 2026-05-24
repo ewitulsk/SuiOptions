@@ -60,6 +60,11 @@ pub struct Config {
     /// URL form, e.g. `postgresql://postgres:postgres@localhost:7654/indexer`.
     pub database_url: String,
 
+    /// HTTP health-check bind address. The uptime dashboard and ALB target
+    /// groups hit `GET /health` here. Defaults to `0.0.0.0:8081`.
+    #[serde(default = "default_health_addr")]
+    pub health_addr: SocketAddr,
+
     /// r2d2 pool size for Postgres connections. The worker holds at most one
     /// connection at a time; the fanout's cold path (history older than the
     /// in-memory tail) can hold additional ones briefly.
@@ -119,6 +124,10 @@ impl Config {
         })?;
         Ok(net.package_info.package_id.clone())
     }
+}
+
+fn default_health_addr() -> SocketAddr {
+    "0.0.0.0:8081".parse().unwrap()
 }
 
 fn default_heartbeat_secs() -> u64 {
