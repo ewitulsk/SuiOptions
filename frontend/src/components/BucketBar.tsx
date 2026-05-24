@@ -1,8 +1,14 @@
-type Props = { spot: number; capPct: number };
+import { usePythPrice } from "../api/usePythPrice";
 
-export function BucketBar({ spot, capPct }: Props) {
+type Props = { symbol: string | null | undefined; capPct: number };
+
+export function BucketBar({ symbol, capPct }: Props) {
   const r = 12;
   const c = 2 * Math.PI * r;
+  const live = usePythPrice(symbol);
+  const priceLabel = live
+    ? `$${live.price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : "—";
   return (
     <div className="bbar">
       <div className="bbar__sel">
@@ -27,10 +33,8 @@ export function BucketBar({ spot, capPct }: Props) {
       <div className="bbar__spacer"></div>
       <div className="bbar__price">
         <div>
-          <div className="bbar__price-val">
-            ${spot.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </div>
-          <div className="bbar__price-tick">+0.42% · spot live</div>
+          <div className="bbar__price-val">{priceLabel}</div>
+          <div className="bbar__price-tick">{live ? "spot live · pyth" : "connecting…"}</div>
         </div>
         <div className="bbar__cap">
           <div className="bbar__cap-ring">

@@ -1,7 +1,7 @@
 // Mock dashboard state — drop-in seam for on-chain positions, bucket cursors,
 // and exercise/claim flows. Real implementation should fetch from Sui RPC +
 // indexer and submit transactions via wallet.
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type {
   DashboardModal,
   DashboardSpots,
@@ -9,11 +9,7 @@ import type {
   OwnedPosition,
   WrittenPosition,
 } from "../types";
-
-const DASH_SPOTS: DashboardSpots = {
-  BTC: 86_420.5,
-  SUI: 4.18,
-};
+import { usePythPrice } from "../api/usePythPrice";
 
 const TODAY = new Date("2026-05-16");
 
@@ -76,20 +72,23 @@ export function useDashboardState(): DashboardState {
   const [ownedSeed, setOwnedSeed] = useState<SeedOwned[]>(SEED_OWNED);
   const [writtenSeed, setWrittenSeed] = useState<SeedWritten[]>(SEED_WRITTEN);
   const [cursors, setCursors] = useState<Record<string, number>>(SEED_CURSORS);
-  const [spots, setSpots] = useState<DashboardSpots>(DASH_SPOTS);
   const [tab, setTab] = useState<"owned" | "written">("owned");
   const [modal, setModal] = useState<DashboardModal>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  useEffect(() => {
-    const t = setInterval(() => {
-      setSpots((s) => ({
-        BTC: +(s.BTC + (Math.random() - 0.5) * s.BTC * 0.001).toFixed(2),
-        SUI: +(s.SUI + (Math.random() - 0.5) * s.SUI * 0.002).toFixed(4),
-      }));
-    }, 4000);
-    return () => clearInterval(t);
-  }, []);
+  // Two hooks → two subscriptions on the shared Pyth singleton. The client
+  // coalesces them into a single Hermes stream containing both feed ids; if
+  // /buy or /earn is also mounted with `TBTC`, that screen shares the BTC
+  // feed via the same connection (TBTC and BTC alias to the same feed id).
+  const btcLive = usePythPrice("BTC");
+  const suiLive = usePythPrice("SUI");
+  const spots = useMemo<DashboardSpots>(
+    () => ({
+      BTC: btcLive?.price ?? null,
+      SUI: suiLive?.price ?? null,
+    }),
+    [btcLive?.price, suiLive?.price],
+  );
 
   const ownedRows = useMemo<OwnedPosition[]>(
     () =>
