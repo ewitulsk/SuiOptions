@@ -6090,6 +6090,7 @@ dependencies = [
  "deployments",
  "futures",
  "futures-util",
+ "move-core-types",
  "parking_lot 0.12.5",
  "protocol-types",
  "pyth-client",
@@ -7604,6 +7605,7 @@ dependencies = [
  "anyhow",
  "config",
  "serde",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
