@@ -5,20 +5,10 @@ use std::collections::BTreeMap;
 use parking_lot::RwLock;
 use tracing::{debug, trace};
 
-use shared::protocol_types::asset::AssetType;
 use shared::protocol_types::events::{ChainEvent, IndexedEvent};
 use shared::protocol_types::ids::ObjectId;
 
-#[derive(Clone, Debug)]
-pub struct Bucket {
-    pub asset_type: AssetType,
-    pub settlement_type: AssetType,
-    pub strike: u64,
-    pub expiry_ms: u64,
-    pub total_written: u128,
-    pub exercise_cursor: u128,
-    pub cleaned: bool,
-}
+use crate::bucket::Bucket;
 
 #[derive(Default)]
 pub struct AppState {
@@ -30,7 +20,18 @@ impl AppState {
         Self::default()
     }
 
-    pub fn ingest_event(&self, indexed: &IndexedEvent) {
+    pub fn active_buckets(&self) -> Vec<(ObjectId, Bucket)> {
+        self.buckets
+            .read()
+            .iter()
+            .filter(|(_, v)| !v.cleaned)
+            .map(|(k, v)| (*k, v.clone()))
+            .collect()
+    }
+}
+
+impl shared::indexer_client::EventSink for AppState {
+    fn ingest_event(&self, indexed: &IndexedEvent) {
         trace!(sequence = indexed.sequence, "ingesting indexer event");
         match &indexed.event {
             ChainEvent::BucketCreated(b) => {
@@ -66,20 +67,13 @@ impl AppState {
             _ => {}
         }
     }
-
-    pub fn active_buckets(&self) -> Vec<(ObjectId, Bucket)> {
-        self.buckets
-            .read()
-            .iter()
-            .filter(|(_, v)| !v.cleaned)
-            .map(|(k, v)| (*k, v.clone()))
-            .collect()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::indexer_client::EventSink;
+    use shared::protocol_types::asset::AssetType;
     use shared::protocol_types::events::{BucketCleaned, BucketCreated};
 
     fn evt(seq: u64, ev: ChainEvent) -> IndexedEvent {
@@ -105,7 +99,10 @@ mod tests {
             }),
         ));
         assert_eq!(s.active_buckets().len(), 1);
-        s.ingest_event(&evt(2, ChainEvent::BucketCleaned(BucketCleaned { bucket_id: id })));
+        s.ingest_event(&evt(
+            2,
+            ChainEvent::BucketCleaned(BucketCleaned { bucket_id: id }),
+        ));
         assert_eq!(s.active_buckets().len(), 0);
     }
 }

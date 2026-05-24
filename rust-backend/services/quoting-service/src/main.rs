@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::info;
 
-use quoting_service::{indexer_client, state, AppState, Cli, Config};
+use quoting_service::{state, AppState, Cli, Config};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
     let url = cfg.indexer_url.clone();
     let app_for_indexer = Arc::clone(&app);
     tokio::spawn(async move {
-        if let Err(e) = indexer_client::run(url, app_for_indexer).await {
+        if let Err(e) = shared::indexer_client::run(url, app_for_indexer).await {
             tracing::error!(error = %e, "indexer subscriber exited");
         }
     });
