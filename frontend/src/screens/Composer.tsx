@@ -57,7 +57,17 @@ export function Composer({ initialView }: Props) {
       <div className="app__wrap">
         <LiveBuckets />
 
-        <BucketBar symbol={s.series?.asset_symbol} capPct={43} />
+        <BucketBar
+          symbol={s.selectedAsset}
+          capPct={43}
+          assets={s.assets}
+          selectedAsset={s.selectedAsset}
+          onSelectAsset={s.selectAsset}
+          expiries={s.expiries}
+          selectedExpiryMs={s.selectedExpiryMs}
+          onSelectExpiry={s.selectExpiry}
+          settlementSymbol={s.series?.settlement_symbol ?? "USDC"}
+        />
 
         <div className="question">
           {s.view === "writer" ? (
