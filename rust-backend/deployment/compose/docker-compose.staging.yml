@@ -57,7 +57,7 @@ services:
     restart: unless-stopped
     networks: [net]
 
-  # Single public entrypoint per env. Strips the /staging/{quoting,api}
+  # Single public entrypoint per env. Strips the /staging/{quoting,api,indexer,scheduler,mm-bot}
   # prefix before forwarding. depends_on is start-order only; nginx
   # tolerates backends being briefly unreachable on first boot.
   nginx:
@@ -66,7 +66,7 @@ services:
       - "9020:80"
     volumes:
       - /opt/options/staging/nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on: [quoting, api-service]
+    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot]
     restart: unless-stopped
     networks: [net]
 
