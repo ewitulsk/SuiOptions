@@ -27,10 +27,3 @@ route53_zone_id = "Z01234567890ABCDEFGHI"
 # rds_backup_retention_days = 7
 # ssh_pubkey              = "ssh-ed25519 AAAA... you@host"   # leave empty to disable SSH (SSM still works)
 # github_deploy_branches  = ["staging", "main"]
-
-# ---- CI runner (self-hosted GH Actions on spot) -----------------------------
-
-# runner_instance_type    = "c7g.xlarge"   # bump to c7g.2xlarge if builds OOM
-# runner_max_spot_price   = ""             # empty = on-demand price as cap
-# runner_root_volume_gb   = 80
-# runner_version          = "2.319.1"

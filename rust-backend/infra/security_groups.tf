@@ -63,19 +63,6 @@ resource "aws_security_group" "ec2" {
   }
 }
 
-resource "aws_security_group" "runner" {
-  name        = "${var.project}-runner"
-  description = "Self-hosted GH Actions runner. Egress only (calls out to GH + ECR + Secrets Manager); no inbound."
-  vpc_id      = aws_vpc.main.id
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
 resource "aws_security_group" "rds" {
   name        = "${var.project}-rds"
   description = "Postgres. Only the EC2 SG can reach it."
