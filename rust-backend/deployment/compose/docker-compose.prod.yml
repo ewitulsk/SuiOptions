@@ -26,8 +26,6 @@ services:
     environment:
       APP_ENV: prod
       RUST_LOG: info,quoting_service=info
-    ports:
-      - "9032:9002"
     depends_on: [indexer]
     restart: unless-stopped
     networks: [net]
@@ -60,9 +58,20 @@ services:
     environment:
       APP_ENV: prod
       RUST_LOG: info,api_service=info
-    ports:
-      - "9033:9003"
     depends_on: [indexer]
+    restart: unless-stopped
+    networks: [net]
+
+  # Single public entrypoint per env. Strips the /prod/{quoting,api}
+  # prefix before forwarding. depends_on is start-order only; nginx
+  # tolerates backends being briefly unreachable on first boot.
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "9030:80"
+    volumes:
+      - /opt/options/prod/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on: [quoting, api-service]
     restart: unless-stopped
     networks: [net]
 

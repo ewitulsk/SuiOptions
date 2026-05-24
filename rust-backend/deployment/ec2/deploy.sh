@@ -16,8 +16,10 @@
 #   <SERVICE>_TAG line per declared service across deploys.
 # - Services in the request but NOT declared in this env's compose file
 #   are logged + skipped (e.g. asking for mm-bot in prod today).
-# - Health-check + rollback runs only when quoting-service is in the
-#   planned set (only service exposing /health today).
+# - Health-check + rollback runs for each planned service that exposes
+#   /health today (quoting-service, api-service). Services without a
+#   /health endpoint are skipped — extend health_path_for() when adding
+#   one.
 
 set -euo pipefail
 
@@ -167,8 +169,29 @@ done
 docker compose -f "$COMPOSE_FILE" pull "${PLANNED_CNAMES[@]}"
 docker compose -f "$COMPOSE_FILE" up -d "${PLANNED_CNAMES[@]}"
 
-# Health-check quoting if it was rolled. Other services don't expose
-# /health yet — if they're added in the future, extend this loop.
+# nginx is the single public entrypoint per env and is NOT in
+# ALL_SERVICES — its image is a pinned public tag and it's not part of
+# the rollable set. Ensure it's running every deploy (idempotent: compose
+# no-ops if the container is already up with the same spec). nginx.conf
+# is a bind mount; updates to the file are picked up on the next nginx
+# (re)start, not on file change alone.
+docker compose -f "$COMPOSE_FILE" up -d nginx
+
+# Health-check every planned service that has a /health endpoint. Probes
+# through nginx — no service publishes a host port anymore, so the only
+# path from the host is via the env's nginx sidecar. Verifies both that
+# nginx is up AND that the upstream is reachable + healthy.
+#
+# Returns the public nginx path for $1, or non-zero if that service has no
+# /health endpoint and should be skipped.
+health_path_for() {
+  case "$1" in
+    quoting-service) echo "/$ENV/quoting/health" ;;
+    api-service)     echo "/$ENV/api/health" ;;
+    *) return 1 ;;
+  esac
+}
+
 rollback() {
   echo "rolling planned services back to prior tags" >&2
   for svc in "${PLANNED[@]}"; do
@@ -181,22 +204,24 @@ rollback() {
   docker compose -f "$COMPOSE_FILE" up -d "${PLANNED_CNAMES[@]}" || true
 }
 
+case "$ENV" in dev) NGINX_PORT=9010 ;; staging) NGINX_PORT=9020 ;; prod) NGINX_PORT=9030 ;; esac
+
 for svc in "${PLANNED[@]}"; do
-  if [ "$svc" != "quoting-service" ]; then
+  if ! path=$(health_path_for "$svc"); then
     continue
   fi
-  case "$ENV" in dev) PORT=9012 ;; staging) PORT=9022 ;; prod) PORT=9032 ;; esac
-  echo "waiting for quoting /health on :$PORT ..."
+  URL="http://localhost:$NGINX_PORT$path"
+  echo "waiting for $svc /health via nginx: $URL ..."
   healthy=0
   for i in $(seq 1 30); do
-    if curl -fsS "http://localhost:$PORT/health" >/dev/null 2>&1; then
+    if curl -fsS "$URL" >/dev/null 2>&1; then
       healthy=1
       break
     fi
     sleep 2
   done
   if [ "$healthy" -ne 1 ]; then
-    echo "quoting-service health check failed" >&2
+    echo "$svc health check failed" >&2
     rollback
     exit 1
   fi

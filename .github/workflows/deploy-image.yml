@@ -1,0 +1,39 @@
+name: Deploy specific image
+
+# Manual redeploy of an image tag that already exists in ECR — skips the
+# build phase entirely. Use to retry a failed deploy without rebuilding,
+# or to roll an env to a known-good tag.
+#
+# Rolls every service to the given tag. This matches _deploy.yml's
+# image_tag-override path, which intentionally treats a pinned tag as a
+# whole-stack rollback rather than a per-service surgery (per-service
+# rollback is a hand-rolled SSM today — see comment in _deploy.yml).
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+        default: staging
+      image_tag:
+        description: 'Image tag to deploy (must already exist in ECR, e.g. c2196b12e496).'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/_deploy.yml
+    secrets: inherit
+    with:
+      envs: ${{ format('["{0}"]', inputs.environment) }}
+      image_tag: ${{ inputs.image_tag }}
