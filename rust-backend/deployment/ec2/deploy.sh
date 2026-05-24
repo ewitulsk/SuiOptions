@@ -172,9 +172,9 @@ docker compose -f "$COMPOSE_FILE" up -d "${PLANNED_CNAMES[@]}"
 # nginx is the single public entrypoint per env and is NOT in
 # ALL_SERVICES — its image is a pinned public tag and it's not part of
 # the rollable set. Ensure it's running every deploy (idempotent: compose
-# no-ops if the container is already up with the same spec). nginx.conf
-# is a bind mount; updates to the file are picked up on the next nginx
-# (re)start, not on file change alone.
+# no-ops if the container is already up with the same spec). The reload
+# below picks up any bind-mount nginx.conf changes the bundle dropped on
+# disk, since `up -d` alone won't.
 docker compose -f "$COMPOSE_FILE" up -d nginx
 
 # Health-check every planned service that has a /health endpoint. Probes
@@ -206,6 +206,20 @@ rollback() {
   done
   docker compose -f "$COMPOSE_FILE" up -d "${PLANNED_CNAMES[@]}" || true
 }
+
+# nginx.conf is bind-mounted, so the `up -d nginx` above no-ops when
+# only the file contents changed. Validate the new config and signal a
+# graceful reload before probing health, otherwise new routes added in
+# this deploy (e.g. an additional service's /health) would 404 against
+# the stale in-memory config and trip the rollback for no real reason —
+# the SO-50 nginx-route deploy hit exactly that and is the reason this
+# block exists.
+if ! docker compose -f "$COMPOSE_FILE" exec -T nginx nginx -t; then
+  echo "nginx config validation failed" >&2
+  rollback
+  exit 1
+fi
+docker compose -f "$COMPOSE_FILE" exec -T nginx nginx -s reload
 
 case "$ENV" in dev) NGINX_PORT=9010 ;; staging) NGINX_PORT=9020 ;; prod) NGINX_PORT=9030 ;; esac
 
