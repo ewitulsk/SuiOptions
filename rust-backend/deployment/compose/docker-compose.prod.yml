@@ -1,15 +1,18 @@
 # Compose stack for the `prod` env (Sui mainnet).
 # Variables come from /opt/options/prod/.env, written by deploy.sh.
 #
-# mm-bot is commented out until the faucet-less mainnet bootstrap path
-# is in place (see services/mm-bot/config/config.prod.toml). The indexer
-# and quoting-service deploy cleanly on mainnet on their own.
+# mm-bot and option-scheduler are commented out until the faucet-less
+# mainnet bootstrap path and deployer-key handling are in place. The
+# indexer and quoting-service deploy cleanly on mainnet on their own.
+# When deploy.sh is asked to roll a service that isn't declared here it
+# logs and skips, so leaving the blocks commented is the supported way
+# to opt-out per env.
 
 name: options-prod
 
 services:
   indexer:
-    image: ${ECR}/options/indexer:${IMAGE_TAG}
+    image: ${ECR}/options/indexer:${INDEXER_TAG}
     environment:
       APP_ENV: prod
       DB_PASSWORD: ${DB_PASSWORD}
@@ -19,7 +22,7 @@ services:
     networks: [net]
 
   quoting:
-    image: ${ECR}/options/quoting-service:${IMAGE_TAG}
+    image: ${ECR}/options/quoting-service:${QUOTING_TAG}
     environment:
       APP_ENV: prod
       RUST_LOG: info,quoting_service=info
@@ -30,7 +33,7 @@ services:
     networks: [net]
 
   # mm-bot:
-  #   image: ${ECR}/options/mm-bot:${IMAGE_TAG}
+  #   image: ${ECR}/options/mm-bot:${MM_BOT_TAG}
   #   environment:
   #     APP_ENV: prod
   #     RUST_LOG: info,mm_bot=info
@@ -38,6 +41,17 @@ services:
   #     - mm_bot_state:/app/state
   #     - /opt/options/prod/secrets:/run/secrets:ro
   #   depends_on: [quoting]
+  #   restart: unless-stopped
+  #   networks: [net]
+
+  # option-scheduler:
+  #   image: ${ECR}/options/option-scheduler:${SCHEDULER_TAG}
+  #   environment:
+  #     APP_ENV: prod
+  #     RUST_LOG: info,option_scheduler=info
+  #   volumes:
+  #     - /opt/options/prod/secrets:/run/secrets:ro
+  #   depends_on: [indexer]
   #   restart: unless-stopped
   #   networks: [net]
 

@@ -12,9 +12,9 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use tracing::{debug, trace};
 
-use shared::protocol_types::asset::AssetType;
-use shared::protocol_types::ids::{ObjectId, SuiAddress};
-use shared::protocol_types::SigningScheme;
+use protocol_types::asset::AssetType;
+use protocol_types::ids::{ObjectId, SuiAddress};
+use protocol_types::SigningScheme;
 
 use super::reservations::ReservationTable;
 

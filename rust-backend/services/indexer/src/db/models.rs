@@ -10,9 +10,9 @@ use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use std::str::FromStr;
 
-use shared::protocol_types::asset::AssetType;
-use shared::protocol_types::events::{ChainEvent, IndexedEvent};
-use shared::protocol_types::ids::{ObjectId, SuiAddress};
+use protocol_types::asset::AssetType;
+use protocol_types::events::{ChainEvent, IndexedEvent};
+use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::store::{AccountState, BucketState, PositionState};
 

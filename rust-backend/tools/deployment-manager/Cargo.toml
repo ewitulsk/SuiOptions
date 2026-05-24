@@ -12,7 +12,11 @@ name = "deploy"
 path = "src/main.rs"
 
 [dependencies]
-shared = { workspace = true }
+protocol-types = { workspace = true }
+runtime-config = { workspace = true }
+cli-spec       = { workspace = true }
+sui-tx         = { workspace = true }
+deployments    = { workspace = true }
 
 sui-sdk = { workspace = true }
 sui-types = { workspace = true }

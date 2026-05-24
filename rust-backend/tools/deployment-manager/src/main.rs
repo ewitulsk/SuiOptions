@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
     };
     let output_path = cli.output;
 
-    let secrets = shared::Secrets::load(&cli.secrets)
+    let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
 
     let targets: Vec<Network> = match cli.network {
@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
 
 async fn deploy_one(
     network: Network,
-    secrets: &shared::Secrets,
+    secrets: &runtime_config::Secrets,
     contracts_path: &std::path::Path,
     test_tokens_path: Option<&std::path::Path>,
     previous_tokens: Option<TestTokensRecord>,

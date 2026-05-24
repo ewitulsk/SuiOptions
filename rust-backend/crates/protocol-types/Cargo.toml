@@ -1,0 +1,25 @@
+[package]
+name = "protocol-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+bcs = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Used by the runtime verify_signature dispatcher in signing_scheme.rs.
+ed25519-dalek = { workspace = true }
+k256 = { version = "0.13", features = ["ecdsa"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+
+[dev-dependencies]
+rand = { workspace = true }

@@ -10,8 +10,8 @@ use sui_json_rpc_types::{ObjectChange, SuiTransactionBlockResponse};
 use sui_types::base_types::ObjectID;
 use tracing::{debug, info, warn};
 
-use shared::sui_client::SuiClientWrapper;
-use shared::tx::admin::{new_call_option, NewCallOptionArgs};
+use sui_tx::sui_client::SuiClientWrapper;
+use sui_tx::tx::admin::{new_call_option, NewCallOptionArgs};
 
 use crate::strike_grid::StrikeGrid;
 

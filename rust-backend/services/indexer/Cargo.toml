@@ -12,7 +12,10 @@ name = "indexer"
 path = "src/main.rs"
 
 [dependencies]
-shared = { workspace = true }
+protocol-types = { workspace = true }
+runtime-config = { workspace = true }
+cli-spec       = { workspace = true }
+deployments    = { workspace = true }
 
 # Sui checkpoint ingestion framework. Pinned at workspace level so the
 # indexer and deployment-manager share one resolved ABI.

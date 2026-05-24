@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use parking_lot::RwLock;
 use tracing::{debug, trace};
 
-use shared::protocol_types::asset::AssetType;
-use shared::protocol_types::ids::ObjectId;
+use protocol_types::asset::AssetType;
+use protocol_types::ids::ObjectId;
 
 #[derive(Clone, Debug)]
 pub struct BucketView {

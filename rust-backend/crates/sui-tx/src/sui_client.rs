@@ -50,7 +50,7 @@ pub struct Signer {
 
 impl Signer {
     /// Load the keypair from the workspace secrets TOML.
-    pub fn from_secrets(secrets: &crate::Secrets, network: Network) -> Result<Self> {
+    pub fn from_secrets(secrets: &runtime_config::Secrets, network: Network) -> Result<Self> {
         let raw = secrets.sui_private_key(network.as_str())?;
         Self::from_string(raw.trim())
     }
@@ -72,7 +72,7 @@ pub struct SuiClientWrapper {
 }
 
 impl SuiClientWrapper {
-    pub async fn connect(secrets: &crate::Secrets, network: Network) -> Result<Self> {
+    pub async fn connect(secrets: &runtime_config::Secrets, network: Network) -> Result<Self> {
         let signer = Signer::from_secrets(secrets, network).context("loading signer")?;
         let client = SuiClientBuilder::default()
             .build(network.rpc_url())

@@ -21,12 +21,12 @@ use std::time::Duration;
 
 use tracing::{debug, info, trace, warn};
 
-use shared::protocol_types::asset::AssetType;
-use shared::protocol_types::errors::ProtocolError;
-use shared::protocol_types::ids::ObjectId;
-use shared::protocol_types::messages::{MmQuotePayload, RfqQuoteEntry};
-use shared::protocol_types::quote::Quote;
-use shared::protocol_types::sides::Side;
+use protocol_types::asset::AssetType;
+use protocol_types::errors::ProtocolError;
+use protocol_types::ids::ObjectId;
+use protocol_types::messages::{MmQuotePayload, RfqQuoteEntry};
+use protocol_types::quote::Quote;
+use protocol_types::sides::Side;
 
 use crate::state::{
     AppState, BucketView, InsertOutcome, Reservation, ReservationTable,
@@ -113,7 +113,7 @@ pub fn validate_and_reserve(
         .snapshot(&mm_account_id)
         .ok_or(QuoteRejection::UnknownSigner)?;
     let scheme = acct.signing_scheme.ok_or(QuoteRejection::InvalidPubkey)?;
-    let signed = shared::protocol_types::quote::SignedQuote {
+    let signed = protocol_types::quote::SignedQuote {
         quote: quote.clone(),
         signature: payload.signature.clone(),
     };
@@ -232,9 +232,9 @@ pub async fn orchestrate(
 
     // Broadcast to MMs.
     for mm in mms {
-        let frame = shared::protocol_types::messages::ServiceToMm::RFQBroadcast {
+        let frame = protocol_types::messages::ServiceToMm::RFQBroadcast {
             request_id: request_id.clone(),
-            payload: shared::protocol_types::messages::RfqBroadcastPayload {
+            payload: protocol_types::messages::RfqBroadcastPayload {
                 bucket_id,
                 write_amount,
                 side,
@@ -293,12 +293,12 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
 
-    use shared::protocol_types::asset::AssetType;
-    use shared::protocol_types::events::{
+    use protocol_types::asset::AssetType;
+    use protocol_types::events::{
         AccountCreated, AccountDeposit, BucketCreated, ChainEvent, IndexedEvent,
     };
-    use shared::protocol_types::ids::SuiAddress;
-    use shared::protocol_types::messages::MmQuotePayload;
+    use protocol_types::ids::SuiAddress;
+    use protocol_types::messages::MmQuotePayload;
 
     fn make_state(mm_account: ObjectId, signing_pubkey: Vec<u8>, balance: u64) -> AppState {
         let s = AppState::new();
@@ -310,7 +310,7 @@ mod tests {
             event: ChainEvent::AccountCreated(AccountCreated {
                 account_id: mm_account,
                 owner: SuiAddress::ZERO,
-                signing_scheme: shared::protocol_types::SigningScheme::Ed25519,
+                signing_scheme: protocol_types::SigningScheme::Ed25519,
                 signing_pubkey,
             }),
         });

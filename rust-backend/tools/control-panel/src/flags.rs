@@ -6,7 +6,7 @@
 //! binary picks its own defaults (which match what's stored here, by
 //! construction).
 
-use shared::program_spec::{ArgKind, ArgSpec, ProgramSpec, SubcommandSpec};
+use cli_spec::program_spec::{ArgKind, ArgSpec, ProgramSpec, SubcommandSpec};
 
 #[derive(Debug, Clone)]
 pub enum FlagValue {

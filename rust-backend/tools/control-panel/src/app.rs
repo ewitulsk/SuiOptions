@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use shared::program_spec::ProgramSpec;
+use cli_spec::program_spec::ProgramSpec;
 use tokio::sync::mpsc;
 
 use crate::flags::{EnvVar, FlagValue, ProgramFlags};

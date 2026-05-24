@@ -1,7 +1,7 @@
 //! Control panel TUI for the rust-backend workspace.
 //!
 //! Starts/stops every binary in the workspace and streams its stdout+stderr
-//! back live. Each binary registers itself via `shared::define_program!`, so
+//! back live. Each binary registers itself via `cli_spec::define_program!`, so
 //! flag metadata (defaults, possible values, help text) flows directly from
 //! the clap `#[derive(Parser)]` into the TUI.
 //!

@@ -9,7 +9,7 @@
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
-use shared::protocol_types::ids::ObjectId;
+use protocol_types::ids::ObjectId;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ReputationStats {

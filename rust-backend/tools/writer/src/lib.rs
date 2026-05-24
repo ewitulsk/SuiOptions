@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use sui_types::base_types::ObjectID;
 
-use shared::sui_client::Network;
+use sui_tx::sui_client::Network;
 
 #[derive(Parser, Debug)]
 #[command(name = "writer", about = "Retail-writer test client for the options protocol")]
@@ -52,7 +52,7 @@ pub struct Cli {
     pub rfq_timeout_secs: u64,
 }
 
-shared::define_program! {
+cli_spec::define_program! {
     id          = "writer",
     cargo_pkg   = "writer",
     working_dir = ".",

@@ -19,9 +19,9 @@ use futures_util::SinkExt;
 use integration_tests::*;
 use tokio_tungstenite::tungstenite::Message;
 
-use shared::protocol_types::asset::AssetType;
-use shared::protocol_types::messages::{MmToService, ServiceToMm, ServiceToRetail};
-use shared::protocol_types::sides::{MmRole, RetailRole, Side};
+use protocol_types::asset::AssetType;
+use protocol_types::messages::{MmToService, ServiceToMm, ServiceToRetail};
+use protocol_types::sides::{MmRole, RetailRole, Side};
 
 #[tokio::test]
 async fn rfq_round_trip() {

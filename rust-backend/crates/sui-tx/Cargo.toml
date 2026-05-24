@@ -1,5 +1,5 @@
 [package]
-name = "shared"
+name = "sui-tx"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,30 +8,30 @@ license.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-# Serialization
+protocol-types = { workspace = true }
+runtime-config = { workspace = true }
+
+anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-bcs = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }
-config = { version = "0.14", features = ["toml"] }
 base64 = "0.22"
 
-# Crypto
+clap = { workspace = true }
+
+# Crypto for QuoteSigner.
 ed25519-dalek = { workspace = true }
 k256 = { version = "0.13", features = ["ecdsa"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
-rand = { workspace = true }
 
-# Async / WS
+# Async / WS.
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
-async-trait = { workspace = true }
 
-# Sui SDK (transaction-building, RPC, types). Same pinned workspace versions
-# the deployment-manager and the indexer already use.
+# Sui SDK.
 sui-sdk = { workspace = true }
 sui-types = { workspace = true }
 sui-keys = { workspace = true }
@@ -41,15 +41,4 @@ sui-transaction-builder = { workspace = true }
 shared-crypto = { workspace = true }
 move-core-types = { workspace = true }
 
-# Plumbing
-clap = { workspace = true }
-chrono = { workspace = true }
-thiserror = { workspace = true }
-anyhow = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-
-# Pyth price feed client.
-reqwest = { workspace = true }
-dashmap = { workspace = true }
-parking_lot = { workspace = true }

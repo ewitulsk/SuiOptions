@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, info, trace, warn};
 
-use shared::protocol_types::messages::{
+use protocol_types::messages::{
     AuthAckPayload, AuthChallengePayload, MmHelloPayload, MmToService, ServiceToMm,
 };
 
@@ -109,7 +109,7 @@ pub async fn handle(
         );
         sink.send(Message::Text(serde_json::to_string(&ServiceToMm::Error {
             request_id: None,
-            payload: shared::protocol_types::messages::ErrorPayload {
+            payload: protocol_types::messages::ErrorPayload {
                 code: code.into(),
                 message,
             },

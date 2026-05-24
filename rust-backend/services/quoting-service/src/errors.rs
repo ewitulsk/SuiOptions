@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use shared::protocol_types::errors::ProtocolError;
+use protocol_types::errors::ProtocolError;
 
 #[derive(Debug, Error)]
 pub enum ServiceError {

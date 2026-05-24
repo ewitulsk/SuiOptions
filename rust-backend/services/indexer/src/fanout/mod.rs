@@ -26,8 +26,8 @@ use tokio::time::interval;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
-use shared::protocol_types::events::IndexedEvent;
-use shared::protocol_types::messages::{
+use protocol_types::events::IndexedEvent;
+use protocol_types::messages::{
     IndexerSnapshotPayload, IndexerStream, IndexerSubscribe,
 };
 
@@ -154,9 +154,9 @@ fn parse_subscribe(frame: Message) -> Result<u64> {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
-    use shared::protocol_types::asset::AssetType;
-    use shared::protocol_types::events::{BucketCreated, ChainEvent};
-    use shared::protocol_types::ids::ObjectId;
+    use protocol_types::asset::AssetType;
+    use protocol_types::events::{BucketCreated, ChainEvent};
+    use protocol_types::ids::ObjectId;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     /// End-to-end roundtrip through the fanout server: snapshot then live.

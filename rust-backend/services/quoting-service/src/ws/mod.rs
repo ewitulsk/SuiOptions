@@ -166,12 +166,12 @@ async fn dispatch(
 
     if payload.get("account_id").is_some() {
         // MM Hello shape.
-        let hello: shared::protocol_types::messages::MmHelloPayload =
+        let hello: protocol_types::messages::MmHelloPayload =
             serde_json::from_value(payload.clone())?;
         debug!(?peer, account = %hello.account_id, "mm hello");
         mm::handle(ws, peer, state, cfg, hello).await
     } else {
-        let hello: shared::protocol_types::messages::RetailHelloPayload =
+        let hello: protocol_types::messages::RetailHelloPayload =
             serde_json::from_value(payload.clone())?;
         debug!(?peer, role = ?hello.role, "retail hello");
         retail::handle(ws, peer, state, cfg, hello).await

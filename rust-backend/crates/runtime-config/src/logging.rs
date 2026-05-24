@@ -15,15 +15,21 @@ use tracing_subscriber::EnvFilter;
 /// names (hyphens become underscores), so `quoting-service` is
 /// `quoting_service` here.
 const OUR_CRATES: &[&str] = &[
-    "shared",
+    "protocol_types",
+    "runtime_config",
+    "cli_spec",
+    "pyth_client",
+    "sui_tx",
+    "pricing",
     "indexer",
     "quoting_service",
     "mm_bot",
+    "option_scheduler",
     "deployment_manager",
     "exchange",
     "writer",
     "control_panel",
-    "tests",
+    "integration_tests",
 ];
 
 /// Install the global tracing subscriber. See module docs for `RUST_LOG`

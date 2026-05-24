@@ -97,7 +97,7 @@ pub struct AccountCreated {
     /// Tag for the registered signing key. BCS-encodes as a single u8;
     /// must match the on-chain struct field order in `events.move`.
     pub signing_scheme: crate::SigningScheme,
-    #[serde(with = "crate::protocol_types::coding::bytes_hex")]
+    #[serde(with = "crate::coding::bytes_hex")]
     pub signing_pubkey: Vec<u8>,
 }
 
@@ -121,7 +121,7 @@ pub struct AccountWithdraw {
 pub struct SigningKeyRotated {
     pub account_id: ObjectId,
     pub new_scheme: crate::SigningScheme,
-    #[serde(with = "crate::protocol_types::coding::bytes_hex")]
+    #[serde(with = "crate::coding::bytes_hex")]
     pub new_pubkey: Vec<u8>,
 }
 

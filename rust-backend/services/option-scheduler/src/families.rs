@@ -30,9 +30,9 @@ use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
-use shared::protocol_types::events::{BucketCleaned, BucketCreated, ChainEvent, IndexedEvent};
-use shared::protocol_types::ids::ObjectId;
-use shared::protocol_types::messages::{IndexerStream, IndexerSubscribe};
+use protocol_types::events::{BucketCleaned, BucketCreated, ChainEvent, IndexedEvent};
+use protocol_types::ids::ObjectId;
+use protocol_types::messages::{IndexerStream, IndexerSubscribe};
 use sui_types::base_types::ObjectID;
 
 /// Canonical `(package, module, type)` triple. Used to match the indexer's
@@ -309,9 +309,9 @@ pub fn log_registry(registry: &Registry, pairs: &[PairKey]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::protocol_types::asset::AssetType;
-    use shared::protocol_types::events::{BucketCleaned, BucketCreated};
-    use shared::protocol_types::ids::ObjectId;
+    use protocol_types::asset::AssetType;
+    use protocol_types::events::{BucketCleaned, BucketCreated};
+    use protocol_types::ids::ObjectId;
 
     fn pair_key() -> PairKey {
         PairKey {

@@ -9,11 +9,11 @@ name = "control"
 path = "src/main.rs"
 
 [dependencies]
-shared = { workspace = true }
+cli-spec = { workspace = true }
 
 # Every other binary in the workspace, pulled in as a library so we can
 # introspect its clap CommandFactory. Each registers a `program_spec()` via
-# shared::define_program!.
+# cli_spec::define_program!.
 indexer            = { path = "../../services/indexer" }
 quoting-service    = { path = "../../services/quoting-service" }
 mm-bot             = { path = "../../services/mm-bot" }

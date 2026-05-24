@@ -13,7 +13,7 @@ impl Signer {
     /// Load the signing keypair for `network` from the workspace secrets
     /// file. There is no env-var fallback — every binary that signs reads
     /// its key from the same TOML.
-    pub fn from_secrets(secrets: &shared::Secrets, network: Network) -> Result<Self> {
+    pub fn from_secrets(secrets: &runtime_config::Secrets, network: Network) -> Result<Self> {
         let raw = secrets.sui_private_key(network.as_str())?;
         Self::from_string(raw.trim())
     }

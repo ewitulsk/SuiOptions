@@ -8,12 +8,12 @@
 //! 3. MM signs those bytes with its Account signing key (using whichever of
 //!    Ed25519 / Secp256k1 / Secp256r1 it registered on chain) and replies
 //!    `AuthResponse { signature }`.
-//! 4. Service verifies via [`shared::protocol_types::verify_signature`]. The pubkey
+//! 4. Service verifies via [`protocol_types::verify_signature`]. The pubkey
 //!    + scheme supplied in the Hello must agree with what the indexer
 //!    holds on file for that Account — otherwise the MM is claiming an
 //!    account it doesn't control.
 
-use shared::protocol_types::SigningScheme;
+use protocol_types::SigningScheme;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum AuthError {
@@ -51,7 +51,7 @@ pub fn verify_challenge_response(
     if indexer_scheme != supplied_scheme || indexer_pubkey != supplied_pubkey {
         return Err(AuthError::PubkeyMismatch);
     }
-    shared::protocol_types::verify_signature(indexer_scheme, indexer_pubkey, challenge, signature)
+    protocol_types::verify_signature(indexer_scheme, indexer_pubkey, challenge, signature)
         .map_err(|_| AuthError::SignatureInvalid)
 }
 

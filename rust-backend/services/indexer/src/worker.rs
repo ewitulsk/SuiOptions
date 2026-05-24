@@ -3,7 +3,7 @@
 //! Implements [`sui_data_ingestion_core::Worker`]. The framework hands us
 //! `CheckpointData` instances in order; we walk every transaction's emitted
 //! events, filter to the type strings we recognize (see
-//! [`crate::event_types`]), BCS-deserialize into the `shared::protocol_types::events`
+//! [`crate::event_types`]), BCS-deserialize into the `protocol_types::events`
 //! mirror structs, and persist them.
 //!
 //! Per checkpoint:
@@ -54,7 +54,7 @@ impl Worker for ProtocolEventWorker {
 
         // Decode pass — collect everything we recognise in checkpoint order
         // before touching the store. Keeps the lock window in step 2 small.
-        let mut decoded: Vec<(shared::protocol_types::events::ChainEvent, String, i32)> =
+        let mut decoded: Vec<(protocol_types::events::ChainEvent, String, i32)> =
             Vec::new();
         for tx in &checkpoint.transactions {
             let Some(events) = &tx.events else { continue };
@@ -109,9 +109,9 @@ impl Worker for ProtocolEventWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::protocol_types::asset::AssetType;
-    use shared::protocol_types::events::BucketCreated;
-    use shared::protocol_types::ids::ObjectId;
+    use protocol_types::asset::AssetType;
+    use protocol_types::events::BucketCreated;
+    use protocol_types::ids::ObjectId;
 
     /// Sanity-check that an event the worker would receive via Sui's framework
     /// (BCS bytes + matching type string) round-trips through the dispatch

@@ -20,8 +20,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use tracing::{debug, trace};
 
-use shared::protocol_types::asset::AssetType;
-use shared::protocol_types::ids::ObjectId;
+use protocol_types::asset::AssetType;
+use protocol_types::ids::ObjectId;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reservation {
