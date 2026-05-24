@@ -93,29 +93,3 @@ variable "github_deploy_branches" {
   type        = list(string)
   default     = ["staging", "main"]
 }
-
-# ---- CI runner --------------------------------------------------------------
-
-variable "runner_instance_type" {
-  description = "Self-hosted GH Actions runner spot instance type. ARM/Graviton; bump to c7g.2xlarge if cargo OOMs during three-image parallel bake."
-  type        = string
-  default     = "c7g.xlarge"
-}
-
-variable "runner_max_spot_price" {
-  description = "Max hourly USD price for the runner spot request. Empty = on-demand price as the cap (recommended; spot price usually lands at $0.04-0.06/hr for c7g.xlarge in us-east-1)."
-  type        = string
-  default     = ""
-}
-
-variable "runner_root_volume_gb" {
-  description = "EBS gp3 root volume for the runner. Cargo target dirs + docker layer cache add up; 80 GB leaves headroom."
-  type        = number
-  default     = 80
-}
-
-variable "runner_version" {
-  description = "GitHub Actions runner version (arm64 binary). Pinned so bootstrap is deterministic; bump as new versions ship. Stay on a version new enough for the node runtime actions require — node24 (>= 2.327.x) for current aws-actions/*."
-  type        = string
-  default     = "2.334.0"
-}

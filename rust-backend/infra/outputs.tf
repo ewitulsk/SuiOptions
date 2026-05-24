@@ -56,16 +56,5 @@ output "secrets_to_fill" {
   value = concat(
     [for env in local.envs : "options/${env}/indexer (auto-populated; rotate via random_password.indexer_db)"],
     [for env in ["dev", "staging"] : "options/${env}/mm-bot (REPLACE_ME — fill sui_key + quote_key)"],
-    ["options/ci/github-runner-pat (REPLACE_ME — fill pat; see infra/README.md)"]
   )
-}
-
-output "runner_spot_request_id" {
-  description = "Spot request ID for the GH Actions runner."
-  value       = aws_spot_instance_request.runner.id
-}
-
-output "runner_instance_id" {
-  description = "EC2 instance ID currently fulfilling the runner spot request."
-  value       = aws_spot_instance_request.runner.spot_instance_id
 }
