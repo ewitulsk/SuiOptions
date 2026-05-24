@@ -33,8 +33,16 @@ locals {
     compose_dev            = file("${path.module}/../deployment/compose/docker-compose.dev.yml")
     compose_staging        = file("${path.module}/../deployment/compose/docker-compose.staging.yml")
     compose_prod           = file("${path.module}/../deployment/compose/docker-compose.prod.yml")
-    vpc_cidr               = var.vpc_cidr
+    promtail_config        = file("${path.module}/../deployment/monitoring/promtail-config.yml")
+    promtail_compose       = file("${path.module}/../deployment/monitoring/docker-compose.promtail.yml")
+    loki_config            = file("${path.module}/../deployment/monitoring/loki-config.yml")
+    monitoring_compose     = file("${path.module}/../deployment/monitoring/docker-compose.monitoring.yml")
+    grafana_ds             = file("${path.module}/../deployment/monitoring/grafana-datasources.yml")
+    loki_bucket            = aws_s3_bucket.loki.bucket
     aws_region             = var.aws_region
+    grafana_secret         = aws_secretsmanager_secret.grafana_admin.name
+    domain_name            = var.domain_name
+    vpc_cidr               = var.vpc_cidr
     tailscale_auth_key_arn = aws_secretsmanager_secret.tailscale_auth_key.arn
   })
 }

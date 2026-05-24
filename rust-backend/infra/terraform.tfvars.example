@@ -27,3 +27,7 @@ route53_zone_id = "Z01234567890ABCDEFGHI"
 # rds_backup_retention_days = 7
 # ssh_pubkey              = "ssh-ed25519 AAAA... you@host"   # leave empty to disable SSH (SSM still works)
 # github_deploy_branches  = ["staging", "main"]
+
+# ---- Monitoring (Grafana + Loki — runs on the services EC2) -----------------
+
+# grafana_admin_password   = ""          # auto-generated if empty; stored in Secrets Manager either way

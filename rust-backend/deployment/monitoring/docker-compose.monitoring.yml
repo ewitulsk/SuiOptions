@@ -1,0 +1,39 @@
+# Monitoring stack: Grafana + Loki.
+# Runs on the services EC2 alongside the per-env compose stacks.
+# Promtail (in docker-compose.promtail.yml) joins the same network.
+
+name: options-monitoring
+
+services:
+  loki:
+    image: grafana/loki:3.4.2
+    command: -config.file=/etc/loki/loki-config.yml -config.expand-env=true
+    environment:
+      LOKI_S3_BUCKET: ${LOKI_S3_BUCKET}
+      AWS_REGION: ${AWS_REGION}
+    volumes:
+      - ${DATA_DIR}/loki/config:/etc/loki:ro
+      - ${DATA_DIR}/loki/data:/loki
+    ports:
+      - "127.0.0.1:3100:3100"
+    restart: unless-stopped
+    networks: [monitoring]
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    environment:
+      GF_SERVER_ROOT_URL: https://${GRAFANA_DOMAIN}/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ${DATA_DIR}/grafana/data:/var/lib/grafana
+      - ${DATA_DIR}/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on: [loki]
+    restart: unless-stopped
+    networks: [monitoring]
+
+networks:
+  monitoring:

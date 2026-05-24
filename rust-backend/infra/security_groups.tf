@@ -62,6 +62,15 @@ resource "aws_security_group" "ec2" {
     security_groups = [aws_security_group.alb.id]
   }
 
+  # Grafana UI (reverse-proxied by the ALB at /grafana/*).
+  ingress {
+    description     = "Grafana from ALB"
+    from_port       = 3000
+    to_port         = 3000
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0

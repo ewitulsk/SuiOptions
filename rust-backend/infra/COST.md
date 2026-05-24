@@ -32,7 +32,9 @@ grows.
 | Route 53 queries | first 1B/mo at $0.40 / million | $0.40 / 1M | < 1M/mo | **~$0.04** |
 | **Logging / state** | | | | |
 | S3 (SSM output bucket) | 14-day lifecycle, ~KB-sized objects | $0.023 / GB-mo | < 1 GB | **<$0.10** |
-| CloudWatch Logs | (not used at this stage) | — | 0 | **$0.00** |
+| **Monitoring** (runs on the services EC2) | | | | |
+| S3 Loki storage | log chunks + index, 90-day retention | $0.023 / GB-mo | ~5 GB (grows) | **~$0.12** |
+| Secrets Manager | Grafana admin password (1 entry) | $0.40 / secret-mo | 1 | **$0.40** |
 | **Networking** | | | | |
 | VPC / IGW / subnets / route tables / SGs | | free | — | **$0.00** |
 | NAT Gateway | not provisioned (EC2 in public subnet) | $0.045 / hr if used | 0 | **$0.00** |
@@ -45,7 +47,8 @@ grows.
 
 ### Steady-state total
 
-**≈ $64.04/mo** (with the Route 53 zone in your AWS account; **≈ $63.54/mo** without).
+**≈ $64.56/mo** (with the Route 53 zone in your AWS account; **≈ $64.06/mo** without).
+Includes the Grafana + Loki monitoring stack (~$0.52/mo added — no extra EC2).
 
 ## 2. One-time / occasional
 
@@ -93,9 +96,10 @@ brainstorming:
 | Split prod onto its own EC2 (scaling plan A) | +$25-30 | $165 |
 | Split prod onto its own Aurora cluster (scaling plan B) | +$45-50 | $215 |
 
-Anchor: today's ~$64/mo gets you fully working dev + staging + prod
-stacks, all behind HTTPS, with managed Postgres and zero observability.
-Scaling plans add cost only when you actually need them.
+Anchor: today's ~$65/mo gets you fully working dev + staging + prod
+stacks, all behind HTTPS, with managed Postgres and centralized
+Grafana + Loki logging on a single EC2. Scaling plans add cost only when you actually
+need them.
 
 ## 5. Sources
 
