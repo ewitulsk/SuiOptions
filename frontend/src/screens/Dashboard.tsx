@@ -145,6 +145,20 @@ export function Dashboard() {
           </button>
         </div>
 
+        {(() => {
+          const missing = Object.entries(d.spots)
+            .filter(([, v]) => v === null)
+            .map(([k]) => k);
+          if (missing.length === 0) return null;
+          return (
+            <div className="dash-alert" role="alert">
+              Live spot price unavailable for {missing.join(", ")}. Spot-derived
+              values (notional, ITM, intrinsic) may be missing or stale until
+              the feed reconnects.
+            </div>
+          );
+        })()}
+
         <DashSummary
           tab={d.tab}
           totals={d.totals}

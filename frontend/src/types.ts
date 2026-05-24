@@ -94,7 +94,8 @@ export type WrittenPosition = {
   status: "claimable" | "active" | "partially_exercised" | "fully_exercised";
 };
 
-export type DashboardSpots = Record<string, number>;
+/** `null` means the live feed for that asset hasn't delivered (or has dropped). */
+export type DashboardSpots = Record<string, number | null>;
 
 export type DashboardTotals = {
   ownedNotional: number;

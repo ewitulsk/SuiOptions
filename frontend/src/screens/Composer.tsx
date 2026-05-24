@@ -57,7 +57,7 @@ export function Composer({ initialView }: Props) {
       <div className="app__wrap">
         <LiveBuckets />
 
-        <BucketBar spot={s.spot} capPct={43} />
+        <BucketBar symbol={s.series?.asset_symbol} capPct={43} />
 
         <div className="question">
           {s.view === "writer" ? (

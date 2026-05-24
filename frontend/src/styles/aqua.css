@@ -1132,6 +1132,16 @@
   border-radius: 22px;
   text-align: center;
 }
+[data-theme="aqua"] .dash-alert {
+  padding: 12px 16px;
+  margin: 0 0 16px;
+  background: rgba(220, 80, 50, 0.08);
+  border: 1px solid rgba(220, 80, 50, 0.30);
+  border-radius: 14px;
+  color: #8a2a14;
+  font-size: 13px;
+  line-height: 1.4;
+}
 [data-theme="aqua"] .dash-empty__title {
   font-family: "Sora", system-ui, sans-serif; font-size: 24px;
   color: var(--aqua-ink-2); margin-bottom: 8px;
