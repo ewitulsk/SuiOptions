@@ -1,3 +1,4 @@
+import { useNavigate } from "react-router-dom";
 import { useDashboardState } from "../mocks/dashboard";
 import { Header } from "../components/Header";
 import { WaveHero } from "../components/WaveHero";
@@ -5,8 +6,6 @@ import { Toast } from "../components/Toast";
 import { ActionModal } from "../components/ActionModal";
 import { OwnedCard, WrittenCard } from "../components/PositionCards";
 import type { DashboardTotals } from "../types";
-
-type Props = { onNavigate: (target: string) => void };
 
 function DashSummary({
   tab,
@@ -90,8 +89,9 @@ function DashSummary({
   );
 }
 
-export function Dashboard({ onNavigate }: Props) {
+export function Dashboard() {
   const d = useDashboardState();
+  const navigate = useNavigate();
 
   const empty = (label: string) => (
     <div className="dash-empty">
@@ -103,9 +103,7 @@ export function Dashboard({ onNavigate }: Props) {
       </div>
       <button
         className="dash-empty__cta"
-        onClick={() =>
-          onNavigate(label === "calls owned" ? "composer:trader" : "composer:writer")
-        }
+        onClick={() => navigate(label === "calls owned" ? "/buy" : "/earn")}
       >
         Go to {label === "calls owned" ? "Buy" : "Earn"} →
       </button>
@@ -115,7 +113,7 @@ export function Dashboard({ onNavigate }: Props) {
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
       <WaveHero />
-      <Header screen="dashboard" onNavigate={onNavigate} />
+      <Header />
 
       <div className="app__wrap">
         <div className="dash-hero">

@@ -10,8 +10,6 @@ import { Header } from "../components/Header";
 import { WaveHero } from "../components/WaveHero";
 import type { ActivityEvent, ActivityTotals } from "../types";
 
-type Props = { onNavigate: (target: string) => void };
-
 function ActivitySummary({ totals }: { totals: ActivityTotals }) {
   const net = totals.premiumIn - totals.premiumOut;
   return (
@@ -129,14 +127,14 @@ function EventRow({ e, now }: { e: ActivityEvent; now: number }) {
   );
 }
 
-export function Activity({ onNavigate }: Props) {
+export function Activity() {
   const a = useActivityState();
   const earliest = a.events[a.events.length - 1];
 
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
       <WaveHero />
-      <Header screen="activity" onNavigate={onNavigate} />
+      <Header />
 
       <div className="app__wrap">
         <div className="dash-hero">

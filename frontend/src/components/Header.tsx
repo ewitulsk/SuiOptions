@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   ConnectModal,
   useAccounts,
@@ -7,17 +8,7 @@ import {
   useDisconnectWallet,
   useSwitchAccount,
 } from "@mysten/dapp-kit";
-import type { View } from "../types";
 import { useThemeMode, toggleMode } from "../theme";
-
-export type Screen = "composer" | "dashboard" | "activity";
-
-type Props = {
-  screen: Screen;
-  view?: View;
-  setView?: (v: View) => void;
-  onNavigate: (target: string) => void;
-};
 
 function shortAddress(addr: string): string {
   if (addr.length <= 12) return addr;
@@ -161,9 +152,9 @@ function ThemeToggle() {
   );
 }
 
-export function Header({ screen, view, setView, onNavigate }: Props) {
-  const earnActive = screen === "composer" && view === "writer";
-  const buyActive = screen === "composer" && view === "trader";
+export function Header() {
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
   const account = useCurrentAccount();
   const [pickerOpen, setPickerOpen] = useState(false);
 
@@ -175,26 +166,26 @@ export function Header({ screen, view, setView, onNavigate }: Props) {
       </div>
       <nav className="header__nav">
         <button
-          className={earnActive ? "is-active" : ""}
-          onClick={() => (setView ? setView("writer") : onNavigate("composer:writer"))}
+          className={pathname === "/earn" ? "is-active" : ""}
+          onClick={() => navigate("/earn")}
         >
           Earn
         </button>
         <button
-          className={buyActive ? "is-active" : ""}
-          onClick={() => (setView ? setView("trader") : onNavigate("composer:trader"))}
+          className={pathname === "/buy" ? "is-active" : ""}
+          onClick={() => navigate("/buy")}
         >
           Buy
         </button>
         <button
-          className={screen === "dashboard" ? "is-active" : ""}
-          onClick={() => onNavigate("dashboard")}
+          className={pathname === "/dashboard" ? "is-active" : ""}
+          onClick={() => navigate("/dashboard")}
         >
           Dashboard
         </button>
         <button
-          className={screen === "activity" ? "is-active" : ""}
-          onClick={() => onNavigate("activity")}
+          className={pathname === "/activity" ? "is-active" : ""}
+          onClick={() => navigate("/activity")}
         >
           Activity
         </button>

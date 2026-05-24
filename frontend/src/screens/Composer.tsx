@@ -27,10 +27,9 @@ function expiryLabel(s: ComposerState): string {
 
 type Props = {
   initialView: View;
-  onNavigate: (target: string) => void;
 };
 
-export function Composer({ initialView, onNavigate }: Props) {
+export function Composer({ initialView }: Props) {
   const s = useComposerState({ initialView });
   const [feedOpen, setFeedOpen] = useState(false);
 
@@ -53,12 +52,7 @@ export function Composer({ initialView, onNavigate }: Props) {
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
       <WaveHero />
-      <Header
-        screen="composer"
-        view={s.view}
-        setView={s.setView}
-        onNavigate={onNavigate}
-      />
+      <Header />
 
       <div className="app__wrap">
         <LiveBuckets />
