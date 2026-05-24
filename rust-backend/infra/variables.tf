@@ -44,9 +44,9 @@ variable "route53_zone_id" {
 # ---- EC2 --------------------------------------------------------------------
 
 variable "ec2_instance_type" {
-  description = "EC2 instance type. ARM (t4g.*) recommended."
+  description = "EC2 instance type. x86 (t3.*) so GH-runner builds stay native — no QEMU emulation. Switching to t4g.* (Graviton/ARM) needs a matching change in bake.hcl + the AMI filter in ec2.tf + setup-qemu-action in _deploy.yml."
   type        = string
-  default     = "t4g.small"
+  default     = "t3.small"
 }
 
 variable "ec2_root_volume_gb" {

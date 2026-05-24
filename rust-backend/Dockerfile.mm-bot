@@ -1,8 +1,7 @@
-# Target: linux/arm64 (Graviton EC2). bake.hcl sets platforms=linux/arm64
-# and docker buildx emulates arm64 via QEMU on x86 GH runners. No
-# `--platform=$BUILDPLATFORM` on the builder — that would native-compile
-# to amd64 and the Graviton kernel would reject the binary with
-# `Exec format error`.
+# Builder runs under bake.hcl's target platform. Do NOT add
+# `--platform=$BUILDPLATFORM` — it would pin the builder to the GH
+# runner's arch and produce a binary that doesn't match the image
+# manifest's arch.
 FROM rust:1-bookworm AS builder
 WORKDIR /src
 
