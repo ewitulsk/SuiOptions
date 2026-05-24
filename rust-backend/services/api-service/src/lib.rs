@@ -4,9 +4,10 @@
 //! protocol state (currently just buckets), and serves it over HTTP.
 //! Holds no funds, signs nothing — strictly a read/query layer.
 
+pub mod bucket;
 pub mod config;
-pub mod http;
-pub mod indexer_client;
+pub mod handlers;
+pub mod router;
 pub mod state;
 
 pub use config::Config;
