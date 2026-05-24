@@ -38,6 +38,7 @@ locals {
     loki_config            = file("${path.module}/../deployment/monitoring/loki-config.yml")
     monitoring_compose     = file("${path.module}/../deployment/monitoring/docker-compose.monitoring.yml")
     grafana_ds             = file("${path.module}/../deployment/monitoring/grafana-datasources.yml")
+    gatus_config           = file("${path.module}/../deployment/monitoring/gatus-config.yml")
     loki_bucket            = aws_s3_bucket.loki.bucket
     aws_region             = var.aws_region
     grafana_secret         = aws_secretsmanager_secret.grafana_admin.name

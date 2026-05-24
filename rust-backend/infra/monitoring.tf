@@ -160,3 +160,48 @@ resource "aws_lb_listener_rule" "grafana" {
     target_group_arn = aws_lb_target_group.grafana.arn
   }
 }
+
+# ---------------------------------------------------------------------------
+# ALB: Gatus status page  (public uptime dashboard)
+# ---------------------------------------------------------------------------
+
+resource "aws_lb_target_group" "gatus" {
+  name        = "${var.project}-gatus"
+  port        = 8080
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.main.id
+  target_type = "instance"
+
+  deregistration_delay = 30
+
+  health_check {
+    path                = "/health"
+    matcher             = "200"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
+}
+
+resource "aws_lb_target_group_attachment" "gatus" {
+  target_group_arn = aws_lb_target_group.gatus.arn
+  target_id        = aws_instance.host.id
+  port             = 8080
+}
+
+resource "aws_lb_listener_rule" "gatus" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 4
+
+  condition {
+    path_pattern {
+      values = ["/status", "/status/*"]
+    }
+  }
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.gatus.arn
+  }
+}

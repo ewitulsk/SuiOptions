@@ -1,0 +1,116 @@
+# Gatus uptime dashboard configuration.
+#
+# Checks each environment's public-facing health endpoints through the
+# ALB, plus internal service health endpoints via Docker DNS for the
+# services that aren't publicly routed.
+#
+# DOMAIN is injected from the compose environment.
+
+web:
+  port: 8080
+  context-root: /status
+
+storage:
+  type: sqlite
+  path: /data/gatus.db
+
+ui:
+  title: SuiOptions Status
+  description: Real-time service health for the SuiOptions protocol
+
+endpoints:
+  # ── Staging (public via ALB) ───────────────────────────────────────
+  - name: API Service
+    group: staging
+    url: http://options-staging-api-service-1:9003/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Quoting Service
+    group: staging
+    url: http://options-staging-quoting-1:9002/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Indexer
+    group: staging
+    url: http://options-staging-indexer-1:8081/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: MM Bot
+    group: staging
+    url: http://options-staging-mm-bot-1:8084/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Option Scheduler
+    group: staging
+    url: http://options-staging-option-scheduler-1:8083/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Nginx Gateway
+    group: staging
+    url: http://options-staging-nginx-1:80/staging/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+
+  # ── Dev ────────────────────────────────────────────────────────────
+  - name: API Service
+    group: dev
+    url: http://options-dev-api-service-1:9003/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Quoting Service
+    group: dev
+    url: http://options-dev-quoting-1:9002/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Indexer
+    group: dev
+    url: http://options-dev-indexer-1:8081/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: MM Bot
+    group: dev
+    url: http://options-dev-mm-bot-1:8084/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Option Scheduler
+    group: dev
+    url: http://options-dev-option-scheduler-1:8083/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Nginx Gateway
+    group: dev
+    url: http://options-dev-nginx-1:80/dev/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"

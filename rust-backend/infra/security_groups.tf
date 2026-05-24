@@ -71,6 +71,15 @@ resource "aws_security_group" "ec2" {
     security_groups = [aws_security_group.alb.id]
   }
 
+  # Gatus uptime dashboard (reverse-proxied by the ALB at /status/*).
+  ingress {
+    description     = "Gatus from ALB"
+    from_port       = 8080
+    to_port         = 8080
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0

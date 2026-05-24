@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = SchedulerConfig::load(&cli.config)
         .with_context(|| format!("loading {}", cli.config.display()))?;
+    runtime_config::health::spawn(cfg.health_addr);
     let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
     let dep = Deployments::load(&cli.deployments)
