@@ -278,7 +278,7 @@ async fn main() -> Result<()> {
     // owns a tokio task that pushes into the cache; the bootstrap +
     // sampler task seeds and maintains the vol buffer.
     let http_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(10))
         .build()
         .context("building reqwest client")?;
     let price_cache = PriceCache::new();

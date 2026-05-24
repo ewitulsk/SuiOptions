@@ -23,6 +23,7 @@ use super::types::{HermesEnvelope, PriceFeedId, PriceUpdate};
 const MAX_RETRIES: u32 = 5;
 const INITIAL_BACKOFF_MS: u64 = 200;
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(60);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Latest prices for one or more feeds. Returns the `parsed` array.
 pub async fn latest(
@@ -68,7 +69,7 @@ where
 {
     let mut backoff = INITIAL_BACKOFF_MS;
     for attempt in 1..=MAX_RETRIES {
-        match client.get(url).query(query).send().await {
+        match client.get(url).query(query).timeout(REQUEST_TIMEOUT).send().await {
             Ok(resp) => {
                 let status = resp.status();
                 if status == StatusCode::TOO_MANY_REQUESTS {
