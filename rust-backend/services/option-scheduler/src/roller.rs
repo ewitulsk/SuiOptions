@@ -6,7 +6,7 @@
 //! sent and return without touching the chain.
 
 use anyhow::{Context, Result};
-use sui_json_rpc_types::{ObjectChange, SuiTransactionBlockResponse};
+use sui_json_rpc_types::ObjectChange;
 use sui_types::base_types::ObjectID;
 use tracing::{debug, info, warn};
 
@@ -79,7 +79,7 @@ pub async fn submit(
     .context("submitting new_call_option")?;
 
     let digest = resp.digest.to_string();
-    let bucket_ids = extract_bucket_ids(&resp);
+    let bucket_ids = extract_bucket_ids(resp.object_changes.as_deref().unwrap_or(&[]));
     if bucket_ids.is_empty() {
         warn!(
             digest,
@@ -95,11 +95,12 @@ pub async fn submit(
     Ok(RollOutcome { digest, bucket_ids })
 }
 
-fn extract_bucket_ids(resp: &SuiTransactionBlockResponse) -> Vec<ObjectID> {
+/// Pull `bucket::Bucket` ObjectIDs out of a tx's ObjectChanges, in the
+/// order they appear. The chain emits one Created per strike for a
+/// successful `new_call_option`, so the result lines up with the strike
+/// grid the planner submitted.
+pub(crate) fn extract_bucket_ids(changes: &[ObjectChange]) -> Vec<ObjectID> {
     debug!("extracting bucket ids from object changes");
-    let Some(changes) = resp.object_changes.as_ref() else {
-        return vec![];
-    };
     changes
         .iter()
         .filter_map(|c| match c {
@@ -115,4 +116,118 @@ fn extract_bucket_ids(resp: &SuiTransactionBlockResponse) -> Vec<ObjectID> {
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use move_core_types::language_storage::StructTag;
+    use move_core_types::{account_address::AccountAddress, identifier::Identifier};
+    use sui_types::base_types::{ObjectDigest, SequenceNumber, SuiAddress};
+    use sui_types::object::Owner;
+
+    // Sentinel package address used in every constructed StructTag. The
+    // value doesn't matter — `extract_bucket_ids` only looks at the
+    // module and type name.
+    fn pkg() -> AccountAddress {
+        AccountAddress::from_hex_literal("0xabc").unwrap()
+    }
+
+    fn struct_tag(module: &str, name: &str) -> StructTag {
+        StructTag {
+            address: pkg(),
+            module: Identifier::new(module).unwrap(),
+            name: Identifier::new(name).unwrap(),
+            type_params: vec![],
+        }
+    }
+
+    fn created(id: ObjectID, module: &str, name: &str) -> ObjectChange {
+        ObjectChange::Created {
+            sender: SuiAddress::ZERO,
+            owner: Owner::Shared {
+                initial_shared_version: SequenceNumber::from_u64(1),
+            },
+            object_type: struct_tag(module, name),
+            object_id: id,
+            version: SequenceNumber::from_u64(1),
+            digest: ObjectDigest::random(),
+        }
+    }
+
+    fn mutated(id: ObjectID, module: &str, name: &str) -> ObjectChange {
+        ObjectChange::Mutated {
+            sender: SuiAddress::ZERO,
+            owner: Owner::AddressOwner(SuiAddress::ZERO),
+            object_type: struct_tag(module, name),
+            object_id: id,
+            version: SequenceNumber::from_u64(2),
+            previous_version: SequenceNumber::from_u64(1),
+            digest: ObjectDigest::random(),
+        }
+    }
+
+    #[test]
+    fn empty_input_returns_empty() {
+        assert!(extract_bucket_ids(&[]).is_empty());
+    }
+
+    #[test]
+    fn pulls_bucket_created_in_order() {
+        // A typical new_call_option tx: one TreasuryCap created per
+        // strike, one Bucket created per strike, plus the usual gas /
+        // mutated bits. The function must return only the Bucket
+        // Createds, in the order they appear.
+        let b1 = ObjectID::random();
+        let b2 = ObjectID::random();
+        let b3 = ObjectID::random();
+        let cap = ObjectID::random();
+        let changes = vec![
+            created(cap, "coin", "TreasuryCap"),
+            created(b1, "bucket", "Bucket"),
+            created(cap, "coin", "TreasuryCap"),
+            created(b2, "bucket", "Bucket"),
+            created(cap, "coin", "TreasuryCap"),
+            created(b3, "bucket", "Bucket"),
+        ];
+        assert_eq!(extract_bucket_ids(&changes), vec![b1, b2, b3]);
+    }
+
+    #[test]
+    fn ignores_mutated_buckets() {
+        // A subsequent execute_write mutates an existing Bucket; the
+        // roller must never confuse that for a freshly-rolled one.
+        let b = ObjectID::random();
+        let changes = vec![mutated(b, "bucket", "Bucket")];
+        assert!(extract_bucket_ids(&changes).is_empty());
+    }
+
+    #[test]
+    fn ignores_other_modules_and_types() {
+        // Same module, wrong type name (PositionNFT, CallOptionToken) and
+        // wrong module entirely (account::Account, sui::SUI) all get
+        // dropped.
+        let changes = vec![
+            created(ObjectID::random(), "bucket", "PositionNFT"),
+            created(ObjectID::random(), "account", "Account"),
+            created(ObjectID::random(), "sui", "SUI"),
+            created(ObjectID::random(), "BUCKET", "Bucket"), // case-sensitive
+            created(ObjectID::random(), "bucket", "bucket"), // case-sensitive
+        ];
+        assert!(extract_bucket_ids(&changes).is_empty());
+    }
+
+    #[test]
+    fn returns_only_bucket_among_mixed() {
+        // The one true Bucket survives, everything else is filtered.
+        let bucket_id = ObjectID::random();
+        let changes = vec![
+            created(ObjectID::random(), "coin", "TreasuryCap"),
+            created(bucket_id, "bucket", "Bucket"),
+            created(ObjectID::random(), "bucket", "PositionNFT"),
+            mutated(ObjectID::random(), "bucket", "Bucket"),
+        ];
+        assert_eq!(extract_bucket_ids(&changes), vec![bucket_id]);
+    }
 }

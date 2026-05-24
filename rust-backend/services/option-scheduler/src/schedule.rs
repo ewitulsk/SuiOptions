@@ -1,9 +1,15 @@
-//! Expiry-cadence picker.
+//! Expiry-cadence picker and per-tick roll/skip decision.
 //!
 //! MVP: fixed interval. `next_expiry_ms(latest_expiry_ms, interval_ms)` is
 //! `latest + interval`. If the chain has no family for the pair yet (cold
 //! start), we anchor at the next interval-aligned boundary strictly after
 //! `now_ms`.
+//!
+//! [`decide_tick`] sits on top of that and answers the only question the
+//! tick loop's pair-stanza in `main.rs` cares about: given the registry's
+//! latest expiry and the wall clock, should we roll, and to what expiry?
+//! Pulled out as a pure function so every branch is exhaustively unit-
+//! tested without spinning up an indexer, Pyth, or a Sui client.
 //!
 //! Future: cron-style ("next Friday 08:00 UTC") via a string spec in config.
 
@@ -36,6 +42,58 @@ pub fn next_expiry_ms(
     }
 }
 
+/// Per-pair decision the tick loop makes before any I/O.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TickDecision {
+    /// Submit a new family at this expiry. Caller still has to resolve
+    /// spot + grid + actually call the chain.
+    Roll { next_expiry_ms: u64 },
+    /// No work for this pair on this tick.
+    Skip(SkipReason),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Latest family is still further out than `roll_threshold_ms`. The
+    /// stored value is `latest_expiry_ms - now_ms` (saturating), useful for
+    /// the operator log.
+    BeyondRollWindow { time_to_expiry_ms: u64 },
+    /// Belt-and-braces guard for the case where the cadence picker would
+    /// return an expiry the chain already has — should never fire on the
+    /// MVP's fixed-interval cadence with `interval_ms > 0`, but does fire
+    /// if config slips a zero interval through, so it stays.
+    AlreadyAtComputedExpiry,
+}
+
+/// Decide whether a pair needs a fresh family this tick, and at what
+/// expiry. Pure: takes `now_ms` and the registry's view of the latest
+/// expiry, returns a decision. All chain/network I/O lives in the caller.
+pub fn decide_tick(
+    latest_expiry_ms: Option<u64>,
+    now_ms: u64,
+    roll_threshold_ms: u64,
+    expiry_interval_ms: u64,
+) -> TickDecision {
+    let needs_roll = match latest_expiry_ms {
+        None => true,
+        Some(t) => t.saturating_sub(now_ms) < roll_threshold_ms,
+    };
+    if !needs_roll {
+        // Unwrap is safe: the `None` arm above sets needs_roll = true.
+        let t = latest_expiry_ms.expect("None arm sets needs_roll");
+        return TickDecision::Skip(SkipReason::BeyondRollWindow {
+            time_to_expiry_ms: t.saturating_sub(now_ms),
+        });
+    }
+    let next = next_expiry_ms(latest_expiry_ms, expiry_interval_ms, now_ms);
+    if let Some(t) = latest_expiry_ms {
+        if t >= next {
+            return TickDecision::Skip(SkipReason::AlreadyAtComputedExpiry);
+        }
+    }
+    TickDecision::Roll { next_expiry_ms: next }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,5 +120,85 @@ mod tests {
         let now = 5 * week;
         let next = next_expiry_ms(None, week, now);
         assert_eq!(next, 6 * week);
+    }
+
+    // -- decide_tick ---------------------------------------------------
+
+    const WEEK_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+    const ROLL_THRESHOLD: u64 = WEEK_MS; // default in config.rs
+
+    #[test]
+    fn decide_cold_start_rolls() {
+        // No family yet → roll, expiry = next epoch-aligned boundary.
+        let now = 5 * WEEK_MS + 1;
+        let d = decide_tick(None, now, ROLL_THRESHOLD, WEEK_MS);
+        assert_eq!(d, TickDecision::Roll { next_expiry_ms: 6 * WEEK_MS });
+    }
+
+    #[test]
+    fn decide_skips_when_latest_is_beyond_window() {
+        // Latest family expires in 2 weeks, threshold is 1 week → skip.
+        let now = 1_700_000_000_000u64;
+        let latest = now + 2 * WEEK_MS;
+        let d = decide_tick(Some(latest), now, ROLL_THRESHOLD, WEEK_MS);
+        assert_eq!(
+            d,
+            TickDecision::Skip(SkipReason::BeyondRollWindow {
+                time_to_expiry_ms: 2 * WEEK_MS,
+            })
+        );
+    }
+
+    #[test]
+    fn decide_rolls_inside_window() {
+        // Latest expires in 3 days; threshold is 1 week → roll, expiry = latest + 1w.
+        let now = 1_700_000_000_000u64;
+        let latest = now + 3 * 24 * 60 * 60 * 1_000;
+        let d = decide_tick(Some(latest), now, ROLL_THRESHOLD, WEEK_MS);
+        assert_eq!(d, TickDecision::Roll { next_expiry_ms: latest + WEEK_MS });
+    }
+
+    #[test]
+    fn decide_threshold_is_strict_less_than() {
+        // `latest - now == threshold` exactly → not yet inside window.
+        // The check is `t.saturating_sub(now) < threshold`, so equality
+        // skips. Tells the operator the strict-vs-loose convention is
+        // locked in.
+        let now = 1_700_000_000_000u64;
+        let latest = now + ROLL_THRESHOLD;
+        let d = decide_tick(Some(latest), now, ROLL_THRESHOLD, WEEK_MS);
+        assert_eq!(
+            d,
+            TickDecision::Skip(SkipReason::BeyondRollWindow {
+                time_to_expiry_ms: ROLL_THRESHOLD,
+            })
+        );
+
+        // One ms inside → roll.
+        let d2 = decide_tick(Some(latest - 1), now, ROLL_THRESHOLD, WEEK_MS);
+        assert!(matches!(d2, TickDecision::Roll { .. }));
+    }
+
+    #[test]
+    fn decide_rolls_when_latest_already_past_now() {
+        // Pathological: the latest family on chain has already expired and
+        // nobody has rolled. `saturating_sub` clamps to 0, which is < any
+        // positive threshold → roll the next family.
+        let now = 1_700_000_000_000u64;
+        let latest = now - WEEK_MS;
+        let d = decide_tick(Some(latest), now, ROLL_THRESHOLD, WEEK_MS);
+        assert_eq!(d, TickDecision::Roll { next_expiry_ms: latest + WEEK_MS });
+    }
+
+    #[test]
+    fn decide_no_double_roll_with_zero_interval_guard() {
+        // Defensive: if a misconfigured zero interval reaches the planner,
+        // `next_expiry_ms` returns `now + 1`. With latest > now, the
+        // sanity check should fire and skip — never roll backwards onto
+        // an expiry the chain already has.
+        let now = 1_700_000_000_000u64;
+        let latest = now + 3 * 24 * 60 * 60 * 1_000;
+        let d = decide_tick(Some(latest), now, ROLL_THRESHOLD, 0);
+        assert_eq!(d, TickDecision::Skip(SkipReason::AlreadyAtComputedExpiry));
     }
 }

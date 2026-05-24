@@ -32,7 +32,7 @@ use sui_tx::sui_client::SuiClientWrapper;
 use option_scheduler::config::{PairConfig, SchedulerConfig};
 use option_scheduler::families::{CanonicalType, PairKey, Registry, log_registry, run_subscriber};
 use option_scheduler::roller::{self, RollPlan};
-use option_scheduler::schedule::next_expiry_ms;
+use option_scheduler::schedule::{decide_tick, SkipReason, TickDecision};
 use option_scheduler::spot::ResolvedSpotSource;
 use option_scheduler::strike_grid::build_strike_grid_from_chain;
 use option_scheduler::Cli;
@@ -217,31 +217,30 @@ async fn tick_once(
         let pair_label = format!("{}/{}", meta.cfg.underlying, meta.cfg.settlement);
         let latest = registry.latest_family(idx);
         let latest_expiry = latest.as_ref().map(|f| f.expiry_ms);
-
-        // Are we inside the roll window?
-        let needs_roll = match latest_expiry {
-            None => true, // no family on chain yet — cold-start roll
-            Some(t) => t.saturating_sub(now) < cfg.roll_threshold_ms,
-        };
+        let decision = decide_tick(
+            latest_expiry,
+            now,
+            cfg.roll_threshold_ms,
+            meta.cfg.expiry_interval_ms,
+        );
         debug!(
             pair = %pair_label,
             latest_expiry = ?latest_expiry,
-            needs_roll,
-            time_to_expiry_ms = latest_expiry.map(|t| t.saturating_sub(now)),
+            decision = ?decision,
             "tick: evaluating pair"
         );
-        if !needs_roll {
-            continue;
-        }
-
-        let next_expiry = next_expiry_ms(latest_expiry, meta.cfg.expiry_interval_ms, now);
-        // Sanity: don't roll if we already have a family at this exact
-        // expiry (indexer may have lagged behind a previous tick's submit).
-        if let Some(t) = latest_expiry {
-            if t >= next_expiry {
+        let next_expiry = match decision {
+            TickDecision::Roll { next_expiry_ms } => next_expiry_ms,
+            TickDecision::Skip(SkipReason::BeyondRollWindow { .. }) => continue,
+            TickDecision::Skip(SkipReason::AlreadyAtComputedExpiry) => {
+                warn!(
+                    pair = %pair_label,
+                    latest_expiry = ?latest_expiry,
+                    "skipping roll: cadence picker returned an expiry the chain already has"
+                );
                 continue;
             }
-        }
+        };
 
         let spot_chain = match meta
             .spot
