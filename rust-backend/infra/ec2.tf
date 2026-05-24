@@ -27,12 +27,15 @@ resource "aws_key_pair" "host" {
 
 locals {
   bootstrap_user_data = templatefile("${path.module}/templates/cloud-init.sh.tftpl", {
-    bootstrap_script  = file("${path.module}/../deployment/ec2/ec2-bootstrap.sh")
-    deploy_script     = file("${path.module}/../deployment/ec2/deploy.sh")
-    render_secrets_sh = file("${path.module}/../deployment/ec2/render-secrets.sh")
-    compose_dev       = file("${path.module}/../deployment/compose/docker-compose.dev.yml")
-    compose_staging   = file("${path.module}/../deployment/compose/docker-compose.staging.yml")
-    compose_prod      = file("${path.module}/../deployment/compose/docker-compose.prod.yml")
+    bootstrap_script       = file("${path.module}/../deployment/ec2/ec2-bootstrap.sh")
+    deploy_script          = file("${path.module}/../deployment/ec2/deploy.sh")
+    render_secrets_sh      = file("${path.module}/../deployment/ec2/render-secrets.sh")
+    compose_dev            = file("${path.module}/../deployment/compose/docker-compose.dev.yml")
+    compose_staging        = file("${path.module}/../deployment/compose/docker-compose.staging.yml")
+    compose_prod           = file("${path.module}/../deployment/compose/docker-compose.prod.yml")
+    vpc_cidr               = var.vpc_cidr
+    aws_region             = var.aws_region
+    tailscale_auth_key_arn = aws_secretsmanager_secret.tailscale_auth_key.arn
   })
 }
 

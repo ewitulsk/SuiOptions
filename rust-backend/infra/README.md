@@ -82,6 +82,86 @@ validation while the DNS records propagate. That's normal.
    staging) or by running the GH Actions workflow manually with
    `workflow_dispatch`.
 
+## Team VPN access (Tailscale subnet router)
+
+The EC2 host doubles as a Tailscale subnet router that advertises the
+VPC CIDR onto our tailnet. Teammates with access to the tailnet can
+then `psql` directly into RDS from their laptops
+
+### One-time operator setup
+
+1. **Create the Tailscale tailnet** (skip if it already exists).
+   Sign in at <https://login.tailscale.com/> with the org Google
+   account. Free plan is fine.
+
+2. **Define the router tag** in the tailnet policy file
+   (Access Controls → Edit file):
+   ```jsonc
+   {
+     "tagOwners": {
+       "tag:options-router": ["autogroup:admin"]
+     }
+   }
+   ```
+
+3. **Mint an auth key** (Settings → Keys → Generate auth key):
+   - Reusable: yes (so re-applying terraform doesn't burn the key)
+   - Ephemeral: no
+   - Pre-approved: yes
+   - Tag: `tag:options-router`
+
+4. **Store the auth key** in the Secrets Manager entry that Terraform
+   already created:
+   ```bash
+   aws secretsmanager put-secret-value \
+     --secret-id options/_master/tailscale-auth-key \
+     --secret-string '{"auth_key":"tskey-auth-xxxxxxxxxxxx"}'
+   ```
+
+5. **Kick the systemd unit on the EC2** (it retries every 30s, so this
+   step is optional — it'll catch up on its own within a minute):
+   ```bash
+   aws ssm start-session --target <ec2_instance_id output>
+   sudo systemctl restart tailscale-up.service
+   sudo systemctl status  tailscale-up.service
+   ```
+
+6. **Approve the advertised subnet** in the admin console
+   (Machines → `options-router` → Edit route settings → enable
+   `10.40.0.0/16`).
+
+### Onboarding a teammate
+
+1. In the admin console, **Users → Invite users**. Tailscale emails
+   them a join link.
+2. Teammate installs the Tailscale client (`brew install --cask
+   tailscale` or the desktop installer) and signs in.
+3. To connect to RDS, they just `psql` against the RDS endpoint
+   (from the `rds_endpoint` output) — the hostname resolves to its
+   private IP in public DNS, and the Tailscale subnet route carries
+   the traffic in:
+   ```bash
+   PGPASSWORD=$(aws secretsmanager get-secret-value \
+     --secret-id options/_master/db --query SecretString --output text \
+     | jq -r .password) \
+     psql -h <rds_endpoint output> -U postgres -d postgres
+   ```
+
+### Gotcha: existing EC2 won't auto-install Tailscale
+
+`user_data_replace_on_change = false` in `ec2.tf` means changing the
+cloud-init template does **not** recreate the box. For the currently
+running host, install Tailscale once by hand via SSM:
+
+```bash
+aws ssm start-session --target <ec2_instance_id output>
+# Then paste the Tailscale block from templates/cloud-init.sh.tftpl,
+# or just run /usr/local/sbin/options-ec2-bootstrap.sh if you've
+# tainted+reapplied the instance.
+```
+
+Future fresh applies will install Tailscale automatically.
+
 ## Manual DNS note
 
 If `route53_zone_id` is empty, Terraform creates the ACM cert but

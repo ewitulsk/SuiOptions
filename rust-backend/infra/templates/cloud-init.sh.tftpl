@@ -39,4 +39,80 @@ RENDER_EOF
   chmod +x "/opt/options/$env/render-secrets.sh"
 done
 
+# ---- Tailscale subnet router ----------------------------------------------
+# Advertises the VPC CIDR onto the tailnet so teammates can reach in-VPC
+# resources (RDS, etc.) from their laptops. Auth key lives in Secrets
+# Manager; populated by the operator after `terraform apply`.
+
+# Official Tailscale apt repo (Ubuntu 22.04 jammy).
+curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.noarmor.gpg \
+  | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list \
+  | tee /etc/apt/sources.list.d/tailscale.list >/dev/null
+apt-get update
+apt-get install -y tailscale jq
+
+# Subnet routing needs IPv4 forwarding.
+cat > /etc/sysctl.d/99-tailscale.conf <<'SYSCTL_EOF'
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+SYSCTL_EOF
+sysctl --system
+
+# `tailscale-up` script: fetch the auth key from Secrets Manager and
+# bring up the subnet router. Idempotent — re-running is a no-op once
+# the node is already registered. Exits non-zero (and logs) if the
+# secret still holds the REPLACE_ME placeholder, so `systemctl status`
+# surfaces the misconfiguration rather than masking it.
+cat > /usr/local/sbin/tailscale-up.sh <<TS_EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+AUTH_KEY=\$(aws secretsmanager get-secret-value \
+  --region "${aws_region}" \
+  --secret-id "${tailscale_auth_key_arn}" \
+  --query SecretString --output text \
+  | jq -r .auth_key)
+
+if [ -z "\$AUTH_KEY" ] || [ "\$AUTH_KEY" = "REPLACE_ME" ] || [ "\$AUTH_KEY" = "null" ]; then
+  echo "tailscale-up: auth key not yet populated in ${tailscale_auth_key_arn} — skipping" >&2
+  exit 1
+fi
+
+tailscale up \
+  --authkey="\$AUTH_KEY" \
+  --hostname=options-router \
+  --advertise-routes=${vpc_cidr} \
+  --accept-dns=false \
+  --ssh
+TS_EOF
+chmod +x /usr/local/sbin/tailscale-up.sh
+
+# systemd unit so the router comes back up after reboot. Runs after the
+# tailscaled daemon is ready and after network is online.
+cat > /etc/systemd/system/tailscale-up.service <<'UNIT_EOF'
+[Unit]
+Description=Bring up Tailscale as an options-router subnet router
+After=tailscaled.service network-online.target
+Wants=tailscaled.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tailscale-up.sh
+RemainAfterExit=yes
+# Retry a few times if the secret isn't populated yet on first boot.
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+
+systemctl daemon-reload
+systemctl enable tailscale-up.service
+# Don't fail bootstrap if the auth key isn't populated yet — the unit
+# will keep retrying, and the operator can `systemctl restart` after
+# populating the secret.
+systemctl start tailscale-up.service || true
+
 echo "options host bootstrap: complete"
