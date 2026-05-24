@@ -27,13 +27,14 @@ export function LiveBuckets() {
 
 function SeriesBlock({ series }: { series: Series }) {
   return (
-    <div className="live-buckets__series">
-      <div className="live-buckets__series-header">
+    <details className="live-buckets__series">
+      <summary className="live-buckets__series-header">
         <span className="live-buckets__pair">
           {series.asset_symbol} / {series.settlement_symbol}
         </span>
         <span className="live-buckets__expiry">expires {formatExpiry(series.expiry_iso)}</span>
-      </div>
+        <span className="live-buckets__count">{series.buckets.length} buckets</span>
+      </summary>
       <table className="live-buckets__table">
         <thead>
           <tr>
@@ -56,7 +57,7 @@ function SeriesBlock({ series }: { series: Series }) {
           ))}
         </tbody>
       </table>
-    </div>
+    </details>
   );
 }
 

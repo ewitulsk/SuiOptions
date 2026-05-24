@@ -21,9 +21,13 @@ html[data-mode="dark"] .live-buckets {
 .live-buckets__status { font-size: 13px; opacity: 0.7; }
 .live-buckets__status--error { color: #b00020; }
 .live-buckets__series + .live-buckets__series { margin-top: 20px; }
-.live-buckets__series-header { display: flex; gap: 12px; align-items: baseline; margin-bottom: 6px; }
+.live-buckets__series-header { display: flex; gap: 12px; align-items: baseline; margin-bottom: 6px; cursor: pointer; list-style: none; user-select: none; }
+.live-buckets__series-header::-webkit-details-marker { display: none; }
+.live-buckets__series-header::before { content: "▸"; font-size: 10px; opacity: 0.55; transition: transform 0.15s ease; display: inline-block; }
+.live-buckets__series[open] > .live-buckets__series-header::before { transform: rotate(90deg); }
 .live-buckets__pair { font-weight: 600; font-size: 14px; }
 .live-buckets__expiry { font-size: 12px; opacity: 0.65; }
+.live-buckets__count { font-size: 12px; opacity: 0.5; margin-left: auto; }
 .live-buckets__table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .live-buckets__table th, .live-buckets__table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid rgba(0, 0, 0, 0.05); }
 html[data-mode="dark"] .live-buckets__table th, html[data-mode="dark"] .live-buckets__table td { border-bottom-color: rgba(255, 255, 255, 0.06); }
