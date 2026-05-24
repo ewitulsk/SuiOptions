@@ -214,7 +214,7 @@ jobs:
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$EC2_INSTANCE_ID" \
             --document-name AWS-RunShellScript \
-            --comment "deploy $DEPLOY_ENV @ $TAG -> $SERVICES" \
+            --comment "deploy $DEPLOY_ENV @ $TAG" \
             --parameters file:///tmp/ssm-params.json \
             --output-s3-bucket-name "$SSM_OUTPUT_BUCKET" \
             --query Command.CommandId --output text)

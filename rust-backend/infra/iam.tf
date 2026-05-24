@@ -116,6 +116,9 @@ data "aws_iam_policy_document" "gh_actions_inline" {
       "ecr:UploadLayerPart",
       "ecr:BatchGetImage",
       "ecr:GetDownloadUrlForLayer",
+      # DescribeImages lets the deploy-latest workflow look up the most
+      # recently-pushed tag without rebuilding.
+      "ecr:DescribeImages",
     ]
     resources = [for r in aws_ecr_repository.svc : r.arn]
   }
