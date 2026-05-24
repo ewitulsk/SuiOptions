@@ -139,15 +139,6 @@ impl Repo {
     /// progress. Empty batches are a no-op (the worker may see checkpoints
     /// containing zero indexable events).
     pub fn apply_checkpoint(&self, batch: &CheckpointBatch) -> Result<()> {
-        debug!(
-            checkpoint = batch.checkpoint,
-            events = batch.events.len(),
-            accounts = batch.accounts.len(),
-            buckets = batch.buckets.len(),
-            position_upserts = batch.position_upserts.len(),
-            position_deletes = batch.position_deletes.len(),
-            "applying checkpoint to postgres"
-        );
         if batch.is_empty() {
             trace!(checkpoint = batch.checkpoint, "empty checkpoint, advancing progress only");
             // Still advance progress so we don't re-scan empty checkpoints
