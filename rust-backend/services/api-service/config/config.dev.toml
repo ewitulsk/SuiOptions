@@ -1,0 +1,12 @@
+# api-service config — dev env (devnet).
+#
+# Bind on all interfaces so the docker port mapping works. The compose
+# file publishes 9013:9003 on the host.
+
+bind_addr        = "0.0.0.0:9003"
+
+# Talk to the indexer over the env's compose-internal network.
+indexer_url      = "ws://indexer:9001/"
+
+# Frontend dev origins. Tighten once a real dev frontend URL exists.
+allowed_origins  = ["*"]

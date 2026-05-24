@@ -50,6 +50,17 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  api-service:
+    image: ${ECR}/options/api-service:${API_SERVICE_TAG}
+    environment:
+      APP_ENV: staging
+      RUST_LOG: info,api_service=debug
+    ports:
+      - "9023:9003"
+    depends_on: [indexer]
+    restart: unless-stopped
+    networks: [net]
+
 networks:
   net:
 

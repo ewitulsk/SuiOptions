@@ -57,6 +57,14 @@ target "option-scheduler" {
   cache-to   = [{ type = "gha", mode = "max", scope = "option-scheduler" }]
 }
 
+target "api-service" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.api-service"
+  tags       = ["${ECR}/options/api-service:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "api-service" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "api-service" }]
+}
+
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service"]
 }

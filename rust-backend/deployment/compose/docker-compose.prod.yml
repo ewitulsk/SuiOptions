@@ -55,6 +55,17 @@ services:
   #   restart: unless-stopped
   #   networks: [net]
 
+  api-service:
+    image: ${ECR}/options/api-service:${API_SERVICE_TAG}
+    environment:
+      APP_ENV: prod
+      RUST_LOG: info,api_service=info
+    ports:
+      - "9033:9003"
+    depends_on: [indexer]
+    restart: unless-stopped
+    networks: [net]
+
 networks:
   net:
 

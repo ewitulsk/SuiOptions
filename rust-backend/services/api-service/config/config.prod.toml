@@ -1,0 +1,12 @@
+# api-service config — prod env (mainnet).
+#
+# Bind on all interfaces so the docker port mapping works. The compose
+# file publishes 9033:9003 on the host.
+
+bind_addr        = "0.0.0.0:9003"
+
+# Talk to the indexer over the env's compose-internal network.
+indexer_url      = "ws://indexer:9001/"
+
+# Frontend prod origin. REPLACE with the real frontend URL before going live.
+allowed_origins  = ["*"]
