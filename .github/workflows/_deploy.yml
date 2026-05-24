@@ -93,7 +93,7 @@ jobs:
             # For rollbacks the user normally wants to bring the whole
             # stack to a known-good tag; if they want one service only,
             # they can use a hand-rolled SSM command.
-            services='["indexer","mm-bot","option-scheduler","quoting-service"]'
+            services='["api-service","indexer","mm-bot","option-scheduler","quoting-service"]'
             echo "force_all or image_tag override → rolling all services"
           else
             services=$(printf '%s\n' "$CHANGED_FILES" \
@@ -167,6 +167,10 @@ jobs:
           cp deployment/ec2/deploy.sh         /tmp/bundle/
           cp deployment/ec2/render-secrets.sh /tmp/bundle/
           cp deployment/compose/docker-compose.${{ matrix.env }}.yml /tmp/bundle/
+          # nginx sidecar config — compose bind-mounts /opt/options/<env>/nginx.conf
+          # into the nginx container, so the per-env config lands flat next to
+          # the compose file.
+          cp deployment/nginx/nginx.${{ matrix.env }}.conf /tmp/bundle/nginx.conf
           tar czf /tmp/bundle.tgz -C /tmp/bundle .
           aws s3 cp /tmp/bundle.tgz \
             "s3://$SSM_OUTPUT_BUCKET/deploy-bundles/$TAG-${{ matrix.env }}.tgz"
@@ -179,6 +183,9 @@ jobs:
         run: |
           # Build the SSM parameter file with jq so JSON escaping is
           # mechanical (the SERVICES variable contains double quotes).
+          # Note: AWS-RunShellScript runs under /bin/sh (dash on Ubuntu),
+          # which doesn't support `set -o pipefail` — keep this `set -eu`.
+          # deploy.sh itself runs under bash and uses pipefail there.
           jq -nc \
             --arg region "$AWS_REGION" \
             --arg ecr "$ECR_REGISTRY" \
@@ -189,7 +196,7 @@ jobs:
             --arg services "$SERVICES" '
             {
               commands: [
-                "set -euo pipefail",
+                "set -eu",
                 "export AWS_REGION=\($region)",
                 "export ECR=\($ecr)",
                 "export IMAGE_TAG=\($tag)",

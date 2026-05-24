@@ -19,11 +19,20 @@ output "alb_zone_id" {
 }
 
 output "domain_url" {
-  description = "Where the quoting service is reachable per env."
+  description = "Per-env public URLs. quoting is WS, api is HTTP."
   value = {
-    dev     = "https://${var.domain_name}/dev/"
-    staging = "https://${var.domain_name}/staging/"
-    prod    = "https://${var.domain_name}/prod/"
+    dev = {
+      quoting = "wss://${var.domain_name}/dev/quoting"
+      api     = "https://${var.domain_name}/dev/api"
+    }
+    staging = {
+      quoting = "wss://${var.domain_name}/staging/quoting"
+      api     = "https://${var.domain_name}/staging/api"
+    }
+    prod = {
+      quoting = "wss://${var.domain_name}/prod/quoting"
+      api     = "https://${var.domain_name}/prod/api"
+    }
   }
 }
 
