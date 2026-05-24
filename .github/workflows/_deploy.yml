@@ -120,10 +120,10 @@ jobs:
 
       - uses: aws-actions/amazon-ecr-login@v2
 
-      - uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
+      # No setup-qemu-action: bake.hcl targets linux/amd64 and the GH
+      # runner is amd64, so the whole build runs native. Add back +
+      # setup-qemu-action@v3 with `platforms: arm64` here if bake.hcl
+      # ever moves back to linux/arm64.
       - uses: docker/setup-buildx-action@v3
 
       - name: Build & push ${{ matrix.service }}
