@@ -1,5 +1,9 @@
-FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
-ARG TARGETPLATFORM
+# Target: linux/arm64 (Graviton EC2). bake.hcl sets platforms=linux/arm64
+# and docker buildx emulates arm64 via QEMU on x86 GH runners. No
+# `--platform=$BUILDPLATFORM` on the builder — that would native-compile
+# to amd64 and the Graviton kernel would reject the binary with
+# `Exec format error`.
+FROM rust:1-bookworm AS builder
 WORKDIR /src
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
