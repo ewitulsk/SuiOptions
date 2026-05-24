@@ -124,12 +124,24 @@ data "aws_iam_policy_document" "gh_actions_inline" {
   }
 
   # SSM send-command to the EC2 + read invocation results.
+  # Match instances by Name tag rather than ARN — EC2 replacements (AMI
+  # bumps, user_data changes that opt into replace_on_change, etc.) change
+  # the instance ID and otherwise leave the policy stale. The tag is set
+  # in ec2.tf on aws_instance.host.
   statement {
-    actions = [
-      "ssm:SendCommand",
-    ]
+    actions = ["ssm:SendCommand"]
     resources = [
-      aws_instance.host.arn,
+      "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/*",
+    ]
+    condition {
+      test     = "StringEquals"
+      variable = "ssm:resourceTag/Name"
+      values   = ["${var.project}-host"]
+    }
+  }
+  statement {
+    actions = ["ssm:SendCommand"]
+    resources = [
       "arn:aws:ssm:${var.aws_region}::document/AWS-RunShellScript",
     ]
   }
