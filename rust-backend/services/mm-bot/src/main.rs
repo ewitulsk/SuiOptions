@@ -704,6 +704,7 @@ fn spawn_vol_task(
         // --- maintain from the live cache -----------------------------------
         let mut ticker = tokio::time::interval(Duration::from_millis(cfg.vol_sample_interval_ms));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut vol_log_counter: u64 = 0;
         loop {
             ticker.tick().await;
             let Some(cp) = cache.peek(underlying_feed) else {
@@ -716,7 +717,10 @@ fn spawn_vol_task(
             }
             buf.write().push(now_ms(), cp.price);
             if let Some(sigma) = buf.read().current_annualized() {
-                tracing::debug!(sigma, samples = buf.read().len(), "vol updated");
+                vol_log_counter += 1;
+                if vol_log_counter % 60 == 1 {
+                    tracing::debug!(sigma, samples = buf.read().len(), "vol updated");
+                }
             }
         }
     });
