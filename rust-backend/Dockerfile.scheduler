@@ -27,7 +27,8 @@ ENV APP_ENV=dev
 # /run/secrets/scheduler.toml is rendered at deploy time by
 # render-secrets.sh from `options/<env>/scheduler` in Secrets Manager.
 #
-# --network is derived from APP_ENV (dev→testnet, staging→devnet,
+# --network is derived from APP_ENV (dev→devnet, staging→testnet,
 # prod→mainnet) so the scheduler resolves the right deployments.json
-# slot without a separate config knob.
-ENTRYPOINT ["/bin/sh", "-c", "case \"$APP_ENV\" in dev) NET=testnet ;; staging) NET=devnet ;; prod) NET=mainnet ;; *) echo \"unknown APP_ENV: $APP_ENV\" >&2; exit 1 ;; esac; exec /usr/local/bin/option-scheduler --config /app/config/config.${APP_ENV}.toml --deployments /app/deployments.json --secrets /run/secrets/scheduler.toml --network $NET"]
+# slot without a separate config knob. Mapping matches deployment.md
+# and the network field in indexer/mm-bot/api-service configs.
+ENTRYPOINT ["/bin/sh", "-c", "case \"$APP_ENV\" in dev) NET=devnet ;; staging) NET=testnet ;; prod) NET=mainnet ;; *) echo \"unknown APP_ENV: $APP_ENV\" >&2; exit 1 ;; esac; exec /usr/local/bin/option-scheduler --config /app/config/config.${APP_ENV}.toml --deployments /app/deployments.json --secrets /run/secrets/scheduler.toml --network $NET"]

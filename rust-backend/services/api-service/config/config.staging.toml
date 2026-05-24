@@ -5,6 +5,11 @@
 
 bind_addr        = "0.0.0.0:9003"
 
+# Sui network slot in deployments.json. staging -> testnet (matches
+# indexer/mm-bot configs and deployment.md; testnet is where the
+# deployed package lives).
+network          = "testnet"
+
 # Talk to the indexer over the env's compose-internal network.
 indexer_url      = "ws://indexer:9001/"
 
