@@ -24,13 +24,14 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Semaphore};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 
 use protocol_types::messages::{
     BucketUpdatePayload, ErrorPayload, HelloAckPayload, RetailHelloPayload, RetailToService,
     RfqResponsePayload, ServiceToRetail,
 };
 
+use crate::state::RfqObservation;
 use crate::{rfq, AppState, Config};
 
 pub async fn handle(
@@ -119,6 +120,18 @@ pub async fn handle(
                     write_amount = payload.write_amount,
                     "retail rfq request"
                 );
+                // Best-effort observer fan-out (rfq-monitor and friends).
+                // Fire before the rate-limit checks so operators see the
+                // actual incoming traffic, including requests we then
+                // reject. send() errors only when there are zero
+                // subscribers, which is fine — drop the result.
+                let _ = state.rfq_observers.send(RfqObservation {
+                    timestamp_ms: now_ms(),
+                    request_id: request_id.clone(),
+                    bucket_id: payload.bucket_id,
+                    write_amount: payload.write_amount,
+                    side: payload.side,
+                });
                 // Try to claim a per-session and global permit before
                 // spawning. Both use `try_acquire_owned` (non-blocking) so
                 // a saturated quota fails fast with a `rate_limited` error

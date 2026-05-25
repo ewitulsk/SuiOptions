@@ -21,6 +21,7 @@ option-scheduler   = { path = "../../services/option-scheduler" }
 api-service        = { path = "../../services/api-service" }
 exchange           = { path = "../../tools/exchange" }
 writer             = { path = "../../tools/writer" }
+rfq-monitor        = { path = "../../tools/rfq-monitor" }
 deployment-manager = { path = "../../tools/deployment-manager" }
 
 clap = { workspace = true }

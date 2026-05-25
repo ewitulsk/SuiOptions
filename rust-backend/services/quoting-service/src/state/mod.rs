@@ -12,13 +12,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use tokio::sync::{mpsc, Semaphore};
+use serde::Serialize;
+use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::time::interval;
 use tracing::{debug, trace, warn};
 
 use protocol_types::asset::AssetType;
 use protocol_types::events::{ChainEvent, IndexedEvent};
 use protocol_types::ids::ObjectId;
+use protocol_types::sides::Side;
 
 pub use accounts::{AccountMirror, AccountStore};
 pub use buckets::{BucketStore, BucketView};
@@ -32,6 +34,18 @@ pub use reservations::{InsertOutcome, Reservation, ReservationTable};
 pub enum MmResponse {
     Quote(ObjectId, protocol_types::messages::MmQuotePayload),
     Decline(ObjectId),
+}
+
+/// One-line observation of a retail `RFQRequest` arriving at the service.
+/// Pushed onto [`AppState::rfq_observers`] for operator-facing tooling
+/// (e.g. the `rfq-monitor` binary).
+#[derive(Clone, Debug, Serialize)]
+pub struct RfqObservation {
+    pub timestamp_ms: u64,
+    pub request_id: String,
+    pub bucket_id: ObjectId,
+    pub write_amount: u64,
+    pub side: Side,
 }
 
 pub struct AppState {
@@ -49,6 +63,10 @@ pub struct AppState {
     /// a saturated permit count means we reject the RFQ with
     /// `Error{code:"rate_limited"}` instead of spawning another task.
     pub rfq_global_inflight: Arc<Semaphore>,
+    /// Fan-out for observer tooling. The retail handler publishes one
+    /// [`RfqObservation`] per incoming RFQ; subscribers are best-effort and
+    /// may miss messages under backlog (the broadcast channel drops oldest).
+    pub rfq_observers: broadcast::Sender<RfqObservation>,
 }
 
 impl Default for AppState {
@@ -61,10 +79,11 @@ impl Default for AppState {
 
 impl AppState {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_global_rfq_cap(256)
     }
 
     pub fn with_global_rfq_cap(cap: usize) -> Self {
+        let (rfq_observers, _) = broadcast::channel(256);
         Self {
             accounts: AccountStore::default(),
             buckets: BucketStore::default(),
@@ -73,6 +92,7 @@ impl AppState {
             mms: MmRegistry::default(),
             pending_rfqs: DashMap::new(),
             rfq_global_inflight: Arc::new(Semaphore::new(cap)),
+            rfq_observers,
         }
     }
 

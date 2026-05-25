@@ -28,6 +28,7 @@ const OUR_CRATES: &[&str] = &[
     "deployment_manager",
     "exchange",
     "writer",
+    "rfq_monitor",
     "control_panel",
     "integration_tests",
 ];
