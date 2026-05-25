@@ -43,6 +43,11 @@ tracing-subscriber = { workspace = true }
 parking_lot = { workspace = true }
 reqwest = { workspace = true }
 
+# Postgres persistence for the local rolls table.
+diesel = { workspace = true }
+diesel_migrations = { workspace = true }
+r2d2 = { workspace = true }
+
 [dev-dependencies]
 # Construct StructTag fixtures in roller tests. The production crate
 # only ever pattern-matches against ObjectChange, so move-core-types

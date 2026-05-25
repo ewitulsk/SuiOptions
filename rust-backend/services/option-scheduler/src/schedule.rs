@@ -18,12 +18,14 @@
 /// `latest_expiry_ms`:
 ///   - `Some(t)` — chain already has a family for this pair; return
 ///     `t + interval_ms` (always strictly in the future relative to `t`).
-///   - `None` — cold start. Return the next `now_ms`-aligned multiple of
-///     `interval_ms`, i.e. the smallest `interval_ms * k > now_ms`.
+///   - `None` — cold start. Return an epoch-aligned expiry that is
+///     strictly more than `roll_threshold_ms` away from `now_ms`, so
+///     the *next* tick doesn't immediately re-fire and double-roll.
 pub fn next_expiry_ms(
     latest_expiry_ms: Option<u64>,
     interval_ms: u64,
     now_ms: u64,
+    roll_threshold_ms: u64,
 ) -> u64 {
     if interval_ms == 0 {
         // Defensive — config validates this elsewhere. Never roll twice on
@@ -33,10 +35,10 @@ pub fn next_expiry_ms(
     match latest_expiry_ms {
         Some(t) => t.saturating_add(interval_ms),
         None => {
-            // Cold start: next interval-aligned slot strictly after `now`.
-            // Aligning to epoch (ms-since-Unix) keeps every cold-started
-            // pair on the same global cadence.
-            let k = now_ms / interval_ms + 1;
+            // Cold start: land the expiry past the roll threshold so the
+            // next tick doesn't immediately re-fire and double-roll.
+            let target = now_ms.saturating_add(roll_threshold_ms);
+            let k = target / interval_ms + 1;
             k.saturating_mul(interval_ms)
         }
     }
@@ -85,7 +87,7 @@ pub fn decide_tick(
             time_to_expiry_ms: t.saturating_sub(now_ms),
         });
     }
-    let next = next_expiry_ms(latest_expiry_ms, expiry_interval_ms, now_ms);
+    let next = next_expiry_ms(latest_expiry_ms, expiry_interval_ms, now_ms, roll_threshold_ms);
     if let Some(t) = latest_expiry_ms {
         if t >= next {
             return TickDecision::Skip(SkipReason::AlreadyAtComputedExpiry);
@@ -102,24 +104,28 @@ mod tests {
     fn next_after_existing_family() {
         let week = 7 * 24 * 60 * 60 * 1_000;
         let t = 1_700_000_000_000u64;
-        assert_eq!(next_expiry_ms(Some(t), week, 0), t + week);
+        assert_eq!(next_expiry_ms(Some(t), week, 0, week), t + week);
     }
 
     #[test]
-    fn cold_start_aligns_to_epoch_grid() {
+    fn cold_start_lands_past_roll_threshold() {
         let week = 7 * 24 * 60 * 60 * 1_000;
-        let now = 5 * week + 1; // somewhere inside the 6th week-slot
-        let next = next_expiry_ms(None, week, now);
-        assert_eq!(next, 6 * week);
-        assert!(next > now);
+        let now = 5 * week + 1;
+        let next = next_expiry_ms(None, week, now, week);
+        // Must be strictly past now + roll_threshold so the next tick
+        // sees `next - now > threshold` and skips.
+        assert!(next > now + week, "cold-start expiry must be past roll_threshold");
+        // Must also be epoch-aligned.
+        assert_eq!(next % week, 0);
     }
 
     #[test]
     fn cold_start_exactly_on_boundary_skips_to_next() {
         let week = 7 * 24 * 60 * 60 * 1_000;
         let now = 5 * week;
-        let next = next_expiry_ms(None, week, now);
-        assert_eq!(next, 6 * week);
+        let next = next_expiry_ms(None, week, now, week);
+        // now + threshold = 6*week; k = 6*week/week + 1 = 7 → 7*week
+        assert_eq!(next, 7 * week);
     }
 
     // -- decide_tick ---------------------------------------------------
@@ -128,11 +134,25 @@ mod tests {
     const ROLL_THRESHOLD: u64 = WEEK_MS; // default in config.rs
 
     #[test]
-    fn decide_cold_start_rolls() {
-        // No family yet → roll, expiry = next epoch-aligned boundary.
+    fn decide_cold_start_rolls_past_threshold() {
+        // No family yet → roll, expiry lands past now + roll_threshold.
         let now = 5 * WEEK_MS + 1;
         let d = decide_tick(None, now, ROLL_THRESHOLD, WEEK_MS);
-        assert_eq!(d, TickDecision::Roll { next_expiry_ms: 6 * WEEK_MS });
+        // now + threshold is inside week 12 (=6*week), so k=12/1+1=13 → 7*week
+        // (with threshold == interval, target = now + week ≈ 6*week+1,
+        //  k = floor((6*week+1)/week)+1 = 7 → 7*week).
+        assert_eq!(d, TickDecision::Roll { next_expiry_ms: 7 * WEEK_MS });
+    }
+
+    #[test]
+    fn cold_start_does_not_double_roll() {
+        // After the first cold-start roll lands at 7*WEEK_MS, the next
+        // tick (still cold-start from the chain's POV, but now
+        // latest=Some(7*WEEK_MS)) should skip because 7w - 5w+1 > threshold.
+        let now = 5 * WEEK_MS + 1;
+        let cold_expiry = 7 * WEEK_MS; // what the first roll would produce
+        let d = decide_tick(Some(cold_expiry), now, ROLL_THRESHOLD, WEEK_MS);
+        assert!(matches!(d, TickDecision::Skip(SkipReason::BeyondRollWindow { .. })));
     }
 
     #[test]
@@ -200,5 +220,17 @@ mod tests {
         let latest = now + 3 * 24 * 60 * 60 * 1_000;
         let d = decide_tick(Some(latest), now, ROLL_THRESHOLD, 0);
         assert_eq!(d, TickDecision::Skip(SkipReason::AlreadyAtComputedExpiry));
+    }
+
+    #[test]
+    fn cold_start_with_small_threshold() {
+        // When threshold < interval, the cold-start expiry still lands
+        // past the threshold so no double-roll.
+        let week = WEEK_MS;
+        let threshold = week / 2; // half a week
+        let now = 5 * week + 1;
+        let next = next_expiry_ms(None, week, now, threshold);
+        assert!(next > now + threshold);
+        assert_eq!(next % week, 0);
     }
 }

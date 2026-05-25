@@ -12,6 +12,10 @@ indexer_url       = "ws://indexer:9001/"
 tick_secs         = 60
 roll_threshold_ms = 604_800_000
 
+# Local rolls DB — prevents indexer-race duplicate bucket creation.
+local_rolls_enabled    = false
+# scheduler_database_url = "postgresql://scheduler_prod:${DB_PASSWORD}@${DB_HOST}:5432/scheduler_prod"
+
 [pyth]
 hermes_url = "https://hermes.pyth.network"
 
