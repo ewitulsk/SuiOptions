@@ -11,5 +11,7 @@ database_url            = "postgresql://indexer_staging:${DB_PASSWORD}@${DB_HOST
 db_pool_size            = 8
 recent_log_capacity     = 1024
 
-# Tail from current tip on first boot.
-# start_checkpoint = 339373884
+# Backfill from just before the SO-55 contract republish so we capture
+# the new package's BucketCreated/AccountCreated events from inception.
+# Only consulted when `indexer_progress` is empty (i.e. on a fresh DB).
+start_checkpoint = 340804360
