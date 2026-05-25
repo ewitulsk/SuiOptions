@@ -203,10 +203,14 @@ impl Registry {
 /// Subscribe to the indexer fanout and stream events into `registry`.
 /// Reconnects forever; the indexer's `Snapshot` catch-up handles missed
 /// sequences during downtime.
+///
+/// When `db_pool` is `Some`, also confirms matching rolls in the local
+/// scheduler DB (Phase 3 indexer-feedback hook).
 pub async fn run_subscriber(
     url: String,
     registry: Registry,
     pairs: Arc<Vec<PairKey>>,
+    db_pool: Option<crate::db::DbPool>,
 ) -> Result<()> {
     loop {
         let after = registry.last_sequence();
@@ -240,12 +244,12 @@ pub async fn run_subscriber(
                         Ok(IndexerStream::Snapshot { payload }) => {
                             debug!(events = payload.events.len(), "snapshot");
                             for e in &payload.events {
-                                ingest(&registry, &pairs, e);
+                                ingest(&registry, &pairs, e, db_pool.as_ref());
                             }
                             registry.note_sequence(payload.latest_sequence);
                         }
                         Ok(IndexerStream::Event { payload }) => {
-                            ingest(&registry, &pairs, &payload);
+                            ingest(&registry, &pairs, &payload, db_pool.as_ref());
                         }
                         Ok(IndexerStream::Heartbeat { latest_sequence }) => {
                             registry.note_sequence(latest_sequence);
@@ -262,13 +266,34 @@ pub async fn run_subscriber(
     }
 }
 
-fn ingest(registry: &Registry, pairs: &[PairKey], env: &IndexedEvent) {
+fn ingest(
+    registry: &Registry,
+    pairs: &[PairKey],
+    env: &IndexedEvent,
+    db_pool: Option<&crate::db::DbPool>,
+) {
     match &env.event {
         ChainEvent::BucketCreated(ev) => {
             if let Some(idx) = pairs.iter().position(|p| p.matches_event(ev)) {
                 registry.apply_created(idx, ev);
-            } else {
-                // Drop silently — chain has buckets for assets we don't care about.
+
+                // Phase 3: confirm the roll in the local scheduler DB.
+                if let Some(pool) = db_pool {
+                    let pair = &pairs[idx];
+                    if let Err(e) = crate::db::confirm_from_indexer(
+                        pool,
+                        &pair.underlying_symbol,
+                        &pair.settlement_symbol,
+                        ev.expiry_ms,
+                        &ev.bucket_id.to_hex(),
+                    ) {
+                        warn!(
+                            error = %e,
+                            bucket_id = %ev.bucket_id,
+                            "confirm_from_indexer failed"
+                        );
+                    }
+                }
             }
         }
         ChainEvent::BucketCleaned(ev) => registry.apply_cleaned(ev),

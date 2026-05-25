@@ -45,6 +45,44 @@ pub struct RollOutcome {
     pub bucket_ids: Vec<ObjectID>,
 }
 
+/// Classification of a submit error for the local-rolls retry policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorClass {
+    /// Build, sign, preflight, or gas-stale: the tx never reached
+    /// consensus. Safe to delete the pending row and retry on next tick.
+    DefinitelyNotSent,
+    /// RPC timeout, transport error after transmit, unknown: the tx may
+    /// or may not have been accepted. Must go to `needs_reconciliation`.
+    Ambiguous,
+}
+
+/// Inspect an `anyhow::Error` from `submit` and decide whether the tx
+/// definitely never reached consensus or might have.
+pub fn classify_error(err: &anyhow::Error) -> ErrorClass {
+    let msg = format!("{err:#}").to_lowercase();
+    // Build/sign/preflight errors — the tx was never transmitted.
+    let definitely_not_sent = [
+        "building",
+        "parsing type tag",
+        "signature",
+        "gas price",
+        "gas budget",
+        "insufficient gas",
+        "not enough coins",
+        "reverted",
+        "object not found",
+        "invalid object",
+        "building bucket::new_call_option tx",
+    ];
+    for pat in &definitely_not_sent {
+        if msg.contains(pat) {
+            return ErrorClass::DefinitelyNotSent;
+        }
+    }
+    // Everything else (timeout, transport, unknown) is ambiguous.
+    ErrorClass::Ambiguous
+}
+
 pub async fn submit(
     wrap: &SuiClientWrapper,
     package: ObjectID,
@@ -231,5 +269,43 @@ mod tests {
             mutated(ObjectID::random(), "bucket", "Bucket"),
         ];
         assert_eq!(extract_bucket_ids(&changes), vec![bucket_id]);
+    }
+
+    // ── ErrorClass tests ────────────────────────────────────────────
+
+    #[test]
+    fn classify_build_error_as_definitely_not_sent() {
+        let err = anyhow::anyhow!("building bucket::new_call_option tx: object not found");
+        assert_eq!(classify_error(&err), ErrorClass::DefinitelyNotSent);
+    }
+
+    #[test]
+    fn classify_gas_error_as_definitely_not_sent() {
+        let err = anyhow::anyhow!("insufficient gas: balance 0, needed 10000");
+        assert_eq!(classify_error(&err), ErrorClass::DefinitelyNotSent);
+    }
+
+    #[test]
+    fn classify_signature_error_as_definitely_not_sent() {
+        let err = anyhow::anyhow!("signature verification failed");
+        assert_eq!(classify_error(&err), ErrorClass::DefinitelyNotSent);
+    }
+
+    #[test]
+    fn classify_revert_as_definitely_not_sent() {
+        let err = anyhow::anyhow!("bucket::new_call_option reverted: MoveAbort(...)");
+        assert_eq!(classify_error(&err), ErrorClass::DefinitelyNotSent);
+    }
+
+    #[test]
+    fn classify_timeout_as_ambiguous() {
+        let err = anyhow::anyhow!("submitting bucket::new_call_option tx: connection timed out");
+        assert_eq!(classify_error(&err), ErrorClass::Ambiguous);
+    }
+
+    #[test]
+    fn classify_unknown_error_as_ambiguous() {
+        let err = anyhow::anyhow!("something completely unexpected happened");
+        assert_eq!(classify_error(&err), ErrorClass::Ambiguous);
     }
 }

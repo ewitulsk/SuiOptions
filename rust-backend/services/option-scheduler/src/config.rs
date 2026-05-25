@@ -67,6 +67,28 @@ pub struct SchedulerConfig {
 
     /// Configured pairs to roll. Bot is a no-op for any pair not listed.
     pub pairs: Vec<PairConfig>,
+
+    /// Postgres URL for the scheduler's local rolls DB. When set (and
+    /// `local_rolls_enabled` is true), the scheduler records every
+    /// claim/submit in this DB so a stale indexer can never cause a
+    /// duplicate on-chain bucket creation.
+    #[serde(default)]
+    pub scheduler_database_url: Option<String>,
+
+    /// Feature flag. When false the scheduler runs exactly as before
+    /// (no DB, no claim step). Set true once the `scheduler_{env}` DB
+    /// is provisioned.
+    #[serde(default)]
+    pub local_rolls_enabled: bool,
+
+    /// Safety margin (in indexer sequences) the reconciler requires
+    /// before concluding an ambiguous submit never landed. Default 100.
+    #[serde(default = "default_reconciler_safety_margin")]
+    pub reconciler_safety_margin: u64,
+
+    /// How often the reconciler task wakes up, in seconds. Default 30.
+    #[serde(default = "default_reconciler_interval_secs")]
+    pub reconciler_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -144,6 +166,14 @@ pub enum SpotConfig {
     },
     // Future: `Http { url: String, json_path: String }` for an arbitrary
     // JSON oracle.
+}
+
+fn default_reconciler_safety_margin() -> u64 {
+    100
+}
+
+fn default_reconciler_interval_secs() -> u64 {
+    30
 }
 
 fn default_max_publish_lag_ms() -> u64 {
