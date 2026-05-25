@@ -27,6 +27,12 @@ const MIN_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const CHANNEL_DEPTH: usize = 1024;
 
+/// If a connection was alive for at least this long before erroring, the
+/// session was productive (data was flowing) and the error is a normal
+/// server-side disconnect (e.g. HTTP/2 INTERNAL_ERROR from Hermes).
+/// In that case we reset the backoff instead of growing it.
+const HEALTHY_DURATION: Duration = Duration::from_secs(5);
+
 /// Event delivered to the consumer. Most of the time it's a [`Price`]
 /// update; a [`Disconnected`] notice fires after the reconnect loop has
 /// been failing for `since.elapsed()` so the cache layer can mark feeds
@@ -65,6 +71,7 @@ async fn run_loop(
     let mut was_disconnected = false;
 
     loop {
+        let started = tokio::time::Instant::now();
         match connect_and_pump(&client, &url, &query, &tx).await {
             Ok(()) => {
                 // Hermes closed cleanly (24h cap). Reconnect immediately.
@@ -72,19 +79,29 @@ async fn run_loop(
                 backoff = MIN_BACKOFF;
             }
             Err(e) => {
+                let alive = started.elapsed();
                 let reason = format!("{e:#}");
-                warn!(url, error = %reason, "pyth sse stream errored; reconnecting");
-                if !was_disconnected {
-                    let _ = tx
-                        .send(StreamEvent::Disconnected {
-                            reason: reason.clone(),
-                        })
-                        .await;
-                    was_disconnected = true;
+
+                if alive >= HEALTHY_DURATION {
+                    // Connection was productive — the error is a normal
+                    // server-side disconnect (e.g. HTTP/2 INTERNAL_ERROR).
+                    // Reset backoff so we reconnect quickly.
+                    info!(url, alive_secs = alive.as_secs(), "pyth sse stream interrupted after healthy session; reconnecting");
+                    backoff = MIN_BACKOFF;
+                } else {
+                    warn!(url, error = %reason, "pyth sse stream errored; reconnecting");
+                    if !was_disconnected {
+                        let _ = tx
+                            .send(StreamEvent::Disconnected {
+                                reason: reason.clone(),
+                            })
+                            .await;
+                        was_disconnected = true;
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                    continue;
                 }
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(MAX_BACKOFF);
-                continue;
             }
         }
 
