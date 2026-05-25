@@ -43,7 +43,8 @@ impl indexer_client::EventSink for AppState {
                     bucket = %b.bucket_id,
                     asset_type = %b.asset_type,
                     settlement_type = %b.settlement_type,
-                    strike = b.strike,
+                    strike = %b.strike,
+                    strike_scale = b.strike_scale,
                     expiry_ms = b.expiry_ms,
                     "BucketCreated"
                 );
@@ -53,6 +54,7 @@ impl indexer_client::EventSink for AppState {
                         asset_type: b.asset_type.clone(),
                         settlement_type: b.settlement_type.clone(),
                         strike: b.strike,
+                        strike_scale: b.strike_scale,
                         expiry_ms: b.expiry_ms,
                         total_written: 0,
                         exercise_cursor: 0,
@@ -107,6 +109,7 @@ mod tests {
                 settlement_type: AssetType::new("USDC"),
                 expiry_ms: 1_700_000_000_000,
                 strike: 60_000_000_000,
+                strike_scale: 0,
             }),
         ));
         assert_eq!(s.active_buckets().len(), 1);

@@ -150,6 +150,7 @@ mod tests {
             settlement_type: AssetType::new("0x123::usdc::USDC"),
             expiry_ms: 1_700_000_000_000,
             strike: 50_000_000_000,
+            strike_scale: 2,
         };
         let bytes = bcs::to_bytes(&evt).unwrap();
         let got = dispatch(&t, &t.bucket_created, &bytes).unwrap();

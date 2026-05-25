@@ -96,7 +96,8 @@ impl PairKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StrikeBucket {
-    pub strike: u64,
+    pub strike: u128,
+    pub strike_scale: u8,
     pub bucket_id: ObjectId,
 }
 
@@ -167,6 +168,7 @@ impl Registry {
         // replayed snapshot is idempotent.
         let new = StrikeBucket {
             strike: ev.strike,
+            strike_scale: ev.strike_scale,
             bucket_id: ev.bucket_id,
         };
         if !entry.iter().any(|b| b.bucket_id == new.bucket_id) {
@@ -289,7 +291,13 @@ pub fn log_registry(registry: &Registry, pairs: &[PairKey]) {
             continue;
         }
         for fam in families {
-            let strikes: Vec<u64> = fam.strikes.iter().map(|b| b.strike).collect();
+            // Log the human-readable USD strike (scale already applied) plus
+            // the raw chain pair so operators can cross-reference.
+            let strikes: Vec<String> = fam
+                .strikes
+                .iter()
+                .map(|b| format!("{}@scale{}", b.strike, b.strike_scale))
+                .collect();
             let ids: BTreeSet<String> = fam
                 .strikes
                 .iter()
@@ -357,6 +365,7 @@ mod tests {
             ),
             expiry_ms: 1_700_000_000_000,
             strike: 500,
+            strike_scale: 0,
         };
         assert!(p.matches_event(&ev));
         r.apply_created(0, &ev);
@@ -386,6 +395,7 @@ mod tests {
             ),
             expiry_ms: 1,
             strike: 1,
+            strike_scale: 0,
         };
         assert!(!p.matches_event(&ev));
         // mirror what `ingest` does: skip apply_created when no pair matches.
@@ -395,7 +405,7 @@ mod tests {
     #[test]
     fn highest_expiry_wins_as_latest() {
         let r = Registry::new();
-        let mk = |strike: u64, expiry: u64| BucketCreated {
+        let mk = |strike: u128, expiry: u64| BucketCreated {
             bucket_id: ObjectId::new([strike as u8; 32]),
             asset_type: AssetType::new(
                 "0x0b756179b7ae9efea2fdfb805308443bab763605459b92947616e0a04136d843::tbtc::TBTC",
@@ -405,6 +415,7 @@ mod tests {
             ),
             expiry_ms: expiry,
             strike,
+            strike_scale: 0,
         };
         r.apply_created(0, &mk(400, 1_000));
         r.apply_created(0, &mk(425, 1_000));

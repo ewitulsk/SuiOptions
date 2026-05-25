@@ -85,6 +85,7 @@ async fn main() -> Result<()> {
             start_strike,
             strike_interval,
             count,
+            strike_scale,
         } => {
             let u_type = resolve_coin_type(net, &underlying)?;
             let s_type = resolve_coin_type(net, &settlement)?;
@@ -100,6 +101,7 @@ async fn main() -> Result<()> {
                     start_strike,
                     strike_interval,
                     count,
+                    strike_scale,
                 },
                 cli.gas_budget,
             )

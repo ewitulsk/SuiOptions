@@ -35,7 +35,8 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// `bucket::new_call_option<U, S>` — creates `count` buckets at
-    /// `start_strike + i * strike_interval` for `i ∈ [0, count)`. Tokens
+    /// `start_strike + i * strike_interval` for `i ∈ [0, count)`. Real
+    /// strike ratio is `strike / 10^strike_scale` (see SO-55). Tokens
     /// are looked up by symbol from `deployments.testTokens`.
     CreateBuckets {
         #[arg(long, default_value = "TBTC")]
@@ -45,11 +46,14 @@ pub enum Command {
         #[arg(long)]
         expiry_ms: u64,
         #[arg(long)]
-        start_strike: u64,
+        start_strike: u128,
         #[arg(long)]
-        strike_interval: u64,
+        strike_interval: u128,
         #[arg(long)]
         count: u64,
+        /// 0..=9. Scheduler auto-derives this; admin uses it manually.
+        #[arg(long, default_value_t = 0)]
+        strike_scale: u8,
     },
     /// Faucet-mint `amount` of a test token to the signer.
     Mint {

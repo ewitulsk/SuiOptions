@@ -40,13 +40,14 @@ pub struct AccountState {
     pub balances: BTreeMap<AssetType, u64>,
 }
 
-/// What we keep per Bucket: cursor state + identity. Strike and asset types
-/// are immutable across the bucket's life.
+/// What we keep per Bucket: cursor state + identity. Strike, scale, and
+/// asset types are immutable across the bucket's life.
 #[derive(Clone, Debug)]
 pub struct BucketState {
     pub asset_type: AssetType,
     pub settlement_type: AssetType,
-    pub strike: u64,
+    pub strike: u128,
+    pub strike_scale: u8,
     pub expiry_ms: u64,
     pub total_written: u128,
     pub exercise_cursor: u128,
@@ -407,7 +408,8 @@ fn bucket_row(id: ObjectId, state: &BucketState, sequence: i64) -> BucketRow {
         bucket_id: id.to_hex(),
         asset_type: state.asset_type.as_str().to_string(),
         settlement_type: state.settlement_type.as_str().to_string(),
-        strike: u64_to_bigdecimal(state.strike),
+        strike: u128_to_bigdecimal(state.strike),
+        strike_scale: state.strike_scale as i16,
         expiry_ms: state.expiry_ms as i64,
         total_written: u128_to_bigdecimal(state.total_written),
         exercise_cursor: u128_to_bigdecimal(state.exercise_cursor),
@@ -489,6 +491,7 @@ fn apply_bucket_created(inner: &mut Inner, b: &BucketCreated) {
             asset_type: b.asset_type.clone(),
             settlement_type: b.settlement_type.clone(),
             strike: b.strike,
+            strike_scale: b.strike_scale,
             expiry_ms: b.expiry_ms,
             total_written: 0,
             exercise_cursor: 0,
@@ -590,6 +593,7 @@ mod tests {
             settlement_type: AssetType::new("USDC"),
             expiry_ms: 1_000,
             strike: 50_000_000,
+            strike_scale: 0,
         })
     }
 
@@ -620,6 +624,7 @@ mod tests {
                 settlement_type: AssetType::new("USDC"),
                 expiry_ms: 1_000,
                 strike: 50,
+                strike_scale: 0,
             }),
             1,
         );

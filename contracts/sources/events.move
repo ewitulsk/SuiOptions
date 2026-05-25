@@ -8,7 +8,10 @@ public struct BucketCreated has copy, drop {
     asset_type: TypeName,
     settlement_type: TypeName,
     expiry_ms: u64,
-    strike: u64,
+    /// See `bucket::Bucket.strike` — actual ratio is
+    /// `strike / 10^strike_scale`.
+    strike: u128,
+    strike_scale: u8,
 }
 
 public struct WriteExecuted has copy, drop {
@@ -96,9 +99,17 @@ public(package) fun emit_bucket_created(
     asset_type: TypeName,
     settlement_type: TypeName,
     expiry_ms: u64,
-    strike: u64,
+    strike: u128,
+    strike_scale: u8,
 ) {
-    event::emit(BucketCreated { bucket_id, asset_type, settlement_type, expiry_ms, strike });
+    event::emit(BucketCreated {
+        bucket_id,
+        asset_type,
+        settlement_type,
+        expiry_ms,
+        strike,
+        strike_scale,
+    });
 }
 
 public(package) fun emit_write_executed(

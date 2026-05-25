@@ -242,11 +242,13 @@ pub struct RfqBroadcastPayload {
     pub side: Side,
     #[serde(with = "u64_string")]
     pub deadline_ms: u64,
-    /// Bucket's on-chain strike — settlement raw-units per underlying
-    /// raw-unit. MMs price against this so they don't have to track
-    /// bucket state separately.
-    #[serde(with = "u64_string")]
-    pub strike: u64,
+    /// Bucket's on-chain strike. Real ratio (settlement raw-units per
+    /// underlying raw-unit) is `strike / 10^strike_scale`. MMs must
+    /// normalize before plugging into a pricing model.
+    #[serde(with = "u128_string")]
+    pub strike: u128,
+    /// 0..=9. See `BucketCreated::strike_scale`.
+    pub strike_scale: u8,
     /// Bucket expiry as a Sui clock millisecond timestamp. The MM derives
     /// time-to-expiry from this directly instead of guessing.
     #[serde(with = "u64_string")]
@@ -440,12 +442,14 @@ mod tests {
                 side: Side::Writer,
                 deadline_ms: 1_748_534_400_000,
                 strike: 500,
+                strike_scale: 0,
                 expiry_ms: 1_900_000_000_000,
             },
         };
         let s = serde_json::to_string(&msg).unwrap();
         assert!(s.contains("\"deadline_ms\":\"1748534400000\""));
         assert!(s.contains("\"strike\":\"500\""));
+        assert!(s.contains("\"strike_scale\":0"));
         assert!(s.contains("\"expiry_ms\":\"1900000000000\""));
         let back: ServiceToMm = serde_json::from_str(&s).unwrap();
         assert_eq!(back, msg);

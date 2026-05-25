@@ -68,11 +68,16 @@ use crate::state::AppState;
 #[derive(Serialize)]
 pub struct BucketDto {
     pub bucket_id: String,
-    /// Strike in settlement-token whole units (`raw / 10^settlement_decimals`).
-    /// `null` if settlement decimals are unknown.
+    /// Strike in USD-equivalent whole units. `null` if either decimals
+    /// lookup failed. Post-SO-55: real ratio is
+    /// `strike_raw / 10^strike_scale × 10^(under_dec − settle_dec)` —
+    /// see `strike_raw_to_usd`.
     pub strike: Option<f64>,
-    /// Raw on-chain strike in settlement atomic units.
+    /// Raw on-chain u128 strike. Real ratio = `strike_raw / 10^strike_scale`.
     pub strike_raw: String,
+    /// On-chain `strike_scale` (0..=9). Exposed so frontends can recompute
+    /// the USD strike independently if they want.
+    pub strike_scale: u8,
     /// Total underlying written into the bucket, in underlying whole units.
     /// `null` if asset decimals are unknown.
     pub total_written: Option<f64>,
@@ -171,12 +176,11 @@ fn dto_from(
     asset_decimals: Option<u8>,
     settle_decimals: Option<u8>,
 ) -> BucketDto {
-    // On-chain strike is settlement-smallest-units per underlying-
-    // smallest-unit (spec §3.2.4 / §3.3.5), so the USD conversion needs
-    // *both* decimals — dividing by settle_dec alone collapses the
-    // strike by 10^under_dec.
+    // On-chain strike (post-SO-55) is `strike_raw / 10^strike_scale`
+    // settlement-smallest-units per underlying-smallest-unit, so USD
+    // conversion needs both decimals AND the per-bucket scale.
     let strike = match (asset_decimals, settle_decimals) {
-        (Some(u), Some(s)) => Some(strike_raw_to_usd(b.strike, u, s)),
+        (Some(u), Some(s)) => Some(strike_raw_to_usd(b.strike, b.strike_scale, u, s)),
         _ => None,
     };
     let total_written = asset_decimals.map(|d| scale_u128(b.total_written, d));
@@ -190,6 +194,7 @@ fn dto_from(
         bucket_id,
         strike,
         strike_raw: b.strike.to_string(),
+        strike_scale: b.strike_scale,
         total_written,
         total_written_raw: b.total_written.to_string(),
         exercise_cursor,
@@ -202,11 +207,11 @@ fn scale_u128(raw: u128, decimals: u8) -> f64 {
     raw as f64 / 10f64.powi(decimals as i32)
 }
 
-/// Convert an on-chain strike (settlement-smallest-units per
-/// underlying-smallest-unit) into USD. Mirrors the bucket-creation math
-/// in `option-scheduler/src/strike_grid.rs`.
-fn strike_raw_to_usd(raw: u64, under_dec: u8, settle_dec: u8) -> f64 {
-    raw as f64 * 10f64.powi(under_dec as i32 - settle_dec as i32)
+/// Convert an on-chain strike (`raw / 10^strike_scale` settlement-
+/// smallest-units per underlying-smallest-unit) into USD. Mirrors the
+/// bucket-creation math in `option-scheduler/src/strike_grid.rs`.
+fn strike_raw_to_usd(raw: u128, strike_scale: u8, under_dec: u8, settle_dec: u8) -> f64 {
+    raw as f64 * 10f64.powi(under_dec as i32 - settle_dec as i32 - strike_scale as i32)
 }
 
 fn iso_millis(ms: i64) -> String {
@@ -275,11 +280,12 @@ mod tests {
         TokenCatalog::from_deployments(&deps, "testnet").unwrap()
     }
 
-    fn mk_bucket(strike: u64, written: u128, cursor: u128) -> Bucket {
+    fn mk_bucket(strike: u128, strike_scale: u8, written: u128, cursor: u128) -> Bucket {
         Bucket {
             asset_type: AssetType::new("0xpkg::tbtc::TBTC"),
             settlement_type: AssetType::new("0xpkg::tusdc::TUSDC"),
             strike,
+            strike_scale,
             expiry_ms: 1_782_345_600_000,
             total_written: written,
             exercise_cursor: cursor,
@@ -298,9 +304,9 @@ mod tests {
         let buckets = vec![
             (
                 ObjectId::new([0xaa; 32]),
-                mk_bucket(850, 420_000_000, 100_000_000),
+                mk_bucket(850, 0, 420_000_000, 100_000_000),
             ),
-            (ObjectId::new([0xbb; 32]), mk_bucket(900, 0, 0)),
+            (ObjectId::new([0xbb; 32]), mk_bucket(900, 0, 0, 0)),
         ];
         let series = group_into_series(buckets, &cat);
         assert_eq!(series.len(), 1);
@@ -329,7 +335,7 @@ mod tests {
         // produces today) into 0.000769 USD. Pin the conversion so the
         // regression can't sneak back in.
         let cat = fixture_catalog();
-        let buckets = vec![(ObjectId::new([0xee; 32]), mk_bucket(769, 0, 0))];
+        let buckets = vec![(ObjectId::new([0xee; 32]), mk_bucket(769, 0, 0, 0))];
         let s = group_into_series(buckets, &cat);
         assert_eq!(s[0].buckets[0].strike, Some(76_900.0));
         assert_eq!(s[0].buckets[0].strike_raw, "769");
@@ -391,20 +397,88 @@ mod tests {
             asset_type: AssetType::new("0xpkg::deep::DEEP"),
             settlement_type: AssetType::new("0xpkg::tusdc::TUSDC"),
             strike: 150,
+            strike_scale: 0,
             expiry_ms: 1_782_345_600_000,
             total_written: 0,
             exercise_cursor: 0,
             cleaned: false,
         };
         let s = group_into_series(vec![(ObjectId::new([0xff; 32]), b)], &cat);
-        // 150 * 10^(6-9) = 0.15
+        // 150 * 10^(6-9-0) = 0.15
         assert!((s[0].buckets[0].strike.unwrap() - 0.15).abs() < 1e-12);
+    }
+
+    #[test]
+    fn strike_scale_lets_tdeep_round_trip_through_dto() {
+        // Regression for SO-55 — TDEEP/TUSDC at $0.15. Same decimals on
+        // both sides, scheduler picks strike_scale=5 → strike_raw=15_000.
+        // The api-service formula has to consume the scale; without it
+        // the displayed strike collapses by 10^5.
+        let mut tokens = std::collections::BTreeMap::new();
+        tokens.insert(
+            "TDEEP".into(),
+            deployments::TokenInfo {
+                coin_type: "0xpkg::tdeep::TDEEP".into(),
+                faucet_id: "0xd".into(),
+                decimals: 6,
+            },
+        );
+        tokens.insert(
+            "TUSDC".into(),
+            deployments::TokenInfo {
+                coin_type: "0xpkg::tusdc::TUSDC".into(),
+                faucet_id: "0xs".into(),
+                decimals: 6,
+            },
+        );
+        let deps = deployments::Deployments {
+            mainnet: None,
+            devnet: None,
+            testnet: Some(deployments::NetworkDeployment {
+                package_info: deployments::PackageInfo {
+                    package_id: "0xp".into(),
+                    admin_cap_id: "0xa".into(),
+                    protocol_config_id: "0xc".into(),
+                    upgrade_cap_id: "0xu".into(),
+                    treasury_id: None,
+                    publish_digest: "x".into(),
+                    init_digest: None,
+                    deployer: "0xd".into(),
+                    deployed_at: "".into(),
+                    network: "testnet".into(),
+                    test_tokens: Some(deployments::TestTokens {
+                        package_id: "0xtp".into(),
+                        upgrade_cap_id: "0xtu".into(),
+                        publish_digest: "y".into(),
+                        deployed_at: "".into(),
+                        tokens,
+                    }),
+                },
+                token_info: std::collections::BTreeMap::new(),
+            }),
+        };
+        let cat = TokenCatalog::from_deployments(&deps, "testnet").unwrap();
+        let b = Bucket {
+            asset_type: AssetType::new("0xpkg::tdeep::TDEEP"),
+            settlement_type: AssetType::new("0xpkg::tusdc::TUSDC"),
+            strike: 15_000,
+            strike_scale: 5,
+            expiry_ms: 1_782_345_600_000,
+            total_written: 0,
+            exercise_cursor: 0,
+            cleaned: false,
+        };
+        let s = group_into_series(vec![(ObjectId::new([0xfe; 32]), b)], &cat);
+        // 15_000 * 10^(6 - 6 - 5) = 0.15 USD
+        assert!((s[0].buckets[0].strike.unwrap() - 0.15).abs() < 1e-12);
+        assert_eq!(s[0].buckets[0].strike_scale, 5);
+        assert_eq!(s[0].buckets[0].strike_raw, "15000");
     }
 
     #[test]
     fn unknown_coin_type_falls_back_to_raw_string() {
         let cat = TokenCatalog::default();
-        let buckets = vec![(ObjectId::new([0xcc; 32]), mk_bucket(1, 0, 0))];
+        let buckets = vec![(ObjectId::new([0xcc; 32]), mk_bucket(1, 0, 0, 0))];
         let series = group_into_series(buckets, &cat);
         assert_eq!(series[0].asset_symbol, "0xpkg::tbtc::TBTC");
         assert_eq!(series[0].asset_decimals, None);
@@ -417,7 +491,7 @@ mod tests {
         let cat = fixture_catalog();
         let buckets = vec![(
             ObjectId::new([0xdd; 32]),
-            mk_bucket(85_000_000_000, 0, 0),
+            mk_bucket(85_000_000_000, 0, 0, 0),
         )];
         let s = group_into_series(buckets, &cat);
         assert_eq!(s[0].buckets[0].fill_pct, Some(0.0));

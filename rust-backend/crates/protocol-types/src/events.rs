@@ -22,8 +22,21 @@ pub struct BucketCreated {
     pub settlement_type: AssetType,
     #[serde(with = "u64_string")]
     pub expiry_ms: u64,
-    #[serde(with = "u64_string")]
-    pub strike: u64,
+    /// Scaled strike. Real ratio = `strike / 10^strike_scale`
+    /// (settlement-smallest-units per underlying-smallest-unit). u128 to
+    /// match the on-chain Bucket field.
+    #[serde(with = "u128_string")]
+    pub strike: u128,
+    /// 0..=9. Caps at 9 to match Pyth's normalized convention.
+    pub strike_scale: u8,
+}
+
+impl BucketCreated {
+    /// Real ratio as an f64. Lossy for very large strikes; convenient
+    /// for log lines and UI. On-chain math always uses the raw integers.
+    pub fn strike_as_f64(&self) -> f64 {
+        self.strike as f64 / 10f64.powi(self.strike_scale as i32)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,14 +200,30 @@ mod tests {
             settlement_type: AssetType::new("USDC"),
             expiry_ms: 1_748_534_400_000,
             strike: 50_000_000_000,
+            strike_scale: 0,
         });
         let v: serde_json::Value = serde_json::to_value(&evt).unwrap();
         assert_eq!(v["type"], "BucketCreated");
         assert_eq!(v["payload"]["asset_type"], "BTC");
         assert_eq!(v["payload"]["strike"], "50000000000");
+        assert_eq!(v["payload"]["strike_scale"], 0);
 
         let back: ChainEvent = serde_json::from_value(v).unwrap();
         assert_eq!(back, evt);
+    }
+
+    #[test]
+    fn strike_as_f64_applies_scale() {
+        let ev = BucketCreated {
+            bucket_id: ObjectId::new([0; 32]),
+            asset_type: AssetType::new("DEEP"),
+            settlement_type: AssetType::new("USDC"),
+            expiry_ms: 0,
+            strike: 15_000,
+            strike_scale: 5,
+        };
+        // scale=5 → divisor 100_000 → 15_000 / 100_000 = 0.15
+        assert!((ev.strike_as_f64() - 0.15).abs() < 1e-12);
     }
 
     #[test]

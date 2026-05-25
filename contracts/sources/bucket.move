@@ -19,11 +19,49 @@ public struct Bucket<phantom Underlying, phantom Settlement> has key {
     asset_type: TypeName,
     settlement_type: TypeName,
     expiry_ms: u64,
-    strike: u64,
+    /// Strike ratio in scaled chain units. The real ratio (settlement
+    /// smallest-units per underlying smallest-unit) is
+    /// `strike / 10^strike_scale`. Using u128 + u8 lets a sub-cent asset
+    /// paired against a same-decimal stablecoin (e.g. TDEEP/TUSDC) carry
+    /// meaningful resolution that a plain integer ratio cannot.
+    strike: u128,
+    strike_scale: u8,
     total_written: u128,
     exercise_cursor: u128,
     underlying_balance: Balance<Underlying>,
     settlement_balance: Balance<Settlement>,
+}
+
+/// Maximum supported strike_scale. 38 is the largest exponent for which
+/// `pow10` still fits in u128 (`10^38 ≈ 1×10^38`, `u128::MAX ≈ 3.4×10^38`);
+/// passing 39 would abort inside the loop's multiply, so we cap one below
+/// that on a dedicated assert for a cleaner error.
+const MAX_STRIKE_SCALE: u8 = 38;
+
+/// 10^exp for exp ∈ [0, MAX_STRIKE_SCALE]. Aborts if exp exceeds the cap
+/// — keeps `pow10` cheap and guarantees the result fits in u128.
+fun pow10(exp: u8): u128 {
+    assert!(exp <= MAX_STRIKE_SCALE, errors::strike_scale_too_large());
+    let mut result: u128 = 1;
+    let mut i: u8 = 0;
+    while (i < exp) {
+        result = result * 10;
+        i = i + 1;
+    };
+    result
+}
+
+/// settlement = round_half_up((amount × strike) / 10^strike_scale).
+///
+/// Round-half-up (not floor) so a tiny exercise rounds to the nearest
+/// settlement smallest-unit instead of consistently truncating to zero
+/// in the buyer's favor. Aborts via the u64 cast if the result exceeds
+/// u64::MAX (Coin<T>::value is u64).
+fun apply_strike(amount: u128, strike: u128, strike_scale: u8): u64 {
+    let divisor = pow10(strike_scale);
+    let numerator = amount * strike;
+    let half = divisor / 2;
+    ((numerator + half) / divisor) as u64
 }
 
 public enum FlowKind has copy, drop, store {
@@ -38,30 +76,42 @@ public fun trader_flow(): FlowKind { FlowKind::Trader }
 public fun new_call_option<Underlying, Settlement>(
     _: &AdminCap,
     expiry_ms: u64,
-    start_strike: u64,
-    strike_interval: u64,
+    start_strike: u128,
+    strike_interval: u128,
     count: u64,
+    strike_scale: u8,
     ctx: &mut TxContext,
 ) {
     assert!(count > 0, errors::count_must_be_positive());
+    // Fail at creation rather than at the first exercise/redeem if the
+    // scheduler ever hands us an out-of-range scale.
+    assert!(strike_scale <= MAX_STRIKE_SCALE, errors::strike_scale_too_large());
     let asset_type = type_name::with_defining_ids<Underlying>();
     let settlement_type = type_name::with_defining_ids<Settlement>();
     let mut i: u64 = 0;
     while (i < count) {
-        let strike = start_strike + i * strike_interval;
+        let strike = start_strike + (i as u128) * strike_interval;
         let bucket = Bucket<Underlying, Settlement> {
             id: object::new(ctx),
             asset_type,
             settlement_type,
             expiry_ms,
             strike,
+            strike_scale,
             total_written: 0,
             exercise_cursor: 0,
             underlying_balance: balance::zero<Underlying>(),
             settlement_balance: balance::zero<Settlement>(),
         };
         let bucket_id = object::id(&bucket);
-        events::emit_bucket_created(bucket_id, asset_type, settlement_type, expiry_ms, strike);
+        events::emit_bucket_created(
+            bucket_id,
+            asset_type,
+            settlement_type,
+            expiry_ms,
+            strike,
+            strike_scale,
+        );
         transfer::share_object(bucket);
         i = i + 1;
     };
@@ -249,8 +299,11 @@ public fun exercise<Underlying, Settlement>(
     let amount = call_option::amount(&call);
     assert!(amount > 0, errors::zero_amount());
 
-    let required_settlement_u128 = (amount as u128) * (bucket.strike as u128);
-    let required_settlement = required_settlement_u128 as u64;
+    let required_settlement = apply_strike(
+        amount as u128,
+        bucket.strike,
+        bucket.strike_scale,
+    );
     assert!(settlement_payment.value() == required_settlement, errors::settlement_amount_mismatch());
 
     assert!(
@@ -300,7 +353,7 @@ public fun redeem_position<Underlying, Settlement>(
     let unexercised = total_range - exercised;
 
     let underlying_amount = unexercised as u64;
-    let settlement_amount = (exercised * (bucket.strike as u128)) as u64;
+    let settlement_amount = apply_strike(exercised, bucket.strike, bucket.strike_scale);
 
     let underlying = coin::from_balance(
         bucket.underlying_balance.split(underlying_amount),
@@ -349,6 +402,7 @@ public fun cleanup_bucket<Underlying, Settlement>(
         settlement_type: _,
         expiry_ms: _,
         strike: _,
+        strike_scale: _,
         total_written: _,
         exercise_cursor: _,
         underlying_balance,
@@ -364,7 +418,8 @@ public fun cleanup_bucket<Underlying, Settlement>(
 }
 
 public fun expiry_ms<U, S>(bucket: &Bucket<U, S>): u64 { bucket.expiry_ms }
-public fun strike<U, S>(bucket: &Bucket<U, S>): u64 { bucket.strike }
+public fun strike<U, S>(bucket: &Bucket<U, S>): u128 { bucket.strike }
+public fun strike_scale<U, S>(bucket: &Bucket<U, S>): u8 { bucket.strike_scale }
 public fun total_written<U, S>(bucket: &Bucket<U, S>): u128 { bucket.total_written }
 public fun exercise_cursor<U, S>(bucket: &Bucket<U, S>): u128 { bucket.exercise_cursor }
 public fun asset_type<U, S>(bucket: &Bucket<U, S>): TypeName { bucket.asset_type }
@@ -376,4 +431,14 @@ public fun underlying_balance<U, S>(bucket: &Bucket<U, S>): u64 {
 
 public fun settlement_balance<U, S>(bucket: &Bucket<U, S>): u64 {
     bucket.settlement_balance.value()
+}
+
+#[test_only]
+public fun apply_strike_for_testing(amount: u128, strike: u128, strike_scale: u8): u64 {
+    apply_strike(amount, strike, strike_scale)
+}
+
+#[test_only]
+public fun pow10_for_testing(exp: u8): u128 {
+    pow10(exp)
 }

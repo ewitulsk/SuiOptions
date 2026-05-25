@@ -13,7 +13,8 @@ use protocol_types::ids::ObjectId;
 pub struct BucketView {
     pub asset_type: AssetType,
     pub settlement_type: AssetType,
-    pub strike: u64,
+    pub strike: u128,
+    pub strike_scale: u8,
     pub expiry_ms: u64,
     pub total_written: u128,
     pub exercise_cursor: u128,
@@ -30,7 +31,7 @@ impl BucketStore {
     }
 
     pub fn upsert(&self, id: ObjectId, view: BucketView) {
-        debug!(%id, strike = view.strike, expiry_ms = view.expiry_ms, "upserting bucket");
+        debug!(%id, strike = %view.strike, strike_scale = view.strike_scale, expiry_ms = view.expiry_ms, "upserting bucket");
         self.by_id.write().insert(id, view);
     }
 
@@ -84,6 +85,7 @@ mod tests {
                 asset_type: AssetType::new("BTC"),
                 settlement_type: AssetType::new("USDC"),
                 strike: 50,
+                strike_scale: 0,
                 expiry_ms: 100,
                 total_written: 0,
                 exercise_cursor: 0,

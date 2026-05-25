@@ -1,134 +1,158 @@
 //! Strike-grid computation.
 //!
-//! Translates `(spot_usd, strikes_below, strikes_above, interval_pct)` into
-//! `(start_strike, strike_interval, count)` in **chain strike units**.
+//! Translates `(spot_usd_cross, under_dec, settle_dec, strikes_below,
+//! strikes_above, interval_pct)` into `(start_strike, strike_interval,
+//! count, strike_scale)` in **scaled chain strike units** — i.e. the same
+//! shape `bucket::new_call_option` expects after SO-55.
 //!
-//! ## Chain units
+//! ## Chain units (post-SO-55)
 //!
-//! The Move contract's `strike: u64` is in settlement smallest-units per
-//! underlying smallest-unit. The conversion is the same one `mm-bot` uses
-//! and is documented at `rust-backend/README.md` (and on the on-chain side
-//! at `contracts/sources/bucket.move`):
+//! On-chain `strike: u128` is the *scaled* ratio. The real settlement
+//! smallest-units owed per underlying smallest-unit is `strike /
+//! 10^strike_scale`. Putting the divisor in a per-bucket field lets a
+//! sub-cent asset paired against a same-decimal stablecoin (e.g.
+//! TDEEP/TUSDC at $0.15 with both 6-dec) carry meaningful resolution that
+//! a plain integer ratio cannot.
 //!
-//! ```text
-//!   strike_chain = spot_usd × 10^settlement_decimals / 10^underlying_decimals
-//! ```
+//! ## Auto-derived scale
 //!
-//! For TBTC (8 dec) / TUSDC (6 dec) at $50k:
-//!   `50_000 × 10^6 / 10^8 = 500`.
+//! [`build_strike_grid_for_pair`] picks the smallest `strike_scale` in
+//! `[0, MAX_STRIKE_SCALE]` such that the resulting `strike_interval` is at
+//! least `TARGET_INTERVAL_CHAIN_UNITS` (= 1000). That gives three digits
+//! of sub-interval resolution, so the round-half-up math in
+//! `bucket::apply_strike` doesn't degenerate even for tiny exercises. If
+//! no scale in range hits the target, we accept the largest scale that
+//! still produces a non-zero interval; if even that's zero, we error.
 //!
-//! For TDEEP (6 dec) / TUSDC (6 dec) at $0.15:
-//!   `0.15 × 10^6 / 10^6 = 0.15` — rounds to 0, which is why an asset whose
-//!   chain price would round to <1 needs `interval_pct` to produce
-//!   ≥1-unit steps (or the bucket grid degenerates). The function returns
-//!   an error in that case so the bot doesn't silently submit a no-op.
+//! Worked examples:
+//! - TBTC(8)/TUSDC(6) at $77 000, 5% interval → scale=2, spot_chain=77 000,
+//!   interval=3 850.
+//! - TDEEP(6)/TUSDC(6) at $0.15, 10% interval → scale=5, spot_chain=15 000,
+//!   interval=1 500.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use tracing::debug;
+
+/// Caps `strike_scale` at the same upper bound the on-chain `pow10` does
+/// (`bucket.move::MAX_STRIKE_SCALE`). 38 is the largest exponent for which
+/// `10^scale` still fits in u128; the picker also guards against the
+/// `spot × 10^(scale + dec_diff)` product overflowing u128, so we'll
+/// naturally fall back to a smaller scale for high-value pairs.
+pub const MAX_STRIKE_SCALE: u8 = 38;
+
+/// Minimum chain-units we want each strike interval to span. Three digits
+/// gives `round_half_up` enough room that an exercise of one underlying
+/// smallest-unit settles to a meaningful integer instead of 0.
+const TARGET_INTERVAL_CHAIN_UNITS: u128 = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrikeGrid {
-    pub start_strike: u64,
-    pub strike_interval: u64,
+    pub start_strike: u128,
+    pub strike_interval: u128,
     pub count: u64,
+    pub strike_scale: u8,
 }
 
-/// Convert a USD spot price into the chain's u64 strike unit. Floors the
-/// fractional remainder, matching the bucket's u64 type.
+/// Legacy helper kept for tests / dev convenience: convert a USD spot
+/// into the scale=0 chain-unit ratio.
 pub fn spot_usd_to_chain_units(
-    spot_usd: f64,
+    spot_usd_cross: f64,
     underlying_decimals: u8,
     settlement_decimals: u8,
-) -> Result<u64> {
-    if !spot_usd.is_finite() || spot_usd <= 0.0 {
-        return Err(anyhow!("spot price must be positive and finite: {spot_usd}"));
+) -> Result<u128> {
+    if !spot_usd_cross.is_finite() || spot_usd_cross <= 0.0 {
+        return Err(anyhow!(
+            "spot price must be positive and finite: {spot_usd_cross}"
+        ));
     }
-    let pow_settle = 10f64.powi(settlement_decimals as i32);
-    let pow_under = 10f64.powi(underlying_decimals as i32);
-    let raw = spot_usd * pow_settle / pow_under;
+    let exp = settlement_decimals as i32 - underlying_decimals as i32;
+    let raw = spot_usd_cross * 10f64.powi(exp);
     if !raw.is_finite() || raw < 0.0 {
         return Err(anyhow!("spot conversion overflowed: {raw}"));
     }
-    if raw >= u64::MAX as f64 {
-        return Err(anyhow!("spot conversion exceeds u64::MAX: {raw}"));
+    if raw >= u128::MAX as f64 {
+        return Err(anyhow!("spot conversion exceeds u128::MAX: {raw}"));
     }
-    let chain = raw.floor() as u64;
-    debug!(spot_usd, underlying_decimals, settlement_decimals, chain, "spot usd to chain units");
-    Ok(chain)
+    Ok(raw.floor() as u128)
 }
 
-/// Build a `(start, interval, count)` strike grid from a pre-scaled
-/// chain-unit spot.
+/// Build the strike grid for a pair, auto-deriving `strike_scale` so the
+/// interval lands in a comfortable resolution band. See the module-level
+/// doc for the algorithm.
 ///
-/// This is the kernel both the static and Pyth spot sources call into.
-/// Static computes `spot_chain` from `usd × 10^(settle - under)`; Pyth
-/// computes it from the cross of two live USD prices. Either way, this
-/// function only sees a u64.
-///
-/// The interval is `spot_chain * interval_pct / 100`, floored. The start
-/// strike sits `strikes_below` steps below spot; total `count =
-/// strikes_below + strikes_above + 1` so spot lands on the middle strike
-/// (subject to flooring).
-pub fn build_strike_grid_from_chain(
-    spot_chain: u64,
+/// `spot_usd_cross` is the *cross* settlement-per-underlying in USD
+/// terms — for a stablecoin settlement it collapses to the underlying's
+/// USD price.
+pub fn build_strike_grid_for_pair(
+    spot_usd_cross: f64,
+    underlying_decimals: u8,
+    settlement_decimals: u8,
     strikes_below: u32,
     strikes_above: u32,
     interval_pct: f64,
 ) -> Result<StrikeGrid> {
-    if spot_chain == 0 {
-        return Err(anyhow!(
-            "spot is 0 in chain units — pick a settlement with more decimals or \
-             a non-test underlying"
-        ));
+    if !spot_usd_cross.is_finite() || spot_usd_cross <= 0.0 {
+        bail!("spot must be positive and finite: {spot_usd_cross}");
     }
-    if !(interval_pct.is_finite() && interval_pct > 0.0) {
-        return Err(anyhow!("interval_pct must be positive: {interval_pct}"));
+    if !interval_pct.is_finite() || interval_pct <= 0.0 {
+        bail!("interval_pct must be positive: {interval_pct}");
     }
-    let interval_f = spot_chain as f64 * interval_pct / 100.0;
-    let strike_interval = interval_f.floor() as u64;
-    if strike_interval == 0 {
-        return Err(anyhow!(
-            "interval_pct={interval_pct}% at spot_chain={spot_chain} rounds to a \
-             zero strike interval — widen the spacing or pick a more granular \
-             settlement"
-        ));
+
+    let dec_diff = settlement_decimals as i32 - underlying_decimals as i32;
+
+    // Walk scales 0..=MAX. The first one that meets the resolution target
+    // wins; otherwise we remember the last *viable* (interval ≥ 1) scale
+    // so degenerate but workable pairs still get a grid.
+    let mut chosen: Option<(u8, u128, u128)> = None;
+    for scale in 0u8..=MAX_STRIKE_SCALE {
+        let exp = scale as i32 + dec_diff;
+        let spot_chain_f = spot_usd_cross * 10f64.powi(exp);
+        if !spot_chain_f.is_finite() || spot_chain_f < 0.0 || spot_chain_f >= u128::MAX as f64 {
+            continue;
+        }
+        let spot_chain = spot_chain_f.floor() as u128;
+        let interval = (spot_chain_f * interval_pct / 100.0).floor() as u128;
+        if spot_chain < 1 || interval < 1 {
+            continue;
+        }
+        chosen = Some((scale, spot_chain, interval));
+        if interval >= TARGET_INTERVAL_CHAIN_UNITS {
+            break;
+        }
     }
-    let start_strike = (spot_chain as i128) - (strikes_below as i128) * (strike_interval as i128);
-    if start_strike <= 0 {
-        return Err(anyhow!(
-            "start_strike non-positive ({start_strike}) — strikes_below too large \
+    let (strike_scale, spot_chain, strike_interval) = chosen.ok_or_else(|| {
+        anyhow!(
+            "no viable strike_scale in [0, {MAX_STRIKE_SCALE}]: \
+             spot_usd_cross={spot_usd_cross} interval_pct={interval_pct}% \
+             under_dec={underlying_decimals} settle_dec={settlement_decimals}"
+        )
+    })?;
+
+    let start_strike_i =
+        (spot_chain as i128) - (strikes_below as i128) * (strike_interval as i128);
+    if start_strike_i <= 0 {
+        bail!(
+            "start_strike non-positive ({start_strike_i}) — strikes_below too large \
              for spot_chain={spot_chain}, interval={strike_interval}"
-        ));
+        );
     }
     let count = (strikes_below as u64) + (strikes_above as u64) + 1;
     debug!(
+        spot_usd_cross,
+        strike_scale,
         spot_chain,
-        start_strike,
+        start_strike = start_strike_i,
         strike_interval,
         count,
         interval_pct,
         "computed strike grid"
     );
     Ok(StrikeGrid {
-        start_strike: start_strike as u64,
+        start_strike: start_strike_i as u128,
         strike_interval,
         count,
+        strike_scale,
     })
-}
-
-/// Convenience wrapper for the static spot path: USD → chain units →
-/// grid. Pyth callers go through [`build_strike_grid_from_chain`]
-/// directly since they already have the chain-unit spot.
-pub fn build_strike_grid(
-    spot_usd: f64,
-    underlying_decimals: u8,
-    settlement_decimals: u8,
-    strikes_below: u32,
-    strikes_above: u32,
-    interval_pct: f64,
-) -> Result<StrikeGrid> {
-    let spot_chain = spot_usd_to_chain_units(spot_usd, underlying_decimals, settlement_decimals)?;
-    build_strike_grid_from_chain(spot_chain, strikes_below, strikes_above, interval_pct)
 }
 
 #[cfg(test)]
@@ -136,76 +160,91 @@ mod tests {
     use super::*;
 
     #[test]
-    fn btc_usdc_50k_round_trip() {
-        // 8-dec underlying, 6-dec settlement, $50k spot → 500 chain units.
-        let s = spot_usd_to_chain_units(50_000.0, 8, 6).unwrap();
-        assert_eq!(s, 500);
-
-        // ±4 strikes at 5% spacing → step = 25, start = 400, count = 9.
-        let g = build_strike_grid(50_000.0, 8, 6, 4, 4, 5.0).unwrap();
-        assert_eq!(g.strike_interval, 25);
-        assert_eq!(g.start_strike, 400);
+    fn btc_usdc_77k_picks_scale_2() {
+        // TBTC(8) / TUSDC(6) at ~$77k, 5% interval. At scale=0 the
+        // interval would only be 38 chain units — well under the 1000
+        // resolution target. scale=2 gives us 3850.
+        let g = build_strike_grid_for_pair(77_000.0, 8, 6, 4, 4, 5.0).unwrap();
+        assert_eq!(g.strike_scale, 2);
+        assert_eq!(g.strike_interval, 3850);
+        // spot_chain at scale=2 is 77000 → start = 77000 - 4×3850 = 61600.
+        assert_eq!(g.start_strike, 61_600);
         assert_eq!(g.count, 9);
-        // Highest strike on the grid: start + (count-1)*interval = 400 + 8*25 = 600.
-        let highest = g.start_strike + (g.count - 1) * g.strike_interval;
-        assert_eq!(highest, 600);
     }
 
     #[test]
-    fn deep_usdc_15_cents_rounds_to_zero_chain() {
-        // 6-dec underlying, 6-dec settlement, $0.15 → 0.15 in chain units → 0 after floor.
-        let s = spot_usd_to_chain_units(0.15, 6, 6).unwrap();
-        assert_eq!(s, 0);
-
-        // build_strike_grid should error rather than silently submit a no-op.
-        let err = build_strike_grid(0.15, 6, 6, 2, 2, 10.0).unwrap_err();
-        assert!(err.to_string().contains("spot is 0 in chain units"), "{err}");
+    fn deep_usdc_15_cents_now_works() {
+        // TDEEP(6) / TUSDC(6) at $0.15, 10% interval. Pre-SO-55 this
+        // bailed with "spot is 0 in chain units". Post: auto-derive picks
+        // scale=5 (spot_chain=15_000, interval=1_500).
+        let g = build_strike_grid_for_pair(0.15, 6, 6, 2, 2, 10.0).unwrap();
+        assert_eq!(g.strike_scale, 5);
+        assert_eq!(g.strike_interval, 1_500);
+        assert_eq!(g.start_strike, 15_000 - 2 * 1_500);
+        assert_eq!(g.count, 5);
     }
 
     #[test]
-    fn symmetric_grid_count() {
-        let g = build_strike_grid(50_000.0, 8, 6, 4, 4, 5.0).unwrap();
-        assert_eq!(g.count, 9);
-
-        let g = build_strike_grid(50_000.0, 8, 6, 2, 6, 5.0).unwrap();
-        // 2 below + 6 above + 1 spot = 9
-        assert_eq!(g.count, 9);
-        // start = spot - 2*step
-        assert_eq!(g.start_strike, 500 - 2 * 25);
+    fn fallback_to_largest_viable_scale_when_target_unreachable() {
+        // Tuned so even at scale=MAX (38) the interval is < 1000 but
+        // still ≥ 1 — picker exhausts the loop and returns scale=MAX
+        // with that workable-but-coarse interval rather than erroring.
+        //
+        // Math (spot=$1, dec_diff=-2 → spot_chain at scale=38 = 1e36;
+        // interval = 1e36 × 1e-33 / 100 = 10).
+        let g = build_strike_grid_for_pair(1.0, 8, 6, 2, 2, 1e-33).unwrap();
+        assert_eq!(g.strike_scale, MAX_STRIKE_SCALE);
+        assert!(g.strike_interval >= 1);
+        assert!(g.strike_interval < TARGET_INTERVAL_CHAIN_UNITS);
     }
 
     #[test]
-    fn rejects_zero_step() {
-        // 0.01% at spot=500 chain units → 0.05 → floor 0
-        let err = build_strike_grid(50_000.0, 8, 6, 4, 4, 0.01).unwrap_err();
-        assert!(err.to_string().contains("zero strike interval"), "{err}");
+    fn picker_exits_at_first_scale_meeting_target() {
+        // BTC at $77k, 1% interval. scale=2 gives interval=770 (<1000),
+        // scale=3 gives interval=7700 (≥1000). Picker should stop at 3,
+        // not greedily pick a higher scale.
+        let g = build_strike_grid_for_pair(77_000.0, 8, 6, 2, 2, 1.0).unwrap();
+        assert_eq!(g.strike_scale, 3);
+        assert_eq!(g.strike_interval, 7_700);
     }
 
     #[test]
-    fn rejects_negative_start() {
-        // 1000 strikes below at 5% would walk start past zero.
-        let err = build_strike_grid(50_000.0, 8, 6, 1000, 0, 5.0).unwrap_err();
+    fn rejects_when_no_scale_yields_nonzero_interval() {
+        // Implausibly small spot — even at scale=MAX (38), spot_chain
+        // (1e-45 × 1e38 = 1e-7) underflows to 0 so no scale produces a
+        // viable grid. Picker errors rather than submitting a no-op
+        // family.
+        let err = build_strike_grid_for_pair(1e-45, 6, 6, 2, 2, 1.0).unwrap_err();
+        assert!(err.to_string().contains("no viable strike_scale"), "{err}");
+    }
+
+    #[test]
+    fn rejects_zero_or_negative_spot() {
+        assert!(build_strike_grid_for_pair(0.0, 8, 6, 2, 2, 5.0).is_err());
+        assert!(build_strike_grid_for_pair(-1.0, 8, 6, 2, 2, 5.0).is_err());
+        assert!(build_strike_grid_for_pair(f64::NAN, 8, 6, 2, 2, 5.0).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_or_negative_interval_pct() {
+        assert!(build_strike_grid_for_pair(50_000.0, 8, 6, 2, 2, 0.0).is_err());
+        assert!(build_strike_grid_for_pair(50_000.0, 8, 6, 2, 2, -1.0).is_err());
+        assert!(build_strike_grid_for_pair(50_000.0, 8, 6, 2, 2, f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn rejects_start_strike_below_zero() {
+        // 1000 strikes below at $77k → walks past zero, regardless of scale.
+        let err = build_strike_grid_for_pair(77_000.0, 8, 6, 1000, 0, 5.0).unwrap_err();
         assert!(err.to_string().contains("non-positive"), "{err}");
     }
 
     #[test]
-    fn rejects_bad_inputs() {
-        assert!(spot_usd_to_chain_units(0.0, 8, 6).is_err());
-        assert!(spot_usd_to_chain_units(-1.0, 8, 6).is_err());
-        assert!(spot_usd_to_chain_units(f64::NAN, 8, 6).is_err());
-        assert!(build_strike_grid(50_000.0, 8, 6, 4, 4, 0.0).is_err());
-        assert!(build_strike_grid(50_000.0, 8, 6, 4, 4, f64::INFINITY).is_err());
-    }
-
-    #[test]
-    fn higher_settlement_precision_unlocks_low_priced_assets() {
-        // If settlement has 9 dec and underlying has 6 dec, $0.15 → 150 chain units.
-        let s = spot_usd_to_chain_units(0.15, 6, 9).unwrap();
-        assert_eq!(s, 150);
-        let g = build_strike_grid(0.15, 6, 9, 2, 2, 10.0).unwrap();
-        // step = floor(150 * 10 / 100) = 15
-        assert_eq!(g.strike_interval, 15);
-        assert_eq!(g.start_strike, 150 - 2 * 15);
-        assert_eq!(g.count, 5);
+    fn spot_usd_to_chain_units_round_trip() {
+        assert_eq!(spot_usd_to_chain_units(50_000.0, 8, 6).unwrap(), 500);
+        assert_eq!(spot_usd_to_chain_units(0.15, 6, 9).unwrap(), 150);
+        // Sub-1 ratio floors to 0 at scale=0; build_strike_grid_for_pair
+        // is the path callers want for that case.
+        assert_eq!(spot_usd_to_chain_units(0.15, 6, 6).unwrap(), 0);
     }
 }

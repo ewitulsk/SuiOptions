@@ -2,15 +2,15 @@
   "mainnet": null,
   "testnet": {
     "package_info": {
-      "packageId": "0x68dad5139aa75760637513a432b35a25921a3af7abad2bda0110e650e82c8db6",
-      "adminCapId": "0x72082ed231e62e8de2bc9166bc42a7c7f7c812f765bde7e8c0582c72141bf6a1",
-      "protocolConfigId": "0x08c04f19371922be88b0d04c5b0a4b209fcfa95469f964643ad4da0851f0ffe8",
-      "upgradeCapId": "0x77c5d50ffbb34d4fc2dd298ccd2a19d3aa2aa04167d601b8c76265a4a5d3976d",
-      "treasuryId": "0x03fb3bf63afc76f4de02d9c8e2df31058000531544f057211dd0b68c78d5e474",
-      "publishDigest": "DJTG5cKTS3cN6EaemAENsPvRuhfyoWQ1Lcfcx2737u8q",
-      "initDigest": "2ZJ8n2Ec6beZLseEBUF9R6rNSL16YgGmNsnJf4n8Bnhe",
+      "packageId": "0x4ddc9a6d801425086d48bb2658200c5b72219ee40f4c055c2437d85aa9661709",
+      "adminCapId": "0xe5704d416ff7dd3263db1d8608ac7d323b1cb562ae59cf4ae4a62aad54134fc6",
+      "protocolConfigId": "0xc016a346ad00cbfe28eadca79d2ce29b53e74b7a0087db34c477c90d0fec2548",
+      "upgradeCapId": "0x7140c25c22215afc99277e59e4cde00a88a533eacef7f5cd51e7b59d0869cc35",
+      "treasuryId": "0x4e9eb014f68304dd3da9c520166e2d114b197af5b46502a1a9c416c061b8f3a4",
+      "publishDigest": "HUSsffq4qjqeKmK1CgTsfTPT6GfhdxxteWCAbm6iM93x",
+      "initDigest": "AQhZU1Cqk3Sf2bgvvRs8UPfTZrDi6wewi2bp4EXuzMsA",
       "deployer": "0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865",
-      "deployedAt": "2026-05-17T05:18:32.385038+00:00",
+      "deployedAt": "2026-05-25T02:52:28.618983+00:00",
       "network": "testnet",
       "testTokens": {
         "packageId": "0x0b756179b7ae9efea2fdfb805308443bab763605459b92947616e0a04136d843",

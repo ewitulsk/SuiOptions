@@ -334,7 +334,8 @@ async fn main() -> Result<()> {
             } => {
                 tracing::debug!(
                     ?request_id,
-                    strike = payload.strike,
+                    strike = %payload.strike,
+                    strike_scale = payload.strike_scale,
                     expiry_ms = payload.expiry_ms,
                     write_amount = payload.write_amount,
                     "received rfq broadcast"
@@ -373,9 +374,16 @@ async fn main() -> Result<()> {
                 };
                 let sigma = vol_buf.read().current_annualized().unwrap_or(cfg.pyth.fallback_vol);
 
+                // `spot_scaled` is at strike_scale=0 (raw settlement-per-
+                // underlying chain units). Post-SO-55 the bucket's strike
+                // lives at its own scale (`payload.strike_scale`), so we
+                // divide it back down to scale=0 before plugging both
+                // into Black-Scholes.
+                let strike_scaled =
+                    payload.strike as f64 / 10f64.powi(payload.strike_scale as i32);
                 let inputs = CallInputs {
                     spot: spot_scaled as f64,
-                    strike: payload.strike as f64,
+                    strike: strike_scaled,
                     t_years,
                     r: cfg.rate,
                     sigma,
@@ -386,7 +394,9 @@ async fn main() -> Result<()> {
                 tracing::debug!(
                     spot = spot_scaled,
                     sigma,
-                    strike = payload.strike,
+                    strike = strike_scaled,
+                    strike_raw = %payload.strike,
+                    strike_scale = payload.strike_scale,
                     t_years,
                     per_unit,
                     write_amount = payload.write_amount,

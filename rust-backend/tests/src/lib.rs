@@ -70,6 +70,7 @@ impl Harness {
                 settlement_type: AssetType::new("USDC"),
                 expiry_ms: 9_999_999_999_999,
                 strike: 50_000_000,
+                strike_scale: 0,
             }),
             3,
         );

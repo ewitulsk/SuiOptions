@@ -30,9 +30,10 @@ impl RollPlan {
         info!(
             pair = %format!("{}/{}", self.underlying_symbol, self.settlement_symbol),
             expiry_ms = self.expiry_ms,
-            start_strike = self.grid.start_strike,
-            strike_interval = self.grid.strike_interval,
+            start_strike = %self.grid.start_strike,
+            strike_interval = %self.grid.strike_interval,
             count = self.grid.count,
+            strike_scale = self.grid.strike_scale,
             dry_run,
             "rolling new bucket family"
         );
@@ -72,6 +73,7 @@ pub async fn submit(
             start_strike: plan.grid.start_strike,
             strike_interval: plan.grid.strike_interval,
             count: plan.grid.count,
+            strike_scale: plan.grid.strike_scale,
         },
         gas_budget,
     )

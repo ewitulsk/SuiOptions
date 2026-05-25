@@ -240,6 +240,7 @@ pub async fn orchestrate(
                 side,
                 deadline_ms,
                 strike: bucket.strike,
+                strike_scale: bucket.strike_scale,
                 expiry_ms: bucket.expiry_ms,
             },
         };
@@ -332,6 +333,7 @@ mod tests {
                 settlement_type: AssetType::new("USDC"),
                 expiry_ms: 1_000_000,
                 strike: 50,
+                strike_scale: 0,
             }),
         });
         s

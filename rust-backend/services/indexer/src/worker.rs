@@ -131,6 +131,7 @@ mod tests {
             settlement_type: AssetType::new("USDC"),
             expiry_ms: 1_700_000_000_000,
             strike: 50_000_000_000,
+            strike_scale: 2,
         };
         let bytes = bcs::to_bytes(&evt).unwrap();
         let chain_event = event_types::dispatch(&types, &types.bucket_created, &bytes)
@@ -140,6 +141,7 @@ mod tests {
 
         let bucket = store.bucket(&ObjectId::new([0x99; 32])).unwrap();
         assert_eq!(bucket.strike, 50_000_000_000);
+        assert_eq!(bucket.strike_scale, 2);
         assert_eq!(bucket.asset_type.as_str(), "BTC");
         assert_eq!(bucket.settlement_type.as_str(), "USDC");
     }
