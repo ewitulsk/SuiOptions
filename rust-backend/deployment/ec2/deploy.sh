@@ -33,6 +33,13 @@ esac
 
 cd "/opt/options/$ENV"
 
+# One-off cleanup: pre-SO-54 bundles dropped nginx.conf flat in the env
+# dir. After SO-54 the file lives under nginx/nginx.conf and the old
+# top-level file is never touched again. Idempotent — `rm -f` on a
+# missing path is a no-op — so this is safe to leave in across all
+# future deploys.
+rm -f "./nginx.conf"
+
 : "${IMAGE_TAG:?IMAGE_TAG must be set}"
 : "${ECR:?ECR must be set}"
 : "${DB_HOST:?DB_HOST must be set}"
