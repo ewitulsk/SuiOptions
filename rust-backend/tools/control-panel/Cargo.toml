@@ -31,6 +31,7 @@ tracing = { workspace = true }
 
 # TUI.
 ratatui = "0.28"
+ansi-to-tui = "6"
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures = { workspace = true }
 futures-util = { workspace = true }

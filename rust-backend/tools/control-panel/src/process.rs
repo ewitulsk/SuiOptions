@@ -237,6 +237,12 @@ async fn pipe_lines<R: tokio::io::AsyncRead + Unpin>(
 ) {
     let mut lines = BufReader::new(reader).lines();
     while let Ok(Some(text)) = lines.next_line().await {
+        // Children inherit tracing-subscriber's default `with_ansi(true)`
+        // even when their stdout is a pipe, so log lines arrive with
+        // `\x1b[...m` SGR sequences embedded. We keep the raw bytes here
+        // and let the renderer parse them into styled spans (see
+        // `ui::draw_logs`) so the operator sees the same colors they'd
+        // see running the binary directly.
         let line = LogLine { stream, text };
         push_log(&logs, line.clone());
         let _ = events.send(ProcEvent::Line {
