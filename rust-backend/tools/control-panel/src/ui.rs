@@ -313,19 +313,42 @@ fn draw_env(f: &mut Frame, app: &AppState, area: Rect) {
 }
 
 fn draw_logs(f: &mut Frame, app: &AppState, area: Rect) {
+    use ansi_to_tui::IntoText;
+
     let proc = app.current_process();
     let lines: Vec<Line> = proc
         .snapshot_logs()
         .into_iter()
-        .map(|l| {
-            let style = match l.stream {
-                Stream::Stdout => Style::default().fg(Color::White),
-                Stream::Stderr => Style::default().fg(Color::Red),
-                Stream::System => Style::default()
+        .map(|l| match l.stream {
+            // Our own framing lines ("$ cmd…", "── exited") never contain
+            // ANSI; render them dim cyan directly.
+            Stream::System => Line::from(Span::styled(
+                l.text,
+                Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::DIM),
-            };
-            Line::from(Span::styled(l.text, style))
+            )),
+            // Children emit colored output via tracing-subscriber's
+            // default SGR codes. Parse the escape sequences into styled
+            // spans so the operator sees the same colors they'd see
+            // running the binary directly. Fall back to a flat span if
+            // the parser chokes on something exotic; tint stderr red so
+            // it's still distinguishable from stdout.
+            Stream::Stdout | Stream::Stderr => {
+                let fallback_style = if l.stream == Stream::Stderr {
+                    Style::default().fg(Color::Red)
+                } else {
+                    Style::default()
+                };
+                match l.text.into_text() {
+                    Ok(text) => text
+                        .lines
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| Line::from(String::new())),
+                    Err(_) => Line::from(Span::styled(l.text, fallback_style)),
+                }
+            }
         })
         .collect();
     let total = lines.len();
