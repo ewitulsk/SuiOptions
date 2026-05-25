@@ -1,0 +1,345 @@
+# Redeploy the options-protocol Move package to dev or staging, then
+# reset the environment so the indexer starts clean from the new
+# contract's deployment checkpoint.
+#
+# Steps (in order):
+#   1. Build + run the deployment-manager → publishes the Move package
+#      on-chain and writes the new IDs to deployments.json.
+#   2. Query Sui RPC to resolve the deployment checkpoint.
+#   3. Stop the indexer on EC2.
+#   4. DROP the entire indexer_<env> database (prod-guarded).
+#   5. Delete the mm-bot account file from the Docker volume.
+#   6. Update the indexer config's start_checkpoint to checkpoint − 1.
+#   7. Prep the indexer database (diesel migrations run on first start).
+#   8. Push updated files into the stopped containers on EC2.
+#   9. Start the indexer (+ all services).
+#  10. Commit updated files to the git repo.
+#
+# PRODUCTION IS EXPLICITLY BLOCKED — the workflow only offers dev and
+# staging as choices, and every destructive step also checks at runtime.
+
+name: Redeploy Contract
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment to redeploy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+      deploy_tokens:
+        description: 'Also publish the test-tokens package (TUSDC/TBTC/TWAL/TDEEP)'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write    # push updated deployments.json + config
+  id-token: write    # OIDC → AWS
+
+env:
+  AWS_REGION:        ${{ vars.AWS_REGION }}
+  ECR_REGISTRY:      ${{ vars.ECR_REGISTRY }}
+  EC2_INSTANCE_ID:   ${{ vars.EC2_INSTANCE_ID }}
+  DEPLOY_ROLE_ARN:   ${{ vars.DEPLOY_ROLE_ARN }}
+  RDS_HOST:          ${{ vars.RDS_HOST }}
+  SSM_OUTPUT_BUCKET: ${{ vars.SSM_OUTPUT_BUCKET }}
+
+jobs:
+  redeploy:
+    runs-on: ubuntu-latest
+    steps:
+      # ── 0. Checkout ──────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 1. Derive network from environment ───────────────────────
+      - name: Resolve network
+        id: net
+        run: |
+          case "${{ inputs.environment }}" in
+            dev)     echo "network=devnet"  >> "$GITHUB_OUTPUT" ;;
+            staging) echo "network=testnet" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::error::Invalid environment '${{ inputs.environment }}'"
+              exit 1
+              ;;
+          esac
+
+      # ── 2. AWS credentials (OIDC) ───────────────────────────────
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── 3. Rust toolchain + cargo cache ──────────────────────────
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-backend
+
+      # ── 4. System deps for Sui SDK build ─────────────────────────
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev clang cmake protobuf-compiler
+
+      # ── 5. Build deployment manager ──────────────────────────────
+      - name: Build deployment manager
+        working-directory: rust-backend
+        run: cargo build --release -p deployment-manager
+
+      # ── 6. Fetch deployer key from Secrets Manager ───────────────
+      - name: Write secrets file
+        env:
+          ENV: ${{ inputs.environment }}
+          NETWORK: ${{ steps.net.outputs.network }}
+        run: |
+          # The scheduler secret holds the deployer key (AdminCap
+          # owner). This is the canonical signing key for publishes.
+          SCHEDULER_JSON=$(aws secretsmanager get-secret-value \
+            --secret-id "options/$ENV/scheduler" \
+            --query SecretString --output text)
+          SUI_KEY=$(echo "$SCHEDULER_JSON" | jq -r '.sui_key')
+
+          if [ -z "$SUI_KEY" ] || [ "$SUI_KEY" = "null" ]; then
+            echo "::error::No sui_key in options/$ENV/scheduler secret"
+            exit 1
+          fi
+
+          mkdir -p /tmp/deploy-secrets
+          printf '[sui]\n%s = "%s"\n' "$NETWORK" "$SUI_KEY" \
+            > /tmp/deploy-secrets/secrets.toml
+
+      # ── 7. Run deployment manager ────────────────────────────────
+      - name: Deploy contract on-chain
+        working-directory: rust-backend
+        env:
+          NETWORK: ${{ steps.net.outputs.network }}
+        run: |
+          ARGS=(
+            --network "$NETWORK"
+            --output  deployments.json
+            --secrets /tmp/deploy-secrets/secrets.toml
+          )
+          if [ "${{ inputs.deploy_tokens }}" = "true" ]; then
+            ARGS+=(--deploy-tokens)
+          fi
+          ./target/release/deployment-manager "${ARGS[@]}"
+
+      # ── 8. Resolve the deployment checkpoint from the tx digest ──
+      - name: Get deployment checkpoint
+        id: checkpoint
+        env:
+          NETWORK: ${{ steps.net.outputs.network }}
+        run: |
+          DIGEST=$(jq -r ".[\"$NETWORK\"].package_info.publishDigest" \
+            rust-backend/deployments.json)
+
+          case "$NETWORK" in
+            devnet)  RPC="https://fullnode.devnet.sui.io:443" ;;
+            testnet) RPC="https://fullnode.testnet.sui.io:443" ;;
+          esac
+
+          # Retry a few times — the RPC may lag behind the publish.
+          for attempt in 1 2 3 4 5; do
+            RESULT=$(curl -sf "$RPC" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"jsonrpc\": \"2.0\",
+                \"id\": 1,
+                \"method\": \"sui_getTransactionBlock\",
+                \"params\": [\"$DIGEST\", {\"showEffects\": true}]
+              }")
+
+            CHECKPOINT=$(echo "$RESULT" | jq -r '.result.checkpoint // empty')
+            if [ -n "$CHECKPOINT" ]; then
+              break
+            fi
+            echo "Attempt $attempt: checkpoint not yet available, retrying in 5s…"
+            sleep 5
+          done
+
+          if [ -z "$CHECKPOINT" ]; then
+            echo "::error::Could not resolve checkpoint for digest $DIGEST"
+            exit 1
+          fi
+
+          START=$((CHECKPOINT - 1))
+          echo "checkpoint=$CHECKPOINT" >> "$GITHUB_OUTPUT"
+          echo "start_checkpoint=$START" >> "$GITHUB_OUTPUT"
+          echo "Contract deployed at checkpoint $CHECKPOINT → indexer starts at $START"
+
+      # ── 9. Update indexer config with the new start_checkpoint ───
+      - name: Update indexer start_checkpoint
+        env:
+          ENV: ${{ inputs.environment }}
+          START: ${{ steps.checkpoint.outputs.start_checkpoint }}
+        run: |
+          CONFIG="rust-backend/services/indexer/config/config.${ENV}.toml"
+
+          # Remove any existing start_checkpoint block (comment + value).
+          # Uses sed ranges to catch multi-line comment blocks above the key.
+          sed -i '/^#.*[Bb]ackfill/,/^start_checkpoint/d' "$CONFIG"
+          sed -i '/^#.*Auto-set by redeploy/,/^start_checkpoint/d' "$CONFIG"
+          sed -i '/^start_checkpoint/d' "$CONFIG"
+          # Trim trailing blank lines.
+          sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$CONFIG"
+
+          # Append the new value.
+          printf '\n# Auto-set by redeploy-contract workflow.\nstart_checkpoint = %s\n' \
+            "$START" >> "$CONFIG"
+
+      # ── 10. Delete mm-bot account file from repo ─────────────────
+      - name: Remove mm-bot account file
+        run: rm -f rust-backend/mm-bot.account.json
+
+      # ── 11. Upload updated files to S3 for EC2 ──────────────────
+      - name: Upload redeploy bundle
+        id: bundle
+        env:
+          ENV: ${{ inputs.environment }}
+        run: |
+          TS=$(date +%s)
+          BUNDLE_KEY="redeploy-bundles/${ENV}-${TS}.tgz"
+
+          mkdir -p /tmp/redeploy-bundle
+          cp rust-backend/deployments.json /tmp/redeploy-bundle/
+          cp "rust-backend/services/indexer/config/config.${ENV}.toml" /tmp/redeploy-bundle/
+          tar czf /tmp/redeploy-bundle.tgz -C /tmp/redeploy-bundle .
+
+          aws s3 cp /tmp/redeploy-bundle.tgz \
+            "s3://${SSM_OUTPUT_BUCKET}/${BUNDLE_KEY}"
+
+          echo "key=$BUNDLE_KEY" >> "$GITHUB_OUTPUT"
+
+      # ── 12. SSM: reset the environment on EC2 ───────────────────
+      - name: Reset environment on EC2
+        env:
+          ENV: ${{ inputs.environment }}
+          BUNDLE_KEY: ${{ steps.bundle.outputs.key }}
+        run: |
+          # ── PRODUCTION GUARD ──
+          if [ "$ENV" = "prod" ] || [ "$ENV" = "production" ] || [ "$ENV" = "mainnet" ]; then
+            echo "::error::REFUSING to touch production — aborting"
+            exit 1
+          fi
+
+          DB_PASSWORD=$(aws secretsmanager get-secret-value \
+            --secret-id "options/$ENV/indexer" \
+            --query SecretString --output text | jq -r '.db_password')
+
+          # SSM commands run under /bin/sh (dash on Ubuntu); keep this
+          # set -eu (no pipefail). deploy.sh itself is bash.
+          jq -nc \
+            --arg env "$ENV" \
+            --arg db_host "$RDS_HOST" \
+            --arg db_pass "$DB_PASSWORD" \
+            --arg bucket "$SSM_OUTPUT_BUCKET" \
+            --arg bundle_key "$BUNDLE_KEY" \
+            --arg region "$AWS_REGION" '
+            {
+              commands: [
+                "set -eu",
+
+                "# ── PRODUCTION GUARD (belt + suspenders) ──",
+                "if [ \"\($env)\" = \"prod\" ] || [ \"\($env)\" = \"production\" ]; then echo \"FATAL: refusing prod\"; exit 1; fi",
+
+                "cd /opt/options/\($env)",
+                "COMPOSE_FILE=\"docker-compose.\($env).yml\"",
+
+                "# ── 1. Stop the indexer ──",
+                "docker compose -f \"$COMPOSE_FILE\" stop indexer || true",
+                "echo \"indexer stopped\"",
+
+                "# ── 2. DROP the indexer database (all tables) ──",
+                "docker run --rm --network host -e PGPASSWORD=\($db_pass | @sh) postgres:16 psql -h \($db_host) -U \"indexer_\($env)\" -d \"indexer_\($env)\" -c \"DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO \\\"indexer_\($env)\\\";\"",
+                "echo \"database indexer_\($env) wiped\"",
+
+                "# ── 3. Delete the mm-bot account file ──",
+                "docker run --rm -v \"options-\($env)_mm_bot_state:/vol\" alpine rm -f /vol/mm-bot.account.json",
+                "echo \"mm-bot account file deleted\"",
+
+                "# ── 4. Download updated files from S3 ──",
+                "aws s3 cp \"s3://\($bucket)/\($bundle_key)\" /tmp/redeploy-bundle.tgz --region \($region)",
+                "mkdir -p /tmp/redeploy",
+                "tar xzf /tmp/redeploy-bundle.tgz -C /tmp/redeploy",
+
+                "# ── 5. Update the indexer config (start_checkpoint) ──",
+                "INDEXER_CID=$(docker compose -f \"$COMPOSE_FILE\" ps -aq indexer 2>/dev/null || true)",
+                "if [ -n \"$INDEXER_CID\" ]; then docker cp \"/tmp/redeploy/config.\($env).toml\" \"$INDEXER_CID:/app/config/config.\($env).toml\"; echo \"updated indexer config\"; fi",
+
+                "# ── 6. docker cp deployments.json into ALL stopped/running containers ──",
+                "for svc in indexer quoting mm-bot option-scheduler api-service; do CID=$(docker compose -f \"$COMPOSE_FILE\" ps -aq \"$svc\" 2>/dev/null || true); if [ -n \"$CID\" ]; then docker cp /tmp/redeploy/deployments.json \"$CID:/app/deployments.json\"; echo \"updated deployments.json in $svc\"; fi; done",
+
+                "# ── 7. Start the indexer (diesel migrations run on first connect) ──",
+                "docker compose -f \"$COMPOSE_FILE\" start indexer",
+                "echo \"indexer started — migrations will run automatically on the fresh DB\"",
+
+                "# ── 8. Restart all other services so they pick up new deployments.json ──",
+                "docker compose -f \"$COMPOSE_FILE\" restart mm-bot quoting option-scheduler api-service || true",
+                "echo \"all services restarted\"",
+
+                "# Cleanup",
+                "rm -rf /tmp/redeploy /tmp/redeploy-bundle.tgz",
+                "echo \"redeploy complete (\($env))\""
+              ]
+            }' > /tmp/ssm-params.json
+
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "redeploy-contract $ENV" \
+            --parameters file:///tmp/ssm-params.json \
+            --output-s3-bucket-name "$SSM_OUTPUT_BUCKET" \
+            --timeout-seconds 300 \
+            --query Command.CommandId --output text)
+          echo "SSM command: $CMD_ID"
+
+          # Wait for completion.
+          aws ssm wait command-executed \
+            --command-id "$CMD_ID" \
+            --instance-id "$EC2_INSTANCE_ID" || true
+
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --query Status --output text)
+          echo "SSM status: $STATUS"
+
+          # Print stdout.
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --query StandardOutputContent --output text
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "::error::SSM command failed with status $STATUS"
+            aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --query StandardErrorContent --output text
+            exit 1
+          fi
+
+      # ── 13. Commit and push changes to git ──────────────────────
+      - name: Commit updated files
+        env:
+          ENV: ${{ inputs.environment }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add rust-backend/deployments.json
+          git add "rust-backend/services/indexer/config/config.${ENV}.toml"
+          git rm -f --ignore-unmatch rust-backend/mm-bot.account.json
+
+          git commit -m "[redeploy] Fresh ${ENV} contract deployment" \
+            -m "Network: ${{ steps.net.outputs.network }}" \
+            -m "Deployment checkpoint: ${{ steps.checkpoint.outputs.checkpoint }}" \
+            -m "Indexer start_checkpoint: ${{ steps.checkpoint.outputs.start_checkpoint }}"
+          git push
