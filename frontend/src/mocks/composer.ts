@@ -1,9 +1,7 @@
 // Composer state.
 //
-// Strikes are now live (sourced from api-service /buckets via useBuckets()).
-// Everything else — wallet balances, spot price, MM quotes — is still mocked
-// pending real wiring. The hook keeps a single return shape so UI components
-// don't change as more pieces become live.
+// Strikes and quotes are live (api-service /buckets + quoting service RFQs).
+// Wallet balances and spot price are still mocked pending real wiring.
 import { useEffect, useMemo, useState } from "react";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useBuckets } from "../api/useBuckets";
@@ -18,17 +16,6 @@ import type {
   View,
 } from "../types";
 
-// Used to compute mocked premiums by tile position. Real on-chain strikes
-// drive the tile labels; these drive the premium math so the displayed
-// premiums look the same as before this hook went live.
-const MOCK_PREMIUM_STRIKES = [82000, 84000, 85000, 88000, 94000, 95000];
-
-function mockPremiumPerUnit(spot: number, strike: number): number {
-  const intrinsic = Math.max(0, spot - strike);
-  const timeValue = Math.max(0, (1 - Math.abs(spot - strike) / spot) * spot * 0.025);
-  return Math.max(intrinsic + timeValue, 0.001);
-}
-
 function formatExpiry(iso: string): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -40,22 +27,6 @@ function shortId(hex: string): string {
   if (hex.length <= 12) return hex;
   return `${hex.slice(0, 6)}...${hex.slice(-4)}`;
 }
-
-type MmFixture = {
-  name: string;
-  addr: string;
-  fill: number;
-  revertRate: number;
-  latency: number;
-  driftW: number;
-  driftT: number;
-};
-
-const MM_FIXTURE: MmFixture[] = [
-  { name: "argonaut_mm_01", addr: "0x9f3a…42b1", fill: 98.4, revertRate: 0.003, latency: 142, driftW: 0,    driftT: 0    },
-  { name: "phocas_capital", addr: "0x4ca1…07ee", fill: 96.1, revertRate: 0.008, latency: 188, driftW: -0.6, driftT: 0.7  },
-  { name: "tidal_quants",   addr: "0xb2f8…11d0", fill: 99.2, revertRate: 0.001, latency: 96,  driftW: -1.4, driftT: 1.5  },
-];
 
 export type ComposerStateOpts = {
   initialView?: View;
@@ -146,10 +117,7 @@ export function useComposerState({
   }, []);
 
   // Live strikes: user picks (asset, expiry); we look up the matching series
-  // from the api-service response. Premiums stay mocked until the quoting
-  // service is wired in — we compute them from a parallel mock strike grid
-  // indexed by position so they don't blow up when on-chain test strikes
-  // happen to be tiny (e.g. $0.13).
+  // from the api-service response.
   const bucketsQuery = useBuckets();
   const seriesList: Series[] = useMemo(() => bucketsQuery.data ?? [], [bucketsQuery.data]);
 
@@ -242,15 +210,11 @@ export function useComposerState({
             premium: bestScaled,
           };
         }
-        // Fallback: mocked premium math
-        const mockStrike = MOCK_PREMIUM_STRIKES[idx % MOCK_PREMIUM_STRIKES.length];
-        const perUnit = mockPremiumPerUnit(spot, mockStrike);
-        const total = perUnit * amount;
         return {
           strike,
-          perUnit,
-          premiumDisplay: `${total.toFixed(2)} ${settlementSymbol}`,
-          premium: total,
+          perUnit: 0,
+          premiumDisplay: `— ${settlementSymbol}`,
+          premium: 0,
         };
       }),
     [spot, amount, liveStrikes, settlementSymbol, quotesByBucket, series],
@@ -278,8 +242,7 @@ export function useComposerState({
   const insufficient = view === "writer" ? insufficientBtc : insufficientUsdc;
 
   // Map real RFQ quotes to the UI Quote type for the currently selected
-  // bucket. Falls back to mock quotes when the quoting service hasn't
-  // returned anything yet.
+  // bucket.
   const selectedBucketId = series?.buckets[selectedIdx]?.bucket_id ?? null;
   const realBucketQuote = selectedBucketId
     ? quotesByBucket[selectedBucketId]
@@ -312,36 +275,8 @@ export function useComposerState({
         view === "writer" ? b.premium - a.premium : a.premium - b.premium,
       );
       setQuotes(mapped);
-    } else if (!rfqConnected) {
-      // Fallback: mock quotes while quoting service is unavailable.
-      if (!selected) return;
+    } else {
       setQuotes([]);
-      const timers = MM_FIXTURE.map((n, i) =>
-        setTimeout(() => {
-          setQuotes((qs) => {
-            const drift = view === "writer" ? n.driftW : n.driftT;
-            const next: Quote[] = [
-              ...qs,
-              {
-                id: `${selected.strike}-${n.addr}`,
-                name: n.name,
-                addr: n.addr,
-                fill: n.fill,
-                revertRate: n.revertRate,
-                latency: n.latency,
-                premium: +(selected.premium + drift).toFixed(2),
-                ttl: 30 - i * 3,
-                arrivedAt: Date.now(),
-              },
-            ];
-            next.sort((a, b) =>
-              view === "writer" ? b.premium - a.premium : a.premium - b.premium,
-            );
-            return next;
-          });
-        }, 400 + i * 600),
-      );
-      return () => timers.forEach(clearTimeout);
     }
   }, [realBucketQuote, rfqConnected, selectedIdx, amount, view, selected, series?.settlement_decimals]);
 

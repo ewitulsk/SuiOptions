@@ -38,7 +38,7 @@ export function Composer({ initialView }: Props) {
     : s.insufficient
       ? "Insufficient balance"
       : s.quotes.length === 0
-        ? "Waiting on MMs…"
+        ? "No quotes available"
         : `Earn ${s.bestPremium.toFixed(2)} USDC upfront →`;
 
   const traderCtaLabel = !s.connected
@@ -46,7 +46,7 @@ export function Composer({ initialView }: Props) {
     : s.insufficientUsdc
       ? `Insufficient USDC · need ${s.selected.premium.toFixed(2)}`
       : s.quotes.length === 0
-        ? "Waiting on MMs…"
+        ? "No quotes available"
         : `Buy call · pay ${s.bestPremium.toFixed(2)} USDC →`;
 
   return (

@@ -24,7 +24,7 @@ export function QuoteFeed({ quotes, view, onClose }: Props) {
               color: "var(--aqua-ink-3)",
             }}
           >
-            waiting on MMs…
+            no quotes available
           </div>
         )}
         {quotes.map((q, i) => (
