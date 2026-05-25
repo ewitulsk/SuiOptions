@@ -34,9 +34,11 @@ use anyhow::{anyhow, bail, Result};
 use tracing::debug;
 
 /// Caps `strike_scale` at the same upper bound the on-chain `pow10` does
-/// (`bucket.move::MAX_STRIKE_SCALE`). Also matches Pyth Hermes' 9-dec
-/// normalized convention.
-pub const MAX_STRIKE_SCALE: u8 = 9;
+/// (`bucket.move::MAX_STRIKE_SCALE`). 38 is the largest exponent for which
+/// `10^scale` still fits in u128; the picker also guards against the
+/// `spot × 10^(scale + dec_diff)` product overflowing u128, so we'll
+/// naturally fall back to a smaller scale for high-value pairs.
+pub const MAX_STRIKE_SCALE: u8 = 38;
 
 /// Minimum chain-units we want each strike interval to span. Three digits
 /// gives `round_half_up` enough room that an exercise of one underlying
@@ -184,13 +186,14 @@ mod tests {
 
     #[test]
     fn fallback_to_largest_viable_scale_when_target_unreachable() {
-        // 1e-9 % interval at $77k: even scale=9 only yields interval ≈ 7,
-        // well under the 1000 resolution target. The picker should still
-        // return scale=9 with the workable-but-coarse interval rather
-        // than erroring, since a non-zero grid is strictly better than
-        // refusing to roll.
-        let g = build_strike_grid_for_pair(77_000.0, 8, 6, 2, 2, 1e-9).unwrap();
-        assert_eq!(g.strike_scale, 9);
+        // Tuned so even at scale=MAX (38) the interval is < 1000 but
+        // still ≥ 1 — picker exhausts the loop and returns scale=MAX
+        // with that workable-but-coarse interval rather than erroring.
+        //
+        // Math (spot=$1, dec_diff=-2 → spot_chain at scale=38 = 1e36;
+        // interval = 1e36 × 1e-33 / 100 = 10).
+        let g = build_strike_grid_for_pair(1.0, 8, 6, 2, 2, 1e-33).unwrap();
+        assert_eq!(g.strike_scale, MAX_STRIKE_SCALE);
         assert!(g.strike_interval >= 1);
         assert!(g.strike_interval < TARGET_INTERVAL_CHAIN_UNITS);
     }
@@ -207,11 +210,11 @@ mod tests {
 
     #[test]
     fn rejects_when_no_scale_yields_nonzero_interval() {
-        // Implausibly small interval_pct (1e-30) combined with sub-cent
-        // spot — even scale=9 underflows to 0. Error rather than submit a
-        // no-op grid.
-        let err = build_strike_grid_for_pair(0.000_001, 6, 6, 2, 2, 1e-30)
-            .unwrap_err();
+        // Implausibly small spot — even at scale=MAX (38), spot_chain
+        // (1e-45 × 1e38 = 1e-7) underflows to 0 so no scale produces a
+        // viable grid. Picker errors rather than submitting a no-op
+        // family.
+        let err = build_strike_grid_for_pair(1e-45, 6, 6, 2, 2, 1.0).unwrap_err();
         assert!(err.to_string().contains("no viable strike_scale"), "{err}");
     }
 

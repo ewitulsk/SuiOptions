@@ -32,9 +32,11 @@ public struct Bucket<phantom Underlying, phantom Settlement> has key {
     settlement_balance: Balance<Settlement>,
 }
 
-/// Maximum supported strike_scale. Caps the multiplicand in
-/// `pow10` and matches Pyth Hermes' 9-decimal normalized convention.
-const MAX_STRIKE_SCALE: u8 = 9;
+/// Maximum supported strike_scale. 38 is the largest exponent for which
+/// `pow10` still fits in u128 (`10^38 ≈ 1×10^38`, `u128::MAX ≈ 3.4×10^38`);
+/// passing 39 would abort inside the loop's multiply, so we cap one below
+/// that on a dedicated assert for a cleaner error.
+const MAX_STRIKE_SCALE: u8 = 38;
 
 /// 10^exp for exp ∈ [0, MAX_STRIKE_SCALE]. Aborts if exp exceeds the cap
 /// — keeps `pow10` cheap and guarantees the result fits in u128.

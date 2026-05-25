@@ -107,12 +107,20 @@ fun test_pow10_table() {
     assert!(bucket::pow10_for_testing(1) == 10, 0);
     assert!(bucket::pow10_for_testing(2) == 100, 0);
     assert!(bucket::pow10_for_testing(9) == 1_000_000_000, 0);
+    // Boundary: 10^38 still fits in u128 (u128::MAX ≈ 3.4e38). 39 would
+    // overflow the loop's multiply — see test_pow10_above_max_aborts.
+    assert!(
+        bucket::pow10_for_testing(38) == 100_000_000_000_000_000_000_000_000_000_000_000_000,
+        0,
+    );
 }
 
 #[test]
 #[expected_failure(abort_code = 25, location = options_protocol::bucket)] // strike_scale_too_large
 fun test_pow10_above_max_aborts() {
-    let _ = bucket::pow10_for_testing(10);
+    // MAX_STRIKE_SCALE=38; 39 trips the assert before the loop's u128
+    // multiply could overflow on its own.
+    let _ = bucket::pow10_for_testing(39);
 }
 
 #[test]
@@ -186,7 +194,7 @@ fun test_new_call_option_scale_above_max_aborts() {
     ts::next_tx(&mut scenario, th::admin_addr());
     let cap = th::take_admin_cap(&scenario);
     bucket::new_call_option<BTC, USDC>(
-        &cap, EXPIRY_MS, STRIKE, STRIKE_INTERVAL, 1, /*strike_scale*/ 10, scenario.ctx(),
+        &cap, EXPIRY_MS, STRIKE, STRIKE_INTERVAL, 1, /*strike_scale*/ 39, scenario.ctx(),
     );
     th::return_admin_cap(&scenario, cap);
 
