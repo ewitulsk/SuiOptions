@@ -207,14 +207,13 @@ rollback() {
   docker compose -f "$COMPOSE_FILE" up -d "${PLANNED_CNAMES[@]}" || true
 }
 
-# nginx.conf is bind-mounted, so the `up -d nginx` above no-ops when
-# only the file contents changed. Validate the new config and signal a
-# graceful reload before probing health, otherwise new routes added in
-# this deploy (e.g. an additional service's /health) would 404 against
-# the stale in-memory config and trip the rollback for no real reason —
-# the SO-50 nginx-route deploy hit exactly that and is the reason this
-# block exists.
-if ! docker compose -f "$COMPOSE_FILE" exec -T nginx nginx -t; then
+# Validate the new nginx.conf and signal a graceful reload before
+# probing health, otherwise new locations added in this deploy would
+# 404 against the still-in-memory previous config. The config lives at
+# the -c path the nginx master was started with (see compose), not
+# /etc/nginx/nginx.conf — point `nginx -t` there explicitly.
+if ! docker compose -f "$COMPOSE_FILE" exec -T nginx \
+       nginx -t -c /etc/nginx/options/nginx.conf; then
   echo "nginx config validation failed" >&2
   rollback
   exit 1

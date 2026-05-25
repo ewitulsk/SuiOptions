@@ -64,8 +64,15 @@ services:
     image: nginx:1.27-alpine
     ports:
       - "9020:80"
+    # Bind-mount the directory (not the file) so file replacements by
+    # the bundle's tar extraction are visible inside the container —
+    # a single-file mount binds the host inode, which tar's
+    # unlink+create silently orphans. nginx -c picks the file out of
+    # the mounted directory; the image's default /etc/nginx/nginx.conf
+    # stays untouched and unused.
     volumes:
-      - /opt/options/staging/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /opt/options/staging/nginx/:/etc/nginx/options/:ro
+    command: ["nginx", "-c", "/etc/nginx/options/nginx.conf", "-g", "daemon off;"]
     depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot]
     restart: unless-stopped
     networks: [net]

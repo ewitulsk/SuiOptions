@@ -200,14 +200,17 @@ jobs:
           # Bundle only the files the box needs to run deploy.sh for
           # this env. Per-env compose files are split so prod deploys
           # don't carry dev's compose.
-          mkdir -p /tmp/bundle
+          mkdir -p /tmp/bundle/nginx
           cp deployment/ec2/deploy.sh         /tmp/bundle/
           cp deployment/ec2/render-secrets.sh /tmp/bundle/
           cp deployment/compose/docker-compose.${{ matrix.env }}.yml /tmp/bundle/
-          # nginx sidecar config — compose bind-mounts /opt/options/<env>/nginx.conf
-          # into the nginx container, so the per-env config lands flat next to
-          # the compose file.
-          cp deployment/nginx/nginx.${{ matrix.env }}.conf /tmp/bundle/nginx.conf
+          # nginx sidecar config — shipped inside a `nginx/` directory so
+          # compose can bind-mount the directory (and nginx -c picks the
+          # file out of it). Mounting the directory instead of the file
+          # avoids Docker's bind-mount-a-file inode trap — tar's
+          # unlink+create extraction would otherwise orphan the
+          # container's view of the file on every deploy.
+          cp deployment/nginx/nginx.${{ matrix.env }}.conf /tmp/bundle/nginx/nginx.conf
           tar czf /tmp/bundle.tgz -C /tmp/bundle .
           aws s3 cp /tmp/bundle.tgz \
             "s3://$SSM_OUTPUT_BUCKET/deploy-bundles/$TAG-${{ matrix.env }}.tgz"
