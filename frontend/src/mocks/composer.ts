@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useBuckets } from "../api/useBuckets";
+import { useRfqQuotes } from "../api/useRfqQuotes";
 import type { Series } from "../api/client";
 import type {
   Bucket,
@@ -33,6 +34,11 @@ function formatExpiry(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+function shortId(hex: string): string {
+  if (hex.length <= 12) return hex;
+  return `${hex.slice(0, 6)}...${hex.slice(-4)}`;
 }
 
 type MmFixture = {
@@ -208,12 +214,35 @@ export function useComposerState({
     [series],
   );
 
+  const bucketsLoading = bucketsQuery.isLoading;
+  const bucketsEmpty = !bucketsLoading && liveStrikes.length === 0;
+
+  // Real RFQ quotes from the quoting service (1-min polling interval).
+  const rfqSide = view === "writer" ? "writer" as const : "trader" as const;
+  const { quotesByBucket, connected: rfqConnected } = useRfqQuotes({
+    series,
+    side: rfqSide,
+    enabled: !bucketsEmpty && !bucketsLoading,
+  });
+
   const strikes = useMemo<Strike[]>(
     () =>
       liveStrikes.map((strike, idx) => {
-        // Premium math is mocked — anchor it to a synthetic strike at this
-        // tile's position so values stay in the same range as before
-        // regardless of the real on-chain strike.
+        // If we have a real quote for this bucket, use its premium.
+        const bucketId = series?.buckets[idx]?.bucket_id;
+        const realQuote = bucketId ? quotesByBucket[bucketId] : undefined;
+        if (realQuote && realQuote.quotes.length > 0) {
+          const bestRaw = Number(realQuote.quotes[0].quote.premium);
+          const decimals = series?.settlement_decimals ?? 6;
+          const bestScaled = bestRaw / Math.pow(10, decimals);
+          return {
+            strike,
+            perUnit: amount > 0 ? bestScaled / amount : bestScaled,
+            premiumDisplay: `${bestScaled.toFixed(2)} ${settlementSymbol}`,
+            premium: bestScaled,
+          };
+        }
+        // Fallback: mocked premium math
         const mockStrike = MOCK_PREMIUM_STRIKES[idx % MOCK_PREMIUM_STRIKES.length];
         const perUnit = mockPremiumPerUnit(spot, mockStrike);
         const total = perUnit * amount;
@@ -224,7 +253,7 @@ export function useComposerState({
           premium: total,
         };
       }),
-    [spot, amount, liveStrikes, settlementSymbol],
+    [spot, amount, liveStrikes, settlementSymbol, quotesByBucket, series],
   );
 
   // Clamp selection when the strike list shrinks/grows underneath us
@@ -248,40 +277,73 @@ export function useComposerState({
   const insufficientUsdc = (selected?.premium ?? 0) > usdcBalance;
   const insufficient = view === "writer" ? insufficientBtc : insufficientUsdc;
 
-  const bucketsLoading = bucketsQuery.isLoading;
-  const bucketsEmpty = !bucketsLoading && strikes.length === 0;
+  // Map real RFQ quotes to the UI Quote type for the currently selected
+  // bucket. Falls back to mock quotes when the quoting service hasn't
+  // returned anything yet.
+  const selectedBucketId = series?.buckets[selectedIdx]?.bucket_id ?? null;
+  const realBucketQuote = selectedBucketId
+    ? quotesByBucket[selectedBucketId]
+    : undefined;
 
-  // Stream MM quotes whenever selection / amount / view changes
   useEffect(() => {
-    if (!selected) return;
-    setQuotes([]);
-    const timers = MM_FIXTURE.map((n, i) =>
-      setTimeout(() => {
-        setQuotes((qs) => {
-          const drift = view === "writer" ? n.driftW : n.driftT;
-          const next: Quote[] = [
-            ...qs,
-            {
-              id: `${selected.strike}-${n.addr}`,
-              name: n.name,
-              addr: n.addr,
-              fill: n.fill,
-              revertRate: n.revertRate,
-              latency: n.latency,
-              premium: +(selected.premium + drift).toFixed(2),
-              ttl: 30 - i * 3,
-              arrivedAt: Date.now(),
-            },
-          ];
-          next.sort((a, b) =>
-            view === "writer" ? b.premium - a.premium : a.premium - b.premium,
-          );
-          return next;
-        });
-      }, 400 + i * 600),
-    );
-    return () => timers.forEach(clearTimeout);
-  }, [selectedIdx, amount, view, selected]);
+    if (realBucketQuote && realBucketQuote.quotes.length > 0) {
+      const mapped: Quote[] = realBucketQuote.quotes.map((q, i) => {
+        const premiumRaw = Number(q.quote.premium);
+        const decimals = series?.settlement_decimals ?? 6;
+        const premiumScaled = premiumRaw / Math.pow(10, decimals);
+        return {
+          id: `${q.mm_id}-${q.quote.nonce}`,
+          name: shortId(q.mm_id),
+          addr: shortId(q.quote.signer_account_id),
+          fill: Math.round(q.mm_reputation * 100),
+          revertRate: 0,
+          latency: 0,
+          premium: premiumScaled,
+          ttl: Math.max(
+            0,
+            Math.round(
+              (Number(q.quote.valid_until_ms) - Date.now()) / 1000,
+            ),
+          ),
+          arrivedAt: realBucketQuote.updatedAt - i * 100,
+        };
+      });
+      mapped.sort((a, b) =>
+        view === "writer" ? b.premium - a.premium : a.premium - b.premium,
+      );
+      setQuotes(mapped);
+    } else if (!rfqConnected) {
+      // Fallback: mock quotes while quoting service is unavailable.
+      if (!selected) return;
+      setQuotes([]);
+      const timers = MM_FIXTURE.map((n, i) =>
+        setTimeout(() => {
+          setQuotes((qs) => {
+            const drift = view === "writer" ? n.driftW : n.driftT;
+            const next: Quote[] = [
+              ...qs,
+              {
+                id: `${selected.strike}-${n.addr}`,
+                name: n.name,
+                addr: n.addr,
+                fill: n.fill,
+                revertRate: n.revertRate,
+                latency: n.latency,
+                premium: +(selected.premium + drift).toFixed(2),
+                ttl: 30 - i * 3,
+                arrivedAt: Date.now(),
+              },
+            ];
+            next.sort((a, b) =>
+              view === "writer" ? b.premium - a.premium : a.premium - b.premium,
+            );
+            return next;
+          });
+        }, 400 + i * 600),
+      );
+      return () => timers.forEach(clearTimeout);
+    }
+  }, [realBucketQuote, rfqConnected, selectedIdx, amount, view, selected, series?.settlement_decimals]);
 
   const bestPremium = quotes[0]?.premium ?? (selected?.premium ?? 0);
 

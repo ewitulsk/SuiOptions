@@ -189,6 +189,12 @@ export function Header() {
         >
           Activity
         </button>
+        <button
+          className={pathname === "/control" ? "is-active" : ""}
+          onClick={() => navigate("/control")}
+        >
+          Control
+        </button>
         <button>Docs</button>
       </nav>
       <span className="header__status">

@@ -43,3 +43,72 @@ html[data-mode="dark"] .live-buckets__table th, html[data-mode="dark"] .live-buc
   margin: 12px 0;
 }
 html[data-mode="dark"] .composer-status { border-color: rgba(255, 255, 255, 0.15); }
+
+/* ---- Control Panel ---- */
+.cp-title { margin: 0 0 12px; font-size: 18px; font-weight: 600; }
+.cp-status { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 20px; }
+.cp-status__dot { width: 8px; height: 8px; border-radius: 50%; background: rgba(0,0,0,0.15); flex-shrink: 0; }
+.cp-status__dot--on { background: #22B07A; }
+html[data-mode="dark"] .cp-status__dot { background: rgba(255,255,255,0.2); }
+html[data-mode="dark"] .cp-status__dot--on { background: #22B07A; }
+
+.cp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+@media (max-width: 700px) { .cp-grid { grid-template-columns: 1fr; } }
+
+.cp-section {
+  padding: 16px;
+  border: 1px solid rgba(0,0,0,0.08);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.6);
+}
+html[data-mode="dark"] .cp-section {
+  border-color: rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.04);
+}
+.cp-section h3 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.7; }
+.cp-muted { font-size: 13px; opacity: 0.6; }
+
+.cp-bucket-sel__series + .cp-bucket-sel__series { margin-top: 12px; }
+.cp-bucket-sel__header { font-size: 12px; font-weight: 600; margin-bottom: 4px; opacity: 0.7; }
+.cp-bucket-sel__btn {
+  display: block; width: 100%; text-align: left; padding: 6px 10px; margin: 2px 0;
+  border: 1px solid rgba(0,0,0,0.08); border-radius: 6px; background: transparent;
+  font-size: 12px; font-family: "JetBrains Mono", monospace; cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.cp-bucket-sel__btn:hover { background: rgba(77,162,255,0.08); }
+.cp-bucket-sel__btn.is-active { border-color: var(--aqua-sui, #4DA2FF); background: rgba(77,162,255,0.12); }
+html[data-mode="dark"] .cp-bucket-sel__btn { border-color: rgba(255,255,255,0.1); color: inherit; }
+html[data-mode="dark"] .cp-bucket-sel__btn:hover { background: rgba(77,162,255,0.12); }
+
+.cp-form { display: flex; flex-direction: column; gap: 12px; }
+.cp-label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; opacity: 0.8; }
+.cp-input {
+  padding: 6px 10px; border: 1px solid rgba(0,0,0,0.12); border-radius: 6px;
+  font-size: 13px; font-family: "JetBrains Mono", monospace; background: rgba(255,255,255,0.5);
+}
+html[data-mode="dark"] .cp-input { border-color: rgba(255,255,255,0.12); background: rgba(255,255,255,0.06); color: inherit; }
+.cp-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.cp-auto { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+.cp-btn { font-size: 13px; padding: 8px 16px; }
+.cp-btn--small { font-size: 11px; padding: 4px 10px; border: 1px solid rgba(0,0,0,0.12); border-radius: 6px; background: transparent; }
+html[data-mode="dark"] .cp-btn--small { border-color: rgba(255,255,255,0.12); color: inherit; }
+
+.cp-log-section { margin-bottom: 32px; }
+.cp-log-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.cp-log-header h3 { margin: 0; }
+.cp-log {
+  max-height: 400px; overflow-y: auto; border: 1px solid rgba(0,0,0,0.08); border-radius: 8px;
+  background: rgba(255,255,255,0.4); font-family: "JetBrains Mono", monospace; font-size: 12px;
+}
+html[data-mode="dark"] .cp-log { border-color: rgba(255,255,255,0.08); background: rgba(255,255,255,0.02); }
+
+.cp-log__row { display: flex; gap: 8px; padding: 4px 10px; border-bottom: 1px solid rgba(0,0,0,0.04); align-items: baseline; }
+html[data-mode="dark"] .cp-log__row { border-bottom-color: rgba(255,255,255,0.04); }
+.cp-log__row--error { color: #b00020; }
+html[data-mode="dark"] .cp-log__row--error { color: #FF7A6E; }
+.cp-log__row--response { color: #22B07A; }
+.cp-log__time { opacity: 0.5; flex-shrink: 0; }
+.cp-log__arrow { flex-shrink: 0; }
+.cp-log__rid { opacity: 0.5; flex-shrink: 0; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+.cp-log__detail { flex: 1; }

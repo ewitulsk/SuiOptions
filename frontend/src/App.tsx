@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { Composer } from "./screens/Composer";
 import { Dashboard } from "./screens/Dashboard";
 import { Activity } from "./screens/Activity";
+import { ControlPanel } from "./screens/ControlPanel";
 
 export function App() {
   return (
@@ -12,6 +13,7 @@ export function App() {
       <Route path="/buy" element={<Composer key="trader" initialView="trader" />} />
       <Route path="/dashboard" element={<Dashboard />} />
       <Route path="/activity" element={<Activity />} />
+      <Route path="/control" element={<ControlPanel />} />
       <Route path="*" element={<Navigate to="/earn" replace />} />
     </Routes>
   );
