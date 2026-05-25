@@ -16,6 +16,7 @@ pub fn all() -> Vec<ProgramSpec> {
         api_service::program_spec(),
         exchange::program_spec(),
         writer::program_spec(),
+        rfq_monitor::program_spec(),
         deployment_manager::program_spec(),
     ]
 }
@@ -38,6 +39,7 @@ mod tests {
                 "api-service",
                 "exchange",
                 "writer",
+                "rfq-monitor",
                 "deploy",
             ]
         );

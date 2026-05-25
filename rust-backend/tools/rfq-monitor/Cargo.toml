@@ -1,0 +1,26 @@
+[package]
+name = "rfq-monitor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rfq-monitor"
+path = "src/main.rs"
+
+[dependencies]
+cli-spec       = { workspace = true }
+runtime-config = { workspace = true }
+protocol-types = { workspace = true }
+
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }

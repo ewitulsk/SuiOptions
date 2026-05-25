@@ -17,6 +17,7 @@ members = [
     "tools/deployment-manager",
     "tools/exchange",
     "tools/writer",
+    "tools/rfq-monitor",
     "tools/control-panel",
     "tests",
 ]

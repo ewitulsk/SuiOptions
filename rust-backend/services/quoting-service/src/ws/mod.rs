@@ -52,7 +52,7 @@ pub async fn serve_on(
 }
 
 async fn handle(
-    mut socket: TcpStream,
+    socket: TcpStream,
     peer: SocketAddr,
     state: Arc<AppState>,
     cfg: Arc<Config>,
@@ -63,7 +63,7 @@ async fn handle(
     // pass through untouched.
     if let Some(req) = peek_http_request(&socket).await? {
         if !req.is_ws_upgrade {
-            return handle_plain_http(&mut socket, &req).await;
+            return handle_plain_http(socket, &req, state).await;
         }
     }
     let ws = tokio_tungstenite::accept_async(socket).await?;
@@ -107,13 +107,20 @@ async fn peek_http_request(socket: &TcpStream) -> Result<Option<PeekedRequest>> 
     Ok(Some(PeekedRequest { path, is_ws_upgrade }))
 }
 
-async fn handle_plain_http(socket: &mut TcpStream, req: &PeekedRequest) -> Result<()> {
+async fn handle_plain_http(
+    mut socket: TcpStream,
+    req: &PeekedRequest,
+    state: Arc<AppState>,
+) -> Result<()> {
     // Drain the request bytes we peeked. ALB sends them in one packet and
     // doesn't expect us to read the body; reading 1KB is enough to clear
     // the kernel buffer for the close.
     let mut drain = [0u8; 1024];
     let _ = socket.try_read(&mut drain);
 
+    if req.path == "/rfq-stream" || req.path.ends_with("/rfq-stream") {
+        return serve_rfq_stream(socket, state).await;
+    }
     let body = if req.path == "/health" || req.path.ends_with("/health") {
         b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
             .to_vec()
@@ -121,6 +128,50 @@ async fn handle_plain_http(socket: &mut TcpStream, req: &PeekedRequest) -> Resul
         b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
     };
     socket.write_all(&body).await?;
+    socket.shutdown().await.ok();
+    Ok(())
+}
+
+/// Stream `RfqObservation`s as newline-delimited JSON over a long-lived
+/// HTTP response. Drives the `rfq-monitor` tool. Slow subscribers that fall
+/// 256 messages behind get `Lagged` and we emit a synthetic `_lagged` line
+/// so the operator can see drops without us silently swallowing them.
+async fn serve_rfq_stream(mut socket: TcpStream, state: Arc<AppState>) -> Result<()> {
+    socket
+        .write_all(
+            b"HTTP/1.1 200 OK\r\n\
+              Content-Type: application/x-ndjson\r\n\
+              Cache-Control: no-store\r\n\
+              Connection: close\r\n\
+              \r\n",
+        )
+        .await?;
+
+    let mut rx = state.rfq_observers.subscribe();
+    loop {
+        match rx.recv().await {
+            Ok(obs) => {
+                let mut line = match serde_json::to_string(&obs) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        debug!(error = %e, "encode rfq observation");
+                        continue;
+                    }
+                };
+                line.push('\n');
+                if socket.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                let line = format!("{{\"_lagged\":{n}}}\n");
+                if socket.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
     socket.shutdown().await.ok();
     Ok(())
 }
