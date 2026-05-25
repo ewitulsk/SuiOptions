@@ -34,7 +34,7 @@ use option_scheduler::families::{CanonicalType, PairKey, Registry, log_registry,
 use option_scheduler::roller::{self, RollPlan};
 use option_scheduler::schedule::{decide_tick, SkipReason, TickDecision};
 use option_scheduler::spot::ResolvedSpotSource;
-use option_scheduler::strike_grid::build_strike_grid_from_chain;
+use option_scheduler::strike_grid::build_strike_grid_for_pair;
 use option_scheduler::Cli;
 
 #[tokio::main]
@@ -137,6 +137,8 @@ async fn main() -> Result<()> {
             cfg: pair.clone(),
             underlying_type: u.coin_type.clone(),
             settlement_type: s.coin_type.clone(),
+            underlying_decimals: u_spec.decimals,
+            settlement_decimals: s_spec.decimals,
             spot,
         });
         info!(
@@ -199,6 +201,11 @@ struct PairMeta {
     cfg: PairConfig,
     underlying_type: String,
     settlement_type: String,
+    /// Cached at boot so the tick loop can compute chain-unit spots
+    /// against any `strike_scale` the planner picks (post-SO-55 the spot
+    /// source returns a USD cross, not pre-scaled chain units).
+    underlying_decimals: u8,
+    settlement_decimals: u8,
     spot: ResolvedSpotSource,
 }
 
@@ -242,9 +249,9 @@ async fn tick_once(
             }
         };
 
-        let spot_chain = match meta
+        let spot_usd_cross = match meta
             .spot
-            .resolve_chain_units(http_client, &cfg.pyth.hermes_url)
+            .resolve_usd_cross(http_client, &cfg.pyth.hermes_url)
             .await
         {
             Ok(s) => s,
@@ -253,8 +260,10 @@ async fn tick_once(
                 continue;
             }
         };
-        let grid = match build_strike_grid_from_chain(
-            spot_chain,
+        let grid = match build_strike_grid_for_pair(
+            spot_usd_cross,
+            meta.underlying_decimals,
+            meta.settlement_decimals,
             meta.cfg.strikes_below,
             meta.cfg.strikes_above,
             meta.cfg.interval_pct,

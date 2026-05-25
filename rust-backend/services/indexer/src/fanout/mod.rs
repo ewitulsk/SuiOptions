@@ -170,6 +170,7 @@ mod tests {
                 settlement_type: AssetType::new("USDC"),
                 expiry_ms: 1,
                 strike: 1,
+                strike_scale: 0,
             }),
             0,
         );
@@ -215,6 +216,7 @@ mod tests {
                 settlement_type: AssetType::new("USDC"),
                 expiry_ms: 1,
                 strike: 1,
+                strike_scale: 0,
             }),
             1,
         );

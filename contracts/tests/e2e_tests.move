@@ -22,7 +22,8 @@ use options_protocol::quote;
 use options_protocol::treasury;
 use options_protocol::test_helpers::{Self as th, BTC, USDC};
 
-const STRIKE: u64 = 50_000;
+const STRIKE: u128 = 50_000;
+const STRIKE_SCALE: u8 = 0;
 const EXPIRY_MS: u64 = 1_000_000;
 const FEE_BPS: u64 = 50; // 0.5%
 
@@ -36,7 +37,7 @@ fun setup_protocol_with_bucket(scenario: &mut Scenario) {
     let cap = th::take_admin_cap(scenario);
     let mut config = th::take_config(scenario);
     admin::set_fee_bps(&cap, &mut config, FEE_BPS);
-    bucket::new_call_option<BTC, USDC>(&cap, EXPIRY_MS, STRIKE, 1, 1, scenario.ctx());
+    bucket::new_call_option<BTC, USDC>(&cap, EXPIRY_MS, STRIKE, 1, 1, STRIKE_SCALE, scenario.ctx());
     th::return_admin_cap(scenario, cap);
     ts::return_shared(config);
 }
@@ -54,8 +55,8 @@ fun setup_protocol_with_bucket(scenario: &mut Scenario) {
 //   write1: 100 BTC for premium 5_000_000 → fee 25_000, net 4_975_000
 //   write2:  50 BTC for premium 3_000_000 → fee 15_000, net 2_985_000
 //   exercise 120 by Trader MM:
-//     writer #1 → exercised 100 / unexercised 0  → 0 BTC + 100*STRIKE USDC
-//     writer #2 → exercised  20 / unexercised 30 → 30 BTC +  20*STRIKE USDC
+//     writer #1 → exercised 100 / unexercised 0  → 0 BTC + (((100 as u128) * STRIKE) as u64) USDC
+//     writer #2 → exercised  20 / unexercised 30 → 30 BTC +  (((20 as u128) * STRIKE) as u64) USDC
 //   trader MM burns leftover 30 call tokens (unexercised at expiry).
 
 #[test]
@@ -207,11 +208,11 @@ fun test_e2e_writer_flow_full_lifecycle() {
         ts::return_to_sender(&scenario, call_a);
     };
 
-    // ---- Trader MM exercises 120 BTC. Pays 120*STRIKE USDC. Cursor → 120.
+    // ---- Trader MM exercises 120 BTC. Pays (((120 as u128) * STRIKE) as u64) USDC. Cursor → 120.
     ts::next_tx(&mut scenario, th::trader_mm_addr());
     {
         let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-        let payment = coin::mint_for_testing<USDC>(120 * STRIKE, scenario.ctx());
+        let payment = coin::mint_for_testing<USDC>((((120 as u128) * STRIKE) as u64), scenario.ctx());
         let underlying_out = bucket::exercise<BTC, USDC>(
             &mut b,
             exercise_chunk,
@@ -222,7 +223,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
         assert!(underlying_out.value() == 120, 0);
         assert!(bucket::exercise_cursor(&b) == 120, 0);
         assert!(bucket::underlying_balance(&b) == 30, 0);
-        assert!(bucket::settlement_balance(&b) == 120 * STRIKE, 0);
+        assert!(bucket::settlement_balance(&b) == (((120 as u128) * STRIKE) as u64), 0);
         coin::burn_for_testing(underlying_out);
         ts::return_shared(b);
     };
@@ -237,10 +238,10 @@ fun test_e2e_writer_flow_full_lifecycle() {
         let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
         let (u, s) = bucket::redeem_position<BTC, USDC>(&mut b, p, &clock, scenario.ctx());
         assert!(u.value() == 0, 0);
-        assert!(s.value() == 100 * STRIKE, 0);
-        // Bucket drains down: 30 BTC remain, 20*STRIKE USDC remain.
+        assert!(s.value() == (((100 as u128) * STRIKE) as u64), 0);
+        // Bucket drains down: 30 BTC remain, (((20 as u128) * STRIKE) as u64) USDC remain.
         assert!(bucket::underlying_balance(&b) == 30, 0);
-        assert!(bucket::settlement_balance(&b) == 20 * STRIKE, 0);
+        assert!(bucket::settlement_balance(&b) == (((20 as u128) * STRIKE) as u64), 0);
         coin::burn_for_testing(u);
         coin::burn_for_testing(s);
         ts::return_shared(b);
@@ -253,7 +254,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
         let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
         let (u, s) = bucket::redeem_position<BTC, USDC>(&mut b, p, &clock, scenario.ctx());
         assert!(u.value() == 30, 0);
-        assert!(s.value() == 20 * STRIKE, 0);
+        assert!(s.value() == (((20 as u128) * STRIKE) as u64), 0);
         // Bucket fully drained.
         assert!(bucket::underlying_balance(&b) == 0, 0);
         assert!(bucket::settlement_balance(&b) == 0, 0);
@@ -315,8 +316,8 @@ fun test_e2e_writer_flow_full_lifecycle() {
 //   trader#2 exercises 30 of 80  → cursor 130
 //   trader#2 burns leftover 50 call tokens (unexercised) post-expiry
 //   MM redeems both positions:
-//     pos [0,100):   cursor=130 ≥ 100  → 0 BTC + 100*STRIKE USDC
-//     pos [100,180): cursor=130 mid-range → 50 BTC + 30*STRIKE USDC
+//     pos [0,100):   cursor=130 ≥ 100  → 0 BTC + (((100 as u128) * STRIKE) as u64) USDC
+//     pos [100,180): cursor=130 mid-range → 50 BTC + (((30u64 as u128) * STRIKE) as u64) USDC
 
 #[test]
 fun test_e2e_trader_flow_full_lifecycle() {
@@ -442,12 +443,12 @@ fun test_e2e_trader_flow_full_lifecycle() {
     {
         let call = ts::take_from_sender<CallOption>(&scenario);
         let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-        let payment = coin::mint_for_testing<USDC>(buy1_amount * STRIKE, scenario.ctx());
+        let payment = coin::mint_for_testing<USDC>((((buy1_amount as u128) * STRIKE) as u64), scenario.ctx());
         let underlying_out = bucket::exercise<BTC, USDC>(&mut b, call, payment, &clock, scenario.ctx());
         assert!(underlying_out.value() == buy1_amount, 0);
         assert!(bucket::exercise_cursor(&b) == 100, 0);
         assert!(bucket::underlying_balance(&b) == 80, 0);
-        assert!(bucket::settlement_balance(&b) == 100 * STRIKE, 0);
+        assert!(bucket::settlement_balance(&b) == (((100 as u128) * STRIKE) as u64), 0);
         coin::burn_for_testing(underlying_out);
         ts::return_shared(b);
     };
@@ -463,12 +464,12 @@ fun test_e2e_trader_flow_full_lifecycle() {
     ts::next_tx(&mut scenario, th::stranger_addr());
     {
         let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-        let payment = coin::mint_for_testing<USDC>(30 * STRIKE, scenario.ctx());
+        let payment = coin::mint_for_testing<USDC>((((30u64 as u128) * STRIKE) as u64), scenario.ctx());
         let underlying_out = bucket::exercise<BTC, USDC>(&mut b, exercise_30, payment, &clock, scenario.ctx());
         assert!(underlying_out.value() == 30, 0);
         assert!(bucket::exercise_cursor(&b) == 130, 0);
         assert!(bucket::underlying_balance(&b) == 50, 0);
-        assert!(bucket::settlement_balance(&b) == 130 * STRIKE, 0);
+        assert!(bucket::settlement_balance(&b) == (((130 as u128) * STRIKE) as u64), 0);
         coin::burn_for_testing(underlying_out);
         ts::return_shared(b);
     };
@@ -496,19 +497,19 @@ fun test_e2e_trader_flow_full_lifecycle() {
 
         let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
 
-        // Redeem position [0,100): cursor=130 ≥ 100 → 0 BTC + 100*STRIKE USDC.
+        // Redeem position [0,100): cursor=130 ≥ 100 → 0 BTC + (((100 as u128) * STRIKE) as u64) USDC.
         let (u1, s1) = bucket::redeem_position<BTC, USDC>(&mut b, early, &clock, scenario.ctx());
         assert!(u1.value() == 0, 0);
-        assert!(s1.value() == 100 * STRIKE, 0);
+        assert!(s1.value() == (((100 as u128) * STRIKE) as u64), 0);
         assert!(bucket::underlying_balance(&b) == 50, 0);
-        assert!(bucket::settlement_balance(&b) == 30 * STRIKE, 0);
+        assert!(bucket::settlement_balance(&b) == (((30u64 as u128) * STRIKE) as u64), 0);
         coin::burn_for_testing(u1);
         coin::burn_for_testing(s1);
 
         // Redeem position [100,180): cursor=130 → 30 exercised, 50 unexercised.
         let (u2, s2) = bucket::redeem_position<BTC, USDC>(&mut b, late, &clock, scenario.ctx());
         assert!(u2.value() == 50, 0);
-        assert!(s2.value() == 30 * STRIKE, 0);
+        assert!(s2.value() == (((30u64 as u128) * STRIKE) as u64), 0);
         assert!(bucket::underlying_balance(&b) == 0, 0);
         assert!(bucket::settlement_balance(&b) == 0, 0);
         coin::burn_for_testing(u2);

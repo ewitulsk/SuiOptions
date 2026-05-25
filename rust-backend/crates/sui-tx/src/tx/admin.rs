@@ -92,13 +92,14 @@ pub struct NewCallOptionArgs<'a> {
     pub underlying_type: &'a str,
     pub settlement_type: &'a str,
     pub expiry_ms: u64,
-    pub start_strike: u64,
-    pub strike_interval: u64,
+    pub start_strike: u128,
+    pub strike_interval: u128,
     pub count: u64,
+    pub strike_scale: u8,
 }
 
 /// Calls `bucket::new_call_option<U, S>(&AdminCap, expiry, start, interval,
-/// count, ctx)`. Emits one `BucketCreated` event per strike.
+/// count, strike_scale, ctx)`. Emits one `BucketCreated` event per strike.
 pub async fn new_call_option(
     client: &SuiClient,
     signer: &Signer,
@@ -114,11 +115,13 @@ pub async fn new_call_option(
         vec![args.underlying_type, args.settlement_type],
         vec![
             SuiJsonValue::from_object_id(args.admin_cap),
-            // u64 args ride as string in JSON to avoid 2^53 truncation.
+            // u64 / u128 args ride as string in JSON to avoid 2^53 truncation.
             SuiJsonValue::new(serde_json::Value::String(args.expiry_ms.to_string()))?,
             SuiJsonValue::new(serde_json::Value::String(args.start_strike.to_string()))?,
             SuiJsonValue::new(serde_json::Value::String(args.strike_interval.to_string()))?,
             SuiJsonValue::new(serde_json::Value::String(args.count.to_string()))?,
+            // strike_scale is u8 — small enough to ride as a number.
+            SuiJsonValue::new(serde_json::Value::Number(args.strike_scale.into()))?,
         ],
         gas_budget,
     )

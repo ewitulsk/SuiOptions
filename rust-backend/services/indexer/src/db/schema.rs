@@ -46,6 +46,7 @@ diesel::table! {
         asset_type      -> Text,
         settlement_type -> Text,
         strike          -> Numeric,
+        strike_scale    -> Int2,
         expiry_ms       -> Int8,
         total_written   -> Numeric,
         exercise_cursor -> Numeric,

@@ -49,7 +49,10 @@ CREATE TABLE buckets (
     bucket_id        TEXT         PRIMARY KEY,
     asset_type       TEXT         NOT NULL,
     settlement_type  TEXT         NOT NULL,
+    -- u128 fits in 39 digits (u128::MAX = 340282366920938463463374607431768211455).
+    -- Real ratio = strike / 10^strike_scale; see SO-55.
     strike           NUMERIC(39)  NOT NULL,
+    strike_scale     SMALLINT     NOT NULL DEFAULT 0,
     expiry_ms        BIGINT       NOT NULL,
     total_written    NUMERIC(39)  NOT NULL DEFAULT 0,
     exercise_cursor  NUMERIC(39)  NOT NULL DEFAULT 0,

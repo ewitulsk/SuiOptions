@@ -66,6 +66,7 @@ impl AppState {
                         asset_type: b.asset_type.clone(),
                         settlement_type: b.settlement_type.clone(),
                         strike: b.strike,
+                        strike_scale: b.strike_scale,
                         expiry_ms: b.expiry_ms,
                         total_written: 0,
                         exercise_cursor: 0,
@@ -196,6 +197,7 @@ mod tests {
                 settlement_type: AssetType::new("USDC"),
                 expiry_ms: 1_000,
                 strike: 50,
+                strike_scale: 0,
             }),
         ));
 
