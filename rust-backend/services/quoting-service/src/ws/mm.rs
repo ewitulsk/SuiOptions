@@ -179,7 +179,16 @@ pub async fn handle(
             match msg {
                 MmToService::Quote { request_id, payload } => {
                     trace!(mm = %account_id, request_id, premium = payload.quote.premium, nonce = payload.quote.nonce, "received mm quote");
-                    if let Some(tx) = read_state.pending_rfqs.get(&request_id) {
+                    // Clone the sender out and drop the DashMap Ref before
+                    // awaiting — holding a Ref across .await keeps the
+                    // shard's read lock alive, which blocks concurrent
+                    // inserts from orchestrate() on the same shard and
+                    // can starve the tokio runtime under burst load.
+                    let tx = read_state
+                        .pending_rfqs
+                        .get(&request_id)
+                        .map(|e| e.value().clone());
+                    if let Some(tx) = tx {
                         let _ = tx.send(MmResponse::Quote(account_id, payload)).await;
                     } else {
                         debug!(request_id, "quote arrived after rfq closed");
@@ -187,7 +196,11 @@ pub async fn handle(
                 }
                 MmToService::Decline { request_id, .. } => {
                     trace!(mm = %account_id, request_id, "mm declined");
-                    if let Some(tx) = read_state.pending_rfqs.get(&request_id) {
+                    let tx = read_state
+                        .pending_rfqs
+                        .get(&request_id)
+                        .map(|e| e.value().clone());
+                    if let Some(tx) = tx {
                         let _ = tx.send(MmResponse::Decline(account_id)).await;
                     }
                 }

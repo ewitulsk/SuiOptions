@@ -1,7 +1,9 @@
 # Quoting service config — staging env (testnet).
 
-bind_addr            = "0.0.0.0:9002"
-indexer_url          = "ws://indexer:9001/"
-rfq_window_ms        = 2000
-ping_interval_secs   = 15
-protocol_id          = "sui-options-protocol-v0"
+bind_addr                       = "0.0.0.0:9002"
+indexer_url                     = "ws://indexer:9001/"
+rfq_window_ms                   = 2000
+ping_interval_secs              = 15
+protocol_id                     = "sui-options-protocol-v0"
+max_inflight_rfqs_per_session   = 16
+max_inflight_rfqs_global        = 256

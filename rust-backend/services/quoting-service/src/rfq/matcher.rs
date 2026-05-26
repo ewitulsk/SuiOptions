@@ -27,6 +27,13 @@ impl MatcherInput {
     pub fn expect(&mut self, mm: ObjectId) {
         self.expected.insert(mm);
     }
+
+    /// Undo an earlier `expect` — used when the broadcast send to that MM
+    /// fails, so the matcher doesn't keep waiting for a response that will
+    /// never come.
+    pub fn unexpect(&mut self, mm: ObjectId) {
+        self.expected.remove(&mm);
+    }
 }
 
 #[derive(Debug, Default)]

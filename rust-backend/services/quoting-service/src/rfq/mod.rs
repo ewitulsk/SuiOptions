@@ -220,7 +220,10 @@ pub async fn orchestrate(
     let mms = state.mms.all_for_role(mm_role);
     debug!(?side, mms = mms.len(), request_id = %request_id, "rfq broadcast");
 
-    let (mut input, output) = matcher::channel(mms.len().max(1));
+    // Floor capacity at 8 so a single-MM deployment still has headroom for
+    // the response burst; without this the channel is `channel(1)` and
+    // `tx.send().await` from the MM read task serializes on every quote.
+    let (mut input, output) = matcher::channel(mms.len().max(8));
     // Publish the matcher's input side under the request_id so the MM read
     // tasks can route their responses to it.
     state
@@ -247,7 +250,14 @@ pub async fn orchestrate(
         // Tell the matcher who we expect a response from so it can decide
         // to short-circuit when every MM has answered.
         input.expect(mm.account_id);
-        let _ = mm.tx.send(frame).await;
+        // try_send: a slow MM whose outbound channel is full should miss
+        // this window, not back-pressure the orchestrator. Awaiting an
+        // unbounded send here lets one stuck MM pile up orchestrators
+        // indefinitely under load.
+        if let Err(e) = mm.tx.try_send(frame) {
+            debug!(mm = %mm.account_id, request_id = %request_id, error = %e, "dropping rfq broadcast: mm channel full or closed");
+            input.unexpect(mm.account_id);
+        }
     }
     // Drop the sender side(s) we hold so the matcher's close-detection works
     // once every MM that's going to answer has done so.
@@ -491,5 +501,66 @@ mod tests {
         let mut v = vec![mk(500), mk(300), mk(700), mk(100)];
         sort_best_first(Side::Trader, &mut v);
         assert_eq!(v.iter().map(|e| e.quote.premium).collect::<Vec<_>>(), vec![100, 300, 500, 700]);
+    }
+
+    /// Regression: a slow/stalled MM must not back-pressure the orchestrator.
+    /// Before the fix, `orchestrate` awaited `mm.tx.send(frame).await` with
+    /// no timeout — a stuck MM (channel full) blocked the orchestrator for
+    /// the full RFQ window per request, and a concurrent burst piled up
+    /// indefinitely. With `try_send`, the orchestrator drops the broadcast
+    /// to that MM and returns within the RFQ window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn orchestrate_does_not_block_on_full_mm_channel() {
+        use crate::state::MmConnection;
+        use protocol_types::sides::MmRole;
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+
+        let mm = ObjectId::new([0x01; 32]);
+        let bucket = ObjectId::new([0x99; 32]);
+        let state = Arc::new(make_state(mm, vec![0u8; 32], 10_000));
+
+        // Register an MM whose outbound channel is full and never drained.
+        let (tx, rx) = mpsc::channel(1);
+        // Fill the channel so subsequent `try_send` calls fail with Full.
+        tx.try_send(protocol_types::messages::ServiceToMm::Ping).unwrap();
+        // Keep rx alive but don't drain it — emulates a stuck write loop.
+        let _rx_keepalive = rx;
+        state.mms.insert(MmConnection {
+            account_id: mm,
+            roles: Arc::new(parking_lot::RwLock::new(vec![MmRole::TraderMm])),
+            tx,
+        });
+
+        // Fire 64 concurrent orchestrations. Each should complete inside
+        // the 50ms window — total wall time must stay near the window,
+        // not multiply by the number of concurrent calls.
+        let start = std::time::Instant::now();
+        let mut handles = Vec::new();
+        for i in 0..64 {
+            let st = Arc::clone(&state);
+            handles.push(tokio::spawn(async move {
+                orchestrate(
+                    st,
+                    Side::Writer,
+                    bucket,
+                    100,
+                    format!("req-{i}"),
+                    std::time::Duration::from_millis(50),
+                    b"P".to_vec(),
+                    0,
+                )
+                .await
+            }));
+        }
+        for h in handles {
+            let quotes = h.await.unwrap();
+            assert!(quotes.is_empty(), "no quotes expected from a stuck MM");
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "orchestrate took {elapsed:?} — likely blocking on full MM channel"
+        );
     }
 }

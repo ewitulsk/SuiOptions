@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time::interval;
 use tracing::{debug, trace, warn};
 
@@ -34,7 +34,6 @@ pub enum MmResponse {
     Decline(ObjectId),
 }
 
-#[derive(Default)]
 pub struct AppState {
     pub accounts: AccountStore,
     pub buckets: BucketStore,
@@ -45,11 +44,36 @@ pub struct AppState {
     /// removed when the RFQ completes. The MM read task looks up its
     /// `Quote`/`Decline` response's `request_id` here to route it.
     pub pending_rfqs: DashMap<String, mpsc::Sender<MmResponse>>,
+    /// Global cap on concurrent RFQ orchestrations across all retail
+    /// connections. Acquired by `retail.rs` with `try_acquire_owned`;
+    /// a saturated permit count means we reject the RFQ with
+    /// `Error{code:"rate_limited"}` instead of spawning another task.
+    pub rfq_global_inflight: Arc<Semaphore>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        // Default cap matches `Config::default().max_inflight_rfqs_global`.
+        // `AppState::with_global_rfq_cap` lets `main.rs` override at boot.
+        Self::with_global_rfq_cap(256)
+    }
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_global_rfq_cap(cap: usize) -> Self {
+        Self {
+            accounts: AccountStore::default(),
+            buckets: BucketStore::default(),
+            reservations: ReservationTable::default(),
+            reputation: ReputationStore::default(),
+            mms: MmRegistry::default(),
+            pending_rfqs: DashMap::new(),
+            rfq_global_inflight: Arc::new(Semaphore::new(cap)),
+        }
     }
 
     /// Feed an indexer event into the state. Idempotent at the event-id

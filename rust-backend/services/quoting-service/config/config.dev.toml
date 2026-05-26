@@ -11,3 +11,6 @@ rfq_window_ms        = 2000
 ping_interval_secs   = 15
 
 protocol_id          = "sui-options-protocol-v0"
+
+max_inflight_rfqs_per_session   = 16
+max_inflight_rfqs_global        = 256

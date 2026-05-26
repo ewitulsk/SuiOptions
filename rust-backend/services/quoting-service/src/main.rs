@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
     let cfg = Arc::new(
         Config::load(&cfg_path).with_context(|| format!("loading config from {cfg_path}"))?,
     );
-    let app = Arc::new(AppState::new());
+    let app = Arc::new(AppState::with_global_rfq_cap(cfg.max_inflight_rfqs_global));
 
     state::spawn_reservation_evictor(Arc::clone(&app), Duration::from_millis(250));
 
