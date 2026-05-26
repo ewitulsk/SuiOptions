@@ -28,6 +28,13 @@ pub struct Config {
     /// holds — used to short-circuit-reject quotes whose `protocol_id` is
     /// wrong before the chain has to.
     pub protocol_id: Vec<u8>,
+    /// Max concurrent in-flight RFQ orchestrations per retail connection.
+    /// A misbehaving client can otherwise spawn one tokio task per RFQ
+    /// without bound (see SO-65).
+    pub max_inflight_rfqs_per_session: usize,
+    /// Max concurrent in-flight RFQ orchestrations across all retail
+    /// connections. Backstop for the per-session limit.
+    pub max_inflight_rfqs_global: usize,
 }
 
 impl Default for Config {
@@ -38,6 +45,8 @@ impl Default for Config {
             rfq_window: Duration::from_secs(2),
             ping_interval: Duration::from_secs(15),
             protocol_id: b"sui-options-protocol-v0".to_vec(),
+            max_inflight_rfqs_per_session: 16,
+            max_inflight_rfqs_global: 256,
         }
     }
 }
@@ -55,10 +64,22 @@ struct FileConfig {
     /// Either a UTF-8 string (the common case — domain separators are
     /// human-readable) or a `0x`-prefixed hex blob.
     protocol_id: String,
+    #[serde(default = "default_max_inflight_per_session")]
+    max_inflight_rfqs_per_session: usize,
+    #[serde(default = "default_max_inflight_global")]
+    max_inflight_rfqs_global: usize,
 }
 
 fn default_ping_interval_secs() -> u64 {
     15
+}
+
+fn default_max_inflight_per_session() -> usize {
+    16
+}
+
+fn default_max_inflight_global() -> usize {
+    256
 }
 
 impl Config {
@@ -78,6 +99,8 @@ impl Config {
             rfq_window: Duration::from_millis(file.rfq_window_ms),
             ping_interval: Duration::from_secs(file.ping_interval_secs),
             protocol_id: parse_protocol_id(&file.protocol_id)?,
+            max_inflight_rfqs_per_session: file.max_inflight_rfqs_per_session,
+            max_inflight_rfqs_global: file.max_inflight_rfqs_global,
         })
     }
 }
@@ -125,6 +148,9 @@ protocol_id   = "test-domain"
         assert_eq!(cfg.rfq_window, Duration::from_millis(1500));
         assert_eq!(cfg.ping_interval, Duration::from_secs(20));
         assert_eq!(cfg.protocol_id, b"test-domain".to_vec());
+        // Defaults apply when keys are missing.
+        assert_eq!(cfg.max_inflight_rfqs_per_session, 16);
+        assert_eq!(cfg.max_inflight_rfqs_global, 256);
         std::fs::remove_file(&path).ok();
     }
 }

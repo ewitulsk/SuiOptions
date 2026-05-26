@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, info, trace, warn};
@@ -49,6 +49,11 @@ pub async fn handle(
     })?))
     .await?;
     info!(session_id, "retail hello-acked");
+
+    // Per-session inflight cap on RFQ orchestrations. Combined with the
+    // global cap on AppState, this prevents one client (or the storm we
+    // saw in SO-65) from spawning unbounded tokio tasks.
+    let session_inflight = Arc::new(Semaphore::new(cfg.max_inflight_rfqs_per_session));
 
     let (out_tx, mut out_rx) = mpsc::channel::<ServiceToRetail>(64);
     let write_task = tokio::spawn(async move {
@@ -114,12 +119,56 @@ pub async fn handle(
                     write_amount = payload.write_amount,
                     "retail rfq request"
                 );
+                // Try to claim a per-session and global permit before
+                // spawning. Both use `try_acquire_owned` (non-blocking) so
+                // a saturated quota fails fast with a `rate_limited` error
+                // rather than queuing arbitrary work.
+                let session_permit = match Arc::clone(&session_inflight).try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!(session_id, request_id = %request_id, "session rfq inflight cap hit");
+                        let _ = out_tx
+                            .send(ServiceToRetail::Error {
+                                request_id: Some(request_id),
+                                payload: ErrorPayload {
+                                    code: "rate_limited".into(),
+                                    message: "too many in-flight RFQs for this session"
+                                        .into(),
+                                },
+                            })
+                            .await;
+                        continue;
+                    }
+                };
+                let global_permit = match Arc::clone(&state.rfq_global_inflight)
+                    .try_acquire_owned()
+                {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!(request_id = %request_id, "global rfq inflight cap hit");
+                        let _ = out_tx
+                            .send(ServiceToRetail::Error {
+                                request_id: Some(request_id),
+                                payload: ErrorPayload {
+                                    code: "rate_limited".into(),
+                                    message: "service is at global RFQ capacity".into(),
+                                },
+                            })
+                            .await;
+                        // session_permit drops here, freeing its slot.
+                        continue;
+                    }
+                };
                 // Spawn the RFQ so the retail read loop isn't blocked by the
                 // RFQ window — they may send more requests in the meantime.
                 let state = Arc::clone(&state);
                 let cfg = Arc::clone(&cfg);
                 let out_tx = out_tx.clone();
                 tokio::spawn(async move {
+                    // Permits free on drop when the task exits — covers
+                    // success, error, and panic paths.
+                    let _session_permit = session_permit;
+                    let _global_permit = global_permit;
                     let now = now_ms();
                     let quotes = rfq::orchestrate(
                         Arc::clone(&state),

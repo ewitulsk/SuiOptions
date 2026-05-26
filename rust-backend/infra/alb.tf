@@ -7,9 +7,76 @@ resource "aws_lb" "alb" {
 
   idle_timeout = 300 # WS connections need >60s; bump well above that.
 
+  # Access logs land in S3; the bucket policy below grants the regional
+  # ELB service account permission to write. Without this, traffic that
+  # induces failures (e.g. the SO-65 RFQ burst) leaves no trace of which
+  # client IP / path produced it.
+  access_logs {
+    bucket  = aws_s3_bucket.alb_logs.bucket
+    prefix  = "alb"
+    enabled = true
+  }
+
   tags = {
     Name = "${var.project}-alb"
   }
+
+  # Force ordering: the bucket policy must exist before the LB tries to
+  # write its first probe log on apply, otherwise terraform errors with
+  # "Access Denied for bucket: ...".
+  depends_on = [aws_s3_bucket_policy.alb_logs]
+}
+
+# ---- Access logs bucket -------------------------------------------------
+
+resource "aws_s3_bucket" "alb_logs" {
+  bucket_prefix = "${var.project}-alb-logs-"
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+
+  rule {
+    id     = "expire-old-logs"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      days = 30
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "alb_logs" {
+  bucket                  = aws_s3_bucket.alb_logs.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# The ELB service in each region writes from a fixed AWS account. We use
+# `aws_elb_service_account` to pick the right one rather than hardcoding.
+data "aws_elb_service_account" "main" {}
+
+data "aws_iam_policy_document" "alb_logs" {
+  statement {
+    sid     = "AllowELBLogWrite"
+    actions = ["s3:PutObject"]
+    resources = [
+      "${aws_s3_bucket.alb_logs.arn}/alb/AWSLogs/${data.aws_caller_identity.current.account_id}/*",
+    ]
+    principals {
+      type        = "AWS"
+      identifiers = [data.aws_elb_service_account.main.arn]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+  policy = data.aws_iam_policy_document.alb_logs.json
 }
 
 # ---- One target group + rule per env ------------------------------------

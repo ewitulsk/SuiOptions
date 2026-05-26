@@ -23,6 +23,16 @@ services:
       RUST_LOG: info,quoting_service=debug
     depends_on: [indexer]
     restart: unless-stopped
+    # If the tokio runtime wedges (see SO-65), the container's TCP listener
+    # stays open but /health stops responding. Surfacing that as
+    # `unhealthy` in `docker ps` is what we need to trip our nginx-proxied
+    # ALB probe and Gatus; docker doesn't auto-restart on unhealthy.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "3", "http://localhost:9002/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     networks: [net]
 
   mm-bot:
