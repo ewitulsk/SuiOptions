@@ -123,10 +123,22 @@ pub fn time_to_expiry_years(expiry_ms: u64, now_ms: u64) -> f64 {
     ms as f64 / 1000.0 / 86_400.0 / 365.0
 }
 
-/// Convert the bucket's `(strike, strike_scale)` pair back to a strike at
-/// scale=0 (settlement raw-units per underlying raw-unit), for plugging
+/// Rebase the bucket's `(strike, strike_scale)` pair onto scale=0
+/// (settlement raw-units per underlying raw-unit) so it can be plugged
 /// into Black-Scholes alongside `spot_scaled`.
-pub fn strike_at_scale_zero(strike: u128, strike_scale: u8) -> f64 {
+///
+/// Why scale=0: `compute_spot` produces `spot_scaled` as an integer at
+/// scale=0, and the BS call price is invariant to multiplying `S` and
+/// `K` by a common factor (`d1` carries `ln(S/K)`, so the ratio is
+/// what matters). Bringing both quantities to a common scale before
+/// the math keeps the per-unit price in settlement-raw-per-underlying-
+/// raw, which is exactly what `premium_for_write(per_unit, write_amount)`
+/// needs.
+///
+/// Precision: the conversion goes through `f64`, which is exact for
+/// integers up to 2^53 ≈ 9e15. Strikes whose raw `u128` magnitude
+/// exceeds that lose precision past the 15th significant digit.
+pub fn rebase_strike_to_scale_zero(strike: u128, strike_scale: u8) -> f64 {
     strike as f64 / 10f64.powi(strike_scale as i32)
 }
 
@@ -147,7 +159,7 @@ pub fn price_rfq(
     now_ms: u64,
 ) -> PriceDecision {
     let t_years = time_to_expiry_years(payload.expiry_ms, now_ms);
-    let strike_scaled = strike_at_scale_zero(payload.strike, payload.strike_scale);
+    let strike_scaled = rebase_strike_to_scale_zero(payload.strike, payload.strike_scale);
     let inputs = CallInputs {
         spot: spot_scaled as f64,
         strike: strike_scaled,
@@ -404,19 +416,32 @@ mod tests {
         close(time_to_expiry_years(thirty_days_ms, 0), 30.0 / 365.0, 1e-12);
     }
 
-    // -- strike_at_scale_zero -------------------------------------------
+    // -- rebase_strike_to_scale_zero ------------------------------------
 
     #[test]
-    fn strike_scale_zero_is_identity() {
-        close(strike_at_scale_zero(60_000, 0), 60_000.0, 1e-12);
+    fn rebase_strike_scale_zero_is_identity() {
+        close(rebase_strike_to_scale_zero(60_000, 0), 60_000.0, 1e-12);
     }
 
     #[test]
-    fn strike_scale_divides() {
+    fn rebase_strike_divides_by_ten_to_the_scale() {
         // strike=60_000_000, scale=3 → 60_000
-        close(strike_at_scale_zero(60_000_000, 3), 60_000.0, 1e-12);
+        close(rebase_strike_to_scale_zero(60_000_000, 3), 60_000.0, 1e-12);
         // scale=9, strike=1 → 1e-9
-        close(strike_at_scale_zero(1, 9), 1e-9, 1e-18);
+        close(rebase_strike_to_scale_zero(1, 9), 1e-9, 1e-18);
+    }
+
+    #[test]
+    fn rebase_strike_high_scale_round_trips_within_f64_precision() {
+        // strike=100 * 10^18, scale=18 → exactly 100.0
+        let s = rebase_strike_to_scale_zero(100_000_000_000_000_000_000u128, 18);
+        close(s, 100.0, 1e-9);
+        // Just past f64's integer-exact range (2^53 ≈ 9.007e15): the
+        // conversion still works, but loses precision in the low digits.
+        // We pin the magnitude is right (not the low bits).
+        let almost_2pow53 = (1u128 << 53) + 1;
+        let s = rebase_strike_to_scale_zero(almost_2pow53, 0);
+        assert!((s - (1u128 << 53) as f64).abs() <= 1.0, "got {s}");
     }
 
     // -- resolve_sigma ---------------------------------------------------
@@ -484,6 +509,40 @@ mod tests {
             }
             other => panic!("expected Quote, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn price_rfq_high_strike_scale_matches_scale_zero_hand_calc() {
+        // Same option expressed two ways:
+        //   (a) strike=100, scale=0 → effective 100.0
+        //   (b) strike=100 * 10^18, scale=18 → effective 100.0
+        // BS is invariant to common scaling of S/K, so the per-unit price
+        // (and therefore the premium for the same write_amount) must match
+        // bit-for-bit at scales the f64 conversion is exact for.
+        let year_ms = 1000 * 86_400 * 365u64;
+        let p_low = rfq(year_ms, 100, 0, 1_000_000);
+        let p_high = rfq(year_ms, 100_000_000_000_000_000_000u128, 18, 1_000_000);
+        let cfg = pricing_cfg();
+
+        let d_low = price_rfq(&cfg, &p_low, 100, 0.20, 0);
+        let d_high = price_rfq(&cfg, &p_high, 100, 0.20, 0);
+
+        let (low, high) = match (&d_low, &d_high) {
+            (
+                PriceDecision::Quote { premium: a, strike_scaled: sa, per_unit: ua, .. },
+                PriceDecision::Quote { premium: b, strike_scaled: sb, per_unit: ub, .. },
+            ) => ((a, sa, ua), (b, sb, ub)),
+            _ => panic!("expected two Quotes, got {d_low:?} / {d_high:?}"),
+        };
+        // Effective strike and per-unit price must be identical.
+        close(*low.1, *high.1, 1e-9);
+        close(*low.2, *high.2, 1e-12);
+        // Premium is floor(per_unit * write), so equal per_unit ⇒ equal premium.
+        assert_eq!(low.0, high.0);
+
+        // Sanity-check the magnitude against a textbook ATM (S=K=100,
+        // T=1y, r=5%, σ=20% → ~10.4506). With write=1M, premium ≈ 10.45M.
+        assert!((10_000_000..=11_000_000).contains(low.0), "premium {} off textbook", low.0);
     }
 
     #[test]
