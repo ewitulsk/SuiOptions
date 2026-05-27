@@ -7,7 +7,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useBuckets } from "../api/useBuckets";
+import { useRfq } from "../api/useRfq";
 import type { Series } from "../api/client";
+import type { RfqQuoteEntry, Side as ProtocolSide } from "../api/quoting";
 import type {
   Bucket,
   ConfirmStage,
@@ -35,21 +37,46 @@ function formatExpiry(iso: string): string {
   return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
-type MmFixture = {
-  name: string;
-  addr: string;
-  fill: number;
-  revertRate: number;
-  latency: number;
-  driftW: number;
-  driftT: number;
-};
+function shortenId(id: string): string {
+  const s = id.startsWith("0x") ? id.slice(2) : id;
+  if (s.length <= 8) return `0x${s}`;
+  return `0x${s.slice(0, 4)}…${s.slice(-4)}`;
+}
 
-const MM_FIXTURE: MmFixture[] = [
-  { name: "argonaut_mm_01", addr: "0x9f3a…42b1", fill: 98.4, revertRate: 0.003, latency: 142, driftW: 0,    driftT: 0    },
-  { name: "phocas_capital", addr: "0x4ca1…07ee", fill: 96.1, revertRate: 0.008, latency: 188, driftW: -0.6, driftT: 0.7  },
-  { name: "tidal_quants",   addr: "0xb2f8…11d0", fill: 99.2, revertRate: 0.001, latency: 96,  driftW: -1.4, driftT: 1.5  },
-];
+/**
+ * Map quoting-service `RfqQuoteEntry`s into the UI's `Quote` shape.
+ *
+ * `mm_reputation` is a 0..1 score from the service; we project to 0..100
+ * for the existing "fill" gauge. `revertRate` and `latency` aren't yet
+ * surfaced by the service — left at 0 so the gauges read as "no data"
+ * rather than misleading values.
+ */
+function rfqEntriesToUi(
+  entries: RfqQuoteEntry[],
+  settlementDecimals: number | null,
+): Quote[] {
+  const now = Date.now();
+  const settlementScale = settlementDecimals !== null ? 10 ** settlementDecimals : 1;
+  return entries.map((e) => {
+    const premium = Number(e.quote.premium) / settlementScale;
+    const validUntil = Number(e.quote.valid_until_ms);
+    const ttl = Number.isFinite(validUntil)
+      ? Math.max(0, Math.round((validUntil - now) / 1000))
+      : 0;
+    const label = shortenId(e.mm_id);
+    return {
+      id: `${e.mm_id}-${e.quote.nonce}`,
+      name: label,
+      addr: label,
+      fill: Math.max(0, Math.min(100, Math.round(e.mm_reputation * 100))),
+      revertRate: 0,
+      latency: 0,
+      premium,
+      ttl,
+      arrivedAt: now,
+    };
+  });
+}
 
 export type ComposerStateOpts = {
   initialView?: View;
@@ -121,7 +148,6 @@ export function useComposerState({
   const [spot, setSpot] = useState(79083.44);
   const [amount, setAmount] = useState(initialAmount);
   const [selectedIdx, setSelectedIdx] = useState(initialIdx);
-  const [quotes, setQuotes] = useState<Quote[]>([]);
   const [confirmStage, setConfirmStage] = useState<ConfirmStage>(null);
   const [confirmSummary, setConfirmSummary] = useState<ConfirmSummary | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -251,37 +277,39 @@ export function useComposerState({
   const bucketsLoading = bucketsQuery.isLoading;
   const bucketsEmpty = !bucketsLoading && strikes.length === 0;
 
-  // Stream MM quotes whenever selection / amount / view changes
-  useEffect(() => {
-    if (!selected) return;
-    setQuotes([]);
-    const timers = MM_FIXTURE.map((n, i) =>
-      setTimeout(() => {
-        setQuotes((qs) => {
-          const drift = view === "writer" ? n.driftW : n.driftT;
-          const next: Quote[] = [
-            ...qs,
-            {
-              id: `${selected.strike}-${n.addr}`,
-              name: n.name,
-              addr: n.addr,
-              fill: n.fill,
-              revertRate: n.revertRate,
-              latency: n.latency,
-              premium: +(selected.premium + drift).toFixed(2),
-              ttl: 30 - i * 3,
-              arrivedAt: Date.now(),
-            },
-          ];
-          next.sort((a, b) =>
-            view === "writer" ? b.premium - a.premium : a.premium - b.premium,
-          );
-          return next;
-        });
-      }, 400 + i * 600),
+  // Real RFQ flow: when the user picks (asset, expiry, strike) and types
+  // an amount, send an RFQRequest to the quoting service over WS. Each
+  // request shows up in the `rfq-monitor` tool. The response — already
+  // sorted best-price-first for `view` — drives the on-screen quote feed.
+  const selectedBucketId: string | null = useMemo(() => {
+    if (!series) return null;
+    return (
+      series.buckets.find((b) => b.strike === selected.strike)?.bucket_id ?? null
     );
-    return () => timers.forEach(clearTimeout);
-  }, [selectedIdx, amount, view, selected]);
+  }, [series, selected.strike]);
+
+  const writeAmountRaw: string | null = useMemo(() => {
+    const dec = series?.asset_decimals;
+    if (dec === null || dec === undefined) return null;
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+    // Convert display-units → raw smallest-units. Safe up to ~2^53 raw
+    // (Number's integer precision ceiling) — well above any realistic
+    // BTC/SUI/USDC amount the UI lets the user type.
+    return Math.round(amount * 10 ** dec).toString();
+  }, [series?.asset_decimals, amount]);
+
+  const rfqSide: ProtocolSide = view; // View ⊂ Side at the value level.
+  const { quotes: rfqEntries } = useRfq({
+    bucketId: selectedBucketId,
+    writeAmountRaw,
+    side: rfqSide,
+    enabled: !bucketsQuery.isLoading,
+  });
+
+  const quotes: Quote[] = useMemo(
+    () => rfqEntriesToUi(rfqEntries, series?.settlement_decimals ?? null),
+    [rfqEntries, series?.settlement_decimals],
+  );
 
   const bestPremium = quotes[0]?.premium ?? (selected?.premium ?? 0);
 

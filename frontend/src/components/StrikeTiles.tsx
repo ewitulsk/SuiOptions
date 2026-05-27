@@ -34,7 +34,12 @@ export function StrikeTiles({ strikes, selectedIdx, onSelect, view }: Props) {
         const tier = tierVarFor(i, strikes.length, view);
         return (
           <button
-            key={s.strike}
+            // Two buckets in a series can scale to the same display
+            // strike (e.g. one at strike_scale=0 and another at
+            // strike_scale=2 whose math collides). They're distinct
+            // bucket_ids so we want both tiles to render; pair the
+            // strike with the index to keep React's reconciler happy.
+            key={`${i}-${s.strike}`}
             className={"tile" + (selectedIdx === i ? " is-selected" : "")}
             style={{ ["--tier-ink" as string]: tier } as React.CSSProperties}
             onClick={() => onSelect(i)}
