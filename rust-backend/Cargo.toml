@@ -19,6 +19,7 @@ members = [
     "tools/writer",
     "tools/rfq-monitor",
     "tools/control-panel",
+    "tools/mm-quote",
     "tests",
 ]
 

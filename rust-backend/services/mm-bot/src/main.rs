@@ -40,7 +40,6 @@ use protocol_types::sides::MmRole;
 use protocol_types::SigningScheme;
 
 use deployments::Deployments;
-use pricing::{call_price_per_unit, premium_for_write, CallInputs};
 use pyth_client::{self as pyth, PriceCache, PriceFeedId, RollingVolBuffer};
 use sui_tx::quote_signer::QuoteSigner;
 use sui_tx::sui_client::{Network, SuiClientWrapper};
@@ -48,6 +47,9 @@ use sui_tx::tx::account::create_and_share_account;
 use sui_tx::tx::test_tokens::mint_and_deposit_into_account;
 use sui_tx::ws_client;
 
+use mm_bot::pricing::{
+    compute_spot_from_cache, price_rfq, resolve_sigma, PriceDecision, PricingConfig, Staleness,
+};
 use mm_bot::Cli;
 
 // -- Config --------------------------------------------------------------
@@ -318,6 +320,14 @@ async fn main() -> Result<()> {
     // Quote loop.
     let token_recipient = resolve_token_recipient(&cfg, &secrets_loaded)?;
     let protocol_id = net.protocol_id_bytes()?;
+    let pricing_cfg = PricingConfig {
+        rate: cfg.rate,
+        quote_ttl_ms: cfg.quote_ttl_ms,
+    };
+    let staleness = Staleness {
+        max_price_age: Duration::from_millis(cfg.pyth.max_price_age_ms),
+        max_publish_lag: Duration::from_millis(cfg.pyth.max_publish_lag_ms),
+    };
     let mut nonce_counter = now_ms();
     loop {
         let frame: ServiceToMm = match ws_client::next_json(&mut ws).await {
@@ -341,24 +351,21 @@ async fn main() -> Result<()> {
                     "received rfq broadcast"
                 );
                 let now = now_ms();
-                // Time to expiry from the bucket's expiry_ms — saturates
-                // at zero so an already-expired bucket prices to intrinsic.
-                let ms_to_expiry = payload.expiry_ms.saturating_sub(now);
-                let t_years = ms_to_expiry as f64 / 1000.0 / 86_400.0 / 365.0;
 
                 // Live spot from Pyth, scaled into the bucket's units
                 // (settlement smallest-units per underlying smallest-unit).
-                let spot_scaled = match compute_spot(
+                let spot_scaled = match compute_spot_from_cache(
                     &price_cache,
                     underlying_feed,
                     settlement_feed,
                     underlying_decimals,
                     settlement_decimals,
-                    &cfg.pyth,
+                    staleness,
                 ) {
                     Ok(s) => s,
-                    Err(reason) => {
-                        tracing::debug!(?request_id, %reason, "declining: stale market data");
+                    Err(e) => {
+                        let reason: &'static str = e.as_str();
+                        tracing::debug!(?request_id, reason, "declining: stale market data");
                         ws_client::send_json(
                             &mut ws,
                             &MmToService::Decline {
@@ -372,80 +379,69 @@ async fn main() -> Result<()> {
                         continue;
                     }
                 };
-                let sigma = vol_buf.read().current_annualized().unwrap_or(cfg.pyth.fallback_vol);
+                let sigma =
+                    resolve_sigma(vol_buf.read().current_annualized(), cfg.pyth.fallback_vol);
 
-                // `spot_scaled` is at strike_scale=0 (raw settlement-per-
-                // underlying chain units). Post-SO-55 the bucket's strike
-                // lives at its own scale (`payload.strike_scale`), so we
-                // divide it back down to scale=0 before plugging both
-                // into Black-Scholes.
-                let strike_scaled =
-                    payload.strike as f64 / 10f64.powi(payload.strike_scale as i32);
-                let inputs = CallInputs {
-                    spot: spot_scaled as f64,
-                    strike: strike_scaled,
-                    t_years,
-                    r: cfg.rate,
-                    sigma,
-                };
-                let per_unit = call_price_per_unit(inputs);
-                let premium = premium_for_write(per_unit, payload.write_amount);
-
-                tracing::debug!(
-                    spot = spot_scaled,
-                    sigma,
-                    strike = strike_scaled,
-                    strike_raw = %payload.strike,
-                    strike_scale = payload.strike_scale,
-                    t_years,
-                    per_unit,
-                    write_amount = payload.write_amount,
-                    premium,
-                    "priced"
-                );
-
-                if premium == 0 {
-                    tracing::debug!(?request_id, "priced to zero; declining");
-                    ws_client::send_json(
-                        &mut ws,
-                        &MmToService::Decline {
-                            request_id,
-                            payload: protocol_types::messages::DeclinePayload {
-                                reason: "priced to zero".into(),
+                match price_rfq(&pricing_cfg, &payload, spot_scaled, sigma, now) {
+                    PriceDecision::Quote {
+                        premium,
+                        valid_until_ms,
+                        spot_scaled,
+                        strike_scaled,
+                        t_years,
+                        sigma,
+                        per_unit,
+                    } => {
+                        tracing::debug!(
+                            spot = spot_scaled,
+                            sigma,
+                            strike = strike_scaled,
+                            strike_raw = %payload.strike,
+                            strike_scale = payload.strike_scale,
+                            t_years,
+                            per_unit,
+                            write_amount = payload.write_amount,
+                            premium,
+                            "priced"
+                        );
+                        nonce_counter = nonce_counter.wrapping_add(1);
+                        let quote = Quote {
+                            protocol_id: protocol_id.clone(),
+                            signer_account_id: account_id_pt,
+                            signer_token_recipient: token_recipient,
+                            bucket_id: payload.bucket_id,
+                            write_amount: payload.write_amount,
+                            premium,
+                            valid_until_ms,
+                            nonce: nonce_counter,
+                        };
+                        let bytes = quote.to_bcs_bytes()?;
+                        let sig = signer.sign(&bytes)?;
+                        ws_client::send_json(
+                            &mut ws,
+                            &MmToService::Quote {
+                                request_id,
+                                payload: MmQuotePayload {
+                                    quote,
+                                    signature: sig,
+                                },
                             },
-                        },
-                    )
-                    .await?;
-                    continue;
+                        )
+                        .await?;
+                        tracing::info!(premium, nonce = nonce_counter, "quote sent");
+                    }
+                    PriceDecision::Decline { reason } => {
+                        tracing::debug!(?request_id, %reason, "declining");
+                        ws_client::send_json(
+                            &mut ws,
+                            &MmToService::Decline {
+                                request_id,
+                                payload: protocol_types::messages::DeclinePayload { reason },
+                            },
+                        )
+                        .await?;
+                    }
                 }
-
-                let valid_until_ms = now + cfg.quote_ttl_ms;
-                nonce_counter = nonce_counter.wrapping_add(1);
-                let quote = Quote {
-                    protocol_id: protocol_id.clone(),
-                    signer_account_id: account_id_pt,
-                    signer_token_recipient: token_recipient,
-                    bucket_id: payload.bucket_id,
-                    write_amount: payload.write_amount,
-                    premium,
-                    valid_until_ms,
-                    nonce: nonce_counter,
-                };
-                let bytes = quote.to_bcs_bytes()?;
-                let sig = signer.sign(&bytes)?;
-
-                ws_client::send_json(
-                    &mut ws,
-                    &MmToService::Quote {
-                        request_id,
-                        payload: MmQuotePayload {
-                            quote,
-                            signature: sig,
-                        },
-                    },
-                )
-                .await?;
-                tracing::info!(premium, nonce = nonce_counter, "quote sent");
             }
             ServiceToMm::Ping => {
                 ws_client::send_json(&mut ws, &MmToService::Pong).await?;
@@ -611,41 +607,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-/// Live cross spot, scaled into the bucket's on-chain units:
-/// settlement smallest-units per underlying smallest-unit.
-///
-/// Formula: `(p_underlying_usd / p_settlement_usd) * 10^(settle_dec - under_dec)`.
-/// Errors out with the staleness reason so the caller can decline cleanly.
-fn compute_spot(
-    cache: &PriceCache,
-    underlying_feed: PriceFeedId,
-    settlement_feed: PriceFeedId,
-    underlying_decimals: u8,
-    settlement_decimals: u8,
-    cfg: &PythConfig,
-) -> Result<u64, &'static str> {
-    let local = Duration::from_millis(cfg.max_price_age_ms);
-    let publish = Duration::from_millis(cfg.max_publish_lag_ms);
-    let u = cache
-        .get_fresh(underlying_feed, local, publish)
-        .ok_or("underlying price stale or unseen")?;
-    let s = cache
-        .get_fresh(settlement_feed, local, publish)
-        .ok_or("settlement price stale or unseen")?;
-    if !(u.price.is_finite() && u.price > 0.0 && s.price.is_finite() && s.price > 0.0) {
-        return Err("non-positive or non-finite price");
-    }
-    let cross = u.price / s.price;
-    let scale = 10f64.powi(settlement_decimals as i32 - underlying_decimals as i32);
-    let scaled = cross * scale;
-    if !scaled.is_finite() || scaled < 0.0 || scaled > u64::MAX as f64 {
-        return Err("scaled spot out of range");
-    }
-    let spot = scaled.round() as u64;
-    tracing::trace!(underlying_usd = u.price, settlement_usd = s.price, cross, spot, "computed spot");
-    Ok(spot)
 }
 
 /// Block until both feeds have at least one cached observation (ignoring

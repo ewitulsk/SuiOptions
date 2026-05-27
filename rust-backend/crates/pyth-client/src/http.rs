@@ -43,6 +43,9 @@ pub async fn latest(
 /// One historical observation at-or-before `unix_seconds` for a single
 /// feed. The Benchmarks API supports multi-id queries the same way Hermes
 /// does, but the mm-bot only needs one feed per call for vol sampling.
+///
+/// Note: the Benchmarks v1 endpoint uses the bare `ids` query parameter
+/// (Hermes v2 uses `ids[]`).
 pub async fn benchmark_at(
     client: &Client,
     benchmarks_url: &str,
@@ -54,7 +57,7 @@ pub async fn benchmark_at(
         benchmarks_url.trim_end_matches('/'),
         unix_seconds
     );
-    let query = [("ids[]", id.to_hex())];
+    let query = [("ids", id.to_hex())];
     let env: HermesEnvelope = get_with_backoff(client, &url, &query).await?;
     env.parsed
         .into_iter()
