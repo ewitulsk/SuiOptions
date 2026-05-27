@@ -22,7 +22,12 @@ recent_log_capacity     = 1024
 # Checkpoint to start ingesting from. Leave commented out to tail from the
 # current tip (the indexer asks `sui_getLatestCheckpointSequenceNumber` at
 # boot). Set to a specific number to backfill from there — `0` is genesis.
-start_checkpoint = 339373884
+# Sits just before the SO-55 contract republish so a freshly-wiped local
+# DB picks up the new package's BucketCreated / AccountCreated events
+# from inception. Pre-republish events use a Move struct without
+# strike_scale and would fail to parse against current protocol-types.
+# Only consulted when `indexer_progress` is empty (i.e. on a fresh DB).
+start_checkpoint = 340804360
 
 # Optional JSON-RPC override for the latest-checkpoint lookup. Defaults to
 # Sui's public fullnode for `network` (mainnet/testnet/devnet). Only used
