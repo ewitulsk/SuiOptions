@@ -1,11 +1,14 @@
 //! Library surface for the `mm-bot` binary.
 //!
-//! Hosts the clap [`Cli`] type and the [`program_spec`] entry point. The
-//! actual bot loop lives in `main.rs`.
+//! Hosts the clap [`Cli`] type, the [`program_spec`] entry point, and the
+//! [`pricing`] module that captures the pure parts of the market-making
+//! process. The async bot loop lives in `main.rs`.
 
 use std::path::PathBuf;
 
 use clap::Parser;
+
+pub mod pricing;
 
 #[derive(Parser, Debug)]
 #[command(name = "mm-bot", about = "Test market-maker bot for the options protocol")]

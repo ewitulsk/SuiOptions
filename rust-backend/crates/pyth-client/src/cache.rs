@@ -70,6 +70,12 @@ impl PriceCache {
         self.inner.get(&id).map(|e| e.clone())
     }
 
+    /// Directly seed/overwrite a feed's cached entry. Used by test harnesses
+    /// and the price-quote simulator that don't run the real SSE task.
+    pub fn insert(&self, id: PriceFeedId, cp: CachedPrice) {
+        self.inner.insert(id, cp);
+    }
+
     /// Spawn the background task that drains `rx` (from
     /// [`super::stream::spawn_subscriber`]) into this cache. Logs
     /// connection state transitions at info level.
