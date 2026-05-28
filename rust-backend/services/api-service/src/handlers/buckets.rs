@@ -89,6 +89,10 @@ pub struct BucketDto {
     /// written yet (avoids a NaN); `null` when underlying decimals are
     /// unknown so the math is unsafe.
     pub fill_pct: Option<f64>,
+    /// Admin-set freeze on new writes. The writer screen filters these
+    /// out entirely; the future positions dashboard will badge owned
+    /// positions in an invalidated bucket. See SO-69.
+    pub invalidated: bool,
 }
 
 #[derive(Serialize)]
@@ -200,6 +204,7 @@ fn dto_from(
         exercise_cursor,
         exercise_cursor_raw: b.exercise_cursor.to_string(),
         fill_pct,
+        invalidated: b.invalidated,
     }
 }
 
@@ -290,6 +295,7 @@ mod tests {
             total_written: written,
             exercise_cursor: cursor,
             cleaned: false,
+            invalidated: false,
         }
     }
 
@@ -402,6 +408,7 @@ mod tests {
             total_written: 0,
             exercise_cursor: 0,
             cleaned: false,
+            invalidated: false,
         };
         let s = group_into_series(vec![(ObjectId::new([0xff; 32]), b)], &cat);
         // 150 * 10^(6-9-0) = 0.15
@@ -467,6 +474,7 @@ mod tests {
             total_written: 0,
             exercise_cursor: 0,
             cleaned: false,
+            invalidated: false,
         };
         let s = group_into_series(vec![(ObjectId::new([0xfe; 32]), b)], &cat);
         // 15_000 * 10^(6 - 6 - 5) = 0.15 USD

@@ -11,4 +11,5 @@ pub struct Bucket {
     pub total_written: u128,
     pub exercise_cursor: u128,
     pub cleaned: bool,
+    pub invalidated: bool,
 }

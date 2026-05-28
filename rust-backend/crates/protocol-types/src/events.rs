@@ -104,6 +104,26 @@ pub struct BucketCleaned {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketInvalidated {
+    pub bucket_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub at_ms: u64,
+    pub admin: SuiAddress,
+    #[serde(with = "crate::coding::bytes_hex")]
+    pub reason: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketRevalidated {
+    pub bucket_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub at_ms: u64,
+    pub admin: SuiAddress,
+    #[serde(with = "crate::coding::bytes_hex")]
+    pub reason: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountCreated {
     pub account_id: ObjectId,
     pub owner: SuiAddress,
@@ -168,6 +188,8 @@ pub enum ChainEvent {
     Redeemed(Redeemed),
     ExpiredOptionBurned(ExpiredOptionBurned),
     BucketCleaned(BucketCleaned),
+    BucketInvalidated(BucketInvalidated),
+    BucketRevalidated(BucketRevalidated),
     AccountCreated(AccountCreated),
     AccountDeposit(AccountDeposit),
     AccountWithdraw(AccountWithdraw),

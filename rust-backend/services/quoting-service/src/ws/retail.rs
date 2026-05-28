@@ -132,6 +132,23 @@ pub async fn handle(
                     write_amount: payload.write_amount,
                     side: payload.side,
                 });
+                // Short-circuit invalidated buckets with an explicit error
+                // so the retail UI can show "this bucket has been disabled"
+                // instead of a generic "no quotes" timeout. See SO-69.
+                if state.buckets.is_invalidated(&payload.bucket_id) {
+                    debug!(request_id = %request_id, %payload.bucket_id, "rfq for invalidated bucket");
+                    let _ = out_tx
+                        .send(ServiceToRetail::Error {
+                            request_id: Some(request_id),
+                            payload: ErrorPayload {
+                                code: "bucket_invalidated".into(),
+                                message: "bucket has been invalidated by the protocol admin"
+                                    .into(),
+                            },
+                        })
+                        .await;
+                    continue;
+                }
                 // Try to claim a per-session and global permit before
                 // spawning. Both use `try_acquire_owned` (non-blocking) so
                 // a saturated quota fails fast with a `rate_limited` error

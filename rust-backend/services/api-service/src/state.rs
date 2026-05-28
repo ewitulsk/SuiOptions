@@ -59,6 +59,7 @@ impl indexer_client::EventSink for AppState {
                         total_written: 0,
                         exercise_cursor: 0,
                         cleaned: false,
+                        invalidated: false,
                     },
                 );
             }
@@ -77,6 +78,16 @@ impl indexer_client::EventSink for AppState {
                     v.cleaned = true;
                 }
             }
+            ChainEvent::BucketInvalidated(i) => {
+                if let Some(v) = self.buckets.write().get_mut(&i.bucket_id) {
+                    v.invalidated = true;
+                }
+            }
+            ChainEvent::BucketRevalidated(r) => {
+                if let Some(v) = self.buckets.write().get_mut(&r.bucket_id) {
+                    v.invalidated = false;
+                }
+            }
             _ => {}
         }
     }
@@ -87,7 +98,10 @@ mod tests {
     use super::*;
     use indexer_client::EventSink;
     use protocol_types::asset::AssetType;
-    use protocol_types::events::{BucketCleaned, BucketCreated};
+    use protocol_types::events::{
+        BucketCleaned, BucketCreated, BucketInvalidated, BucketRevalidated,
+    };
+    use protocol_types::ids::SuiAddress;
 
     fn evt(seq: u64, ev: ChainEvent) -> IndexedEvent {
         IndexedEvent {
@@ -118,5 +132,45 @@ mod tests {
             ChainEvent::BucketCleaned(BucketCleaned { bucket_id: id }),
         ));
         assert_eq!(s.active_buckets().len(), 0);
+    }
+
+    #[test]
+    fn invalidation_toggle_surfaces_on_active_bucket() {
+        let s = AppState::new(TokenCatalog::default());
+        let id = ObjectId::new([0xab; 32]);
+        s.ingest_event(&evt(
+            1,
+            ChainEvent::BucketCreated(BucketCreated {
+                bucket_id: id,
+                asset_type: AssetType::new("BTC"),
+                settlement_type: AssetType::new("USDC"),
+                expiry_ms: 1_700_000_000_000,
+                strike: 60_000_000_000,
+                strike_scale: 0,
+            }),
+        ));
+        assert!(!s.active_buckets()[0].1.invalidated);
+
+        s.ingest_event(&evt(
+            2,
+            ChainEvent::BucketInvalidated(BucketInvalidated {
+                bucket_id: id,
+                at_ms: 10,
+                admin: SuiAddress::new([0xaa; 32]),
+                reason: b"oops".to_vec(),
+            }),
+        ));
+        assert!(s.active_buckets()[0].1.invalidated);
+
+        s.ingest_event(&evt(
+            3,
+            ChainEvent::BucketRevalidated(BucketRevalidated {
+                bucket_id: id,
+                at_ms: 20,
+                admin: SuiAddress::new([0xaa; 32]),
+                reason: b"undo".to_vec(),
+            }),
+        ));
+        assert!(!s.active_buckets()[0].1.invalidated);
     }
 }

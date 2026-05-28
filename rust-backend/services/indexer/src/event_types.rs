@@ -16,9 +16,9 @@
 use anyhow::{Context, Result};
 
 use protocol_types::events::{
-    AccountCreated, AccountDeposit, AccountWithdraw, BucketCleaned, BucketCreated, ChainEvent,
-    Exercised, ExpiredOptionBurned, FeeUpdated, Redeemed, SigningKeyRotated, TreasuryWithdrawn,
-    WriteExecuted,
+    AccountCreated, AccountDeposit, AccountWithdraw, BucketCleaned, BucketCreated,
+    BucketInvalidated, BucketRevalidated, ChainEvent, Exercised, ExpiredOptionBurned, FeeUpdated,
+    Redeemed, SigningKeyRotated, TreasuryWithdrawn, WriteExecuted,
 };
 
 const EVENTS_MODULE: &str = "events";
@@ -33,6 +33,8 @@ pub struct EventTypes {
     pub redeemed: String,
     pub expired_option_burned: String,
     pub bucket_cleaned: String,
+    pub bucket_invalidated: String,
+    pub bucket_revalidated: String,
     pub account_created: String,
     pub account_deposit: String,
     pub account_withdraw: String,
@@ -51,6 +53,8 @@ impl EventTypes {
             redeemed: mk("Redeemed"),
             expired_option_burned: mk("ExpiredOptionBurned"),
             bucket_cleaned: mk("BucketCleaned"),
+            bucket_invalidated: mk("BucketInvalidated"),
+            bucket_revalidated: mk("BucketRevalidated"),
             account_created: mk("AccountCreated"),
             account_deposit: mk("AccountDeposit"),
             account_withdraw: mk("AccountWithdraw"),
@@ -60,7 +64,7 @@ impl EventTypes {
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 12] {
+    pub fn all_strings(&self) -> [&str; 14] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -68,6 +72,8 @@ impl EventTypes {
             &self.redeemed,
             &self.expired_option_burned,
             &self.bucket_cleaned,
+            &self.bucket_invalidated,
+            &self.bucket_revalidated,
             &self.account_created,
             &self.account_deposit,
             &self.account_withdraw,
@@ -104,6 +110,10 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(ExpiredOptionBurned, ExpiredOptionBurned)
     } else if type_str == types.bucket_cleaned {
         decode!(BucketCleaned, BucketCleaned)
+    } else if type_str == types.bucket_invalidated {
+        decode!(BucketInvalidated, BucketInvalidated)
+    } else if type_str == types.bucket_revalidated {
+        decode!(BucketRevalidated, BucketRevalidated)
     } else if type_str == types.account_created {
         decode!(AccountCreated, AccountCreated)
     } else if type_str == types.account_deposit {

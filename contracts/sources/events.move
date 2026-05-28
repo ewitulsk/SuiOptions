@@ -58,6 +58,20 @@ public struct BucketCleaned has copy, drop {
     bucket_id: ID,
 }
 
+public struct BucketInvalidated has copy, drop {
+    bucket_id: ID,
+    at_ms: u64,
+    admin: address,
+    reason: vector<u8>,
+}
+
+public struct BucketRevalidated has copy, drop {
+    bucket_id: ID,
+    at_ms: u64,
+    admin: address,
+    reason: vector<u8>,
+}
+
 public struct AccountCreated has copy, drop {
     account_id: ID,
     owner: address,
@@ -184,6 +198,24 @@ public(package) fun emit_expired_option_burned(
 
 public(package) fun emit_bucket_cleaned(bucket_id: ID) {
     event::emit(BucketCleaned { bucket_id });
+}
+
+public(package) fun emit_bucket_invalidated(
+    bucket_id: ID,
+    at_ms: u64,
+    admin: address,
+    reason: vector<u8>,
+) {
+    event::emit(BucketInvalidated { bucket_id, at_ms, admin, reason });
+}
+
+public(package) fun emit_bucket_revalidated(
+    bucket_id: ID,
+    at_ms: u64,
+    admin: address,
+    reason: vector<u8>,
+) {
+    event::emit(BucketRevalidated { bucket_id, at_ms, admin, reason });
 }
 
 public(package) fun emit_account_created(

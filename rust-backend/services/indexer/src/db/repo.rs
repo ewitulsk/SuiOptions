@@ -195,6 +195,7 @@ impl Repo {
                         buckets::total_written.eq(&bkt.total_written),
                         buckets::exercise_cursor.eq(&bkt.exercise_cursor),
                         buckets::cleaned.eq(bkt.cleaned),
+                        buckets::invalidated.eq(bkt.invalidated),
                         buckets::updated_at_seq.eq(bkt.updated_at_seq),
                     ))
                     .execute(conn)

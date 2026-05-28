@@ -85,6 +85,8 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::Redeemed(_) => "Redeemed",
         ChainEvent::ExpiredOptionBurned(_) => "ExpiredOptionBurned",
         ChainEvent::BucketCleaned(_) => "BucketCleaned",
+        ChainEvent::BucketInvalidated(_) => "BucketInvalidated",
+        ChainEvent::BucketRevalidated(_) => "BucketRevalidated",
         ChainEvent::AccountCreated(_) => "AccountCreated",
         ChainEvent::AccountDeposit(_) => "AccountDeposit",
         ChainEvent::AccountWithdraw(_) => "AccountWithdraw",
@@ -131,6 +133,7 @@ pub struct BucketRow {
     pub total_written: BigDecimal,
     pub exercise_cursor: BigDecimal,
     pub cleaned: bool,
+    pub invalidated: bool,
     pub updated_at_seq: i64,
 }
 
@@ -166,6 +169,7 @@ impl BucketRow {
                 total_written: bigdecimal_to_u128(&self.total_written)?,
                 exercise_cursor: bigdecimal_to_u128(&self.exercise_cursor)?,
                 cleaned: self.cleaned,
+                invalidated: self.invalidated,
             },
         ))
     }
