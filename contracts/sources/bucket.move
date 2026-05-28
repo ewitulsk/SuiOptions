@@ -263,9 +263,11 @@ fun execute_write_with_quote<Underlying, Settlement>(
     bucket.total_written = range_end;
 
     let position = position::mint(bucket_id, range_start, range_end, ctx);
+    let position_id = object::id(&position);
     transfer::public_transfer(position, position_recipient);
 
     let call = call_option::mint(bucket_id, write_amount, ctx);
+    let call_option_id = object::id(&call);
     transfer::public_transfer(call, call_token_recipient);
 
     events::emit_write_executed(
@@ -273,7 +275,9 @@ fun execute_write_with_quote<Underlying, Settlement>(
         quote::signer_account_id(&q),
         signer_recipient,
         ctx.sender(),
+        position_id,
         position_recipient,
+        call_option_id,
         call_token_recipient,
         write_amount,
         gross_premium,
