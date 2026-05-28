@@ -51,6 +51,7 @@ diesel::table! {
         total_written   -> Numeric,
         exercise_cursor -> Numeric,
         cleaned         -> Bool,
+        invalidated     -> Bool,
         updated_at_seq  -> Int8,
     }
 }

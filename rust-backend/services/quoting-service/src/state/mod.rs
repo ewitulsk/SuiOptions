@@ -114,6 +114,7 @@ impl AppState {
                         expiry_ms: b.expiry_ms,
                         total_written: 0,
                         exercise_cursor: 0,
+                        invalidated: false,
                     },
                 );
             }
@@ -136,6 +137,12 @@ impl AppState {
             ChainEvent::Redeemed(_) => {}
             ChainEvent::ExpiredOptionBurned(_) => {}
             ChainEvent::BucketCleaned(_) => {}
+            ChainEvent::BucketInvalidated(i) => {
+                self.buckets.set_invalidated(i.bucket_id, true);
+            }
+            ChainEvent::BucketRevalidated(r) => {
+                self.buckets.set_invalidated(r.bucket_id, false);
+            }
             ChainEvent::AccountCreated(a) => {
                 self.accounts.set_signing_key(
                     a.account_id,

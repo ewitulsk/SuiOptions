@@ -171,7 +171,19 @@ export function useComposerState({
   // indexed by position so they don't blow up when on-chain test strikes
   // happen to be tiny (e.g. $0.13).
   const bucketsQuery = useBuckets();
-  const seriesList: Series[] = useMemo(() => bucketsQuery.data ?? [], [bucketsQuery.data]);
+  // SO-69: the writer screen hides invalidated buckets — admin froze them
+  // and new writes would revert. Series with no remaining buckets after
+  // filtering disappear from the picker too. The trader screen still
+  // shows every bucket; users without an existing position can't enter
+  // anyway, and the quoting-service rejects RFQs against invalidated
+  // buckets with an explicit error.
+  const seriesList: Series[] = useMemo(() => {
+    const raw = bucketsQuery.data ?? [];
+    if (view !== "writer") return raw;
+    return raw
+      .map((s) => ({ ...s, buckets: s.buckets.filter((b) => !b.invalidated) }))
+      .filter((s) => s.buckets.length > 0);
+  }, [bucketsQuery.data, view]);
 
   const assets: AssetOption[] = useMemo(() => {
     const seen = new Map<string, AssetOption>();

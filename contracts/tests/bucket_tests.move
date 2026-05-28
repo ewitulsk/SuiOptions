@@ -1032,3 +1032,202 @@ fun test_cleanup_bucket_with_remaining_balance_aborts() {
     clock.destroy_for_testing();
     ts::end(scenario);
 }
+
+// --- invalidate / revalidate ---
+
+fun invalidate(scenario: &mut Scenario, clock: &sui::clock::Clock, reason: vector<u8>) {
+    ts::next_tx(scenario, th::admin_addr());
+    let cap = th::take_admin_cap(scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC>>(scenario);
+    bucket::invalidate_bucket<BTC, USDC>(&cap, &mut b, reason, clock, scenario.ctx());
+    th::return_admin_cap(scenario, cap);
+    ts::return_shared(b);
+}
+
+fun revalidate(scenario: &mut Scenario, clock: &sui::clock::Clock, reason: vector<u8>) {
+    ts::next_tx(scenario, th::admin_addr());
+    let cap = th::take_admin_cap(scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC>>(scenario);
+    bucket::revalidate_bucket<BTC, USDC>(&cap, &mut b, reason, clock, scenario.ctx());
+    th::return_admin_cap(scenario, cap);
+    ts::return_shared(b);
+}
+
+#[test]
+fun test_bucket_invalidated_defaults_false_then_set_true() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_bucket(&mut scenario);
+
+    ts::next_tx(&mut scenario, th::admin_addr());
+    let b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    assert!(!bucket::invalidated(&b), 0);
+    ts::return_shared(b);
+
+    invalidate(&mut scenario, &clock, b"wrong strike");
+
+    ts::next_tx(&mut scenario, th::admin_addr());
+    let b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    assert!(bucket::invalidated(&b), 0);
+    ts::return_shared(b);
+
+    revalidate(&mut scenario, &clock, b"fixed");
+
+    ts::next_tx(&mut scenario, th::admin_addr());
+    let b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    assert!(!bucket::invalidated(&b), 0);
+    ts::return_shared(b);
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = 26, location = options_protocol::bucket)] // bucket_invalidated
+fun test_execute_write_on_invalidated_bucket_aborts() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_bucket(&mut scenario);
+    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
+    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+
+    invalidate(&mut scenario, &clock, b"bad config");
+
+    write_via_helper(&mut scenario, &clock, 50, 1_000, 1);
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+fun test_revalidate_re_enables_execute_write() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_bucket(&mut scenario);
+    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
+    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+
+    invalidate(&mut scenario, &clock, b"hold");
+    revalidate(&mut scenario, &clock, b"resumed");
+
+    write_via_helper(&mut scenario, &clock, 25, 1_000, 1);
+
+    ts::next_tx(&mut scenario, th::admin_addr());
+    let b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    assert!(bucket::total_written(&b) == 25, 0);
+    ts::return_shared(b);
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+fun test_exercise_still_works_when_invalidated() {
+    // Write first, then invalidate, then exercise — the freeze is on new
+    // writes only; outstanding call holders can still exercise pre-expiry.
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_bucket(&mut scenario);
+    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
+    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    write_via_helper(&mut scenario, &clock, 60, 1_000, 1);
+
+    invalidate(&mut scenario, &clock, b"post-write");
+
+    ts::next_tx(&mut scenario, th::trader_mm_addr());
+    let call = ts::take_from_sender<CallOption>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let payment = coin::mint_for_testing<USDC>((((60 as u128) * STRIKE) as u64), scenario.ctx());
+    let underlying = bucket::exercise<BTC, USDC>(&mut b, call, payment, &clock, scenario.ctx());
+    assert!(underlying.value() == 60, 0);
+    assert!(bucket::exercise_cursor(&b) == 60, 0);
+    coin::burn_for_testing(underlying);
+    ts::return_shared(b);
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+fun test_redeem_still_works_when_invalidated() {
+    // Invalidate pre-expiry, advance past expiry, redeem proceeds normally.
+    let mut scenario = ts::begin(th::admin_addr());
+    let mut clock = th::init_protocol(&mut scenario);
+    setup_bucket(&mut scenario);
+    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
+    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    write_via_helper(&mut scenario, &clock, 40, 1_000, 1);
+
+    invalidate(&mut scenario, &clock, b"recall");
+    clock.set_for_testing(EXPIRY_MS + 1);
+
+    ts::next_tx(&mut scenario, th::writer_addr());
+    let pos = ts::take_from_sender<PositionNFT>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let (u, s) = bucket::redeem_position<BTC, USDC>(&mut b, pos, &clock, scenario.ctx());
+    assert!(u.value() == 40, 0);
+    assert!(s.value() == 0, 0);
+    coin::burn_for_testing(u);
+    coin::burn_for_testing(s);
+    ts::return_shared(b);
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = 26, location = options_protocol::bucket)] // bucket_invalidated
+fun test_double_invalidate_aborts() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_bucket(&mut scenario);
+
+    invalidate(&mut scenario, &clock, b"first");
+    invalidate(&mut scenario, &clock, b"second");
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = 27, location = options_protocol::bucket)] // bucket_not_invalidated
+fun test_revalidate_when_not_invalidated_aborts() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_bucket(&mut scenario);
+
+    revalidate(&mut scenario, &clock, b"nothing to undo");
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = 8, location = options_protocol::bucket)] // bucket_expired
+fun test_invalidate_after_expiry_aborts() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let mut clock = th::init_protocol(&mut scenario);
+    setup_bucket(&mut scenario);
+
+    clock.set_for_testing(EXPIRY_MS);
+
+    invalidate(&mut scenario, &clock, b"too late");
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = 8, location = options_protocol::bucket)] // bucket_expired
+fun test_revalidate_after_expiry_aborts() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let mut clock = th::init_protocol(&mut scenario);
+    setup_bucket(&mut scenario);
+
+    invalidate(&mut scenario, &clock, b"pre-expiry");
+    clock.set_for_testing(EXPIRY_MS);
+    revalidate(&mut scenario, &clock, b"too late");
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}

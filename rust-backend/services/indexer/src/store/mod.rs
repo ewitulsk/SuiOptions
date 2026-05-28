@@ -52,6 +52,7 @@ pub struct BucketState {
     pub total_written: u128,
     pub exercise_cursor: u128,
     pub cleaned: bool,
+    pub invalidated: bool,
 }
 
 /// A live position derived from a `WriteExecuted` event. `Redeemed` removes
@@ -352,6 +353,16 @@ fn stage_event_into_batch(
                 batch.buckets.push(bucket_row(c.bucket_id, state, sequence));
             }
         }
+        ChainEvent::BucketInvalidated(i) => {
+            if let Some(state) = inner.buckets.get(&i.bucket_id) {
+                batch.buckets.push(bucket_row(i.bucket_id, state, sequence));
+            }
+        }
+        ChainEvent::BucketRevalidated(r) => {
+            if let Some(state) = inner.buckets.get(&r.bucket_id) {
+                batch.buckets.push(bucket_row(r.bucket_id, state, sequence));
+            }
+        }
         ChainEvent::AccountCreated(a) => {
             if let Some(state) = inner.accounts.get(&a.account_id) {
                 batch.accounts.push(account_row(a.account_id, state, sequence));
@@ -414,6 +425,7 @@ fn bucket_row(id: ObjectId, state: &BucketState, sequence: i64) -> BucketRow {
         total_written: u128_to_bigdecimal(state.total_written),
         exercise_cursor: u128_to_bigdecimal(state.exercise_cursor),
         cleaned: state.cleaned,
+        invalidated: state.invalidated,
         updated_at_seq: sequence,
     }
 }
@@ -463,6 +475,16 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent) {
                 b.cleaned = true;
             }
         }
+        ChainEvent::BucketInvalidated(i) => {
+            if let Some(b) = inner.buckets.get_mut(&i.bucket_id) {
+                b.invalidated = true;
+            }
+        }
+        ChainEvent::BucketRevalidated(r) => {
+            if let Some(b) = inner.buckets.get_mut(&r.bucket_id) {
+                b.invalidated = false;
+            }
+        }
         ChainEvent::AccountCreated(a) => {
             inner
                 .accounts
@@ -496,6 +518,7 @@ fn apply_bucket_created(inner: &mut Inner, b: &BucketCreated) {
             total_written: 0,
             exercise_cursor: 0,
             cleaned: false,
+            invalidated: false,
         },
     );
 }
@@ -584,7 +607,9 @@ impl AccountDelta for AccountWithdraw {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol_types::events::{AccountCreated, AccountDeposit, BucketCreated};
+    use protocol_types::events::{
+        AccountCreated, AccountDeposit, BucketCreated, BucketInvalidated, BucketRevalidated,
+    };
 
     fn bucket_evt(id: u8) -> ChainEvent {
         ChainEvent::BucketCreated(BucketCreated {
@@ -710,6 +735,36 @@ mod tests {
         let got = rx.recv().await.unwrap();
         assert_eq!(got.sequence, 1);
         matches!(got.event, ChainEvent::BucketCreated(_));
+    }
+
+    #[test]
+    fn bucket_invalidation_flag_toggles_via_events() {
+        let store = Store::default();
+        let id = ObjectId::new([0x42; 32]);
+        store.ingest(bucket_evt(0x42), 1);
+        assert!(!store.bucket(&id).unwrap().invalidated);
+
+        store.ingest(
+            ChainEvent::BucketInvalidated(BucketInvalidated {
+                bucket_id: id,
+                at_ms: 100,
+                admin: SuiAddress::new([0xa1; 32]),
+                reason: b"bad config".to_vec(),
+            }),
+            2,
+        );
+        assert!(store.bucket(&id).unwrap().invalidated);
+
+        store.ingest(
+            ChainEvent::BucketRevalidated(BucketRevalidated {
+                bucket_id: id,
+                at_ms: 200,
+                admin: SuiAddress::new([0xa1; 32]),
+                reason: b"resolved".to_vec(),
+            }),
+            3,
+        );
+        assert!(!store.bucket(&id).unwrap().invalidated);
     }
 
     #[test]

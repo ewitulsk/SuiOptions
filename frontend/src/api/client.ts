@@ -30,6 +30,12 @@ export type Bucket = {
   exercise_cursor_raw: string;
   /** `100 * exercise_cursor / total_written`; `0` when nothing written; `null` if decimals unknown. */
   fill_pct: number | null;
+  /**
+   * Admin freeze on new writes. Both flows of `execute_write` revert
+   * against an invalidated bucket; the writer screen filters these out
+   * entirely. Exercises and redeems are unaffected. See SO-69.
+   */
+  invalidated: boolean;
 };
 
 /**

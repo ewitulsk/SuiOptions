@@ -30,6 +30,10 @@ public struct Bucket<phantom Underlying, phantom Settlement> has key {
     exercise_cursor: u128,
     underlying_balance: Balance<Underlying>,
     settlement_balance: Balance<Settlement>,
+    /// Admin-controlled freeze on new writes. Exercises and redeems are
+    /// unaffected — invalidation only blocks `execute_write`. Toggleable
+    /// pre-expiry via `invalidate_bucket` / `revalidate_bucket`.
+    invalidated: bool,
 }
 
 /// Maximum supported strike_scale. 38 is the largest exponent for which
@@ -102,6 +106,7 @@ public fun new_call_option<Underlying, Settlement>(
             exercise_cursor: 0,
             underlying_balance: balance::zero<Underlying>(),
             settlement_balance: balance::zero<Settlement>(),
+            invalidated: false,
         };
         let bucket_id = object::id(&bucket);
         events::emit_bucket_created(
@@ -198,6 +203,7 @@ fun execute_write_with_quote<Underlying, Settlement>(
     let bucket_id = object::id(bucket);
     assert!(quote::bucket_id(&q) == bucket_id, errors::quote_bucket_mismatch());
     assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
+    assert!(!bucket.invalidated, errors::bucket_invalidated());
 
     let write_amount = quote::write_amount(&q);
     let gross_premium = quote::premium(&q);
@@ -407,6 +413,7 @@ public fun cleanup_bucket<Underlying, Settlement>(
         exercise_cursor: _,
         underlying_balance,
         settlement_balance,
+        invalidated: _,
     } = bucket;
     assert!(underlying_balance.value() == 0, errors::bucket_not_drained());
     assert!(settlement_balance.value() == 0, errors::bucket_not_drained());
@@ -417,7 +424,36 @@ public fun cleanup_bucket<Underlying, Settlement>(
     events::emit_bucket_cleaned(bucket_id);
 }
 
+public fun invalidate_bucket<Underlying, Settlement>(
+    _: &AdminCap,
+    bucket: &mut Bucket<Underlying, Settlement>,
+    reason: vector<u8>,
+    clock: &Clock,
+    ctx: &TxContext,
+) {
+    let now = clock.timestamp_ms();
+    assert!(now < bucket.expiry_ms, errors::bucket_expired());
+    assert!(!bucket.invalidated, errors::bucket_invalidated());
+    bucket.invalidated = true;
+    events::emit_bucket_invalidated(object::id(bucket), now, ctx.sender(), reason);
+}
+
+public fun revalidate_bucket<Underlying, Settlement>(
+    _: &AdminCap,
+    bucket: &mut Bucket<Underlying, Settlement>,
+    reason: vector<u8>,
+    clock: &Clock,
+    ctx: &TxContext,
+) {
+    let now = clock.timestamp_ms();
+    assert!(now < bucket.expiry_ms, errors::bucket_expired());
+    assert!(bucket.invalidated, errors::bucket_not_invalidated());
+    bucket.invalidated = false;
+    events::emit_bucket_revalidated(object::id(bucket), now, ctx.sender(), reason);
+}
+
 public fun expiry_ms<U, S>(bucket: &Bucket<U, S>): u64 { bucket.expiry_ms }
+public fun invalidated<U, S>(bucket: &Bucket<U, S>): bool { bucket.invalidated }
 public fun strike<U, S>(bucket: &Bucket<U, S>): u128 { bucket.strike }
 public fun strike_scale<U, S>(bucket: &Bucket<U, S>): u8 { bucket.strike_scale }
 public fun total_written<U, S>(bucket: &Bucket<U, S>): u128 { bucket.total_written }

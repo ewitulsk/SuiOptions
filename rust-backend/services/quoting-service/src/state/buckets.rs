@@ -18,6 +18,10 @@ pub struct BucketView {
     pub expiry_ms: u64,
     pub total_written: u128,
     pub exercise_cursor: u128,
+    /// Admin freeze on new writes. Reflected here so we can pre-empt
+    /// RFQs and quote validation on invalidated buckets without round-
+    /// tripping to the chain. Toggled by Bucket{In,Re}validated events.
+    pub invalidated: bool,
 }
 
 #[derive(Default)]
@@ -58,6 +62,25 @@ impl BucketStore {
         }
     }
 
+    pub fn set_invalidated(&self, id: ObjectId, invalidated: bool) {
+        let mut g = self.by_id.write();
+        if let Some(v) = g.get_mut(&id) {
+            trace!(%id, invalidated, "updating bucket invalidated flag");
+            v.invalidated = invalidated;
+        }
+    }
+
+    /// True iff we know about this bucket and its `invalidated` flag is set.
+    /// Returns false for unknown buckets — callers should treat
+    /// `unknown bucket` separately from `invalidated`.
+    pub fn is_invalidated(&self, id: &ObjectId) -> bool {
+        self.by_id
+            .read()
+            .get(id)
+            .map(|v| v.invalidated)
+            .unwrap_or(false)
+    }
+
     pub fn get(&self, id: &ObjectId) -> Option<BucketView> {
         self.by_id.read().get(id).cloned()
     }
@@ -89,6 +112,7 @@ mod tests {
                 expiry_ms: 100,
                 total_written: 0,
                 exercise_cursor: 0,
+                invalidated: false,
             },
         );
         let v = s.get(&id).unwrap();
@@ -98,5 +122,35 @@ mod tests {
         let v = s.get(&id).unwrap();
         assert_eq!(v.total_written, 10_000);
         assert_eq!(v.exercise_cursor, 2_500);
+    }
+
+    #[test]
+    fn invalidated_flag_toggles() {
+        let s = BucketStore::new();
+        let id = ObjectId::new([0x02; 32]);
+        s.upsert(
+            id,
+            BucketView {
+                asset_type: AssetType::new("BTC"),
+                settlement_type: AssetType::new("USDC"),
+                strike: 1,
+                strike_scale: 0,
+                expiry_ms: 1,
+                total_written: 0,
+                exercise_cursor: 0,
+                invalidated: false,
+            },
+        );
+        assert!(!s.is_invalidated(&id));
+        s.set_invalidated(id, true);
+        assert!(s.is_invalidated(&id));
+        s.set_invalidated(id, false);
+        assert!(!s.is_invalidated(&id));
+    }
+
+    #[test]
+    fn is_invalidated_returns_false_for_unknown_bucket() {
+        let s = BucketStore::new();
+        assert!(!s.is_invalidated(&ObjectId::new([0x99; 32])));
     }
 }

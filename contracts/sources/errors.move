@@ -25,3 +25,5 @@ public fun count_must_be_positive(): u64 { 22 }
 public fun invalid_signing_scheme(): u64 { 23 }
 public fun invalid_pubkey_length(): u64 { 24 }
 public fun strike_scale_too_large(): u64 { 25 }
+public fun bucket_invalidated(): u64 { 26 }
+public fun bucket_not_invalidated(): u64 { 27 }

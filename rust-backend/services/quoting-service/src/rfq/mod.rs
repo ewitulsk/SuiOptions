@@ -46,6 +46,10 @@ pub enum QuoteRejection {
     UnknownSigner,
     UnknownBucket,
     InvalidPubkey,
+    /// Admin has invalidated the bucket; a quote against it would revert
+    /// on chain. Defense-in-depth against a race between the MM signing
+    /// and the BucketInvalidated event landing.
+    BucketInvalidated,
 }
 
 impl From<ProtocolError> for QuoteRejection {
@@ -126,6 +130,9 @@ pub fn validate_and_reserve(
         .buckets
         .get(&bucket_id)
         .ok_or(QuoteRejection::UnknownBucket)?;
+    if bucket.invalidated {
+        return Err(QuoteRejection::BucketInvalidated);
+    }
     let (asset, amount) = reservation_for(side, &bucket, quote);
     if state.available(mm_account_id, &asset) < amount {
         return Err(QuoteRejection::InsufficientAvailableBalance);
@@ -215,6 +222,12 @@ pub async fn orchestrate(
             return Vec::new();
         }
     };
+    if bucket.invalidated {
+        // Retail handler should have already short-circuited with an
+        // explicit error; this is defense-in-depth against direct callers.
+        debug!(%bucket_id, "rfq for invalidated bucket — returning empty");
+        return Vec::new();
+    }
 
     let mm_role = side.counterparty_mm();
     let mms = state.mms.all_for_role(mm_role);
@@ -453,6 +466,33 @@ mod tests {
             validate_and_reserve(&state, Side::Writer, bucket, 100, &p, mm, b"P", 0).unwrap_err(),
             QuoteRejection::BucketMismatch,
         );
+    }
+
+    #[test]
+    fn rejects_quote_against_invalidated_bucket() {
+        // Defense-in-depth: even if retail.rs lets an RFQ through (race
+        // with the BucketInvalidated event), the per-quote check must
+        // refuse to reserve. See SO-69.
+        let sk = SigningKey::generate(&mut OsRng);
+        let mm = ObjectId::new([0x01; 32]);
+        let state = make_state(mm, sk.verifying_key().to_bytes().to_vec(), 10_000);
+        let bucket = ObjectId::new([0x99; 32]);
+        state.ingest_event(&IndexedEvent {
+            sequence: 3,
+            timestamp_ms: 0,
+            event: ChainEvent::BucketInvalidated(protocol_types::events::BucketInvalidated {
+                bucket_id: bucket,
+                at_ms: 1,
+                admin: SuiAddress::ZERO,
+                reason: b"misconfig".to_vec(),
+            }),
+        });
+        let p = signed_quote(&sk, b"P".to_vec(), mm, bucket, 100, 500, 1);
+        assert_eq!(
+            validate_and_reserve(&state, Side::Writer, bucket, 100, &p, mm, b"P", 0).unwrap_err(),
+            QuoteRejection::BucketInvalidated,
+        );
+        assert_eq!(state.reservations.len(), 0);
     }
 
     #[test]
