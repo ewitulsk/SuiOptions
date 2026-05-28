@@ -87,10 +87,10 @@ struct Inner {
     accounts: BTreeMap<ObjectId, AccountState>,
     buckets: BTreeMap<ObjectId, BucketState>,
     // Positions are keyed off the WriteExecuted's range_start since the
-    // position object id isn't in the event payload (PositionNFTs are minted
-    // and transferred to `position_nft_recipient` — we treat the range
+    // position object id isn't in the event payload (Position objects are
+    // minted and transferred to `position_recipient` — we treat the range
     // identity as the off-chain handle until the indexer can resolve real
-    // NFT ids).
+    // object ids).
     positions: BTreeMap<(ObjectId, u128), PositionState>,
 }
 
@@ -519,12 +519,12 @@ fn apply_write_executed(inner: &mut Inner, w: &WriteExecuted) {
     // about deposits/withdraws to be authoritative for balances — this
     // event only mutates the cursor.
     //
-    // Positions: the position NFT goes to `position_nft_recipient`.
+    // Positions: the Position object goes to `position_recipient`.
     inner.positions.insert(
         (w.bucket_id, w.range_start),
         PositionState {
             bucket_id: w.bucket_id,
-            recipient: w.position_nft_recipient,
+            recipient: w.position_recipient,
             range_start: w.range_start,
             range_end: w.range_end,
         },
@@ -634,7 +634,7 @@ mod tests {
                 signer_account_id: ObjectId::ZERO,
                 signer_token_recipient: SuiAddress::ZERO,
                 executor: SuiAddress::ZERO,
-                position_nft_recipient: SuiAddress::new([0x77; 32]),
+                position_recipient: SuiAddress::new([0x77; 32]),
                 call_token_recipient: SuiAddress::ZERO,
                 write_amount: 10,
                 gross_premium: 5,

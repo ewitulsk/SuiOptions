@@ -128,7 +128,7 @@ Goal: every CTA in the UI submits a real Sui transaction and reflects the result
 
 ### Close early
 
-- [ ] **F2.15** "Close early" CTA in `PositionCards.tsx:WrittenCard` currently routes to a mock buyback. Real flow: separate RFQ side (buyback ask from MMs) → wallet signs a transfer of the PositionNFT to the MM's address. Coordinate with quoting-service (DEP-B3).
+- [ ] **F2.15** "Close early" CTA in `PositionCards.tsx:WrittenCard` currently routes to a mock buyback. Real flow: separate RFQ side (buyback ask from MMs) → wallet signs a transfer of the `Position` object to the MM's address. Coordinate with quoting-service (DEP-B3).
 
 **Phase 2 exit criteria**: all CTAs land real transactions on testnet, with correct optimistic + indexer-reconciled state.
 

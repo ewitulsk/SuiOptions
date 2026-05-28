@@ -69,7 +69,7 @@ pub struct ExecuteWriteParams<'a> {
     pub nonce: u64,
     pub signature: Vec<u8>,
 
-    pub position_nft_recipient: SuiAddress,
+    pub position_recipient: SuiAddress,
     pub call_token_recipient: SuiAddress,
 
     pub gas_budget: u64,
@@ -113,7 +113,7 @@ pub async fn execute_writer_flow(
     let arg_valid_until_ms = pt.pure(&p.valid_until_ms)?;
     let arg_nonce = pt.pure(&p.nonce)?;
     let arg_signature = pt.pure(&p.signature)?;
-    let arg_position_recipient = pt.pure(&p.position_nft_recipient)?;
+    let arg_position_recipient = pt.pure(&p.position_recipient)?;
     let arg_call_token_recipient = pt.pure(&p.call_token_recipient)?;
     let arg_mint_amount = pt.pure(&p.write_amount)?;
 

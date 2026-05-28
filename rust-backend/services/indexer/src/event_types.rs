@@ -168,7 +168,7 @@ mod tests {
             signer_account_id: ObjectId::new([0x22; 32]),
             signer_token_recipient: SuiAddress::new([0x33; 32]),
             executor: SuiAddress::new([0x44; 32]),
-            position_nft_recipient: SuiAddress::new([0x55; 32]),
+            position_recipient: SuiAddress::new([0x55; 32]),
             call_token_recipient: SuiAddress::new([0x66; 32]),
             write_amount: 10_000,
             gross_premium: 500,

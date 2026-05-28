@@ -8,7 +8,7 @@ use options_protocol::account;
 use options_protocol::admin;
 use options_protocol::bucket::{Self, Bucket};
 use options_protocol::call_option::{Self, CallOption};
-use options_protocol::position::{Self, PositionNFT};
+use options_protocol::position::{Self, Position};
 use options_protocol::quote;
 use options_protocol::test_helpers::{Self as th, BTC, USDC};
 
@@ -266,7 +266,7 @@ fun test_writer_flow_happy_path() {
     let net = ts::take_from_sender<Coin<USDC>>(&scenario);
     assert!(net.value() == premium, 0);
     coin::burn_for_testing(net);
-    let pos = ts::take_from_sender<PositionNFT>(&scenario);
+    let pos = ts::take_from_sender<Position>(&scenario);
     assert!(position::range_start(&pos) == 0, 0);
     assert!(position::range_end(&pos) == (write_amount as u128), 0);
     assert!(position::bucket_id(&pos) == bucket_id, 0);
@@ -424,7 +424,7 @@ fun test_trader_flow_happy_path() {
 
     // Writer MM gets the position NFT.
     ts::next_tx(&mut scenario, th::writer_mm_addr());
-    let pos = ts::take_from_sender<PositionNFT>(&scenario);
+    let pos = ts::take_from_sender<Position>(&scenario);
     assert!(position::range_start(&pos) == 0, 0);
     assert!(position::range_end(&pos) == (write_amount as u128), 0);
     ts::return_to_sender(&scenario, pos);
@@ -813,7 +813,7 @@ fun test_redeem_before_expiry_aborts() {
     write_via_helper(&mut scenario, &clock, 50, 1_000, 1);
 
     ts::next_tx(&mut scenario, th::writer_addr());
-    let pos = ts::take_from_sender<PositionNFT>(&scenario);
+    let pos = ts::take_from_sender<Position>(&scenario);
     let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
     let (u, s) = bucket::redeem_position<BTC, USDC>(&mut b, pos, &clock, scenario.ctx());
     coin::burn_for_testing(u);
@@ -837,7 +837,7 @@ fun test_redeem_fully_unexercised_returns_all_underlying() {
     clock.set_for_testing(EXPIRY_MS + 1);
 
     ts::next_tx(&mut scenario, th::writer_addr());
-    let pos = ts::take_from_sender<PositionNFT>(&scenario);
+    let pos = ts::take_from_sender<Position>(&scenario);
     let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
     let (u, s) = bucket::redeem_position<BTC, USDC>(&mut b, pos, &clock, scenario.ctx());
     assert!(u.value() == 80, 0);
@@ -871,7 +871,7 @@ fun test_redeem_fully_exercised_returns_all_settlement() {
     clock.set_for_testing(EXPIRY_MS + 1);
 
     ts::next_tx(&mut scenario, th::writer_addr());
-    let pos = ts::take_from_sender<PositionNFT>(&scenario);
+    let pos = ts::take_from_sender<Position>(&scenario);
     let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
     let (u, s) = bucket::redeem_position<BTC, USDC>(&mut b, pos, &clock, scenario.ctx());
     assert!(u.value() == 0, 0);
@@ -900,7 +900,7 @@ fun test_fifo_assignment_two_writers_partial_exercise() {
     // Both writes deliver to writer_addr() in the helper; we'll track the position by range_end.
     write_via_helper(&mut scenario, &clock, 50, 1_000, 2);
 
-    // Now writer holds two PositionNFTs. Exercise 120 via call options held by trader MM.
+    // Now writer holds two Positions. Exercise 120 via call options held by trader MM.
     ts::next_tx(&mut scenario, th::trader_mm_addr());
     let mut call_a = ts::take_from_sender<CallOption>(&scenario);
     // Trader MM should have received two call options; combine them.
@@ -923,8 +923,8 @@ fun test_fifo_assignment_two_writers_partial_exercise() {
     clock.set_for_testing(EXPIRY_MS + 1);
 
     ts::next_tx(&mut scenario, th::writer_addr());
-    let pos_a = ts::take_from_sender<PositionNFT>(&scenario);
-    let pos_b = ts::take_from_sender<PositionNFT>(&scenario);
+    let pos_a = ts::take_from_sender<Position>(&scenario);
+    let pos_b = ts::take_from_sender<Position>(&scenario);
 
     // Identify each by range_end.
     let (early, late) = if (position::range_end(&pos_a) == 100) { (pos_a, pos_b) } else { (pos_b, pos_a) };
