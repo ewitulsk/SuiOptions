@@ -35,6 +35,11 @@ on:
         required: false
         type: boolean
         default: true
+      rebuild_manager:
+        description: 'Force-rebuild the deployment-manager binary (ignore the cached one)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write    # push updated deployments.json + config
@@ -74,22 +79,38 @@ jobs:
           role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ── 3. Rust toolchain + cargo cache ──────────────────────────
+      # ── 3. Rust toolchain ────────────────────────────────────────
       - uses: dtolnay/rust-toolchain@stable
 
+      # ── 4. Restore the prebuilt deployment-manager binary ────────
+      # Keyed on the binary's dependency closure (its own crate, the
+      # workspace crates it links, and Cargo.lock for the external Sui
+      # pin). A hit skips the slow Sui-SDK build entirely; a miss
+      # rebuilds and saves the binary for next time. The Move package
+      # under contracts/ is compiled at *runtime* by the binary, so it
+      # is deliberately NOT part of the key.
+      - name: Restore cached deployment-manager binary
+        id: dm-cache
+        uses: actions/cache@v4
+        with:
+          path: rust-backend/target/release/deploy
+          key: deployment-manager-bin-${{ runner.os }}-${{ hashFiles('rust-backend/Cargo.lock', 'rust-backend/Cargo.toml', 'rust-backend/crates/**', 'rust-backend/tools/deployment-manager/**') }}
+
+      # ── 5. Build deployment manager (only on cache miss / forced) ─
       - uses: Swatinem/rust-cache@v2
+        if: steps.dm-cache.outputs.cache-hit != 'true' || inputs.rebuild_manager
         with:
           workspaces: rust-backend
 
-      # ── 4. System deps for Sui SDK build ─────────────────────────
       - name: Install build dependencies
+        if: steps.dm-cache.outputs.cache-hit != 'true' || inputs.rebuild_manager
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libssl-dev clang cmake protobuf-compiler
 
-      # ── 5. Build deployment manager ──────────────────────────────
       - name: Build deployment manager
+        if: steps.dm-cache.outputs.cache-hit != 'true' || inputs.rebuild_manager
         working-directory: rust-backend
         run: cargo build --release -p deployment-manager
 
@@ -129,7 +150,7 @@ jobs:
           if [ "${{ inputs.deploy_tokens }}" = "true" ]; then
             ARGS+=(--deploy-tokens)
           fi
-          ./target/release/deployment-manager "${ARGS[@]}"
+          ./target/release/deploy "${ARGS[@]}"
 
       # ── 8. Resolve the deployment checkpoint from the tx digest ──
       - name: Get deployment checkpoint
