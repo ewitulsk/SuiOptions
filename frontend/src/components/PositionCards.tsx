@@ -152,11 +152,9 @@ export function OwnedCard({
 export function WrittenCard({
   p,
   onClaim,
-  onCloseEarly,
 }: {
   p: WrittenPosition;
   onClaim: (p: WrittenPosition) => void;
-  onCloseEarly: (p: WrittenPosition) => void;
 }) {
   const exercisedPct = p.exercisedPct;
   return (
@@ -250,11 +248,8 @@ export function WrittenCard({
         )}
         {(p.status === "active" || p.status === "partially_exercised") && (
           <>
-            <button
-              className="pos-card__cta pos-card__cta--ghost"
-              onClick={() => onCloseEarly(p)}
-            >
-              Close early · MM buyback
+            <button className="pos-card__cta pos-card__cta--ghost" disabled>
+              Active · sit until expiry
             </button>
             <span className="pos-card__foot-note">
               expires in {p.dte}d — claim eligible at expiry

@@ -61,6 +61,7 @@ diesel::table! {
         bucket_id      -> Text,
         range_start    -> Numeric,
         range_end      -> Numeric,
+        object_id      -> Text,
         recipient      -> Text,
         updated_at_seq -> Int8,
     }

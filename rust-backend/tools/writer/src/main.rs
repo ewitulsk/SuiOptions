@@ -155,7 +155,7 @@ async fn main() -> Result<()> {
         valid_until_ms: best.quote.valid_until_ms,
         nonce: best.quote.nonce,
         signature: best.signature.clone(),
-        position_nft_recipient: writer_addr,
+        position_recipient: writer_addr,
         // Writer flow requires signer_token_recipient == call_token_recipient.
         call_token_recipient: signer_token_recipient,
         gas_budget: cli.gas_budget,

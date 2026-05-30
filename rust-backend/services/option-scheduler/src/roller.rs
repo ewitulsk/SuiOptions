@@ -245,11 +245,11 @@ mod tests {
 
     #[test]
     fn ignores_other_modules_and_types() {
-        // Same module, wrong type name (PositionNFT, CallOptionToken) and
+        // Same module, wrong type name (Position, CallOptionToken) and
         // wrong module entirely (account::Account, sui::SUI) all get
         // dropped.
         let changes = vec![
-            created(ObjectID::random(), "bucket", "PositionNFT"),
+            created(ObjectID::random(), "bucket", "Position"),
             created(ObjectID::random(), "account", "Account"),
             created(ObjectID::random(), "sui", "SUI"),
             created(ObjectID::random(), "BUCKET", "Bucket"), // case-sensitive
@@ -265,7 +265,7 @@ mod tests {
         let changes = vec![
             created(ObjectID::random(), "coin", "TreasuryCap"),
             created(bucket_id, "bucket", "Bucket"),
-            created(ObjectID::random(), "bucket", "PositionNFT"),
+            created(ObjectID::random(), "bucket", "Position"),
             mutated(ObjectID::random(), "bucket", "Bucket"),
         ];
         assert_eq!(extract_bucket_ids(&changes), vec![bucket_id]);

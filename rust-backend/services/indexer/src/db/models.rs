@@ -146,6 +146,7 @@ pub struct PositionRow {
     pub bucket_id: String,
     pub range_start: BigDecimal,
     pub range_end: BigDecimal,
+    pub object_id: String,
     pub recipient: String,
     pub updated_at_seq: i64,
 }
@@ -179,6 +180,8 @@ impl PositionRow {
     pub fn into_state(self) -> anyhow::Result<((ObjectId, u128), PositionState)> {
         let bucket = ObjectId::from_hex(&self.bucket_id)
             .map_err(|e| anyhow::anyhow!("bucket_id {}: {e}", self.bucket_id))?;
+        let object_id = ObjectId::from_hex(&self.object_id)
+            .map_err(|e| anyhow::anyhow!("object_id {}: {e}", self.object_id))?;
         let recipient = SuiAddress::from_hex(&self.recipient)
             .map_err(|e| anyhow::anyhow!("recipient {}: {e}", self.recipient))?;
         let start = bigdecimal_to_u128(&self.range_start)?;
@@ -187,6 +190,7 @@ impl PositionRow {
             (bucket, start),
             PositionState {
                 bucket_id: bucket,
+                object_id,
                 recipient,
                 range_start: start,
                 range_end: end,

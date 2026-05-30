@@ -10,7 +10,7 @@ use options_protocol::admin::{Self, AdminCap, ProtocolConfig};
 use options_protocol::call_option::{Self, CallOption};
 use options_protocol::errors;
 use options_protocol::events;
-use options_protocol::position::{Self, PositionNFT};
+use options_protocol::position::{Self, Position};
 use options_protocol::quote::{Self, Quote, SignedQuote};
 use options_protocol::treasury::{Self, Treasury};
 
@@ -130,7 +130,7 @@ public fun execute_write<Underlying, Settlement>(
     underlying_in: Coin<Underlying>,
     premium_in: Coin<Settlement>,
     flow: FlowKind,
-    position_nft_recipient: address,
+    position_recipient: address,
     call_token_recipient: address,
     signed_quote: SignedQuote,
     clock: &Clock,
@@ -145,7 +145,7 @@ public fun execute_write<Underlying, Settlement>(
         underlying_in,
         premium_in,
         flow,
-        position_nft_recipient,
+        position_recipient,
         call_token_recipient,
         q,
         clock,
@@ -162,7 +162,7 @@ public fun execute_write_for_testing<Underlying, Settlement>(
     underlying_in: Coin<Underlying>,
     premium_in: Coin<Settlement>,
     flow: FlowKind,
-    position_nft_recipient: address,
+    position_recipient: address,
     call_token_recipient: address,
     signed_quote: SignedQuote,
     clock: &Clock,
@@ -177,7 +177,7 @@ public fun execute_write_for_testing<Underlying, Settlement>(
         underlying_in,
         premium_in,
         flow,
-        position_nft_recipient,
+        position_recipient,
         call_token_recipient,
         q,
         clock,
@@ -194,7 +194,7 @@ fun execute_write_with_quote<Underlying, Settlement>(
     underlying_in: Coin<Underlying>,
     premium_in: Coin<Settlement>,
     flow: FlowKind,
-    position_nft_recipient: address,
+    position_recipient: address,
     call_token_recipient: address,
     q: Quote,
     clock: &Clock,
@@ -242,7 +242,7 @@ fun execute_write_with_quote<Underlying, Settlement>(
             // Signer is the writer MM (the seller of the option).
             // Signer-supplied side: underlying debited from their Account.
             // Executor-supplied side: premium matching gross_premium.
-            assert!(signer_recipient == position_nft_recipient, errors::quote_recipient_mismatch());
+            assert!(signer_recipient == position_recipient, errors::quote_recipient_mismatch());
             assert!(underlying_in.value() == 0, errors::amount_mismatch());
             assert!(premium_in.value() == gross_premium, errors::amount_mismatch());
 
@@ -269,9 +269,11 @@ fun execute_write_with_quote<Underlying, Settlement>(
     bucket.total_written = range_end;
 
     let position = position::mint(bucket_id, range_start, range_end, ctx);
-    transfer::public_transfer(position, position_nft_recipient);
+    let position_id = object::id(&position);
+    transfer::public_transfer(position, position_recipient);
 
     let call = call_option::mint(bucket_id, write_amount, ctx);
+    let call_option_id = object::id(&call);
     transfer::public_transfer(call, call_token_recipient);
 
     events::emit_write_executed(
@@ -279,7 +281,9 @@ fun execute_write_with_quote<Underlying, Settlement>(
         quote::signer_account_id(&q),
         signer_recipient,
         ctx.sender(),
-        position_nft_recipient,
+        position_id,
+        position_recipient,
+        call_option_id,
         call_token_recipient,
         write_amount,
         gross_premium,
@@ -337,7 +341,7 @@ public fun exercise<Underlying, Settlement>(
 
 public fun redeem_position<Underlying, Settlement>(
     bucket: &mut Bucket<Underlying, Settlement>,
-    position: PositionNFT,
+    position: Position,
     clock: &Clock,
     ctx: &mut TxContext,
 ): (Coin<Underlying>, Coin<Settlement>) {

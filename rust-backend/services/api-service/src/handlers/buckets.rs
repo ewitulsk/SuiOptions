@@ -101,8 +101,12 @@ pub struct SeriesDto {
     /// type string when the coin type isn't in the catalog.
     pub asset_symbol: String,
     pub asset_decimals: Option<u8>,
+    /// Full Move coin type (e.g. `0xtp::tbtc::TBTC`). Used by the
+    /// frontend as the `Underlying` type arg when building exercise PTBs.
+    pub asset_coin_type: String,
     pub settlement_symbol: String,
     pub settlement_decimals: Option<u8>,
+    pub settlement_coin_type: String,
     /// Unix millis. Sent as a number — Date.now()-style. Safe in JS as
     /// long as expiries stay before year 2255.
     pub expiry_ms: i64,
@@ -162,10 +166,16 @@ fn group_into_series(
             });
 
             SeriesDto {
-                asset_symbol: asset_meta.map(|m| m.symbol.clone()).unwrap_or(asset_ct),
+                asset_symbol: asset_meta
+                    .map(|m| m.symbol.clone())
+                    .unwrap_or_else(|| asset_ct.clone()),
                 asset_decimals,
-                settlement_symbol: settle_meta.map(|m| m.symbol.clone()).unwrap_or(settle_ct),
+                asset_coin_type: asset_ct,
+                settlement_symbol: settle_meta
+                    .map(|m| m.symbol.clone())
+                    .unwrap_or_else(|| settle_ct.clone()),
                 settlement_decimals: settle_decimals,
+                settlement_coin_type: settle_ct,
                 expiry_ms: expiry_ms as i64,
                 expiry_iso: iso_millis(expiry_ms as i64),
                 buckets: bucket_dtos,
@@ -215,7 +225,7 @@ fn scale_u128(raw: u128, decimals: u8) -> f64 {
 /// Convert an on-chain strike (`raw / 10^strike_scale` settlement-
 /// smallest-units per underlying-smallest-unit) into USD. Mirrors the
 /// bucket-creation math in `option-scheduler/src/strike_grid.rs`.
-fn strike_raw_to_usd(raw: u128, strike_scale: u8, under_dec: u8, settle_dec: u8) -> f64 {
+pub(crate) fn strike_raw_to_usd(raw: u128, strike_scale: u8, under_dec: u8, settle_dec: u8) -> f64 {
     raw as f64 * 10f64.powi(under_dec as i32 - settle_dec as i32 - strike_scale as i32)
 }
 

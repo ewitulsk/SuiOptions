@@ -17,7 +17,7 @@ use options_protocol::account;
 use options_protocol::admin;
 use options_protocol::bucket::{Self, Bucket};
 use options_protocol::call_option::{Self, CallOption};
-use options_protocol::position::{Self, PositionNFT};
+use options_protocol::position::{Self, Position};
 use options_protocol::quote;
 use options_protocol::treasury;
 use options_protocol::test_helpers::{Self as th, BTC, USDC};
@@ -132,7 +132,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
         let net = ts::take_from_sender<Coin<USDC>>(&scenario);
         assert!(net.value() == write1_net, 0);
         coin::burn_for_testing(net);
-        let p = ts::take_from_sender<PositionNFT>(&scenario);
+        let p = ts::take_from_sender<Position>(&scenario);
         assert!(position::range_start(&p) == 0 && position::range_end(&p) == 100, 0);
         ts::return_to_sender(&scenario, p);
     };
@@ -190,7 +190,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
         let net = ts::take_from_sender<Coin<USDC>>(&scenario);
         assert!(net.value() == write2_net, 0);
         coin::burn_for_testing(net);
-        let p = ts::take_from_sender<PositionNFT>(&scenario);
+        let p = ts::take_from_sender<Position>(&scenario);
         assert!(position::range_start(&p) == 100 && position::range_end(&p) == 150, 0);
         ts::return_to_sender(&scenario, p);
     };
@@ -234,7 +234,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
     // ---- Redeem writer #1's position (range [0,100), cursor=120 → fully exercised).
     ts::next_tx(&mut scenario, th::writer_addr());
     {
-        let p = ts::take_from_sender<PositionNFT>(&scenario);
+        let p = ts::take_from_sender<Position>(&scenario);
         let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
         let (u, s) = bucket::redeem_position<BTC, USDC>(&mut b, p, &clock, scenario.ctx());
         assert!(u.value() == 0, 0);
@@ -250,7 +250,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
     // ---- Redeem writer #2's position (range [100,150), cursor=120 → 20 exercised, 30 unexercised).
     ts::next_tx(&mut scenario, th::stranger_addr());
     {
-        let p = ts::take_from_sender<PositionNFT>(&scenario);
+        let p = ts::take_from_sender<Position>(&scenario);
         let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
         let (u, s) = bucket::redeem_position<BTC, USDC>(&mut b, p, &clock, scenario.ctx());
         assert!(u.value() == 30, 0);
@@ -305,7 +305,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
 // ---------------------------------------------------------------------------
 //
 // Cast
-//   writer_mm_addr  — Writer MM (signs quotes; receives PositionNFTs)
+//   writer_mm_addr  — Writer MM (signs quotes; receives Positions)
 //   trader_addr     — Retail trader #1 (first buyer; underlying range [0,100))
 //   stranger_addr   — Retail trader #2 (second buyer; underlying range [100,180))
 //
@@ -491,8 +491,8 @@ fun test_e2e_trader_flow_full_lifecycle() {
     ts::next_tx(&mut scenario, th::writer_mm_addr());
     {
         // Take both positions and identify them by range_end.
-        let p_a = ts::take_from_sender<PositionNFT>(&scenario);
-        let p_b = ts::take_from_sender<PositionNFT>(&scenario);
+        let p_a = ts::take_from_sender<Position>(&scenario);
+        let p_b = ts::take_from_sender<Position>(&scenario);
         let (early, late) = if (position::range_end(&p_a) == 100) { (p_a, p_b) } else { (p_b, p_a) };
 
         let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);

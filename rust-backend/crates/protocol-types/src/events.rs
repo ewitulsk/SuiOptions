@@ -45,7 +45,9 @@ pub struct WriteExecuted {
     pub signer_account_id: ObjectId,
     pub signer_token_recipient: SuiAddress,
     pub executor: SuiAddress,
-    pub position_nft_recipient: SuiAddress,
+    pub position_id: ObjectId,
+    pub position_recipient: SuiAddress,
+    pub call_option_id: ObjectId,
     pub call_token_recipient: SuiAddress,
     #[serde(with = "u64_string")]
     pub write_amount: u64,
