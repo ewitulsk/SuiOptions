@@ -250,16 +250,23 @@ jobs:
             exit 1
           fi
 
-          DB_PASSWORD=$(aws secretsmanager get-secret-value \
-            --secret-id "options/$ENV/indexer" \
-            --query SecretString --output text | jq -r '.db_password')
+          # The schema reset (DROP/CREATE SCHEMA) must run as the RDS
+          # master. The per-env indexer_<env> role owns its tables (so it
+          # can DROP the schema) but lacks CREATE on the database, so it
+          # cannot recreate the public schema. The master owns every db.
+          MASTER_JSON=$(aws secretsmanager get-secret-value \
+            --secret-id "options/_master/db" \
+            --query SecretString --output text)
+          MASTER_USER=$(echo "$MASTER_JSON" | jq -r '.username')
+          MASTER_PASS=$(echo "$MASTER_JSON" | jq -r '.password')
 
           # SSM commands run under /bin/sh (dash on Ubuntu); keep this
           # set -eu (no pipefail). deploy.sh itself is bash.
           jq -nc \
             --arg env "$ENV" \
             --arg db_host "$RDS_HOST" \
-            --arg db_pass "$DB_PASSWORD" \
+            --arg master_user "$MASTER_USER" \
+            --arg master_pass "$MASTER_PASS" \
             --arg bucket "$SSM_OUTPUT_BUCKET" \
             --arg bundle_key "$BUNDLE_KEY" \
             --arg region "$AWS_REGION" '
@@ -277,8 +284,8 @@ jobs:
                 "docker compose -f \"$COMPOSE_FILE\" stop indexer || true",
                 "echo \"indexer stopped\"",
 
-                "# ── 2. DROP the indexer database (all tables) ──",
-                "docker run --rm --network host -e PGPASSWORD=\($db_pass | @sh) postgres:16 psql -h \($db_host) -U \"indexer_\($env)\" -d \"indexer_\($env)\" -c \"DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO \\\"indexer_\($env)\\\";\"",
+                "# ── 2. DROP the indexer database (all tables) — as RDS master ──",
+                "docker run --rm --network host -e PGPASSWORD=\($master_pass | @sh) postgres:16 psql -h \($db_host) -U \($master_user | @sh) -d \"indexer_\($env)\" -c \"DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public AUTHORIZATION \\\"indexer_\($env)\\\"; GRANT ALL ON SCHEMA public TO \\\"indexer_\($env)\\\";\"",
                 "echo \"database indexer_\($env) wiped\"",
 
                 "# ── 3. Delete the mm-bot account file ──",
