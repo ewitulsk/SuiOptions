@@ -24,6 +24,8 @@ export type Bucket = {
   bucket_id: string;
   strike: number | null;
   strike_raw: string;
+  /** On-chain `strike_scale`. Real ratio = `strike_raw / 10^strike_scale`. */
+  strike_scale: number;
   total_written: number | null;
   total_written_raw: string;
   exercise_cursor: number | null;
@@ -40,8 +42,11 @@ export type Series = {
   /** Friendly symbol (e.g. `"TBTC"`) or raw Move type if unknown. */
   asset_symbol: string;
   asset_decimals: number | null;
+  /** Full Move coin type — the `Underlying` type arg for PTB builders. */
+  asset_coin_type: string;
   settlement_symbol: string;
   settlement_decimals: number | null;
+  settlement_coin_type: string;
   /** Unix millis. Safe to use directly with `new Date(...)`. */
   expiry_ms: number;
   /** Pre-formatted ISO-8601 UTC, e.g. `"2026-06-26T08:00:00Z"`. */
@@ -61,4 +66,85 @@ export async function fetchBuckets(): Promise<Series[]> {
   }
   const body: BucketsResponse = await res.json();
   return body.series;
+}
+
+/**
+ * One `Position` object owned by the caller's wallet. Mirrors
+ * `api-service::handlers::positions::PositionDto`. Raw u128 fields ship
+ * as decimal strings; the frontend divides by `asset_decimals` for
+ * display.
+ */
+export type Position = {
+  position_object_id: string;
+  bucket_id: string;
+  asset_symbol: string;
+  asset_decimals: number | null;
+  asset_coin_type: string;
+  settlement_symbol: string;
+  settlement_decimals: number | null;
+  settlement_coin_type: string;
+  strike: number | null;
+  strike_raw: string;
+  strike_scale: number;
+  expiry_ms: number;
+  range_start_raw: string;
+  range_end_raw: string;
+  total_written_raw: string;
+  exercise_cursor_raw: string;
+  premium_received_raw: string;
+  mm_account_id: string;
+  minted_at_ms: number;
+};
+
+export type PositionsResponse = { positions: Position[] };
+
+export async function fetchPositions(wallet: string): Promise<Position[]> {
+  const res = await fetch(
+    `${API_BASE_URL}/positions?wallet=${encodeURIComponent(wallet)}`,
+  );
+  if (!res.ok) {
+    throw new Error(`GET /positions failed: ${res.status} ${res.statusText}`);
+  }
+  const body: PositionsResponse = await res.json();
+  return body.positions;
+}
+
+/**
+ * One `WriteExecuted` event where the caller's wallet was the
+ * `call_token_recipient`. Used to show provenance for owned-call cards
+ * (`boughtFrom`, `premiumPaid`, `boughtAt`). Mirrors
+ * `api-service::handlers::call_token_lots::LotDto`.
+ */
+export type CallTokenLot = {
+  call_option_id: string;
+  bucket_id: string;
+  asset_symbol: string;
+  asset_decimals: number | null;
+  asset_coin_type: string;
+  settlement_symbol: string;
+  settlement_decimals: number | null;
+  settlement_coin_type: string;
+  strike: number | null;
+  strike_raw: string;
+  strike_scale: number;
+  expiry_ms: number;
+  amount_raw: string;
+  premium_paid_raw: string;
+  seller_account_id: string;
+  timestamp_ms: number;
+};
+
+export type CallTokenLotsResponse = { lots: CallTokenLot[] };
+
+export async function fetchCallTokenLots(wallet: string): Promise<CallTokenLot[]> {
+  const res = await fetch(
+    `${API_BASE_URL}/call-token-lots?wallet=${encodeURIComponent(wallet)}`,
+  );
+  if (!res.ok) {
+    throw new Error(
+      `GET /call-token-lots failed: ${res.status} ${res.statusText}`,
+    );
+  }
+  const body: CallTokenLotsResponse = await res.json();
+  return body.lots;
 }

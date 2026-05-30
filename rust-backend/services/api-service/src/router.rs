@@ -21,6 +21,11 @@ pub async fn serve(
     let app = Router::new()
         .route("/health", get(health))
         .route("/buckets", get(handlers::buckets::list_buckets))
+        .route("/positions", get(handlers::positions::list_positions))
+        .route(
+            "/call-token-lots",
+            get(handlers::call_token_lots::list_call_token_lots),
+        )
         .with_state(state)
         .layer(cors);
 

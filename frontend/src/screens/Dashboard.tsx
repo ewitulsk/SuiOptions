@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { useDashboardState } from "../mocks/dashboard";
+import { useDashboardState } from "../state/dashboard";
 import { Header } from "../components/Header";
 import { WaveHero } from "../components/WaveHero";
 import { Toast } from "../components/Toast";
@@ -177,12 +177,7 @@ export function Dashboard() {
             (d.writtenRows.length === 0
               ? empty("calls written")
               : d.writtenRows.map((p) => (
-                  <WrittenCard
-                    key={p.id}
-                    p={p}
-                    onClaim={d.openClaim}
-                    onCloseEarly={d.openCloseEarly}
-                  />
+                  <WrittenCard key={p.id} p={p} onClaim={d.openClaim} />
                 )))}
         </div>
       </div>

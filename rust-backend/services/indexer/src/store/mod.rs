@@ -59,6 +59,12 @@ pub struct BucketState {
 #[derive(Clone, Debug)]
 pub struct PositionState {
     pub bucket_id: ObjectId,
+    /// On-chain `Position` object id. Captured from
+    /// `WriteExecuted.position_id` at mint. The frontend needs this to
+    /// build a `redeem_position` PTB. `Position` objects are transferable
+    /// via `sui::transfer::public_transfer` so this id is stable across
+    /// owners; `recipient` may go stale until transfer-walking lands.
+    pub object_id: ObjectId,
     pub recipient: SuiAddress,
     pub range_start: u128,
     pub range_end: u128,
@@ -423,6 +429,7 @@ fn position_row(state: &PositionState, sequence: i64) -> PositionRow {
         bucket_id: state.bucket_id.to_hex(),
         range_start: u128_to_bigdecimal(state.range_start),
         range_end: u128_to_bigdecimal(state.range_end),
+        object_id: state.object_id.to_hex(),
         recipient: state.recipient.to_hex(),
         updated_at_seq: sequence,
     }
@@ -524,6 +531,7 @@ fn apply_write_executed(inner: &mut Inner, w: &WriteExecuted) {
         (w.bucket_id, w.range_start),
         PositionState {
             bucket_id: w.bucket_id,
+            object_id: w.position_id,
             recipient: w.position_recipient,
             range_start: w.range_start,
             range_end: w.range_end,

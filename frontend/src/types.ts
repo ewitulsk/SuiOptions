@@ -110,7 +110,6 @@ export type DashboardTotals = {
 export type DashboardModal =
   | { kind: "exercise"; stage: ConfirmStage | "review"; position: OwnedPosition; qty: number }
   | { kind: "claim"; stage: ConfirmStage | "review"; position: WrittenPosition }
-  | { kind: "close_early"; stage: ConfirmStage | "review"; position: WrittenPosition }
   | null;
 
 // Activity
