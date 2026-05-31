@@ -51,6 +51,10 @@ services:
     image: ${ECR}/options/option-scheduler:${SCHEDULER_TAG}
     environment:
       APP_ENV: dev
+      # Mandatory: the scheduler refuses to start without its rolls DB.
+      # Expanded into scheduler_database_url in config.dev.toml.
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
       RUST_LOG: info,option_scheduler=debug
     volumes:
       - /opt/options/dev/secrets:/run/secrets:ro

@@ -12,9 +12,14 @@ indexer_url       = "ws://indexer:9001/"
 tick_secs         = 60
 roll_threshold_ms = 604_800_000
 
-# Local rolls DB — prevents indexer-race duplicate bucket creation.
-local_rolls_enabled    = false
-# scheduler_database_url = "postgresql://scheduler_prod:${DB_PASSWORD}@${DB_HOST}:5432/scheduler_prod"
+# Scheduler rolls DB (mandatory). Single source of truth for which
+# (pair, expiry) slots have been rolled; its partial UNIQUE index is the
+# hard guard against duplicate bucket creation. The scheduler fails fast
+# at boot if this is unreachable. (With no [[pairs]] the binary exits at
+# the "no pairs configured" check before connecting, so the prod DB need
+# not exist until pairs are enabled.) ${DB_PASSWORD}/${DB_HOST} are
+# injected by the compose env and expanded at load time.
+scheduler_database_url = "postgresql://scheduler_prod:${DB_PASSWORD}@${DB_HOST}:5432/scheduler_prod"
 
 [pyth]
 hermes_url = "https://hermes.pyth.network"

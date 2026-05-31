@@ -35,7 +35,8 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use runtime_config::config_load;
 use serde::Deserialize;
 
 fn default_health_addr() -> std::net::SocketAddr {
@@ -68,18 +69,14 @@ pub struct SchedulerConfig {
     /// Configured pairs to roll. Bot is a no-op for any pair not listed.
     pub pairs: Vec<PairConfig>,
 
-    /// Postgres URL for the scheduler's local rolls DB. When set (and
-    /// `local_rolls_enabled` is true), the scheduler records every
-    /// claim/submit in this DB so a stale indexer can never cause a
-    /// duplicate on-chain bucket creation.
-    #[serde(default)]
-    pub scheduler_database_url: Option<String>,
-
-    /// Feature flag. When false the scheduler runs exactly as before
-    /// (no DB, no claim step). Set true once the `scheduler_{env}` DB
-    /// is provisioned.
-    #[serde(default)]
-    pub local_rolls_enabled: bool,
+    /// Postgres URL for the scheduler's rolls DB. Mandatory: the DB is the
+    /// single source of truth for which (pair, expiry) slots have been
+    /// rolled, and its partial UNIQUE index is the hard guarantee against
+    /// duplicate on-chain bucket creation. The scheduler connects at boot
+    /// and fails fast if it is unreachable — it never falls back to
+    /// indexer-derived state for the roll decision. Supports `${VAR}`
+    /// expansion (e.g. `${DB_PASSWORD}`, `${DB_HOST}`) at load time.
+    pub scheduler_database_url: String,
 
     /// Safety margin (in indexer sequences) the reconciler requires
     /// before concluding an ambiguous submit never landed. Default 100.
@@ -185,14 +182,11 @@ fn default_max_conf_bps() -> u32 {
 }
 
 impl SchedulerConfig {
+    /// Load the TOML config, expanding `${VAR}` references (e.g.
+    /// `${DB_PASSWORD}` in `scheduler_database_url`) against the process
+    /// env. A missing referenced env var is a hard error at boot.
     pub fn load(path: &Path) -> Result<Self> {
-        let settings = config::Config::builder()
-            .add_source(config::File::from(path).required(true))
-            .build()
-            .with_context(|| format!("loading {}", path.display()))?;
-        settings
-            .try_deserialize::<Self>()
-            .with_context(|| format!("parsing {}", path.display()))
+        config_load::load_toml(path)
     }
 }
 
@@ -210,10 +204,41 @@ mod tests {
     }
 
     #[test]
+    fn database_url_is_mandatory() {
+        // The DB is the single source of truth for dedup, so a config
+        // without it must fail to parse rather than silently disable the
+        // guard.
+        let res: Result<SchedulerConfig, _> = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+indexer_url = "ws://127.0.0.1:9001/"
+
+[[pairs]]
+underlying          = "TBTC"
+settlement          = "TUSDC"
+expiry_interval_ms  = 604800000
+strikes_below       = 2
+strikes_above       = 2
+interval_pct        = 5.0
+
+  [pairs.spot]
+  source = "static"
+  usd    = 50000.0
+"#,
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize();
+        assert!(res.is_err(), "missing scheduler_database_url must error");
+    }
+
+    #[test]
     fn parses_static_pair() {
         let cfg = parse(
             r#"
 indexer_url       = "ws://127.0.0.1:9001/"
+scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler_test"
 
 [[pairs]]
 underlying          = "TBTC"
@@ -229,6 +254,10 @@ interval_pct        = 5.0
 "#,
         );
         assert_eq!(cfg.pairs.len(), 1);
+        assert_eq!(
+            cfg.scheduler_database_url,
+            "postgresql://postgres:postgres@localhost:5432/scheduler_test"
+        );
         assert_eq!(cfg.tick_secs, 60); // default
         assert_eq!(cfg.pyth.hermes_url, "https://hermes.pyth.network");
         match &cfg.pairs[0].spot {
@@ -242,6 +271,7 @@ interval_pct        = 5.0
         let cfg = parse(
             r#"
 indexer_url = "ws://127.0.0.1:9001/"
+scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler_test"
 
 [pyth]
 hermes_url = "https://hermes.custom/"
@@ -276,6 +306,7 @@ interval_pct        = 5.0
         let cfg = parse(
             r#"
 indexer_url = "ws://127.0.0.1:9001/"
+scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler_test"
 
 [[pairs]]
 underlying          = "TBTC"

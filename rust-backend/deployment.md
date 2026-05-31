@@ -509,9 +509,23 @@ Done once per AWS account. Not in CI.
    GRANT ALL PRIVILEGES ON DATABASE indexer_dev     TO indexer_dev;
    GRANT ALL PRIVILEGES ON DATABASE indexer_staging TO indexer_staging;
    GRANT ALL PRIVILEGES ON DATABASE indexer_prod    TO indexer_prod;
+
+   -- option-scheduler rolls DB (mandatory — the scheduler fails fast at
+   -- boot if it can't connect). One logical DB + user per env, same
+   -- pattern as the indexer. The user password reuses the env's
+   -- ${DB_PASSWORD} secret (same value the indexer user uses).
+   CREATE DATABASE scheduler_dev;
+   CREATE DATABASE scheduler_staging;
+   CREATE DATABASE scheduler_prod;
+   CREATE USER scheduler_dev     WITH PASSWORD '<from-secrets-manager>';
+   CREATE USER scheduler_staging WITH PASSWORD '<from-secrets-manager>';
+   CREATE USER scheduler_prod    WITH PASSWORD '<from-secrets-manager>';
+   GRANT ALL PRIVILEGES ON DATABASE scheduler_dev     TO scheduler_dev;
+   GRANT ALL PRIVILEGES ON DATABASE scheduler_staging TO scheduler_staging;
+   GRANT ALL PRIVILEGES ON DATABASE scheduler_prod    TO scheduler_prod;
    ```
-   Migrations are embedded in the indexer binary and run on first
-   connect.
+   Migrations are embedded in both the indexer and option-scheduler
+   binaries and run on first connect.
 4. **ECR.** Create the three repos. Set lifecycle policy to keep last 20.
 5. **Secrets Manager.** Create the secrets listed in §4.
 6. **ACM.** Request a public cert for `api.<domain>`, validate via DNS.
