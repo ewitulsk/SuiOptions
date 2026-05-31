@@ -79,40 +79,69 @@ jobs:
           role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ── 3. Rust toolchain ────────────────────────────────────────
+      # ── 3. Fetch the prebuilt deployment-manager binary ──────────
+      # The binary lives as a fixed GitHub prerelease asset
+      # (tag: deployment-manager-bin, asset: deploy-linux-x64). Normal
+      # runs just download + run it — NO Rust toolchain, NO cargo, NO
+      # apt build-deps. A compile happens only when the rebuild_manager
+      # flag is set, or on the very first run when no asset exists yet;
+      # the fresh binary is then re-uploaded for next time.
+      - name: Fetch prebuilt deployment-manager binary
+        id: dm
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REBUILD: ${{ inputs.rebuild_manager }}
+        run: |
+          mkdir -p rust-backend/target/release
+          if [ "$REBUILD" = "true" ]; then
+            echo "rebuild=true" >> "$GITHUB_OUTPUT"
+            echo "rebuild_manager flag set — compiling a fresh binary."
+          elif gh release download deployment-manager-bin \
+                 --pattern deploy-linux-x64 \
+                 --output rust-backend/target/release/deploy 2>/dev/null; then
+            chmod +x rust-backend/target/release/deploy
+            echo "rebuild=false" >> "$GITHUB_OUTPUT"
+            echo "Using prebuilt binary from release deployment-manager-bin."
+          else
+            echo "rebuild=true" >> "$GITHUB_OUTPUT"
+            echo "No prebuilt binary found — bootstrapping by compiling one."
+          fi
+
+      # ── 4. Build the deployment manager (only when rebuilding) ───
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.dm.outputs.rebuild == 'true'
 
-      # ── 4. Restore the prebuilt deployment-manager binary ────────
-      # Keyed on the binary's dependency closure (its own crate, the
-      # workspace crates it links, and Cargo.lock for the external Sui
-      # pin). A hit skips the slow Sui-SDK build entirely; a miss
-      # rebuilds and saves the binary for next time. The Move package
-      # under contracts/ is compiled at *runtime* by the binary, so it
-      # is deliberately NOT part of the key.
-      - name: Restore cached deployment-manager binary
-        id: dm-cache
-        uses: actions/cache@v4
-        with:
-          path: rust-backend/target/release/deploy
-          key: deployment-manager-bin-${{ runner.os }}-${{ hashFiles('rust-backend/Cargo.lock', 'rust-backend/Cargo.toml', 'rust-backend/crates/**', 'rust-backend/tools/deployment-manager/**') }}
-
-      # ── 5. Build deployment manager (only on cache miss / forced) ─
       - uses: Swatinem/rust-cache@v2
-        if: steps.dm-cache.outputs.cache-hit != 'true' || inputs.rebuild_manager
+        if: steps.dm.outputs.rebuild == 'true'
         with:
           workspaces: rust-backend
 
       - name: Install build dependencies
-        if: steps.dm-cache.outputs.cache-hit != 'true' || inputs.rebuild_manager
+        if: steps.dm.outputs.rebuild == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libssl-dev clang cmake protobuf-compiler
 
       - name: Build deployment manager
-        if: steps.dm-cache.outputs.cache-hit != 'true' || inputs.rebuild_manager
+        if: steps.dm.outputs.rebuild == 'true'
         working-directory: rust-backend
         run: cargo build --release -p deployment-manager
+
+      # ── 5. Publish the freshly built binary for next time ────────
+      - name: Upload deployment-manager binary
+        if: steps.dm.outputs.rebuild == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view deployment-manager-bin >/dev/null 2>&1 || \
+            gh release create deployment-manager-bin \
+              --prerelease \
+              --title "deployment-manager binary" \
+              --notes "Prebuilt linux x86_64 deployment-manager binary, auto-updated by the redeploy-contract workflow. Not a real release."
+          cp rust-backend/target/release/deploy /tmp/deploy-linux-x64
+          gh release upload deployment-manager-bin /tmp/deploy-linux-x64 --clobber
+          echo "Uploaded fresh binary to release deployment-manager-bin."
 
       # ── 6. Fetch deployer key from Secrets Manager ───────────────
       - name: Write secrets file
