@@ -314,7 +314,7 @@ jobs:
                 "echo \"indexer stopped\"",
 
                 "# ── 2. DROP the indexer database (all tables) — as RDS master ──",
-                "docker run --rm --network host -e PGPASSWORD=\($master_pass | @sh) postgres:16 psql -h \($db_host) -U \($master_user | @sh) -d \"indexer_\($env)\" -c \"DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public AUTHORIZATION \\\"indexer_\($env)\\\"; GRANT ALL ON SCHEMA public TO \\\"indexer_\($env)\\\";\"",
+                "docker run --rm --network host -e PGPASSWORD=\($master_pass | @sh) postgres:16 psql -h \($db_host) -U \($master_user | @sh) -d \"indexer_\($env)\" -c \"DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO \\\"indexer_\($env)\\\";\"",
                 "echo \"database indexer_\($env) wiped\"",
 
                 "# ── 3. Delete the mm-bot account file ──",
