@@ -9,6 +9,7 @@ import {
   useSwitchAccount,
 } from "@mysten/dapp-kit";
 import { useThemeMode, toggleMode } from "../theme";
+import { useAdminCap } from "../api/useAdminCap";
 
 function shortAddress(addr: string): string {
   if (addr.length <= 12) return addr;
@@ -157,6 +158,8 @@ export function Header() {
   const { pathname } = useLocation();
   const account = useCurrentAccount();
   const [pickerOpen, setPickerOpen] = useState(false);
+  const adminCap = useAdminCap(account?.address ?? null);
+  const isAdmin = adminCap.data?.isAdmin ?? false;
 
   return (
     <header className="header">
@@ -189,6 +192,14 @@ export function Header() {
         >
           Activity
         </button>
+        {isAdmin && (
+          <button
+            className={pathname === "/admin" ? "is-active" : ""}
+            onClick={() => navigate("/admin")}
+          >
+            Admin
+          </button>
+        )}
         <button>Docs</button>
       </nav>
       <span className="header__status">
