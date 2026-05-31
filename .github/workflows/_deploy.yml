@@ -260,14 +260,22 @@ jobs:
             --query Command.CommandId --output text)
           echo "ssm command: $CMD_ID"
 
-          aws ssm wait command-executed \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" || true
-
-          STATUS=$(aws ssm get-command-invocation \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" \
-            --query Status --output text)
+          # Poll for a terminal state. The built-in `aws ssm wait
+          # command-executed` caps at ~100s (20 attempts × 5s), which is
+          # shorter than image pulls + health checks — it would report a
+          # false failure while the command is still InProgress. Give the
+          # deploy up to 10 minutes to reach Success/Failed.
+          STATUS=Pending
+          for _ in $(seq 1 120); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --query Status --output text 2>/dev/null || echo Pending)
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 5
+          done
           echo "ssm status: $STATUS"
 
           aws ssm get-command-invocation \
