@@ -255,7 +255,9 @@ jobs:
           ENV: ${{ inputs.environment }}
         run: |
           TS=$(date +%s)
-          BUNDLE_KEY="redeploy-bundles/${ENV}-${TS}.tgz"
+          # Park under deploy-bundles/ — the only prefix the EC2 instance
+          # role is allowed to GetObject from on this bucket (see iam.tf).
+          BUNDLE_KEY="deploy-bundles/redeploy-${ENV}-${TS}.tgz"
 
           mkdir -p /tmp/redeploy-bundle
           cp rust-backend/deployments.json /tmp/redeploy-bundle/
