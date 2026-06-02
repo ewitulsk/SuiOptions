@@ -41,7 +41,6 @@ services:
       APP_ENV: dev
       RUST_LOG: info,mm_bot=debug
     volumes:
-      - mm_bot_state:/app/state
       - /opt/options/dev/secrets:/run/secrets:ro
     depends_on: [quoting]
     restart: unless-stopped
@@ -89,6 +88,3 @@ services:
 
 networks:
   net:
-
-volumes:
-  mm_bot_state:

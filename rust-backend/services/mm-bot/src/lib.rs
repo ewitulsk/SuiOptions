@@ -16,9 +16,6 @@ pub struct Cli {
     #[arg(short, long, default_value = "services/mm-bot/config/config.toml")]
     pub config: PathBuf,
 
-    #[arg(long, default_value = "services/mm-bot/config/mm-bot.account.json")]
-    pub account_state: PathBuf,
-
     #[arg(short, long, default_value = "deployments.json")]
     pub deployments: PathBuf,
 

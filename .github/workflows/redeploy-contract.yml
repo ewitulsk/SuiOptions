@@ -11,9 +11,10 @@
 #      indexer_<env> AND scheduler_<env> databases via the shared
 #      wipe-provision-db.sh script (prod-guarded). Wiping the scheduler DB
 #      is required so it re-rolls buckets for the new contract.
-#   5. Delete the mm-bot account file from the Docker volume.
-#   6. Commit the updated deployments.json + indexer config to git.
-#   7. Call _deploy.yml with force_all + ref=<the commit just pushed>: every
+#      (The mm-bot needs no reset — it resolves its Account from chain state
+#      for the current package on boot, bootstrapping a fresh one if none.)
+#   5. Commit the updated deployments.json + indexer config to git.
+#   6. Call _deploy.yml with force_all + ref=<the commit just pushed>: every
 #      service image is rebuilt (baking the new deployments.json), pushed to
 #      ECR, and rolled out via deploy.sh (pull + up -d + migrations + health
 #      checks). This brings the stopped indexer/scheduler back up on fresh
@@ -257,11 +258,7 @@ jobs:
           printf '\n# Auto-set by redeploy-contract workflow.\nstart_checkpoint = %s\n' \
             "$START" >> "$CONFIG"
 
-      # ── 10. Delete mm-bot account file from repo ─────────────────
-      - name: Remove mm-bot account file
-        run: rm -f rust-backend/mm-bot.account.json
-
-      # ── 11. Upload the DB-wipe script to S3 for EC2 ─────────────
+      # ── 10. Upload the DB-wipe script to S3 for EC2 ─────────────
       # Only the provisioning script needs to reach the box now — the new
       # deployments.json and indexer config are baked into the rebuilt
       # images by the deploy job, not docker-cp'd in.
@@ -284,7 +281,7 @@ jobs:
 
           echo "key=$BUNDLE_KEY" >> "$GITHUB_OUTPUT"
 
-      # ── 12. SSM: stop indexer/scheduler, wipe DBs, drop mm-bot acct ──
+      # ── 11. SSM: stop indexer/scheduler, wipe DBs ──────────────────
       # Does NOT restart anything — the deploy job rebuilds + rolls out the
       # whole stack afterward.
       - name: Reset databases on EC2
@@ -343,17 +340,16 @@ jobs:
                 "# when its rolls DB is also wiped (it is DB-authoritative — see SO-80).",
                 "for svc in indexer scheduler; do DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/redeploy/wipe-provision-db.sh \($env | @sh) \"$svc\"; done",
 
-                "# ── 4. Delete the mm-bot account file ──",
-                "docker run --rm -v \"options-\($env)_mm_bot_state:/vol\" alpine rm -f /vol/mm-bot.account.json",
-                "echo \"mm-bot account file deleted\"",
-
+                "# The mm-bot needs no reset — it resolves its Account from",
+                "# chain state for the current package on boot, bootstrapping a",
+                "# fresh one if none exists yet.",
                 "# indexer + option-scheduler are left STOPPED on purpose — the",
                 "# deploy job rebuilds every image (baking the new deployments.json",
                 "# + indexer config) and `docker compose up -d`s the whole stack,",
                 "# starting them fresh on the wiped DBs (migrations run on connect).",
                 "# Cleanup",
                 "rm -rf /tmp/redeploy /tmp/redeploy-bundle.tgz",
-                "echo \"DB + account reset complete (\($env)) — handing off to rebuild/deploy\""
+                "echo \"DB reset complete (\($env)) — handing off to rebuild/deploy\""
               ]
             }' > /tmp/ssm-params.json
 
@@ -393,7 +389,7 @@ jobs:
             exit 1
           fi
 
-      # ── 13. Commit and push changes to git ──────────────────────
+      # ── 12. Commit and push changes to git ──────────────────────
       # Must push BEFORE the deploy job runs: that job checks out this exact
       # commit (via the `ref` it receives) so the rebuilt images bake this
       # deployments.json + indexer config.
@@ -407,7 +403,6 @@ jobs:
 
           git add rust-backend/deployments.json
           git add "rust-backend/services/indexer/config/config.${ENV}.toml"
-          git rm -f --ignore-unmatch rust-backend/mm-bot.account.json
 
           git commit -m "[redeploy] Fresh ${ENV} contract deployment" \
             -m "Network: ${{ steps.net.outputs.network }}" \

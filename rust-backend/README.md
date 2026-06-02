@@ -55,7 +55,7 @@ rust-backend/
 ├── services/
 │   ├── indexer/          config/{config.toml}
 │   ├── quoting-service/  config/{config.toml}
-│   ├── mm-bot/           config/{config.toml, secrets.toml, mm-bot.account.json}
+│   ├── mm-bot/           config/{config.toml, secrets.toml}
 │   └── option-scheduler/ config/{config.toml, secrets.toml}
 ├── tools/
 │   ├── deployment-manager/  config/{secrets.toml}
@@ -409,18 +409,24 @@ fresh coin in their wallet.
 
 Two phases per run.
 
-**Bootstrap** (once, on first start when no `mm-bot.account.json` is
-present):
+**Bootstrap** (when the current deployment has no Account for this bot
+yet — e.g. first start, or right after a fresh contract redeploy):
 
 1. Reads `signing_scheme` from the TOML and derives the verifying key from
    the `MM_QUOTE_KEY` secret accordingly (Ed25519 seed / Secp256k1 scalar
    / Secp256r1 scalar — all 32 bytes).
-2. Calls `account::create_and_share_account(scheme, signing_pubkey)` to
-   create a shared Account whose registered `(scheme, pubkey)` matches.
-3. Mints `bootstrap_settlement_amount` of the settlement token from its
-   faucet and deposits it into the new Account in one PTB so the bot can
-   pay premiums on day one.
-4. Persists `(account_id, settlement_symbol)` to `mm-bot.account.json`.
+2. Looks up its Account from chain state for the current package: scans
+   `AccountCreated` events under the deployment's `packageId` for one whose
+   tx sender is the bot's Sui address and whose `(scheme, pubkey)` match. If
+   found, it adopts that Account and skips straight to Serve.
+3. If none exists, calls `account::create_and_share_account(scheme,
+   signing_pubkey)` to create a shared Account whose registered
+   `(scheme, pubkey)` matches, then mints `bootstrap_settlement_amount` of
+   the settlement token from its faucet and deposits it so the bot can pay
+   premiums on day one.
+
+No local state is persisted — the deployment is the source of truth, so a
+new contract package automatically gets a fresh Account.
 
 **Serve** (every run after that):
 
@@ -484,9 +490,9 @@ bootstrap_settlement_amount = 1_000_000_000_000
 cargo run --release -p mm-bot
 ```
 
-Defaults point at `services/mm-bot/config/{config,secrets}.toml` and
-persist Account state at `services/mm-bot/config/mm-bot.account.json`.
-Override any with `--config` / `--secrets` / `--account-state`.
+Defaults point at `services/mm-bot/config/{config,secrets}.toml`. Override
+with `--config` / `--secrets`. The Account is resolved from chain state on
+every boot, not from a local file.
 
 The bot logs its account id on bootstrap; that's what the quoting service
 and the writer will see in `RFQResponse.quotes[].mm_id`.
