@@ -23,3 +23,32 @@ const info = deployments[ENV]?.package_info;
 export const PACKAGE_ID: string | undefined = info?.packageId;
 export const PROTOCOL_CONFIG_ID: string | undefined = info?.protocolConfigId;
 export const TREASURY_ID: string | undefined = info?.treasuryId;
+
+// Testnet faucet tokens (SO-93). Each is a shared `Faucet` with a public
+// `mint_to_sender`. Only the testnet deployment publishes these; mainnet /
+// devnet have a `null` package_info, so this resolves to `[]` and the
+// faucet page falls back to a "testnet only" empty state.
+export type TestToken = {
+  symbol: string;
+  /** Full Move coin type, e.g. `0x…::tbtc::TBTC`. */
+  coinType: string;
+  /** Shared `Faucet` object id. */
+  faucetId: string;
+  decimals: number;
+  /** Module name from the coin type's middle segment, e.g. `tbtc`. */
+  module: string;
+  /** Package that published the test tokens (≠ the protocol `PACKAGE_ID`). */
+  packageId: string;
+};
+
+const tt = info?.testTokens;
+export const TEST_TOKENS: TestToken[] = tt
+  ? Object.entries(tt.tokens).map(([symbol, t]) => ({
+      symbol,
+      coinType: t.coinType,
+      faucetId: t.faucetId,
+      decimals: t.decimals,
+      module: t.coinType.split("::")[1] ?? symbol.toLowerCase(),
+      packageId: tt.packageId,
+    }))
+  : [];
