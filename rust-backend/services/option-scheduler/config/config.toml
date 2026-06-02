@@ -4,12 +4,20 @@
 # types, pyth feed ids) come from `deployments.json`. This file controls
 # which pairs the bot rolls buckets for and how aggressively.
 
-# WS endpoint of the local indexer fanout. The scheduler subscribes here
-# to hydrate its in-memory family registry (BucketCreated / BucketCleaned).
+# WS endpoint of the local indexer fanout. Consumed only to confirm
+# submitted rolls and drive the reconciler — never to make a roll
+# decision (that is sourced solely from the DB below).
 indexer_url       = "ws://127.0.0.1:9001/"
 
-# How often the tick loop wakes up. Cheap — just reads in-memory state +
-# maybe submits one tx.
+# Scheduler rolls DB (mandatory). Single source of truth for which
+# (pair, expiry) slots have been rolled; its partial UNIQUE index is the
+# hard guard against duplicate bucket creation. The scheduler fails fast
+# at boot if this is unreachable. Point a local Postgres here for
+# `cargo run`. Supports `${VAR}` expansion for deployed envs.
+scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler"
+
+# How often the tick loop wakes up. Cheap — reads the DB + maybe submits
+# one tx.
 tick_secs         = 60
 
 # When the latest family for a pair is closer than this to expiry, roll
@@ -30,10 +38,10 @@ settlement          = "TUSDC"
 expiry_interval_ms  = 604_800_000      # 1 week
 
 # Strike grid: spot ± `strikes_below`/`strikes_above` strikes, spaced
-# `interval_pct` apart. e.g. spot $50_000, ±4 strikes at 5% → nine strikes
-# from $40k to $60k, snapped down to the nearest grid step.
-strikes_below       = 4
-strikes_above       = 4
+# `interval_pct` apart. e.g. spot $50_000, ±2 strikes at 5% → five strikes
+# from $45k to $55k, snapped down to the nearest grid step.
+strikes_below       = 2
+strikes_above       = 2
 interval_pct        = 5.0
 
   # Pyth pulls the cross of TBTC and TUSDC USD prices at roll time. Both

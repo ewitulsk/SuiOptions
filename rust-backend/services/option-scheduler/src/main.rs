@@ -5,24 +5,24 @@
 //!   2. Connect SuiClient; assert signer == deployer (only address with AdminCap).
 //!   3. For each configured pair: resolve underlying/settlement `TokenInfo`,
 //!      build a canonicalised PairKey.
-//!   4. Spawn the indexer subscriber. It hydrates the in-memory family
-//!      registry from the snapshot and follows the live stream forever.
-//!   5. If `local_rolls_enabled`, open the scheduler DB, run migrations,
-//!      and log all active rows for operator-visible reconciliation.
+//!   4. Open the scheduler DB (MANDATORY) and run migrations. If the DB is
+//!      unreachable the binary fails fast and exits — there is no
+//!      in-memory fallback.
+//!   5. Spawn the indexer subscriber. It follows the live stream forever
+//!      and is used ONLY to confirm submitted rolls and drive the
+//!      reconciler — never to make a roll decision.
 //!
 //! Tick loop (every `tick_secs`, default 60):
-//!   For each pair, find the family with the latest expiry. If
+//!   For each pair, read the latest active expiry FROM THE DB. If
 //!   `latest_expiry - now < roll_threshold_ms`, compute the next expiry
-//!   via the cadence and the strike grid via current spot, then submit
-//!   `bucket::new_call_option<U, S>` (or just log under --dry-run).
+//!   via the cadence, claim the slot in the DB (the partial UNIQUE index
+//!   is the hard dedup), resolve the strike grid via current spot, and
+//!   submit `bucket::new_call_option<U, S>` (or just log under --dry-run).
 //!
-//!   With `local_rolls_enabled`, the tick loop additionally claims the
-//!   slot in the local DB before submitting, classifies submit errors,
-//!   and never re-rolls a slot that is already claimed.
-//!
-//! Updates to the registry never happen from inside this binary — every
-//! BucketCreated we ever care about comes back through the indexer, so
-//! the registry stays single-sourced.
+//! The DB is the single source of truth for which (pair, expiry) slots
+//! have been rolled. The scheduler never relies on indexer-flowed state to
+//! decide whether to roll, so a stale or empty registry — e.g. right after
+//! a restart — can no longer cause a duplicate family.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -159,54 +159,48 @@ async fn main() -> Result<()> {
     let pair_keys = Arc::new(pair_keys);
     let registry = Registry::new();
 
-    // ── Phase 1+6: scheduler DB ─────────────────────────────────────
-    let db_pool: Option<db::DbPool> = if cfg.local_rolls_enabled {
-        let url = cfg
-            .scheduler_database_url
-            .as_deref()
-            .ok_or_else(|| {
-                anyhow!(
-                    "local_rolls_enabled=true but scheduler_database_url is not set in config"
-                )
-            })?;
-        let pool = db::establish_pool(url, 4)?;
-        db::run_migrations(&pool)?;
-        info!("scheduler DB connected and migrations applied");
+    // ── Scheduler DB (mandatory) ────────────────────────────────────
+    // The DB is the single source of truth for which (pair, expiry)
+    // slots have been rolled. Connect eagerly and fail hard/fast if it
+    // is unreachable — there is no in-memory fallback, by design: a
+    // scheduler that can't reach its DB must not roll, because the only
+    // hard guard against duplicate bucket creation is the DB's partial
+    // UNIQUE index.
+    let db_pool: db::DbPool = db::establish_pool(&cfg.scheduler_database_url, 4)
+        .context("connecting to scheduler DB (required) — refusing to start without it")?;
+    db::run_migrations(&db_pool).context("running scheduler DB migrations")?;
+    info!("scheduler DB connected and migrations applied");
 
-        // Boot reconciliation: log active rows.
-        match db::all_active_rows(&pool) {
-            Ok(rows) => {
-                for row in &rows {
-                    info!(
-                        id = row.id,
-                        pair = %format!("{}/{}", row.underlying_symbol, row.settlement_symbol),
-                        expiry_ms = row.expiry_ms,
-                        state = %row.state,
-                        tx_digest = ?row.tx_digest,
-                        "active roll at boot"
-                    );
-                }
-                if rows.is_empty() {
-                    info!("no active rolls in scheduler DB at boot");
-                }
+    // Boot reconciliation: log active rows.
+    match db::all_active_rows(&db_pool) {
+        Ok(rows) => {
+            for row in &rows {
+                info!(
+                    id = row.id,
+                    pair = %format!("{}/{}", row.underlying_symbol, row.settlement_symbol),
+                    expiry_ms = row.expiry_ms,
+                    state = %row.state,
+                    tx_digest = ?row.tx_digest,
+                    "active roll at boot"
+                );
             }
-            Err(e) => warn!(error = %e, "failed to read active rolls at boot"),
+            if rows.is_empty() {
+                info!("no active rolls in scheduler DB at boot");
+            }
         }
-        Some(pool)
-    } else {
-        info!("local_rolls_enabled=false; running without scheduler DB");
-        None
-    };
+        Err(e) => warn!(error = %e, "failed to read active rolls at boot"),
+    }
 
-    // Indexer subscriber — runs forever in the background.
-    // When db_pool is set, the subscriber also calls confirm_from_indexer.
+    // Indexer subscriber — runs forever in the background. It is used
+    // ONLY for post-submit confirmation (marking rolls confirmed) and to
+    // drive the reconciler; it never feeds the roll decision.
     {
         let url = cfg.indexer_url.clone();
         let registry = registry.clone();
         let pair_keys = pair_keys.clone();
         let pool = db_pool.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_subscriber(url, registry, pair_keys, pool).await {
+            if let Err(e) = run_subscriber(url, registry, pair_keys, Some(pool)).await {
                 error!(error = %e, "indexer subscriber exited");
             }
         });
@@ -218,17 +212,15 @@ async fn main() -> Result<()> {
     sleep(Duration::from_secs(2)).await;
     log_registry(&registry, &pair_keys);
 
-    // ── Phase 4: reconciler task ────────────────────────────────────
-    if let Some(ref pool) = db_pool {
-        let pool = pool.clone();
+    // ── Reconciler task ─────────────────────────────────────────────
+    {
+        let pool = db_pool.clone();
         let registry = registry.clone();
         let safety_margin = cfg.reconciler_safety_margin;
         let interval = Duration::from_secs(cfg.reconciler_interval_secs.max(1));
         tokio::spawn(async move {
             loop {
-                if let Err(e) =
-                    run_reconciler(&pool, &registry, safety_margin)
-                {
+                if let Err(e) = run_reconciler(&pool, &registry, safety_margin) {
                     warn!(error = %e, "reconciler tick errored");
                 }
                 sleep(interval).await;
@@ -246,7 +238,6 @@ async fn main() -> Result<()> {
         tick_secs = cfg.tick_secs,
         roll_threshold_ms = cfg.roll_threshold_ms,
         dry_run = cli.dry_run,
-        local_rolls = cfg.local_rolls_enabled,
         "tick loop starting"
     );
 
@@ -260,7 +251,7 @@ async fn main() -> Result<()> {
             &wrap,
             package,
             admin_cap,
-            db_pool.as_ref(),
+            &db_pool,
         )
         .await
         {
@@ -291,25 +282,29 @@ async fn tick_once(
     wrap: &SuiClientWrapper,
     package: sui_types::base_types::ObjectID,
     admin_cap: sui_types::base_types::ObjectID,
-    db_pool: Option<&db::DbPool>,
+    db_pool: &db::DbPool,
 ) -> Result<()> {
     let now = now_ms();
-    for (idx, meta) in pairs.iter().enumerate() {
+    for meta in pairs {
         let pair_label = format!("{}/{}", meta.cfg.underlying, meta.cfg.settlement);
-        let latest = registry.latest_family(idx);
-        let mut latest_expiry = latest.as_ref().map(|f| f.expiry_ms);
 
-        // ── Phase 2 step 1: pre-decide with local DB ───────────────
-        if let Some(pool) = db_pool {
-            if let Ok(Some(local)) =
-                db::latest_active_expiry(pool, &meta.cfg.underlying, &meta.cfg.settlement)
-            {
-                latest_expiry = Some(match latest_expiry {
-                    Some(reg) => reg.max(local),
-                    None => local,
-                });
+        // The scheduler DB is the SOLE authority for what has been rolled.
+        // The indexer-fed registry is deliberately not consulted for the
+        // roll decision — relying on indexer-flowed state is exactly what
+        // produced duplicate families. A transient DB read error skips the
+        // pair this tick (retried next tick) rather than risking a roll on
+        // missing state.
+        let latest_expiry = match db::latest_active_expiry(
+            db_pool,
+            &meta.cfg.underlying,
+            &meta.cfg.settlement,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, pair = %pair_label, "latest_active_expiry failed; skipping pair this tick");
+                continue;
             }
-        }
+        };
 
         let decision = decide_tick(
             latest_expiry,
@@ -336,31 +331,34 @@ async fn tick_once(
             }
         };
 
-        // ── Phase 2 step 2: claim the slot in the local DB ─────────
-        if let Some(pool) = db_pool {
-            let anchor_seq = registry.last_sequence();
-            match db::claim_slot(
-                pool,
-                &meta.cfg.underlying,
-                &meta.cfg.settlement,
-                next_expiry,
-                anchor_seq,
-            ) {
-                Ok(true) => {
-                    debug!(pair = %pair_label, expiry_ms = next_expiry, "slot claimed");
-                }
-                Ok(false) => {
-                    debug!(
-                        pair = %pair_label,
-                        expiry_ms = next_expiry,
-                        "slot already claimed; skipping"
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    warn!(error = %e, pair = %pair_label, "claim_slot failed; skipping");
-                    continue;
-                }
+        // Claim the slot. The partial UNIQUE index on
+        // (underlying, settlement, expiry) is the hard guarantee: at most
+        // one active row per slot, so a duplicate roll can never be
+        // submitted even across restarts or concurrent ticks. The anchor
+        // sequence lets the reconciler later tell whether the indexer has
+        // caught up past this submit.
+        let anchor_seq = registry.last_sequence();
+        match db::claim_slot(
+            db_pool,
+            &meta.cfg.underlying,
+            &meta.cfg.settlement,
+            next_expiry,
+            anchor_seq,
+        ) {
+            Ok(true) => {
+                debug!(pair = %pair_label, expiry_ms = next_expiry, "slot claimed");
+            }
+            Ok(false) => {
+                debug!(
+                    pair = %pair_label,
+                    expiry_ms = next_expiry,
+                    "slot already claimed; skipping"
+                );
+                continue;
+            }
+            Err(e) => {
+                warn!(error = %e, pair = %pair_label, "claim_slot failed; skipping");
+                continue;
             }
         }
 
@@ -373,14 +371,12 @@ async fn tick_once(
             Err(e) => {
                 warn!(error = %e, pair = %pair_label, "spot resolve failed; skipping");
                 // Clean up the pending claim so the next tick can retry.
-                if let Some(pool) = db_pool {
-                    let _ = db::delete_pending(
-                        pool,
-                        &meta.cfg.underlying,
-                        &meta.cfg.settlement,
-                        next_expiry,
-                    );
-                }
+                let _ = db::delete_pending(
+                    db_pool,
+                    &meta.cfg.underlying,
+                    &meta.cfg.settlement,
+                    next_expiry,
+                );
                 continue;
             }
         };
@@ -395,14 +391,12 @@ async fn tick_once(
             Ok(g) => g,
             Err(e) => {
                 warn!(error = %e, pair = %pair_label, "strike grid invalid; skipping");
-                if let Some(pool) = db_pool {
-                    let _ = db::delete_pending(
-                        pool,
-                        &meta.cfg.underlying,
-                        &meta.cfg.settlement,
-                        next_expiry,
-                    );
-                }
+                let _ = db::delete_pending(
+                    db_pool,
+                    &meta.cfg.underlying,
+                    &meta.cfg.settlement,
+                    next_expiry,
+                );
                 continue;
             }
         };
@@ -419,14 +413,12 @@ async fn tick_once(
 
         if cli.dry_run {
             // Under dry-run, clean up the pending row since we won't submit.
-            if let Some(pool) = db_pool {
-                let _ = db::delete_pending(
-                    pool,
-                    &meta.cfg.underlying,
-                    &meta.cfg.settlement,
-                    next_expiry,
-                );
-            }
+            let _ = db::delete_pending(
+                db_pool,
+                &meta.cfg.underlying,
+                &meta.cfg.settlement,
+                next_expiry,
+            );
             continue;
         }
 
@@ -441,18 +433,16 @@ async fn tick_once(
                 for id in &out.bucket_ids {
                     info!(bucket_id = %id, "new bucket");
                 }
-                if let Some(pool) = db_pool {
-                    let ids: Vec<String> = out.bucket_ids.iter().map(|id| id.to_string()).collect();
-                    if let Err(e) = db::mark_submitted(
-                        pool,
-                        &meta.cfg.underlying,
-                        &meta.cfg.settlement,
-                        next_expiry,
-                        &out.digest,
-                        &ids,
-                    ) {
-                        warn!(error = %e, "mark_submitted failed");
-                    }
+                let ids: Vec<String> = out.bucket_ids.iter().map(|id| id.to_string()).collect();
+                if let Err(e) = db::mark_submitted(
+                    db_pool,
+                    &meta.cfg.underlying,
+                    &meta.cfg.settlement,
+                    next_expiry,
+                    &out.digest,
+                    &ids,
+                ) {
+                    warn!(error = %e, "mark_submitted failed");
                 }
             }
             Err(e) => {
@@ -463,25 +453,23 @@ async fn tick_once(
                     pair = %pair_label,
                     "new_call_option submit failed"
                 );
-                if let Some(pool) = db_pool {
-                    match class {
-                        ErrorClass::DefinitelyNotSent => {
-                            let _ = db::delete_pending(
-                                pool,
-                                &meta.cfg.underlying,
-                                &meta.cfg.settlement,
-                                next_expiry,
-                            );
-                        }
-                        ErrorClass::Ambiguous => {
-                            let _ = db::mark_needs_reconciliation(
-                                pool,
-                                &meta.cfg.underlying,
-                                &meta.cfg.settlement,
-                                next_expiry,
-                                &format!("{e:#}"),
-                            );
-                        }
+                match class {
+                    ErrorClass::DefinitelyNotSent => {
+                        let _ = db::delete_pending(
+                            db_pool,
+                            &meta.cfg.underlying,
+                            &meta.cfg.settlement,
+                            next_expiry,
+                        );
+                    }
+                    ErrorClass::Ambiguous => {
+                        let _ = db::mark_needs_reconciliation(
+                            db_pool,
+                            &meta.cfg.underlying,
+                            &meta.cfg.settlement,
+                            next_expiry,
+                            &format!("{e:#}"),
+                        );
                     }
                 }
             }
