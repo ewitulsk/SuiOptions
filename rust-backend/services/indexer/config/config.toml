@@ -27,7 +27,7 @@ recent_log_capacity     = 1024
 # from inception. Pre-republish events use a Move struct without
 # strike_scale and would fail to parse against current protocol-types.
 # Only consulted when `indexer_progress` is empty (i.e. on a fresh DB).
-start_checkpoint = 340804360
+start_checkpoint = 343702757
 
 # Optional JSON-RPC override for the latest-checkpoint lookup. Defaults to
 # Sui's public fullnode for `network` (mainnet/testnet/devnet). Only used
