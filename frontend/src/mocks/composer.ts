@@ -5,9 +5,14 @@
 // pending real wiring. The hook keeps a single return shape so UI components
 // don't change as more pieces become live.
 import { useEffect, useMemo, useState } from "react";
-import { useCurrentAccount } from "@mysten/dapp-kit";
+import {
+  useCurrentAccount,
+  useSignAndExecuteTransaction,
+} from "@mysten/dapp-kit";
+import { useQueryClient } from "@tanstack/react-query";
 import { useBuckets } from "../api/useBuckets";
 import { useRfq } from "../api/useRfq";
+import { buildWriteTx } from "../tx/composer";
 import type { Series } from "../api/client";
 import type { RfqQuoteEntry, Side as ProtocolSide } from "../api/quoting";
 import type {
@@ -325,14 +330,34 @@ export function useComposerState({
 
   const bestPremium = quotes[0]?.premium ?? (selected?.premium ?? 0);
 
-  const submit = () => {
-    if (insufficient || !connected || quotes.length === 0) return;
+  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
+  const queryClient = useQueryClient();
+
+  const submit = async () => {
+    if (insufficient || !connected || rfqEntries.length === 0 || !series || !account)
+      return;
+    // Only the writer (Earn) flow is wired to a real PTB. The trader (Buy)
+    // flow is gated behind "Coming Soon" (SO-A3) until its builder ships.
+    if (view !== "writer") {
+      setToast("Buying calls — coming soon");
+      setTimeout(() => setToast(null), 4000);
+      return;
+    }
+    const entry = rfqEntries[0]; // best-price-first
     setConfirmStage("signing");
-    setTimeout(() => setConfirmStage("broadcast"), 1100);
-    setTimeout(() => {
+    try {
+      const tx = buildWriteTx({
+        entry,
+        underlyingCoinType: series.asset_coin_type,
+        settlementCoinType: series.settlement_coin_type,
+        writer: account.address,
+      });
+      setConfirmStage("broadcast");
+      await signAndExecute({ transaction: tx });
+
       const rangeStart = bucket.cursor + bucket.queued;
-      const asset = series?.asset_symbol ?? "BTC";
-      const expiry = series ? formatExpiry(series.expiry_iso) : "Jun 26th, 2026";
+      const asset = series.asset_symbol;
+      const expiry = formatExpiry(series.expiry_iso);
       setConfirmSummary({
         view,
         premium: bestPremium,
@@ -345,7 +370,15 @@ export function useComposerState({
         expiry,
       });
       setConfirmStage("confirmed");
-    }, 2400);
+      // Reflect the new position on the Dashboard without a manual refresh.
+      queryClient.invalidateQueries({ queryKey: ["buckets"] });
+      queryClient.invalidateQueries({ queryKey: ["positions", account.address] });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setToast(`failed · ${message}`);
+      setTimeout(() => setToast(null), 6000);
+      setConfirmStage(null);
+    }
   };
 
   const closeConfirm = () => {
