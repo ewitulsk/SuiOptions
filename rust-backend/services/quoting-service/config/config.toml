@@ -14,7 +14,12 @@ rfq_window_ms        = 2000
 # WS keep-alive cadence.
 ping_interval_secs   = 15
 
-# Domain separator the on-chain `ProtocolConfig.protocol_id` carries. Match
-# this to the value set at contract deploy time. Either a UTF-8 string
-# (shown here) or a `0x…` hex blob.
-protocol_id          = "sui-options-protocol-v0"
+# Which slot in `deployments.json` to resolve `protocol_id` from. The
+# service derives the domain separator (the AdminCap object id) from the
+# deployment, exactly as the contract and mm-bot do, so a redeploy doesn't
+# require editing this file. One of: mainnet / testnet / devnet.
+network              = "testnet"
+
+# Path to `deployments.json`. Relative paths resolve from the working
+# directory; running from `rust-backend/` matches the default.
+# deployments_path   = "deployments.json"

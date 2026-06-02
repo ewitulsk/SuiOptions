@@ -10,7 +10,9 @@ indexer_url          = "ws://indexer:9001/"
 rfq_window_ms        = 2000
 ping_interval_secs   = 15
 
-protocol_id          = "sui-options-protocol-v0"
+# Resolve protocol_id (the AdminCap object id) from deployments.json,
+# matching the contract and mm-bot.
+network              = "devnet"
 
 max_inflight_rfqs_per_session   = 16
 max_inflight_rfqs_global        = 256

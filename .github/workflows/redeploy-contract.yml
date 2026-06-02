@@ -1,22 +1,29 @@
 # Redeploy the options-protocol Move package to dev or staging, then
-# reset the environment so the indexer starts clean from the new
-# contract's deployment checkpoint.
+# rebuild + roll out EVERY service so each one boots against the new
+# contract's deployments.json (which is baked into the image at build).
 #
 # Steps (in order):
 #   1. Build + run the deployment-manager → publishes the Move package
 #      on-chain and writes the new IDs to deployments.json.
 #   2. Query Sui RPC to resolve the deployment checkpoint.
-#   3. Stop the indexer + option-scheduler on EC2.
-#   4. Wipe + provision the indexer_<env> AND scheduler_<env> databases via
-#      the shared wipe-provision-db.sh script (prod-guarded). Wiping the
-#      scheduler DB is required so it re-rolls buckets for the new contract.
+#   3. Update the indexer config's start_checkpoint to checkpoint − 1.
+#   4. Stop the indexer + option-scheduler on EC2 and wipe + provision the
+#      indexer_<env> AND scheduler_<env> databases via the shared
+#      wipe-provision-db.sh script (prod-guarded). Wiping the scheduler DB
+#      is required so it re-rolls buckets for the new contract.
 #      (The mm-bot needs no reset — it resolves its Account from chain state
 #      for the current package on boot, bootstrapping a fresh one if none.)
-#   5. Update the indexer config's start_checkpoint to checkpoint − 1.
-#   6. Push updated files into the stopped containers on EC2.
-#   7. Start the indexer + option-scheduler (migrations run on first start).
-#   8. Restart the remaining services to pick up the new deployments.json.
-#   9. Commit updated files to the git repo.
+#   5. Commit the updated deployments.json + indexer config to git.
+#   6. Call _deploy.yml with force_all + ref=<the commit just pushed>: every
+#      service image is rebuilt (baking the new deployments.json), pushed to
+#      ECR, and rolled out via deploy.sh (pull + up -d + migrations + health
+#      checks). This brings the stopped indexer/scheduler back up on fresh
+#      images + DBs and recreates the rest on the new deployment.
+#
+# Why rebuild instead of `docker cp`-ing the file in: baking keeps the ECR
+# images and the committed deployments.json in lockstep, so a later
+# container recreation (a normal deploy, a box reboot) can't silently
+# revert a service to a stale AdminCap id.
 #
 # PRODUCTION IS EXPLICITLY BLOCKED — the workflow only offers dev and
 # staging as choices, and every destructive step also checks at runtime.
@@ -57,8 +64,12 @@ env:
   SSM_OUTPUT_BUCKET: ${{ vars.SSM_OUTPUT_BUCKET }}
 
 jobs:
-  redeploy:
+  publish:
     runs-on: ubuntu-latest
+    outputs:
+      # The commit this job pushes (new deployments.json + indexer config).
+      # The deploy job checks this out so the rebuilt images bake it.
+      new_sha: ${{ steps.commit.outputs.sha }}
     steps:
       # ── 0. Checkout ──────────────────────────────────────────────
       - uses: actions/checkout@v4
@@ -247,7 +258,10 @@ jobs:
           printf '\n# Auto-set by redeploy-contract workflow.\nstart_checkpoint = %s\n' \
             "$START" >> "$CONFIG"
 
-      # ── 10. Upload updated files to S3 for EC2 ──────────────────
+      # ── 10. Upload the DB-wipe script to S3 for EC2 ─────────────
+      # Only the provisioning script needs to reach the box now — the new
+      # deployments.json and indexer config are baked into the rebuilt
+      # images by the deploy job, not docker-cp'd in.
       - name: Upload redeploy bundle
         id: bundle
         env:
@@ -259,8 +273,6 @@ jobs:
           BUNDLE_KEY="deploy-bundles/redeploy-${ENV}-${TS}.tgz"
 
           mkdir -p /tmp/redeploy-bundle
-          cp rust-backend/deployments.json /tmp/redeploy-bundle/
-          cp "rust-backend/services/indexer/config/config.${ENV}.toml" /tmp/redeploy-bundle/
           cp rust-backend/deployment/ec2/wipe-provision-db.sh /tmp/redeploy-bundle/
           tar czf /tmp/redeploy-bundle.tgz -C /tmp/redeploy-bundle .
 
@@ -269,8 +281,10 @@ jobs:
 
           echo "key=$BUNDLE_KEY" >> "$GITHUB_OUTPUT"
 
-      # ── 11. SSM: reset the environment on EC2 ───────────────────
-      - name: Reset environment on EC2
+      # ── 11. SSM: stop indexer/scheduler, wipe DBs ──────────────────
+      # Does NOT restart anything — the deploy job rebuilds + rolls out the
+      # whole stack afterward.
+      - name: Reset databases on EC2
         env:
           ENV: ${{ inputs.environment }}
           BUNDLE_KEY: ${{ steps.bundle.outputs.key }}
@@ -326,24 +340,16 @@ jobs:
                 "# when its rolls DB is also wiped (it is DB-authoritative — see SO-80).",
                 "for svc in indexer scheduler; do DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/redeploy/wipe-provision-db.sh \($env | @sh) \"$svc\"; done",
 
-                "# ── 4. Update the indexer config (start_checkpoint) ──",
-                "INDEXER_CID=$(docker compose -f \"$COMPOSE_FILE\" ps -aq indexer 2>/dev/null || true)",
-                "if [ -n \"$INDEXER_CID\" ]; then docker cp \"/tmp/redeploy/config.\($env).toml\" \"$INDEXER_CID:/app/config/config.\($env).toml\"; echo \"updated indexer config\"; fi",
-
-                "# ── 5. docker cp deployments.json into ALL stopped/running containers ──",
-                "for svc in indexer quoting mm-bot option-scheduler api-service; do CID=$(docker compose -f \"$COMPOSE_FILE\" ps -aq \"$svc\" 2>/dev/null || true); if [ -n \"$CID\" ]; then docker cp /tmp/redeploy/deployments.json \"$CID:/app/deployments.json\"; echo \"updated deployments.json in $svc\"; fi; done",
-
-                "# ── 6. Start the services we stopped (diesel migrations run on first connect) ──",
-                "docker compose -f \"$COMPOSE_FILE\" start indexer option-scheduler",
-                "echo \"indexer + option-scheduler started — migrations run automatically on the fresh DBs\"",
-
-                "# ── 7. Restart the still-running services so they pick up new deployments.json ──",
-                "docker compose -f \"$COMPOSE_FILE\" restart mm-bot quoting api-service || true",
-                "echo \"all services restarted\"",
-
+                "# The mm-bot needs no reset — it resolves its Account from",
+                "# chain state for the current package on boot, bootstrapping a",
+                "# fresh one if none exists yet.",
+                "# indexer + option-scheduler are left STOPPED on purpose — the",
+                "# deploy job rebuilds every image (baking the new deployments.json",
+                "# + indexer config) and `docker compose up -d`s the whole stack,",
+                "# starting them fresh on the wiped DBs (migrations run on connect).",
                 "# Cleanup",
                 "rm -rf /tmp/redeploy /tmp/redeploy-bundle.tgz",
-                "echo \"redeploy complete (\($env))\""
+                "echo \"DB reset complete (\($env)) — handing off to rebuild/deploy\""
               ]
             }' > /tmp/ssm-params.json
 
@@ -384,7 +390,11 @@ jobs:
           fi
 
       # ── 12. Commit and push changes to git ──────────────────────
+      # Must push BEFORE the deploy job runs: that job checks out this exact
+      # commit (via the `ref` it receives) so the rebuilt images bake this
+      # deployments.json + indexer config.
       - name: Commit updated files
+        id: commit
         env:
           ENV: ${{ inputs.environment }}
         run: |
@@ -399,3 +409,19 @@ jobs:
             -m "Deployment checkpoint: ${{ steps.checkpoint.outputs.checkpoint }}" \
             -m "Indexer start_checkpoint: ${{ steps.checkpoint.outputs.start_checkpoint }}"
           git push
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  # ── Rebuild + roll out EVERY service on the new deployment ──────
+  # force_all rebuilds all five images from the commit `publish` just
+  # pushed (ref), baking the new deployments.json, and deploy.sh pulls +
+  # `up -d`s the whole stack — starting the stopped indexer/scheduler on
+  # the wiped DBs and recreating the rest. Gated on `publish` so the DB
+  # wipe + commit are done before any new image comes up.
+  deploy:
+    needs: publish
+    uses: ./.github/workflows/_deploy.yml
+    secrets: inherit
+    with:
+      envs: ${{ format('["{0}"]', inputs.environment) }}
+      force_all: true
+      ref: ${{ needs.publish.outputs.new_sha }}

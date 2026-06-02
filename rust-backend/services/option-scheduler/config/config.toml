@@ -13,8 +13,8 @@ indexer_url       = "ws://127.0.0.1:9001/"
 # (pair, expiry) slots have been rolled; its partial UNIQUE index is the
 # hard guard against duplicate bucket creation. The scheduler fails fast
 # at boot if this is unreachable. Point a local Postgres here for
-# `cargo run`. Supports `${VAR}` expansion for deployed envs.
-scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler"
+# `cargo run`. Supports env-var expansion for deployed envs.
+scheduler_database_url = "postgresql://postgres:postgres@localhost:7653/scheduler"
 
 # How often the tick loop wakes up. Cheap — reads the DB + maybe submits
 # one tx.
