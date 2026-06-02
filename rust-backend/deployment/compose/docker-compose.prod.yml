@@ -46,7 +46,6 @@ services:
   #     APP_ENV: prod
   #     RUST_LOG: info,mm_bot=info
   #   volumes:
-  #     - mm_bot_state:/app/state
   #     - /opt/options/prod/secrets:/run/secrets:ro
   #   depends_on: [quoting]
   #   restart: unless-stopped
@@ -94,6 +93,3 @@ services:
 
 networks:
   net:
-
-volumes:
-  mm_bot_state:

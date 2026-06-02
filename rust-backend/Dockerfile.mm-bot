@@ -20,13 +20,10 @@ COPY --from=builder /src/target/release/mm-bot /usr/local/bin/mm-bot
 COPY services/mm-bot/config/ /app/config/
 COPY deployments.json /app/deployments.json
 
-# Persistent state lives in /app/state (mm-bot.account.json). Mount a
-# named volume there from compose so the Account survives container
-# replacement.
-RUN mkdir -p /app/state
+# No persistent state: the Account is resolved from chain state for the
+# current deployment on every boot (see mm-bot::resolve_account).
 
 ENV APP_ENV=dev
 ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/mm-bot \
   --config /app/config/config.${APP_ENV}.toml \
-  --secrets /run/secrets/mm-bot.toml \
-  --account-state /app/state/mm-bot.account.json"]
+  --secrets /run/secrets/mm-bot.toml"]

@@ -55,7 +55,6 @@ for the Sui network. They are not the same word — `dev` env runs against
        │   └─ mm-bot    (no port)  └─ mm-bot                └─ mm-bot           │
        │                                                                        │
        │  Volumes (per env):                                                    │
-       │   mm_bot_<env>_state    holds mm-bot.account.json                      │
        │   secrets_<env>         holds rendered secrets.toml (tmpfs preferred)  │
        │                                                                        │
        └────────────────────────────────────┬───────────────────────────────────┘
@@ -208,7 +207,6 @@ services:
       APP_ENV: dev
       RUST_LOG: info,mm_bot=debug
     volumes:
-      - mm_bot_dev_state:/app/state
       - /opt/options/dev/secrets:/run/secrets:ro
     depends_on: [quoting]
     restart: unless-stopped
@@ -216,15 +214,12 @@ services:
 
 networks:
   options_dev_net:
-
-volumes:
-  mm_bot_dev_state:
 ```
 
-The mm-bot image's entrypoint writes `mm-bot.account.json` to
-`/app/state/`, so the named volume persists Account bootstrap across
-container restarts. Note that the `mm-bot --account-state` flag needs to
-point there (set in the entrypoint or via flag).
+The mm-bot keeps no persistent state: it resolves its Account from chain
+state for the current deployment on every boot (scanning `AccountCreated`
+events under the current package), so container replacement and contract
+redeploys need no volume or file handling.
 
 ---
 
@@ -334,7 +329,6 @@ export DB_PASSWORD=$(aws secretsmanager get-secret-value \
 | Path on host | What | Why it persists |
 |---|---|---|
 | `/opt/options/<env>/secrets/secrets.toml` | mm-bot Sui + quote keys | Rendered each deploy from Secrets Manager. |
-| Docker volume `mm_bot_<env>_state` | `mm-bot.account.json` | Cached Account id created on first run. Losing it makes the bot create a fresh Account on next start, which will need re-funding. |
 | Aurora `indexer_<env>` DB | Indexer events, checkpoint progress | Authoritative state. Backups: Aurora's automated daily snapshot (7-day retention is the default; bump prod to 30). |
 | `deployments.json` (baked into image) | Package ids per network | Updated by manually running `cargo run -p deploy`, committed to repo, picked up on next image build. |
 
@@ -840,13 +834,10 @@ target.
 1. **Provision a new EC2** (`options-prod-ec2`), same AMI/role as the
    shared box. Run `ec2-bootstrap.sh` to install Docker, compose, SSM,
    and create `/opt/options/prod/`.
-2. **Copy prod state.** mm-bot's `mm-bot.account.json` lives in the
-   `mm_bot_prod_state` volume on the shared box. Either:
-   - `docker run --rm -v mm_bot_prod_state:/src -v $(pwd):/dst alpine
-     cp /src/mm-bot.account.json /dst/` on the old box, then scp to
-     new box, then `docker run --rm -v mm_bot_prod_state:/dst -v
-     $(pwd):/src alpine cp /src/mm-bot.account.json /dst/`.
-   - OR back up via SSM + S3 if you prefer no direct host access.
+2. **No mm-bot state to copy.** The mm-bot resolves its Account from chain
+   state for the current deployment on boot, so there is no per-host file
+   or volume to migrate — it will re-adopt the same on-chain Account from
+   the new box.
 3. **Cut over the ALB.** Detach the existing EC2 from `tg-quoting-prod`,
    register the new EC2 instead. Drain delay on the TG handles in-flight
    WS connections (set to 30s).

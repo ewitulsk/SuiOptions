@@ -4,8 +4,8 @@
 # settlement. There is no faucet on mainnet, so booting this against
 # mainnet will fail unless `bootstrap_settlement_amount` is zero AND the
 # bootstrap code path is changed to skip the faucet call (or the Account
-# is funded manually first and `mm-bot.account.json` is pre-seeded into
-# the named volume).
+# is created + funded manually first by the bot's Sui key with its quote
+# pubkey, so the on-chain lookup adopts it instead of bootstrapping).
 #
 # Until that's resolved, the mm-bot service should be commented out of
 # docker-compose.prod.yml. The indexer + quoting-service deploy and run

@@ -10,12 +10,13 @@
 #   4. Wipe + provision the indexer_<env> AND scheduler_<env> databases via
 #      the shared wipe-provision-db.sh script (prod-guarded). Wiping the
 #      scheduler DB is required so it re-rolls buckets for the new contract.
-#   5. Delete the mm-bot account file from the Docker volume.
-#   6. Update the indexer config's start_checkpoint to checkpoint − 1.
-#   7. Push updated files into the stopped containers on EC2.
-#   8. Start the indexer + option-scheduler (migrations run on first start).
-#   9. Restart the remaining services to pick up the new deployments.json.
-#  10. Commit updated files to the git repo.
+#      (The mm-bot needs no reset — it resolves its Account from chain state
+#      for the current package on boot, bootstrapping a fresh one if none.)
+#   5. Update the indexer config's start_checkpoint to checkpoint − 1.
+#   6. Push updated files into the stopped containers on EC2.
+#   7. Start the indexer + option-scheduler (migrations run on first start).
+#   8. Restart the remaining services to pick up the new deployments.json.
+#   9. Commit updated files to the git repo.
 #
 # PRODUCTION IS EXPLICITLY BLOCKED — the workflow only offers dev and
 # staging as choices, and every destructive step also checks at runtime.
@@ -246,11 +247,7 @@ jobs:
           printf '\n# Auto-set by redeploy-contract workflow.\nstart_checkpoint = %s\n' \
             "$START" >> "$CONFIG"
 
-      # ── 10. Delete mm-bot account file from repo ─────────────────
-      - name: Remove mm-bot account file
-        run: rm -f rust-backend/mm-bot.account.json
-
-      # ── 11. Upload updated files to S3 for EC2 ──────────────────
+      # ── 10. Upload updated files to S3 for EC2 ──────────────────
       - name: Upload redeploy bundle
         id: bundle
         env:
@@ -272,7 +269,7 @@ jobs:
 
           echo "key=$BUNDLE_KEY" >> "$GITHUB_OUTPUT"
 
-      # ── 12. SSM: reset the environment on EC2 ───────────────────
+      # ── 11. SSM: reset the environment on EC2 ───────────────────
       - name: Reset environment on EC2
         env:
           ENV: ${{ inputs.environment }}
@@ -329,22 +326,18 @@ jobs:
                 "# when its rolls DB is also wiped (it is DB-authoritative — see SO-80).",
                 "for svc in indexer scheduler; do DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/redeploy/wipe-provision-db.sh \($env | @sh) \"$svc\"; done",
 
-                "# ── 4. Delete the mm-bot account file ──",
-                "docker run --rm -v \"options-\($env)_mm_bot_state:/vol\" alpine rm -f /vol/mm-bot.account.json",
-                "echo \"mm-bot account file deleted\"",
-
-                "# ── 5. Update the indexer config (start_checkpoint) ──",
+                "# ── 4. Update the indexer config (start_checkpoint) ──",
                 "INDEXER_CID=$(docker compose -f \"$COMPOSE_FILE\" ps -aq indexer 2>/dev/null || true)",
                 "if [ -n \"$INDEXER_CID\" ]; then docker cp \"/tmp/redeploy/config.\($env).toml\" \"$INDEXER_CID:/app/config/config.\($env).toml\"; echo \"updated indexer config\"; fi",
 
-                "# ── 6. docker cp deployments.json into ALL stopped/running containers ──",
+                "# ── 5. docker cp deployments.json into ALL stopped/running containers ──",
                 "for svc in indexer quoting mm-bot option-scheduler api-service; do CID=$(docker compose -f \"$COMPOSE_FILE\" ps -aq \"$svc\" 2>/dev/null || true); if [ -n \"$CID\" ]; then docker cp /tmp/redeploy/deployments.json \"$CID:/app/deployments.json\"; echo \"updated deployments.json in $svc\"; fi; done",
 
-                "# ── 7. Start the services we stopped (diesel migrations run on first connect) ──",
+                "# ── 6. Start the services we stopped (diesel migrations run on first connect) ──",
                 "docker compose -f \"$COMPOSE_FILE\" start indexer option-scheduler",
                 "echo \"indexer + option-scheduler started — migrations run automatically on the fresh DBs\"",
 
-                "# ── 8. Restart the still-running services so they pick up new deployments.json ──",
+                "# ── 7. Restart the still-running services so they pick up new deployments.json ──",
                 "docker compose -f \"$COMPOSE_FILE\" restart mm-bot quoting api-service || true",
                 "echo \"all services restarted\"",
 
@@ -390,7 +383,7 @@ jobs:
             exit 1
           fi
 
-      # ── 13. Commit and push changes to git ──────────────────────
+      # ── 12. Commit and push changes to git ──────────────────────
       - name: Commit updated files
         env:
           ENV: ${{ inputs.environment }}
@@ -400,7 +393,6 @@ jobs:
 
           git add rust-backend/deployments.json
           git add "rust-backend/services/indexer/config/config.${ENV}.toml"
-          git rm -f --ignore-unmatch rust-backend/mm-bot.account.json
 
           git commit -m "[redeploy] Fresh ${ENV} contract deployment" \
             -m "Network: ${{ steps.net.outputs.network }}" \

@@ -5,11 +5,13 @@
 //!     (32-byte hex secret — interpretation depends on the scheme).
 //!   - Resolves the test-token pair (`underlying_symbol` / `settlement_symbol`)
 //!     against `deployments.json`.
-//!   - If no `mm-bot.account.json` exists, calls
-//!     `account::create_and_share_account(scheme, pubkey)` and persists the
-//!     new Account id, then funds it with `bootstrap_settlement_amount` of
-//!     the settlement asset via `test_tokens::<sym>::mint` +
-//!     `account::deposit` in a single PTB.
+//!   - Resolves its Account from chain state for the *current* deployment:
+//!     looks up the `AccountCreated` event under the current package for this
+//!     bot's Sui address. If none exists (e.g. right after a fresh contract
+//!     deployment), calls `account::create_and_share_account(scheme, pubkey)`
+//!     and funds it with `bootstrap_settlement_amount` of the settlement
+//!     asset via `test_tokens::<sym>::mint` + `account::deposit`. No local
+//!     state is persisted — the deployment is the source of truth.
 //!
 //! Phase 2: serve.
 //!   - Authenticates over WS via the scheme-aware challenge (§5.4.1).
@@ -28,7 +30,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sui_types::base_types::ObjectID;
 
 use protocol_types::ids::{ObjectId as PtObjectId, SuiAddress as PtSuiAddress};
@@ -43,7 +45,7 @@ use deployments::Deployments;
 use pyth_client::{self as pyth, PriceCache, PriceFeedId, RollingVolBuffer};
 use sui_tx::quote_signer::QuoteSigner;
 use sui_tx::sui_client::{Network, SuiClientWrapper};
-use sui_tx::tx::account::create_and_share_account;
+use sui_tx::tx::account::{create_and_share_account, find_account};
 use sui_tx::tx::test_tokens::mint_and_deposit_into_account;
 use sui_tx::ws_client;
 
@@ -170,27 +172,6 @@ fn default_quote_ttl_ms() -> u64 {
 fn default_bootstrap_amount() -> u64 {
     1_000_000_000_000
 } // 1e12 raw — plenty of settlement to quote with
-
-// -- Persisted state -----------------------------------------------------
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AccountState {
-    account_id: String,
-    /// Optional: track which symbol we bootstrap-funded with, so a config
-    /// change doesn't silently leave us under-funded.
-    settlement_symbol: Option<String>,
-}
-
-fn load_account_state(p: &Path) -> Option<AccountState> {
-    let bytes = std::fs::read(p).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-fn save_account_state(p: &Path, state: &AccountState) -> Result<()> {
-    let pretty = serde_json::to_vec_pretty(state)?;
-    std::fs::write(p, pretty).context("writing account state sidecar")?;
-    Ok(())
-}
 
 // -- Main loop -----------------------------------------------------------
 
@@ -501,25 +482,27 @@ async fn resolve_account(
     signer: &QuoteSigner,
     pubkey_bytes: &[u8],
 ) -> Result<ObjectID> {
-    if let Some(state) = load_account_state(&cli.account_state) {
-        if let Some(prev) = &state.settlement_symbol {
-            if prev != &cfg.settlement_symbol {
-                tracing::warn!(
-                    prev,
-                    cfg.settlement_symbol,
-                    "account was bootstrapped with a different settlement symbol — bot may quote without sufficient balance"
-                );
-            }
-        }
-        return ObjectID::from_hex_literal(&state.account_id).context("parsing account id");
+    let wrap = SuiClientWrapper::connect(secrets, cfg.network).await?;
+    let package = net.package()?;
+
+    // The deployment is the source of truth — no local sidecar. If this
+    // bot's Sui address already created an Account under the current package,
+    // adopt it; otherwise bootstrap a fresh one. A fresh contract deployment
+    // (new package) has no such event, so the bot self-heals by creating a
+    // new account against the package the indexer is actually watching.
+    if let Some(account_id) =
+        find_account(&wrap.client, package, wrap.signer.address, signer.scheme(), pubkey_bytes)
+            .await?
+    {
+        tracing::info!(%account_id, "adopted existing on-chain account for this deployment");
+        return Ok(account_id);
     }
 
-    tracing::info!("no account state — bootstrapping a fresh Account");
-    let wrap = SuiClientWrapper::connect(secrets, cfg.network).await?;
+    tracing::info!("no account for the current deployment — bootstrapping a fresh Account");
     let created = create_and_share_account(
         &wrap.client,
         &wrap.signer,
-        net.package()?,
+        package,
         signer.scheme(),
         pubkey_bytes,
         cli.gas_budget,
@@ -527,7 +510,9 @@ async fn resolve_account(
     .await?;
     tracing::info!(digest = %created.digest, account_id = %created.account_id, "account created");
 
-    // Fund it with settlement so it can pay premiums on day one.
+    // Fund it with settlement so it can pay premiums on day one. Create and
+    // fund are separate txs; a crash between them leaves the account
+    // (adopted on the next boot) unfunded — acceptable for the test MM bot.
     let settlement = net.token(&cfg.settlement_symbol)?;
     let (tokens_pkg, settlement_module) = settlement.module_path()?;
     let fund_resp = mint_and_deposit_into_account(
@@ -538,7 +523,7 @@ async fn resolve_account(
         settlement.faucet()?,
         &settlement.coin_type,
         created.account_id,
-        net.package()?,
+        package,
         cfg.bootstrap_settlement_amount,
         cli.gas_budget,
     )
@@ -550,13 +535,6 @@ async fn resolve_account(
         "account funded"
     );
 
-    save_account_state(
-        &cli.account_state,
-        &AccountState {
-            account_id: created.account_id.to_string(),
-            settlement_symbol: Some(cfg.settlement_symbol.clone()),
-        },
-    )?;
     Ok(created.account_id)
 }
 
