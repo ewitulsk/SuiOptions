@@ -12,4 +12,4 @@ db_pool_size            = 8
 recent_log_capacity     = 1024
 
 # Auto-set by redeploy-contract workflow.
-start_checkpoint = 343702757
+start_checkpoint = 343725629
