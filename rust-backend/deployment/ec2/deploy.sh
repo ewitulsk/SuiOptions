@@ -17,8 +17,8 @@
 # - Services in the request but NOT declared in this env's compose file
 #   are logged + skipped (e.g. asking for mm-bot in prod today).
 # - Health-check + rollback runs for each planned service that exposes
-#   /health today (quoting-service, api-service). Services without a
-#   /health endpoint are skipped — extend health_path_for() when adding
+#   /health (see health_path_for() for the current set). Services without
+#   a /health endpoint are skipped — extend health_path_for() when adding
 #   one.
 
 set -euo pipefail
