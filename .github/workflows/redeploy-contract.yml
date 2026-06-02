@@ -6,13 +6,15 @@
 #   1. Build + run the deployment-manager → publishes the Move package
 #      on-chain and writes the new IDs to deployments.json.
 #   2. Query Sui RPC to resolve the deployment checkpoint.
-#   3. Stop the indexer on EC2.
-#   4. DROP the entire indexer_<env> database (prod-guarded).
+#   3. Stop the indexer + option-scheduler on EC2.
+#   4. Wipe + provision the indexer_<env> AND scheduler_<env> databases via
+#      the shared wipe-provision-db.sh script (prod-guarded). Wiping the
+#      scheduler DB is required so it re-rolls buckets for the new contract.
 #   5. Delete the mm-bot account file from the Docker volume.
 #   6. Update the indexer config's start_checkpoint to checkpoint − 1.
-#   7. Prep the indexer database (diesel migrations run on first start).
-#   8. Push updated files into the stopped containers on EC2.
-#   9. Start the indexer (+ all services).
+#   7. Push updated files into the stopped containers on EC2.
+#   8. Start the indexer + option-scheduler (migrations run on first start).
+#   9. Restart the remaining services to pick up the new deployments.json.
 #  10. Commit updated files to the git repo.
 #
 # PRODUCTION IS EXPLICITLY BLOCKED — the workflow only offers dev and
@@ -262,6 +264,7 @@ jobs:
           mkdir -p /tmp/redeploy-bundle
           cp rust-backend/deployments.json /tmp/redeploy-bundle/
           cp "rust-backend/services/indexer/config/config.${ENV}.toml" /tmp/redeploy-bundle/
+          cp rust-backend/deployment/ec2/wipe-provision-db.sh /tmp/redeploy-bundle/
           tar czf /tmp/redeploy-bundle.tgz -C /tmp/redeploy-bundle .
 
           aws s3 cp /tmp/redeploy-bundle.tgz \
@@ -311,22 +314,24 @@ jobs:
                 "cd /opt/options/\($env)",
                 "COMPOSE_FILE=\"docker-compose.\($env).yml\"",
 
-                "# ── 1. Stop the indexer ──",
-                "docker compose -f \"$COMPOSE_FILE\" stop indexer || true",
-                "echo \"indexer stopped\"",
+                "# ── 1. Stop the services whose DBs we wipe ──",
+                "docker compose -f \"$COMPOSE_FILE\" stop indexer option-scheduler || true",
+                "echo \"indexer + option-scheduler stopped\"",
 
-                "# ── 2. DROP the indexer database (all tables) — as RDS master ──",
-                "docker run --rm --network host -e PGPASSWORD=\($master_pass | @sh) postgres:16 psql -h \($db_host) -U \($master_user | @sh) -d \"indexer_\($env)\" -c \"DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO \\\"indexer_\($env)\\\";\"",
-                "echo \"database indexer_\($env) wiped\"",
-
-                "# ── 3. Delete the mm-bot account file ──",
-                "docker run --rm -v \"options-\($env)_mm_bot_state:/vol\" alpine rm -f /vol/mm-bot.account.json",
-                "echo \"mm-bot account file deleted\"",
-
-                "# ── 4. Download updated files from S3 ──",
+                "# ── 2. Download updated files + provisioning script from S3 ──",
                 "aws s3 cp \"s3://\($bucket)/\($bundle_key)\" /tmp/redeploy-bundle.tgz --region \($region)",
                 "mkdir -p /tmp/redeploy",
                 "tar xzf /tmp/redeploy-bundle.tgz -C /tmp/redeploy",
+                "chmod +x /tmp/redeploy/wipe-provision-db.sh",
+
+                "# ── 3. Wipe + provision the indexer and scheduler DBs (shared script) ──",
+                "# A freshly published contract has no buckets; the scheduler only re-rolls",
+                "# when its rolls DB is also wiped (it is DB-authoritative — see SO-80).",
+                "for svc in indexer scheduler; do DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/redeploy/wipe-provision-db.sh \($env | @sh) \"$svc\"; done",
+
+                "# ── 4. Delete the mm-bot account file ──",
+                "docker run --rm -v \"options-\($env)_mm_bot_state:/vol\" alpine rm -f /vol/mm-bot.account.json",
+                "echo \"mm-bot account file deleted\"",
 
                 "# ── 5. Update the indexer config (start_checkpoint) ──",
                 "INDEXER_CID=$(docker compose -f \"$COMPOSE_FILE\" ps -aq indexer 2>/dev/null || true)",
@@ -335,12 +340,12 @@ jobs:
                 "# ── 6. docker cp deployments.json into ALL stopped/running containers ──",
                 "for svc in indexer quoting mm-bot option-scheduler api-service; do CID=$(docker compose -f \"$COMPOSE_FILE\" ps -aq \"$svc\" 2>/dev/null || true); if [ -n \"$CID\" ]; then docker cp /tmp/redeploy/deployments.json \"$CID:/app/deployments.json\"; echo \"updated deployments.json in $svc\"; fi; done",
 
-                "# ── 7. Start the indexer (diesel migrations run on first connect) ──",
-                "docker compose -f \"$COMPOSE_FILE\" start indexer",
-                "echo \"indexer started — migrations will run automatically on the fresh DB\"",
+                "# ── 7. Start the services we stopped (diesel migrations run on first connect) ──",
+                "docker compose -f \"$COMPOSE_FILE\" start indexer option-scheduler",
+                "echo \"indexer + option-scheduler started — migrations run automatically on the fresh DBs\"",
 
-                "# ── 8. Restart all other services so they pick up new deployments.json ──",
-                "docker compose -f \"$COMPOSE_FILE\" restart mm-bot quoting option-scheduler api-service || true",
+                "# ── 8. Restart the still-running services so they pick up new deployments.json ──",
+                "docker compose -f \"$COMPOSE_FILE\" restart mm-bot quoting api-service || true",
                 "echo \"all services restarted\"",
 
                 "# Cleanup",
