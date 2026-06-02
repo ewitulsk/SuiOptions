@@ -1,6 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSuiClient } from "@mysten/dapp-kit";
 
+import { PACKAGE_ID } from "../config";
+
 /**
  * Detects whether the connected wallet holds an `AdminCap` and, if so,
  * returns the object id of (the first) one. Every admin PTB needs to pass
@@ -9,11 +11,8 @@ import { useSuiClient } from "@mysten/dapp-kit";
  *
  * `AdminCap` is a plain owned object (`admin.move`); the wallet is the
  * source of truth for who is an admin. Returns `{ isAdmin: false }` when
- * the wallet is null or `VITE_PACKAGE_ID` is unset.
+ * the wallet is null or the selected environment has no deployment.
  */
-const PACKAGE_ID: string | undefined = import.meta.env.VITE_PACKAGE_ID as
-  | string
-  | undefined;
 
 export type AdminCapStatus = {
   isAdmin: boolean;

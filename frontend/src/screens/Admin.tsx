@@ -31,11 +31,7 @@ import {
   buildSetFeeBpsTx,
   buildWithdrawTx,
 } from "../tx/admin";
-
-const PROTOCOL_CONFIG_ID = import.meta.env.VITE_PROTOCOL_CONFIG_ID as
-  | string
-  | undefined;
-const TREASURY_ID = import.meta.env.VITE_TREASURY_ID as string | undefined;
+import { PROTOCOL_CONFIG_ID, TREASURY_ID } from "../config";
 
 function scaleRaw(raw: string, decimals: number | null): string {
   if (decimals === null) return raw;
@@ -441,8 +437,8 @@ function SetFeeForm({
       </div>
       {configMissing && (
         <div className="admin-empty">
-          <code>VITE_PROTOCOL_CONFIG_ID</code> is not set — cannot target the
-          shared <code>ProtocolConfig</code>.
+          No deployment is configured for this environment — cannot target
+          the shared <code>ProtocolConfig</code>.
         </div>
       )}
       <div className="admin-grid">
@@ -506,8 +502,8 @@ function TreasuryForms({
       </div>
       {treasuryMissing && (
         <div className="admin-empty">
-          <code>VITE_TREASURY_ID</code> is not set — cannot target the shared{" "}
-          <code>Treasury</code>.
+          No deployment is configured for this environment — cannot target
+          the shared <code>Treasury</code>.
         </div>
       )}
       <div className="admin-grid">
