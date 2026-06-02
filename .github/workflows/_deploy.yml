@@ -37,6 +37,11 @@ on:
         required: false
         type: boolean
         default: false
+      ref:
+        description: 'Git ref/SHA to check out for build + deploy bundle. Empty = the commit that triggered the run (normal path). The redeploy-contract workflow passes the commit it just pushed so the rebuilt images bake the new deployments.json.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -60,7 +65,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # need history for the diff range
+          ref: ${{ inputs.ref }}   # empty = triggering commit; redeploy passes its new commit
+          fetch-depth: 0           # need history for the diff range
 
       - id: tag
         env:
@@ -112,6 +118,8 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}   # empty = triggering commit; redeploy passes its new commit
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -149,6 +157,8 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}   # empty = triggering commit; redeploy passes its new commit
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:

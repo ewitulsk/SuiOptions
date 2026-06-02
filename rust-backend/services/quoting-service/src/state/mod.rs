@@ -71,7 +71,7 @@ pub struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
-        // Default cap matches `Config::default().max_inflight_rfqs_global`.
+        // Default cap matches `default_max_inflight_global()` in config.
         // `AppState::with_global_rfq_cap` lets `main.rs` override at boot.
         Self::with_global_rfq_cap(256)
     }

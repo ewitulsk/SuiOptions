@@ -8,7 +8,7 @@
 //! in-process without touching the filesystem.
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -26,7 +26,11 @@ pub struct Config {
     pub ping_interval: Duration,
     /// Domain-separator bytes the on-chain `ProtocolConfig.protocol_id`
     /// holds — used to short-circuit-reject quotes whose `protocol_id` is
-    /// wrong before the chain has to.
+    /// wrong before the chain has to. Resolved at load time from
+    /// `deployments.json` (the AdminCap object id, exactly as the contract
+    /// derives it in `admin.move::init` and the mm-bot signs it), so it
+    /// stays in lockstep with the deployment instead of a hand-copied
+    /// string.
     pub protocol_id: Vec<u8>,
     /// Max concurrent in-flight RFQ orchestrations per retail connection.
     /// A misbehaving client can otherwise spawn one tokio task per RFQ
@@ -37,23 +41,9 @@ pub struct Config {
     pub max_inflight_rfqs_global: usize,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            bind_addr: "127.0.0.1:9002".parse().unwrap(),
-            indexer_url: "ws://127.0.0.1:9001/".to_string(),
-            rfq_window: Duration::from_secs(2),
-            ping_interval: Duration::from_secs(15),
-            protocol_id: b"sui-options-protocol-v0".to_vec(),
-            max_inflight_rfqs_per_session: 16,
-            max_inflight_rfqs_global: 256,
-        }
-    }
-}
-
 /// On-disk TOML shape. Kept separate from [`Config`] so the public type can
 /// stay ergonomic (`Duration`, `Vec<u8>`) while the file stays human-friendly
-/// (millis as integers, protocol_id as a string).
+/// (millis as integers, network slot as a name).
 #[derive(Debug, Deserialize)]
 struct FileConfig {
     bind_addr: SocketAddr,
@@ -61,9 +51,14 @@ struct FileConfig {
     rfq_window_ms: u64,
     #[serde(default = "default_ping_interval_secs")]
     ping_interval_secs: u64,
-    /// Either a UTF-8 string (the common case — domain separators are
-    /// human-readable) or a `0x`-prefixed hex blob.
-    protocol_id: String,
+    /// Which slot in `deployments.json` to resolve `protocol_id` from.
+    /// Accepted values: `mainnet`, `testnet`, `devnet` (case-insensitive).
+    network: String,
+    /// Path to `deployments.json`. Relative paths resolve from the
+    /// process's working directory — the container's `WORKDIR /app`
+    /// matches the image's `/app/deployments.json`.
+    #[serde(default = "default_deployments_path")]
+    deployments_path: PathBuf,
     #[serde(default = "default_max_inflight_per_session")]
     max_inflight_rfqs_per_session: usize,
     #[serde(default = "default_max_inflight_global")]
@@ -72,6 +67,10 @@ struct FileConfig {
 
 fn default_ping_interval_secs() -> u64 {
     15
+}
+
+fn default_deployments_path() -> PathBuf {
+    PathBuf::from("deployments.json")
 }
 
 fn default_max_inflight_per_session() -> usize {
@@ -98,19 +97,27 @@ impl Config {
             indexer_url: file.indexer_url,
             rfq_window: Duration::from_millis(file.rfq_window_ms),
             ping_interval: Duration::from_secs(file.ping_interval_secs),
-            protocol_id: parse_protocol_id(&file.protocol_id)?,
+            protocol_id: resolve_protocol_id(&file.deployments_path, &file.network)?,
             max_inflight_rfqs_per_session: file.max_inflight_rfqs_per_session,
             max_inflight_rfqs_global: file.max_inflight_rfqs_global,
         })
     }
 }
 
-fn parse_protocol_id(s: &str) -> Result<Vec<u8>> {
-    if let Some(hex_body) = s.strip_prefix("0x") {
-        hex::decode(hex_body).with_context(|| format!("protocol_id is not valid hex: {s:?}"))
-    } else {
-        Ok(s.as_bytes().to_vec())
-    }
+/// Read `deployments.json` and derive `protocol_id` for `network` exactly
+/// as the chain does (`admin.move::init`: the AdminCap object id as bytes)
+/// and the mm-bot does (`NetworkDeployment::protocol_id_bytes`). Keeping
+/// all three on the same source is what prevents `ProtocolMismatch`
+/// rejections after a redeploy.
+fn resolve_protocol_id(deployments_path: &Path, network: &str) -> Result<Vec<u8>> {
+    let dep = deployments::Deployments::load(deployments_path)?;
+    let net = dep.for_network(network).with_context(|| {
+        format!(
+            "resolving network {network} in {}",
+            deployments_path.display()
+        )
+    })?;
+    net.protocol_id_bytes()
 }
 
 #[cfg(test)]
@@ -118,28 +125,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_string_protocol_id() {
-        assert_eq!(parse_protocol_id("hello").unwrap(), b"hello".to_vec());
-    }
-
-    #[test]
-    fn parses_hex_protocol_id() {
-        assert_eq!(parse_protocol_id("0xdeadbeef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
-    }
-
-    #[test]
     fn loads_toml_round_trip() {
+        // protocol_id is the AdminCap object id, byte-for-byte.
+        let admin_cap = "0xda7ebab81868f7654daabf99c7e99dd44d5a9fb0da5ff179e5a0341276559a16";
+        let expected = hex::decode(admin_cap.trim_start_matches("0x")).unwrap();
+
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("qs-config-{}.toml", std::process::id()));
+        let pid = std::process::id();
+        let deployments_path = dir.join(format!("qs-deployments-{pid}.json"));
+        std::fs::write(
+            &deployments_path,
+            format!(
+                r#"{{
+  "mainnet": null,
+  "testnet": {{
+    "package_info": {{
+      "packageId": "0x183ea56e98cb03af50bf3db7328035ac7ec94bb8dc11026d43a2c1ad641056b6",
+      "adminCapId": "{admin_cap}",
+      "protocolConfigId": "0xeb3ea89b93a627ddccce5e746a5e11d2833c20640fadadc732e2b0ae04f10b6f",
+      "upgradeCapId": "0x681818aa5c1176a5c9c0d49e6f90211c63537d30ab7356b49f545b66f7fbfea0",
+      "publishDigest": "ycZcKEXGMyX13zjba3zM2g7T8bH1dsWWSznkpKLJ2ND",
+      "deployer": "0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865",
+      "deployedAt": "2026-06-02T02:51:48.574422195+00:00",
+      "network": "testnet"
+    }}
+  }},
+  "devnet": null
+}}"#
+            ),
+        )
+        .unwrap();
+
+        let path = dir.join(format!("qs-config-{pid}.toml"));
         std::fs::write(
             &path,
-            r#"
+            format!(
+                r#"
 bind_addr     = "127.0.0.1:9999"
 indexer_url   = "ws://example.com/feed"
 rfq_window_ms = 1500
 ping_interval_secs = 20
-protocol_id   = "test-domain"
+network       = "testnet"
+deployments_path = "{}"
 "#,
+                deployments_path.display()
+            ),
         )
         .unwrap();
         let cfg = Config::load(&path).unwrap();
@@ -147,10 +177,11 @@ protocol_id   = "test-domain"
         assert_eq!(cfg.indexer_url, "ws://example.com/feed");
         assert_eq!(cfg.rfq_window, Duration::from_millis(1500));
         assert_eq!(cfg.ping_interval, Duration::from_secs(20));
-        assert_eq!(cfg.protocol_id, b"test-domain".to_vec());
+        assert_eq!(cfg.protocol_id, expected);
         // Defaults apply when keys are missing.
         assert_eq!(cfg.max_inflight_rfqs_per_session, 16);
         assert_eq!(cfg.max_inflight_rfqs_global, 256);
         std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&deployments_path).ok();
     }
 }
