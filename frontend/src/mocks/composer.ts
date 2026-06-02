@@ -1,12 +1,14 @@
 // Composer state.
 //
-// Strikes are now live (sourced from api-service /buckets via useBuckets()).
-// Everything else — wallet balances, spot price, MM quotes — is still mocked
-// pending real wiring. The hook keeps a single return shape so UI components
-// don't change as more pieces become live.
+// Fully live: strikes + RFQ quotes come from api-service / quoting-service,
+// spot from Pyth, wallet balances from on-chain `getBalance`, and the bucket
+// cursor/queue from the `/buckets` response. The hook keeps a single return
+// shape so UI components don't change.
 import { useEffect, useMemo, useState } from "react";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useBuckets } from "../api/useBuckets";
+import { useCoinBalance } from "../api/useCoinBalance";
+import { usePythPrice } from "../api/usePythPrice";
 import { useRfq } from "../api/useRfq";
 import type { Series } from "../api/client";
 import type { RfqQuoteEntry, Side as ProtocolSide } from "../api/quoting";
@@ -19,17 +21,6 @@ import type {
   View,
 } from "../types";
 
-// Used to compute mocked premiums by tile position. Real on-chain strikes
-// drive the tile labels; these drive the premium math so the displayed
-// premiums look the same as before this hook went live.
-const MOCK_PREMIUM_STRIKES = [82000, 84000, 85000, 88000, 94000, 95000];
-
-function mockPremiumPerUnit(spot: number, strike: number): number {
-  const intrinsic = Math.max(0, spot - strike);
-  const timeValue = Math.max(0, (1 - Math.abs(spot - strike) / spot) * spot * 0.025);
-  return Math.max(intrinsic + timeValue, 0.001);
-}
-
 function formatExpiry(iso: string): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -41,6 +32,12 @@ function shortenId(id: string): string {
   const s = id.startsWith("0x") ? id.slice(2) : id;
   if (s.length <= 8) return `0x${s}`;
   return `0x${s.slice(0, 4)}…${s.slice(-4)}`;
+}
+
+/** Raw smallest-units → display units. `decimals === null` → unscaled. */
+function scaleRaw(raw: string, decimals: number | null): number {
+  if (decimals === null) return Number(raw);
+  return Number(raw) / 10 ** decimals;
 }
 
 /**
@@ -100,6 +97,8 @@ export type ComposerState = {
   connected: boolean;
   address: string | null;
   spot: number;
+  /** True when a feed is expected but no Pyth price has arrived yet. */
+  spotUnavailable: boolean;
   amount: number;
   setAmount: (n: number) => void;
   selectedIdx: number;
@@ -145,31 +144,15 @@ export function useComposerState({
   const [view, setView] = useState<View>(initialView);
   const account = useCurrentAccount();
   const connected = !!account;
-  const [spot, setSpot] = useState(79083.44);
+  const wallet = account?.address ?? null;
   const [amount, setAmount] = useState(initialAmount);
   const [selectedIdx, setSelectedIdx] = useState(initialIdx);
   const [confirmStage, setConfirmStage] = useState<ConfirmStage>(null);
   const [confirmSummary, setConfirmSummary] = useState<ConfirmSummary | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  const [bucket] = useState<Bucket>({ cursor: 0.84, queued: 0.42, cap: 3.0 });
-
-  const btcBalance = 0.4321;
-  const usdcBalance = 5000.0;
-
-  // Tick spot
-  useEffect(() => {
-    const t = setInterval(() => {
-      setSpot((s) => +(s + (Math.random() - 0.5) * s * 0.001).toFixed(2));
-    }, 4000);
-    return () => clearInterval(t);
-  }, []);
-
   // Live strikes: user picks (asset, expiry); we look up the matching series
-  // from the api-service response. Premiums stay mocked until the quoting
-  // service is wired in — we compute them from a parallel mock strike grid
-  // indexed by position so they don't blow up when on-chain test strikes
-  // happen to be tiny (e.g. $0.13).
+  // from the api-service response.
   const bucketsQuery = useBuckets();
   // SO-69: the writer screen hides invalidated buckets — admin froze them
   // and new writes would revert. Series with no remaining buckets after
@@ -237,6 +220,19 @@ export function useComposerState({
     );
   }, [seriesList, selectedAsset, selectedExpiryMs]);
 
+  // Spot via Pyth, keyed by the selected asset symbol (e.g. "TBTC"). `null`
+  // until the first price arrives, or if the symbol has no mapped feed.
+  const live = usePythPrice(selectedAsset);
+  const spot = live?.price ?? 0;
+  const spotUnavailable = selectedAsset !== null && live === null;
+
+  // Wallet balances from on-chain `getBalance`, scaled by each side's
+  // decimals. Resolve coin types from the selected series.
+  const underlyingBal = useCoinBalance(wallet, series?.asset_coin_type ?? null);
+  const settlementBal = useCoinBalance(wallet, series?.settlement_coin_type ?? null);
+  const btcBalance = scaleRaw(underlyingBal.data ?? "0", series?.asset_decimals ?? null);
+  const usdcBalance = scaleRaw(settlementBal.data ?? "0", series?.settlement_decimals ?? null);
+
   const settlementSymbol = series?.settlement_symbol ?? "USDC";
   const liveStrikes: number[] = useMemo(
     () =>
@@ -246,23 +242,18 @@ export function useComposerState({
     [series],
   );
 
+  // Per-tile premium isn't known until an MM quotes the (bucket, amount):
+  // the live premium comes from the RFQ feed (`bestPremium`), not a synthetic
+  // per-strike grid. Tiles show a placeholder until a quote arrives.
   const strikes = useMemo<Strike[]>(
     () =>
-      liveStrikes.map((strike, idx) => {
-        // Premium math is mocked — anchor it to a synthetic strike at this
-        // tile's position so values stay in the same range as before
-        // regardless of the real on-chain strike.
-        const mockStrike = MOCK_PREMIUM_STRIKES[idx % MOCK_PREMIUM_STRIKES.length];
-        const perUnit = mockPremiumPerUnit(spot, mockStrike);
-        const total = perUnit * amount;
-        return {
-          strike,
-          perUnit,
-          premiumDisplay: `${total.toFixed(2)} ${settlementSymbol}`,
-          premium: total,
-        };
-      }),
-    [spot, amount, liveStrikes, settlementSymbol],
+      liveStrikes.map((strike) => ({
+        strike,
+        perUnit: 0,
+        premium: 0,
+        premiumDisplay: "—",
+      })),
+    [liveStrikes],
   );
 
   // Clamp selection when the strike list shrinks/grows underneath us
@@ -279,20 +270,17 @@ export function useComposerState({
     strike: 0,
     perUnit: 0,
     premium: 0,
-    premiumDisplay: `0.00 ${settlementSymbol}`,
+    premiumDisplay: "—",
   };
   const selected: Strike = strikes[selectedIdx] ?? strikes[0] ?? placeholderStrike;
-  const insufficientBtc = amount > btcBalance;
-  const insufficientUsdc = (selected?.premium ?? 0) > usdcBalance;
-  const insufficient = view === "writer" ? insufficientBtc : insufficientUsdc;
 
   const bucketsLoading = bucketsQuery.isLoading;
   const bucketsEmpty = !bucketsLoading && strikes.length === 0;
 
   // Real RFQ flow: when the user picks (asset, expiry, strike) and types
-  // an amount, send an RFQRequest to the quoting service over WS. Each
-  // request shows up in the `rfq-monitor` tool. The response — already
-  // sorted best-price-first for `view` — drives the on-screen quote feed.
+  // an amount, send an RFQRequest to the quoting service over WS. The
+  // response — already sorted best-price-first for `view` — drives the
+  // on-screen quote feed and the headline premium.
   const selectedBucketId: string | null = useMemo(() => {
     if (!series) return null;
     return (
@@ -323,7 +311,27 @@ export function useComposerState({
     [rfqEntries, series?.settlement_decimals],
   );
 
-  const bestPremium = quotes[0]?.premium ?? (selected?.premium ?? 0);
+  const bestPremium = quotes[0]?.premium ?? 0;
+
+  // Insufficiency uses real balances. Writer supplies the underlying
+  // (`amount`); trader pays the live premium.
+  const insufficientBtc = amount > btcBalance;
+  const insufficientUsdc = bestPremium > usdcBalance;
+  const insufficient = view === "writer" ? insufficientBtc : insufficientUsdc;
+
+  // Tideline state from the selected bucket's live cursor + total_written.
+  // `queued` is the amount written ahead of (but not yet exercised before)
+  // a new write, which lands at `total_written`. `cap` extends past the new
+  // write so its zone stays visible and the bar never divides by zero.
+  const bucket: Bucket = useMemo(() => {
+    const dec = series?.asset_decimals ?? null;
+    const b = series?.buckets.find((x) => x.bucket_id === selectedBucketId) ?? null;
+    const cursor = b ? (b.exercise_cursor ?? scaleRaw(b.exercise_cursor_raw, dec)) : 0;
+    const totalWritten = b ? (b.total_written ?? scaleRaw(b.total_written_raw, dec)) : 0;
+    const queued = Math.max(0, totalWritten - cursor);
+    const cap = totalWritten + amount > 0 ? totalWritten + amount : 1;
+    return { cursor, queued, cap };
+  }, [series, selectedBucketId, amount]);
 
   const submit = () => {
     if (insufficient || !connected || quotes.length === 0) return;
@@ -354,8 +362,8 @@ export function useComposerState({
     if (s) {
       setToast(
         view === "writer"
-          ? `position opened · +${s.premium.toFixed(2)} USDC received`
-          : `call purchased · ${s.amount.toFixed(4)} BTC strike $${s.strike.toLocaleString("en-US")}`,
+          ? `position opened · +${s.premium.toFixed(2)} ${settlementSymbol} received`
+          : `call purchased · ${s.amount.toFixed(4)} ${series?.asset_symbol ?? "BTC"} strike $${s.strike.toLocaleString("en-US")}`,
       );
       setTimeout(() => setToast(null), 4500);
     }
@@ -367,6 +375,7 @@ export function useComposerState({
     connected,
     address: account?.address ?? null,
     spot,
+    spotUnavailable,
     amount,
     setAmount,
     selectedIdx,
