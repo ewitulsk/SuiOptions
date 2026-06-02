@@ -6,6 +6,7 @@ import { getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { BrowserRouter } from "react-router-dom";
 import "@mysten/dapp-kit/dist/index.css";
 import { App } from "./App";
+import { ENV } from "./config";
 import "./theme";
 import "./styles/aqua.css";
 import "./styles/global.css";
@@ -21,7 +22,7 @@ const queryClient = new QueryClient();
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <SuiClientProvider networks={networkConfig} defaultNetwork="testnet">
+      <SuiClientProvider networks={networkConfig} defaultNetwork={ENV}>
         <WalletProvider autoConnect>
           <BrowserRouter>
             <App />

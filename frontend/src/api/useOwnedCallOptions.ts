@@ -1,6 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSuiClient } from "@mysten/dapp-kit";
 
+import { PACKAGE_ID } from "../config";
+
 /**
  * One `CallOption` object held by the user's wallet. The object id is
  * what gets passed into `bucket::exercise`; `bucket_id` joins this back
@@ -17,18 +19,15 @@ export type OwnedCallOption = {
   amount_raw: string;
 };
 
-const PACKAGE_ID: string | undefined = import.meta.env.VITE_PACKAGE_ID as
-  | string
-  | undefined;
-
 /**
  * Lists `CallOption` objects the wallet currently holds.
  *
- * Requires `VITE_PACKAGE_ID` to be set — the struct-type filter we pass
- * to `suix_getOwnedObjects` is `{package}::call_option::CallOption`,
- * which is package-id-prefixed. Returns an empty array when either
- * `wallet` is null or the env var is missing (so screens render their
- * "no calls owned" empty state instead of crashing).
+ * Requires a deployment for the selected environment — the struct-type
+ * filter we pass to `suix_getOwnedObjects` is
+ * `{package}::call_option::CallOption`, which is package-id-prefixed.
+ * Returns an empty array when either `wallet` is null or no package id is
+ * configured (so screens render their "no calls owned" empty state
+ * instead of crashing).
  */
 export function useOwnedCallOptions(wallet: string | null) {
   const client = useSuiClient();

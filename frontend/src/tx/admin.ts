@@ -21,14 +21,12 @@
 import { Transaction } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
 
-const PACKAGE_ID: string | undefined = import.meta.env.VITE_PACKAGE_ID as
-  | string
-  | undefined;
+import { ENV, PACKAGE_ID } from "../config";
 
 function requirePackage(): string {
   if (!PACKAGE_ID) {
     throw new Error(
-      "VITE_PACKAGE_ID is not set — the admin page cannot build PTBs against the protocol",
+      `No deployment for VITE_ENVIRONMENT="${ENV}" in deployments.json — the admin page cannot build PTBs against the protocol`,
     );
   }
   return PACKAGE_ID;
