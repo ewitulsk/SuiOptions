@@ -1,8 +1,8 @@
 # api-service
 
-HTTP backend for the frontend. Subscribes to the indexer's WS fanout,
-maintains an in-memory view of protocol state, and serves it via REST.
-Holds no funds, signs nothing — strictly a read/query layer.
+HTTP backend for the frontend. Every read is a just-in-time GraphQL query to
+the indexer — api-service holds no protocol state of its own. Holds no funds,
+signs nothing — strictly a read/query layer.
 
 ## Run
 
@@ -11,12 +11,13 @@ cargo run -p api-service
 ```
 
 Config: `services/api-service/config/config.toml`. By default binds
-`127.0.0.1:9003`, subscribes to `ws://127.0.0.1:9001/`, and reads
-`deployments.json` from the workspace root for the testnet network.
+`127.0.0.1:9003` and reads protocol state via the indexer's GraphQL API at
+`indexer_graphql_url` (default `http://127.0.0.1:9002/graphql`). Token
+symbols/decimals come from the token-info service.
 
-The indexer must be running for `/buckets` to return anything — every
-bucket the api-service knows about came from a `BucketCreated` event
-the indexer ingested and forwarded.
+The indexer must be running and caught up for these endpoints to return
+data — every row is sourced from a query against the indexer's materialized
+views or event log.
 
 ## Endpoints
 
@@ -24,7 +25,11 @@ the indexer ingested and forwarded.
 |---|---|---|
 | `GET` | `/health` | Liveness — returns `"ok"`. |
 | `GET` | `/buckets` | Active buckets, grouped by series. See shape below. |
-| `POST` | `/dashboard/positions` | Enrich a wallet's written positions (SO-97). Body `{ "object_ids": ["0x…"] }`. Proxies the indexer GraphQL `positions(objectIds)` query and layers on catalog symbols/decimals + USD strike. Ids the indexer doesn't know yet are omitted (caller renders them degraded). The authoritative id list comes from the wallet (`getOwnedObjects ::position::Position`), not this service. |
+| `GET` | `/positions?wallet=0x…` | `Position` objects held by a wallet (writer side). |
+| `GET` | `/call-token-lots?wallet=0x…` | `WriteExecuted` purchase lots where the wallet was the call-token recipient (buyer provenance). |
+| `POST` | `/dashboard/positions` | Enrich a wallet's written positions (SO-97). Body `{ "object_ids": ["0x…"] }`. Queries the indexer GraphQL `positions(objectIds)` and layers on catalog symbols/decimals + USD strike. Ids the indexer doesn't know yet are omitted (caller renders them degraded). The authoritative id list comes from the wallet (`getOwnedObjects ::position::Position`), not this service. |
+| `GET` | `/indexer/progress` | Proxies the indexer's checkpoint-ingestion progress for the Debug page. |
+| `GET` | `/events?wallet=0x…` | The wallet's activity feed (writes/buys/exercises/claims/deposits/withdraws), newest first, sourced from the indexer's `events(participant:)` query. `tx_hash` is `null` (digest not carried by `IndexedEvent`). |
 
 CORS is configured from `allowed_origins` in the config file. Defaults
 allow `http://localhost:5173` (Vite dev server).
@@ -106,12 +111,10 @@ is still visible but flagged as un-renderable.
 
 ## Architecture notes
 
-- The api-service is a **read model** built from indexer events. It owns
-  no persistence and is safe to restart at any time — the indexer's WS
-  snapshot replays missed events.
-- Source of truth for symbols/decimals is `deployments.json`, read once
-  at startup. Restart the service after a deploy that adds tokens.
-- The WS snapshot the api-service receives at connect is bounded by the
-  indexer's `recent_log_capacity` (default 1024 events). Once the
-  indexer's history exceeds that, a fresh api-service boot may miss
-  older `BucketCreated` events. Tracked separately — see SO-XX.
+- api-service is **stateless**: every endpoint answers from a just-in-time
+  GraphQL query to the indexer, so it's safe to restart at any time and there
+  is no event log to replay.
+- Source of truth for symbols/decimals is the token-info service, fetched at
+  startup. Restart the service after a deploy that adds tokens.
+- If the indexer is unreachable, endpoints fail at request time (`502`)
+  rather than serving stale state.

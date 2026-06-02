@@ -259,7 +259,7 @@ pub(crate) fn strike_raw_to_usd(raw: u128, strike_scale: u8, under_dec: u8, sett
     raw as f64 * 10f64.powi(under_dec as i32 - settle_dec as i32 - strike_scale as i32)
 }
 
-fn iso_millis(ms: i64) -> String {
+pub(crate) fn iso_millis(ms: i64) -> String {
     Utc.timestamp_millis_opt(ms)
         .single()
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
