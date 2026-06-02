@@ -229,33 +229,7 @@ async fn main() -> Result<()> {
     let account_id =
         resolve_account(&cli, &cfg, net, &secrets_loaded, &signer, &pubkey_bytes).await?;
     tracing::info!(account_id = %account_id, "mm account ready");
-
-    // Connect + auth to the quoting service.
-    let mut ws = ws_client::connect(&cfg.quoting_url).await?;
     let account_id_pt = pt_object_id_from_sui(account_id);
-    ws_client::send_json(
-        &mut ws,
-        &MmToService::Hello {
-            payload: MmHelloPayload {
-                roles: cfg.roles.clone(),
-                account_id: account_id_pt,
-                signing_scheme: signer.scheme(),
-                signing_pubkey: pubkey_bytes.clone(),
-            },
-        },
-    )
-    .await?;
-    let challenge = expect_auth_challenge(&mut ws).await?;
-    let sig = signer.sign(&challenge)?;
-    ws_client::send_json(
-        &mut ws,
-        &MmToService::AuthResponse {
-            payload: AuthResponsePayload { signature: sig },
-        },
-    )
-    .await?;
-    expect_auth_ack(&mut ws).await?;
-    tracing::info!("authenticated with quoting service");
 
     // Pyth client + live price cache + rolling-vol buffer. The SSE task
     // owns a tokio task that pushes into the cache; the bootstrap +
@@ -298,7 +272,7 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    // Quote loop.
+    // RFQ pricing context — built once, reused across reconnects.
     let token_recipient = resolve_token_recipient(&cfg, &secrets_loaded)?;
     let protocol_id = net.protocol_id_bytes()?;
     let pricing_cfg = PricingConfig {
@@ -309,139 +283,246 @@ async fn main() -> Result<()> {
         max_price_age: Duration::from_millis(cfg.pyth.max_price_age_ms),
         max_publish_lag: Duration::from_millis(cfg.pyth.max_publish_lag_ms),
     };
+    // nonce is monotonic for the bot's lifetime — keep it across reconnects.
     let mut nonce_counter = now_ms();
-    loop {
-        let frame: ServiceToMm = match ws_client::next_json(&mut ws).await {
-            Ok(f) => f,
+
+    // Connect → authenticate → serve, reconnecting with capped exponential
+    // backoff. A transient auth rejection — the indexer hasn't ingested our
+    // AccountCreated yet (`auth_scheme_unknown`) — or a dropped connection is
+    // expected right after a redeploy, so we keep the process (and its
+    // /health endpoint) alive and retry until the indexer catches up. Only a
+    // permanent auth error (a key/scheme mismatch the indexer will never
+    // accept) is fatal.
+    const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+    const MAX_BACKOFF: Duration = Duration::from_secs(30);
+    let mut backoff = INITIAL_BACKOFF;
+
+    'reconnect: loop {
+        let mut ws = match ws_client::connect(&cfg.quoting_url).await {
+            Ok(ws) => ws,
             Err(e) => {
-                tracing::warn!(error = %e, "ws closed");
-                break;
+                tracing::warn!(error = %e, backoff_s = backoff.as_secs(),
+                    "connect to quoting service failed; retrying");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue 'reconnect;
             }
         };
-        match frame {
-            ServiceToMm::RFQBroadcast {
-                request_id,
-                payload,
-            } => {
-                tracing::debug!(
-                    ?request_id,
-                    strike = %payload.strike,
-                    strike_scale = payload.strike_scale,
-                    expiry_ms = payload.expiry_ms,
-                    write_amount = payload.write_amount,
-                    "received rfq broadcast"
-                );
-                let now = now_ms();
 
-                // Live spot from Pyth, scaled into the bucket's units
-                // (settlement smallest-units per underlying smallest-unit).
-                let spot_scaled = match compute_spot_from_cache(
-                    &price_cache,
-                    underlying_feed,
-                    settlement_feed,
-                    underlying_decimals,
-                    settlement_decimals,
-                    staleness,
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let reason: &'static str = e.as_str();
-                        tracing::debug!(?request_id, reason, "declining: stale market data");
-                        ws_client::send_json(
-                            &mut ws,
-                            &MmToService::Decline {
-                                request_id,
-                                payload: protocol_types::messages::DeclinePayload {
-                                    reason: format!("stale market data: {reason}"),
-                                },
-                            },
-                        )
-                        .await?;
-                        continue;
-                    }
-                };
-                let sigma =
-                    resolve_sigma(vol_buf.read().current_annualized(), cfg.pyth.fallback_vol);
-
-                match price_rfq(&pricing_cfg, &payload, spot_scaled, sigma, now) {
-                    PriceDecision::Quote {
-                        premium,
-                        valid_until_ms,
-                        spot_scaled,
-                        strike_scaled,
-                        t_years,
-                        sigma,
-                        per_unit,
-                    } => {
-                        tracing::debug!(
-                            spot = spot_scaled,
-                            sigma,
-                            strike = strike_scaled,
-                            strike_raw = %payload.strike,
-                            strike_scale = payload.strike_scale,
-                            t_years,
-                            per_unit,
-                            write_amount = payload.write_amount,
-                            premium,
-                            "priced"
-                        );
-                        nonce_counter = nonce_counter.wrapping_add(1);
-                        let quote = Quote {
-                            protocol_id: protocol_id.clone(),
-                            signer_account_id: account_id_pt,
-                            signer_token_recipient: token_recipient,
-                            bucket_id: payload.bucket_id,
-                            write_amount: payload.write_amount,
-                            premium,
-                            valid_until_ms,
-                            nonce: nonce_counter,
-                        };
-                        let bytes = quote.to_bcs_bytes()?;
-                        let sig = signer.sign(&bytes)?;
-                        ws_client::send_json(
-                            &mut ws,
-                            &MmToService::Quote {
-                                request_id,
-                                payload: MmQuotePayload {
-                                    quote,
-                                    signature: sig,
-                                },
-                            },
-                        )
-                        .await?;
-                        tracing::info!(premium, nonce = nonce_counter, "quote sent");
-                    }
-                    PriceDecision::Decline { reason } => {
-                        tracing::debug!(?request_id, %reason, "declining");
-                        ws_client::send_json(
-                            &mut ws,
-                            &MmToService::Decline {
-                                request_id,
-                                payload: protocol_types::messages::DeclinePayload { reason },
-                            },
-                        )
-                        .await?;
-                    }
-                }
+        // Auth handshake: Hello → AuthChallenge → AuthResponse → AuthAck.
+        let hello = MmToService::Hello {
+            payload: MmHelloPayload {
+                roles: cfg.roles.clone(),
+                account_id: account_id_pt,
+                signing_scheme: signer.scheme(),
+                signing_pubkey: pubkey_bytes.clone(),
+            },
+        };
+        if let Err(e) = ws_client::send_json(&mut ws, &hello).await {
+            tracing::warn!(error = %e, "sending Hello failed; reconnecting");
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+            continue 'reconnect;
+        }
+        let challenge = match expect_auth_challenge(&mut ws).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "reading auth challenge failed; reconnecting");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue 'reconnect;
             }
-            ServiceToMm::Ping => {
-                ws_client::send_json(&mut ws, &MmToService::Pong).await?;
+        };
+        let sig = signer.sign(&challenge)?;
+        if let Err(e) = ws_client::send_json(
+            &mut ws,
+            &MmToService::AuthResponse {
+                payload: AuthResponsePayload { signature: sig },
+            },
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "sending AuthResponse failed; reconnecting");
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+            continue 'reconnect;
+        }
+        match expect_auth_ack(&mut ws).await {
+            Ok(AuthVerdict::Ok) => {
+                tracing::info!("authenticated with quoting service");
+                backoff = INITIAL_BACKOFF;
             }
-            ServiceToMm::AccountStateUpdate { .. } => {
-                tracing::trace!("received account state update");
+            Ok(AuthVerdict::Retryable { code, message }) => {
+                tracing::warn!(%code, %message, backoff_s = backoff.as_secs(),
+                    "auth not ready yet (indexer catching up); retrying");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue 'reconnect;
             }
-            ServiceToMm::ReservationConfirmed { .. } => {
-                tracing::trace!("received reservation confirmed");
+            Ok(AuthVerdict::Fatal { code, message }) => {
+                tracing::error!(%code, %message,
+                    "auth permanently rejected — mm-bot signing key/scheme does not match the registered account");
+                anyhow::bail!("auth permanently rejected: {code} — {message}");
             }
-            ServiceToMm::ReservationReleased { .. } => {
-                tracing::trace!("received reservation released");
-            }
-            other => {
-                tracing::debug!(?other, "ignored frame");
+            Err(e) => {
+                tracing::warn!(error = %e, "unexpected response during auth; reconnecting");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue 'reconnect;
             }
         }
+
+        // Serve: price + sign RFQs until the connection drops, then reconnect.
+        'serve: loop {
+            let frame: ServiceToMm = match ws_client::next_json(&mut ws).await {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!(error = %e, "ws closed; reconnecting");
+                    break 'serve;
+                }
+            };
+            match frame {
+                ServiceToMm::RFQBroadcast {
+                    request_id,
+                    payload,
+                } => {
+                    tracing::debug!(
+                        ?request_id,
+                        strike = %payload.strike,
+                        strike_scale = payload.strike_scale,
+                        expiry_ms = payload.expiry_ms,
+                        write_amount = payload.write_amount,
+                        "received rfq broadcast"
+                    );
+                    let now = now_ms();
+
+                    // Live spot from Pyth, scaled into the bucket's units
+                    // (settlement smallest-units per underlying smallest-unit).
+                    let spot_scaled = match compute_spot_from_cache(
+                        &price_cache,
+                        underlying_feed,
+                        settlement_feed,
+                        underlying_decimals,
+                        settlement_decimals,
+                        staleness,
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let reason: &'static str = e.as_str();
+                            tracing::debug!(?request_id, reason, "declining: stale market data");
+                            if let Err(e) = ws_client::send_json(
+                                &mut ws,
+                                &MmToService::Decline {
+                                    request_id,
+                                    payload: protocol_types::messages::DeclinePayload {
+                                        reason: format!("stale market data: {reason}"),
+                                    },
+                                },
+                            )
+                            .await
+                            {
+                                tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
+                                break 'serve;
+                            }
+                            continue 'serve;
+                        }
+                    };
+                    let sigma =
+                        resolve_sigma(vol_buf.read().current_annualized(), cfg.pyth.fallback_vol);
+
+                    match price_rfq(&pricing_cfg, &payload, spot_scaled, sigma, now) {
+                        PriceDecision::Quote {
+                            premium,
+                            valid_until_ms,
+                            spot_scaled,
+                            strike_scaled,
+                            t_years,
+                            sigma,
+                            per_unit,
+                        } => {
+                            tracing::debug!(
+                                spot = spot_scaled,
+                                sigma,
+                                strike = strike_scaled,
+                                strike_raw = %payload.strike,
+                                strike_scale = payload.strike_scale,
+                                t_years,
+                                per_unit,
+                                write_amount = payload.write_amount,
+                                premium,
+                                "priced"
+                            );
+                            nonce_counter = nonce_counter.wrapping_add(1);
+                            let quote = Quote {
+                                protocol_id: protocol_id.clone(),
+                                signer_account_id: account_id_pt,
+                                signer_token_recipient: token_recipient,
+                                bucket_id: payload.bucket_id,
+                                write_amount: payload.write_amount,
+                                premium,
+                                valid_until_ms,
+                                nonce: nonce_counter,
+                            };
+                            let bytes = quote.to_bcs_bytes()?;
+                            let sig = signer.sign(&bytes)?;
+                            if let Err(e) = ws_client::send_json(
+                                &mut ws,
+                                &MmToService::Quote {
+                                    request_id,
+                                    payload: MmQuotePayload {
+                                        quote,
+                                        signature: sig,
+                                    },
+                                },
+                            )
+                            .await
+                            {
+                                tracing::warn!(error = %e, "ws send (quote) failed; reconnecting");
+                                break 'serve;
+                            }
+                            tracing::info!(premium, nonce = nonce_counter, "quote sent");
+                        }
+                        PriceDecision::Decline { reason } => {
+                            tracing::debug!(?request_id, %reason, "declining");
+                            if let Err(e) = ws_client::send_json(
+                                &mut ws,
+                                &MmToService::Decline {
+                                    request_id,
+                                    payload: protocol_types::messages::DeclinePayload { reason },
+                                },
+                            )
+                            .await
+                            {
+                                tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
+                                break 'serve;
+                            }
+                        }
+                    }
+                }
+                ServiceToMm::Ping => {
+                    if let Err(e) = ws_client::send_json(&mut ws, &MmToService::Pong).await {
+                        tracing::warn!(error = %e, "ws send (pong) failed; reconnecting");
+                        break 'serve;
+                    }
+                }
+                ServiceToMm::AccountStateUpdate { .. } => {
+                    tracing::trace!("received account state update");
+                }
+                ServiceToMm::ReservationConfirmed { .. } => {
+                    tracing::trace!("received reservation confirmed");
+                }
+                ServiceToMm::ReservationReleased { .. } => {
+                    tracing::trace!("received reservation released");
+                }
+                other => {
+                    tracing::debug!(?other, "ignored frame");
+                }
+            }
+        }
+
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
-    Ok(())
 }
 
 // -- helpers -------------------------------------------------------------
@@ -545,14 +626,37 @@ async fn expect_auth_challenge(ws: &mut ws_client::WsStream) -> Result<Vec<u8>> 
     }
 }
 
-async fn expect_auth_ack(ws: &mut ws_client::WsStream) -> Result<()> {
+/// Classified outcome of the auth handshake's final ack.
+enum AuthVerdict {
+    /// Authenticated — proceed to serve.
+    Ok,
+    /// The quoting service rejected auth for a reason that resolves on its
+    /// own — chiefly `auth_scheme_unknown` (the indexer hasn't ingested our
+    /// AccountCreated yet). Retry until it catches up.
+    Retryable { code: String, message: String },
+    /// A permanent rejection (`auth_pubkey_mismatch` / `auth_signature_invalid`):
+    /// the registered key/scheme will never match what we present. Fatal —
+    /// retrying can't fix a misconfigured key.
+    Fatal { code: String, message: String },
+}
+
+/// Read the ack frame and classify it. `Err` covers a ws error or an
+/// unexpected frame — the caller treats those as a transient disconnect.
+async fn expect_auth_ack(ws: &mut ws_client::WsStream) -> Result<AuthVerdict> {
     match ws_client::next_json::<ServiceToMm>(ws).await? {
-        ServiceToMm::AuthAck { .. } => Ok(()),
-        ServiceToMm::Error { payload, .. } => Err(anyhow!(
-            "auth rejected: {} — {}",
-            payload.code,
-            payload.message
-        )),
+        ServiceToMm::AuthAck { .. } => Ok(AuthVerdict::Ok),
+        ServiceToMm::Error { payload, .. } => {
+            let code = payload.code;
+            let message = payload.message;
+            // Only these two are permanent; everything else (incl. the
+            // expected `auth_scheme_unknown`) is worth retrying.
+            match code.as_str() {
+                "auth_pubkey_mismatch" | "auth_signature_invalid" => {
+                    Ok(AuthVerdict::Fatal { code, message })
+                }
+                _ => Ok(AuthVerdict::Retryable { code, message }),
+            }
+        }
         other => Err(anyhow!("expected AuthAck, got {:?}", other)),
     }
 }
