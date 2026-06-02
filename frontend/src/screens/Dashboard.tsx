@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { useDashboardState } from "../state/dashboard";
+import { useDashboardState, shortAccount } from "../state/dashboard";
 import { Header } from "../components/Header";
 import { WaveHero } from "../components/WaveHero";
 import { Toast } from "../components/Toast";
@@ -78,13 +78,6 @@ function DashSummary({
         </div>
         <div className="dash-summary__sub">across {writtenCount} positions</div>
       </div>
-      <div className="dash-summary__cell">
-        <div className="dash-summary__label">Avg fill latency</div>
-        <div className="dash-summary__val">
-          142<span className="dash-summary__unit"> ms</span>
-        </div>
-        <div className="dash-summary__sub">MM response time</div>
-      </div>
     </div>
   );
 }
@@ -119,7 +112,11 @@ export function Dashboard() {
         <div className="dash-hero">
           <div className="dash-hero__eyebrow">your account</div>
           <h1 className="dash-hero__title">Dashboard</h1>
-          <div className="dash-hero__addr">connected · 0x9f3a…42b1</div>
+          <div className="dash-hero__addr">
+            {d.connected && d.address
+              ? `connected · ${shortAccount(d.address)}`
+              : "not connected"}
+          </div>
         </div>
 
         <div className="dash-tabs">
@@ -167,18 +164,29 @@ export function Dashboard() {
         />
 
         <div className="dash-list">
-          {d.tab === "owned" &&
-            (d.ownedRows.length === 0
-              ? empty("calls owned")
-              : d.ownedRows.map((p) => (
-                  <OwnedCard key={p.id} p={p} onExercise={d.openExercise} />
-                )))}
-          {d.tab === "written" &&
-            (d.writtenRows.length === 0
-              ? empty("calls written")
-              : d.writtenRows.map((p) => (
-                  <WrittenCard key={p.id} p={p} onClaim={d.openClaim} />
-                )))}
+          {!d.connected ? (
+            <div className="dash-empty">
+              <div className="dash-empty__title">connect your wallet</div>
+              <div className="dash-empty__sub">
+                Connect a wallet to see the calls you've owned and written.
+              </div>
+            </div>
+          ) : (
+            <>
+              {d.tab === "owned" &&
+                (d.ownedRows.length === 0
+                  ? empty("calls owned")
+                  : d.ownedRows.map((p) => (
+                      <OwnedCard key={p.id} p={p} onExercise={d.openExercise} />
+                    )))}
+              {d.tab === "written" &&
+                (d.writtenRows.length === 0
+                  ? empty("calls written")
+                  : d.writtenRows.map((p) => (
+                      <WrittenCard key={p.id} p={p} onClaim={d.openClaim} />
+                    )))}
+            </>
+          )}
         </div>
       </div>
 
