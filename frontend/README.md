@@ -30,3 +30,27 @@ implementation to real Sui SDK / indexer / WSS calls is a contained change.
 - `npm run dev` — Vite dev server on :5173
 - `npm run build` — type-check + production build
 - `npm run typecheck`
+
+## Environment variables
+
+The frontend reads exactly three `VITE_`-prefixed variables. **All three have
+defaults wired for local dev, so none are strictly required** — set them to
+point at a non-local environment. Define them in `frontend/.env.local` (Vite
+loads it automatically; not committed).
+
+| Variable             | Required | Default                  | Purpose |
+| -------------------- | -------- | ------------------------ | ------- |
+| `VITE_ENVIRONMENT`   | No       | `testnet`                | Selects which deployment block to read from `rust-backend/deployments.json`. One of `mainnet` \| `testnet` \| `devnet`. Drives the package / protocol-config / treasury ids (`src/config.ts`) **and** the wallet's default Sui network (`src/main.tsx`). An environment with no published deployment leaves those ids unset and the app falls back to its empty / "no deployment configured" states. |
+| `VITE_API_BASE_URL`  | No       | `http://127.0.0.1:9003`  | Base URL of the Rust `api-service` (REST). |
+| `VITE_QUOTING_WS_URL`| No       | `ws://127.0.0.1:9002/`   | WebSocket URL of the quoting service. |
+
+Contract ids (package, `ProtocolConfig`, `Treasury`) are **not** env vars —
+they come from `deployments.json` keyed by `VITE_ENVIRONMENT`.
+
+Example `frontend/.env.local`:
+
+```
+VITE_ENVIRONMENT=testnet
+VITE_API_BASE_URL=https://api.staging.example.com
+VITE_QUOTING_WS_URL=wss://quotes.staging.example.com/
+```
