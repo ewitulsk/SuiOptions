@@ -44,7 +44,7 @@ export function Composer({ initialView }: Props) {
   const traderCtaLabel = !s.connected
     ? "Connect to buy"
     : s.insufficientUsdc
-      ? `Insufficient USDC · need ${s.selected.premium.toFixed(2)}`
+      ? `Insufficient USDC · need ${s.bestPremium.toFixed(2)}`
       : s.quotes.length === 0
         ? "Waiting on MMs…"
         : `Buy call · pay ${s.bestPremium.toFixed(2)} USDC →`;
@@ -114,10 +114,16 @@ export function Composer({ initialView }: Props) {
                 ? "INSUFFICIENT BTC BALANCE"
                 : ""
               : s.insufficientUsdc
-                ? `INSUFFICIENT USDC · NEED ${s.selected.premium.toFixed(2)}`
+                ? `INSUFFICIENT USDC · NEED ${s.bestPremium.toFixed(2)}`
                 : ""
           }
         />
+
+        {s.view === "trader" && s.spotUnavailable && (
+          <div className="composer-status">
+            spot price unavailable — live feed not yet connected for {s.selectedAsset}
+          </div>
+        )}
 
         {s.view === "writer" && <Tideline bucket={s.bucket} amount={s.amount} />}
 
