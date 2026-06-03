@@ -3,6 +3,7 @@ import { Composer } from "./screens/Composer";
 import { Dashboard } from "./screens/Dashboard";
 import { Activity } from "./screens/Activity";
 import { Admin } from "./screens/Admin";
+import { Faucet } from "./screens/Faucet";
 
 export function App() {
   return (
@@ -15,6 +16,8 @@ export function App() {
       <Route path="/activity" element={<Activity />} />
       {/* Admin self-gates on AdminCap and redirects non-admins to /earn. */}
       <Route path="/admin" element={<Admin />} />
+      {/* Faucet is testnet-only; on other envs it renders a "testnet only" notice. */}
+      <Route path="/faucet" element={<Faucet />} />
       <Route path="*" element={<Navigate to="/earn" replace />} />
     </Routes>
   );

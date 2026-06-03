@@ -10,6 +10,7 @@ import {
 } from "@mysten/dapp-kit";
 import { useThemeMode, toggleMode } from "../theme";
 import { useAdminCap } from "../api/useAdminCap";
+import { ENV } from "../config";
 
 function shortAddress(addr: string): string {
   if (addr.length <= 12) return addr;
@@ -192,6 +193,14 @@ export function Header() {
         >
           Activity
         </button>
+        {ENV === "testnet" && (
+          <button
+            className={pathname === "/faucet" ? "is-active" : ""}
+            onClick={() => navigate("/faucet")}
+          >
+            Faucet
+          </button>
+        )}
         {isAdmin && (
           <button
             className={pathname === "/admin" ? "is-active" : ""}
