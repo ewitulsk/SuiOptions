@@ -33,6 +33,11 @@ export function Composer({ initialView }: Props) {
   const s = useComposerState({ initialView });
   const [feedOpen, setFeedOpen] = useState(false);
 
+  // The trader (Buy) flow isn't wired to a contract yet (SO-90). Lock the
+  // screen behind a "Coming Soon" scrim — the UI stays visible behind it so
+  // nav still works, but the composer can't be interacted with or submitted.
+  const comingSoon = s.view === "trader";
+
   const writerCtaLabel = !s.connected
     ? "Connect to write"
     : s.insufficient
@@ -54,7 +59,10 @@ export function Composer({ initialView }: Props) {
       <WaveHero />
       <Header />
 
-      <div className="app__wrap">
+      <div
+        className={comingSoon ? "app__wrap app__wrap--locked" : "app__wrap"}
+        aria-hidden={comingSoon}
+      >
         <LiveBuckets />
 
         <BucketBar
@@ -146,6 +154,7 @@ export function Composer({ initialView }: Props) {
           className="cta"
           onClick={s.submit}
           disabled={
+            comingSoon ||
             !s.connected ||
             s.insufficient ||
             s.quotes.length === 0 ||
@@ -158,6 +167,16 @@ export function Composer({ initialView }: Props) {
           {s.view === "writer" ? writerCtaLabel : traderCtaLabel}
         </button>
       </div>
+
+      {comingSoon && (
+        <div className="coming-soon" role="status">
+          <div className="coming-soon__card">
+            <div className="coming-soon__eyebrow">trader flow</div>
+            <h2>Buying calls — coming soon</h2>
+            <p>Writing is live on the Earn screen. Buying is up next.</p>
+          </div>
+        </div>
+      )}
 
       {feedOpen ? (
         <QuoteFeed quotes={s.quotes} view={s.view} onClose={() => setFeedOpen(false)} />
