@@ -144,7 +144,9 @@ export function Composer({ initialView }: Props) {
             s.insufficient ||
             s.quotes.length === 0 ||
             s.bucketsLoading ||
-            s.bucketsEmpty
+            s.bucketsEmpty ||
+            s.confirmStage === "signing" ||
+            s.confirmStage === "broadcast"
           }
         >
           {s.view === "writer" ? writerCtaLabel : traderCtaLabel}
