@@ -72,6 +72,14 @@ export function OwnedCard({
           <div className="pos-card__metric-sub">
             paid {p.premiumPaid.toFixed(2)} USDC · {p.boughtFrom}
           </div>
+          <div className="pos-card__metric-sub">
+            exercise cost{" "}
+            {(p.amount * p.strike).toLocaleString("en-US", {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            })}{" "}
+            USDC
+          </div>
         </div>
         <div className="pos-card__metric">
           <div className="pos-card__metric-label">Spot now</div>
