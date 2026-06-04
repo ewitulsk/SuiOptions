@@ -17,7 +17,8 @@ use protocol_types::ids::{ObjectId, SuiAddress};
 use crate::store::{AccountState, BucketState, PositionState};
 
 use super::schema::{
-    account_balances, accounts, buckets, indexed_events, indexer_progress, positions,
+    account_balances, accounts, buckets, event_participants, indexed_events, indexer_progress,
+    positions,
 };
 
 // ---------- indexer_progress ----------
@@ -57,6 +58,19 @@ pub struct NewIndexedEventRow {
     pub timestamp_ms: i64,
     pub event_type: String,
     pub payload: serde_json::Value,
+}
+
+// ---------- event_participants ----------
+
+/// One (event, address, role) edge — every address an event touches, so the
+/// generalized `events` query can filter by "involves address X in any role"
+/// without OR-ing across payload keys. Insert-only.
+#[derive(Queryable, Insertable, Debug, Clone)]
+#[diesel(table_name = event_participants)]
+pub struct EventParticipantRow {
+    pub sequence: i64,
+    pub address: String,
+    pub role: String,
 }
 
 impl IndexedEventRow {

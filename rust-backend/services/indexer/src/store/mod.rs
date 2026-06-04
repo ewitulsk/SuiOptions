@@ -26,7 +26,8 @@ use protocol_types::events::{
 use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::db::models::{
-    u128_to_bigdecimal, u64_to_bigdecimal, AccountBalanceRow, AccountRow, BucketRow, PositionRow,
+    u128_to_bigdecimal, u64_to_bigdecimal, AccountBalanceRow, AccountRow, BucketRow,
+    EventParticipantRow, PositionRow,
 };
 use crate::db::{CheckpointBatch, EventBuild, HydratedViews};
 
@@ -203,6 +204,8 @@ impl Store {
                 timestamp_ms as i64,
                 &mut db_batch,
             );
+            // Per-event participant edges for the `events(participant:)` filter.
+            collect_participants(&inner, &event, sequence as i64, &mut db_batch);
             db_batch.events.push(EventBuild::new_event_row(
                 sequence as i64,
                 checkpoint as i64,
@@ -325,6 +328,69 @@ impl Store {
 
     pub fn position_count(&self) -> usize {
         self.inner.read().positions.len()
+    }
+}
+
+fn account_owner_hex(inner: &Inner, account_id: &ObjectId) -> Option<String> {
+    inner
+        .accounts
+        .get(account_id)
+        .and_then(|a| a.owner)
+        .map(|o| o.to_hex())
+}
+
+/// Fan an event out to the addresses it touches, each tagged with a role, so
+/// the generalized `events(participant:)` query can match "involves address X
+/// in ANY role" with a single indexed lookup. Account-scoped events resolve
+/// the owner wallet via the in-memory accounts view.
+fn collect_participants(
+    inner: &Inner,
+    event: &ChainEvent,
+    sequence: i64,
+    batch: &mut CheckpointBatch,
+) {
+    let mut push = |address: String, role: &str| {
+        batch.event_participants.push(EventParticipantRow {
+            sequence,
+            address,
+            role: role.to_string(),
+        });
+    };
+    match event {
+        ChainEvent::WriteExecuted(w) => {
+            push(w.position_recipient.to_hex(), "position_recipient");
+            push(w.call_token_recipient.to_hex(), "call_token_recipient");
+            push(w.signer_token_recipient.to_hex(), "signer_token_recipient");
+            push(w.executor.to_hex(), "executor");
+            if let Some(o) = account_owner_hex(inner, &w.signer_account_id) {
+                push(o, "signer_account_owner");
+            }
+        }
+        ChainEvent::Exercised(e) => push(e.exerciser.to_hex(), "exerciser"),
+        ChainEvent::Redeemed(r) => push(r.redeemer.to_hex(), "redeemer"),
+        ChainEvent::ExpiredOptionBurned(b) => push(b.burner.to_hex(), "burner"),
+        ChainEvent::BucketInvalidated(i) => push(i.admin.to_hex(), "admin"),
+        ChainEvent::BucketRevalidated(r) => push(r.admin.to_hex(), "admin"),
+        ChainEvent::AccountCreated(a) => push(a.owner.to_hex(), "account_owner"),
+        ChainEvent::AccountDeposit(d) => {
+            if let Some(o) = account_owner_hex(inner, &d.account_id) {
+                push(o, "account_owner");
+            }
+        }
+        ChainEvent::AccountWithdraw(w) => {
+            if let Some(o) = account_owner_hex(inner, &w.account_id) {
+                push(o, "account_owner");
+            }
+        }
+        ChainEvent::SigningKeyRotated(r) => {
+            if let Some(o) = account_owner_hex(inner, &r.account_id) {
+                push(o, "account_owner");
+            }
+        }
+        ChainEvent::TreasuryWithdrawn(t) => push(t.recipient.to_hex(), "treasury_recipient"),
+        ChainEvent::BucketCreated(_)
+        | ChainEvent::BucketCleaned(_)
+        | ChainEvent::FeeUpdated(_) => {}
     }
 }
 
@@ -814,5 +880,43 @@ mod tests {
         assert_eq!(snap.events.len(), 2);
         assert_eq!(snap.events[0].sequence, 4);
         assert_eq!(snap.events[1].sequence, 5);
+    }
+
+    #[test]
+    fn stage_batch_fans_out_event_participants() {
+        let store = Store::default();
+        let writer = SuiAddress::new([0x77; 32]);
+        let buyer = SuiAddress::new([0x22; 32]);
+        let we = ChainEvent::WriteExecuted(WriteExecuted {
+            bucket_id: ObjectId::new([0x11; 32]),
+            signer_account_id: ObjectId::ZERO,
+            signer_token_recipient: buyer,
+            executor: writer,
+            position_id: ObjectId::new([0x88; 32]),
+            position_recipient: writer,
+            call_option_id: ObjectId::new([0x99; 32]),
+            call_token_recipient: buyer,
+            write_amount: 10,
+            gross_premium: 5,
+            fee: 0,
+            net_premium: 5,
+            range_start: 0,
+            range_end: 10,
+            nonce: 1,
+        });
+        let staged = store
+            .stage_batch(1, 1_000, vec![(we, "0xdigest".to_string(), 0)])
+            .unwrap();
+        let parts = &staged.db_batch.event_participants;
+        let has = |addr: &SuiAddress, role: &str| {
+            parts.iter().any(|p| p.address == addr.to_hex() && p.role == role)
+        };
+        assert!(has(&writer, "position_recipient"));
+        assert!(has(&writer, "executor"));
+        assert!(has(&buyer, "call_token_recipient"));
+        assert!(has(&buyer, "signer_token_recipient"));
+        // Account owner unknown (no AccountCreated) → no signer_account_owner row.
+        assert!(!parts.iter().any(|p| p.role == "signer_account_owner"));
+        assert_eq!(staged.db_batch.events.len(), 1);
     }
 }

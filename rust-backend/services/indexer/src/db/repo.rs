@@ -24,9 +24,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use bigdecimal::BigDecimal;
 use chrono::Utc;
-use diesel::pg::PgConnection;
+use diesel::pg::{Pg, PgConnection};
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, PooledConnection};
+use diesel::sql_types::{Bool, Jsonb};
+use diesel::IntoSql;
 use tracing::{debug, info, trace};
 
 use protocol_types::events::{ChainEvent, IndexedEvent};
@@ -36,10 +38,11 @@ use crate::store::{AccountState, BucketState, PositionState};
 
 use super::models::{
     account_row_into_state, bigdecimal_to_u128, event_type_tag, AccountBalanceRow, AccountRow,
-    BucketRow, IndexedEventRow, NewIndexedEventRow, PositionRow, ProgressRow,
+    BucketRow, EventParticipantRow, IndexedEventRow, NewIndexedEventRow, PositionRow, ProgressRow,
 };
 use super::schema::{
-    account_balances, accounts, buckets, indexed_events, indexer_progress, positions,
+    account_balances, accounts, buckets, event_participants, indexed_events, indexer_progress,
+    positions,
 };
 use super::DbPool;
 
@@ -60,6 +63,8 @@ pub struct CheckpointBatch {
     pub position_upserts: Vec<PositionRow>,
     /// Positions to drop (`Redeemed` removes them). Keyed `(bucket_id_hex, range_start)`.
     pub position_deletes: Vec<(String, BigDecimal)>,
+    /// Per-event (address, role) edges for the `participant` query filter.
+    pub event_participants: Vec<EventParticipantRow>,
 }
 
 impl CheckpointBatch {
@@ -73,6 +78,7 @@ impl CheckpointBatch {
             buckets: Vec::new(),
             position_upserts: Vec::new(),
             position_deletes: Vec::new(),
+            event_participants: Vec::new(),
         }
     }
 
@@ -83,6 +89,7 @@ impl CheckpointBatch {
             && self.buckets.is_empty()
             && self.position_upserts.is_empty()
             && self.position_deletes.is_empty()
+            && self.event_participants.is_empty()
     }
 }
 
@@ -154,6 +161,16 @@ impl Repo {
                     .on_conflict_do_nothing()
                     .execute(conn)
                     .context("inserting indexed_events")?;
+            }
+
+            if !batch.event_participants.is_empty() {
+                // Inserted after indexed_events (FK). on_conflict_do_nothing
+                // keeps checkpoint reprocessing idempotent.
+                diesel::insert_into(event_participants::table)
+                    .values(&batch.event_participants)
+                    .on_conflict_do_nothing()
+                    .execute(conn)
+                    .context("inserting event_participants")?;
             }
 
             for acct in &batch.accounts {
@@ -403,5 +420,174 @@ impl Repo {
             .load::<(PositionRow, BucketRow)>(&mut conn)
             .context("loading positions by object_ids")
     }
+
+    /// Generalized event query (SO-97): compile the `EventFilter` AST to a
+    /// parameterized WHERE over `indexed_events`, ordered by sequence with
+    /// cursor pagination. Wrapped in a transaction with a `statement_timeout`
+    /// so a pathological filter can't run away even though the API is internal.
+    pub fn query_events(&self, q: EventQuery) -> Result<Vec<IndexedEventRow>> {
+        let mut conn = self.conn()?;
+        conn.transaction::<Vec<IndexedEventRow>, anyhow::Error, _>(|conn| {
+            diesel::sql_query("SET LOCAL statement_timeout = 5000")
+                .execute(conn)
+                .context("setting statement_timeout")?;
+
+            let cond: BoxedEventCond = match &q.filter {
+                Some(f) => compile_event_filter(f, 0)?,
+                None => Box::new(diesel::dsl::sql::<Bool>("TRUE")),
+            };
+
+            let mut query = indexed_events::table.into_boxed().filter(cond);
+            if let Some(after) = q.after_sequence {
+                query = if q.descending {
+                    query.filter(indexed_events::sequence.lt(after))
+                } else {
+                    query.filter(indexed_events::sequence.gt(after))
+                };
+            }
+            query = if q.descending {
+                query.order(indexed_events::sequence.desc())
+            } else {
+                query.order(indexed_events::sequence.asc())
+            };
+            query
+                .limit(q.limit)
+                .load::<IndexedEventRow>(conn)
+                .context("loading events")
+        })
+    }
+}
+
+// ── generalized event filter (SO-97) ──────────────────────────────────────
+
+/// Plain (async-graphql-free) filter AST. `src/graphql.rs` maps its
+/// `InputObject` onto this so the compiler stays a pure DB concern.
+#[derive(Default, Clone, Debug)]
+pub struct EventFilter {
+    pub and: Vec<EventFilter>,
+    pub or: Vec<EventFilter>,
+    pub not: Option<Box<EventFilter>>,
+    /// `event_type IN (...)`.
+    pub event_type: Option<Vec<String>>,
+    /// Address involved in any role (via `event_participants`).
+    pub participant: Option<String>,
+    /// Convenience → `payload @> {"account_id": …}`.
+    pub account_id: Option<String>,
+    /// Convenience → `payload @> {"bucket_id": …}`.
+    pub bucket_id: Option<String>,
+    /// General matcher → `payload @> $json`.
+    pub payload_contains: Option<serde_json::Value>,
+    pub timestamp_ms_gte: Option<i64>,
+    pub timestamp_ms_lte: Option<i64>,
+    pub sequence_gt: Option<i64>,
+    pub sequence_lt: Option<i64>,
+    pub checkpoint_gte: Option<i64>,
+    pub checkpoint_lte: Option<i64>,
+    pub tx_digest: Option<String>,
+}
+
+pub struct EventQuery {
+    pub filter: Option<EventFilter>,
+    pub descending: bool,
+    pub after_sequence: Option<i64>,
+    pub limit: i64,
+}
+
+const MAX_FILTER_DEPTH: u8 = 12;
+
+// `payload @> $json` — JSONB containment, GIN-indexed.
+diesel::infix_operator!(JsonbContains, " @> ", backend: Pg);
+
+type BoxedEventCond = Box<dyn BoxableExpression<indexed_events::table, Pg, SqlType = Bool>>;
+
+fn payload_contains_expr(value: serde_json::Value) -> BoxedEventCond {
+    Box::new(JsonbContains::new(
+        indexed_events::payload,
+        value.into_sql::<Jsonb>(),
+    ))
+}
+
+fn fold_bool(conds: Vec<BoxedEventCond>, all: bool) -> BoxedEventCond {
+    let mut it = conds.into_iter();
+    match it.next() {
+        None => Box::new(diesel::dsl::sql::<Bool>(if all { "TRUE" } else { "FALSE" })),
+        Some(first) => it.fold(first, |acc, c| {
+            if all {
+                Box::new(acc.and(c))
+            } else {
+                Box::new(acc.or(c))
+            }
+        }),
+    }
+}
+
+fn compile_event_filter(f: &EventFilter, depth: u8) -> Result<BoxedEventCond> {
+    if depth > MAX_FILTER_DEPTH {
+        anyhow::bail!("event filter nested deeper than {MAX_FILTER_DEPTH}");
+    }
+    let mut conds: Vec<BoxedEventCond> = Vec::new();
+
+    if let Some(types) = &f.event_type {
+        if !types.is_empty() {
+            conds.push(Box::new(indexed_events::event_type.eq_any(types.clone())));
+        }
+    }
+    if let Some(v) = f.timestamp_ms_gte {
+        conds.push(Box::new(indexed_events::timestamp_ms.ge(v)));
+    }
+    if let Some(v) = f.timestamp_ms_lte {
+        conds.push(Box::new(indexed_events::timestamp_ms.le(v)));
+    }
+    if let Some(v) = f.sequence_gt {
+        conds.push(Box::new(indexed_events::sequence.gt(v)));
+    }
+    if let Some(v) = f.sequence_lt {
+        conds.push(Box::new(indexed_events::sequence.lt(v)));
+    }
+    if let Some(v) = f.checkpoint_gte {
+        conds.push(Box::new(indexed_events::checkpoint.ge(v)));
+    }
+    if let Some(v) = f.checkpoint_lte {
+        conds.push(Box::new(indexed_events::checkpoint.le(v)));
+    }
+    if let Some(tx) = &f.tx_digest {
+        conds.push(Box::new(indexed_events::tx_digest.eq(tx.clone())));
+    }
+    if let Some(addr) = &f.participant {
+        let sub = event_participants::table
+            .filter(event_participants::address.eq(addr.clone()))
+            .select(event_participants::sequence);
+        conds.push(Box::new(indexed_events::sequence.eq_any(sub)));
+    }
+    if let Some(a) = &f.account_id {
+        conds.push(payload_contains_expr(serde_json::json!({ "account_id": a })));
+    }
+    if let Some(b) = &f.bucket_id {
+        conds.push(payload_contains_expr(serde_json::json!({ "bucket_id": b })));
+    }
+    if let Some(j) = &f.payload_contains {
+        conds.push(payload_contains_expr(j.clone()));
+    }
+    if !f.and.is_empty() {
+        let inner = f
+            .and
+            .iter()
+            .map(|s| compile_event_filter(s, depth + 1))
+            .collect::<Result<Vec<_>>>()?;
+        conds.push(fold_bool(inner, true));
+    }
+    if !f.or.is_empty() {
+        let inner = f
+            .or
+            .iter()
+            .map(|s| compile_event_filter(s, depth + 1))
+            .collect::<Result<Vec<_>>>()?;
+        conds.push(fold_bool(inner, false));
+    }
+    if let Some(n) = &f.not {
+        conds.push(Box::new(diesel::dsl::not(compile_event_filter(n, depth + 1)?)));
+    }
+
+    Ok(fold_bool(conds, true))
 }
 
