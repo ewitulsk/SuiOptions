@@ -59,7 +59,7 @@ function displayAsset(symbol: string): string {
   return symbol;
 }
 
-function shortAccount(id: string): string {
+export function shortAccount(id: string): string {
   const s = id.startsWith("0x") ? id.slice(2) : id;
   if (s.length <= 8) return `0x${s}`;
   return `0x${s.slice(0, 4)}…${s.slice(-4)}`;
@@ -281,6 +281,8 @@ export type DashboardState = {
   closeModal: () => void;
   toast: string | null;
   connected: boolean;
+  /** Connected wallet address, or null when disconnected. */
+  address: string | null;
 };
 
 export function useDashboardState(): DashboardState {
@@ -489,5 +491,6 @@ export function useDashboardState(): DashboardState {
     closeModal,
     toast,
     connected,
+    address: wallet,
   };
 }
