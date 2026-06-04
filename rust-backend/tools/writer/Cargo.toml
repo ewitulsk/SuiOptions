@@ -16,7 +16,7 @@ protocol-types = { workspace = true }
 runtime-config = { workspace = true }
 cli-spec       = { workspace = true }
 sui-tx         = { workspace = true }
-deployments    = { workspace = true }
+token-info-client = { workspace = true }
 
 sui-types = { workspace = true }
 

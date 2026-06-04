@@ -10,7 +10,7 @@
 //!    so a single tx covers the whole flow.
 //!
 //! Every on-chain id (package, ProtocolConfig, Treasury, test-tokens
-//! package, faucets, coin types) is resolved from `deployments.json`.
+//! package, faucets, coin types) is resolved from the token-info service.
 //!
 //! ```text
 //!   writer --bucket 0x… --write-amount 100000
@@ -30,7 +30,7 @@ use protocol_types::messages::{
 };
 use protocol_types::sides::{RetailRole, Side};
 
-use deployments::Deployments;
+use token_info_client::TokenInfoClient;
 use sui_tx::sui_client::SuiClientWrapper;
 use sui_tx::tx::execute_write::{execute_writer_flow, ExecuteWriteParams};
 use sui_tx::ws_client;
@@ -47,17 +47,17 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let dep = Deployments::load(&cli.deployments)
-        .with_context(|| format!("loading {}", cli.deployments.display()))?;
-    let net = dep.for_network(cli.network.as_str())?;
+    let snapshot = TokenInfoClient::new(&cli.token_info_url)
+        .fetch_blocking_until_ready(30, std::time::Duration::from_secs(2))
+        .await?;
 
-    let package = net.package()?;
-    let protocol_config = net.protocol_config()?;
-    let treasury = net.treasury().context("treasury_id missing from deployments")?;
+    let package = snapshot.package()?;
+    let protocol_config = snapshot.protocol_config()?;
+    let treasury = snapshot.treasury().context("treasury_id missing from token-info")?;
 
     // Resolve underlying + settlement via testTokens.
-    let underlying = net.token(&cli.underlying)?;
-    let settlement = net.token(&cli.settlement)?;
+    let underlying = snapshot.token(&cli.underlying)?;
+    let settlement = snapshot.token(&cli.settlement)?;
     let (tokens_pkg, underlying_module) = underlying.module_path()?;
 
     let secrets = runtime_config::Secrets::load(&cli.secrets)

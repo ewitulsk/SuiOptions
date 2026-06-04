@@ -20,7 +20,7 @@
 #     sh wipe-provision-db.sh <env> <service>
 #
 #   <env>     dev | staging        (prod is BLOCKED)
-#   <service> indexer | scheduler
+#   <service> indexer | scheduler | token-info
 #
 # Master creds come from the caller (the deploy role reads
 # options/_master/db) — the per-env role can't CREATE on the cluster. The
@@ -50,10 +50,11 @@ esac
 
 # DB name and owning role both follow the `<service>_<env>` convention.
 case "$SERVICE" in
-  indexer)   DB_PREFIX=indexer ;;
-  scheduler) DB_PREFIX=scheduler ;;
+  indexer)    DB_PREFIX=indexer ;;
+  scheduler)  DB_PREFIX=scheduler ;;
+  token-info) DB_PREFIX=token_info ;;
   *)
-    echo "FATAL: unknown service '$SERVICE' (expected indexer|scheduler)"
+    echo "FATAL: unknown service '$SERVICE' (expected indexer|scheduler|token-info)"
     exit 1
     ;;
 esac

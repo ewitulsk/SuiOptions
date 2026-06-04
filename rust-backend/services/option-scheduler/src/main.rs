@@ -1,7 +1,7 @@
 //! option-scheduler — bucket-creation lifecycle bot.
 //!
 //! Boot:
-//!   1. Parse Cli + load deployments + secrets.
+//!   1. Parse Cli + fetch the token-info snapshot + load secrets.
 //!   2. Connect SuiClient; assert signer == deployer (only address with AdminCap).
 //!   3. For each configured pair: resolve underlying/settlement `TokenInfo`,
 //!      build a canonicalised PairKey.
@@ -32,8 +32,8 @@ use clap::Parser;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-use deployments::Deployments;
 use sui_tx::sui_client::SuiClientWrapper;
+use token_info_client::TokenInfoClient;
 
 use option_scheduler::config::{PairConfig, SchedulerConfig};
 use option_scheduler::db;
@@ -59,22 +59,28 @@ async fn main() -> Result<()> {
     runtime_config::health::spawn(cfg.health_addr);
     let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
-    let dep = Deployments::load(&cli.deployments)
-        .with_context(|| format!("loading {}", cli.deployments.display()))?;
-    let net = dep.for_network(cli.network.as_str())?;
+    // Fetch the protocol ids + supported-token catalog from token-info.
+    // Hard cutover: if token-info is unreachable after the retry window we
+    // crash (no deployments.json fallback).
+    let snapshot = TokenInfoClient::new(&cli.token_info_url)
+        .fetch_blocking_until_ready(30, Duration::from_secs(2))
+        .await
+        .with_context(|| {
+            format!("fetching catalog from token-info at {}", cli.token_info_url)
+        })?;
 
-    let package = net.package()?;
-    let admin_cap = net.admin_cap()?;
+    let package = snapshot.package()?;
+    let admin_cap = snapshot.admin_cap()?;
     let wrap = SuiClientWrapper::connect(&secrets, cli.network).await?;
 
     // AdminCap belongs to the deployer only — exchange enforces the same check
     // (tools/exchange/src/main.rs). A scheduler signed by anyone else is
     // useless and we'd rather fail loudly at boot than hit a chain revert on
     // every tick.
-    let deployer = net.deployer_address()?;
+    let deployer = snapshot.deployer_address()?;
     if wrap.signer.address != deployer {
         return Err(anyhow!(
-            "configured signer {} ≠ deployer {} from deployments.json — \
+            "configured signer {} ≠ deployer {} from token-info — \
              only the deployer holds AdminCap",
             wrap.signer.address,
             deployer
@@ -103,27 +109,27 @@ async fn main() -> Result<()> {
     let mut pair_keys: Vec<PairKey> = Vec::with_capacity(cfg.pairs.len());
     let mut pair_meta: Vec<PairMeta> = Vec::with_capacity(cfg.pairs.len());
     for pair in &cfg.pairs {
-        let u = net.token(&pair.underlying).with_context(|| {
+        let u = snapshot.token(&pair.underlying).with_context(|| {
             format!(
-                "underlying {} not in deployments.testTokens",
+                "underlying {} not in token-info testTokens",
                 pair.underlying
             )
         })?;
-        let s = net.token(&pair.settlement).with_context(|| {
+        let s = snapshot.token(&pair.settlement).with_context(|| {
             format!(
-                "settlement {} not in deployments.testTokens",
+                "settlement {} not in token-info testTokens",
                 pair.settlement
             )
         })?;
-        let u_spec = net.token_spec(&pair.underlying).with_context(|| {
+        let u_spec = snapshot.token_spec(&pair.underlying).with_context(|| {
             format!(
-                "underlying {} not in deployments.token_info",
+                "underlying {} not in token-info catalog",
                 pair.underlying
             )
         })?;
-        let s_spec = net.token_spec(&pair.settlement).with_context(|| {
+        let s_spec = snapshot.token_spec(&pair.settlement).with_context(|| {
             format!(
-                "settlement {} not in deployments.token_info",
+                "settlement {} not in token-info catalog",
                 pair.settlement
             )
         })?;

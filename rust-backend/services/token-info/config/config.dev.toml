@@ -1,0 +1,18 @@
+# token-info config — dev env (devnet).
+#
+# `database_url` is templated by deploy.sh against the Terraform RDS
+# (DB_PASSWORD / DB_HOST injected at deploy time, expanded by config_load).
+# The internal port is bound on all interfaces but is NOT proxied by nginx,
+# so it stays reachable only inside the docker network / over the VPN.
+
+environment        = "dev"
+network            = "devnet"
+deployments_path   = "/app/deployments.json"
+
+database_url       = "postgresql://token_info_dev:${DB_PASSWORD}@${DB_HOST}:5432/token_info_dev"
+db_pool_size       = 8
+
+public_bind_addr   = "0.0.0.0:9005"
+internal_bind_addr = "0.0.0.0:9006"
+
+allowed_origins    = ["*"]

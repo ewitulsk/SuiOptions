@@ -1,11 +1,12 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::info;
 
 use api_service::{catalog::TokenCatalog, router, AppState, Cli, Config};
-use deployments::Deployments;
+use token_info_client::TokenInfoClient;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -16,11 +17,14 @@ async fn main() -> Result<()> {
     info!(cfg_path, "loading config");
     let cfg = Config::load(&cfg_path).with_context(|| format!("loading config from {cfg_path}"))?;
 
-    let deployments = Deployments::load(&cfg.deployments_path).with_context(|| {
-        format!("loading deployments from {}", cfg.deployments_path.display())
-    })?;
-    let catalog = TokenCatalog::from_deployments(&deployments, &cfg.network)
-        .with_context(|| format!("building token catalog for network {}", cfg.network))?;
+    // Fetch the supported-token catalog from token-info. Hard cutover: if
+    // token-info is unreachable after the retry window we crash (no
+    // deployments.json fallback).
+    let snapshot = TokenInfoClient::new(&cfg.token_info_url)
+        .fetch_blocking_until_ready(30, Duration::from_secs(2))
+        .await
+        .with_context(|| format!("fetching catalog from token-info at {}", cfg.token_info_url))?;
+    let catalog = TokenCatalog::from_tokens(snapshot.tokens());
 
     let state = Arc::new(AppState::new(catalog));
 

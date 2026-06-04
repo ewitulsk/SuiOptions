@@ -240,59 +240,27 @@ fn iso_millis(ms: i64) -> String {
 mod tests {
     use super::*;
     use crate::bucket::Bucket;
-    use deployments::{
-        Deployments, NetworkDeployment, PackageInfo, TestTokens, TokenInfo, TokenSpec,
-    };
     use protocol_types::asset::AssetType;
     use protocol_types::ids::ObjectId;
-    use std::collections::BTreeMap;
+    use token_info_client::SupportedToken;
+
+    fn tok(ticker: &str, coin_type: &str, decimals: u8) -> SupportedToken {
+        SupportedToken {
+            coin_type: coin_type.into(),
+            ticker: ticker.into(),
+            name: ticker.into(),
+            logo_uri: None,
+            decimals,
+            pyth_feed_id: None,
+            enabled: true,
+        }
+    }
 
     fn fixture_catalog() -> TokenCatalog {
-        let mut tokens = BTreeMap::new();
-        tokens.insert(
-            "TBTC".into(),
-            TokenInfo {
-                coin_type: "0xpkg::tbtc::TBTC".into(),
-                faucet_id: "0x1".into(),
-                decimals: 8,
-            },
-        );
-        tokens.insert(
-            "TUSDC".into(),
-            TokenInfo {
-                coin_type: "0xpkg::tusdc::TUSDC".into(),
-                faucet_id: "0x2".into(),
-                decimals: 6,
-            },
-        );
-        let token_info: BTreeMap<String, TokenSpec> = BTreeMap::new();
-        let deps = Deployments {
-            mainnet: None,
-            devnet: None,
-            testnet: Some(NetworkDeployment {
-                package_info: PackageInfo {
-                    package_id: "0xp".into(),
-                    admin_cap_id: "0xa".into(),
-                    protocol_config_id: "0xc".into(),
-                    upgrade_cap_id: "0xu".into(),
-                    treasury_id: None,
-                    publish_digest: "x".into(),
-                    init_digest: None,
-                    deployer: "0xd".into(),
-                    deployed_at: "".into(),
-                    network: "testnet".into(),
-                    test_tokens: Some(TestTokens {
-                        package_id: "0xtp".into(),
-                        upgrade_cap_id: "0xtu".into(),
-                        publish_digest: "y".into(),
-                        deployed_at: "".into(),
-                        tokens,
-                    }),
-                },
-                token_info,
-            }),
-        };
-        TokenCatalog::from_deployments(&deps, "testnet").unwrap()
+        TokenCatalog::from_tokens(&[
+            tok("TBTC", "0xpkg::tbtc::TBTC", 8),
+            tok("TUSDC", "0xpkg::tusdc::TUSDC", 6),
+        ])
     }
 
     fn mk_bucket(strike: u128, strike_scale: u8, written: u128, cursor: u128) -> Bucket {
@@ -365,50 +333,10 @@ mod tests {
         // deployment lists a sub-dollar asset against a higher-precision
         // settlement (the very case strike_grid.rs §3.4 warns about).
         // DEEP(6)/TUSDC(9) at $0.15 → strike_raw 150 → $0.15.
-        let mut tokens = std::collections::BTreeMap::new();
-        tokens.insert(
-            "DEEP".into(),
-            deployments::TokenInfo {
-                coin_type: "0xpkg::deep::DEEP".into(),
-                faucet_id: "0xd".into(),
-                decimals: 6,
-            },
-        );
-        tokens.insert(
-            "TUSDC9".into(),
-            deployments::TokenInfo {
-                coin_type: "0xpkg::tusdc::TUSDC".into(),
-                faucet_id: "0xs".into(),
-                decimals: 9,
-            },
-        );
-        let deps = deployments::Deployments {
-            mainnet: None,
-            devnet: None,
-            testnet: Some(deployments::NetworkDeployment {
-                package_info: deployments::PackageInfo {
-                    package_id: "0xp".into(),
-                    admin_cap_id: "0xa".into(),
-                    protocol_config_id: "0xc".into(),
-                    upgrade_cap_id: "0xu".into(),
-                    treasury_id: None,
-                    publish_digest: "x".into(),
-                    init_digest: None,
-                    deployer: "0xd".into(),
-                    deployed_at: "".into(),
-                    network: "testnet".into(),
-                    test_tokens: Some(deployments::TestTokens {
-                        package_id: "0xtp".into(),
-                        upgrade_cap_id: "0xtu".into(),
-                        publish_digest: "y".into(),
-                        deployed_at: "".into(),
-                        tokens,
-                    }),
-                },
-                token_info: std::collections::BTreeMap::new(),
-            }),
-        };
-        let cat = TokenCatalog::from_deployments(&deps, "testnet").unwrap();
+        let cat = TokenCatalog::from_tokens(&[
+            tok("DEEP", "0xpkg::deep::DEEP", 6),
+            tok("TUSDC9", "0xpkg::tusdc::TUSDC", 9),
+        ]);
         let b = Bucket {
             asset_type: AssetType::new("0xpkg::deep::DEEP"),
             settlement_type: AssetType::new("0xpkg::tusdc::TUSDC"),
@@ -431,50 +359,10 @@ mod tests {
         // both sides, scheduler picks strike_scale=5 → strike_raw=15_000.
         // The api-service formula has to consume the scale; without it
         // the displayed strike collapses by 10^5.
-        let mut tokens = std::collections::BTreeMap::new();
-        tokens.insert(
-            "TDEEP".into(),
-            deployments::TokenInfo {
-                coin_type: "0xpkg::tdeep::TDEEP".into(),
-                faucet_id: "0xd".into(),
-                decimals: 6,
-            },
-        );
-        tokens.insert(
-            "TUSDC".into(),
-            deployments::TokenInfo {
-                coin_type: "0xpkg::tusdc::TUSDC".into(),
-                faucet_id: "0xs".into(),
-                decimals: 6,
-            },
-        );
-        let deps = deployments::Deployments {
-            mainnet: None,
-            devnet: None,
-            testnet: Some(deployments::NetworkDeployment {
-                package_info: deployments::PackageInfo {
-                    package_id: "0xp".into(),
-                    admin_cap_id: "0xa".into(),
-                    protocol_config_id: "0xc".into(),
-                    upgrade_cap_id: "0xu".into(),
-                    treasury_id: None,
-                    publish_digest: "x".into(),
-                    init_digest: None,
-                    deployer: "0xd".into(),
-                    deployed_at: "".into(),
-                    network: "testnet".into(),
-                    test_tokens: Some(deployments::TestTokens {
-                        package_id: "0xtp".into(),
-                        upgrade_cap_id: "0xtu".into(),
-                        publish_digest: "y".into(),
-                        deployed_at: "".into(),
-                        tokens,
-                    }),
-                },
-                token_info: std::collections::BTreeMap::new(),
-            }),
-        };
-        let cat = TokenCatalog::from_deployments(&deps, "testnet").unwrap();
+        let cat = TokenCatalog::from_tokens(&[
+            tok("TDEEP", "0xpkg::tdeep::TDEEP", 6),
+            tok("TUSDC", "0xpkg::tusdc::TUSDC", 6),
+        ]);
         let b = Bucket {
             asset_type: AssetType::new("0xpkg::tdeep::TDEEP"),
             settlement_type: AssetType::new("0xpkg::tusdc::TUSDC"),

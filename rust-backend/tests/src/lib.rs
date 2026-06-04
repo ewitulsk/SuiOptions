@@ -109,6 +109,7 @@ impl Harness {
             rfq_window: Duration::from_millis(400),
             ping_interval: Duration::from_secs(10),
             protocol_id: b"test-protocol".to_vec(),
+            token_info_url: String::new(),
             max_inflight_rfqs_per_session: 16,
             max_inflight_rfqs_global: 256,
         });

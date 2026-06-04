@@ -1,0 +1,87 @@
+//! Postgres-facing repository for the supported-token catalog.
+
+use anyhow::{Context, Result};
+use diesel::prelude::*;
+use diesel::upsert::excluded;
+
+use super::models::{TokenRow, UpsertToken};
+use super::schema::supported_tokens as st;
+use super::DbPool;
+
+#[derive(Clone)]
+pub struct Repo {
+    pool: std::sync::Arc<DbPool>,
+}
+
+impl Repo {
+    pub fn new(pool: std::sync::Arc<DbPool>) -> Self {
+        Self { pool }
+    }
+
+    /// All catalog rows, ticker-sorted. `enabled_only` filters to enabled.
+    pub fn list(&self, enabled_only: bool) -> Result<Vec<TokenRow>> {
+        let mut conn = self.pool.get().context("checkout conn")?;
+        let mut q = st::table.into_boxed();
+        if enabled_only {
+            q = q.filter(st::enabled.eq(true));
+        }
+        q.order(st::ticker.asc())
+            .load::<TokenRow>(&mut conn)
+            .context("listing tokens")
+    }
+
+    /// One token by coin type, or `None`.
+    pub fn get(&self, coin_type: &str) -> Result<Option<TokenRow>> {
+        let mut conn = self.pool.get().context("checkout conn")?;
+        st::table
+            .find(coin_type)
+            .first::<TokenRow>(&mut conn)
+            .optional()
+            .context("getting token")
+    }
+
+    /// Insert or update a token (internal API). On conflict on `coin_type`,
+    /// every non-key field is overwritten and `updated_at` is bumped.
+    pub fn upsert(&self, t: UpsertToken) -> Result<TokenRow> {
+        let mut conn = self.pool.get().context("checkout conn")?;
+        diesel::insert_into(st::table)
+            .values(&t)
+            .on_conflict(st::coin_type)
+            .do_update()
+            .set((
+                st::ticker.eq(excluded(st::ticker)),
+                st::name.eq(excluded(st::name)),
+                st::logo_uri.eq(excluded(st::logo_uri)),
+                st::decimals.eq(excluded(st::decimals)),
+                st::pyth_feed_id.eq(excluded(st::pyth_feed_id)),
+                st::enabled.eq(excluded(st::enabled)),
+                st::source.eq(excluded(st::source)),
+                st::updated_at.eq(diesel::dsl::now),
+            ))
+            .get_result::<TokenRow>(&mut conn)
+            .context("upserting token")
+    }
+
+    /// Delete a token by coin type. Returns the number of rows removed (0 if
+    /// it wasn't present).
+    pub fn delete(&self, coin_type: &str) -> Result<usize> {
+        let mut conn = self.pool.get().context("checkout conn")?;
+        diesel::delete(st::table.find(coin_type))
+            .execute(&mut conn)
+            .context("deleting token")
+    }
+
+    /// Seed a token only if its coin type isn't already present — used by the
+    /// dev/staging auto-seed so a manual edit (or a prior seed) is never
+    /// clobbered. Returns true if a row was inserted.
+    pub fn seed_if_absent(&self, t: UpsertToken) -> Result<bool> {
+        let mut conn = self.pool.get().context("checkout conn")?;
+        let inserted = diesel::insert_into(st::table)
+            .values(&t)
+            .on_conflict(st::coin_type)
+            .do_nothing()
+            .execute(&mut conn)
+            .context("seeding token")?;
+        Ok(inserted > 0)
+    }
+}

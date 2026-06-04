@@ -318,7 +318,6 @@ dependencies = [
  "clap",
  "cli-spec",
  "config",
- "deployments",
  "futures-util",
  "indexer-client",
  "parking_lot 0.12.5",
@@ -327,6 +326,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "token-info-client",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tower-http 0.6.10",
@@ -2674,7 +2674,6 @@ dependencies = [
  "anyhow",
  "clap",
  "cli-spec",
- "deployments",
  "hex",
  "protocol-types",
  "runtime-config",
@@ -2683,6 +2682,7 @@ dependencies = [
  "sui-json-rpc-types",
  "sui-tx",
  "sui-types",
+ "token-info-client",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3804,7 +3804,6 @@ dependencies = [
  "cli-spec",
  "config",
  "dashmap 6.1.0",
- "deployments",
  "diesel",
  "diesel_migrations",
  "futures",
@@ -3819,6 +3818,7 @@ dependencies = [
  "sui-sdk",
  "sui-types",
  "thiserror 1.0.69",
+ "token-info-client",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tracing",
@@ -4850,7 +4850,6 @@ dependencies = [
  "clap",
  "cli-spec",
  "config",
- "deployments",
  "ed25519-dalek",
  "futures",
  "futures-util",
@@ -4865,6 +4864,7 @@ dependencies = [
  "serde_json",
  "sui-tx",
  "sui-types",
+ "token-info-client",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -6113,7 +6113,6 @@ dependencies = [
  "clap",
  "cli-spec",
  "config",
- "deployments",
  "diesel",
  "diesel_migrations",
  "futures",
@@ -6131,6 +6130,7 @@ dependencies = [
  "sui-tx",
  "sui-types",
  "thiserror 1.0.69",
+ "token-info-client",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tracing",
@@ -7110,7 +7110,6 @@ dependencies = [
  "cli-spec",
  "config",
  "dashmap 6.1.0",
- "deployments",
  "ed25519-dalek",
  "futures",
  "futures-util",
@@ -7126,6 +7125,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 1.0.69",
+ "token-info-client",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tracing",
@@ -10083,6 +10083,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
+name = "token-info"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "chrono",
+ "clap",
+ "cli-spec",
+ "config",
+ "deployments",
+ "diesel",
+ "diesel_migrations",
+ "r2d2",
+ "runtime-config",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "token-info-client",
+ "tokio",
+ "tower-http 0.6.10",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "token-info-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "deployments",
+ "protocol-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sui-types",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tokio"
 version = "1.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11591,7 +11631,6 @@ dependencies = [
  "anyhow",
  "clap",
  "cli-spec",
- "deployments",
  "futures",
  "futures-util",
  "protocol-types",
@@ -11600,6 +11639,7 @@ dependencies = [
  "serde_json",
  "sui-tx",
  "sui-types",
+ "token-info-client",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tracing",

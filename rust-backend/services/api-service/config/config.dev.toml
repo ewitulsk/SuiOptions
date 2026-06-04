@@ -7,10 +7,12 @@ bind_addr        = "0.0.0.0:9003"
 
 # Sui network slot in deployments.json. dev -> devnet (matches
 # indexer/mm-bot configs and deployment.md).
-network          = "devnet"
 
 # Talk to the indexer over the env's compose-internal network.
 indexer_url      = "ws://indexer:9001/"
 
 # Frontend dev origins. Tighten once a real dev frontend URL exists.
 allowed_origins  = ["*"]
+
+# token-info public API over the compose-internal network.
+token_info_url   = "http://token-info:9005"

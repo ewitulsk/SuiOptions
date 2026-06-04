@@ -14,12 +14,7 @@ rfq_window_ms        = 2000
 # WS keep-alive cadence.
 ping_interval_secs   = 15
 
-# Which slot in `deployments.json` to resolve `protocol_id` from. The
-# service derives the domain separator (the AdminCap object id) from the
-# deployment, exactly as the contract and mm-bot do, so a redeploy doesn't
-# require editing this file. One of: mainnet / testnet / devnet.
-network              = "testnet"
-
-# Path to `deployments.json`. Relative paths resolve from the working
-# directory; running from `rust-backend/` matches the default.
-# deployments_path   = "deployments.json"
+# token-info public API. The protocol_id domain separator (the AdminCap
+# object id) is fetched from here at boot, exactly as the contract and
+# mm-bot derive it, so a redeploy doesn't require editing this file.
+token_info_url       = "http://127.0.0.1:9005"

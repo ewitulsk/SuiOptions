@@ -1,0 +1,16 @@
+# token-info config — prod env (mainnet).
+#
+# prod does NOT auto-seed: the mainnet catalog starts empty and is populated
+# via the internal mutate API. deployments.json still supplies package_info.
+
+environment        = "prod"
+network            = "mainnet"
+deployments_path   = "/app/deployments.json"
+
+database_url       = "postgresql://token_info_prod:${DB_PASSWORD}@${DB_HOST}:5432/token_info_prod"
+db_pool_size       = 8
+
+public_bind_addr   = "0.0.0.0:9005"
+internal_bind_addr = "0.0.0.0:9006"
+
+allowed_origins    = ["*"]

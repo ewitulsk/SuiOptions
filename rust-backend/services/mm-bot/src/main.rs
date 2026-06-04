@@ -41,8 +41,8 @@ use protocol_types::quote::Quote;
 use protocol_types::sides::MmRole;
 use protocol_types::SigningScheme;
 
-use deployments::Deployments;
 use pyth_client::{self as pyth, PriceCache, PriceFeedId, RollingVolBuffer};
+use token_info_client::TokenInfoClient;
 use sui_tx::quote_signer::QuoteSigner;
 use sui_tx::sui_client::{Network, SuiClientWrapper};
 use sui_tx::tx::account::{create_and_share_account, find_account};
@@ -184,22 +184,26 @@ async fn main() -> Result<()> {
     runtime_config::health::spawn(cfg.health_addr);
     let secrets_loaded = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
-    let dep = Deployments::load(&cli.deployments)
-        .with_context(|| format!("loading {}", cli.deployments.display()))?;
-    let net = dep.for_network(cfg.network.as_str())?;
+    // Resolve the token catalog from token-info. Hard cutover: if token-info
+    // is unreachable after the retry window we crash (no deployments.json
+    // fallback).
+    let snapshot = TokenInfoClient::new(&cli.token_info_url)
+        .fetch_blocking_until_ready(30, std::time::Duration::from_secs(2))
+        .await
+        .with_context(|| format!("fetching catalog from token-info at {}", cli.token_info_url))?;
 
     // Off-chain token catalog lookup (coin type, decimals, pyth feed).
     // This is the source the pricing path reads from; the bootstrap path
-    // separately looks up the test-token faucet via `net.token(symbol)`.
-    let underlying_spec = net.token_spec(&cfg.underlying_symbol).with_context(|| {
+    // separately looks up the test-token faucet via `snapshot.token(symbol)`.
+    let underlying_spec = snapshot.token_spec(&cfg.underlying_symbol).with_context(|| {
         format!(
-            "underlying symbol {} not in deployments.token_info",
+            "underlying symbol {} not in token-info catalog",
             cfg.underlying_symbol
         )
     })?;
-    let settlement_spec = net.token_spec(&cfg.settlement_symbol).with_context(|| {
+    let settlement_spec = snapshot.token_spec(&cfg.settlement_symbol).with_context(|| {
         format!(
-            "settlement symbol {} not in deployments.token_info",
+            "settlement symbol {} not in token-info catalog",
             cfg.settlement_symbol
         )
     })?;
@@ -227,7 +231,7 @@ async fn main() -> Result<()> {
 
     // Account: bootstrap if missing, then fund with settlement.
     let account_id =
-        resolve_account(&cli, &cfg, net, &secrets_loaded, &signer, &pubkey_bytes).await?;
+        resolve_account(&cli, &cfg, &snapshot, &secrets_loaded, &signer, &pubkey_bytes).await?;
     tracing::info!(account_id = %account_id, "mm account ready");
     let account_id_pt = pt_object_id_from_sui(account_id);
 
@@ -274,7 +278,7 @@ async fn main() -> Result<()> {
 
     // RFQ pricing context — built once, reused across reconnects.
     let token_recipient = resolve_token_recipient(&cfg, &secrets_loaded)?;
-    let protocol_id = net.protocol_id_bytes()?;
+    let protocol_id = snapshot.protocol_id_bytes()?;
     let pricing_cfg = PricingConfig {
         rate: cfg.rate,
         quote_ttl_ms: cfg.quote_ttl_ms,
@@ -558,13 +562,13 @@ fn load_quote_signer(
 async fn resolve_account(
     cli: &Cli,
     cfg: &BotConfig,
-    net: &deployments::NetworkDeployment,
+    snapshot: &token_info_client::Snapshot,
     secrets: &runtime_config::Secrets,
     signer: &QuoteSigner,
     pubkey_bytes: &[u8],
 ) -> Result<ObjectID> {
     let wrap = SuiClientWrapper::connect(secrets, cfg.network).await?;
-    let package = net.package()?;
+    let package = snapshot.package()?;
 
     // The deployment is the source of truth — no local sidecar. If this
     // bot's Sui address already created an Account under the current package,
@@ -594,7 +598,7 @@ async fn resolve_account(
     // Fund it with settlement so it can pay premiums on day one. Create and
     // fund are separate txs; a crash between them leaves the account
     // (adopted on the next boot) unfunded — acceptable for the test MM bot.
-    let settlement = net.token(&cfg.settlement_symbol)?;
+    let settlement = snapshot.token(&cfg.settlement_symbol)?;
     let (tokens_pkg, settlement_module) = settlement.module_path()?;
     let fund_resp = mint_and_deposit_into_account(
         &wrap.client,

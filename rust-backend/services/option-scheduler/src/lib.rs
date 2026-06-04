@@ -28,8 +28,12 @@ pub struct Cli {
     #[arg(short, long, default_value = "services/option-scheduler/config/config.toml")]
     pub config: PathBuf,
 
-    #[arg(short, long, default_value = "deployments.json")]
-    pub deployments: PathBuf,
+    /// Base URL of the token-info service. The supported-token catalog and
+    /// the protocol's on-chain ids are fetched from here at boot (replaces
+    /// reading `deployments.json`). Hard cutover: no fallback — the binary
+    /// crashes if token-info is unreachable.
+    #[arg(long, env = "TOKEN_INFO_URL", default_value = "http://127.0.0.1:9005")]
+    pub token_info_url: String,
 
     /// Per-binary secrets TOML. Holds the Sui signing key. No env-var
     /// fallback. Must hold the deployer key — AdminCap is non-transferable.

@@ -14,8 +14,8 @@ use sui_tx::sui_client::Network;
 #[derive(Parser, Debug)]
 #[command(name = "writer", about = "Retail-writer test client for the options protocol")]
 pub struct Cli {
-    #[arg(short, long, default_value = "deployments.json")]
-    pub deployments: PathBuf,
+    #[arg(long, env = "TOKEN_INFO_URL", default_value = "http://127.0.0.1:9005")]
+    pub token_info_url: String,
 
     /// Per-binary secrets TOML. Holds the Sui signing key. No env-var
     /// fallback.
@@ -33,7 +33,7 @@ pub struct Cli {
     pub bucket: ObjectID,
 
     /// Underlying amount we're writing, in raw smallest-units (see token
-    /// decimals in `deployments.json::testTokens`).
+    /// decimals in the token-info service's testTokens).
     #[arg(short = 'w', long)]
     pub write_amount: u64,
 

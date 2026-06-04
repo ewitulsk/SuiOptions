@@ -25,7 +25,7 @@ import type { RfqQuoteEntry } from "../api/quoting";
 function requirePackage(): string {
   if (!PACKAGE_ID) {
     throw new Error(
-      `No deployment for VITE_ENVIRONMENT="${ENV}" in deployments.json — the composer cannot build PTBs against the protocol`,
+      `No deployment for VITE_ENVIRONMENT="${ENV}" (token-info returned no packageId) — the composer cannot build PTBs against the protocol`,
     );
   }
   return PACKAGE_ID;

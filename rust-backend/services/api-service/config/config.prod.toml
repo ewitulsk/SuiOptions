@@ -6,10 +6,12 @@
 bind_addr        = "0.0.0.0:9003"
 
 # Sui network slot in deployments.json. prod -> mainnet.
-network          = "mainnet"
 
 # Talk to the indexer over the env's compose-internal network.
 indexer_url      = "ws://indexer:9001/"
 
 # Frontend prod origin. REPLACE with the real frontend URL before going live.
 allowed_origins  = ["*"]
+
+# token-info public API over the compose-internal network.
+token_info_url   = "http://token-info:9005"

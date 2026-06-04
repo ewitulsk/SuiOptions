@@ -6,6 +6,19 @@
 name: options-dev
 
 services:
+  # Token catalog. Binds a public read port (9005, proxied by nginx) and an
+  # internal mutate port (9006, never proxied — reachable only on `net`/VPN).
+  # Publishes no host ports.
+  token-info:
+    image: ${ECR}/options/token-info:${TOKEN_INFO_TAG}
+    environment:
+      APP_ENV: dev
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      RUST_LOG: info,token_info=debug
+    restart: unless-stopped
+    networks: [net]
+
   indexer:
     image: ${ECR}/options/indexer:${INDEXER_TAG}
     environment:
@@ -13,6 +26,7 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       DB_HOST: ${DB_HOST}
       RUST_LOG: info,indexer=debug
+    depends_on: [token-info]
     restart: unless-stopped
     networks: [net]
 
@@ -21,7 +35,7 @@ services:
     environment:
       APP_ENV: dev
       RUST_LOG: info,quoting_service=debug
-    depends_on: [indexer]
+    depends_on: [indexer, token-info]
     restart: unless-stopped
     # If the tokio runtime wedges (see SO-65), the container's TCP listener
     # stays open but /health stops responding. Surfacing that as
@@ -39,10 +53,11 @@ services:
     image: ${ECR}/options/mm-bot:${MM_BOT_TAG}
     environment:
       APP_ENV: dev
+      TOKEN_INFO_URL: http://token-info:9005
       RUST_LOG: info,mm_bot=debug
     volumes:
       - /opt/options/dev/secrets:/run/secrets:ro
-    depends_on: [quoting]
+    depends_on: [quoting, token-info]
     restart: unless-stopped
     networks: [net]
 
@@ -54,10 +69,11 @@ services:
       # Expanded into scheduler_database_url in config.dev.toml.
       DB_PASSWORD: ${DB_PASSWORD}
       DB_HOST: ${DB_HOST}
+      TOKEN_INFO_URL: http://token-info:9005
       RUST_LOG: info,option_scheduler=debug
     volumes:
       - /opt/options/dev/secrets:/run/secrets:ro
-    depends_on: [indexer]
+    depends_on: [indexer, token-info]
     restart: unless-stopped
     networks: [net]
 
@@ -66,7 +82,7 @@ services:
     environment:
       APP_ENV: dev
       RUST_LOG: info,api_service=debug
-    depends_on: [indexer]
+    depends_on: [indexer, token-info]
     restart: unless-stopped
     networks: [net]
 

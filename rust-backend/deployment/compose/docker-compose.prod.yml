@@ -11,6 +11,19 @@
 name: options-prod
 
 services:
+  # Token catalog. Binds a public read port (9005, proxied by nginx) and an
+  # internal mutate port (9006, never proxied — reachable only on `net`/VPN).
+  # Publishes no host ports.
+  token-info:
+    image: ${ECR}/options/token-info:${TOKEN_INFO_TAG}
+    environment:
+      APP_ENV: prod
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      RUST_LOG: info,token_info=info
+    restart: unless-stopped
+    networks: [net]
+
   indexer:
     image: ${ECR}/options/indexer:${INDEXER_TAG}
     environment:
@@ -18,6 +31,7 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       DB_HOST: ${DB_HOST}
       RUST_LOG: info,indexer=info
+    depends_on: [token-info]
     restart: unless-stopped
     networks: [net]
 
@@ -26,7 +40,7 @@ services:
     environment:
       APP_ENV: prod
       RUST_LOG: info,quoting_service=info
-    depends_on: [indexer]
+    depends_on: [indexer, token-info]
     restart: unless-stopped
     # If the tokio runtime wedges (see SO-65), the container's TCP listener
     # stays open but /health stops responding. Surfacing that as
@@ -71,7 +85,7 @@ services:
     environment:
       APP_ENV: prod
       RUST_LOG: info,api_service=info
-    depends_on: [indexer]
+    depends_on: [indexer, token-info]
     restart: unless-stopped
     networks: [net]
 

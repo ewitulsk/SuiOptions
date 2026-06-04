@@ -1,12 +1,10 @@
 # Indexer config for Sui testnet.
 #
-# The package id is NOT in this file — it's resolved at startup from
-# `deployments.json` using the `network` field below. A redeploy only
-# requires updating `deployments.json` (the `deployment-manager` writes
-# it automatically).
+# The package id is NOT in this file — it's fetched at startup from the
+# token-info service. A redeploy only requires updating token-info.
 
 network                 = "testnet"
-deployments_path        = "deployments.json"
+token_info_url          = "http://127.0.0.1:9005"
 remote_store_url        = "https://checkpoints.testnet.sui.io"
 concurrency             = 5
 fanout_addr             = "127.0.0.1:9001"

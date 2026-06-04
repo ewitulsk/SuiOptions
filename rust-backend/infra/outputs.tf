@@ -64,6 +64,7 @@ output "secrets_to_fill" {
   description = "Secrets Manager entries the operator must populate by hand after apply."
   value = concat(
     [for env in local.envs : "options/${env}/indexer (auto-populated; rotate via random_password.indexer_db)"],
+    [for env in local.envs : "options/${env}/token-info (auto-populated; rotate via random_password.token_info_db)"],
     [for env in ["dev", "staging"] : "options/${env}/mm-bot (REPLACE_ME — fill sui_key + quote_key)"],
     ["options/_master/tailscale-auth-key (REPLACE_ME — fill auth_key from tailscale admin console)"],
   )
