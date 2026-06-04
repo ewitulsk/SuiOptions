@@ -26,6 +26,12 @@ import type {
   View,
 } from "../types";
 
+// A signed quote carries a short TTL (spec §4.4, ~30–60s). We refuse to
+// broadcast one that's already lapsed — or about to, before the tx can land —
+// since the on-chain `check_non_signature_fields` would abort with
+// E_QUOTE_EXPIRED (code 1). The buffer covers signing + consensus latency.
+const QUOTE_EXPIRY_BUFFER_MS = 5000;
+
 function formatExpiry(iso: string): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -304,7 +310,7 @@ export function useComposerState({
   }, [series?.asset_decimals, amount]);
 
   const rfqSide: ProtocolSide = view; // View ⊂ Side at the value level.
-  const { quotes: rfqEntries } = useRfq({
+  const { quotes: rfqEntries, refresh: refreshRfq } = useRfq({
     bucketId: selectedBucketId,
     writeAmountRaw,
     side: rfqSide,
@@ -352,6 +358,21 @@ export function useComposerState({
       return;
     }
     const entry = rfqEntries[0]; // best-price-first
+
+    // Guard against firing a doomed tx: if the chosen quote's TTL has lapsed
+    // (or is within the latency buffer of doing so), force a fresh RFQ and
+    // bail rather than letting the on-chain expiry check revert.
+    const validUntilMs = Number(entry.quote.valid_until_ms);
+    if (
+      !Number.isFinite(validUntilMs) ||
+      validUntilMs - Date.now() <= QUOTE_EXPIRY_BUFFER_MS
+    ) {
+      refreshRfq();
+      setToast("quote expired · requesting a fresh quote");
+      setTimeout(() => setToast(null), 4000);
+      return;
+    }
+
     setConfirmStage("signing");
     try {
       const tx = buildWriteTx({

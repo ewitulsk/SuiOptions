@@ -17,6 +17,8 @@ export type UseRfqResult = {
   status: RfqStatus;
   /** Last error message (only set when `status === "error"`). */
   error: string | null;
+  /** Force a fresh RFQ with the current inputs (e.g. after a quote lapses). */
+  refresh: () => void;
 };
 
 export function useRfq(opts: {
@@ -30,6 +32,8 @@ export function useRfq(opts: {
   const [quotes, setQuotes] = useState<RfqQuoteEntry[]>([]);
   const [status, setStatus] = useState<RfqStatus>("idle");
   const [error, setError] = useState<string | null>(null);
+  // Bumping this re-runs the effect with the same inputs, re-sending the RFQ.
+  const [refreshTick, setRefreshTick] = useState(0);
 
   useEffect(() => {
     if (
@@ -75,7 +79,7 @@ export function useRfq(opts: {
       cancelled = true;
       clearTimeout(handle);
     };
-  }, [enabled, bucketId, writeAmountRaw, side]);
+  }, [enabled, bucketId, writeAmountRaw, side, refreshTick]);
 
-  return { quotes, status, error };
+  return { quotes, status, error, refresh: () => setRefreshTick((n) => n + 1) };
 }

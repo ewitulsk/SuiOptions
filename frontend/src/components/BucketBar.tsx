@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { usePythPrice } from "../api/usePythPrice";
-import type { AssetOption, ExpiryOption } from "../mocks/composer";
+import type { AssetOption, ExpiryOption } from "../state/composer";
 
 type Props = {
   symbol: string | null | undefined;

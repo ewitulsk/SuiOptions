@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useComposerState } from "../mocks/composer";
+import { useComposerState } from "../state/composer";
 import { WaveHero } from "../components/WaveHero";
 import { Header } from "../components/Header";
 import { BucketBar } from "../components/BucketBar";
@@ -12,7 +12,7 @@ import { ConfirmModal } from "../components/ConfirmModal";
 import { Toast } from "../components/Toast";
 import { LiveBuckets } from "../components/LiveBuckets";
 import type { View } from "../types";
-import type { ComposerState } from "../mocks/composer";
+import type { ComposerState } from "../state/composer";
 
 function assetLabel(s: ComposerState): string {
   return s.series?.asset_symbol ?? "—";
