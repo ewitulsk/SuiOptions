@@ -192,7 +192,17 @@ impl Store {
             inner.next_sequence += 1;
             apply_event(&mut inner, &event);
             // Snapshot whatever views the event touched into the DB batch.
-            stage_event_into_batch(&inner, &event, sequence as i64, &mut db_batch);
+            // tx_digest + timestamp are needed to denormalize position
+            // provenance (SO-97), so pass them through before `tx_digest`
+            // is moved into the event row below.
+            stage_event_into_batch(
+                &inner,
+                &event,
+                sequence as i64,
+                &tx_digest,
+                timestamp_ms as i64,
+                &mut db_batch,
+            );
             db_batch.events.push(EventBuild::new_event_row(
                 sequence as i64,
                 checkpoint as i64,
@@ -325,6 +335,8 @@ fn stage_event_into_batch(
     inner: &Inner,
     event: &ChainEvent,
     sequence: i64,
+    tx_digest: &str,
+    timestamp_ms: i64,
     batch: &mut CheckpointBatch,
 ) {
     match event {
@@ -337,11 +349,13 @@ fn stage_event_into_batch(
             if let Some(state) = inner.buckets.get(&w.bucket_id) {
                 batch.buckets.push(bucket_row(w.bucket_id, state, sequence));
             }
-            if let Some(state) = inner.positions.get(&(w.bucket_id, w.range_start)) {
-                batch
-                    .position_upserts
-                    .push(position_row(state, sequence));
-            }
+            // Build the position row straight from the event so we can
+            // denormalize provenance (premium / MM / tx / minted-at). `w`
+            // carries the structural fields too, so the post-apply state
+            // lookup isn't needed.
+            batch
+                .position_upserts
+                .push(write_position_row(w, sequence, tx_digest, timestamp_ms));
         }
         ChainEvent::Exercised(e) => {
             if let Some(state) = inner.buckets.get(&e.bucket_id) {
@@ -436,14 +450,25 @@ fn bucket_row(id: ObjectId, state: &BucketState, sequence: i64) -> BucketRow {
     }
 }
 
-fn position_row(state: &PositionState, sequence: i64) -> PositionRow {
+fn write_position_row(
+    w: &WriteExecuted,
+    sequence: i64,
+    tx_digest: &str,
+    minted_at_ms: i64,
+) -> PositionRow {
     PositionRow {
-        bucket_id: state.bucket_id.to_hex(),
-        range_start: u128_to_bigdecimal(state.range_start),
-        range_end: u128_to_bigdecimal(state.range_end),
-        object_id: state.object_id.to_hex(),
-        recipient: state.recipient.to_hex(),
+        bucket_id: w.bucket_id.to_hex(),
+        range_start: u128_to_bigdecimal(w.range_start),
+        range_end: u128_to_bigdecimal(w.range_end),
+        object_id: w.position_id.to_hex(),
+        recipient: w.position_recipient.to_hex(),
         updated_at_seq: sequence,
+        // SO-97 provenance: gross premium the writer received, the
+        // counterparty MM account, and the minting tx for explorer links.
+        premium_received: u64_to_bigdecimal(w.gross_premium),
+        mm_account_id: w.signer_account_id.to_hex(),
+        tx_digest: tx_digest.to_string(),
+        minted_at_ms,
     }
 }
 

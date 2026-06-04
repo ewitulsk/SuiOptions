@@ -89,6 +89,10 @@ chrono = { version = "0.4", features = ["serde"] }
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
+# GraphQL query API (indexer, SO-97).
+async-graphql = { version = "7" }
+async-graphql-axum = { version = "7" }
+
 # Postgres persistence for the indexer.
 diesel = { version = "2.2", features = ["postgres", "r2d2", "chrono", "numeric", "serde_json"] }
 diesel_migrations = { version = "2", features = ["postgres"] }

@@ -52,6 +52,11 @@ pub struct Config {
     /// Bind address for the WS fanout (quoting service subscribes here).
     pub fanout_addr: SocketAddr,
 
+    /// Bind address for the GraphQL query API (SO-97). api-service queries
+    /// `POST /graphql` here to enrich the Dashboard's wallet-direct positions.
+    #[serde(default = "default_graphql_addr")]
+    pub graphql_addr: SocketAddr,
+
     /// How often the fanout publishes a `Heartbeat` frame.
     #[serde(default = "default_heartbeat_secs", rename = "heartbeat_interval_secs")]
     heartbeat_interval_secs: u64,
@@ -128,6 +133,10 @@ impl Config {
 
 fn default_health_addr() -> SocketAddr {
     "0.0.0.0:8081".parse().unwrap()
+}
+
+fn default_graphql_addr() -> SocketAddr {
+    "0.0.0.0:9002".parse().unwrap()
 }
 
 fn default_heartbeat_secs() -> u64 {

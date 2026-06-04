@@ -383,5 +383,25 @@ impl Repo {
         events.reverse();
         Ok(events)
     }
+
+    /// SO-97: enriched positions for a set of on-chain object ids — the
+    /// authoritative list comes from the caller's wallet; this joins each id
+    /// to its bucket (strike/expiry/cursor) plus the denormalized provenance
+    /// on the position row. Unknown ids are simply absent from the result.
+    pub fn positions_by_object_ids(
+        &self,
+        object_ids: &[String],
+    ) -> Result<Vec<(PositionRow, BucketRow)>> {
+        if object_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut conn = self.conn()?;
+        positions::table
+            .inner_join(buckets::table.on(positions::bucket_id.eq(buckets::bucket_id)))
+            .filter(positions::object_id.eq_any(object_ids))
+            .select((positions::all_columns, buckets::all_columns))
+            .load::<(PositionRow, BucketRow)>(&mut conn)
+            .context("loading positions by object_ids")
+    }
 }
 

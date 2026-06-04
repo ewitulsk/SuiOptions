@@ -13,5 +13,8 @@ network          = "testnet"
 # Talk to the indexer over the env's compose-internal network.
 indexer_url      = "ws://indexer:9001/"
 
+# Indexer GraphQL query API (SO-97) for Dashboard position enrichment.
+indexer_graphql_url = "http://indexer:9002/graphql"
+
 # Frontend staging origins. Tighten once a real staging frontend URL exists.
 allowed_origins  = ["*"]

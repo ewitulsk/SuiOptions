@@ -149,6 +149,13 @@ pub struct PositionRow {
     pub object_id: String,
     pub recipient: String,
     pub updated_at_seq: i64,
+    /// SO-97 provenance, denormalized from the minting `WriteExecuted` so the
+    /// GraphQL positions query needs only a positions×buckets join. Set once
+    /// at mint; ignored by `into_state` (the in-memory view doesn't need it).
+    pub premium_received: BigDecimal,
+    pub mm_account_id: String,
+    pub tx_digest: String,
+    pub minted_at_ms: i64,
 }
 
 // ---------- conversions to/from in-memory state ----------

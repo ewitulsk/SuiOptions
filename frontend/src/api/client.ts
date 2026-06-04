@@ -154,3 +154,54 @@ export async function fetchCallTokenLots(wallet: string): Promise<CallTokenLot[]
   const body: CallTokenLotsResponse = await res.json();
   return body.lots;
 }
+
+/**
+ * Enriched written position (SO-97). The frontend reads the authoritative
+ * id list from the wallet, then posts the ids here; api-service joins each to
+ * the indexer's bucket + provenance. Mirrors
+ * `api-service::handlers::dashboard::EnrichedPositionDto`. Ids the indexer
+ * doesn't know yet are simply absent from the response.
+ */
+export type EnrichedPosition = {
+  position_object_id: string;
+  bucket_id: string;
+  asset_symbol: string;
+  asset_decimals: number | null;
+  asset_coin_type: string;
+  settlement_symbol: string;
+  settlement_decimals: number | null;
+  settlement_coin_type: string;
+  strike: number | null;
+  strike_raw: string;
+  strike_scale: number;
+  expiry_ms: number;
+  range_start_raw: string;
+  range_end_raw: string;
+  total_written_raw: string;
+  exercise_cursor_raw: string;
+  premium_received_raw: string;
+  mm_account_id: string;
+  /** Minting tx digest for explorer links; empty string if unknown. */
+  tx_digest: string;
+  minted_at_ms: number;
+};
+
+export type EnrichResponse = { positions: EnrichedPosition[] };
+
+export async function fetchEnrichedPositions(
+  objectIds: string[],
+): Promise<EnrichedPosition[]> {
+  if (objectIds.length === 0) return [];
+  const res = await fetch(`${API_BASE_URL}/dashboard/positions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ object_ids: objectIds }),
+  });
+  if (!res.ok) {
+    throw new Error(
+      `POST /dashboard/positions failed: ${res.status} ${res.statusText}`,
+    );
+  }
+  const body: EnrichResponse = await res.json();
+  return body.positions;
+}

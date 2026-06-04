@@ -24,6 +24,7 @@ the indexer ingested and forwarded.
 |---|---|---|
 | `GET` | `/health` | Liveness — returns `"ok"`. |
 | `GET` | `/buckets` | Active buckets, grouped by series. See shape below. |
+| `POST` | `/dashboard/positions` | Enrich a wallet's written positions (SO-97). Body `{ "object_ids": ["0x…"] }`. Proxies the indexer GraphQL `positions(objectIds)` query and layers on catalog symbols/decimals + USD strike. Ids the indexer doesn't know yet are omitted (caller renders them degraded). The authoritative id list comes from the wallet (`getOwnedObjects ::position::Position`), not this service. |
 
 CORS is configured from `allowed_origins` in the config file. Defaults
 allow `http://localhost:5173` (Vite dev server).

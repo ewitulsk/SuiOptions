@@ -64,6 +64,10 @@ diesel::table! {
         object_id      -> Text,
         recipient      -> Text,
         updated_at_seq -> Int8,
+        premium_received -> Numeric,
+        mm_account_id    -> Text,
+        tx_digest        -> Text,
+        minted_at_ms     -> Int8,
     }
 }
 
