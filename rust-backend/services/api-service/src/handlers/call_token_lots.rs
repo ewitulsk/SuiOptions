@@ -98,12 +98,12 @@ pub async fn list_call_token_lots(
                     .map(|m| m.symbol.clone())
                     .unwrap_or_else(|| bucket.asset_type.as_str().to_string()),
                 asset_decimals,
-                asset_coin_type: bucket.asset_type.as_str().to_string(),
+                asset_coin_type: bucket.asset_type.to_canonical(),
                 settlement_symbol: settle_meta
                     .map(|m| m.symbol.clone())
                     .unwrap_or_else(|| bucket.settlement_type.as_str().to_string()),
                 settlement_decimals: settle_decimals,
-                settlement_coin_type: bucket.settlement_type.as_str().to_string(),
+                settlement_coin_type: bucket.settlement_type.to_canonical(),
                 strike,
                 strike_raw: bucket.strike.to_string(),
                 strike_scale: bucket.strike_scale,

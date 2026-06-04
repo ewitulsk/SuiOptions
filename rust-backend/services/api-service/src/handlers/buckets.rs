@@ -170,12 +170,12 @@ fn group_into_series(
                     .map(|m| m.symbol.clone())
                     .unwrap_or_else(|| asset_ct.clone()),
                 asset_decimals,
-                asset_coin_type: asset_ct,
+                asset_coin_type: protocol_types::asset::canonicalize_move_type(&asset_ct),
                 settlement_symbol: settle_meta
                     .map(|m| m.symbol.clone())
                     .unwrap_or_else(|| settle_ct.clone()),
                 settlement_decimals: settle_decimals,
-                settlement_coin_type: settle_ct,
+                settlement_coin_type: protocol_types::asset::canonicalize_move_type(&settle_ct),
                 expiry_ms: expiry_ms as i64,
                 expiry_iso: iso_millis(expiry_ms as i64),
                 buckets: bucket_dtos,
@@ -502,6 +502,29 @@ mod tests {
         assert_eq!(series[0].asset_decimals, None);
         assert_eq!(series[0].buckets[0].strike, None);
         assert_eq!(series[0].buckets[0].strike_raw, "1");
+    }
+
+    #[test]
+    fn emits_canonical_0x_coin_types() {
+        // Regression for the balance bug (SO): chain events carry the
+        // `TypeName` form with no `0x` prefix, which `suix_getBalance`
+        // rejects. The handler must emit a valid `0x` Move literal.
+        let cat = fixture_catalog();
+        let raw = "9b72409a9f38a8784420d17577aa6dbe5aa2ab4224cd04c44d8b515f6c97ba86";
+        let b = Bucket {
+            asset_type: AssetType::new(format!("{raw}::tbtc::TBTC")),
+            settlement_type: AssetType::new(format!("{raw}::tusdc::TUSDC")),
+            strike: 850,
+            strike_scale: 0,
+            expiry_ms: 1_782_345_600_000,
+            total_written: 0,
+            exercise_cursor: 0,
+            cleaned: false,
+            invalidated: false,
+        };
+        let s = group_into_series(vec![(ObjectId::new([0x11; 32]), b)], &cat);
+        assert_eq!(s[0].asset_coin_type, format!("0x{raw}::tbtc::TBTC"));
+        assert_eq!(s[0].settlement_coin_type, format!("0x{raw}::tusdc::TUSDC"));
     }
 
     #[test]

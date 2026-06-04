@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSuiClient } from "@mysten/dapp-kit";
+import { normalizeStructTag } from "@mysten/sui/utils";
 
 /**
  * The wallet's total balance of a given coin type, in raw smallest-units
@@ -17,7 +18,14 @@ export function useCoinBalance(owner: string | null, coinType: string | null) {
     refetchInterval: 5_000,
     queryFn: async () => {
       if (!owner || !coinType) return "0";
-      const bal = await client.getBalance({ owner, coinType });
+      // `suix_getBalance` rejects a coin type whose address lacks the `0x`
+      // prefix (e.g. a raw chain `TypeName` like `9b72…::tbtc::TBTC`) — and
+      // unlike the transaction builder, `getBalance` does not normalize its
+      // argument. Canonicalize defensively so any source resolves correctly.
+      const bal = await client.getBalance({
+        owner,
+        coinType: normalizeStructTag(coinType),
+      });
       return bal.totalBalance;
     },
   });
