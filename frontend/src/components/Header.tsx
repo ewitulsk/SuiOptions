@@ -159,8 +159,16 @@ export function Header() {
   const { pathname } = useLocation();
   const account = useCurrentAccount();
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const adminCap = useAdminCap(account?.address ?? null);
   const isAdmin = adminCap.data?.isAdmin ?? false;
+
+  // Nav doubles as a mobile dropdown; navigating (or tapping a no-op item)
+  // collapses it so the page is visible again.
+  const go = (path: string) => {
+    navigate(path);
+    setMenuOpen(false);
+  };
 
   return (
     <header className="header">
@@ -168,35 +176,35 @@ export function Header() {
         <span className="header__brand-mark"></span>
         tideline
       </div>
-      <nav className="header__nav">
+      <nav className={"header__nav" + (menuOpen ? " is-open" : "")}>
         <button
           className={pathname === "/earn" ? "is-active" : ""}
-          onClick={() => navigate("/earn")}
+          onClick={() => go("/earn")}
         >
           Earn
         </button>
         <button
           className={pathname === "/buy" ? "is-active" : ""}
-          onClick={() => navigate("/buy")}
+          onClick={() => go("/buy")}
         >
           Buy
         </button>
         <button
           className={pathname === "/dashboard" ? "is-active" : ""}
-          onClick={() => navigate("/dashboard")}
+          onClick={() => go("/dashboard")}
         >
           Dashboard
         </button>
         <button
           className={pathname === "/activity" ? "is-active" : ""}
-          onClick={() => navigate("/activity")}
+          onClick={() => go("/activity")}
         >
           Activity
         </button>
         {ENV === "testnet" && (
           <button
             className={pathname === "/faucet" ? "is-active" : ""}
-            onClick={() => navigate("/faucet")}
+            onClick={() => go("/faucet")}
           >
             Faucet
           </button>
@@ -204,12 +212,12 @@ export function Header() {
         {isAdmin && (
           <button
             className={pathname === "/admin" ? "is-active" : ""}
-            onClick={() => navigate("/admin")}
+            onClick={() => go("/admin")}
           >
             Admin
           </button>
         )}
-        <button>Docs</button>
+        <button onClick={() => setMenuOpen(false)}>Docs</button>
       </nav>
       <span className="header__status">
         <span className="dot"></span>WSS live
@@ -222,6 +230,17 @@ export function Header() {
           Connect wallet
         </button>
       )}
+      <button
+        type="button"
+        className={"header__burger" + (menuOpen ? " is-open" : "")}
+        aria-label="Menu"
+        aria-expanded={menuOpen}
+        onClick={() => setMenuOpen((o) => !o)}
+      >
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
 
       {/* Single stable ConnectModal mount, controlled by `pickerOpen`.
           Sharing one instance avoids unmount/remount across the menu's

@@ -1683,3 +1683,153 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 [data-theme="aqua"] .admin-btn--danger:hover:not(:disabled) { background: rgba(255,122,110,0.10); }
 
 [data-theme="aqua"] .admin-actions-row { display: flex; gap: 10px; flex-wrap: wrap; }
+
+
+/* ============================================================
+   RESPONSIVE — mobile & tablet
+   The layout was authored for a fixed 1280px desktop. These
+   queries reflow it for touch/narrow viewports: the header nav
+   collapses into a hamburger dropdown, multi-column grids stack,
+   hero type scales down, wide tables scroll horizontally, and the
+   floating quote feed becomes a full-width sheet.
+   Breakpoints: 900 (tablet), 760 (large phone / nav collapse),
+   600 (phone), 520/400 (small phone).
+   ============================================================ */
+
+/* Hamburger button — hidden on desktop, revealed at the nav-collapse
+   breakpoint below. Three bars morph into an X when open. */
+[data-theme="aqua"] .header__burger {
+  display: none;
+  flex-direction: column; justify-content: center; gap: 4px;
+  width: 40px; height: 40px; padding: 0 9px;
+  background: var(--aqua-glass);
+  border: 1px solid var(--aqua-line);
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+[data-theme="aqua"] .header__burger span {
+  display: block; width: 100%; height: 2px; border-radius: 2px;
+  background: var(--aqua-ink-2);
+  transition: transform 160ms ease, opacity 160ms ease;
+}
+[data-theme="aqua"] .header__burger.is-open span:nth-child(1) { transform: translateY(6px) rotate(45deg); }
+[data-theme="aqua"] .header__burger.is-open span:nth-child(2) { opacity: 0; }
+[data-theme="aqua"] .header__burger.is-open span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
+
+/* ---------- Tablet ---------- */
+@media (max-width: 900px) {
+  [data-theme="aqua"] .dash-summary { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ---------- Large phone — header nav collapses ---------- */
+@media (max-width: 760px) {
+  [data-theme="aqua"] .app__wrap { padding: 0 16px 64px; }
+
+  /* Header: brand left, theme/connect/burger right, nav becomes a dropdown. */
+  [data-theme="aqua"] .header { gap: 10px; padding: 10px 16px; }
+  [data-theme="aqua"] .header__brand { flex: 1; }
+  [data-theme="aqua"] .header__status { display: none; }
+  [data-theme="aqua"] .header__burger { display: flex; }
+
+  [data-theme="aqua"] .header__nav {
+    display: none;
+    position: absolute; top: 100%; left: 0; right: 0;
+    flex: none; flex-direction: column; gap: 2px;
+    padding: 8px;
+    background: rgba(var(--aqua-tint-rgb), 0.97);
+    backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+    border-bottom: 1px solid var(--aqua-line);
+    box-shadow: 0 14px 32px rgba(var(--aqua-shadow-rgb), 0.14);
+  }
+  [data-theme="aqua"] .header__nav.is-open { display: flex; }
+  [data-theme="aqua"] .header__nav button {
+    width: 100%; text-align: left;
+    padding: 13px 16px; font-size: 15px; border-radius: 12px;
+  }
+
+  /* Composer */
+  [data-theme="aqua"] .question { font-size: 24px; margin: 20px auto 24px; }
+  [data-theme="aqua"] .panels { grid-template-columns: 1fr; gap: 12px; }
+  [data-theme="aqua"] .panel { padding: 20px; }
+  [data-theme="aqua"] .panel__hero { font-size: 44px; }
+
+  /* Bucket bar wraps; the price row drops to its own full-width line. */
+  [data-theme="aqua"] .bbar { flex-wrap: wrap; }
+  [data-theme="aqua"] .bbar__spacer { display: none; }
+  [data-theme="aqua"] .bbar__sel,
+  [data-theme="aqua"] .bbar__sel-btn { padding: 12px 14px; }
+  [data-theme="aqua"] .bbar__price {
+    width: 100%; justify-content: flex-start; gap: 16px;
+    padding: 12px 16px; border-top: 1px solid var(--aqua-line-2);
+  }
+  [data-theme="aqua"] .bbar__price-val { font-size: 18px; }
+
+  /* Dashboard */
+  [data-theme="aqua"] .dash-hero__title { font-size: 36px; }
+  [data-theme="aqua"] .dash-tabs { display: flex; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+  [data-theme="aqua"] .dash-tabs::-webkit-scrollbar { display: none; }
+  [data-theme="aqua"] .dash-tab { flex: 0 0 auto; }
+  [data-theme="aqua"] .pos-card { padding: 20px; }
+  [data-theme="aqua"] .pos-card__body { grid-template-columns: 1fr 1fr; gap: 14px; }
+
+  /* Wide admin/faucet tables scroll horizontally inside their own box. */
+  [data-theme="aqua"] .admin-grid { grid-template-columns: 1fr; }
+  [data-theme="aqua"] .admin-table { overflow-x: auto; }
+  [data-theme="aqua"] .admin-table__row { min-width: 560px; }
+}
+
+/* ---------- Phone ---------- */
+@media (max-width: 600px) {
+  /* Activity timeline: drop the connector rail and reflow each row so the
+     icon + body + value sit on top, with the timestamp beneath. */
+  [data-theme="aqua"] .act-timeline::before { display: none; }
+  [data-theme="aqua"] .act-row {
+    grid-template-columns: 40px 1fr auto;
+    grid-template-areas:
+      "icon body  value"
+      "icon time  time";
+    gap: 4px 12px; padding: 14px;
+  }
+  [data-theme="aqua"] .act-row__icon  { grid-area: icon; align-self: start; }
+  [data-theme="aqua"] .act-row__body  { grid-area: body; }
+  [data-theme="aqua"] .act-row__value { grid-area: value; }
+  [data-theme="aqua"] .act-row__time  {
+    grid-area: time; flex-direction: row; align-items: baseline;
+    gap: 8px; padding-top: 6px;
+  }
+
+  /* Quote feed becomes a near-full-width sheet instead of a 320px panel. */
+  [data-theme="aqua"] .feed { left: 12px; right: 12px; top: 72px; width: auto; }
+  [data-theme="aqua"] .feed-toggle { right: 16px; bottom: 16px; }
+}
+
+/* ---------- Small phone ---------- */
+@media (max-width: 520px) {
+  [data-theme="aqua"] .app__wrap { padding: 0 12px 56px; }
+
+  [data-theme="aqua"] .question { font-size: 21px; }
+  [data-theme="aqua"] .panel__hero { font-size: 38px; }
+  [data-theme="aqua"] .exercise { grid-template-columns: 1fr; }
+
+  [data-theme="aqua"] .amount__field { padding: 14px 16px; }
+  [data-theme="aqua"] .amount__input { font-size: 26px; }
+  [data-theme="aqua"] .amount__asset { padding: 10px 14px; }
+
+  [data-theme="aqua"] .dash-hero__title { font-size: 30px; }
+  [data-theme="aqua"] .dash-summary { grid-template-columns: 1fr 1fr; gap: 10px; }
+  [data-theme="aqua"] .dash-summary__val { font-size: 24px; }
+  [data-theme="aqua"] .pos-card__body { grid-template-columns: 1fr; }
+  [data-theme="aqua"] .pos-card__foot { flex-direction: column; align-items: stretch; }
+  [data-theme="aqua"] .pos-card__cta { width: 100%; text-align: center; }
+
+  /* Modals: tighten padding, stack actions with the primary on top. */
+  [data-theme="aqua"] .modal,
+  [data-theme="aqua"] .modal--wide { padding: 22px 20px; }
+  [data-theme="aqua"] .modal__actions { flex-direction: column-reverse; }
+  [data-theme="aqua"] .modal__actions .modal__cta { width: 100%; }
+}
+
+/* ---------- Very small phone ---------- */
+@media (max-width: 400px) {
+  [data-theme="aqua"] .header__connect { padding: 9px 12px; font-size: 12px; }
+}
