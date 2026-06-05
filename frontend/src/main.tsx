@@ -1,12 +1,24 @@
-import React from "react";
+import React, { useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { SuiClientProvider, WalletProvider, createNetworkConfig } from "@mysten/dapp-kit";
+import {
+  SuiClientProvider,
+  WalletProvider,
+  createNetworkConfig,
+  useSuiClientContext,
+} from "@mysten/dapp-kit";
+import { isEnokiNetwork, registerEnokiWallets } from "@mysten/enoki";
 import { getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { BrowserRouter } from "react-router-dom";
 import "@mysten/dapp-kit/dist/index.css";
 import { App } from "./App";
-import { ENV, TOKEN_INFO_URL, initConfig } from "./config";
+import {
+  ENOKI_API_KEY,
+  ENV,
+  GOOGLE_CLIENT_ID,
+  TOKEN_INFO_URL,
+  initConfig,
+} from "./config";
 import "./theme";
 import "./styles/aqua.css";
 import "./styles/global.css";
@@ -19,11 +31,38 @@ const { networkConfig } = createNetworkConfig({
 
 const queryClient = new QueryClient();
 
+// Registers Enoki's zkLogin wallets (e.g. "Sign in with Google") into dapp-kit's
+// wallet registry so they appear in the existing ConnectModal and work with the
+// app's `useSignAndExecuteTransaction` calls unchanged. Must render inside
+// SuiClientProvider (for the client/network context) and above WalletProvider.
+// No-ops when the Enoki key / Google client id aren't configured, or on a
+// network Enoki doesn't support (e.g. devnet).
+function RegisterEnokiWallets() {
+  const { client, network } = useSuiClientContext();
+
+  useEffect(() => {
+    if (!ENOKI_API_KEY || !GOOGLE_CLIENT_ID || !isEnokiNetwork(network)) return;
+
+    const { unregister } = registerEnokiWallets({
+      apiKey: ENOKI_API_KEY,
+      providers: {
+        google: { clientId: GOOGLE_CLIENT_ID },
+      },
+      client,
+      network,
+    });
+    return unregister;
+  }, [client, network]);
+
+  return null;
+}
+
 function renderApp() {
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
       <QueryClientProvider client={queryClient}>
         <SuiClientProvider networks={networkConfig} defaultNetwork={ENV}>
+          <RegisterEnokiWallets />
           <WalletProvider autoConnect>
             <BrowserRouter>
               <App />

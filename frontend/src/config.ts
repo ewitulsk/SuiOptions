@@ -62,6 +62,17 @@ export type SupportedToken = {
 
 export let SUPPORTED_TOKENS: SupportedToken[] = [];
 
+// Enoki zkLogin (social sign-in). Both values are public: `VITE_ENOKI_API_KEY`
+// is Enoki's *public* frontend key and the Google client id is a public OAuth
+// id — neither is a secret, so they are safe in the bundle. When either is
+// unset the Enoki "Sign in with Google" wallet is simply not registered and the
+// app falls back to browser-extension wallets only (so local dev needs no
+// setup). See `RegisterEnokiWallets` in `main.tsx`.
+export const ENOKI_API_KEY: string | undefined = import.meta.env
+  .VITE_ENOKI_API_KEY as string | undefined;
+export const GOOGLE_CLIENT_ID: string | undefined = import.meta.env
+  .VITE_GOOGLE_CLIENT_ID as string | undefined;
+
 // --- wire shapes returned by token-info -------------------------------------
 
 type PackageInfoDto = {
