@@ -38,7 +38,6 @@ permissions:
 
 env:
   AWS_REGION:        ${{ vars.AWS_REGION }}
-  EC2_INSTANCE_ID:   ${{ vars.EC2_INSTANCE_ID }}
   DEPLOY_ROLE_ARN:   ${{ vars.DEPLOY_ROLE_ARN }}
   RDS_HOST:          ${{ vars.RDS_HOST }}
   SSM_OUTPUT_BUCKET: ${{ vars.SSM_OUTPUT_BUCKET }}
@@ -75,6 +74,10 @@ jobs:
         with:
           role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - uses: ./.github/actions/resolve-ec2
+        with:
+          region: ${{ env.AWS_REGION }}
 
       # ── 3. Fetch RDS master creds ────────────────────────────────
       # The per-env <service>_<env> role lacks CREATE on the cluster, so
