@@ -153,6 +153,14 @@ data "aws_iam_policy_document" "gh_actions_inline" {
     resources = ["*"]
   }
 
+  # Resolve the host's instance ID by Name tag at run time (see
+  # .github/actions/resolve-ec2). DescribeInstances is an API-level read
+  # with no resource-level scoping, so it must be granted on "*".
+  statement {
+    actions   = ["ec2:DescribeInstances"]
+    resources = ["*"]
+  }
+
   # SSM output bucket (created below).
   statement {
     actions = [
