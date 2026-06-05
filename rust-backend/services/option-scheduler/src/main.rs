@@ -102,36 +102,18 @@ async fn main() -> Result<()> {
         .build()
         .context("building reqwest client")?;
 
-    // Resolve every configured pair against deployments. Both the
-    // testTokens entry (coin type, faucet, decimals) and the off-chain
-    // token catalog (pyth feed) are consulted; Pyth pairs without a feed
-    // id in deployments fail here, not at first tick.
+    // Resolve every configured pair against the /tokens catalog (coin type,
+    // decimals, Pyth feed). The scheduler never mints, so it touches no
+    // faucet/testTokens data. Pyth pairs without a feed id fail here, not at
+    // first tick.
     let mut pair_keys: Vec<PairKey> = Vec::with_capacity(cfg.pairs.len());
     let mut pair_meta: Vec<PairMeta> = Vec::with_capacity(cfg.pairs.len());
     for pair in &cfg.pairs {
-        let u = snapshot.token(&pair.underlying).with_context(|| {
-            format!(
-                "underlying {} not in token-info testTokens",
-                pair.underlying
-            )
-        })?;
-        let s = snapshot.token(&pair.settlement).with_context(|| {
-            format!(
-                "settlement {} not in token-info testTokens",
-                pair.settlement
-            )
-        })?;
         let u_spec = snapshot.token_spec(&pair.underlying).with_context(|| {
-            format!(
-                "underlying {} not in token-info catalog",
-                pair.underlying
-            )
+            format!("underlying {} not in token-info catalog", pair.underlying)
         })?;
         let s_spec = snapshot.token_spec(&pair.settlement).with_context(|| {
-            format!(
-                "settlement {} not in token-info catalog",
-                pair.settlement
-            )
+            format!("settlement {} not in token-info catalog", pair.settlement)
         })?;
         let spot = ResolvedSpotSource::from_config(&pair.spot, u_spec, s_spec)
             .with_context(|| {
@@ -143,13 +125,13 @@ async fn main() -> Result<()> {
         pair_keys.push(PairKey {
             underlying_symbol: pair.underlying.clone(),
             settlement_symbol: pair.settlement.clone(),
-            underlying: CanonicalType::parse(&u.coin_type)?,
-            settlement: CanonicalType::parse(&s.coin_type)?,
+            underlying: CanonicalType::parse(&u_spec.coin_type)?,
+            settlement: CanonicalType::parse(&s_spec.coin_type)?,
         });
         pair_meta.push(PairMeta {
             cfg: pair.clone(),
-            underlying_type: u.coin_type.clone(),
-            settlement_type: s.coin_type.clone(),
+            underlying_type: u_spec.coin_type.clone(),
+            settlement_type: s_spec.coin_type.clone(),
             underlying_decimals: u_spec.decimals,
             settlement_decimals: s_spec.decimals,
             spot,

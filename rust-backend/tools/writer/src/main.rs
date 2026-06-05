@@ -55,10 +55,12 @@ async fn main() -> Result<()> {
     let protocol_config = snapshot.protocol_config()?;
     let treasury = snapshot.treasury().context("treasury_id missing from token-info")?;
 
-    // Resolve underlying + settlement via testTokens.
-    let underlying = snapshot.token(&cli.underlying)?;
-    let settlement = snapshot.token(&cli.settlement)?;
-    let (tokens_pkg, underlying_module) = underlying.module_path()?;
+    // Coin types from the /tokens catalog; the underlying faucet (which the
+    // writer mints) from the testTokens passthrough.
+    let underlying_spec = snapshot.token_spec(&cli.underlying)?;
+    let settlement_spec = snapshot.token_spec(&cli.settlement)?;
+    let underlying_faucet = snapshot.faucet_token(&cli.underlying)?;
+    let (tokens_pkg, underlying_module) = underlying_faucet.module_path()?;
 
     let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
@@ -137,11 +139,11 @@ async fn main() -> Result<()> {
 
     let params = ExecuteWriteParams {
         package,
-        underlying_type: &underlying.coin_type,
-        settlement_type: &settlement.coin_type,
+        underlying_type: &underlying_spec.coin_type,
+        settlement_type: &settlement_spec.coin_type,
         tokens_package: tokens_pkg,
         underlying_module: &underlying_module,
-        underlying_faucet_id: underlying.faucet()?,
+        underlying_faucet_id: underlying_faucet.faucet()?,
         bucket_id: cli.bucket,
         protocol_config_id: protocol_config,
         treasury_id: treasury,

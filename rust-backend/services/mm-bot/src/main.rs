@@ -192,9 +192,9 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("fetching catalog from token-info at {}", cli.token_info_url))?;
 
-    // Off-chain token catalog lookup (coin type, decimals, pyth feed).
-    // This is the source the pricing path reads from; the bootstrap path
-    // separately looks up the test-token faucet via `snapshot.token(symbol)`.
+    // /tokens catalog lookup (coin type, decimals, pyth feed). This is the
+    // source the pricing path reads from; the bootstrap path separately looks
+    // up the test-token faucet via `snapshot.faucet_token(symbol)`.
     let underlying_spec = snapshot.token_spec(&cfg.underlying_symbol).with_context(|| {
         format!(
             "underlying symbol {} not in token-info catalog",
@@ -598,7 +598,7 @@ async fn resolve_account(
     // Fund it with settlement so it can pay premiums on day one. Create and
     // fund are separate txs; a crash between them leaves the account
     // (adopted on the next boot) unfunded — acceptable for the test MM bot.
-    let settlement = snapshot.token(&cfg.settlement_symbol)?;
+    let settlement = snapshot.faucet_token(&cfg.settlement_symbol)?;
     let (tokens_pkg, settlement_module) = settlement.module_path()?;
     let fund_resp = mint_and_deposit_into_account(
         &wrap.client,

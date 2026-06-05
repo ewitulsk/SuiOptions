@@ -114,7 +114,11 @@ impl Snapshot {
         Ok(self.admin_cap()?.into_bytes().to_vec())
     }
 
-    // --- test-token (faucet) accessors -------------------------------------
+    // --- faucet accessors (testTokens passthrough) -------------------------
+    //
+    // Faucets are a testnet-only deploy artifact served from `/package-info`.
+    // Use these ONLY for mint/fund operations — coin types, decimals and Pyth
+    // feeds for every consumer come from the `/tokens` catalog accessors below.
 
     /// Entire `testTokens` block (faucets + coin types). Testnet/dev only;
     /// errors on mainnet where it's absent.
@@ -130,12 +134,17 @@ impl Snapshot {
         self.package_info.test_tokens.as_ref()
     }
 
-    /// Case-insensitive testTokens lookup (coin type + faucet + decimals).
-    pub fn token(&self, symbol: &str) -> Result<&TokenInfo> {
+    /// Case-insensitive faucet lookup for a test token (faucet id + module
+    /// path). For minting test tokens only — NOT the general token source.
+    pub fn faucet_token(&self, symbol: &str) -> Result<&TokenInfo> {
         self.test_tokens()?.get(symbol)
     }
 
-    // --- catalog accessors --------------------------------------------------
+    // --- catalog accessors (/tokens) ---------------------------------------
+    //
+    // The single token surface for every consumer: coin type, decimals, Pyth
+    // feed, name, logo. On dev/staging this includes the test tokens (overlaid
+    // by token-info); on mainnet it's the operator-managed catalog.
 
     pub fn tokens(&self) -> &[SupportedToken] {
         &self.tokens

@@ -28,14 +28,15 @@ use sui_tx::tx::test_tokens::{mint_and_deposit_into_account, mint_to_sender};
 
 use exchange::{Cli, Command};
 
-/// Resolves either an uppercase symbol (looked up via testTokens) or a
+/// Resolves either a ticker (looked up via the `/tokens` catalog) or a
 /// fully-qualified Move type string. Lets every command that needs a type
-/// arg accept either form.
+/// arg accept either form. Catalog-backed so it works on every network
+/// (testTokens is empty on mainnet).
 fn resolve_coin_type(snapshot: &Snapshot, input: &str) -> Result<String> {
     if input.contains("::") {
         return Ok(input.to_owned());
     }
-    Ok(snapshot.token(input)?.coin_type.clone())
+    Ok(snapshot.token_spec(input)?.coin_type.clone())
 }
 
 #[tokio::main]
