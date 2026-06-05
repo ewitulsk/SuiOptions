@@ -11,3 +11,15 @@ public_bind_addr   = "0.0.0.0:9005"
 internal_bind_addr = "0.0.0.0:9006"
 
 allowed_origins    = ["*"]
+
+# Display metadata for the staging test-token overlay. Keyed by ticker.
+[seed_meta.TBTC]
+name     = "Test Bitcoin"
+logo_uri = "https://assets.coingecko.com/coins/images/1/small/bitcoin.png"
+[seed_meta.TUSDC]
+name     = "Test USDC"
+logo_uri = "https://assets.coingecko.com/coins/images/6319/small/usdc.png"
+[seed_meta.TWAL]
+name = "Test Walrus"
+[seed_meta.TDEEP]
+name = "Test DeepBook"

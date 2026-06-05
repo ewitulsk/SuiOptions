@@ -6,7 +6,7 @@ use tracing::{error, info};
 
 use deployments::Deployments;
 use token_info::db::{establish_pool, run_migrations, Repo};
-use token_info::{router, seed, AppState, Cli, Config};
+use token_info::{overlay, router, AppState, Cli, Config};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,6 +32,13 @@ async fn main() -> Result<()> {
         "loaded package_info from deployments.json"
     );
 
+    // Dev/staging: derive the read-time test-token overlay merged into
+    // `/tokens`. Prod gets an empty overlay (DB catalog only).
+    let overlay = overlay::build(net, &cfg.seed_meta, cfg.overlay_test_tokens());
+    if !cfg.overlay_test_tokens() {
+        info!(environment = %cfg.environment, "test-token overlay disabled (not dev/staging)");
+    }
+
     // Stand up the catalog DB and apply migrations before serving.
     let pool = Arc::new(
         establish_pool(&cfg.database_url, cfg.db_pool_size).context("establish_pool")?,
@@ -40,14 +47,7 @@ async fn main() -> Result<()> {
     let repo = Repo::new(pool);
     info!(pool_size = cfg.db_pool_size, "postgres pool ready");
 
-    // Dev/staging: seed the catalog from testTokens. Prod starts empty.
-    if cfg.should_seed() {
-        seed::auto_seed(&repo, net).context("auto_seed")?;
-    } else {
-        info!(environment = %cfg.environment, "skipping auto-seed (not dev/staging)");
-    }
-
-    let state = Arc::new(AppState::new(repo, package_info));
+    let state = Arc::new(AppState::new(repo, package_info, overlay));
 
     // Public read API + internal mutate API on separate ports.
     let public_state = Arc::clone(&state);

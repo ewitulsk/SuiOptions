@@ -19,7 +19,6 @@ pub struct TokenRow {
     pub decimals: i16,
     pub pyth_feed_id: Option<String>,
     pub enabled: bool,
-    pub source: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -39,8 +38,9 @@ impl TokenRow {
     }
 }
 
-/// Insert/upsert payload. `created_at` / `updated_at` use DB defaults on
-/// insert; the repo bumps `updated_at` explicitly on update.
+/// Insert/upsert payload for the internal mutate API. `created_at` /
+/// `updated_at` use DB defaults on insert; the repo bumps `updated_at`
+/// explicitly on update.
 #[derive(Insertable, AsChangeset, Debug, Clone)]
 #[diesel(table_name = supported_tokens)]
 pub struct UpsertToken {
@@ -51,5 +51,4 @@ pub struct UpsertToken {
     pub decimals: i16,
     pub pyth_feed_id: Option<String>,
     pub enabled: bool,
-    pub source: String,
 }

@@ -12,8 +12,8 @@
 pub mod config;
 pub mod db;
 pub mod handlers;
+pub mod overlay;
 pub mod router;
-pub mod seed;
 pub mod state;
 
 pub use config::Config;

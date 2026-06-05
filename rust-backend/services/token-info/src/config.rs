@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -8,9 +9,9 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Deployment environment: `dev` / `staging` / `prod`. Gates the
-    /// auto-seed — only `dev` and `staging` seed the catalog from
-    /// `deployments.json` testTokens. `prod` starts empty (mainnet tokens are
-    /// added via the internal API).
+    /// dev/staging test-token overlay on `/tokens` — only `dev` and `staging`
+    /// fold the `deployments.json` testTokens into the catalog response.
+    /// `prod` serves the DB catalog only.
     pub environment: String,
 
     /// Which slot in `deployments.json` to read `package_info` from
@@ -40,6 +41,21 @@ pub struct Config {
     /// CORS allow-list for the public API. `["*"]` permits any origin.
     #[serde(default = "default_cors")]
     pub allowed_origins: Vec<String>,
+
+    /// Display metadata (name, logo) for the dev/staging test-token overlay,
+    /// keyed by ticker (e.g. `TBTC`). testTokens carry no name/logo, so this
+    /// is where they come from. Ignored on prod (no overlay).
+    #[serde(default)]
+    pub seed_meta: BTreeMap<String, SeedMeta>,
+}
+
+/// Optional display metadata for an overlaid test token.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SeedMeta {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub logo_uri: Option<String>,
 }
 
 fn default_deployments_path() -> PathBuf {
@@ -59,10 +75,13 @@ impl Config {
         config_load::load_toml(path)
     }
 
-    /// Auto-seed the catalog from testTokens only on dev/staging. Mainnet/prod
-    /// never seeds synthetic tokens.
-    pub fn should_seed(&self) -> bool {
-        matches!(self.environment.to_ascii_lowercase().as_str(), "dev" | "staging")
+    /// Overlay the deployments.json test tokens onto `/tokens` only on
+    /// dev/staging. Mainnet/prod serves the durable DB catalog alone.
+    pub fn overlay_test_tokens(&self) -> bool {
+        matches!(
+            self.environment.to_ascii_lowercase().as_str(),
+            "dev" | "staging"
+        )
     }
 }
 
@@ -71,7 +90,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn seed_gate() {
+    fn overlay_gate() {
         let mk = |env: &str| Config {
             environment: env.into(),
             network: "testnet".into(),
@@ -81,10 +100,11 @@ mod tests {
             public_bind_addr: "0.0.0.0:9005".parse().unwrap(),
             internal_bind_addr: "0.0.0.0:9006".parse().unwrap(),
             allowed_origins: vec!["*".into()],
+            seed_meta: BTreeMap::new(),
         };
-        assert!(mk("dev").should_seed());
-        assert!(mk("staging").should_seed());
-        assert!(mk("STAGING").should_seed());
-        assert!(!mk("prod").should_seed());
+        assert!(mk("dev").overlay_test_tokens());
+        assert!(mk("staging").overlay_test_tokens());
+        assert!(mk("STAGING").overlay_test_tokens());
+        assert!(!mk("prod").overlay_test_tokens());
     }
 }

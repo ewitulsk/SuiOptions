@@ -1,4 +1,8 @@
-//! Postgres-facing repository for the supported-token catalog.
+//! Postgres-facing repository for the durable supported-token catalog.
+//!
+//! This is the operator-managed catalog only. On dev/staging the `/tokens`
+//! endpoint additionally overlays test tokens at read time (see `overlay.rs`)
+//! — those never touch this table.
 
 use anyhow::{Context, Result};
 use diesel::prelude::*;
@@ -55,7 +59,6 @@ impl Repo {
                 st::decimals.eq(excluded(st::decimals)),
                 st::pyth_feed_id.eq(excluded(st::pyth_feed_id)),
                 st::enabled.eq(excluded(st::enabled)),
-                st::source.eq(excluded(st::source)),
                 st::updated_at.eq(diesel::dsl::now),
             ))
             .get_result::<TokenRow>(&mut conn)
@@ -69,19 +72,5 @@ impl Repo {
         diesel::delete(st::table.find(coin_type))
             .execute(&mut conn)
             .context("deleting token")
-    }
-
-    /// Seed a token only if its coin type isn't already present — used by the
-    /// dev/staging auto-seed so a manual edit (or a prior seed) is never
-    /// clobbered. Returns true if a row was inserted.
-    pub fn seed_if_absent(&self, t: UpsertToken) -> Result<bool> {
-        let mut conn = self.pool.get().context("checkout conn")?;
-        let inserted = diesel::insert_into(st::table)
-            .values(&t)
-            .on_conflict(st::coin_type)
-            .do_nothing()
-            .execute(&mut conn)
-            .context("seeding token")?;
-        Ok(inserted > 0)
     }
 }

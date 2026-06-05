@@ -1,7 +1,8 @@
 # token-info config — prod env (mainnet).
 #
-# prod does NOT auto-seed: the mainnet catalog starts empty and is populated
-# via the internal mutate API. deployments.json still supplies package_info.
+# prod serves the DB catalog only (no test-token overlay). The mainnet catalog
+# is populated via the internal mutate API. deployments.json still supplies
+# package_info.
 
 environment        = "prod"
 network            = "mainnet"

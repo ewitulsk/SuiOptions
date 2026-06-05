@@ -10,7 +10,6 @@ diesel::table! {
         decimals     -> Int2,
         pyth_feed_id -> Nullable<Text>,
         enabled      -> Bool,
-        source       -> Text,
         created_at   -> Timestamptz,
         updated_at   -> Timestamptz,
     }
