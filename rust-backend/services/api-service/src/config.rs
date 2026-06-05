@@ -1,7 +1,8 @@
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use runtime_config::config_load;
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -17,18 +18,9 @@ pub struct Config {
     /// CORS allow-list. `["*"]` permits any origin (dev only).
     #[serde(default = "default_cors")]
     pub allowed_origins: Vec<String>,
-    /// Sui network slot (`testnet` / `mainnet` / `devnet`) to read from
-    /// `deployments.json`. Selects which token catalog we use to resolve
-    /// coin types to {symbol, decimals}.
-    pub network: String,
-    /// Path to `deployments.json` (committed at the workspace root). The
-    /// api-service only reads it — never writes.
-    #[serde(default = "default_deployments_path")]
-    pub deployments_path: PathBuf,
-}
-
-fn default_deployments_path() -> PathBuf {
-    PathBuf::from("deployments.json")
+    /// token-info public base URL. The coin-type → {symbol, decimals} catalog
+    /// is fetched from here at boot (replaces reading `deployments.json`).
+    pub token_info_url: String,
 }
 
 fn default_indexer_graphql_url() -> String {
@@ -41,14 +33,7 @@ fn default_cors() -> Vec<String> {
 
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref();
-        let settings = config::Config::builder()
-            .add_source(config::File::from(path).required(true))
-            .build()
-            .with_context(|| format!("loading config {}", path.display()))?;
-        settings
-            .try_deserialize()
-            .with_context(|| format!("parsing config {}", path.display()))
+        config_load::load_toml(path)
     }
 }
 
@@ -66,8 +51,7 @@ mod tests {
 bind_addr        = "127.0.0.1:9003"
 indexer_url      = "ws://127.0.0.1:9001/"
 allowed_origins  = ["http://localhost:5173"]
-network          = "testnet"
-deployments_path = "deployments.json"
+token_info_url   = "http://127.0.0.1:9005"
 "#,
         )
         .unwrap();
@@ -75,7 +59,7 @@ deployments_path = "deployments.json"
         assert_eq!(cfg.bind_addr.to_string(), "127.0.0.1:9003");
         assert_eq!(cfg.indexer_url, "ws://127.0.0.1:9001/");
         assert_eq!(cfg.allowed_origins, vec!["http://localhost:5173".to_string()]);
-        assert_eq!(cfg.network, "testnet");
+        assert_eq!(cfg.token_info_url, "http://127.0.0.1:9005");
         std::fs::remove_file(&path).ok();
     }
 }

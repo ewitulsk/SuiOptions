@@ -8,11 +8,13 @@
 //! in-process without touching the filesystem.
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use runtime_config::config_load;
 use serde::Deserialize;
+use token_info_client::TokenInfoClient;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -24,13 +26,16 @@ pub struct Config {
     pub rfq_window: Duration,
     /// How often the service sends `Ping`s to keep the WS connection live.
     pub ping_interval: Duration,
+    /// token-info public base URL. The protocol-id domain separator (the
+    /// AdminCap object id bytes) is fetched from here at boot, replacing the
+    /// old `deployments.json` read.
+    pub token_info_url: String,
     /// Domain-separator bytes the on-chain `ProtocolConfig.protocol_id`
     /// holds — used to short-circuit-reject quotes whose `protocol_id` is
-    /// wrong before the chain has to. Resolved at load time from
-    /// `deployments.json` (the AdminCap object id, exactly as the contract
-    /// derives it in `admin.move::init` and the mm-bot signs it), so it
-    /// stays in lockstep with the deployment instead of a hand-copied
-    /// string.
+    /// wrong before the chain has to. Fetched at boot from token-info (the
+    /// AdminCap object id, exactly as the contract derives it in
+    /// `admin.move::init` and the mm-bot signs it), so it stays in lockstep
+    /// with the deployment instead of a hand-copied string.
     pub protocol_id: Vec<u8>,
     /// Max concurrent in-flight RFQ orchestrations per retail connection.
     /// A misbehaving client can otherwise spawn one tokio task per RFQ
@@ -51,14 +56,9 @@ struct FileConfig {
     rfq_window_ms: u64,
     #[serde(default = "default_ping_interval_secs")]
     ping_interval_secs: u64,
-    /// Which slot in `deployments.json` to resolve `protocol_id` from.
-    /// Accepted values: `mainnet`, `testnet`, `devnet` (case-insensitive).
-    network: String,
-    /// Path to `deployments.json`. Relative paths resolve from the
-    /// process's working directory — the container's `WORKDIR /app`
-    /// matches the image's `/app/deployments.json`.
-    #[serde(default = "default_deployments_path")]
-    deployments_path: PathBuf,
+    /// token-info public base URL. The protocol-id domain separator is
+    /// fetched from here at boot.
+    token_info_url: String,
     #[serde(default = "default_max_inflight_per_session")]
     max_inflight_rfqs_per_session: usize,
     #[serde(default = "default_max_inflight_global")]
@@ -67,10 +67,6 @@ struct FileConfig {
 
 fn default_ping_interval_secs() -> u64 {
     15
-}
-
-fn default_deployments_path() -> PathBuf {
-    PathBuf::from("deployments.json")
 }
 
 fn default_max_inflight_per_session() -> usize {
@@ -82,106 +78,66 @@ fn default_max_inflight_global() -> usize {
 }
 
 impl Config {
-    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref();
-        let settings = config::Config::builder()
-            .add_source(config::File::from(path).required(true))
-            .build()
-            .with_context(|| format!("loading config {}", path.display()))?;
-        let file: FileConfig = settings
-            .try_deserialize()
-            .with_context(|| format!("parsing config {}", path.display()))?;
+    /// Load the TOML file, then fetch the `protocol_id` domain separator from
+    /// token-info. Hard cutover off `deployments.json`: if token-info is
+    /// unreachable after the retry window we propagate the error (the process
+    /// crashes), there is no local fallback.
+    pub async fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let file: FileConfig = config_load::load_toml(path)?;
+
+        let snapshot = TokenInfoClient::new(&file.token_info_url)
+            .fetch_blocking_until_ready(30, Duration::from_secs(2))
+            .await
+            .with_context(|| {
+                format!("fetching protocol_id from token-info at {}", file.token_info_url)
+            })?;
+        let protocol_id = snapshot.protocol_id_bytes()?;
 
         Ok(Self {
             bind_addr: file.bind_addr,
             indexer_url: file.indexer_url,
             rfq_window: Duration::from_millis(file.rfq_window_ms),
             ping_interval: Duration::from_secs(file.ping_interval_secs),
-            protocol_id: resolve_protocol_id(&file.deployments_path, &file.network)?,
+            token_info_url: file.token_info_url,
+            protocol_id,
             max_inflight_rfqs_per_session: file.max_inflight_rfqs_per_session,
             max_inflight_rfqs_global: file.max_inflight_rfqs_global,
         })
     }
 }
 
-/// Read `deployments.json` and derive `protocol_id` for `network` exactly
-/// as the chain does (`admin.move::init`: the AdminCap object id as bytes)
-/// and the mm-bot does (`NetworkDeployment::protocol_id_bytes`). Keeping
-/// all three on the same source is what prevents `ProtocolMismatch`
-/// rejections after a redeploy.
-fn resolve_protocol_id(deployments_path: &Path, network: &str) -> Result<Vec<u8>> {
-    let dep = deployments::Deployments::load(deployments_path)?;
-    let net = dep.for_network(network).with_context(|| {
-        format!(
-            "resolving network {network} in {}",
-            deployments_path.display()
-        )
-    })?;
-    net.protocol_id_bytes()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // `Config::load` now fetches `protocol_id` from token-info over the
+    // network, so the round-trip test covers the on-disk TOML shape only
+    // (the network fetch is exercised by token-info-client's own tests).
     #[test]
-    fn loads_toml_round_trip() {
-        // protocol_id is the AdminCap object id, byte-for-byte.
-        let admin_cap = "0xda7ebab81868f7654daabf99c7e99dd44d5a9fb0da5ff179e5a0341276559a16";
-        let expected = hex::decode(admin_cap.trim_start_matches("0x")).unwrap();
-
+    fn parses_toml_file_shape() {
         let dir = std::env::temp_dir();
         let pid = std::process::id();
-        let deployments_path = dir.join(format!("qs-deployments-{pid}.json"));
-        std::fs::write(
-            &deployments_path,
-            format!(
-                r#"{{
-  "mainnet": null,
-  "testnet": {{
-    "package_info": {{
-      "packageId": "0x183ea56e98cb03af50bf3db7328035ac7ec94bb8dc11026d43a2c1ad641056b6",
-      "adminCapId": "{admin_cap}",
-      "protocolConfigId": "0xeb3ea89b93a627ddccce5e746a5e11d2833c20640fadadc732e2b0ae04f10b6f",
-      "upgradeCapId": "0x681818aa5c1176a5c9c0d49e6f90211c63537d30ab7356b49f545b66f7fbfea0",
-      "publishDigest": "ycZcKEXGMyX13zjba3zM2g7T8bH1dsWWSznkpKLJ2ND",
-      "deployer": "0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865",
-      "deployedAt": "2026-06-02T02:51:48.574422195+00:00",
-      "network": "testnet"
-    }}
-  }},
-  "devnet": null
-}}"#
-            ),
-        )
-        .unwrap();
-
         let path = dir.join(format!("qs-config-{pid}.toml"));
         std::fs::write(
             &path,
-            format!(
-                r#"
-bind_addr     = "127.0.0.1:9999"
-indexer_url   = "ws://example.com/feed"
-rfq_window_ms = 1500
+            r#"
+bind_addr      = "127.0.0.1:9999"
+indexer_url    = "ws://example.com/feed"
+rfq_window_ms  = 1500
 ping_interval_secs = 20
-network       = "testnet"
-deployments_path = "{}"
+token_info_url = "http://127.0.0.1:9005"
 "#,
-                deployments_path.display()
-            ),
         )
         .unwrap();
-        let cfg = Config::load(&path).unwrap();
-        assert_eq!(cfg.bind_addr.to_string(), "127.0.0.1:9999");
-        assert_eq!(cfg.indexer_url, "ws://example.com/feed");
-        assert_eq!(cfg.rfq_window, Duration::from_millis(1500));
-        assert_eq!(cfg.ping_interval, Duration::from_secs(20));
-        assert_eq!(cfg.protocol_id, expected);
+        let file: FileConfig = config_load::load_toml(&path).unwrap();
+        assert_eq!(file.bind_addr.to_string(), "127.0.0.1:9999");
+        assert_eq!(file.indexer_url, "ws://example.com/feed");
+        assert_eq!(file.rfq_window_ms, 1500);
+        assert_eq!(file.ping_interval_secs, 20);
+        assert_eq!(file.token_info_url, "http://127.0.0.1:9005");
         // Defaults apply when keys are missing.
-        assert_eq!(cfg.max_inflight_rfqs_per_session, 16);
-        assert_eq!(cfg.max_inflight_rfqs_global, 256);
+        assert_eq!(file.max_inflight_rfqs_per_session, 16);
+        assert_eq!(file.max_inflight_rfqs_global, 256);
         std::fs::remove_file(&path).ok();
-        std::fs::remove_file(&deployments_path).ok();
     }
 }

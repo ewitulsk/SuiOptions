@@ -17,7 +17,7 @@ runtime-config = { workspace = true }
 cli-spec       = { workspace = true }
 sui-tx         = { workspace = true }
 pyth-client    = { workspace = true }
-deployments    = { workspace = true }
+token-info-client = { workspace = true }
 
 # Sui SDK (used to parse the rolled tx response and pull ObjectChanges).
 sui-types = { workspace = true }

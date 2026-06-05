@@ -34,7 +34,7 @@ from typing import Iterable
 
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -62,6 +62,7 @@ REBUILD_ALL_GLOBS = [
 #                      pyth-client, deployments
 #   api-service      : protocol-types, runtime-config, cli-spec, indexer-client,
 #                      deployments
+#   token-info       : runtime-config, cli-spec, deployments, token-info-client
 SERVICE_GLOBS: dict[str, list[str]] = {
     "indexer": [
         "rust-backend/services/indexer/**",
@@ -108,6 +109,14 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/indexer-client/**",
         "rust-backend/crates/deployments/**",
+    ],
+    "token-info": [
+        "rust-backend/services/token-info/**",
+        "rust-backend/Dockerfile.token-info",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/deployments/**",
+        "rust-backend/crates/token-info-client/**",
     ],
 }
 

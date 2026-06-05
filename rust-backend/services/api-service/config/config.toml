@@ -11,5 +11,7 @@ allowed_origins  = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
 # Which Sui network slot in `deployments.json` to read from. Drives the
 # coin-type → {symbol, decimals} lookup used to enrich bucket payloads.
-network          = "testnet"
-deployments_path = "deployments.json"
+
+# token-info public API. Catalog (coin-type -> {symbol, decimals}) is
+# fetched from here at boot.
+token_info_url   = "http://127.0.0.1:9005"

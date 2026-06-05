@@ -44,14 +44,14 @@ use std::path::Path;
 use std::str::FromStr;
 
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sui_types::base_types::{ObjectID, SuiAddress};
 use tracing::{debug, info};
 
 /// One deployed test token: its `Coin<T>` Move type, the shared `Faucet`
 /// object id that wraps the TreasuryCap, and the coin's decimals.
 /// Test-token records are testnet-only; mainnet has no faucets.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenInfo {
     /// Fully-qualified Move type, e.g. `0xpkg::tbtc::TBTC`.
@@ -89,7 +89,7 @@ impl TokenInfo {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestTokens {
     pub package_id: String,
@@ -121,7 +121,7 @@ impl TestTokens {
 
 /// On-chain artifacts from publishing the protocol Move package (and,
 /// on testnet, the test-tokens package).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageInfo {
     pub package_id: String,
@@ -143,7 +143,7 @@ pub struct PackageInfo {
 /// on testnet from the testTokens deploy and authored by hand on
 /// mainnet. Carries everything off-chain pricers (mm-bot) need to source
 /// a USD spot.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenSpec {
     /// Fully-qualified Move type, e.g. `0xpkg::tbtc::TBTC`. On testnet,
@@ -172,7 +172,7 @@ impl TokenSpec {
 /// Per-network deployment record. `package_info` carries everything
 /// derived from publishing Move packages; `token_info` is the off-chain
 /// pricing catalog.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkDeployment {
     pub package_info: PackageInfo,
     #[serde(default)]
@@ -247,7 +247,7 @@ impl NetworkDeployment {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Deployments {
     pub mainnet: Option<NetworkDeployment>,
     pub testnet: Option<NetworkDeployment>,

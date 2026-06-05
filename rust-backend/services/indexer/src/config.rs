@@ -1,32 +1,30 @@
 //! Indexer configuration.
 //!
-//! Loaded from a TOML file (default `config/testnet.toml`). The package id
-//! is **not** in this file — it's resolved at runtime from
-//! `deployments.json` based on `network`, so re-deploying the contracts
-//! doesn't require editing the indexer config.
+//! Loaded from a TOML file (default `config/config.toml`). The package id
+//! is **not** in this file — it's fetched at runtime from the token-info
+//! service, so re-deploying the contracts doesn't require editing the
+//! indexer config.
 //!
 //! Pattern is borrowed from Pismo's indexer, plus the fanout-specific
 //! fields unique to this protocol.
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use runtime_config::config_load;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    /// Which slot in `deployments.json` to resolve the `package_id` from.
-    /// Accepted values: `mainnet`, `testnet`, `devnet` (case-insensitive).
+    /// Network identifier. Accepted values: `mainnet`, `testnet`, `devnet`
+    /// (case-insensitive). Used to derive the default JSON-RPC URL.
     pub network: String,
 
-    /// Path to `deployments.json`. Relative paths resolve from the
-    /// process's working directory — running the binary from
-    /// `rust-backend/` matches the default.
-    #[serde(default = "default_deployments_path")]
-    pub deployments_path: PathBuf,
+    /// token-info public base URL. The deployed `package_id` is fetched
+    /// from here at boot (replaces reading `deployments.json`).
+    pub token_info_url: String,
 
     /// Sui checkpoint remote store. Production-facing values:
     ///   `https://checkpoints.testnet.sui.io`
@@ -83,10 +81,6 @@ pub struct Config {
     pub recent_log_capacity: usize,
 }
 
-fn default_deployments_path() -> PathBuf {
-    PathBuf::from("deployments.json")
-}
-
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         config_load::load_toml(path)
@@ -113,21 +107,6 @@ impl Config {
                 ));
             }
         })
-    }
-
-    /// Read `deployments.json` and pull the `package_id` for the configured
-    /// `network`. Surfaced as `String` because that's the form the
-    /// event-type builder needs (`{package_id}::events::EventName`).
-    pub fn resolve_package_id(&self) -> Result<String> {
-        let dep = deployments::Deployments::load(&self.deployments_path)?;
-        let net = dep.for_network(&self.network).with_context(|| {
-            format!(
-                "resolving network {} in {}",
-                self.network,
-                self.deployments_path.display()
-            )
-        })?;
-        Ok(net.package_info.package_id.clone())
     }
 }
 
@@ -168,6 +147,7 @@ mod tests {
             "no_start",
             r#"
 network = "testnet"
+token_info_url = "http://127.0.0.1:9005"
 remote_store_url = "https://checkpoints.testnet.sui.io"
 concurrency = 5
 fanout_addr = "127.0.0.1:9001"
@@ -185,6 +165,7 @@ database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
             "with_start",
             r#"
 network = "testnet"
+token_info_url = "http://127.0.0.1:9005"
 remote_store_url = "https://checkpoints.testnet.sui.io"
 start_checkpoint = 12345
 concurrency = 5
@@ -203,6 +184,7 @@ database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
             "rpc_default",
             r#"
 network = "testnet"
+token_info_url = "http://127.0.0.1:9005"
 remote_store_url = "https://checkpoints.testnet.sui.io"
 concurrency = 5
 fanout_addr = "127.0.0.1:9001"
@@ -220,6 +202,7 @@ database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
             "rpc_explicit",
             r#"
 network = "testnet"
+token_info_url = "http://127.0.0.1:9005"
 remote_store_url = "https://checkpoints.testnet.sui.io"
 rpc_url = "https://my-private-fullnode.example.com:443"
 concurrency = 5

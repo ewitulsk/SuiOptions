@@ -14,8 +14,11 @@ use sui_tx::sui_client::Network;
 #[derive(Parser, Debug)]
 #[command(name = "exchange", about = "Admin CLI for the covered-call options protocol")]
 pub struct Cli {
-    #[arg(short, long, default_value = "deployments.json")]
-    pub deployments: PathBuf,
+    /// Base URL of the token-info service. Source of truth for the token
+    /// catalog and on-chain ids. No `deployments.json` fallback — a hard
+    /// cutover; the tool crashes if token-info is unreachable.
+    #[arg(long, env = "TOKEN_INFO_URL", default_value = "http://127.0.0.1:9005")]
+    pub token_info_url: String,
 
     /// Per-binary secrets TOML. Holds the Sui signing key. No env-var
     /// fallback.

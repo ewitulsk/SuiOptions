@@ -1,0 +1,31 @@
+# token-info config (local dev).
+#
+# The sole reader of deployments.json. Serves a public read API and an
+# internal mutate API on separate ports. On dev/staging the `/tokens`
+# endpoint overlays the deployments.json testTokens (display name/logo from
+# [seed_meta] below); the DB holds only manually-managed tokens.
+
+environment        = "dev"
+network            = "testnet"
+deployments_path   = "deployments.json"
+
+database_url       = "postgresql://postgres:postgres@localhost:7654/token_info"
+db_pool_size       = 8
+
+public_bind_addr   = "127.0.0.1:9005"
+internal_bind_addr = "127.0.0.1:9006"
+
+allowed_origins    = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+# Display metadata for the dev/staging test-token overlay (testTokens carry no
+# name/logo). Keyed by ticker. logo_uri is optional. Dev placeholders.
+[seed_meta.TBTC]
+name     = "Test Bitcoin"
+logo_uri = "https://assets.coingecko.com/coins/images/1/small/bitcoin.png"
+[seed_meta.TUSDC]
+name     = "Test USDC"
+logo_uri = "https://assets.coingecko.com/coins/images/6319/small/usdc.png"
+[seed_meta.TWAL]
+name = "Test Walrus"
+[seed_meta.TDEEP]
+name = "Test DeepBook"

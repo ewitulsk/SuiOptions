@@ -4,8 +4,12 @@
 // one live subscriber. Re-runs the connection whenever the active set
 // changes. Mirrors the transport used by `rust-backend/crates/pyth-client`.
 //
-// Feed ids are the same ones recorded in `rust-backend/deployments.json`
-// under `testnet.token_info.*.pythFeedId`.
+// Supported-token feed ids come from the token-info catalog
+// (`SUPPORTED_TOKENS[].pythFeedId`). A few bare market symbols (BTC/SUI/USDC),
+// used by ambient spot widgets that work in real-asset terms, keep a small
+// static alias map — they are display-only and not part of the catalog.
+
+import { SUPPORTED_TOKENS } from "../config";
 
 const HERMES_BASE = "https://hermes.pyth.network";
 
@@ -23,14 +27,12 @@ export type PythPrice = {
 type Subscriber = (price: PythPrice) => void;
 
 /**
- * Symbol → feed id. Test-token symbols mirror `deployments.json::testnet.token_info`.
- * Bare symbols (BTC/SUI/USDC) point at the same Pyth feeds and exist so screens
- * working in real-asset terms (e.g. the dashboard) resolve without a translation step.
+ * Bare market-symbol aliases for ambient spot widgets (e.g. the dashboard's
+ * BTC/SUI tickers). These are NOT supported-token catalog entries — supported
+ * tokens resolve their feed from `SUPPORTED_TOKENS[].pythFeedId` instead.
  */
-export const PYTH_FEEDS: Record<string, string> = {
-  TBTC: "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
+const DISPLAY_ALIASES: Record<string, string> = {
   BTC: "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
-  TUSDC: "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a",
   USDC: "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a",
   SUI: "0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744",
 };
@@ -40,8 +42,15 @@ export function resolveFeedId(symbolOrId: string): string | null {
   if (/^0x[0-9a-f]{64}$/i.test(trimmed) || /^[0-9a-f]{64}$/i.test(trimmed)) {
     return normalize(trimmed);
   }
-  const mapped = PYTH_FEEDS[trimmed.toUpperCase()];
-  return mapped ? normalize(mapped) : null;
+  const upper = trimmed.toUpperCase();
+  // Supported tokens: resolve the feed from the token-info catalog.
+  const token = SUPPORTED_TOKENS.find((t) => t.ticker.toUpperCase() === upper);
+  if (token?.pythFeedId) {
+    return normalize(token.pythFeedId);
+  }
+  // Ambient display symbols (BTC/SUI/USDC).
+  const alias = DISPLAY_ALIASES[upper];
+  return alias ? normalize(alias) : null;
 }
 
 function normalize(id: string): string {

@@ -9,11 +9,13 @@
 //! default `services/indexer/config/config.toml`. Honors `RUST_LOG`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use sui_data_ingestion_core::setup_single_workflow;
 use sui_sdk::SuiClientBuilder;
+use token_info_client::TokenInfoClient;
 use tracing::{error, info};
 
 use indexer::{establish_pool, run_migrations, Cli, Config, ProtocolEventWorker, Repo, Store};
@@ -28,20 +30,23 @@ async fn main() -> Result<()> {
     let cfg = Config::load(&cfg_path)
         .with_context(|| format!("loading config from {cfg_path}"))?;
 
-    // Resolve the deployed package id from deployments.json so a redeploy
-    // doesn't need an indexer config edit.
-    let package_id = cfg.resolve_package_id().with_context(|| {
-        format!(
-            "resolving package_id from {} (network={})",
-            cfg.deployments_path.display(),
-            cfg.network
-        )
-    })?;
+    // Resolve the deployed package id from the token-info service so a
+    // redeploy doesn't need an indexer config edit. Hard cutover: if
+    // token-info is unreachable after the retry window we crash (no
+    // deployments.json fallback). Do this before the DB pool so an outage
+    // fails fast.
+    let snapshot = TokenInfoClient::new(&cfg.token_info_url)
+        .fetch_blocking_until_ready(30, Duration::from_secs(2))
+        .await
+        .with_context(|| {
+            format!("fetching package_id from token-info at {}", cfg.token_info_url)
+        })?;
+    let package_id = snapshot.package_info.package_id.clone();
     info!(
         network = %cfg.network,
         package_id = %package_id,
-        deployments = %cfg.deployments_path.display(),
-        "resolved package id from deployments"
+        token_info_url = %cfg.token_info_url,
+        "resolved package id from token-info"
     );
 
     // Stand up the DB pool and apply pending migrations before anything else

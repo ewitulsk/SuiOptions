@@ -67,6 +67,14 @@ target "api-service" {
   cache-to   = [{ type = "gha", mode = "max", scope = "api-service" }]
 }
 
+target "token-info" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.token-info"
+  tags       = ["${ECR}/options/token-info:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "token-info" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "token-info" }]
+}
+
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info"]
 }

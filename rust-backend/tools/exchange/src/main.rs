@@ -21,21 +21,22 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 
-use deployments::{Deployments, NetworkDeployment};
+use token_info_client::{Snapshot, TokenInfoClient};
 use sui_tx::sui_client::SuiClientWrapper;
 use sui_tx::tx::admin::{new_call_option, set_fee_bps, withdraw_treasury, NewCallOptionArgs};
 use sui_tx::tx::test_tokens::{mint_and_deposit_into_account, mint_to_sender};
 
 use exchange::{Cli, Command};
 
-/// Resolves either an uppercase symbol (looked up via testTokens) or a
+/// Resolves either a ticker (looked up via the `/tokens` catalog) or a
 /// fully-qualified Move type string. Lets every command that needs a type
-/// arg accept either form.
-fn resolve_coin_type(net: &NetworkDeployment, input: &str) -> Result<String> {
+/// arg accept either form. Catalog-backed so it works on every network
+/// (testTokens is empty on mainnet).
+fn resolve_coin_type(snapshot: &Snapshot, input: &str) -> Result<String> {
     if input.contains("::") {
         return Ok(input.to_owned());
     }
-    Ok(net.token(input)?.coin_type.clone())
+    Ok(snapshot.token_spec(input)?.coin_type.clone())
 }
 
 #[tokio::main]
@@ -48,18 +49,13 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let dep = Deployments::load(&cli.deployments)
-        .with_context(|| format!("loading {}", cli.deployments.display()))?;
-    let net = dep.for_network(cli.network.as_str()).with_context(|| {
-        format!(
-            "no deployment for {} in {}",
-            cli.network,
-            cli.deployments.display()
-        )
-    })?;
-    let package = net.package()?;
-    let admin_cap = net.admin_cap()?;
-    let protocol_config = net.protocol_config()?;
+    let snapshot = TokenInfoClient::new(&cli.token_info_url)
+        .fetch_blocking_until_ready(30, std::time::Duration::from_secs(2))
+        .await
+        .with_context(|| format!("fetching token-info from {}", cli.token_info_url))?;
+    let package = snapshot.package()?;
+    let admin_cap = snapshot.admin_cap()?;
+    let protocol_config = snapshot.protocol_config()?;
 
     let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
@@ -69,11 +65,11 @@ async fn main() -> Result<()> {
         cli.cmd,
         Command::CreateBuckets { .. } | Command::SetFee { .. } | Command::WithdrawTreasury { .. }
     );
-    if needs_admin && wrap.signer.address != net.deployer_address()? {
+    if needs_admin && wrap.signer.address != snapshot.deployer_address()? {
         return Err(anyhow!(
-            "configured signer {} ≠ deployer {} from deployments.json — only the deployer holds AdminCap",
+            "configured signer {} ≠ deployer {} from token-info — only the deployer holds AdminCap",
             wrap.signer.address,
-            net.package_info.deployer
+            snapshot.package_info.deployer
         ));
     }
 
@@ -87,8 +83,8 @@ async fn main() -> Result<()> {
             count,
             strike_scale,
         } => {
-            let u_type = resolve_coin_type(net, &underlying)?;
-            let s_type = resolve_coin_type(net, &settlement)?;
+            let u_type = resolve_coin_type(&snapshot, &underlying)?;
+            let s_type = resolve_coin_type(&snapshot, &settlement)?;
             let resp = new_call_option(
                 &wrap.client,
                 &wrap.signer,
@@ -125,7 +121,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Mint { token, amount } => {
-            let tokens = net.test_tokens()?;
+            let tokens = snapshot.test_tokens()?;
             let info = tokens.get(&token)?;
             let (pkg, module) = info.module_path()?;
             let resp = mint_to_sender(
@@ -145,7 +141,7 @@ async fn main() -> Result<()> {
             token,
             amount,
         } => {
-            let tokens = net.test_tokens()?;
+            let tokens = snapshot.test_tokens()?;
             let info = tokens.get(&token)?;
             let (pkg, module) = info.module_path()?;
             let resp = mint_and_deposit_into_account(
@@ -184,8 +180,8 @@ async fn main() -> Result<()> {
             amount,
             recipient,
         } => {
-            let asset_type = resolve_coin_type(net, &token)?;
-            let treasury = net.treasury().context("treasury_id missing")?;
+            let asset_type = resolve_coin_type(&snapshot, &token)?;
+            let treasury = snapshot.treasury().context("treasury_id missing")?;
             let resp = withdraw_treasury(
                 &wrap.client,
                 &wrap.signer,
@@ -201,8 +197,8 @@ async fn main() -> Result<()> {
             println!("✓ withdraw-treasury digest: {}", resp.digest);
         }
         Command::Info => {
-            let protocol_id_bytes = net.protocol_id_bytes()?;
-            let pi = &net.package_info;
+            let protocol_id_bytes = snapshot.protocol_id_bytes()?;
+            let pi = &snapshot.package_info;
             println!("network         : {}", cli.network);
             println!("package         : {}", pi.package_id);
             println!("admin_cap       : {}", pi.admin_cap_id);
@@ -214,7 +210,7 @@ async fn main() -> Result<()> {
             println!("deployer        : {}", pi.deployer);
             println!("protocol_id     : 0x{}", hex::encode(&protocol_id_bytes));
             println!("signer          : {}", wrap.signer.address);
-            if let Some(tt) = net.maybe_test_tokens() {
+            if let Some(tt) = snapshot.maybe_test_tokens() {
                 println!();
                 println!("test_tokens.package: {}", tt.package_id);
                 for (sym, info) in &tt.tokens {
@@ -224,13 +220,13 @@ async fn main() -> Result<()> {
                     );
                 }
             }
-            if !net.token_info.is_empty() {
+            if !snapshot.tokens().is_empty() {
                 println!();
                 println!("token_info:");
-                for (sym, spec) in &net.token_info {
+                for spec in snapshot.tokens() {
                     println!(
                         "  {:5} dec={} pyth={} type={}",
-                        sym,
+                        spec.ticker,
                         spec.decimals,
                         spec.pyth_feed_id.as_deref().unwrap_or("(none)"),
                         spec.coin_type

@@ -16,7 +16,7 @@ import { ENV, PACKAGE_ID } from "../config";
 function requirePackage(): string {
   if (!PACKAGE_ID) {
     throw new Error(
-      `No deployment for VITE_ENVIRONMENT="${ENV}" in deployments.json — the dashboard cannot build PTBs against the protocol`,
+      `No deployment for VITE_ENVIRONMENT="${ENV}" (token-info returned no packageId) — the dashboard cannot build PTBs against the protocol`,
     );
   }
   return PACKAGE_ID;

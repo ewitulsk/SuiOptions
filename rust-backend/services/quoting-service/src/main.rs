@@ -15,7 +15,9 @@ async fn main() -> Result<()> {
     let cfg_path = cli.config.to_string_lossy().into_owned();
     info!(cfg_path, "loading config");
     let cfg = Arc::new(
-        Config::load(&cfg_path).with_context(|| format!("loading config from {cfg_path}"))?,
+        Config::load(&cfg_path)
+            .await
+            .with_context(|| format!("loading config from {cfg_path}"))?,
     );
     let app = Arc::new(AppState::with_global_rfq_cap(cfg.max_inflight_rfqs_global));
 

@@ -6,7 +6,7 @@
 # output, then committed back by `terraform output` — see deployment.md §6.
 
 network                 = "devnet"
-deployments_path        = "/app/deployments.json"
+token_info_url          = "http://token-info:9005"
 remote_store_url        = "https://checkpoints.devnet.sui.io"
 concurrency             = 5
 fanout_addr             = "0.0.0.0:9001"

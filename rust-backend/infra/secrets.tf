@@ -1,6 +1,7 @@
-# Per-env app secrets. Two entries per env, one per service:
-#   options/<env>/indexer  -> {"db_password": "..."}
-#   options/<env>/mm-bot   -> {"sui_key": "...", "quote_key": "..."}
+# Per-env app secrets, one per service:
+#   options/<env>/indexer     -> {"db_password": "..."}
+#   options/<env>/token-info  -> {"db_password": "..."}
+#   options/<env>/mm-bot      -> {"sui_key": "...", "quote_key": "..."}
 #
 # Terraform creates empty placeholders. The actual values are filled in
 # via the AWS console (or `aws secretsmanager put-secret-value`) after
@@ -33,6 +34,28 @@ resource "aws_secretsmanager_secret_version" "indexer" {
   secret_id = each.value.id
   secret_string = jsonencode({
     db_password = random_password.indexer_db[each.key].result
+  })
+}
+
+# token-info secret per env.
+resource "aws_secretsmanager_secret" "token_info" {
+  for_each                = toset(local.envs)
+  name                    = "options/${each.key}/token-info"
+  description             = "token-info DB password (JSON: db_password)."
+  recovery_window_in_days = 7
+}
+
+resource "random_password" "token_info_db" {
+  for_each = toset(local.envs)
+  length   = 32
+  special  = false
+}
+
+resource "aws_secretsmanager_secret_version" "token_info" {
+  for_each  = aws_secretsmanager_secret.token_info
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    db_password = random_password.token_info_db[each.key].result
   })
 }
 

@@ -44,6 +44,14 @@ endpoints:
       - "[STATUS] == 200"
       - "[BODY] == ok"
 
+  - name: Token Info
+    group: staging
+    url: http://options-staging-token-info-1:9005/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
   - name: MM Bot
     group: staging
     url: http://options-staging-mm-bot-1:8084/health
@@ -87,6 +95,14 @@ endpoints:
   - name: Indexer
     group: dev
     url: http://options-dev-indexer-1:8081/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Token Info
+    group: dev
+    url: http://options-dev-token-info-1:9005/health
     interval: 30s
     conditions:
       - "[STATUS] == 200"

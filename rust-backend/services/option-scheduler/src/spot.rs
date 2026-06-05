@@ -89,8 +89,8 @@ impl ResolvedSpotSource {
     /// boot.
     pub fn from_config(
         cfg: &SpotConfig,
-        underlying_spec: &deployments::TokenSpec,
-        settlement_spec: &deployments::TokenSpec,
+        underlying_spec: &token_info_client::SupportedToken,
+        settlement_spec: &token_info_client::SupportedToken,
     ) -> Result<Self> {
         match *cfg {
             SpotConfig::Static { usd } => {
