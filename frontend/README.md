@@ -33,16 +33,18 @@ implementation to real Sui SDK / indexer / WSS calls is a contained change.
 
 ## Environment variables
 
-The frontend reads exactly three `VITE_`-prefixed variables. **All three have
-defaults wired for local dev, so none are strictly required** — set them to
-point at a non-local environment. Define them in `frontend/.env.local` (Vite
-loads it automatically; not committed).
+The frontend reads a handful of `VITE_`-prefixed variables. **All have defaults
+wired for local dev (or are optional), so none are strictly required** — set
+them to point at a non-local environment or to enable social sign-in. Define
+them in `frontend/.env.local` (Vite loads it automatically; not committed).
 
-| Variable             | Required | Default                  | Purpose |
-| -------------------- | -------- | ------------------------ | ------- |
-| `VITE_ENVIRONMENT`   | No       | `testnet`                | Selects which deployment block to read from `rust-backend/deployments.json`. One of `mainnet` \| `testnet` \| `devnet`. Drives the package / protocol-config / treasury ids (`src/config.ts`) **and** the wallet's default Sui network (`src/main.tsx`). An environment with no published deployment leaves those ids unset and the app falls back to its empty / "no deployment configured" states. |
-| `VITE_API_BASE_URL`  | No       | `http://127.0.0.1:9003`  | Base URL of the Rust `api-service` (REST). |
-| `VITE_QUOTING_WS_URL`| No       | `ws://127.0.0.1:9002/`   | WebSocket URL of the quoting service. |
+| Variable               | Required | Default                  | Purpose |
+| ---------------------- | -------- | ------------------------ | ------- |
+| `VITE_ENVIRONMENT`     | No       | `testnet`                | Selects which deployment block to read from `rust-backend/deployments.json`. One of `mainnet` \| `testnet` \| `devnet`. Drives the package / protocol-config / treasury ids (`src/config.ts`) **and** the wallet's default Sui network (`src/main.tsx`). An environment with no published deployment leaves those ids unset and the app falls back to its empty / "no deployment configured" states. |
+| `VITE_API_BASE_URL`    | No       | `http://127.0.0.1:9003`  | Base URL of the Rust `api-service` (REST). |
+| `VITE_QUOTING_WS_URL`  | No       | `ws://127.0.0.1:9002/`   | WebSocket URL of the quoting service. |
+| `VITE_ENOKI_API_KEY`   | No       | _(unset)_                | Enoki **public** frontend API key (Enoki Developer Portal). Enables zkLogin "Sign in with Google" in the connect modal. When unset, social login is hidden and only browser-extension wallets are offered. |
+| `VITE_GOOGLE_CLIENT_ID`| No       | _(unset)_                | Google OAuth 2.0 **web** client id. Required alongside `VITE_ENOKI_API_KEY` to register the Enoki Google wallet. Both must be set for social login to appear. Enoki only supports `mainnet`/`testnet` (not `devnet`). |
 
 Contract ids (package, `ProtocolConfig`, `Treasury`) are **not** env vars —
 they come from `deployments.json` keyed by `VITE_ENVIRONMENT`.
