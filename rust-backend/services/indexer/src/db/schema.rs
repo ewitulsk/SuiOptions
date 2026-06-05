@@ -64,11 +64,25 @@ diesel::table! {
         object_id      -> Text,
         recipient      -> Text,
         updated_at_seq -> Int8,
+        premium_received -> Numeric,
+        mm_account_id    -> Text,
+        tx_digest        -> Text,
+        minted_at_ms     -> Int8,
+    }
+}
+
+diesel::table! {
+    event_participants (sequence, address, role) {
+        sequence -> Int8,
+        address  -> Text,
+        role     -> Text,
     }
 }
 
 diesel::joinable!(account_balances -> accounts (account_id));
+diesel::joinable!(event_participants -> indexed_events (sequence));
 diesel::allow_tables_to_appear_in_same_query!(
+    event_participants,
     indexer_progress,
     indexed_events,
     accounts,

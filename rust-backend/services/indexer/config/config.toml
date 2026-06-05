@@ -10,6 +10,7 @@ deployments_path        = "deployments.json"
 remote_store_url        = "https://checkpoints.testnet.sui.io"
 concurrency             = 5
 fanout_addr             = "127.0.0.1:9001"
+graphql_addr            = "127.0.0.1:9002"
 heartbeat_interval_secs = 5
 
 # Postgres persistence. The docker-compose at services/indexer/docker-compose.yml

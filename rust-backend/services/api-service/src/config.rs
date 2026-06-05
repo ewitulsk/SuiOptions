@@ -10,6 +10,10 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     /// Indexer WS endpoint. Subscribed from boot.
     pub indexer_url: String,
+    /// Indexer GraphQL query endpoint (SO-97). Used to enrich the Dashboard's
+    /// wallet-direct positions. e.g. `http://127.0.0.1:9002/graphql`.
+    #[serde(default = "default_indexer_graphql_url")]
+    pub indexer_graphql_url: String,
     /// CORS allow-list. `["*"]` permits any origin (dev only).
     #[serde(default = "default_cors")]
     pub allowed_origins: Vec<String>,
@@ -25,6 +29,10 @@ pub struct Config {
 
 fn default_deployments_path() -> PathBuf {
     PathBuf::from("deployments.json")
+}
+
+fn default_indexer_graphql_url() -> String {
+    "http://127.0.0.1:9002/graphql".to_string()
 }
 
 fn default_cors() -> Vec<String> {

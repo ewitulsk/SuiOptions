@@ -130,7 +130,18 @@ async fn main() -> Result<()> {
         }
     });
 
+    // GraphQL query API (SO-97). Reads the same Postgres views the worker
+    // writes; independent of the WS fanout.
+    let graphql_addr = cfg.graphql_addr;
+    let graphql_repo = repo.clone();
+    let graphql_handle = tokio::spawn(async move {
+        if let Err(e) = indexer::graphql::serve(graphql_addr, graphql_repo).await {
+            error!(error = %e, "graphql server exited");
+        }
+    });
+
     info!(addr = %cfg.fanout_addr, "indexer fanout listening");
+    info!(addr = %cfg.graphql_addr, "indexer graphql listening");
     info!(
         remote = %cfg.remote_store_url,
         from = start_checkpoint,
@@ -149,6 +160,12 @@ async fn main() -> Result<()> {
             match res {
                 Ok(_) => info!("fanout finished"),
                 Err(e) => error!(error = %e, "fanout join failed"),
+            }
+        }
+        res = graphql_handle => {
+            match res {
+                Ok(_) => info!("graphql finished"),
+                Err(e) => error!(error = %e, "graphql join failed"),
             }
         }
     }

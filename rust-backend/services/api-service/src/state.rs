@@ -8,8 +8,46 @@ use tracing::{debug, trace};
 use protocol_types::events::{ChainEvent, IndexedEvent};
 use protocol_types::ids::{ObjectId, SuiAddress};
 
+use serde::Deserialize;
+
 use crate::bucket::Bucket;
 use crate::catalog::TokenCatalog;
+
+// ── indexer GraphQL response (SO-97) ──────────────────────────────────────
+
+#[derive(Deserialize)]
+struct GqlResponse {
+    data: Option<GqlData>,
+    errors: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Deserialize)]
+struct GqlData {
+    positions: Vec<IndexerPosition>,
+}
+
+/// One enriched position from the indexer GraphQL API. All on-chain integers
+/// arrive as decimal strings to preserve precision; the handler scales them.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexerPosition {
+    pub object_id: String,
+    pub bucket_id: String,
+    pub recipient: String,
+    pub range_start_raw: String,
+    pub range_end_raw: String,
+    pub asset_type: String,
+    pub settlement_type: String,
+    pub strike_raw: String,
+    pub strike_scale: i32,
+    pub expiry_ms: String,
+    pub total_written_raw: String,
+    pub exercise_cursor_raw: String,
+    pub premium_received_raw: String,
+    pub mm_account_id: String,
+    pub tx_digest: String,
+    pub minted_at_ms: String,
+}
 
 /// One live `Position` object held by some wallet. Tracked by `object_id`
 /// because that's the stable identity across transfers. `recipient` is the
@@ -54,16 +92,50 @@ pub struct AppState {
     /// Keyed by recipient address. Sorted by sequence (newest last).
     lots_by_recipient: RwLock<BTreeMap<SuiAddress, Vec<CallTokenLot>>>,
     pub catalog: TokenCatalog,
+    /// SO-97: client for the indexer GraphQL query API, used to enrich the
+    /// Dashboard's wallet-direct positions.
+    http: reqwest::Client,
+    indexer_graphql_url: String,
 }
 
 impl AppState {
-    pub fn new(catalog: TokenCatalog) -> Self {
+    pub fn new(catalog: TokenCatalog, indexer_graphql_url: String) -> Self {
         Self {
             buckets: RwLock::new(BTreeMap::new()),
             positions: RwLock::new(BTreeMap::new()),
             lots_by_recipient: RwLock::new(BTreeMap::new()),
             catalog,
+            http: reqwest::Client::new(),
+            indexer_graphql_url,
         }
+    }
+
+    /// Query the indexer's GraphQL `positions(objectIds)` for enrichment.
+    /// Returns the rows the indexer knows about; unknown ids are simply
+    /// absent (the caller renders those degraded).
+    pub async fn query_indexer_positions(
+        &self,
+        object_ids: &[String],
+    ) -> anyhow::Result<Vec<IndexerPosition>> {
+        if object_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        const QUERY: &str = r#"query($ids:[String!]!){positions(objectIds:$ids){objectId bucketId recipient rangeStartRaw rangeEndRaw assetType settlementType strikeRaw strikeScale expiryMs totalWrittenRaw exerciseCursorRaw premiumReceivedRaw mmAccountId txDigest mintedAtMs}}"#;
+        let body = serde_json::json!({ "query": QUERY, "variables": { "ids": object_ids } });
+        let resp = self
+            .http
+            .post(&self.indexer_graphql_url)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let parsed: GqlResponse = resp.json().await?;
+        if let Some(errors) = parsed.errors {
+            if !errors.is_empty() {
+                anyhow::bail!("indexer graphql errors: {:?}", errors);
+            }
+        }
+        Ok(parsed.data.map(|d| d.positions).unwrap_or_default())
     }
 
     pub fn active_buckets(&self) -> Vec<(ObjectId, Bucket)> {
@@ -212,7 +284,7 @@ mod tests {
 
     #[test]
     fn bucket_lifecycle() {
-        let s = AppState::new(TokenCatalog::default());
+        let s = AppState::new(TokenCatalog::default(), "http://127.0.0.1:9002/graphql".to_string());
         let id = ObjectId::new([0xaa; 32]);
         s.ingest_event(&evt(
             1,
@@ -235,7 +307,7 @@ mod tests {
 
     #[test]
     fn invalidation_toggle_surfaces_on_active_bucket() {
-        let s = AppState::new(TokenCatalog::default());
+        let s = AppState::new(TokenCatalog::default(), "http://127.0.0.1:9002/graphql".to_string());
         let id = ObjectId::new([0xab; 32]);
         s.ingest_event(&evt(
             1,

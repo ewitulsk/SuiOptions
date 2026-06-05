@@ -4,7 +4,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use axum::{routing::get, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
@@ -25,6 +28,10 @@ pub async fn serve(
         .route(
             "/call-token-lots",
             get(handlers::call_token_lots::list_call_token_lots),
+        )
+        .route(
+            "/dashboard/positions",
+            post(handlers::dashboard::enrich_positions),
         )
         .with_state(state)
         .layer(cors);

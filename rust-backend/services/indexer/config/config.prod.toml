@@ -5,6 +5,7 @@ deployments_path        = "/app/deployments.json"
 remote_store_url        = "https://checkpoints.mainnet.sui.io"
 concurrency             = 5
 fanout_addr             = "0.0.0.0:9001"
+graphql_addr            = "0.0.0.0:9002"
 heartbeat_interval_secs = 5
 
 database_url            = "postgresql://indexer_prod:${DB_PASSWORD}@${DB_HOST}:5432/indexer_prod"

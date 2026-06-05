@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
     let catalog = TokenCatalog::from_deployments(&deployments, &cfg.network)
         .with_context(|| format!("building token catalog for network {}", cfg.network))?;
 
-    let state = Arc::new(AppState::new(catalog));
+    let state = Arc::new(AppState::new(catalog, cfg.indexer_graphql_url.clone()));
 
     let url = cfg.indexer_url.clone();
     let state_for_indexer = Arc::clone(&state);

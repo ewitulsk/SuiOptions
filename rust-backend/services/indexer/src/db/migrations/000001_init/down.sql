@@ -1,3 +1,4 @@
+DROP TABLE IF EXISTS event_participants;
 DROP TABLE IF EXISTS positions;
 DROP TABLE IF EXISTS buckets;
 DROP TABLE IF EXISTS account_balances;

@@ -17,6 +17,7 @@ pub mod config;
 pub mod db;
 pub mod event_types;
 pub mod fanout;
+pub mod graphql;
 pub mod store;
 pub mod worker;
 

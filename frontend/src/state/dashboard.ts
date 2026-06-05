@@ -14,17 +14,18 @@
 // through `signing → broadcast → confirmed`.
 
 import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   useCurrentAccount,
   useSignAndExecuteTransaction,
 } from "@mysten/dapp-kit";
 
 import { useBuckets } from "../api/useBuckets";
-import { useCallTokenLots } from "../api/useCallTokenLots";
 import { useOwnedCallOptions } from "../api/useOwnedCallOptions";
-import { usePositions } from "../api/usePositions";
+import { useOwnedPositions, type OwnedPositionObj } from "../api/useOwnedPositions";
 import { usePythPrice } from "../api/usePythPrice";
-import type { CallTokenLot, Position, Series } from "../api/client";
+import { fetchEnrichedPositions } from "../api/client";
+import type { CallTokenLot, EnrichedPosition, Position, Series } from "../api/client";
 import type { OwnedCallOption } from "../api/useOwnedCallOptions";
 import { buildExerciseTx, buildRedeemTx } from "../tx/dashboard";
 import type {
@@ -104,27 +105,6 @@ function lookupBucketCursor(
 
 // ── owned-row construction ────────────────────────────────────────────
 
-/**
- * Group call-token lots by bucket so a user's split CallOptions (which
- * don't have their own WriteExecuted) can still attribute provenance to
- * "your purchases in this bucket".
- */
-function indexLotsByBucket(lots: CallTokenLot[]): Map<string, CallTokenLot[]> {
-  const m = new Map<string, CallTokenLot[]>();
-  for (const lot of lots) {
-    const arr = m.get(lot.bucket_id);
-    if (arr) arr.push(lot);
-    else m.set(lot.bucket_id, [lot]);
-  }
-  return m;
-}
-
-function indexLotsByCallId(lots: CallTokenLot[]): Map<string, CallTokenLot> {
-  const m = new Map<string, CallTokenLot>();
-  for (const lot of lots) m.set(lot.call_option_id, lot);
-  return m;
-}
-
 function indexBucketSeries(buckets: Series[] | undefined): Map<
   string,
   { series: Series; bucket: Series["buckets"][number] }
@@ -135,6 +115,42 @@ function indexBucketSeries(buckets: Series[] | undefined): Map<
     for (const b of s.buckets) m.set(b.bucket_id, { series: s, bucket: b });
   }
   return m;
+}
+
+/**
+ * SO-97: synthesize a `Position` for a wallet-held object the indexer hasn't
+ * enriched yet (lag, or its bucket aged out of the read model). Structural
+ * fields come from the wallet object; bucket fields fall back to `/buckets`
+ * when available. Provenance (premium / MM / minted-at) is unknown — left
+ * blank so the row renders degraded rather than disappearing.
+ */
+function degradedPosition(
+  o: OwnedPositionObj,
+  info: { series: Series; bucket: Series["buckets"][number] } | undefined,
+): Position {
+  const s = info?.series;
+  const b = info?.bucket;
+  return {
+    position_object_id: o.object_id,
+    bucket_id: o.bucket_id,
+    asset_symbol: s?.asset_symbol ?? "",
+    asset_decimals: s?.asset_decimals ?? null,
+    asset_coin_type: s?.asset_coin_type ?? "",
+    settlement_symbol: s?.settlement_symbol ?? "USDC",
+    settlement_decimals: s?.settlement_decimals ?? null,
+    settlement_coin_type: s?.settlement_coin_type ?? "",
+    strike: b?.strike ?? 0,
+    strike_raw: b?.strike_raw ?? "0",
+    strike_scale: b?.strike_scale ?? 0,
+    expiry_ms: s?.expiry_ms ?? Date.now(),
+    range_start_raw: o.range_start_raw,
+    range_end_raw: o.range_end_raw,
+    total_written_raw: b?.total_written_raw ?? o.range_end_raw,
+    exercise_cursor_raw: b?.exercise_cursor_raw ?? "0",
+    premium_received_raw: "0",
+    mm_account_id: "",
+    minted_at_ms: 0,
+  };
 }
 
 function buildOwnedRow(
@@ -251,8 +267,8 @@ function buildWrittenRow(
     expiry: isoDate(p.expiry_ms),
     amount,
     premiumReceived,
-    soldTo: shortAccount(p.mm_account_id),
-    soldAt: isoDate(p.minted_at_ms),
+    soldTo: p.mm_account_id ? shortAccount(p.mm_account_id) : "—",
+    soldAt: p.minted_at_ms ? isoDate(p.minted_at_ms) : "",
     rangeStart,
     rangeEnd,
     spot,
@@ -290,10 +306,22 @@ export function useDashboardState(): DashboardState {
   const wallet = account?.address ?? null;
   const connected = wallet !== null;
 
-  const positions = usePositions(wallet);
-  const lots = useCallTokenLots(wallet);
+  // Written positions: the wallet is the authoritative list (transfer-correct,
+  // no projection snapshot bound), enriched by object id via api-service.
+  const ownedPositions = useOwnedPositions(wallet);
   const owned = useOwnedCallOptions(wallet);
   const buckets = useBuckets();
+
+  const positionIds = useMemo(
+    () => (ownedPositions.data ?? []).map((p) => p.object_id).sort(),
+    [ownedPositions.data],
+  );
+  const enriched = useQuery<EnrichedPosition[], Error>({
+    queryKey: ["enriched-positions", positionIds],
+    enabled: positionIds.length > 0,
+    refetchInterval: 5_000,
+    queryFn: () => fetchEnrichedPositions(positionIds),
+  });
 
   const btcLive = usePythPrice("BTC");
   const suiLive = usePythPrice("SUI");
@@ -320,30 +348,41 @@ export function useDashboardState(): DashboardState {
 
   const ownedRows = useMemo<OwnedPosition[]>(() => {
     const ownedObjs = owned.data ?? [];
-    const lotsArr = lots.data ?? [];
-    const lotByCallId = indexLotsByCallId(lotsArr);
-    const lotsByBucket = indexLotsByBucket(lotsArr);
     const bucketIdx = indexBucketSeries(buckets.data);
+    // SO-97: CallOption provenance (boughtFrom / premiumPaid) is dropped for
+    // now — splits make object-id provenance unreliable. Pass empty lot maps
+    // so the row renders "—" rather than a fabricated source.
+    const noLotByCallId = new Map<string, CallTokenLot>();
+    const noLotsByBucket = new Map<string, CallTokenLot[]>();
 
     return ownedObjs
       .map((o) => {
         const series = bucketIdx.get(o.bucket_id)?.series;
         const symbol = displayAsset(series?.asset_symbol ?? "");
         const spot = spots[symbol] ?? 0;
-        return buildOwnedRow(o, lotByCallId, lotsByBucket, bucketIdx, spot, now);
+        return buildOwnedRow(o, noLotByCallId, noLotsByBucket, bucketIdx, spot, now);
       })
       .filter((r): r is OwnedPosition => r !== null);
-  }, [owned.data, lots.data, buckets.data, spots, now]);
+  }, [owned.data, buckets.data, spots, now]);
 
   const writtenRows = useMemo<WrittenPosition[]>(() => {
-    const ps = positions.data ?? [];
-    return ps.map((p) => {
-      const liveCursor = lookupBucketCursor(buckets.data, p.bucket_id);
-      const symbol = displayAsset(p.asset_symbol);
+    const objs = ownedPositions.data ?? [];
+    const enrichedById = new Map(
+      (enriched.data ?? []).map((e) => [e.position_object_id, e]),
+    );
+    const bucketIdx = indexBucketSeries(buckets.data);
+    return objs.map((o) => {
+      // Enriched rows are `Position`-shaped (a superset); degraded rows are
+      // synthesized from the wallet object + /buckets so a held position
+      // never silently disappears while the indexer catches up.
+      const pos: Position =
+        enrichedById.get(o.object_id) ?? degradedPosition(o, bucketIdx.get(o.bucket_id));
+      const liveCursor = lookupBucketCursor(buckets.data, pos.bucket_id);
+      const symbol = displayAsset(pos.asset_symbol);
       const spot = spots[symbol] ?? 0;
-      return buildWrittenRow(p, liveCursor, spot, now);
+      return buildWrittenRow(pos, liveCursor, spot, now);
     });
-  }, [positions.data, buckets.data, spots, now]);
+  }, [ownedPositions.data, enriched.data, buckets.data, spots, now]);
 
   // ── totals ────────────────────────────────────────────────────────
 
@@ -435,15 +474,20 @@ export function useDashboardState(): DashboardState {
         setModal({ ...captured, stage: "confirmed" } as DashboardModal);
       } else if (captured.kind === "claim") {
         const { position: p } = captured;
-        const matchPos = (positions.data ?? []).find(
-          (pp) => pp.position_object_id === p.id,
-        );
-        if (!matchPos) throw new Error("position not found in /positions");
+        // Resolve the on-chain object from the wallet (authoritative) and the
+        // coin types from /buckets — no dependency on the /positions endpoint.
+        const matchPos = (ownedPositions.data ?? []).find((pp) => pp.object_id === p.id);
+        const bucketInfo = (buckets.data ?? [])
+          .flatMap((s) => s.buckets.map((b) => ({ series: s, b })))
+          .find((x) => x.b.bucket_id === matchPos?.bucket_id);
+        if (!matchPos || !bucketInfo) {
+          throw new Error("missing on-chain reference for claim");
+        }
         const tx = buildRedeemTx({
           bucketId: matchPos.bucket_id,
-          positionObjectId: matchPos.position_object_id,
-          underlyingCoinType: matchPos.asset_coin_type,
-          settlementCoinType: matchPos.settlement_coin_type,
+          positionObjectId: matchPos.object_id,
+          underlyingCoinType: bucketInfo.series.asset_coin_type,
+          settlementCoinType: bucketInfo.series.settlement_coin_type,
           recipient: wallet,
         });
         setModal({ ...captured, stage: "broadcast" } as DashboardModal);
@@ -472,8 +516,8 @@ export function useDashboardState(): DashboardState {
     }
     setModal(null);
     // Trigger refetches so the rows reflect the new on-chain state.
-    positions.refetch();
-    lots.refetch();
+    ownedPositions.refetch();
+    enriched.refetch();
     owned.refetch();
   };
 
