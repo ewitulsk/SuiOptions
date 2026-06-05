@@ -1,0 +1,34 @@
+name: Resolve EC2 instance ID
+description: >
+  Find the running deploy host by its Name tag and export EC2_INSTANCE_ID to
+  $GITHUB_ENV. Replaces the hardcoded vars.EC2_INSTANCE_ID, which goes stale
+  whenever terraform replaces the instance (the host's AMI floats via
+  most_recent, and aws_instance.host.ami is force-new).
+
+inputs:
+  region:
+    description: AWS region the host runs in.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        # Name tag is "${var.project}-host" — see rust-backend/infra/ec2.tf.
+        # One host serves every env, so exactly one instance must match.
+        ID=$(aws ec2 describe-instances \
+          --region "${{ inputs.region }}" \
+          --filters "Name=tag:Name,Values=options-host" \
+                    "Name=instance-state-name,Values=running" \
+          --query 'Reservations[].Instances[].InstanceId' --output text)
+        if [ -z "$ID" ] || [ "$ID" = "None" ]; then
+          echo "::error::No running EC2 instance tagged Name=options-host found"
+          exit 1
+        fi
+        if [ "$(printf '%s' "$ID" | wc -w)" -ne 1 ]; then
+          echo "::error::Expected exactly one running options-host, got: $ID"
+          exit 1
+        fi
+        echo "EC2_INSTANCE_ID=$ID" >> "$GITHUB_ENV"
+        echo "Resolved options-host → $ID"

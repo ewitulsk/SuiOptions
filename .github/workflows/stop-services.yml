@@ -23,7 +23,6 @@ permissions:
 
 env:
   AWS_REGION:        ${{ vars.AWS_REGION }}
-  EC2_INSTANCE_ID:   ${{ vars.EC2_INSTANCE_ID }}
   DEPLOY_ROLE_ARN:   ${{ vars.DEPLOY_ROLE_ARN }}
   SSM_OUTPUT_BUCKET: ${{ vars.SSM_OUTPUT_BUCKET }}
 
@@ -34,10 +33,16 @@ jobs:
       group: deploy-${{ inputs.environment }}
       cancel-in-progress: false
     steps:
+      - uses: actions/checkout@v4   # for ./.github/actions/resolve-ec2
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - uses: ./.github/actions/resolve-ec2
+        with:
+          region: ${{ env.AWS_REGION }}
 
       - name: SSM stop services
         env:
