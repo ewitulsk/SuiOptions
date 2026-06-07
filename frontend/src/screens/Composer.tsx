@@ -10,7 +10,6 @@ import { WriterPanels, TraderPanels } from "../components/Panels";
 import { QuoteFeed } from "../components/QuoteFeed";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { Toast } from "../components/Toast";
-import { LiveBuckets } from "../components/LiveBuckets";
 import type { View } from "../types";
 import type { ComposerState } from "../state/composer";
 
@@ -63,8 +62,6 @@ export function Composer({ initialView }: Props) {
         className={comingSoon ? "app__wrap app__wrap--locked" : "app__wrap"}
         aria-hidden={comingSoon}
       >
-        <LiveBuckets />
-
         <BucketBar
           symbol={s.selectedAsset}
           capPct={43}
