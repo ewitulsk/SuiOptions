@@ -1,0 +1,132 @@
+name: Reload nginx
+
+# Ship the current deployment/nginx/nginx.<env>.conf to the EC2 host and
+# hot-reload the nginx sidecar — WITHOUT rebuilding or rolling any service.
+#
+# Use after merging an nginx-config-only change. A normal "Deploy lower
+# envs" run would also work, but because the config lives under
+# deployment/** the affected-files filter treats it as rebuild-all and
+# rolls every service just to reload nginx. This is the lightweight path.
+#
+# Safety: the new config is validated with `nginx -t` *before* the reload.
+# If validation fails the previous config is restored and the job fails,
+# leaving the running nginx untouched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+        default: staging
+
+permissions:
+  contents: read
+  id-token: write   # OIDC to AWS
+
+env:
+  AWS_REGION:        ${{ vars.AWS_REGION }}
+  DEPLOY_ROLE_ARN:   ${{ vars.DEPLOY_ROLE_ARN }}
+  SSM_OUTPUT_BUCKET: ${{ vars.SSM_OUTPUT_BUCKET }}
+
+jobs:
+  reload:
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4   # for nginx.<env>.conf + ./.github/actions/resolve-ec2
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: ./.github/actions/resolve-ec2
+        with:
+          region: ${{ env.AWS_REGION }}
+
+      - name: Upload nginx.conf to S3
+        working-directory: rust-backend
+        run: |
+          # Under deploy-bundles/ on purpose: the EC2 host role's
+          # s3:GetObject is scoped to that prefix (see infra/iam.tf), and
+          # the bucket's 14-day lifecycle rule cleans the object up.
+          KEY="deploy-bundles/nginx-reload-${{ github.run_id }}-${ENVIRONMENT}.conf"
+          aws s3 cp "deployment/nginx/nginx.${ENVIRONMENT}.conf" \
+            "s3://$SSM_OUTPUT_BUCKET/$KEY"
+          echo "S3_KEY=$KEY" >> "$GITHUB_ENV"
+
+      - name: SSM ship config + reload nginx
+        run: |
+          # AWS-RunShellScript joins the `commands` array into one /bin/sh
+          # (dash) script — shell vars set on one line persist to the next,
+          # but there's no pipefail, so keep it `set -eu`. The nginx host
+          # ports mirror deploy.sh (dev 9010 / staging 9020 / prod 9030).
+          jq -nc \
+            --arg bucket "$SSM_OUTPUT_BUCKET" \
+            --arg key "$S3_KEY" \
+            --arg env "$ENVIRONMENT" '
+            {
+              commands: [
+                "set -eu",
+                "ENV=\($env)",
+                "cd /opt/options/$ENV",
+                "COMPOSE=docker-compose.$ENV.yml",
+                "case $ENV in dev) PORT=9010;; staging) PORT=9020;; prod) PORT=9030;; esac",
+                "echo Fetching new nginx.conf...",
+                "aws s3 cp s3://\($bucket)/\($key) nginx/nginx.conf.new",
+                "# Ensure the sidecar is running on its CURRENT (known-good) config first.",
+                "docker compose -f \"$COMPOSE\" up -d nginx",
+                "# Swap in the new file (directory is bind-mounted, so the",
+                "# container sees it by path on the next open). Keep a backup.",
+                "cp nginx/nginx.conf nginx/nginx.conf.bak",
+                "mv nginx/nginx.conf.new nginx/nginx.conf",
+                "# Validate BEFORE reloading; restore + fail if the config is bad.",
+                "if ! docker compose -f \"$COMPOSE\" exec -T nginx nginx -t -c /etc/nginx/options/nginx.conf; then echo \"nginx -t failed — restoring previous config\" >&2; mv nginx/nginx.conf.bak nginx/nginx.conf; exit 1; fi",
+                "rm -f nginx/nginx.conf.bak",
+                "docker compose -f \"$COMPOSE\" exec -T nginx nginx -s reload",
+                "echo nginx reloaded — probing /$ENV/api/health ...",
+                "ok=0; for i in $(seq 1 15); do if curl -fsS \"http://localhost:$PORT/$ENV/api/health\" >/dev/null 2>&1; then ok=1; break; fi; sleep 2; done",
+                "if [ \"$ok\" -ne 1 ]; then echo \"health probe failed after reload\" >&2; exit 1; fi",
+                "echo \"reload ok ($ENV)\""
+              ]
+            }' > /tmp/ssm-params.json
+
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "reload nginx ($ENVIRONMENT)" \
+            --parameters file:///tmp/ssm-params.json \
+            --query Command.CommandId --output text)
+          echo "ssm command: $CMD_ID"
+
+          aws ssm wait command-executed \
+            --command-id "$CMD_ID" \
+            --instance-id "$EC2_INSTANCE_ID" || true
+
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --query Status --output text)
+          echo "ssm status: $STATUS"
+
+          echo "--- stdout ---"
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --query StandardOutputContent --output text
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "--- stderr ---"
+            aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --query StandardErrorContent --output text
+            exit 1
+          fi
