@@ -55,12 +55,12 @@ REBUILD_ALL_GLOBS = [
 #
 # Crate dependency map (must mirror each service's Cargo.toml):
 #   indexer          : protocol-types, runtime-config, cli-spec, deployments
-#   quoting-service  : protocol-types, runtime-config, cli-spec, indexer-client
+#   quoting-service  : protocol-types, runtime-config, cli-spec, indexer-graphql
 #   mm-bot           : protocol-types, runtime-config, cli-spec, sui-tx,
 #                      pyth-client, pricing, deployments
 #   option-scheduler : protocol-types, runtime-config, cli-spec, sui-tx,
-#                      pyth-client, deployments
-#   api-service      : protocol-types, runtime-config, cli-spec, indexer-client,
+#                      pyth-client, deployments, indexer-graphql
+#   api-service      : protocol-types, runtime-config, cli-spec, indexer-graphql,
 #                      deployments
 #   token-info       : runtime-config, cli-spec, deployments, token-info-client
 SERVICE_GLOBS: dict[str, list[str]] = {
@@ -78,7 +78,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/protocol-types/**",
         "rust-backend/crates/runtime-config/**",
         "rust-backend/crates/cli-spec/**",
-        "rust-backend/crates/indexer-client/**",
+        "rust-backend/crates/indexer-graphql/**",
     ],
     "mm-bot": [
         "rust-backend/services/mm-bot/**",
@@ -100,6 +100,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/sui-tx/**",
         "rust-backend/crates/pyth-client/**",
         "rust-backend/crates/deployments/**",
+        "rust-backend/crates/indexer-graphql/**",
     ],
     "api-service": [
         "rust-backend/services/api-service/**",
@@ -107,7 +108,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/protocol-types/**",
         "rust-backend/crates/runtime-config/**",
         "rust-backend/crates/cli-spec/**",
-        "rust-backend/crates/indexer-client/**",
+        "rust-backend/crates/indexer-graphql/**",
         "rust-backend/crates/deployments/**",
     ],
     "token-info": [
