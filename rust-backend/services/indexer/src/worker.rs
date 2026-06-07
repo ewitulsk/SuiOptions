@@ -25,22 +25,29 @@ use sui_types::full_checkpoint_content::CheckpointData;
 
 use crate::db::Repo;
 use crate::event_types::{self, EventTypes};
+use crate::progress::ProgressState;
 use crate::store::Store;
 
 pub struct ProtocolEventWorker {
     store: Arc<Store>,
     repo: Repo,
     types: EventTypes,
+    progress: Arc<ProgressState>,
 }
 
 impl ProtocolEventWorker {
-    pub fn new(store: Arc<Store>, repo: Repo, package_id: &str) -> Self {
+    pub fn new(
+        store: Arc<Store>,
+        repo: Repo,
+        package_id: &str,
+        progress: Arc<ProgressState>,
+    ) -> Self {
         let types = EventTypes::for_package(package_id);
         info!(package_id, "indexer worker listening for events");
         for t in types.all_strings() {
             debug!(event_type = t, "subscribed");
         }
-        Self { store, repo, types }
+        Self { store, repo, types, progress }
     }
 }
 
@@ -94,6 +101,7 @@ impl Worker for ProtocolEventWorker {
             .apply_checkpoint(&staged.db_batch)
             .with_context(|| format!("persisting checkpoint {seq}"))?;
         self.store.broadcast_staged(&staged.indexed);
+        self.progress.record_checkpoint(seq);
 
         if !staged.indexed.is_empty() {
             debug!(

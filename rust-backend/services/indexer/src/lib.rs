@@ -18,12 +18,14 @@ pub mod db;
 pub mod event_types;
 pub mod fanout;
 pub mod graphql;
+pub mod progress;
 pub mod store;
 pub mod worker;
 
 pub use config::Config;
 pub use db::{establish_pool, run_migrations, Repo};
 pub use event_types::EventTypes;
+pub use progress::{ProgressSnapshot, ProgressState};
 pub use store::{AccountState, BucketState, PositionState, Store};
 pub use worker::ProtocolEventWorker;
 

@@ -3,6 +3,7 @@ import { Composer } from "./screens/Composer";
 import { Dashboard } from "./screens/Dashboard";
 import { Activity } from "./screens/Activity";
 import { Admin } from "./screens/Admin";
+import { Debug } from "./screens/Debug";
 import { Faucet } from "./screens/Faucet";
 
 export function App() {
@@ -18,6 +19,8 @@ export function App() {
       <Route path="/admin" element={<Admin />} />
       {/* Faucet is testnet-only; on other envs it renders a "testnet only" notice. */}
       <Route path="/faucet" element={<Faucet />} />
+      {/* Unlisted internals page: reachable at /debug, not linked in nav (SO-107). */}
+      <Route path="/debug" element={<Debug />} />
       <Route path="*" element={<Navigate to="/earn" replace />} />
     </Routes>
   );

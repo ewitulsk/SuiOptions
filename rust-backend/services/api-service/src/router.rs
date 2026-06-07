@@ -33,6 +33,10 @@ pub async fn serve(
             "/dashboard/positions",
             post(handlers::dashboard::enrich_positions),
         )
+        .route(
+            "/indexer/progress",
+            get(handlers::indexer_progress::get_progress),
+        )
         .with_state(state)
         .layer(cors);
 

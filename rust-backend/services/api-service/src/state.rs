@@ -8,10 +8,23 @@ use tracing::{debug, trace};
 use protocol_types::events::{ChainEvent, IndexedEvent};
 use protocol_types::ids::{ObjectId, SuiAddress};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::bucket::Bucket;
 use crate::catalog::TokenCatalog;
+
+/// Indexer checkpoint-ingestion progress, proxied from the indexer's
+/// `GET /progress` for the Debug page (SO-107). Field names mirror the
+/// indexer's `ProgressSnapshot`.
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct IndexerProgress {
+    pub start_checkpoint: u64,
+    pub current_checkpoint: u64,
+    /// `null` until the indexer has polled the chain tip at least once.
+    pub tip_checkpoint: Option<u64>,
+    pub rate_checkpoints_per_sec: f64,
+    pub caught_up: bool,
+}
 
 // ── indexer GraphQL response (SO-97) ──────────────────────────────────────
 
@@ -96,10 +109,18 @@ pub struct AppState {
     /// Dashboard's wallet-direct positions.
     http: reqwest::Client,
     indexer_graphql_url: String,
+    /// SO-107: the indexer's `GET /progress` URL, derived from the GraphQL URL
+    /// (same host:port, `/graphql` → `/progress`).
+    indexer_progress_url: String,
 }
 
 impl AppState {
     pub fn new(catalog: TokenCatalog, indexer_graphql_url: String) -> Self {
+        let base = indexer_graphql_url
+            .strip_suffix("/graphql")
+            .unwrap_or(&indexer_graphql_url)
+            .trim_end_matches('/');
+        let indexer_progress_url = format!("{base}/progress");
         Self {
             buckets: RwLock::new(BTreeMap::new()),
             positions: RwLock::new(BTreeMap::new()),
@@ -107,7 +128,19 @@ impl AppState {
             catalog,
             http: reqwest::Client::new(),
             indexer_graphql_url,
+            indexer_progress_url,
         }
+    }
+
+    /// Proxy the indexer's checkpoint-ingestion progress for the Debug page.
+    pub async fn query_indexer_progress(&self) -> anyhow::Result<IndexerProgress> {
+        let resp = self
+            .http
+            .get(&self.indexer_progress_url)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.json().await?)
     }
 
     /// Query the indexer's GraphQL `positions(objectIds)` for enrichment.

@@ -12,6 +12,7 @@
 //! 53-bit precision loss; the caller parses + scales.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::Result;
 use async_graphql::http::GraphiQLSource;
@@ -21,12 +22,13 @@ use async_graphql::{
 };
 use async_graphql_axum::GraphQL;
 use axum::response::{Html, IntoResponse};
-use axum::{routing::get, Router};
+use axum::{routing::get, Extension, Router};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 use crate::db::models::{BucketRow, IndexedEventRow, PositionRow};
 use crate::db::{EventFilter, EventQuery, Repo};
+use crate::progress::{ProgressSnapshot, ProgressState};
 
 /// An enriched written position: the on-chain `Position` joined to its bucket,
 /// plus the provenance denormalized onto the row at mint.
@@ -235,9 +237,15 @@ async fn graphiql() -> impl IntoResponse {
     Html(GraphiQLSource::build().endpoint("/graphql").finish())
 }
 
+/// `GET /progress` — checkpoint-ingestion status for the frontend Debug page
+/// (SO-107). Plain REST (not GraphQL) so it's a trivial fetch with no query.
+async fn progress(Extension(state): Extension<Arc<ProgressState>>) -> axum::Json<ProgressSnapshot> {
+    axum::Json(state.snapshot())
+}
+
 /// Serve the GraphQL API at `POST /graphql` (+ a GraphiQL playground on GET)
-/// on `addr`. Internal-only.
-pub async fn serve(addr: SocketAddr, repo: Repo) -> Result<()> {
+/// and the `GET /progress` status endpoint on `addr`. Internal-only.
+pub async fn serve(addr: SocketAddr, repo: Repo, progress_state: Arc<ProgressState>) -> Result<()> {
     let schema = Schema::build(QueryRoot, EmptyMutation, EmptySubscription)
         .data(repo)
         .finish();
@@ -247,6 +255,8 @@ pub async fn serve(addr: SocketAddr, repo: Repo) -> Result<()> {
         .allow_headers(Any);
     let app = Router::new()
         .route("/graphql", get(graphiql).post_service(GraphQL::new(schema)))
+        .route("/progress", get(progress))
+        .layer(Extension(progress_state))
         .layer(cors);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, "indexer graphql listening");
