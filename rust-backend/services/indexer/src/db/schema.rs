@@ -27,6 +27,7 @@ diesel::table! {
         account_id     -> Text,
         owner          -> Nullable<Text>,
         signing_pubkey -> Bytea,
+        signing_scheme -> Nullable<Int2>,
         updated_at_seq -> Int8,
     }
 }

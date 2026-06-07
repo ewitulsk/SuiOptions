@@ -3,7 +3,7 @@
 # types, pyth feed ids) come from `deployments.json::devnet`.
 
 # WS endpoint of the indexer fanout inside the compose stack.
-indexer_url       = "ws://indexer:9001/"
+indexer_graphql_url       = "http://indexer:9002/graphql"
 
 tick_secs         = 60
 roll_threshold_ms = 604_800_000   # 1 week

@@ -1,9 +1,13 @@
 //! All mutable shared state lives here. The WS handlers and RFQ orchestrator
 //! both work against [`AppState`] — never against raw fields — so any future
 //! refactor of how data is stored doesn't ripple out.
+//!
+//! Account balances, signing keys, and bucket state are NOT mirrored here:
+//! they're read just-in-time from the indexer's GraphQL API
+//! ([`indexer_graphql::IndexerClient`]). The only state this service owns is
+//! what the indexer can't tell it: in-flight quote reservations and the
+//! per-MM reputation score.
 
-pub mod accounts;
-pub mod buckets;
 pub mod mm_registry;
 pub mod reputation;
 pub mod reservations;
@@ -15,15 +19,13 @@ use dashmap::DashMap;
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::time::interval;
-use tracing::{debug, trace, warn};
+use tracing::warn;
 
 use protocol_types::asset::AssetType;
-use protocol_types::events::{ChainEvent, IndexedEvent};
 use protocol_types::ids::ObjectId;
 use protocol_types::sides::Side;
 
-pub use accounts::{AccountMirror, AccountStore};
-pub use buckets::{BucketStore, BucketView};
+pub use indexer_graphql::{Account, Bucket, IndexerClient};
 pub use mm_registry::{MmConnection, MmRegistry};
 pub use reputation::{ReputationStats, ReputationStore};
 pub use reservations::{InsertOutcome, Reservation, ReservationTable};
@@ -49,11 +51,15 @@ pub struct RfqObservation {
 }
 
 pub struct AppState {
-    pub accounts: AccountStore,
-    pub buckets: BucketStore,
     pub reservations: ReservationTable,
     pub reputation: ReputationStore,
     pub mms: MmRegistry,
+    /// JIT client for indexer account/bucket/event reads.
+    pub indexer: IndexerClient,
+    /// Per-account high-water sequence for `WriteExecuted` reconciliation —
+    /// the cursor [`reconcile_executed`](Self::reconcile_executed) advances so
+    /// each pass only scans new executions.
+    reconcile_cursors: DashMap<ObjectId, u64>,
     /// `request_id → matcher_tx`. Populated when an RFQ is broadcast,
     /// removed when the RFQ completes. The MM read task looks up its
     /// `Quote`/`Decline` response's `request_id` here to route it.
@@ -69,117 +75,63 @@ pub struct AppState {
     pub rfq_observers: broadcast::Sender<RfqObservation>,
 }
 
-impl Default for AppState {
-    fn default() -> Self {
-        // Default cap matches `default_max_inflight_global()` in config.
-        // `AppState::with_global_rfq_cap` lets `main.rs` override at boot.
-        Self::with_global_rfq_cap(256)
-    }
-}
-
 impl AppState {
-    pub fn new() -> Self {
-        Self::with_global_rfq_cap(256)
-    }
-
-    pub fn with_global_rfq_cap(cap: usize) -> Self {
+    pub fn with_global_rfq_cap(cap: usize, indexer_graphql_url: String) -> Self {
         let (rfq_observers, _) = broadcast::channel(256);
         Self {
-            accounts: AccountStore::default(),
-            buckets: BucketStore::default(),
             reservations: ReservationTable::default(),
             reputation: ReputationStore::default(),
             mms: MmRegistry::default(),
+            indexer: IndexerClient::new(indexer_graphql_url),
+            reconcile_cursors: DashMap::new(),
             pending_rfqs: DashMap::new(),
             rfq_global_inflight: Arc::new(Semaphore::new(cap)),
             rfq_observers,
         }
     }
 
-    /// Feed an indexer event into the state. Idempotent at the event-id
-    /// level: the indexer guarantees one delivery per sequence, but the
-    /// store updates are themselves idempotent (re-applying a write to the
-    /// same range_start is a no-op since we just set the same totals).
-    pub fn ingest_event(&self, indexed: &IndexedEvent) {
-        trace!(sequence = indexed.sequence, event = ?std::mem::discriminant(&indexed.event), "ingesting indexer event");
-        match &indexed.event {
-            ChainEvent::BucketCreated(b) => {
-                self.buckets.upsert(
-                    b.bucket_id,
-                    BucketView {
-                        asset_type: b.asset_type.clone(),
-                        settlement_type: b.settlement_type.clone(),
-                        strike: b.strike,
-                        strike_scale: b.strike_scale,
-                        expiry_ms: b.expiry_ms,
-                        total_written: 0,
-                        exercise_cursor: 0,
-                        invalidated: false,
-                    },
-                );
+    /// Spendable balance for `(account, asset)`: the JIT-fetched on-chain
+    /// balance minus our own active reservations in that asset. Callers must
+    /// [`reconcile_executed`](Self::reconcile_executed) first so reservations
+    /// whose write already landed (and is thus already reflected in the
+    /// on-chain balance) don't get double-counted.
+    pub fn available(&self, account: &Account, asset: &AssetType) -> u64 {
+        account
+            .balance(asset)
+            .saturating_sub(self.reservations.active_amount(account.account_id, asset))
+    }
+
+    /// Release reservations whose `WriteExecuted` the indexer now reports, and
+    /// record each as executed for reputation. This is the JIT replacement for
+    /// the old fanout-driven release: instead of a live `WriteExecuted` frame,
+    /// we scan the indexer's event log for this account since our last cursor.
+    ///
+    /// NOTE (speed-up): this runs on demand during quote validation, so an
+    /// idle MM's executed reservations aren't released until either it's quoted
+    /// again or its TTL evicts it. A short-interval background reconcile (or a
+    /// narrow `WriteExecuted`-only fanout subscription) would tighten that and
+    /// is the obvious optimization if reservation-release latency ever matters.
+    pub async fn reconcile_executed(&self, account: ObjectId) -> anyhow::Result<()> {
+        let after = self
+            .reconcile_cursors
+            .get(&account)
+            .map(|c| *c)
+            .unwrap_or(0);
+        let executed = self
+            .indexer
+            .write_executed_for_account_since(account, after)
+            .await?;
+        let mut max_seq = after;
+        for (seq, nonce) in executed {
+            if self.reservations.release(account, nonce).is_some() {
+                self.reputation.record_executed(account);
             }
-            ChainEvent::WriteExecuted(w) => {
-                self.buckets.set_total_written(w.bucket_id, w.range_end);
-                // The signer's reservation for this nonce is now satisfied —
-                // release if present.
-                if let Some(r) = self.reservations.release(w.signer_account_id, w.nonce) {
-                    debug!(
-                        account = %r.account_id,
-                        nonce = r.nonce,
-                        "released reservation for executed write"
-                    );
-                    self.reputation.record_executed(w.signer_account_id);
-                }
-            }
-            ChainEvent::Exercised(e) => {
-                self.buckets.set_cursor_only(e.bucket_id, e.cursor_after);
-            }
-            ChainEvent::Redeemed(_) => {}
-            ChainEvent::ExpiredOptionBurned(_) => {}
-            ChainEvent::BucketCleaned(_) => {}
-            ChainEvent::BucketInvalidated(i) => {
-                self.buckets.set_invalidated(i.bucket_id, true);
-            }
-            ChainEvent::BucketRevalidated(r) => {
-                self.buckets.set_invalidated(r.bucket_id, false);
-            }
-            ChainEvent::AccountCreated(a) => {
-                self.accounts.set_signing_key(
-                    a.account_id,
-                    a.signing_scheme,
-                    a.signing_pubkey.clone(),
-                );
-                self.accounts.set_owner(a.account_id, a.owner);
-            }
-            ChainEvent::AccountDeposit(d) => {
-                self.accounts.apply_delta(d.account_id, d.asset_type.clone(), d.amount as i128);
-            }
-            ChainEvent::AccountWithdraw(w) => {
-                self.accounts.apply_delta(
-                    w.account_id,
-                    w.asset_type.clone(),
-                    -(w.amount as i128),
-                );
-            }
-            ChainEvent::SigningKeyRotated(r) => {
-                self.accounts.set_signing_key(
-                    r.account_id,
-                    r.new_scheme,
-                    r.new_pubkey.clone(),
-                );
-            }
-            ChainEvent::FeeUpdated(_) | ChainEvent::TreasuryWithdrawn(_) => {}
+            max_seq = max_seq.max(seq);
         }
-    }
-
-    pub fn available(&self, account: ObjectId, asset: &AssetType) -> u64 {
-        self.accounts.available(&self.reservations, account, asset)
-    }
-}
-
-impl indexer_client::EventSink for AppState {
-    fn ingest_event(&self, event: &IndexedEvent) {
-        AppState::ingest_event(self, event);
+        if max_seq > after {
+            self.reconcile_cursors.insert(account, max_seq);
+        }
+        Ok(())
     }
 }
 
@@ -204,57 +156,35 @@ pub fn spawn_reservation_evictor(state: Arc<AppState>, tick: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol_types::asset::AssetType;
-    use protocol_types::events::{
-        AccountCreated, AccountDeposit, BucketCreated, ChainEvent, IndexedEvent,
-    };
-    use protocol_types::ids::SuiAddress;
+    use std::collections::BTreeMap;
 
-    fn evt(seq: u64, e: ChainEvent) -> IndexedEvent {
-        IndexedEvent {
-            sequence: seq,
-            timestamp_ms: 1,
-            event: e,
+    fn account_with(account_id: ObjectId, usdc: u64) -> Account {
+        Account {
+            account_id,
+            owner: None,
+            signing_scheme: Some(protocol_types::SigningScheme::Ed25519),
+            signing_pubkey: vec![0xab; 32],
+            balances: BTreeMap::from([(AssetType::new("USDC"), usdc)]),
         }
     }
 
     #[test]
-    fn ingest_populates_balances_and_buckets() {
-        let s = AppState::new();
+    fn available_subtracts_active_reservations() {
+        let s = AppState::with_global_rfq_cap(8, "http://127.0.0.1:1/graphql".into());
         let account = ObjectId::new([0x01; 32]);
-        let bucket = ObjectId::new([0x02; 32]);
-        s.ingest_event(&evt(
-            0,
-            ChainEvent::AccountCreated(AccountCreated {
-                account_id: account,
-                owner: SuiAddress::ZERO,
-                signing_scheme: protocol_types::SigningScheme::Ed25519,
-                signing_pubkey: vec![0xab; 32],
-            }),
-        ));
-        s.ingest_event(&evt(
-            1,
-            ChainEvent::AccountDeposit(AccountDeposit {
-                account_id: account,
-                asset_type: AssetType::new("USDC"),
-                amount: 1_000,
-            }),
-        ));
-        s.ingest_event(&evt(
-            2,
-            ChainEvent::BucketCreated(BucketCreated {
-                bucket_id: bucket,
-                asset_type: AssetType::new("BTC"),
-                settlement_type: AssetType::new("USDC"),
-                expiry_ms: 1_000,
-                strike: 50,
-                strike_scale: 0,
-            }),
-        ));
+        let acct = account_with(account, 1_000);
+        assert_eq!(s.available(&acct, &AssetType::new("USDC")), 1_000);
 
-        assert_eq!(s.available(account, &AssetType::new("USDC")), 1_000);
-        let b = s.buckets.get(&bucket).unwrap();
-        assert_eq!(b.strike, 50);
-        assert_eq!(s.accounts.snapshot(&account).unwrap().signing_pubkey, vec![0xab; 32]);
+        s.reservations.insert(Reservation {
+            account_id: account,
+            nonce: 1,
+            asset_type: AssetType::new("USDC"),
+            amount: 300,
+            valid_until_ms: 9_999,
+            created_at_ms: 0,
+        });
+        assert_eq!(s.available(&acct, &AssetType::new("USDC")), 700);
+        // A different asset is unaffected.
+        assert_eq!(s.available(&acct, &AssetType::new("BTC")), 0);
     }
 }

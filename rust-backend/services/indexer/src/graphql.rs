@@ -26,8 +26,8 @@ use axum::{routing::get, Extension, Router};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
-use crate::db::models::{BucketRow, IndexedEventRow, PositionRow};
-use crate::db::{EventFilter, EventQuery, Repo};
+use crate::db::models::{AccountBalanceRow, AccountRow, BucketRow, IndexedEventRow, PositionRow};
+use crate::db::{BucketQuery, EventFilter, EventQuery, Repo};
 use crate::progress::{ProgressSnapshot, ProgressState};
 
 /// An enriched written position: the on-chain `Position` joined to its bucket,
@@ -102,6 +102,92 @@ impl From<IndexedEventRow> for EventGql {
             payload: Json(r.payload),
         }
     }
+}
+
+/// One bucket from the materialized view. On-chain integers are decimal
+/// strings (precision-safe); the caller parses + scales. Backs the JIT
+/// `bucket(id)` / `buckets(...)` queries that replace consumer in-memory
+/// bucket mirrors.
+#[derive(SimpleObject)]
+pub struct BucketGql {
+    pub bucket_id: String,
+    pub asset_type: String,
+    pub settlement_type: String,
+    pub strike_raw: String,
+    pub strike_scale: i32,
+    pub expiry_ms: String,
+    pub total_written_raw: String,
+    pub exercise_cursor_raw: String,
+    pub cleaned: bool,
+    pub invalidated: bool,
+}
+
+impl From<BucketRow> for BucketGql {
+    fn from(b: BucketRow) -> Self {
+        BucketGql {
+            bucket_id: b.bucket_id,
+            asset_type: b.asset_type,
+            settlement_type: b.settlement_type,
+            strike_raw: b.strike.to_string(),
+            strike_scale: b.strike_scale as i32,
+            expiry_ms: b.expiry_ms.to_string(),
+            total_written_raw: b.total_written.to_string(),
+            exercise_cursor_raw: b.exercise_cursor.to_string(),
+            cleaned: b.cleaned,
+            invalidated: b.invalidated,
+        }
+    }
+}
+
+/// One per-asset balance on an account. `balance_raw` is a decimal string.
+#[derive(SimpleObject)]
+pub struct AccountBalanceGql {
+    pub asset_type: String,
+    pub balance_raw: String,
+}
+
+impl From<AccountBalanceRow> for AccountBalanceGql {
+    fn from(r: AccountBalanceRow) -> Self {
+        AccountBalanceGql {
+            asset_type: r.asset_type,
+            balance_raw: r.balance.to_string(),
+        }
+    }
+}
+
+/// One account with its registered signing key and per-asset balances. Backs
+/// the JIT `account(id)` query that replaces the quoting-service's in-memory
+/// account mirror. `signing_pubkey_hex` is lowercase hex (no `0x`);
+/// `signing_scheme` is the on-chain u8 tag (0=Ed25519, 1=Secp256k1,
+/// 2=Secp256r1), null only for un-backfilled rows.
+#[derive(SimpleObject)]
+pub struct AccountGql {
+    pub account_id: String,
+    pub owner: Option<String>,
+    pub signing_scheme: Option<i32>,
+    pub signing_pubkey_hex: String,
+    pub balances: Vec<AccountBalanceGql>,
+}
+
+impl AccountGql {
+    fn build(acct: AccountRow, balances: Vec<AccountBalanceRow>) -> Self {
+        AccountGql {
+            account_id: acct.account_id,
+            owner: acct.owner,
+            signing_scheme: acct.signing_scheme.map(|s| s as i32),
+            signing_pubkey_hex: hex_encode(&acct.signing_pubkey),
+            balances: balances.into_iter().map(AccountBalanceGql::from).collect(),
+        }
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 #[derive(SimpleObject)]
@@ -184,6 +270,81 @@ impl QueryRoot {
     ) -> async_graphql::Result<Vec<PositionGql>> {
         let repo = ctx.data_unchecked::<Repo>().clone();
         let rows = tokio::task::spawn_blocking(move || repo.positions_by_object_ids(&object_ids))
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(rows.into_iter().map(PositionGql::from).collect())
+    }
+
+    /// JIT: one bucket by id, or null if unknown.
+    async fn bucket(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+    ) -> async_graphql::Result<Option<BucketGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let row = tokio::task::spawn_blocking(move || repo.bucket_by_id(&id))
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(row.map(BucketGql::from))
+    }
+
+    /// JIT: buckets matching the given filters (all ANDed). `activeOnly`
+    /// drops cleaned buckets.
+    async fn buckets(
+        &self,
+        ctx: &Context<'_>,
+        active_only: Option<bool>,
+        ids: Option<Vec<String>>,
+        asset_type: Option<String>,
+        settlement_type: Option<String>,
+        expiry_ms: Option<String>,
+    ) -> async_graphql::Result<Vec<BucketGql>> {
+        let expiry_ms = match expiry_ms.as_deref() {
+            Some(s) => Some(
+                s.parse::<i64>()
+                    .map_err(|e| async_graphql::Error::new(format!("bad expiryMs {s:?}: {e}")))?,
+            ),
+            None => None,
+        };
+        let q = BucketQuery {
+            active_only: active_only.unwrap_or(false),
+            ids,
+            asset_type,
+            settlement_type,
+            expiry_ms,
+        };
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let rows = tokio::task::spawn_blocking(move || repo.buckets_query(q))
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(rows.into_iter().map(BucketGql::from).collect())
+    }
+
+    /// JIT: one account (signing key + per-asset balances), or null if unknown.
+    async fn account(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+    ) -> async_graphql::Result<Option<AccountGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let row = tokio::task::spawn_blocking(move || repo.account_by_id(&id))
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(row.map(|(acct, bals)| AccountGql::build(acct, bals)))
+    }
+
+    /// JIT: enriched positions held by `recipient` (mint-time owner-of-record).
+    async fn positions_by_recipient(
+        &self,
+        ctx: &Context<'_>,
+        recipient: String,
+    ) -> async_graphql::Result<Vec<PositionGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let rows = tokio::task::spawn_blocking(move || repo.positions_by_recipient(&recipient))
             .await
             .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
             .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;

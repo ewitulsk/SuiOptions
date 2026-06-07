@@ -181,6 +181,7 @@ impl Repo {
                     .set((
                         accounts::owner.eq(&acct.owner),
                         accounts::signing_pubkey.eq(&acct.signing_pubkey),
+                        accounts::signing_scheme.eq(acct.signing_scheme),
                         accounts::updated_at_seq.eq(acct.updated_at_seq),
                     ))
                     .execute(conn)
@@ -421,6 +422,83 @@ impl Repo {
             .context("loading positions by object_ids")
     }
 
+    /// JIT point-lookup: one account with its per-asset balances. Returns
+    /// `None` when the account isn't known. Backs the GraphQL `account(id)`
+    /// query that replaces the quoting-service's in-memory account mirror.
+    pub fn account_by_id(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<(AccountRow, Vec<AccountBalanceRow>)>> {
+        let mut conn = self.conn()?;
+        let acct = accounts::table
+            .find(account_id)
+            .first::<AccountRow>(&mut conn)
+            .optional()
+            .context("loading account")?;
+        let Some(acct) = acct else {
+            return Ok(None);
+        };
+        let bals = account_balances::table
+            .filter(account_balances::account_id.eq(account_id))
+            .load::<AccountBalanceRow>(&mut conn)
+            .context("loading account_balances")?;
+        Ok(Some((acct, bals)))
+    }
+
+    /// JIT point-lookup: one bucket by id. Backs the GraphQL `bucket(id)`
+    /// query (quoting-service validity/invalidation checks).
+    pub fn bucket_by_id(&self, bucket_id: &str) -> Result<Option<BucketRow>> {
+        let mut conn = self.conn()?;
+        buckets::table
+            .find(bucket_id)
+            .first::<BucketRow>(&mut conn)
+            .optional()
+            .context("loading bucket")
+    }
+
+    /// JIT list query over the bucket view. All filters are ANDed; `None`
+    /// means "don't constrain". `active_only` drops cleaned buckets. Backs
+    /// the GraphQL `buckets(...)` query (api-service catalog + option-scheduler
+    /// roll-confirmation lookups).
+    pub fn buckets_query(&self, f: BucketQuery) -> Result<Vec<BucketRow>> {
+        let mut conn = self.conn()?;
+        let mut q = buckets::table.into_boxed();
+        if f.active_only {
+            q = q.filter(buckets::cleaned.eq(false));
+        }
+        if let Some(ids) = &f.ids {
+            q = q.filter(buckets::bucket_id.eq_any(ids.clone()));
+        }
+        if let Some(a) = &f.asset_type {
+            q = q.filter(buckets::asset_type.eq(a.clone()));
+        }
+        if let Some(s) = &f.settlement_type {
+            q = q.filter(buckets::settlement_type.eq(s.clone()));
+        }
+        if let Some(e) = f.expiry_ms {
+            q = q.filter(buckets::expiry_ms.eq(e));
+        }
+        q.order(buckets::expiry_ms.asc())
+            .load::<BucketRow>(&mut conn)
+            .context("loading buckets")
+    }
+
+    /// JIT: enriched positions held by `recipient` (mint-time owner-of-record),
+    /// each joined to its bucket. Backs the GraphQL `positions(recipient:)`
+    /// query (api-service writer-side positions list).
+    pub fn positions_by_recipient(
+        &self,
+        recipient: &str,
+    ) -> Result<Vec<(PositionRow, BucketRow)>> {
+        let mut conn = self.conn()?;
+        positions::table
+            .inner_join(buckets::table.on(positions::bucket_id.eq(buckets::bucket_id)))
+            .filter(positions::recipient.eq(recipient))
+            .select((positions::all_columns, buckets::all_columns))
+            .load::<(PositionRow, BucketRow)>(&mut conn)
+            .context("loading positions by recipient")
+    }
+
     /// Generalized event query (SO-97): compile the `EventFilter` AST to a
     /// parameterized WHERE over `indexed_events`, ordered by sequence with
     /// cursor pagination. Wrapped in a transaction with a `statement_timeout`
@@ -491,6 +569,17 @@ pub struct EventQuery {
     pub descending: bool,
     pub after_sequence: Option<i64>,
     pub limit: i64,
+}
+
+/// Filter for [`Repo::buckets_query`]. All set fields are ANDed.
+#[derive(Default, Clone, Debug)]
+pub struct BucketQuery {
+    /// Drop cleaned buckets when true.
+    pub active_only: bool,
+    pub ids: Option<Vec<String>>,
+    pub asset_type: Option<String>,
+    pub settlement_type: Option<String>,
+    pub expiry_ms: Option<i64>,
 }
 
 const MAX_FILTER_DEPTH: u8 = 12;

@@ -9,10 +9,8 @@ use serde::Deserialize;
 pub struct Config {
     /// HTTP bind address (frontend hits this).
     pub bind_addr: SocketAddr,
-    /// Indexer WS endpoint. Subscribed from boot.
-    pub indexer_url: String,
-    /// Indexer GraphQL query endpoint (SO-97). Used to enrich the Dashboard's
-    /// wallet-direct positions. e.g. `http://127.0.0.1:9002/graphql`.
+    /// Indexer GraphQL query endpoint. All protocol reads are JIT queries
+    /// against this. e.g. `http://127.0.0.1:9002/graphql`.
     #[serde(default = "default_indexer_graphql_url")]
     pub indexer_graphql_url: String,
     /// CORS allow-list. `["*"]` permits any origin (dev only).
@@ -48,16 +46,16 @@ mod tests {
         std::fs::write(
             &path,
             r#"
-bind_addr        = "127.0.0.1:9003"
-indexer_url      = "ws://127.0.0.1:9001/"
-allowed_origins  = ["http://localhost:5173"]
-token_info_url   = "http://127.0.0.1:9005"
+bind_addr           = "127.0.0.1:9003"
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
+allowed_origins     = ["http://localhost:5173"]
+token_info_url      = "http://127.0.0.1:9005"
 "#,
         )
         .unwrap();
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.bind_addr.to_string(), "127.0.0.1:9003");
-        assert_eq!(cfg.indexer_url, "ws://127.0.0.1:9001/");
+        assert_eq!(cfg.indexer_graphql_url, "http://127.0.0.1:9002/graphql");
         assert_eq!(cfg.allowed_origins, vec!["http://localhost:5173".to_string()]);
         assert_eq!(cfg.token_info_url, "http://127.0.0.1:9005");
         std::fs::remove_file(&path).ok();

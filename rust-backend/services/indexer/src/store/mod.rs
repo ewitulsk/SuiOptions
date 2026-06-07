@@ -38,6 +38,10 @@ use crate::db::{CheckpointBatch, EventBuild, HydratedViews};
 pub struct AccountState {
     pub owner: Option<SuiAddress>,
     pub signing_pubkey: Vec<u8>,
+    /// Registered signing scheme, set from `AccountCreated` /
+    /// `SigningKeyRotated`. `None` only for rows hydrated before the scheme
+    /// column was backfilled.
+    pub signing_scheme: Option<protocol_types::SigningScheme>,
     pub balances: BTreeMap<AssetType, u64>,
 }
 
@@ -543,6 +547,7 @@ fn account_row(id: ObjectId, state: &AccountState, sequence: i64) -> AccountRow 
         account_id: id.to_hex(),
         owner: state.owner.as_ref().map(|o| o.to_hex()),
         signing_pubkey: state.signing_pubkey.clone(),
+        signing_scheme: state.signing_scheme.map(|s| s.as_u8() as i16),
         updated_at_seq: sequence,
     }
 }
@@ -584,20 +589,20 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent) {
             }
         }
         ChainEvent::AccountCreated(a) => {
-            inner
+            let acct = inner
                 .accounts
                 .entry(a.account_id)
-                .or_insert_with(AccountState::default)
-                .signing_pubkey = a.signing_pubkey.clone();
-            if let Some(acct) = inner.accounts.get_mut(&a.account_id) {
-                acct.owner = Some(a.owner);
-            }
+                .or_insert_with(AccountState::default);
+            acct.signing_pubkey = a.signing_pubkey.clone();
+            acct.signing_scheme = Some(a.signing_scheme);
+            acct.owner = Some(a.owner);
         }
         ChainEvent::AccountDeposit(d) => apply_account_delta(inner, d, true),
         ChainEvent::AccountWithdraw(w) => apply_account_delta(inner, w, false),
         ChainEvent::SigningKeyRotated(r) => {
             if let Some(acct) = inner.accounts.get_mut(&r.account_id) {
                 acct.signing_pubkey = r.new_pubkey.clone();
+                acct.signing_scheme = Some(r.new_scheme);
             }
         }
         ChainEvent::FeeUpdated(_) | ChainEvent::TreasuryWithdrawn(_) => {}

@@ -3,7 +3,7 @@
 //! Shape:
 //!
 //! ```toml
-//! indexer_url       = "ws://127.0.0.1:9001/"
+//! indexer_graphql_url       = "http://127.0.0.1:9002/graphql"
 //! tick_secs         = 60
 //! roll_threshold_ms = 604_800_000
 //!
@@ -49,8 +49,10 @@ pub struct SchedulerConfig {
     #[serde(default = "default_health_addr")]
     pub health_addr: std::net::SocketAddr,
 
-    /// WS endpoint of the indexer fanout.
-    pub indexer_url: String,
+    /// Indexer GraphQL query endpoint. Used for just-in-time roll
+    /// confirmation and the reconciliation high-water sequence.
+    /// e.g. `http://127.0.0.1:9002/graphql`.
+    pub indexer_graphql_url: String,
 
     #[serde(default = "default_tick_secs")]
     pub tick_secs: u64,
@@ -211,7 +213,7 @@ mod tests {
         let res: Result<SchedulerConfig, _> = config::Config::builder()
             .add_source(config::File::from_str(
                 r#"
-indexer_url = "ws://127.0.0.1:9001/"
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
 
 [[pairs]]
 underlying          = "TBTC"
@@ -237,7 +239,7 @@ interval_pct        = 5.0
     fn parses_static_pair() {
         let cfg = parse(
             r#"
-indexer_url       = "ws://127.0.0.1:9001/"
+indexer_graphql_url       = "http://127.0.0.1:9002/graphql"
 scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler_test"
 
 [[pairs]]
@@ -270,7 +272,7 @@ interval_pct        = 5.0
     fn parses_pyth_pair_with_defaults() {
         let cfg = parse(
             r#"
-indexer_url = "ws://127.0.0.1:9001/"
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
 scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler_test"
 
 [pyth]
@@ -305,7 +307,7 @@ interval_pct        = 5.0
     fn parses_pyth_pair_with_explicit_guards() {
         let cfg = parse(
             r#"
-indexer_url = "ws://127.0.0.1:9001/"
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
 scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler_test"
 
 [[pairs]]

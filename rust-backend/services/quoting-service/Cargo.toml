@@ -15,7 +15,7 @@ path = "src/main.rs"
 protocol-types = { workspace = true }
 runtime-config = { workspace = true }
 cli-spec       = { workspace = true }
-indexer-client = { workspace = true }
+indexer-graphql = { workspace = true }
 token-info-client = { workspace = true }
 
 config = { version = "0.14", features = ["toml"] }

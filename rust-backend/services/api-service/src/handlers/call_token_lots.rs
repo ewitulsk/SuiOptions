@@ -15,15 +15,18 @@
 //!   `WriteExecuted`. The dashboard falls back to "derived from your
 //!   holdings in this bucket" for those.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use axum::http::StatusCode;
 use axum::{
     extract::{Query, State},
     Json,
 };
 use serde::{Deserialize, Serialize};
 
-use protocol_types::ids::SuiAddress;
+use protocol_types::events::ChainEvent;
+use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::handlers::buckets::strike_raw_to_usd;
 use crate::state::AppState;
@@ -66,34 +69,55 @@ pub struct LotsResponse {
 pub async fn list_call_token_lots(
     State(state): State<Arc<AppState>>,
     Query(q): Query<LotsQuery>,
-) -> Json<LotsResponse> {
+) -> Result<Json<LotsResponse>, StatusCode> {
     let wallet = match SuiAddress::from_hex(&q.wallet) {
         Ok(a) => a,
-        Err(_) => return Json(LotsResponse { lots: vec![] }),
+        Err(_) => return Ok(Json(LotsResponse { lots: vec![] })),
     };
 
-    let buckets = state.buckets_by_id();
-    let mut lots: Vec<LotDto> = state
-        .lots_for_recipient(&wallet)
+    // A "lot" is one WriteExecuted whose call_token_recipient is this wallet.
+    // We reconstruct them straight from the event log, then join each to its
+    // bucket (fetched once into a map) for strike/expiry/symbols.
+    let events = state
+        .indexer
+        .write_executed_for_recipient(wallet)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "indexer write-executed query failed");
+            StatusCode::BAD_GATEWAY
+        })?;
+    let buckets: BTreeMap<ObjectId, indexer_graphql::Bucket> = state
+        .indexer
+        .buckets(false, None, None, None)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "indexer buckets query failed");
+            StatusCode::BAD_GATEWAY
+        })?
         .into_iter()
-        .filter_map(|lot| {
-            let bucket = buckets.get(&lot.bucket_id)?;
+        .map(|b| (b.bucket_id, b))
+        .collect();
+
+    let mut lots: Vec<LotDto> = events
+        .into_iter()
+        .filter_map(|ev| {
+            let ChainEvent::WriteExecuted(w) = ev.event else {
+                return None;
+            };
+            let bucket = buckets.get(&w.bucket_id)?;
             let asset_meta = state.catalog.lookup(bucket.asset_type.as_str());
             let settle_meta = state.catalog.lookup(bucket.settlement_type.as_str());
             let asset_decimals = asset_meta.map(|m| m.decimals);
             let settle_decimals = settle_meta.map(|m| m.decimals);
             let strike = match (asset_decimals, settle_decimals) {
-                (Some(u), Some(s)) => Some(strike_raw_to_usd(
-                    bucket.strike,
-                    bucket.strike_scale,
-                    u,
-                    s,
-                )),
+                (Some(u), Some(s)) => {
+                    Some(strike_raw_to_usd(bucket.strike, bucket.strike_scale, u, s))
+                }
                 _ => None,
             };
             Some(LotDto {
-                call_option_id: lot.call_option_id.to_hex(),
-                bucket_id: lot.bucket_id.to_hex(),
+                call_option_id: w.call_option_id.to_hex(),
+                bucket_id: w.bucket_id.to_hex(),
                 asset_symbol: asset_meta
                     .map(|m| m.symbol.clone())
                     .unwrap_or_else(|| bucket.asset_type.as_str().to_string()),
@@ -108,10 +132,10 @@ pub async fn list_call_token_lots(
                 strike_raw: bucket.strike.to_string(),
                 strike_scale: bucket.strike_scale,
                 expiry_ms: bucket.expiry_ms as i64,
-                amount_raw: lot.amount.to_string(),
-                premium_paid_raw: lot.premium_paid.to_string(),
-                seller_account_id: lot.seller_account_id.to_hex(),
-                timestamp_ms: lot.timestamp_ms as i64,
+                amount_raw: w.write_amount.to_string(),
+                premium_paid_raw: w.gross_premium.to_string(),
+                seller_account_id: w.signer_account_id.to_hex(),
+                timestamp_ms: ev.timestamp_ms as i64,
             })
         })
         .collect();
@@ -119,5 +143,5 @@ pub async fn list_call_token_lots(
     // Most recent first — UI expects newest purchases at the top.
     lots.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
 
-    Json(LotsResponse { lots })
+    Ok(Json(LotsResponse { lots }))
 }

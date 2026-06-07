@@ -19,17 +19,12 @@ async fn main() -> Result<()> {
             .await
             .with_context(|| format!("loading config from {cfg_path}"))?,
     );
-    let app = Arc::new(AppState::with_global_rfq_cap(cfg.max_inflight_rfqs_global));
+    let app = Arc::new(AppState::with_global_rfq_cap(
+        cfg.max_inflight_rfqs_global,
+        cfg.indexer_graphql_url.clone(),
+    ));
 
     state::spawn_reservation_evictor(Arc::clone(&app), Duration::from_millis(250));
-
-    let url = cfg.indexer_url.clone();
-    let app_for_indexer = Arc::clone(&app);
-    tokio::spawn(async move {
-        if let Err(e) = indexer_client::run(url, app_for_indexer).await {
-            tracing::error!(error = %e, "indexer subscriber exited");
-        }
-    });
 
     info!(addr = %cfg.bind_addr, "starting ws server");
     quoting_service::ws::serve(cfg.bind_addr, app, cfg).await

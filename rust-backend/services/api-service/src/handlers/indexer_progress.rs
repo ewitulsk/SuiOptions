@@ -9,12 +9,12 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 
-use crate::state::{AppState, IndexerProgress};
+use crate::state::{AppState, Progress};
 
 pub async fn get_progress(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<IndexerProgress>, StatusCode> {
-    match state.query_indexer_progress().await {
+) -> Result<Json<Progress>, StatusCode> {
+    match state.indexer.progress().await {
         Ok(progress) => Ok(Json(progress)),
         Err(e) => {
             tracing::warn!(error = %e, "indexer progress proxy failed");

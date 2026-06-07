@@ -5,7 +5,7 @@
 # the indexer's on-chain balance view.
 
 bind_addr            = "127.0.0.1:9002"
-indexer_url          = "ws://127.0.0.1:9001/"
+indexer_graphql_url          = "http://127.0.0.1:9002/graphql"
 
 # Window during which the service collects MM quotes for one retail RFQ
 # before responding. Spec default is 2s; tighten in latency-sensitive setups.

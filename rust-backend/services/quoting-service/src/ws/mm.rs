@@ -60,11 +60,20 @@ pub async fn handle(
     };
 
     // The indexer's `(scheme, pubkey)` is authoritative; supplied must agree.
-    let indexer_view = state.accounts.snapshot(&hello.account_id);
-    let indexer_scheme = indexer_view.as_ref().and_then(|m| m.signing_scheme);
+    // Fetched JIT; an indexer error or unknown account leaves both `None`/
+    // empty, which `verify_challenge_response` treats as "scheme unknown"
+    // (fail closed).
+    let indexer_view = match state.indexer.account(hello.account_id).await {
+        Ok(view) => view,
+        Err(e) => {
+            tracing::warn!(account = %hello.account_id, error = %e, "indexer account lookup failed during mm auth");
+            None
+        }
+    };
+    let indexer_scheme = indexer_view.as_ref().and_then(|a| a.signing_scheme);
     let indexer_key = indexer_view
         .as_ref()
-        .map(|m| m.signing_pubkey.clone())
+        .map(|a| a.signing_pubkey.clone())
         .unwrap_or_default();
     if let Err(reason) = verify_challenge_response(
         indexer_scheme,

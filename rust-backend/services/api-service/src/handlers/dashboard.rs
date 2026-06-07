@@ -14,7 +14,7 @@ use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 
 use crate::handlers::buckets::strike_raw_to_usd;
-use crate::state::{AppState, IndexerPosition};
+use crate::state::{AppState, Position};
 
 #[derive(Deserialize)]
 pub struct EnrichRequest {
@@ -57,7 +57,7 @@ pub async fn enrich_positions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<EnrichRequest>,
 ) -> Json<EnrichResponse> {
-    let rows = match state.query_indexer_positions(&req.object_ids).await {
+    let rows = match state.indexer.positions_by_object_ids(&req.object_ids).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(error = %e, "indexer position enrichment failed");
@@ -73,44 +73,44 @@ pub async fn enrich_positions(
 }
 
 impl AppState {
-    /// Layer catalog symbols/decimals + USD strike onto a raw indexer row.
-    fn enrich_one(&self, p: IndexerPosition) -> EnrichedPositionDto {
-        let asset_meta = self.catalog.lookup(&p.asset_type);
-        let settle_meta = self.catalog.lookup(&p.settlement_type);
+    /// Layer catalog symbols/decimals + USD strike onto an enriched indexer
+    /// position.
+    fn enrich_one(&self, p: Position) -> EnrichedPositionDto {
+        let asset_meta = self.catalog.lookup(p.asset_type.as_str());
+        let settle_meta = self.catalog.lookup(p.settlement_type.as_str());
         let asset_decimals = asset_meta.map(|m| m.decimals);
         let settle_decimals = settle_meta.map(|m| m.decimals);
-        let strike_scale = u8::try_from(p.strike_scale).unwrap_or(0);
 
-        let strike = match (asset_decimals, settle_decimals, p.strike_raw.parse::<u128>()) {
-            (Some(u), Some(s), Ok(raw)) => Some(strike_raw_to_usd(raw, strike_scale, u, s)),
+        let strike = match (asset_decimals, settle_decimals) {
+            (Some(u), Some(s)) => Some(strike_raw_to_usd(p.strike, p.strike_scale, u, s)),
             _ => None,
         };
 
         EnrichedPositionDto {
-            position_object_id: p.object_id,
-            bucket_id: p.bucket_id,
+            position_object_id: p.object_id.to_hex(),
+            bucket_id: p.bucket_id.to_hex(),
             asset_symbol: asset_meta
                 .map(|m| m.symbol.clone())
-                .unwrap_or_else(|| p.asset_type.clone()),
+                .unwrap_or_else(|| p.asset_type.as_str().to_string()),
             asset_decimals,
-            asset_coin_type: p.asset_type,
+            asset_coin_type: p.asset_type.to_canonical(),
             settlement_symbol: settle_meta
                 .map(|m| m.symbol.clone())
-                .unwrap_or_else(|| p.settlement_type.clone()),
+                .unwrap_or_else(|| p.settlement_type.as_str().to_string()),
             settlement_decimals: settle_decimals,
-            settlement_coin_type: p.settlement_type,
+            settlement_coin_type: p.settlement_type.to_canonical(),
             strike,
-            strike_raw: p.strike_raw,
-            strike_scale,
-            expiry_ms: p.expiry_ms.parse().unwrap_or(0),
-            range_start_raw: p.range_start_raw,
-            range_end_raw: p.range_end_raw,
-            total_written_raw: p.total_written_raw,
-            exercise_cursor_raw: p.exercise_cursor_raw,
-            premium_received_raw: p.premium_received_raw,
-            mm_account_id: p.mm_account_id,
+            strike_raw: p.strike.to_string(),
+            strike_scale: p.strike_scale,
+            expiry_ms: p.expiry_ms as i64,
+            range_start_raw: p.range_start.to_string(),
+            range_end_raw: p.range_end.to_string(),
+            total_written_raw: p.total_written.to_string(),
+            exercise_cursor_raw: p.exercise_cursor.to_string(),
+            premium_received_raw: p.premium_received.to_string(),
+            mm_account_id: p.mm_account_id.to_hex(),
             tx_digest: p.tx_digest,
-            minted_at_ms: p.minted_at_ms.parse().unwrap_or(0),
+            minted_at_ms: p.minted_at_ms as i64,
         }
     }
 }

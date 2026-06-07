@@ -119,6 +119,10 @@ pub struct AccountRow {
     pub account_id: String,
     pub owner: Option<String>,
     pub signing_pubkey: Vec<u8>,
+    /// On-chain signing-scheme tag (0=Ed25519, 1=Secp256k1, 2=Secp256r1).
+    /// Nullable for rows the backfill couldn't resolve. Field order matches
+    /// the column order in `schema.rs` for `Queryable`.
+    pub signing_scheme: Option<i16>,
     pub updated_at_seq: i64,
 }
 
@@ -231,11 +235,21 @@ pub fn account_row_into_state(row: AccountRow) -> anyhow::Result<(ObjectId, Acco
         .map(SuiAddress::from_hex)
         .transpose()
         .map_err(|e| anyhow::anyhow!("owner {:?}: {e}", row.owner))?;
+    let signing_scheme = row
+        .signing_scheme
+        .map(|s| {
+            u8::try_from(s)
+                .ok()
+                .and_then(|b| protocol_types::SigningScheme::from_u8(b).ok())
+                .ok_or_else(|| anyhow::anyhow!("invalid signing_scheme {s} for {}", row.account_id))
+        })
+        .transpose()?;
     Ok((
         id,
         AccountState {
             owner,
             signing_pubkey: row.signing_pubkey,
+            signing_scheme,
             balances: Default::default(),
         },
     ))

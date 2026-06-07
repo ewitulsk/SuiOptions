@@ -21,7 +21,9 @@ use diesel::pg::PgConnection;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
-pub use repo::{CheckpointBatch, EventBuild, EventFilter, EventQuery, HydratedViews, Repo};
+pub use repo::{
+    BucketQuery, CheckpointBatch, EventBuild, EventFilter, EventQuery, HydratedViews, Repo,
+};
 
 pub type DbPool = Pool<ConnectionManager<PgConnection>>;
 pub type ArcPool = Arc<DbPool>;

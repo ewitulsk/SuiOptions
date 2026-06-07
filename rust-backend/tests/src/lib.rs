@@ -75,37 +75,15 @@ impl Harness {
             3,
         );
 
-        // Bring up indexer fanout on an ephemeral port.
-        let indexer_listener = TcpListener::bind("127.0.0.1:0").await?;
-        let indexer_addr = indexer_listener.local_addr()?;
-        let store_for_indexer = Arc::clone(&store);
-        tokio::spawn(async move {
-            // Reimplement the accept loop here so we can use the
-            // already-bound listener (fanout::serve binds internally).
-            loop {
-                let (socket, peer) = match indexer_listener.accept().await {
-                    Ok(v) => v,
-                    Err(_) => break,
-                };
-                let st = Arc::clone(&store_for_indexer);
-                tokio::spawn(async move {
-                    // The fanout module's connection handler is private —
-                    // call serve with our own listener via an inline copy
-                    // would be ugly. Instead, run the WS handshake here
-                    // and re-use the indexer's snapshot machinery.
-                    let ws = match tokio_tungstenite::accept_async(socket).await {
-                        Ok(w) => w,
-                        Err(_) => return,
-                    };
-                    drop(handle_indexer_connection(ws, peer, st).await);
-                });
-            }
-        });
+        // Stand up a mock indexer GraphQL server backed by the in-memory
+        // store. JIT: the quoting service reads account/bucket/events on
+        // demand from here instead of subscribing to an event stream.
+        let graphql_addr = spawn_mock_indexer_graphql(Arc::clone(&store)).await?;
 
         // Quoting service.
         let cfg = Arc::new(quoting_service::Config {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
-            indexer_url: format!("ws://{}/", indexer_addr),
+            indexer_graphql_url: format!("http://{}/graphql", graphql_addr),
             rfq_window: Duration::from_millis(400),
             ping_interval: Duration::from_secs(10),
             protocol_id: b"test-protocol".to_vec(),
@@ -113,14 +91,10 @@ impl Harness {
             max_inflight_rfqs_per_session: 16,
             max_inflight_rfqs_global: 256,
         });
-        let app = Arc::new(quoting_service::AppState::new());
-
-        // Subscribe the quoting service to the indexer.
-        let app_clone = Arc::clone(&app);
-        let url = cfg.indexer_url.clone();
-        tokio::spawn(async move {
-            let _ = indexer_client::run(url, app_clone).await;
-        });
+        let app = Arc::new(quoting_service::AppState::with_global_rfq_cap(
+            cfg.max_inflight_rfqs_global,
+            cfg.indexer_graphql_url.clone(),
+        ));
 
         // Quoting WS server: rebind on ephemeral.
         let quoting_listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -141,20 +115,6 @@ impl Harness {
             }
         });
 
-        // Wait until the quoting service's indexer client has caught up on
-        // the MM account and bucket. Poll for up to ~2s.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while std::time::Instant::now() < deadline {
-            if app.accounts.snapshot(&mm_account).is_some()
-                && app.buckets.get(&bucket).is_some()
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(app.accounts.snapshot(&mm_account).is_some(), "mm account didn't propagate");
-        assert!(app.buckets.get(&bucket).is_some(), "bucket didn't propagate");
-
         Ok(Self {
             indexer_store: store,
             quoting_addr,
@@ -168,61 +128,123 @@ impl Harness {
 
 // -- Connection helpers --------------------------------------------------
 
-async fn handle_indexer_connection<S>(
-    ws: WebSocketStream<S>,
-    _peer: SocketAddr,
-    _store: Arc<indexer::Store>,
-) -> Result<()>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    // Forward to the indexer's own connection handler logic by re-implementing
-    // the small Snapshot+stream protocol. Kept tiny to avoid pulling the
-    // indexer's internal `handle_connection`.
-    use protocol_types::messages::{IndexerSnapshotPayload, IndexerStream, IndexerSubscribe};
-    let (mut sink, mut stream) = ws.split();
-    let first = match stream.next().await {
-        Some(Ok(Message::Text(t))) => t,
-        Some(Ok(Message::Binary(b))) => String::from_utf8(b)?,
-        _ => return Ok(()),
-    };
-    let sub: IndexerSubscribe = serde_json::from_str(&first)?;
-    let after = match sub {
-        IndexerSubscribe::Subscribe { after_sequence } => after_sequence,
-    };
-    let snap = _store.snapshot_after(after);
-    let frame = IndexerStream::Snapshot {
-        payload: IndexerSnapshotPayload {
-            latest_sequence: snap.latest_sequence,
-            events: snap.events,
-        },
-    };
-    sink.send(Message::Text(serde_json::to_string(&frame)?)).await?;
+/// Minimal mock of the indexer's GraphQL API, backed by the in-memory
+/// `Store`. Answers the three query shapes the quoting service issues —
+/// `account(id)`, `bucket(id)`, and `events(...)` — dispatching on which root
+/// field the query string mentions. Field encodings (camelCase keys, decimal
+/// strings, hex pubkey) mirror the real resolvers in `indexer::graphql`.
+async fn spawn_mock_indexer_graphql(store: Arc<indexer::Store>) -> Result<SocketAddr> {
+    use axum::{extract::State, routing::post, Json, Router};
+    use serde_json::{json, Value};
 
-    let mut rx = _store.subscribe();
-    loop {
-        tokio::select! {
-            ev = rx.recv() => {
-                match ev {
-                    Ok(ev) => {
-                        let frame = IndexerStream::Event { payload: ev };
-                        if sink.send(Message::Text(serde_json::to_string(&frame)?)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            incoming = stream.next() => {
-                match incoming {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Err(_)) => break,
-                    _ => continue,
-                }
-            }
+    async fn handler(
+        State(store): State<Arc<indexer::Store>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        let query = body.get("query").and_then(|q| q.as_str()).unwrap_or("");
+        let vars = body.get("variables").cloned().unwrap_or_else(|| json!({}));
+
+        if query.contains("account(") {
+            let id = vars.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let acct = ObjectId::from_hex(id).ok().and_then(|o| store.account(&o));
+            let node = acct.map(|a| account_json(id, &a)).unwrap_or(Value::Null);
+            return Json(json!({ "data": { "account": node } }));
         }
+        if query.contains("bucket(") && !query.contains("buckets(") {
+            let id = vars.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let bkt = ObjectId::from_hex(id).ok().and_then(|o| store.bucket(&o));
+            let node = bkt.map(|b| bucket_json(id, &b)).unwrap_or(Value::Null);
+            return Json(json!({ "data": { "bucket": node } }));
+        }
+        if query.contains("events(") {
+            return Json(json!({ "data": { "events": events_json(&store, &vars) } }));
+        }
+        Json(json!({ "data": Value::Null }))
     }
-    Ok(())
+
+    let app = Router::new()
+        .route("/graphql", post(handler))
+        .with_state(store);
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    Ok(addr)
+}
+
+fn account_json(id: &str, a: &indexer::AccountState) -> serde_json::Value {
+    serde_json::json!({
+        "accountId": id,
+        "owner": a.owner.as_ref().map(|o| o.to_hex()),
+        "signingScheme": a.signing_scheme.map(|s| s.as_u8() as i64),
+        "signingPubkeyHex": hex::encode(&a.signing_pubkey),
+        "balances": a.balances.iter().map(|(asset, bal)| serde_json::json!({
+            "assetType": asset.as_str(),
+            "balanceRaw": bal.to_string(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn bucket_json(id: &str, b: &indexer::BucketState) -> serde_json::Value {
+    serde_json::json!({
+        "bucketId": id,
+        "assetType": b.asset_type.as_str(),
+        "settlementType": b.settlement_type.as_str(),
+        "strikeRaw": b.strike.to_string(),
+        "strikeScale": b.strike_scale as i64,
+        "expiryMs": b.expiry_ms.to_string(),
+        "totalWrittenRaw": b.total_written.to_string(),
+        "exerciseCursorRaw": b.exercise_cursor.to_string(),
+        "cleaned": b.cleaned,
+        "invalidated": b.invalidated,
+    })
+}
+
+/// Serve the `events(...)` query from the store's snapshot, applying the
+/// `eventType` + `payloadContains.signer_account_id` filters the quoting
+/// service uses for reservation reconciliation.
+fn events_json(store: &indexer::Store, vars: &serde_json::Value) -> serde_json::Value {
+    let after: u64 = vars
+        .get("after")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let filter = vars.get("f");
+    let want_types: Vec<String> = filter
+        .and_then(|f| f.get("eventType"))
+        .and_then(|t| serde_json::from_value(t.clone()).ok())
+        .unwrap_or_default();
+    let want_signer = filter
+        .and_then(|f| f.get("payloadContains"))
+        .and_then(|p| p.get("signer_account_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let nodes: Vec<serde_json::Value> = store
+        .snapshot_after(after)
+        .events
+        .into_iter()
+        .filter(|ev| {
+            let tag = indexer::db::models::event_type_tag(&ev.event);
+            if !want_types.is_empty() && !want_types.iter().any(|t| t == tag) {
+                return false;
+            }
+            match (&want_signer, &ev.event) {
+                (Some(want), ChainEvent::WriteExecuted(w)) => w.signer_account_id.to_hex() == *want,
+                (Some(_), _) => false,
+                (None, _) => true,
+            }
+        })
+        .map(|ev| {
+            serde_json::json!({
+                "sequence": ev.sequence.to_string(),
+                "timestampMs": ev.timestamp_ms.to_string(),
+                "payload": serde_json::to_value(&ev.event).unwrap(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "nodes": nodes, "nextCursor": serde_json::Value::Null })
 }
 
 async fn handle_quoting_connection(

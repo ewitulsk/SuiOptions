@@ -36,7 +36,7 @@ pub fn random_challenge() -> Vec<u8> {
 
 /// Verify a challenge response.
 ///
-/// `indexer_*` come from `AccountMirror` (what the chain registered).
+/// `indexer_*` come from the indexer's `account` query (what the chain registered).
 /// `supplied_*` come from the MM's `Hello`. Both must match before we
 /// verify the signature so an MM can't claim an account it doesn't own.
 pub fn verify_challenge_response(
