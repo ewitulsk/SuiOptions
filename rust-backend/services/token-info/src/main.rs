@@ -49,12 +49,18 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState::new(repo, package_info, overlay));
 
+    // Admin-JWT gate for the public mutate routes. token-info never validates
+    // tokens itself — this client delegates to auth-service's /verify.
+    let auth = Arc::new(auth_client::AuthClient::new(&cfg.auth_service_url));
+    info!(auth_service_url = %cfg.auth_service_url, "auth delegation configured");
+
     // Public read API + internal mutate API on separate ports.
     let public_state = Arc::clone(&state);
     let public_addr = cfg.public_bind_addr;
     let origins = cfg.allowed_origins.clone();
+    let public_auth = Arc::clone(&auth);
     let public = tokio::spawn(async move {
-        router::serve_public(public_addr, public_state, &origins).await
+        router::serve_public(public_addr, public_state, &origins, public_auth).await
     });
 
     let internal_state = Arc::clone(&state);

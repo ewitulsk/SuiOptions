@@ -17,6 +17,10 @@ internal_bind_addr = "0.0.0.0:9006"
 
 allowed_origins    = ["*"]
 
+# auth-service internal verify route (compose-internal) — gates the public
+# mutate endpoints.
+auth_service_url   = "http://auth-service:9008"
+
 # Display metadata for the dev test-token overlay. Keyed by ticker.
 [seed_meta.TBTC]
 name     = "Test Bitcoin"

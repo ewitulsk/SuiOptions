@@ -1,5 +1,5 @@
 [package]
-name = "token-info"
+name = "auth-service"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,15 +8,13 @@ license.workspace = true
 path = "src/lib.rs"
 
 [[bin]]
-name = "token-info"
+name = "auth-service"
 path = "src/main.rs"
 
 [dependencies]
-runtime-config    = { workspace = true }
-cli-spec          = { workspace = true }
-deployments       = { workspace = true }
-token-info-client = { workspace = true }
-auth-client       = { workspace = true }
+runtime-config = { workspace = true }
+cli-spec       = { workspace = true }
+protocol-types = { workspace = true }
 
 config = { version = "0.14", features = ["toml"] }
 clap = { workspace = true }
@@ -36,10 +34,16 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-# Postgres persistence (catalog).
-diesel = { workspace = true }
-diesel_migrations = { workspace = true }
-r2d2 = { workspace = true }
+# Challenge nonce store.
+dashmap = { workspace = true }
+rand = { workspace = true }
+
+# Sui personal-message digest + signature decoding, HS256 JWT signing.
+blake2 = { workspace = true }
+base64 = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+ed25519-dalek = { workspace = true }

@@ -90,4 +90,20 @@ $NETWORK = "$SUI_KEY"
 EOF
 fi
 
+# ---- auth-service secret -> rendered TOML --------------------------------
+# JWT signing secret. auth-service is the sole holder; token-info delegates
+# verification to it and never sees this value.
+if AUTH_JSON=$(fetch auth-service 2>/dev/null); then
+  JWT_SECRET=$(echo "$AUTH_JSON" | jq -r '.jwt_secret')
+  if [ -z "$JWT_SECRET" ] || [ "$JWT_SECRET" = "null" ]; then
+    echo "missing jwt_secret in options/$ENV/auth-service" >&2
+    exit 1
+  fi
+  umask 077
+  cat > "$DIR/auth-service.toml" <<EOF
+[auth]
+jwt_secret = "$JWT_SECRET"
+EOF
+fi
+
 echo "render-secrets: ok ($ENV)"

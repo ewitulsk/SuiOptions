@@ -16,6 +16,20 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       DB_HOST: ${DB_HOST}
       RUST_LOG: info,token_info=debug
+    depends_on: [auth-service]
+    restart: unless-stopped
+    networks: [net]
+
+  # Admin auth. Issues + verifies the JWTs that gate token-info's public
+  # mutate endpoints. Public port (9007, proxied by nginx) + internal verify
+  # port (9008, never proxied). Reads its JWT secret from /run/secrets.
+  auth-service:
+    image: ${ECR}/options/auth-service:${AUTH_SERVICE_TAG}
+    environment:
+      APP_ENV: dev
+      RUST_LOG: info,auth_service=debug
+    volumes:
+      - /opt/options/dev/secrets:/run/secrets:ro
     restart: unless-stopped
     networks: [net]
 
@@ -98,7 +112,7 @@ services:
     volumes:
       - /opt/options/dev/nginx/:/etc/nginx/options/:ro
     command: ["nginx", "-c", "/etc/nginx/options/nginx.conf", "-g", "daemon off;"]
-    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot]
+    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service]
     restart: unless-stopped
     networks: [net]
 

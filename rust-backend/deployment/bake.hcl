@@ -75,6 +75,14 @@ target "token-info" {
   cache-to   = [{ type = "gha", mode = "max", scope = "token-info" }]
 }
 
+target "auth-service" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.auth-service"
+  tags       = ["${ECR}/options/auth-service:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "auth-service" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "auth-service" }]
+}
+
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service"]
 }
