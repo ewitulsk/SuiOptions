@@ -1,6 +1,6 @@
 # api-service config (local dev).
 #
-# Subscribes to the indexer's WS fanout and serves HTTP to the frontend.
+# Reads protocol state from the indexer's GraphQL API and serves HTTP to the frontend.
 
 bind_addr        = "127.0.0.1:9003"
 indexer_graphql_url = "http://127.0.0.1:9002/graphql"

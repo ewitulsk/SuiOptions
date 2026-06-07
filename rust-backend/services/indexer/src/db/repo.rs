@@ -14,9 +14,6 @@
 //!   - [`Repo::hydrate`] — at boot, reloads accounts/buckets/positions into
 //!     in-memory state so `Store::bucket()` / `Store::account()` work without
 //!     replaying the log.
-//!
-//! A secondary [`Repo::events_after`] backs cold fanout snapshots — when a
-//! subscriber asks for a sequence older than what's in the in-memory log.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -31,7 +28,7 @@ use diesel::sql_types::{Bool, Jsonb};
 use diesel::IntoSql;
 use tracing::{debug, info, trace};
 
-use protocol_types::events::{ChainEvent, IndexedEvent};
+use protocol_types::events::ChainEvent;
 use protocol_types::ids::ObjectId;
 
 use crate::store::{AccountState, BucketState, PositionState};
@@ -369,37 +366,6 @@ impl Repo {
             buckets: bucket_map,
             positions: position_map,
         })
-    }
-
-    /// Pull events with `sequence > after_sequence`, ordered. Cold-path for
-    /// fanout subscribers asking for history older than the in-memory tail.
-    pub fn events_after(&self, after_sequence: i64, limit: i64) -> Result<Vec<IndexedEvent>> {
-        let mut conn = self.conn()?;
-        let rows: Vec<IndexedEventRow> = indexed_events::table
-            .filter(indexed_events::sequence.gt(after_sequence))
-            .order(indexed_events::sequence.asc())
-            .limit(limit)
-            .load(&mut conn)
-            .context("loading indexed_events tail")?;
-        rows.into_iter().map(|r| r.into_indexed_event()).collect()
-    }
-
-    /// Most-recent N events, in ascending sequence order. Used at boot to
-    /// repopulate the in-memory log so the broadcast tail isn't empty.
-    pub fn recent_events(&self, limit: i64) -> Result<Vec<IndexedEvent>> {
-        let mut conn = self.conn()?;
-        // ORDER BY DESC LIMIT N then reverse — equivalent to "last N in asc order".
-        let rows: Vec<IndexedEventRow> = indexed_events::table
-            .order(indexed_events::sequence.desc())
-            .limit(limit)
-            .load(&mut conn)
-            .context("loading recent indexed_events")?;
-        let mut events: Vec<IndexedEvent> = rows
-            .into_iter()
-            .map(|r| r.into_indexed_event())
-            .collect::<Result<_>>()?;
-        events.reverse();
-        Ok(events)
     }
 
     /// SO-97: enriched positions for a set of on-chain object ids — the

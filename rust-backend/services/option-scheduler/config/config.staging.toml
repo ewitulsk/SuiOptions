@@ -2,7 +2,7 @@
 # Chain-side ids (package, AdminCap, deployer address, test-token coin
 # types, pyth feed ids) come from `deployments.json::devnet`.
 
-# WS endpoint of the indexer fanout inside the compose stack.
+# GraphQL endpoint of the indexer inside the compose stack.
 indexer_graphql_url       = "http://indexer:9002/graphql"
 
 tick_secs         = 60

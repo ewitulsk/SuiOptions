@@ -15,8 +15,6 @@
 //! - [`RetailToService`] / [`ServiceToRetail`] — retail frontend ↔ quoting
 //!   service.
 //! - [`MmToService`] / [`ServiceToMm`] — market-maker bot ↔ quoting service.
-//! - [`IndexerStream`] — indexer → consumers (one-way push of events plus the
-//!   occasional snapshot).
 
 use std::collections::BTreeMap;
 
@@ -24,7 +22,6 @@ use serde::{Deserialize, Serialize};
 
 use super::asset::AssetType;
 use super::coding::{u128_string, u64_string};
-use super::events::IndexedEvent;
 use super::ids::ObjectId;
 use super::quote::{Quote, SignedQuote};
 use super::sides::{MmRole, RetailRole, Side};
@@ -312,48 +309,6 @@ impl<'de> Deserialize<'de> for U64Str {
             u64::deserialize(de).map(U64Str)
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// indexer → consumers (quoting service, frontends)
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum IndexerStream {
-    /// Initial backfill — the consumer's resume cursor.
-    Snapshot {
-        payload: IndexerSnapshotPayload,
-    },
-    /// Single live event.
-    Event {
-        payload: IndexedEvent,
-    },
-    /// Periodic stream marker; even if there are no events the consumer can
-    /// detect partition.
-    Heartbeat {
-        #[serde(with = "u64_string")]
-        latest_sequence: u64,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IndexerSnapshotPayload {
-    #[serde(with = "u64_string")]
-    pub latest_sequence: u64,
-    pub events: Vec<IndexedEvent>,
-}
-
-/// Subscribe request the consumer sends to the indexer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum IndexerSubscribe {
-    /// Stream everything from `after_sequence` (exclusive). 0 means "from the
-    /// beginning".
-    Subscribe {
-        #[serde(with = "u64_string")]
-        after_sequence: u64,
-    },
 }
 
 // ---------------------------------------------------------------------------

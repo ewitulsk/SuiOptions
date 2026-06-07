@@ -5,12 +5,10 @@
 //! service, so re-deploying the contracts doesn't require editing the
 //! indexer config.
 //!
-//! Pattern is borrowed from Pismo's indexer, plus the fanout-specific
-//! fields unique to this protocol.
+//! Pattern is borrowed from Pismo's indexer.
 
 use std::net::SocketAddr;
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -47,17 +45,10 @@ pub struct Config {
     /// How many checkpoints the framework processes in parallel.
     pub concurrency: usize,
 
-    /// Bind address for the WS fanout (quoting service subscribes here).
-    pub fanout_addr: SocketAddr,
-
-    /// Bind address for the GraphQL query API (SO-97). api-service queries
-    /// `POST /graphql` here to enrich the Dashboard's wallet-direct positions.
+    /// Bind address for the GraphQL query API (SO-97). Consumers read protocol
+    /// state just-in-time from `POST /graphql` here.
     #[serde(default = "default_graphql_addr")]
     pub graphql_addr: SocketAddr,
-
-    /// How often the fanout publishes a `Heartbeat` frame.
-    #[serde(default = "default_heartbeat_secs", rename = "heartbeat_interval_secs")]
-    heartbeat_interval_secs: u64,
 
     /// Postgres connection string for the persistence layer. Standard libpq
     /// URL form, e.g. `postgresql://postgres:postgres@localhost:7654/indexer`.
@@ -69,25 +60,15 @@ pub struct Config {
     pub health_addr: SocketAddr,
 
     /// r2d2 pool size for Postgres connections. The worker holds at most one
-    /// connection at a time; the fanout's cold path (history older than the
-    /// in-memory tail) can hold additional ones briefly.
+    /// connection at a time; GraphQL query resolvers can hold additional ones
+    /// briefly.
     #[serde(default = "default_db_pool_size")]
     pub db_pool_size: u32,
-
-    /// How many of the most recent persisted events to keep in the in-memory
-    /// log on boot. The fanout serves snapshots from this tail; anything
-    /// older is served from Postgres via [`crate::db::Repo::events_after`].
-    #[serde(default = "default_recent_log_capacity")]
-    pub recent_log_capacity: usize,
 }
 
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         config_load::load_toml(path)
-    }
-
-    pub fn heartbeat_interval(&self) -> Duration {
-        Duration::from_secs(self.heartbeat_interval_secs)
     }
 
     /// JSON-RPC URL to query for the latest checkpoint. Returns the
@@ -118,16 +99,8 @@ fn default_graphql_addr() -> SocketAddr {
     "0.0.0.0:9002".parse().unwrap()
 }
 
-fn default_heartbeat_secs() -> u64 {
-    5
-}
-
 fn default_db_pool_size() -> u32 {
     8
-}
-
-fn default_recent_log_capacity() -> usize {
-    1024
 }
 
 #[cfg(test)]
@@ -150,7 +123,6 @@ network = "testnet"
 token_info_url = "http://127.0.0.1:9005"
 remote_store_url = "https://checkpoints.testnet.sui.io"
 concurrency = 5
-fanout_addr = "127.0.0.1:9001"
 database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
 "#,
         );
@@ -169,7 +141,6 @@ token_info_url = "http://127.0.0.1:9005"
 remote_store_url = "https://checkpoints.testnet.sui.io"
 start_checkpoint = 12345
 concurrency = 5
-fanout_addr = "127.0.0.1:9001"
 database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
 "#,
         );
@@ -187,7 +158,6 @@ network = "testnet"
 token_info_url = "http://127.0.0.1:9005"
 remote_store_url = "https://checkpoints.testnet.sui.io"
 concurrency = 5
-fanout_addr = "127.0.0.1:9001"
 database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
 "#,
         );
@@ -206,7 +176,6 @@ token_info_url = "http://127.0.0.1:9005"
 remote_store_url = "https://checkpoints.testnet.sui.io"
 rpc_url = "https://my-private-fullnode.example.com:443"
 concurrency = 5
-fanout_addr = "127.0.0.1:9001"
 database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
 "#,
         );

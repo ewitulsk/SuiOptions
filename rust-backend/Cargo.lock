@@ -4064,19 +4064,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "indexer-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "futures-util",
- "protocol-types",
- "serde_json",
- "tokio",
- "tokio-tungstenite 0.24.0",
- "tracing",
-]
-
-[[package]]
 name = "indexer-graphql"
 version = "0.1.0"
 dependencies = [

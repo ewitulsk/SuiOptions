@@ -102,15 +102,14 @@ impl AppState {
     }
 
     /// Release reservations whose `WriteExecuted` the indexer now reports, and
-    /// record each as executed for reputation. This is the JIT replacement for
-    /// the old fanout-driven release: instead of a live `WriteExecuted` frame,
-    /// we scan the indexer's event log for this account since our last cursor.
+    /// record each as executed for reputation. We scan the indexer's event log
+    /// (via GraphQL) for this account since our last cursor.
     ///
     /// NOTE (speed-up): this runs on demand during quote validation, so an
     /// idle MM's executed reservations aren't released until either it's quoted
-    /// again or its TTL evicts it. A short-interval background reconcile (or a
-    /// narrow `WriteExecuted`-only fanout subscription) would tighten that and
-    /// is the obvious optimization if reservation-release latency ever matters.
+    /// again or its TTL evicts it. A short-interval background reconcile would
+    /// tighten that and is the obvious optimization if reservation-release
+    /// latency ever matters.
     pub async fn reconcile_executed(&self, account: ObjectId) -> anyhow::Result<()> {
         let after = self
             .reconcile_cursors

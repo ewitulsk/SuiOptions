@@ -16,7 +16,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use protocol_types::asset::AssetType;
-use protocol_types::events::{AccountCreated, AccountDeposit, BucketCreated, ChainEvent};
+use protocol_types::events::{AccountCreated, AccountDeposit, BucketCreated, ChainEvent, IndexedEvent};
 use protocol_types::ids::{ObjectId, SuiAddress};
 use protocol_types::messages::{
     AuthResponsePayload, MmHelloPayload, MmQuotePayload, MmToService, RetailHelloPayload,
@@ -40,45 +40,50 @@ impl Harness {
     pub async fn start() -> Result<Self> {
         let _ = tracing_subscriber::fmt::try_init();
 
-        let store = Arc::new(indexer::Store::new(64));
+        let store = Arc::new(indexer::Store::new());
         let mm_account = ObjectId::new([0x11; 32]);
         let mm_sk = SigningKey::generate(&mut rand::rngs::OsRng);
         let bucket = ObjectId::new([0x22; 32]);
 
-        // Pre-seed: MM account with USDC balance, plus the bucket.
-        store.ingest(
-            ChainEvent::AccountCreated(AccountCreated {
-                account_id: mm_account,
-                owner: SuiAddress::new([0x33; 32]),
-                signing_scheme: protocol_types::SigningScheme::Ed25519,
-                signing_pubkey: mm_sk.verifying_key().to_bytes().to_vec(),
-            }),
-            1,
-        );
-        store.ingest(
-            ChainEvent::AccountDeposit(AccountDeposit {
-                account_id: mm_account,
-                asset_type: AssetType::new("USDC"),
-                amount: 1_000_000_000,
-            }),
-            2,
-        );
-        store.ingest(
-            ChainEvent::BucketCreated(BucketCreated {
-                bucket_id: bucket,
-                asset_type: AssetType::new("BTC"),
-                settlement_type: AssetType::new("USDC"),
-                expiry_ms: 9_999_999_999_999,
-                strike: 50_000_000,
-                strike_scale: 0,
-            }),
-            3,
-        );
+        // Pre-seed: MM account with USDC balance, plus the bucket. The store
+        // no longer keeps an event log (that was fanout-only), so we capture
+        // the ingested events to serve the mock `events(...)` query from.
+        let seed_events = vec![
+            store.ingest(
+                ChainEvent::AccountCreated(AccountCreated {
+                    account_id: mm_account,
+                    owner: SuiAddress::new([0x33; 32]),
+                    signing_scheme: protocol_types::SigningScheme::Ed25519,
+                    signing_pubkey: mm_sk.verifying_key().to_bytes().to_vec(),
+                }),
+                1,
+            ),
+            store.ingest(
+                ChainEvent::AccountDeposit(AccountDeposit {
+                    account_id: mm_account,
+                    asset_type: AssetType::new("USDC"),
+                    amount: 1_000_000_000,
+                }),
+                2,
+            ),
+            store.ingest(
+                ChainEvent::BucketCreated(BucketCreated {
+                    bucket_id: bucket,
+                    asset_type: AssetType::new("BTC"),
+                    settlement_type: AssetType::new("USDC"),
+                    expiry_ms: 9_999_999_999_999,
+                    strike: 50_000_000,
+                    strike_scale: 0,
+                }),
+                3,
+            ),
+        ];
 
         // Stand up a mock indexer GraphQL server backed by the in-memory
-        // store. JIT: the quoting service reads account/bucket/events on
-        // demand from here instead of subscribing to an event stream.
-        let graphql_addr = spawn_mock_indexer_graphql(Arc::clone(&store)).await?;
+        // store + captured events. JIT: the quoting service reads
+        // account/bucket/events on demand from here.
+        let graphql_addr =
+            spawn_mock_indexer_graphql(Arc::clone(&store), Arc::new(seed_events)).await?;
 
         // Quoting service.
         let cfg = Arc::new(quoting_service::Config {
@@ -133,38 +138,44 @@ impl Harness {
 /// `account(id)`, `bucket(id)`, and `events(...)` — dispatching on which root
 /// field the query string mentions. Field encodings (camelCase keys, decimal
 /// strings, hex pubkey) mirror the real resolvers in `indexer::graphql`.
-async fn spawn_mock_indexer_graphql(store: Arc<indexer::Store>) -> Result<SocketAddr> {
+async fn spawn_mock_indexer_graphql(
+    store: Arc<indexer::Store>,
+    events: Arc<Vec<IndexedEvent>>,
+) -> Result<SocketAddr> {
     use axum::{extract::State, routing::post, Json, Router};
     use serde_json::{json, Value};
 
-    async fn handler(
-        State(store): State<Arc<indexer::Store>>,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
+    #[derive(Clone)]
+    struct MockState {
+        store: Arc<indexer::Store>,
+        events: Arc<Vec<IndexedEvent>>,
+    }
+
+    async fn handler(State(st): State<MockState>, Json(body): Json<Value>) -> Json<Value> {
         let query = body.get("query").and_then(|q| q.as_str()).unwrap_or("");
         let vars = body.get("variables").cloned().unwrap_or_else(|| json!({}));
 
         if query.contains("account(") {
             let id = vars.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let acct = ObjectId::from_hex(id).ok().and_then(|o| store.account(&o));
+            let acct = ObjectId::from_hex(id).ok().and_then(|o| st.store.account(&o));
             let node = acct.map(|a| account_json(id, &a)).unwrap_or(Value::Null);
             return Json(json!({ "data": { "account": node } }));
         }
         if query.contains("bucket(") && !query.contains("buckets(") {
             let id = vars.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let bkt = ObjectId::from_hex(id).ok().and_then(|o| store.bucket(&o));
+            let bkt = ObjectId::from_hex(id).ok().and_then(|o| st.store.bucket(&o));
             let node = bkt.map(|b| bucket_json(id, &b)).unwrap_or(Value::Null);
             return Json(json!({ "data": { "bucket": node } }));
         }
         if query.contains("events(") {
-            return Json(json!({ "data": { "events": events_json(&store, &vars) } }));
+            return Json(json!({ "data": { "events": events_json(&st.events, &vars) } }));
         }
         Json(json!({ "data": Value::Null }))
     }
 
     let app = Router::new()
         .route("/graphql", post(handler))
-        .with_state(store);
+        .with_state(MockState { store, events });
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     tokio::spawn(async move {
@@ -201,10 +212,10 @@ fn bucket_json(id: &str, b: &indexer::BucketState) -> serde_json::Value {
     })
 }
 
-/// Serve the `events(...)` query from the store's snapshot, applying the
-/// `eventType` + `payloadContains.signer_account_id` filters the quoting
-/// service uses for reservation reconciliation.
-fn events_json(store: &indexer::Store, vars: &serde_json::Value) -> serde_json::Value {
+/// Serve the `events(...)` query from the captured seed events, applying the
+/// `sequence_gt` (`after`) + `eventType` + `payloadContains.signer_account_id`
+/// filters the quoting service uses for reservation reconciliation.
+fn events_json(events: &[IndexedEvent], vars: &serde_json::Value) -> serde_json::Value {
     let after: u64 = vars
         .get("after")
         .and_then(|v| v.as_str())
@@ -221,10 +232,9 @@ fn events_json(store: &indexer::Store, vars: &serde_json::Value) -> serde_json::
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let nodes: Vec<serde_json::Value> = store
-        .snapshot_after(after)
-        .events
-        .into_iter()
+    let nodes: Vec<serde_json::Value> = events
+        .iter()
+        .filter(|ev| ev.sequence > after)
         .filter(|ev| {
             let tag = indexer::db::models::event_type_tag(&ev.event);
             if !want_types.is_empty() && !want_types.iter().any(|t| t == tag) {

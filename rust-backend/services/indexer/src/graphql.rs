@@ -1,7 +1,7 @@
 //! GraphQL query API over the indexer's Postgres views (SO-97).
 //!
-//! Runs as a second HTTP listener alongside the WS fanout, internal-only.
-//! Diesel is sync, so resolvers hop onto `spawn_blocking` over the r2d2 pool.
+//! The indexer's outbound query surface, internal-only. Diesel is sync, so
+//! resolvers hop onto `spawn_blocking` over the r2d2 pool.
 //! Two queries:
 //!   - `positions(objectIds)` — enrich the wallet-direct Dashboard list.
 //!   - `events(filter, …)`    — generalized event query with a recursive

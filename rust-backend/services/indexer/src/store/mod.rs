@@ -1,22 +1,17 @@
-//! In-memory event log + materialized views.
+//! In-memory materialized views.
 //!
-//! The store is the single source of truth for the off-chain stack: every
-//! `ChainEvent` flows through [`Store::ingest`], which assigns a monotonic
-//! `sequence`, updates the materialized views (accounts, buckets, positions),
-//! appends to the log, and broadcasts the resulting [`IndexedEvent`] to
-//! subscribers.
-//!
-//! The log holds the entire history. `Store::snapshot(after_sequence)` is the
-//! catch-up primitive: a new subscriber asks "give me everything after N",
-//! then live-streams from the broadcast channel. Channels have a bounded
-//! capacity and skip — but the subscriber can recover from the gap by
-//! re-snapshotting, so loss is recoverable.
+//! Every `ChainEvent` flows through [`Store::stage_batch`] (or
+//! [`Store::ingest`] in tests), which assigns a monotonic `sequence` and
+//! updates the materialized views (accounts, buckets, positions). The views
+//! are a write-through cache over Postgres: the worker persists each
+//! checkpoint via [`crate::db::Repo`], and the cache is rehydrated from
+//! Postgres on boot. Consumers read protocol state via the GraphQL query API,
+//! never directly from this store.
 
 use std::collections::BTreeMap;
 
 use parking_lot::RwLock;
-use tokio::sync::broadcast;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use protocol_types::asset::AssetType;
 use protocol_types::events::{
@@ -76,14 +71,8 @@ pub struct PositionState {
     pub range_end: u128,
 }
 
-#[derive(Clone, Debug)]
-pub struct Snapshot {
-    pub latest_sequence: u64,
-    pub events: Vec<IndexedEvent>,
-}
-
-/// Output of [`Store::stage_batch`]. The `indexed` events are already in the
-/// in-memory log and just await broadcast; `db_batch` is what
+/// Output of [`Store::stage_batch`]. The `indexed` events carry the assigned
+/// sequences (used for logging); `db_batch` is what
 /// [`crate::db::Repo::apply_checkpoint`] writes.
 pub struct StagedBatch {
     pub indexed: Vec<IndexedEvent>,
@@ -92,9 +81,7 @@ pub struct StagedBatch {
 
 #[derive(Debug)]
 struct Inner {
-    log: Vec<IndexedEvent>,
-    /// Sequence numbers start at 1. `after_sequence: 0` therefore means
-    /// "from before the beginning — give me everything".
+    /// Next sequence to assign. Starts at 1.
     next_sequence: u64,
     accounts: BTreeMap<ObjectId, AccountState>,
     buckets: BTreeMap<ObjectId, BucketState>,
@@ -109,7 +96,6 @@ struct Inner {
 impl Default for Inner {
     fn default() -> Self {
         Self {
-            log: Vec::new(),
             next_sequence: 1,
             accounts: BTreeMap::new(),
             buckets: BTreeMap::new(),
@@ -118,55 +104,36 @@ impl Default for Inner {
     }
 }
 
+#[derive(Default)]
 pub struct Store {
     inner: RwLock<Inner>,
-    /// Live broadcast of `IndexedEvent`s as they're ingested. Subscribers
-    /// that fall behind will see `RecvError::Lagged`; they're expected to
-    /// re-snapshot from the log and resume.
-    tx: broadcast::Sender<IndexedEvent>,
-}
-
-impl Default for Store {
-    fn default() -> Self {
-        Self::new(1024)
-    }
 }
 
 impl Store {
-    pub fn new(broadcast_capacity: usize) -> Self {
-        let (tx, _) = broadcast::channel(broadcast_capacity);
-        Self {
-            inner: RwLock::new(Inner::default()),
-            tx,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Wrap a raw `ChainEvent` with sequence metadata, update materialized
-    /// state, append to the log, broadcast.
+    /// Wrap a raw `ChainEvent` with sequence metadata and update materialized
+    /// state. Test helper — production ingestion goes through
+    /// [`stage_batch`](Self::stage_batch).
     pub fn ingest(&self, event: ChainEvent, timestamp_ms: u64) -> IndexedEvent {
         let mut inner = self.inner.write();
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
         trace!(sequence, timestamp_ms, event_type = ?std::mem::discriminant(&event), "ingesting event");
         apply_event(&mut inner, &event);
-        let indexed = IndexedEvent {
+        IndexedEvent {
             sequence,
             timestamp_ms,
             event,
-        };
-        inner.log.push(indexed.clone());
-        // It's fine if no subscribers are listening — `send` returns Err but
-        // the event is still on the log.
-        let _ = self.tx.send(indexed.clone());
-        indexed
+        }
     }
 
     /// Stage every event from a checkpoint under a single lock: apply each
-    /// to in-memory state, assign sequences, build the [`CheckpointBatch`]
-    /// the [`crate::db::Repo`] will persist in one transaction, and append
-    /// to the in-memory log. Returns the `IndexedEvent`s in order so the
-    /// caller can broadcast them *after* the DB write succeeds — this keeps
-    /// the invariant "what's on the wire is durable in Postgres".
+    /// to in-memory state, assign sequences, and build the [`CheckpointBatch`]
+    /// the [`crate::db::Repo`] will persist in one transaction. Returns the
+    /// `IndexedEvent`s in order for logging.
     ///
     /// `events` is `(ChainEvent, tx_digest_base58, event_index_within_tx)`.
     pub fn stage_batch(
@@ -181,7 +148,7 @@ impl Store {
         // `indexer_progress` and resume past it on restart.
         if events.is_empty() {
             trace!(checkpoint, "empty checkpoint; advancing progress only");
-            let last_sequence = inner.log.last().map(|e| e.sequence as i64).unwrap_or(0);
+            let last_sequence = (inner.next_sequence - 1) as i64;
             return Ok(StagedBatch {
                 indexed: Vec::new(),
                 db_batch: CheckpointBatch::empty(checkpoint as i64, last_sequence),
@@ -218,81 +185,38 @@ impl Store {
                 timestamp_ms as i64,
                 &event,
             )?);
-            let ev = IndexedEvent {
+            indexed.push(IndexedEvent {
                 sequence,
                 timestamp_ms,
                 event,
-            };
-            inner.log.push(ev.clone());
-            indexed.push(ev);
+            });
         }
 
         db_batch.last_sequence = (inner.next_sequence - 1) as i64;
         Ok(StagedBatch { indexed, db_batch })
     }
 
-    /// Push staged events to the broadcast channel. Called by the worker
-    /// after `Repo::apply_checkpoint` returns Ok.
-    pub fn broadcast_staged(&self, indexed: &[IndexedEvent]) {
-        for ev in indexed {
-            // It's fine if no subscribers are listening.
-            let _ = self.tx.send(ev.clone());
-        }
-    }
-
     /// Replace the in-memory views with the contents of a [`HydratedViews`]
     /// loaded from Postgres at boot. Also bumps `next_sequence` to one past
     /// the highest persisted sequence so newly ingested events stay
     /// monotonic across restarts.
-    pub fn hydrate(&self, views: HydratedViews, last_sequence: u64, recent_log: Vec<IndexedEvent>) {
+    pub fn hydrate(&self, views: HydratedViews, last_sequence: u64) {
         let mut inner = self.inner.write();
         debug!(
             accounts = views.accounts.len(),
             buckets = views.buckets.len(),
             positions = views.positions.len(),
             last_sequence,
-            log_events = recent_log.len(),
             "hydrating store from postgres"
         );
         inner.accounts = views.accounts;
         inner.buckets = views.buckets;
         inner.positions = views.positions;
-        inner.log = recent_log;
         inner.next_sequence = last_sequence + 1;
     }
 
-    /// Every event strictly after `after_sequence`. `0` means "from the
-    /// beginning"; callers that have caught up should pass the last sequence
-    /// they observed.
-    pub fn snapshot_after(&self, after_sequence: u64) -> Snapshot {
-        let inner = self.inner.read();
-        let events: Vec<_> = inner
-            .log
-            .iter()
-            .filter(|e| e.sequence > after_sequence)
-            .cloned()
-            .collect();
-        // `latest_sequence` is the highest published sequence, or
-        // `after_sequence` if nothing's been published yet — consumers should
-        // use it as their resume cursor.
-        let latest_sequence = inner
-            .log
-            .last()
-            .map(|e| e.sequence)
-            .unwrap_or(after_sequence);
-        Snapshot {
-            latest_sequence,
-            events,
-        }
-    }
-
     pub fn latest_sequence(&self) -> u64 {
-        let inner = self.inner.read();
-        inner.log.last().map(|e| e.sequence).unwrap_or(0)
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<IndexedEvent> {
-        self.tx.subscribe()
+        self.inner.read().next_sequence.saturating_sub(1)
     }
 
     pub fn account(&self, id: &ObjectId) -> Option<AccountState> {
@@ -727,19 +651,14 @@ mod tests {
     }
 
     #[test]
-    fn ingest_assigns_monotonic_sequence_and_appends_log() {
+    fn ingest_assigns_monotonic_sequence() {
         let store = Store::default();
         let a = store.ingest(bucket_evt(0x01), 1);
         let b = store.ingest(bucket_evt(0x02), 2);
         // Sequences start at 1 (0 means "from before the beginning").
         assert_eq!(a.sequence, 1);
         assert_eq!(b.sequence, 2);
-        // `after_sequence: 0` → everything.
-        assert_eq!(store.snapshot_after(0).events.len(), 2);
-        // `after_sequence: 1` → only events strictly after seq 1.
-        let snap = store.snapshot_after(1);
-        assert_eq!(snap.events.len(), 1);
-        assert_eq!(snap.events[0].sequence, 2);
+        assert_eq!(store.latest_sequence(), 2);
     }
 
     #[test]
@@ -833,16 +752,6 @@ mod tests {
         assert_eq!(s.owner, Some(SuiAddress::new([0xcd; 32])));
     }
 
-    #[tokio::test]
-    async fn broadcast_delivers_live_events_to_subscribers() {
-        let store = Store::new(8);
-        let mut rx = store.subscribe();
-        store.ingest(bucket_evt(0x05), 1);
-        let got = rx.recv().await.unwrap();
-        assert_eq!(got.sequence, 1);
-        matches!(got.event, ChainEvent::BucketCreated(_));
-    }
-
     #[test]
     fn bucket_invalidation_flag_toggles_via_events() {
         let store = Store::default();
@@ -871,20 +780,6 @@ mod tests {
             3,
         );
         assert!(!store.bucket(&id).unwrap().invalidated);
-    }
-
-    #[test]
-    fn snapshot_after_filters_old_events() {
-        let store = Store::default();
-        for i in 0..5 {
-            store.ingest(bucket_evt(i as u8), i);
-        }
-        // Sequences emitted: 1, 2, 3, 4, 5.
-        let snap = store.snapshot_after(3);
-        assert_eq!(snap.latest_sequence, 5);
-        assert_eq!(snap.events.len(), 2);
-        assert_eq!(snap.events[0].sequence, 4);
-        assert_eq!(snap.events[1].sequence, 5);
     }
 
     #[test]
