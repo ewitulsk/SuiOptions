@@ -243,6 +243,18 @@ impl IndexerClient {
         self.scan_events(filter, 0).await
     }
 
+    /// Every event `wallet` participated in (any role), ascending by sequence.
+    /// The indexer's `participant` filter matches the per-event address fan-out
+    /// — including the account owner for deposit/withdraw — so this is the
+    /// single query the activity feed needs. Backs api-service `/events`.
+    pub async fn events_for_participant(
+        &self,
+        wallet: SuiAddress,
+    ) -> Result<Vec<IndexedEvent>> {
+        let filter = json!({ "participant": wallet.to_hex() });
+        self.scan_events(filter, 0).await
+    }
+
     /// Paginate the `events` query (ascending) for `filter`, starting after
     /// `after`, decoding each node's payload into a typed `IndexedEvent`.
     async fn scan_events(

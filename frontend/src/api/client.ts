@@ -230,3 +230,48 @@ export async function fetchIndexerProgress(): Promise<IndexerProgress> {
   }
   return (await res.json()) as IndexerProgress;
 }
+
+/**
+ * One row of the connected wallet's activity feed. Mirrors
+ * `api-service::handlers::events::EventDto`. The feed is already specialised
+ * to this wallet's perspective and sorted newest-first.
+ *
+ * The values are structured (symbol/strike/amount/signed value); the
+ * frontend composes the human title/body in `state/activity.ts`.
+ */
+export type EventDto = {
+  id: string;
+  ts_ms: number;
+  ts_iso: string;
+  /** EVENT_TYPE_META key: position_opened | exercise | claim | deposit | withdraw. */
+  type: string;
+  /** writer | trader | account. */
+  side: string;
+  /** confirmed | pending | … (all live events are confirmed). */
+  status: string;
+  bucket_id: string | null;
+  asset_symbol: string | null;
+  settlement_symbol: string | null;
+  strike: number | null;
+  expiry_ms: number | null;
+  /** Scaled underlying size (write/buy/exercise amount). */
+  amount: number | null;
+  /** Signed value for the UI's {delta, unit}. */
+  value_delta: number | null;
+  value_unit: string | null;
+  /** Always null for now — the indexer doesn't carry the tx digest. */
+  tx_hash: string | null;
+};
+
+export type EventsResponse = { events: EventDto[] };
+
+export async function fetchActivity(wallet: string): Promise<EventDto[]> {
+  const res = await fetch(
+    `${API_BASE_URL}/events?wallet=${encodeURIComponent(wallet)}`,
+  );
+  if (!res.ok) {
+    throw new Error(`GET /events failed: ${res.status} ${res.statusText}`);
+  }
+  const body: EventsResponse = await res.json();
+  return body.events;
+}

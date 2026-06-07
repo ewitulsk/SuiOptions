@@ -1,3 +1,4 @@
+import { useCurrentAccount } from "@mysten/dapp-kit";
 import {
   ACTIVITY_FILTERS,
   EVENT_TYPE_META,
@@ -5,10 +6,16 @@ import {
   relativeTime,
   useActivityState,
   type ActivityFilter,
-} from "../mocks/activity";
+} from "../state/activity";
 import { Header } from "../components/Header";
 import { WaveHero } from "../components/WaveHero";
 import type { ActivityEvent, ActivityTotals } from "../types";
+
+function shortAddress(addr: string): string {
+  const s = addr.startsWith("0x") ? addr.slice(2) : addr;
+  if (s.length <= 8) return `0x${s}`;
+  return `0x${s.slice(0, 4)}…${s.slice(-4)}`;
+}
 
 function ActivitySummary({ totals }: { totals: ActivityTotals }) {
   const net = totals.premiumIn - totals.premiumOut;
@@ -128,7 +135,9 @@ function EventRow({ e, now }: { e: ActivityEvent; now: number }) {
 }
 
 export function Activity() {
-  const a = useActivityState();
+  const account = useCurrentAccount();
+  const wallet = account?.address ?? null;
+  const a = useActivityState(wallet);
   const earliest = a.events[a.events.length - 1];
 
   return (
@@ -141,10 +150,21 @@ export function Activity() {
           <div className="dash-hero__eyebrow">on-chain log · indexer-backed</div>
           <h1 className="dash-hero__title">Activity</h1>
           <div className="dash-hero__addr">
-            every event for 0x9f3a…42b1 · live tail via wss
+            {wallet
+              ? `every event for ${shortAddress(wallet)} · polled from the indexer`
+              : "connect your wallet to see your activity"}
           </div>
         </div>
 
+        {!wallet ? (
+          <div className="act-empty">
+            <div className="act-empty__title">connect your wallet</div>
+            <div className="act-empty__sub">
+              Your on-chain activity appears here once a wallet is connected.
+            </div>
+          </div>
+        ) : (
+          <>
         <ActivitySummary totals={a.totals} />
         <ActivityFilters filter={a.filter} setFilter={a.setFilter} />
 
@@ -185,6 +205,8 @@ export function Activity() {
               day: "numeric",
             })}
           </div>
+        )}
+          </>
         )}
       </div>
     </div>

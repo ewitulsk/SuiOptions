@@ -37,6 +37,7 @@ pub async fn serve(
             "/indexer/progress",
             get(handlers::indexer_progress::get_progress),
         )
+        .route("/events", get(handlers::events::list_events))
         .with_state(state)
         .layer(cors);
 
