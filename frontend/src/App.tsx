@@ -19,7 +19,7 @@ export function App() {
       <Route path="/admin" element={<Admin />} />
       {/* Faucet is testnet-only; on other envs it renders a "testnet only" notice. */}
       <Route path="/faucet" element={<Faucet />} />
-      {/* Public internals page: indexer ingestion status (SO-107). */}
+      {/* Unlisted internals page: reachable at /debug, not linked in nav (SO-107). */}
       <Route path="/debug" element={<Debug />} />
       <Route path="*" element={<Navigate to="/earn" replace />} />
     </Routes>
