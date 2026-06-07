@@ -16,9 +16,11 @@ use clap::Parser;
 use sui_data_ingestion_core::setup_single_workflow;
 use sui_sdk::SuiClientBuilder;
 use token_info_client::TokenInfoClient;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
-use indexer::{establish_pool, run_migrations, Cli, Config, ProtocolEventWorker, Repo, Store};
+use indexer::{
+    establish_pool, run_migrations, Cli, Config, ProgressState, ProtocolEventWorker, Repo, Store,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -69,6 +71,7 @@ async fn main() -> Result<()> {
         .context("recent_events")?;
     let views = repo.hydrate().context("hydrate views")?;
     let last_persisted_sequence = progress.as_ref().map(|p| p.last_sequence as u64).unwrap_or(0);
+    let persisted_last_checkpoint = progress.as_ref().map(|p| p.last_checkpoint as u64);
     store.hydrate(views, last_persisted_sequence, recent_log);
     info!(
         accounts = store.account_count(),
@@ -110,10 +113,51 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Progress tracking for `GET /progress` (SO-107). The bar's origin (0%) is
+    // the run's true starting checkpoint: the config-pinned value if set, else
+    // the boot tip we resolved above. `current` seeds from persisted progress
+    // so a resume reports the right position before the next checkpoint lands.
+    let origin_start = cfg.start_checkpoint.unwrap_or(start_checkpoint);
+    let initial_current = persisted_last_checkpoint.unwrap_or(origin_start);
+    let progress_state = Arc::new(ProgressState::new(origin_start, initial_current));
+
+    // Background tip-poller: refresh the chain head every 10s so the bar has a
+    // live 100% target. Best-effort — if no RPC resolves, /progress just omits
+    // the tip (frontend shows current/rate without a percentage).
+    match cfg.resolve_rpc_url() {
+        Ok(tip_rpc) => {
+            let tip_state = Arc::clone(&progress_state);
+            tokio::spawn(async move {
+                let mut client = None;
+                let mut ticker = tokio::time::interval(Duration::from_secs(10));
+                loop {
+                    ticker.tick().await;
+                    if client.is_none() {
+                        client = SuiClientBuilder::default().build(&tip_rpc).await.ok();
+                    }
+                    let Some(c) = client.as_ref() else { continue };
+                    match c.read_api().get_latest_checkpoint_sequence_number().await {
+                        Ok(tip) => tip_state.set_tip(tip),
+                        Err(e) => {
+                            warn!(error = %e, "tip poll failed; will reconnect");
+                            client = None;
+                        }
+                    }
+                }
+            });
+        }
+        Err(e) => warn!(error = %e, "no RPC for tip polling; /progress will omit the tip"),
+    }
+
     // Sui checkpoint ingestion. `setup_single_workflow` returns
     // `(ExecutorProgress future, termination Sender)` — we drive the future
     // alongside the fanout.
-    let worker = ProtocolEventWorker::new(Arc::clone(&store), repo.clone(), &package_id);
+    let worker = ProtocolEventWorker::new(
+        Arc::clone(&store),
+        repo.clone(),
+        &package_id,
+        Arc::clone(&progress_state),
+    );
     let (executor, _term_sender) = setup_single_workflow(
         worker,
         cfg.remote_store_url.clone(),
@@ -139,8 +183,9 @@ async fn main() -> Result<()> {
     // writes; independent of the WS fanout.
     let graphql_addr = cfg.graphql_addr;
     let graphql_repo = repo.clone();
+    let graphql_progress = Arc::clone(&progress_state);
     let graphql_handle = tokio::spawn(async move {
-        if let Err(e) = indexer::graphql::serve(graphql_addr, graphql_repo).await {
+        if let Err(e) = indexer::graphql::serve(graphql_addr, graphql_repo, graphql_progress).await {
             error!(error = %e, "graphql server exited");
         }
     });

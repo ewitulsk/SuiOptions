@@ -205,3 +205,28 @@ export async function fetchEnrichedPositions(
   const body: EnrichResponse = await res.json();
   return body.positions;
 }
+
+/**
+ * Indexer checkpoint-ingestion progress (SO-107). Proxied by api-service from
+ * the indexer's `GET /progress`. Mirrors `api-service::state::IndexerProgress`.
+ * Checkpoint sequence numbers are well within JS safe-integer range, so plain
+ * `number` is fine here. `tip_checkpoint` is null until the indexer has polled
+ * the chain tip at least once.
+ */
+export type IndexerProgress = {
+  start_checkpoint: number;
+  current_checkpoint: number;
+  tip_checkpoint: number | null;
+  rate_checkpoints_per_sec: number;
+  caught_up: boolean;
+};
+
+export async function fetchIndexerProgress(): Promise<IndexerProgress> {
+  const res = await fetch(`${API_BASE_URL}/indexer/progress`);
+  if (!res.ok) {
+    throw new Error(
+      `GET /indexer/progress failed: ${res.status} ${res.statusText}`,
+    );
+  }
+  return (await res.json()) as IndexerProgress;
+}

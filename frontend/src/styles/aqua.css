@@ -1683,3 +1683,57 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 [data-theme="aqua"] .admin-btn--danger:hover:not(:disabled) { background: rgba(255,122,110,0.10); }
 
 [data-theme="aqua"] .admin-actions-row { display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* ── Debug page: indexer loading bar (SO-107) ────────────────────────────── */
+[data-theme="aqua"] .debug-card {
+  margin-top: 16px;
+  padding: 18px 20px;
+  border-radius: 16px;
+  background: var(--aqua-glass);
+  backdrop-filter: blur(12px);
+  box-shadow: inset 0 0 0 1px var(--aqua-line);
+}
+[data-theme="aqua"] .debug-card__head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 12px;
+}
+[data-theme="aqua"] .debug-card__title {
+  font-size: 13px; font-weight: 600; color: var(--aqua-ink-1);
+}
+[data-theme="aqua"] .debug-card__pill {
+  font-size: 12px; font-weight: 700; color: var(--aqua-sui-deep);
+  padding: 2px 10px; border-radius: 999px;
+  background: rgba(77,162,255,0.10);
+  font-variant-numeric: tabular-nums;
+}
+[data-theme="aqua"] .debug-card__pill.is-live { color: #1f8f5f; background: rgba(31,143,95,0.12); }
+[data-theme="aqua"] .debug-card__status { font-size: 13px; color: var(--aqua-ink-3); }
+[data-theme="aqua"] .debug-card__status.is-error { color: var(--aqua-coral); }
+
+[data-theme="aqua"] .debug-bar {
+  height: 12px; border-radius: 999px; overflow: hidden;
+  background: rgba(var(--aqua-shadow-rgb),0.08);
+  box-shadow: inset 0 0 0 1px var(--aqua-line);
+}
+[data-theme="aqua"] .debug-bar__fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--aqua-sui) 0%, var(--aqua-sui-deep) 100%);
+  box-shadow: 0 0 12px var(--aqua-sui-glow);
+  transition: width 0.6s ease;
+}
+[data-theme="aqua"] .debug-bar__fill.is-live {
+  background: linear-gradient(90deg, #34d399 0%, #1f8f5f 100%);
+}
+[data-theme="aqua"] .debug-stats {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+  margin-top: 16px;
+}
+[data-theme="aqua"] .debug-stat__label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--aqua-ink-3);
+}
+[data-theme="aqua"] .debug-stat__val {
+  font-size: 16px; font-weight: 600; color: var(--aqua-ink-1);
+  font-variant-numeric: tabular-nums;
+}
+[data-theme="aqua"] .debug-stat__sub { font-size: 12px; color: var(--aqua-ink-3); font-weight: 400; }
