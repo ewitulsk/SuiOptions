@@ -20,8 +20,9 @@ use token_info_client::TokenInfoClient;
 pub struct Config {
     /// Where the service accepts WS connections from retail + MM clients.
     pub bind_addr: SocketAddr,
-    /// The indexer's WS endpoint. Subscribed to from boot.
-    pub indexer_url: String,
+    /// The indexer's GraphQL endpoint. Account balances, signing keys, and
+    /// bucket state are read just-in-time from here per request.
+    pub indexer_graphql_url: String,
     /// How long an `RFQRequest` collects quotes before responding.
     pub rfq_window: Duration,
     /// How often the service sends `Ping`s to keep the WS connection live.
@@ -52,7 +53,7 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 struct FileConfig {
     bind_addr: SocketAddr,
-    indexer_url: String,
+    indexer_graphql_url: String,
     rfq_window_ms: u64,
     #[serde(default = "default_ping_interval_secs")]
     ping_interval_secs: u64,
@@ -95,7 +96,7 @@ impl Config {
 
         Ok(Self {
             bind_addr: file.bind_addr,
-            indexer_url: file.indexer_url,
+            indexer_graphql_url: file.indexer_graphql_url,
             rfq_window: Duration::from_millis(file.rfq_window_ms),
             ping_interval: Duration::from_secs(file.ping_interval_secs),
             token_info_url: file.token_info_url,
@@ -121,17 +122,17 @@ mod tests {
         std::fs::write(
             &path,
             r#"
-bind_addr      = "127.0.0.1:9999"
-indexer_url    = "ws://example.com/feed"
-rfq_window_ms  = 1500
-ping_interval_secs = 20
-token_info_url = "http://127.0.0.1:9005"
+bind_addr           = "127.0.0.1:9999"
+indexer_graphql_url = "http://example.com/graphql"
+rfq_window_ms       = 1500
+ping_interval_secs  = 20
+token_info_url      = "http://127.0.0.1:9005"
 "#,
         )
         .unwrap();
         let file: FileConfig = config_load::load_toml(&path).unwrap();
         assert_eq!(file.bind_addr.to_string(), "127.0.0.1:9999");
-        assert_eq!(file.indexer_url, "ws://example.com/feed");
+        assert_eq!(file.indexer_graphql_url, "http://example.com/graphql");
         assert_eq!(file.rfq_window_ms, 1500);
         assert_eq!(file.ping_interval_secs, 20);
         assert_eq!(file.token_info_url, "http://127.0.0.1:9005");

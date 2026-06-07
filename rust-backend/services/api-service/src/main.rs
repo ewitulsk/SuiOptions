@@ -28,13 +28,5 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState::new(catalog, cfg.indexer_graphql_url.clone()));
 
-    let url = cfg.indexer_url.clone();
-    let state_for_indexer = Arc::clone(&state);
-    tokio::spawn(async move {
-        if let Err(e) = indexer_client::run(url, state_for_indexer).await {
-            tracing::error!(error = %e, "indexer subscriber exited");
-        }
-    });
-
     router::serve(cfg.bind_addr, state, &cfg.allowed_origins).await
 }

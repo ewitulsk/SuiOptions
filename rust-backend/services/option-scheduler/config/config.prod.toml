@@ -8,7 +8,7 @@
 # wiring in place but the [[pairs]] list empty so the binary boots and
 # exits cleanly with "no pairs configured" at startup.
 
-indexer_url       = "ws://indexer:9001/"
+indexer_graphql_url       = "http://indexer:9002/graphql"
 tick_secs         = 60
 roll_threshold_ms = 604_800_000
 

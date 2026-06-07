@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use axum::http::StatusCode;
 use axum::{
     extract::{Query, State},
     Json,
@@ -80,56 +81,59 @@ pub struct PositionsResponse {
 pub async fn list_positions(
     State(state): State<Arc<AppState>>,
     Query(q): Query<PositionsQuery>,
-) -> Json<PositionsResponse> {
+) -> Result<Json<PositionsResponse>, StatusCode> {
     let wallet = match SuiAddress::from_hex(&q.wallet) {
         Ok(a) => a,
-        Err(_) => return Json(PositionsResponse { positions: vec![] }),
+        Err(_) => return Ok(Json(PositionsResponse { positions: vec![] })),
     };
 
-    let buckets = state.buckets_by_id();
-    let mut positions: Vec<PositionDto> = state
-        .positions_for_recipient(&wallet)
+    // The indexer's `positionsByRecipient` returns each position already
+    // joined to its bucket, so there's no second lookup to do here.
+    let rows = state
+        .indexer
+        .positions_by_recipient(wallet)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "indexer positions query failed");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    let mut positions: Vec<PositionDto> = rows
         .into_iter()
-        .filter_map(|(object_id, p)| {
-            let bucket = buckets.get(&p.bucket_id)?;
-            let asset_meta = state.catalog.lookup(bucket.asset_type.as_str());
-            let settle_meta = state.catalog.lookup(bucket.settlement_type.as_str());
+        .map(|p| {
+            let asset_meta = state.catalog.lookup(p.asset_type.as_str());
+            let settle_meta = state.catalog.lookup(p.settlement_type.as_str());
             let asset_decimals = asset_meta.map(|m| m.decimals);
             let settle_decimals = settle_meta.map(|m| m.decimals);
             let strike = match (asset_decimals, settle_decimals) {
-                (Some(u), Some(s)) => Some(strike_raw_to_usd(
-                    bucket.strike,
-                    bucket.strike_scale,
-                    u,
-                    s,
-                )),
+                (Some(u), Some(s)) => Some(strike_raw_to_usd(p.strike, p.strike_scale, u, s)),
                 _ => None,
             };
-            Some(PositionDto {
-                position_object_id: object_id.to_hex(),
+            PositionDto {
+                position_object_id: p.object_id.to_hex(),
                 bucket_id: p.bucket_id.to_hex(),
                 asset_symbol: asset_meta
                     .map(|m| m.symbol.clone())
-                    .unwrap_or_else(|| bucket.asset_type.as_str().to_string()),
+                    .unwrap_or_else(|| p.asset_type.as_str().to_string()),
                 asset_decimals,
-                asset_coin_type: bucket.asset_type.to_canonical(),
+                asset_coin_type: p.asset_type.to_canonical(),
                 settlement_symbol: settle_meta
                     .map(|m| m.symbol.clone())
-                    .unwrap_or_else(|| bucket.settlement_type.as_str().to_string()),
+                    .unwrap_or_else(|| p.settlement_type.as_str().to_string()),
                 settlement_decimals: settle_decimals,
-                settlement_coin_type: bucket.settlement_type.to_canonical(),
+                settlement_coin_type: p.settlement_type.to_canonical(),
                 strike,
-                strike_raw: bucket.strike.to_string(),
-                strike_scale: bucket.strike_scale,
-                expiry_ms: bucket.expiry_ms as i64,
+                strike_raw: p.strike.to_string(),
+                strike_scale: p.strike_scale,
+                expiry_ms: p.expiry_ms as i64,
                 range_start_raw: p.range_start.to_string(),
                 range_end_raw: p.range_end.to_string(),
-                total_written_raw: bucket.total_written.to_string(),
-                exercise_cursor_raw: bucket.exercise_cursor.to_string(),
+                total_written_raw: p.total_written.to_string(),
+                exercise_cursor_raw: p.exercise_cursor.to_string(),
                 premium_received_raw: p.premium_received.to_string(),
                 mm_account_id: p.mm_account_id.to_hex(),
-                minted_at_ms: p.timestamp_ms as i64,
-            })
+                minted_at_ms: p.minted_at_ms as i64,
+            }
         })
         .collect();
 
@@ -140,5 +144,5 @@ pub async fn list_positions(
             .then_with(|| a.range_start_raw.cmp(&b.range_start_raw))
     });
 
-    Json(PositionsResponse { positions })
+    Ok(Json(PositionsResponse { positions }))
 }

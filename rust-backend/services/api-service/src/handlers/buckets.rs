@@ -57,6 +57,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use axum::http::StatusCode;
 use axum::{extract::State, Json};
 use chrono::{TimeZone, Utc};
 use serde::Serialize;
@@ -120,11 +121,40 @@ pub struct BucketsResponse {
     pub series: Vec<SeriesDto>,
 }
 
-pub async fn list_buckets(State(state): State<Arc<AppState>>) -> Json<BucketsResponse> {
-    let active = state.active_buckets();
-    Json(BucketsResponse {
+pub async fn list_buckets(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BucketsResponse>, StatusCode> {
+    let active = state
+        .indexer
+        .buckets(true, None, None, None)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "indexer buckets query failed");
+            StatusCode::BAD_GATEWAY
+        })?;
+    let active = active.into_iter().map(into_local_bucket).collect();
+    Ok(Json(BucketsResponse {
         series: group_into_series(active, &state.catalog),
-    })
+    }))
+}
+
+/// Map the JIT client's bucket into the local `(id, Bucket)` shape that the
+/// pure `group_into_series` helper (and its tests) work against.
+fn into_local_bucket(b: indexer_graphql::Bucket) -> (protocol_types::ids::ObjectId, Bucket) {
+    (
+        b.bucket_id,
+        Bucket {
+            asset_type: b.asset_type,
+            settlement_type: b.settlement_type,
+            strike: b.strike,
+            strike_scale: b.strike_scale,
+            expiry_ms: b.expiry_ms,
+            total_written: b.total_written,
+            exercise_cursor: b.exercise_cursor,
+            cleaned: b.cleaned,
+            invalidated: b.invalidated,
+        },
+    )
 }
 
 type SeriesKey = (String, String, u64);

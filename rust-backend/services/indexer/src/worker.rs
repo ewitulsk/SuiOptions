@@ -10,9 +10,8 @@
 //!   1. Decode + collect every recognised event in checkpoint order.
 //!   2. [`Store::stage_batch`] under a single lock: applies materialised-view
 //!      mutations, assigns monotonic sequences, builds a [`CheckpointBatch`].
-//!   3. [`Repo::apply_checkpoint`] writes the batch in one transaction.
-//!   4. Only after Postgres commits do we broadcast — guaranteeing the
-//!      fanout never emits something that isn't durably stored.
+//!   3. [`Repo::apply_checkpoint`] writes the batch in one transaction, after
+//!      which the materialized views and Postgres are consistent.
 
 use std::sync::Arc;
 
@@ -93,14 +92,13 @@ impl Worker for ProtocolEventWorker {
             }
         }
 
-        // Stage → persist → broadcast. If the DB write fails, return Err so
-        // the framework retries; on a hard crash, boot-time hydration from
-        // `indexer_progress` corrects any in-memory drift.
+        // Stage → persist. If the DB write fails, return Err so the framework
+        // retries; on a hard crash, boot-time hydration from `indexer_progress`
+        // corrects any in-memory drift.
         let staged = self.store.stage_batch(seq, ts_ms, decoded)?;
         self.repo
             .apply_checkpoint(&staged.db_batch)
             .with_context(|| format!("persisting checkpoint {seq}"))?;
-        self.store.broadcast_staged(&staged.indexed);
         self.progress.record_checkpoint(seq);
 
         if !staged.indexed.is_empty() {
@@ -131,7 +129,7 @@ mod tests {
     fn dispatch_round_trips_a_bucket_created_event_into_store() {
         let pkg = "0xabc";
         let types = EventTypes::for_package(pkg);
-        let store = Store::new(8);
+        let store = Store::new();
 
         let evt = BucketCreated {
             bucket_id: ObjectId::new([0x99; 32]),

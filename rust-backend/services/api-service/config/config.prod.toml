@@ -8,7 +8,6 @@ bind_addr        = "0.0.0.0:9003"
 # Sui network slot in deployments.json. prod -> mainnet.
 
 # Talk to the indexer over the env's compose-internal network.
-indexer_url      = "ws://indexer:9001/"
 
 # Indexer GraphQL query API (SO-97) for Dashboard position enrichment.
 indexer_graphql_url = "http://indexer:9002/graphql"

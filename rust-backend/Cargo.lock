@@ -318,18 +318,14 @@ dependencies = [
  "clap",
  "cli-spec",
  "config",
- "futures-util",
- "indexer-client",
- "parking_lot 0.12.5",
+ "indexer-graphql",
  "protocol-types",
- "reqwest",
  "runtime-config",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "token-info-client",
  "tokio",
- "tokio-tungstenite 0.24.0",
  "tower-http 0.6.10",
  "tracing",
  "tracing-subscriber",
@@ -4068,15 +4064,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "indexer-client"
+name = "indexer-graphql"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "futures-util",
  "protocol-types",
+ "reqwest",
+ "serde",
  "serde_json",
- "tokio",
- "tokio-tungstenite 0.24.0",
  "tracing",
 ]
 
@@ -4188,13 +4183,13 @@ name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum 0.7.9",
  "bcs",
  "ed25519-dalek",
  "futures",
  "futures-util",
  "hex",
  "indexer",
- "indexer-client",
  "protocol-types",
  "quoting-service",
  "rand 0.8.6",
@@ -6383,10 +6378,8 @@ dependencies = [
  "config",
  "diesel",
  "diesel_migrations",
- "futures",
- "futures-util",
+ "indexer-graphql",
  "move-core-types",
- "parking_lot 0.12.5",
  "protocol-types",
  "pyth-client",
  "r2d2",
@@ -6400,7 +6393,6 @@ dependencies = [
  "thiserror 1.0.69",
  "token-info-client",
  "tokio",
- "tokio-tungstenite 0.24.0",
  "tracing",
  "tracing-subscriber",
 ]
@@ -7402,7 +7394,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
- "indexer-client",
+ "indexer-graphql",
  "k256 0.13.4",
  "p256",
  "parking_lot 0.12.5",

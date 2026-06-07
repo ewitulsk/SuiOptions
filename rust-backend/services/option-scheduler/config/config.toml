@@ -4,10 +4,10 @@
 # types, pyth feed ids) come from `deployments.json`. This file controls
 # which pairs the bot rolls buckets for and how aggressively.
 
-# WS endpoint of the local indexer fanout. Consumed only to confirm
+# GraphQL endpoint of the local indexer. Consumed only to confirm
 # submitted rolls and drive the reconciler — never to make a roll
 # decision (that is sourced solely from the DB below).
-indexer_url       = "ws://127.0.0.1:9001/"
+indexer_graphql_url       = "http://127.0.0.1:9002/graphql"
 
 # Scheduler rolls DB (mandatory). Single source of truth for which
 # (pair, expiry) slots have been rolled; its partial UNIQUE index is the

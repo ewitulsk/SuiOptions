@@ -1,5 +1,5 @@
 [package]
-name = "indexer-client"
+name = "indexer-graphql"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,8 +11,7 @@ path = "src/lib.rs"
 protocol-types = { workspace = true }
 
 anyhow = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
-tokio-tungstenite = { workspace = true }
-futures-util = { workspace = true }
 tracing = { workspace = true }

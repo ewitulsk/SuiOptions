@@ -3,7 +3,7 @@
 //! Wires up:
 //!   1. Sui checkpoint stream → `ProtocolEventWorker` (via
 //!      `setup_single_workflow` from sui-data-ingestion-core).
-//!   2. WS fanout server for the quoting service.
+//!   2. GraphQL query API for consumers.
 //!
 //! Run with `cargo run -p indexer`. Set `CONFIG_PATH` to override the
 //! default `services/indexer/config/config.toml`. Honors `RUST_LOG`.
@@ -60,19 +60,16 @@ async fn main() -> Result<()> {
     let repo = Repo::new(Arc::clone(&pool));
     info!(pool_size = cfg.db_pool_size, "postgres pool ready");
 
-    let store = Arc::new(Store::new(cfg.recent_log_capacity));
+    let store = Arc::new(Store::new());
 
     // Hydrate the in-memory views from Postgres. After this call the store
     // looks identical to the one we'd have built by replaying every event
     // through `Store::ingest` — `bucket()` / `account()` work immediately.
     let progress = repo.load_progress().context("load_progress")?;
-    let recent_log = repo
-        .recent_events(cfg.recent_log_capacity as i64)
-        .context("recent_events")?;
     let views = repo.hydrate().context("hydrate views")?;
     let last_persisted_sequence = progress.as_ref().map(|p| p.last_sequence as u64).unwrap_or(0);
     let persisted_last_checkpoint = progress.as_ref().map(|p| p.last_checkpoint as u64);
-    store.hydrate(views, last_persisted_sequence, recent_log);
+    store.hydrate(views, last_persisted_sequence);
     info!(
         accounts = store.account_count(),
         buckets = store.bucket_count(),
@@ -170,17 +167,8 @@ async fn main() -> Result<()> {
 
     runtime_config::health::spawn(cfg.health_addr);
 
-    let fanout_store = Arc::clone(&store);
-    let fanout_addr = cfg.fanout_addr;
-    let heartbeat = cfg.heartbeat_interval();
-    let fanout_handle = tokio::spawn(async move {
-        if let Err(e) = indexer::fanout::serve(fanout_addr, fanout_store, heartbeat).await {
-            error!(error = %e, "fanout server exited");
-        }
-    });
-
-    // GraphQL query API (SO-97). Reads the same Postgres views the worker
-    // writes; independent of the WS fanout.
+    // GraphQL query API (SO-97). Consumers read protocol state just-in-time
+    // from here; it's the indexer's only outbound query surface.
     let graphql_addr = cfg.graphql_addr;
     let graphql_repo = repo.clone();
     let graphql_progress = Arc::clone(&progress_state);
@@ -190,7 +178,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    info!(addr = %cfg.fanout_addr, "indexer fanout listening");
     info!(addr = %cfg.graphql_addr, "indexer graphql listening");
     info!(
         remote = %cfg.remote_store_url,
@@ -204,12 +191,6 @@ async fn main() -> Result<()> {
             match res {
                 Ok(_) => info!("ingestion finished"),
                 Err(e) => error!(error = %e, "ingestion failed"),
-            }
-        }
-        res = fanout_handle => {
-            match res {
-                Ok(_) => info!("fanout finished"),
-                Err(e) => error!(error = %e, "fanout join failed"),
             }
         }
         res = graphql_handle => {

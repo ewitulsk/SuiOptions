@@ -11,7 +11,7 @@ use diesel::prelude::*;
 use std::str::FromStr;
 
 use protocol_types::asset::AssetType;
-use protocol_types::events::{ChainEvent, IndexedEvent};
+use protocol_types::events::ChainEvent;
 use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::store::{AccountState, BucketState, PositionState};
@@ -73,22 +73,6 @@ pub struct EventParticipantRow {
     pub role: String,
 }
 
-impl IndexedEventRow {
-    /// Reconstruct an `IndexedEvent` from a stored row. Returns the same shape
-    /// `Store::ingest` produces, so the fanout can serve historical reads
-    /// indistinguishably from live ones.
-    pub fn into_indexed_event(self) -> anyhow::Result<IndexedEvent> {
-        let event: ChainEvent = serde_json::from_value(self.payload).map_err(|e| {
-            anyhow::anyhow!("decoding payload for sequence {}: {e}", self.sequence)
-        })?;
-        Ok(IndexedEvent {
-            sequence: self.sequence as u64,
-            timestamp_ms: self.timestamp_ms as u64,
-            event,
-        })
-    }
-}
-
 /// Tag used in `indexed_events.event_type`. Stable identifiers — they're
 /// what downstream consumers grep on and they index well.
 pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
@@ -119,6 +103,10 @@ pub struct AccountRow {
     pub account_id: String,
     pub owner: Option<String>,
     pub signing_pubkey: Vec<u8>,
+    /// On-chain signing-scheme tag (0=Ed25519, 1=Secp256k1, 2=Secp256r1).
+    /// Nullable for rows the backfill couldn't resolve. Field order matches
+    /// the column order in `schema.rs` for `Queryable`.
+    pub signing_scheme: Option<i16>,
     pub updated_at_seq: i64,
 }
 
@@ -231,11 +219,21 @@ pub fn account_row_into_state(row: AccountRow) -> anyhow::Result<(ObjectId, Acco
         .map(SuiAddress::from_hex)
         .transpose()
         .map_err(|e| anyhow::anyhow!("owner {:?}: {e}", row.owner))?;
+    let signing_scheme = row
+        .signing_scheme
+        .map(|s| {
+            u8::try_from(s)
+                .ok()
+                .and_then(|b| protocol_types::SigningScheme::from_u8(b).ok())
+                .ok_or_else(|| anyhow::anyhow!("invalid signing_scheme {s} for {}", row.account_id))
+        })
+        .transpose()?;
     Ok((
         id,
         AccountState {
             owner,
             signing_pubkey: row.signing_pubkey,
+            signing_scheme,
             balances: Default::default(),
         },
     ))

@@ -30,14 +30,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use sui_tx::sui_client::SuiClientWrapper;
 use token_info_client::TokenInfoClient;
 
+use indexer_graphql::IndexerClient;
+
 use option_scheduler::config::{PairConfig, SchedulerConfig};
 use option_scheduler::db;
-use option_scheduler::families::{CanonicalType, PairKey, Registry, log_registry, run_subscriber};
+use option_scheduler::families::{CanonicalType, PairKey};
 use option_scheduler::roller::{self, ErrorClass, RollPlan};
 use option_scheduler::schedule::{decide_tick, SkipReason, TickDecision};
 use option_scheduler::spot::ResolvedSpotSource;
@@ -145,7 +147,11 @@ async fn main() -> Result<()> {
         );
     }
     let pair_keys = Arc::new(pair_keys);
-    let registry = Registry::new();
+
+    // JIT indexer client. Used ONLY to confirm submitted rolls landed and to
+    // read the high-water sequence the reconciler gates on — never to make a
+    // roll decision.
+    let indexer = Arc::new(IndexerClient::new(cfg.indexer_graphql_url.clone()));
 
     // ── Scheduler DB (mandatory) ────────────────────────────────────
     // The DB is the single source of truth for which (pair, expiry)
@@ -179,36 +185,20 @@ async fn main() -> Result<()> {
         Err(e) => warn!(error = %e, "failed to read active rolls at boot"),
     }
 
-    // Indexer subscriber — runs forever in the background. It is used
-    // ONLY for post-submit confirmation (marking rolls confirmed) and to
-    // drive the reconciler; it never feeds the roll decision.
+    // ── Confirmation + reconciler task ──────────────────────────────
+    // Periodically: (1) confirm submitted rolls whose bucket the indexer now
+    // reports, and (2) clear ambiguous rows once the indexer has provably
+    // caught up past their submit point. Both are JIT GraphQL queries — there
+    // is no live stream. Neither feeds the roll decision.
     {
-        let url = cfg.indexer_url.clone();
-        let registry = registry.clone();
+        let pool = db_pool.clone();
         let pair_keys = pair_keys.clone();
-        let pool = db_pool.clone();
-        tokio::spawn(async move {
-            if let Err(e) = run_subscriber(url, registry, pair_keys, Some(pool)).await {
-                error!(error = %e, "indexer subscriber exited");
-            }
-        });
-    }
-
-    // Give the snapshot a moment to land before the first tick so the
-    // dry-run print isn't empty. Anything we miss now will be filled in
-    // on the next tick.
-    sleep(Duration::from_secs(2)).await;
-    log_registry(&registry, &pair_keys);
-
-    // ── Reconciler task ─────────────────────────────────────────────
-    {
-        let pool = db_pool.clone();
-        let registry = registry.clone();
+        let indexer = indexer.clone();
         let safety_margin = cfg.reconciler_safety_margin;
         let interval = Duration::from_secs(cfg.reconciler_interval_secs.max(1));
         tokio::spawn(async move {
             loop {
-                if let Err(e) = run_reconciler(&pool, &registry, safety_margin) {
+                if let Err(e) = run_reconciler(&pool, &indexer, &pair_keys, safety_margin).await {
                     warn!(error = %e, "reconciler tick errored");
                 }
                 sleep(interval).await;
@@ -233,7 +223,7 @@ async fn main() -> Result<()> {
         if let Err(e) = tick_once(
             &cli,
             &cfg,
-            &registry,
+            &indexer,
             &pair_meta,
             &http_client,
             &wrap,
@@ -264,7 +254,7 @@ struct PairMeta {
 async fn tick_once(
     cli: &Cli,
     cfg: &SchedulerConfig,
-    registry: &Registry,
+    indexer: &IndexerClient,
     pairs: &[PairMeta],
     http_client: &reqwest::Client,
     wrap: &SuiClientWrapper,
@@ -325,7 +315,22 @@ async fn tick_once(
         // submitted even across restarts or concurrent ticks. The anchor
         // sequence lets the reconciler later tell whether the indexer has
         // caught up past this submit.
-        let anchor_seq = registry.last_sequence();
+        //
+        // The anchor is read JIT from the indexer head. If that read fails we
+        // skip the roll this tick (retried next tick) rather than stamp a
+        // bogus anchor — an anchor that's too low could let the reconciler
+        // prematurely conclude a real submit never landed.
+        let anchor_seq = match indexer.head_sequence().await {
+            Ok(seq) => seq,
+            Err(e) => {
+                warn!(
+                    pair = %pair_label,
+                    error = %e,
+                    "skipping roll: could not read indexer head sequence for submit anchor"
+                );
+                continue;
+            }
+        };
         match db::claim_slot(
             db_pool,
             &meta.cfg.underlying,
@@ -466,18 +471,29 @@ async fn tick_once(
     Ok(())
 }
 
-/// Phase 4: reconciler — resolves `needs_reconciliation` rows once the
-/// indexer has provably caught up past the submit point.
-fn run_reconciler(
+/// Confirmation + reconciliation pass (JIT).
+///
+/// Phase 3 (confirm): for every submitted / needs_reconciliation row, ask the
+/// indexer whether a bucket for that (pair, expiry) now exists; if so, mark
+/// the row confirmed. This replaces the old push-driven `BucketCreated`
+/// confirmation.
+///
+/// Phase 4 (reconcile): any row still `needs_reconciliation` once the indexer
+/// head has provably caught up past the submit anchor had no bucket land —
+/// clear it.
+async fn run_reconciler(
     pool: &db::DbPool,
-    registry: &Registry,
+    indexer: &IndexerClient,
+    pair_keys: &[PairKey],
     safety_margin: u64,
 ) -> Result<()> {
+    confirm_landed_rolls(pool, indexer, pair_keys).await?;
+
     let rows = db::needs_reconciliation_rows(pool)?;
     if rows.is_empty() {
         return Ok(());
     }
-    let current_seq = registry.last_sequence();
+    let current_seq = indexer.head_sequence().await?;
     for row in rows {
         let anchor = row.submit_anchor_seq.unwrap_or(0) as u64;
         if current_seq <= anchor + safety_margin {
@@ -490,17 +506,58 @@ fn run_reconciler(
             );
             continue;
         }
-        // Indexer has caught up. Check if a BucketCreated arrived for
-        // this (pair, expiry) — if it did, Phase 3 already set
-        // state='confirmed', so we only see rows that are still
-        // needs_reconciliation here, meaning no bucket arrived.
+        // Indexer has caught up. confirm_landed_rolls above already flipped
+        // any row whose bucket exists to 'confirmed', so a row still in
+        // needs_reconciliation here means no bucket ever landed.
         info!(
             id = row.id,
             pair = %format!("{}/{}", row.underlying_symbol, row.settlement_symbol),
             expiry_ms = row.expiry_ms,
-            "reconciler: indexer caught up with no matching BucketCreated — safe to clear"
+            "reconciler: indexer caught up with no matching bucket — safe to clear"
         );
         db::delete_reconciled(pool, row.id)?;
+    }
+    Ok(())
+}
+
+/// For each submitted / needs_reconciliation row, JIT-query the indexer for a
+/// bucket at that expiry matching the row's configured pair, and confirm the
+/// row if one exists. Idempotent: `confirm_from_indexer` only touches rows
+/// still in a confirmable state.
+async fn confirm_landed_rolls(
+    pool: &db::DbPool,
+    indexer: &IndexerClient,
+    pair_keys: &[PairKey],
+) -> Result<()> {
+    let rows = db::all_active_rows(pool)?;
+    for row in rows {
+        if !matches!(row.state.as_str(), "submitted" | "needs_reconciliation") {
+            continue;
+        }
+        let expiry = row.expiry_ms as u64;
+        let buckets = indexer.buckets(false, None, None, Some(expiry)).await?;
+        for b in buckets {
+            // A bucket at this expiry could belong to a different configured
+            // pair; confirm only against the pair that actually matches this
+            // row's symbols.
+            let Some(pk) = pair_keys
+                .iter()
+                .find(|p| p.matches_assets(&b.asset_type, &b.settlement_type))
+            else {
+                continue;
+            };
+            if pk.underlying_symbol == row.underlying_symbol
+                && pk.settlement_symbol == row.settlement_symbol
+            {
+                db::confirm_from_indexer(
+                    pool,
+                    &pk.underlying_symbol,
+                    &pk.settlement_symbol,
+                    expiry,
+                    &b.bucket_id.to_hex(),
+                )?;
+            }
+        }
     }
     Ok(())
 }

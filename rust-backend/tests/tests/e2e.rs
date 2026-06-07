@@ -1,5 +1,5 @@
-//! End-to-end: indexer fanout + indexer subscriber + quoting service WS +
-//! mock retail + mock MM, all in process.
+//! End-to-end: mock indexer GraphQL + quoting service WS + mock retail +
+//! mock MM, all in process.
 //!
 //! Validates the happy path of the RFQ flow described in §5.8:
 //!

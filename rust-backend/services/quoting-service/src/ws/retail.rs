@@ -98,7 +98,7 @@ pub async fn handle(
             RetailToService::SubscribeBuckets { payload } => {
                 debug!(buckets = payload.bucket_ids.len(), "retail subscribe buckets");
                 for id in payload.bucket_ids {
-                    if let Some(b) = state.buckets.get(&id) {
+                    if let Ok(Some(b)) = state.indexer.bucket(id).await {
                         let _ = out_tx
                             .send(ServiceToRetail::BucketUpdate {
                                 payload: BucketUpdatePayload {
@@ -132,10 +132,41 @@ pub async fn handle(
                     write_amount: payload.write_amount,
                     side: payload.side,
                 });
-                // Short-circuit invalidated buckets with an explicit error
-                // so the retail UI can show "this bucket has been disabled"
-                // instead of a generic "no quotes" timeout. See SO-69.
-                if state.buckets.is_invalidated(&payload.bucket_id) {
+                // Resolve the bucket JIT. This both feeds the orchestrator
+                // (strike/expiry for the broadcast) and lets us short-circuit
+                // invalidated/unknown buckets with an explicit error instead
+                // of a generic "no quotes" timeout. See SO-69.
+                let bucket = match state.indexer.bucket(payload.bucket_id).await {
+                    Ok(Some(b)) => b,
+                    Ok(None) => {
+                        debug!(request_id = %request_id, %payload.bucket_id, "rfq for unknown bucket");
+                        let _ = out_tx
+                            .send(ServiceToRetail::Error {
+                                request_id: Some(request_id),
+                                payload: ErrorPayload {
+                                    code: "unknown_bucket".into(),
+                                    message: "bucket is not known to the indexer".into(),
+                                },
+                            })
+                            .await;
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(request_id = %request_id, %payload.bucket_id, error = %e, "indexer bucket lookup failed");
+                        let _ = out_tx
+                            .send(ServiceToRetail::Error {
+                                request_id: Some(request_id),
+                                payload: ErrorPayload {
+                                    code: "indexer_unavailable".into(),
+                                    message: "could not reach the indexer to price this request"
+                                        .into(),
+                                },
+                            })
+                            .await;
+                        continue;
+                    }
+                };
+                if bucket.invalidated {
                     debug!(request_id = %request_id, %payload.bucket_id, "rfq for invalidated bucket");
                     let _ = out_tx
                         .send(ServiceToRetail::Error {
@@ -203,7 +234,7 @@ pub async fn handle(
                     let quotes = rfq::orchestrate(
                         Arc::clone(&state),
                         payload.side,
-                        payload.bucket_id,
+                        bucket,
                         payload.write_amount,
                         request_id.clone(),
                         cfg.rfq_window,

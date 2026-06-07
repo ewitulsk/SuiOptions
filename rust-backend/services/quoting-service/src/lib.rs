@@ -7,15 +7,14 @@
 //!
 //! Internal shape:
 //!
-//! - [`state`] owns everything mutable — Account mirrors (balances minus
-//!   active reservations), buckets, the live reservation table, MM
-//!   reputation.
+//! - [`state`] owns the only mutable state this service keeps locally — the
+//!   live reservation table and MM reputation. Account balances, signing
+//!   keys, and bucket state are read just-in-time from the indexer's GraphQL
+//!   API.
 //! - [`rfq`] orchestrates one RFQ end to end: broadcast to MMs, collect with
 //!   a deadline, validate, reserve, sort, ship to retail.
 //! - [`ws`] is the transport. It owns no state — every interesting decision
 //!   happens in [`state`] or [`rfq`].
-//! - [`indexer_client`] subscribes to the indexer's stream and pipes events
-//!   into [`state`].
 
 pub mod config;
 pub mod errors;

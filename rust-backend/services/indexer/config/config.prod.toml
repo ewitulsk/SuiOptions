@@ -4,13 +4,10 @@ network                 = "mainnet"
 token_info_url          = "http://token-info:9005"
 remote_store_url        = "https://checkpoints.mainnet.sui.io"
 concurrency             = 5
-fanout_addr             = "0.0.0.0:9001"
 graphql_addr            = "0.0.0.0:9002"
-heartbeat_interval_secs = 5
 
 database_url            = "postgresql://indexer_prod:${DB_PASSWORD}@${DB_HOST}:5432/indexer_prod"
 db_pool_size            = 8
-recent_log_capacity     = 1024
 
 # Mainnet: tail from current tip on first boot. Set a specific checkpoint
 # only if you need backfill from a known block.

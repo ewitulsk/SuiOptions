@@ -1,8 +1,8 @@
 //! HTTP backend for the frontend.
 //!
-//! Subscribes to the indexer's WS fanout, builds an in-memory view of
-//! protocol state (currently just buckets), and serves it over HTTP.
-//! Holds no funds, signs nothing — strictly a read/query layer.
+//! Every read is a just-in-time GraphQL query to the indexer — api-service
+//! holds no protocol state of its own. Holds no funds, signs nothing —
+//! strictly a read/query layer.
 
 pub mod bucket;
 pub mod catalog;
@@ -32,7 +32,7 @@ cli_spec::define_program! {
     id          = "api-service",
     cargo_pkg   = "api-service",
     working_dir = ".",
-    description = "HTTP backend for the frontend. Subscribes to the indexer's WS fanout, \
-                   maintains an in-memory mirror of protocol state, and serves it via REST.",
+    description = "HTTP backend for the frontend. Serves protocol state via REST, \
+                   sourced from just-in-time GraphQL queries to the indexer.",
     cli         = crate::Cli,
 }

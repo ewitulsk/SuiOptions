@@ -28,9 +28,9 @@ use protocol_types::messages::{MmQuotePayload, RfqQuoteEntry};
 use protocol_types::quote::Quote;
 use protocol_types::sides::Side;
 
-use crate::state::{
-    AppState, BucketView, InsertOutcome, Reservation, ReservationTable,
-};
+use indexer_graphql::{Account, Bucket};
+
+use crate::state::{AppState, InsertOutcome, Reservation, ReservationTable};
 
 /// What's wrong with a quote — surfaced for logging / reputation but never
 /// propagated to retail (the retail-facing list just shows what was good).
@@ -72,7 +72,7 @@ impl From<ProtocolError> for QuoteRejection {
 ///   premium in the bucket's Settlement asset.
 /// - Trader flow (retail trades): signer is Writer MM, signer provides
 ///   `write_amount` of the bucket's Underlying asset.
-pub fn reservation_for(side: Side, bucket: &BucketView, quote: &Quote) -> (AssetType, u64) {
+pub fn reservation_for(side: Side, bucket: &Bucket, quote: &Quote) -> (AssetType, u64) {
     match side {
         Side::Writer => (bucket.settlement_type.clone(), quote.premium),
         Side::Trader => (bucket.asset_type.clone(), quote.write_amount),
@@ -82,10 +82,17 @@ pub fn reservation_for(side: Side, bucket: &BucketView, quote: &Quote) -> (Asset
 /// Run a single quote through every check. On success, places a reservation
 /// and returns the entry that would go into `RFQResponse`. On failure,
 /// returns the rejection reason and reserves nothing.
+///
+/// `bucket` and `account` are fetched just-in-time by the caller
+/// ([`orchestrate`]) so this stays a pure, synchronous function: no indexer
+/// round-trips happen here. The caller is also responsible for calling
+/// [`AppState::reconcile_executed`] before this so `available` doesn't
+/// double-count a reservation whose write already landed.
 pub fn validate_and_reserve(
     state: &AppState,
     side: Side,
-    bucket_id: ObjectId,
+    bucket: &Bucket,
+    account: &Account,
     write_amount: u64,
     payload: &MmQuotePayload,
     mm_account_id: ObjectId,
@@ -93,12 +100,12 @@ pub fn validate_and_reserve(
     now_ms: u64,
 ) -> Result<RfqQuoteEntry, QuoteRejection> {
     let quote = &payload.quote;
-    trace!(mm = %mm_account_id, %bucket_id, nonce = quote.nonce, premium = quote.premium, "validating quote");
+    trace!(mm = %mm_account_id, bucket = %bucket.bucket_id, nonce = quote.nonce, premium = quote.premium, "validating quote");
     // Cheap structural checks first.
     if quote.protocol_id != protocol_id {
         return Err(QuoteRejection::ProtocolMismatch);
     }
-    if quote.bucket_id != bucket_id {
+    if quote.bucket_id != bucket.bucket_id {
         return Err(QuoteRejection::BucketMismatch);
     }
     if quote.write_amount != write_amount {
@@ -112,29 +119,21 @@ pub fn validate_and_reserve(
     }
 
     // Signature against the MM's registered pubkey + scheme.
-    let acct = state
-        .accounts
-        .snapshot(&mm_account_id)
-        .ok_or(QuoteRejection::UnknownSigner)?;
-    let scheme = acct.signing_scheme.ok_or(QuoteRejection::InvalidPubkey)?;
+    let scheme = account.signing_scheme.ok_or(QuoteRejection::InvalidPubkey)?;
     let signed = protocol_types::quote::SignedQuote {
         quote: quote.clone(),
         signature: payload.signature.clone(),
     };
     signed
-        .verify(scheme, &acct.signing_pubkey, protocol_id, mm_account_id, now_ms)
+        .verify(scheme, &account.signing_pubkey, protocol_id, mm_account_id, now_ms)
         .map_err(QuoteRejection::from)?;
 
     // Reservation feasibility.
-    let bucket = state
-        .buckets
-        .get(&bucket_id)
-        .ok_or(QuoteRejection::UnknownBucket)?;
     if bucket.invalidated {
         return Err(QuoteRejection::BucketInvalidated);
     }
-    let (asset, amount) = reservation_for(side, &bucket, quote);
-    if state.available(mm_account_id, &asset) < amount {
+    let (asset, amount) = reservation_for(side, bucket, quote);
+    if state.available(account, &asset) < amount {
         return Err(QuoteRejection::InsufficientAvailableBalance);
     }
 
@@ -202,29 +201,20 @@ pub fn release_reservations(reservations: &ReservationTable, entries: &[RfqQuote
 pub async fn orchestrate(
     state: Arc<AppState>,
     side: Side,
-    bucket_id: ObjectId,
+    bucket: Bucket,
     write_amount: u64,
     request_id: String,
     rfq_window: Duration,
     protocol_id: Vec<u8>,
     now_ms: u64,
 ) -> Vec<RfqQuoteEntry> {
+    let bucket_id = bucket.bucket_id;
     let deadline_ms = now_ms.saturating_add(rfq_window.as_millis() as u64);
 
-    // Resolve the bucket up-front so the broadcast can include the
-    // bucket's strike + expiry. MMs price against these instead of
-    // guessing — every quote that comes back already knows what option
-    // it's quoting.
-    let bucket = match state.buckets.get(&bucket_id) {
-        Some(b) => b,
-        None => {
-            debug!(%bucket_id, "rfq for unknown bucket — returning empty");
-            return Vec::new();
-        }
-    };
+    // The bucket is fetched JIT by the caller (retail.rs) so the broadcast can
+    // include its strike + expiry — MMs price against these instead of
+    // guessing. Defense-in-depth against direct callers: refuse invalidated.
     if bucket.invalidated {
-        // Retail handler should have already short-circuited with an
-        // explicit error; this is defense-in-depth against direct callers.
         debug!(%bucket_id, "rfq for invalidated bucket — returning empty");
         return Vec::new();
     }
@@ -281,13 +271,30 @@ pub async fn orchestrate(
     // Once the deadline closes the receiver, remove the routing entry.
     state.pending_rfqs.remove(&request_id);
 
-    // Validate + reserve.
+    // Validate + reserve. Each MM's account (signing key + balances) is
+    // fetched JIT, after reconciling any of its reservations whose write has
+    // already landed so `available` isn't understated.
     let mut accepted = Vec::with_capacity(raw_responses.len());
     for (mm_id, payload) in raw_responses {
+        if let Err(e) = state.reconcile_executed(mm_id).await {
+            warn!(mm = %mm_id, error = %e, "reservation reconcile failed; proceeding with stale reservations");
+        }
+        let account = match state.indexer.account(mm_id).await {
+            Ok(Some(a)) => a,
+            Ok(None) => {
+                debug!(mm = %mm_id, "rfq quote from signer the indexer doesn't know — rejecting");
+                continue;
+            }
+            Err(e) => {
+                warn!(mm = %mm_id, error = %e, "indexer account lookup failed; rejecting quote");
+                continue;
+            }
+        };
         match validate_and_reserve(
             &state,
             side,
-            bucket_id,
+            &bucket,
+            &account,
             write_amount,
             &payload,
             mm_id,
@@ -317,49 +324,42 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
 
+    use std::collections::BTreeMap;
+
     use protocol_types::asset::AssetType;
-    use protocol_types::events::{
-        AccountCreated, AccountDeposit, BucketCreated, ChainEvent, IndexedEvent,
-    };
     use protocol_types::ids::SuiAddress;
     use protocol_types::messages::MmQuotePayload;
 
-    fn make_state(mm_account: ObjectId, signing_pubkey: Vec<u8>, balance: u64) -> AppState {
-        let s = AppState::new();
-        // Seed account + bucket via events.
-        let bucket = ObjectId::new([0x99; 32]);
-        s.ingest_event(&IndexedEvent {
-            sequence: 0,
-            timestamp_ms: 0,
-            event: ChainEvent::AccountCreated(AccountCreated {
-                account_id: mm_account,
-                owner: SuiAddress::ZERO,
-                signing_scheme: protocol_types::SigningScheme::Ed25519,
-                signing_pubkey,
-            }),
-        });
-        s.ingest_event(&IndexedEvent {
-            sequence: 1,
-            timestamp_ms: 0,
-            event: ChainEvent::AccountDeposit(AccountDeposit {
-                account_id: mm_account,
-                asset_type: AssetType::new("USDC"),
-                amount: balance,
-            }),
-        });
-        s.ingest_event(&IndexedEvent {
-            sequence: 2,
-            timestamp_ms: 0,
-            event: ChainEvent::BucketCreated(BucketCreated {
-                bucket_id: bucket,
-                asset_type: AssetType::new("BTC"),
-                settlement_type: AssetType::new("USDC"),
-                expiry_ms: 1_000_000,
-                strike: 50,
-                strike_scale: 0,
-            }),
-        });
-        s
+    /// A quoting state with no live indexer — the validation path is pure, so
+    /// tests pass the bucket + account in directly. The URL is unreachable on
+    /// purpose: any test that actually hit it would be a bug.
+    fn test_state() -> AppState {
+        AppState::with_global_rfq_cap(256, "http://127.0.0.1:1/graphql".into())
+    }
+
+    fn mk_account(mm: ObjectId, signing_pubkey: Vec<u8>, balance: u64) -> Account {
+        Account {
+            account_id: mm,
+            owner: Some(SuiAddress::ZERO),
+            signing_scheme: Some(protocol_types::SigningScheme::Ed25519),
+            signing_pubkey,
+            balances: BTreeMap::from([(AssetType::new("USDC"), balance)]),
+        }
+    }
+
+    fn mk_bucket() -> Bucket {
+        Bucket {
+            bucket_id: ObjectId::new([0x99; 32]),
+            asset_type: AssetType::new("BTC"),
+            settlement_type: AssetType::new("USDC"),
+            strike: 50,
+            strike_scale: 0,
+            expiry_ms: 1_000_000,
+            total_written: 0,
+            exercise_cursor: 0,
+            cleaned: false,
+            invalidated: false,
+        }
     }
 
     fn signed_quote(
@@ -389,26 +389,31 @@ mod tests {
     fn happy_path_writes_a_reservation() {
         let sk = SigningKey::generate(&mut OsRng);
         let mm = ObjectId::new([0x01; 32]);
-        let state = make_state(mm, sk.verifying_key().to_bytes().to_vec(), 10_000);
-        let bucket = ObjectId::new([0x99; 32]);
-        let p = signed_quote(&sk, b"P".to_vec(), mm, bucket, 100, 500, 1);
+        let state = test_state();
+        let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec(), 10_000);
+        let bucket = mk_bucket();
+        let p = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 500, 1);
 
-        let entry = validate_and_reserve(&state, Side::Writer, bucket, 100, &p, mm, b"P", 0).unwrap();
+        let entry =
+            validate_and_reserve(&state, Side::Writer, &bucket, &account, 100, &p, mm, b"P", 0)
+                .unwrap();
         assert_eq!(entry.mm_id, mm);
         assert_eq!(entry.quote.premium, 500);
         // 10000 USDC balance, 500 reserved → 9500 available.
-        assert_eq!(state.available(mm, &AssetType::new("USDC")), 9500);
+        assert_eq!(state.available(&account, &AssetType::new("USDC")), 9500);
     }
 
     #[test]
     fn rejects_insufficient_balance() {
         let sk = SigningKey::generate(&mut OsRng);
         let mm = ObjectId::new([0x01; 32]);
-        let state = make_state(mm, sk.verifying_key().to_bytes().to_vec(), 100);
-        let bucket = ObjectId::new([0x99; 32]);
-        let p = signed_quote(&sk, b"P".to_vec(), mm, bucket, 100, 500, 1);
+        let state = test_state();
+        let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec(), 100);
+        let bucket = mk_bucket();
+        let p = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 500, 1);
         assert_eq!(
-            validate_and_reserve(&state, Side::Writer, bucket, 100, &p, mm, b"P", 0).unwrap_err(),
+            validate_and_reserve(&state, Side::Writer, &bucket, &account, 100, &p, mm, b"P", 0)
+                .unwrap_err(),
             QuoteRejection::InsufficientAvailableBalance,
         );
         assert_eq!(state.reservations.len(), 0);
@@ -418,13 +423,16 @@ mod tests {
     fn rejects_duplicate_nonce() {
         let sk = SigningKey::generate(&mut OsRng);
         let mm = ObjectId::new([0x01; 32]);
-        let state = make_state(mm, sk.verifying_key().to_bytes().to_vec(), 10_000);
-        let bucket = ObjectId::new([0x99; 32]);
-        let p1 = signed_quote(&sk, b"P".to_vec(), mm, bucket, 100, 500, 7);
-        let p2 = signed_quote(&sk, b"P".to_vec(), mm, bucket, 100, 600, 7);
-        validate_and_reserve(&state, Side::Writer, bucket, 100, &p1, mm, b"P", 0).unwrap();
+        let state = test_state();
+        let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec(), 10_000);
+        let bucket = mk_bucket();
+        let p1 = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 500, 7);
+        let p2 = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 600, 7);
+        validate_and_reserve(&state, Side::Writer, &bucket, &account, 100, &p1, mm, b"P", 0)
+            .unwrap();
         assert_eq!(
-            validate_and_reserve(&state, Side::Writer, bucket, 100, &p2, mm, b"P", 0).unwrap_err(),
+            validate_and_reserve(&state, Side::Writer, &bucket, &account, 100, &p2, mm, b"P", 0)
+                .unwrap_err(),
             QuoteRejection::DuplicateNonce,
         );
     }
@@ -433,11 +441,13 @@ mod tests {
     fn rejects_expired_quote() {
         let sk = SigningKey::generate(&mut OsRng);
         let mm = ObjectId::new([0x01; 32]);
-        let state = make_state(mm, sk.verifying_key().to_bytes().to_vec(), 10_000);
-        let bucket = ObjectId::new([0x99; 32]);
-        let p = signed_quote(&sk, b"P".to_vec(), mm, bucket, 100, 500, 1);
-        let rej = validate_and_reserve(&state, Side::Writer, bucket, 100, &p, mm, b"P", 1_000_000)
-            .unwrap_err();
+        let state = test_state();
+        let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec(), 10_000);
+        let bucket = mk_bucket();
+        let p = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 500, 1);
+        let rej =
+            validate_and_reserve(&state, Side::Writer, &bucket, &account, 100, &p, mm, b"P", 1_000_000)
+                .unwrap_err();
         assert_eq!(rej, QuoteRejection::Expired);
     }
 
@@ -445,12 +455,14 @@ mod tests {
     fn rejects_tampered_signature() {
         let sk = SigningKey::generate(&mut OsRng);
         let mm = ObjectId::new([0x01; 32]);
-        let state = make_state(mm, sk.verifying_key().to_bytes().to_vec(), 10_000);
-        let bucket = ObjectId::new([0x99; 32]);
-        let mut p = signed_quote(&sk, b"P".to_vec(), mm, bucket, 100, 500, 1);
+        let state = test_state();
+        let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec(), 10_000);
+        let bucket = mk_bucket();
+        let mut p = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 500, 1);
         p.quote.premium = 9_999; // tamper after signing
         assert_eq!(
-            validate_and_reserve(&state, Side::Writer, bucket, 100, &p, mm, b"P", 0).unwrap_err(),
+            validate_and_reserve(&state, Side::Writer, &bucket, &account, 100, &p, mm, b"P", 0)
+                .unwrap_err(),
             QuoteRejection::SignatureInvalid,
         );
     }
@@ -459,11 +471,13 @@ mod tests {
     fn rejects_bucket_mismatch() {
         let sk = SigningKey::generate(&mut OsRng);
         let mm = ObjectId::new([0x01; 32]);
-        let state = make_state(mm, sk.verifying_key().to_bytes().to_vec(), 10_000);
-        let bucket = ObjectId::new([0x99; 32]);
+        let state = test_state();
+        let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec(), 10_000);
+        let bucket = mk_bucket();
         let p = signed_quote(&sk, b"P".to_vec(), mm, ObjectId::new([0xaa; 32]), 100, 500, 1);
         assert_eq!(
-            validate_and_reserve(&state, Side::Writer, bucket, 100, &p, mm, b"P", 0).unwrap_err(),
+            validate_and_reserve(&state, Side::Writer, &bucket, &account, 100, &p, mm, b"P", 0)
+                .unwrap_err(),
             QuoteRejection::BucketMismatch,
         );
     }
@@ -475,21 +489,14 @@ mod tests {
         // refuse to reserve. See SO-69.
         let sk = SigningKey::generate(&mut OsRng);
         let mm = ObjectId::new([0x01; 32]);
-        let state = make_state(mm, sk.verifying_key().to_bytes().to_vec(), 10_000);
-        let bucket = ObjectId::new([0x99; 32]);
-        state.ingest_event(&IndexedEvent {
-            sequence: 3,
-            timestamp_ms: 0,
-            event: ChainEvent::BucketInvalidated(protocol_types::events::BucketInvalidated {
-                bucket_id: bucket,
-                at_ms: 1,
-                admin: SuiAddress::ZERO,
-                reason: b"misconfig".to_vec(),
-            }),
-        });
-        let p = signed_quote(&sk, b"P".to_vec(), mm, bucket, 100, 500, 1);
+        let state = test_state();
+        let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec(), 10_000);
+        let mut bucket = mk_bucket();
+        bucket.invalidated = true;
+        let p = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 500, 1);
         assert_eq!(
-            validate_and_reserve(&state, Side::Writer, bucket, 100, &p, mm, b"P", 0).unwrap_err(),
+            validate_and_reserve(&state, Side::Writer, &bucket, &account, 100, &p, mm, b"P", 0)
+                .unwrap_err(),
             QuoteRejection::BucketInvalidated,
         );
         assert_eq!(state.reservations.len(), 0);
@@ -557,8 +564,8 @@ mod tests {
         use tokio::sync::mpsc;
 
         let mm = ObjectId::new([0x01; 32]);
-        let bucket = ObjectId::new([0x99; 32]);
-        let state = Arc::new(make_state(mm, vec![0u8; 32], 10_000));
+        let bucket = mk_bucket();
+        let state = Arc::new(test_state());
 
         // Register an MM whose outbound channel is full and never drained.
         let (tx, rx) = mpsc::channel(1);
@@ -579,11 +586,12 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..64 {
             let st = Arc::clone(&state);
+            let bkt = bucket.clone();
             handles.push(tokio::spawn(async move {
                 orchestrate(
                     st,
                     Side::Writer,
-                    bucket,
+                    bkt,
                     100,
                     format!("req-{i}"),
                     std::time::Duration::from_millis(50),
