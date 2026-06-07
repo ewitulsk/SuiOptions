@@ -37,6 +37,8 @@ pub struct Secrets {
     pub sui: SuiSecrets,
     #[serde(default)]
     pub mm_bot: MmBotSecrets,
+    #[serde(default)]
+    pub auth: AuthSecrets,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -53,6 +55,14 @@ pub struct MmBotSecrets {
     /// 32-byte secret in hex (`0x…` prefix optional). Interpreted per the
     /// MM bot's configured `signing_scheme`.
     pub quote_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AuthSecrets {
+    /// HMAC-SHA256 secret the auth-service signs and verifies JWTs with.
+    /// auth-service is the only holder; token-info delegates verification
+    /// over an internal route and never sees this value.
+    pub jwt_secret: Option<String>,
 }
 
 impl Secrets {
@@ -73,6 +83,7 @@ impl Secrets {
             has_devnet = result.sui.devnet.is_some(),
             has_default = result.sui.default.is_some(),
             has_quote_key = result.mm_bot.quote_key.is_some(),
+            has_jwt_secret = result.auth.jwt_secret.is_some(),
             "secrets loaded"
         );
         Ok(result)
@@ -105,6 +116,13 @@ impl Secrets {
             .quote_key
             .as_deref()
             .ok_or_else(|| anyhow!("secrets.toml is missing mm_bot.quote_key"))
+    }
+
+    pub fn jwt_secret(&self) -> Result<&str> {
+        self.auth
+            .jwt_secret
+            .as_deref()
+            .ok_or_else(|| anyhow!("secrets.toml is missing auth.jwt_secret"))
     }
 }
 

@@ -34,7 +34,7 @@ from typing import Iterable
 
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -62,7 +62,9 @@ REBUILD_ALL_GLOBS = [
 #                      pyth-client, deployments
 #   api-service      : protocol-types, runtime-config, cli-spec, indexer-client,
 #                      deployments
-#   token-info       : runtime-config, cli-spec, deployments, token-info-client
+#   token-info       : runtime-config, cli-spec, deployments, token-info-client,
+#                      auth-client
+#   auth-service     : runtime-config, cli-spec, protocol-types
 SERVICE_GLOBS: dict[str, list[str]] = {
     "indexer": [
         "rust-backend/services/indexer/**",
@@ -117,6 +119,14 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/deployments/**",
         "rust-backend/crates/token-info-client/**",
+        "rust-backend/crates/auth-client/**",
+    ],
+    "auth-service": [
+        "rust-backend/services/auth-service/**",
+        "rust-backend/Dockerfile.auth-service",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/protocol-types/**",
     ],
 }
 

@@ -19,6 +19,7 @@ import type { Transaction } from "@mysten/sui/transactions";
 import { Header } from "../components/Header";
 import { WaveHero } from "../components/WaveHero";
 import { Toast } from "../components/Toast";
+import { TokenManager } from "../components/TokenManager";
 import { useBuckets } from "../api/useBuckets";
 import { useAdminCap } from "../api/useAdminCap";
 import type { Bucket, Series } from "../api/client";
@@ -287,6 +288,9 @@ export function Admin() {
           onCreate={(build) => run("create-treasury", build, "treasury created")}
           adminCapId={adminCapId}
         />
+
+        {/* ── Supported tokens (token-info) ───────────────────────── */}
+        <TokenManager flash={flash} />
       </div>
 
       {toast && <Toast message={toast} />}

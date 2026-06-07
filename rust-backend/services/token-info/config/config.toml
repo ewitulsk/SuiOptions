@@ -17,6 +17,9 @@ internal_bind_addr = "127.0.0.1:9006"
 
 allowed_origins    = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
+# auth-service internal verify route — gates the public mutate endpoints.
+auth_service_url   = "http://127.0.0.1:9008"
+
 # Display metadata for the dev/staging test-token overlay (testTokens carry no
 # name/logo). Keyed by ticker. logo_uri is optional. Dev placeholders.
 [seed_meta.TBTC]

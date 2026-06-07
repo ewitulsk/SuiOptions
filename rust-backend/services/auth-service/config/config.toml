@@ -1,0 +1,22 @@
+# auth-service config (local dev).
+#
+# Issues admin JWTs after a Sui signature challenge-response and exposes an
+# internal verify route. The JWT secret comes from the secrets TOML
+# (`--secrets`, default services/auth-service/config/secrets.toml); copy
+# secrets.example.toml to secrets.toml and fill in `auth.jwt_secret`.
+
+environment        = "dev"
+
+public_bind_addr   = "127.0.0.1:9007"
+internal_bind_addr = "127.0.0.1:9008"
+
+allowed_origins    = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+# Wallets allowed to obtain an admin JWT. Case/padding-insensitive. The seed
+# entry is the protocol deployer (AdminCap holder) from deployments.json —
+# replace / extend with the real admin wallet addresses.
+admin_addresses    = ["0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865"]
+
+token_ttl_secs     = 3600
+refresh_max_secs   = 86400
+challenge_ttl_secs = 300

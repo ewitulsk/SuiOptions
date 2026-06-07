@@ -42,6 +42,12 @@ pub struct Config {
     #[serde(default = "default_cors")]
     pub allowed_origins: Vec<String>,
 
+    /// auth-service INTERNAL base URL (its `/verify` route). The public
+    /// mutate routes (`POST/PUT/DELETE /tokens`) are gated by an admin JWT,
+    /// which token-info does not validate itself — it delegates to
+    /// auth-service via `auth-client`.
+    pub auth_service_url: String,
+
     /// Display metadata (name, logo) for the dev/staging test-token overlay,
     /// keyed by ticker (e.g. `TBTC`). testTokens carry no name/logo, so this
     /// is where they come from. Ignored on prod (no overlay).
@@ -100,6 +106,7 @@ mod tests {
             public_bind_addr: "0.0.0.0:9005".parse().unwrap(),
             internal_bind_addr: "0.0.0.0:9006".parse().unwrap(),
             allowed_origins: vec!["*".into()],
+            auth_service_url: "http://127.0.0.1:9008".into(),
             seed_meta: BTreeMap::new(),
         };
         assert!(mk("dev").overlay_test_tokens());

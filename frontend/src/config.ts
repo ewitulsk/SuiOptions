@@ -24,6 +24,13 @@ export const TOKEN_INFO_URL: string =
   (import.meta.env.VITE_TOKEN_INFO_URL as string | undefined) ??
   "http://127.0.0.1:9005";
 
+// auth-service public base URL. Local dev hits the service directly; deployed
+// builds set VITE_AUTH_URL to the env's public route
+// (e.g. https://<host>/<env>/auth). Used by the admin token-manager to obtain
+// the JWT that gates token-info's mutate endpoints.
+export const AUTH_URL: string =
+  (import.meta.env.VITE_AUTH_URL as string | undefined) ?? "http://127.0.0.1:9007";
+
 // Populated by `initConfig()`. Exported as live bindings — consumers that
 // `import { PACKAGE_ID }` see the value once initialization completes (which
 // happens before the first render).

@@ -1,0 +1,17 @@
+# auth-service config — staging env (testnet).
+
+environment        = "staging"
+
+public_bind_addr   = "0.0.0.0:9007"
+internal_bind_addr = "0.0.0.0:9008"
+
+allowed_origins    = ["*"]
+
+# Wallets allowed to obtain an admin JWT. Case/padding-insensitive. The seed
+# entry is the protocol deployer (AdminCap holder) from deployments.json —
+# replace / extend with the real admin wallet addresses.
+admin_addresses    = ["0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865"]
+
+token_ttl_secs     = 3600
+refresh_max_secs   = 86400
+challenge_ttl_secs = 300
