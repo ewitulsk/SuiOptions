@@ -1,6 +1,7 @@
 import { Header } from "../components/Header";
 import { WaveHero } from "../components/WaveHero";
 import { IndexerProgressBar } from "../components/IndexerProgressBar";
+import { LiveBuckets } from "../components/LiveBuckets";
 
 export function Debug() {
   return (
@@ -16,6 +17,7 @@ export function Debug() {
         </div>
 
         <IndexerProgressBar />
+        <LiveBuckets />
       </div>
     </div>
   );
