@@ -52,12 +52,11 @@ function scaleRaw(raw: string, decimals: number | null): number {
   return Number(raw) / 10 ** decimals;
 }
 
-/** Format a tile's indicative premium (display-scaled settlement units). */
+/** Format a tile's premium as a whole-dollar amount (no decimals). */
 function formatPremium(v: number): string {
   if (!Number.isFinite(v)) return "—";
-  if (v >= 1) return v.toFixed(2);
-  if (v > 0) return v.toFixed(4);
-  return "0";
+  if (v <= 0) return "0";
+  return Math.round(v).toString();
 }
 
 /**
@@ -289,48 +288,10 @@ export function useComposerState({
     enabled: view === "writer" && !bucketsQuery.isLoading,
   });
 
-  // Tiles show the indicative premium once the bulk-view response arrives,
-  // scaled into settlement display units; placeholder until then.
-  const strikes = useMemo<Strike[]>(() => {
-    const scale =
-      series?.settlement_decimals != null ? 10 ** series.settlement_decimals : 1;
-    return seriesBuckets.map((b) => {
-      const entry = bulkPremiums.get(b.bucket_id);
-      const premium = entry ? Number(entry.premium) / scale : 0;
-      return {
-        strike: b.strike as number,
-        perUnit: 0,
-        premium,
-        premiumDisplay: entry ? formatPremium(premium) : "—",
-      };
-    });
-  }, [seriesBuckets, bulkPremiums, series?.settlement_decimals]);
-
-  // Clamp selection when the strike list shrinks/grows underneath us
-  // (e.g. first /buckets fetch resolves, or a new bucket appears).
-  useEffect(() => {
-    if (strikes.length === 0) return;
-    if (selectedIdx >= strikes.length) setSelectedIdx(strikes.length - 1);
-  }, [strikes.length, selectedIdx]);
-
-  // Placeholder used while strikes are loading or empty — keeps downstream
-  // components from crashing on `selected.strike` etc. Composer screen
-  // gates the interactive UI on bucketsLoading / bucketsEmpty instead.
-  const placeholderStrike: Strike = {
-    strike: 0,
-    perUnit: 0,
-    premium: 0,
-    premiumDisplay: "—",
-  };
-  const selected: Strike = strikes[selectedIdx] ?? strikes[0] ?? placeholderStrike;
-
-  const bucketsLoading = bucketsQuery.isLoading;
-  const bucketsEmpty = !bucketsLoading && strikes.length === 0;
-
-  // Real RFQ flow: when the user picks (asset, expiry, strike) and types
-  // an amount, send an RFQRequest to the quoting service over WS. The
-  // response — already sorted best-price-first for `view` — drives the
-  // on-screen quote feed and the headline premium.
+  // Real RFQ flow: when the user picks (asset, expiry, strike) and types an
+  // amount, send an RFQRequest to the quoting service over WS. The response —
+  // already sorted best-price-first for `view` — drives the on-screen quote
+  // feed, the headline premium, and the selected tile's firm premium.
   // Selection indexes `seriesBuckets` directly so two strikes that collide on
   // display value still resolve to the right bucket_id.
   const selectedBucketId: string | null = useMemo(
@@ -352,6 +313,59 @@ export function useComposerState({
   );
 
   const bestPremium = quotes[0]?.premium ?? 0;
+
+  // The signed RFQ for the selected tile returns a firm premium that
+  // supersedes its indicative bulk-view average; show it on that tile once it
+  // arrives. Other tiles keep their bulk-view premium.
+  const realSelectedPremium = rfqEntries.length > 0 ? bestPremium : null;
+
+  // Tiles show the indicative bulk-view premium (or the firm RFQ premium for
+  // the selected tile), already in settlement display units; placeholder until
+  // a premium is available.
+  const strikes = useMemo<Strike[]>(() => {
+    const scale =
+      series?.settlement_decimals != null ? 10 ** series.settlement_decimals : 1;
+    return seriesBuckets.map((b) => {
+      const entry = bulkPremiums.get(b.bucket_id);
+      const indicative = entry ? Number(entry.premium) / scale : null;
+      const value =
+        (b.bucket_id === selectedBucketId ? realSelectedPremium : null) ??
+        indicative;
+      return {
+        strike: b.strike as number,
+        perUnit: 0,
+        premium: value ?? 0,
+        premiumDisplay: value !== null ? formatPremium(value) : "—",
+      };
+    });
+  }, [
+    seriesBuckets,
+    bulkPremiums,
+    series?.settlement_decimals,
+    selectedBucketId,
+    realSelectedPremium,
+  ]);
+
+  // Clamp selection when the strike list shrinks/grows underneath us
+  // (e.g. first /buckets fetch resolves, or a new bucket appears).
+  useEffect(() => {
+    if (strikes.length === 0) return;
+    if (selectedIdx >= strikes.length) setSelectedIdx(strikes.length - 1);
+  }, [strikes.length, selectedIdx]);
+
+  // Placeholder used while strikes are loading or empty — keeps downstream
+  // components from crashing on `selected.strike` etc. Composer screen
+  // gates the interactive UI on bucketsLoading / bucketsEmpty instead.
+  const placeholderStrike: Strike = {
+    strike: 0,
+    perUnit: 0,
+    premium: 0,
+    premiumDisplay: "—",
+  };
+  const selected: Strike = strikes[selectedIdx] ?? strikes[0] ?? placeholderStrike;
+
+  const bucketsLoading = bucketsQuery.isLoading;
+  const bucketsEmpty = !bucketsLoading && strikes.length === 0;
 
   // Insufficiency uses real balances. Writer supplies the underlying
   // (`amount`); trader pays the live premium.
