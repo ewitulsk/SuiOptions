@@ -1,0 +1,24 @@
+# gas-station config (local dev).
+#
+# Sponsors user transactions by paying their gas. The sponsor key is read from
+# the secrets TOML (`--secrets`, default services/gas-station/config/secrets.toml)
+# under the `[sui]` slot for `network` below; copy secrets.example.toml to
+# secrets.toml and fill it in.
+
+environment = "dev"
+
+bind_addr   = "127.0.0.1:9009"
+network     = "testnet"
+
+allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+# 1 SUI. Below this the toggle defaults off in the UI.
+min_balance_threshold_mist = 1000000000
+
+# 0.5 SUI cap per sponsored tx (also the dry-run budget).
+max_gas_budget_mist = 500000000
+min_gas_budget_mist = 1000000
+gas_budget_buffer_bps = 2500
+
+# Empty = sponsor any package (local dev only). Populate in staging/prod.
+allowed_packages = []

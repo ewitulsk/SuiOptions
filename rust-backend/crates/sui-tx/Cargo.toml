@@ -14,6 +14,7 @@ runtime-config = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+bcs = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }
 base64 = "0.22"

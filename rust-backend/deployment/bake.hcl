@@ -83,6 +83,14 @@ target "auth-service" {
   cache-to   = [{ type = "gha", mode = "max", scope = "auth-service" }]
 }
 
+target "gas-station" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.gas-station"
+  tags       = ["${ECR}/options/gas-station:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "gas-station" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "gas-station" }]
+}
+
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station"]
 }

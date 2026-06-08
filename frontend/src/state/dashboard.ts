@@ -15,10 +15,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import {
-  useCurrentAccount,
-  useSignAndExecuteTransaction,
-} from "@mysten/dapp-kit";
+import { useCurrentAccount } from "@mysten/dapp-kit";
+import { useSubmitTransaction } from "../tx/submit";
 
 import { useBuckets } from "../api/useBuckets";
 import { useOwnedCallOptions } from "../api/useOwnedCallOptions";
@@ -440,7 +438,7 @@ export function useDashboardState(): DashboardState {
     setModal({ kind: "claim", stage: "review", position: p });
   };
 
-  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
+  const submitTx = useSubmitTransaction();
 
   const submit = async () => {
     if (!modal || !wallet) return;
@@ -480,7 +478,7 @@ export function useDashboardState(): DashboardState {
           recipient: wallet,
         });
         setModal({ ...captured, stage: "broadcast" } as DashboardModal);
-        await signAndExecute({ transaction: tx });
+        await submitTx(tx);
         setModal({ ...captured, stage: "confirmed" } as DashboardModal);
       } else if (captured.kind === "claim") {
         const { position: p } = captured;
@@ -502,7 +500,7 @@ export function useDashboardState(): DashboardState {
           recipient: wallet,
         });
         setModal({ ...captured, stage: "broadcast" } as DashboardModal);
-        await signAndExecute({ transaction: tx });
+        await submitTx(tx);
         setModal({ ...captured, stage: "confirmed" } as DashboardModal);
       }
     } catch (err) {

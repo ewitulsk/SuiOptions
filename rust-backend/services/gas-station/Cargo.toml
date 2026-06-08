@@ -1,0 +1,36 @@
+[package]
+name = "gas-station"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "gas-station"
+path = "src/main.rs"
+
+[dependencies]
+runtime-config = { workspace = true }
+cli-spec       = { workspace = true }
+sui-tx         = { workspace = true }
+
+clap = { workspace = true }
+
+tokio = { workspace = true }
+
+axum = { workspace = true }
+tower-http = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = "0.22"
+
+sui-types = { workspace = true }
+
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

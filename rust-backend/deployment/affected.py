@@ -34,7 +34,7 @@ from typing import Iterable
 
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -65,6 +65,7 @@ REBUILD_ALL_GLOBS = [
 #   token-info       : runtime-config, cli-spec, deployments, token-info-client,
 #                      auth-client
 #   auth-service     : runtime-config, cli-spec, protocol-types
+#   gas-station      : runtime-config, cli-spec, sui-tx
 SERVICE_GLOBS: dict[str, list[str]] = {
     "indexer": [
         "rust-backend/services/indexer/**",
@@ -128,6 +129,13 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/runtime-config/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/protocol-types/**",
+    ],
+    "gas-station": [
+        "rust-backend/services/gas-station/**",
+        "rust-backend/Dockerfile.gas-station",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/sui-tx/**",
     ],
 }
 

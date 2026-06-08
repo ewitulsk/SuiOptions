@@ -31,6 +31,12 @@ export const TOKEN_INFO_URL: string =
 export const AUTH_URL: string =
   (import.meta.env.VITE_AUTH_URL as string | undefined) ?? "http://127.0.0.1:9007";
 
+// gas-station public base URL. Sponsors user transactions (pays their gas).
+// Local dev hits the service directly; deployed builds set VITE_GAS_STATION_URL
+// to the env's public route (e.g. https://<host>/<env>/gas-station).
+export const GAS_STATION_URL: string =
+  (import.meta.env.VITE_GAS_STATION_URL as string | undefined) ?? "http://127.0.0.1:9009";
+
 // Populated by `initConfig()`. Exported as live bindings — consumers that
 // `import { PACKAGE_ID }` see the value once initialization completes (which
 // happens before the first render).

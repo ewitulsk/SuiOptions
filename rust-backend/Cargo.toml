@@ -18,6 +18,7 @@ members = [
     "services/api-service",
     "services/token-info",
     "services/auth-service",
+    "services/gas-station",
     "tools/deployment-manager",
     "tools/exchange",
     "tools/writer",

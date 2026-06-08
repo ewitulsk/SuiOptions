@@ -5,11 +5,9 @@
 // sign+execute idiom and `dash-hero` layout.
 
 import { useState } from "react";
-import {
-  useCurrentAccount,
-  useSignAndExecuteTransaction,
-} from "@mysten/dapp-kit";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 import type { Transaction } from "@mysten/sui/transactions";
+import { useSubmitTransaction } from "../tx/submit";
 
 import { Header } from "../components/Header";
 import { WaveHero } from "../components/WaveHero";
@@ -27,7 +25,7 @@ function toRaw(amount: string, decimals: number): bigint {
 export function Faucet() {
   const account = useCurrentAccount();
   const wallet = account?.address ?? null;
-  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
+  const submitTx = useSubmitTransaction();
 
   const [toast, setToast] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -45,7 +43,7 @@ export function Faucet() {
     setBusy(key);
     try {
       const tx = build();
-      await signAndExecute({ transaction: tx });
+      await submitTx(tx);
       flash(`✓ ${ok}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

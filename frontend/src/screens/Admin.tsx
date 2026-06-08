@@ -9,11 +9,9 @@
 
 import { useMemo, useState } from "react";
 import { Navigate } from "react-router-dom";
-import {
-  useCurrentAccount,
-  useSignAndExecuteTransaction,
-} from "@mysten/dapp-kit";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 import type { Transaction } from "@mysten/sui/transactions";
+import { useSubmitTransaction } from "../tx/submit";
 
 import { Header } from "../components/Header";
 import { WaveHero } from "../components/WaveHero";
@@ -49,7 +47,7 @@ export function Admin() {
   const wallet = account?.address ?? null;
   const adminCap = useAdminCap(wallet);
   const buckets = useBuckets();
-  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
+  const submitTx = useSubmitTransaction();
 
   const [toast, setToast] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -96,7 +94,7 @@ export function Admin() {
     setBusy(key);
     try {
       const tx = build();
-      await signAndExecute({ transaction: tx });
+      await submitTx(tx);
       flash(`✓ ${ok}`);
       buckets.refetch();
     } catch (err) {
