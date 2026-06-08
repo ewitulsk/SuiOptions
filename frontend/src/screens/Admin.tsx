@@ -206,6 +206,7 @@ export function Admin() {
                                   bucketId: bucket.bucket_id,
                                   underlyingCoinType: series.asset_coin_type,
                                   settlementCoinType: series.settlement_coin_type,
+                                  callCoinType: bucket.call_coin_type,
                                   reason,
                                 }),
                               "bucket invalidated",
@@ -228,6 +229,7 @@ export function Admin() {
                                   bucketId: bucket.bucket_id,
                                   underlyingCoinType: series.asset_coin_type,
                                   settlementCoinType: series.settlement_coin_type,
+                                  callCoinType: bucket.call_coin_type,
                                   reason,
                                 }),
                               "bucket revalidated",
@@ -251,6 +253,7 @@ export function Admin() {
                                   bucketId: bucket.bucket_id,
                                   underlyingCoinType: series.asset_coin_type,
                                   settlementCoinType: series.settlement_coin_type,
+                                  callCoinType: bucket.call_coin_type,
                                 }),
                               "bucket cleaned up",
                             )

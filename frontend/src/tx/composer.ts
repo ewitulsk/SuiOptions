@@ -1,7 +1,7 @@
 // Programmable Transaction Block builder for the Earn (writer) composer.
 //
 // Shape mirrors the Move signature in `contracts/sources/bucket.move`:
-//   bucket::execute_write<U, S>(bucket, config, treasury, signer_account,
+//   bucket::execute_write<U, S, Call>(bucket, config, treasury, signer_account,
 //     underlying_in, premium_in, flow, position_recipient,
 //     call_token_recipient, signed_quote, clock, ctx)
 //
@@ -42,6 +42,8 @@ export type WriteParams = {
   underlyingCoinType: string;
   /** `series.settlement_coin_type` — the `Settlement` type arg. */
   settlementCoinType: string;
+  /** The bucket's per-bucket option coin type (`Call` type arg). */
+  callCoinType: string;
   /** Connected wallet; receives the Position NFT and net premium. */
   writer: string;
 };
@@ -103,7 +105,7 @@ export function buildWriteTx(p: WriteParams): Transaction {
 
   tx.moveCall({
     target: `${pkg}::bucket::execute_write`,
-    typeArguments: [p.underlyingCoinType, p.settlementCoinType],
+    typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.callCoinType],
     arguments: [
       tx.object(q.bucket_id),
       tx.object(PROTOCOL_CONFIG_ID),
