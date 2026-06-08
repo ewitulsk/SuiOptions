@@ -24,6 +24,12 @@ export type Bucket = {
   bucket_id: string;
   strike: number | null;
   strike_raw: string;
+  /**
+   * Fully-qualified type of this bucket's fungible option coin
+   * (`Coin<call_coin_type>`). Used as the `Call` type arg when exercising
+   * and to match the wallet's owned option coins back to their bucket.
+   */
+  call_coin_type: string;
   /** On-chain `strike_scale`. Real ratio = `strike_raw / 10^strike_scale`. */
   strike_scale: number;
   total_written: number | null;
@@ -122,7 +128,6 @@ export async function fetchPositions(wallet: string): Promise<Position[]> {
  * `api-service::handlers::call_token_lots::LotDto`.
  */
 export type CallTokenLot = {
-  call_option_id: string;
   bucket_id: string;
   asset_symbol: string;
   asset_decimals: number | null;

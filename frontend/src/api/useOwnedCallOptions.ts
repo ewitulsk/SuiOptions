@@ -1,70 +1,72 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSuiClient } from "@mysten/dapp-kit";
+import { normalizeStructTag } from "@mysten/sui/utils";
 
-import { PACKAGE_ID } from "../config";
+import type { Series } from "./client";
 
 /**
- * One `CallOption` object held by the user's wallet. The object id is
- * what gets passed into `bucket::exercise`; `bucket_id` joins this back
- * to a bucket from `/buckets`; `amount` is the raw `u64` underlying
- * smallest-units the call covers.
+ * One bucket's worth of option coins held by the wallet. The option is a
+ * per-bucket fungible `Coin<Call>`, so a holding is identified by its coin
+ * type (1:1 with a bucket) and an aggregate balance — not a per-object id.
  *
- * `CallOption` is a Sui Move owned object (not a `Coin<T>`); the wallet
- * is the source of truth for current holdings. Provenance (who you
- * bought it from, what you paid) comes from `useCallTokenLots`.
+ * - `coin_type` — the `Call` type arg for `bucket::exercise`; also what
+ *   `coinWithBalance` selects/splits from to pay into a PTB.
+ * - `bucket_id` — joins back to a bucket from `/buckets`.
+ * - `amount_raw` — total balance across all the wallet's coin objects of this
+ *   type, in underlying smallest-units.
  */
 export type OwnedCallOption = {
-  object_id: string;
+  coin_type: string;
   bucket_id: string;
   amount_raw: string;
 };
 
 /**
- * Lists `CallOption` objects the wallet currently holds.
+ * Lists the wallet's option-coin holdings, mapped back to their buckets.
  *
- * Requires a deployment for the selected environment — the struct-type
- * filter we pass to `suix_getOwnedObjects` is
- * `{package}::call_option::CallOption`, which is package-id-prefixed.
- * Returns an empty array when either `wallet` is null or no package id is
- * configured (so screens render their "no calls owned" empty state
- * instead of crashing).
+ * Option coins live in per-roll-published packages, so there's no single
+ * struct-type filter to query. Instead we read every coin balance the wallet
+ * holds (`getAllBalances`) and keep the ones whose type matches a known
+ * bucket's `call_coin_type` (from `/buckets`). Returns an empty array until
+ * both a wallet and at least one bucket coin type are known.
  */
-export function useOwnedCallOptions(wallet: string | null) {
+export function useOwnedCallOptions(
+  wallet: string | null,
+  series: Series[] | undefined,
+) {
   const client = useSuiClient();
+
+  // Normalized option coin type -> bucket id.
+  const callTypeToBucket = new Map<string, string>();
+  for (const s of series ?? []) {
+    for (const b of s.buckets) {
+      if (b.call_coin_type) {
+        callTypeToBucket.set(normalizeStructTag(b.call_coin_type), b.bucket_id);
+      }
+    }
+  }
+  // Stable key so the query refetches when the known coin-type set changes.
+  const typesKey = Array.from(callTypeToBucket.keys()).sort().join(",");
+
   return useQuery<OwnedCallOption[], Error>({
-    queryKey: ["owned-call-options", wallet, PACKAGE_ID],
-    enabled: wallet !== null && !!PACKAGE_ID,
+    queryKey: ["owned-call-options", wallet, typesKey],
+    enabled: wallet !== null && callTypeToBucket.size > 0,
     refetchInterval: 5_000,
     queryFn: async () => {
-      if (!wallet || !PACKAGE_ID) return [];
-      const structType = `${PACKAGE_ID}::call_option::CallOption`;
-      const result: OwnedCallOption[] = [];
-      let cursor: string | null | undefined = undefined;
-      // Paginate; in practice users hold a handful of CallOption objects
-      // but the SDK enforces a page cap so we still iterate.
-      do {
-        const page = await client.getOwnedObjects({
-          owner: wallet,
-          filter: { StructType: structType },
-          options: { showContent: true, showType: true },
-          cursor,
+      if (!wallet) return [];
+      const balances = await client.getAllBalances({ owner: wallet });
+      const out: OwnedCallOption[] = [];
+      for (const bal of balances) {
+        const bucket_id = callTypeToBucket.get(normalizeStructTag(bal.coinType));
+        if (!bucket_id) continue;
+        if (BigInt(bal.totalBalance) <= 0n) continue;
+        out.push({
+          coin_type: bal.coinType,
+          bucket_id,
+          amount_raw: bal.totalBalance,
         });
-        for (const item of page.data) {
-          const data = item.data;
-          if (!data || !data.content || data.content.dataType !== "moveObject")
-            continue;
-          const fields = (data.content as unknown as {
-            fields: { bucket_id: string; amount: string };
-          }).fields;
-          result.push({
-            object_id: data.objectId,
-            bucket_id: fields.bucket_id,
-            amount_raw: fields.amount,
-          });
-        }
-        cursor = page.hasNextPage ? page.nextCursor : undefined;
-      } while (cursor);
-      return result;
+      }
+      return out;
     },
   });
 }

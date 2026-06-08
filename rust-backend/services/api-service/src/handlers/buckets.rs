@@ -76,6 +76,10 @@ pub struct BucketDto {
     pub strike: Option<f64>,
     /// Raw on-chain u128 strike. Real ratio = `strike_raw / 10^strike_scale`.
     pub strike_raw: String,
+    /// Fully-qualified type of this bucket's fungible option coin
+    /// (`Coin<call_coin_type>`). The frontend uses it as the `Call` type arg
+    /// when exercising, and to match the user's owned option coins to buckets.
+    pub call_coin_type: String,
     /// On-chain `strike_scale` (0..=9). Exposed so frontends can recompute
     /// the USD strike independently if they want.
     pub strike_scale: u8,
@@ -146,6 +150,7 @@ fn into_local_bucket(b: indexer_graphql::Bucket) -> (protocol_types::ids::Object
         Bucket {
             asset_type: b.asset_type,
             settlement_type: b.settlement_type,
+            call_type: b.call_type,
             strike: b.strike,
             strike_scale: b.strike_scale,
             expiry_ms: b.expiry_ms,
@@ -238,6 +243,7 @@ fn dto_from(
         bucket_id,
         strike,
         strike_raw: b.strike.to_string(),
+        call_coin_type: protocol_types::asset::canonicalize_move_type(b.call_type.as_str()),
         strike_scale: b.strike_scale,
         total_written,
         total_written_raw: b.total_written.to_string(),
@@ -297,6 +303,7 @@ mod tests {
         Bucket {
             asset_type: AssetType::new("0xpkg::tbtc::TBTC"),
             settlement_type: AssetType::new("0xpkg::tusdc::TUSDC"),
+            call_type: AssetType::new("0xpkg::call_0::CALL_0"),
             strike,
             strike_scale,
             expiry_ms: 1_782_345_600_000,
@@ -370,6 +377,7 @@ mod tests {
         let b = Bucket {
             asset_type: AssetType::new("0xpkg::deep::DEEP"),
             settlement_type: AssetType::new("0xpkg::tusdc::TUSDC"),
+            call_type: AssetType::new("0xpkg::call_0::CALL_0"),
             strike: 150,
             strike_scale: 0,
             expiry_ms: 1_782_345_600_000,
@@ -396,6 +404,7 @@ mod tests {
         let b = Bucket {
             asset_type: AssetType::new("0xpkg::tdeep::TDEEP"),
             settlement_type: AssetType::new("0xpkg::tusdc::TUSDC"),
+            call_type: AssetType::new("0xpkg::call_0::CALL_0"),
             strike: 15_000,
             strike_scale: 5,
             expiry_ms: 1_782_345_600_000,
@@ -432,6 +441,7 @@ mod tests {
         let b = Bucket {
             asset_type: AssetType::new(format!("{raw}::tbtc::TBTC")),
             settlement_type: AssetType::new(format!("{raw}::tusdc::TUSDC")),
+            call_type: AssetType::new(format!("{raw}::call_0::CALL_0")),
             strike: 850,
             strike_scale: 0,
             expiry_ms: 1_782_345_600_000,

@@ -204,6 +204,7 @@ fn bucket_json(id: &str, b: &indexer::BucketState) -> serde_json::Value {
         "bucketId": id,
         "assetType": b.asset_type.as_str(),
         "settlementType": b.settlement_type.as_str(),
+        "callType": b.call_type.as_str(),
         "strikeRaw": b.strike.to_string(),
         "strikeScale": b.strike_scale as i64,
         "expiryMs": b.expiry_ms.to_string(),

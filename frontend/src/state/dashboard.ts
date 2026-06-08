@@ -155,7 +155,6 @@ function degradedPosition(
 
 function buildOwnedRow(
   obj: OwnedCallOption,
-  lotByCallId: Map<string, CallTokenLot>,
   lotsByBucket: Map<string, CallTokenLot[]>,
   bucketIdx: Map<string, { series: Series; bucket: Series["buckets"][number] }>,
   spot: number,
@@ -165,13 +164,10 @@ function buildOwnedRow(
   if (!bucketInfo) return null;
   const { series } = bucketInfo;
 
-  // Provenance: prefer the exact lot when ids match. Fall back to a
-  // bucket-aggregate (most recent lot) when the user split a call object
-  // — the split child's id doesn't appear in any WriteExecuted.
-  const directLot = lotByCallId.get(obj.object_id);
+  // Provenance: option coins are fungible (no per-object id), so we attribute
+  // at the bucket level — the most recent WriteExecuted lot for this bucket.
   const bucketLots = lotsByBucket.get(obj.bucket_id) ?? [];
-  const aggregateLot = bucketLots.length > 0 ? bucketLots[0] : null;
-  const provenance = directLot ?? aggregateLot;
+  const provenance = bucketLots.length > 0 ? bucketLots[0] : null;
 
   const amount = scaleU64(obj.amount_raw, series.asset_decimals);
   const strike = series.buckets.find((b) => b.bucket_id === obj.bucket_id)?.strike ?? 0;
@@ -199,7 +195,7 @@ function buildOwnedRow(
       : "active_otm";
 
   return {
-    id: obj.object_id,
+    id: obj.coin_type,
     side: "owned",
     asset: displayAsset(series.asset_symbol),
     strike,
@@ -208,7 +204,7 @@ function buildOwnedRow(
     premiumPaid,
     boughtFrom: provenance ? shortAccount(provenance.seller_account_id) : "—",
     boughtAt: provenance ? isoDate(provenance.timestamp_ms) : "",
-    rangeId: shortAccount(obj.object_id),
+    rangeId: shortAccount(obj.bucket_id),
     spot,
     dte,
     itm,
@@ -309,8 +305,10 @@ export function useDashboardState(): DashboardState {
   // Written positions: the wallet is the authoritative list (transfer-correct,
   // no projection snapshot bound), enriched by object id via api-service.
   const ownedPositions = useOwnedPositions(wallet);
-  const owned = useOwnedCallOptions(wallet);
   const buckets = useBuckets();
+  // Option coins live in per-roll packages; the bucket list supplies the
+  // coin-type→bucket mapping the owned-call query needs.
+  const owned = useOwnedCallOptions(wallet, buckets.data);
 
   const positionIds = useMemo(
     () => (ownedPositions.data ?? []).map((p) => p.object_id).sort(),
@@ -349,10 +347,9 @@ export function useDashboardState(): DashboardState {
   const ownedRows = useMemo<OwnedPosition[]>(() => {
     const ownedObjs = owned.data ?? [];
     const bucketIdx = indexBucketSeries(buckets.data);
-    // SO-97: CallOption provenance (boughtFrom / premiumPaid) is dropped for
-    // now — splits make object-id provenance unreliable. Pass empty lot maps
-    // so the row renders "—" rather than a fabricated source.
-    const noLotByCallId = new Map<string, CallTokenLot>();
+    // Provenance (boughtFrom / premiumPaid) is bucket-level only now that the
+    // option is a fungible coin. Pass an empty lot map so the row renders "—"
+    // rather than a fabricated source.
     const noLotsByBucket = new Map<string, CallTokenLot[]>();
 
     return ownedObjs
@@ -360,7 +357,7 @@ export function useDashboardState(): DashboardState {
         const series = bucketIdx.get(o.bucket_id)?.series;
         const symbol = displayAsset(series?.asset_symbol ?? "");
         const spot = spots[symbol] ?? 0;
-        return buildOwnedRow(o, noLotByCallId, noLotsByBucket, bucketIdx, spot, now);
+        return buildOwnedRow(o, noLotsByBucket, bucketIdx, spot, now);
       })
       .filter((r): r is OwnedPosition => r !== null);
   }, [owned.data, buckets.data, spots, now]);
@@ -438,7 +435,7 @@ export function useDashboardState(): DashboardState {
     try {
       if (captured.kind === "exercise") {
         const { position: p, qty } = captured;
-        const ownedObj = (owned.data ?? []).find((o) => o.object_id === p.id);
+        const ownedObj = (owned.data ?? []).find((o) => o.coin_type === p.id);
         const bucketInfo = (buckets.data ?? [])
           .flatMap((s) => s.buckets.map((b) => ({ series: s, b })))
           .find((x) => x.b.bucket_id === ownedObj?.bucket_id);
@@ -447,7 +444,6 @@ export function useDashboardState(): DashboardState {
         }
         const { series, b: bucket } = bucketInfo;
         const assetDec = series.asset_decimals ?? 0;
-        const fullAmountRaw = BigInt(ownedObj.amount_raw);
         const exerciseAmountRaw = BigInt(
           Math.round(qty * 10 ** assetDec).toString(),
         );
@@ -461,8 +457,7 @@ export function useDashboardState(): DashboardState {
 
         const tx = buildExerciseTx({
           bucketId: ownedObj.bucket_id,
-          callOptionId: ownedObj.object_id,
-          fullAmountRaw,
+          callCoinType: ownedObj.coin_type,
           exerciseAmountRaw,
           settlementAmountRaw,
           underlyingCoinType: series.asset_coin_type,
@@ -486,6 +481,7 @@ export function useDashboardState(): DashboardState {
         const tx = buildRedeemTx({
           bucketId: matchPos.bucket_id,
           positionObjectId: matchPos.object_id,
+          callCoinType: bucketInfo.b.call_coin_type,
           underlyingCoinType: bucketInfo.series.asset_coin_type,
           settlementCoinType: bucketInfo.series.settlement_coin_type,
           recipient: wallet,

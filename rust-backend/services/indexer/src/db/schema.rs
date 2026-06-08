@@ -46,6 +46,7 @@ diesel::table! {
         bucket_id       -> Text,
         asset_type      -> Text,
         settlement_type -> Text,
+        call_type       -> Text,
         strike          -> Numeric,
         strike_scale    -> Int2,
         expiry_ms       -> Int8,

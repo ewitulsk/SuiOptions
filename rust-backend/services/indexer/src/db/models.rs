@@ -129,6 +129,7 @@ pub struct BucketRow {
     pub bucket_id: String,
     pub asset_type: String,
     pub settlement_type: String,
+    pub call_type: String,
     pub strike: BigDecimal,
     pub strike_scale: i16,
     pub expiry_ms: i64,
@@ -171,6 +172,7 @@ impl BucketRow {
             BucketState {
                 asset_type: AssetType::new(self.asset_type),
                 settlement_type: AssetType::new(self.settlement_type),
+                call_type: AssetType::new(self.call_type),
                 strike: bigdecimal_to_u128(&self.strike)?,
                 strike_scale: u8::try_from(self.strike_scale).map_err(|_| {
                     anyhow::anyhow!("strike_scale out of u8 range: {}", self.strike_scale)

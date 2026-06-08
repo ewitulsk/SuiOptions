@@ -1,9 +1,12 @@
 // Programmable Transaction Block builders for dashboard actions.
 //
 // Shapes mirror the Move signatures in `contracts/sources/bucket.move`:
-//   - bucket::exercise<U, S>(bucket, call, settlement_payment, clock, ctx)
-//   - bucket::redeem_position<U, S>(bucket, position, clock, ctx)
+//   - bucket::exercise<U, S, Call>(bucket, call_coin, settlement_payment, clock, ctx)
+//   - bucket::redeem_position<U, S, Call>(bucket, position, clock, ctx)
 //
+// The option is a per-bucket fungible `Coin<Call>`, so `exercise` takes a coin
+// (selected/split via `coinWithBalance`) rather than a `CallOption` object id,
+// and every call carries the bucket's `Call` type as the third type arg.
 // Both rely on the dapp-kit `SuiClient` to resolve shared-object metadata
 // (initial_shared_version, mutability) so callers just pass object ids.
 
@@ -24,10 +27,9 @@ function requirePackage(): string {
 
 export type ExerciseParams = {
   bucketId: string;
-  callOptionId: string;
-  /** Total amount inside the `CallOption` object, in underlying smallest units. */
-  fullAmountRaw: bigint;
-  /** Amount to exercise, in underlying smallest units. `≤ fullAmountRaw`. */
+  /** The bucket's per-bucket option coin type (`Call` type arg). */
+  callCoinType: string;
+  /** Amount to exercise, in underlying smallest units (== option coin units). */
   exerciseAmountRaw: bigint;
   /** Settlement to pay, in settlement-asset smallest units. `= amount * strike` per §3.3.5. */
   settlementAmountRaw: bigint;
@@ -38,27 +40,25 @@ export type ExerciseParams = {
 };
 
 /**
- * Build a PTB that exercises `exerciseAmountRaw` of a `CallOption`.
+ * Build a PTB that exercises `exerciseAmountRaw` of the bucket's option coin.
  *
- * If the user wants to exercise less than the whole object, we split first
- * via `call_option::split` and pass the carved child into `exercise`. The
- * remainder stays in the user's wallet as the original object (now with
- * reduced `amount`).
+ * `coinWithBalance` selects/splits exactly `exerciseAmountRaw` of the option
+ * coin (`Coin<Call>`) from the user's holdings — partial exercise needs no
+ * special-casing — and the same helper pulls the settlement payment.
  */
 export function buildExerciseTx(p: ExerciseParams): Transaction {
   const pkg = requirePackage();
   const tx = new Transaction();
 
-  const partial = p.exerciseAmountRaw < p.fullAmountRaw;
-  const callArg = partial
-    ? tx.moveCall({
-        target: `${pkg}::call_option::split`,
-        arguments: [tx.object(p.callOptionId), tx.pure.u64(p.exerciseAmountRaw)],
-      })
-    : tx.object(p.callOptionId);
+  // Exact option coin to burn, selected/split from the user's holdings.
+  const callCoin = tx.add(
+    coinWithBalance({
+      balance: p.exerciseAmountRaw,
+      type: p.callCoinType,
+    }),
+  );
 
-  // Pull the exact settlement Coin out of the user's USDC holdings.
-  // `coinWithBalance` handles merging/splitting across multiple coin objects.
+  // Exact settlement Coin out of the user's holdings.
   const settlement = tx.add(
     coinWithBalance({
       balance: p.settlementAmountRaw,
@@ -68,10 +68,10 @@ export function buildExerciseTx(p: ExerciseParams): Transaction {
 
   const underlying = tx.moveCall({
     target: `${pkg}::bucket::exercise`,
-    typeArguments: [p.underlyingCoinType, p.settlementCoinType],
+    typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.callCoinType],
     arguments: [
       tx.object(p.bucketId),
-      callArg,
+      callCoin,
       settlement,
       tx.object(SUI_CLOCK_OBJECT_ID),
     ],
@@ -84,6 +84,8 @@ export function buildExerciseTx(p: ExerciseParams): Transaction {
 export type RedeemParams = {
   bucketId: string;
   positionObjectId: string;
+  /** The bucket's per-bucket option coin type (`Call` type arg). */
+  callCoinType: string;
   underlyingCoinType: string;
   settlementCoinType: string;
   recipient: string;
@@ -99,7 +101,7 @@ export function buildRedeemTx(p: RedeemParams): Transaction {
 
   const [underlying, settlement] = tx.moveCall({
     target: `${pkg}::bucket::redeem_position`,
-    typeArguments: [p.underlyingCoinType, p.settlementCoinType],
+    typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.callCoinType],
     arguments: [
       tx.object(p.bucketId),
       tx.object(p.positionObjectId),
