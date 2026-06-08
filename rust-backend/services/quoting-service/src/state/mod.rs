@@ -31,11 +31,24 @@ pub use reputation::{ReputationStats, ReputationStore};
 pub use reservations::{InsertOutcome, Reservation, ReservationTable};
 
 /// Routed MM response — populated by the MM read task, drained by the RFQ
-/// orchestrator's matcher.
+/// orchestrator's matcher (or the bulk-view collector).
 #[derive(Debug)]
 pub enum MmResponse {
     Quote(ObjectId, protocol_types::messages::MmQuotePayload),
     Decline(ObjectId),
+    /// Unsigned indicative premiums for a bulk-view RFQ. Routed through the
+    /// same `pending_rfqs` channel keyed by request_id.
+    BulkView(ObjectId, protocol_types::messages::BulkViewQuotePayload),
+}
+
+/// One cached bulk-view premium for a `(bucket_id, write_amount)` pair.
+#[derive(Clone, Copy, Debug)]
+pub struct BulkViewCacheEntry {
+    /// Mean of responding MMs' premiums, settlement smallest-units.
+    pub premium: u64,
+    pub mm_count: u32,
+    /// When this value was fetched (unix ms). Drives TTL/staleness.
+    pub cached_at_ms: u64,
 }
 
 /// One-line observation of a retail `RFQRequest` arriving at the service.
@@ -64,6 +77,15 @@ pub struct AppState {
     /// removed when the RFQ completes. The MM read task looks up its
     /// `Quote`/`Decline` response's `request_id` here to route it.
     pub pending_rfqs: DashMap<String, mpsc::Sender<MmResponse>>,
+    /// Cached bulk-view premiums keyed by `(bucket_id, write_amount)`. Served
+    /// stale-while-revalidate: a hit older than the TTL is returned
+    /// immediately while a background refresh re-broadcasts to MMs.
+    pub bulk_view_cache: DashMap<(ObjectId, u64), BulkViewCacheEntry>,
+    /// In-flight bulk-view refreshes, keyed the same as the cache. Presence
+    /// means some task is already re-broadcasting that key, so others skip it
+    /// (single-flight — "only send to MMs if a new request came in AND no
+    /// refresh is already running").
+    bulk_view_refreshing: DashMap<(ObjectId, u64), ()>,
     /// Global cap on concurrent RFQ orchestrations across all retail
     /// connections. Acquired by `retail.rs` with `try_acquire_owned`;
     /// a saturated permit count means we reject the RFQ with
@@ -85,9 +107,23 @@ impl AppState {
             indexer: IndexerClient::new(indexer_graphql_url),
             reconcile_cursors: DashMap::new(),
             pending_rfqs: DashMap::new(),
+            bulk_view_cache: DashMap::new(),
+            bulk_view_refreshing: DashMap::new(),
             rfq_global_inflight: Arc::new(Semaphore::new(cap)),
             rfq_observers,
         }
+    }
+
+    /// Try to claim the single-flight refresh slot for a `(bucket, amount)`
+    /// key. Returns true if this caller now owns the refresh (must call
+    /// [`release_bulk_view_refresh`](Self::release_bulk_view_refresh) when
+    /// done); false if another task already holds it.
+    pub fn try_claim_bulk_view_refresh(&self, key: (ObjectId, u64)) -> bool {
+        self.bulk_view_refreshing.insert(key, ()).is_none()
+    }
+
+    pub fn release_bulk_view_refresh(&self, key: (ObjectId, u64)) {
+        self.bulk_view_refreshing.remove(&key);
     }
 
     /// Spendable balance for `(account, asset)`: the JIT-fetched on-chain

@@ -8,6 +8,7 @@ bind_addr            = "0.0.0.0:9002"
 indexer_graphql_url          = "http://indexer:9002/graphql"
 
 rfq_window_ms        = 2000
+bulk_view_cache_ttl_ms = 30000
 ping_interval_secs   = 15
 
 # token-info public API over the compose-internal network. The protocol_id

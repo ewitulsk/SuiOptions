@@ -72,6 +72,12 @@ pub async fn collect_with_deadline(
                     trace!(mm = %mm, "mm declined rfq");
                     out.declines.push(mm);
                 }
+                // Bulk-view responses are collected by `bulk_view.rs` on its
+                // own channel; one arriving here means a stray late frame on a
+                // reused request_id — ignore it.
+                MmResponse::BulkView(mm, _) => {
+                    trace!(mm = %mm, "ignoring bulk-view response on signed-rfq matcher");
+                }
             }
         }
     })

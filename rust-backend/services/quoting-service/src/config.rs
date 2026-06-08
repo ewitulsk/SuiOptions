@@ -25,6 +25,10 @@ pub struct Config {
     pub indexer_graphql_url: String,
     /// How long an `RFQRequest` collects quotes before responding.
     pub rfq_window: Duration,
+    /// How long a cached bulk-view premium stays fresh. A hit older than this
+    /// is still returned (stale-while-revalidate) but triggers a background
+    /// refresh to MMs. Spec default 30s.
+    pub bulk_view_cache_ttl: Duration,
     /// How often the service sends `Ping`s to keep the WS connection live.
     pub ping_interval: Duration,
     /// token-info public base URL. The protocol-id domain separator (the
@@ -55,6 +59,8 @@ struct FileConfig {
     bind_addr: SocketAddr,
     indexer_graphql_url: String,
     rfq_window_ms: u64,
+    #[serde(default = "default_bulk_view_cache_ttl_ms")]
+    bulk_view_cache_ttl_ms: u64,
     #[serde(default = "default_ping_interval_secs")]
     ping_interval_secs: u64,
     /// token-info public base URL. The protocol-id domain separator is
@@ -68,6 +74,10 @@ struct FileConfig {
 
 fn default_ping_interval_secs() -> u64 {
     15
+}
+
+fn default_bulk_view_cache_ttl_ms() -> u64 {
+    30_000
 }
 
 fn default_max_inflight_per_session() -> usize {
@@ -98,6 +108,7 @@ impl Config {
             bind_addr: file.bind_addr,
             indexer_graphql_url: file.indexer_graphql_url,
             rfq_window: Duration::from_millis(file.rfq_window_ms),
+            bulk_view_cache_ttl: Duration::from_millis(file.bulk_view_cache_ttl_ms),
             ping_interval: Duration::from_secs(file.ping_interval_secs),
             token_info_url: file.token_info_url,
             protocol_id,
@@ -139,6 +150,7 @@ token_info_url      = "http://127.0.0.1:9005"
         // Defaults apply when keys are missing.
         assert_eq!(file.max_inflight_rfqs_per_session, 16);
         assert_eq!(file.max_inflight_rfqs_global, 256);
+        assert_eq!(file.bulk_view_cache_ttl_ms, 30_000);
         std::fs::remove_file(&path).ok();
     }
 }

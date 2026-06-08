@@ -43,6 +43,27 @@ export type ErrorPayload = {
   message: string;
 };
 
+// -- bulk-view (indicative tile premiums) --
+
+/** One averaged indicative premium for a bucket. */
+export type BulkViewPremium = {
+  bucket_id: string;
+  /** u64 raw settlement smallest-units — mean of responding MMs. */
+  premium: string;
+  /** How many MMs contributed to the average. */
+  mm_count: number;
+  /** Served from a past-TTL cache entry (a refresh is running in the background). */
+  stale: boolean;
+  /** u64 ms since the cached value was fetched. */
+  cache_age_ms: string;
+};
+
+export type BulkViewResponsePayload = {
+  write_amount: string;
+  /** One entry per bucket that had a value; buckets no MM priced are omitted. */
+  premiums: BulkViewPremium[];
+};
+
 // -- inbound (service → retail) --
 
 export type ServiceToRetail =
@@ -57,6 +78,11 @@ export type ServiceToRetail =
       };
     }
   | { type: "RFQResponse"; request_id: string; payload: RfqResponsePayload }
+  | {
+      type: "BulkViewRFQResponse";
+      request_id: string;
+      payload: BulkViewResponsePayload;
+    }
   | { type: "Error"; request_id?: string | null; payload: ErrorPayload }
   | { type: "Ping" };
 
@@ -69,5 +95,10 @@ export type RetailToService =
       type: "RFQRequest";
       request_id: string;
       payload: { bucket_id: string; write_amount: string; side: Side };
+    }
+  | {
+      type: "BulkViewRFQRequest";
+      request_id: string;
+      payload: { bucket_ids: string[]; write_amount: string; side: Side };
     }
   | { type: "Pong" };

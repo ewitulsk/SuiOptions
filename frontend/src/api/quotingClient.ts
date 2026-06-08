@@ -8,6 +8,7 @@
 // — keep this file's frame shapes (in `./quoting.ts`) in sync.
 
 import type {
+  BulkViewPremium,
   RetailRole,
   RetailToService,
   RfqQuoteEntry,
@@ -30,6 +31,12 @@ type Pending = {
   timer: ReturnType<typeof setTimeout>;
 };
 
+type PendingBulk = {
+  resolve: (premiums: BulkViewPremium[]) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
 class QuotingClient {
   private ws: WebSocket | null = null;
   /** In-flight connect attempt; subsequent callers await the same promise. */
@@ -38,6 +45,7 @@ class QuotingClient {
   /** Sent in the Hello payload — informational on the server side, doesn't change RFQ routing. */
   private role: RetailRole = "writer";
   private pending = new Map<string, Pending>();
+  private pendingBulk = new Map<string, PendingBulk>();
   private reconnectAttempt = 0;
   private explicitClose = false;
 
@@ -73,6 +81,51 @@ class QuotingClient {
       } catch (e) {
         clearTimeout(timer);
         this.pending.delete(requestId);
+        reject(e instanceof Error ? e : new Error(String(e)));
+      }
+    });
+  }
+
+  /**
+   * Request indicative (unsigned) premiums for many buckets at one write
+   * amount — drives the tile display. Resolves with one entry per bucket the
+   * service had a value for (omitting buckets no MM priced). Never reserves
+   * MM balance or produces a signable quote.
+   */
+  async sendBulkView(args: {
+    bucketIds: string[];
+    writeAmount: string;
+    side: Side;
+    requestId?: string;
+  }): Promise<BulkViewPremium[]> {
+    await this.ensureConnected();
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new Error("quoting ws not open after connect");
+    }
+    const requestId = args.requestId ?? crypto.randomUUID();
+    const frame: RetailToService = {
+      type: "BulkViewRFQRequest",
+      request_id: requestId,
+      payload: {
+        bucket_ids: args.bucketIds,
+        write_amount: args.writeAmount,
+        side: args.side,
+      },
+    };
+    return new Promise<BulkViewPremium[]>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingBulk.delete(requestId);
+        reject(
+          new Error(`bulk-view ${requestId} timed out after ${RFQ_TIMEOUT_MS}ms`),
+        );
+      }, RFQ_TIMEOUT_MS);
+      this.pendingBulk.set(requestId, { resolve, reject, timer });
+      try {
+        ws.send(JSON.stringify(frame));
+      } catch (e) {
+        clearTimeout(timer);
+        this.pendingBulk.delete(requestId);
         reject(e instanceof Error ? e : new Error(String(e)));
       }
     });
@@ -143,6 +196,12 @@ class QuotingClient {
           );
         }
         this.pending.clear();
+        for (const [, p] of this.pendingBulk) {
+          clearTimeout(p.timer);
+          // Display-only; resolve empty so the tiles keep their placeholder.
+          p.resolve([]);
+        }
+        this.pendingBulk.clear();
         if (!settled) {
           settled = true;
           reject(new Error("quoting ws closed before HelloAck"));
@@ -192,6 +251,14 @@ class QuotingClient {
       p.resolve(msg.payload.quotes);
       return;
     }
+    if (msg.type === "BulkViewRFQResponse") {
+      const p = this.pendingBulk.get(msg.request_id);
+      if (!p) return;
+      clearTimeout(p.timer);
+      this.pendingBulk.delete(msg.request_id);
+      p.resolve(msg.payload.premiums);
+      return;
+    }
     if (msg.type === "Error") {
       const rid = msg.request_id ?? null;
       if (rid) {
@@ -209,6 +276,15 @@ class QuotingClient {
               new Error(`${msg.payload.code}: ${msg.payload.message}`),
             );
           }
+          return;
+        }
+        const pb = this.pendingBulk.get(rid);
+        if (pb) {
+          clearTimeout(pb.timer);
+          this.pendingBulk.delete(rid);
+          // Bulk view is best-effort display; surface an error as "no
+          // premiums" so tiles fall back to the placeholder rather than throw.
+          pb.resolve([]);
           return;
         }
       }

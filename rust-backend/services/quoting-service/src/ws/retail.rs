@@ -27,8 +27,8 @@ use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, info, warn};
 
 use protocol_types::messages::{
-    BucketUpdatePayload, ErrorPayload, HelloAckPayload, RetailHelloPayload, RetailToService,
-    RfqResponsePayload, ServiceToRetail,
+    BucketUpdatePayload, BulkViewRfqResponsePayload, ErrorPayload, HelloAckPayload,
+    RetailHelloPayload, RetailToService, RfqResponsePayload, ServiceToRetail,
 };
 
 use crate::state::RfqObservation;
@@ -263,6 +263,71 @@ pub async fn handle(
                                 bucket_id: payload.bucket_id,
                                 write_amount: payload.write_amount,
                                 quotes,
+                            },
+                        })
+                        .await;
+                });
+            }
+            RetailToService::BulkViewRFQRequest { request_id, payload } => {
+                debug!(
+                    request_id = %request_id,
+                    ?payload.side,
+                    buckets = payload.bucket_ids.len(),
+                    write_amount = payload.write_amount,
+                    "retail bulk-view rfq request"
+                );
+                // Resolve each bucket JIT, dropping unknown/invalidated ones —
+                // a quote against those would never execute, so they shouldn't
+                // show an indicative premium either.
+                let mut buckets = Vec::with_capacity(payload.bucket_ids.len());
+                for id in &payload.bucket_ids {
+                    match state.indexer.bucket(*id).await {
+                        Ok(Some(b)) if !b.invalidated => buckets.push(b),
+                        Ok(_) => {}
+                        Err(e) => {
+                            debug!(request_id = %request_id, bucket = %id, error = %e, "bulk-view bucket lookup failed; skipping");
+                        }
+                    }
+                }
+                // Share the same inflight caps as signed RFQs. On saturation
+                // we just skip the bulk view (tiles keep their placeholder)
+                // rather than erroring — it's a non-critical display path.
+                let session_permit = match Arc::clone(&session_inflight).try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        debug!(session_id, request_id = %request_id, "session inflight cap hit; skipping bulk view");
+                        continue;
+                    }
+                };
+                let global_permit = match Arc::clone(&state.rfq_global_inflight).try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        debug!(request_id = %request_id, "global inflight cap hit; skipping bulk view");
+                        continue;
+                    }
+                };
+                let state = Arc::clone(&state);
+                let cfg = Arc::clone(&cfg);
+                let out_tx = out_tx.clone();
+                tokio::spawn(async move {
+                    let _session_permit = session_permit;
+                    let _global_permit = global_permit;
+                    let premiums = rfq::bulk_view::orchestrate_bulk_view(
+                        Arc::clone(&state),
+                        payload.side,
+                        buckets,
+                        payload.write_amount,
+                        cfg.rfq_window,
+                        cfg.bulk_view_cache_ttl,
+                        now_ms(),
+                    )
+                    .await;
+                    let _ = out_tx
+                        .send(ServiceToRetail::BulkViewRFQResponse {
+                            request_id,
+                            payload: BulkViewRfqResponsePayload {
+                                write_amount: payload.write_amount,
+                                premiums,
                             },
                         })
                         .await;

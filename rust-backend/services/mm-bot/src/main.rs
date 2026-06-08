@@ -35,7 +35,8 @@ use sui_types::base_types::ObjectID;
 
 use protocol_types::ids::{ObjectId as PtObjectId, SuiAddress as PtSuiAddress};
 use protocol_types::messages::{
-    AuthResponsePayload, MmHelloPayload, MmQuotePayload, MmToService, ServiceToMm,
+    AuthResponsePayload, BulkViewMmPremium, BulkViewQuotePayload, MmHelloPayload, MmQuotePayload,
+    MmToService, RfqBroadcastPayload, ServiceToMm,
 };
 use protocol_types::quote::Quote;
 use protocol_types::sides::MmRole;
@@ -95,6 +96,12 @@ struct BotConfig {
 
     /// Roles advertised to the quoting service.
     roles: Vec<MmRole>,
+
+    /// Opt in to answering unsigned bulk-view RFQs (indicative premiums for
+    /// the frontend's tiles). These are priced but never signed — no nonce is
+    /// consumed and nothing reaches the chain. Defaults to false.
+    #[serde(default)]
+    bulk_view_enabled: bool,
 
     /// Where minted call tokens / position NFTs should land. Defaults to
     /// the bot's Sui address.
@@ -320,6 +327,7 @@ async fn main() -> Result<()> {
                 account_id: account_id_pt,
                 signing_scheme: signer.scheme(),
                 signing_pubkey: pubkey_bytes.clone(),
+                bulk_view: cfg.bulk_view_enabled,
             },
         };
         if let Err(e) = ws_client::send_json(&mut ws, &hello).await {
@@ -501,6 +509,77 @@ async fn main() -> Result<()> {
                                 break 'serve;
                             }
                         }
+                    }
+                }
+                ServiceToMm::BulkViewRFQBroadcast {
+                    request_id,
+                    payload,
+                } => {
+                    tracing::debug!(
+                        ?request_id,
+                        buckets = payload.buckets.len(),
+                        write_amount = payload.write_amount,
+                        "received bulk-view rfq broadcast"
+                    );
+                    let now = now_ms();
+                    // One spot/vol read for the whole batch.
+                    let premiums = match compute_spot_from_cache(
+                        &price_cache,
+                        underlying_feed,
+                        settlement_feed,
+                        underlying_decimals,
+                        settlement_decimals,
+                        staleness,
+                    ) {
+                        Ok(spot_scaled) => {
+                            let sigma = resolve_sigma(
+                                vol_buf.read().current_annualized(),
+                                cfg.pyth.fallback_vol,
+                            );
+                            let mut out = Vec::with_capacity(payload.buckets.len());
+                            for b in &payload.buckets {
+                                // Reuse the signed-RFQ pricer; we keep only the
+                                // premium — no Quote is built, no nonce burned,
+                                // nothing is signed.
+                                let synthetic = RfqBroadcastPayload {
+                                    bucket_id: b.bucket_id,
+                                    write_amount: payload.write_amount,
+                                    side: payload.side,
+                                    deadline_ms: payload.deadline_ms,
+                                    strike: b.strike,
+                                    strike_scale: b.strike_scale,
+                                    expiry_ms: b.expiry_ms,
+                                };
+                                if let PriceDecision::Quote { premium, .. } =
+                                    price_rfq(&pricing_cfg, &synthetic, spot_scaled, sigma, now)
+                                {
+                                    out.push(BulkViewMmPremium {
+                                        bucket_id: b.bucket_id,
+                                        premium,
+                                    });
+                                }
+                            }
+                            out
+                        }
+                        Err(e) => {
+                            // No signable quote either way — return an empty
+                            // batch rather than declining (bulk view has no
+                            // per-bucket decline).
+                            tracing::debug!(?request_id, reason = e.as_str(), "bulk-view: stale market data; returning empty");
+                            Vec::new()
+                        }
+                    };
+                    if let Err(e) = ws_client::send_json(
+                        &mut ws,
+                        &MmToService::BulkViewQuote {
+                            request_id,
+                            payload: BulkViewQuotePayload { premiums },
+                        },
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %e, "ws send (bulk-view quote) failed; reconnecting");
+                        break 'serve;
                     }
                 }
                 ServiceToMm::Ping => {

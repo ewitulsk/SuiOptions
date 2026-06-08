@@ -145,6 +145,7 @@ pub async fn handle(
     let conn = MmConnection {
         account_id: hello.account_id,
         roles: Arc::new(RwLock::new(hello.roles.clone())),
+        bulk_view: hello.bulk_view,
         tx: out_tx,
     };
     state.mms.insert(conn);
@@ -211,6 +212,20 @@ pub async fn handle(
                         .map(|e| e.value().clone());
                     if let Some(tx) = tx {
                         let _ = tx.send(MmResponse::Decline(account_id)).await;
+                    }
+                }
+                MmToService::BulkViewQuote { request_id, payload } => {
+                    trace!(mm = %account_id, request_id, premiums = payload.premiums.len(), "received bulk-view quote");
+                    // Clone the sender out before awaiting — same DashMap-Ref
+                    // discipline as the signed Quote path above.
+                    let tx = read_state
+                        .pending_rfqs
+                        .get(&request_id)
+                        .map(|e| e.value().clone());
+                    if let Some(tx) = tx {
+                        let _ = tx.send(MmResponse::BulkView(account_id, payload)).await;
+                    } else {
+                        debug!(request_id, "bulk-view quote arrived after rfq closed");
                     }
                 }
                 MmToService::Pong => {}

@@ -90,6 +90,7 @@ impl Harness {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             indexer_graphql_url: format!("http://{}/graphql", graphql_addr),
             rfq_window: Duration::from_millis(400),
+            bulk_view_cache_ttl: Duration::from_secs(30),
             ping_interval: Duration::from_secs(10),
             protocol_id: b"test-protocol".to_vec(),
             token_info_url: String::new(),
@@ -308,6 +309,7 @@ pub async fn connect_mm(
             account_id,
             signing_scheme: protocol_types::SigningScheme::Ed25519,
             signing_pubkey: sk.verifying_key().to_bytes().to_vec(),
+            bulk_view: false,
         },
     };
     ws.send(Message::Text(serde_json::to_string(&hello)?)).await?;
