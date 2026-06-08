@@ -28,7 +28,7 @@ ENV="${1:?usage: render-secrets.sh <dev|staging|prod>}"
 case "$ENV" in
   dev)     NETWORK=devnet  ;;
   staging) NETWORK=testnet ;;
-  prod)    NETWORK=mainnet ;;
+  prod)    NETWORK=testnet ;;
   *) echo "unknown env: $ENV" >&2; exit 1 ;;
 esac
 
