@@ -19,6 +19,8 @@ use protocol_types::sides::MmRole;
 pub struct MmConnection {
     pub account_id: ObjectId,
     pub roles: Arc<RwLock<Vec<MmRole>>>,
+    /// Whether this MM opted in to unsigned bulk-view RFQs (Hello.bulk_view).
+    pub bulk_view: bool,
     pub tx: mpsc::Sender<ServiceToMm>,
 }
 
@@ -62,6 +64,18 @@ impl MmRegistry {
         conns
     }
 
+    /// MMs that serve `role` AND opted in to bulk-view RFQs. The bulk-view
+    /// orchestrator broadcasts only to these.
+    pub fn all_for_bulk_view(&self, role: MmRole) -> Vec<MmConnection> {
+        let conns: Vec<_> = self.by_account
+            .iter()
+            .filter(|e| e.value().serves(role) && e.value().bulk_view)
+            .map(|e| e.value().clone())
+            .collect();
+        debug!(?role, count = conns.len(), "queried bulk-view mms for role");
+        conns
+    }
+
     pub fn len(&self) -> usize {
         self.by_account.len()
     }
@@ -80,15 +94,20 @@ mod tests {
         r.insert(MmConnection {
             account_id: ObjectId::new([0x01; 32]),
             roles: Arc::new(RwLock::new(vec![MmRole::TraderMm])),
+            bulk_view: false,
             tx: tx_a,
         });
         r.insert(MmConnection {
             account_id: ObjectId::new([0x02; 32]),
             roles: Arc::new(RwLock::new(vec![MmRole::WriterMm, MmRole::TraderMm])),
+            bulk_view: true,
             tx: tx_b,
         });
 
         assert_eq!(r.all_for_role(MmRole::TraderMm).len(), 2);
         assert_eq!(r.all_for_role(MmRole::WriterMm).len(), 1);
+        // Only the second MM opted in to bulk-view.
+        assert_eq!(r.all_for_bulk_view(MmRole::TraderMm).len(), 1);
+        assert_eq!(r.all_for_bulk_view(MmRole::WriterMm).len(), 1);
     }
 }

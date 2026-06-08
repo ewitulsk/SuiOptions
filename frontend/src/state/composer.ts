@@ -14,6 +14,7 @@ import { useBuckets } from "../api/useBuckets";
 import { useCoinBalance } from "../api/useCoinBalance";
 import { usePythPrice } from "../api/usePythPrice";
 import { useRfq } from "../api/useRfq";
+import { useBulkView } from "../api/useBulkView";
 import { buildWriteTx } from "../tx/composer";
 import type { Series } from "../api/client";
 import type { RfqQuoteEntry, Side as ProtocolSide } from "../api/quoting";
@@ -49,6 +50,14 @@ function shortenId(id: string): string {
 function scaleRaw(raw: string, decimals: number | null): number {
   if (decimals === null) return Number(raw);
   return Number(raw) / 10 ** decimals;
+}
+
+/** Format a tile's indicative premium (display-scaled settlement units). */
+function formatPremium(v: number): string {
+  if (!Number.isFinite(v)) return "—";
+  if (v >= 1) return v.toFixed(2);
+  if (v > 0) return v.toFixed(4);
+  return "0";
 }
 
 /**
@@ -245,27 +254,57 @@ export function useComposerState({
   const usdcBalance = scaleRaw(settlementBal.data ?? "0", series?.settlement_decimals ?? null);
 
   const settlementSymbol = series?.settlement_symbol ?? "USDC";
-  const liveStrikes: number[] = useMemo(
-    () =>
-      (series?.buckets ?? [])
-        .map((b) => b.strike)
-        .filter((s): s is number => s !== null),
+
+  // Buckets in the selected series with a known strike — the tile axis. Strike
+  // order is the api-service's (ascending); tiles, premiums, and selection all
+  // index this list so duplicate display-strikes stay distinct.
+  const seriesBuckets = useMemo(
+    () => (series?.buckets ?? []).filter((b) => b.strike !== null),
     [series],
   );
 
-  // Per-tile premium isn't known until an MM quotes the (bucket, amount):
-  // the live premium comes from the RFQ feed (`bestPremium`), not a synthetic
-  // per-strike grid. Tiles show a placeholder until a quote arrives.
-  const strikes = useMemo<Strike[]>(
-    () =>
-      liveStrikes.map((strike) => ({
-        strike,
-        perUnit: 0,
-        premium: 0,
-        premiumDisplay: "—",
-      })),
-    [liveStrikes],
+  // Raw write amount (underlying smallest-units) for the current input. Drives
+  // both the signed RFQ and the bulk-view tile premiums; null disables them.
+  const writeAmountRaw: string | null = useMemo(() => {
+    const dec = series?.asset_decimals;
+    if (dec === null || dec === undefined) return null;
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+    // Convert display-units → raw smallest-units. Safe up to ~2^53 raw
+    // (Number's integer precision ceiling) — well above any realistic
+    // BTC/SUI/USDC amount the UI lets the user type.
+    return Math.round(amount * 10 ** dec).toString();
+  }, [series?.asset_decimals, amount]);
+
+  // Indicative per-tile premiums via the bulk-view RFQ: one request covering
+  // every strike at the current amount, averaged across opted-in MMs and
+  // cached server-side (stale-while-revalidate). Writer (Earn) side only.
+  const bulkBucketIds = useMemo(
+    () => seriesBuckets.map((b) => b.bucket_id),
+    [seriesBuckets],
   );
+  const { premiums: bulkPremiums } = useBulkView({
+    bucketIds: bulkBucketIds,
+    writeAmountRaw,
+    side: view,
+    enabled: view === "writer" && !bucketsQuery.isLoading,
+  });
+
+  // Tiles show the indicative premium once the bulk-view response arrives,
+  // scaled into settlement display units; placeholder until then.
+  const strikes = useMemo<Strike[]>(() => {
+    const scale =
+      series?.settlement_decimals != null ? 10 ** series.settlement_decimals : 1;
+    return seriesBuckets.map((b) => {
+      const entry = bulkPremiums.get(b.bucket_id);
+      const premium = entry ? Number(entry.premium) / scale : 0;
+      return {
+        strike: b.strike as number,
+        perUnit: 0,
+        premium,
+        premiumDisplay: entry ? formatPremium(premium) : "—",
+      };
+    });
+  }, [seriesBuckets, bulkPremiums, series?.settlement_decimals]);
 
   // Clamp selection when the strike list shrinks/grows underneath us
   // (e.g. first /buckets fetch resolves, or a new bucket appears).
@@ -292,22 +331,12 @@ export function useComposerState({
   // an amount, send an RFQRequest to the quoting service over WS. The
   // response — already sorted best-price-first for `view` — drives the
   // on-screen quote feed and the headline premium.
-  const selectedBucketId: string | null = useMemo(() => {
-    if (!series) return null;
-    return (
-      series.buckets.find((b) => b.strike === selected.strike)?.bucket_id ?? null
-    );
-  }, [series, selected.strike]);
-
-  const writeAmountRaw: string | null = useMemo(() => {
-    const dec = series?.asset_decimals;
-    if (dec === null || dec === undefined) return null;
-    if (!Number.isFinite(amount) || amount <= 0) return null;
-    // Convert display-units → raw smallest-units. Safe up to ~2^53 raw
-    // (Number's integer precision ceiling) — well above any realistic
-    // BTC/SUI/USDC amount the UI lets the user type.
-    return Math.round(amount * 10 ** dec).toString();
-  }, [series?.asset_decimals, amount]);
+  // Selection indexes `seriesBuckets` directly so two strikes that collide on
+  // display value still resolve to the right bucket_id.
+  const selectedBucketId: string | null = useMemo(
+    () => seriesBuckets[selectedIdx]?.bucket_id ?? null,
+    [seriesBuckets, selectedIdx],
+  );
 
   const rfqSide: ProtocolSide = view; // View ⊂ Side at the value level.
   const { quotes: rfqEntries, refresh: refreshRfq } = useRfq({

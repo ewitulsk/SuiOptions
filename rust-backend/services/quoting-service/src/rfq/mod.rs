@@ -12,6 +12,7 @@
 //! The validation/sort/reservation step is pure and testable without any WS.
 //! See [`validate_and_reserve`] / [`sort_best_first`].
 
+pub mod bulk_view;
 mod matcher;
 
 pub use matcher::{collect_with_deadline, MatcherInput, MatcherOutput};
@@ -576,6 +577,7 @@ mod tests {
         state.mms.insert(MmConnection {
             account_id: mm,
             roles: Arc::new(parking_lot::RwLock::new(vec![MmRole::TraderMm])),
+            bulk_view: false,
             tx,
         });
 

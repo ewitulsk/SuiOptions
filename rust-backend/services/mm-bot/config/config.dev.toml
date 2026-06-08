@@ -15,6 +15,7 @@ rate               = 0.05
 quote_ttl_ms       = 30_000
 
 roles = ["trader_mm", "writer_mm"]
+bulk_view_enabled = true
 
 bootstrap_settlement_amount = 1_000_000_000_000
 

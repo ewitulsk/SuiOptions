@@ -38,6 +38,11 @@ quote_ttl_ms       = 30_000
 # Both roles by default; a single Account can serve writer + trader.
 roles = ["trader_mm", "writer_mm"]
 
+# Answer unsigned bulk-view RFQs (indicative premiums for the frontend's
+# tiles). Priced with the same model as signed RFQs but never signed — no
+# nonce is consumed and nothing reaches the chain. Defaults to false.
+bulk_view_enabled = true
+
 # Settlement deposited into the freshly-bootstrapped Account on first run
 # so it can pay premiums right away (writer flow). In TUSDC smallest-units.
 bootstrap_settlement_amount = 1_000_000_000_000
