@@ -218,9 +218,12 @@ impl IndexerClient {
         account: ObjectId,
         after: u64,
     ) -> Result<Vec<(u64, u64)>> {
+        // The stored payload is the tagged `ChainEvent` envelope
+        // (`{"type":…,"payload":{…}}`), so the field match must nest under
+        // `payload` for JSONB `@>` to hit.
         let filter = json!({
             "eventType": ["WriteExecuted"],
-            "payloadContains": { "signer_account_id": account.to_hex() },
+            "payloadContains": { "payload": { "signer_account_id": account.to_hex() } },
         });
         let events = self.scan_events(filter, after).await?;
         let mut out = Vec::with_capacity(events.len());
@@ -238,9 +241,12 @@ impl IndexerClient {
         &self,
         wallet: SuiAddress,
     ) -> Result<Vec<IndexedEvent>> {
+        // Match nests under `payload` — the column stores the tagged
+        // `ChainEvent` envelope (`{"type":…,"payload":{…}}`), not the bare
+        // event fields. See `write_executed_for_account_since`.
         let filter = json!({
             "eventType": ["WriteExecuted"],
-            "payloadContains": { "call_token_recipient": wallet.to_hex() },
+            "payloadContains": { "payload": { "call_token_recipient": wallet.to_hex() } },
         });
         self.scan_events(filter, 0).await
     }
