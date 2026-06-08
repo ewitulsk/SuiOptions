@@ -1,5 +1,5 @@
 locals {
-  service_repos = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info"]
+  service_repos = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service"]
 }
 
 resource "aws_ecr_repository" "svc" {
