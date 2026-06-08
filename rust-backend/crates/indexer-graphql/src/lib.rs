@@ -41,6 +41,8 @@ pub struct Bucket {
     pub bucket_id: ObjectId,
     pub asset_type: AssetType,
     pub settlement_type: AssetType,
+    /// Fully-qualified type of the per-bucket fungible option coin.
+    pub call_type: AssetType,
     pub strike: u128,
     pub strike_scale: u8,
     pub expiry_ms: u64,
@@ -123,7 +125,7 @@ impl IndexerClient {
     /// One bucket by id, or `None` if the indexer doesn't know it.
     pub async fn bucket(&self, bucket_id: ObjectId) -> Result<Option<Bucket>> {
         const Q: &str = "query($id:String!){bucket(id:$id){bucketId assetType settlementType \
-            strikeRaw strikeScale expiryMs totalWrittenRaw exerciseCursorRaw cleaned invalidated}}";
+            callType strikeRaw strikeScale expiryMs totalWrittenRaw exerciseCursorRaw cleaned invalidated}}";
         let data: BucketWrap = self
             .gql(Q, json!({ "id": bucket_id.to_hex() }))
             .await?;
@@ -140,7 +142,7 @@ impl IndexerClient {
     ) -> Result<Vec<Bucket>> {
         const Q: &str = "query($a:Boolean,$u:String,$s:String,$e:String){\
             buckets(activeOnly:$a,assetType:$u,settlementType:$s,expiryMs:$e){\
-            bucketId assetType settlementType strikeRaw strikeScale expiryMs \
+            bucketId assetType settlementType callType strikeRaw strikeScale expiryMs \
             totalWrittenRaw exerciseCursorRaw cleaned invalidated}}";
         let vars = json!({
             "a": active_only,
@@ -395,6 +397,7 @@ struct BucketJson {
     bucket_id: String,
     asset_type: String,
     settlement_type: String,
+    call_type: String,
     strike_raw: String,
     strike_scale: i32,
     expiry_ms: String,
@@ -467,6 +470,7 @@ impl TryFrom<BucketJson> for Bucket {
             bucket_id: parse_object_id(&b.bucket_id)?,
             asset_type: AssetType::new(b.asset_type),
             settlement_type: AssetType::new(b.settlement_type),
+            call_type: AssetType::new(b.call_type),
             strike: parse_u128(&b.strike_raw)?,
             strike_scale: parse_u8(b.strike_scale)?,
             expiry_ms: parse_u64(&b.expiry_ms)?,

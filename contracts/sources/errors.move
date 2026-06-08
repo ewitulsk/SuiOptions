@@ -27,3 +27,4 @@ public fun invalid_pubkey_length(): u64 { 24 }
 public fun strike_scale_too_large(): u64 { 25 }
 public fun bucket_invalidated(): u64 { 26 }
 public fun bucket_not_invalidated(): u64 { 27 }
+public fun treasury_cap_not_fresh(): u64 { 28 }

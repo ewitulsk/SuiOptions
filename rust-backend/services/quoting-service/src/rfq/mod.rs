@@ -353,6 +353,7 @@ mod tests {
             bucket_id: ObjectId::new([0x99; 32]),
             asset_type: AssetType::new("BTC"),
             settlement_type: AssetType::new("USDC"),
+            call_type: AssetType::new("0x9::call_0::CALL_0"),
             strike: 50,
             strike_scale: 0,
             expiry_ms: 1_000_000,

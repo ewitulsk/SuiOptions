@@ -7,6 +7,9 @@
 /// The accumulated fee, account balances, bucket balances, and cursor state
 /// are asserted after every step, so conservation across the whole lifecycle
 /// is verified — not just point invariants.
+///
+/// The call option is a per-bucket fungible `Coin<CALL>`: split/join are coin
+/// ops, and the bucket's coin supply tracks outstanding option amount.
 #[test_only]
 module options_protocol::e2e_tests;
 
@@ -16,11 +19,10 @@ use sui::test_scenario::{Self as ts, Scenario};
 use options_protocol::account;
 use options_protocol::admin;
 use options_protocol::bucket::{Self, Bucket};
-use options_protocol::call_option::{Self, CallOption};
 use options_protocol::position::{Self, Position};
 use options_protocol::quote;
 use options_protocol::treasury;
-use options_protocol::test_helpers::{Self as th, BTC, USDC};
+use options_protocol::test_helpers::{Self as th, BTC, USDC, CALL};
 
 const STRIKE: u128 = 50_000;
 const STRIKE_SCALE: u8 = 0;
@@ -37,9 +39,9 @@ fun setup_protocol_with_bucket(scenario: &mut Scenario) {
     let cap = th::take_admin_cap(scenario);
     let mut config = th::take_config(scenario);
     admin::set_fee_bps(&cap, &mut config, FEE_BPS);
-    bucket::new_call_option<BTC, USDC>(&cap, EXPIRY_MS, STRIKE, 1, 1, STRIKE_SCALE, scenario.ctx());
     th::return_admin_cap(scenario, cap);
     ts::return_shared(config);
+    th::new_bucket<BTC, USDC, CALL>(scenario, EXPIRY_MS, STRIKE, STRIKE_SCALE);
 }
 
 // ---------------------------------------------------------------------------
@@ -83,7 +85,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
     let bucket_id;
     {
         ts::next_tx(&mut scenario, th::writer_addr());
-        let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+        let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let config = th::take_config(&scenario);
         let mut treas = th::take_treasury(&scenario);
         let mut mm = th::take_account(&scenario);
@@ -99,7 +101,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
             EXPIRY_MS,
             1,
         );
-        bucket::execute_write_for_testing<BTC, USDC>(
+        bucket::execute_write_for_testing<BTC, USDC, CALL>(
             &mut b,
             &config,
             &mut treas,
@@ -117,6 +119,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
         assert!(bucket::total_written(&b) == 100, 0);
         assert!(bucket::underlying_balance(&b) == 100, 0);
         assert!(bucket::exercise_cursor(&b) == 0, 0);
+        assert!(bucket::call_supply(&b) == 100, 0);
         assert!(account::balance_of<USDC>(&mm) == 20_000_000 - write1_premium, 0);
         assert!(treasury::balance_of<USDC>(&treas) == write1_fee, 0);
 
@@ -144,7 +147,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
     let write2_net = write2_premium - write2_fee;
     {
         ts::next_tx(&mut scenario, th::stranger_addr());
-        let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+        let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let config = th::take_config(&scenario);
         let mut treas = th::take_treasury(&scenario);
         let mut mm = th::take_account(&scenario);
@@ -159,7 +162,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
             EXPIRY_MS,
             2,
         );
-        bucket::execute_write_for_testing<BTC, USDC>(
+        bucket::execute_write_for_testing<BTC, USDC, CALL>(
             &mut b,
             &config,
             &mut treas,
@@ -176,6 +179,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
 
         assert!(bucket::total_written(&b) == 150, 0);
         assert!(bucket::underlying_balance(&b) == 150, 0);
+        assert!(bucket::call_supply(&b) == 150, 0);
         assert!(account::balance_of<USDC>(&mm) == 20_000_000 - write1_premium - write2_premium, 0);
         assert!(treasury::balance_of<USDC>(&treas) == write1_fee + write2_fee, 0);
 
@@ -195,15 +199,15 @@ fun test_e2e_writer_flow_full_lifecycle() {
         ts::return_to_sender(&scenario, p);
     };
 
-    // ---- Trader MM joins both call tokens, splits off 120 to exercise.
+    // ---- Trader MM joins both call coins, splits off 120 to exercise.
     ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let exercise_chunk: CallOption;
+    let exercise_chunk: Coin<CALL>;
     {
-        let mut call_a = ts::take_from_sender<CallOption>(&scenario);
-        let call_b = ts::take_from_sender<CallOption>(&scenario);
-        call_option::join(&mut call_a, call_b);
-        assert!(call_option::amount(&call_a) == 150, 0);
-        exercise_chunk = call_option::split(&mut call_a, 120, scenario.ctx());
+        let mut call_a = ts::take_from_sender<Coin<CALL>>(&scenario);
+        let call_b = ts::take_from_sender<Coin<CALL>>(&scenario);
+        coin::join(&mut call_a, call_b);
+        assert!(call_a.value() == 150, 0);
+        exercise_chunk = coin::split(&mut call_a, 120, scenario.ctx());
         // Keep the remaining 30 with the MM for later burn_expired.
         ts::return_to_sender(&scenario, call_a);
     };
@@ -211,9 +215,9 @@ fun test_e2e_writer_flow_full_lifecycle() {
     // ---- Trader MM exercises 120 BTC. Pays (((120 as u128) * STRIKE) as u64) USDC. Cursor → 120.
     ts::next_tx(&mut scenario, th::trader_mm_addr());
     {
-        let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+        let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let payment = coin::mint_for_testing<USDC>((((120 as u128) * STRIKE) as u64), scenario.ctx());
-        let underlying_out = bucket::exercise<BTC, USDC>(
+        let underlying_out = bucket::exercise<BTC, USDC, CALL>(
             &mut b,
             exercise_chunk,
             payment,
@@ -224,6 +228,8 @@ fun test_e2e_writer_flow_full_lifecycle() {
         assert!(bucket::exercise_cursor(&b) == 120, 0);
         assert!(bucket::underlying_balance(&b) == 30, 0);
         assert!(bucket::settlement_balance(&b) == (((120 as u128) * STRIKE) as u64), 0);
+        // 150 written − 120 burned-on-exercise = 30 outstanding.
+        assert!(bucket::call_supply(&b) == 30, 0);
         coin::burn_for_testing(underlying_out);
         ts::return_shared(b);
     };
@@ -235,8 +241,8 @@ fun test_e2e_writer_flow_full_lifecycle() {
     ts::next_tx(&mut scenario, th::writer_addr());
     {
         let p = ts::take_from_sender<Position>(&scenario);
-        let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-        let (u, s) = bucket::redeem_position<BTC, USDC>(&mut b, p, &clock, scenario.ctx());
+        let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+        let (u, s) = bucket::redeem_position<BTC, USDC, CALL>(&mut b, p, &clock, scenario.ctx());
         assert!(u.value() == 0, 0);
         assert!(s.value() == (((100 as u128) * STRIKE) as u64), 0);
         // Bucket drains down: 30 BTC remain, (((20 as u128) * STRIKE) as u64) USDC remain.
@@ -251,8 +257,8 @@ fun test_e2e_writer_flow_full_lifecycle() {
     ts::next_tx(&mut scenario, th::stranger_addr());
     {
         let p = ts::take_from_sender<Position>(&scenario);
-        let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-        let (u, s) = bucket::redeem_position<BTC, USDC>(&mut b, p, &clock, scenario.ctx());
+        let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+        let (u, s) = bucket::redeem_position<BTC, USDC, CALL>(&mut b, p, &clock, scenario.ctx());
         assert!(u.value() == 30, 0);
         assert!(s.value() == (((20 as u128) * STRIKE) as u64), 0);
         // Bucket fully drained.
@@ -266,10 +272,12 @@ fun test_e2e_writer_flow_full_lifecycle() {
     // ---- Trader MM burns the remaining 30 unexercised call tokens.
     ts::next_tx(&mut scenario, th::trader_mm_addr());
     {
-        let leftover = ts::take_from_sender<CallOption>(&scenario);
-        assert!(call_option::amount(&leftover) == 30, 0);
-        let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-        bucket::burn_expired_option<BTC, USDC>(&mut b, leftover, &clock, scenario.ctx());
+        let leftover = ts::take_from_sender<Coin<CALL>>(&scenario);
+        assert!(leftover.value() == 30, 0);
+        let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+        bucket::burn_expired_option<BTC, USDC, CALL>(&mut b, leftover, &clock, scenario.ctx());
+        // All options now burned.
+        assert!(bucket::call_supply(&b) == 0, 0);
         ts::return_shared(b);
     };
 
@@ -277,8 +285,8 @@ fun test_e2e_writer_flow_full_lifecycle() {
     ts::next_tx(&mut scenario, th::admin_addr());
     {
         let cap = th::take_admin_cap(&scenario);
-        let b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-        bucket::cleanup_bucket<BTC, USDC>(&cap, b, &clock);
+        let b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+        bucket::cleanup_bucket<BTC, USDC, CALL>(&cap, b, &clock, scenario.ctx());
 
         let mut treas = th::take_treasury(&scenario);
         let total_fee = write1_fee + write2_fee;
@@ -344,7 +352,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
     let bucket_id;
     {
         ts::next_tx(&mut scenario, th::trader_addr());
-        let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+        let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let config = th::take_config(&scenario);
         let mut treas = th::take_treasury(&scenario);
         let mut mm = th::take_account(&scenario);
@@ -360,7 +368,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
             EXPIRY_MS,
             1,
         );
-        bucket::execute_write_for_testing<BTC, USDC>(
+        bucket::execute_write_for_testing<BTC, USDC, CALL>(
             &mut b,
             &config,
             &mut treas,
@@ -377,6 +385,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
 
         assert!(bucket::total_written(&b) == 100, 0);
         assert!(bucket::underlying_balance(&b) == 100, 0);
+        assert!(bucket::call_supply(&b) == 100, 0);
         assert!(account::balance_of<BTC>(&mm) == mm_initial_btc - buy1_amount, 0);
         assert!(account::balance_of<USDC>(&mm) == buy1_net, 0);
         assert!(treasury::balance_of<USDC>(&treas) == buy1_fee, 0);
@@ -393,7 +402,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
     let buy2_fee = bps(buy2_premium);
     {
         ts::next_tx(&mut scenario, th::stranger_addr());
-        let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+        let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let config = th::take_config(&scenario);
         let mut treas = th::take_treasury(&scenario);
         let mut mm = th::take_account(&scenario);
@@ -408,7 +417,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
             EXPIRY_MS,
             2,
         );
-        bucket::execute_write_for_testing<BTC, USDC>(
+        bucket::execute_write_for_testing<BTC, USDC, CALL>(
             &mut b,
             &config,
             &mut treas,
@@ -425,6 +434,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
 
         assert!(bucket::total_written(&b) == 180, 0);
         assert!(bucket::underlying_balance(&b) == 180, 0);
+        assert!(bucket::call_supply(&b) == 180, 0);
         assert!(account::balance_of<BTC>(&mm) == mm_initial_btc - buy1_amount - buy2_amount, 0);
         assert!(
             account::balance_of<USDC>(&mm) == buy1_net + (buy2_premium - buy2_fee),
@@ -441,35 +451,37 @@ fun test_e2e_trader_flow_full_lifecycle() {
     // ---- Trader #1 exercises full 100. Cursor → 100.
     ts::next_tx(&mut scenario, th::trader_addr());
     {
-        let call = ts::take_from_sender<CallOption>(&scenario);
-        let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+        let call = ts::take_from_sender<Coin<CALL>>(&scenario);
+        let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let payment = coin::mint_for_testing<USDC>((((buy1_amount as u128) * STRIKE) as u64), scenario.ctx());
-        let underlying_out = bucket::exercise<BTC, USDC>(&mut b, call, payment, &clock, scenario.ctx());
+        let underlying_out = bucket::exercise<BTC, USDC, CALL>(&mut b, call, payment, &clock, scenario.ctx());
         assert!(underlying_out.value() == buy1_amount, 0);
         assert!(bucket::exercise_cursor(&b) == 100, 0);
         assert!(bucket::underlying_balance(&b) == 80, 0);
         assert!(bucket::settlement_balance(&b) == (((100 as u128) * STRIKE) as u64), 0);
+        assert!(bucket::call_supply(&b) == 80, 0);
         coin::burn_for_testing(underlying_out);
         ts::return_shared(b);
     };
 
     // ---- Trader #2 splits their 80 call into [30, 50] and exercises 30. Cursor → 130.
     ts::next_tx(&mut scenario, th::stranger_addr());
-    let exercise_30: CallOption;
+    let exercise_30: Coin<CALL>;
     {
-        let mut call = ts::take_from_sender<CallOption>(&scenario);
-        exercise_30 = call_option::split(&mut call, 30, scenario.ctx());
+        let mut call = ts::take_from_sender<Coin<CALL>>(&scenario);
+        exercise_30 = coin::split(&mut call, 30, scenario.ctx());
         ts::return_to_sender(&scenario, call); // remaining 50 stays with stranger for later burn
     };
     ts::next_tx(&mut scenario, th::stranger_addr());
     {
-        let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+        let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let payment = coin::mint_for_testing<USDC>((((30u64 as u128) * STRIKE) as u64), scenario.ctx());
-        let underlying_out = bucket::exercise<BTC, USDC>(&mut b, exercise_30, payment, &clock, scenario.ctx());
+        let underlying_out = bucket::exercise<BTC, USDC, CALL>(&mut b, exercise_30, payment, &clock, scenario.ctx());
         assert!(underlying_out.value() == 30, 0);
         assert!(bucket::exercise_cursor(&b) == 130, 0);
         assert!(bucket::underlying_balance(&b) == 50, 0);
         assert!(bucket::settlement_balance(&b) == (((130 as u128) * STRIKE) as u64), 0);
+        assert!(bucket::call_supply(&b) == 50, 0);
         coin::burn_for_testing(underlying_out);
         ts::return_shared(b);
     };
@@ -480,10 +492,11 @@ fun test_e2e_trader_flow_full_lifecycle() {
     // ---- Stranger burns their leftover 50 unexercised call tokens.
     ts::next_tx(&mut scenario, th::stranger_addr());
     {
-        let leftover = ts::take_from_sender<CallOption>(&scenario);
-        assert!(call_option::amount(&leftover) == 50, 0);
-        let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-        bucket::burn_expired_option<BTC, USDC>(&mut b, leftover, &clock, scenario.ctx());
+        let leftover = ts::take_from_sender<Coin<CALL>>(&scenario);
+        assert!(leftover.value() == 50, 0);
+        let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+        bucket::burn_expired_option<BTC, USDC, CALL>(&mut b, leftover, &clock, scenario.ctx());
+        assert!(bucket::call_supply(&b) == 0, 0);
         ts::return_shared(b);
     };
 
@@ -495,10 +508,10 @@ fun test_e2e_trader_flow_full_lifecycle() {
         let p_b = ts::take_from_sender<Position>(&scenario);
         let (early, late) = if (position::range_end(&p_a) == 100) { (p_a, p_b) } else { (p_b, p_a) };
 
-        let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+        let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
 
         // Redeem position [0,100): cursor=130 ≥ 100 → 0 BTC + (((100 as u128) * STRIKE) as u64) USDC.
-        let (u1, s1) = bucket::redeem_position<BTC, USDC>(&mut b, early, &clock, scenario.ctx());
+        let (u1, s1) = bucket::redeem_position<BTC, USDC, CALL>(&mut b, early, &clock, scenario.ctx());
         assert!(u1.value() == 0, 0);
         assert!(s1.value() == (((100 as u128) * STRIKE) as u64), 0);
         assert!(bucket::underlying_balance(&b) == 50, 0);
@@ -507,7 +520,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
         coin::burn_for_testing(s1);
 
         // Redeem position [100,180): cursor=130 → 30 exercised, 50 unexercised.
-        let (u2, s2) = bucket::redeem_position<BTC, USDC>(&mut b, late, &clock, scenario.ctx());
+        let (u2, s2) = bucket::redeem_position<BTC, USDC, CALL>(&mut b, late, &clock, scenario.ctx());
         assert!(u2.value() == 50, 0);
         assert!(s2.value() == (((30u64 as u128) * STRIKE) as u64), 0);
         assert!(bucket::underlying_balance(&b) == 0, 0);
@@ -522,8 +535,8 @@ fun test_e2e_trader_flow_full_lifecycle() {
     ts::next_tx(&mut scenario, th::admin_addr());
     {
         let cap = th::take_admin_cap(&scenario);
-        let b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-        bucket::cleanup_bucket<BTC, USDC>(&cap, b, &clock);
+        let b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+        bucket::cleanup_bucket<BTC, USDC, CALL>(&cap, b, &clock, scenario.ctx());
 
         let mut treas = th::take_treasury(&scenario);
         let total_fee = buy1_fee + buy2_fee;

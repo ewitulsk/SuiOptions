@@ -4,6 +4,8 @@ use protocol_types::asset::AssetType;
 pub struct Bucket {
     pub asset_type: AssetType,
     pub settlement_type: AssetType,
+    /// Fully-qualified type of the per-bucket fungible option coin.
+    pub call_type: AssetType,
     /// On-chain strike — real ratio is `strike / 10^strike_scale`.
     pub strike: u128,
     pub strike_scale: u8,

@@ -7,10 +7,9 @@ use sui::test_scenario::{Self as ts, Scenario};
 use options_protocol::account;
 use options_protocol::admin;
 use options_protocol::bucket::{Self, Bucket};
-use options_protocol::call_option::{Self, CallOption};
 use options_protocol::position::{Self, Position};
 use options_protocol::quote;
-use options_protocol::test_helpers::{Self as th, BTC, USDC};
+use options_protocol::test_helpers::{Self as th, BTC, USDC, CALL, CALL2, CALL3};
 
 const STRIKE: u128 = 50_000;
 const STRIKE_INTERVAL: u128 = 1_000;
@@ -18,21 +17,13 @@ const STRIKE_SCALE: u8 = 0; // pre-SO-55 semantics — strike == settlement-smal
 const EXPIRY_MS: u64 = 1_000_000;
 
 fun setup_bucket(scenario: &mut Scenario) {
-    ts::next_tx(scenario, th::admin_addr());
-    let cap = th::take_admin_cap(scenario);
-    bucket::new_call_option<BTC, USDC>(
-        &cap, EXPIRY_MS, STRIKE, STRIKE_INTERVAL, 1, STRIKE_SCALE, scenario.ctx(),
-    );
-    th::return_admin_cap(scenario, cap);
+    th::new_bucket<BTC, USDC, CALL>(scenario, EXPIRY_MS, STRIKE, STRIKE_SCALE);
 }
 
 fun setup_three_buckets(scenario: &mut Scenario) {
-    ts::next_tx(scenario, th::admin_addr());
-    let cap = th::take_admin_cap(scenario);
-    bucket::new_call_option<BTC, USDC>(
-        &cap, EXPIRY_MS, STRIKE, STRIKE_INTERVAL, 3, STRIKE_SCALE, scenario.ctx(),
-    );
-    th::return_admin_cap(scenario, cap);
+    th::new_bucket<BTC, USDC, CALL>(scenario, EXPIRY_MS, STRIKE, STRIKE_SCALE);
+    th::new_bucket<BTC, USDC, CALL2>(scenario, EXPIRY_MS, STRIKE + STRIKE_INTERVAL, STRIKE_SCALE);
+    th::new_bucket<BTC, USDC, CALL3>(scenario, EXPIRY_MS, STRIKE + 2 * STRIKE_INTERVAL, STRIKE_SCALE);
 }
 
 fun fund_account<T>(scenario: &mut Scenario, owner: address, amount: u64) {
@@ -43,57 +34,27 @@ fun fund_account<T>(scenario: &mut Scenario, owner: address, amount: u64) {
     ts::return_shared(acc);
 }
 
-// --- new_call_option ---
+// --- create_bucket ---
 
 #[test]
-fun test_new_call_option_creates_count_buckets_at_correct_strikes() {
+fun test_create_bucket_sets_correct_strikes() {
+    // Each bucket now carries a distinct option-coin type; the off-chain
+    // scheduler fans a strike grid out into one create_bucket per strike.
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
     setup_three_buckets(&mut scenario);
 
     ts::next_tx(&mut scenario, th::admin_addr());
-    // Take all three shared buckets in sequence and collect strikes.
-    let mut strikes: vector<u128> = vector[];
-    let b1 = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-    strikes.push_back(bucket::strike(&b1));
+    let b1 = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    assert!(bucket::strike(&b1) == STRIKE, 0);
+    assert!(bucket::call_supply(&b1) == 0, 0);
     ts::return_shared(b1);
-    let b2 = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-    strikes.push_back(bucket::strike(&b2));
+    let b2 = ts::take_shared<Bucket<BTC, USDC, CALL2>>(&scenario);
+    assert!(bucket::strike(&b2) == STRIKE + STRIKE_INTERVAL, 0);
     ts::return_shared(b2);
-    let b3 = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-    strikes.push_back(bucket::strike(&b3));
+    let b3 = ts::take_shared<Bucket<BTC, USDC, CALL3>>(&scenario);
+    assert!(bucket::strike(&b3) == STRIKE + 2 * STRIKE_INTERVAL, 0);
     ts::return_shared(b3);
-
-    // The order isn't guaranteed; sort and verify the set.
-    let mut seen_lo = false;
-    let mut seen_mid = false;
-    let mut seen_hi = false;
-    let mut i = 0;
-    while (i < strikes.length()) {
-        let s = strikes[i];
-        if (s == STRIKE) seen_lo = true;
-        if (s == STRIKE + STRIKE_INTERVAL) seen_mid = true;
-        if (s == STRIKE + 2 * STRIKE_INTERVAL) seen_hi = true;
-        i = i + 1;
-    };
-    assert!(seen_lo && seen_mid && seen_hi, 0);
-
-    clock.destroy_for_testing();
-    ts::end(scenario);
-}
-
-#[test]
-#[expected_failure(abort_code = 22, location = options_protocol::bucket)] // count_must_be_positive
-fun test_new_call_option_zero_count_aborts() {
-    let mut scenario = ts::begin(th::admin_addr());
-    let clock = th::init_protocol(&mut scenario);
-
-    ts::next_tx(&mut scenario, th::admin_addr());
-    let cap = th::take_admin_cap(&scenario);
-    bucket::new_call_option<BTC, USDC>(
-        &cap, EXPIRY_MS, STRIKE, STRIKE_INTERVAL, 0, STRIKE_SCALE, scenario.ctx(),
-    );
-    th::return_admin_cap(&scenario, cap);
 
     clock.destroy_for_testing();
     ts::end(scenario);
@@ -162,22 +123,18 @@ fun test_apply_strike_tdeep_at_15_cents() {
 }
 
 #[test]
-fun test_new_call_option_records_strike_scale() {
+fun test_create_bucket_records_strike_scale() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
 
-    ts::next_tx(&mut scenario, th::admin_addr());
-    let cap = th::take_admin_cap(&scenario);
-    bucket::new_call_option<BTC, USDC>(
-        &cap, EXPIRY_MS, 12_345, 100, 2, /*strike_scale*/ 4, scenario.ctx(),
-    );
-    th::return_admin_cap(&scenario, cap);
+    th::new_bucket<BTC, USDC, CALL>(&mut scenario, EXPIRY_MS, 12_345, /*strike_scale*/ 4);
+    th::new_bucket<BTC, USDC, CALL2>(&mut scenario, EXPIRY_MS, 12_445, /*strike_scale*/ 4);
 
     ts::next_tx(&mut scenario, th::admin_addr());
-    let b1 = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let b1 = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     assert!(bucket::strike_scale(&b1) == 4, 0);
     ts::return_shared(b1);
-    let b2 = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let b2 = ts::take_shared<Bucket<BTC, USDC, CALL2>>(&scenario);
     assert!(bucket::strike_scale(&b2) == 4, 0);
     ts::return_shared(b2);
 
@@ -187,16 +144,11 @@ fun test_new_call_option_records_strike_scale() {
 
 #[test]
 #[expected_failure(abort_code = 25, location = options_protocol::bucket)] // strike_scale_too_large
-fun test_new_call_option_scale_above_max_aborts() {
+fun test_create_bucket_scale_above_max_aborts() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
 
-    ts::next_tx(&mut scenario, th::admin_addr());
-    let cap = th::take_admin_cap(&scenario);
-    bucket::new_call_option<BTC, USDC>(
-        &cap, EXPIRY_MS, STRIKE, STRIKE_INTERVAL, 1, /*strike_scale*/ 39, scenario.ctx(),
-    );
-    th::return_admin_cap(&scenario, cap);
+    th::new_bucket<BTC, USDC, CALL>(&mut scenario, EXPIRY_MS, STRIKE, /*strike_scale*/ 39);
 
     clock.destroy_for_testing();
     ts::end(scenario);
@@ -213,7 +165,7 @@ fun test_writer_flow_happy_path() {
     fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
 
     ts::next_tx(&mut scenario, th::writer_addr());
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut mm_acc = th::take_account(&scenario);
@@ -235,7 +187,7 @@ fun test_writer_flow_happy_path() {
     let underlying = coin::mint_for_testing<BTC>(write_amount, scenario.ctx());
     let zero_settlement = coin::zero<USDC>(scenario.ctx());
 
-    bucket::execute_write_for_testing<BTC, USDC>(
+    bucket::execute_write_for_testing<BTC, USDC, CALL>(
         &mut b,
         &config,
         &mut treasury,
@@ -254,6 +206,7 @@ fun test_writer_flow_happy_path() {
     assert!(bucket::total_written(&b) == (write_amount as u128), 0);
     assert!(bucket::underlying_balance(&b) == write_amount, 0);
     assert!(bucket::exercise_cursor(&b) == 0, 0);
+    assert!(bucket::call_supply(&b) == write_amount, 0);
     assert!(account::balance_of<USDC>(&mm_acc) == 10_000_000 - premium, 0);
 
     ts::return_shared(b);
@@ -272,11 +225,10 @@ fun test_writer_flow_happy_path() {
     assert!(position::bucket_id(&pos) == bucket_id, 0);
     ts::return_to_sender(&scenario, pos);
 
-    // Trader MM receives call option.
+    // Trader MM receives the option as a fungible Coin<CALL>.
     ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let call = ts::take_from_sender<CallOption>(&scenario);
-    assert!(call_option::amount(&call) == write_amount, 0);
-    assert!(call_option::bucket_id(&call) == bucket_id, 0);
+    let call = ts::take_from_sender<Coin<CALL>>(&scenario);
+    assert!(call.value() == write_amount, 0);
     ts::return_to_sender(&scenario, call);
 
     clock.destroy_for_testing();
@@ -300,7 +252,7 @@ fun test_writer_flow_with_fee_skim() {
     ts::return_shared(config);
 
     ts::next_tx(&mut scenario, th::writer_addr());
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut mm_acc = th::take_account(&scenario);
@@ -322,7 +274,7 @@ fun test_writer_flow_with_fee_skim() {
     );
     let sq = quote::new_signed_quote(q, vector[]);
 
-    bucket::execute_write_for_testing<BTC, USDC>(
+    bucket::execute_write_for_testing<BTC, USDC, CALL>(
         &mut b,
         &config,
         &mut treasury,
@@ -369,7 +321,7 @@ fun test_trader_flow_happy_path() {
     fund_account<BTC>(&mut scenario, th::writer_mm_addr(), 1_000);
 
     ts::next_tx(&mut scenario, th::trader_addr());
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut mm_acc = th::take_account(&scenario);
@@ -389,7 +341,7 @@ fun test_trader_flow_happy_path() {
     );
     let sq = quote::new_signed_quote(q, vector[]);
 
-    bucket::execute_write_for_testing<BTC, USDC>(
+    bucket::execute_write_for_testing<BTC, USDC, CALL>(
         &mut b,
         &config,
         &mut treasury,
@@ -404,9 +356,9 @@ fun test_trader_flow_happy_path() {
         scenario.ctx(),
     );
 
-    let bucket_id = object::id(&b);
     assert!(bucket::total_written(&b) == (write_amount as u128), 0);
     assert!(bucket::underlying_balance(&b) == write_amount, 0);
+    assert!(bucket::call_supply(&b) == write_amount, 0);
     assert!(account::balance_of<BTC>(&mm_acc) == 1_000 - write_amount, 0);
     assert!(account::balance_of<USDC>(&mm_acc) == premium, 0);
 
@@ -415,11 +367,10 @@ fun test_trader_flow_happy_path() {
     ts::return_shared(treasury);
     ts::return_shared(mm_acc);
 
-    // Trader gets the call option.
+    // Trader gets the call option coin.
     ts::next_tx(&mut scenario, th::trader_addr());
-    let call = ts::take_from_sender<CallOption>(&scenario);
-    assert!(call_option::amount(&call) == write_amount, 0);
-    assert!(call_option::bucket_id(&call) == bucket_id, 0);
+    let call = ts::take_from_sender<Coin<CALL>>(&scenario);
+    assert!(call.value() == write_amount, 0);
     ts::return_to_sender(&scenario, call);
 
     // Writer MM gets the position NFT.
@@ -447,7 +398,7 @@ fun test_execute_write_after_expiry_aborts() {
     clock.set_for_testing(EXPIRY_MS); // at expiry: now >= expiry → reject
 
     ts::next_tx(&mut scenario, th::writer_addr());
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut mm_acc = th::take_account(&scenario);
@@ -464,7 +415,7 @@ fun test_execute_write_after_expiry_aborts() {
     );
     let sq = quote::new_signed_quote(q, vector[]);
 
-    bucket::execute_write_for_testing<BTC, USDC>(
+    bucket::execute_write_for_testing<BTC, USDC, CALL>(
         &mut b,
         &config,
         &mut treasury,
@@ -497,7 +448,7 @@ fun test_execute_write_bucket_mismatch_aborts() {
     fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
 
     ts::next_tx(&mut scenario, th::writer_addr());
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut mm_acc = th::take_account(&scenario);
@@ -514,7 +465,7 @@ fun test_execute_write_bucket_mismatch_aborts() {
     );
     let sq = quote::new_signed_quote(q, vector[]);
 
-    bucket::execute_write_for_testing<BTC, USDC>(
+    bucket::execute_write_for_testing<BTC, USDC, CALL>(
         &mut b,
         &config,
         &mut treasury,
@@ -547,7 +498,7 @@ fun test_writer_flow_amount_mismatch_aborts() {
     fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
 
     ts::next_tx(&mut scenario, th::writer_addr());
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut mm_acc = th::take_account(&scenario);
@@ -564,7 +515,7 @@ fun test_writer_flow_amount_mismatch_aborts() {
     );
     let sq = quote::new_signed_quote(q, vector[]);
 
-    bucket::execute_write_for_testing<BTC, USDC>(
+    bucket::execute_write_for_testing<BTC, USDC, CALL>(
         &mut b,
         &config,
         &mut treasury,
@@ -597,7 +548,7 @@ fun test_writer_flow_recipient_mismatch_aborts() {
     fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
 
     ts::next_tx(&mut scenario, th::writer_addr());
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut mm_acc = th::take_account(&scenario);
@@ -614,7 +565,7 @@ fun test_writer_flow_recipient_mismatch_aborts() {
     );
     let sq = quote::new_signed_quote(q, vector[]);
 
-    bucket::execute_write_for_testing<BTC, USDC>(
+    bucket::execute_write_for_testing<BTC, USDC, CALL>(
         &mut b,
         &config,
         &mut treasury,
@@ -647,7 +598,7 @@ fun write_via_helper(
     nonce: u64,
 ) {
     ts::next_tx(scenario, th::writer_addr());
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(scenario);
     let config = th::take_config(scenario);
     let mut treasury = th::take_treasury(scenario);
     let mut mm_acc = th::take_account(scenario);
@@ -664,7 +615,7 @@ fun write_via_helper(
     );
     let sq = quote::new_signed_quote(q, vector[]);
 
-    bucket::execute_write_for_testing<BTC, USDC>(
+    bucket::execute_write_for_testing<BTC, USDC, CALL>(
         &mut b,
         &config,
         &mut treasury,
@@ -696,14 +647,14 @@ fun test_exercise_happy_path() {
 
     // Trader MM holds the call option; have them exercise 40 of it.
     ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let mut call = ts::take_from_sender<CallOption>(&scenario);
-    let exercise_chunk = call_option::split(&mut call, 40, scenario.ctx());
+    let mut call = ts::take_from_sender<Coin<CALL>>(&scenario);
+    let exercise_chunk = coin::split(&mut call, 40, scenario.ctx());
     ts::return_to_sender(&scenario, call);
 
     ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let settlement_payment = coin::mint_for_testing<USDC>((((40 as u128) * STRIKE) as u64), scenario.ctx());
-    let underlying = bucket::exercise<BTC, USDC>(
+    let underlying = bucket::exercise<BTC, USDC, CALL>(
         &mut b,
         exercise_chunk,
         settlement_payment,
@@ -714,6 +665,8 @@ fun test_exercise_happy_path() {
     assert!(bucket::exercise_cursor(&b) == 40, 0);
     assert!(bucket::underlying_balance(&b) == 60, 0);
     assert!(bucket::settlement_balance(&b) == (((40 as u128) * STRIKE) as u64), 0);
+    // 100 written − 40 burned = 60 outstanding.
+    assert!(bucket::call_supply(&b) == 60, 0);
 
     coin::burn_for_testing(underlying);
     ts::return_shared(b);
@@ -733,12 +686,12 @@ fun test_exercise_settlement_mismatch_aborts() {
     write_via_helper(&mut scenario, &clock, 50, 1_000, 1);
 
     ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let call = ts::take_from_sender<CallOption>(&scenario);
+    let call = ts::take_from_sender<Coin<CALL>>(&scenario);
 
     ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let underpaid = coin::mint_for_testing<USDC>((((50 as u128) * STRIKE) as u64) - 1, scenario.ctx()); // one short
-    let underlying = bucket::exercise<BTC, USDC>(
+    let underlying = bucket::exercise<BTC, USDC, CALL>(
         &mut b,
         call,
         underpaid,
@@ -765,34 +718,10 @@ fun test_exercise_after_expiry_aborts() {
     clock.set_for_testing(EXPIRY_MS);
 
     ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let call = ts::take_from_sender<CallOption>(&scenario);
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let call = ts::take_from_sender<Coin<CALL>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let payment = coin::mint_for_testing<USDC>((((50 as u128) * STRIKE) as u64), scenario.ctx());
-    let u = bucket::exercise<BTC, USDC>(&mut b, call, payment, &clock, scenario.ctx());
-    coin::burn_for_testing(u);
-    ts::return_shared(b);
-
-    clock.destroy_for_testing();
-    ts::end(scenario);
-}
-
-#[test]
-#[expected_failure(abort_code = 17, location = options_protocol::bucket)] // call_option_bucket_mismatch
-fun test_exercise_call_from_other_bucket_aborts() {
-    let mut scenario = ts::begin(th::admin_addr());
-    let clock = th::init_protocol(&mut scenario);
-    setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
-    write_via_helper(&mut scenario, &clock, 50, 1_000, 1);
-
-    // Mint a call option pointing to a different bucket.
-    ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let bogus_call = call_option::mint(object::id_from_address(@0xDEAD), 10, scenario.ctx());
-
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-    let payment = coin::mint_for_testing<USDC>((((10 as u128) * STRIKE) as u64), scenario.ctx());
-    let u = bucket::exercise<BTC, USDC>(&mut b, bogus_call, payment, &clock, scenario.ctx());
+    let u = bucket::exercise<BTC, USDC, CALL>(&mut b, call, payment, &clock, scenario.ctx());
     coin::burn_for_testing(u);
     ts::return_shared(b);
 
@@ -814,8 +743,8 @@ fun test_redeem_before_expiry_aborts() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let pos = ts::take_from_sender<Position>(&scenario);
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-    let (u, s) = bucket::redeem_position<BTC, USDC>(&mut b, pos, &clock, scenario.ctx());
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    let (u, s) = bucket::redeem_position<BTC, USDC, CALL>(&mut b, pos, &clock, scenario.ctx());
     coin::burn_for_testing(u);
     coin::burn_for_testing(s);
     ts::return_shared(b);
@@ -838,8 +767,8 @@ fun test_redeem_fully_unexercised_returns_all_underlying() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let pos = ts::take_from_sender<Position>(&scenario);
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-    let (u, s) = bucket::redeem_position<BTC, USDC>(&mut b, pos, &clock, scenario.ctx());
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    let (u, s) = bucket::redeem_position<BTC, USDC, CALL>(&mut b, pos, &clock, scenario.ctx());
     assert!(u.value() == 80, 0);
     assert!(s.value() == 0, 0);
     coin::burn_for_testing(u);
@@ -861,10 +790,10 @@ fun test_redeem_fully_exercised_returns_all_settlement() {
 
     // Exercise the entire amount.
     ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let call = ts::take_from_sender<CallOption>(&scenario);
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let call = ts::take_from_sender<Coin<CALL>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let payment = coin::mint_for_testing<USDC>((((60 as u128) * STRIKE) as u64), scenario.ctx());
-    let underlying = bucket::exercise<BTC, USDC>(&mut b, call, payment, &clock, scenario.ctx());
+    let underlying = bucket::exercise<BTC, USDC, CALL>(&mut b, call, payment, &clock, scenario.ctx());
     coin::burn_for_testing(underlying);
     ts::return_shared(b);
 
@@ -872,8 +801,8 @@ fun test_redeem_fully_exercised_returns_all_settlement() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let pos = ts::take_from_sender<Position>(&scenario);
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-    let (u, s) = bucket::redeem_position<BTC, USDC>(&mut b, pos, &clock, scenario.ctx());
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    let (u, s) = bucket::redeem_position<BTC, USDC, CALL>(&mut b, pos, &clock, scenario.ctx());
     assert!(u.value() == 0, 0);
     assert!(s.value() == (((60 as u128) * STRIKE) as u64), 0);
     coin::burn_for_testing(u);
@@ -902,19 +831,19 @@ fun test_fifo_assignment_two_writers_partial_exercise() {
 
     // Now writer holds two Positions. Exercise 120 via call options held by trader MM.
     ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let mut call_a = ts::take_from_sender<CallOption>(&scenario);
-    // Trader MM should have received two call options; combine them.
-    let call_b = ts::take_from_sender<CallOption>(&scenario);
-    call_option::join(&mut call_a, call_b);
-    assert!(call_option::amount(&call_a) == 150, 0);
+    let mut call_a = ts::take_from_sender<Coin<CALL>>(&scenario);
+    // Trader MM should have received two call coins; combine them.
+    let call_b = ts::take_from_sender<Coin<CALL>>(&scenario);
+    coin::join(&mut call_a, call_b);
+    assert!(call_a.value() == 150, 0);
 
-    let exercise_piece = call_option::split(&mut call_a, 120, scenario.ctx());
+    let exercise_piece = coin::split(&mut call_a, 120, scenario.ctx());
     ts::return_to_sender(&scenario, call_a);
 
     ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let payment = coin::mint_for_testing<USDC>((((120 as u128) * STRIKE) as u64), scenario.ctx());
-    let underlying = bucket::exercise<BTC, USDC>(&mut b, exercise_piece, payment, &clock, scenario.ctx());
+    let underlying = bucket::exercise<BTC, USDC, CALL>(&mut b, exercise_piece, payment, &clock, scenario.ctx());
     coin::burn_for_testing(underlying);
     assert!(bucket::exercise_cursor(&b) == 120, 0);
     ts::return_shared(b);
@@ -929,15 +858,15 @@ fun test_fifo_assignment_two_writers_partial_exercise() {
     // Identify each by range_end.
     let (early, late) = if (position::range_end(&pos_a) == 100) { (pos_a, pos_b) } else { (pos_b, pos_a) };
 
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
 
-    let (u_early, s_early) = bucket::redeem_position<BTC, USDC>(&mut b, early, &clock, scenario.ctx());
+    let (u_early, s_early) = bucket::redeem_position<BTC, USDC, CALL>(&mut b, early, &clock, scenario.ctx());
     assert!(u_early.value() == 0, 0);
     assert!(s_early.value() == (((100 as u128) * STRIKE) as u64), 0);
     coin::burn_for_testing(u_early);
     coin::burn_for_testing(s_early);
 
-    let (u_late, s_late) = bucket::redeem_position<BTC, USDC>(&mut b, late, &clock, scenario.ctx());
+    let (u_late, s_late) = bucket::redeem_position<BTC, USDC, CALL>(&mut b, late, &clock, scenario.ctx());
     assert!(u_late.value() == 30, 0);            // 50 written - 20 exercised
     assert!(s_late.value() == (((20 as u128) * STRIKE) as u64), 0);   // 20 exercised
     coin::burn_for_testing(u_late);
@@ -962,9 +891,10 @@ fun test_burn_expired_option_after_expiry() {
     clock.set_for_testing(EXPIRY_MS + 1);
 
     ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let call = ts::take_from_sender<CallOption>(&scenario);
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-    bucket::burn_expired_option<BTC, USDC>(&mut b, call, &clock, scenario.ctx());
+    let call = ts::take_from_sender<Coin<CALL>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    bucket::burn_expired_option<BTC, USDC, CALL>(&mut b, call, &clock, scenario.ctx());
+    assert!(bucket::call_supply(&b) == 0, 0);
     ts::return_shared(b);
 
     clock.destroy_for_testing();
@@ -982,9 +912,9 @@ fun test_burn_expired_option_before_expiry_aborts() {
     write_via_helper(&mut scenario, &clock, 30, 1_000, 1);
 
     ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let call = ts::take_from_sender<CallOption>(&scenario);
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-    bucket::burn_expired_option<BTC, USDC>(&mut b, call, &clock, scenario.ctx());
+    let call = ts::take_from_sender<Coin<CALL>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    bucket::burn_expired_option<BTC, USDC, CALL>(&mut b, call, &clock, scenario.ctx());
     ts::return_shared(b);
 
     clock.destroy_for_testing();
@@ -1003,8 +933,8 @@ fun test_cleanup_bucket_when_drained() {
 
     ts::next_tx(&mut scenario, th::admin_addr());
     let cap = th::take_admin_cap(&scenario);
-    let b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-    bucket::cleanup_bucket<BTC, USDC>(&cap, b, &clock);
+    let b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    bucket::cleanup_bucket<BTC, USDC, CALL>(&cap, b, &clock, scenario.ctx());
     th::return_admin_cap(&scenario, cap);
 
     clock.destroy_for_testing();
@@ -1025,8 +955,8 @@ fun test_cleanup_bucket_with_remaining_balance_aborts() {
 
     ts::next_tx(&mut scenario, th::admin_addr());
     let cap = th::take_admin_cap(&scenario);
-    let b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-    bucket::cleanup_bucket<BTC, USDC>(&cap, b, &clock);
+    let b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    bucket::cleanup_bucket<BTC, USDC, CALL>(&cap, b, &clock, scenario.ctx());
     th::return_admin_cap(&scenario, cap);
 
     clock.destroy_for_testing();
@@ -1038,8 +968,8 @@ fun test_cleanup_bucket_with_remaining_balance_aborts() {
 fun invalidate(scenario: &mut Scenario, clock: &sui::clock::Clock, reason: vector<u8>) {
     ts::next_tx(scenario, th::admin_addr());
     let cap = th::take_admin_cap(scenario);
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(scenario);
-    bucket::invalidate_bucket<BTC, USDC>(&cap, &mut b, reason, clock, scenario.ctx());
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(scenario);
+    bucket::invalidate_bucket<BTC, USDC, CALL>(&cap, &mut b, reason, clock, scenario.ctx());
     th::return_admin_cap(scenario, cap);
     ts::return_shared(b);
 }
@@ -1047,8 +977,8 @@ fun invalidate(scenario: &mut Scenario, clock: &sui::clock::Clock, reason: vecto
 fun revalidate(scenario: &mut Scenario, clock: &sui::clock::Clock, reason: vector<u8>) {
     ts::next_tx(scenario, th::admin_addr());
     let cap = th::take_admin_cap(scenario);
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(scenario);
-    bucket::revalidate_bucket<BTC, USDC>(&cap, &mut b, reason, clock, scenario.ctx());
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(scenario);
+    bucket::revalidate_bucket<BTC, USDC, CALL>(&cap, &mut b, reason, clock, scenario.ctx());
     th::return_admin_cap(scenario, cap);
     ts::return_shared(b);
 }
@@ -1060,21 +990,21 @@ fun test_bucket_invalidated_defaults_false_then_set_true() {
     setup_bucket(&mut scenario);
 
     ts::next_tx(&mut scenario, th::admin_addr());
-    let b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     assert!(!bucket::invalidated(&b), 0);
     ts::return_shared(b);
 
     invalidate(&mut scenario, &clock, b"wrong strike");
 
     ts::next_tx(&mut scenario, th::admin_addr());
-    let b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     assert!(bucket::invalidated(&b), 0);
     ts::return_shared(b);
 
     revalidate(&mut scenario, &clock, b"fixed");
 
     ts::next_tx(&mut scenario, th::admin_addr());
-    let b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     assert!(!bucket::invalidated(&b), 0);
     ts::return_shared(b);
 
@@ -1113,7 +1043,7 @@ fun test_revalidate_re_enables_execute_write() {
     write_via_helper(&mut scenario, &clock, 25, 1_000, 1);
 
     ts::next_tx(&mut scenario, th::admin_addr());
-    let b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     assert!(bucket::total_written(&b) == 25, 0);
     ts::return_shared(b);
 
@@ -1135,10 +1065,10 @@ fun test_exercise_still_works_when_invalidated() {
     invalidate(&mut scenario, &clock, b"post-write");
 
     ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let call = ts::take_from_sender<CallOption>(&scenario);
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
+    let call = ts::take_from_sender<Coin<CALL>>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let payment = coin::mint_for_testing<USDC>((((60 as u128) * STRIKE) as u64), scenario.ctx());
-    let underlying = bucket::exercise<BTC, USDC>(&mut b, call, payment, &clock, scenario.ctx());
+    let underlying = bucket::exercise<BTC, USDC, CALL>(&mut b, call, payment, &clock, scenario.ctx());
     assert!(underlying.value() == 60, 0);
     assert!(bucket::exercise_cursor(&b) == 60, 0);
     coin::burn_for_testing(underlying);
@@ -1162,9 +1092,9 @@ fun test_redeem_still_works_when_invalidated() {
     clock.set_for_testing(EXPIRY_MS + 1);
 
     ts::next_tx(&mut scenario, th::writer_addr());
-    let pos = ts::take_from_sender<PositionNFT>(&scenario);
-    let mut b = ts::take_shared<Bucket<BTC, USDC>>(&scenario);
-    let (u, s) = bucket::redeem_position<BTC, USDC>(&mut b, pos, &clock, scenario.ctx());
+    let pos = ts::take_from_sender<Position>(&scenario);
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    let (u, s) = bucket::redeem_position<BTC, USDC, CALL>(&mut b, pos, &clock, scenario.ctx());
     assert!(u.value() == 40, 0);
     assert!(s.value() == 0, 0);
     coin::burn_for_testing(u);

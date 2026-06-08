@@ -17,6 +17,10 @@ runtime-config = { workspace = true }
 cli-spec       = { workspace = true }
 sui-tx         = { workspace = true }
 token-info-client = { workspace = true }
+# Reuse the scheduler's codegen→publish→create_bucket roll pipeline so the
+# manual `create-buckets` admin command mints per-bucket option coins the same
+# way the scheduler does.
+option-scheduler = { path = "../../services/option-scheduler" }
 
 sui-types = { workspace = true }
 sui-json-rpc-types = { workspace = true }

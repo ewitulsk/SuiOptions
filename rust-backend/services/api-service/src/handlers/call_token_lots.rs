@@ -38,7 +38,6 @@ pub struct LotsQuery {
 
 #[derive(Serialize)]
 pub struct LotDto {
-    pub call_option_id: String,
     pub bucket_id: String,
     pub asset_symbol: String,
     pub asset_decimals: Option<u8>,
@@ -116,7 +115,6 @@ pub async fn list_call_token_lots(
                 _ => None,
             };
             Some(LotDto {
-                call_option_id: w.call_option_id.to_hex(),
                 bucket_id: w.bucket_id.to_hex(),
                 asset_symbol: asset_meta
                     .map(|m| m.symbol.clone())

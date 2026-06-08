@@ -10,6 +10,7 @@ use clap::Parser;
 
 use sui_tx::sui_client::Network;
 
+pub mod codegen;
 pub mod config;
 pub mod db;
 pub mod families;

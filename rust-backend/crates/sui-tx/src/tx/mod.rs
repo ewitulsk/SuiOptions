@@ -15,6 +15,7 @@
 
 pub mod account;
 pub mod admin;
+pub mod coin_pkg;
 pub mod execute_write;
 pub mod test_tokens;
 

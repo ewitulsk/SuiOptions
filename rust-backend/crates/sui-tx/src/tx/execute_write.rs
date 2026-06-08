@@ -44,6 +44,9 @@ pub struct ExecuteWriteParams<'a> {
     pub package: ObjectID,
     pub underlying_type: &'a str,
     pub settlement_type: &'a str,
+    /// Fully-qualified type of the bucket's per-bucket option coin
+    /// (`0x<gen_pkg>::call_<i>::CALL_<I>`).
+    pub call_type: &'a str,
 
     /// Test-tokens package id holding the faucets.
     pub tokens_package: ObjectID,
@@ -122,6 +125,8 @@ pub async fn execute_writer_flow(
         .with_context(|| format!("parsing underlying type {}", p.underlying_type))?;
     let s_tag = TypeTag::from_str(p.settlement_type)
         .with_context(|| format!("parsing settlement type {}", p.settlement_type))?;
+    let c_tag = TypeTag::from_str(p.call_type)
+        .with_context(|| format!("parsing call type {}", p.call_type))?;
 
     // 1. test_tokens::<module>::mint(faucet, write_amount) -> Coin<Underlying>
     let coin_underlying = pt.programmable_move_call(
@@ -183,7 +188,7 @@ pub async fn execute_writer_flow(
         p.package,
         Identifier::new("bucket").unwrap(),
         Identifier::new("execute_write").unwrap(),
-        vec![u_tag, s_tag],
+        vec![u_tag, s_tag, c_tag],
         vec![
             bucket,
             config,

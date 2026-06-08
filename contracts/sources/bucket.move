@@ -3,21 +3,28 @@ module options_protocol::bucket;
 use std::type_name::{Self, TypeName};
 use sui::balance::{Self, Balance};
 use sui::clock::Clock;
-use sui::coin::{Self, Coin};
+use sui::coin::{Self, Coin, TreasuryCap};
 
 use options_protocol::account::{Self, Account};
 use options_protocol::admin::{Self, AdminCap, ProtocolConfig};
-use options_protocol::call_option::{Self, CallOption};
 use options_protocol::errors;
 use options_protocol::events;
 use options_protocol::position::{Self, Position};
 use options_protocol::quote::{Self, Quote, SignedQuote};
 use options_protocol::treasury::{Self, Treasury};
 
-public struct Bucket<phantom Underlying, phantom Settlement> has key {
+/// The call option is a per-bucket fungible coin: `Coin<Call>`. `Call` is a
+/// One-Time-Witness type minted from a package the options-scheduler
+/// publishes per bucket set, so every bucket has its own coin currency. The
+/// bucket owns the sole `TreasuryCap<Call>` — it is the only minter and
+/// burner — which makes the coin's outstanding supply exactly equal to the
+/// outstanding (unexercised, unburned) option amount, and makes bucket
+/// isolation a type-system guarantee rather than a runtime `bucket_id` check.
+public struct Bucket<phantom Underlying, phantom Settlement, phantom Call> has key {
     id: UID,
     asset_type: TypeName,
     settlement_type: TypeName,
+    call_type: TypeName,
     expiry_ms: u64,
     /// Strike ratio in scaled chain units. The real ratio (settlement
     /// smallest-units per underlying smallest-unit) is
@@ -30,6 +37,9 @@ public struct Bucket<phantom Underlying, phantom Settlement> has key {
     exercise_cursor: u128,
     underlying_balance: Balance<Underlying>,
     settlement_balance: Balance<Settlement>,
+    /// Sole mint/burn authority for the option coin. Held for the bucket's
+    /// whole life; never exposed by reference outside this module.
+    call_treasury: TreasuryCap<Call>,
     /// Admin-controlled freeze on new writes. Exercises and redeems are
     /// unaffected — invalidation only blocks `execute_write`. Toggleable
     /// pre-expiry via `invalidate_bucket` / `revalidate_bucket`.
@@ -77,53 +87,64 @@ public fun writer_flow(): FlowKind { FlowKind::Writer }
 
 public fun trader_flow(): FlowKind { FlowKind::Trader }
 
-public fun new_call_option<Underlying, Settlement>(
+/// Create a single bucket for the (Underlying, Settlement, Call) triple,
+/// taking ownership of the option coin's `TreasuryCap`.
+///
+/// One bucket per call (rather than the old `count` loop) because each
+/// bucket needs a *distinct* `Call` coin type, and a generic function is
+/// monomorphic in its type arguments per invocation. The options-scheduler
+/// fans a bucket set out off-chain: it publishes one package containing N
+/// One-Time-Witness coin modules, then issues N `create_bucket` calls in a
+/// single PTB, one per freshly-minted `TreasuryCap`.
+///
+/// The cap must be fresh (zero supply) so the supply==outstanding-options
+/// invariant holds from genesis.
+public fun create_bucket<Underlying, Settlement, Call>(
     _: &AdminCap,
+    call_treasury: TreasuryCap<Call>,
     expiry_ms: u64,
-    start_strike: u128,
-    strike_interval: u128,
-    count: u64,
+    strike: u128,
     strike_scale: u8,
     ctx: &mut TxContext,
 ) {
-    assert!(count > 0, errors::count_must_be_positive());
     // Fail at creation rather than at the first exercise/redeem if the
     // scheduler ever hands us an out-of-range scale.
     assert!(strike_scale <= MAX_STRIKE_SCALE, errors::strike_scale_too_large());
+    assert!(coin::total_supply(&call_treasury) == 0, errors::treasury_cap_not_fresh());
+
     let asset_type = type_name::with_defining_ids<Underlying>();
     let settlement_type = type_name::with_defining_ids<Settlement>();
-    let mut i: u64 = 0;
-    while (i < count) {
-        let strike = start_strike + (i as u128) * strike_interval;
-        let bucket = Bucket<Underlying, Settlement> {
-            id: object::new(ctx),
-            asset_type,
-            settlement_type,
-            expiry_ms,
-            strike,
-            strike_scale,
-            total_written: 0,
-            exercise_cursor: 0,
-            underlying_balance: balance::zero<Underlying>(),
-            settlement_balance: balance::zero<Settlement>(),
-            invalidated: false,
-        };
-        let bucket_id = object::id(&bucket);
-        events::emit_bucket_created(
-            bucket_id,
-            asset_type,
-            settlement_type,
-            expiry_ms,
-            strike,
-            strike_scale,
-        );
-        transfer::share_object(bucket);
-        i = i + 1;
+    let call_type = type_name::with_defining_ids<Call>();
+    let bucket = Bucket<Underlying, Settlement, Call> {
+        id: object::new(ctx),
+        asset_type,
+        settlement_type,
+        call_type,
+        expiry_ms,
+        strike,
+        strike_scale,
+        total_written: 0,
+        exercise_cursor: 0,
+        underlying_balance: balance::zero<Underlying>(),
+        settlement_balance: balance::zero<Settlement>(),
+        call_treasury,
+        invalidated: false,
     };
+    let bucket_id = object::id(&bucket);
+    events::emit_bucket_created(
+        bucket_id,
+        asset_type,
+        settlement_type,
+        call_type,
+        expiry_ms,
+        strike,
+        strike_scale,
+    );
+    transfer::share_object(bucket);
 }
 
-public fun execute_write<Underlying, Settlement>(
-    bucket: &mut Bucket<Underlying, Settlement>,
+public fun execute_write<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
     config: &ProtocolConfig,
     treasury: &mut Treasury,
     signer_account: &mut Account,
@@ -137,7 +158,7 @@ public fun execute_write<Underlying, Settlement>(
     ctx: &mut TxContext,
 ) {
     let q = quote::verify_and_consume_quote(signer_account, config, &signed_quote, clock);
-    execute_write_with_quote<Underlying, Settlement>(
+    execute_write_with_quote<Underlying, Settlement, Call>(
         bucket,
         config,
         treasury,
@@ -154,8 +175,8 @@ public fun execute_write<Underlying, Settlement>(
 }
 
 #[test_only]
-public fun execute_write_for_testing<Underlying, Settlement>(
-    bucket: &mut Bucket<Underlying, Settlement>,
+public fun execute_write_for_testing<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
     config: &ProtocolConfig,
     treasury: &mut Treasury,
     signer_account: &mut Account,
@@ -169,7 +190,7 @@ public fun execute_write_for_testing<Underlying, Settlement>(
     ctx: &mut TxContext,
 ) {
     let q = quote::verify_skip_sig(signer_account, config, &signed_quote, clock);
-    execute_write_with_quote<Underlying, Settlement>(
+    execute_write_with_quote<Underlying, Settlement, Call>(
         bucket,
         config,
         treasury,
@@ -186,8 +207,8 @@ public fun execute_write_for_testing<Underlying, Settlement>(
 }
 
 #[allow(lint(self_transfer))]
-fun execute_write_with_quote<Underlying, Settlement>(
-    bucket: &mut Bucket<Underlying, Settlement>,
+fun execute_write_with_quote<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
     config: &ProtocolConfig,
     treasury: &mut Treasury,
     signer_account: &mut Account,
@@ -272,8 +293,8 @@ fun execute_write_with_quote<Underlying, Settlement>(
     let position_id = object::id(&position);
     transfer::public_transfer(position, position_recipient);
 
-    let call = call_option::mint(bucket_id, write_amount, ctx);
-    let call_option_id = object::id(&call);
+    // Mint the option as a fungible coin from the bucket's own treasury.
+    let call = coin::mint(&mut bucket.call_treasury, write_amount, ctx);
     transfer::public_transfer(call, call_token_recipient);
 
     events::emit_write_executed(
@@ -283,7 +304,6 @@ fun execute_write_with_quote<Underlying, Settlement>(
         ctx.sender(),
         position_id,
         position_recipient,
-        call_option_id,
         call_token_recipient,
         write_amount,
         gross_premium,
@@ -295,18 +315,17 @@ fun execute_write_with_quote<Underlying, Settlement>(
     );
 }
 
-public fun exercise<Underlying, Settlement>(
-    bucket: &mut Bucket<Underlying, Settlement>,
-    call: CallOption,
+public fun exercise<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    call: Coin<Call>,
     settlement_payment: Coin<Settlement>,
     clock: &Clock,
     ctx: &mut TxContext,
 ): Coin<Underlying> {
     assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
     let bucket_id = object::id(bucket);
-    assert!(call_option::bucket_id(&call) == bucket_id, errors::call_option_bucket_mismatch());
 
-    let amount = call_option::amount(&call);
+    let amount = call.value();
     assert!(amount > 0, errors::zero_amount());
 
     let required_settlement = apply_strike(
@@ -321,7 +340,9 @@ public fun exercise<Underlying, Settlement>(
         errors::cursor_overflow(),
     );
 
-    call_option::burn(call);
+    // Burning through the bucket's own treasury enforces, by type, that the
+    // coin belongs to this bucket — no `bucket_id` field check needed.
+    coin::burn(&mut bucket.call_treasury, call);
 
     bucket.settlement_balance.join(settlement_payment.into_balance());
     bucket.exercise_cursor = bucket.exercise_cursor + (amount as u128);
@@ -339,8 +360,8 @@ public fun exercise<Underlying, Settlement>(
     underlying
 }
 
-public fun redeem_position<Underlying, Settlement>(
-    bucket: &mut Bucket<Underlying, Settlement>,
+public fun redeem_position<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
     position: Position,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -387,29 +408,31 @@ public fun redeem_position<Underlying, Settlement>(
     (underlying, settlement)
 }
 
-public fun burn_expired_option<Underlying, Settlement>(
-    bucket: &mut Bucket<Underlying, Settlement>,
-    call: CallOption,
+public fun burn_expired_option<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    call: Coin<Call>,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
     assert!(clock.timestamp_ms() >= bucket.expiry_ms, errors::bucket_not_expired());
     let bucket_id = object::id(bucket);
-    assert!(call_option::bucket_id(&call) == bucket_id, errors::call_option_bucket_mismatch());
-    let amount = call_option::burn(call);
+    let amount = coin::burn(&mut bucket.call_treasury, call);
     events::emit_expired_option_burned(bucket_id, ctx.sender(), amount);
 }
 
-public fun cleanup_bucket<Underlying, Settlement>(
+#[allow(lint(self_transfer))]
+public fun cleanup_bucket<Underlying, Settlement, Call>(
     _: &AdminCap,
-    bucket: Bucket<Underlying, Settlement>,
+    bucket: Bucket<Underlying, Settlement, Call>,
     clock: &Clock,
+    ctx: &mut TxContext,
 ) {
     assert!(clock.timestamp_ms() >= bucket.expiry_ms, errors::bucket_not_expired());
     let Bucket {
         id,
         asset_type: _,
         settlement_type: _,
+        call_type: _,
         expiry_ms: _,
         strike: _,
         strike_scale: _,
@@ -417,20 +440,25 @@ public fun cleanup_bucket<Underlying, Settlement>(
         exercise_cursor: _,
         underlying_balance,
         settlement_balance,
+        call_treasury,
         invalidated: _,
     } = bucket;
     assert!(underlying_balance.value() == 0, errors::bucket_not_drained());
     assert!(settlement_balance.value() == 0, errors::bucket_not_drained());
     underlying_balance.destroy_zero();
     settlement_balance.destroy_zero();
+    // The TreasuryCap can't be dropped (no `drop`), and outstanding option
+    // coins may still exist (holders who never exercised or burned). Hand
+    // the cap back to the admin rather than forcing supply to zero.
+    transfer::public_transfer(call_treasury, ctx.sender());
     let bucket_id = id.to_inner();
     id.delete();
     events::emit_bucket_cleaned(bucket_id);
 }
 
-public fun invalidate_bucket<Underlying, Settlement>(
+public fun invalidate_bucket<Underlying, Settlement, Call>(
     _: &AdminCap,
-    bucket: &mut Bucket<Underlying, Settlement>,
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
     reason: vector<u8>,
     clock: &Clock,
     ctx: &TxContext,
@@ -442,9 +470,9 @@ public fun invalidate_bucket<Underlying, Settlement>(
     events::emit_bucket_invalidated(object::id(bucket), now, ctx.sender(), reason);
 }
 
-public fun revalidate_bucket<Underlying, Settlement>(
+public fun revalidate_bucket<Underlying, Settlement, Call>(
     _: &AdminCap,
-    bucket: &mut Bucket<Underlying, Settlement>,
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
     reason: vector<u8>,
     clock: &Clock,
     ctx: &TxContext,
@@ -456,20 +484,25 @@ public fun revalidate_bucket<Underlying, Settlement>(
     events::emit_bucket_revalidated(object::id(bucket), now, ctx.sender(), reason);
 }
 
-public fun expiry_ms<U, S>(bucket: &Bucket<U, S>): u64 { bucket.expiry_ms }
-public fun invalidated<U, S>(bucket: &Bucket<U, S>): bool { bucket.invalidated }
-public fun strike<U, S>(bucket: &Bucket<U, S>): u128 { bucket.strike }
-public fun strike_scale<U, S>(bucket: &Bucket<U, S>): u8 { bucket.strike_scale }
-public fun total_written<U, S>(bucket: &Bucket<U, S>): u128 { bucket.total_written }
-public fun exercise_cursor<U, S>(bucket: &Bucket<U, S>): u128 { bucket.exercise_cursor }
-public fun asset_type<U, S>(bucket: &Bucket<U, S>): TypeName { bucket.asset_type }
-public fun settlement_type<U, S>(bucket: &Bucket<U, S>): TypeName { bucket.settlement_type }
+public fun expiry_ms<U, S, C>(bucket: &Bucket<U, S, C>): u64 { bucket.expiry_ms }
+public fun invalidated<U, S, C>(bucket: &Bucket<U, S, C>): bool { bucket.invalidated }
+public fun strike<U, S, C>(bucket: &Bucket<U, S, C>): u128 { bucket.strike }
+public fun strike_scale<U, S, C>(bucket: &Bucket<U, S, C>): u8 { bucket.strike_scale }
+public fun total_written<U, S, C>(bucket: &Bucket<U, S, C>): u128 { bucket.total_written }
+public fun exercise_cursor<U, S, C>(bucket: &Bucket<U, S, C>): u128 { bucket.exercise_cursor }
+public fun asset_type<U, S, C>(bucket: &Bucket<U, S, C>): TypeName { bucket.asset_type }
+public fun settlement_type<U, S, C>(bucket: &Bucket<U, S, C>): TypeName { bucket.settlement_type }
+public fun call_type<U, S, C>(bucket: &Bucket<U, S, C>): TypeName { bucket.call_type }
 
-public fun underlying_balance<U, S>(bucket: &Bucket<U, S>): u64 {
+public fun call_supply<U, S, C>(bucket: &Bucket<U, S, C>): u64 {
+    coin::total_supply(&bucket.call_treasury)
+}
+
+public fun underlying_balance<U, S, C>(bucket: &Bucket<U, S, C>): u64 {
     bucket.underlying_balance.value()
 }
 
-public fun settlement_balance<U, S>(bucket: &Bucket<U, S>): u64 {
+public fun settlement_balance<U, S, C>(bucket: &Bucket<U, S, C>): u64 {
     bucket.settlement_balance.value()
 }
 
