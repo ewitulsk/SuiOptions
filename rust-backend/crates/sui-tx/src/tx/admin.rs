@@ -86,48 +86,6 @@ async fn execute_move_call(
     Ok(resp)
 }
 
-pub struct NewCallOptionArgs<'a> {
-    pub package: ObjectID,
-    pub admin_cap: ObjectID,
-    pub underlying_type: &'a str,
-    pub settlement_type: &'a str,
-    pub expiry_ms: u64,
-    pub start_strike: u128,
-    pub strike_interval: u128,
-    pub count: u64,
-    pub strike_scale: u8,
-}
-
-/// Calls `bucket::new_call_option<U, S>(&AdminCap, expiry, start, interval,
-/// count, strike_scale, ctx)`. Emits one `BucketCreated` event per strike.
-pub async fn new_call_option(
-    client: &SuiClient,
-    signer: &Signer,
-    args: &NewCallOptionArgs<'_>,
-    gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
-    execute_move_call(
-        client,
-        signer,
-        args.package,
-        "bucket",
-        "new_call_option",
-        vec![args.underlying_type, args.settlement_type],
-        vec![
-            SuiJsonValue::from_object_id(args.admin_cap),
-            // u64 / u128 args ride as string in JSON to avoid 2^53 truncation.
-            SuiJsonValue::new(serde_json::Value::String(args.expiry_ms.to_string()))?,
-            SuiJsonValue::new(serde_json::Value::String(args.start_strike.to_string()))?,
-            SuiJsonValue::new(serde_json::Value::String(args.strike_interval.to_string()))?,
-            SuiJsonValue::new(serde_json::Value::String(args.count.to_string()))?,
-            // strike_scale is u8 — small enough to ride as a number.
-            SuiJsonValue::new(serde_json::Value::Number(args.strike_scale.into()))?,
-        ],
-        gas_budget,
-    )
-    .await
-}
-
 /// Calls `admin::set_fee_bps(&AdminCap, &mut ProtocolConfig, new_bps)`.
 pub async fn set_fee_bps(
     client: &SuiClient,

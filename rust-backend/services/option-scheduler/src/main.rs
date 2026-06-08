@@ -399,6 +399,7 @@ async fn tick_once(
             settlement_symbol: meta.cfg.settlement.clone(),
             underlying_type: meta.underlying_type.clone(),
             settlement_type: meta.settlement_type.clone(),
+            underlying_decimals: meta.underlying_decimals,
             expiry_ms: next_expiry,
             grid,
         };

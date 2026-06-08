@@ -2,14 +2,41 @@
 module options_protocol::test_helpers;
 
 use sui::clock::{Self, Clock};
+use sui::coin;
 use sui::test_scenario::{Self as ts, Scenario};
 
 use options_protocol::admin::{Self, AdminCap, ProtocolConfig};
 use options_protocol::account::{Self, Account};
+use options_protocol::bucket;
 use options_protocol::treasury::{Self, Treasury};
 
 public struct USDC has drop {}
 public struct BTC has drop {}
+
+/// Per-bucket option-coin marker types. Each bucket needs a distinct `Call`
+/// type for true isolation; tests that create more than one bucket use a
+/// different marker per bucket. `create_treasury_cap_for_testing` lets us
+/// forge a fresh, zero-supply cap for an arbitrary type without an OTW.
+public struct CALL has drop {}
+public struct CALL2 has drop {}
+public struct CALL3 has drop {}
+
+/// Create and share a bucket for `(U, S, C)` with a fresh test option-coin
+/// treasury cap. Runs as the admin. Mirrors what the scheduler does on chain
+/// (publish a coin package, then `create_bucket` with the new cap), minus the
+/// publish step.
+public fun new_bucket<U, S, C>(
+    scenario: &mut Scenario,
+    expiry_ms: u64,
+    strike: u128,
+    strike_scale: u8,
+) {
+    ts::next_tx(scenario, admin_addr());
+    let cap = take_admin_cap(scenario);
+    let tcap = coin::create_treasury_cap_for_testing<C>(scenario.ctx());
+    bucket::create_bucket<U, S, C>(&cap, tcap, expiry_ms, strike, strike_scale, scenario.ctx());
+    return_admin_cap(scenario, cap);
+}
 
 public fun admin_addr(): address { @0xA1 }
 public fun writer_addr(): address { @0xB2 }

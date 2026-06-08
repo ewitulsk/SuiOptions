@@ -137,10 +137,15 @@ async fn main() -> Result<()> {
     let signer_token_recipient =
         sui_address_from_pt(best.quote.signer_token_recipient)?;
 
+    // The option coin type is the bucket's third type parameter; read it off
+    // the on-chain Bucket<U, S, Call> object.
+    let call_type = bucket_call_type(&wrap.client, cli.bucket).await?;
+
     let params = ExecuteWriteParams {
         package,
         underlying_type: &underlying_spec.coin_type,
         settlement_type: &settlement_spec.coin_type,
+        call_type: &call_type,
         tokens_package: tokens_pkg,
         underlying_module: &underlying_module,
         underlying_faucet_id: underlying_faucet.faucet()?,
@@ -166,6 +171,30 @@ async fn main() -> Result<()> {
     let resp = execute_writer_flow(&wrap.client, &wrap.signer, &params).await?;
     println!("✓ execute_write digest: {}", resp.digest);
     Ok(())
+}
+
+/// Read the bucket's option-coin type (the `Call` in `Bucket<U, S, Call>`)
+/// straight off the on-chain object's type parameters.
+async fn bucket_call_type(client: &sui_sdk::SuiClient, bucket: ObjectID) -> Result<String> {
+    let resp = client
+        .read_api()
+        .get_object_with_options(
+            bucket,
+            sui_json_rpc_types::SuiObjectDataOptions::new().with_type(),
+        )
+        .await?;
+    let data = resp.data.ok_or_else(|| anyhow!("bucket {bucket} not found on chain"))?;
+    let object_type = data.object_type().context("bucket object has no type")?;
+    match object_type {
+        sui_types::base_types::ObjectType::Struct(mot) => {
+            let params = mot.type_params();
+            let call = params
+                .get(2)
+                .ok_or_else(|| anyhow!("bucket type has no Call type param: {mot}"))?;
+            Ok(call.to_canonical_string(/* with_prefix */ true))
+        }
+        other => Err(anyhow!("bucket object is not a struct type: {other}")),
+    }
 }
 
 // -- protocol-types ↔ sui-types id bridges -------------------------------

@@ -20,6 +20,9 @@ pub struct BucketCreated {
     pub bucket_id: ObjectId,
     pub asset_type: AssetType,
     pub settlement_type: AssetType,
+    /// Fully-qualified type of the per-bucket fungible option coin
+    /// (`Coin<call_type>`). BCS-matches the on-chain `TypeName` field.
+    pub call_type: AssetType,
     #[serde(with = "u64_string")]
     pub expiry_ms: u64,
     /// Scaled strike. Real ratio = `strike / 10^strike_scale`
@@ -47,7 +50,6 @@ pub struct WriteExecuted {
     pub executor: SuiAddress,
     pub position_id: ObjectId,
     pub position_recipient: SuiAddress,
-    pub call_option_id: ObjectId,
     pub call_token_recipient: SuiAddress,
     #[serde(with = "u64_string")]
     pub write_amount: u64,
@@ -222,6 +224,7 @@ mod tests {
             bucket_id: ObjectId::new([0x01; 32]),
             asset_type: AssetType::new("BTC"),
             settlement_type: AssetType::new("USDC"),
+            call_type: AssetType::new("0x9::call_0::CALL_0"),
             expiry_ms: 1_748_534_400_000,
             strike: 50_000_000_000,
             strike_scale: 0,
@@ -242,6 +245,7 @@ mod tests {
             bucket_id: ObjectId::new([0; 32]),
             asset_type: AssetType::new("DEEP"),
             settlement_type: AssetType::new("USDC"),
+            call_type: AssetType::new("0x9::call_0::CALL_0"),
             expiry_ms: 0,
             strike: 15_000,
             strike_scale: 5,

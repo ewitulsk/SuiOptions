@@ -1,18 +1,27 @@
 //! Bucket-roll executor.
 //!
-//! Builds a `NewCallOptionArgs`, submits it via the shared admin tx
-//! builder, and pulls every created bucket id out of `ObjectChanges` so
-//! we can log them. Honors `--dry-run`: we log the args we *would* have
-//! sent and return without touching the chain.
+//! A roll now publishes a fresh option-coin package and creates one bucket per
+//! strike, each backed by its own fungible `Coin<Call>`:
+//!
+//!   1. codegen N One-Time-Witness coin modules for the strike grid,
+//!   2. compile the package in-process (`sui-move-build`),
+//!   3. publish it and harvest the `TreasuryCap`s its inits minted,
+//!   4. `bucket::create_bucket<U, S, Call_i>` once per cap in a single PTB,
+//!   5. pull every created bucket id out of `ObjectChanges` so we can log them.
+//!
+//! Honors `--dry-run`: the caller logs the args it *would* have sent and never
+//! reaches `submit`.
 
 use anyhow::{Context, Result};
 use sui_json_rpc_types::ObjectChange;
+use sui_move_build::BuildConfig;
 use sui_types::base_types::ObjectID;
 use tracing::{debug, info, warn};
 
 use sui_tx::sui_client::SuiClientWrapper;
-use sui_tx::tx::admin::{new_call_option, NewCallOptionArgs};
+use sui_tx::tx::coin_pkg::{self, CreateBucketSpec};
 
+use crate::codegen;
 use crate::strike_grid::StrikeGrid;
 
 #[derive(Debug, Clone)]
@@ -21,6 +30,9 @@ pub struct RollPlan {
     pub settlement_symbol: String,
     pub underlying_type: String,
     pub settlement_type: String,
+    /// Underlying decimals — the option coin mints with the same decimals so
+    /// one option smallest-unit == one underlying smallest-unit.
+    pub underlying_decimals: u8,
     pub expiry_ms: u64,
     pub grid: StrikeGrid,
 }
@@ -96,43 +108,109 @@ pub async fn submit(
         underlying = %plan.underlying_type,
         settlement = %plan.settlement_type,
         expiry_ms = plan.expiry_ms,
+        count = plan.grid.count,
         gas_budget,
         "submitting roll"
     );
-    let resp = new_call_option(
+
+    // 1. codegen + 2. compile the per-roll option-coin package.
+    let label = format!(
+        "{}-{}@{}",
+        plan.underlying_symbol, plan.settlement_symbol, plan.expiry_ms
+    );
+    let pkg = codegen::generate(plan.grid.count, plan.underlying_decimals, &label)
+        .context("generating coin package")?;
+    let compiled = BuildConfig::new_for_testing()
+        .build(&pkg.dir)
+        .with_context(|| {
+            format!("compiling generated coin package at {}", pkg.dir.display())
+        });
+    // Always clean the temp dir, success or failure.
+    let compiled = match compiled {
+        Ok(c) => c,
+        Err(e) => {
+            pkg.cleanup();
+            return Err(e);
+        }
+    };
+    let modules = compiled.get_package_bytes(/* with_unpublished_deps */ false);
+    let deps = compiled.get_dependency_storage_package_ids();
+    pkg.cleanup();
+
+    // 3. publish + harvest the TreasuryCaps.
+    let published =
+        coin_pkg::publish_coin_package(&wrap.client, &wrap.signer, modules, deps, gas_budget)
+            .await
+            .context("publishing coin package")?;
+    info!(
+        coin_package = %published.package_id,
+        digest = %published.digest,
+        caps = published.caps.len(),
+        "coin package published"
+    );
+
+    // 4. pair each cap to its strike and create the buckets.
+    let specs = pair_caps_to_strikes(plan, &published.caps)?;
+    let resp = coin_pkg::create_buckets(
         &wrap.client,
         &wrap.signer,
-        &NewCallOptionArgs {
-            package,
-            admin_cap,
-            underlying_type: &plan.underlying_type,
-            settlement_type: &plan.settlement_type,
-            expiry_ms: plan.expiry_ms,
-            start_strike: plan.grid.start_strike,
-            strike_interval: plan.grid.strike_interval,
-            count: plan.grid.count,
-            strike_scale: plan.grid.strike_scale,
-        },
+        package,
+        admin_cap,
+        &specs,
         gas_budget,
     )
     .await
-    .context("submitting new_call_option")?;
+    .context("creating buckets")?;
 
     let digest = resp.digest.to_string();
     let bucket_ids = extract_bucket_ids(resp.object_changes.as_deref().unwrap_or(&[]));
     if bucket_ids.is_empty() {
         warn!(
             digest,
-            "new_call_option succeeded but no Bucket objects observed in ObjectChanges — \
+            "create_buckets succeeded but no Bucket objects observed in ObjectChanges — \
              relying on indexer to fill in"
         );
     }
-    info!(
-        digest,
-        bucket_count = bucket_ids.len(),
-        "roll submitted"
-    );
+    info!(digest, bucket_count = bucket_ids.len(), "roll submitted");
     Ok(RollOutcome { digest, bucket_ids })
+}
+
+/// Pair each harvested `TreasuryCap` to the strike its module was generated
+/// for. The cap's call type encodes the module index (`…::call_<i>::CALL_<I>`),
+/// which maps to `start_strike + i * strike_interval`.
+fn pair_caps_to_strikes(
+    plan: &RollPlan,
+    caps: &[coin_pkg::HarvestedCap],
+) -> Result<Vec<CreateBucketSpec>> {
+    if caps.len() as u64 != plan.grid.count {
+        anyhow::bail!(
+            "harvested {} treasury caps but grid wanted {} buckets",
+            caps.len(),
+            plan.grid.count
+        );
+    }
+    let mut specs = Vec::with_capacity(caps.len());
+    for cap in caps {
+        let i = codegen::call_index(&cap.call_type)
+            .with_context(|| format!("indexing cap {}", cap.call_type))?;
+        if i >= plan.grid.count {
+            anyhow::bail!(
+                "cap index {i} out of range for grid count {}",
+                plan.grid.count
+            );
+        }
+        let strike = plan.grid.start_strike + (i as u128) * plan.grid.strike_interval;
+        specs.push(CreateBucketSpec {
+            underlying_type: plan.underlying_type.clone(),
+            settlement_type: plan.settlement_type.clone(),
+            call_type: cap.call_type.clone(),
+            cap_ref: cap.cap_ref,
+            expiry_ms: plan.expiry_ms,
+            strike,
+            strike_scale: plan.grid.strike_scale,
+        });
+    }
+    Ok(specs)
 }
 
 /// Pull `bucket::Bucket` ObjectIDs out of a tx's ObjectChanges, in the

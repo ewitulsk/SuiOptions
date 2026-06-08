@@ -23,8 +23,11 @@ use clap::Parser;
 
 use token_info_client::{Snapshot, TokenInfoClient};
 use sui_tx::sui_client::SuiClientWrapper;
-use sui_tx::tx::admin::{new_call_option, set_fee_bps, withdraw_treasury, NewCallOptionArgs};
+use sui_tx::tx::admin::{set_fee_bps, withdraw_treasury};
 use sui_tx::tx::test_tokens::{mint_and_deposit_into_account, mint_to_sender};
+
+use option_scheduler::roller::{self, RollPlan};
+use option_scheduler::strike_grid::StrikeGrid;
 
 use exchange::{Cli, Command};
 
@@ -83,41 +86,30 @@ async fn main() -> Result<()> {
             count,
             strike_scale,
         } => {
-            let u_type = resolve_coin_type(&snapshot, &underlying)?;
+            let u_spec = snapshot
+                .token_spec(&underlying)
+                .with_context(|| format!("underlying {underlying} not in token-info catalog"))?;
             let s_type = resolve_coin_type(&snapshot, &settlement)?;
-            let resp = new_call_option(
-                &wrap.client,
-                &wrap.signer,
-                &NewCallOptionArgs {
-                    package,
-                    admin_cap,
-                    underlying_type: &u_type,
-                    settlement_type: &s_type,
-                    expiry_ms,
+            // Drive the same per-roll codegen→publish→create_bucket pipeline
+            // the scheduler uses, so manual buckets get per-bucket option coins.
+            let plan = RollPlan {
+                underlying_symbol: underlying.clone(),
+                settlement_symbol: settlement.clone(),
+                underlying_type: u_spec.coin_type.clone(),
+                settlement_type: s_type,
+                underlying_decimals: u_spec.decimals,
+                expiry_ms,
+                grid: StrikeGrid {
                     start_strike,
                     strike_interval,
                     count,
                     strike_scale,
                 },
-                cli.gas_budget,
-            )
-            .await?;
-            println!("✓ create-buckets digest: {}", resp.digest);
-            if let Some(changes) = &resp.object_changes {
-                for c in changes {
-                    if let sui_json_rpc_types::ObjectChange::Created {
-                        object_id,
-                        object_type,
-                        ..
-                    } = c
-                    {
-                        if object_type.module.as_str() == "bucket"
-                            && object_type.name.as_str() == "Bucket"
-                        {
-                            println!("  bucket: {object_id}");
-                        }
-                    }
-                }
+            };
+            let out = roller::submit(&wrap, package, admin_cap, &plan, cli.gas_budget).await?;
+            println!("✓ create-buckets digest: {}", out.digest);
+            for id in &out.bucket_ids {
+                println!("  bucket: {id}");
             }
         }
         Command::Mint { token, amount } => {

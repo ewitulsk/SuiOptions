@@ -293,7 +293,6 @@ mod tests {
             executor: writer,
             position_id: ObjectId::new([0x44; 32]),
             position_recipient: writer,
-            call_option_id: ObjectId::new([0x55; 32]),
             call_token_recipient: buyer,
             write_amount: 100,
             gross_premium: 90,

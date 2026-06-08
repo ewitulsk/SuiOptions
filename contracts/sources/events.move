@@ -7,6 +7,8 @@ public struct BucketCreated has copy, drop {
     bucket_id: ID,
     asset_type: TypeName,
     settlement_type: TypeName,
+    /// Fully-qualified type of the per-bucket option coin (`Coin<call_type>`).
+    call_type: TypeName,
     expiry_ms: u64,
     /// See `bucket::Bucket.strike` — actual ratio is
     /// `strike / 10^strike_scale`.
@@ -21,7 +23,6 @@ public struct WriteExecuted has copy, drop {
     executor: address,
     position_id: ID,
     position_recipient: address,
-    call_option_id: ID,
     call_token_recipient: address,
     write_amount: u64,
     gross_premium: u64,
@@ -114,6 +115,7 @@ public(package) fun emit_bucket_created(
     bucket_id: ID,
     asset_type: TypeName,
     settlement_type: TypeName,
+    call_type: TypeName,
     expiry_ms: u64,
     strike: u128,
     strike_scale: u8,
@@ -122,6 +124,7 @@ public(package) fun emit_bucket_created(
         bucket_id,
         asset_type,
         settlement_type,
+        call_type,
         expiry_ms,
         strike,
         strike_scale,
@@ -135,7 +138,6 @@ public(package) fun emit_write_executed(
     executor: address,
     position_id: ID,
     position_recipient: address,
-    call_option_id: ID,
     call_token_recipient: address,
     write_amount: u64,
     gross_premium: u64,
@@ -152,7 +154,6 @@ public(package) fun emit_write_executed(
         executor,
         position_id,
         position_recipient,
-        call_option_id,
         call_token_recipient,
         write_amount,
         gross_premium,
