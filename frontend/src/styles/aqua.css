@@ -1168,6 +1168,11 @@
   border: 1px solid var(--aqua-line);
 }
 [data-theme="aqua"] .pos-card__cta--ghost:hover { background: rgba(var(--aqua-surface-rgb),0.7); }
+[data-theme="aqua"] .pos-card__cta--secondary {
+  color: var(--aqua-coral); background: transparent;
+  border: 1px solid var(--aqua-coral);
+}
+[data-theme="aqua"] .pos-card__cta--secondary:hover { transform: translateY(-2px); }
 [data-theme="aqua"] .pos-card__cta:disabled {
   background: rgba(var(--aqua-shadow-rgb),0.04); color: var(--aqua-ink-4);
   border-color: var(--aqua-line); cursor: not-allowed;
