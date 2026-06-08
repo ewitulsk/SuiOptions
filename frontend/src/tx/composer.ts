@@ -123,3 +123,95 @@ export function buildWriteTx(p: WriteParams): Transaction {
 
   return tx;
 }
+
+export type BuyParams = {
+  /** Chosen MM quote (default: the best, `quotes[0]`). */
+  entry: RfqQuoteEntry;
+  /** `series.asset_coin_type` — the `Underlying` type arg. */
+  underlyingCoinType: string;
+  /** `series.settlement_coin_type` — the `Settlement` type arg. */
+  settlementCoinType: string;
+  /** The bucket's per-bucket option coin type (`Call` type arg). */
+  callCoinType: string;
+  /** Connected wallet; pays the premium and receives the CallOption. */
+  trader: string;
+};
+
+/**
+ * Build a trader-flow `execute_write` PTB from a signed RFQ quote.
+ *
+ * Mirror of {@link buildWriteTx} for the Buy page. Trader-flow invariants
+ * enforced by `execute_write_with_quote` (FlowKind::Trader):
+ * signer_recipient == position_recipient; underlying_in.value() == 0;
+ * premium_in.value() == gross_premium. The Writer MM (signer) supplies the
+ * underlying from their Account and receives the Position NFT; the trader
+ * (ctx.sender()) pays the premium from their wallet and receives the
+ * CallOption coin.
+ */
+export function buildBuyTx(p: BuyParams): Transaction {
+  const pkg = requirePackage();
+  if (!PROTOCOL_CONFIG_ID || !TREASURY_ID) {
+    throw new Error(
+      `Missing protocolConfigId/treasuryId for VITE_ENVIRONMENT="${ENV}" — cannot build execute_write`,
+    );
+  }
+  const q = p.entry.quote;
+  const tx = new Transaction();
+
+  // Reconstruct the signed quote on chain. Hex fields → vector<u8>.
+  const quoteArg = tx.moveCall({
+    target: `${pkg}::quote::new_quote`,
+    arguments: [
+      tx.pure.vector("u8", Array.from(fromHex(strip0x(q.protocol_id)))),
+      tx.pure.id(q.signer_account_id),
+      tx.pure.address(q.signer_token_recipient),
+      tx.pure.id(q.bucket_id),
+      tx.pure.u64(BigInt(q.write_amount)),
+      tx.pure.u64(BigInt(q.premium)),
+      tx.pure.u64(BigInt(q.valid_until_ms)),
+      tx.pure.u64(BigInt(q.nonce)),
+    ],
+  });
+  const signedQuote = tx.moveCall({
+    target: `${pkg}::quote::new_signed_quote`,
+    arguments: [
+      quoteArg,
+      tx.pure.vector("u8", Array.from(fromHex(strip0x(p.entry.signature)))),
+    ],
+  });
+
+  const flow = tx.moveCall({ target: `${pkg}::bucket::trader_flow` });
+
+  // Trader pays exactly the premium in settlement; the underlying side is a
+  // zero coin (the MM's underlying is debited from their Account).
+  const premium = tx.add(
+    coinWithBalance({
+      balance: BigInt(q.premium),
+      type: p.settlementCoinType,
+    }),
+  );
+  const underlyingZero = tx.moveCall({
+    target: "0x2::coin::zero",
+    typeArguments: [p.underlyingCoinType],
+  });
+
+  tx.moveCall({
+    target: `${pkg}::bucket::execute_write`,
+    typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.callCoinType],
+    arguments: [
+      tx.object(q.bucket_id),
+      tx.object(PROTOCOL_CONFIG_ID),
+      tx.object(TREASURY_ID),
+      tx.object(q.signer_account_id), // MM Account (shared, mutable)
+      underlyingZero,
+      premium,
+      flow,
+      tx.pure.address(q.signer_token_recipient), // position_recipient = the MM/writer
+      tx.pure.address(p.trader), // call_token_recipient = the trader
+      signedQuote,
+      tx.object(SUI_CLOCK_OBJECT_ID),
+    ],
+  });
+
+  return tx;
+}

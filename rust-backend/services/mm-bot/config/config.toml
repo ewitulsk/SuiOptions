@@ -35,6 +35,13 @@ rate               = 0.05
 # How long the bot's signed quotes stay valid.
 quote_ttl_ms       = 30_000
 
+# Two-sided spread off the Black-Scholes mid, in basis points. We serve both
+# sides from one Account, so the spread is what makes the book two-sided:
+#   ask_markup_bps   — marked UP when we write to a retail trader (Side::Trader)
+#   bid_markdown_bps — marked DOWN when we buy from a retail writer (Side::Writer)
+ask_markup_bps     = 100
+bid_markdown_bps   = 100
+
 # Both roles by default; a single Account can serve writer + trader.
 roles = ["trader_mm", "writer_mm"]
 
@@ -44,8 +51,22 @@ roles = ["trader_mm", "writer_mm"]
 bulk_view_enabled = true
 
 # Settlement deposited into the freshly-bootstrapped Account on first run
-# so it can pay premiums right away (writer flow). In TUSDC smallest-units.
+# so it can pay premiums right away (Trader-MM / bid side). In TUSDC
+# smallest-units.
 bootstrap_settlement_amount = 1_000_000_000_000
+
+# Underlying deposited into the freshly-bootstrapped Account on first run so it
+# can write calls to retail traders (Writer-MM / ask side). In TBTC
+# smallest-units.
+bootstrap_underlying_amount = 100_000_000_000
+
+# Background inventory top-up (Writer-MM side): when the Account's underlying
+# balance falls below `underlying_replenish_threshold`, mint+deposit
+# `underlying_replenish_amount` more via the test faucet. Set the threshold to
+# 0 to disable. `underlying_replenish_interval_secs` is how often we check.
+underlying_replenish_threshold    = 20_000_000_000
+underlying_replenish_amount       = 100_000_000_000
+underlying_replenish_interval_secs = 60
 
 # Optional: where minted call tokens / position NFTs should land. Leave
 # unset to derive from the Sui wallet key.

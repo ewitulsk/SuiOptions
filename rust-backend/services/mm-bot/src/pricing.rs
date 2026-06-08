@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use pricing::{call_price_per_unit, premium_for_write, CallInputs};
 use protocol_types::messages::RfqBroadcastPayload;
+use protocol_types::sides::Side;
 use pyth_client::{PriceCache, PriceFeedId};
 
 /// Knobs that affect quote arithmetic but are independent of staleness/IO.
@@ -19,6 +20,27 @@ pub struct PricingConfig {
     pub rate: f64,
     /// How long the quote we emit stays valid, in milliseconds.
     pub quote_ttl_ms: u64,
+    /// Ask-side markup, in basis points, applied when we quote as the Writer
+    /// MM (retail is buying — `Side::Trader`): the premium we charge is marked
+    /// *up* off the Black-Scholes mid.
+    pub ask_markup_bps: u64,
+    /// Bid-side markdown, in basis points, applied when we quote as the Trader
+    /// MM (retail is writing — `Side::Writer`): the premium we pay is marked
+    /// *down* off the mid.
+    pub bid_markdown_bps: u64,
+}
+
+/// Apply the side-aware spread to the Black-Scholes mid per-unit price.
+///
+/// We serve both sides off one Account, so the spread is what makes the book
+/// two-sided: we charge above mid on the ask (we're writing to a retail
+/// trader) and pay below mid on the bid (we're buying from a retail writer).
+fn apply_spread(per_unit_mid: f64, side: Side, cfg: &PricingConfig) -> f64 {
+    let bps = match side {
+        Side::Trader => cfg.ask_markup_bps as f64,
+        Side::Writer => -(cfg.bid_markdown_bps as f64),
+    };
+    per_unit_mid * (1.0 + bps / 10_000.0)
 }
 
 /// Staleness bounds applied when reading Pyth's cache.
@@ -167,7 +189,8 @@ pub fn price_rfq(
         r: cfg.rate,
         sigma,
     };
-    let per_unit = call_price_per_unit(inputs);
+    let per_unit_mid = call_price_per_unit(inputs);
+    let per_unit = apply_spread(per_unit_mid, payload.side, cfg);
     let premium = premium_for_write(per_unit, payload.write_amount);
     if premium == 0 {
         return PriceDecision::Decline {
@@ -196,10 +219,20 @@ mod tests {
     use pyth_client::CachedPrice;
 
     fn rfq(expiry_ms: u64, strike: u128, strike_scale: u8, write_amount: u64) -> RfqBroadcastPayload {
+        rfq_side(Side::Trader, expiry_ms, strike, strike_scale, write_amount)
+    }
+
+    fn rfq_side(
+        side: Side,
+        expiry_ms: u64,
+        strike: u128,
+        strike_scale: u8,
+        write_amount: u64,
+    ) -> RfqBroadcastPayload {
         RfqBroadcastPayload {
             bucket_id: ObjectId::new([0u8; 32]),
             write_amount,
-            side: Side::Trader,
+            side,
             deadline_ms: expiry_ms,
             strike,
             strike_scale,
@@ -462,6 +495,8 @@ mod tests {
         PricingConfig {
             rate: 0.05,
             quote_ttl_ms: 30_000,
+            ask_markup_bps: 0,
+            bid_markdown_bps: 0,
         }
     }
 
@@ -595,11 +630,81 @@ mod tests {
         // T=1, r=0 → premium = 10 * write.
         let year_ms = 1000 * 86_400 * 365u64;
         let p = rfq(year_ms, 100, 0, 1);
-        let cfg = PricingConfig { rate: 0.0, quote_ttl_ms: 30_000 };
+        let cfg = PricingConfig {
+            rate: 0.0,
+            quote_ttl_ms: 30_000,
+            ask_markup_bps: 0,
+            bid_markdown_bps: 0,
+        };
         let d = price_rfq(&cfg, &p, 110, 0.0, 0);
         match d {
             PriceDecision::Quote { premium, .. } => assert_eq!(premium, 10),
             _ => panic!("expected Quote"),
         }
+    }
+
+    // -- spread ---------------------------------------------------------
+
+    fn premium_of(d: &PriceDecision) -> u64 {
+        match d {
+            PriceDecision::Quote { premium, .. } => *premium,
+            other => panic!("expected Quote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spread_marks_ask_up_and_bid_down_around_mid() {
+        // Same ATM option (S=K=100, T=1y, σ=20%, write=1M → mid ≈ 10.45M)
+        // priced as a trader-side ask and a writer-side bid with a 100bps /
+        // 200bps spread. Ask must sit above mid, bid below.
+        let year_ms = 1000 * 86_400 * 365u64;
+        let cfg = PricingConfig {
+            rate: 0.05,
+            quote_ttl_ms: 30_000,
+            ask_markup_bps: 100,
+            bid_markdown_bps: 200,
+        };
+        let mid = premium_of(&price_rfq(&pricing_cfg(), &rfq(year_ms, 100, 0, 1_000_000), 100, 0.20, 0));
+        let ask = premium_of(&price_rfq(
+            &cfg,
+            &rfq_side(Side::Trader, year_ms, 100, 0, 1_000_000),
+            100,
+            0.20,
+            0,
+        ));
+        let bid = premium_of(&price_rfq(
+            &cfg,
+            &rfq_side(Side::Writer, year_ms, 100, 0, 1_000_000),
+            100,
+            0.20,
+            0,
+        ));
+        assert!(ask > mid, "ask {ask} should exceed mid {mid}");
+        assert!(bid < mid, "bid {bid} should be below mid {mid}");
+        // Markup/markdown are proportional to the configured bps.
+        close(ask as f64 / mid as f64, 1.01, 1e-3);
+        close(bid as f64 / mid as f64, 0.98, 1e-3);
+    }
+
+    #[test]
+    fn zero_spread_is_side_independent_and_matches_mid() {
+        // With both bps at zero, trader and writer sides price identically to
+        // the bare Black-Scholes mid (regression guard for the pre-spread path).
+        let year_ms = 1000 * 86_400 * 365u64;
+        let ask = premium_of(&price_rfq(
+            &pricing_cfg(),
+            &rfq_side(Side::Trader, year_ms, 100, 0, 1_000_000),
+            100,
+            0.20,
+            0,
+        ));
+        let bid = premium_of(&price_rfq(
+            &pricing_cfg(),
+            &rfq_side(Side::Writer, year_ms, 100, 0, 1_000_000),
+            100,
+            0.20,
+            0,
+        ));
+        assert_eq!(ask, bid);
     }
 }

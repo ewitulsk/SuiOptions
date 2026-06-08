@@ -201,3 +201,53 @@ pub async fn find_account(
     }
     Ok(None)
 }
+
+/// Read `account::balance_of<T>(account)` via devInspect — no tx is submitted
+/// and no gas is spent. Returns 0 when the Account holds no balance of `T`
+/// (the Move view returns 0 for a missing dynamic field).
+pub async fn account_balance_of(
+    client: &SuiClient,
+    sender: SuiAddress,
+    options_package: ObjectID,
+    account_id: ObjectID,
+    coin_type: &str,
+) -> Result<u64> {
+    use move_core_types::language_storage::TypeTag;
+    use std::str::FromStr;
+    use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
+    use sui_types::transaction::TransactionKind;
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let account = pt.obj(crate::tx::shared_object_arg(client, account_id, false).await?)?;
+    let coin_tag = TypeTag::from_str(coin_type)
+        .with_context(|| format!("parsing coin type {coin_type}"))?;
+    pt.programmable_move_call(
+        options_package,
+        Identifier::new("account").unwrap(),
+        Identifier::new("balance_of").unwrap(),
+        vec![coin_tag],
+        vec![account],
+    );
+
+    let resp = client
+        .read_api()
+        .dev_inspect_transaction_block(
+            sender,
+            TransactionKind::ProgrammableTransaction(pt.finish()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .context("devInspect balance_of")?;
+
+    let results = resp
+        .results
+        .ok_or_else(|| anyhow!("devInspect balance_of returned no results: {:?}", resp.error))?;
+    let (bytes, _ty) = results
+        .first()
+        .and_then(|r| r.return_values.first())
+        .ok_or_else(|| anyhow!("devInspect balance_of: missing return value"))?;
+    let value: u64 = bcs::from_bytes(bytes).context("decoding balance_of u64 return")?;
+    Ok(value)
+}
