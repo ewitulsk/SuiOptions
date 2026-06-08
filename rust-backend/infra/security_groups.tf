@@ -84,7 +84,7 @@ resource "aws_security_group" "ec2" {
   # to the Loki server on the shared host. Both hosts share this SG, so
   # allow 3100 only between SG members (not the ALB, not the internet).
   ingress {
-    description = "Loki from co-SG hosts (prod promtail -> shared loki)"
+    description = "Loki from co-SG hosts (prod promtail to shared loki)"
     from_port   = 3100
     to_port     = 3100
     protocol    = "tcp"
