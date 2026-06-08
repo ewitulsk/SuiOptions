@@ -20,8 +20,13 @@ FROM debian:bookworm-slim
 # binary fails to start with `cannot open shared object file: libpq.so.5`
 # before main() runs, which masks itself as a slow startup at deploy time
 # (see SO-66 root-cause).
+#
+# git is required at RUNTIME: each roll codegens an option-coin package and
+# compiles it in-process via sui-move-build, which resolves the `Sui`
+# framework git dependency by shelling out to `git`. Without it every roll
+# fails at "compiling generated coin package" and no buckets are created.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 libpq5 curl && rm -rf /var/lib/apt/lists/*
+    ca-certificates libssl3 libpq5 curl git && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /src/target/release/option-scheduler /usr/local/bin/option-scheduler
 COPY services/option-scheduler/config/ /app/config/

@@ -98,10 +98,32 @@ chmod 600 "$MONITORING_DIR/.env"
 chown -R 472:472 "$MONITORING_DIR/grafana"
 chown -R 10001:10001 "$MONITORING_DIR/loki/data" "$MONITORING_DIR/loki/cache" "$MONITORING_DIR/loki/compactor"
 
-# Start the full monitoring stack.
+# Self-serve helper: re-run the bring-up by hand if the stack goes down.
+#   sudo /opt/options/monitoring/monitoring-up.sh
+# or from a laptop:
+#   aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript \
+#     --parameters 'commands=["/opt/options/monitoring/monitoring-up.sh"]'
+cat > "$MONITORING_DIR/monitoring-up.sh" <<'MONUP_EOF'
+#!/usr/bin/env bash
+# Bring up the monitoring stack. Grafana + Loki + Promtail only need the
+# self-contained `monitoring` network, so they always start. Gatus also
+# attaches to per-env app networks (options-<env>_net) that exist only for
+# deployed envs, so it's best-effort — a missing env network must never take
+# down logging.
+set -uo pipefail
+cd /opt/options/monitoring
+docker compose -f docker-compose.monitoring.yml -f docker-compose.promtail.yml up -d loki grafana promtail
+docker compose -f docker-compose.monitoring.yml up -d gatus || \
+  echo "gatus skipped (a per-env app network is missing — expected when that env isn't deployed)"
+MONUP_EOF
+chmod +x "$MONITORING_DIR/monitoring-up.sh"
+
+# Start the monitoring stack. Best-effort: a failure here must NOT abort the
+# bootstrap under `set -e`, or the Tailscale block below never runs and the
+# host becomes unreachable over the tailnet.
 cd "$MONITORING_DIR"
-docker compose -f docker-compose.monitoring.yml -f docker-compose.promtail.yml pull
-docker compose -f docker-compose.monitoring.yml -f docker-compose.promtail.yml up -d
+docker compose -f docker-compose.monitoring.yml -f docker-compose.promtail.yml pull || true
+"$MONITORING_DIR/monitoring-up.sh" || true
 
 # ---- Tailscale subnet router ----------------------------------------------
 # Advertises the VPC CIDR onto the tailnet so teammates can reach in-VPC
