@@ -79,3 +79,56 @@ resource "aws_instance" "host" {
     Name = "${var.project}-host"
   }
 }
+
+# ---- Dedicated prod host ----------------------------------------------------
+# prod runs on its own instance (same type), isolated from dev/staging. It
+# runs ONLY the prod compose stack plus a Promtail shipper that forwards
+# container logs to the central Loki on the shared host over the private
+# VPC IP. No Loki/Grafana/Gatus server and no Tailscale router live here —
+# those stay on the shared host. Reuses the shared SG + instance profile,
+# so RDS access and ALB ingress (9030) are already permitted.
+
+locals {
+  prod_bootstrap_user_data = templatefile("${path.module}/templates/cloud-init.prod.sh.tftpl", {
+    bootstrap_script  = file("${path.module}/../deployment/ec2/ec2-bootstrap.sh")
+    deploy_script     = file("${path.module}/../deployment/ec2/deploy.sh")
+    render_secrets_sh = file("${path.module}/../deployment/ec2/render-secrets.sh")
+    compose_prod      = file("${path.module}/../deployment/compose/docker-compose.prod.yml")
+    promtail_config   = file("${path.module}/../deployment/monitoring/promtail-config.yml")
+    promtail_compose  = file("${path.module}/../deployment/monitoring/docker-compose.promtail.yml")
+    aws_region        = var.aws_region
+    # Ship logs to the central Loki on the shared host, reachable over the
+    # private VPC IP (SG self-ingress on 3100, see security_groups.tf).
+    loki_url = "http://${aws_instance.host.private_ip}:3100"
+  })
+}
+
+resource "aws_instance" "prod_host" {
+  ami                         = data.aws_ami.ubuntu.id
+  instance_type               = var.ec2_instance_type
+  subnet_id                   = aws_subnet.public[0].id
+  vpc_security_group_ids      = [aws_security_group.ec2.id]
+  iam_instance_profile        = aws_iam_instance_profile.ec2.name
+  associate_public_ip_address = true
+  key_name                    = var.ssh_pubkey == "" ? null : aws_key_pair.host[0].key_name
+
+  user_data_base64            = base64gzip(local.prod_bootstrap_user_data)
+  user_data_replace_on_change = false
+
+  root_block_device {
+    volume_size           = var.ec2_root_volume_gb
+    volume_type           = "gp3"
+    delete_on_termination = true
+    encrypted             = true
+  }
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required" # IMDSv2 only
+    http_put_response_hop_limit = 2          # docker reaches the IMDS
+  }
+
+  tags = {
+    Name = "${var.project}-prod-host"
+  }
+}

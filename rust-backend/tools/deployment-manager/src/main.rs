@@ -51,61 +51,42 @@ async fn main() -> Result<()> {
     let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
 
-    let targets: Vec<Network> = match cli.network {
-        Some(n) => vec![n],
-        None => Network::ALL.to_vec(),
-    };
+    let network = cli.network;
+    let env_key = cli.env.to_ascii_lowercase();
 
     let mut store = Deployments::load_or_default(&output_path)?;
 
-    let mut failures: Vec<(Network, anyhow::Error)> = Vec::new();
-    for net in &targets {
-        // Carry forward the existing testTokens record so re-publishing the
-        // options package without `--deploy-tokens` doesn't wipe it.
-        let previous_tokens = store
-            .networks
-            .get(net.as_str())
-            .and_then(|d| d.package_info.test_tokens.clone());
-        let previous_token_info = store
-            .networks
-            .get(net.as_str())
-            .map(|d| d.token_info.clone())
-            .unwrap_or_default();
-        match deploy_one(
-            *net,
-            &secrets,
-            &contracts_path,
-            test_tokens_path.as_deref(),
-            previous_tokens,
-            previous_token_info,
-            cli.gas_budget,
-            cli.skip_init,
-        )
-        .await
-        {
-            Ok(record) => {
-                tracing::info!(network = %net, package = %record.package_info.package_id, "deployment recorded");
-                store.upsert(*net, record);
-                // Persist after each network so a later failure doesn't lose
-                // an earlier success.
-                store.save(&output_path)?;
-            }
-            Err(e) => {
-                tracing::error!(network = %net, error = %e, "deployment failed");
-                failures.push((*net, e));
-            }
-        }
-    }
+    // Carry forward the existing testTokens record + off-chain catalog so
+    // re-publishing the options package without `--deploy-tokens` doesn't
+    // wipe them. Keyed by the env slot we're (re)deploying.
+    let previous_tokens = store
+        .envs
+        .get(&env_key)
+        .and_then(|d| d.package_info.test_tokens.clone());
+    let previous_token_info = store
+        .envs
+        .get(&env_key)
+        .map(|d| d.token_info.clone())
+        .unwrap_or_default();
 
-    if !failures.is_empty() {
-        eprintln!("\n{} network(s) failed:", failures.len());
-        for (net, e) in &failures {
-            eprintln!("  {net}: {e:#}");
-        }
-        std::process::exit(1);
-    }
+    let record = deploy_one(
+        network,
+        &secrets,
+        &contracts_path,
+        test_tokens_path.as_deref(),
+        previous_tokens,
+        previous_token_info,
+        cli.gas_budget,
+        cli.skip_init,
+    )
+    .await
+    .with_context(|| format!("deploying env {env_key} to {network}"))?;
 
-    tracing::info!(path = %output_path.display(), "all deployments written");
+    tracing::info!(env = %env_key, network = %network, package = %record.package_info.package_id, "deployment recorded");
+    store.upsert(&env_key, record);
+    store.save(&output_path)?;
+
+    tracing::info!(path = %output_path.display(), env = %env_key, "deployment written");
     Ok(())
 }
 

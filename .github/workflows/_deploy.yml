@@ -167,6 +167,7 @@ jobs:
       - uses: ./.github/actions/resolve-ec2
         with:
           region: ${{ env.AWS_REGION }}
+          env: ${{ matrix.env }}
 
       - uses: aws-actions/amazon-ecr-login@v2
 

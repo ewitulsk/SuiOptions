@@ -50,6 +50,7 @@ jobs:
       - uses: ./.github/actions/resolve-ec2
         with:
           region: ${{ env.AWS_REGION }}
+          env: ${{ inputs.environment }}
 
       - name: Upload nginx.conf to S3
         working-directory: rust-backend

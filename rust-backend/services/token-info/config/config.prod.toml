@@ -1,11 +1,12 @@
-# token-info config — prod env (mainnet).
+# token-info config — prod env (Sui testnet).
 #
-# prod serves the DB catalog only (no test-token overlay). The mainnet catalog
-# is populated via the internal mutate API. deployments.json still supplies
-# package_info.
+# prod is a distinct testnet deployment (its own published package, separate
+# from staging). package_info comes from the `prod` slot in deployments.json;
+# because the network is testnet, the test-token overlay is folded into
+# `/tokens` just like staging.
 
 environment        = "prod"
-network            = "mainnet"
+network            = "testnet"
 deployments_path   = "/app/deployments.json"
 
 database_url       = "postgresql://token_info_prod:${DB_PASSWORD}@${DB_HOST}:5432/token_info_prod"

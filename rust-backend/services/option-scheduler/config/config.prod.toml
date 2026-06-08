@@ -1,12 +1,12 @@
-# option-scheduler config — prod env (Sui mainnet).
+# option-scheduler config — prod env (Sui testnet).
 # Chain-side ids (package, AdminCap, deployer address, token coin types,
-# pyth feed ids) come from `deployments.json::mainnet`.
+# pyth feed ids) come from `deployments.json::prod`.
 #
-# Pairs / cadence intentionally left empty until prod mm-bot bootstrap
-# (faucet-less mainnet flow) is resolved — the scheduler would create
-# bucket families that no MM is around to quote on. Keep the deploy
-# wiring in place but the [[pairs]] list empty so the binary boots and
-# exits cleanly with "no pairs configured" at startup.
+# Pairs / cadence intentionally left empty until the prod mm-bot bootstrap
+# is wired up — the scheduler would otherwise create bucket families that
+# no MM is around to quote on. Keep the deploy wiring in place but the
+# [[pairs]] list empty so the binary boots and exits cleanly with "no
+# pairs configured" at startup.
 
 indexer_graphql_url       = "http://indexer:9002/graphql"
 tick_secs         = 60

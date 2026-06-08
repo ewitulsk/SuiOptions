@@ -80,6 +80,17 @@ resource "aws_security_group" "ec2" {
     security_groups = [aws_security_group.alb.id]
   }
 
+  # Central Loki. The dedicated prod host's Promtail ships container logs
+  # to the Loki server on the shared host. Both hosts share this SG, so
+  # allow 3100 only between SG members (not the ALB, not the internet).
+  ingress {
+    description = "Loki from co-SG hosts (prod promtail -> shared loki)"
+    from_port   = 3100
+    to_port     = 3100
+    protocol    = "tcp"
+    self        = true
+  }
+
   egress {
     from_port   = 0
     to_port     = 0

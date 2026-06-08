@@ -80,6 +80,7 @@ jobs:
       - uses: ./.github/actions/resolve-ec2
         with:
           region: ${{ env.AWS_REGION }}
+          env: ${{ inputs.environment }}
 
       # ── 3. Fetch RDS master creds ────────────────────────────────
       # The per-env <service>_<env> role lacks CREATE on the cluster, so

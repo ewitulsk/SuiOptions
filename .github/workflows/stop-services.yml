@@ -43,6 +43,7 @@ jobs:
       - uses: ./.github/actions/resolve-ec2
         with:
           region: ${{ env.AWS_REGION }}
+          env: ${{ inputs.environment }}
 
       - name: SSM stop services
         env:

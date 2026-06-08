@@ -23,11 +23,12 @@ async fn main() -> Result<()> {
         format!("loading deployments from {}", cfg.deployments_path.display())
     })?;
     let net = deployments
-        .for_network(&cfg.network)
-        .with_context(|| format!("resolving network {} in deployments.json", cfg.network))?;
+        .for_env(&cfg.environment)
+        .with_context(|| format!("resolving env {} in deployments.json", cfg.environment))?;
     let package_info = net.package_info.clone();
     info!(
-        network = %cfg.network,
+        environment = %cfg.environment,
+        network = %package_info.network,
         package_id = %package_info.package_id,
         "loaded package_info from deployments.json"
     );

@@ -13,7 +13,7 @@
 //! accessor surface of `deployments::NetworkDeployment` (`package()`,
 //! `admin_cap()`, `protocol_config()`, `treasury()`, `deployer_address()`,
 //! `protocol_id_bytes()`, `token_spec()`, `test_tokens()`, …) so call sites
-//! that used `Deployments::load(path)?.for_network(net)?` swap to
+//! that used `Deployments::load(path)?.for_env(env)?` swap to
 //! `TokenInfoClient::new(url).fetch().await?` with minimal churn.
 //!
 //! ## Hard cutover
