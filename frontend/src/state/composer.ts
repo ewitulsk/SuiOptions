@@ -418,10 +418,20 @@ export function useComposerState({
 
     setConfirmStage("signing");
     try {
+      const callCoinType = series.buckets.find(
+        (b) => b.bucket_id === entry.quote.bucket_id,
+      )?.call_coin_type;
+      if (!callCoinType) {
+        setConfirmStage(null);
+        setToast("bucket metadata not loaded · try again");
+        setTimeout(() => setToast(null), 4000);
+        return;
+      }
       const tx = buildWriteTx({
         entry,
         underlyingCoinType: series.asset_coin_type,
         settlementCoinType: series.settlement_coin_type,
+        callCoinType,
         writer: account.address,
       });
       setConfirmStage("broadcast");
