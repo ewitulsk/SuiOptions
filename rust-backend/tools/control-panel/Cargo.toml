@@ -19,6 +19,8 @@ quoting-service    = { path = "../../services/quoting-service" }
 mm-bot             = { path = "../../services/mm-bot" }
 option-scheduler   = { path = "../../services/option-scheduler" }
 api-service        = { path = "../../services/api-service" }
+token-info         = { path = "../../services/token-info" }
+auth-service       = { path = "../../services/auth-service" }
 exchange           = { path = "../../tools/exchange" }
 writer             = { path = "../../tools/writer" }
 rfq-monitor        = { path = "../../tools/rfq-monitor" }
