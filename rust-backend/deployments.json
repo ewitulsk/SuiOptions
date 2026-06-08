@@ -1,6 +1,7 @@
 {
-  "mainnet": null,
-  "testnet": {
+  "dev": null,
+  "prod": null,
+  "staging": {
     "package_info": {
       "packageId": "0x85f42447392fad70c0e5dd905de85b2687177befa63d05222d77d91d61ec0a50",
       "adminCapId": "0x6ddf8de9f68466b72b893ef80b067589877050a4a1d10b5f61d9fed78f4e319c",
@@ -61,6 +62,5 @@
         "decimals": 9
       }
     }
-  },
-  "devnet": null
+  }
 }

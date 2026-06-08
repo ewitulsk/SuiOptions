@@ -1,12 +1,12 @@
-# Compose stack for the `prod` env (Sui mainnet).
-# Variables come from /opt/options/prod/.env, written by deploy.sh.
+# Compose stack for the `prod` env (Sui testnet — a distinct deployment
+# from staging). Variables come from /opt/options/prod/.env, written by
+# deploy.sh. Runs on the dedicated prod EC2 host (options-prod-host).
 #
-# mm-bot and option-scheduler are commented out until the faucet-less
-# mainnet bootstrap path and deployer-key handling are in place. The
-# indexer and quoting-service deploy cleanly on mainnet on their own.
-# When deploy.sh is asked to roll a service that isn't declared here it
-# logs and skips, so leaving the blocks commented is the supported way
-# to opt-out per env.
+# mm-bot and option-scheduler are commented out until the prod mm-bot
+# bootstrap + deployer-key handling are in place. The indexer and
+# quoting-service deploy cleanly on their own. When deploy.sh is asked to
+# roll a service that isn't declared here it logs and skips, so leaving
+# the blocks commented is the supported way to opt-out per env.
 
 name: options-prod
 

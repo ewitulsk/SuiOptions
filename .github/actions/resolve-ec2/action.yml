@@ -3,32 +3,46 @@ description: >
   Find the running deploy host by its Name tag and export EC2_INSTANCE_ID to
   $GITHUB_ENV. Replaces the hardcoded vars.EC2_INSTANCE_ID, which goes stale
   whenever terraform replaces the instance (the host's AMI floats via
-  most_recent, and aws_instance.host.ami is force-new).
+  most_recent, and aws_instance.host.ami is force-new). prod runs on its own
+  instance (options-prod-host); dev/staging + monitoring share options-host.
 
 inputs:
   region:
     description: AWS region the host runs in.
     required: true
+  env:
+    description: >
+      Deployment env. `prod` resolves the dedicated prod host
+      (options-prod-host); anything else (or empty) resolves the shared host
+      (options-host).
+    required: false
+    default: ''
 
 runs:
   using: composite
   steps:
     - shell: bash
+      env:
+        DEPLOY_ENV: ${{ inputs.env }}
       run: |
-        # Name tag is "${var.project}-host" — see rust-backend/infra/ec2.tf.
-        # One host serves every env, so exactly one instance must match.
+        # Name tags are "${var.project}-host" / "${var.project}-prod-host" —
+        # see rust-backend/infra/ec2.tf. Each tag matches exactly one host.
+        case "$DEPLOY_ENV" in
+          prod) NAME=options-prod-host ;;
+          *)    NAME=options-host ;;
+        esac
         ID=$(aws ec2 describe-instances \
           --region "${{ inputs.region }}" \
-          --filters "Name=tag:Name,Values=options-host" \
+          --filters "Name=tag:Name,Values=$NAME" \
                     "Name=instance-state-name,Values=running" \
           --query 'Reservations[].Instances[].InstanceId' --output text)
         if [ -z "$ID" ] || [ "$ID" = "None" ]; then
-          echo "::error::No running EC2 instance tagged Name=options-host found"
+          echo "::error::No running EC2 instance tagged Name=$NAME found"
           exit 1
         fi
         if [ "$(printf '%s' "$ID" | wc -w)" -ne 1 ]; then
-          echo "::error::Expected exactly one running options-host, got: $ID"
+          echo "::error::Expected exactly one running $NAME, got: $ID"
           exit 1
         fi
         echo "EC2_INSTANCE_ID=$ID" >> "$GITHUB_ENV"
-        echo "Resolved options-host → $ID"
+        echo "Resolved $NAME → $ID"

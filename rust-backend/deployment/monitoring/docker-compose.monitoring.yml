@@ -15,7 +15,11 @@ services:
       - ${DATA_DIR}/loki/config:/etc/loki:ro
       - ${DATA_DIR}/loki/data:/loki
     ports:
-      - "127.0.0.1:3100:3100"
+      # Bound on all interfaces (not just loopback) so the dedicated prod
+      # host's Promtail can push over the private VPC IP. Access is gated
+      # by the EC2 SG, which only allows 3100 between co-SG hosts (see
+      # infra/security_groups.tf) — never the ALB or the internet.
+      - "3100:3100"
     restart: unless-stopped
     networks: [monitoring]
 

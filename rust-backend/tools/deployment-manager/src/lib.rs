@@ -22,9 +22,17 @@ use crate::network::Network;
     about = "Deploy options-protocol contracts to Sui networks and record addresses."
 )]
 pub struct Cli {
-    /// Network to deploy to. Omit to deploy to all three.
+    /// Deployment environment to record this under in deployments.json
+    /// (`dev` / `staging` / `prod`). This is the slot key; the Sui network
+    /// the package actually publishes to is `--network`. Two envs can
+    /// target the same network as distinct deployments.
+    #[arg(short = 'e', long)]
+    pub env: String,
+
+    /// Sui network to publish to (also picks the RPC + the signing key
+    /// slot in secrets.toml).
     #[arg(short, long, value_enum)]
-    pub network: Option<Network>,
+    pub network: Network,
 
     /// Path to the Move package containing the contracts.
     /// Default assumes the manager is run from `rust-backend/`.

@@ -2,12 +2,17 @@
 //! on-chain id our off-chain stack needs, plus the off-chain token catalog
 //! used for pricing.
 //!
-//! Shape (matches `deployment-manager`'s output):
+//! Shape (matches `deployment-manager`'s output): keyed by deployment
+//! environment (`dev` / `staging` / `prod`), one record each. The Sui
+//! network a record lives on is carried inside it as
+//! `package_info.network` — that's what lets two envs (e.g. staging and
+//! prod) both run on testnet as *distinct* deployments.
 //!
 //! ```json
 //! {
-//!   "mainnet": null,
-//!   "testnet": {
+//!   "dev": null,
+//!   "prod": null,
+//!   "staging": {
 //!     "package_info": {
 //!       "packageId":        "0x…",
 //!       "adminCapId":       "0x…",
@@ -26,8 +31,7 @@
 //!       "TBTC":  { "coinType": "0x…::tbtc::TBTC", "decimals": 8, "pythFeedId": "0x…" },
 //!       …
 //!     }
-//!   },
-//!   "devnet": null
+//!   }
 //! }
 //! ```
 //!
@@ -247,11 +251,11 @@ impl NetworkDeployment {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// All recorded deployments, keyed by environment (`dev` / `staging` /
+/// `prod`). Un-deployed envs are written as `null` (and dropped on load).
+#[derive(Debug)]
 pub struct Deployments {
-    pub mainnet: Option<NetworkDeployment>,
-    pub testnet: Option<NetworkDeployment>,
-    pub devnet: Option<NetworkDeployment>,
+    pub envs: BTreeMap<String, NetworkDeployment>,
 }
 
 impl Deployments {
@@ -259,28 +263,25 @@ impl Deployments {
         info!(path = %path.display(), "loading deployments");
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading deployments file {}", path.display()))?;
-        let parsed: Self = serde_json::from_slice(&bytes)
+        // Tolerate `null` slots for un-deployed envs (the shape
+        // deployment-manager writes). Keys are lowercased so lookup is
+        // case-insensitive.
+        let raw: BTreeMap<String, Option<NetworkDeployment>> = serde_json::from_slice(&bytes)
             .with_context(|| format!("parsing deployments file {}", path.display()))?;
-        debug!(
-            has_mainnet = parsed.mainnet.is_some(),
-            has_testnet = parsed.testnet.is_some(),
-            has_devnet = parsed.devnet.is_some(),
-            "deployments loaded"
-        );
-        Ok(parsed)
+        let envs: BTreeMap<String, NetworkDeployment> = raw
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|d| (k.to_ascii_lowercase(), d)))
+            .collect();
+        debug!(envs = ?envs.keys().collect::<Vec<_>>(), "deployments loaded");
+        Ok(Self { envs })
     }
 
-    /// Network slot lookup. Accepts any casing of "mainnet" / "testnet" /
-    /// "devnet"; everything else errors.
-    pub fn for_network(&self, name: &str) -> Result<&NetworkDeployment> {
-        let slot = match name.to_ascii_lowercase().as_str() {
-            "mainnet" => &self.mainnet,
-            "testnet" => &self.testnet,
-            "devnet" => &self.devnet,
-            other => return Err(anyhow!("unknown network slot: {other}")),
-        };
-        slot.as_ref()
-            .ok_or_else(|| anyhow!("no deployment recorded for {name}"))
+    /// Environment slot lookup. Accepts any casing of `dev` / `staging` /
+    /// `prod`; an env with no recorded deployment errors.
+    pub fn for_env(&self, env: &str) -> Result<&NetworkDeployment> {
+        self.envs
+            .get(&env.to_ascii_lowercase())
+            .ok_or_else(|| anyhow!("no deployment recorded for env {env}"))
     }
 }
 
@@ -342,7 +343,8 @@ mod tests {
             return;
         }
         let d = Deployments::load(&path).unwrap();
-        let testnet = d.for_network("testnet").unwrap();
+        // staging is the populated testnet deployment in the fixture.
+        let testnet = d.for_env("staging").unwrap();
         let _ = testnet.package().unwrap();
         let _ = testnet.admin_cap().unwrap();
         let _ = testnet.protocol_config().unwrap();
@@ -369,9 +371,9 @@ mod tests {
         // Case-insensitive symbol lookup.
         assert!(testnet.token_spec("tbtc").is_ok());
 
-        // Case-insensitive network slot lookup.
-        assert!(d.for_network("TESTNET").is_ok());
-        assert!(d.for_network("mainnet").is_err()); // null in fixture
-        assert!(d.for_network("garbage").is_err());
+        // Case-insensitive env slot lookup.
+        assert!(d.for_env("STAGING").is_ok());
+        assert!(d.for_env("prod").is_err()); // null in fixture
+        assert!(d.for_env("garbage").is_err());
     }
 }

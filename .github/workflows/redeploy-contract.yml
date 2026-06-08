@@ -25,8 +25,10 @@
 # container recreation (a normal deploy, a box reboot) can't silently
 # revert a service to a stale AdminCap id.
 #
-# PRODUCTION IS EXPLICITLY BLOCKED — the workflow only offers dev and
-# staging as choices, and every destructive step also checks at runtime.
+# prod is a testnet deployment, so it IS a valid target here (it publishes
+# to testnet and wipes the prod testnet DBs). What stays EXPLICITLY BLOCKED
+# is touching a *mainnet* deployment — the destructive DB-wipe steps refuse
+# to run when the resolved network is mainnet.
 
 name: Redeploy Contract
 
@@ -40,6 +42,7 @@ on:
         options:
           - dev
           - staging
+          - prod
       deploy_tokens:
         description: 'Also publish the test-tokens package (TUSDC/TBTC/TWAL/TDEEP)'
         required: false
@@ -80,6 +83,7 @@ jobs:
           case "${{ inputs.environment }}" in
             dev)     echo "network=devnet"  >> "$GITHUB_OUTPUT" ;;
             staging) echo "network=testnet" >> "$GITHUB_OUTPUT" ;;
+            prod)    echo "network=testnet" >> "$GITHUB_OUTPUT" ;;
             *)
               echo "::error::Invalid environment '${{ inputs.environment }}'"
               exit 1
@@ -95,6 +99,7 @@ jobs:
       - uses: ./.github/actions/resolve-ec2
         with:
           region: ${{ env.AWS_REGION }}
+          env: ${{ inputs.environment }}
 
       # ── 3. Fetch the prebuilt deployment-manager binary ──────────
       # The binary lives as a fixed GitHub prerelease asset
@@ -187,8 +192,10 @@ jobs:
         working-directory: rust-backend
         env:
           NETWORK: ${{ steps.net.outputs.network }}
+          ENV: ${{ inputs.environment }}
         run: |
           ARGS=(
+            --env     "$ENV"
             --network "$NETWORK"
             --output  deployments.json
             --secrets /tmp/deploy-secrets/secrets.toml
@@ -203,8 +210,10 @@ jobs:
         id: checkpoint
         env:
           NETWORK: ${{ steps.net.outputs.network }}
+          ENV: ${{ inputs.environment }}
         run: |
-          DIGEST=$(jq -r ".[\"$NETWORK\"].package_info.publishDigest" \
+          # deployments.json is keyed by env now; the network only picks the RPC.
+          DIGEST=$(jq -r ".[\"$ENV\"].package_info.publishDigest" \
             rust-backend/deployments.json)
 
           case "$NETWORK" in
@@ -290,11 +299,14 @@ jobs:
       - name: Reset databases on EC2
         env:
           ENV: ${{ inputs.environment }}
+          NETWORK: ${{ steps.net.outputs.network }}
           BUNDLE_KEY: ${{ steps.bundle.outputs.key }}
         run: |
-          # ── PRODUCTION GUARD ──
-          if [ "$ENV" = "prod" ] || [ "$ENV" = "production" ] || [ "$ENV" = "mainnet" ]; then
-            echo "::error::REFUSING to touch production — aborting"
+          # ── MAINNET GUARD ──
+          # prod is a testnet deployment and is a valid target. What we never
+          # auto-wipe is a real-money mainnet deployment.
+          if [ "$NETWORK" = "mainnet" ]; then
+            echo "::error::REFUSING to wipe a mainnet deployment — aborting"
             exit 1
           fi
 
@@ -312,6 +324,7 @@ jobs:
           # set -eu (no pipefail). deploy.sh itself is bash.
           jq -nc \
             --arg env "$ENV" \
+            --arg network "$NETWORK" \
             --arg db_host "$RDS_HOST" \
             --arg master_user "$MASTER_USER" \
             --arg master_pass "$MASTER_PASS" \
@@ -322,8 +335,8 @@ jobs:
               commands: [
                 "set -eu",
 
-                "# ── PRODUCTION GUARD (belt + suspenders) ──",
-                "if [ \"\($env)\" = \"prod\" ] || [ \"\($env)\" = \"production\" ]; then echo \"FATAL: refusing prod\"; exit 1; fi",
+                "# ── MAINNET GUARD (belt + suspenders) ──",
+                "if [ \"\($network)\" = \"mainnet\" ]; then echo \"FATAL: refusing mainnet\"; exit 1; fi",
 
                 "cd /opt/options/\($env)",
                 "COMPOSE_FILE=\"docker-compose.\($env).yml\"",

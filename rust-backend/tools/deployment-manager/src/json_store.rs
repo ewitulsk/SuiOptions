@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::network::Network;
+/// The deployment environments we always render as keys (even when unset),
+/// so the on-disk shape is stable and humans can see what's missing.
+const ENVS: [&str; 3] = ["dev", "prod", "staging"];
 
-/// One network's deployment record. Two halves:
+/// One env's deployment record. Two halves:
 ///   - `package_info` — everything that comes out of publishing Move
 ///     packages (protocol object ids, the test-token catalog with
 ///     faucets, deploy digests). Field names inside are camelCase to
@@ -82,12 +84,14 @@ pub struct TokenSpec {
     pub pyth_feed_id: Option<String>,
 }
 
-/// On-disk shape: `{ "mainnet": {...}, "testnet": {...}, "devnet": {...} }`.
-/// Stored sorted so diffs stay clean across runs.
+/// On-disk shape: `{ "dev": {...}, "prod": {...}, "staging": {...} }`,
+/// keyed by deployment environment. The Sui network each record lives on
+/// is carried inside it (`package_info.network`). Stored sorted so diffs
+/// stay clean across runs.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Deployments {
-    pub networks: BTreeMap<String, NetworkDeployment>,
+    pub envs: BTreeMap<String, NetworkDeployment>,
 }
 
 impl Deployments {
@@ -103,20 +107,20 @@ impl Deployments {
         let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&bytes)
             .with_context(|| format!("parsing {}", path.display()))?;
 
-        let mut networks = BTreeMap::new();
+        let mut envs = BTreeMap::new();
         for (key, value) in raw {
             if value.is_null() {
                 continue;
             }
             let record: NetworkDeployment = serde_json::from_value(value)
                 .with_context(|| format!("parsing {} entry in {}", key, path.display()))?;
-            networks.insert(key, record);
+            envs.insert(key, record);
         }
-        Ok(Self { networks })
+        Ok(Self { envs })
     }
 
-    pub fn upsert(&mut self, network: Network, deployment: NetworkDeployment) {
-        self.networks.insert(network.as_str().to_owned(), deployment);
+    pub fn upsert(&mut self, env: &str, deployment: NetworkDeployment) {
+        self.envs.insert(env.to_owned(), deployment);
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -126,15 +130,15 @@ impl Deployments {
                     .with_context(|| format!("creating {}", parent.display()))?;
             }
         }
-        // Always include every network key, even if unset, so consumers can
+        // Always include every env key, even if unset, so consumers can
         // rely on the shape and humans can see what's missing at a glance.
+        // Any extra keys already in the map are preserved too.
         let mut full = serde_json::Map::new();
-        for net in Network::ALL {
-            let key = net.as_str().to_owned();
-            match self.networks.get(&key) {
-                Some(d) => full.insert(key, serde_json::to_value(d)?),
-                None => full.insert(key, serde_json::Value::Null),
-            };
+        for env in ENVS {
+            full.insert(env.to_owned(), serde_json::Value::Null);
+        }
+        for (env, dep) in &self.envs {
+            full.insert(env.clone(), serde_json::to_value(dep)?);
         }
         let pretty = serde_json::to_vec_pretty(&serde_json::Value::Object(full))?;
         std::fs::write(path, pretty)

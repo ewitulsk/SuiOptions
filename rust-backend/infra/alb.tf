@@ -133,8 +133,9 @@ resource "aws_lb_target_group" "ingress" {
 resource "aws_lb_target_group_attachment" "ingress" {
   for_each         = local.alb_envs
   target_group_arn = aws_lb_target_group.ingress[each.key].arn
-  target_id        = aws_instance.host.id
-  port             = each.value.nginx_port
+  # prod lives on its own instance; dev/staging stay on the shared host.
+  target_id = each.key == "prod" ? aws_instance.prod_host.id : aws_instance.host.id
+  port      = each.value.nginx_port
 
   # Mirrors the TG's create_before_destroy — the attachment's
   # target_group_arn references a TG that's being replaced, so the

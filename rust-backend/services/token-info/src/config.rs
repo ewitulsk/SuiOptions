@@ -8,14 +8,15 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    /// Deployment environment: `dev` / `staging` / `prod`. Gates the
-    /// dev/staging test-token overlay on `/tokens` — only `dev` and `staging`
-    /// fold the `deployments.json` testTokens into the catalog response.
-    /// `prod` serves the DB catalog only.
+    /// Deployment environment: `dev` / `staging` / `prod`. Selects which
+    /// slot in `deployments.json` to read `package_info` from
+    /// (case-insensitive).
     pub environment: String,
 
-    /// Which slot in `deployments.json` to read `package_info` from
-    /// (`testnet` / `mainnet` / `devnet`, case-insensitive).
+    /// Sui network this deployment lives on (`testnet` / `mainnet` /
+    /// `devnet`). Gates the test-token overlay on `/tokens`: any non-mainnet
+    /// network folds the `deployments.json` testTokens into the catalog
+    /// response; mainnet serves the durable DB catalog alone.
     pub network: String,
 
     /// Path to `deployments.json`. token-info is the ONLY service that reads
@@ -81,13 +82,12 @@ impl Config {
         config_load::load_toml(path)
     }
 
-    /// Overlay the deployments.json test tokens onto `/tokens` only on
-    /// dev/staging. Mainnet/prod serves the durable DB catalog alone.
+    /// Overlay the deployments.json test tokens onto `/tokens` on every
+    /// non-mainnet network. Test tokens (TBTC/TUSDC/…) only exist on
+    /// testnet/devnet, so a testnet `prod` deployment overlays them just
+    /// like staging; mainnet serves the durable DB catalog alone.
     pub fn overlay_test_tokens(&self) -> bool {
-        matches!(
-            self.environment.to_ascii_lowercase().as_str(),
-            "dev" | "staging"
-        )
+        !matches!(self.network.to_ascii_lowercase().as_str(), "mainnet")
     }
 }
 
@@ -97,9 +97,9 @@ mod tests {
 
     #[test]
     fn overlay_gate() {
-        let mk = |env: &str| Config {
-            environment: env.into(),
-            network: "testnet".into(),
+        let mk = |network: &str| Config {
+            environment: "prod".into(),
+            network: network.into(),
             deployments_path: "deployments.json".into(),
             database_url: "x".into(),
             db_pool_size: 8,
@@ -109,9 +109,11 @@ mod tests {
             auth_service_url: "http://127.0.0.1:9008".into(),
             seed_meta: BTreeMap::new(),
         };
-        assert!(mk("dev").overlay_test_tokens());
-        assert!(mk("staging").overlay_test_tokens());
-        assert!(mk("STAGING").overlay_test_tokens());
-        assert!(!mk("prod").overlay_test_tokens());
+        // Overlay follows the network, not the env name: a testnet `prod`
+        // overlays test tokens; only mainnet opts out.
+        assert!(mk("testnet").overlay_test_tokens());
+        assert!(mk("devnet").overlay_test_tokens());
+        assert!(mk("TESTNET").overlay_test_tokens());
+        assert!(!mk("mainnet").overlay_test_tokens());
     }
 }
