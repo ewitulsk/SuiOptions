@@ -22,6 +22,7 @@ import {
 
 import { useBuckets } from "../api/useBuckets";
 import { useOwnedCallOptions } from "../api/useOwnedCallOptions";
+import { useCallTokenLots } from "../api/useCallTokenLots";
 import { useOwnedPositions, type OwnedPositionObj } from "../api/useOwnedPositions";
 import { usePythPrice } from "../api/usePythPrice";
 import { fetchEnrichedPositions } from "../api/client";
@@ -165,7 +166,9 @@ function buildOwnedRow(
   const { series } = bucketInfo;
 
   // Provenance: option coins are fungible (no per-object id), so we attribute
-  // at the bucket level — the most recent WriteExecuted lot for this bucket.
+  // at the bucket level — all WriteExecuted lots for this bucket. `bucketLots`
+  // is newest-first; `provenance` (the most recent) drives the single-value
+  // `boughtFrom`/`boughtAt` display, while `premiumPaid` aggregates every lot.
   const bucketLots = lotsByBucket.get(obj.bucket_id) ?? [];
   const provenance = bucketLots.length > 0 ? bucketLots[0] : null;
 
@@ -176,15 +179,20 @@ function buildOwnedRow(
   const itm = spot > 0 && spot > strike;
   const moneyness = strike > 0 ? ((spot - strike) / strike) * 100 : 0;
   const intrinsicNow = Math.max(0, (spot - strike) * amount);
-  // Premium attribution: if the lot's `amount` doesn't match the
-  // current object's amount (split), pro-rate. Best-effort; not exact.
-  const lotAmount = provenance
-    ? scaleU64(provenance.amount_raw, series.asset_decimals)
-    : amount;
-  const lotPremium = provenance
-    ? scaleU64(provenance.premium_paid_raw, series.settlement_decimals)
-    : 0;
-  const premiumPaid = lotAmount > 0 ? (lotPremium * amount) / lotAmount : 0;
+  // Premium attribution (true cost basis): sum premium + amount across all
+  // lots for this bucket, then pro-rate to the currently-held `amount`. The
+  // pro-rate covers the case where holdings don't match lot totals (splits,
+  // partial transfers). Best-effort; not exact for split children.
+  const totalLotAmount = bucketLots.reduce(
+    (sum, lot) => sum + scaleU64(lot.amount_raw, series.asset_decimals),
+    0,
+  );
+  const totalLotPremium = bucketLots.reduce(
+    (sum, lot) => sum + scaleU64(lot.premium_paid_raw, series.settlement_decimals),
+    0,
+  );
+  const premiumPaid =
+    totalLotAmount > 0 ? (totalLotPremium * amount) / totalLotAmount : 0;
   const pnl = intrinsicNow - premiumPaid;
   const status: OwnedPosition["status"] = expired
     ? itm
@@ -309,6 +317,8 @@ export function useDashboardState(): DashboardState {
   // Option coins live in per-roll packages; the bucket list supplies the
   // coin-type→bucket mapping the owned-call query needs.
   const owned = useOwnedCallOptions(wallet, buckets.data);
+  // Per-purchase provenance for owned calls (boughtFrom / premiumPaid / boughtAt).
+  const lots = useCallTokenLots(wallet);
 
   const positionIds = useMemo(
     () => (ownedPositions.data ?? []).map((p) => p.object_id).sort(),
@@ -347,20 +357,25 @@ export function useDashboardState(): DashboardState {
   const ownedRows = useMemo<OwnedPosition[]>(() => {
     const ownedObjs = owned.data ?? [];
     const bucketIdx = indexBucketSeries(buckets.data);
-    // Provenance (boughtFrom / premiumPaid) is bucket-level only now that the
-    // option is a fungible coin. Pass an empty lot map so the row renders "—"
-    // rather than a fabricated source.
-    const noLotsByBucket = new Map<string, CallTokenLot[]>();
+    // Provenance (boughtFrom / premiumPaid) is bucket-level: option coins are
+    // fungible, so we group every WriteExecuted lot by its bucket. The backend
+    // returns lots newest-first, preserved on insert.
+    const lotsByBucket = new Map<string, CallTokenLot[]>();
+    for (const lot of lots.data ?? []) {
+      const list = lotsByBucket.get(lot.bucket_id);
+      if (list) list.push(lot);
+      else lotsByBucket.set(lot.bucket_id, [lot]);
+    }
 
     return ownedObjs
       .map((o) => {
         const series = bucketIdx.get(o.bucket_id)?.series;
         const symbol = displayAsset(series?.asset_symbol ?? "");
         const spot = spots[symbol] ?? 0;
-        return buildOwnedRow(o, noLotsByBucket, bucketIdx, spot, now);
+        return buildOwnedRow(o, lotsByBucket, bucketIdx, spot, now);
       })
       .filter((r): r is OwnedPosition => r !== null);
-  }, [owned.data, buckets.data, spots, now]);
+  }, [owned.data, buckets.data, lots.data, spots, now]);
 
   const writtenRows = useMemo<WrittenPosition[]>(() => {
     const objs = ownedPositions.data ?? [];
