@@ -172,8 +172,18 @@ async fn main() -> Result<()> {
     let graphql_addr = cfg.graphql_addr;
     let graphql_repo = repo.clone();
     let graphql_progress = Arc::clone(&progress_state);
+    let graphql_origins = cfg.allowed_origins.clone();
+    let graphql_playground = cfg.expose_playground;
     let graphql_handle = tokio::spawn(async move {
-        if let Err(e) = indexer::graphql::serve(graphql_addr, graphql_repo, graphql_progress).await {
+        if let Err(e) = indexer::graphql::serve(
+            graphql_addr,
+            graphql_repo,
+            graphql_progress,
+            &graphql_origins,
+            graphql_playground,
+        )
+        .await
+        {
             error!(error = %e, "graphql server exited");
         }
     });

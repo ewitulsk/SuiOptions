@@ -22,7 +22,8 @@ use async_graphql::{
 };
 use async_graphql_axum::GraphQL;
 use axum::response::{Html, IntoResponse};
-use axum::{routing::get, Extension, Router};
+use axum::routing::{get, post_service};
+use axum::{Extension, Router};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
@@ -406,23 +407,60 @@ async fn progress(Extension(state): Extension<Arc<ProgressState>>) -> axum::Json
     axum::Json(state.snapshot())
 }
 
-/// Serve the GraphQL API at `POST /graphql` (+ a GraphiQL playground on GET)
-/// and the `GET /progress` status endpoint on `addr`. Internal-only.
-pub async fn serve(addr: SocketAddr, repo: Repo, progress_state: Arc<ProgressState>) -> Result<()> {
-    let schema = Schema::build(QueryRoot, EmptyMutation, EmptySubscription)
-        .data(repo)
-        .finish();
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
+/// Build the CORS layer from the configured allow-list. `["*"]` (or any entry
+/// of `"*"`) permits any origin; otherwise the listed origins are allowed.
+/// Mirrors the helper in api-service / token-info so the services behave alike.
+fn build_cors(allowed_origins: &[String]) -> Result<CorsLayer> {
+    if allowed_origins.iter().any(|o| o == "*") {
+        return Ok(CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any));
+    }
+    let mut origins = Vec::with_capacity(allowed_origins.len());
+    for o in allowed_origins {
+        origins.push(o.parse()?);
+    }
+    Ok(CorsLayer::new()
+        .allow_origin(origins)
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(Any))
+}
+
+/// Serve the GraphQL API at `POST /graphql` and the `GET /progress` status
+/// endpoint on `addr`. CORS is scoped by `allowed_origins`. When
+/// `expose_playground` is set, the GraphiQL UI is served on `GET /graphql` and
+/// introspection is enabled; otherwise both are disabled (the deployed default
+/// for any internet-reachable env).
+pub async fn serve(
+    addr: SocketAddr,
+    repo: Repo,
+    progress_state: Arc<ProgressState>,
+    allowed_origins: &[String],
+    expose_playground: bool,
+) -> Result<()> {
+    let mut builder = Schema::build(QueryRoot, EmptyMutation, EmptySubscription)
+        .data(repo)
+        .limit_depth(15)
+        .limit_complexity(1000);
+    if !expose_playground {
+        builder = builder.disable_introspection();
+    }
+    let schema = builder.finish();
+    let cors = build_cors(allowed_origins)?;
+    let graphql_service = GraphQL::new(schema);
+    let graphql_route = if expose_playground {
+        get(graphiql).post_service(graphql_service)
+    } else {
+        post_service(graphql_service)
+    };
     let app = Router::new()
-        .route("/graphql", get(graphiql).post_service(GraphQL::new(schema)))
+        .route("/graphql", graphql_route)
         .route("/progress", get(progress))
         .layer(Extension(progress_state))
         .layer(cors);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(%addr, "indexer graphql listening");
+    info!(%addr, expose_playground, "indexer graphql listening");
     axum::serve(listener, app).await?;
     Ok(())
 }

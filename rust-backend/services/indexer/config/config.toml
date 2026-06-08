@@ -9,6 +9,10 @@ remote_store_url        = "https://checkpoints.testnet.sui.io"
 concurrency             = 5
 graphql_addr            = "127.0.0.1:9002"
 
+# Local dev: scope CORS to the Vite dev server and serve the GraphiQL playground.
+allowed_origins         = ["http://localhost:5173", "http://127.0.0.1:5173"]
+expose_playground       = true
+
 # Postgres persistence. The docker-compose at services/indexer/docker-compose.yml
 # stands up a matching DB on port 7654. Migrations are embedded in the binary
 # and run on boot.

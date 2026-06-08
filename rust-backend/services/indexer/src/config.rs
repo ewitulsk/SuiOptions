@@ -50,6 +50,18 @@ pub struct Config {
     #[serde(default = "default_graphql_addr")]
     pub graphql_addr: SocketAddr,
 
+    /// CORS allow-list for the GraphQL API. `["*"]` (the default) allows any
+    /// origin — matches the other public services (api-service, token-info).
+    /// Set explicit origins to scope it.
+    #[serde(default = "default_allowed_origins")]
+    pub allowed_origins: Vec<String>,
+
+    /// Serve the GraphiQL playground at `GET /graphql` and leave schema
+    /// introspection enabled. Defaults to `false` (locked down); dev/staging
+    /// opt in via their config. Keep this off in prod.
+    #[serde(default)]
+    pub expose_playground: bool,
+
     /// Postgres connection string for the persistence layer. Standard libpq
     /// URL form, e.g. `postgresql://postgres:postgres@localhost:7654/indexer`.
     pub database_url: String,
@@ -97,6 +109,10 @@ fn default_health_addr() -> SocketAddr {
 
 fn default_graphql_addr() -> SocketAddr {
     "0.0.0.0:9002".parse().unwrap()
+}
+
+fn default_allowed_origins() -> Vec<String> {
+    vec!["*".to_string()]
 }
 
 fn default_db_pool_size() -> u32 {
@@ -163,6 +179,44 @@ database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
         );
         let cfg = Config::load(&p).unwrap();
         assert!(cfg.resolve_rpc_url().unwrap().contains("testnet"));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn cors_and_playground_have_locked_down_defaults() {
+        let p = write_tmp(
+            "cors_defaults",
+            r#"
+network = "testnet"
+token_info_url = "http://127.0.0.1:9005"
+remote_store_url = "https://checkpoints.testnet.sui.io"
+concurrency = 5
+database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
+"#,
+        );
+        let cfg = Config::load(&p).unwrap();
+        assert_eq!(cfg.allowed_origins, vec!["*".to_string()]);
+        assert!(!cfg.expose_playground);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn cors_and_playground_parse_when_set() {
+        let p = write_tmp(
+            "cors_set",
+            r#"
+network = "testnet"
+token_info_url = "http://127.0.0.1:9005"
+remote_store_url = "https://checkpoints.testnet.sui.io"
+concurrency = 5
+database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
+allowed_origins = ["http://localhost:5173"]
+expose_playground = true
+"#,
+        );
+        let cfg = Config::load(&p).unwrap();
+        assert_eq!(cfg.allowed_origins, vec!["http://localhost:5173".to_string()]);
+        assert!(cfg.expose_playground);
         std::fs::remove_file(&p).ok();
     }
 
