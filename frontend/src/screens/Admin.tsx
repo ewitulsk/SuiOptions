@@ -4,7 +4,6 @@
 //
 // Surfaces every admin-gated contract entrypoint:
 //   - per-bucket invalidate / revalidate / cleanup        (bucket.move)
-//   - create a strike ladder of buckets (new_call_option)  (bucket.move)
 //   - set protocol fee (set_fee_bps)                       (admin.move)
 //   - withdraw treasury fees / (re)create the treasury     (treasury.move)
 
@@ -27,7 +26,6 @@ import {
   buildCleanupBucketTx,
   buildCreateTreasuryTx,
   buildInvalidateBucketTx,
-  buildNewCallOptionTx,
   buildRevalidateBucketTx,
   buildSetFeeBpsTx,
   buildWithdrawTx,
@@ -270,13 +268,6 @@ export function Admin() {
           )}
         </section>
 
-        {/* ── Create buckets ──────────────────────────────────────── */}
-        <CreateCallOptionForm
-          busy={busy}
-          onSubmit={(build) => run("new-call", build, "buckets created")}
-          adminCapId={adminCapId}
-        />
-
         {/* ── Protocol fee ────────────────────────────────────────── */}
         <SetFeeForm
           busy={busy}
@@ -298,125 +289,6 @@ export function Admin() {
 
       {toast && <Toast message={toast} />}
     </div>
-  );
-}
-
-// ── Create call option (strike ladder) ─────────────────────────────────
-
-function CreateCallOptionForm({
-  busy,
-  onSubmit,
-  adminCapId,
-}: {
-  busy: string | null;
-  onSubmit: (build: () => Transaction) => void;
-  adminCapId: string;
-}) {
-  const [underlying, setUnderlying] = useState("");
-  const [settlement, setSettlement] = useState("");
-  const [expiry, setExpiry] = useState("");
-  const [startStrike, setStartStrike] = useState("");
-  const [interval, setInterval] = useState("0");
-  const [count, setCount] = useState("1");
-  const [scale, setScale] = useState("0");
-
-  const ready =
-    underlying && settlement && expiry && startStrike && count && scale !== "";
-
-  return (
-    <section className="admin-section">
-      <div className="admin-section__head">
-        <h2 className="admin-section__title">Create call option</h2>
-        <div className="admin-section__sub">
-          mints <code>count</code> buckets at <code>start_strike</code>,
-          <code>start_strike + interval</code>, … sharing one expiry. Strikes
-          are raw scaled units: real ratio = <code>strike / 10^scale</code>.
-        </div>
-      </div>
-      <div className="admin-grid">
-        <Field label="Underlying coin type">
-          <input
-            className="admin-field__input"
-            placeholder="0x…::tbtc::TBTC"
-            value={underlying}
-            onChange={(e) => setUnderlying(e.target.value.trim())}
-          />
-        </Field>
-        <Field label="Settlement coin type">
-          <input
-            className="admin-field__input"
-            placeholder="0x…::tusdc::TUSDC"
-            value={settlement}
-            onChange={(e) => setSettlement(e.target.value.trim())}
-          />
-        </Field>
-        <Field label="Expiry">
-          <input
-            className="admin-field__input"
-            type="datetime-local"
-            value={expiry}
-            onChange={(e) => setExpiry(e.target.value)}
-          />
-        </Field>
-        <Field label="Strike scale (10^scale)">
-          <input
-            className="admin-field__input"
-            type="number"
-            min={0}
-            max={38}
-            value={scale}
-            onChange={(e) => setScale(e.target.value)}
-          />
-        </Field>
-        <Field label="Start strike (raw)">
-          <input
-            className="admin-field__input"
-            type="number"
-            min={0}
-            value={startStrike}
-            onChange={(e) => setStartStrike(e.target.value)}
-          />
-        </Field>
-        <Field label="Strike interval (raw)">
-          <input
-            className="admin-field__input"
-            type="number"
-            min={0}
-            value={interval}
-            onChange={(e) => setInterval(e.target.value)}
-          />
-        </Field>
-        <Field label="Count">
-          <input
-            className="admin-field__input"
-            type="number"
-            min={1}
-            value={count}
-            onChange={(e) => setCount(e.target.value)}
-          />
-        </Field>
-      </div>
-      <button
-        className="admin-btn admin-btn--primary"
-        disabled={!ready || busy !== null}
-        onClick={() =>
-          onSubmit(() =>
-            buildNewCallOptionTx({
-              adminCapId,
-              underlyingCoinType: underlying,
-              settlementCoinType: settlement,
-              expiryMs: BigInt(new Date(expiry).getTime()),
-              startStrikeRaw: BigInt(startStrike),
-              strikeIntervalRaw: BigInt(interval || "0"),
-              count: BigInt(count),
-              strikeScale: Number(scale),
-            }),
-          )
-        }
-      >
-        {busy === "new-call" ? "creating…" : "Create buckets"}
-      </button>
-    </section>
   );
 }
 

@@ -4,8 +4,6 @@
 //   contracts/sources/admin.move
 //     - admin::set_fee_bps(&AdminCap, &mut ProtocolConfig, new_bps)
 //   contracts/sources/bucket.move
-//     - bucket::new_call_option<U, S>(&AdminCap, expiry_ms, start_strike,
-//         strike_interval, count, strike_scale, ctx)
 //     - bucket::invalidate_bucket<U, S, Call>(&AdminCap, &mut Bucket, reason, &Clock, ctx)
 //     - bucket::revalidate_bucket<U, S, Call>(&AdminCap, &mut Bucket, reason, &Clock, ctx)
 //     - bucket::cleanup_bucket<U, S, Call>(&AdminCap, Bucket, &Clock)
@@ -100,40 +98,6 @@ export function buildCleanupBucketTx(p: CleanupBucketParams): Transaction {
       tx.object(p.adminCapId),
       tx.object(p.bucketId),
       tx.object(SUI_CLOCK_OBJECT_ID),
-    ],
-  });
-  return tx;
-}
-
-export type NewCallOptionParams = {
-  adminCapId: string;
-  underlyingCoinType: string;
-  settlementCoinType: string;
-  /** Unix millis expiry. */
-  expiryMs: bigint;
-  /** First strike, in scaled chain units (raw u128). */
-  startStrikeRaw: bigint;
-  /** Spacing between consecutive strikes, in the same scaled units. */
-  strikeIntervalRaw: bigint;
-  /** Number of buckets to mint across the strike ladder. */
-  count: bigint;
-  /** Real ratio = strike / 10^strike_scale. `0 ≤ scale ≤ 38`. */
-  strikeScale: number;
-};
-
-export function buildNewCallOptionTx(p: NewCallOptionParams): Transaction {
-  const pkg = requirePackage();
-  const tx = new Transaction();
-  tx.moveCall({
-    target: `${pkg}::bucket::new_call_option`,
-    typeArguments: [p.underlyingCoinType, p.settlementCoinType],
-    arguments: [
-      tx.object(p.adminCapId),
-      tx.pure.u64(p.expiryMs),
-      tx.pure.u128(p.startStrikeRaw),
-      tx.pure.u128(p.strikeIntervalRaw),
-      tx.pure.u64(p.count),
-      tx.pure.u8(p.strikeScale),
     ],
   });
   return tx;
