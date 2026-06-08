@@ -143,9 +143,17 @@ export function OwnedCard({
           </button>
         )}
         {p.status === "active_otm" && (
-          <button className="pos-card__cta pos-card__cta--ghost" disabled>
-            Hold · wait for BTC ≥ {fmtStrike(p.asset, p.strike)}
-          </button>
+          <>
+            <button className="pos-card__cta pos-card__cta--ghost" disabled>
+              Hold · wait for {p.asset} ≥ {fmtStrike(p.asset, p.strike)}
+            </button>
+            <button
+              className="pos-card__cta pos-card__cta--secondary"
+              onClick={() => onExercise(p)}
+            >
+              Exercise anyway → receive {fmtAmt(p.asset, p.amount)} {p.asset}
+            </button>
+          </>
         )}
         {p.status === "expired_otm" && (
           <button className="pos-card__cta pos-card__cta--ghost" disabled>
