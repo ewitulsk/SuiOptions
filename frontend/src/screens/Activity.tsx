@@ -8,7 +8,6 @@ import {
   type ActivityFilter,
 } from "../state/activity";
 import { Header } from "../components/Header";
-import { WaveHero } from "../components/WaveHero";
 import type { ActivityEvent, ActivityTotals } from "../types";
 
 function shortAddress(addr: string): string {
@@ -142,7 +141,6 @@ export function Activity() {
 
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
-      <WaveHero />
       <Header />
 
       <div className="app__wrap">

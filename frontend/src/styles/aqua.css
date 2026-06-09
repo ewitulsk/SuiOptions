@@ -71,20 +71,6 @@
   max-width: 1180px; margin: 0 auto; padding: 0 32px 96px;
 }
 
-/* ---------- Wave hero — the brand motif ---------- */
-[data-theme="aqua"] .wave-hero {
-  position: relative; height: 84px;
-  margin: 0 -32px 0;
-}
-[data-theme="aqua"] .wave-hero svg { display: block; width: 100%; height: 100%; }
-[data-theme="aqua"] .wave-hero .wave-back  { animation: aqua-wave 14s linear infinite; }
-[data-theme="aqua"] .wave-hero .wave-mid   { animation: aqua-wave 10s linear infinite reverse; opacity: 0.6; }
-[data-theme="aqua"] .wave-hero .wave-front { animation: aqua-wave  7s linear infinite; opacity: 0.85; }
-@keyframes aqua-wave {
-  from { transform: translateX(0); }
-  to   { transform: translateX(-50%); }
-}
-
 /* ---------- Header ---------- */
 [data-theme="aqua"] .header {
   position: sticky; top: 0; z-index: 20;
@@ -93,6 +79,33 @@
   background: rgba(var(--aqua-tint-rgb),0.78);
   backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
   border-bottom: 1px solid var(--aqua-line);
+  overflow: hidden;
+}
+/* Keep all header content above the wave background. */
+[data-theme="aqua"] .header > *:not(.header__waves) { position: relative; z-index: 1; }
+
+/* ---------- Wave motif — now a subtle animated backdrop behind the bar ---------- */
+[data-theme="aqua"] .header__waves {
+  position: absolute; inset: 0; z-index: 0;
+  pointer-events: none; overflow: hidden;
+  opacity: 0.55;
+  /* Soft blur keeps the bright fills but melts them into the bar so they
+     never compete with the nav text for attention. */
+  filter: blur(6px);
+}
+/* svg is 2× the bar width so translateX(-50%) reveals an identical copy —
+   seamless loop with no empty edge / hard reset. Anchored to the bottom so
+   the crests rise softly behind the nav. */
+[data-theme="aqua"] .header__waves svg {
+  display: block; position: absolute; bottom: 0; left: 0;
+  width: 200%; height: 150%;
+}
+[data-theme="aqua"] .header__waves .wave-back  { animation: aqua-wave 10s linear infinite; }
+[data-theme="aqua"] .header__waves .wave-mid   { animation: aqua-wave  7s linear infinite reverse; }
+[data-theme="aqua"] .header__waves .wave-front { animation: aqua-wave  5s linear infinite; }
+@keyframes aqua-wave {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
 }
 [data-theme="aqua"] .header__brand {
   display: flex; align-items: center; gap: 10px;
@@ -116,7 +129,7 @@
 }
 [data-theme="aqua"] .header__nav button {
   font-family: inherit; font-size: 13px; font-weight: 500;
-  color: var(--aqua-ink-3); background: transparent; border: none;
+  color: var(--aqua-ink-2); background: transparent; border: none;
   padding: 8px 14px; border-radius: 999px;
   transition: background 160ms ease, color 160ms ease;
 }
@@ -125,20 +138,21 @@
   color: var(--aqua-ink-1); background: var(--aqua-glass-3);
   box-shadow: 0 1px 0 rgba(var(--aqua-shadow-rgb),0.04), 0 2px 8px rgba(77,162,255,0.18);
 }
-[data-theme="aqua"] .header__status {
-  display: inline-flex; align-items: center; gap: 8px;
-  font-family: "JetBrains Mono", monospace; font-size: 10.5px; font-weight: 600;
-  letter-spacing: 0.10em; text-transform: uppercase;
-  color: var(--aqua-sui-deep);
-  background: rgba(77,162,255,0.10);
-  border-radius: 999px; padding: 6px 12px;
+/* Plain technical connection readout (debug page). */
+[data-theme="aqua"] .conn-status {
+  display: inline-flex; align-items: center; gap: 7px;
+  margin-top: 14px;
+  font-family: "JetBrains Mono", monospace; font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--aqua-ink-3);
 }
-[data-theme="aqua"] .header__status .dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--aqua-sui);
-  box-shadow: 0 0 0 0 var(--aqua-sui-glow);
-  animation: aqua-pulse 1.6s ease-in-out infinite;
+[data-theme="aqua"] .conn-status__dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--aqua-ink-4);
 }
+[data-theme="aqua"] .conn-status--connected  .conn-status__dot { background: var(--aqua-success); }
+[data-theme="aqua"] .conn-status--connecting .conn-status__dot { background: #E0A93B; }
+[data-theme="aqua"] .conn-status--disconnected .conn-status__dot { background: var(--aqua-coral); }
 @keyframes aqua-pulse {
   0%,100% { box-shadow: 0 0 0 0 var(--aqua-sui-glow); }
   50%     { box-shadow: 0 0 0 6px transparent; }
