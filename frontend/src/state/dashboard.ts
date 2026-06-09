@@ -18,6 +18,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useSubmitTransaction } from "../tx/submit";
 
+import type { ToastState } from "../components/Toast";
 import { useBuckets } from "../api/useBuckets";
 import { useOwnedCallOptions } from "../api/useOwnedCallOptions";
 import { useCallTokenLots } from "../api/useCallTokenLots";
@@ -297,7 +298,7 @@ export type DashboardState = {
   openClaim: (p: WrittenPosition) => void;
   submit: () => Promise<void>;
   closeModal: () => void;
-  toast: string | null;
+  toast: ToastState | null;
   connected: boolean;
   /** Connected wallet address, or null when disconnected. */
   address: string | null;
@@ -341,7 +342,7 @@ export function useDashboardState(): DashboardState {
 
   const [tab, setTab] = useState<"owned" | "written">("owned");
   const [modal, setModal] = useState<DashboardModal>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<ToastState | null>(null);
 
   // Re-tick once a minute so `dte` rolls over without a manual refresh.
   const [now, setNow] = useState<number>(() => Date.now());
@@ -505,7 +506,7 @@ export function useDashboardState(): DashboardState {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setToast(`failed · ${message}`);
+      setToast({ message: `failed · ${message}`, variant: "error" });
       setTimeout(() => setToast(null), 6000);
       setModal(null);
     }
@@ -515,11 +516,12 @@ export function useDashboardState(): DashboardState {
     if (modal && (modal as { stage?: string }).stage === "confirmed") {
       const k = modal.kind;
       if (k === "exercise") {
-        setToast(
-          `exercised · received ${modal.qty.toFixed(modal.position.asset === "BTC" ? 4 : 0)} ${modal.position.asset}`,
-        );
+        setToast({
+          message: `exercised · received ${modal.qty.toFixed(modal.position.asset === "BTC" ? 4 : 0)} ${modal.position.asset}`,
+          variant: "success",
+        });
       } else if (k === "claim") {
-        setToast("claimed · position closed");
+        setToast({ message: "claimed · position closed", variant: "success" });
       }
       setTimeout(() => setToast(null), 4500);
     }

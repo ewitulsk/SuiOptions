@@ -195,7 +195,7 @@ export function Dashboard() {
         onClose={d.closeModal}
       />
 
-      {d.toast && <Toast message={d.toast} />}
+      {d.toast && <Toast message={d.toast.message} variant={d.toast.variant} />}
     </div>
   );
 }

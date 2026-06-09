@@ -14,6 +14,7 @@ import { usePythPrice } from "../api/usePythPrice";
 import { useRfq } from "../api/useRfq";
 import { useBulkView } from "../api/useBulkView";
 import { buildBuyTx, buildWriteTx } from "../tx/composer";
+import type { ToastState } from "../components/Toast";
 import type { Series } from "../api/client";
 import type { RfqQuoteEntry, Side as ProtocolSide } from "../api/quoting";
 import type {
@@ -134,7 +135,7 @@ export type ComposerState = {
   confirmSummary: ConfirmSummary | null;
   submit: () => void;
   closeConfirm: () => void;
-  toast: string | null;
+  toast: ToastState | null;
   /** Series the strikes come from (asset/settlement/expiry). Null while loading or if none exist. */
   series: Series | null;
   /** True until the first /buckets fetch resolves. */
@@ -166,7 +167,7 @@ export function useComposerState({
   const [selectedIdx, setSelectedIdx] = useState(initialIdx);
   const [confirmStage, setConfirmStage] = useState<ConfirmStage>(null);
   const [confirmSummary, setConfirmSummary] = useState<ConfirmSummary | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<ToastState | null>(null);
 
   // Live strikes: user picks (asset, expiry); we look up the matching series
   // from the api-service response.
@@ -404,7 +405,7 @@ export function useComposerState({
       validUntilMs - Date.now() <= QUOTE_EXPIRY_BUFFER_MS
     ) {
       refreshRfq();
-      setToast("quote expired · requesting a fresh quote");
+      setToast({ message: "quote expired · requesting a fresh quote", variant: "info" });
       setTimeout(() => setToast(null), 4000);
       return;
     }
@@ -416,7 +417,7 @@ export function useComposerState({
       )?.call_coin_type;
       if (!callCoinType) {
         setConfirmStage(null);
-        setToast("bucket metadata not loaded · try again");
+        setToast({ message: "bucket metadata not loaded · try again", variant: "info" });
         setTimeout(() => setToast(null), 4000);
         return;
       }
@@ -459,7 +460,7 @@ export function useComposerState({
       queryClient.invalidateQueries({ queryKey: ["positions", account.address] });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setToast(`failed · ${message}`);
+      setToast({ message: `failed · ${message}`, variant: "error" });
       setTimeout(() => setToast(null), 6000);
       setConfirmStage(null);
     }
@@ -469,11 +470,13 @@ export function useComposerState({
     const s = confirmSummary;
     setConfirmStage(null);
     if (s) {
-      setToast(
-        view === "writer"
-          ? `position opened · +${s.premium.toFixed(2)} ${settlementSymbol} received`
-          : `call purchased · ${s.amount.toFixed(4)} ${series?.asset_symbol ?? "BTC"} strike $${s.strike.toLocaleString("en-US")}`,
-      );
+      setToast({
+        message:
+          view === "writer"
+            ? `position opened · +${s.premium.toFixed(2)} ${settlementSymbol} received`
+            : `call purchased · ${s.amount.toFixed(4)} ${series?.asset_symbol ?? "BTC"} strike $${s.strike.toLocaleString("en-US")}`,
+        variant: "success",
+      });
       setTimeout(() => setToast(null), 4500);
     }
   };
