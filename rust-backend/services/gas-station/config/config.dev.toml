@@ -12,9 +12,6 @@ max_gas_budget_mist = 500000000
 min_gas_budget_mist = 1000000
 gas_budget_buffer_bps = 2500
 
-# token-info supplies the sponsorable packages: the protocol package plus every
-# supported token's coin-type package.
+# token-info supplies the protocol package (and dev/staging test tokens) that
+# seed the sponsored-PTB templates at boot.
 token_info_url = "http://token-info:9005"
-
-# Extra packages to sponsor beyond what token-info reports. Off-catalog only.
-additional_allowed_packages = []

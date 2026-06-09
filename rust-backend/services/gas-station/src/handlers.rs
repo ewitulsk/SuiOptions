@@ -87,7 +87,7 @@ pub async fn sponsor(
     let out = sponsor::sponsor_transaction(
         &s.sui.client,
         &s.sui.signer,
-        &s.allowed_packages,
+        &s.templates,
         &s.policy,
         sender,
         &kind_bytes,

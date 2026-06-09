@@ -12,12 +12,13 @@ use base64::Engine;
 use shared_crypto::intent::Intent;
 use sui_json_rpc_types::{SuiExecutionStatus, SuiTransactionBlockEffectsAPI};
 use sui_sdk::SuiClient;
-use sui_types::base_types::{ObjectID, ObjectRef, SuiAddress};
+use sui_types::base_types::{ObjectRef, SuiAddress};
 use sui_types::crypto::EncodeDecodeBase64;
 use sui_types::transaction::{Command, GasData, Transaction, TransactionData, TransactionKind};
 use tracing::info;
 
 use crate::sui_client::Signer;
+use crate::tx::template::{match_any, PtbTemplate};
 
 /// Budget-sizing knobs (from gas-station config).
 pub struct BudgetPolicy {
@@ -43,28 +44,31 @@ pub struct SponsoredTx {
 }
 
 /// Reject anything we're not willing to pay for: only programmable
-/// transactions, never publish/upgrade, and — when `allowed_packages` is
-/// non-empty — every Move call must target an allow-listed package. An empty
-/// allowlist means "allow all" (local dev).
-fn validate_kind(kind: &TransactionKind, allowed_packages: &[ObjectID]) -> Result<()> {
+/// transactions, never publish/upgrade, and — when `templates` is non-empty —
+/// the PTB must match one of the exact shapes the frontend builds (see
+/// [`crate::tx::template`]). An empty template set means "allow all" (local
+/// dev).
+fn validate_kind(kind: &TransactionKind, templates: &[PtbTemplate]) -> Result<()> {
     let pt = match kind {
         TransactionKind::ProgrammableTransaction(pt) => pt,
         _ => bail!("only programmable transactions can be sponsored"),
     };
+    // Never sponsor code deployment, even in local allow-all mode.
     for cmd in &pt.commands {
-        match cmd {
-            Command::Publish(..) | Command::Upgrade(..) => {
-                bail!("refusing to sponsor a publish/upgrade transaction")
-            }
-            Command::MoveCall(call) => {
-                if !allowed_packages.is_empty() && !allowed_packages.contains(&call.package) {
-                    bail!("package {} is not in the sponsor allowlist", call.package);
-                }
-            }
-            _ => {}
+        if matches!(cmd, Command::Publish(..) | Command::Upgrade(..)) {
+            bail!("refusing to sponsor a publish/upgrade transaction");
         }
     }
-    Ok(())
+    if templates.is_empty() {
+        return Ok(());
+    }
+    match match_any(templates, pt) {
+        Some(name) => {
+            info!(template = name, "PTB matched sponsored template");
+            Ok(())
+        }
+        None => bail!("PTB matches no sponsored template"),
+    }
 }
 
 /// Build, dry-run-size, and sign a sponsored transaction.
@@ -75,14 +79,14 @@ fn validate_kind(kind: &TransactionKind, allowed_packages: &[ObjectID]) -> Resul
 pub async fn sponsor_transaction(
     client: &SuiClient,
     signer: &Signer,
-    allowed_packages: &[ObjectID],
+    templates: &[PtbTemplate],
     policy: &BudgetPolicy,
     sender: SuiAddress,
     kind_bytes: &[u8],
 ) -> Result<SponsoredTx> {
     let kind: TransactionKind = bcs::from_bytes(kind_bytes)
         .context("decoding TransactionKind (GasLessTransactionData)")?;
-    validate_kind(&kind, allowed_packages)?;
+    validate_kind(&kind, templates)?;
 
     let sponsor = signer.address;
 
@@ -191,7 +195,9 @@ pub async fn sponsor_balance(client: &SuiClient, sponsor: SuiAddress) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tx::template::protocol_templates;
     use move_core_types::identifier::Identifier;
+    use sui_types::base_types::ObjectID;
     use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 
     fn movecall_kind(pkg: ObjectID) -> TransactionKind {
@@ -207,22 +213,16 @@ mod tests {
     }
 
     #[test]
-    fn allowlist_empty_allows_any_package() {
+    fn empty_templates_allow_any() {
         let kind = movecall_kind(ObjectID::random());
         assert!(validate_kind(&kind, &[]).is_ok());
     }
 
     #[test]
-    fn allowlist_permits_listed_package() {
-        let pkg = ObjectID::random();
-        let kind = movecall_kind(pkg);
-        assert!(validate_kind(&kind, &[pkg]).is_ok());
-    }
-
-    #[test]
-    fn allowlist_rejects_unlisted_package() {
+    fn unknown_shape_is_rejected() {
+        let templates = protocol_templates(ObjectID::random(), &[], false);
         let kind = movecall_kind(ObjectID::random());
-        let err = validate_kind(&kind, &[ObjectID::random()]).unwrap_err();
-        assert!(err.to_string().contains("allowlist"), "{err}");
+        let err = validate_kind(&kind, &templates).unwrap_err();
+        assert!(err.to_string().contains("no sponsored template"), "{err}");
     }
 }
