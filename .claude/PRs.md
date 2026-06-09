@@ -37,3 +37,4 @@ PRs raised through Claude Code.
 | PR | Jira | Epic | Title |
 |----|------|------|-------|
 | [#131](https://github.com/ewitulsk/SuiOptions/pull/131) | [SO-141](https://suioptions.atlassian.net/browse/SO-141) | SO-19 Frontend | Consume Token-Info Logo, Name & Pyth Feeds on the Frontend |
+| [#134](https://github.com/ewitulsk/SuiOptions/pull/134) | [SO-145](https://suioptions.atlassian.net/browse/SO-145) | SO-19 Frontend | Fix Hardcoded Bitcoin Logo on Earn Page; Serve TWAL/TDEEP Logos |

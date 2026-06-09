@@ -22,7 +22,9 @@ export function AmountInput({
   usdcBalance,
   error,
 }: Props) {
-  const assetName = findToken(assetSymbol)?.name ?? assetSymbol ?? "BTC";
+  const assetName = findToken(assetSymbol)?.name ?? assetSymbol ?? "—";
+  const assetInitial =
+    (assetSymbol ?? "").replace(/[^A-Za-z0-9]/g, "").charAt(0).toUpperCase() || "?";
   return (
     <div>
       <div className="amount">
@@ -46,7 +48,11 @@ export function AmountInput({
           <TokenLogo
             symbol={assetSymbol}
             className="amount__asset-icon"
-            fallback={<span className="amount__asset-icon">₿</span>}
+            fallback={
+              <span className="amount__asset-icon amount__asset-icon--generic">
+                {assetInitial}
+              </span>
+            }
           />
           <div>
             <div className="amount__asset-name">{assetName}</div>

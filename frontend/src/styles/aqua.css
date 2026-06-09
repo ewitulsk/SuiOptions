@@ -480,6 +480,9 @@
   color: #fff; font-weight: 700; font-size: 16px;
   display: flex; align-items: center; justify-content: center;
 }
+[data-theme="aqua"] .amount__asset-icon--generic {
+  background: linear-gradient(135deg, var(--aqua-sui) 0%, var(--aqua-sui-deep) 100%);
+}
 [data-theme="aqua"] .amount__asset-name {
   font-weight: 600; font-size: 14px; color: var(--aqua-ink-1);
 }
