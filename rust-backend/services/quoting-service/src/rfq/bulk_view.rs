@@ -166,6 +166,8 @@ async fn refresh_buckets(
         .iter()
         .map(|b| BulkViewBucket {
             bucket_id: b.bucket_id,
+            asset_type: b.asset_type.clone(),
+            settlement_type: b.settlement_type.clone(),
             strike: b.strike,
             strike_scale: b.strike_scale,
             expiry_ms: b.expiry_ms,

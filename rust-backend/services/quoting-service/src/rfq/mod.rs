@@ -243,6 +243,8 @@ pub async fn orchestrate(
             request_id: request_id.clone(),
             payload: protocol_types::messages::RfqBroadcastPayload {
                 bucket_id,
+                asset_type: bucket.asset_type.clone(),
+                settlement_type: bucket.settlement_type.clone(),
                 write_amount,
                 side,
                 deadline_ms,

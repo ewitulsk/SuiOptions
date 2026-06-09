@@ -265,6 +265,13 @@ pub struct AuthAckPayload {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RfqBroadcastPayload {
     pub bucket_id: ObjectId,
+    /// Bucket's underlying coin type. An MM sources a single
+    /// `(underlying, settlement)` spot from Pyth, so it must decline any
+    /// bucket whose pair differs — pricing a foreign pair against the wrong
+    /// spot yields a nonsense premium.
+    pub asset_type: AssetType,
+    /// Bucket's settlement coin type. See `asset_type`.
+    pub settlement_type: AssetType,
     #[serde(with = "u64_string")]
     pub write_amount: u64,
     pub side: Side,
@@ -401,6 +408,11 @@ pub struct BulkViewRfqBroadcastPayload {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BulkViewBucket {
     pub bucket_id: ObjectId,
+    /// Bucket's underlying coin type. See [`RfqBroadcastPayload::asset_type`] —
+    /// the MM declines (here: omits) buckets outside its served pair.
+    pub asset_type: AssetType,
+    /// Bucket's settlement coin type.
+    pub settlement_type: AssetType,
     #[serde(with = "u128_string")]
     pub strike: u128,
     pub strike_scale: u8,
@@ -505,6 +517,8 @@ mod tests {
             request_id: "req-1".into(),
             payload: RfqBroadcastPayload {
                 bucket_id: ObjectId::new([0x0a; 32]),
+                asset_type: AssetType::new("0x9::tbtc::TBTC"),
+                settlement_type: AssetType::new("0x9::tusdc::TUSDC"),
                 write_amount: 5,
                 side: Side::Writer,
                 deadline_ms: 1_748_534_400_000,
@@ -514,6 +528,7 @@ mod tests {
             },
         };
         let s = serde_json::to_string(&msg).unwrap();
+        assert!(s.contains("\"asset_type\":\"0x9::tbtc::TBTC\""));
         assert!(s.contains("\"deadline_ms\":\"1748534400000\""));
         assert!(s.contains("\"strike\":\"500\""));
         assert!(s.contains("\"strike_scale\":0"));
@@ -561,6 +576,8 @@ mod tests {
                 deadline_ms: 1_748_534_400_000,
                 buckets: vec![BulkViewBucket {
                     bucket_id: ObjectId::new([0x0a; 32]),
+                    asset_type: AssetType::new("0x9::tbtc::TBTC"),
+                    settlement_type: AssetType::new("0x9::tusdc::TUSDC"),
                     strike: 500,
                     strike_scale: 2,
                     expiry_ms: 1_900_000_000_000,

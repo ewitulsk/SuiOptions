@@ -361,6 +361,11 @@ async fn main() -> Result<()> {
         quote_ttl_ms: cfg.quote_ttl_ms,
         ask_markup_bps: cfg.ask_markup_bps,
         bid_markdown_bps: cfg.bid_markdown_bps,
+        // The bot reads one pair's spot from Pyth; the pricer declines RFQs for
+        // any other pair. Canonicalize once here so each RFQ only canonicalizes
+        // the incoming side.
+        underlying_type: protocol_types::asset::canonicalize_move_type(&underlying_spec.coin_type),
+        settlement_type: protocol_types::asset::canonicalize_move_type(&settlement_spec.coin_type),
     };
     let staleness = Staleness {
         max_price_age: Duration::from_millis(cfg.pyth.max_price_age_ms),
@@ -615,6 +620,8 @@ async fn main() -> Result<()> {
                                 // nothing is signed.
                                 let synthetic = RfqBroadcastPayload {
                                     bucket_id: b.bucket_id,
+                                    asset_type: b.asset_type.clone(),
+                                    settlement_type: b.settlement_type.clone(),
                                     write_amount: payload.write_amount,
                                     side: payload.side,
                                     deadline_ms: payload.deadline_ms,

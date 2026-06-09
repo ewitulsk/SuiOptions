@@ -123,8 +123,15 @@ fn main() -> Result<()> {
         (None, None) => bail!("one of --days-to-expiry or --expiry-ms is required"),
     };
 
+    // Simulator prices whatever pair the user passes on the CLI — tag the
+    // payload and config with the same sentinel pair so the pricer's pair-gate
+    // always matches (the real bot resolves these from token-info).
+    let sim_pair = protocol_types::asset::AssetType::new("0x0::sim::PAIR");
+
     let payload = RfqBroadcastPayload {
         bucket_id: ObjectId::new([0u8; 32]),
+        asset_type: sim_pair.clone(),
+        settlement_type: sim_pair.clone(),
         write_amount: args.write_amount,
         // Simulator always pretends retail is trading (buying calls) — only
         // the pricing primitives are exercised; `side` is informational.
@@ -141,6 +148,8 @@ fn main() -> Result<()> {
         // Simulator prints the Black-Scholes mid — no spread.
         ask_markup_bps: 0,
         bid_markdown_bps: 0,
+        underlying_type: sim_pair.to_canonical(),
+        settlement_type: sim_pair.to_canonical(),
     };
     let decision = price_rfq(&cfg, &payload, spot_scaled, args.sigma, now);
 
