@@ -332,6 +332,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "api-service-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "parking_lot 0.12.5",
+ "protocol-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "append-only-vec"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5150,6 +5163,7 @@ name = "mm-bot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "api-service-client",
  "bcs",
  "chrono",
  "clap",

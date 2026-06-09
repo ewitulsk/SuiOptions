@@ -242,15 +242,13 @@ pub async fn orchestrate(
         let frame = protocol_types::messages::ServiceToMm::RFQBroadcast {
             request_id: request_id.clone(),
             payload: protocol_types::messages::RfqBroadcastPayload {
+                // Only the bucket address travels — the MM resolves the
+                // strike/expiry/coin-types itself from api-service so it never
+                // trusts pricing inputs delivered over the wire.
                 bucket_id,
-                asset_type: bucket.asset_type.clone(),
-                settlement_type: bucket.settlement_type.clone(),
                 write_amount,
                 side,
                 deadline_ms,
-                strike: bucket.strike,
-                strike_scale: bucket.strike_scale,
-                expiry_ms: bucket.expiry_ms,
             },
         };
         // Tell the matcher who we expect a response from so it can decide

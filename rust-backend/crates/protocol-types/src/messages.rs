@@ -262,32 +262,20 @@ pub struct AuthAckPayload {
     pub session_id: String,
 }
 
+/// Service → MM: a quote is wanted on `bucket_id` for `write_amount` on the
+/// given `side`. The payload carries **only the bucket address** — never its
+/// strike, expiry, or coin types. The MM resolves those itself from the
+/// api-service (its own trust boundary) so a malicious or buggy upstream can't
+/// hand it spoofed pricing inputs (e.g. a TWAL strike tagged as TBTC). The
+/// remaining fields are request parameters, not bucket attributes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RfqBroadcastPayload {
     pub bucket_id: ObjectId,
-    /// Bucket's underlying coin type. An MM sources a single
-    /// `(underlying, settlement)` spot from Pyth, so it must decline any
-    /// bucket whose pair differs — pricing a foreign pair against the wrong
-    /// spot yields a nonsense premium.
-    pub asset_type: AssetType,
-    /// Bucket's settlement coin type. See `asset_type`.
-    pub settlement_type: AssetType,
     #[serde(with = "u64_string")]
     pub write_amount: u64,
     pub side: Side,
     #[serde(with = "u64_string")]
     pub deadline_ms: u64,
-    /// Bucket's on-chain strike. Real ratio (settlement raw-units per
-    /// underlying raw-unit) is `strike / 10^strike_scale`. MMs must
-    /// normalize before plugging into a pricing model.
-    #[serde(with = "u128_string")]
-    pub strike: u128,
-    /// 0..=9. See `BucketCreated::strike_scale`.
-    pub strike_scale: u8,
-    /// Bucket expiry as a Sui clock millisecond timestamp. The MM derives
-    /// time-to-expiry from this directly instead of guessing.
-    #[serde(with = "u64_string")]
-    pub expiry_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,7 +379,9 @@ pub struct BulkViewPremium {
 }
 
 /// Service → MM: price these buckets at `write_amount`, no signing. Sent only
-/// to MMs that advertised `bulk_view = true` in their Hello.
+/// to MMs that advertised `bulk_view = true` in their Hello. Like
+/// [`RfqBroadcastPayload`], it carries only bucket **addresses** — the MM
+/// resolves each bucket's pricing inputs from the api-service itself.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BulkViewRfqBroadcastPayload {
     #[serde(with = "u64_string")]
@@ -399,25 +389,7 @@ pub struct BulkViewRfqBroadcastPayload {
     pub side: Side,
     #[serde(with = "u64_string")]
     pub deadline_ms: u64,
-    pub buckets: Vec<BulkViewBucket>,
-}
-
-/// One bucket in a [`BulkViewRfqBroadcastPayload`]. Carries the same pricing
-/// inputs `RfqBroadcastPayload` does, minus the per-request `write_amount`
-/// (shared across the batch).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BulkViewBucket {
-    pub bucket_id: ObjectId,
-    /// Bucket's underlying coin type. See [`RfqBroadcastPayload::asset_type`] —
-    /// the MM declines (here: omits) buckets outside its served pair.
-    pub asset_type: AssetType,
-    /// Bucket's settlement coin type.
-    pub settlement_type: AssetType,
-    #[serde(with = "u128_string")]
-    pub strike: u128,
-    pub strike_scale: u8,
-    #[serde(with = "u64_string")]
-    pub expiry_ms: u64,
+    pub bucket_ids: Vec<ObjectId>,
 }
 
 /// MM → service: indicative premiums for the requested buckets. Unsigned; no
@@ -512,27 +484,25 @@ mod tests {
     }
 
     #[test]
-    fn rfq_broadcast_includes_deadline() {
+    fn rfq_broadcast_carries_only_bucket_address_and_request_params() {
+        // The MM resolves strike/expiry/coin-types itself; the broadcast must
+        // not leak any bucket attribute beyond the address.
         let msg = ServiceToMm::RFQBroadcast {
             request_id: "req-1".into(),
             payload: RfqBroadcastPayload {
                 bucket_id: ObjectId::new([0x0a; 32]),
-                asset_type: AssetType::new("0x9::tbtc::TBTC"),
-                settlement_type: AssetType::new("0x9::tusdc::TUSDC"),
                 write_amount: 5,
                 side: Side::Writer,
                 deadline_ms: 1_748_534_400_000,
-                strike: 500,
-                strike_scale: 0,
-                expiry_ms: 1_900_000_000_000,
             },
         };
         let s = serde_json::to_string(&msg).unwrap();
-        assert!(s.contains("\"asset_type\":\"0x9::tbtc::TBTC\""));
         assert!(s.contains("\"deadline_ms\":\"1748534400000\""));
-        assert!(s.contains("\"strike\":\"500\""));
-        assert!(s.contains("\"strike_scale\":0"));
-        assert!(s.contains("\"expiry_ms\":\"1900000000000\""));
+        assert!(s.contains("\"write_amount\":\"5\""));
+        // No bucket attributes ride along.
+        assert!(!s.contains("strike"));
+        assert!(!s.contains("expiry"));
+        assert!(!s.contains("asset_type"));
         let back: ServiceToMm = serde_json::from_str(&s).unwrap();
         assert_eq!(back, msg);
     }
@@ -574,20 +544,13 @@ mod tests {
                 write_amount: 100,
                 side: Side::Writer,
                 deadline_ms: 1_748_534_400_000,
-                buckets: vec![BulkViewBucket {
-                    bucket_id: ObjectId::new([0x0a; 32]),
-                    asset_type: AssetType::new("0x9::tbtc::TBTC"),
-                    settlement_type: AssetType::new("0x9::tusdc::TUSDC"),
-                    strike: 500,
-                    strike_scale: 2,
-                    expiry_ms: 1_900_000_000_000,
-                }],
+                bucket_ids: vec![ObjectId::new([0x0a; 32]), ObjectId::new([0x0b; 32])],
             },
         };
         let s = serde_json::to_string(&bc).unwrap();
         assert!(s.contains("\"type\":\"BulkViewRFQBroadcast\""));
         assert!(s.contains("\"write_amount\":\"100\""));
-        assert!(s.contains("\"strike\":\"500\""));
+        assert!(!s.contains("strike"));
         assert_eq!(serde_json::from_str::<ServiceToMm>(&s).unwrap(), bc);
 
         let q = MmToService::BulkViewQuote {

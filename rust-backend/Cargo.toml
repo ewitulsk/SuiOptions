@@ -9,6 +9,7 @@ members = [
     "crates/pricing",
     "crates/deployments",
     "crates/token-info-client",
+    "crates/api-service-client",
     "crates/indexer-graphql",
     "crates/auth-client",
     "services/indexer",
@@ -43,6 +44,7 @@ sui-tx         = { path = "crates/sui-tx" }
 pricing        = { path = "crates/pricing" }
 deployments    = { path = "crates/deployments" }
 token-info-client = { path = "crates/token-info-client" }
+api-service-client = { path = "crates/api-service-client" }
 indexer-graphql = { path = "crates/indexer-graphql" }
 auth-client    = { path = "crates/auth-client" }
 

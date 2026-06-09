@@ -36,13 +36,14 @@ use sui_types::base_types::ObjectID;
 use protocol_types::ids::{ObjectId as PtObjectId, SuiAddress as PtSuiAddress};
 use protocol_types::messages::{
     AuthResponsePayload, BulkViewMmPremium, BulkViewQuotePayload, MmHelloPayload, MmQuotePayload,
-    MmToService, RfqBroadcastPayload, ServiceToMm,
+    MmToService, ServiceToMm,
 };
 use protocol_types::quote::Quote;
 use protocol_types::sides::MmRole;
 use protocol_types::SigningScheme;
 
 use pyth_client::{self as pyth, PriceCache, PriceFeedId, RollingVolBuffer};
+use api_service_client::ApiServiceClient;
 use token_info_client::TokenInfoClient;
 use sui_tx::quote_signer::QuoteSigner;
 use sui_tx::sui_client::{Network, SuiClientWrapper};
@@ -51,7 +52,8 @@ use sui_tx::tx::test_tokens::mint_and_deposit_into_account;
 use sui_tx::ws_client;
 
 use mm_bot::pricing::{
-    compute_spot_from_cache, price_rfq, resolve_sigma, PriceDecision, PricingConfig, Staleness,
+    compute_spot_from_cache, price_rfq, resolve_sigma, serves_pair, PriceDecision, PricingConfig,
+    RfqPricingInputs, Staleness,
 };
 use mm_bot::Cli;
 
@@ -361,12 +363,20 @@ async fn main() -> Result<()> {
         quote_ttl_ms: cfg.quote_ttl_ms,
         ask_markup_bps: cfg.ask_markup_bps,
         bid_markdown_bps: cfg.bid_markdown_bps,
-        // The bot reads one pair's spot from Pyth; the pricer declines RFQs for
-        // any other pair. Canonicalize once here so each RFQ only canonicalizes
-        // the incoming side.
-        underlying_type: protocol_types::asset::canonicalize_move_type(&underlying_spec.coin_type),
-        settlement_type: protocol_types::asset::canonicalize_move_type(&settlement_spec.coin_type),
     };
+    // api-service client: the bot looks each RFQ's bucket up by address to get
+    // its true (strike, expiry, coin types) rather than trusting the broadcast.
+    let api = ApiServiceClient::new(&cli.api_url);
+    // The single pair this bot sources a Pyth spot for. Canonicalized once so
+    // each lookup only compares; any bucket outside this pair is declined.
+    let cfg_underlying = protocol_types::asset::canonicalize_move_type(&underlying_spec.coin_type);
+    let cfg_settlement = protocol_types::asset::canonicalize_move_type(&settlement_spec.coin_type);
+    tracing::info!(
+        api_url = %cli.api_url,
+        underlying = %cfg_underlying,
+        settlement = %cfg_settlement,
+        "bucket lookups via api-service; quoting only this pair"
+    );
     let staleness = Staleness {
         max_price_age: Duration::from_millis(cfg.pyth.max_price_age_ms),
         max_publish_lag: Duration::from_millis(cfg.pyth.max_publish_lag_ms),
@@ -477,13 +487,66 @@ async fn main() -> Result<()> {
                 } => {
                     tracing::debug!(
                         ?request_id,
-                        strike = %payload.strike,
-                        strike_scale = payload.strike_scale,
-                        expiry_ms = payload.expiry_ms,
+                        bucket_id = %payload.bucket_id,
                         write_amount = payload.write_amount,
                         "received rfq broadcast"
                     );
                     let now = now_ms();
+
+                    // Resolve the bucket's true pricing inputs from api-service
+                    // by address. The broadcast carries no strike/expiry/pair, so
+                    // a spoofed or buggy upstream can't trick us into mispricing.
+                    let bucket = match api.bucket_pricing(payload.bucket_id).await {
+                        Ok(Some(b)) => b,
+                        not_found_or_err => {
+                            let reason = match not_found_or_err {
+                                Ok(None) => "unknown or settled bucket".to_string(),
+                                Err(e) => format!("bucket lookup failed: {e:#}"),
+                                Ok(Some(_)) => unreachable!(),
+                            };
+                            tracing::debug!(?request_id, %reason, "declining");
+                            if let Err(e) = ws_client::send_json(
+                                &mut ws,
+                                &MmToService::Decline {
+                                    request_id,
+                                    payload: protocol_types::messages::DeclinePayload { reason },
+                                },
+                            )
+                            .await
+                            {
+                                tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
+                                break 'serve;
+                            }
+                            continue 'serve;
+                        }
+                    };
+
+                    // Only quote the single pair we source a Pyth spot for.
+                    if !serves_pair(
+                        &bucket.asset_coin_type,
+                        &bucket.settlement_coin_type,
+                        &cfg_underlying,
+                        &cfg_settlement,
+                    ) {
+                        let reason = format!(
+                            "pair not served: {}/{}",
+                            bucket.asset_coin_type, bucket.settlement_coin_type
+                        );
+                        tracing::debug!(?request_id, %reason, "declining");
+                        if let Err(e) = ws_client::send_json(
+                            &mut ws,
+                            &MmToService::Decline {
+                                request_id,
+                                payload: protocol_types::messages::DeclinePayload { reason },
+                            },
+                        )
+                        .await
+                        {
+                            tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
+                            break 'serve;
+                        }
+                        continue 'serve;
+                    }
 
                     // Live spot from Pyth, scaled into the bucket's units
                     // (settlement smallest-units per underlying smallest-unit).
@@ -519,7 +582,14 @@ async fn main() -> Result<()> {
                     let sigma =
                         resolve_sigma(vol_buf.read().current_annualized(), cfg.pyth.fallback_vol);
 
-                    match price_rfq(&pricing_cfg, &payload, spot_scaled, sigma, now) {
+                    let inputs = RfqPricingInputs {
+                        write_amount: payload.write_amount,
+                        side: payload.side,
+                        strike: bucket.strike,
+                        strike_scale: bucket.strike_scale,
+                        expiry_ms: bucket.expiry_ms,
+                    };
+                    match price_rfq(&pricing_cfg, &inputs, spot_scaled, sigma, now) {
                         PriceDecision::Quote {
                             premium,
                             valid_until_ms,
@@ -533,8 +603,8 @@ async fn main() -> Result<()> {
                                 spot = spot_scaled,
                                 sigma,
                                 strike = strike_scaled,
-                                strike_raw = %payload.strike,
-                                strike_scale = payload.strike_scale,
+                                strike_raw = %bucket.strike,
+                                strike_scale = bucket.strike_scale,
                                 t_years,
                                 per_unit,
                                 write_amount = payload.write_amount,
@@ -594,7 +664,7 @@ async fn main() -> Result<()> {
                 } => {
                     tracing::debug!(
                         ?request_id,
-                        buckets = payload.buckets.len(),
+                        buckets = payload.bucket_ids.len(),
                         write_amount = payload.write_amount,
                         "received bulk-view rfq broadcast"
                     );
@@ -613,27 +683,42 @@ async fn main() -> Result<()> {
                                 vol_buf.read().current_annualized(),
                                 cfg.pyth.fallback_vol,
                             );
-                            let mut out = Vec::with_capacity(payload.buckets.len());
-                            for b in &payload.buckets {
+                            let mut out = Vec::with_capacity(payload.bucket_ids.len());
+                            for bucket_id in &payload.bucket_ids {
+                                // Resolve each bucket from api-service (cached),
+                                // skip ones we can't price for any reason — a
+                                // bulk-view bucket has no per-bucket decline.
+                                let bucket = match api.bucket_pricing(*bucket_id).await {
+                                    Ok(Some(b)) => b,
+                                    Ok(None) => continue,
+                                    Err(e) => {
+                                        tracing::debug!(bucket_id = %bucket_id, error = %format!("{e:#}"), "bulk-view: bucket lookup failed; skipping");
+                                        continue;
+                                    }
+                                };
+                                if !serves_pair(
+                                    &bucket.asset_coin_type,
+                                    &bucket.settlement_coin_type,
+                                    &cfg_underlying,
+                                    &cfg_settlement,
+                                ) {
+                                    continue;
+                                }
                                 // Reuse the signed-RFQ pricer; we keep only the
                                 // premium — no Quote is built, no nonce burned,
                                 // nothing is signed.
-                                let synthetic = RfqBroadcastPayload {
-                                    bucket_id: b.bucket_id,
-                                    asset_type: b.asset_type.clone(),
-                                    settlement_type: b.settlement_type.clone(),
+                                let inputs = RfqPricingInputs {
                                     write_amount: payload.write_amount,
                                     side: payload.side,
-                                    deadline_ms: payload.deadline_ms,
-                                    strike: b.strike,
-                                    strike_scale: b.strike_scale,
-                                    expiry_ms: b.expiry_ms,
+                                    strike: bucket.strike,
+                                    strike_scale: bucket.strike_scale,
+                                    expiry_ms: bucket.expiry_ms,
                                 };
                                 if let PriceDecision::Quote { premium, .. } =
-                                    price_rfq(&pricing_cfg, &synthetic, spot_scaled, sigma, now)
+                                    price_rfq(&pricing_cfg, &inputs, spot_scaled, sigma, now)
                                 {
                                     out.push(BulkViewMmPremium {
-                                        bucket_id: b.bucket_id,
+                                        bucket_id: *bucket_id,
                                         premium,
                                     });
                                 }

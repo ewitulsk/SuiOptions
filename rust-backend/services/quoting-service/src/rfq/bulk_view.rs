@@ -27,7 +27,7 @@ use tracing::{debug, trace};
 
 use protocol_types::ids::ObjectId;
 use protocol_types::messages::{
-    BulkViewBucket, BulkViewPremium, BulkViewRfqBroadcastPayload, ServiceToMm,
+    BulkViewPremium, BulkViewRfqBroadcastPayload, ServiceToMm,
 };
 use protocol_types::sides::Side;
 
@@ -162,17 +162,9 @@ async fn refresh_buckets(
     }
 
     let deadline_ms = now_ms.saturating_add(window.as_millis() as u64);
-    let wire_buckets: Vec<BulkViewBucket> = claimed
-        .iter()
-        .map(|b| BulkViewBucket {
-            bucket_id: b.bucket_id,
-            asset_type: b.asset_type.clone(),
-            settlement_type: b.settlement_type.clone(),
-            strike: b.strike,
-            strike_scale: b.strike_scale,
-            expiry_ms: b.expiry_ms,
-        })
-        .collect();
+    // Only the addresses travel; the MM resolves each bucket's pricing inputs
+    // from api-service itself.
+    let bucket_ids: Vec<ObjectId> = claimed.iter().map(|b| b.bucket_id).collect();
 
     // Route MM responses through the shared pending_rfqs table under a fresh
     // routing id (independent of any retail request_id).
@@ -188,7 +180,7 @@ async fn refresh_buckets(
                 write_amount,
                 side,
                 deadline_ms,
-                buckets: wire_buckets.clone(),
+                bucket_ids: bucket_ids.clone(),
             },
         };
         match mm.tx.try_send(frame) {

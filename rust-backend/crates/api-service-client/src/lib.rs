@@ -1,0 +1,157 @@
+//! Shared client for the **api-service** (`services/api-service`).
+//!
+//! api-service is the read model the frontend renders from; it projects the
+//! indexer's authoritative bucket state over plain HTTP. The mm-bot uses this
+//! client to resolve a bucket's *pricing inputs* (strike, scale, expiry, and
+//! the underlying/settlement coin types) from the bucket **address alone**.
+//!
+//! ## Why the bot looks buckets up instead of trusting the RFQ
+//!
+//! The quoting service's RFQ broadcast carries only the bucket id — never its
+//! strike or coin types. If those rode along on the wire, a malicious or buggy
+//! upstream could hand the bot spoofed inputs (e.g. a cheap TWAL strike tagged
+//! as the TBTC pair) and trick it into signing a badly-mispriced quote. By
+//! resolving the bucket itself against api-service, the bot keeps its own trust
+//! boundary: it prices only what the authoritative read model says the bucket
+//! is.
+//!
+//! ## Caching
+//!
+//! A bucket's pricing inputs are immutable for its lifetime — strike, scale,
+//! expiry and coin types never change once it's created (only `total_written` /
+//! `exercise_cursor` move, which pricing ignores). So a successful lookup is
+//! cached forever; the bulk-view path re-prices the same buckets every refresh
+//! and would otherwise hammer api-service.
+
+use std::collections::HashMap;
+
+use anyhow::{Context, Result};
+use parking_lot::RwLock;
+use protocol_types::asset::canonicalize_move_type;
+use protocol_types::ids::ObjectId;
+use serde::Deserialize;
+use tracing::debug;
+
+/// The immutable pricing inputs for one bucket, resolved from api-service.
+/// Coin types are canonical (`0x`-prefixed, padded) so callers can compare
+/// them directly against a canonicalized configured pair.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BucketPricing {
+    pub asset_coin_type: String,
+    pub settlement_coin_type: String,
+    pub strike: u128,
+    pub strike_scale: u8,
+    pub expiry_ms: u64,
+}
+
+/// The subset of `GET /buckets/:bucket_id`'s response we price from. serde
+/// ignores the rest of the (display-oriented) payload.
+#[derive(Deserialize)]
+struct BucketDetailWire {
+    asset_coin_type: String,
+    settlement_coin_type: String,
+    strike_raw: String,
+    strike_scale: u8,
+    expiry_ms: i64,
+}
+
+/// Resolves bucket pricing inputs from api-service, caching immutable results.
+pub struct ApiServiceClient {
+    http: reqwest::Client,
+    base_url: String,
+    cache: RwLock<HashMap<ObjectId, BucketPricing>>,
+}
+
+impl ApiServiceClient {
+    /// `base_url` is the api-service root (no trailing slash needed), e.g.
+    /// `http://api-service:9003`.
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            cache: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Resolve one bucket's pricing inputs.
+    ///
+    /// - `Ok(Some(_))` — the bucket exists and was parsed (served from cache on
+    ///   any repeat call).
+    /// - `Ok(None)` — api-service returned 404: the bucket is unknown, cleaned,
+    ///   or settled-and-gone. The caller declines/omits it.
+    /// - `Err(_)` — a transport/parse failure the caller surfaces as a decline.
+    pub async fn bucket_pricing(&self, id: ObjectId) -> Result<Option<BucketPricing>> {
+        if let Some(hit) = self.cache.read().get(&id).cloned() {
+            return Ok(Some(hit));
+        }
+
+        let url = format!("{}/buckets/{}", self.base_url, id.to_hex());
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            debug!(bucket = %id.to_hex(), "api-service: bucket not found");
+            return Ok(None);
+        }
+        let resp = resp
+            .error_for_status()
+            .with_context(|| format!("GET {url} returned an error status"))?;
+        let wire: BucketDetailWire = resp
+            .json()
+            .await
+            .with_context(|| format!("decoding bucket detail from {url}"))?;
+
+        let pricing = BucketPricing {
+            asset_coin_type: canonicalize_move_type(&wire.asset_coin_type),
+            settlement_coin_type: canonicalize_move_type(&wire.settlement_coin_type),
+            strike: wire
+                .strike_raw
+                .parse::<u128>()
+                .with_context(|| format!("parsing strike_raw {:?}", wire.strike_raw))?,
+            strike_scale: wire.strike_scale,
+            expiry_ms: wire.expiry_ms.max(0) as u64,
+        };
+        self.cache.write().insert(id, pricing.clone());
+        Ok(Some(pricing))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_and_canonicalizes_bucket_detail() {
+        // api-service emits `0x`-canonical types already; the client must also
+        // tolerate (and canonicalize) the bare `TypeName` form defensively.
+        let raw = r#"{
+            "bucket_id": "0x0a",
+            "asset_coin_type": "9b72::twal::TWAL",
+            "settlement_coin_type": "0x9b72::tusdc::TUSDC",
+            "strike": 0.0315,
+            "strike_raw": "31473",
+            "strike_scale": 9,
+            "expiry_ms": 1781740800000,
+            "total_written_raw": "0"
+        }"#;
+        let wire: BucketDetailWire = serde_json::from_str(raw).unwrap();
+        let p = BucketPricing {
+            asset_coin_type: canonicalize_move_type(&wire.asset_coin_type),
+            settlement_coin_type: canonicalize_move_type(&wire.settlement_coin_type),
+            strike: wire.strike_raw.parse().unwrap(),
+            strike_scale: wire.strike_scale,
+            expiry_ms: wire.expiry_ms.max(0) as u64,
+        };
+        assert_eq!(
+            p.asset_coin_type,
+            "0x0000000000000000000000000000000000000000000000000000000000009b72::twal::TWAL"
+        );
+        assert_eq!(p.strike, 31_473);
+        assert_eq!(p.strike_scale, 9);
+        assert_eq!(p.expiry_ms, 1_781_740_800_000);
+    }
+}

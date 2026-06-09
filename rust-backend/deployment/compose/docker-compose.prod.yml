@@ -72,10 +72,12 @@ services:
   #   image: ${ECR}/options/mm-bot:${MM_BOT_TAG}
   #   environment:
   #     APP_ENV: prod
+  #     TOKEN_INFO_URL: http://token-info:9005
+  #     API_URL: http://api-service:9003
   #     RUST_LOG: info,mm_bot=info
   #   volumes:
   #     - /opt/options/prod/secrets:/run/secrets:ro
-  #   depends_on: [quoting]
+  #   depends_on: [quoting, token-info, api-service]
   #   restart: unless-stopped
   #   networks: [net]
 

@@ -19,6 +19,7 @@ sui-tx         = { workspace = true }
 pyth-client    = { workspace = true }
 pricing        = { workspace = true }
 token-info-client = { workspace = true }
+api-service-client = { workspace = true }
 
 # Sui SDK (used directly for derive token recipient from secret key).
 sui-types = { workspace = true }

@@ -21,6 +21,12 @@ pub struct Cli {
     #[arg(long, env = "TOKEN_INFO_URL", default_value = "http://127.0.0.1:9005")]
     pub token_info_url: String,
 
+    /// Base URL of the api-service. The bot resolves each RFQ's bucket
+    /// (strike, expiry, coin types) from here by address, so it never trusts
+    /// pricing inputs delivered on the RFQ broadcast itself.
+    #[arg(long, env = "API_URL", default_value = "http://127.0.0.1:9003")]
+    pub api_url: String,
+
     /// Per-binary secrets TOML. Holds the Sui signing key (under the
     /// network selected by `network` in the bot config) and the
     /// quote-signing key (`mm_bot.quote_key`). No env-var fallback.
