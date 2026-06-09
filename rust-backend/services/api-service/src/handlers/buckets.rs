@@ -58,13 +58,18 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use chrono::{TimeZone, Utc};
 use serde::Serialize;
 
+use protocol_types::ids::ObjectId;
+
 use crate::bucket::Bucket;
 use crate::catalog::TokenCatalog;
-use crate::state::AppState;
+use crate::state::{AppState, IndexerBucket};
 
 #[derive(Serialize)]
 pub struct BucketDto {
@@ -140,6 +145,111 @@ pub async fn list_buckets(
     Ok(Json(BucketsResponse {
         series: group_into_series(active, &state.catalog),
     }))
+}
+
+/// `GET /buckets/:bucket_id` — one bucket's cursor/queue state.
+///
+/// A focused, cheaply-pollable single-row view: the writer composer's
+/// "YOUR PLACE IN THE QUEUE" tideline reads `exercise_cursor` (how far
+/// FIFO assignment has eaten into the bucket) and `queued_ahead` (written
+/// underlying sitting ahead of the cursor, still unassigned) every few
+/// seconds without re-pulling the whole `/buckets` catalog. The numbers
+/// are the same ones `/buckets` exposes per-bucket; this is just the
+/// narrow, frequently-refreshed projection.
+#[derive(Serialize)]
+pub struct BucketDetailDto {
+    pub bucket_id: String,
+    /// Friendly symbol from the catalog; raw Move type when unknown.
+    pub asset_symbol: String,
+    pub asset_decimals: Option<u8>,
+    pub asset_coin_type: String,
+    pub settlement_symbol: String,
+    pub settlement_decimals: Option<u8>,
+    pub settlement_coin_type: String,
+    /// Strike in USD whole units. `null` if either decimals lookup failed.
+    pub strike: Option<f64>,
+    pub strike_raw: String,
+    pub strike_scale: u8,
+    pub expiry_ms: i64,
+    /// Total underlying written, in whole units. `null` if asset decimals
+    /// are unknown.
+    pub total_written: Option<f64>,
+    pub total_written_raw: String,
+    /// Exercise cursor in whole units. `null` if asset decimals unknown.
+    pub exercise_cursor: Option<f64>,
+    pub exercise_cursor_raw: String,
+    /// Underlying written but not yet assigned: `total_written -
+    /// exercise_cursor`, in whole units. `null` if asset decimals unknown.
+    pub queued_ahead: Option<f64>,
+    pub queued_ahead_raw: String,
+    /// `100 * exercise_cursor / total_written`. `0.0` when nothing's been
+    /// written; `null` when underlying decimals are unknown.
+    pub fill_pct: Option<f64>,
+}
+
+pub async fn get_bucket(
+    State(state): State<Arc<AppState>>,
+    Path(bucket_id): Path<String>,
+) -> Result<Json<BucketDetailDto>, StatusCode> {
+    let id = ObjectId::from_hex(&bucket_id).map_err(|_| StatusCode::NOT_FOUND)?;
+    let bucket = state.indexer.bucket(id).await.map_err(|e| {
+        tracing::warn!(error = %e, "indexer bucket query failed");
+        StatusCode::BAD_GATEWAY
+    })?;
+    // Cleaned buckets are settled-and-gone — treat them as absent so the
+    // tideline stops polling a stale id rather than rendering dead state.
+    let bucket = bucket.filter(|b| !b.cleaned).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(detail_dto_from(&bucket, &state.catalog)))
+}
+
+/// Pure projection — split out so the queued-ahead math is unit-testable
+/// without an indexer.
+fn detail_dto_from(b: &IndexerBucket, catalog: &TokenCatalog) -> BucketDetailDto {
+    let asset_meta = catalog.lookup(b.asset_type.as_str());
+    let settle_meta = catalog.lookup(b.settlement_type.as_str());
+    let asset_decimals = asset_meta.map(|m| m.decimals);
+    let settle_decimals = settle_meta.map(|m| m.decimals);
+
+    let strike = match (asset_decimals, settle_decimals) {
+        (Some(u), Some(s)) => Some(strike_raw_to_usd(b.strike, b.strike_scale, u, s)),
+        _ => None,
+    };
+    let total_written = asset_decimals.map(|d| scale_u128(b.total_written, d));
+    let exercise_cursor = asset_decimals.map(|d| scale_u128(b.exercise_cursor, d));
+    // Cursor should never run past written, but saturate so a transiently
+    // inconsistent indexer read can't underflow-panic the poller.
+    let queued_ahead_raw = b.total_written.saturating_sub(b.exercise_cursor);
+    let queued_ahead = asset_decimals.map(|d| scale_u128(queued_ahead_raw, d));
+    let fill_pct = match (total_written, exercise_cursor) {
+        (Some(w), Some(c)) if w > 0.0 => Some(100.0 * c / w),
+        (Some(_), Some(_)) => Some(0.0),
+        _ => None,
+    };
+
+    BucketDetailDto {
+        bucket_id: b.bucket_id.to_hex(),
+        asset_symbol: asset_meta
+            .map(|m| m.symbol.clone())
+            .unwrap_or_else(|| b.asset_type.as_str().to_string()),
+        asset_decimals,
+        asset_coin_type: b.asset_type.to_canonical(),
+        settlement_symbol: settle_meta
+            .map(|m| m.symbol.clone())
+            .unwrap_or_else(|| b.settlement_type.as_str().to_string()),
+        settlement_decimals: settle_decimals,
+        settlement_coin_type: b.settlement_type.to_canonical(),
+        strike,
+        strike_raw: b.strike.to_string(),
+        strike_scale: b.strike_scale,
+        expiry_ms: b.expiry_ms as i64,
+        total_written,
+        total_written_raw: b.total_written.to_string(),
+        exercise_cursor,
+        exercise_cursor_raw: b.exercise_cursor.to_string(),
+        queued_ahead,
+        queued_ahead_raw: queued_ahead_raw.to_string(),
+        fill_pct,
+    }
 }
 
 /// Map the JIT client's bucket into the local `(id, Bucket)` shape that the
@@ -464,5 +574,69 @@ mod tests {
         )];
         let s = group_into_series(buckets, &cat);
         assert_eq!(s[0].buckets[0].fill_pct, Some(0.0));
+    }
+
+    fn mk_idx_bucket(id: ObjectId, written: u128, cursor: u128) -> IndexerBucket {
+        IndexerBucket {
+            bucket_id: id,
+            asset_type: AssetType::new("0xpkg::tbtc::TBTC"),
+            settlement_type: AssetType::new("0xpkg::tusdc::TUSDC"),
+            call_type: AssetType::new("0xpkg::call_0::CALL_0"),
+            strike: 850,
+            strike_scale: 0,
+            expiry_ms: 1_782_345_600_000,
+            total_written: written,
+            exercise_cursor: cursor,
+            cleaned: false,
+            invalidated: false,
+        }
+    }
+
+    #[test]
+    fn queued_ahead_is_written_minus_cursor() {
+        // TBTC(8): 4.2 written, 1.0 assigned → 3.2 still queued ahead of
+        // the cursor. This is the number the tideline draws.
+        let cat = fixture_catalog();
+        let dto = detail_dto_from(
+            &mk_idx_bucket(ObjectId::new([0xaa; 32]), 420_000_000, 100_000_000),
+            &cat,
+        );
+        assert_eq!(dto.total_written, Some(4.2));
+        assert_eq!(dto.exercise_cursor, Some(1.0));
+        assert_eq!(dto.queued_ahead, Some(3.2));
+        assert_eq!(dto.queued_ahead_raw, "320000000");
+        assert!((dto.fill_pct.unwrap() - 100.0 * 1.0 / 4.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn queued_ahead_saturates_when_cursor_exceeds_written() {
+        // Defensive: an inconsistent indexer read where cursor > written
+        // must clamp to 0, not underflow-panic the poller.
+        let cat = fixture_catalog();
+        let dto = detail_dto_from(&mk_idx_bucket(ObjectId::new([0xbb; 32]), 1, 5), &cat);
+        assert_eq!(dto.queued_ahead_raw, "0");
+        assert_eq!(dto.queued_ahead, Some(0.0));
+    }
+
+    #[test]
+    fn unknown_decimals_null_the_scaled_fields() {
+        // Coin type absent from the catalog → no decimals, so every scaled
+        // field (including queued_ahead) is null but raw values survive.
+        let cat = TokenCatalog::default();
+        let dto = detail_dto_from(
+            &mk_idx_bucket(ObjectId::new([0xcc; 32]), 420_000_000, 100_000_000),
+            &cat,
+        );
+        assert_eq!(dto.asset_decimals, None);
+        assert_eq!(dto.queued_ahead, None);
+        assert_eq!(dto.queued_ahead_raw, "320000000");
+        assert_eq!(dto.fill_pct, None);
+    }
+
+    #[test]
+    fn malformed_bucket_id_is_a_404_guard() {
+        // The handler's 404-on-unknown path keys off `ObjectId::from_hex`
+        // rejecting garbage before any indexer round-trip.
+        assert!(ObjectId::from_hex("not-a-real-object-id").is_err());
     }
 }
