@@ -12,10 +12,18 @@ settlement_symbol  = "TUSDC"
 rate               = 0.05
 quote_ttl_ms       = 30_000
 
+ask_markup_bps     = 100
+bid_markdown_bps   = 100
+
 roles = ["trader_mm", "writer_mm"]
 bulk_view_enabled = true
 
 bootstrap_settlement_amount = 1_000_000_000_000
+bootstrap_underlying_amount = 100_000_000_000
+
+underlying_replenish_threshold    = 20_000_000_000
+underlying_replenish_amount       = 100_000_000_000
+underlying_replenish_interval_secs = 60
 
 [pyth]
 hermes_url             = "https://hermes.pyth.network"

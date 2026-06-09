@@ -15,7 +15,7 @@ import { useCoinBalance } from "../api/useCoinBalance";
 import { usePythPrice } from "../api/usePythPrice";
 import { useRfq } from "../api/useRfq";
 import { useBulkView } from "../api/useBulkView";
-import { buildWriteTx } from "../tx/composer";
+import { buildBuyTx, buildWriteTx } from "../tx/composer";
 import type { Series } from "../api/client";
 import type { RfqQuoteEntry, Side as ProtocolSide } from "../api/quoting";
 import type {
@@ -393,13 +393,6 @@ export function useComposerState({
   const submit = async () => {
     if (insufficient || !connected || rfqEntries.length === 0 || !series || !account)
       return;
-    // Only the writer (Earn) flow is wired to a real PTB. The trader (Buy)
-    // flow is gated behind "Coming Soon" (SO-A3) until its builder ships.
-    if (view !== "writer") {
-      setToast("Buying calls — coming soon");
-      setTimeout(() => setToast(null), 4000);
-      return;
-    }
     const entry = rfqEntries[0]; // best-price-first
 
     // Guard against firing a doomed tx: if the chosen quote's TTL has lapsed
@@ -427,13 +420,22 @@ export function useComposerState({
         setTimeout(() => setToast(null), 4000);
         return;
       }
-      const tx = buildWriteTx({
-        entry,
-        underlyingCoinType: series.asset_coin_type,
-        settlementCoinType: series.settlement_coin_type,
-        callCoinType,
-        writer: account.address,
-      });
+      const tx =
+        view === "trader"
+          ? buildBuyTx({
+              entry,
+              underlyingCoinType: series.asset_coin_type,
+              settlementCoinType: series.settlement_coin_type,
+              callCoinType,
+              trader: account.address,
+            })
+          : buildWriteTx({
+              entry,
+              underlyingCoinType: series.asset_coin_type,
+              settlementCoinType: series.settlement_coin_type,
+              callCoinType,
+              writer: account.address,
+            });
       setConfirmStage("broadcast");
       await signAndExecute({ transaction: tx });
 

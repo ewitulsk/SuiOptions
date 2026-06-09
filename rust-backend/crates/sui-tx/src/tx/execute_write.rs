@@ -78,6 +78,48 @@ pub struct ExecuteWriteParams<'a> {
     pub gas_budget: u64,
 }
 
+/// Inputs for the trader-flow PTB. Mirrors [`ExecuteWriteParams`] but the
+/// executor mints the *settlement* premium (not underlying), so the faucet
+/// fields point at the settlement test-token instead.
+pub struct ExecuteTraderParams<'a> {
+    pub package: ObjectID,
+    pub underlying_type: &'a str,
+    pub settlement_type: &'a str,
+    /// Fully-qualified type of the bucket's per-bucket option coin.
+    pub call_type: &'a str,
+
+    /// Test-tokens package id holding the faucets.
+    pub tokens_package: ObjectID,
+    /// Lowercase module name of the *settlement* test-token, e.g. `"tusdc"`.
+    pub settlement_module: &'a str,
+    /// Shared `Faucet` object id for the settlement coin.
+    pub settlement_faucet_id: ObjectID,
+
+    // Shared protocol objects.
+    pub bucket_id: ObjectID,
+    pub protocol_config_id: ObjectID,
+    pub treasury_id: ObjectID,
+    pub mm_account_id: ObjectID,
+
+    // Quote fields the MM signed over (BCS-canonical).
+    pub protocol_id: Vec<u8>,
+    pub signer_account_id_bytes: [u8; 32],
+    pub signer_token_recipient: SuiAddress,
+    pub bucket_id_bytes: [u8; 32],
+    pub write_amount: u64,
+    pub premium: u64,
+    pub valid_until_ms: u64,
+    pub nonce: u64,
+    pub signature: Vec<u8>,
+
+    /// Trader flow: must equal `signer_token_recipient` (the MM gets the Position).
+    pub position_recipient: SuiAddress,
+    /// Trader flow: the retail trader receives the CallOption coin.
+    pub call_token_recipient: SuiAddress,
+
+    pub gas_budget: u64,
+}
+
 /// Build + sign + submit the writer-flow PTB.
 pub async fn execute_writer_flow(
     client: &SuiClient,
@@ -204,6 +246,154 @@ pub async fn execute_writer_flow(
         ],
     );
 
+    submit_execute_write(client, signer, pt, p.gas_budget).await
+}
+
+/// Build + sign + submit the trader-flow PTB.
+///
+/// Symmetric to [`execute_writer_flow`], but the executor is the *retail
+/// trader*: they supply the premium (minted from the settlement faucet inside
+/// the PTB) and the underlying side is an empty coin (the Writer MM provides
+/// the underlying from their Account). Per the `FlowKind::Trader` branch in
+/// `bucket::execute_write_with_quote`, the signer (MM) receives the Position
+/// NFT, so `position_recipient` must equal the quote's `signer_token_recipient`;
+/// the trader receives the `CallOption` coin via `call_token_recipient`.
+pub async fn execute_trader_flow(
+    client: &SuiClient,
+    signer: &Signer,
+    p: &ExecuteTraderParams<'_>,
+) -> Result<SuiTransactionBlockResponse> {
+    info!(
+        %p.package,
+        %p.bucket_id,
+        write_amount = p.write_amount,
+        premium = p.premium,
+        nonce = p.nonce,
+        "building execute_write (trader flow) PTB"
+    );
+    let mut pt = ProgrammableTransactionBuilder::new();
+
+    // Shared object args.
+    let bucket = pt.obj(shared_object_arg(client, p.bucket_id, true).await?)?;
+    let config = pt.obj(shared_object_arg(client, p.protocol_config_id, false).await?)?;
+    let treasury = pt.obj(shared_object_arg(client, p.treasury_id, true).await?)?;
+    let mm_account = pt.obj(shared_object_arg(client, p.mm_account_id, true).await?)?;
+    let faucet = pt.obj(shared_object_arg(client, p.settlement_faucet_id, true).await?)?;
+    let clock = pt.obj(ObjectArg::SharedObject {
+        id: SUI_CLOCK_OBJECT_ID,
+        initial_shared_version: SUI_CLOCK_OBJECT_SHARED_VERSION,
+        mutability: SharedObjectMutability::Immutable,
+    })?;
+
+    // Pure inputs.
+    let arg_protocol_id = pt.pure(&p.protocol_id)?;
+    let arg_signer_acct_id = pt.pure(&p.signer_account_id_bytes)?;
+    let arg_signer_token_recipient = pt.pure(&p.signer_token_recipient)?;
+    let arg_bucket_id = pt.pure(&p.bucket_id_bytes)?;
+    let arg_write_amount = pt.pure(&p.write_amount)?;
+    let arg_premium = pt.pure(&p.premium)?;
+    let arg_valid_until_ms = pt.pure(&p.valid_until_ms)?;
+    let arg_nonce = pt.pure(&p.nonce)?;
+    let arg_signature = pt.pure(&p.signature)?;
+    let arg_position_recipient = pt.pure(&p.position_recipient)?;
+    let arg_call_token_recipient = pt.pure(&p.call_token_recipient)?;
+    let arg_mint_amount = pt.pure(&p.premium)?;
+
+    // Type tags.
+    let u_tag = TypeTag::from_str(p.underlying_type)
+        .with_context(|| format!("parsing underlying type {}", p.underlying_type))?;
+    let s_tag = TypeTag::from_str(p.settlement_type)
+        .with_context(|| format!("parsing settlement type {}", p.settlement_type))?;
+    let c_tag = TypeTag::from_str(p.call_type)
+        .with_context(|| format!("parsing call type {}", p.call_type))?;
+
+    // 1. coin::zero<Underlying>() — the MM provides the underlying from their Account.
+    let coin_underlying_zero = pt.programmable_move_call(
+        SUI_FRAMEWORK_PACKAGE_ID,
+        Identifier::new("coin").unwrap(),
+        Identifier::new("zero").unwrap(),
+        vec![u_tag.clone()],
+        vec![],
+    );
+
+    // 2. test_tokens::<module>::mint(faucet, premium) -> Coin<Settlement>
+    let coin_settlement = pt.programmable_move_call(
+        p.tokens_package,
+        Identifier::new(p.settlement_module)
+            .map_err(|e| anyhow!("settlement module {}: {e}", p.settlement_module))?,
+        Identifier::new("mint").unwrap(),
+        vec![],
+        vec![faucet, arg_mint_amount],
+    );
+
+    // 3. quote::new_quote(...)
+    let quote_val = pt.programmable_move_call(
+        p.package,
+        Identifier::new("quote").unwrap(),
+        Identifier::new("new_quote").unwrap(),
+        vec![],
+        vec![
+            arg_protocol_id,
+            arg_signer_acct_id,
+            arg_signer_token_recipient,
+            arg_bucket_id,
+            arg_write_amount,
+            arg_premium,
+            arg_valid_until_ms,
+            arg_nonce,
+        ],
+    );
+
+    // 4. quote::new_signed_quote(quote, signature)
+    let signed_quote = pt.programmable_move_call(
+        p.package,
+        Identifier::new("quote").unwrap(),
+        Identifier::new("new_signed_quote").unwrap(),
+        vec![],
+        vec![quote_val, arg_signature],
+    );
+
+    // 5. bucket::trader_flow()
+    let flow = pt.programmable_move_call(
+        p.package,
+        Identifier::new("bucket").unwrap(),
+        Identifier::new("trader_flow").unwrap(),
+        vec![],
+        vec![],
+    );
+
+    // 6. bucket::execute_write<U, S, Call>(...)
+    pt.programmable_move_call(
+        p.package,
+        Identifier::new("bucket").unwrap(),
+        Identifier::new("execute_write").unwrap(),
+        vec![u_tag, s_tag, c_tag],
+        vec![
+            bucket,
+            config,
+            treasury,
+            mm_account,
+            coin_underlying_zero,
+            coin_settlement,
+            flow,
+            arg_position_recipient,
+            arg_call_token_recipient,
+            signed_quote,
+            clock,
+        ],
+    );
+
+    submit_execute_write(client, signer, pt, p.gas_budget).await
+}
+
+/// Gas-select, sign, submit, and assert success for an `execute_write` PTB.
+/// Shared by both the writer and trader flows.
+async fn submit_execute_write(
+    client: &SuiClient,
+    signer: &Signer,
+    pt: ProgrammableTransactionBuilder,
+    gas_budget: u64,
+) -> Result<SuiTransactionBlockResponse> {
     let programmable = pt.finish();
 
     // Gas selection.
@@ -227,7 +417,7 @@ pub async fn execute_writer_flow(
         signer.address,
         vec![gas_coin.object_ref()],
         programmable,
-        p.gas_budget,
+        gas_budget,
         gas_price,
     );
 

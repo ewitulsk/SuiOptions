@@ -18,6 +18,7 @@ pub fn all() -> Vec<ProgramSpec> {
         auth_service::program_spec(),
         exchange::program_spec(),
         writer::program_spec(),
+        trader::program_spec(),
         rfq_monitor::program_spec(),
         deployment_manager::program_spec(),
     ]
@@ -43,6 +44,7 @@ mod tests {
                 "auth-service",
                 "exchange",
                 "writer",
+                "trader",
                 "rfq-monitor",
                 "deploy",
             ]

@@ -23,6 +23,7 @@ token-info         = { path = "../../services/token-info" }
 auth-service       = { path = "../../services/auth-service" }
 exchange           = { path = "../../tools/exchange" }
 writer             = { path = "../../tools/writer" }
+trader             = { path = "../../tools/trader" }
 rfq-monitor        = { path = "../../tools/rfq-monitor" }
 deployment-manager = { path = "../../tools/deployment-manager" }
 

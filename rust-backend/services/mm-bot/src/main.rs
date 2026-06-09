@@ -46,7 +46,7 @@ use pyth_client::{self as pyth, PriceCache, PriceFeedId, RollingVolBuffer};
 use token_info_client::TokenInfoClient;
 use sui_tx::quote_signer::QuoteSigner;
 use sui_tx::sui_client::{Network, SuiClientWrapper};
-use sui_tx::tx::account::{create_and_share_account, find_account};
+use sui_tx::tx::account::{account_balance_of, create_and_share_account, find_account};
 use sui_tx::tx::test_tokens::mint_and_deposit_into_account;
 use sui_tx::ws_client;
 
@@ -94,6 +94,17 @@ struct BotConfig {
     #[serde(default = "default_quote_ttl_ms")]
     quote_ttl_ms: u64,
 
+    /// Ask-side markup in basis points, applied when quoting as the Writer MM
+    /// (retail buying — trader flow): premium is marked *up* off the
+    /// Black-Scholes mid. Defaults to 100 (1%).
+    #[serde(default = "default_spread_bps")]
+    ask_markup_bps: u64,
+    /// Bid-side markdown in basis points, applied when quoting as the Trader
+    /// MM (retail writing — writer flow): premium is marked *down* off the
+    /// mid. Defaults to 100 (1%).
+    #[serde(default = "default_spread_bps")]
+    bid_markdown_bps: u64,
+
     /// Roles advertised to the quoting service.
     roles: Vec<MmRole>,
 
@@ -112,6 +123,26 @@ struct BotConfig {
     /// freshly-created Account so it can pay premiums.
     #[serde(default = "default_bootstrap_amount")]
     bootstrap_settlement_amount: u64,
+
+    /// On first run, mint+deposit this much *underlying* asset into the
+    /// freshly-created Account so it can write calls to retail traders
+    /// (writer-MM / ask side). In underlying smallest-units.
+    #[serde(default = "default_bootstrap_underlying_amount")]
+    bootstrap_underlying_amount: u64,
+
+    /// Background top-up: when the Account's underlying balance falls below
+    /// this, mint+deposit `underlying_replenish_amount` more. Set to 0 to
+    /// disable auto-replenish.
+    #[serde(default = "default_underlying_replenish_threshold")]
+    underlying_replenish_threshold: u64,
+
+    /// Amount minted+deposited on each auto-replenish top-up.
+    #[serde(default = "default_underlying_replenish_amount")]
+    underlying_replenish_amount: u64,
+
+    /// How often the replenish task checks the underlying balance.
+    #[serde(default = "default_replenish_interval_secs")]
+    underlying_replenish_interval_secs: u64,
 
     /// Pyth Hermes/Benchmarks settings. All fields have defaults.
     #[serde(default)]
@@ -179,6 +210,21 @@ fn default_quote_ttl_ms() -> u64 {
 fn default_bootstrap_amount() -> u64 {
     1_000_000_000_000
 } // 1e12 raw — plenty of settlement to quote with
+fn default_spread_bps() -> u64 {
+    100
+} // 1% markup/markdown off the BS mid
+fn default_bootstrap_underlying_amount() -> u64 {
+    100_000_000_000
+} // 1e11 raw underlying — inventory to write against
+fn default_underlying_replenish_threshold() -> u64 {
+    20_000_000_000
+} // top up when underlying drops below 2e10 raw
+fn default_underlying_replenish_amount() -> u64 {
+    100_000_000_000
+} // mint 1e11 raw per top-up
+fn default_replenish_interval_secs() -> u64 {
+    60
+}
 
 // -- Main loop -----------------------------------------------------------
 
@@ -242,6 +288,30 @@ async fn main() -> Result<()> {
     tracing::info!(account_id = %account_id, "mm account ready");
     let account_id_pt = pt_object_id_from_sui(account_id);
 
+    // Keep underlying inventory topped up so the writer-MM (ask) side never
+    // runs dry mid-test. Only relevant if we advertise writer_mm and
+    // auto-replenish is enabled.
+    if cfg.roles.contains(&MmRole::WriterMm) && cfg.underlying_replenish_threshold > 0 {
+        let package = snapshot.package()?;
+        let underlying = snapshot.faucet_token(&cfg.underlying_symbol)?;
+        let (u_tokens_pkg, u_module) = underlying.module_path()?;
+        spawn_replenish_task(ReplenishParams {
+            secrets: secrets_loaded.clone(),
+            network: cfg.network,
+            package,
+            account_id,
+            tokens_pkg: u_tokens_pkg,
+            module: u_module,
+            faucet_id: underlying.faucet()?,
+            coin_type: underlying.coin_type.clone(),
+            symbol: cfg.underlying_symbol.clone(),
+            threshold: cfg.underlying_replenish_threshold,
+            top_up: cfg.underlying_replenish_amount,
+            interval_secs: cfg.underlying_replenish_interval_secs,
+            gas_budget: cli.gas_budget,
+        });
+    }
+
     // Pyth client + live price cache + rolling-vol buffer. The SSE task
     // owns a tokio task that pushes into the cache; the bootstrap +
     // sampler task seeds and maintains the vol buffer.
@@ -289,6 +359,8 @@ async fn main() -> Result<()> {
     let pricing_cfg = PricingConfig {
         rate: cfg.rate,
         quote_ttl_ms: cfg.quote_ttl_ms,
+        ask_markup_bps: cfg.ask_markup_bps,
+        bid_markdown_bps: cfg.bid_markdown_bps,
     };
     let staleness = Staleness {
         max_price_age: Duration::from_millis(cfg.pyth.max_price_age_ms),
@@ -674,9 +746,10 @@ async fn resolve_account(
     .await?;
     tracing::info!(digest = %created.digest, account_id = %created.account_id, "account created");
 
-    // Fund it with settlement so it can pay premiums on day one. Create and
-    // fund are separate txs; a crash between them leaves the account
-    // (adopted on the next boot) unfunded — acceptable for the test MM bot.
+    // Fund it with settlement so it can pay premiums on day one (Trader-MM /
+    // bid side). Create and fund are separate txs; a crash between them leaves
+    // the account (adopted on the next boot) unfunded — acceptable for the
+    // test MM bot.
     let settlement = snapshot.faucet_token(&cfg.settlement_symbol)?;
     let (tokens_pkg, settlement_module) = settlement.module_path()?;
     let fund_resp = mint_and_deposit_into_account(
@@ -696,7 +769,32 @@ async fn resolve_account(
         digest = %fund_resp.digest,
         amount = cfg.bootstrap_settlement_amount,
         symbol = %cfg.settlement_symbol,
-        "account funded"
+        "account funded (settlement)"
+    );
+
+    // Fund it with underlying so it can write calls to retail traders
+    // (Writer-MM / ask side). The background replenish task keeps this topped
+    // up as the inventory drains.
+    let underlying = snapshot.faucet_token(&cfg.underlying_symbol)?;
+    let (u_tokens_pkg, underlying_module) = underlying.module_path()?;
+    let fund_resp = mint_and_deposit_into_account(
+        &wrap.client,
+        &wrap.signer,
+        u_tokens_pkg,
+        &underlying_module,
+        underlying.faucet()?,
+        &underlying.coin_type,
+        created.account_id,
+        package,
+        cfg.bootstrap_underlying_amount,
+        cli.gas_budget,
+    )
+    .await?;
+    tracing::info!(
+        digest = %fund_resp.digest,
+        amount = cfg.bootstrap_underlying_amount,
+        symbol = %cfg.underlying_symbol,
+        "account funded (underlying)"
     );
 
     Ok(created.account_id)
@@ -797,6 +895,88 @@ async fn wait_for_first_prices(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Inputs for the underlying-inventory replenish task.
+struct ReplenishParams {
+    secrets: runtime_config::Secrets,
+    network: Network,
+    package: ObjectID,
+    account_id: ObjectID,
+    tokens_pkg: ObjectID,
+    module: String,
+    faucet_id: ObjectID,
+    coin_type: String,
+    symbol: String,
+    threshold: u64,
+    top_up: u64,
+    interval_secs: u64,
+    gas_budget: u64,
+}
+
+/// Periodically read the Account's underlying balance (via devInspect, no gas)
+/// and mint+deposit a top-up when it drops below the configured threshold.
+/// Runs in its own tokio task with its own Sui client so it doesn't contend
+/// with the WS serve loop. Transient errors are logged and retried on the next
+/// tick — a wedged faucet shouldn't kill the bot.
+fn spawn_replenish_task(p: ReplenishParams) {
+    tokio::spawn(async move {
+        let wrap = match SuiClientWrapper::connect(&p.secrets, p.network).await {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::error!(error = %format!("{e:#}"), "replenish: failed to connect; task exiting");
+                return;
+            }
+        };
+        let mut ticker = tokio::time::interval(Duration::from_secs(p.interval_secs.max(1)));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            let balance = match account_balance_of(
+                &wrap.client,
+                wrap.signer.address,
+                p.package,
+                p.account_id,
+                &p.coin_type,
+            )
+            .await
+            {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "replenish: balance read failed; retrying next tick");
+                    continue;
+                }
+            };
+            if balance >= p.threshold {
+                tracing::trace!(balance, threshold = p.threshold, "replenish: inventory ok");
+                continue;
+            }
+            tracing::info!(
+                balance,
+                threshold = p.threshold,
+                top_up = p.top_up,
+                symbol = %p.symbol,
+                "replenish: underlying below threshold; minting top-up"
+            );
+            match mint_and_deposit_into_account(
+                &wrap.client,
+                &wrap.signer,
+                p.tokens_pkg,
+                &p.module,
+                p.faucet_id,
+                &p.coin_type,
+                p.account_id,
+                p.package,
+                p.top_up,
+                p.gas_budget,
+            )
+            .await
+            {
+                Ok(resp) => tracing::info!(digest = %resp.digest, amount = p.top_up, symbol = %p.symbol, "replenish: topped up underlying"),
+                Err(e) => tracing::warn!(error = %format!("{e:#}"), "replenish: top-up tx failed; retrying next tick"),
+            }
+        }
+    });
 }
 
 /// Bootstrap the vol buffer from Pyth Benchmarks (one historical sample

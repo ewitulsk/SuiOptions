@@ -21,6 +21,7 @@ members = [
     "tools/deployment-manager",
     "tools/exchange",
     "tools/writer",
+    "tools/trader",
     "tools/rfq-monitor",
     "tools/control-panel",
     "tools/mm-quote",

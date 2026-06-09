@@ -24,10 +24,17 @@ settlement_symbol  = "USDC"
 rate               = 0.05
 quote_ttl_ms       = 30_000
 
+ask_markup_bps     = 100
+bid_markdown_bps   = 100
+
 roles = ["trader_mm", "writer_mm"]
 
-# Mainnet: no auto-bootstrap. Pre-fund the Account out-of-band.
+# Mainnet: no auto-bootstrap and no faucet-based replenish. Pre-fund the
+# Account (settlement + underlying) out-of-band; keep these at 0 so the bot
+# never reaches for a faucet that doesn't exist on mainnet.
 bootstrap_settlement_amount = 0
+bootstrap_underlying_amount = 0
+underlying_replenish_threshold = 0
 
 [pyth]
 hermes_url             = "https://hermes.pyth.network"

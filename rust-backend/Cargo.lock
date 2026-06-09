@@ -1844,6 +1844,7 @@ dependencies = [
  "token-info",
  "tokio",
  "tracing",
+ "trader",
  "writer",
 ]
 
@@ -9964,6 +9965,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "bcs",
  "clap",
  "ed25519-dalek",
  "futures",
@@ -10952,6 +10954,31 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "trader"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "cli-spec",
+ "futures",
+ "futures-util",
+ "protocol-types",
+ "runtime-config",
+ "serde",
+ "serde_json",
+ "sui-json-rpc-types",
+ "sui-sdk",
+ "sui-tx",
+ "sui-types",
+ "token-info-client",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

@@ -138,6 +138,9 @@ fn main() -> Result<()> {
     let cfg = PricingConfig {
         rate: args.rate,
         quote_ttl_ms: args.quote_ttl_ms,
+        // Simulator prints the Black-Scholes mid — no spread.
+        ask_markup_bps: 0,
+        bid_markdown_bps: 0,
     };
     let decision = price_rfq(&cfg, &payload, spot_scaled, args.sigma, now);
 
