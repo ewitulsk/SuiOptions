@@ -1,6 +1,6 @@
 # Reusable selective-deploy workflow.
 #
-# Called by deploy-lower.yml (push to staging → dev+staging) and
+# Called by deploy-lower.yml (manual dispatch → dev+staging) and
 # deploy-prod.yml (push to main → prod).
 #
 # Three jobs:
@@ -80,11 +80,35 @@ jobs:
             echo "skip_build=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - id: base
+        if: ${{ !inputs.force_all && !inputs.image_tag }}
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          # github.event.before is a push-only field. deploy-lower.yml is
+          # workflow_dispatch-only, so on a lower-env deploy it is empty;
+          # on a branch's first push it is all-zeros. Diffing against
+          # either yields an empty change set, so affected.py sees nothing
+          # and the deploy silently no-ops (build/deploy gate on
+          # services != '[]'). Fall back to HEAD^ so a manual dispatch
+          # still diffs its triggering commit. Multi-commit manual deploys
+          # should use force_all.
+          if [ -n "$PUSH_BEFORE" ] \
+            && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+            base="$PUSH_BEFORE"
+            echo "diff base: push before ($base)"
+          else
+            base="$(git rev-parse HEAD^)"
+            echo "diff base: HEAD^ ($base) — no valid push 'before' (manual dispatch?)"
+          fi
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+
       - id: changed
         if: ${{ !inputs.force_all && !inputs.image_tag }}
         uses: tj-actions/changed-files@v44
         with:
-          base_sha: ${{ github.event.before }}
+          base_sha: ${{ steps.base.outputs.sha }}
           separator: "\n"
 
       - id: derive
