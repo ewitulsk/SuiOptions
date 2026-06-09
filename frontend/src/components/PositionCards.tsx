@@ -1,9 +1,16 @@
 import type { OwnedPosition, WrittenPosition } from "../types";
+import { TokenLogo } from "./TokenLogo";
 
 function AssetGlyph({ asset }: { asset: string }) {
-  if (asset === "BTC") return <span className="asset-glyph asset-glyph--btc">₿</span>;
-  if (asset === "SUI") return <span className="asset-glyph asset-glyph--sui">≈</span>;
-  return <span className="asset-glyph">{asset[0]}</span>;
+  const fallback =
+    asset === "BTC" ? (
+      <span className="asset-glyph asset-glyph--btc">₿</span>
+    ) : asset === "SUI" ? (
+      <span className="asset-glyph asset-glyph--sui">≈</span>
+    ) : (
+      <span className="asset-glyph">{asset[0]}</span>
+    );
+  return <TokenLogo symbol={asset} className="asset-glyph" fallback={fallback} />;
 }
 
 function StatusPill({ status }: { status: string }) {

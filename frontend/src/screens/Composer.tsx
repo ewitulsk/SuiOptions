@@ -101,6 +101,7 @@ export function Composer({ initialView }: Props) {
           amount={s.amount}
           setAmount={s.setAmount}
           view={s.view}
+          assetSymbol={s.selectedAsset}
           btcBalance={s.btcBalance}
           usdcBalance={s.usdcBalance}
           error={

@@ -1,9 +1,13 @@
 import type { View } from "../types";
+import { findToken } from "../config";
+import { TokenLogo } from "./TokenLogo";
 
 type Props = {
   amount: number;
   setAmount: (n: number) => void;
   view: View;
+  /** Underlying-asset symbol (on-chain ticker, e.g. `TBTC`); null while loading. */
+  assetSymbol: string | null;
   btcBalance: number;
   usdcBalance: number;
   error: string;
@@ -13,10 +17,12 @@ export function AmountInput({
   amount,
   setAmount,
   view,
+  assetSymbol,
   btcBalance,
   usdcBalance,
   error,
 }: Props) {
+  const assetName = findToken(assetSymbol)?.name ?? assetSymbol ?? "BTC";
   return (
     <div>
       <div className="amount">
@@ -37,9 +43,13 @@ export function AmountInput({
           </button>
         </div>
         <div className="amount__asset">
-          <span className="amount__asset-icon">₿</span>
+          <TokenLogo
+            symbol={assetSymbol}
+            className="amount__asset-icon"
+            fallback={<span className="amount__asset-icon">₿</span>}
+          />
           <div>
-            <div className="amount__asset-name">BTC</div>
+            <div className="amount__asset-name">{assetName}</div>
             <div className="amount__asset-bal">
               bal {view === "writer" ? btcBalance.toFixed(4) : `${usdcBalance.toFixed(2)} USDC`}
             </div>

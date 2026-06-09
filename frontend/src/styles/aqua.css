@@ -1043,6 +1043,16 @@
 [data-theme="aqua"] .asset-glyph--btc { background: linear-gradient(135deg, #F7931A 0%, #FFB74D 100%); }
 [data-theme="aqua"] .asset-glyph--sui { background: linear-gradient(135deg, var(--aqua-sui) 0%, var(--aqua-sui-deep) 100%); font-size: 22px; }
 
+/* Served token logo (token-info logoUri) — fills its circular icon container.
+   Drop the per-symbol gradient so transparent logo PNGs sit on a clean disc. */
+[data-theme="aqua"] .token-logo {
+  background: #fff;
+  overflow: hidden;
+}
+[data-theme="aqua"] .token-logo__img {
+  width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block;
+}
+
 [data-theme="aqua"] .status-pill {
   font-family: "JetBrains Mono", monospace; font-size: 10px; font-weight: 700;
   letter-spacing: 0.12em; text-transform: uppercase;
