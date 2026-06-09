@@ -274,7 +274,8 @@ export function useComposerState({
 
   // Indicative per-tile premiums via the bulk-view RFQ: one request covering
   // every strike at the current amount, averaged across opted-in MMs and
-  // cached server-side (stale-while-revalidate). Writer (Earn) side only.
+  // cached server-side (stale-while-revalidate). Served by Trader MMs on the
+  // writer (Earn) side and Writer MMs on the trader (Buy) side.
   const bulkBucketIds = useMemo(
     () => seriesBuckets.map((b) => b.bucket_id),
     [seriesBuckets],
@@ -283,7 +284,7 @@ export function useComposerState({
     bucketIds: bulkBucketIds,
     writeAmountRaw,
     side: view,
-    enabled: view === "writer" && !bucketsQuery.isLoading,
+    enabled: !bucketsQuery.isLoading,
   });
 
   // Real RFQ flow: when the user picks (asset, expiry, strike) and types an
@@ -314,7 +315,8 @@ export function useComposerState({
 
   // The signed RFQ for the selected tile returns a firm premium that
   // supersedes its indicative bulk-view average; show it on that tile once it
-  // arrives. Other tiles keep their bulk-view premium.
+  // arrives (both Buy and Earn sides). Other tiles keep their bulk-view
+  // premium.
   const realSelectedPremium = rfqEntries.length > 0 ? bestPremium : null;
 
   // Tiles show the indicative bulk-view premium (or the firm RFQ premium for
