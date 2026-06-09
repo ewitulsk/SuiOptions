@@ -98,7 +98,10 @@ jobs:
             # For rollbacks the user normally wants to bring the whole
             # stack to a known-good tag; if they want one service only,
             # they can use a hand-rolled SSM command.
-            services='["api-service","indexer","mm-bot","option-scheduler","quoting-service","token-info","gas-station"]'
+            # Keep this in sync with ALL_SERVICES in deployment/ec2/deploy.sh
+            # and affected.py — a service missing here is never tag-seeded on
+            # force_all, so deploy.sh rejects the deploy on a fresh box.
+            services='["indexer","quoting-service","mm-bot","option-scheduler","api-service","token-info","auth-service","gas-station"]'
             echo "force_all or image_tag override → rolling all services"
           else
             services=$(printf '%s\n' "$CHANGED_FILES" \
