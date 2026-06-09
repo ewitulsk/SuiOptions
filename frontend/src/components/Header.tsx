@@ -200,6 +200,28 @@ export function Header() {
 
   return (
     <header className="header">
+      <div className="header__waves" aria-hidden>
+        <svg viewBox="0 0 2400 84" preserveAspectRatio="none">
+          <path
+            className="wave-back"
+            d="M0,52 C200,72 400,32 600,52 C800,72 1000,32 1200,52 C1400,72 1600,32 1800,52 C2000,72 2200,32 2400,52 L2400,84 L0,84 Z"
+            fill="#C7E6FF"
+            opacity="0.5"
+          />
+          <path
+            className="wave-mid"
+            d="M0,58 C200,40 400,76 600,58 C800,40 1000,76 1200,58 C1400,40 1600,76 1800,58 C2000,40 2200,76 2400,58 L2400,84 L0,84 Z"
+            fill="#9CD4FF"
+            opacity="0.55"
+          />
+          <path
+            className="wave-front"
+            d="M0,64 C200,80 400,48 600,64 C800,80 1000,48 1200,64 C1400,80 1600,48 1800,64 C2000,80 2200,48 2400,64 L2400,84 L0,84 Z"
+            fill="#6FBEFF"
+            opacity="0.65"
+          />
+        </svg>
+      </div>
       <div className="header__brand">
         <span className="header__brand-mark"></span>
         tideline
@@ -247,9 +269,6 @@ export function Header() {
         )}
         <button>Docs</button>
       </nav>
-      <span className="header__status">
-        <span className="dot"></span>WSS live
-      </span>
       <SponsorToggle />
       <ThemeToggle />
       {account ? (

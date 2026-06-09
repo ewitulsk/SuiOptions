@@ -20,6 +20,8 @@ const QUOTING_WS_URL: string =
   (import.meta.env.VITE_QUOTING_WS_URL as string | undefined) ??
   "ws://127.0.0.1:9002/";
 
+export type QuotingStatus = "connecting" | "connected" | "disconnected";
+
 const CLIENT_VERSION = "0.0.1";
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 8_000;
@@ -48,6 +50,30 @@ class QuotingClient {
   private pendingBulk = new Map<string, PendingBulk>();
   private reconnectAttempt = 0;
   private explicitClose = false;
+  private status: QuotingStatus = "disconnected";
+  private listeners = new Set<() => void>();
+
+  /** Current connection status — for the useSyncExternalStore snapshot. */
+  getStatus = (): QuotingStatus => this.status;
+
+  /** Subscribe to status changes. Returns an unsubscribe fn. */
+  subscribe = (fn: () => void): (() => void) => {
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
+  };
+
+  /** Open the socket proactively (e.g. to surface live connection status). */
+  connect_(): Promise<void> {
+    return this.ensureConnected();
+  }
+
+  private setStatus(s: QuotingStatus) {
+    if (this.status === s) return;
+    this.status = s;
+    for (const fn of this.listeners) fn();
+  }
 
   async sendRfq(args: {
     bucketId: string;
@@ -147,6 +173,7 @@ class QuotingClient {
 
   private connect(): Promise<void> {
     this.explicitClose = false;
+    this.setStatus("connecting");
     return new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(QUOTING_WS_URL);
       this.ws = ws;
@@ -177,6 +204,7 @@ class QuotingClient {
           this.helloAcked = true;
           this.reconnectAttempt = 0;
           this.connecting = null;
+          this.setStatus("connected");
           settled = true;
           resolve();
           return;
@@ -189,6 +217,7 @@ class QuotingClient {
         const wasAcked = this.helloAcked;
         this.helloAcked = false;
         this.connecting = null;
+        this.setStatus("disconnected");
         for (const [id, p] of this.pending) {
           clearTimeout(p.timer);
           p.reject(

@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useComposerState } from "../state/composer";
-import { WaveHero } from "../components/WaveHero";
 import { Header } from "../components/Header";
 import { BucketBar } from "../components/BucketBar";
 import { StrikeTiles } from "../components/StrikeTiles";
@@ -50,7 +49,6 @@ export function Composer({ initialView }: Props) {
 
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
-      <WaveHero />
       <Header />
 
       <div className="app__wrap">

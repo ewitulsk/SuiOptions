@@ -14,7 +14,6 @@ import type { Transaction } from "@mysten/sui/transactions";
 import { useSubmitTransaction } from "../tx/submit";
 
 import { Header } from "../components/Header";
-import { WaveHero } from "../components/WaveHero";
 import { Toast } from "../components/Toast";
 import { TokenManager } from "../components/TokenManager";
 import { useBuckets } from "../api/useBuckets";
@@ -70,7 +69,6 @@ export function Admin() {
   if (adminCap.isLoading) {
     return (
       <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
-        <WaveHero />
         <Header />
         <div className="app__wrap">
           <div className="admin-gate">checking admin access…</div>
@@ -107,7 +105,6 @@ export function Admin() {
 
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
-      <WaveHero />
       <Header />
 
       <div className="app__wrap">
