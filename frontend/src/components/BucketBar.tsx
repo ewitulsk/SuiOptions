@@ -223,8 +223,8 @@ function AssetIcon({ symbol }: { symbol: string | null }) {
 function formatExpiryShort(ms: number): string {
   const d = new Date(ms);
   if (Number.isNaN(d.getTime())) return "—";
-  const month = d.toLocaleDateString("en-US", { month: "short", timeZone: "UTC" }).toUpperCase();
-  const day = d.getUTCDate();
+  const month = d.toLocaleDateString("en-US", { month: "short" }).toUpperCase();
+  const day = d.getDate();
   return `${month}_${day}`;
 }
 
@@ -237,7 +237,6 @@ function formatExpiryFull(ms: number): string {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-    timeZone: "UTC",
     timeZoneName: "short",
   });
 }
