@@ -75,6 +75,24 @@ export type SupportedToken = {
 
 export let SUPPORTED_TOKENS: SupportedToken[] = [];
 
+/**
+ * Resolve a supported-token catalog entry from a market symbol. Call sites pass
+ * either the on-chain ticker (`TBTC`) or the stripped display alias (`BTC`, the
+ * form `displayAsset()` produces), so match the ticker directly first, then the
+ * ticker with a leading test-token `T` removed. Returns `null` for symbols that
+ * aren't catalog tokens (e.g. native `SUI`).
+ */
+export function findToken(symbol: string | null | undefined): SupportedToken | null {
+  if (!symbol) return null;
+  const upper = symbol.trim().toUpperCase();
+  if (!upper) return null;
+  return (
+    SUPPORTED_TOKENS.find((t) => t.ticker.toUpperCase() === upper) ??
+    SUPPORTED_TOKENS.find((t) => t.ticker.toUpperCase().replace(/^T/, "") === upper) ??
+    null
+  );
+}
+
 // --- wire shapes returned by token-info -------------------------------------
 
 type PackageInfoDto = {

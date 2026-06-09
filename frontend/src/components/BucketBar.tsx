@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { usePythPrice } from "../api/usePythPrice";
+import { TokenLogo } from "./TokenLogo";
 import type { AssetOption, ExpiryOption } from "../state/composer";
 
 type Props = {
@@ -213,11 +214,12 @@ function AssetIcon({ symbol }: { symbol: string | null }) {
   if (!symbol) return null;
   const isBtc = /btc/i.test(symbol);
   const initial = symbol.replace(/[^A-Za-z0-9]/g, "").charAt(0).toUpperCase() || "?";
-  return (
+  const fallback = (
     <span className={"bbar__sel-icon" + (isBtc ? "" : " bbar__sel-icon--generic")}>
       {isBtc ? "₿" : initial}
     </span>
   );
+  return <TokenLogo symbol={symbol} className="bbar__sel-icon" fallback={fallback} />;
 }
 
 function formatExpiryShort(ms: number): string {

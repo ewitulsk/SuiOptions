@@ -4,12 +4,13 @@
 // one live subscriber. Re-runs the connection whenever the active set
 // changes. Mirrors the transport used by `rust-backend/crates/pyth-client`.
 //
-// Supported-token feed ids come from the token-info catalog
-// (`SUPPORTED_TOKENS[].pythFeedId`). A few bare market symbols (BTC/SUI/USDC),
-// used by ambient spot widgets that work in real-asset terms, keep a small
-// static alias map — they are display-only and not part of the catalog.
+// Feed ids come from the token-info catalog (`SUPPORTED_TOKENS[].pythFeedId`),
+// resolved via `findToken` so both on-chain tickers (TBTC) and display aliases
+// (BTC) hit the same served feed. The one static alias left is `SUI` — native
+// SUI is an ambient spot symbol, not a catalog token, so token-info serves no
+// feed for it.
 
-import { SUPPORTED_TOKENS } from "../config";
+import { findToken } from "../config";
 
 const HERMES_BASE = "https://hermes.pyth.network";
 
@@ -27,30 +28,23 @@ export type PythPrice = {
 type Subscriber = (price: PythPrice) => void;
 
 /**
- * Bare market-symbol aliases for ambient spot widgets (e.g. the dashboard's
- * BTC/SUI tickers). These are NOT supported-token catalog entries — supported
- * tokens resolve their feed from `SUPPORTED_TOKENS[].pythFeedId` instead.
+ * Native SUI spot feed. SUI is an ambient display symbol used by spot widgets,
+ * not a token-info catalog entry, so it has no served `pythFeedId` to consume.
  */
-const DISPLAY_ALIASES: Record<string, string> = {
-  BTC: "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
-  USDC: "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a",
-  SUI: "0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744",
-};
+const SUI_FEED_ID = "0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744";
 
 export function resolveFeedId(symbolOrId: string): string | null {
   const trimmed = symbolOrId.trim();
   if (/^0x[0-9a-f]{64}$/i.test(trimmed) || /^[0-9a-f]{64}$/i.test(trimmed)) {
     return normalize(trimmed);
   }
-  const upper = trimmed.toUpperCase();
-  // Supported tokens: resolve the feed from the token-info catalog.
-  const token = SUPPORTED_TOKENS.find((t) => t.ticker.toUpperCase() === upper);
+  // Supported tokens: resolve the feed served by the token-info catalog.
+  const token = findToken(trimmed);
   if (token?.pythFeedId) {
     return normalize(token.pythFeedId);
   }
-  // Ambient display symbols (BTC/SUI/USDC).
-  const alias = DISPLAY_ALIASES[upper];
-  return alias ? normalize(alias) : null;
+  // Ambient native SUI spot — not a catalog token.
+  return trimmed.toUpperCase() === "SUI" ? normalize(SUI_FEED_ID) : null;
 }
 
 function normalize(id: string): string {
