@@ -17,6 +17,7 @@ pub mod account;
 pub mod admin;
 pub mod coin_pkg;
 pub mod execute_write;
+pub mod sponsor;
 pub mod test_tokens;
 
 use anyhow::{anyhow, Result};

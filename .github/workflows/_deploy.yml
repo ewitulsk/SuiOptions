@@ -98,7 +98,7 @@ jobs:
             # For rollbacks the user normally wants to bring the whole
             # stack to a known-good tag; if they want one service only,
             # they can use a hand-rolled SSM command.
-            services='["api-service","indexer","mm-bot","option-scheduler","quoting-service","token-info"]'
+            services='["api-service","indexer","mm-bot","option-scheduler","quoting-service","token-info","gas-station"]'
             echo "force_all or image_tag override → rolling all services"
           else
             services=$(printf '%s\n' "$CHANGED_FILES" \

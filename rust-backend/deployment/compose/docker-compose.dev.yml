@@ -100,6 +100,18 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # Gas station. Sponsors user transactions by paying their gas. Public port
+  # (9009, proxied by nginx). Reads the sponsor key from /run/secrets.
+  gas-station:
+    image: ${ECR}/options/gas-station:${GAS_STATION_TAG}
+    environment:
+      APP_ENV: dev
+      RUST_LOG: info,gas_station=debug
+    volumes:
+      - /opt/options/dev/secrets:/run/secrets:ro
+    restart: unless-stopped
+    networks: [net]
+
   # Single public entrypoint per env. Strips the /dev/{quoting,api,indexer,scheduler,mm-bot}
   # prefix before forwarding. depends_on is start-order only; nginx
   # tolerates backends being briefly unreachable on first boot.
@@ -112,7 +124,7 @@ services:
     volumes:
       - /opt/options/dev/nginx/:/etc/nginx/options/:ro
     command: ["nginx", "-c", "/etc/nginx/options/nginx.conf", "-g", "daemon off;"]
-    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service]
+    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station]
     restart: unless-stopped
     networks: [net]
 

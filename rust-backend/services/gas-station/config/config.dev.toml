@@ -1,0 +1,16 @@
+# gas-station config — dev env (devnet).
+
+environment = "dev"
+
+bind_addr   = "0.0.0.0:9009"
+network     = "devnet"
+
+allowed_origins = ["*"]
+
+min_balance_threshold_mist = 1000000000
+max_gas_budget_mist = 500000000
+min_gas_budget_mist = 1000000
+gas_budget_buffer_bps = 2500
+
+# Devnet protocol package (from deployments.json). Empty = allow all.
+allowed_packages = ["0x85f42447392fad70c0e5dd905de85b2687177befa63d05222d77d91d61ec0a50"]

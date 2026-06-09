@@ -1,0 +1,16 @@
+# gas-station config — prod env (testnet, matching render-secrets.sh).
+
+environment = "prod"
+
+bind_addr   = "0.0.0.0:9009"
+network     = "testnet"
+
+allowed_origins = ["*"]
+
+min_balance_threshold_mist = 1000000000
+max_gas_budget_mist = 500000000
+min_gas_budget_mist = 1000000
+gas_budget_buffer_bps = 2500
+
+# Protocol package(s) to sponsor. Replace with the real prod package(s).
+allowed_packages = ["0xb63ebad34344ccc456cfaa4b228c4fa98abd1058d55b0e3dbee7563c7e694d58"]

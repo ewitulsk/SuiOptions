@@ -5,11 +5,9 @@
 // cursor/queue from the `/buckets` response. The hook keeps a single return
 // shape so UI components don't change.
 import { useEffect, useMemo, useState } from "react";
-import {
-  useCurrentAccount,
-  useSignAndExecuteTransaction,
-} from "@mysten/dapp-kit";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useQueryClient } from "@tanstack/react-query";
+import { useSubmitTransaction } from "../tx/submit";
 import { useBuckets } from "../api/useBuckets";
 import { useCoinBalance } from "../api/useCoinBalance";
 import { usePythPrice } from "../api/usePythPrice";
@@ -387,7 +385,7 @@ export function useComposerState({
     return { cursor, queued, cap };
   }, [series, selectedBucketId, amount]);
 
-  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
+  const submitTx = useSubmitTransaction();
   const queryClient = useQueryClient();
 
   const submit = async () => {
@@ -437,7 +435,7 @@ export function useComposerState({
               writer: account.address,
             });
       setConfirmStage("broadcast");
-      await signAndExecute({ transaction: tx });
+      await submitTx(tx);
 
       const rangeStart = bucket.cursor + bucket.queued;
       const asset = series.asset_symbol;

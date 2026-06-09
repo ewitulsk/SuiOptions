@@ -9,6 +9,11 @@ import {
   useSwitchAccount,
 } from "@mysten/dapp-kit";
 import { useThemeMode, toggleMode } from "../theme";
+import {
+  useSponsorEnabled,
+  useSponsorHealth,
+  setSponsorEnabled,
+} from "../state/sponsor";
 import { useAdminCap } from "../api/useAdminCap";
 import { ENV } from "../config";
 
@@ -129,6 +134,37 @@ function WalletMenu() {
   );
 }
 
+function SponsorToggle() {
+  const enabled = useSponsorEnabled();
+  const health = useSponsorHealth();
+  const lowBalance = health ? !health.healthy : false;
+  const title = lowBalance
+    ? `Gas sponsorship balance low (${health?.balanceSui.toFixed(2)} SUI) — transactions may fall back to wallet-paid`
+    : enabled
+      ? "Gas sponsorship on — we pay your gas"
+      : "Gas sponsorship off — you pay your own gas";
+  return (
+    <button
+      type="button"
+      className={
+        "header__sponsor" +
+        (enabled ? " is-on" : "") +
+        (lowBalance ? " is-low" : "")
+      }
+      onClick={() => setSponsorEnabled(!enabled)}
+      role="switch"
+      aria-checked={enabled}
+      aria-label="Toggle gas sponsorship"
+      title={title}
+    >
+      <span className="header__sponsor-track" aria-hidden>
+        <span className="header__sponsor-thumb" />
+      </span>
+      <span className="header__sponsor-label">Gas{lowBalance ? " ⚠" : ""}</span>
+    </button>
+  );
+}
+
 function ThemeToggle() {
   const mode = useThemeMode();
   const isDark = mode === "dark";
@@ -214,6 +250,7 @@ export function Header() {
       <span className="header__status">
         <span className="dot"></span>WSS live
       </span>
+      <SponsorToggle />
       <ThemeToggle />
       {account ? (
         <WalletMenu />

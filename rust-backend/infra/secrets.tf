@@ -101,3 +101,24 @@ resource "aws_secretsmanager_secret_version" "mm_bot_placeholder" {
     ignore_changes = [secret_string]
   }
 }
+
+# gas-station secret per env — the sponsor (gas payer) key. Placeholder shape,
+# fill the real suiprivkey by hand after apply.
+resource "aws_secretsmanager_secret" "gas_station" {
+  for_each                = toset(local.envs)
+  name                    = "options/${each.key}/gas-station"
+  description             = "gas-station sponsor signing key (JSON: sui_key)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "gas_station_placeholder" {
+  for_each  = aws_secretsmanager_secret.gas_station
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    sui_key = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}

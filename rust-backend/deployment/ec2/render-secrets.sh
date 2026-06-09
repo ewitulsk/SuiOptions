@@ -106,4 +106,20 @@ jwt_secret = "$JWT_SECRET"
 EOF
 fi
 
+# ---- gas-station secret -> rendered TOML ---------------------------------
+# Sponsor (gas payer) key. One Sui key per env, in the network slot the
+# service's config expects (dev → devnet, staging/prod → testnet).
+if GAS_JSON=$(fetch gas-station 2>/dev/null); then
+  SUI_KEY=$(echo "$GAS_JSON" | jq -r '.sui_key')
+  if [ -z "$SUI_KEY" ] || [ "$SUI_KEY" = "null" ]; then
+    echo "missing sui_key in options/$ENV/gas-station" >&2
+    exit 1
+  fi
+  umask 077
+  cat > "$DIR/gas-station.toml" <<EOF
+[sui]
+$NETWORK = "$SUI_KEY"
+EOF
+fi
+
 echo "render-secrets: ok ($ENV)"
