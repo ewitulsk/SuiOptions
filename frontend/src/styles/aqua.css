@@ -887,8 +887,16 @@
   to   { opacity: 1; transform: translate(-50%, 0); }
 }
 [data-theme="aqua"] .toast__dot {
-  width: 8px; height: 8px; border-radius: 999px; background: var(--aqua-success);
-  box-shadow: 0 0 0 3px rgba(34,176,122,0.22);
+  width: 8px; height: 8px; border-radius: 999px;
+}
+[data-theme="aqua"] .toast__dot--success {
+  background: var(--aqua-success); box-shadow: 0 0 0 3px rgba(34,176,122,0.22);
+}
+[data-theme="aqua"] .toast__dot--error {
+  background: var(--aqua-coral); box-shadow: 0 0 0 3px rgba(255,122,110,0.22);
+}
+[data-theme="aqua"] .toast__dot--info {
+  background: #FFB84D; box-shadow: 0 0 0 3px rgba(255,184,77,0.22);
 }
 
 

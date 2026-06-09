@@ -170,7 +170,7 @@ export function Composer({ initialView }: Props) {
           onClose={s.closeConfirm}
         />
       )}
-      {s.toast && <Toast message={s.toast} />}
+      {s.toast && <Toast message={s.toast.message} variant={s.toast.variant} />}
     </div>
   );
 }
