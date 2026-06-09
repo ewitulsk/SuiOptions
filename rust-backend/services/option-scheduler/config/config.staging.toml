@@ -41,6 +41,9 @@ strikes_below       = 2
 strikes_above       = 2
 interval_pct        = 10.0
 
+  # DEEP/USD cross via Pyth Hermes. Both legs read their `pythFeedId` from
+  # deployments.json::staging.token_info (TDEEP = DEEP/USD, TUSDC = USDC/USD).
   [pairs.spot]
-  source = "static"
-  usd    = 0.15
+  source             = "pyth"
+  max_publish_lag_ms = 30_000   # decline a roll on prices > 30s stale
+  max_conf_bps       = 100      # decline a roll if conf/price > 1%

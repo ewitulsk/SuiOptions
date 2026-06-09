@@ -109,7 +109,8 @@
       },
       "TDEEP": {
         "coinType": "0x9b72409a9f38a8784420d17577aa6dbe5aa2ab4224cd04c44d8b515f6c97ba86::tdeep::TDEEP",
-        "decimals": 6
+        "decimals": 6,
+        "pythFeedId": "0x29bdd5248234e33bd93d3b81100b5fa32eaa5997843847e2c2cb16d7c6d9f7ff"
       },
       "TUSDC": {
         "coinType": "0x9b72409a9f38a8784420d17577aa6dbe5aa2ab4224cd04c44d8b515f6c97ba86::tusdc::TUSDC",
