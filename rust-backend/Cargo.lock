@@ -3428,6 +3428,7 @@ dependencies = [
  "sui-tx",
  "sui-types",
  "thiserror 1.0.69",
+ "token-info-client",
  "tokio",
  "tower-http 0.6.10",
  "tracing",
