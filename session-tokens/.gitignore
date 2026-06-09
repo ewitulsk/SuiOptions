@@ -1,0 +1,12 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+build/
+*.tsbuildinfo
+
+# local env (deployed ids are documented in the READMEs)
+.env.local
+.env
+.vercel/
