@@ -119,7 +119,8 @@
       },
       "TWAL": {
         "coinType": "0x9b72409a9f38a8784420d17577aa6dbe5aa2ab4224cd04c44d8b515f6c97ba86::twal::TWAL",
-        "decimals": 9
+        "decimals": 9,
+        "pythFeedId": "0xeba0732395fae9dec4bae12e52760b35fc1c5671e2da8b449c9af4efe5d54341"
       }
     }
   }
