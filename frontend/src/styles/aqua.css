@@ -79,7 +79,6 @@
   background: rgba(var(--aqua-tint-rgb),0.78);
   backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
   border-bottom: 1px solid var(--aqua-line);
-  overflow: hidden;
 }
 /* Keep all header content above the wave background. */
 [data-theme="aqua"] .header > *:not(.header__waves) { position: relative; z-index: 1; }
