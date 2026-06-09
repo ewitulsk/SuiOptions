@@ -41,10 +41,16 @@ pub struct Config {
     #[serde(default = "default_buffer_bps")]
     pub gas_budget_buffer_bps: u64,
 
-    /// Move packages the station will sponsor calls to (`0x`-prefixed ids).
-    /// Empty = allow all (local dev only).
+    /// token-info public base URL. Every package id it reports — the protocol
+    /// package plus each supported token's coin-type package — is added to the
+    /// sponsor allowlist at boot.
+    pub token_info_url: String,
+
+    /// Extra Move packages to sponsor on top of everything token-info reports
+    /// (`0x`-prefixed ids). For off-catalog packages only; the token-info set
+    /// is always allowed regardless.
     #[serde(default)]
-    pub allowed_packages: Vec<String>,
+    pub additional_allowed_packages: Vec<String>,
 }
 
 fn default_cors() -> Vec<String> {

@@ -12,9 +12,10 @@ name = "gas-station"
 path = "src/main.rs"
 
 [dependencies]
-runtime-config = { workspace = true }
-cli-spec       = { workspace = true }
-sui-tx         = { workspace = true }
+runtime-config    = { workspace = true }
+cli-spec          = { workspace = true }
+sui-tx            = { workspace = true }
+token-info-client = { workspace = true }
 
 clap = { workspace = true }
 
