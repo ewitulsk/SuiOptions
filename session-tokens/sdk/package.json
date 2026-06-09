@@ -1,0 +1,28 @@
+{
+  "name": "@yourorg/sui-siws-session",
+  "version": "0.0.1",
+  "description": "SIWS session-key SDK for Sui — authenticate with a Solana wallet, mint a scoped on-chain SessionCap to an ephemeral Sui key, act without signing every tx.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mysten/sui": "^2.17.0",
+    "@noble/hashes": "^2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}
