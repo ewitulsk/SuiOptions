@@ -183,17 +183,76 @@ pub fn protocol_templates(
         }
     }
 
-    // SO-154: create a DeepBook permissionless pool for a bucket's call coin.
-    // The user's own 500-DEEP creation fee rides in via `coinWithBalance`
-    // (benign SplitCoins/MergeCoins prelude); the sponsor only risks gas.
-    // The closed `allowed` set means no other DeepBook function can tag along.
+    // DeepBook PTB shapes (SO-154 venue creation + SO-157 trading). Coin
+    // funding rides in via `coinWithBalance` (benign SplitCoins/MergeCoins
+    // preludes); the sponsor only ever risks gas — every asset moved is the
+    // user's own. Closed `allowed` sets keep other DeepBook functions from
+    // tagging along.
     if let Some(db) = deepbook {
-        let create = MoveTarget::new(db, "pool", "create_permissionless_pool");
+        let d = |module: &str, function: &str| MoveTarget::new(db, module, function);
+        let proof = d("balance_manager", "generate_proof_as_owner");
+        let deposit = d("balance_manager", "deposit");
+        let share = MoveTarget::new(framework(), "transfer", "public_share_object");
+
+        let create = d("pool", "create_permissionless_pool");
         templates.push(PtbTemplate {
             name: "deepbook_create_pool".to_owned(),
             required: vec![create.clone()],
             allowed: vec![create.clone()],
             arities: vec![(create, 2)],
+        });
+
+        // Enable trading: new → register (emits the discovery event) → share.
+        let bm_new = d("balance_manager", "new");
+        let bm_register = d("balance_manager", "register_balance_manager");
+        templates.push(PtbTemplate {
+            name: "deepbook_bm_create".to_owned(),
+            required: vec![bm_new.clone(), bm_register.clone(), share.clone()],
+            allowed: vec![bm_new, bm_register, share.clone()],
+            arities: vec![(share, 1)],
+        });
+
+        // Orders: optional exact-amount deposit, owner proof, place.
+        let place_limit = d("pool", "place_limit_order");
+        templates.push(PtbTemplate {
+            name: "deepbook_place_limit".to_owned(),
+            required: vec![proof.clone(), place_limit.clone()],
+            allowed: vec![deposit.clone(), proof.clone(), place_limit.clone()],
+            arities: vec![(place_limit, 2), (deposit.clone(), 1)],
+        });
+        let place_market = d("pool", "place_market_order");
+        templates.push(PtbTemplate {
+            name: "deepbook_place_market".to_owned(),
+            required: vec![proof.clone(), place_market.clone()],
+            allowed: vec![deposit.clone(), proof.clone(), place_market.clone()],
+            arities: vec![(place_market, 2), (deposit, 1)],
+        });
+
+        // Cancels.
+        let cancel = d("pool", "cancel_order");
+        templates.push(PtbTemplate {
+            name: "deepbook_cancel_order".to_owned(),
+            required: vec![proof.clone(), cancel.clone()],
+            allowed: vec![proof.clone(), cancel.clone()],
+            arities: vec![(cancel, 2)],
+        });
+        let cancel_all = d("pool", "cancel_all_orders");
+        templates.push(PtbTemplate {
+            name: "deepbook_cancel_all".to_owned(),
+            required: vec![proof.clone(), cancel_all.clone()],
+            allowed: vec![proof.clone(), cancel_all.clone()],
+            arities: vec![(cancel_all, 2)],
+        });
+
+        // Settle + drain both assets back to the wallet (TransferObjects is
+        // a benign command).
+        let settle = d("pool", "withdraw_settled_amounts");
+        let withdraw_all = d("balance_manager", "withdraw_all");
+        templates.push(PtbTemplate {
+            name: "deepbook_withdraw".to_owned(),
+            required: vec![proof.clone(), settle.clone()],
+            allowed: vec![proof, settle.clone(), withdraw_all.clone()],
+            arities: vec![(settle, 2), (withdraw_all, 1)],
         });
     }
 
@@ -319,6 +378,96 @@ mod tests {
             true,
         );
         assert_eq!(match_any(&templates(), &pt), Some("deepbook_create_pool"));
+    }
+
+    #[test]
+    fn deepbook_trading_templates_match_their_frontend_shapes() {
+        let d = |module: &str, function: &str| MoveTarget::new(deepbook_pkg(), module, function);
+        // Enable trading: new → register → public_share_object<BM>.
+        let bm = build(
+            &[
+                (d("balance_manager", "new"), 0),
+                (d("balance_manager", "register_balance_manager"), 0),
+                (MoveTarget::new(framework(), "transfer", "public_share_object"), 1),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &bm), Some("deepbook_bm_create"));
+
+        // Limit order with a coinWithBalance deposit prelude.
+        let limit = build(
+            &[
+                (d("balance_manager", "deposit"), 1),
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "place_limit_order"), 2),
+            ],
+            true,
+        );
+        assert_eq!(match_any(&templates(), &limit), Some("deepbook_place_limit"));
+
+        // Market order without a deposit.
+        let market = build(
+            &[
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "place_market_order"), 2),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &market), Some("deepbook_place_market"));
+
+        // Cancels.
+        let cancel = build(
+            &[
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "cancel_order"), 2),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &cancel), Some("deepbook_cancel_order"));
+        let cancel_all = build(
+            &[
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "cancel_all_orders"), 2),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &cancel_all), Some("deepbook_cancel_all"));
+
+        // Withdraw: proof → settle → withdraw_all ×2 (+ benign TransferObjects).
+        let withdraw = build(
+            &[
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "withdraw_settled_amounts"), 2),
+                (d("balance_manager", "withdraw_all"), 1),
+                (d("balance_manager", "withdraw_all"), 1),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &withdraw), Some("deepbook_withdraw"));
+    }
+
+    #[test]
+    fn deepbook_order_templates_reject_withdraw_riders() {
+        let d = |module: &str, function: &str| MoveTarget::new(deepbook_pkg(), module, function);
+        // A withdraw smuggled into an order PTB matches no template: the
+        // order templates don't allow withdraw_all, and the withdraw
+        // template doesn't allow place_limit_order.
+        let evil = build(
+            &[
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "place_limit_order"), 2),
+                (d("balance_manager", "withdraw_all"), 1),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &evil), None);
+        // Sharing an arbitrary framework object only matches inside the
+        // bm-create sequence — alone it matches nothing.
+        let share_only = build(
+            &[(MoveTarget::new(framework(), "transfer", "public_share_object"), 1)],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &share_only), None);
     }
 
     #[test]
