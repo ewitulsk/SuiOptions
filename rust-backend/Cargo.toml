@@ -28,6 +28,7 @@ members = [
     "tools/rfq-monitor",
     "tools/control-panel",
     "tools/mm-quote",
+    "tools/deepbook-pool-test",
     "tests",
 ]
 

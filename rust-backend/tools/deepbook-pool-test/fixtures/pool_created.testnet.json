@@ -1,0 +1,23 @@
+{
+  "id": {
+    "txDigest": "CoUNzLMD4owCQGeK6UNAyW8JbqL3daoNeN8hTSHPzRAA",
+    "eventSeq": "0"
+  },
+  "packageId": "0x22be4cade64bf2d02412c7e8d0e8beea2f78828b948118d46735315409371a3c",
+  "transactionModule": "pool",
+  "sender": "0xc9127c6adf88b08c1330d1d63d0112f0cd22a49a428a65ae488547a7821a3624",
+  "type": "0xfb28c4cbc6865bd1c897d26aecbe1f8792d1509a20ffec692c800660cbec6982::pool::PoolCreated<0x15f86e205a99a916404ae9cdf64c54b3c03c36274cfa0db757d7308c2fb677de::sample_coin::SAMPLE_COIN, 0x2::sui::SUI>",
+  "parsedJson": {
+    "lot_size": "1000000",
+    "maker_fee": "500000",
+    "min_size": "1000000",
+    "pool_id": "0x0e7e575c9be015da61ef0ac522ac2494e563e960cd1b30177ae8fdcb7741457e",
+    "taker_fee": "1000000",
+    "tick_size": "1000000",
+    "treasury_address": "0xb3d277c50f7b846a5f609a8d13428ae482b5826bb98437997373f3a0d60d280e",
+    "whitelisted_pool": false
+  },
+  "bcsEncoding": "base64",
+  "bcs": "Dn5XXJvgFdph7wrFIqwklOVj6WDNGzAXeuj9y3dBRX5AQg8AAAAAACChBwAAAAAAQEIPAAAAAABAQg8AAAAAAEBCDwAAAAAAALPSd8UPe4RqX2CajRNCiuSCtYJruYQ3mXNz86DWDSgO",
+  "timestampMs": "1780466486924"
+}

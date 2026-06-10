@@ -2320,6 +2320,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "deepbook-pool-test"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "move-core-types",
+ "runtime-config",
+ "shared-crypto",
+ "sui-json-rpc-types",
+ "sui-sdk",
+ "sui-tx",
+ "sui-types",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "deployment-manager"
 version = "0.1.0"
 dependencies = [
