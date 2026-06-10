@@ -115,7 +115,8 @@ pub enum PriceDecision {
         /// When the quote expires; absolute Unix ms.
         valid_until_ms: u64,
         /// Inputs that produced the price — convenient for logs/tests.
-        spot_scaled: u64,
+        /// Settlement-raw per underlying-raw (may be sub-1 for cheap assets).
+        spot_scaled: f64,
         strike_scaled: f64,
         t_years: f64,
         sigma: f64,
@@ -128,14 +129,20 @@ pub enum PriceDecision {
 
 /// Cross USD/USD → settlement-asset-raw-units per underlying-asset-raw-unit.
 ///
-/// Equivalent to: `(underlying_usd / settlement_usd) * 10^(settle_dec - under_dec)`,
-/// rounded to the nearest u64.
+/// Equivalent to `(underlying_usd / settlement_usd) * 10^(settle_dec - under_dec)`.
+///
+/// Returned as `f64`, NOT rounded to an integer: for a sub-dollar underlying
+/// (DEEP ≈ $0.016) against an equal-decimals settlement the ratio is well below
+/// 1 (e.g. 0.016 settlement-raw per underlying-raw), so rounding to a u64 would
+/// collapse it to 0 and price every such option to zero. Black-Scholes is
+/// float-valued anyway, and `rebase_strike_to_scale_zero` keeps the strike at
+/// the same `f64` scale, so the two stay comparable.
 pub fn compute_spot_from_prices(
     underlying_usd: f64,
     settlement_usd: f64,
     underlying_decimals: u8,
     settlement_decimals: u8,
-) -> Result<u64, SpotError> {
+) -> Result<f64, SpotError> {
     if !(underlying_usd.is_finite()
         && underlying_usd > 0.0
         && settlement_usd.is_finite()
@@ -146,10 +153,12 @@ pub fn compute_spot_from_prices(
     let cross = underlying_usd / settlement_usd;
     let scale = 10f64.powi(settlement_decimals as i32 - underlying_decimals as i32);
     let scaled = cross * scale;
+    // Reject non-finite / negative, and absurdly large ratios (a spot needing
+    // more than u64::MAX settlement-raw per underlying-raw is not a real market).
     if !scaled.is_finite() || scaled < 0.0 || scaled > u64::MAX as f64 {
         return Err(SpotError::OutOfRange);
     }
-    Ok(scaled.round() as u64)
+    Ok(scaled)
 }
 
 /// Same as [`compute_spot_from_prices`] but reads both feeds out of a
@@ -161,7 +170,7 @@ pub fn compute_spot_from_cache(
     underlying_decimals: u8,
     settlement_decimals: u8,
     staleness: Staleness,
-) -> Result<u64, SpotError> {
+) -> Result<f64, SpotError> {
     let u = cache
         .get_fresh(underlying_feed, staleness.max_price_age, staleness.max_publish_lag)
         .ok_or(SpotError::UnderlyingStale)?;
@@ -209,14 +218,14 @@ pub fn resolve_sigma(live_sigma: Option<f64>, fallback: f64) -> f64 {
 pub fn price_rfq(
     cfg: &PricingConfig,
     inputs: &RfqPricingInputs,
-    spot_scaled: u64,
+    spot_scaled: f64,
     sigma: f64,
     now_ms: u64,
 ) -> PriceDecision {
     let t_years = time_to_expiry_years(inputs.expiry_ms, now_ms);
     let strike_scaled = rebase_strike_to_scale_zero(inputs.strike, inputs.strike_scale);
     let call_inputs = CallInputs {
-        spot: spot_scaled as f64,
+        spot: spot_scaled,
         strike: strike_scaled,
         t_years,
         r: cfg.rate,
@@ -284,24 +293,36 @@ mod tests {
     fn spot_btc_usdc_same_decimals() {
         // BTC = $60_000, USDC = $1.0, both 8d → spot = 60_000 * 10^0 = 60_000
         let s = compute_spot_from_prices(60_000.0, 1.0, 8, 8).unwrap();
-        assert_eq!(s, 60_000);
+        close(s, 60_000.0, 1e-9);
     }
 
     #[test]
     fn spot_scales_by_decimal_delta() {
         // Underlying 8d, settlement 6d → 10^(6-8) = 0.01 → spot 60_000 * 0.01 = 600
         let s = compute_spot_from_prices(60_000.0, 1.0, 8, 6).unwrap();
-        assert_eq!(s, 600);
+        close(s, 600.0, 1e-9);
         // Other way around: 10^(8-6) = 100 → spot 60_000 * 100 = 6_000_000
         let s = compute_spot_from_prices(60_000.0, 1.0, 6, 8).unwrap();
-        assert_eq!(s, 6_000_000);
+        close(s, 6_000_000.0, 1e-6);
+    }
+
+    #[test]
+    fn spot_sub_unit_ratio_keeps_precision() {
+        // Regression: DEEP ≈ $0.0158 against TUSDC, both 6d → ratio 0.0158
+        // settlement-raw per underlying-raw. The old u64 round collapsed this
+        // to 0 (every DEEP option priced to zero); f64 keeps it.
+        let s = compute_spot_from_prices(0.0158, 1.0, 6, 6).unwrap();
+        close(s, 0.0158, 1e-12);
+        // TWAL ≈ $0.0327, 9d underlying vs 6d settlement → 0.0327 * 10^-3.
+        let s = compute_spot_from_prices(0.0327, 1.0, 9, 6).unwrap();
+        close(s, 3.27e-5, 1e-15);
     }
 
     #[test]
     fn spot_non_dollar_settlement() {
         // Underlying $60_000, settlement $1500 (e.g. ETH-quoted): spot ≈ 40
         let s = compute_spot_from_prices(60_000.0, 1_500.0, 8, 8).unwrap();
-        assert_eq!(s, 40);
+        close(s, 40.0, 1e-9);
     }
 
     #[test]
@@ -379,7 +400,7 @@ mod tests {
         cache.insert(u, cached(60_000.0));
         cache.insert(s, cached(1.0));
         let spot = compute_spot_from_cache(&cache, u, s, 8, 8, loose_staleness()).unwrap();
-        assert_eq!(spot, 60_000);
+        close(spot, 60_000.0, 1e-9);
     }
 
     #[test]
@@ -539,12 +560,12 @@ mod tests {
         // S=K=100, T=1y, r=5%, σ=20%, write=1 → premium ≈ floor(10.4506) = 10.
         let year_ms = 1000 * 86_400 * 365u64;
         let p = rfq(year_ms, 100, 0, 1);
-        let d = price_rfq(&pricing_cfg(), &p, 100, 0.20, 0);
+        let d = price_rfq(&pricing_cfg(), &p, 100.0, 0.20, 0);
         match d {
             PriceDecision::Quote { premium, valid_until_ms, spot_scaled, strike_scaled, t_years, sigma, per_unit } => {
                 assert_eq!(premium, 10);
                 assert_eq!(valid_until_ms, 30_000);
-                assert_eq!(spot_scaled, 100);
+                close(spot_scaled, 100.0, 1e-12);
                 close(strike_scaled, 100.0, 1e-12);
                 close(t_years, 1.0, 1e-12);
                 assert_eq!(sigma, 0.20);
@@ -558,7 +579,7 @@ mod tests {
     fn price_rfq_declines_when_priced_to_zero() {
         // Spot far below strike, no time → intrinsic = 0 → premium = 0.
         let p = rfq(0, 200, 0, 1_000_000);
-        let d = price_rfq(&pricing_cfg(), &p, 100, 0.2, 0);
+        let d = price_rfq(&pricing_cfg(), &p, 100.0, 0.2, 0);
         match d {
             PriceDecision::Decline { reason } => assert_eq!(reason, "priced to zero"),
             other => panic!("expected Decline, got {other:?}"),
@@ -570,7 +591,7 @@ mod tests {
         // expiry_ms in the past, spot > strike — should price to intrinsic
         // and *not* decline.
         let p = rfq(0, 100, 0, 1);
-        let d = price_rfq(&pricing_cfg(), &p, 150, 0.2, 1_000);
+        let d = price_rfq(&pricing_cfg(), &p, 150.0, 0.2, 1_000);
         match d {
             PriceDecision::Quote { premium, t_years, .. } => {
                 assert_eq!(premium, 50); // intrinsic = 150 - 100, times write=1
@@ -593,8 +614,8 @@ mod tests {
         let p_high = rfq(year_ms, 100_000_000_000_000_000_000u128, 18, 1_000_000);
         let cfg = pricing_cfg();
 
-        let d_low = price_rfq(&cfg, &p_low, 100, 0.20, 0);
-        let d_high = price_rfq(&cfg, &p_high, 100, 0.20, 0);
+        let d_low = price_rfq(&cfg, &p_low, 100.0, 0.20, 0);
+        let d_high = price_rfq(&cfg, &p_high, 100.0, 0.20, 0);
 
         let (low, high) = match (&d_low, &d_high) {
             (
@@ -619,7 +640,7 @@ mod tests {
         // strike=100_000_000, scale=6 → effective strike = 100. With spot 110
         // and zero time, intrinsic = 10 per unit, write 7 → premium 70.
         let p = rfq(0, 100_000_000, 6, 7);
-        let d = price_rfq(&pricing_cfg(), &p, 110, 0.2, 0);
+        let d = price_rfq(&pricing_cfg(), &p, 110.0, 0.2, 0);
         match d {
             PriceDecision::Quote { premium, strike_scaled, .. } => {
                 close(strike_scaled, 100.0, 1e-12);
@@ -635,8 +656,8 @@ mod tests {
         let year_ms = 1000 * 86_400 * 365u64;
         let p1 = rfq(year_ms, 100, 0, 100);
         let p2 = rfq(year_ms, 100, 0, 200);
-        let d1 = price_rfq(&pricing_cfg(), &p1, 100, 0.20, 0);
-        let d2 = price_rfq(&pricing_cfg(), &p2, 100, 0.20, 0);
+        let d1 = price_rfq(&pricing_cfg(), &p1, 100.0, 0.20, 0);
+        let d2 = price_rfq(&pricing_cfg(), &p2, 100.0, 0.20, 0);
         let (a, b) = match (&d1, &d2) {
             (PriceDecision::Quote { premium: a, .. }, PriceDecision::Quote { premium: b, .. }) => (*a, *b),
             _ => panic!("expected two Quotes"),
@@ -649,7 +670,7 @@ mod tests {
     #[test]
     fn price_rfq_valid_until_uses_ttl() {
         let p = rfq(0, 100, 0, 1);
-        let d = price_rfq(&pricing_cfg(), &p, 150, 0.2, 10_000);
+        let d = price_rfq(&pricing_cfg(), &p, 150.0, 0.2, 10_000);
         match d {
             PriceDecision::Quote { valid_until_ms, .. } => {
                 assert_eq!(valid_until_ms, 40_000); // 10_000 + ttl 30_000
@@ -670,7 +691,7 @@ mod tests {
             ask_markup_bps: 0,
             bid_markdown_bps: 0,
         };
-        let d = price_rfq(&cfg, &p, 110, 0.0, 0);
+        let d = price_rfq(&cfg, &p, 110.0, 0.0, 0);
         match d {
             PriceDecision::Quote { premium, .. } => assert_eq!(premium, 10),
             _ => panic!("expected Quote"),
@@ -718,18 +739,18 @@ mod tests {
             ask_markup_bps: 100,
             bid_markdown_bps: 200,
         };
-        let mid = premium_of(&price_rfq(&pricing_cfg(), &rfq(year_ms, 100, 0, 1_000_000), 100, 0.20, 0));
+        let mid = premium_of(&price_rfq(&pricing_cfg(), &rfq(year_ms, 100, 0, 1_000_000), 100.0, 0.20, 0));
         let ask = premium_of(&price_rfq(
             &cfg,
             &rfq_side(Side::Trader, year_ms, 100, 0, 1_000_000),
-            100,
+            100.0,
             0.20,
             0,
         ));
         let bid = premium_of(&price_rfq(
             &cfg,
             &rfq_side(Side::Writer, year_ms, 100, 0, 1_000_000),
-            100,
+            100.0,
             0.20,
             0,
         ));
@@ -748,14 +769,14 @@ mod tests {
         let ask = premium_of(&price_rfq(
             &pricing_cfg(),
             &rfq_side(Side::Trader, year_ms, 100, 0, 1_000_000),
-            100,
+            100.0,
             0.20,
             0,
         ));
         let bid = premium_of(&price_rfq(
             &pricing_cfg(),
             &rfq_side(Side::Writer, year_ms, 100, 0, 1_000_000),
-            100,
+            100.0,
             0.20,
             0,
         ));

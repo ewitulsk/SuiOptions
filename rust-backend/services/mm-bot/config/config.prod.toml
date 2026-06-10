@@ -17,8 +17,8 @@ quoting_url        = "ws://quoting:9002/"
 
 signing_scheme     = "ed25519"
 
-# Replace these with the real mainnet pair you intend to make markets on.
-underlying_symbol  = "WBTC"
+# Replace these with the real mainnet pair(s) you intend to make markets on.
+underlying_symbols = ["WBTC"]
 settlement_symbol  = "USDC"
 
 rate               = 0.05
