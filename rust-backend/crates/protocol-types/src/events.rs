@@ -205,6 +205,250 @@ pub struct DeepBookPoolCreated {
     pub maker_fee: u64,
 }
 
+// ─── write-core / RFQ events (vault-implementation-guide docs 01–02) ───
+
+/// Self-write / venue escrow write (`bucket::write_collateralized`).
+/// Deliberately distinct from `WriteExecuted`: no premium, no signer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollateralizedWrite {
+    pub bucket_id: ObjectId,
+    pub writer: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RfqCreated {
+    pub rfq_id: ObjectId,
+    pub bucket_id: ObjectId,
+    /// Vault ID, or seller address-as-ID for standalone auctions.
+    pub origin: ObjectId,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub reserve_premium: u64,
+    #[serde(with = "u64_string")]
+    pub deadline_ms: u64,
+    #[serde(with = "u64_string")]
+    pub max_deadline_ms: u64,
+    #[serde(with = "u64_string")]
+    pub min_increment_bps: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RfqBid {
+    pub rfq_id: ObjectId,
+    pub bidder: SuiAddress,
+    pub call_recipient: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub premium: u64,
+    /// 0 if this was the first bid.
+    #[serde(with = "u64_string")]
+    pub previous_premium: u64,
+    /// Post-anti-snipe deadline.
+    #[serde(with = "u64_string")]
+    pub new_deadline_ms: u64,
+}
+
+/// Mirrors `WriteExecuted`'s economic fields so the positions
+/// materializer can treat both as "a position was minted with premium X".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RfqSettled {
+    pub rfq_id: ObjectId,
+    pub bucket_id: ObjectId,
+    pub origin: ObjectId,
+    pub winner: SuiAddress,
+    pub call_recipient: SuiAddress,
+    pub position_id: ObjectId,
+    pub position_recipient: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub gross_premium: u64,
+    #[serde(with = "u64_string")]
+    pub fee: u64,
+    #[serde(with = "u64_string")]
+    pub net_premium: u64,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RfqExpiredUnsold {
+    pub rfq_id: ObjectId,
+    pub bucket_id: ObjectId,
+    pub origin: ObjectId,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub reserve_premium: u64,
+}
+
+// ─── vault events (vault-implementation-guide doc 03) ───
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultCreated {
+    pub vault_id: ObjectId,
+    pub underlying_type: AssetType,
+    pub settlement_type: AssetType,
+    pub share_type: AssetType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultDeposit {
+    pub vault_id: ObjectId,
+    pub depositor: SuiAddress,
+    /// The round the deposit participates from (receipt round).
+    #[serde(with = "u64_string")]
+    pub round: u64,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharesClaimed {
+    pub vault_id: ObjectId,
+    pub owner: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub round: u64,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub shares: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WithdrawInitiated {
+    pub vault_id: ObjectId,
+    pub owner: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub round: u64,
+    #[serde(with = "u64_string")]
+    pub shares: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WithdrawCompleted {
+    pub vault_id: ObjectId,
+    pub owner: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub round: u64,
+    #[serde(with = "u64_string")]
+    pub shares: u64,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstantWithdraw {
+    pub vault_id: ObjectId,
+    pub owner: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub round: u64,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultBucketSelected {
+    pub vault_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub round: u64,
+    pub bucket_id: ObjectId,
+    #[serde(with = "u128_string")]
+    pub strike: u128,
+    pub strike_scale: u8,
+    #[serde(with = "u64_string")]
+    pub expiry_ms: u64,
+    #[serde(with = "u64_string")]
+    pub selling_ends_ms: u64,
+    /// Pyth cross at selection, at `spot_scale`.
+    #[serde(with = "u128_string")]
+    pub spot: u128,
+    pub spot_scale: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultPositionRedeemed {
+    pub vault_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub round: u64,
+    pub position_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub underlying_returned: u64,
+    #[serde(with = "u64_string")]
+    pub settlement_returned: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultProceedsSwapped {
+    pub vault_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub round: u64,
+    pub filler: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub settlement_out: u64,
+    #[serde(with = "u64_string")]
+    pub underlying_in: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultFeesCharged {
+    pub vault_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub round: u64,
+    #[serde(with = "u64_string")]
+    pub mgmt_fee: u64,
+    #[serde(with = "u64_string")]
+    pub perf_fee: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultRoundFinalized {
+    pub vault_id: ObjectId,
+    /// The round that was finalized (the pps index).
+    #[serde(with = "u64_string")]
+    pub round: u64,
+    #[serde(with = "u128_string")]
+    pub pps: u128,
+    #[serde(with = "u64_string")]
+    pub aum: u64,
+    #[serde(with = "u64_string")]
+    pub shares: u64,
+    #[serde(with = "u64_string")]
+    pub premium_collected: u64,
+    #[serde(with = "u64_string")]
+    pub premium_underlying: u64,
+    #[serde(with = "u64_string")]
+    pub withdrawals_owed: u64,
+    #[serde(with = "u64_string")]
+    pub shares_burned: u64,
+    #[serde(with = "u64_string")]
+    pub deposits_processed: u64,
+    #[serde(with = "u64_string")]
+    pub shares_minted: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultConfigUpdated {
+    pub vault_id: ObjectId,
+    /// Configs apply at the next finalize; this is the current round.
+    #[serde(with = "u64_string")]
+    pub round: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultDepositsPaused {
+    pub vault_id: ObjectId,
+    pub paused: bool,
+}
+
 /// Tagged union over every event the indexer may publish.
 ///
 /// The variant name is what shows up as `"type"` over the wire; the payload
@@ -228,6 +472,24 @@ pub enum ChainEvent {
     FeeUpdated(FeeUpdated),
     TreasuryWithdrawn(TreasuryWithdrawn),
     DeepBookPoolCreated(DeepBookPoolCreated),
+    CollateralizedWrite(CollateralizedWrite),
+    RfqCreated(RfqCreated),
+    RfqBid(RfqBid),
+    RfqSettled(RfqSettled),
+    RfqExpiredUnsold(RfqExpiredUnsold),
+    VaultCreated(VaultCreated),
+    VaultDeposit(VaultDeposit),
+    SharesClaimed(SharesClaimed),
+    WithdrawInitiated(WithdrawInitiated),
+    WithdrawCompleted(WithdrawCompleted),
+    InstantWithdraw(InstantWithdraw),
+    VaultBucketSelected(VaultBucketSelected),
+    VaultPositionRedeemed(VaultPositionRedeemed),
+    VaultProceedsSwapped(VaultProceedsSwapped),
+    VaultFeesCharged(VaultFeesCharged),
+    VaultRoundFinalized(VaultRoundFinalized),
+    VaultConfigUpdated(VaultConfigUpdated),
+    VaultDepositsPaused(VaultDepositsPaused),
 }
 
 /// An envelope wrapping a `ChainEvent` with the ordering metadata the indexer
