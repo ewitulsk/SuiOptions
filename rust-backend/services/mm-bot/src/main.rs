@@ -152,6 +152,11 @@ struct BotConfig {
     /// Pyth Hermes/Benchmarks settings. All fields have defaults.
     #[serde(default)]
     pyth: PythConfig,
+
+    /// DeepBook quoting loop (SO-158). Off by default; needs the network to
+    /// carry a DeepBook deployment in token-info.
+    #[serde(default)]
+    deepbook: mm_bot::deepbook::DeepBookQuoterConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -411,6 +416,52 @@ async fn main() -> Result<()> {
         max_price_age: Duration::from_millis(cfg.pyth.max_price_age_ms),
         max_publish_lag: Duration::from_millis(cfg.pyth.max_publish_lag_ms),
     };
+
+    // DeepBook quoting loop (SO-158): rest two-sided limit orders on every
+    // tradeable bucket pool of the configured markets, priced by the same
+    // Black-Scholes path that answers RFQs (one QuoterMarket per Market,
+    // sharing its vol buffer — SO-159).
+    if cfg.deepbook.enabled {
+        match snapshot.deepbook() {
+            Some(db) => {
+                let handles = sui_tx::tx::deepbook::DeepBookHandles {
+                    package: db.package()?,
+                    original_package: db.original_package()?,
+                    registry: db.registry()?,
+                };
+                let quoter_markets = markets
+                    .iter()
+                    .map(|m| mm_bot::deepbook::QuoterMarket {
+                        symbol: m.symbol.clone(),
+                        coin_type: m.coin_type.clone(),
+                        feed: m.feed,
+                        decimals: m.decimals,
+                        vol_buf: Arc::clone(&m.vol_buf),
+                    })
+                    .collect();
+                mm_bot::deepbook::spawn_quoter(mm_bot::deepbook::QuoterParams {
+                    cfg: cfg.deepbook.clone(),
+                    secrets: secrets_loaded.clone(),
+                    network: cfg.network,
+                    handles,
+                    api_url: cli.api_url.clone(),
+                    price_cache: price_cache.clone(),
+                    markets: quoter_markets,
+                    settlement_feed,
+                    settlement_coin_type: settlement_coin_type.clone(),
+                    settlement_decimals,
+                    pricing: pricing_cfg,
+                    staleness,
+                    fallback_vol: cfg.pyth.fallback_vol,
+                });
+                tracing::info!(markets = cfg.underlying_symbols.len(), "deepbook quoting enabled");
+            }
+            None => tracing::warn!(
+                "deepbook.enabled set but token-info reports no DeepBook deployment; quoting disabled"
+            ),
+        }
+    }
+
     // nonce is monotonic for the bot's lifetime — keep it across reconnects.
     let mut nonce_counter = now_ms();
 

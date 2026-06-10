@@ -118,6 +118,100 @@ impl ApiServiceClient {
         self.cache.write().insert(id, pricing.clone());
         Ok(Some(pricing))
     }
+
+    /// All buckets with a live DeepBook venue, fresh from `GET /buckets`
+    /// (never cached — `tradeable` flips with the clock and pool creation;
+    /// SO-158).
+    pub async fn tradeable_buckets(&self) -> Result<Vec<TradeableBucket>> {
+        let url = format!("{}/buckets", self.base_url);
+        let wire: BucketsWire = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("GET {url} returned an error status"))?
+            .json()
+            .await
+            .with_context(|| format!("decoding buckets from {url}"))?;
+
+        let mut out = Vec::new();
+        for series in wire.series {
+            for b in series.buckets {
+                if !b.tradeable {
+                    continue;
+                }
+                let Some(pool_id) = b.deepbook_pool_id else { continue };
+                out.push(TradeableBucket {
+                    bucket_id: ObjectId::from_hex(&b.bucket_id)
+                        .map_err(|e| anyhow::anyhow!("bucket_id {}: {e}", b.bucket_id))?,
+                    pool_id,
+                    call_coin_type: canonicalize_move_type(&b.call_coin_type),
+                    asset_coin_type: canonicalize_move_type(&series.asset_coin_type),
+                    settlement_coin_type: canonicalize_move_type(&series.settlement_coin_type),
+                    asset_decimals: series.asset_decimals,
+                    settlement_decimals: series.settlement_decimals,
+                    strike_raw: b
+                        .strike_raw
+                        .parse::<u128>()
+                        .with_context(|| format!("parsing strike_raw {:?}", b.strike_raw))?,
+                    strike_scale: b.strike_scale,
+                    expiry_ms: series.expiry_ms.max(0) as u64,
+                    invalidated: b.invalidated,
+                });
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// One bucket with a live DeepBook venue, flattened from `GET /buckets`
+/// (SO-158). Only buckets api-service marks `tradeable` are returned —
+/// pool exists, not cleaned, not expired.
+#[derive(Clone, Debug)]
+pub struct TradeableBucket {
+    pub bucket_id: ObjectId,
+    pub pool_id: String,
+    pub call_coin_type: String,
+    pub asset_coin_type: String,
+    pub settlement_coin_type: String,
+    pub asset_decimals: Option<u8>,
+    pub settlement_decimals: Option<u8>,
+    pub strike_raw: u128,
+    pub strike_scale: u8,
+    pub expiry_ms: u64,
+    pub invalidated: bool,
+}
+
+#[derive(Deserialize)]
+struct BucketsWire {
+    series: Vec<SeriesWire>,
+}
+
+#[derive(Deserialize)]
+struct SeriesWire {
+    asset_coin_type: String,
+    settlement_coin_type: String,
+    asset_decimals: Option<u8>,
+    settlement_decimals: Option<u8>,
+    expiry_ms: i64,
+    buckets: Vec<SeriesBucketWire>,
+}
+
+#[derive(Deserialize)]
+struct SeriesBucketWire {
+    bucket_id: String,
+    call_coin_type: String,
+    strike_raw: String,
+    strike_scale: u8,
+    invalidated: bool,
+    // serde defaults keep this client compatible with an api-service that
+    // predates SO-153.
+    #[serde(default)]
+    deepbook_pool_id: Option<String>,
+    #[serde(default)]
+    tradeable: bool,
 }
 
 #[cfg(test)]

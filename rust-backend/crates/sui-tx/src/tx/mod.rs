@@ -16,6 +16,7 @@
 pub mod account;
 pub mod admin;
 pub mod coin_pkg;
+pub mod deepbook;
 pub mod execute_write;
 pub mod sponsor;
 pub mod template;

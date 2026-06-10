@@ -95,3 +95,8 @@ bootstrap_samples      = 24
 bootstrap_interval_secs = 3_600
 # Sigma used until the buffer has enough samples, then live takes over.
 fallback_vol           = 0.6
+
+# DeepBook quoting (SO-158). Off by default for local runs — flip on once
+# the local stack serves deepbook ids from token-info.
+[deepbook]
+enabled = false
