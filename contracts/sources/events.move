@@ -33,6 +33,19 @@ public struct WriteExecuted has copy, drop {
     nonce: u64,
 }
 
+/// Emitted by `bucket::write_collateralized` (self-writes / venue escrow
+/// writes). Deliberately distinct from `WriteExecuted`: it has no premium
+/// and no signer — the indexer treats it as a new event type, existing
+/// consumers of `WriteExecuted` are unaffected.
+public struct CollateralizedWrite has copy, drop {
+    bucket_id: ID,
+    /// Tx sender (the venue or self-writer).
+    writer: address,
+    amount: u64,
+    range_start: u128,
+    range_end: u128,
+}
+
 public struct Exercised has copy, drop {
     bucket_id: ID,
     exerciser: address,
@@ -165,6 +178,16 @@ public(package) fun emit_write_executed(
     });
 }
 
+public(package) fun emit_collateralized_write(
+    bucket_id: ID,
+    writer: address,
+    amount: u64,
+    range_start: u128,
+    range_end: u128,
+) {
+    event::emit(CollateralizedWrite { bucket_id, writer, amount, range_start, range_end });
+}
+
 public(package) fun emit_exercised(
     bucket_id: ID,
     exerciser: address,
@@ -273,4 +296,60 @@ public(package) fun emit_treasury_withdrawn(
     recipient: address,
 ) {
     event::emit(TreasuryWithdrawn { asset_type, amount, recipient });
+}
+
+/// Test-only constructors so tests can assert emitted event *contents*
+/// (via `sui::event::events_by_type` + `==`), not just emission counts.
+#[test_only]
+public fun new_write_executed_for_testing(
+    bucket_id: ID,
+    signer_account_id: ID,
+    signer_token_recipient: address,
+    executor: address,
+    position_id: ID,
+    position_recipient: address,
+    call_token_recipient: address,
+    write_amount: u64,
+    gross_premium: u64,
+    fee: u64,
+    net_premium: u64,
+    range_start: u128,
+    range_end: u128,
+    nonce: u64,
+): WriteExecuted {
+    WriteExecuted {
+        bucket_id,
+        signer_account_id,
+        signer_token_recipient,
+        executor,
+        position_id,
+        position_recipient,
+        call_token_recipient,
+        write_amount,
+        gross_premium,
+        fee,
+        net_premium,
+        range_start,
+        range_end,
+        nonce,
+    }
+}
+
+/// The one `WriteExecuted` field a test cannot know up front (the Position
+/// is minted inside the call): expose it so the expected struct can be
+/// completed, then cross-checked against the recipient's inventory.
+#[test_only]
+public fun write_executed_position_id(e: &WriteExecuted): ID {
+    e.position_id
+}
+
+#[test_only]
+public fun new_collateralized_write_for_testing(
+    bucket_id: ID,
+    writer: address,
+    amount: u64,
+    range_start: u128,
+    range_end: u128,
+): CollateralizedWrite {
+    CollateralizedWrite { bucket_id, writer, amount, range_start, range_end }
 }
