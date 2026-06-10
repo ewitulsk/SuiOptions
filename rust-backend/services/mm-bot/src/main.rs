@@ -81,11 +81,14 @@ struct BotConfig {
     #[serde(default = "default_scheme")]
     signing_scheme: SigningScheme,
 
-    /// Asset pair to quote on. Symbols are looked up in
-    /// `deployments.json::testTokens.tokens`, and each must carry a
-    /// `pythFeedId` so the bot can source live prices.
-    #[serde(default = "default_underlying")]
-    underlying_symbol: String,
+    /// Underlyings to make markets in. Each symbol is looked up in the
+    /// token-info catalog (coin type, decimals, `pythFeedId`) and quoted
+    /// against the shared `settlement_symbol`. The bot subscribes to every
+    /// underlying's Pyth feed, keeps a per-underlying vol buffer, and prices
+    /// each bucket against its own pair's spot. A bucket whose pair isn't in
+    /// this list is declined.
+    #[serde(default = "default_underlying_symbols")]
+    underlying_symbols: Vec<String>,
     #[serde(default = "default_settlement")]
     settlement_symbol: String,
 
@@ -200,8 +203,8 @@ fn default_scheme() -> SigningScheme {
     SigningScheme::Ed25519
 }
 
-fn default_underlying() -> String {
-    "TBTC".into()
+fn default_underlying_symbols() -> Vec<String> {
+    vec!["TBTC".into()]
 }
 fn default_settlement() -> String {
     "TUSDC".into()
@@ -228,6 +231,22 @@ fn default_replenish_interval_secs() -> u64 {
     60
 }
 
+// -- Markets -------------------------------------------------------------
+
+/// One underlying the bot makes markets in. Settlement is shared across all
+/// markets (every bucket settles in the configured `settlement_symbol`), so
+/// only the underlying-specific pricing context lives here.
+struct Market {
+    symbol: String,
+    /// Canonical underlying coin type — the key a bucket's `asset_type` is
+    /// matched against to pick this market.
+    coin_type: String,
+    feed: PriceFeedId,
+    decimals: u8,
+    /// Realized-vol buffer fed from this underlying's USD price.
+    vol_buf: Arc<RwLock<RollingVolBuffer>>,
+}
+
 // -- Main loop -----------------------------------------------------------
 
 #[tokio::main]
@@ -250,30 +269,49 @@ async fn main() -> Result<()> {
     // /tokens catalog lookup (coin type, decimals, pyth feed). This is the
     // source the pricing path reads from; the bootstrap path separately looks
     // up the test-token faucet via `snapshot.faucet_token(symbol)`.
-    let underlying_spec = snapshot.token_spec(&cfg.underlying_symbol).with_context(|| {
-        format!(
-            "underlying symbol {} not in token-info catalog",
-            cfg.underlying_symbol
-        )
-    })?;
+    if cfg.underlying_symbols.is_empty() {
+        anyhow::bail!("no underlying_symbols configured — nothing to make markets in");
+    }
     let settlement_spec = snapshot.token_spec(&cfg.settlement_symbol).with_context(|| {
         format!(
             "settlement symbol {} not in token-info catalog",
             cfg.settlement_symbol
         )
     })?;
-
-    let underlying_feed = underlying_spec.pyth_feed().with_context(|| {
-        format!("missing pythFeedId for underlying {}", cfg.underlying_symbol)
-    })?;
     let settlement_feed = settlement_spec.pyth_feed().with_context(|| {
         format!("missing pythFeedId for settlement {}", cfg.settlement_symbol)
     })?;
-    let underlying_decimals = underlying_spec.decimals;
     let settlement_decimals = settlement_spec.decimals;
+    let settlement_coin_type =
+        protocol_types::asset::canonicalize_move_type(&settlement_spec.coin_type);
+
+    // Build one Market per underlying. Vol buffers are created here; their
+    // sampler tasks are spawned once the Pyth subscriber is up (below).
+    let samples_per_year =
+        (365.0 * 24.0 * 60.0 * 60.0 * 1000.0) / cfg.pyth.vol_sample_interval_ms as f64;
+    let vol_window_ms = cfg.pyth.vol_window_hours.saturating_mul(3_600_000);
+    let mut markets: Vec<Market> = Vec::with_capacity(cfg.underlying_symbols.len());
+    for sym in &cfg.underlying_symbols {
+        let spec = snapshot
+            .token_spec(sym)
+            .with_context(|| format!("underlying symbol {sym} not in token-info catalog"))?;
+        let feed = spec
+            .pyth_feed()
+            .with_context(|| format!("missing pythFeedId for underlying {sym}"))?;
+        tracing::info!(underlying = %sym, %feed, decimals = spec.decimals, "market feed resolved");
+        markets.push(Market {
+            symbol: sym.clone(),
+            coin_type: protocol_types::asset::canonicalize_move_type(&spec.coin_type),
+            feed,
+            decimals: spec.decimals,
+            vol_buf: Arc::new(RwLock::new(RollingVolBuffer::new(
+                vol_window_ms,
+                samples_per_year,
+            ))),
+        });
+    }
     tracing::info!(
-        underlying = %cfg.underlying_symbol,
-        underlying_feed = %underlying_feed,
+        markets = markets.len(),
         settlement = %cfg.settlement_symbol,
         settlement_feed = %settlement_feed,
         "pyth feeds resolved"
@@ -290,28 +328,30 @@ async fn main() -> Result<()> {
     tracing::info!(account_id = %account_id, "mm account ready");
     let account_id_pt = pt_object_id_from_sui(account_id);
 
-    // Keep underlying inventory topped up so the writer-MM (ask) side never
-    // runs dry mid-test. Only relevant if we advertise writer_mm and
-    // auto-replenish is enabled.
+    // Keep each underlying's inventory topped up so the writer-MM (ask) side
+    // never runs dry mid-test. One task per underlying. Only relevant if we
+    // advertise writer_mm and auto-replenish is enabled.
     if cfg.roles.contains(&MmRole::WriterMm) && cfg.underlying_replenish_threshold > 0 {
         let package = snapshot.package()?;
-        let underlying = snapshot.faucet_token(&cfg.underlying_symbol)?;
-        let (u_tokens_pkg, u_module) = underlying.module_path()?;
-        spawn_replenish_task(ReplenishParams {
-            secrets: secrets_loaded.clone(),
-            network: cfg.network,
-            package,
-            account_id,
-            tokens_pkg: u_tokens_pkg,
-            module: u_module,
-            faucet_id: underlying.faucet()?,
-            coin_type: underlying.coin_type.clone(),
-            symbol: cfg.underlying_symbol.clone(),
-            threshold: cfg.underlying_replenish_threshold,
-            top_up: cfg.underlying_replenish_amount,
-            interval_secs: cfg.underlying_replenish_interval_secs,
-            gas_budget: cli.gas_budget,
-        });
+        for sym in &cfg.underlying_symbols {
+            let underlying = snapshot.faucet_token(sym)?;
+            let (u_tokens_pkg, u_module) = underlying.module_path()?;
+            spawn_replenish_task(ReplenishParams {
+                secrets: secrets_loaded.clone(),
+                network: cfg.network,
+                package,
+                account_id,
+                tokens_pkg: u_tokens_pkg,
+                module: u_module,
+                faucet_id: underlying.faucet()?,
+                coin_type: underlying.coin_type.clone(),
+                symbol: sym.clone(),
+                threshold: cfg.underlying_replenish_threshold,
+                top_up: cfg.underlying_replenish_amount,
+                interval_secs: cfg.underlying_replenish_interval_secs,
+                gas_budget: cli.gas_budget,
+            });
+        }
     }
 
     // Pyth client + live price cache + rolling-vol buffer. The SSE task
@@ -322,38 +362,32 @@ async fn main() -> Result<()> {
         .build()
         .context("building reqwest client")?;
     let price_cache = PriceCache::new();
+    // Subscribe to every underlying's feed plus the shared settlement feed.
+    let mut all_feeds: Vec<PriceFeedId> = markets.iter().map(|m| m.feed).collect();
+    all_feeds.push(settlement_feed);
     let stream_rx = pyth::spawn_subscriber(
         http_client.clone(),
         cfg.pyth.hermes_url.clone(),
-        vec![underlying_feed, settlement_feed],
+        all_feeds.clone(),
     );
     price_cache.spawn_updater(stream_rx);
 
-    // Vol buffer is keyed off the underlying's USD price. Annualization
-    // factor follows the sample cadence.
-    let samples_per_year =
-        (365.0 * 24.0 * 60.0 * 60.0 * 1000.0) / cfg.pyth.vol_sample_interval_ms as f64;
-    let vol_buf = Arc::new(RwLock::new(RollingVolBuffer::new(
-        cfg.pyth.vol_window_hours.saturating_mul(3_600_000),
-        samples_per_year,
-    )));
-    spawn_vol_task(
-        http_client.clone(),
-        cfg.pyth.clone(),
-        underlying_feed,
-        price_cache.clone(),
-        Arc::clone(&vol_buf),
-    );
+    // One vol sampler per underlying — vol is keyed off each underlying's own
+    // USD price. Annualization factor follows the sample cadence.
+    for m in &markets {
+        spawn_vol_task(
+            http_client.clone(),
+            cfg.pyth.clone(),
+            m.feed,
+            price_cache.clone(),
+            Arc::clone(&m.vol_buf),
+        );
+    }
 
-    // Don't enter the RFQ loop until both feeds have produced at least one
-    // observation. Otherwise every early RFQ gets declined for stale data.
-    wait_for_first_prices(
-        &price_cache,
-        underlying_feed,
-        settlement_feed,
-        Duration::from_secs(30),
-    )
-    .await?;
+    // Don't enter the RFQ loop until every feed (all underlyings + settlement)
+    // has produced at least one observation. Otherwise early RFQs decline for
+    // stale data.
+    wait_for_first_prices(&price_cache, &all_feeds, Duration::from_secs(30)).await?;
 
     // RFQ pricing context — built once, reused across reconnects.
     let token_recipient = resolve_token_recipient(&cfg, &secrets_loaded)?;
@@ -367,15 +401,11 @@ async fn main() -> Result<()> {
     // api-service client: the bot looks each RFQ's bucket up by address to get
     // its true (strike, expiry, coin types) rather than trusting the broadcast.
     let api = ApiServiceClient::new(&cli.api_url);
-    // The single pair this bot sources a Pyth spot for. Canonicalized once so
-    // each lookup only compares; any bucket outside this pair is declined.
-    let cfg_underlying = protocol_types::asset::canonicalize_move_type(&underlying_spec.coin_type);
-    let cfg_settlement = protocol_types::asset::canonicalize_move_type(&settlement_spec.coin_type);
     tracing::info!(
         api_url = %cli.api_url,
-        underlying = %cfg_underlying,
-        settlement = %cfg_settlement,
-        "bucket lookups via api-service; quoting only this pair"
+        markets = ?cfg.underlying_symbols,
+        settlement = %cfg.settlement_symbol,
+        "bucket lookups via api-service; quoting these underlyings"
     );
     let staleness = Staleness {
         max_price_age: Duration::from_millis(cfg.pyth.max_price_age_ms),
@@ -521,40 +551,40 @@ async fn main() -> Result<()> {
                         }
                     };
 
-                    // Only quote the single pair we source a Pyth spot for.
-                    if !serves_pair(
-                        &bucket.asset_coin_type,
-                        &bucket.settlement_coin_type,
-                        &cfg_underlying,
-                        &cfg_settlement,
-                    ) {
-                        let reason = format!(
-                            "pair not served: {}/{}",
-                            bucket.asset_coin_type, bucket.settlement_coin_type
-                        );
-                        tracing::debug!(?request_id, %reason, "declining");
-                        if let Err(e) = ws_client::send_json(
-                            &mut ws,
-                            &MmToService::Decline {
-                                request_id,
-                                payload: protocol_types::messages::DeclinePayload { reason },
-                            },
-                        )
-                        .await
-                        {
-                            tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
-                            break 'serve;
+                    // Pick the market whose pair this bucket belongs to. None
+                    // means we don't source a spot for it — decline.
+                    let market = match find_market(&markets, &bucket, &settlement_coin_type) {
+                        Some(m) => m,
+                        None => {
+                            let reason = format!(
+                                "pair not served: {}/{}",
+                                bucket.asset_coin_type, bucket.settlement_coin_type
+                            );
+                            tracing::debug!(?request_id, %reason, "declining");
+                            if let Err(e) = ws_client::send_json(
+                                &mut ws,
+                                &MmToService::Decline {
+                                    request_id,
+                                    payload: protocol_types::messages::DeclinePayload { reason },
+                                },
+                            )
+                            .await
+                            {
+                                tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
+                                break 'serve;
+                            }
+                            continue 'serve;
                         }
-                        continue 'serve;
-                    }
+                    };
 
-                    // Live spot from Pyth, scaled into the bucket's units
-                    // (settlement smallest-units per underlying smallest-unit).
+                    // Live spot from Pyth for this market, scaled into the
+                    // bucket's units (settlement smallest-units per underlying
+                    // smallest-unit).
                     let spot_scaled = match compute_spot_from_cache(
                         &price_cache,
-                        underlying_feed,
+                        market.feed,
                         settlement_feed,
-                        underlying_decimals,
+                        market.decimals,
                         settlement_decimals,
                         staleness,
                     ) {
@@ -579,8 +609,10 @@ async fn main() -> Result<()> {
                             continue 'serve;
                         }
                     };
-                    let sigma =
-                        resolve_sigma(vol_buf.read().current_annualized(), cfg.pyth.fallback_vol);
+                    let sigma = resolve_sigma(
+                        market.vol_buf.read().current_annualized(),
+                        cfg.pyth.fallback_vol,
+                    );
 
                     let inputs = RfqPricingInputs {
                         write_amount: payload.write_amount,
@@ -600,6 +632,7 @@ async fn main() -> Result<()> {
                             per_unit,
                         } => {
                             tracing::debug!(
+                                market = %market.symbol,
                                 spot = spot_scaled,
                                 sigma,
                                 strike = strike_scaled,
@@ -669,70 +702,78 @@ async fn main() -> Result<()> {
                         "received bulk-view rfq broadcast"
                     );
                     let now = now_ms();
-                    // One spot/vol read for the whole batch.
-                    let premiums = match compute_spot_from_cache(
-                        &price_cache,
-                        underlying_feed,
-                        settlement_feed,
-                        underlying_decimals,
-                        settlement_decimals,
-                        staleness,
-                    ) {
-                        Ok(spot_scaled) => {
-                            let sigma = resolve_sigma(
-                                vol_buf.read().current_annualized(),
-                                cfg.pyth.fallback_vol,
-                            );
-                            let mut out = Vec::with_capacity(payload.bucket_ids.len());
-                            for bucket_id in &payload.bucket_ids {
-                                // Resolve each bucket from api-service (cached),
-                                // skip ones we can't price for any reason — a
-                                // bulk-view bucket has no per-bucket decline.
-                                let bucket = match api.bucket_pricing(*bucket_id).await {
-                                    Ok(Some(b)) => b,
-                                    Ok(None) => continue,
-                                    Err(e) => {
-                                        tracing::debug!(bucket_id = %bucket_id, error = %format!("{e:#}"), "bulk-view: bucket lookup failed; skipping");
-                                        continue;
-                                    }
-                                };
-                                if !serves_pair(
+                    // One spot/vol read per market for the whole batch; `None`
+                    // where that market's feed is currently stale.
+                    let spots: Vec<Option<(f64, f64)>> = markets
+                        .iter()
+                        .map(|m| {
+                            match compute_spot_from_cache(
+                                &price_cache,
+                                m.feed,
+                                settlement_feed,
+                                m.decimals,
+                                settlement_decimals,
+                                staleness,
+                            ) {
+                                Ok(spot) => Some((
+                                    spot,
+                                    resolve_sigma(
+                                        m.vol_buf.read().current_annualized(),
+                                        cfg.pyth.fallback_vol,
+                                    ),
+                                )),
+                                Err(_) => None,
+                            }
+                        })
+                        .collect();
+
+                    let mut premiums = Vec::with_capacity(payload.bucket_ids.len());
+                    for bucket_id in &payload.bucket_ids {
+                        // Resolve each bucket from api-service (cached); skip ones
+                        // we can't price for any reason — a bulk-view bucket has
+                        // no per-bucket decline.
+                        let bucket = match api.bucket_pricing(*bucket_id).await {
+                            Ok(Some(b)) => b,
+                            Ok(None) => continue,
+                            Err(e) => {
+                                tracing::debug!(bucket_id = %bucket_id, error = %format!("{e:#}"), "bulk-view: bucket lookup failed; skipping");
+                                continue;
+                            }
+                        };
+                        // Match the bucket to one of our markets and grab that
+                        // market's spot/sigma; skip if unserved or stale.
+                        let Some((spot_scaled, sigma)) = markets
+                            .iter()
+                            .position(|m| {
+                                serves_pair(
                                     &bucket.asset_coin_type,
                                     &bucket.settlement_coin_type,
-                                    &cfg_underlying,
-                                    &cfg_settlement,
-                                ) {
-                                    continue;
-                                }
-                                // Reuse the signed-RFQ pricer; we keep only the
-                                // premium — no Quote is built, no nonce burned,
-                                // nothing is signed.
-                                let inputs = RfqPricingInputs {
-                                    write_amount: payload.write_amount,
-                                    side: payload.side,
-                                    strike: bucket.strike,
-                                    strike_scale: bucket.strike_scale,
-                                    expiry_ms: bucket.expiry_ms,
-                                };
-                                if let PriceDecision::Quote { premium, .. } =
-                                    price_rfq(&pricing_cfg, &inputs, spot_scaled, sigma, now)
-                                {
-                                    out.push(BulkViewMmPremium {
-                                        bucket_id: *bucket_id,
-                                        premium,
-                                    });
-                                }
-                            }
-                            out
+                                    &m.coin_type,
+                                    &settlement_coin_type,
+                                )
+                            })
+                            .and_then(|i| spots[i])
+                        else {
+                            continue;
+                        };
+                        // Reuse the signed-RFQ pricer; we keep only the premium —
+                        // no Quote is built, no nonce burned, nothing is signed.
+                        let inputs = RfqPricingInputs {
+                            write_amount: payload.write_amount,
+                            side: payload.side,
+                            strike: bucket.strike,
+                            strike_scale: bucket.strike_scale,
+                            expiry_ms: bucket.expiry_ms,
+                        };
+                        if let PriceDecision::Quote { premium, .. } =
+                            price_rfq(&pricing_cfg, &inputs, spot_scaled, sigma, now)
+                        {
+                            premiums.push(BulkViewMmPremium {
+                                bucket_id: *bucket_id,
+                                premium,
+                            });
                         }
-                        Err(e) => {
-                            // No signable quote either way — return an empty
-                            // batch rather than declining (bulk view has no
-                            // per-bucket decline).
-                            tracing::debug!(?request_id, reason = e.as_str(), "bulk-view: stale market data; returning empty");
-                            Vec::new()
-                        }
-                    };
+                    }
                     if let Err(e) = ws_client::send_json(
                         &mut ws,
                         &MmToService::BulkViewQuote {
@@ -784,7 +825,7 @@ fn load_config(path: &Path) -> Result<BotConfig> {
         .with_context(|| format!("parsing {}", path.display()))?;
     tracing::debug!(
         network = %cfg.network,
-        underlying = %cfg.underlying_symbol,
+        underlyings = ?cfg.underlying_symbols,
         settlement = %cfg.settlement_symbol,
         scheme = ?cfg.signing_scheme,
         roles = ?cfg.roles,
@@ -864,30 +905,32 @@ async fn resolve_account(
         "account funded (settlement)"
     );
 
-    // Fund it with underlying so it can write calls to retail traders
-    // (Writer-MM / ask side). The background replenish task keeps this topped
+    // Fund it with each underlying so it can write calls to retail traders
+    // (Writer-MM / ask side). The background replenish tasks keep these topped
     // up as the inventory drains.
-    let underlying = snapshot.faucet_token(&cfg.underlying_symbol)?;
-    let (u_tokens_pkg, underlying_module) = underlying.module_path()?;
-    let fund_resp = mint_and_deposit_into_account(
-        &wrap.client,
-        &wrap.signer,
-        u_tokens_pkg,
-        &underlying_module,
-        underlying.faucet()?,
-        &underlying.coin_type,
-        created.account_id,
-        package,
-        cfg.bootstrap_underlying_amount,
-        cli.gas_budget,
-    )
-    .await?;
-    tracing::info!(
-        digest = %fund_resp.digest,
-        amount = cfg.bootstrap_underlying_amount,
-        symbol = %cfg.underlying_symbol,
-        "account funded (underlying)"
-    );
+    for sym in &cfg.underlying_symbols {
+        let underlying = snapshot.faucet_token(sym)?;
+        let (u_tokens_pkg, underlying_module) = underlying.module_path()?;
+        let fund_resp = mint_and_deposit_into_account(
+            &wrap.client,
+            &wrap.signer,
+            u_tokens_pkg,
+            &underlying_module,
+            underlying.faucet()?,
+            &underlying.coin_type,
+            created.account_id,
+            package,
+            cfg.bootstrap_underlying_amount,
+            cli.gas_budget,
+        )
+        .await?;
+        tracing::info!(
+            digest = %fund_resp.digest,
+            amount = cfg.bootstrap_underlying_amount,
+            symbol = %sym,
+            "account funded (underlying)"
+        );
+    }
 
     Ok(created.account_id)
 }
@@ -964,29 +1007,46 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Block until both feeds have at least one cached observation (ignoring
-/// the publish-lag bound). Times out so a misconfigured feed id surfaces
-/// quickly rather than hanging the bot forever.
+/// Block until every feed has at least one cached observation (ignoring the
+/// publish-lag bound). Times out so a misconfigured feed id surfaces quickly
+/// rather than hanging the bot forever.
 async fn wait_for_first_prices(
     cache: &PriceCache,
-    a: PriceFeedId,
-    b: PriceFeedId,
+    feeds: &[PriceFeedId],
     timeout: Duration,
 ) -> Result<()> {
     let start = std::time::Instant::now();
     loop {
-        if cache.peek(a).is_some() && cache.peek(b).is_some() {
-            tracing::info!("pyth: first prices observed for both feeds");
+        if let Some(missing) = feeds.iter().find(|f| cache.peek(**f).is_none()) {
+            if start.elapsed() > timeout {
+                return Err(anyhow!(
+                    "pyth: no observation within {:?} for feed {missing}",
+                    timeout
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        } else {
+            tracing::info!(feeds = feeds.len(), "pyth: first prices observed for all feeds");
             return Ok(());
         }
-        if start.elapsed() > timeout {
-            return Err(anyhow!(
-                "pyth: no observation within {:?} for one of {a} / {b}",
-                timeout
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Pick the market whose pair matches this bucket. `None` when no configured
+/// market quotes the bucket's `(underlying, settlement)` pair.
+fn find_market<'a>(
+    markets: &'a [Market],
+    bucket: &api_service_client::BucketPricing,
+    settlement_coin_type: &str,
+) -> Option<&'a Market> {
+    markets.iter().find(|m| {
+        serves_pair(
+            &bucket.asset_coin_type,
+            &bucket.settlement_coin_type,
+            &m.coin_type,
+            settlement_coin_type,
+        )
+    })
 }
 
 /// Inputs for the underlying-inventory replenish task.
