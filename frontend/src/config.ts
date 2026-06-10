@@ -37,6 +37,13 @@ export const AUTH_URL: string =
 export const GAS_STATION_URL: string =
   (import.meta.env.VITE_GAS_STATION_URL as string | undefined) ?? "http://127.0.0.1:9009";
 
+// price-charting public base URL (SO-157). Serves OHLC bars (REST) and live
+// bar updates (WS at `<base>/ws`, http(s) scheme auto-swapped to ws(s)).
+// Deployed builds set VITE_CHARTS_URL to the env's public route
+// (e.g. https://<host>/<env>/charts).
+export const CHARTS_URL: string =
+  (import.meta.env.VITE_CHARTS_URL as string | undefined) ?? "http://127.0.0.1:9011";
+
 // Populated by `initConfig()`. Exported as live bindings — consumers that
 // `import { PACKAGE_ID }` see the value once initialization completes (which
 // happens before the first render).
@@ -48,6 +55,10 @@ export let TREASURY_ID: string | undefined;
 // protocol ids. All `undefined` on networks without a DeepBook deployment
 // (devnet) — DeepBook features simply don't render there.
 export let DEEPBOOK_PACKAGE_ID: string | undefined;
+/** Original publish id — event/struct TYPES resolve here (BalanceManager
+ * type tag, BalanceManagerEvent queries), while CALLS target the upgraded
+ * `DEEPBOOK_PACKAGE_ID`. */
+export let DEEPBOOK_ORIGINAL_PACKAGE_ID: string | undefined;
 export let DEEPBOOK_REGISTRY_ID: string | undefined;
 export let DEEP_COIN_TYPE: string | undefined;
 /** `pool::create_permissionless_pool` fee in DEEP atomic units (6 decimals). */
@@ -155,6 +166,7 @@ export async function initConfig(): Promise<void> {
 
   const db = info.deepbook;
   DEEPBOOK_PACKAGE_ID = db?.packageId;
+  DEEPBOOK_ORIGINAL_PACKAGE_ID = db?.originalPackageId;
   DEEPBOOK_REGISTRY_ID = db?.registryId;
   DEEP_COIN_TYPE = db?.deepCoinType;
   DEEPBOOK_POOL_CREATION_FEE = db ? BigInt(db.poolCreationFee) : undefined;

@@ -1,0 +1,415 @@
+// DeepBook trade panel (SO-157): market + limit orders on a bucket's pool,
+// side-by-side with the RFQ mint flow on the Buy screen.
+//
+// Funds model: each order's PTB deposits exactly what it needs from the
+// wallet into the user's BalanceManager (created once via "Enable trading");
+// proceeds and cancelled funds accumulate as BM balances and "Withdraw all"
+// drains both assets back to the wallet. Taker fees are paid in the input
+// token (pay_with_deep=false, 1.25× penalty — no DEEP needed, ever).
+
+import { useMemo, useState } from "react";
+import { useCurrentAccount } from "@mysten/dapp-kit";
+import { useQueryClient } from "@tanstack/react-query";
+
+import type { Bucket, Series } from "../api/client";
+import {
+  useBalanceManager,
+  useBmBalances,
+  useOpenOrders,
+  useOrderBook,
+  type PoolRef,
+} from "../api/deepbook";
+import { useCoinBalance } from "../api/useCoinBalance";
+import {
+  bidNotional,
+  buildCancelAllTx,
+  buildCancelOrderTx,
+  buildEnableTradingTx,
+  buildPlaceLimitOrderTx,
+  buildPlaceMarketOrderTx,
+  buildWithdrawAllTx,
+  deriveVenueParams,
+  toRawPrice,
+  toRawQty,
+} from "../tx/deepbook";
+import { useSubmitTransaction } from "../tx/submit";
+
+type Props = {
+  bucket: Bucket;
+  series: Series;
+};
+
+type Tab = "market" | "limit";
+type Side = "buy" | "sell";
+
+function shortId(id: string): string {
+  return id.length > 10 ? `${id.slice(0, 6)}…${id.slice(-4)}` : id;
+}
+
+export function TradePanel({ bucket, series }: Props) {
+  const account = useCurrentAccount();
+  const submitTx = useSubmitTransaction();
+  const queryClient = useQueryClient();
+
+  const [tab, setTab] = useState<Tab>("market");
+  const [side, setSide] = useState<Side>("buy");
+  const [qtyStr, setQtyStr] = useState("0.01");
+  const [priceStr, setPriceStr] = useState("");
+  const [slippagePct, setSlippagePct] = useState(1);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const baseDec = series.asset_decimals ?? 8;
+  const quoteDec = series.settlement_decimals ?? 6;
+  const pool: PoolRef | null = bucket.deepbook_pool_id
+    ? {
+        poolId: bucket.deepbook_pool_id,
+        baseCoinType: bucket.call_coin_type,
+        quoteCoinType: series.settlement_coin_type,
+        baseDecimals: baseDec,
+        quoteDecimals: quoteDec,
+      }
+    : null;
+  const venue = deriveVenueParams(baseDec, quoteDec);
+
+  const addr = account?.address ?? null;
+  const bm = useBalanceManager(addr);
+  const book = useOrderBook(pool, addr);
+  const openOrders = useOpenOrders(pool, bm.data ?? null, addr);
+  const bmBalances = useBmBalances(pool, bm.data ?? null, addr);
+  const walletQuote = useCoinBalance(addr, series.settlement_coin_type);
+  const walletBase = useCoinBalance(addr, bucket.call_coin_type);
+
+  const refreshAll = () => {
+    for (const key of ["deepbook-book", "deepbook-open-orders", "deepbook-bm-balances", "coin-balance"]) {
+      queryClient.invalidateQueries({ queryKey: [key] });
+    }
+  };
+
+  const qty = Number(qtyStr) || 0;
+  const qtyRaw = toRawQty(qty, baseDec, venue.lotSize);
+  const limitPrice = Number(priceStr) || 0;
+
+  // Market estimate: walk the book for `qty`.
+  const marketEstimate = useMemo(() => {
+    const levels = side === "buy" ? book.data?.asks : book.data?.bids;
+    if (!levels || levels.length === 0 || qty <= 0) return null;
+    let remaining = qty;
+    let cost = 0;
+    for (const l of levels) {
+      const take = Math.min(remaining, l.qty);
+      cost += take * l.price;
+      remaining -= take;
+      if (remaining <= 1e-12) break;
+    }
+    if (remaining > 1e-12) return { cost, partial: true };
+    return { cost, partial: false };
+  }, [book.data, side, qty]);
+
+  const run = async (label: string, build: () => Parameters<typeof submitTx>[0]) => {
+    setBusy(true);
+    setNote(null);
+    try {
+      await submitTx(build());
+      setNote(`${label} submitted`);
+      refreshAll();
+    } catch (e) {
+      setNote(`${label} failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!pool) return null;
+
+  // ---- not yet enabled --------------------------------------------------
+  if (!bm.isLoading && !bm.data) {
+    return (
+      <div className="panel">
+        <div className="panel__head">
+          <span className="panel__head-dot"></span>trade on deepbook
+        </div>
+        <div className="panel__sub" style={{ marginBottom: 10 }}>
+          One-time setup: create your DeepBook trading account (a shared
+          BalanceManager object your orders settle through).
+        </div>
+        <button
+          className="cta"
+          style={{ width: "auto", padding: "10px 18px" }}
+          disabled={!account || busy}
+          onClick={() =>
+            run("enable trading", () => buildEnableTradingTx()).then(() =>
+              queryClient.invalidateQueries({ queryKey: ["deepbook-bm"] }),
+            )
+          }
+        >
+          {!account ? "Connect to trade" : busy ? "Setting up…" : "Enable trading"}
+        </button>
+        {note && <div className="panel__sub" style={{ marginTop: 8 }}>{note}</div>}
+      </div>
+    );
+  }
+
+  const bmId = bm.data!;
+  const bmBase = bmBalances.data?.baseRaw ?? 0n;
+  const bmQuote = bmBalances.data?.quoteRaw ?? 0n;
+  const settle = series.settlement_symbol;
+
+  const placeMarket = () => {
+    if (qtyRaw <= 0n || !marketEstimate) return;
+    const deposit =
+      side === "buy"
+        ? (() => {
+            const cap = BigInt(
+              Math.ceil(marketEstimate.cost * (1 + slippagePct / 100) * 10 ** quoteDec),
+            );
+            return { type: pool.quoteCoinType, amount: cap > bmQuote ? cap - bmQuote : 0n };
+          })()
+        : { type: pool.baseCoinType, amount: qtyRaw > bmBase ? qtyRaw - bmBase : 0n };
+    void run(`market ${side}`, () =>
+      buildPlaceMarketOrderTx({
+        poolId: pool.poolId,
+        bmId,
+        baseCoinType: pool.baseCoinType,
+        quoteCoinType: pool.quoteCoinType,
+        isBid: side === "buy",
+        qtyRaw,
+        depositCoinType: deposit.type,
+        depositAmount: deposit.amount,
+      }),
+    );
+  };
+
+  const placeLimit = () => {
+    if (qtyRaw <= 0n || limitPrice <= 0) return;
+    const priceRaw = toRawPrice(limitPrice, baseDec, quoteDec, venue.tickSize, side === "buy" ? "bid" : "ask");
+    if (priceRaw <= 0n) return;
+    const deposit =
+      side === "buy"
+        ? (() => {
+            const need = bidNotional(priceRaw, qtyRaw);
+            return { type: pool.quoteCoinType, amount: need > bmQuote ? need - bmQuote : 0n };
+          })()
+        : { type: pool.baseCoinType, amount: qtyRaw > bmBase ? qtyRaw - bmBase : 0n };
+    void run(`limit ${side}`, () =>
+      buildPlaceLimitOrderTx({
+        poolId: pool.poolId,
+        bmId,
+        baseCoinType: pool.baseCoinType,
+        quoteCoinType: pool.quoteCoinType,
+        isBid: side === "buy",
+        qtyRaw,
+        priceRaw,
+        depositCoinType: deposit.type,
+        depositAmount: deposit.amount,
+      }),
+    );
+  };
+
+  const poolRef = {
+    poolId: pool.poolId,
+    bmId,
+    baseCoinType: pool.baseCoinType,
+    quoteCoinType: pool.quoteCoinType,
+  };
+  const fmtQuote = (raw: bigint) => (Number(raw) / 10 ** quoteDec).toFixed(2);
+  const fmtBase = (raw: bigint) => (Number(raw) / 10 ** baseDec).toString();
+
+  return (
+    <div className="panel">
+      <div
+        className="panel__head"
+        style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
+      >
+        <span>
+          <span className="panel__head-dot"></span>trade on deepbook
+          {bucket.invalidated && (
+            <span style={{ marginLeft: 8, fontSize: 10, opacity: 0.8 }}>
+              · minting frozen — secondary trading open
+            </span>
+          )}
+        </span>
+        <span style={{ display: "flex", gap: 4 }}>
+          {(["market", "limit"] as Tab[]).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              style={{
+                border: "none",
+                borderRadius: 6,
+                padding: "2px 10px",
+                fontSize: 11,
+                cursor: "pointer",
+                background: tab === t ? "var(--aqua-line, rgba(92,107,122,0.18))" : "transparent",
+                color: "inherit",
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </span>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1.4fr)", gap: 14 }}>
+        {/* order book */}
+        <div style={{ fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
+          {(book.data?.asks ?? []).slice(0, 5).reverse().map((l, i) => (
+            <div key={`a${i}`} style={{ display: "flex", justifyContent: "space-between", color: "var(--aqua-down, #e15d6b)" }}>
+              <span>{l.price.toFixed(2)}</span>
+              <span style={{ opacity: 0.7 }}>{l.qty}</span>
+            </div>
+          ))}
+          <div style={{ borderTop: "1px solid var(--aqua-line, rgba(92,107,122,0.2))", margin: "4px 0" }} />
+          {(book.data?.bids ?? []).slice(0, 5).map((l, i) => (
+            <div key={`b${i}`} style={{ display: "flex", justifyContent: "space-between", color: "var(--aqua-up, #1fbf75)" }}>
+              <span>{l.price.toFixed(2)}</span>
+              <span style={{ opacity: 0.7 }}>{l.qty}</span>
+            </div>
+          ))}
+          {(book.data?.asks?.length ?? 0) + (book.data?.bids?.length ?? 0) === 0 && (
+            <div className="panel__sub">book is empty</div>
+          )}
+        </div>
+
+        {/* order form */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", gap: 6 }}>
+            {(["buy", "sell"] as Side[]).map((s) => (
+              <button
+                key={s}
+                onClick={() => setSide(s)}
+                style={{
+                  flex: 1,
+                  padding: "6px 0",
+                  borderRadius: 8,
+                  border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))",
+                  cursor: "pointer",
+                  background:
+                    side === s
+                      ? s === "buy"
+                        ? "var(--aqua-up, #1fbf75)"
+                        : "var(--aqua-down, #e15d6b)"
+                      : "transparent",
+                  color: side === s ? "#fff" : "inherit",
+                  fontWeight: 600,
+                }}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+
+          <label style={{ fontSize: 11, opacity: 0.8 }}>
+            options
+            <input
+              value={qtyStr}
+              onChange={(e) => setQtyStr(e.target.value)}
+              inputMode="decimal"
+              style={{ width: "100%", padding: 6, borderRadius: 6, border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))", background: "transparent", color: "inherit" }}
+            />
+          </label>
+
+          {tab === "limit" ? (
+            <label style={{ fontSize: 11, opacity: 0.8 }}>
+              limit price ({settle})
+              <input
+                value={priceStr}
+                onChange={(e) => setPriceStr(e.target.value)}
+                inputMode="decimal"
+                placeholder={book.data?.asks[0] ? book.data.asks[0].price.toFixed(2) : ""}
+                style={{ width: "100%", padding: 6, borderRadius: 6, border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))", background: "transparent", color: "inherit" }}
+              />
+            </label>
+          ) : (
+            <div style={{ fontSize: 11, opacity: 0.8 }}>
+              max slippage{" "}
+              <select
+                value={slippagePct}
+                onChange={(e) => setSlippagePct(Number(e.target.value))}
+                style={{ background: "transparent", color: "inherit", border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))", borderRadius: 6, padding: 2 }}
+              >
+                {[0.5, 1, 2, 5].map((p) => (
+                  <option key={p} value={p}>{p}%</option>
+                ))}
+              </select>
+              {marketEstimate && (
+                <div style={{ marginTop: 4 }}>
+                  est. {side === "buy" ? "cost" : "proceeds"}: {marketEstimate.cost.toFixed(2)} {settle}
+                  {marketEstimate.partial && " · book too thin for full size"}
+                </div>
+              )}
+            </div>
+          )}
+
+          <button
+            className="cta"
+            style={{ width: "100%", padding: "10px 0" }}
+            disabled={
+              busy ||
+              !account ||
+              qtyRaw <= 0n ||
+              (tab === "market" && (!marketEstimate || marketEstimate.partial)) ||
+              (tab === "limit" && limitPrice <= 0)
+            }
+            onClick={tab === "market" ? placeMarket : placeLimit}
+          >
+            {busy ? "Submitting…" : `${tab} ${side} ${qty || ""} option${qty === 1 ? "" : "s"}`}
+          </button>
+          {note && <div className="panel__sub">{note}</div>}
+          <div className="panel__sub" style={{ fontSize: 10 }}>
+            wallet: {fmtQuote(BigInt(walletQuote.data ?? "0"))} {settle} ·{" "}
+            {fmtBase(BigInt(walletBase.data ?? "0"))} options
+          </div>
+        </div>
+      </div>
+
+      {/* open orders + settled funds */}
+      <div style={{ marginTop: 10, fontSize: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ opacity: 0.8 }}>
+            open orders: {openOrders.data?.length ?? 0} · in trading account:{" "}
+            {fmtQuote(bmQuote)} {settle} + {fmtBase(bmBase)} options
+          </span>
+          <span style={{ display: "flex", gap: 6 }}>
+            {(openOrders.data?.length ?? 0) > 0 && (
+              <button
+                disabled={busy}
+                onClick={() => void run("cancel all", () => buildCancelAllTx(poolRef))}
+                style={{ fontSize: 11, cursor: "pointer", background: "transparent", border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))", borderRadius: 6, padding: "2px 8px", color: "inherit" }}
+              >
+                cancel all
+              </button>
+            )}
+            {(bmBase > 0n || bmQuote > 0n) && account && (
+              <button
+                disabled={busy}
+                onClick={() =>
+                  void run("withdraw", () =>
+                    buildWithdrawAllTx({ ...poolRef, recipient: account.address }),
+                  )
+                }
+                style={{ fontSize: 11, cursor: "pointer", background: "transparent", border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))", borderRadius: 6, padding: "2px 8px", color: "inherit" }}
+              >
+                withdraw all
+              </button>
+            )}
+          </span>
+        </div>
+        {(openOrders.data ?? []).map((id) => (
+          <div key={id} style={{ display: "flex", justifyContent: "space-between", marginTop: 4, opacity: 0.85 }}>
+            <span>#{shortId(id)}</span>
+            <button
+              disabled={busy}
+              onClick={() =>
+                void run("cancel", () => buildCancelOrderTx({ ...poolRef, orderId: BigInt(id) }))
+              }
+              style={{ fontSize: 11, cursor: "pointer", background: "transparent", border: "none", color: "var(--aqua-down, #e15d6b)" }}
+            >
+              cancel
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
