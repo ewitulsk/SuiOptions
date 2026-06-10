@@ -44,11 +44,18 @@ async fn main() -> Result<()> {
             format!("fetching package_id from token-info at {}", cfg.token_info_url)
         })?;
     let package_id = snapshot.package_info.package_id.clone();
+    // DeepBook PoolCreated events resolve to the ORIGINAL package id (SO-152).
+    // Absent on networks without a DeepBook deployment — ingestion of pool
+    // events is simply off there.
+    let deepbook_original = snapshot
+        .deepbook()
+        .map(|d| d.original_package_id.clone());
     info!(
         network = %cfg.network,
         package_id = %package_id,
+        deepbook_original = %deepbook_original.as_deref().unwrap_or("<none>"),
         token_info_url = %cfg.token_info_url,
-        "resolved package id from token-info"
+        "resolved package ids from token-info"
     );
 
     // Stand up the DB pool and apply pending migrations before anything else
@@ -153,6 +160,7 @@ async fn main() -> Result<()> {
         Arc::clone(&store),
         repo.clone(),
         &package_id,
+        deepbook_original.as_deref(),
         Arc::clone(&progress_state),
     );
     let (executor, _term_sender) = setup_single_workflow(

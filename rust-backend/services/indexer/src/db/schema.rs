@@ -74,6 +74,23 @@ diesel::table! {
 }
 
 diesel::table! {
+    bucket_deepbook_pools (bucket_id) {
+        bucket_id            -> Text,
+        pool_id              -> Text,
+        base_asset_type      -> Text,
+        quote_asset_type     -> Text,
+        tick_size            -> Int8,
+        lot_size             -> Int8,
+        min_size             -> Int8,
+        taker_fee            -> Int8,
+        maker_fee            -> Int8,
+        created_checkpoint   -> Int8,
+        created_timestamp_ms -> Int8,
+        updated_at_seq       -> Int8,
+    }
+}
+
+diesel::table! {
     event_participants (sequence, address, role) {
         sequence -> Int8,
         address  -> Text,
@@ -83,6 +100,7 @@ diesel::table! {
 
 diesel::joinable!(account_balances -> accounts (account_id));
 diesel::joinable!(event_participants -> indexed_events (sequence));
+diesel::joinable!(bucket_deepbook_pools -> buckets (bucket_id));
 diesel::allow_tables_to_appear_in_same_query!(
     event_participants,
     indexer_progress,
@@ -91,4 +109,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     account_balances,
     buckets,
     positions,
+    bucket_deepbook_pools,
 );

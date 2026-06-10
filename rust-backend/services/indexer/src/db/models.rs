@@ -14,11 +14,11 @@ use protocol_types::asset::AssetType;
 use protocol_types::events::ChainEvent;
 use protocol_types::ids::{ObjectId, SuiAddress};
 
-use crate::store::{AccountState, BucketState, PositionState};
+use crate::store::{AccountState, BucketState, DeepBookPoolState, PositionState};
 
 use super::schema::{
-    account_balances, accounts, buckets, event_participants, indexed_events, indexer_progress,
-    positions,
+    account_balances, accounts, bucket_deepbook_pools, buckets, event_participants,
+    indexed_events, indexer_progress, positions,
 };
 
 // ---------- indexer_progress ----------
@@ -91,6 +91,7 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::SigningKeyRotated(_) => "SigningKeyRotated",
         ChainEvent::FeeUpdated(_) => "FeeUpdated",
         ChainEvent::TreasuryWithdrawn(_) => "TreasuryWithdrawn",
+        ChainEvent::DeepBookPoolCreated(_) => "DeepBookPoolCreated",
     }
 }
 
@@ -138,6 +139,50 @@ pub struct BucketRow {
     pub cleaned: bool,
     pub invalidated: bool,
     pub updated_at_seq: i64,
+}
+
+// ---------- bucket_deepbook_pools ----------
+
+/// One bucket's DeepBook trading venue (SO-152). Insert-only with first-pool-
+/// wins semantics (`ON CONFLICT DO NOTHING` on both bucket_id and pool_id).
+#[derive(Queryable, Identifiable, Insertable, Debug, Clone)]
+#[diesel(table_name = bucket_deepbook_pools)]
+#[diesel(primary_key(bucket_id))]
+pub struct DeepBookPoolRow {
+    pub bucket_id: String,
+    pub pool_id: String,
+    pub base_asset_type: String,
+    pub quote_asset_type: String,
+    pub tick_size: i64,
+    pub lot_size: i64,
+    pub min_size: i64,
+    pub taker_fee: i64,
+    pub maker_fee: i64,
+    pub created_checkpoint: i64,
+    pub created_timestamp_ms: i64,
+    pub updated_at_seq: i64,
+}
+
+impl DeepBookPoolRow {
+    pub fn into_state(self) -> anyhow::Result<(ObjectId, DeepBookPoolState)> {
+        let bucket = ObjectId::from_hex(&self.bucket_id)
+            .map_err(|e| anyhow::anyhow!("deepbook bucket_id {}: {e}", self.bucket_id))?;
+        let pool = ObjectId::from_hex(&self.pool_id)
+            .map_err(|e| anyhow::anyhow!("deepbook pool_id {}: {e}", self.pool_id))?;
+        Ok((
+            bucket,
+            DeepBookPoolState {
+                pool_id: pool,
+                base_asset_type: AssetType::new(self.base_asset_type),
+                quote_asset_type: AssetType::new(self.quote_asset_type),
+                tick_size: self.tick_size as u64,
+                lot_size: self.lot_size as u64,
+                min_size: self.min_size as u64,
+                taker_fee: self.taker_fee as u64,
+                maker_fee: self.maker_fee as u64,
+            },
+        ))
+    }
 }
 
 // ---------- positions ----------

@@ -15,14 +15,14 @@ use tracing::{debug, trace};
 
 use protocol_types::asset::AssetType;
 use protocol_types::events::{
-    AccountDeposit, AccountWithdraw, BucketCreated, ChainEvent, Exercised, IndexedEvent, Redeemed,
-    WriteExecuted,
+    AccountDeposit, AccountWithdraw, BucketCreated, ChainEvent, DeepBookPoolCreated, Exercised,
+    IndexedEvent, Redeemed, WriteExecuted,
 };
 use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::db::models::{
     u128_to_bigdecimal, u64_to_bigdecimal, AccountBalanceRow, AccountRow, BucketRow,
-    EventParticipantRow, PositionRow,
+    DeepBookPoolRow, EventParticipantRow, PositionRow,
 };
 use crate::db::{CheckpointBatch, EventBuild, HydratedViews};
 
@@ -54,6 +54,20 @@ pub struct BucketState {
     pub exercise_cursor: u128,
     pub cleaned: bool,
     pub invalidated: bool,
+}
+
+/// A bucket's DeepBook trading venue (SO-152). Written once per bucket —
+/// first `PoolCreated` for a call coin wins; later ones are ignored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeepBookPoolState {
+    pub pool_id: ObjectId,
+    pub base_asset_type: AssetType,
+    pub quote_asset_type: AssetType,
+    pub tick_size: u64,
+    pub lot_size: u64,
+    pub min_size: u64,
+    pub taker_fee: u64,
+    pub maker_fee: u64,
 }
 
 /// A live position derived from a `WriteExecuted` event. `Redeemed` removes
@@ -92,6 +106,8 @@ struct Inner {
     // identity as the off-chain handle until the indexer can resolve real
     // object ids).
     positions: BTreeMap<(ObjectId, u128), PositionState>,
+    /// bucket_id → its DeepBook venue (SO-152).
+    deepbook_pools: BTreeMap<ObjectId, DeepBookPoolState>,
 }
 
 impl Default for Inner {
@@ -101,6 +117,7 @@ impl Default for Inner {
             accounts: BTreeMap::new(),
             buckets: BTreeMap::new(),
             positions: BTreeMap::new(),
+            deepbook_pools: BTreeMap::new(),
         }
     }
 }
@@ -213,6 +230,7 @@ impl Store {
         inner.accounts = views.accounts;
         inner.buckets = views.buckets;
         inner.positions = views.positions;
+        inner.deepbook_pools = views.deepbook_pools;
         inner.next_sequence = last_sequence + 1;
     }
 
@@ -226,6 +244,23 @@ impl Store {
 
     pub fn bucket(&self, id: &ObjectId) -> Option<BucketState> {
         self.inner.read().buckets.get(id).cloned()
+    }
+
+    /// Resolve a bucket by its call coin type (SO-152: DeepBook pools are
+    /// tied to buckets via `PoolCreated`'s base asset). Linear scan — the
+    /// bucket set is small (a handful per active series).
+    pub fn bucket_by_call_type(&self, call_type: &AssetType) -> Option<(ObjectId, BucketState)> {
+        self.inner
+            .read()
+            .buckets
+            .iter()
+            .find(|(_, b)| b.call_type == *call_type)
+            .map(|(id, b)| (*id, b.clone()))
+    }
+
+    /// The bucket's DeepBook venue, if one has been created (SO-152).
+    pub fn deepbook_pool(&self, bucket_id: &ObjectId) -> Option<DeepBookPoolState> {
+        self.inner.read().deepbook_pools.get(bucket_id).cloned()
     }
 
     pub fn positions_for_recipient(&self, recipient: &SuiAddress) -> Vec<PositionState> {
@@ -317,9 +352,12 @@ fn collect_participants(
             }
         }
         ChainEvent::TreasuryWithdrawn(t) => push(t.recipient.to_hex(), "treasury_recipient"),
+        // DeepBookPoolCreated carries no addresses (the creator isn't in the
+        // event payload).
         ChainEvent::BucketCreated(_)
         | ChainEvent::BucketCleaned(_)
-        | ChainEvent::FeeUpdated(_) => {}
+        | ChainEvent::FeeUpdated(_)
+        | ChainEvent::DeepBookPoolCreated(_) => {}
     }
 }
 
@@ -420,6 +458,19 @@ fn stage_event_into_batch(
                     .push(account_row(r.account_id, state, sequence));
             }
         }
+        ChainEvent::DeepBookPoolCreated(p) => {
+            // First pool wins — stage the row only when this event's pool is
+            // the one apply_event recorded (the DB insert is additionally
+            // ON CONFLICT DO NOTHING, so replays stay idempotent).
+            if inner.deepbook_pools.get(&p.bucket_id).map(|s| s.pool_id) == Some(p.pool_id) {
+                batch.deepbook_pools.push(deepbook_pool_row(
+                    p,
+                    batch.checkpoint,
+                    timestamp_ms,
+                    sequence,
+                ));
+            }
+        }
         ChainEvent::ExpiredOptionBurned(_)
         | ChainEvent::FeeUpdated(_)
         | ChainEvent::TreasuryWithdrawn(_) => {
@@ -465,6 +516,28 @@ fn write_position_row(
         mm_account_id: w.signer_account_id.to_hex(),
         tx_digest: tx_digest.to_string(),
         minted_at_ms,
+    }
+}
+
+fn deepbook_pool_row(
+    p: &DeepBookPoolCreated,
+    checkpoint: i64,
+    timestamp_ms: i64,
+    sequence: i64,
+) -> DeepBookPoolRow {
+    DeepBookPoolRow {
+        bucket_id: p.bucket_id.to_hex(),
+        pool_id: p.pool_id.to_hex(),
+        base_asset_type: p.base_asset_type.as_str().to_string(),
+        quote_asset_type: p.quote_asset_type.as_str().to_string(),
+        tick_size: p.tick_size as i64,
+        lot_size: p.lot_size as i64,
+        min_size: p.min_size as i64,
+        taker_fee: p.taker_fee as i64,
+        maker_fee: p.maker_fee as i64,
+        created_checkpoint: checkpoint,
+        created_timestamp_ms: timestamp_ms,
+        updated_at_seq: sequence,
     }
 }
 
@@ -529,6 +602,35 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent) {
             if let Some(acct) = inner.accounts.get_mut(&r.account_id) {
                 acct.signing_pubkey = r.new_pubkey.clone();
                 acct.signing_scheme = Some(r.new_scheme);
+            }
+        }
+        ChainEvent::DeepBookPoolCreated(p) => {
+            // First pool wins. A second PoolCreated for the same bucket means
+            // someone burned 500 DEEP on a duplicate venue — keep the
+            // original mapping and surface the anomaly.
+            if let Some(existing) = inner.deepbook_pools.get(&p.bucket_id) {
+                if existing.pool_id != p.pool_id {
+                    tracing::warn!(
+                        bucket = %p.bucket_id.to_hex(),
+                        kept = %existing.pool_id.to_hex(),
+                        ignored = %p.pool_id.to_hex(),
+                        "duplicate DeepBook pool for bucket; keeping first"
+                    );
+                }
+            } else {
+                inner.deepbook_pools.insert(
+                    p.bucket_id,
+                    DeepBookPoolState {
+                        pool_id: p.pool_id,
+                        base_asset_type: p.base_asset_type.clone(),
+                        quote_asset_type: p.quote_asset_type.clone(),
+                        tick_size: p.tick_size,
+                        lot_size: p.lot_size,
+                        min_size: p.min_size,
+                        taker_fee: p.taker_fee,
+                        maker_fee: p.maker_fee,
+                    },
+                );
             }
         }
         ChainEvent::FeeUpdated(_) | ChainEvent::TreasuryWithdrawn(_) => {}
@@ -784,6 +886,51 @@ mod tests {
             3,
         );
         assert!(!store.bucket(&id).unwrap().invalidated);
+    }
+
+    #[test]
+    fn deepbook_pool_first_wins_and_stages_one_row() {
+        let store = Store::default();
+        let bucket = ObjectId::new([0x42; 32]);
+        store.ingest(bucket_evt(0x42), 1);
+
+        let pool_evt = |pool: u8| {
+            ChainEvent::DeepBookPoolCreated(DeepBookPoolCreated {
+                pool_id: ObjectId::new([pool; 32]),
+                bucket_id: bucket,
+                base_asset_type: AssetType::new("0x9::call_0::CALL_0"),
+                quote_asset_type: AssetType::new("USDC"),
+                tick_size: 10_000,
+                lot_size: 1_000,
+                min_size: 10_000,
+                taker_fee: 1_000_000,
+                maker_fee: 500_000,
+            })
+        };
+
+        let staged = store
+            .stage_batch(
+                2,
+                1_000,
+                vec![
+                    (pool_evt(0xa1), "0xd1".to_string(), 0),
+                    // Duplicate venue for the same bucket: kept out of both
+                    // the view and the DB batch.
+                    (pool_evt(0xa2), "0xd2".to_string(), 0),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(staged.db_batch.deepbook_pools.len(), 1);
+        assert_eq!(
+            staged.db_batch.deepbook_pools[0].pool_id,
+            ObjectId::new([0xa1; 32]).to_hex()
+        );
+        let state = store.deepbook_pool(&bucket).unwrap();
+        assert_eq!(state.pool_id, ObjectId::new([0xa1; 32]));
+        // Both events still land in the log.
+        assert_eq!(staged.db_batch.events.len(), 2);
+        assert_eq!(staged.db_batch.events[0].event_type, "DeepBookPoolCreated");
     }
 
     #[test]

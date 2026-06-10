@@ -122,10 +122,13 @@ pub struct BucketGql {
     pub exercise_cursor_raw: String,
     pub cleaned: bool,
     pub invalidated: bool,
+    /// DeepBook pool trading this bucket's call coin (SO-152); null until a
+    /// venue is created.
+    pub deepbook_pool_id: Option<String>,
 }
 
-impl From<BucketRow> for BucketGql {
-    fn from(b: BucketRow) -> Self {
+impl BucketGql {
+    fn from_row(b: BucketRow, deepbook_pool_id: Option<String>) -> Self {
         BucketGql {
             bucket_id: b.bucket_id,
             asset_type: b.asset_type,
@@ -138,6 +141,7 @@ impl From<BucketRow> for BucketGql {
             exercise_cursor_raw: b.exercise_cursor.to_string(),
             cleaned: b.cleaned,
             invalidated: b.invalidated,
+            deepbook_pool_id,
         }
     }
 }
@@ -286,11 +290,18 @@ impl QueryRoot {
         id: String,
     ) -> async_graphql::Result<Option<BucketGql>> {
         let repo = ctx.data_unchecked::<Repo>().clone();
-        let row = tokio::task::spawn_blocking(move || repo.bucket_by_id(&id))
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
-            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
-        Ok(row.map(BucketGql::from))
+        let row = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let Some(row) = repo.bucket_by_id(&id)? else {
+                return Ok(None);
+            };
+            let pools = repo.deepbook_pool_ids(std::slice::from_ref(&row.bucket_id))?;
+            let pool_id = pools.get(&row.bucket_id).cloned();
+            Ok(Some((row, pool_id)))
+        })
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+        .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(row.map(|(b, pool_id)| BucketGql::from_row(b, pool_id)))
     }
 
     /// JIT: buckets matching the given filters (all ANDed). `activeOnly`
@@ -319,11 +330,22 @@ impl QueryRoot {
             expiry_ms,
         };
         let repo = ctx.data_unchecked::<Repo>().clone();
-        let rows = tokio::task::spawn_blocking(move || repo.buckets_query(q))
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
-            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
-        Ok(rows.into_iter().map(BucketGql::from).collect())
+        let rows = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let rows = repo.buckets_query(q)?;
+            let ids: Vec<String> = rows.iter().map(|b| b.bucket_id.clone()).collect();
+            let mut pools = repo.deepbook_pool_ids(&ids)?;
+            Ok(rows
+                .into_iter()
+                .map(|b| {
+                    let pool_id = pools.remove(&b.bucket_id);
+                    BucketGql::from_row(b, pool_id)
+                })
+                .collect::<Vec<_>>())
+        })
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+        .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(rows)
     }
 
     /// JIT: one account (signing key + per-asset balances), or null if unknown.

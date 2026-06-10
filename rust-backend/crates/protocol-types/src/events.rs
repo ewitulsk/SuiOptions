@@ -178,6 +178,33 @@ pub struct TreasuryWithdrawn {
     pub recipient: SuiAddress,
 }
 
+/// A DeepBook v3 pool created for one of OUR buckets' call coins (SO-152).
+///
+/// Unlike the other events this is NOT a BCS mirror of a single Move struct:
+/// DeepBook's `pool::PoolCreated<Base, Quote>` carries the asset types only
+/// in the event *type string* generics, and `bucket_id` is resolved by the
+/// indexer (bucket whose `call_type` == the pool's base asset). The indexer
+/// decodes the raw payload, parses the generics, and emits this enriched
+/// form; pools whose base asset is not a known call coin are dropped.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeepBookPoolCreated {
+    pub pool_id: ObjectId,
+    /// Resolved off-chain: the bucket whose `call_type` is `base_asset_type`.
+    pub bucket_id: ObjectId,
+    pub base_asset_type: AssetType,
+    pub quote_asset_type: AssetType,
+    #[serde(with = "u64_string")]
+    pub tick_size: u64,
+    #[serde(with = "u64_string")]
+    pub lot_size: u64,
+    #[serde(with = "u64_string")]
+    pub min_size: u64,
+    #[serde(with = "u64_string")]
+    pub taker_fee: u64,
+    #[serde(with = "u64_string")]
+    pub maker_fee: u64,
+}
+
 /// Tagged union over every event the indexer may publish.
 ///
 /// The variant name is what shows up as `"type"` over the wire; the payload
@@ -200,6 +227,7 @@ pub enum ChainEvent {
     SigningKeyRotated(SigningKeyRotated),
     FeeUpdated(FeeUpdated),
     TreasuryWithdrawn(TreasuryWithdrawn),
+    DeepBookPoolCreated(DeepBookPoolCreated),
 }
 
 /// An envelope wrapping a `ChainEvent` with the ordering metadata the indexer

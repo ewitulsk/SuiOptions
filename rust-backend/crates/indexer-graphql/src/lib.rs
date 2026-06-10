@@ -50,6 +50,9 @@ pub struct Bucket {
     pub exercise_cursor: u128,
     pub cleaned: bool,
     pub invalidated: bool,
+    /// DeepBook pool trading this bucket's call coin (SO-152); `None` until
+    /// a venue is created.
+    pub deepbook_pool_id: Option<ObjectId>,
 }
 
 /// An account's registered signing key + per-asset balances. `signing_scheme`
@@ -125,7 +128,8 @@ impl IndexerClient {
     /// One bucket by id, or `None` if the indexer doesn't know it.
     pub async fn bucket(&self, bucket_id: ObjectId) -> Result<Option<Bucket>> {
         const Q: &str = "query($id:String!){bucket(id:$id){bucketId assetType settlementType \
-            callType strikeRaw strikeScale expiryMs totalWrittenRaw exerciseCursorRaw cleaned invalidated}}";
+            callType strikeRaw strikeScale expiryMs totalWrittenRaw exerciseCursorRaw cleaned \
+            invalidated deepbookPoolId}}";
         let data: BucketWrap = self
             .gql(Q, json!({ "id": bucket_id.to_hex() }))
             .await?;
@@ -143,7 +147,7 @@ impl IndexerClient {
         const Q: &str = "query($a:Boolean,$u:String,$s:String,$e:String){\
             buckets(activeOnly:$a,assetType:$u,settlementType:$s,expiryMs:$e){\
             bucketId assetType settlementType callType strikeRaw strikeScale expiryMs \
-            totalWrittenRaw exerciseCursorRaw cleaned invalidated}}";
+            totalWrittenRaw exerciseCursorRaw cleaned invalidated deepbookPoolId}}";
         let vars = json!({
             "a": active_only,
             "u": asset_type.map(|a| a.as_str()),
@@ -411,6 +415,8 @@ struct BucketJson {
     exercise_cursor_raw: String,
     cleaned: bool,
     invalidated: bool,
+    #[serde(default)]
+    deepbook_pool_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -484,6 +490,11 @@ impl TryFrom<BucketJson> for Bucket {
             exercise_cursor: parse_u128(&b.exercise_cursor_raw)?,
             cleaned: b.cleaned,
             invalidated: b.invalidated,
+            deepbook_pool_id: b
+                .deepbook_pool_id
+                .as_deref()
+                .map(parse_object_id)
+                .transpose()?,
         })
     }
 }
