@@ -65,6 +65,13 @@ public struct RfqAuction<phantom Underlying, phantom Settlement, phantom Call> h
     /// Originating object (vault ID, or seller address-as-ID). Indexing
     /// and origin-gating only.
     origin: ID,
+    /// True for auctions opened by a venue module in this package (the
+    /// vault): resolution must flow through that module's settle path so
+    /// outputs are absorbed in-place. The generic `settle` /
+    /// `settle_expired` reject coupled auctions — otherwise they'd push
+    /// the `Position`/refunds to the venue's ID-as-address, where only a
+    /// receiving crank could recover them.
+    coupled: bool,
 }
 
 /// The winning side of a finalized auction, handed back to a venue
@@ -103,6 +110,75 @@ public fun create<Underlying, Settlement, Call>(
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
+    create_impl(
+        bucket,
+        underlying.into_balance(),
+        reserve_premium,
+        duration_ms,
+        snipe_window_ms,
+        snipe_extension_ms,
+        max_extension_ms,
+        min_increment_bps,
+        position_recipient,
+        proceeds_recipient,
+        origin,
+        false,
+        clock,
+        ctx,
+    )
+}
+
+/// Venue-module variant (the vault's `open_rfq`): escrow arrives as a
+/// `Balance` and the auction is marked coupled, so only the venue's own
+/// settle path can resolve it.
+public(package) fun create_coupled<Underlying, Settlement, Call>(
+    bucket: &Bucket<Underlying, Settlement, Call>,
+    underlying: Balance<Underlying>,
+    reserve_premium: u64,
+    duration_ms: u64,
+    snipe_window_ms: u64,
+    snipe_extension_ms: u64,
+    max_extension_ms: u64,
+    min_increment_bps: u64,
+    origin: ID,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): ID {
+    let origin_addr = origin.to_address();
+    create_impl(
+        bucket,
+        underlying,
+        reserve_premium,
+        duration_ms,
+        snipe_window_ms,
+        snipe_extension_ms,
+        max_extension_ms,
+        min_increment_bps,
+        origin_addr,
+        origin_addr,
+        origin,
+        true,
+        clock,
+        ctx,
+    )
+}
+
+fun create_impl<Underlying, Settlement, Call>(
+    bucket: &Bucket<Underlying, Settlement, Call>,
+    underlying: Balance<Underlying>,
+    reserve_premium: u64,
+    duration_ms: u64,
+    snipe_window_ms: u64,
+    snipe_extension_ms: u64,
+    max_extension_ms: u64,
+    min_increment_bps: u64,
+    position_recipient: address,
+    proceeds_recipient: address,
+    origin: ID,
+    coupled: bool,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): ID {
     let amount = underlying.value();
     assert!(amount > 0, errors::zero_amount());
     assert!(!bucket::invalidated(bucket), errors::bucket_invalidated());
@@ -120,7 +196,7 @@ public fun create<Underlying, Settlement, Call>(
     let rfq = RfqAuction<Underlying, Settlement, Call> {
         id: object::new(ctx),
         bucket_id: object::id(bucket),
-        underlying: underlying.into_balance(),
+        underlying,
         amount,
         reserve_premium,
         created_ms: now,
@@ -135,6 +211,7 @@ public fun create<Underlying, Settlement, Call>(
         position_recipient,
         proceeds_recipient,
         origin,
+        coupled,
     };
     let rfq_id = object::id(&rfq);
     events::emit_rfq_created(
@@ -242,6 +319,7 @@ fun destroy<Underlying, Settlement, Call>(
         position_recipient: _,
         proceeds_recipient: _,
         origin,
+        coupled: _,
     } = rfq;
     let receipt = RfqReceipt {
         rfq_id: id.to_inner(),
@@ -281,6 +359,7 @@ public fun settle<Underlying, Settlement, Call>(
     ctx: &mut TxContext,
 ) {
     assert!(rfq.bucket_id == object::id(bucket), errors::rfq_bucket_mismatch());
+    assert!(!rfq.coupled, errors::vault_wrong_origin());
     let position_recipient = rfq.position_recipient;
     let proceeds_recipient = rfq.proceeds_recipient;
     let (mut winner, underlying, receipt) = finalize(rfq, clock);
@@ -334,19 +413,31 @@ public fun settle<Underlying, Settlement, Call>(
 /// underlying → proceeds recipient) so funds can never be stranded.
 /// Callable by anyone, with no deadline precondition: once the bucket is
 /// dead the auction is moot.
+/// `settle_expired`'s checks + destructure, shared with the vault's own
+/// expired-auction recovery (which absorbs the collateral instead of
+/// transferring it).
+public(package) fun finalize_expired<Underlying, Settlement, Call>(
+    rfq: RfqAuction<Underlying, Settlement, Call>,
+    bucket: &Bucket<Underlying, Settlement, Call>,
+    clock: &Clock,
+): (Option<FinalizedBid<Settlement>>, Balance<Underlying>, RfqReceipt) {
+    assert!(rfq.bucket_id == object::id(bucket), errors::rfq_bucket_mismatch());
+    assert!(
+        clock.timestamp_ms() >= bucket::expiry_ms(bucket) || bucket::invalidated(bucket),
+        errors::bucket_not_expired(),
+    );
+    destroy(rfq)
+}
+
 public fun settle_expired<Underlying, Settlement, Call>(
     rfq: RfqAuction<Underlying, Settlement, Call>,
     bucket: &Bucket<Underlying, Settlement, Call>,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
-    assert!(rfq.bucket_id == object::id(bucket), errors::rfq_bucket_mismatch());
-    assert!(
-        clock.timestamp_ms() >= bucket::expiry_ms(bucket) || bucket::invalidated(bucket),
-        errors::bucket_not_expired(),
-    );
+    assert!(!rfq.coupled, errors::vault_wrong_origin());
     let proceeds_recipient = rfq.proceeds_recipient;
-    let (mut winner, underlying, receipt) = destroy(rfq);
+    let (mut winner, underlying, receipt) = finalize_expired(rfq, bucket, clock);
 
     if (winner.is_some()) {
         let FinalizedBid { bidder, call_recipient: _, premium } = winner.extract();

@@ -140,6 +140,115 @@ public struct RfqExpiredUnsold has copy, drop {
     reserve_premium: u64,
 }
 
+public struct VaultCreated has copy, drop {
+    vault_id: ID,
+    underlying_type: TypeName,
+    settlement_type: TypeName,
+    share_type: TypeName,
+}
+
+public struct VaultDeposit has copy, drop {
+    vault_id: ID,
+    depositor: address,
+    /// The round the deposit participates from (receipt round).
+    round: u64,
+    amount: u64,
+}
+
+public struct SharesClaimed has copy, drop {
+    vault_id: ID,
+    owner: address,
+    round: u64,
+    amount: u64,
+    shares: u64,
+}
+
+public struct WithdrawInitiated has copy, drop {
+    vault_id: ID,
+    owner: address,
+    /// The round the withdrawal settles with (receipt round).
+    round: u64,
+    shares: u64,
+}
+
+public struct WithdrawCompleted has copy, drop {
+    vault_id: ID,
+    owner: address,
+    round: u64,
+    shares: u64,
+    amount: u64,
+}
+
+public struct InstantWithdraw has copy, drop {
+    vault_id: ID,
+    owner: address,
+    round: u64,
+    amount: u64,
+}
+
+public struct VaultBucketSelected has copy, drop {
+    vault_id: ID,
+    round: u64,
+    bucket_id: ID,
+    strike: u128,
+    strike_scale: u8,
+    expiry_ms: u64,
+    selling_ends_ms: u64,
+    /// Pyth cross at selection (oracle scale).
+    spot: u128,
+    spot_scale: u8,
+}
+
+public struct VaultPositionRedeemed has copy, drop {
+    vault_id: ID,
+    round: u64,
+    position_id: ID,
+    underlying_returned: u64,
+    settlement_returned: u64,
+}
+
+public struct VaultProceedsSwapped has copy, drop {
+    vault_id: ID,
+    round: u64,
+    filler: address,
+    settlement_out: u64,
+    underlying_in: u64,
+}
+
+public struct VaultFeesCharged has copy, drop {
+    vault_id: ID,
+    round: u64,
+    mgmt_fee: u64,
+    perf_fee: u64,
+}
+
+public struct VaultRoundFinalized has copy, drop {
+    vault_id: ID,
+    /// The round that was finalized (the pps index).
+    round: u64,
+    pps: u128,
+    aum: u64,
+    /// Live shares the round's P&L accrued to (supply + queued).
+    shares: u64,
+    premium_collected: u64,
+    premium_underlying: u64,
+    withdrawals_owed: u64,
+    shares_burned: u64,
+    deposits_processed: u64,
+    shares_minted: u64,
+}
+
+public struct VaultConfigUpdated has copy, drop {
+    vault_id: ID,
+    /// Configs apply at the next finalize; this is the current round.
+    round: u64,
+}
+
+public struct VaultDepositsPaused has copy, drop {
+    vault_id: ID,
+    paused: bool,
+}
+
 public struct AccountCreated has copy, drop {
     account_id: ID,
     owner: address,
@@ -380,6 +489,137 @@ public(package) fun emit_rfq_expired_unsold(
     reserve_premium: u64,
 ) {
     event::emit(RfqExpiredUnsold { rfq_id, bucket_id, origin, amount, reserve_premium });
+}
+
+public(package) fun emit_vault_created(
+    vault_id: ID,
+    underlying_type: TypeName,
+    settlement_type: TypeName,
+    share_type: TypeName,
+) {
+    event::emit(VaultCreated { vault_id, underlying_type, settlement_type, share_type });
+}
+
+public(package) fun emit_vault_deposit(vault_id: ID, depositor: address, round: u64, amount: u64) {
+    event::emit(VaultDeposit { vault_id, depositor, round, amount });
+}
+
+public(package) fun emit_shares_claimed(
+    vault_id: ID,
+    owner: address,
+    round: u64,
+    amount: u64,
+    shares: u64,
+) {
+    event::emit(SharesClaimed { vault_id, owner, round, amount, shares });
+}
+
+public(package) fun emit_withdraw_initiated(vault_id: ID, owner: address, round: u64, shares: u64) {
+    event::emit(WithdrawInitiated { vault_id, owner, round, shares });
+}
+
+public(package) fun emit_withdraw_completed(
+    vault_id: ID,
+    owner: address,
+    round: u64,
+    shares: u64,
+    amount: u64,
+) {
+    event::emit(WithdrawCompleted { vault_id, owner, round, shares, amount });
+}
+
+public(package) fun emit_instant_withdraw(vault_id: ID, owner: address, round: u64, amount: u64) {
+    event::emit(InstantWithdraw { vault_id, owner, round, amount });
+}
+
+public(package) fun emit_vault_bucket_selected(
+    vault_id: ID,
+    round: u64,
+    bucket_id: ID,
+    strike: u128,
+    strike_scale: u8,
+    expiry_ms: u64,
+    selling_ends_ms: u64,
+    spot: u128,
+    spot_scale: u8,
+) {
+    event::emit(VaultBucketSelected {
+        vault_id,
+        round,
+        bucket_id,
+        strike,
+        strike_scale,
+        expiry_ms,
+        selling_ends_ms,
+        spot,
+        spot_scale,
+    });
+}
+
+public(package) fun emit_vault_position_redeemed(
+    vault_id: ID,
+    round: u64,
+    position_id: ID,
+    underlying_returned: u64,
+    settlement_returned: u64,
+) {
+    event::emit(VaultPositionRedeemed {
+        vault_id,
+        round,
+        position_id,
+        underlying_returned,
+        settlement_returned,
+    });
+}
+
+public(package) fun emit_vault_proceeds_swapped(
+    vault_id: ID,
+    round: u64,
+    filler: address,
+    settlement_out: u64,
+    underlying_in: u64,
+) {
+    event::emit(VaultProceedsSwapped { vault_id, round, filler, settlement_out, underlying_in });
+}
+
+public(package) fun emit_vault_fees_charged(vault_id: ID, round: u64, mgmt_fee: u64, perf_fee: u64) {
+    event::emit(VaultFeesCharged { vault_id, round, mgmt_fee, perf_fee });
+}
+
+public(package) fun emit_vault_round_finalized(
+    vault_id: ID,
+    round: u64,
+    pps: u128,
+    aum: u64,
+    shares: u64,
+    premium_collected: u64,
+    premium_underlying: u64,
+    withdrawals_owed: u64,
+    shares_burned: u64,
+    deposits_processed: u64,
+    shares_minted: u64,
+) {
+    event::emit(VaultRoundFinalized {
+        vault_id,
+        round,
+        pps,
+        aum,
+        shares,
+        premium_collected,
+        premium_underlying,
+        withdrawals_owed,
+        shares_burned,
+        deposits_processed,
+        shares_minted,
+    });
+}
+
+public(package) fun emit_vault_config_updated(vault_id: ID, round: u64) {
+    event::emit(VaultConfigUpdated { vault_id, round });
+}
+
+public(package) fun emit_vault_deposits_paused(vault_id: ID, paused: bool) {
+    event::emit(VaultDepositsPaused { vault_id, paused });
 }
 
 public(package) fun emit_account_created(
