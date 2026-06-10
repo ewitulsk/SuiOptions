@@ -31,15 +31,16 @@ use tracing::{debug, info, trace};
 use protocol_types::events::ChainEvent;
 use protocol_types::ids::ObjectId;
 
-use crate::store::{AccountState, BucketState, PositionState};
+use crate::store::{AccountState, BucketState, DeepBookPoolState, PositionState};
 
 use super::models::{
     account_row_into_state, bigdecimal_to_u128, event_type_tag, AccountBalanceRow, AccountRow,
-    BucketRow, EventParticipantRow, IndexedEventRow, NewIndexedEventRow, PositionRow, ProgressRow,
+    BucketRow, DeepBookPoolRow, EventParticipantRow, IndexedEventRow, NewIndexedEventRow,
+    PositionRow, ProgressRow,
 };
 use super::schema::{
-    account_balances, accounts, buckets, event_participants, indexed_events, indexer_progress,
-    positions,
+    account_balances, accounts, bucket_deepbook_pools, buckets, event_participants,
+    indexed_events, indexer_progress, positions,
 };
 use super::DbPool;
 
@@ -57,6 +58,8 @@ pub struct CheckpointBatch {
     pub accounts: Vec<AccountRow>,
     pub account_balances: Vec<AccountBalanceRow>,
     pub buckets: Vec<BucketRow>,
+    /// Bucket → DeepBook venue rows (SO-152). Insert-only, first pool wins.
+    pub deepbook_pools: Vec<DeepBookPoolRow>,
     pub position_upserts: Vec<PositionRow>,
     /// Positions to drop (`Redeemed` removes them). Keyed `(bucket_id_hex, range_start)`.
     pub position_deletes: Vec<(String, BigDecimal)>,
@@ -73,6 +76,7 @@ impl CheckpointBatch {
             accounts: Vec::new(),
             account_balances: Vec::new(),
             buckets: Vec::new(),
+            deepbook_pools: Vec::new(),
             position_upserts: Vec::new(),
             position_deletes: Vec::new(),
             event_participants: Vec::new(),
@@ -84,6 +88,7 @@ impl CheckpointBatch {
             && self.accounts.is_empty()
             && self.account_balances.is_empty()
             && self.buckets.is_empty()
+            && self.deepbook_pools.is_empty()
             && self.position_upserts.is_empty()
             && self.position_deletes.is_empty()
             && self.event_participants.is_empty()
@@ -123,6 +128,7 @@ pub struct HydratedViews {
     pub accounts: BTreeMap<ObjectId, AccountState>,
     pub buckets: BTreeMap<ObjectId, BucketState>,
     pub positions: BTreeMap<(ObjectId, u128), PositionState>,
+    pub deepbook_pools: BTreeMap<ObjectId, DeepBookPoolState>,
 }
 
 #[derive(Clone)]
@@ -215,6 +221,16 @@ impl Repo {
                     ))
                     .execute(conn)
                     .context("upserting buckets")?;
+            }
+
+            if !batch.deepbook_pools.is_empty() {
+                // First pool wins: conflicts on bucket_id (duplicate venue)
+                // or pool_id (replay) are silently skipped.
+                diesel::insert_into(bucket_deepbook_pools::table)
+                    .values(&batch.deepbook_pools)
+                    .on_conflict_do_nothing()
+                    .execute(conn)
+                    .context("inserting bucket_deepbook_pools")?;
             }
 
             for pos in &batch.position_upserts {
@@ -355,16 +371,27 @@ impl Repo {
             position_map.insert(key, state);
         }
 
+        let mut deepbook_map: BTreeMap<ObjectId, DeepBookPoolState> = BTreeMap::new();
+        for row in bucket_deepbook_pools::table
+            .load::<DeepBookPoolRow>(&mut conn)
+            .context("loading bucket_deepbook_pools")?
+        {
+            let (bucket, state) = row.into_state()?;
+            deepbook_map.insert(bucket, state);
+        }
+
         debug!(
             accounts = acct_map.len(),
             buckets = bucket_map.len(),
             positions = position_map.len(),
+            deepbook_pools = deepbook_map.len(),
             "hydration complete"
         );
         Ok(HydratedViews {
             accounts: acct_map,
             buckets: bucket_map,
             positions: position_map,
+            deepbook_pools: deepbook_map,
         })
     }
 
@@ -426,6 +453,27 @@ impl Repo {
     /// means "don't constrain". `active_only` drops cleaned buckets. Backs
     /// the GraphQL `buckets(...)` query (api-service catalog + option-scheduler
     /// roll-confirmation lookups).
+    /// bucket_id → DeepBook pool_id for the given buckets (SO-152). Buckets
+    /// without a venue are simply absent from the map.
+    pub fn deepbook_pool_ids(
+        &self,
+        bucket_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        if bucket_ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let mut conn = self.conn()?;
+        let rows: Vec<(String, String)> = bucket_deepbook_pools::table
+            .filter(bucket_deepbook_pools::bucket_id.eq_any(bucket_ids))
+            .select((
+                bucket_deepbook_pools::bucket_id,
+                bucket_deepbook_pools::pool_id,
+            ))
+            .load(&mut conn)
+            .context("loading bucket_deepbook_pools ids")?;
+        Ok(rows.into_iter().collect())
+    }
+
     pub fn buckets_query(&self, f: BucketQuery) -> Result<Vec<BucketRow>> {
         let mut conn = self.conn()?;
         let mut q = buckets::table.into_boxed();
