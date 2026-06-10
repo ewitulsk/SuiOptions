@@ -4,8 +4,11 @@
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 -- One row per DeepBook fill on a watched pool. The composite uniqueness on
--- (pool_id, tx_digest, event_index) makes re-ingestion idempotent — restarts
--- and cursor overlaps insert with ON CONFLICT DO NOTHING.
+-- (pool_id, tx_digest, event_index, time) makes re-ingestion idempotent —
+-- restarts and cursor overlaps insert with ON CONFLICT DO NOTHING. `time` is
+-- in the key because TimescaleDB requires every unique constraint on a
+-- hypertable to include the partitioning column; it's functionally determined
+-- by (tx_digest, event_index) so uniqueness is unchanged.
 --
 -- price is the human quote-per-base ratio (raw / 10^(9 − baseDec + quoteDec),
 -- formula verified against a live fill — DEEPBOOK-FINDINGS.md §C); price_raw
@@ -22,7 +25,7 @@ CREATE TABLE pool_trades (
     taker_is_bid  BOOLEAN          NOT NULL,
     tx_digest     TEXT             NOT NULL,
     event_index   BIGINT           NOT NULL,
-    UNIQUE (pool_id, tx_digest, event_index)
+    UNIQUE (pool_id, tx_digest, event_index, time)
 );
 SELECT create_hypertable('pool_trades', 'time');
 CREATE INDEX pool_trades_pool_time_idx ON pool_trades (pool_id, time DESC);
