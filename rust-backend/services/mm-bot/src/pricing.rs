@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use pricing::{call_price_per_unit, premium_for_write, CallInputs};
-use protocol_types::messages::RfqBroadcastPayload;
+use protocol_types::asset::canonicalize_move_type;
 use protocol_types::sides::Side;
 use pyth_client::{PriceCache, PriceFeedId};
 
@@ -28,6 +28,39 @@ pub struct PricingConfig {
     /// MM (retail is writing — `Side::Writer`): the premium we pay is marked
     /// *down* off the mid.
     pub bid_markdown_bps: u64,
+}
+
+/// The bucket-resolved + request inputs for pricing one RFQ. The bucket fields
+/// (`strike`, `strike_scale`, `expiry_ms`) come from the api-service lookup —
+/// never the wire broadcast — while `write_amount`/`side` are the request
+/// parameters. Decoupled from the wire payload so pricing stays pure.
+#[derive(Clone, Copy, Debug)]
+pub struct RfqPricingInputs {
+    /// Option size, in underlying smallest-units.
+    pub write_amount: u64,
+    /// Which side retail is on (drives the spread direction).
+    pub side: Side,
+    /// Bucket's on-chain strike; real ratio is `strike / 10^strike_scale`.
+    pub strike: u128,
+    /// 0..=9.
+    pub strike_scale: u8,
+    /// Bucket expiry as a Sui clock millisecond timestamp.
+    pub expiry_ms: u64,
+}
+
+/// Whether the bucket's pair (as resolved from api-service) is the one this bot
+/// sources a Pyth spot for. The bot reads a single `(underlying, settlement)`
+/// pair, so any other bucket must be declined — pricing it against the wrong
+/// spot yields a nonsense premium. Both sides are canonicalized so a bare chain
+/// `TypeName` matches a `0x`-padded configured type.
+pub fn serves_pair(
+    bucket_underlying: &str,
+    bucket_settlement: &str,
+    cfg_underlying: &str,
+    cfg_settlement: &str,
+) -> bool {
+    canonicalize_move_type(bucket_underlying) == canonicalize_move_type(cfg_underlying)
+        && canonicalize_move_type(bucket_settlement) == canonicalize_move_type(cfg_settlement)
 }
 
 /// Apply the side-aware spread to the Black-Scholes mid per-unit price.
@@ -170,28 +203,28 @@ pub fn resolve_sigma(live_sigma: Option<f64>, fallback: f64) -> f64 {
 }
 
 /// The full per-RFQ decision: compose the arithmetic, then either emit a
-/// `Quote` or a `Decline` reason. Staleness/spot-error handling happens
-/// upstream in the caller (which has the cache); this fn only needs the
-/// resolved spot and sigma.
+/// `Quote` or a `Decline` reason. Staleness/spot-error handling and the
+/// pair-match gate (see [`serves_pair`]) happen upstream in the caller; this fn
+/// receives the already-resolved spot, sigma, and bucket inputs.
 pub fn price_rfq(
     cfg: &PricingConfig,
-    payload: &RfqBroadcastPayload,
+    inputs: &RfqPricingInputs,
     spot_scaled: u64,
     sigma: f64,
     now_ms: u64,
 ) -> PriceDecision {
-    let t_years = time_to_expiry_years(payload.expiry_ms, now_ms);
-    let strike_scaled = rebase_strike_to_scale_zero(payload.strike, payload.strike_scale);
-    let inputs = CallInputs {
+    let t_years = time_to_expiry_years(inputs.expiry_ms, now_ms);
+    let strike_scaled = rebase_strike_to_scale_zero(inputs.strike, inputs.strike_scale);
+    let call_inputs = CallInputs {
         spot: spot_scaled as f64,
         strike: strike_scaled,
         t_years,
         r: cfg.rate,
         sigma,
     };
-    let per_unit_mid = call_price_per_unit(inputs);
-    let per_unit = apply_spread(per_unit_mid, payload.side, cfg);
-    let premium = premium_for_write(per_unit, payload.write_amount);
+    let per_unit_mid = call_price_per_unit(call_inputs);
+    let per_unit = apply_spread(per_unit_mid, inputs.side, cfg);
+    let premium = premium_for_write(per_unit, inputs.write_amount);
     if premium == 0 {
         return PriceDecision::Decline {
             reason: "priced to zero".into(),
@@ -214,11 +247,14 @@ mod tests {
 
     use std::time::Instant;
 
-    use protocol_types::ids::ObjectId;
     use protocol_types::sides::Side;
     use pyth_client::CachedPrice;
 
-    fn rfq(expiry_ms: u64, strike: u128, strike_scale: u8, write_amount: u64) -> RfqBroadcastPayload {
+    // A representative configured pair for the `serves_pair` tests below.
+    const UNDERLYING: &str = "0x9b72409a9f38a8784420d17577aa6dbe5aa2ab4224cd04c44d8b515f6c97ba86::tbtc::TBTC";
+    const SETTLEMENT: &str = "0x9b72409a9f38a8784420d17577aa6dbe5aa2ab4224cd04c44d8b515f6c97ba86::tusdc::TUSDC";
+
+    fn rfq(expiry_ms: u64, strike: u128, strike_scale: u8, write_amount: u64) -> RfqPricingInputs {
         rfq_side(Side::Trader, expiry_ms, strike, strike_scale, write_amount)
     }
 
@@ -228,12 +264,10 @@ mod tests {
         strike: u128,
         strike_scale: u8,
         write_amount: u64,
-    ) -> RfqBroadcastPayload {
-        RfqBroadcastPayload {
-            bucket_id: ObjectId::new([0u8; 32]),
+    ) -> RfqPricingInputs {
+        RfqPricingInputs {
             write_amount,
             side,
-            deadline_ms: expiry_ms,
             strike,
             strike_scale,
             expiry_ms,
@@ -641,6 +675,26 @@ mod tests {
             PriceDecision::Quote { premium, .. } => assert_eq!(premium, 10),
             _ => panic!("expected Quote"),
         }
+    }
+
+    // -- serves_pair (pair gate) ----------------------------------------
+
+    #[test]
+    fn serves_pair_rejects_foreign_underlying() {
+        // The bug: a TBTC/TUSDC bot must NOT quote a TWAL bucket. The caller
+        // gates on this before pricing, so the looked-up TWAL bucket is
+        // declined instead of priced against the TBTC spot (~$313k for 0.5 TWAL).
+        let twal = "0x9b72409a9f38a8784420d17577aa6dbe5aa2ab4224cd04c44d8b515f6c97ba86::twal::TWAL";
+        assert!(!serves_pair(twal, SETTLEMENT, UNDERLYING, SETTLEMENT));
+    }
+
+    #[test]
+    fn serves_pair_matches_despite_noncanonical_type() {
+        // api-service emits canonical types, but be robust: a bare chain
+        // `TypeName` (no `0x` / padding) must still match the configured pair.
+        let bare_under = "9b72409a9f38a8784420d17577aa6dbe5aa2ab4224cd04c44d8b515f6c97ba86::tbtc::TBTC";
+        let bare_settle = "9b72409a9f38a8784420d17577aa6dbe5aa2ab4224cd04c44d8b515f6c97ba86::tusdc::TUSDC";
+        assert!(serves_pair(bare_under, bare_settle, UNDERLYING, SETTLEMENT));
     }
 
     // -- spread ---------------------------------------------------------

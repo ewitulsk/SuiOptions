@@ -24,10 +24,8 @@ use anyhow::{bail, Result};
 use clap::Parser;
 
 use mm_bot::pricing::{
-    compute_spot_from_prices, price_rfq, PriceDecision, PricingConfig, SpotError,
+    compute_spot_from_prices, price_rfq, PriceDecision, PricingConfig, RfqPricingInputs, SpotError,
 };
-use protocol_types::ids::ObjectId;
-use protocol_types::messages::RfqBroadcastPayload;
 use protocol_types::sides::Side;
 
 #[derive(Parser, Debug)]
@@ -123,13 +121,14 @@ fn main() -> Result<()> {
         (None, None) => bail!("one of --days-to-expiry or --expiry-ms is required"),
     };
 
-    let payload = RfqBroadcastPayload {
-        bucket_id: ObjectId::new([0u8; 32]),
+    // The simulator exercises the pricing primitives directly — the pair gate
+    // and api-service lookup live in the bot, so here we just feed the inputs
+    // the user passed on the CLI straight into the pricer.
+    let inputs = RfqPricingInputs {
         write_amount: args.write_amount,
         // Simulator always pretends retail is trading (buying calls) — only
         // the pricing primitives are exercised; `side` is informational.
         side: Side::Trader,
-        deadline_ms: expiry_ms,
         strike: args.strike,
         strike_scale: args.strike_scale,
         expiry_ms,
@@ -142,12 +141,12 @@ fn main() -> Result<()> {
         ask_markup_bps: 0,
         bid_markdown_bps: 0,
     };
-    let decision = price_rfq(&cfg, &payload, spot_scaled, args.sigma, now);
+    let decision = price_rfq(&cfg, &inputs, spot_scaled, args.sigma, now);
 
     if args.json {
-        print_json(&decision, spot_scaled, &payload, now);
+        print_json(&decision, spot_scaled, &inputs, now);
     } else {
-        print_human(&decision, spot_scaled, &payload, now, &args);
+        print_human(&decision, spot_scaled, &inputs, now, &args);
     }
     Ok(())
 }
@@ -155,7 +154,7 @@ fn main() -> Result<()> {
 fn print_human(
     decision: &PriceDecision,
     spot_scaled: u64,
-    payload: &RfqBroadcastPayload,
+    inputs: &RfqPricingInputs,
     now: u64,
     args: &Args,
 ) {
@@ -164,10 +163,10 @@ fn print_human(
     println!("  settlement_usd      = {}", args.settlement_usd);
     println!("  underlying_decimals = {}", args.underlying_decimals);
     println!("  settlement_decimals = {}", args.settlement_decimals);
-    println!("  strike (raw)        = {}", payload.strike);
-    println!("  strike_scale        = {}", payload.strike_scale);
-    println!("  expiry_ms           = {}", payload.expiry_ms);
-    println!("  write_amount        = {}", payload.write_amount);
+    println!("  strike (raw)        = {}", inputs.strike);
+    println!("  strike_scale        = {}", inputs.strike_scale);
+    println!("  expiry_ms           = {}", inputs.expiry_ms);
+    println!("  write_amount        = {}", inputs.write_amount);
     println!("  sigma               = {}", args.sigma);
     println!("  rate                = {}", args.rate);
     println!();
@@ -198,15 +197,15 @@ fn print_human(
     }
 }
 
-fn print_json(decision: &PriceDecision, spot_scaled: u64, payload: &RfqBroadcastPayload, now: u64) {
+fn print_json(decision: &PriceDecision, spot_scaled: u64, inputs: &RfqPricingInputs, now: u64) {
     // Hand-roll the JSON so we don't take a serde_json dep just for this.
     print!("{{");
     print!("\"now_ms\":{now},");
     print!("\"spot_scaled\":{spot_scaled},");
-    print!("\"strike\":\"{}\",", payload.strike);
-    print!("\"strike_scale\":{},", payload.strike_scale);
-    print!("\"expiry_ms\":{},", payload.expiry_ms);
-    print!("\"write_amount\":{},", payload.write_amount);
+    print!("\"strike\":\"{}\",", inputs.strike);
+    print!("\"strike_scale\":{},", inputs.strike_scale);
+    print!("\"expiry_ms\":{},", inputs.expiry_ms);
+    print!("\"write_amount\":{},", inputs.write_amount);
     match decision {
         PriceDecision::Quote {
             premium,

@@ -68,10 +68,11 @@ services:
     environment:
       APP_ENV: staging
       TOKEN_INFO_URL: http://token-info:9005
+      API_URL: http://api-service:9003
       RUST_LOG: info,mm_bot=debug
     volumes:
       - /opt/options/staging/secrets:/run/secrets:ro
-    depends_on: [quoting, token-info]
+    depends_on: [quoting, token-info, api-service]
     restart: unless-stopped
     networks: [net]
 
