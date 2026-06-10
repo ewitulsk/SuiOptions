@@ -8,8 +8,9 @@ license.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+pricing = { workspace = true }
+
 serde = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
 rand = { workspace = true }
+rand_chacha = { workspace = true }

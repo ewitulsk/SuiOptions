@@ -65,6 +65,8 @@ bcs = "0.1"
 
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
+# vault-sim synthetic path generation: seeded, reproducible streams.
+rand_chacha = "0.3"
 hex = "0.4"
 sha2 = "0.10"
 # auth-service: HS256 JWT signing (hmac+sha2), Sui personal-message digest

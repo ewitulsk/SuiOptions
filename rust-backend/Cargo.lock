@@ -11326,7 +11326,9 @@ dependencies = [
 name = "vault-sim"
 version = "0.1.0"
 dependencies = [
+ "pricing",
  "rand 0.8.6",
+ "rand_chacha 0.3.1",
  "serde",
  "thiserror 1.0.69",
 ]

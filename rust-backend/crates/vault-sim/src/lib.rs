@@ -13,5 +13,14 @@
 //!   mechanisms are swept scenario parameters, not point estimates.
 
 pub mod cursor;
+pub mod engine;
+pub mod exercise;
+pub mod iv;
 pub mod ledger;
+pub mod metrics;
+pub mod paths;
+pub mod premium;
+pub mod sale;
+pub mod strategy;
+pub mod swap;
 pub mod types;
