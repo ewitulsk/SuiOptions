@@ -44,6 +44,16 @@ export type Bucket = {
    * entirely. Exercises and redeems are unaffected. See SO-69.
    */
   invalidated: boolean;
+  /**
+   * DeepBook pool trading this bucket's call coin against the settlement
+   * asset (SO-153). `null` until someone creates the venue.
+   */
+  deepbook_pool_id: string | null;
+  /**
+   * Pool exists, bucket not cleaned, not expired. Gates the DeepBook trade
+   * UI; `invalidated` does NOT affect it (mint freeze only).
+   */
+  tradeable: boolean;
 };
 
 /**

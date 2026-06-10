@@ -103,6 +103,13 @@ pub struct BucketDto {
     /// out entirely; the future positions dashboard will badge owned
     /// positions in an invalidated bucket. See SO-69.
     pub invalidated: bool,
+    /// DeepBook pool trading this bucket's call coin (SO-153). `null` until
+    /// a venue is created on-chain.
+    pub deepbook_pool_id: Option<String>,
+    /// Whether the DeepBook trade panel should be live: a pool exists, the
+    /// bucket isn't cleaned, and it hasn't expired. `invalidated` does NOT
+    /// gate this — invalidation freezes new mints, not secondary trading.
+    pub tradeable: bool,
 }
 
 #[derive(Serialize)]
@@ -142,8 +149,9 @@ pub async fn list_buckets(
             StatusCode::BAD_GATEWAY
         })?;
     let active = active.into_iter().map(into_local_bucket).collect();
+    let now_ms = Utc::now().timestamp_millis();
     Ok(Json(BucketsResponse {
-        series: group_into_series(active, &state.catalog),
+        series: group_into_series(active, &state.catalog, now_ms),
     }))
 }
 
@@ -185,6 +193,10 @@ pub struct BucketDetailDto {
     /// `100 * exercise_cursor / total_written`. `0.0` when nothing's been
     /// written; `null` when underlying decimals are unknown.
     pub fill_pct: Option<f64>,
+    /// DeepBook pool for this bucket (SO-153); `null` if none.
+    pub deepbook_pool_id: Option<String>,
+    /// Pool exists, bucket not cleaned, not expired (see `/buckets`).
+    pub tradeable: bool,
 }
 
 pub async fn get_bucket(
@@ -199,12 +211,13 @@ pub async fn get_bucket(
     // Cleaned buckets are settled-and-gone — treat them as absent so the
     // tideline stops polling a stale id rather than rendering dead state.
     let bucket = bucket.filter(|b| !b.cleaned).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(detail_dto_from(&bucket, &state.catalog)))
+    let now_ms = Utc::now().timestamp_millis();
+    Ok(Json(detail_dto_from(&bucket, &state.catalog, now_ms)))
 }
 
 /// Pure projection — split out so the queued-ahead math is unit-testable
 /// without an indexer.
-fn detail_dto_from(b: &IndexerBucket, catalog: &TokenCatalog) -> BucketDetailDto {
+fn detail_dto_from(b: &IndexerBucket, catalog: &TokenCatalog, now_ms: i64) -> BucketDetailDto {
     let asset_meta = catalog.lookup(b.asset_type.as_str());
     let settle_meta = catalog.lookup(b.settlement_type.as_str());
     let asset_decimals = asset_meta.map(|m| m.decimals);
@@ -249,7 +262,15 @@ fn detail_dto_from(b: &IndexerBucket, catalog: &TokenCatalog) -> BucketDetailDto
         queued_ahead,
         queued_ahead_raw: queued_ahead_raw.to_string(),
         fill_pct,
+        deepbook_pool_id: b.deepbook_pool_id.as_ref().map(|p| p.to_hex()),
+        tradeable: is_tradeable(b.deepbook_pool_id.is_some(), b.cleaned, b.expiry_ms, now_ms),
     }
+}
+
+/// SO-153 tradeable gate. `invalidated` intentionally absent — it freezes
+/// new mints, not secondary-market transfers of already-minted coins.
+fn is_tradeable(has_pool: bool, cleaned: bool, expiry_ms: u64, now_ms: i64) -> bool {
+    has_pool && !cleaned && (expiry_ms as i64) > now_ms
 }
 
 /// Map the JIT client's bucket into the local `(id, Bucket)` shape that the
@@ -268,6 +289,7 @@ fn into_local_bucket(b: indexer_graphql::Bucket) -> (protocol_types::ids::Object
             exercise_cursor: b.exercise_cursor,
             cleaned: b.cleaned,
             invalidated: b.invalidated,
+            deepbook_pool_id: b.deepbook_pool_id.map(|p| p.to_hex()),
         },
     )
 }
@@ -278,6 +300,7 @@ type SeriesKey = (String, String, u64);
 fn group_into_series(
     buckets: Vec<(protocol_types::ids::ObjectId, Bucket)>,
     catalog: &TokenCatalog,
+    now_ms: i64,
 ) -> Vec<SeriesDto> {
     let mut grouped: BTreeMap<SeriesKey, Vec<(String, Bucket)>> = BTreeMap::new();
     for (id, b) in buckets {
@@ -299,7 +322,7 @@ fn group_into_series(
 
             let mut bucket_dtos: Vec<BucketDto> = members
                 .into_iter()
-                .map(|(id_hex, b)| dto_from(id_hex, &b, asset_decimals, settle_decimals))
+                .map(|(id_hex, b)| dto_from(id_hex, &b, asset_decimals, settle_decimals, now_ms))
                 .collect();
             // Sort strikes ascending for stable UI ordering. Buckets
             // without a known strike (decimals lookup failed) sink to the
@@ -334,6 +357,7 @@ fn dto_from(
     b: &Bucket,
     asset_decimals: Option<u8>,
     settle_decimals: Option<u8>,
+    now_ms: i64,
 ) -> BucketDto {
     // On-chain strike (post-SO-55) is `strike_raw / 10^strike_scale`
     // settlement-smallest-units per underlying-smallest-unit, so USD
@@ -361,6 +385,8 @@ fn dto_from(
         exercise_cursor_raw: b.exercise_cursor.to_string(),
         fill_pct,
         invalidated: b.invalidated,
+        deepbook_pool_id: b.deepbook_pool_id.clone(),
+        tradeable: is_tradeable(b.deepbook_pool_id.is_some(), b.cleaned, b.expiry_ms, now_ms),
     }
 }
 
@@ -389,6 +415,9 @@ mod tests {
     use protocol_types::asset::AssetType;
     use protocol_types::ids::ObjectId;
     use token_info_client::SupportedToken;
+
+    /// Fixed test clock — comfortably before the fixture expiry.
+    const NOW_MS: i64 = 1_700_000_000_000;
 
     fn tok(ticker: &str, coin_type: &str, decimals: u8) -> SupportedToken {
         SupportedToken {
@@ -421,6 +450,7 @@ mod tests {
             exercise_cursor: cursor,
             cleaned: false,
             invalidated: false,
+            deepbook_pool_id: None,
         }
     }
 
@@ -439,7 +469,7 @@ mod tests {
             ),
             (ObjectId::new([0xbb; 32]), mk_bucket(900, 0, 0, 0)),
         ];
-        let series = group_into_series(buckets, &cat);
+        let series = group_into_series(buckets, &cat, NOW_MS);
         assert_eq!(series.len(), 1);
         let s = &series[0];
         assert_eq!(s.asset_symbol, "TBTC");
@@ -467,7 +497,7 @@ mod tests {
         // regression can't sneak back in.
         let cat = fixture_catalog();
         let buckets = vec![(ObjectId::new([0xee; 32]), mk_bucket(769, 0, 0, 0))];
-        let s = group_into_series(buckets, &cat);
+        let s = group_into_series(buckets, &cat, NOW_MS);
         assert_eq!(s[0].buckets[0].strike, Some(76_900.0));
         assert_eq!(s[0].buckets[0].strike_raw, "769");
     }
@@ -495,8 +525,9 @@ mod tests {
             exercise_cursor: 0,
             cleaned: false,
             invalidated: false,
+            deepbook_pool_id: None,
         };
-        let s = group_into_series(vec![(ObjectId::new([0xff; 32]), b)], &cat);
+        let s = group_into_series(vec![(ObjectId::new([0xff; 32]), b)], &cat, NOW_MS);
         // 150 * 10^(6-9-0) = 0.15
         assert!((s[0].buckets[0].strike.unwrap() - 0.15).abs() < 1e-12);
     }
@@ -522,8 +553,9 @@ mod tests {
             exercise_cursor: 0,
             cleaned: false,
             invalidated: false,
+            deepbook_pool_id: None,
         };
-        let s = group_into_series(vec![(ObjectId::new([0xfe; 32]), b)], &cat);
+        let s = group_into_series(vec![(ObjectId::new([0xfe; 32]), b)], &cat, NOW_MS);
         // 15_000 * 10^(6 - 6 - 5) = 0.15 USD
         assert!((s[0].buckets[0].strike.unwrap() - 0.15).abs() < 1e-12);
         assert_eq!(s[0].buckets[0].strike_scale, 5);
@@ -534,7 +566,7 @@ mod tests {
     fn unknown_coin_type_falls_back_to_raw_string() {
         let cat = TokenCatalog::default();
         let buckets = vec![(ObjectId::new([0xcc; 32]), mk_bucket(1, 0, 0, 0))];
-        let series = group_into_series(buckets, &cat);
+        let series = group_into_series(buckets, &cat, NOW_MS);
         assert_eq!(series[0].asset_symbol, "0xpkg::tbtc::TBTC");
         assert_eq!(series[0].asset_decimals, None);
         assert_eq!(series[0].buckets[0].strike, None);
@@ -559,8 +591,9 @@ mod tests {
             exercise_cursor: 0,
             cleaned: false,
             invalidated: false,
+            deepbook_pool_id: None,
         };
-        let s = group_into_series(vec![(ObjectId::new([0x11; 32]), b)], &cat);
+        let s = group_into_series(vec![(ObjectId::new([0x11; 32]), b)], &cat, NOW_MS);
         assert_eq!(s[0].asset_coin_type, format!("0x{raw}::tbtc::TBTC"));
         assert_eq!(s[0].settlement_coin_type, format!("0x{raw}::tusdc::TUSDC"));
     }
@@ -572,7 +605,7 @@ mod tests {
             ObjectId::new([0xdd; 32]),
             mk_bucket(85_000_000_000, 0, 0, 0),
         )];
-        let s = group_into_series(buckets, &cat);
+        let s = group_into_series(buckets, &cat, NOW_MS);
         assert_eq!(s[0].buckets[0].fill_pct, Some(0.0));
     }
 
@@ -589,6 +622,7 @@ mod tests {
             exercise_cursor: cursor,
             cleaned: false,
             invalidated: false,
+            deepbook_pool_id: None,
         }
     }
 
@@ -600,6 +634,7 @@ mod tests {
         let dto = detail_dto_from(
             &mk_idx_bucket(ObjectId::new([0xaa; 32]), 420_000_000, 100_000_000),
             &cat,
+            NOW_MS,
         );
         assert_eq!(dto.total_written, Some(4.2));
         assert_eq!(dto.exercise_cursor, Some(1.0));
@@ -613,7 +648,7 @@ mod tests {
         // Defensive: an inconsistent indexer read where cursor > written
         // must clamp to 0, not underflow-panic the poller.
         let cat = fixture_catalog();
-        let dto = detail_dto_from(&mk_idx_bucket(ObjectId::new([0xbb; 32]), 1, 5), &cat);
+        let dto = detail_dto_from(&mk_idx_bucket(ObjectId::new([0xbb; 32]), 1, 5), &cat, NOW_MS);
         assert_eq!(dto.queued_ahead_raw, "0");
         assert_eq!(dto.queued_ahead, Some(0.0));
     }
@@ -626,11 +661,44 @@ mod tests {
         let dto = detail_dto_from(
             &mk_idx_bucket(ObjectId::new([0xcc; 32]), 420_000_000, 100_000_000),
             &cat,
+            NOW_MS,
         );
         assert_eq!(dto.asset_decimals, None);
         assert_eq!(dto.queued_ahead, None);
         assert_eq!(dto.queued_ahead_raw, "320000000");
         assert_eq!(dto.fill_pct, None);
+    }
+
+    #[test]
+    fn tradeable_gate_matrix() {
+        let expiry = 1_782_345_600_000u64; // after NOW_MS
+        assert!(is_tradeable(true, false, expiry, NOW_MS));
+        assert!(!is_tradeable(false, false, expiry, NOW_MS)); // no pool
+        assert!(!is_tradeable(true, true, expiry, NOW_MS)); // cleaned
+        assert!(!is_tradeable(true, false, 1_000, NOW_MS)); // expired
+        // invalidated intentionally not part of the gate (mint freeze only).
+    }
+
+    #[test]
+    fn dto_carries_deepbook_pool_and_tradeable() {
+        let cat = fixture_catalog();
+        let pool_hex = ObjectId::new([0xee; 32]).to_hex();
+        let mut b = mk_bucket(850, 0, 0, 0);
+        b.deepbook_pool_id = Some(pool_hex.clone());
+        let s = group_into_series(vec![(ObjectId::new([0x33; 32]), b)], &cat, NOW_MS);
+        let dto = &s[0].buckets[0];
+        assert_eq!(dto.deepbook_pool_id.as_deref(), Some(pool_hex.as_str()));
+        assert!(dto.tradeable);
+
+        // No pool → not tradeable, null pool id.
+        let s = group_into_series(
+            vec![(ObjectId::new([0x34; 32]), mk_bucket(850, 0, 0, 0))],
+            &cat,
+            NOW_MS,
+        );
+        let dto = &s[0].buckets[0];
+        assert_eq!(dto.deepbook_pool_id, None);
+        assert!(!dto.tradeable);
     }
 
     #[test]

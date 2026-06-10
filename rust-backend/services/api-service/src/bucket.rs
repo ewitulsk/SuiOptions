@@ -14,4 +14,7 @@ pub struct Bucket {
     pub exercise_cursor: u128,
     pub cleaned: bool,
     pub invalidated: bool,
+    /// DeepBook pool trading this bucket's call coin (SO-153), hex object
+    /// id. `None` until a venue is created.
+    pub deepbook_pool_id: Option<String>,
 }
