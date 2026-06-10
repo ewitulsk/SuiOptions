@@ -123,6 +123,47 @@ impl TestTokens {
     }
 }
 
+/// External **DeepBook v3** deployment the record's network trades on.
+/// Not an artifact of our publish — a reference to Mysten's deployment —
+/// but carried inside `package_info` so token-info serves it to every
+/// consumer (frontend PTBs, gas-station templates, indexer event match).
+/// Absent where DeepBook isn't deployed (devnet).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeepBookInfo {
+    /// Current (upgraded) package id — Move calls target this.
+    pub package_id: String,
+    /// Original publish id. Event/struct type strings resolve to this one
+    /// (Sui upgrade semantics), so event matching must use it.
+    pub original_package_id: String,
+    /// Shared `Registry` object id (`pool::create_permissionless_pool` arg).
+    pub registry_id: String,
+    /// Fully-qualified DEEP coin type — the pool-creation fee currency.
+    pub deep_coin_type: String,
+    /// `create_permissionless_pool` fee in DEEP atomic units (6 decimals),
+    /// as a string to sidestep JSON number precision.
+    pub pool_creation_fee: String,
+}
+
+impl DeepBookInfo {
+    pub fn package(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.package_id).context("parsing deepbook packageId")
+    }
+    pub fn original_package(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.original_package_id)
+            .context("parsing deepbook originalPackageId")
+    }
+    pub fn registry(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.registry_id).context("parsing deepbook registryId")
+    }
+    /// Pool-creation fee in DEEP atomic units.
+    pub fn pool_creation_fee_units(&self) -> Result<u64> {
+        self.pool_creation_fee
+            .parse::<u64>()
+            .context("parsing deepbook poolCreationFee")
+    }
+}
+
 /// On-chain artifacts from publishing the protocol Move package (and,
 /// on testnet, the test-tokens package).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +182,10 @@ pub struct PackageInfo {
     /// Test-token package + faucets. Testnet-only; absent on mainnet.
     #[serde(default)]
     pub test_tokens: Option<TestTokens>,
+    /// DeepBook v3 ids for this network. Absent where DeepBook isn't
+    /// deployed (devnet) — consumers must treat it as optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deepbook: Option<DeepBookInfo>,
 }
 
 /// Off-chain token catalog entry. One per supported ticker, replicated
@@ -306,6 +351,7 @@ mod tests {
                 deployed_at: "".into(),
                 network: "testnet".into(),
                 test_tokens: None,
+                deepbook: None,
             },
             token_info: BTreeMap::new(),
         };
@@ -313,6 +359,43 @@ mod tests {
         assert_eq!(bytes.len(), 32);
         assert_eq!(bytes[0], 0x3a);
         assert_eq!(bytes[31], 0xc8);
+    }
+
+    #[test]
+    fn deepbook_block_roundtrips_and_is_optional() {
+        // Absent (devnet / pre-SO-151 files): parses to None and is not
+        // re-serialized, so old consumers see an unchanged shape.
+        let without: PackageInfo = serde_json::from_str(
+            r#"{
+                "packageId": "0x1", "adminCapId": "0x2",
+                "protocolConfigId": "0x3", "upgradeCapId": "0x4",
+                "publishDigest": "d", "deployer": "0x5",
+                "deployedAt": "", "network": "devnet"
+            }"#,
+        )
+        .unwrap();
+        assert!(without.deepbook.is_none());
+        let json = serde_json::to_string(&without).unwrap();
+        assert!(!json.contains("deepbook"));
+
+        // Present: camelCase fields round-trip and typed accessors parse.
+        let db: DeepBookInfo = serde_json::from_str(
+            r#"{
+                "packageId": "0x22be4cade64bf2d02412c7e8d0e8beea2f78828b948118d46735315409371a3c",
+                "originalPackageId": "0xfb28c4cbc6865bd1c897d26aecbe1f8792d1509a20ffec692c800660cbec6982",
+                "registryId": "0x7c256edbda983a2cd6f946655f4bf3f00a41043993781f8674a7046e8c0e11d1",
+                "deepCoinType": "0x36dbef866a1d62bf7328989a10fb2f07d769f4ee587c0de4a0a256e57e0a58a8::deep::DEEP",
+                "poolCreationFee": "500000000"
+            }"#,
+        )
+        .unwrap();
+        assert!(db.package().is_ok());
+        assert!(db.original_package().is_ok());
+        assert!(db.registry().is_ok());
+        assert_eq!(db.pool_creation_fee_units().unwrap(), 500_000_000);
+        let back = serde_json::to_string(&db).unwrap();
+        assert!(back.contains("originalPackageId"));
+        assert!(back.contains("deepCoinType"));
     }
 
     #[test]
@@ -363,17 +446,28 @@ mod tests {
             assert_eq!(spec.coin_type, t.coin_type);
             assert_eq!(spec.decimals, t.decimals);
         }
+        // DeepBook ids ride along for testnet-backed envs (SO-151).
+        let db = testnet
+            .package_info
+            .deepbook
+            .as_ref()
+            .expect("staging deepbook block");
+        let _ = db.package().unwrap();
+        let _ = db.original_package().unwrap();
+        let _ = db.registry().unwrap();
+        assert_eq!(db.pool_creation_fee_units().unwrap(), 500_000_000);
+
         // Pyth feed ids land on the catalog side, not on TokenInfo.
-        assert!(testnet.token_spec("TBTC").unwrap().pyth_feed().is_ok());
-        assert!(testnet.token_spec("TUSDC").unwrap().pyth_feed().is_ok());
-        assert!(testnet.token_spec("TWAL").unwrap().pyth_feed().is_err());
-        assert!(testnet.token_spec("TDEEP").unwrap().pyth_feed().is_err());
+        // All four staging tokens carry feeds since SO-139/SO-141.
+        for sym in ["TBTC", "TUSDC", "TWAL", "TDEEP"] {
+            assert!(testnet.token_spec(sym).unwrap().pyth_feed().is_ok());
+        }
         // Case-insensitive symbol lookup.
         assert!(testnet.token_spec("tbtc").is_ok());
 
         // Case-insensitive env slot lookup.
         assert!(d.for_env("STAGING").is_ok());
-        assert!(d.for_env("prod").is_err()); // null in fixture
+        assert!(d.for_env("prod").is_ok()); // populated since 2026-06-08
         assert!(d.for_env("garbage").is_err());
     }
 }

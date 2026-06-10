@@ -44,6 +44,15 @@ export let PACKAGE_ID: string | undefined;
 export let PROTOCOL_CONFIG_ID: string | undefined;
 export let TREASURY_ID: string | undefined;
 
+// DeepBook v3 deployment ids (SO-151), served by token-info alongside the
+// protocol ids. All `undefined` on networks without a DeepBook deployment
+// (devnet) — DeepBook features simply don't render there.
+export let DEEPBOOK_PACKAGE_ID: string | undefined;
+export let DEEPBOOK_REGISTRY_ID: string | undefined;
+export let DEEP_COIN_TYPE: string | undefined;
+/** `pool::create_permissionless_pool` fee in DEEP atomic units (6 decimals). */
+export let DEEPBOOK_POOL_CREATION_FEE: bigint | undefined;
+
 // Testnet faucet tokens (SO-93). Each is a shared `Faucet` with a public
 // `mint_to_sender`. Only the testnet/dev deployment publishes these; on
 // mainnet this stays `[]` and the faucet page shows a "testnet only" state.
@@ -104,6 +113,13 @@ type PackageInfoDto = {
     packageId: string;
     tokens: Record<string, { coinType: string; faucetId: string; decimals: number }>;
   } | null;
+  deepbook?: {
+    packageId: string;
+    originalPackageId: string;
+    registryId: string;
+    deepCoinType: string;
+    poolCreationFee: string;
+  } | null;
 };
 
 type SupportedTokenDto = {
@@ -136,6 +152,12 @@ export async function initConfig(): Promise<void> {
   PACKAGE_ID = info.packageId;
   PROTOCOL_CONFIG_ID = info.protocolConfigId;
   TREASURY_ID = info.treasuryId ?? undefined;
+
+  const db = info.deepbook;
+  DEEPBOOK_PACKAGE_ID = db?.packageId;
+  DEEPBOOK_REGISTRY_ID = db?.registryId;
+  DEEP_COIN_TYPE = db?.deepCoinType;
+  DEEPBOOK_POOL_CREATION_FEE = db ? BigInt(db.poolCreationFee) : undefined;
 
   const tt = info.testTokens;
   TEST_TOKENS = tt

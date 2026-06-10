@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use sui_types::base_types::{ObjectID, SuiAddress};
 use tracing::{info, warn};
 
-pub use deployments::{PackageInfo, TestTokens, TokenInfo};
+pub use deployments::{DeepBookInfo, PackageInfo, TestTokens, TokenInfo};
 
 /// One supported-token catalog entry as served by `GET /tokens`.
 ///
@@ -112,6 +112,13 @@ impl Snapshot {
     /// `deployments::NetworkDeployment::protocol_id_bytes`.
     pub fn protocol_id_bytes(&self) -> Result<Vec<u8>> {
         Ok(self.admin_cap()?.into_bytes().to_vec())
+    }
+
+    /// DeepBook v3 deployment ids for this network (SO-151). `None` where
+    /// DeepBook isn't deployed (devnet) — DeepBook-dependent features must
+    /// degrade gracefully rather than crash.
+    pub fn deepbook(&self) -> Option<&DeepBookInfo> {
+        self.package_info.deepbook.as_ref()
     }
 
     // --- faucet accessors (testTokens passthrough) -------------------------
@@ -312,6 +319,7 @@ mod tests {
                 deployed_at: "".into(),
                 network: "testnet".into(),
                 test_tokens: None,
+                deepbook: None,
             },
             tokens: vec![
                 tok(
