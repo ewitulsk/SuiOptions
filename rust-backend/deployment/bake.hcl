@@ -83,6 +83,14 @@ target "auth-service" {
   cache-to   = [{ type = "gha", mode = "max", scope = "auth-service" }]
 }
 
+target "price-charting" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.price-charting"
+  tags       = ["${ECR}/options/price-charting:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "price-charting" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "price-charting" }]
+}
+
 target "gas-station" {
   inherits   = ["_common"]
   dockerfile = "Dockerfile.gas-station"
@@ -92,5 +100,5 @@ target "gas-station" {
 }
 
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting"]
 }

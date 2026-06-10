@@ -34,7 +34,7 @@ from typing import Iterable
 
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -57,7 +57,7 @@ REBUILD_ALL_GLOBS = [
 #   indexer          : protocol-types, runtime-config, cli-spec, deployments
 #   quoting-service  : protocol-types, runtime-config, cli-spec, indexer-graphql
 #   mm-bot           : protocol-types, runtime-config, cli-spec, sui-tx,
-#                      pyth-client, pricing, deployments
+#                      pyth-client, pricing, deployments, api-service-client
 #   option-scheduler : protocol-types, runtime-config, cli-spec, sui-tx,
 #                      pyth-client, deployments, indexer-graphql
 #   api-service      : protocol-types, runtime-config, cli-spec, indexer-graphql,
@@ -93,6 +93,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/pyth-client/**",
         "rust-backend/crates/pricing/**",
         "rust-backend/crates/deployments/**",
+        "rust-backend/crates/api-service-client/**",
     ],
     "option-scheduler": [
         "rust-backend/services/option-scheduler/**",
@@ -129,6 +130,14 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/runtime-config/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/protocol-types/**",
+    ],
+    "price-charting": [
+        "rust-backend/services/price-charting/**",
+        "rust-backend/Dockerfile.price-charting",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/api-service-client/**",
+        "rust-backend/crates/token-info-client/**",
     ],
     "gas-station": [
         "rust-backend/services/gas-station/**",

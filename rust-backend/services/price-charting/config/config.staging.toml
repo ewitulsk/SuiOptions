@@ -1,0 +1,19 @@
+# price-charting — staging (testnet). The DB URL is the Tiger Data
+# TimescaleDB secret, injected as CHART_DATABASE_URL by the deploy
+# pipeline (Secrets Manager: options/staging/price-charting).
+
+environment   = "staging"
+network       = "testnet"
+bind_addr     = "0.0.0.0:9011"
+
+database_url  = "${CHART_DATABASE_URL}"
+db_pool_size  = 4
+
+api_service_url = "http://api-service:9003"
+token_info_url  = "http://token-info:9005"
+
+discovery_interval_secs = 15
+poll_interval_ms        = 2000
+ttl_hours               = 168
+
+allowed_origins = ["*"]

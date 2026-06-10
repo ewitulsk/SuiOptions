@@ -105,6 +105,19 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # OHLC charting for DeepBook option pools (SO-156). Stores fills in the
+  # env's Tiger Data TimescaleDB (CHART_DATABASE_URL from Secrets Manager
+  # via render-secrets.sh); serves bars over REST + WS on 9011.
+  price-charting:
+    image: ${ECR}/options/price-charting:${PRICE_CHARTING_TAG}
+    environment:
+      APP_ENV: prod
+      CHART_DATABASE_URL: ${CHART_DATABASE_URL}
+      RUST_LOG: info,price_charting=debug
+    depends_on: [token-info, api-service]
+    restart: unless-stopped
+    networks: [net]
+
   # Gas station. Sponsors user transactions by paying their gas. Public port
   # (9009, proxied by nginx). Reads the sponsor key from /run/secrets.
   gas-station:

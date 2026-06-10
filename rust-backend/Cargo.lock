@@ -858,6 +858,7 @@ checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
 dependencies = [
  "async-trait",
  "axum-core 0.4.5",
+ "base64 0.22.1",
  "bytes",
  "futures-util",
  "http",
@@ -876,8 +877,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
+ "sha1",
  "sync_wrapper",
  "tokio",
+ "tokio-tungstenite 0.24.0",
  "tower 0.5.3",
  "tower-layer",
  "tower-service",
@@ -7044,6 +7047,33 @@ checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
 dependencies = [
  "proc-macro2",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "price-charting"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "api-service-client",
+ "axum 0.7.9",
+ "bigdecimal",
+ "chrono",
+ "clap",
+ "cli-spec",
+ "diesel",
+ "diesel_migrations",
+ "futures",
+ "parking_lot 0.12.5",
+ "runtime-config",
+ "serde",
+ "serde_json",
+ "sui-sdk",
+ "sui-types",
+ "token-info-client",
+ "tokio",
+ "tower-http 0.6.10",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

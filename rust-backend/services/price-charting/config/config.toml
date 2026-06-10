@@ -1,0 +1,19 @@
+# price-charting — local dev against the staging-style stack. Point
+# CHART_DATABASE_URL at any Postgres with the timescaledb extension
+# (e.g. `docker run -p 5432:5432 timescale/timescaledb:latest-pg16`).
+
+environment   = "dev"
+network       = "testnet"
+bind_addr     = "0.0.0.0:9011"
+
+database_url  = "${CHART_DATABASE_URL}"
+db_pool_size  = 4
+
+api_service_url = "http://127.0.0.1:9003"
+token_info_url  = "http://127.0.0.1:9005"
+
+discovery_interval_secs = 15
+poll_interval_ms        = 2000
+ttl_hours               = 168
+
+allowed_origins = ["*"]
