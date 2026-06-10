@@ -1,0 +1,31 @@
+{
+  "id": {
+    "txDigest": "9BCzvK5qXZDgCyGRQdVsFJKRpVfmSjWsS6fZM33XdHWZ",
+    "eventSeq": "2"
+  },
+  "packageId": "0x22be4cade64bf2d02412c7e8d0e8beea2f78828b948118d46735315409371a3c",
+  "transactionModule": "pool",
+  "sender": "0xa9f24640b32f33fcfa8582791e84a542251398acfc3b696f382a08a768b6ddbf",
+  "type": "0xfb28c4cbc6865bd1c897d26aecbe1f8792d1509a20ffec692c800660cbec6982::order_info::OrderFilled",
+  "parsedJson": {
+    "base_quantity": "1000000000",
+    "maker_balance_manager_id": "0x25a3c50f892b5ded2cf05ae206310564743105c55c0a6f84a0d01a238d95bb1b",
+    "maker_client_order_id": "1",
+    "maker_fee": "11648",
+    "maker_fee_is_deep": true,
+    "maker_order_id": "170141183460483159023462954427354664359",
+    "pool_id": "0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5",
+    "price": "755000",
+    "quote_quantity": "755000",
+    "taker_balance_manager_id": "0x85271a910f5db0a4e71b3f7edb0a67fcac253e6f4b740a51a2459ee28707ab77",
+    "taker_client_order_id": "1781050769953",
+    "taker_fee": "943",
+    "taker_fee_is_deep": false,
+    "taker_is_bid": true,
+    "taker_order_id": "170141183460469231731687303715883625891",
+    "timestamp": "1781050772926"
+  },
+  "bcsEncoding": "base64",
+  "bcs": "HBk2LKUrj/16M87oBaZ9QPMea6MDdT/TpM/frOpxY6WnTQcAAAAAADiFCwAAAACAo634////////////////fwEAAAAAAAAAIQLmrp4BAAA4hQsAAAAAAAGvAwAAAAAAAACALQAAAAAAAAEAypo7AAAAADiFCwAAAAAAJaPFD4krXe0s8FriBjEFZHQxBcVcCm+EoNAaI42VuxuFJxqRD12wpOcbP37bCmf8rCU+b0t0ClGiRZ7ihwerd74N5q6eAQAA",
+  "timestampMs": "1781050773444"
+}
