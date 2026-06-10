@@ -53,6 +53,16 @@ pub struct StrikeGrid {
     pub strike_scale: u8,
 }
 
+impl StrikeGrid {
+    /// Expand the uniform grid into explicit per-bucket strikes — the
+    /// shape `RollPlan` carries now that grids may be non-uniform.
+    pub fn strikes(&self) -> Vec<u128> {
+        (0..self.count)
+            .map(|i| self.start_strike + (i as u128) * self.strike_interval)
+            .collect()
+    }
+}
+
 /// Legacy helper kept for tests / dev convenience: convert a USD spot
 /// into the scale=0 chain-unit ratio.
 pub fn spot_usd_to_chain_units(
@@ -155,6 +165,94 @@ pub fn build_strike_grid_for_pair(
     })
 }
 
+/// Grid v2 (doc 05 §4.2): strikes at fixed standard-deviation multiples
+/// `K_i = round_nice(S · exp(z_i · σ · √τ))` instead of fixed percentages,
+/// so the vault's 0.1-delta strike (z = 1.30) is on-grid by construction
+/// and spacing adapts to the vol regime. The f64 ladder math is shared
+/// with the keeper and the backtester via `pricing::grid`.
+///
+/// Returns explicit per-bucket strikes plus the auto-derived scale. The
+/// scale-picker mirrors [`build_strike_grid_for_pair`]'s, applied to the
+/// *smallest interval between adjacent strikes* (the grid is no longer
+/// uniform): the first scale where that gap reaches
+/// `TARGET_INTERVAL_CHAIN_UNITS` wins, with the largest workable scale as
+/// fallback.
+pub fn build_z_ladder_for_pair(
+    spot_usd_cross: f64,
+    sigma: f64,
+    tau_years: f64,
+    ladder: &[f64],
+    underlying_decimals: u8,
+    settlement_decimals: u8,
+) -> Result<(Vec<u128>, u8)> {
+    if !spot_usd_cross.is_finite() || spot_usd_cross <= 0.0 {
+        bail!("spot must be positive and finite: {spot_usd_cross}");
+    }
+    if !sigma.is_finite() || sigma <= 0.0 {
+        bail!("sigma must be positive and finite: {sigma}");
+    }
+    if !tau_years.is_finite() || tau_years <= 0.0 {
+        bail!("tau_years must be positive and finite: {tau_years}");
+    }
+    if ladder.len() < 2 {
+        bail!("ladder needs at least 2 strikes, got {}", ladder.len());
+    }
+
+    let usd_strikes = pricing::grid::build_z_ladder(spot_usd_cross, sigma, tau_years, ladder);
+    let dec_diff = settlement_decimals as i32 - underlying_decimals as i32;
+
+    let mut chosen: Option<(u8, Vec<u128>, u128)> = None;
+    for scale in 0u8..=MAX_STRIKE_SCALE {
+        let exp = scale as i32 + dec_diff;
+        let factor = 10f64.powi(exp);
+        let mut chain: Vec<u128> = Vec::with_capacity(usd_strikes.len());
+        let mut viable = true;
+        for k in &usd_strikes {
+            let v = k * factor;
+            if !v.is_finite() || v < 1.0 || v >= u128::MAX as f64 {
+                viable = false;
+                break;
+            }
+            let v = v.round() as u128;
+            // Rounding must not collapse adjacent strikes.
+            if chain.last().is_some_and(|prev| *prev >= v) {
+                viable = false;
+                break;
+            }
+            chain.push(v);
+        }
+        if !viable {
+            continue;
+        }
+        let min_gap = chain
+            .windows(2)
+            .map(|w| w[1] - w[0])
+            .min()
+            .expect("ladder has ≥ 2 strikes");
+        chosen = Some((scale, chain, min_gap));
+        if min_gap >= TARGET_INTERVAL_CHAIN_UNITS {
+            break;
+        }
+    }
+    let (strike_scale, strikes, min_gap) = chosen.ok_or_else(|| {
+        anyhow!(
+            "no viable strike_scale in [0, {MAX_STRIKE_SCALE}] for z-ladder: \
+             spot_usd_cross={spot_usd_cross} sigma={sigma} tau_years={tau_years} \
+             under_dec={underlying_decimals} settle_dec={settlement_decimals}"
+        )
+    })?;
+    debug!(
+        spot_usd_cross,
+        sigma,
+        tau_years,
+        strike_scale,
+        min_gap,
+        strikes = ?strikes,
+        "computed z-ladder strike grid"
+    );
+    Ok((strikes, strike_scale))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +335,77 @@ mod tests {
         // 1000 strikes below at $77k → walks past zero, regardless of scale.
         let err = build_strike_grid_for_pair(77_000.0, 8, 6, 1000, 0, 5.0).unwrap_err();
         assert!(err.to_string().contains("non-positive"), "{err}");
+    }
+
+    #[test]
+    fn grid_strikes_expand_uniformly() {
+        let g = StrikeGrid {
+            start_strike: 100,
+            strike_interval: 25,
+            count: 4,
+            strike_scale: 2,
+        };
+        assert_eq!(g.strikes(), vec![100, 125, 150, 175]);
+    }
+
+    #[test]
+    fn z_ladder_sui_usdc_hits_resolution_target() {
+        // SUI(9)/USDC(6) at $3.47, 85% vol, weekly tenor. dec_diff = −3,
+        // so chain values start around 3.47e-3 — the picker must walk the
+        // scale up until adjacent gaps clear 1000 chain units.
+        let (strikes, scale) =
+            build_z_ladder_for_pair(3.47, 0.85, 7.0 / 365.0, &pricing::grid::SUI_LADDER, 9, 6)
+                .unwrap();
+        assert_eq!(strikes.len(), 5);
+        for w in strikes.windows(2) {
+            assert!(w[1] > w[0], "not increasing: {strikes:?}");
+            assert!(w[1] - w[0] >= TARGET_INTERVAL_CHAIN_UNITS, "gap too small: {strikes:?}");
+        }
+        // The z = 1.30 vault-target strike sits above spot.
+        let spot_chain = 3.47 * 10f64.powi(scale as i32 - 3);
+        assert!((strikes[2] as f64) > spot_chain);
+        // ATM (z = 0) strike is within a nice-rounding step of spot.
+        assert!(((strikes[0] as f64) - spot_chain).abs() / spot_chain < 0.01);
+    }
+
+    #[test]
+    fn z_ladder_btc_seven_strikes_with_itm_wing() {
+        let (strikes, scale) = build_z_ladder_for_pair(
+            117_483.91,
+            0.55,
+            7.0 / 365.0,
+            &pricing::grid::BTC_LADDER,
+            8,
+            6,
+        )
+        .unwrap();
+        assert_eq!(strikes.len(), 7);
+        let spot_chain = 117_483.91 * 10f64.powi(scale as i32 - 2);
+        assert!((strikes[0] as f64) < spot_chain, "z=-0.65 wing is ITM");
+        assert!((strikes[6] as f64) > spot_chain * 1.1, "far OTM wing");
+        for w in strikes.windows(2) {
+            assert!(w[1] - w[0] >= TARGET_INTERVAL_CHAIN_UNITS);
+        }
+    }
+
+    #[test]
+    fn z_ladder_spacing_tracks_vol() {
+        let tau = 7.0 / 365.0;
+        let ladder = pricing::grid::SUI_LADDER;
+        let (calm, s1) = build_z_ladder_for_pair(3.47, 0.30, tau, &ladder, 9, 6).unwrap();
+        let (wild, s2) = build_z_ladder_for_pair(3.47, 1.20, tau, &ladder, 9, 6).unwrap();
+        assert_eq!(s1, s2, "same magnitude ⇒ same scale");
+        let width = |v: &[u128]| v[4] as f64 / v[0] as f64 - 1.0;
+        assert!(width(&wild) > width(&calm) * 3.0);
+    }
+
+    #[test]
+    fn z_ladder_rejects_bad_inputs() {
+        let ladder = pricing::grid::SUI_LADDER;
+        assert!(build_z_ladder_for_pair(0.0, 0.8, 0.02, &ladder, 9, 6).is_err());
+        assert!(build_z_ladder_for_pair(3.5, 0.0, 0.02, &ladder, 9, 6).is_err());
+        assert!(build_z_ladder_for_pair(3.5, 0.8, 0.0, &ladder, 9, 6).is_err());
+        assert!(build_z_ladder_for_pair(3.5, 0.8, 0.02, &[1.3], 9, 6).is_err());
     }
 
     #[test]

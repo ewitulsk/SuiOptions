@@ -92,6 +92,12 @@ async fn main() -> Result<()> {
             let s_type = resolve_coin_type(&snapshot, &settlement)?;
             // Drive the same per-roll codegen→publish→create_bucket pipeline
             // the scheduler uses, so manual buckets get per-bucket option coins.
+            let grid = StrikeGrid {
+                start_strike,
+                strike_interval,
+                count,
+                strike_scale,
+            };
             let plan = RollPlan {
                 underlying_symbol: underlying.clone(),
                 settlement_symbol: settlement.clone(),
@@ -99,12 +105,8 @@ async fn main() -> Result<()> {
                 settlement_type: s_type,
                 underlying_decimals: u_spec.decimals,
                 expiry_ms,
-                grid: StrikeGrid {
-                    start_strike,
-                    strike_interval,
-                    count,
-                    strike_scale,
-                },
+                strikes: grid.strikes(),
+                strike_scale,
             };
             let out = roller::submit(&wrap, package, admin_cap, &plan, cli.gas_budget).await?;
             println!("✓ create-buckets digest: {}", out.digest);

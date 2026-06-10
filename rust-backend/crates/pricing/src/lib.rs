@@ -16,6 +16,8 @@
 //! We use Abramowitz-Stegun 26.2.17 for the standard normal CDF — accurate to
 //! ~7e-8, plenty for a test bot.
 
+pub mod grid;
+
 use tracing::trace;
 
 #[derive(Clone, Copy, Debug)]

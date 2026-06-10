@@ -97,18 +97,29 @@ pub struct PythGlobalConfig {
     /// roll, so the public endpoint's rate cap is plenty.
     #[serde(default = "default_hermes_url")]
     pub hermes_url: String,
+
+    /// Base URL for the Pyth Benchmarks REST API — historical daily
+    /// closes for the z-ladder's realized-vol estimate (one call per day
+    /// of the vol window, per roll).
+    #[serde(default = "default_benchmarks_url")]
+    pub benchmarks_url: String,
 }
 
 impl Default for PythGlobalConfig {
     fn default() -> Self {
         Self {
             hermes_url: default_hermes_url(),
+            benchmarks_url: default_benchmarks_url(),
         }
     }
 }
 
 fn default_hermes_url() -> String {
     "https://hermes.pyth.network".into()
+}
+
+fn default_benchmarks_url() -> String {
+    "https://benchmarks.pyth.network".into()
 }
 
 fn default_tick_secs() -> u64 {
@@ -139,6 +150,55 @@ pub struct PairConfig {
     pub interval_pct: f64,
 
     pub spot: SpotConfig,
+
+    /// Grid v2 (doc 05 §4.2): when present, strikes come from the
+    /// vol-aware z-ladder and `strikes_below`/`strikes_above`/
+    /// `interval_pct` are ignored. Absent ⇒ the legacy percentage grid
+    /// (kept for test tokens).
+    #[serde(default)]
+    pub grid: Option<GridConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum GridConfig {
+    /// Strikes at K_i = round_nice(S · exp(z_i · σ · √τ)) with σ =
+    /// realized vol clamped to [vol_floor, vol_ceiling].
+    ZLadder {
+        /// Standard-deviation multiples, ascending. Defaults to the
+        /// 5-point ladder (z = 1.30 ≈ the vault's 0.1-delta target);
+        /// BTC-style pairs configure the 7-point ladder explicitly.
+        #[serde(default = "default_ladder")]
+        ladder: Vec<f64>,
+        /// Trailing window for realized vol, in days.
+        #[serde(default = "default_vol_window_days")]
+        vol_window_days: u32,
+        #[serde(default = "default_vol_floor")]
+        vol_floor: f64,
+        #[serde(default = "default_vol_ceiling")]
+        vol_ceiling: f64,
+        /// Annualized σ used when benchmark history is unavailable —
+        /// required for static-spot (test-token) pairs, a safety net for
+        /// Pyth pairs. Without it, a failed vol fetch skips the roll.
+        #[serde(default)]
+        sigma_fallback: Option<f64>,
+    },
+}
+
+fn default_ladder() -> Vec<f64> {
+    pricing::grid::SUI_LADDER.to_vec()
+}
+
+fn default_vol_window_days() -> u32 {
+    30
+}
+
+fn default_vol_floor() -> f64 {
+    0.2
+}
+
+fn default_vol_ceiling() -> f64 {
+    3.0
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -300,6 +360,106 @@ interval_pct        = 5.0
                 assert_eq!(*max_conf_bps, 100);
             }
             other => panic!("expected pyth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pair_without_grid_table_uses_legacy_percent_path() {
+        let cfg = parse(
+            r#"
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
+scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler_test"
+
+[[pairs]]
+underlying          = "TBTC"
+settlement          = "TUSDC"
+expiry_interval_ms  = 604800000
+strikes_below       = 4
+strikes_above       = 4
+interval_pct        = 5.0
+
+  [pairs.spot]
+  source = "static"
+  usd    = 50000.0
+"#,
+        );
+        assert!(cfg.pairs[0].grid.is_none());
+        assert_eq!(cfg.pyth.benchmarks_url, "https://benchmarks.pyth.network");
+    }
+
+    #[test]
+    fn parses_z_ladder_grid_with_defaults() {
+        let cfg = parse(
+            r#"
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
+scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler_test"
+
+[[pairs]]
+underlying          = "SUI"
+settlement          = "USDC"
+expiry_interval_ms  = 604800000
+strikes_below       = 4
+strikes_above       = 4
+interval_pct        = 5.0
+
+  [pairs.spot]
+  source = "pyth"
+
+  [pairs.grid]
+  mode = "z_ladder"
+"#,
+        );
+        match cfg.pairs[0].grid.as_ref().unwrap() {
+            GridConfig::ZLadder {
+                ladder,
+                vol_window_days,
+                vol_floor,
+                vol_ceiling,
+                sigma_fallback,
+            } => {
+                assert_eq!(ladder, &pricing::grid::SUI_LADDER.to_vec());
+                assert_eq!(*vol_window_days, 30);
+                assert_eq!(*vol_floor, 0.2);
+                assert_eq!(*vol_ceiling, 3.0);
+                assert!(sigma_fallback.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn parses_z_ladder_grid_with_btc_ladder_and_fallback() {
+        let cfg = parse(
+            r#"
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
+scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler_test"
+
+[pyth]
+benchmarks_url = "https://benchmarks.custom/"
+
+[[pairs]]
+underlying          = "WBTC"
+settlement          = "USDC"
+expiry_interval_ms  = 604800000
+strikes_below       = 4
+strikes_above       = 4
+interval_pct        = 5.0
+
+  [pairs.spot]
+  source = "static"
+  usd    = 117000.0
+
+  [pairs.grid]
+  mode           = "z_ladder"
+  ladder         = [-0.65, 0.0, 0.65, 1.3, 1.95, 2.6, 3.25]
+  sigma_fallback = 0.55
+"#,
+        );
+        assert_eq!(cfg.pyth.benchmarks_url, "https://benchmarks.custom/");
+        match cfg.pairs[0].grid.as_ref().unwrap() {
+            GridConfig::ZLadder { ladder, sigma_fallback, .. } => {
+                assert_eq!(ladder.len(), 7);
+                assert_eq!(*sigma_fallback, Some(0.55));
+            }
         }
     }
 

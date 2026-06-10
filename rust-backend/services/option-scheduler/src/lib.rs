@@ -16,6 +16,7 @@ pub mod db;
 pub mod families;
 pub mod roller;
 pub mod schedule;
+pub mod sigma;
 pub mod spot;
 pub mod strike_grid;
 

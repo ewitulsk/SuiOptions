@@ -6498,6 +6498,7 @@ dependencies = [
  "diesel_migrations",
  "indexer-graphql",
  "move-core-types",
+ "pricing",
  "protocol-types",
  "pyth-client",
  "r2d2",
