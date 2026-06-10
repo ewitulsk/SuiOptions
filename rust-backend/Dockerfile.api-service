@@ -23,5 +23,5 @@ COPY services/api-service/config/ /app/config/
 # `reading deployments file deployments.json: No such file or directory`.
 COPY deployments.json /app/deployments.json
 
-ENV APP_ENV=dev
+ENV APP_ENV=staging
 ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/api-service --config /app/config/config.${APP_ENV}.toml"]

@@ -1,22 +1,12 @@
-name: Deploy lower envs
+name: Deploy staging
 
-# Build + selective deploy to dev and/or staging. The actual build/deploy
-# logic lives in _deploy.yml; this file is the trigger + env list.
-# Manual-only (workflow_dispatch) — see SO-17. Choose which env(s) to
-# target via the `environment` input.
+# Build + selective deploy to staging. The actual build/deploy logic
+# lives in _deploy.yml; this file is the trigger.
+# Manual-only (workflow_dispatch) — see SO-17.
 
 on:
   workflow_dispatch:
     inputs:
-      environment:
-        description: 'Target environment(s) to deploy'
-        required: true
-        type: choice
-        options:
-          - both
-          - dev
-          - staging
-        default: both
       image_tag:
         description: 'Image tag to deploy. Empty = current SHA. Non-empty = skip build and roll the given tag (rollback).'
         required: false
@@ -37,6 +27,6 @@ jobs:
     uses: ./.github/workflows/_deploy.yml
     secrets: inherit
     with:
-      envs: ${{ inputs.environment == 'both' && '["dev","staging"]' || format('["{0}"]', inputs.environment) }}
+      envs: '["staging"]'
       image_tag: ${{ inputs.image_tag || '' }}
       force_all: ${{ inputs.force_all == true }}

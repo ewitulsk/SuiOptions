@@ -41,13 +41,6 @@ resource "aws_security_group" "ec2" {
   # per env; backend services (quoting, api-service, etc.) talk to nginx
   # over the docker network and don't publish host ports.
   ingress {
-    description     = "nginx dev"
-    from_port       = 9010
-    to_port         = 9010
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-  }
-  ingress {
     description     = "nginx staging"
     from_port       = 9020
     to_port         = 9020

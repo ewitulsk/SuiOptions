@@ -4,7 +4,7 @@ description: >
   $GITHUB_ENV. Replaces the hardcoded vars.EC2_INSTANCE_ID, which goes stale
   whenever terraform replaces the instance (the host's AMI floats via
   most_recent, and aws_instance.host.ami is force-new). prod runs on its own
-  instance (options-prod-host); dev/staging + monitoring share options-host.
+  instance (options-prod-host); staging + monitoring share options-host.
 
 inputs:
   region:

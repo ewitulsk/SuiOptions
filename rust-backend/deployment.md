@@ -1,7 +1,7 @@
 # Deployment
 
 How the three services in `services/` get from a `git push` to a running
-process on AWS. Three environments, one EC2 box (for now), one Aurora
+process on AWS. Two environments, one EC2 box (for now), one Aurora
 cluster (for now), one ALB. Fully automatic on push; manual contract
 publishes; scaling plans for the obvious next splits at the bottom.
 
@@ -11,23 +11,22 @@ publishes; scaling plans for the obvious next splits at the bottom.
 
 | Env | Sui network | Branch that ships it | DB name | Quoting host port |
 |---|---|---|---|---|
-| `dev` | devnet | `staging` | `indexer_dev` | 9012 |
 | `staging` | testnet | `staging` | `indexer_staging` | 9022 |
 | `prod` | mainnet | `main` | `indexer_prod` | 9032 |
 
 Branch → env mapping:
 
-- Push / merge to `staging` → build once, deploy to **both** `dev` and
-  `staging`. Same image SHA goes to both. Lower envs run identical code,
-  only configs differ.
+- Push / merge to `staging` → build once, deploy to `staging`.
 - Push / merge to `main` → deploy to `prod`. No human gate (per your
   call). The git tag on the deploy commit is the rollback handle.
 
-Naming convention used everywhere in this doc and in code: `dev`,
-`staging`, `prod` for the environment; `testnet`, `devnet`, `mainnet`
-for the Sui network. They are not the same word — `dev` env runs against
-`devnet`, `staging` runs against `testnet`, `prod` runs against
-`mainnet`.
+Naming convention used everywhere in this doc and in code: `staging`,
+`prod` for the environment; `testnet`, `mainnet` for the Sui network.
+They are not the same word — `staging` env runs against `testnet`,
+`prod` runs against `mainnet`.
+
+> A third `dev` env (Sui devnet) used to sit alongside these; it was
+> never used and was removed in SO-160.
 
 ---
 
@@ -40,32 +39,30 @@ for the Sui network. They are not the same word — `dev` env runs against
                           ┌──────────────────────────┐
                           │   ALB (HTTPS, ACM cert)  │
                           │   api.<domain>           │
-                          │   /dev/*   → tg-dev      │
                           │   /staging/* → tg-stg    │
                           │   /prod/*  → tg-prod     │
                           └─────────────┬────────────┘
                                         │
                                         ▼
-       ┌─────────────────────────── EC2 (single box) ───────────────────────────┐
-       │                                                                        │
-       │  /opt/options/dev/      /opt/options/staging/   /opt/options/prod/     │
-       │  docker-compose.yml      docker-compose.yml      docker-compose.yml    │
-       │   ├─ indexer   :9011      ├─ indexer   :9021     ├─ indexer   :9031    │
-       │   ├─ quoting   :9012◄     ├─ quoting   :9022◄    ├─ quoting   :9032◄   │
-       │   └─ mm-bot    (no port)  └─ mm-bot                └─ mm-bot           │
-       │                                                                        │
-       │  Volumes (per env):                                                    │
-       │   secrets_<env>         holds rendered secrets.toml (tmpfs preferred)  │
-       │                                                                        │
-       └────────────────────────────────────┬───────────────────────────────────┘
-                                            │ Postgres :5432
-                                            ▼
-                          ┌──────────────────────────────────────┐
-                          │  Aurora Postgres cluster (1 writer)  │
-                          │  ├─ DB: indexer_dev                  │
-                          │  ├─ DB: indexer_staging              │
-                          │  └─ DB: indexer_prod                 │
-                          └──────────────────────────────────────┘
+       ┌─────────────────── EC2 (single box) ─────────────────────┐
+       │                                                          │
+       │  /opt/options/staging/        /opt/options/prod/         │
+       │  docker-compose.yml           docker-compose.yml         │
+       │   ├─ indexer   :9021           ├─ indexer   :9031        │
+       │   ├─ quoting   :9022◄          ├─ quoting   :9032◄       │
+       │   └─ mm-bot    (no port)       └─ mm-bot                 │
+       │                                                          │
+       │  Volumes (per env):                                      │
+       │   secrets_<env>   holds rendered secrets.toml            │
+       │                                                          │
+       └──────────────────────────┬───────────────────────────────┘
+                                  │ Postgres :5432
+                                  ▼
+                ┌──────────────────────────────────────┐
+                │  Aurora Postgres cluster (1 writer)  │
+                │  ├─ DB: indexer_staging              │
+                │  └─ DB: indexer_prod                 │
+                └──────────────────────────────────────┘
 ```
 
 Inside each env's compose stack the three containers share a private
@@ -82,7 +79,7 @@ per env.
 ## 3. Repo / image layout
 
 Each service ships as its own Docker image, built from its own
-`Dockerfile`. One image is environment-agnostic; the three per-env config
+`Dockerfile`. One image is environment-agnostic; the per-env config
 files are all baked in, and the entrypoint picks one based on
 `$APP_ENV`.
 
@@ -93,21 +90,17 @@ rust-backend/
 ├── Dockerfile.mm-bot
 ├── deployment/
 │   ├── compose/
-│   │   ├── docker-compose.dev.yml
 │   │   ├── docker-compose.staging.yml
 │   │   └── docker-compose.prod.yml
 │   └── ec2-bootstrap.sh
 ├── services/
 │   ├── indexer/config/
-│   │   ├── config.dev.toml
 │   │   ├── config.staging.toml
 │   │   └── config.prod.toml
 │   ├── quoting-service/config/
-│   │   ├── config.dev.toml
 │   │   ├── config.staging.toml
 │   │   └── config.prod.toml
 │   └── mm-bot/config/
-│       ├── config.dev.toml
 │       ├── config.staging.toml
 │       └── config.prod.toml
 └── deployments.json          (committed, baked into all three images)
@@ -146,23 +139,22 @@ binary and configs. The mm-bot entrypoint additionally passes
 
 ### Per-env config differences
 
-`config.dev.toml` example for the indexer:
+`config.staging.toml` example for the indexer:
 
 ```toml
-network                 = "devnet"
+network                 = "testnet"
 deployments_path        = "/app/deployments.json"
-remote_store_url        = "https://checkpoints.devnet.sui.io"
+remote_store_url        = "https://checkpoints.testnet.sui.io"
 concurrency             = 5
 fanout_addr             = "0.0.0.0:9001"   # bind on all interfaces; only the compose net can reach it
 heartbeat_interval_secs = 5
-database_url            = "postgresql://indexer:${DB_PASSWORD}@<aurora-endpoint>:5432/indexer_dev"
+database_url            = "postgresql://indexer:${DB_PASSWORD}@<aurora-endpoint>:5432/indexer_staging"
 db_pool_size            = 8
 recent_log_capacity     = 1024
 ```
 
-Diff from `config.staging.toml`: `network = "testnet"`, different
+Diff from `config.prod.toml`: `network = "mainnet"`, different
 `remote_store_url`, different `database_url`, optional `start_checkpoint`.
-Diff from `config.prod.toml`: `network = "mainnet"`, etc.
 
 > **Config loader note.** Two of the values above use `${VAR}`
 > interpolation: `${DB_PASSWORD}` in the indexer's `database_url`, and
@@ -175,45 +167,45 @@ Diff from `config.prod.toml`: `network = "mainnet"`, etc.
 ports (9001 for indexer fanout, 9002 for quoting). The host-side port
 mapping in `docker-compose.<env>.yml` is what publishes 9012/9022/9032.
 
-### docker-compose.dev.yml (the others are the same shape)
+### docker-compose.staging.yml (prod is the same shape)
 
 ```yaml
-name: options-dev
+name: options-staging
 
 services:
   indexer:
     image: ${ECR}/indexer:${IMAGE_TAG}
     environment:
-      APP_ENV: dev
+      APP_ENV: staging
       DB_PASSWORD: ${DB_PASSWORD}        # injected from deploy step
       RUST_LOG: info,indexer=debug
     restart: unless-stopped
-    networks: [options_dev_net]
+    networks: [options_staging_net]
 
   quoting:
     image: ${ECR}/quoting-service:${IMAGE_TAG}
     environment:
-      APP_ENV: dev
+      APP_ENV: staging
       RUST_LOG: info,quoting_service=debug
     ports:
-      - "9012:9002"
+      - "9022:9002"
     depends_on: [indexer]
     restart: unless-stopped
-    networks: [options_dev_net]
+    networks: [options_staging_net]
 
   mm-bot:
     image: ${ECR}/mm-bot:${IMAGE_TAG}
     environment:
-      APP_ENV: dev
+      APP_ENV: staging
       RUST_LOG: info,mm_bot=debug
     volumes:
-      - /opt/options/dev/secrets:/run/secrets:ro
+      - /opt/options/staging/secrets:/run/secrets:ro
     depends_on: [quoting]
     restart: unless-stopped
-    networks: [options_dev_net]
+    networks: [options_staging_net]
 
 networks:
-  options_dev_net:
+  options_staging_net:
 ```
 
 The mm-bot keeps no persistent state: it resolves its Account from chain
@@ -228,10 +220,10 @@ redeploys need no volume or file handling.
 | Resource | Notes |
 |---|---|
 | **EC2 instance** | Ubuntu 22.04 LTS, t3.medium minimum (4 GB RAM; the indexer's in-memory state grows with checkpoint lag). Single AZ. Docker + docker compose + SSM Agent installed. IAM instance profile with ECR pull, Secrets Manager read, CloudWatch Logs write. |
-| **Aurora Postgres cluster** | Single writer instance (Aurora minimum); 3 logical DBs (`indexer_dev`, `indexer_staging`, `indexer_prod`); 1 DB user per env with grants scoped to its DB only. In private subnet, security group permits EC2 → 5432. |
+| **Aurora Postgres cluster** | Single writer instance (Aurora minimum); 2 logical DBs (`indexer_staging`, `indexer_prod`); 1 DB user per env with grants scoped to its DB only. In private subnet, security group permits EC2 → 5432. |
 | **ECR repos** | `options/indexer`, `options/quoting-service`, `options/mm-bot`. Lifecycle policy: keep last 20 images per repo. |
-| **ALB** | HTTPS:443, HTTP:80→443 redirect. Single ACM cert for `api.<domain>`. Three target groups (one per env) with health check on `/health` (see §10). |
-| **AWS Secrets Manager** | Six secrets, two per env: `options/<env>/sui-key` (Sui bech32 key), `options/<env>/mm-quote-key` (MM quote key), plus one shared `options/<env>/db-password`. |
+| **ALB** | HTTPS:443, HTTP:80→443 redirect. Single ACM cert for `api.<domain>`. Two target groups (one per env) with health check on `/health` (see §10). |
+| **AWS Secrets Manager** | Two secrets per env: `options/<env>/sui-key` (Sui bech32 key), `options/<env>/mm-quote-key` (MM quote key), plus one shared `options/<env>/db-password`. |
 | **Route 53** | One A-record alias: `api.<domain>` → ALB. |
 | **CloudWatch Logs** | Not used initially. Logs stay in `docker logs` on the host. See §13 for the Grafana/Loki migration plan. |
 
@@ -241,18 +233,17 @@ redeploys need no volume or file handling.
 
 One ALB listener on 443. Rules (top to bottom):
 
-1. Path `/dev/*` → target group `tg-quoting-dev` → EC2:9012
-2. Path `/staging/*` → target group `tg-quoting-staging` → EC2:9022
-3. Path `/prod/*` → target group `tg-quoting-prod` → EC2:9032
-4. Default → 404
+1. Path `/staging/*` → target group `tg-quoting-staging` → EC2:9022
+2. Path `/prod/*` → target group `tg-quoting-prod` → EC2:9032
+3. Default → 404
 
 WebSocket upgrades pass through ALB transparently; no special config.
 ACM cert covers `api.<domain>`; renewal is automatic.
 
 > **Wrinkle to fix in the quoting-service.** ALB does **not** strip the
 > path prefix before forwarding. A client connecting to
-> `wss://api.<domain>/dev/` arrives at the quoting-service as a WS
-> upgrade on path `/dev/`. The quoting-service's WS route currently
+> `wss://api.<domain>/staging/` arrives at the quoting-service as a WS
+> upgrade on path `/staging/`. The quoting-service's WS route currently
 > binds to `/` only. Two options:
 >
 > 1. Make the quoting-service accept any path (one line in the router).
@@ -280,7 +271,7 @@ host-side directory bind-mounted read-only into the mm-bot container.
 The deploy job runs on EC2 (via SSM) and does:
 
 ```bash
-ENV=dev
+ENV=staging
 mkdir -p /opt/options/$ENV/secrets
 
 aws secretsmanager get-secret-value \
@@ -294,7 +285,6 @@ aws secretsmanager get-secret-value \
 cat > /opt/options/$ENV/secrets/secrets.toml <<EOF
 [sui]
 $(case $ENV in
-  dev)      echo "devnet  = \"$(cat /tmp/sui-key)\"" ;;
   staging)  echo "testnet = \"$(cat /tmp/sui-key)\"" ;;
   prod)     echo "mainnet = \"$(cat /tmp/sui-key)\"" ;;
 esac)
@@ -337,7 +327,7 @@ export DB_PASSWORD=$(aws secretsmanager get-secret-value \
 1. Developer runs `cargo run -p deploy -- ...` locally targeting a
    specific network. The deploy tool writes `deployments.json`.
 2. Developer commits `deployments.json` + pushes to `staging` (for
-   devnet/testnet redeploys) or `main` (for mainnet).
+   testnet redeploys) or `main` (for mainnet).
 3. CI builds new images that bake the updated `deployments.json` in.
 4. Deploy step rolls services on the EC2.
 
@@ -350,7 +340,7 @@ Contract publishes are **not** in CI — too easy to misfire on mainnet.
 Two workflows: `.github/workflows/deploy-lower.yml` and
 `.github/workflows/deploy-prod.yml`.
 
-### deploy-lower.yml (push to `staging` → dev + staging)
+### deploy-lower.yml (push to `staging` → staging)
 
 ```yaml
 name: Deploy lower envs
@@ -390,7 +380,7 @@ jobs:
     needs: build
     strategy:
       matrix:
-        env: [dev, staging]
+        env: [staging]
       fail-fast: false
     runs-on: ubuntu-latest
     steps:
@@ -412,10 +402,8 @@ jobs:
             --output text
 ```
 
-The `dev` and `staging` deploys run in parallel via the matrix
-(`fail-fast: false` so one env failing doesn't cancel the other). Both
-pull the same image SHA — that's the whole point of the staging-branch
-mapping.
+The deploy pulls the image SHA the build job just pushed — that's the
+whole point of the staging-branch mapping.
 
 ### deploy-prod.yml (push to `main` → prod)
 
@@ -459,7 +447,7 @@ docker compose -f "$COMPOSE" up -d --remove-orphans
 
 # Health check — give services 30s to come up.
 sleep 30
-PORT=$(case $ENV in dev) echo 9012;; staging) echo 9022;; prod) echo 9032;; esac)
+PORT=$(case $ENV in staging) echo 9022;; prod) echo 9032;; esac)
 if ! curl -fsS "http://localhost:$PORT/health" >/dev/null; then
   echo "Health check failed; rolling back to $PREV_TAG"
   if [ -n "$PREV_TAG" ]; then
@@ -489,18 +477,15 @@ Done once per AWS account. Not in CI.
    (ECR pull, Secrets Manager read, CloudWatch Logs write, SSM core).
    Run `deployment/ec2-bootstrap.sh` once:
    - Install Docker, docker compose v2, AWS CLI v2, SSM Agent.
-   - `mkdir -p /opt/options/{dev,staging,prod}/{secrets}`.
+   - `mkdir -p /opt/options/{staging,prod}/{secrets}`.
    - Copy `docker-compose.<env>.yml` and `deploy.sh` into each dir.
 3. **Aurora cluster.** Aurora Postgres 16, single writer
    (`db.t4g.medium`). Create master user. Then via psql:
    ```sql
-   CREATE DATABASE indexer_dev;
    CREATE DATABASE indexer_staging;
    CREATE DATABASE indexer_prod;
-   CREATE USER indexer_dev     WITH PASSWORD '<from-secrets-manager>';
    CREATE USER indexer_staging WITH PASSWORD '<from-secrets-manager>';
    CREATE USER indexer_prod    WITH PASSWORD '<from-secrets-manager>';
-   GRANT ALL PRIVILEGES ON DATABASE indexer_dev     TO indexer_dev;
    GRANT ALL PRIVILEGES ON DATABASE indexer_staging TO indexer_staging;
    GRANT ALL PRIVILEGES ON DATABASE indexer_prod    TO indexer_prod;
 
@@ -508,13 +493,10 @@ Done once per AWS account. Not in CI.
    -- boot if it can't connect). One logical DB + user per env, same
    -- pattern as the indexer. The user password reuses the env's
    -- ${DB_PASSWORD} secret (same value the indexer user uses).
-   CREATE DATABASE scheduler_dev;
    CREATE DATABASE scheduler_staging;
    CREATE DATABASE scheduler_prod;
-   CREATE USER scheduler_dev     WITH PASSWORD '<from-secrets-manager>';
    CREATE USER scheduler_staging WITH PASSWORD '<from-secrets-manager>';
    CREATE USER scheduler_prod    WITH PASSWORD '<from-secrets-manager>';
-   GRANT ALL PRIVILEGES ON DATABASE scheduler_dev     TO scheduler_dev;
    GRANT ALL PRIVILEGES ON DATABASE scheduler_staging TO scheduler_staging;
    GRANT ALL PRIVILEGES ON DATABASE scheduler_prod    TO scheduler_prod;
    ```
@@ -523,7 +505,7 @@ Done once per AWS account. Not in CI.
 4. **ECR.** Create the three repos. Set lifecycle policy to keep last 20.
 5. **Secrets Manager.** Create the secrets listed in §4.
 6. **ACM.** Request a public cert for `api.<domain>`, validate via DNS.
-7. **ALB.** Create with HTTPS:443 listener; three target groups, three
+7. **ALB.** Create with HTTPS:443 listener; two target groups, two
    path rules, one health check per TG. Default action returns 404.
 8. **Route 53.** Alias `api.<domain>` → ALB.
 9. **GitHub OIDC.** Create the `gh-actions-deploy` IAM role with a trust
@@ -578,7 +560,7 @@ baked in, and rolls services.
 
 ### Reset an env
 
-(useful on dev when something gets stuck)
+(useful on staging when something gets stuck)
 
 ```bash
 cd /opt/options/<env>
@@ -593,7 +575,7 @@ docker compose up -d
 ## 11. Adding a new service
 
 Recipe for taking a new long-running process from `cargo new` to running
-in all three envs. Stick to it and the existing deploy pipeline picks
+in both envs. Stick to it and the existing deploy pipeline picks
 up the new service with no manual one-offs.
 
 Worked example: a new service called `oracle-bridge`.
@@ -632,13 +614,12 @@ Mirror the pattern used by the existing services:
 
 ```
 services/oracle-bridge/config/
-├── config.dev.toml
 ├── config.staging.toml
 └── config.prod.toml
 ```
 
 If the service needs secrets, also list which secrets it expects in a
-header comment at the top of `config.dev.toml`. Don't commit a
+header comment at the top of `config.staging.toml`. Don't commit a
 `secrets.toml`; the deploy pipeline renders it from Secrets Manager
 (see step 7).
 
@@ -692,23 +673,22 @@ declared in the env's compose file.
 
 ### 6. Add to each env's compose file
 
-`deployment/compose/docker-compose.dev.yml` (and `.staging.yml`,
-`.prod.yml`):
+`deployment/compose/docker-compose.staging.yml` (and `.prod.yml`):
 
 ```yaml
 services:
   oracle-bridge:
     image: ${ECR}/options/oracle-bridge:${IMAGE_TAG}
     environment:
-      APP_ENV: dev          # staging in staging file, prod in prod file
+      APP_ENV: staging      # prod in prod file
       RUST_LOG: info,oracle_bridge=debug
     depends_on: [indexer]   # if it reads from the indexer
     restart: unless-stopped
-    networks: [options_dev_net]
+    networks: [options_staging_net]
     # Only add ports: / volumes: / secrets if needed (see 8 / 9).
 ```
 
-Three near-identical edits, one per env file. Keep them in sync.
+Two near-identical edits, one per env file. Keep them in sync.
 
 ### 7. (If it needs secrets) Add to Secrets Manager + render script
 
@@ -716,9 +696,9 @@ For each env, create the secret:
 
 ```
 aws secretsmanager create-secret \
-  --name options/dev/oracle-bridge-api-key \
+  --name options/staging/oracle-bridge-api-key \
   --secret-string '<...>'
-# Repeat for staging, prod.
+# Repeat for prod.
 ```
 
 Then extend `/opt/options/<env>/render-secrets.sh` to fetch the new
@@ -746,13 +726,14 @@ config option).
 If the new service exposes an HTTP/WS endpoint that needs to be hit
 from the internet, repeat the §5 pattern:
 
-1. Pick a per-env host port (e.g. 9013/9023/9033 — leave room above
-   the existing 9011-9032 block).
-2. `ports: ["9013:<container-port>"]` in each compose file.
-3. Create a new ALB target group per env (`tg-oracle-bridge-dev` etc.),
-   register the EC2 instance on the new port, health check on
+1. Pick a per-env host port (e.g. 9023/9033 — leave room above
+   the existing 9021-9032 block).
+2. `ports: ["9023:<container-port>"]` in each compose file.
+3. Create a new ALB target group per env (`tg-oracle-bridge-staging`
+   etc.), register the EC2 instance on the new port, health check on
    `/health`.
-4. Add an ALB path rule per env (e.g. `/dev/oracle/*` → tg-dev). Same
+4. Add an ALB path rule per env (e.g. `/staging/oracle/*` →
+   tg-staging). Same
    path-prefix wrinkle from §5 applies — the service must accept any
    URL path, or grow a Caddy strip-prefix sidecar.
 
@@ -779,7 +760,7 @@ git push origin add-oracle-bridge
 Once merged into `staging`:
 
 1. GH Actions builds and pushes four images (the new one included).
-2. SSM rolls dev + staging in parallel.
+2. SSM rolls staging.
 3. `docker compose logs -f oracle-bridge` on the EC2 to confirm it
    came up.
 
@@ -790,10 +771,10 @@ up the same way.
 
 - [ ] Crate created under `services/<name>/`
 - [ ] Added to root `Cargo.toml` workspace members
-- [ ] Three per-env config files committed
+- [ ] Per-env config files committed
 - [ ] `Dockerfile.<name>` at repo root
 - [ ] Added to `deployment/bake.hcl` default group
-- [ ] Added to all three `docker-compose.<env>.yml` files
+- [ ] Added to both `docker-compose.<env>.yml` files
 - [ ] Secrets created in Secrets Manager (if needed) + render script updated
 - [ ] Named volume defined (if it has state)
 - [ ] ALB target group + path rule (if externally reachable)
@@ -823,9 +804,9 @@ up the same way.
 ## 13. Scaling plan A — split prod onto its own EC2
 
 Trigger: prod traffic / mm-bot activity starts to push the shared box,
-**or** a dev/staging deploy bug ever takes prod down.
+**or** a staging deploy bug ever takes prod down.
 
-Goal: dev + staging stay on the existing box; prod moves to its own
+Goal: staging stays on the existing box; prod moves to its own
 EC2. No code changes; only infra + a tweak to the prod deploy job's
 target.
 
@@ -856,18 +837,18 @@ build pipeline. Only the SSM target ID changes.
 ### Cost delta
 
 One additional t3.medium ($30/mo) and an EBS volume ($5/mo). Worth it
-the day prod and dev share a kernel and a bad commit takes both down.
+the day prod and staging share a kernel and a bad commit takes both down.
 
 ---
 
 ## 14. Scaling plan B — split prod onto its own Aurora cluster
 
-Trigger: prod query patterns start interfering with dev/staging
+Trigger: prod query patterns start interfering with staging
 performance, **or** you want a stricter blast-radius story for the
 prod DB.
 
-Goal: prod gets its own Aurora cluster. dev + staging continue to
-share the original cluster.
+Goal: prod gets its own Aurora cluster. staging continues to
+use the original cluster.
 
 ### Steps
 
@@ -953,7 +934,7 @@ who knows where to look. Bad when you grow past that.
 3. **Add Promtail** to each services EC2 (the shared box, and the
    prod-only box after plan A). It tails `docker logs` via the docker
    service discovery plugin and ships to Loki with labels
-   `env=<dev|staging|prod>`, `service=<indexer|quoting|mm-bot>`.
+   `env=<staging|prod>`, `service=<indexer|quoting|mm-bot>`.
 4. **Add a `/metrics` endpoint** to each service (Prometheus text
    format). The `metrics` crate or `prometheus` crate plus a small
    warp/axum handler is ~30 lines per service. Useful first metrics:

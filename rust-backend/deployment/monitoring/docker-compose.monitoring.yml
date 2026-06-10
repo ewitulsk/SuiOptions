@@ -49,12 +49,9 @@ services:
     restart: unless-stopped
     networks:
       - monitoring
-      - options-dev_net
       - options-staging_net
 
 networks:
   monitoring:
-  options-dev_net:
-    external: true
   options-staging_net:
     external: true

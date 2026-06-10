@@ -55,7 +55,7 @@ if ! systemctl is-active --quiet amazon-ssm-agent 2>/dev/null; then
 fi
 
 # ---- Directory layout per env ----------------------------------------------
-for env in dev staging prod; do
+for env in staging prod; do
   mkdir -p "/opt/options/$env/secrets"
   chmod 700 "/opt/options/$env/secrets"
 done

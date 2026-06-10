@@ -55,33 +55,27 @@ validation while the DNS records propagate. That's normal.
    HOST=$(echo "$MASTER" | jq -r .host)
    PASS=$(echo "$MASTER" | jq -r .password)
    PGPASSWORD="$PASS" psql -h "$HOST" -U postgres -d postgres <<SQL
-   CREATE DATABASE indexer_dev;
    CREATE DATABASE indexer_staging;
    CREATE DATABASE indexer_prod;
-   CREATE USER indexer_dev     WITH PASSWORD '$(aws secretsmanager get-secret-value --secret-id options/dev/indexer     --query SecretString --output text | jq -r .db_password)';
    CREATE USER indexer_staging WITH PASSWORD '$(aws secretsmanager get-secret-value --secret-id options/staging/indexer --query SecretString --output text | jq -r .db_password)';
    CREATE USER indexer_prod    WITH PASSWORD '$(aws secretsmanager get-secret-value --secret-id options/prod/indexer    --query SecretString --output text | jq -r .db_password)';
-   GRANT ALL PRIVILEGES ON DATABASE indexer_dev     TO indexer_dev;
    GRANT ALL PRIVILEGES ON DATABASE indexer_staging TO indexer_staging;
    GRANT ALL PRIVILEGES ON DATABASE indexer_prod    TO indexer_prod;
    SQL
    ```
 
-3. **Fill in the mm-bot secrets.** Terraform created placeholders for
-   `options/dev/mm-bot` and `options/staging/mm-bot`. Generate keys
-   locally and upload:
+3. **Fill in the mm-bot secrets.** Terraform created a placeholder for
+   `options/staging/mm-bot`. Generate keys locally and upload:
    ```bash
    SUI_KEY=$(sui keytool generate ed25519 --json | jq -r '.[0].suiPrivateKey')
    QUOTE_KEY=$(openssl rand -hex 32)
    aws secretsmanager put-secret-value \
-     --secret-id options/dev/mm-bot \
+     --secret-id options/staging/mm-bot \
      --secret-string "{\"sui_key\":\"$SUI_KEY\",\"quote_key\":\"$QUOTE_KEY\"}"
-   # repeat for staging
    ```
 
-4. **Trigger the first deploy** by pushing to `staging` (deploys dev +
-   staging) or by running the GH Actions workflow manually with
-   `workflow_dispatch`.
+4. **Trigger the first deploy** by pushing to `staging` or by running
+   the GH Actions workflow manually with `workflow_dispatch`.
 
 ## Team VPN access (Tailscale subnet router)
 
@@ -208,7 +202,7 @@ per-env compose stacks. No dedicated monitoring instance needed.
 ```
 Services EC2
 ┌──────────────────────────────────────────┐
-│  indexer           (dev / staging / prod) │
+│  indexer           (staging / prod)      │
 │  quoting                  "              │
 │  mm-bot                   "              │
 │  option-scheduler         "              │
@@ -245,7 +239,7 @@ Services EC2
      --query SecretString --output text
    ```
 
-3. **Verify logs** are flowing: Explore → Loki → `{env="dev"}` should
+3. **Verify logs** are flowing: Explore → Loki → `{env="staging"}` should
    show container logs within a minute of the services starting.
 
 ### Deploying monitoring on an existing instance
@@ -283,9 +277,9 @@ Promtail auto-discovers Docker containers and applies these labels:
 
 | Label | Source | Example |
 |---|---|---|
-| `env` | Compose project name (`options-<env>`) | `dev`, `staging`, `prod`, `monitoring` |
+| `env` | Compose project name (`options-<env>`) | `staging`, `prod`, `monitoring` |
 | `service` | Compose service name | `indexer`, `quoting`, `mm-bot`, `option-scheduler`, `api-service`, `nginx` |
-| `container` | Docker container name | `options-dev-indexer-1` |
+| `container` | Docker container name | `options-staging-indexer-1` |
 | `level` | Parsed from JSON log lines | `INFO`, `ERROR`, `DEBUG` |
 
 ### Useful LogQL queries
@@ -300,8 +294,8 @@ Promtail auto-discovers Docker containers and applies these labels:
 # All api-service logs in staging:
 {env="staging", service="api-service"}
 
-# mm-bot errors in dev:
-{env="dev", service="mm-bot"} | json | level = "ERROR"
+# mm-bot errors in staging:
+{env="staging", service="mm-bot"} | json | level = "ERROR"
 
 # option-scheduler across all envs:
 {service="option-scheduler"}

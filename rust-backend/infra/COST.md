@@ -96,7 +96,7 @@ brainstorming:
 | Split prod onto its own EC2 (scaling plan A) | +$25-30 | $165 |
 | Split prod onto its own Aurora cluster (scaling plan B) | +$45-50 | $215 |
 
-Anchor: today's ~$65/mo gets you fully working dev + staging + prod
+Anchor: today's ~$65/mo gets you fully working staging + prod
 stacks, all behind HTTPS, with managed Postgres and centralized
 Grafana + Loki logging on a single EC2. Scaling plans add cost only when you actually
 need them.

@@ -10,14 +10,10 @@ chmod +x /usr/local/sbin/options-ec2-bootstrap.sh
 /usr/local/sbin/options-ec2-bootstrap.sh
 
 # ---- Drop per-env compose files + deploy/render scripts --------------------
-for env in dev staging prod; do
+for env in staging prod; do
   mkdir -p "/opt/options/$env/secrets"
   chmod 700 "/opt/options/$env/secrets"
 done
-
-cat > /opt/options/dev/docker-compose.dev.yml <<'COMPOSE_DEV_EOF'
-${compose_dev}
-COMPOSE_DEV_EOF
 
 cat > /opt/options/staging/docker-compose.staging.yml <<'COMPOSE_STAGING_EOF'
 ${compose_staging}
@@ -27,7 +23,7 @@ cat > /opt/options/prod/docker-compose.prod.yml <<'COMPOSE_PROD_EOF'
 ${compose_prod}
 COMPOSE_PROD_EOF
 
-for env in dev staging prod; do
+for env in staging prod; do
   cat > "/opt/options/$env/deploy.sh" <<'DEPLOY_EOF'
 ${deploy_script}
 DEPLOY_EOF

@@ -21,10 +21,6 @@ output "alb_zone_id" {
 output "domain_url" {
   description = "Per-env public URLs. quoting is WS, api is HTTP."
   value = {
-    dev = {
-      quoting = "wss://${var.domain_name}/dev/quoting"
-      api     = "https://${var.domain_name}/dev/api"
-    }
     staging = {
       quoting = "wss://${var.domain_name}/staging/quoting"
       api     = "https://${var.domain_name}/staging/api"
@@ -65,7 +61,7 @@ output "secrets_to_fill" {
   value = concat(
     [for env in local.envs : "options/${env}/indexer (auto-populated; rotate via random_password.indexer_db)"],
     [for env in local.envs : "options/${env}/token-info (auto-populated; rotate via random_password.token_info_db)"],
-    [for env in ["dev", "staging"] : "options/${env}/mm-bot (REPLACE_ME — fill sui_key + quote_key)"],
+    [for env in ["staging"] : "options/${env}/mm-bot (REPLACE_ME — fill sui_key + quote_key)"],
     ["options/_master/tailscale-auth-key (REPLACE_ME — fill auth_key from tailscale admin console)"],
   )
 }

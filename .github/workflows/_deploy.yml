@@ -1,6 +1,6 @@
 # Reusable selective-deploy workflow.
 #
-# Called by deploy-lower.yml (manual dispatch → dev+staging) and
+# Called by deploy-lower.yml (manual dispatch → staging) and
 # deploy-prod.yml (push to main → prod).
 #
 # Three jobs:
@@ -24,7 +24,7 @@ on:
   workflow_call:
     inputs:
       envs:
-        description: 'JSON array of envs to deploy to, e.g. ''["dev","staging"]''.'
+        description: 'JSON array of envs to deploy to, e.g. ''["staging"]''.'
         required: true
         type: string
       image_tag:
@@ -239,8 +239,8 @@ jobs:
         working-directory: rust-backend
         run: |
           # Bundle only the files the box needs to run deploy.sh for
-          # this env. Per-env compose files are split so prod deploys
-          # don't carry dev's compose.
+          # this env. Per-env compose files are split so each env's
+          # bundle carries only its own compose.
           mkdir -p /tmp/bundle/nginx
           cp deployment/ec2/deploy.sh         /tmp/bundle/
           cp deployment/ec2/render-secrets.sh /tmp/bundle/

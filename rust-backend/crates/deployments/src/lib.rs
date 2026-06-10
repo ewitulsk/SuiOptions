@@ -3,14 +3,13 @@
 //! used for pricing.
 //!
 //! Shape (matches `deployment-manager`'s output): keyed by deployment
-//! environment (`dev` / `staging` / `prod`), one record each. The Sui
+//! environment (`staging` / `prod`), one record each. The Sui
 //! network a record lives on is carried inside it as
 //! `package_info.network` — that's what lets two envs (e.g. staging and
 //! prod) both run on testnet as *distinct* deployments.
 //!
 //! ```json
 //! {
-//!   "dev": null,
 //!   "prod": null,
 //!   "staging": {
 //!     "package_info": {
@@ -296,7 +295,7 @@ impl NetworkDeployment {
     }
 }
 
-/// All recorded deployments, keyed by environment (`dev` / `staging` /
+/// All recorded deployments, keyed by environment (`staging` /
 /// `prod`). Un-deployed envs are written as `null` (and dropped on load).
 #[derive(Debug)]
 pub struct Deployments {
@@ -321,7 +320,7 @@ impl Deployments {
         Ok(Self { envs })
     }
 
-    /// Environment slot lookup. Accepts any casing of `dev` / `staging` /
+    /// Environment slot lookup. Accepts any casing of `staging` /
     /// `prod`; an env with no recorded deployment errors.
     pub fn for_env(&self, env: &str) -> Result<&NetworkDeployment> {
         self.envs
