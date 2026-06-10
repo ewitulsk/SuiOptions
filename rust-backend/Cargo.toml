@@ -12,6 +12,7 @@ members = [
     "crates/api-service-client",
     "crates/indexer-graphql",
     "crates/auth-client",
+    "crates/vault-sim",
     "services/indexer",
     "services/quoting-service",
     "services/mm-bot",
@@ -49,6 +50,7 @@ token-info-client = { path = "crates/token-info-client" }
 api-service-client = { path = "crates/api-service-client" }
 indexer-graphql = { path = "crates/indexer-graphql" }
 auth-client    = { path = "crates/auth-client" }
+vault-sim      = { path = "crates/vault-sim" }
 
 # Pinned to match sui-keys's exact requirement on the framework/mainnet branch.
 tokio = { version = "=1.49.0", features = ["full"] }

@@ -11323,6 +11323,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vault-sim"
+version = "0.1.0"
+dependencies = [
+ "rand 0.8.6",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
