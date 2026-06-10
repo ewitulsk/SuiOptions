@@ -30,7 +30,6 @@ locals {
     bootstrap_script       = file("${path.module}/../deployment/ec2/ec2-bootstrap.sh")
     deploy_script          = file("${path.module}/../deployment/ec2/deploy.sh")
     render_secrets_sh      = file("${path.module}/../deployment/ec2/render-secrets.sh")
-    compose_dev            = file("${path.module}/../deployment/compose/docker-compose.dev.yml")
     compose_staging        = file("${path.module}/../deployment/compose/docker-compose.staging.yml")
     compose_prod           = file("${path.module}/../deployment/compose/docker-compose.prod.yml")
     promtail_config        = file("${path.module}/../deployment/monitoring/promtail-config.yml")
@@ -81,7 +80,7 @@ resource "aws_instance" "host" {
 }
 
 # ---- Dedicated prod host ----------------------------------------------------
-# prod runs on its own instance (same type), isolated from dev/staging. It
+# prod runs on its own instance (same type), isolated from staging. It
 # runs ONLY the prod compose stack plus a Promtail shipper that forwards
 # container logs to the central Loki on the shared host over the private
 # VPC IP. No Loki/Grafana/Gatus server and no Tailscale router live here —

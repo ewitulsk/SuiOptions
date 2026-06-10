@@ -1,4 +1,4 @@
-# Redeploy the options-protocol Move package to dev or staging, then
+# Redeploy the options-protocol Move package to staging or prod, then
 # rebuild + roll out EVERY service so each one boots against the new
 # contract's deployments.json (which is baked into the image at build).
 #
@@ -40,7 +40,6 @@ on:
         required: true
         type: choice
         options:
-          - dev
           - staging
           - prod
       deploy_tokens:
@@ -81,7 +80,6 @@ jobs:
         id: net
         run: |
           case "${{ inputs.environment }}" in
-            dev)     echo "network=devnet"  >> "$GITHUB_OUTPUT" ;;
             staging) echo "network=testnet" >> "$GITHUB_OUTPUT" ;;
             prod)    echo "network=testnet" >> "$GITHUB_OUTPUT" ;;
             *)
@@ -217,7 +215,6 @@ jobs:
             rust-backend/deployments.json)
 
           case "$NETWORK" in
-            devnet)  RPC="https://fullnode.devnet.sui.io:443" ;;
             testnet) RPC="https://fullnode.testnet.sui.io:443" ;;
           esac
 

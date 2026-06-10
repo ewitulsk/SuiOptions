@@ -12,7 +12,7 @@
 # prod/mm-bot is intentionally not created — see services/mm-bot/config/config.prod.toml.
 
 locals {
-  envs = ["dev", "staging", "prod"]
+  envs = ["staging", "prod"]
 }
 
 # Indexer secret per env.
@@ -83,7 +83,7 @@ resource "aws_secretsmanager_secret_version" "auth_service" {
 
 # mm-bot secret per env — placeholder shape, fill values by hand.
 resource "aws_secretsmanager_secret" "mm_bot" {
-  for_each                = toset(["dev", "staging"])
+  for_each                = toset(["staging"])
   name                    = "options/${each.key}/mm-bot"
   description             = "mm-bot signing keys (JSON: sui_key, quote_key)."
   recovery_window_in_days = 7
@@ -124,8 +124,7 @@ resource "aws_secretsmanager_secret_version" "gas_station_placeholder" {
 }
 
 # price-charting secret — the Tiger Data TimescaleDB connection URL for the
-# OHLC store (SO-156). One Tiger instance per env; no dev instance is
-# provisioned (devnet has no DeepBook), so no dev secret. Placeholder shape;
+# OHLC store (SO-156). One Tiger instance per env. Placeholder shape;
 # put the real URL by hand after apply:
 #   aws secretsmanager put-secret-value --secret-id options/<env>/price-charting \
 #     --secret-string '{"database_url":"postgres://..."}'

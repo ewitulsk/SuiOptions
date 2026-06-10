@@ -82,7 +82,7 @@ resource "aws_s3_bucket_policy" "alb_logs" {
 # ---- One target group + rule per env ------------------------------------
 #
 # Public URL shape: https://<domain>/<env>/<service>/<endpoint>
-#   <env>     in {dev, staging, prod}
+#   <env>     in {staging, prod}
 #   <service> in {quoting, api}
 #
 # Each env has a single nginx sidecar container as the public entrypoint;
@@ -91,7 +91,6 @@ resource "aws_s3_bucket_policy" "alb_logs" {
 
 locals {
   alb_envs = {
-    dev     = { nginx_port = 9010, priority = 10 }
     staging = { nginx_port = 9020, priority = 20 }
     prod    = { nginx_port = 9030, priority = 30 }
   }
@@ -133,7 +132,7 @@ resource "aws_lb_target_group" "ingress" {
 resource "aws_lb_target_group_attachment" "ingress" {
   for_each         = local.alb_envs
   target_group_arn = aws_lb_target_group.ingress[each.key].arn
-  # prod lives on its own instance; dev/staging stay on the shared host.
+  # prod lives on its own instance; staging stays on the shared host.
   target_id = each.key == "prod" ? aws_instance.prod_host.id : aws_instance.host.id
   port      = each.value.nginx_port
 
@@ -152,20 +151,12 @@ resource "aws_lb_target_group_attachment" "ingress" {
 # vs options-ingress-<env>) is forced to change, so apply will replace
 # the TG — brief 503s during deregistration. Apply during a quiet window.
 moved {
-  from = aws_lb_target_group.quoting["dev"]
-  to   = aws_lb_target_group.ingress["dev"]
-}
-moved {
   from = aws_lb_target_group.quoting["staging"]
   to   = aws_lb_target_group.ingress["staging"]
 }
 moved {
   from = aws_lb_target_group.quoting["prod"]
   to   = aws_lb_target_group.ingress["prod"]
-}
-moved {
-  from = aws_lb_target_group_attachment.quoting["dev"]
-  to   = aws_lb_target_group_attachment.ingress["dev"]
 }
 moved {
   from = aws_lb_target_group_attachment.quoting["staging"]
@@ -226,10 +217,6 @@ resource "aws_lb_listener_rule" "ingress" {
   }
 }
 
-moved {
-  from = aws_lb_listener_rule.path["dev"]
-  to   = aws_lb_listener_rule.ingress["dev"]
-}
 moved {
   from = aws_lb_listener_rule.path["staging"]
   to   = aws_lb_listener_rule.ingress["staging"]

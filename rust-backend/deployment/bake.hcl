@@ -15,7 +15,7 @@ variable "ECR" {
 }
 
 variable "IMAGE_TAG" {
-  default = "dev"
+  default = "local"
 }
 
 # Cache layer separation per service: each target writes its own gha

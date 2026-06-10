@@ -19,7 +19,7 @@
 #   DB_HOST=<rds-host> MASTER_USER=<u> MASTER_PASS=<p> \
 #     sh wipe-provision-db.sh <env> <service>
 #
-#   <env>     dev | staging | prod   (mainnet/production BLOCKED)
+#   <env>     staging | prod   (mainnet/production BLOCKED)
 #   <service> indexer | scheduler | token-info
 #
 # Master creds come from the caller (the deploy role reads
@@ -38,16 +38,16 @@ SERVICE="${2:?usage: wipe-provision-db.sh <env> <service>}"
 # ── MAINNET GUARD ─────────────────────────────────────────────────────
 # prod is a testnet deployment and is a valid target. What we never wipe is
 # a real-money mainnet/production deployment. (Callers gate further: the
-# standalone wipe workflow only offers dev/staging; redeploy-contract
+# standalone wipe workflow only offers staging; redeploy-contract
 # refuses network=mainnet before invoking this.)
 case "$ENV" in
   production|mainnet)
     echo "FATAL: refusing to touch a mainnet/production deployment"
     exit 1
     ;;
-  dev|staging|prod) : ;;
+  staging|prod) : ;;
   *)
-    echo "FATAL: unknown env '$ENV' (expected dev|staging|prod)"
+    echo "FATAL: unknown env '$ENV' (expected staging|prod)"
     exit 1
     ;;
 esac

@@ -6,7 +6,7 @@
 #
 # Invoked by GitHub Actions via `aws ssm send-command`:
 #
-#   deploy.sh <dev|staging|prod> '["indexer","mm-bot"]'
+#   deploy.sh <staging|prod> '["indexer","mm-bot"]'
 #
 # - IMAGE_TAG is the tag the planned services move to (one tag per
 #   deploy; per-service rollback uses the workflow's image_tag dispatch
@@ -23,11 +23,11 @@
 
 set -euo pipefail
 
-ENV="${1:?usage: deploy.sh <dev|staging|prod> <services-json>}"
+ENV="${1:?usage: deploy.sh <staging|prod> <services-json>}"
 SERVICES_JSON="${2:?services-json argument required, e.g. '[\"indexer\"]'}"
 
 case "$ENV" in
-  dev|staging|prod) ;;
+  staging|prod) ;;
   *) echo "unknown env: $ENV" >&2; exit 1 ;;
 esac
 
@@ -247,7 +247,7 @@ if ! docker compose -f "$COMPOSE_FILE" exec -T nginx \
 fi
 docker compose -f "$COMPOSE_FILE" exec -T nginx nginx -s reload
 
-case "$ENV" in dev) NGINX_PORT=9010 ;; staging) NGINX_PORT=9020 ;; prod) NGINX_PORT=9030 ;; esac
+case "$ENV" in staging) NGINX_PORT=9020 ;; prod) NGINX_PORT=9030 ;; esac
 
 for svc in "${PLANNED[@]}"; do
   if ! path=$(health_path_for "$svc"); then

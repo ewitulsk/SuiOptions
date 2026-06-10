@@ -24,9 +24,8 @@
 
 set -euo pipefail
 
-ENV="${1:?usage: render-secrets.sh <dev|staging|prod>}"
+ENV="${1:?usage: render-secrets.sh <staging|prod>}"
 case "$ENV" in
-  dev)     NETWORK=devnet  ;;
   staging) NETWORK=testnet ;;
   prod)    NETWORK=testnet ;;
   *) echo "unknown env: $ENV" >&2; exit 1 ;;
@@ -108,7 +107,7 @@ fi
 
 # ---- gas-station secret -> rendered TOML ---------------------------------
 # Sponsor (gas payer) key. One Sui key per env, in the network slot the
-# service's config expects (dev → devnet, staging/prod → testnet).
+# service's config expects (staging/prod → testnet).
 if GAS_JSON=$(fetch gas-station 2>/dev/null); then
   SUI_KEY=$(echo "$GAS_JSON" | jq -r '.sui_key')
   if [ -z "$SUI_KEY" ] || [ "$SUI_KEY" = "null" ]; then
@@ -124,7 +123,7 @@ fi
 
 # ---- price-charting secret -> sourced into .env by deploy.sh -------------
 # Tiger Data TimescaleDB connection URL. Absent in envs without the
-# service (e.g. dev) — silently skipped like mm-bot.
+# service — silently skipped like mm-bot.
 if CHART_JSON=$(fetch price-charting 2>/dev/null); then
   CHART_DB_URL=$(echo "$CHART_JSON" | jq -r '.database_url')
   if [ -z "$CHART_DB_URL" ] || [ "$CHART_DB_URL" = "null" ] || [ "$CHART_DB_URL" = "REPLACE_ME" ]; then

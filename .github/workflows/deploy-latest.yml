@@ -24,7 +24,6 @@ on:
         required: true
         type: choice
         options:
-          - dev
           - staging
           - prod
         default: staging
@@ -47,8 +46,8 @@ jobs:
       - id: tag
         run: |
           # Newest tagged image in options/indexer, by push timestamp.
-          # Now that images carry env tags (dev, staging, prod,
-          # dev_<sha>, …) alongside the bare SHA, we must filter for the
+          # Now that images carry env tags (staging, prod,
+          # staging_<sha>, …) alongside the bare SHA, we must filter for the
           # 12-char hex SHA tag to avoid handing an env alias to the
           # deploy matrix.
           TAG=$(aws ecr describe-images \

@@ -20,7 +20,6 @@ on:
         required: true
         type: choice
         options:
-          - dev
           - staging
           - prod
         default: staging
@@ -68,7 +67,7 @@ jobs:
           # AWS-RunShellScript joins the `commands` array into one /bin/sh
           # (dash) script — shell vars set on one line persist to the next,
           # but there's no pipefail, so keep it `set -eu`. The nginx host
-          # ports mirror deploy.sh (dev 9010 / staging 9020 / prod 9030).
+          # ports mirror deploy.sh (staging 9020 / prod 9030).
           jq -nc \
             --arg bucket "$SSM_OUTPUT_BUCKET" \
             --arg key "$S3_KEY" \
@@ -79,7 +78,7 @@ jobs:
                 "ENV=\($env)",
                 "cd /opt/options/$ENV",
                 "COMPOSE=docker-compose.$ENV.yml",
-                "case $ENV in dev) PORT=9010;; staging) PORT=9020;; prod) PORT=9030;; esac",
+                "case $ENV in staging) PORT=9020;; prod) PORT=9030;; esac",
                 "echo Fetching new nginx.conf...",
                 "aws s3 cp s3://\($bucket)/\($key) nginx/nginx.conf.new",
                 "# Ensure the sidecar is running on its CURRENT (known-good) config first.",

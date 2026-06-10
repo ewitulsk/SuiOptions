@@ -9,8 +9,8 @@
 #   3. Upload deployment/ec2/wipe-provision-db.sh to S3 (deploy-bundles/).
 #   4. Over SSM on the EC2 host: stop the service → run the script → start it.
 #
-# PRODUCTION IS EXPLICITLY BLOCKED — the choice list offers only dev and
-# staging, and the remote script also guards at runtime.
+# PRODUCTION IS EXPLICITLY BLOCKED — the choice list offers only staging,
+# and the remote script also guards at runtime.
 
 name: Wipe & Provision Service DB
 
@@ -30,7 +30,6 @@ on:
         required: true
         type: choice
         options:
-          - dev
           - staging
 
 permissions:
