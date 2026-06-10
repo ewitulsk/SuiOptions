@@ -47,6 +47,12 @@ pub struct PackageInfo {
     /// Testnet-only; absent on mainnet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_tokens: Option<TestTokensRecord>,
+    /// DeepBook v3 deployment ids (SO-151). Authored by hand, not by this
+    /// tool — kept as opaque JSON and carried forward on redeploys so a
+    /// rerun never drops the block. Typed access lives in
+    /// `crates/deployments::DeepBookInfo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deepbook: Option<serde_json::Value>,
 }
 
 /// The published test-tokens package + the shared faucets.

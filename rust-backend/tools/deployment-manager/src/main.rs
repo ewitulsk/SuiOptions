@@ -68,6 +68,10 @@ async fn main() -> Result<()> {
         .get(&env_key)
         .map(|d| d.token_info.clone())
         .unwrap_or_default();
+    let previous_deepbook = store
+        .envs
+        .get(&env_key)
+        .and_then(|d| d.package_info.deepbook.clone());
 
     let record = deploy_one(
         network,
@@ -76,6 +80,7 @@ async fn main() -> Result<()> {
         test_tokens_path.as_deref(),
         previous_tokens,
         previous_token_info,
+        previous_deepbook,
         cli.gas_budget,
         cli.skip_init,
     )
@@ -97,6 +102,7 @@ async fn deploy_one(
     test_tokens_path: Option<&std::path::Path>,
     previous_tokens: Option<TestTokensRecord>,
     previous_token_info: BTreeMap<String, TokenSpec>,
+    previous_deepbook: Option<serde_json::Value>,
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
@@ -213,6 +219,7 @@ async fn deploy_one(
             deployed_at: chrono::Utc::now().to_rfc3339(),
             network: network.as_str().to_owned(),
             test_tokens,
+            deepbook: previous_deepbook,
         },
         token_info,
     })
