@@ -88,6 +88,58 @@ public struct BucketRevalidated has copy, drop {
     reason: vector<u8>,
 }
 
+public struct RfqCreated has copy, drop {
+    rfq_id: ID,
+    bucket_id: ID,
+    /// Originating object (vault ID, or seller address-as-ID for
+    /// standalone use). Indexing/attribution only.
+    origin: ID,
+    amount: u64,
+    reserve_premium: u64,
+    deadline_ms: u64,
+    max_deadline_ms: u64,
+    min_increment_bps: u64,
+}
+
+public struct RfqBid has copy, drop {
+    rfq_id: ID,
+    bidder: address,
+    call_recipient: address,
+    premium: u64,
+    /// 0 if this is the first bid.
+    previous_premium: u64,
+    /// Post-anti-snipe deadline.
+    new_deadline_ms: u64,
+}
+
+/// Mirrors `WriteExecuted`'s economic fields so the indexer's positions
+/// materializer can treat both as "a position was minted with premium X".
+public struct RfqSettled has copy, drop {
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    winner: address,
+    call_recipient: address,
+    position_id: ID,
+    position_recipient: address,
+    amount: u64,
+    gross_premium: u64,
+    fee: u64,
+    net_premium: u64,
+    range_start: u128,
+    range_end: u128,
+}
+
+/// Emitted when an auction resolves without a write: no bids, or the
+/// bucket expired/was invalidated mid-auction (both escrows refunded).
+public struct RfqExpiredUnsold has copy, drop {
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    amount: u64,
+    reserve_premium: u64,
+}
+
 public struct AccountCreated has copy, drop {
     account_id: ID,
     owner: address,
@@ -246,6 +298,88 @@ public(package) fun emit_bucket_revalidated(
     reason: vector<u8>,
 ) {
     event::emit(BucketRevalidated { bucket_id, at_ms, admin, reason });
+}
+
+public(package) fun emit_rfq_created(
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    amount: u64,
+    reserve_premium: u64,
+    deadline_ms: u64,
+    max_deadline_ms: u64,
+    min_increment_bps: u64,
+) {
+    event::emit(RfqCreated {
+        rfq_id,
+        bucket_id,
+        origin,
+        amount,
+        reserve_premium,
+        deadline_ms,
+        max_deadline_ms,
+        min_increment_bps,
+    });
+}
+
+public(package) fun emit_rfq_bid(
+    rfq_id: ID,
+    bidder: address,
+    call_recipient: address,
+    premium: u64,
+    previous_premium: u64,
+    new_deadline_ms: u64,
+) {
+    event::emit(RfqBid {
+        rfq_id,
+        bidder,
+        call_recipient,
+        premium,
+        previous_premium,
+        new_deadline_ms,
+    });
+}
+
+public(package) fun emit_rfq_settled(
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    winner: address,
+    call_recipient: address,
+    position_id: ID,
+    position_recipient: address,
+    amount: u64,
+    gross_premium: u64,
+    fee: u64,
+    net_premium: u64,
+    range_start: u128,
+    range_end: u128,
+) {
+    event::emit(RfqSettled {
+        rfq_id,
+        bucket_id,
+        origin,
+        winner,
+        call_recipient,
+        position_id,
+        position_recipient,
+        amount,
+        gross_premium,
+        fee,
+        net_premium,
+        range_start,
+        range_end,
+    });
+}
+
+public(package) fun emit_rfq_expired_unsold(
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    amount: u64,
+    reserve_premium: u64,
+) {
+    event::emit(RfqExpiredUnsold { rfq_id, bucket_id, origin, amount, reserve_premium });
 }
 
 public(package) fun emit_account_created(

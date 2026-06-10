@@ -28,3 +28,9 @@ public fun strike_scale_too_large(): u64 { 25 }
 public fun bucket_invalidated(): u64 { 26 }
 public fun bucket_not_invalidated(): u64 { 27 }
 public fun treasury_cap_not_fresh(): u64 { 28 }
+public fun rfq_closed(): u64 { 29 }
+public fun rfq_not_closed(): u64 { 30 }
+public fun rfq_bid_too_low(): u64 { 31 }
+public fun rfq_bucket_mismatch(): u64 { 32 }
+public fun rfq_too_close_to_expiry(): u64 { 33 }
+public fun rfq_duration_too_short(): u64 { 34 }
