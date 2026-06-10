@@ -1,0 +1,34 @@
+# BTC engine-validation replay (doc 06 §9.4): real BTC history priced off
+# the real DVOL index with Ribbon-style 2/10 fees. The skew/haircut sweep
+# here is what gets fitted against Deribit weekly marks (milestone 3) and
+# compared with Ribbon's T-WBTC-C track record (milestone 2).
+#
+#   backtester sweep --scenario scenarios/btc_validation.toml --out out/btc_validation/
+
+[scenario]
+asset = "BTC"
+paths = "replay"
+candles = "data/btc_usd_1d.csv"
+dvol = "data/btc_dvol_1d.csv"
+
+[strategy]
+delta_target = 0.10
+deploy_fraction = 1.0
+slices = 1
+premium_policy = "at_expiry"
+
+[premium]
+iv_provider = "dvol"
+skew_bps = [-500, 0, 500, 1000]
+mechanism = "rfq_batch"
+haircut_bps = [0, 500, 1000, 1500]
+
+[exercise]
+policy = "rational"
+
+[fees]
+mgmt_bps_annual = 200
+perf_bps = 1000
+
+[swap]
+slippage_bps = 10

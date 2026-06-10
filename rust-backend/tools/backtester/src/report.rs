@@ -54,18 +54,19 @@ pub fn markdown_table(summaries: &[CellSummary], rank_key: &str, top: usize) -> 
     }
 
     let mut md = String::new();
-    md.push_str(&format!("| # | Δ | slices | π | iv | mech | haircut | fees (m/p) | slip | {rank_key} | APY(USD) | APY p5 | call-away | maxDD p95 | vs HODL | P(<HODL) | unsold |\n"));
-    md.push_str("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
+    md.push_str(&format!("| # | Δ | slices | π | iv | skew | mech | haircut | fees (m/p) | slip | {rank_key} | APY(USD) | APY p5 | call-away | maxDD p95 | vs HODL | P(<HODL) | unsold |\n"));
+    md.push_str("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for (i, s) in rows.iter().take(top).enumerate() {
         let c = &s.cell;
         let rank_cell = format!("{:.4}", rank_value(s, rank_key)?);
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {}/{} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {}/{} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             i + 1,
             c.delta_target,
             c.slices,
             c.premium_policy,
             c.iv_provider,
+            c.skew_bps,
             c.mechanism,
             c.haircut_bps,
             c.mgmt_bps_annual,

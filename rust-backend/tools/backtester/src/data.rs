@@ -57,10 +57,8 @@ struct VolRow {
     dvol: f64,
 }
 
-/// Loads a vol-index series and aligns it to `bars` by timestamp: each bar
-/// takes the most recent index value at or before its `ts_ms`. Bars before
-/// the first index print get the first value (warm-up approximation).
-pub fn load_vol_index_aligned(path: &FsPath, bars: &[Bar]) -> Result<Vec<f64>> {
+/// Loads a vol-index series as (ts_ms, fraction) points.
+pub fn load_vol_index(path: &FsPath) -> Result<Vec<(u64, f64)>> {
     let mut rdr = csv::Reader::from_path(path)
         .with_context(|| format!("opening vol index file {}", path.display()))?;
     let mut points: Vec<(u64, f64)> = Vec::new();
@@ -74,7 +72,14 @@ pub fn load_vol_index_aligned(path: &FsPath, bars: &[Bar]) -> Result<Vec<f64>> {
         points.windows(2).all(|w| w[0].0 < w[1].0),
         "vol index must be strictly increasing in ts_ms"
     );
+    Ok(points)
+}
 
+/// Loads a vol-index series and aligns it to `bars` by timestamp: each bar
+/// takes the most recent index value at or before its `ts_ms`. Bars before
+/// the first index print get the first value (warm-up approximation).
+pub fn load_vol_index_aligned(path: &FsPath, bars: &[Bar]) -> Result<Vec<f64>> {
+    let points = load_vol_index(path)?;
     let mut out = Vec::with_capacity(bars.len());
     let mut i = 0usize;
     for bar in bars {

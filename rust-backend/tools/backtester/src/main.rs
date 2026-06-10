@@ -65,6 +65,18 @@ enum Command {
         #[arg(long, default_value = "apy_p5")]
         rank: String,
     },
+    /// Calibrate the IV/RV ratio (the keeper's iv_ratio and the
+    /// vrp_transfer provider's vrp_ratio): vol-index / trailing realized
+    /// vol over the overlap of the two series (doc 06 §5).
+    Calibrate {
+        #[arg(long)]
+        candles: PathBuf,
+        #[arg(long)]
+        dvol: PathBuf,
+        /// Realized-vol window, bars.
+        #[arg(long, default_value_t = 30)]
+        window: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -74,7 +86,42 @@ fn main() -> Result<()> {
             cmd_run(&scenario, &out, true, top, &rank)
         }
         Command::Report { in_dir, format, top, rank } => cmd_report(&in_dir, &format, top, &rank),
+        Command::Calibrate { candles, dvol, window } => cmd_calibrate(&candles, &dvol, window),
     }
+}
+
+fn cmd_calibrate(candles: &Path, dvol: &Path, window: usize) -> Result<()> {
+    let bars = data::load_candles(candles)?;
+    let iv = data::load_vol_index_aligned(dvol, &bars)?;
+    // Only the true overlap: bars before the index's first print would
+    // otherwise compare backfilled IV against real RV.
+    let first_iv_ts = data::load_vol_index(dvol)?[0].0;
+    let mut ratios: Vec<f64> = Vec::new();
+    for idx in window..bars.len() {
+        if bars[idx].ts_ms < first_iv_ts {
+            continue;
+        }
+        let rv = vault_sim::iv::realized_vol(&bars, idx, window, 365.0);
+        if rv > 0.0 {
+            ratios.push(iv[idx] / rv);
+        }
+    }
+    anyhow::ensure!(!ratios.is_empty(), "no overlapping IV/RV samples");
+    ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let pct = |p: f64| ratios[((p * (ratios.len() - 1) as f64).round() as usize).min(ratios.len() - 1)];
+    println!(
+        "IV/RV{} over {} samples: p25 {:.3}  median {:.3}  p75 {:.3}",
+        window,
+        ratios.len(),
+        pct(0.25),
+        pct(0.50),
+        pct(0.75),
+    );
+    println!(
+        "→ keeper iv_ratio / scenario vrp_ratio candidate: {:.2}",
+        pct(0.50)
+    );
+    Ok(())
 }
 
 fn cmd_run(
