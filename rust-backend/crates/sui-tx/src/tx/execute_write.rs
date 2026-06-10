@@ -1,21 +1,31 @@
-//! Programmable transaction for `bucket::execute_write` (writer flow).
+//! Programmable transactions for the split `bucket::execute_write_*` entry
+//! points (org-aware protocol).
 //!
-//! Single PTB, six commands:
+//! Writer flow — single PTB, four commands:
 //!
 //! ```text
 //! 1. test_tokens::<u_module>::mint(faucet, write_amount)  -> Coin<Underlying>
-//! 2. coin::zero<Settlement>()                             -> Coin<Settlement>  (empty)
-//! 3. quote::new_quote(...)                                -> Quote
-//! 4. quote::new_signed_quote(q, sig)                      -> SignedQuote
-//! 5. bucket::writer_flow()                                -> FlowKind
-//! 6. bucket::execute_write<U, S>(bucket, config, treasury, mm_account,
-//!    coin_u, coin_s, flow, position_recipient, call_token_recipient,
-//!    signed_quote, clock, ctx)
+//! 2. quote::new_quote(...)                                -> Quote
+//! 3. quote::new_signed_quote(q, sig)                      -> SignedQuote
+//! 4. bucket::execute_write_writer_flow<U, S, Call>(bucket, org, config,
+//!    treasury, mm_account, coin_u, signed_quote, clock, ctx)
+//!                                              -> (Position, Coin<Settlement>)
+//! 5. TransferObjects([result.0, result.1], executor_recipient)
 //! ```
+//!
+//! The contract returns the executor's side to the PTB (the writer's
+//! Position + net premium here; the trader's Coin<Call> in trader flow) and
+//! the trailing `TransferObjects` routes it; the signer/MM's side is still
+//! transferred by the contract to the quote's `signer_token_recipient`.
 //!
 //! The faucet mint composes with the rest of the PTB because the test-token
 //! `mint(&mut Faucet, u64, ctx): Coin<T>` is a non-entry public function —
 //! its result is addressable as a PTB `Argument`.
+//!
+//! NOTE: the frontend builds the same PTB shapes in
+//! `frontend/src/tx/composer.ts`, and the gas-station validates them against
+//! the templates in `template.rs` — keep all three in sync
+//! (see `.claude/ptb-sync.md`).
 
 use std::str::FromStr;
 
@@ -31,10 +41,10 @@ use sui_sdk::SuiClient;
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{
-    ObjectArg, SharedObjectMutability, Transaction, TransactionData,
+    Argument, ObjectArg, SharedObjectMutability, Transaction, TransactionData,
 };
 use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
-use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION, SUI_FRAMEWORK_PACKAGE_ID};
+use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION};
 use tracing::{debug, info};
 
 use crate::sui_client::Signer;
@@ -57,6 +67,8 @@ pub struct ExecuteWriteParams<'a> {
 
     // Shared protocol objects.
     pub bucket_id: ObjectID,
+    /// The bucket's Org (shared, mutated for the org fee deposit).
+    pub org_id: ObjectID,
     pub protocol_config_id: ObjectID,
     pub treasury_id: ObjectID,
     pub mm_account_id: ObjectID,
@@ -72,8 +84,10 @@ pub struct ExecuteWriteParams<'a> {
     pub nonce: u64,
     pub signature: Vec<u8>,
 
-    pub position_recipient: SuiAddress,
-    pub call_token_recipient: SuiAddress,
+    /// Where the PTB transfers the RETURNED (Position, net-premium Coin) —
+    /// conventionally the executor (the writer). The MM's Coin<Call> is
+    /// contract-routed to `signer_token_recipient` and is not configurable.
+    pub executor_recipient: SuiAddress,
 
     pub gas_budget: u64,
 }
@@ -97,6 +111,8 @@ pub struct ExecuteTraderParams<'a> {
 
     // Shared protocol objects.
     pub bucket_id: ObjectID,
+    /// The bucket's Org (shared, mutated for the org fee deposit).
+    pub org_id: ObjectID,
     pub protocol_config_id: ObjectID,
     pub treasury_id: ObjectID,
     pub mm_account_id: ObjectID,
@@ -112,10 +128,10 @@ pub struct ExecuteTraderParams<'a> {
     pub nonce: u64,
     pub signature: Vec<u8>,
 
-    /// Trader flow: must equal `signer_token_recipient` (the MM gets the Position).
-    pub position_recipient: SuiAddress,
-    /// Trader flow: the retail trader receives the CallOption coin.
-    pub call_token_recipient: SuiAddress,
+    /// Where the PTB transfers the RETURNED Coin<Call> — conventionally the
+    /// executor (the trader). The MM's Position is contract-routed to
+    /// `signer_token_recipient` and is not configurable.
+    pub executor_recipient: SuiAddress,
 
     pub gas_budget: u64,
 }
@@ -138,6 +154,7 @@ pub async fn execute_writer_flow(
 
     // Shared object args.
     let bucket = pt.obj(shared_object_arg(client, p.bucket_id, true).await?)?;
+    let org = pt.obj(shared_object_arg(client, p.org_id, true).await?)?;
     let config = pt.obj(shared_object_arg(client, p.protocol_config_id, false).await?)?;
     let treasury = pt.obj(shared_object_arg(client, p.treasury_id, true).await?)?;
     let mm_account = pt.obj(shared_object_arg(client, p.mm_account_id, true).await?)?;
@@ -158,8 +175,6 @@ pub async fn execute_writer_flow(
     let arg_valid_until_ms = pt.pure(&p.valid_until_ms)?;
     let arg_nonce = pt.pure(&p.nonce)?;
     let arg_signature = pt.pure(&p.signature)?;
-    let arg_position_recipient = pt.pure(&p.position_recipient)?;
-    let arg_call_token_recipient = pt.pure(&p.call_token_recipient)?;
     let arg_mint_amount = pt.pure(&p.write_amount)?;
 
     // Type tags.
@@ -180,16 +195,7 @@ pub async fn execute_writer_flow(
         vec![faucet, arg_mint_amount],
     );
 
-    // 2. coin::zero<Settlement>()
-    let coin_settlement_zero = pt.programmable_move_call(
-        SUI_FRAMEWORK_PACKAGE_ID,
-        Identifier::new("coin").unwrap(),
-        Identifier::new("zero").unwrap(),
-        vec![s_tag.clone()],
-        vec![],
-    );
-
-    // 3. quote::new_quote(...)
+    // 2. quote::new_quote(...)
     let quote_val = pt.programmable_move_call(
         p.package,
         Identifier::new("quote").unwrap(),
@@ -207,7 +213,7 @@ pub async fn execute_writer_flow(
         ],
     );
 
-    // 4. quote::new_signed_quote(quote, signature)
+    // 3. quote::new_signed_quote(quote, signature)
     let signed_quote = pt.programmable_move_call(
         p.package,
         Identifier::new("quote").unwrap(),
@@ -216,34 +222,32 @@ pub async fn execute_writer_flow(
         vec![quote_val, arg_signature],
     );
 
-    // 5. bucket::writer_flow()
-    let flow = pt.programmable_move_call(
+    // 4. bucket::execute_write_writer_flow<U, S, Call>(...)
+    //    -> (Position, Coin<Settlement>) returned to the PTB.
+    let result = pt.programmable_move_call(
         p.package,
         Identifier::new("bucket").unwrap(),
-        Identifier::new("writer_flow").unwrap(),
-        vec![],
-        vec![],
-    );
-
-    // 6. bucket::execute_write<U, S>(...)
-    pt.programmable_move_call(
-        p.package,
-        Identifier::new("bucket").unwrap(),
-        Identifier::new("execute_write").unwrap(),
+        Identifier::new("execute_write_writer_flow").unwrap(),
         vec![u_tag, s_tag, c_tag],
         vec![
             bucket,
+            org,
             config,
             treasury,
             mm_account,
             coin_underlying,
-            coin_settlement_zero,
-            flow,
-            arg_position_recipient,
-            arg_call_token_recipient,
             signed_quote,
             clock,
         ],
+    );
+    let Argument::Result(idx) = result else {
+        return Err(anyhow!("unexpected non-Result argument from move call"));
+    };
+
+    // 5. Route the returned (Position, net premium) to the executor.
+    pt.transfer_args(
+        p.executor_recipient,
+        vec![Argument::NestedResult(idx, 0), Argument::NestedResult(idx, 1)],
     );
 
     submit_execute_write(client, signer, pt, p.gas_budget).await
@@ -253,11 +257,10 @@ pub async fn execute_writer_flow(
 ///
 /// Symmetric to [`execute_writer_flow`], but the executor is the *retail
 /// trader*: they supply the premium (minted from the settlement faucet inside
-/// the PTB) and the underlying side is an empty coin (the Writer MM provides
-/// the underlying from their Account). Per the `FlowKind::Trader` branch in
-/// `bucket::execute_write_with_quote`, the signer (MM) receives the Position
-/// NFT, so `position_recipient` must equal the quote's `signer_token_recipient`;
-/// the trader receives the `CallOption` coin via `call_token_recipient`.
+/// the PTB); the Writer MM provides the underlying from their Account. The
+/// contract transfers the Position to the quote's `signer_token_recipient`
+/// (the MM) and returns the `Coin<Call>` to the PTB, which routes it to
+/// `executor_recipient`.
 pub async fn execute_trader_flow(
     client: &SuiClient,
     signer: &Signer,
@@ -275,6 +278,7 @@ pub async fn execute_trader_flow(
 
     // Shared object args.
     let bucket = pt.obj(shared_object_arg(client, p.bucket_id, true).await?)?;
+    let org = pt.obj(shared_object_arg(client, p.org_id, true).await?)?;
     let config = pt.obj(shared_object_arg(client, p.protocol_config_id, false).await?)?;
     let treasury = pt.obj(shared_object_arg(client, p.treasury_id, true).await?)?;
     let mm_account = pt.obj(shared_object_arg(client, p.mm_account_id, true).await?)?;
@@ -295,8 +299,6 @@ pub async fn execute_trader_flow(
     let arg_valid_until_ms = pt.pure(&p.valid_until_ms)?;
     let arg_nonce = pt.pure(&p.nonce)?;
     let arg_signature = pt.pure(&p.signature)?;
-    let arg_position_recipient = pt.pure(&p.position_recipient)?;
-    let arg_call_token_recipient = pt.pure(&p.call_token_recipient)?;
     let arg_mint_amount = pt.pure(&p.premium)?;
 
     // Type tags.
@@ -307,16 +309,7 @@ pub async fn execute_trader_flow(
     let c_tag = TypeTag::from_str(p.call_type)
         .with_context(|| format!("parsing call type {}", p.call_type))?;
 
-    // 1. coin::zero<Underlying>() — the MM provides the underlying from their Account.
-    let coin_underlying_zero = pt.programmable_move_call(
-        SUI_FRAMEWORK_PACKAGE_ID,
-        Identifier::new("coin").unwrap(),
-        Identifier::new("zero").unwrap(),
-        vec![u_tag.clone()],
-        vec![],
-    );
-
-    // 2. test_tokens::<module>::mint(faucet, premium) -> Coin<Settlement>
+    // 1. test_tokens::<module>::mint(faucet, premium) -> Coin<Settlement>
     let coin_settlement = pt.programmable_move_call(
         p.tokens_package,
         Identifier::new(p.settlement_module)
@@ -326,7 +319,7 @@ pub async fn execute_trader_flow(
         vec![faucet, arg_mint_amount],
     );
 
-    // 3. quote::new_quote(...)
+    // 2. quote::new_quote(...)
     let quote_val = pt.programmable_move_call(
         p.package,
         Identifier::new("quote").unwrap(),
@@ -344,7 +337,7 @@ pub async fn execute_trader_flow(
         ],
     );
 
-    // 4. quote::new_signed_quote(quote, signature)
+    // 3. quote::new_signed_quote(quote, signature)
     let signed_quote = pt.programmable_move_call(
         p.package,
         Identifier::new("quote").unwrap(),
@@ -353,35 +346,27 @@ pub async fn execute_trader_flow(
         vec![quote_val, arg_signature],
     );
 
-    // 5. bucket::trader_flow()
-    let flow = pt.programmable_move_call(
+    // 4. bucket::execute_write_trader_flow<U, S, Call>(...)
+    //    -> Coin<Call> returned to the PTB.
+    let call_coin = pt.programmable_move_call(
         p.package,
         Identifier::new("bucket").unwrap(),
-        Identifier::new("trader_flow").unwrap(),
-        vec![],
-        vec![],
-    );
-
-    // 6. bucket::execute_write<U, S, Call>(...)
-    pt.programmable_move_call(
-        p.package,
-        Identifier::new("bucket").unwrap(),
-        Identifier::new("execute_write").unwrap(),
+        Identifier::new("execute_write_trader_flow").unwrap(),
         vec![u_tag, s_tag, c_tag],
         vec![
             bucket,
+            org,
             config,
             treasury,
             mm_account,
-            coin_underlying_zero,
             coin_settlement,
-            flow,
-            arg_position_recipient,
-            arg_call_token_recipient,
             signed_quote,
             clock,
         ],
     );
+
+    // 5. Route the returned Coin<Call> to the executor.
+    pt.transfer_args(p.executor_recipient, vec![call_coin]);
 
     submit_execute_write(client, signer, pt, p.gas_budget).await
 }

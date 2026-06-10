@@ -166,6 +166,20 @@ pub async fn handle(
                         continue;
                     }
                 };
+                if !state.verified_orgs.is_verified(&bucket.org_id.to_hex()) {
+                    debug!(request_id = %request_id, %payload.bucket_id, "rfq for unverified org's bucket");
+                    let _ = out_tx
+                        .send(ServiceToRetail::Error {
+                            request_id: Some(request_id),
+                            payload: ErrorPayload {
+                                code: "bucket_not_verified".into(),
+                                message: "bucket belongs to an org that is not on the verified list"
+                                    .into(),
+                            },
+                        })
+                        .await;
+                    continue;
+                }
                 if bucket.invalidated {
                     debug!(request_id = %request_id, %payload.bucket_id, "rfq for invalidated bucket");
                     let _ = out_tx
@@ -276,13 +290,18 @@ pub async fn handle(
                     write_amount = payload.write_amount,
                     "retail bulk-view rfq request"
                 );
-                // Resolve each bucket JIT, dropping unknown/invalidated ones —
-                // a quote against those would never execute, so they shouldn't
-                // show an indicative premium either.
+                // Resolve each bucket JIT, dropping unknown/invalidated/
+                // unverified-org ones — a quote against those would never be
+                // served, so they shouldn't show an indicative premium either.
                 let mut buckets = Vec::with_capacity(payload.bucket_ids.len());
                 for id in &payload.bucket_ids {
                     match state.indexer.bucket(*id).await {
-                        Ok(Some(b)) if !b.invalidated => buckets.push(b),
+                        Ok(Some(b))
+                            if !b.invalidated
+                                && state.verified_orgs.is_verified(&b.org_id.to_hex()) =>
+                        {
+                            buckets.push(b)
+                        }
                         Ok(_) => {}
                         Err(e) => {
                             debug!(request_id = %request_id, bucket = %id, error = %e, "bulk-view bucket lookup failed; skipping");

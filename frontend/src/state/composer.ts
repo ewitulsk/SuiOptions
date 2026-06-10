@@ -437,6 +437,7 @@ export function useComposerState({
         view === "trader"
           ? buildBuyTx({
               entry,
+              orgId: series.org_id,
               underlyingCoinType: series.asset_coin_type,
               settlementCoinType: series.settlement_coin_type,
               callCoinType,
@@ -444,6 +445,7 @@ export function useComposerState({
             })
           : buildWriteTx({
               entry,
+              orgId: series.org_id,
               underlyingCoinType: series.asset_coin_type,
               settlementCoinType: series.settlement_coin_type,
               callCoinType,

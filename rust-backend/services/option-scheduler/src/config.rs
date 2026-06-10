@@ -54,6 +54,19 @@ pub struct SchedulerConfig {
     /// e.g. `http://127.0.0.1:9002/graphql`.
     pub indexer_graphql_url: String,
 
+    /// The org this scheduler rolls buckets under (shared `Org` object id).
+    /// Optional: when absent, the platform org from token-info's
+    /// `package-info` is used. Self-hosted org schedulers set both this and
+    /// `org_cap_id` to their own org.
+    #[serde(default)]
+    pub org_id: Option<String>,
+
+    /// The `OrgCap` object id authorizing bucket creation for `org_id`.
+    /// Must be owned by the configured signer. Optional: defaults to the
+    /// platform org cap from token-info.
+    #[serde(default)]
+    pub org_cap_id: Option<String>,
+
     #[serde(default = "default_tick_secs")]
     pub tick_secs: u64,
 

@@ -114,6 +114,11 @@ pub struct BucketDto {
 
 #[derive(Serialize)]
 pub struct SeriesDto {
+    /// Org that created every bucket in this series (series are keyed by
+    /// org — two orgs listing the same asset/expiry stay separate).
+    pub org_id: String,
+    /// Display name from the verified-orgs allowlist.
+    pub org_name: Option<String>,
     /// Friendly symbol from `deployments.json` (`"TBTC"`) — or the raw Move
     /// type string when the coin type isn't in the catalog.
     pub asset_symbol: String,
@@ -140,9 +145,12 @@ pub struct BucketsResponse {
 pub async fn list_buckets(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<BucketsResponse>, StatusCode> {
+    // Verified-only surface: only allowlisted orgs' buckets are served.
+    // The filter is pushed down to the indexer query.
+    let org_ids = state.verified_orgs.ids();
     let active = state
         .indexer
-        .buckets(true, None, None, None)
+        .buckets(true, Some(&org_ids), None, None, None)
         .await
         .map_err(|e| {
             tracing::warn!(error = %e, "indexer buckets query failed");
@@ -150,8 +158,14 @@ pub async fn list_buckets(
         })?;
     let active = active.into_iter().map(into_local_bucket).collect();
     let now_ms = Utc::now().timestamp_millis();
+    let org_names: BTreeMap<String, String> = state
+        .verified_orgs
+        .all()
+        .into_iter()
+        .map(|o| (o.org_id, o.name))
+        .collect();
     Ok(Json(BucketsResponse {
-        series: group_into_series(active, &state.catalog, now_ms),
+        series: group_into_series(active, &state.catalog, &org_names, now_ms),
     }))
 }
 
@@ -210,7 +224,11 @@ pub async fn get_bucket(
     })?;
     // Cleaned buckets are settled-and-gone — treat them as absent so the
     // tideline stops polling a stale id rather than rendering dead state.
-    let bucket = bucket.filter(|b| !b.cleaned).ok_or(StatusCode::NOT_FOUND)?;
+    // Unverified orgs' buckets are likewise absent (verified-only surface).
+    let bucket = bucket
+        .filter(|b| !b.cleaned)
+        .filter(|b| state.verified_orgs.is_verified(&b.org_id.to_hex()))
+        .ok_or(StatusCode::NOT_FOUND)?;
     let now_ms = Utc::now().timestamp_millis();
     Ok(Json(detail_dto_from(&bucket, &state.catalog, now_ms)))
 }
@@ -279,6 +297,7 @@ fn into_local_bucket(b: indexer_graphql::Bucket) -> (protocol_types::ids::Object
     (
         b.bucket_id,
         Bucket {
+            org_id: b.org_id.to_hex(),
             asset_type: b.asset_type,
             settlement_type: b.settlement_type,
             call_type: b.call_type,
@@ -294,17 +313,21 @@ fn into_local_bucket(b: indexer_graphql::Bucket) -> (protocol_types::ids::Object
     )
 }
 
-type SeriesKey = (String, String, u64);
+/// Keyed by org FIRST: two orgs can list the same (asset, settlement,
+/// expiry) — merging their strike ladders would silently corrupt the UI.
+type SeriesKey = (String, String, String, u64);
 
 /// Pure helper — split out so it's unit-testable without spinning up axum.
 fn group_into_series(
     buckets: Vec<(protocol_types::ids::ObjectId, Bucket)>,
     catalog: &TokenCatalog,
+    org_names: &BTreeMap<String, String>,
     now_ms: i64,
 ) -> Vec<SeriesDto> {
     let mut grouped: BTreeMap<SeriesKey, Vec<(String, Bucket)>> = BTreeMap::new();
     for (id, b) in buckets {
         let key = (
+            b.org_id.clone(),
             b.asset_type.as_str().to_string(),
             b.settlement_type.as_str().to_string(),
             b.expiry_ms,
@@ -314,7 +337,7 @@ fn group_into_series(
 
     grouped
         .into_iter()
-        .map(|((asset_ct, settle_ct, expiry_ms), members)| {
+        .map(|((org_id, asset_ct, settle_ct, expiry_ms), members)| {
             let asset_meta = catalog.lookup(&asset_ct);
             let settle_meta = catalog.lookup(&settle_ct);
             let asset_decimals = asset_meta.map(|m| m.decimals);
@@ -334,6 +357,8 @@ fn group_into_series(
             });
 
             SeriesDto {
+                org_name: org_names.get(&org_id).cloned(),
+                org_id,
                 asset_symbol: asset_meta
                     .map(|m| m.symbol.clone())
                     .unwrap_or_else(|| asset_ct.clone()),
@@ -440,6 +465,7 @@ mod tests {
 
     fn mk_bucket(strike: u128, strike_scale: u8, written: u128, cursor: u128) -> Bucket {
         Bucket {
+            org_id: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             asset_type: AssetType::new("0xpkg::tbtc::TBTC"),
             settlement_type: AssetType::new("0xpkg::tusdc::TUSDC"),
             call_type: AssetType::new("0xpkg::call_0::CALL_0"),
@@ -469,7 +495,7 @@ mod tests {
             ),
             (ObjectId::new([0xbb; 32]), mk_bucket(900, 0, 0, 0)),
         ];
-        let series = group_into_series(buckets, &cat, NOW_MS);
+        let series = group_into_series(buckets, &cat, &BTreeMap::new(), NOW_MS);
         assert_eq!(series.len(), 1);
         let s = &series[0];
         assert_eq!(s.asset_symbol, "TBTC");
@@ -497,7 +523,7 @@ mod tests {
         // regression can't sneak back in.
         let cat = fixture_catalog();
         let buckets = vec![(ObjectId::new([0xee; 32]), mk_bucket(769, 0, 0, 0))];
-        let s = group_into_series(buckets, &cat, NOW_MS);
+        let s = group_into_series(buckets, &cat, &BTreeMap::new(), NOW_MS);
         assert_eq!(s[0].buckets[0].strike, Some(76_900.0));
         assert_eq!(s[0].buckets[0].strike_raw, "769");
     }
@@ -515,6 +541,7 @@ mod tests {
             tok("TUSDC9", "0xpkg::tusdc::TUSDC", 9),
         ]);
         let b = Bucket {
+            org_id: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             asset_type: AssetType::new("0xpkg::deep::DEEP"),
             settlement_type: AssetType::new("0xpkg::tusdc::TUSDC"),
             call_type: AssetType::new("0xpkg::call_0::CALL_0"),
@@ -527,7 +554,7 @@ mod tests {
             invalidated: false,
             deepbook_pool_id: None,
         };
-        let s = group_into_series(vec![(ObjectId::new([0xff; 32]), b)], &cat, NOW_MS);
+        let s = group_into_series(vec![(ObjectId::new([0xff; 32]), b)], &cat, &BTreeMap::new(), NOW_MS);
         // 150 * 10^(6-9-0) = 0.15
         assert!((s[0].buckets[0].strike.unwrap() - 0.15).abs() < 1e-12);
     }
@@ -543,6 +570,7 @@ mod tests {
             tok("TUSDC", "0xpkg::tusdc::TUSDC", 6),
         ]);
         let b = Bucket {
+            org_id: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             asset_type: AssetType::new("0xpkg::tdeep::TDEEP"),
             settlement_type: AssetType::new("0xpkg::tusdc::TUSDC"),
             call_type: AssetType::new("0xpkg::call_0::CALL_0"),
@@ -555,7 +583,7 @@ mod tests {
             invalidated: false,
             deepbook_pool_id: None,
         };
-        let s = group_into_series(vec![(ObjectId::new([0xfe; 32]), b)], &cat, NOW_MS);
+        let s = group_into_series(vec![(ObjectId::new([0xfe; 32]), b)], &cat, &BTreeMap::new(), NOW_MS);
         // 15_000 * 10^(6 - 6 - 5) = 0.15 USD
         assert!((s[0].buckets[0].strike.unwrap() - 0.15).abs() < 1e-12);
         assert_eq!(s[0].buckets[0].strike_scale, 5);
@@ -566,7 +594,7 @@ mod tests {
     fn unknown_coin_type_falls_back_to_raw_string() {
         let cat = TokenCatalog::default();
         let buckets = vec![(ObjectId::new([0xcc; 32]), mk_bucket(1, 0, 0, 0))];
-        let series = group_into_series(buckets, &cat, NOW_MS);
+        let series = group_into_series(buckets, &cat, &BTreeMap::new(), NOW_MS);
         assert_eq!(series[0].asset_symbol, "0xpkg::tbtc::TBTC");
         assert_eq!(series[0].asset_decimals, None);
         assert_eq!(series[0].buckets[0].strike, None);
@@ -581,6 +609,7 @@ mod tests {
         let cat = fixture_catalog();
         let raw = "9b72409a9f38a8784420d17577aa6dbe5aa2ab4224cd04c44d8b515f6c97ba86";
         let b = Bucket {
+            org_id: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             asset_type: AssetType::new(format!("{raw}::tbtc::TBTC")),
             settlement_type: AssetType::new(format!("{raw}::tusdc::TUSDC")),
             call_type: AssetType::new(format!("{raw}::call_0::CALL_0")),
@@ -593,7 +622,7 @@ mod tests {
             invalidated: false,
             deepbook_pool_id: None,
         };
-        let s = group_into_series(vec![(ObjectId::new([0x11; 32]), b)], &cat, NOW_MS);
+        let s = group_into_series(vec![(ObjectId::new([0x11; 32]), b)], &cat, &BTreeMap::new(), NOW_MS);
         assert_eq!(s[0].asset_coin_type, format!("0x{raw}::tbtc::TBTC"));
         assert_eq!(s[0].settlement_coin_type, format!("0x{raw}::tusdc::TUSDC"));
     }
@@ -605,13 +634,14 @@ mod tests {
             ObjectId::new([0xdd; 32]),
             mk_bucket(85_000_000_000, 0, 0, 0),
         )];
-        let s = group_into_series(buckets, &cat, NOW_MS);
+        let s = group_into_series(buckets, &cat, &BTreeMap::new(), NOW_MS);
         assert_eq!(s[0].buckets[0].fill_pct, Some(0.0));
     }
 
     fn mk_idx_bucket(id: ObjectId, written: u128, cursor: u128) -> IndexerBucket {
         IndexerBucket {
             bucket_id: id,
+            org_id: ObjectId::new([0xaa; 32]),
             asset_type: AssetType::new("0xpkg::tbtc::TBTC"),
             settlement_type: AssetType::new("0xpkg::tusdc::TUSDC"),
             call_type: AssetType::new("0xpkg::call_0::CALL_0"),
@@ -685,7 +715,7 @@ mod tests {
         let pool_hex = ObjectId::new([0xee; 32]).to_hex();
         let mut b = mk_bucket(850, 0, 0, 0);
         b.deepbook_pool_id = Some(pool_hex.clone());
-        let s = group_into_series(vec![(ObjectId::new([0x33; 32]), b)], &cat, NOW_MS);
+        let s = group_into_series(vec![(ObjectId::new([0x33; 32]), b)], &cat, &BTreeMap::new(), NOW_MS);
         let dto = &s[0].buckets[0];
         assert_eq!(dto.deepbook_pool_id.as_deref(), Some(pool_hex.as_str()));
         assert!(dto.tradeable);
@@ -694,11 +724,41 @@ mod tests {
         let s = group_into_series(
             vec![(ObjectId::new([0x34; 32]), mk_bucket(850, 0, 0, 0))],
             &cat,
+            &BTreeMap::new(),
             NOW_MS,
         );
         let dto = &s[0].buckets[0];
         assert_eq!(dto.deepbook_pool_id, None);
         assert!(!dto.tradeable);
+    }
+
+    #[test]
+    fn two_orgs_same_pair_and_expiry_stay_separate_series() {
+        // Two orgs listing the same (asset, settlement, expiry): merging
+        // their strike ladders would silently corrupt the UI — the series
+        // key must include the org.
+        let cat = fixture_catalog();
+        let mut other = mk_bucket(900, 0, 0, 0);
+        other.org_id = format!("0x{}", "bb".repeat(32));
+        let names: BTreeMap<String, String> = [
+            (format!("0x{}", "aa".repeat(32)), "SuiOptions".to_string()),
+            (format!("0x{}", "bb".repeat(32)), "Acme".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let series = group_into_series(
+            vec![
+                (ObjectId::new([0x01; 32]), mk_bucket(850, 0, 0, 0)),
+                (ObjectId::new([0x02; 32]), other),
+            ],
+            &cat,
+            &names,
+            NOW_MS,
+        );
+        assert_eq!(series.len(), 2);
+        assert_eq!(series[0].org_name.as_deref(), Some("SuiOptions"));
+        assert_eq!(series[1].org_name.as_deref(), Some("Acme"));
+        assert_ne!(series[0].org_id, series[1].org_id);
     }
 
     #[test]

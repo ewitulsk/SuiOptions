@@ -12,6 +12,7 @@ deployments    = { workspace = true }
 protocol-types = { workspace = true }
 
 reqwest = { workspace = true }
+parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

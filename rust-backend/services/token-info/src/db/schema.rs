@@ -1,5 +1,5 @@
 //! Hand-written equivalent of what `diesel print-schema` would generate.
-//! Kept in sync with `migrations/000001_init/up.sql`.
+//! Kept in sync with the migrations.
 
 diesel::table! {
     supported_tokens (coin_type) {
@@ -12,5 +12,15 @@ diesel::table! {
         enabled      -> Bool,
         created_at   -> Timestamptz,
         updated_at   -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    verified_orgs (org_id) {
+        org_id     -> Text,
+        name       -> Text,
+        enabled    -> Bool,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
     }
 }

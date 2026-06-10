@@ -50,6 +50,8 @@ export const CHARTS_URL: string =
 export let PACKAGE_ID: string | undefined;
 export let PROTOCOL_CONFIG_ID: string | undefined;
 export let TREASURY_ID: string | undefined;
+/** The platform's own org id ("SuiOptions") — for badging in the UI. */
+export let PLATFORM_ORG_ID: string | undefined;
 
 // DeepBook v3 deployment ids (SO-151), served by token-info alongside the
 // protocol ids. All `undefined` on networks without a DeepBook deployment
@@ -119,6 +121,8 @@ type PackageInfoDto = {
   packageId: string;
   protocolConfigId: string;
   treasuryId?: string | null;
+  /** The platform's own org ("SuiOptions"), created at deploy time. */
+  platformOrgId?: string | null;
   network?: string;
   testTokens?: {
     packageId: string;
@@ -163,6 +167,7 @@ export async function initConfig(): Promise<void> {
   PACKAGE_ID = info.packageId;
   PROTOCOL_CONFIG_ID = info.protocolConfigId;
   TREASURY_ID = info.treasuryId ?? undefined;
+  PLATFORM_ORG_ID = info.platformOrgId ?? undefined;
 
   const db = info.deepbook;
   DEEPBOOK_PACKAGE_ID = db?.packageId;

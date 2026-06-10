@@ -4,6 +4,14 @@ Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-s
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
+## Project invariants
+
+- **PTB sync**: any change to a frontend PTB builder for a gas-sponsored flow
+  (`frontend/src/tx/{composer,dashboard,faucet,deepbook}.ts`) MUST update the
+  matching gas-station template + shape test in
+  `rust-backend/crates/sui-tx/src/tx/template.rs` in the same PR — see
+  [.claude/ptb-sync.md](ptb-sync.md).
+
 ## 1. Think Before Coding
 
 **Don't assume. Don't hide confusion. Surface tradeoffs.**

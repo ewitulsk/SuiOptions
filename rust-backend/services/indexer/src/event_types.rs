@@ -19,8 +19,9 @@ use serde::Deserialize;
 use protocol_types::asset::AssetType;
 use protocol_types::events::{
     AccountCreated, AccountDeposit, AccountWithdraw, BucketCleaned, BucketCreated,
-    BucketInvalidated, BucketRevalidated, ChainEvent, Exercised, ExpiredOptionBurned, FeeUpdated,
-    Redeemed, SigningKeyRotated, TreasuryWithdrawn, WriteExecuted,
+    BucketInvalidated, BucketRevalidated, ChainEvent, Exercised, ExpiredOptionBurned, OrgCreated,
+    OrgFeeUpdated, OrgWithdraw, ProtocolFeeUpdated, ProtocolPauseSet, Redeemed, SigningKeyRotated,
+    TreasuryWithdrawn, WriteExecuted,
 };
 use protocol_types::ids::{ObjectId, SuiAddress};
 
@@ -42,8 +43,12 @@ pub struct EventTypes {
     pub account_deposit: String,
     pub account_withdraw: String,
     pub signing_key_rotated: String,
-    pub fee_updated: String,
+    pub protocol_fee_updated: String,
+    pub protocol_pause_set: String,
     pub treasury_withdrawn: String,
+    pub org_created: String,
+    pub org_fee_updated: String,
+    pub org_withdraw: String,
     /// Prefix of DeepBook's generic `pool::PoolCreated<Base, Quote>` event
     /// (SO-152). Built from DeepBook's ORIGINAL package id — Sui resolves
     /// event/struct types to the first publish, not the upgraded package
@@ -67,14 +72,18 @@ impl EventTypes {
             account_deposit: mk("AccountDeposit"),
             account_withdraw: mk("AccountWithdraw"),
             signing_key_rotated: mk("SigningKeyRotated"),
-            fee_updated: mk("FeeUpdated"),
+            protocol_fee_updated: mk("ProtocolFeeUpdated"),
+            protocol_pause_set: mk("ProtocolPauseSet"),
             treasury_withdrawn: mk("TreasuryWithdrawn"),
+            org_created: mk("OrgCreated"),
+            org_fee_updated: mk("OrgFeeUpdated"),
+            org_withdraw: mk("OrgWithdraw"),
             deepbook_pool_created_prefix: deepbook_original_package_id
                 .map(|pkg| format!("{pkg}::pool::PoolCreated<")),
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 14] {
+    pub fn all_strings(&self) -> [&str; 18] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -88,8 +97,12 @@ impl EventTypes {
             &self.account_deposit,
             &self.account_withdraw,
             &self.signing_key_rotated,
-            &self.fee_updated,
+            &self.protocol_fee_updated,
+            &self.protocol_pause_set,
             &self.treasury_withdrawn,
+            &self.org_created,
+            &self.org_fee_updated,
+            &self.org_withdraw,
         ]
     }
 }
@@ -132,10 +145,18 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(AccountWithdraw, AccountWithdraw)
     } else if type_str == types.signing_key_rotated {
         decode!(SigningKeyRotated, SigningKeyRotated)
-    } else if type_str == types.fee_updated {
-        decode!(FeeUpdated, FeeUpdated)
+    } else if type_str == types.protocol_fee_updated {
+        decode!(ProtocolFeeUpdated, ProtocolFeeUpdated)
+    } else if type_str == types.protocol_pause_set {
+        decode!(ProtocolPauseSet, ProtocolPauseSet)
     } else if type_str == types.treasury_withdrawn {
         decode!(TreasuryWithdrawn, TreasuryWithdrawn)
+    } else if type_str == types.org_created {
+        decode!(OrgCreated, OrgCreated)
+    } else if type_str == types.org_fee_updated {
+        decode!(OrgFeeUpdated, OrgFeeUpdated)
+    } else if type_str == types.org_withdraw {
+        decode!(OrgWithdraw, OrgWithdraw)
     } else {
         Ok(None)
     }
@@ -272,6 +293,7 @@ mod tests {
         let t = types();
         let evt = BucketCreated {
             bucket_id: ObjectId::new([0x42; 32]),
+            org_id: ObjectId::new([0x07; 32]),
             asset_type: AssetType::new("0x2::sui::SUI"),
             settlement_type: AssetType::new("0x123::usdc::USDC"),
             call_type: AssetType::new("0x9::call_0::CALL_0"),
@@ -292,16 +314,17 @@ mod tests {
         let t = types();
         let evt = WriteExecuted {
             bucket_id: ObjectId::new([0x11; 32]),
+            org_id: ObjectId::new([0x07; 32]),
             signer_account_id: ObjectId::new([0x22; 32]),
             signer_token_recipient: SuiAddress::new([0x33; 32]),
             executor: SuiAddress::new([0x44; 32]),
             position_id: ObjectId::new([0xaa; 32]),
-            position_recipient: SuiAddress::new([0x55; 32]),
-            call_token_recipient: SuiAddress::new([0x66; 32]),
+            flow: protocol_types::events::FLOW_WRITER,
             write_amount: 10_000,
             gross_premium: 500,
-            fee: 5,
-            net_premium: 495,
+            org_fee: 3,
+            protocol_fee: 5,
+            net_premium: 492,
             range_start: 12_345,
             range_end: 22_345,
             nonce: 7,

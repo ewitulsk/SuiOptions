@@ -6,7 +6,8 @@ public fun quote_signature_invalid(): u64 { 3 }
 public fun quote_protocol_mismatch(): u64 { 4 }
 public fun quote_bucket_mismatch(): u64 { 5 }
 public fun quote_account_mismatch(): u64 { 6 }
-public fun quote_recipient_mismatch(): u64 { 7 }
+// 7 retired (quote_recipient_mismatch — recipient params removed from
+// execute_write; the signer-side routing guarantee is now structural).
 public fun bucket_expired(): u64 { 8 }
 public fun bucket_not_expired(): u64 { 9 }
 public fun bucket_not_drained(): u64 { 10 }
@@ -16,15 +17,20 @@ public fun settlement_amount_mismatch(): u64 { 13 }
 public fun cursor_overflow(): u64 { 14 }
 public fun not_owner(): u64 { 15 }
 public fun position_bucket_mismatch(): u64 { 16 }
-public fun call_option_bucket_mismatch(): u64 { 17 }
+// 17 retired (call_option_bucket_mismatch — dead since the Coin<Call> migration).
 public fun fee_too_high(): u64 { 18 }
 public fun nonce_still_valid(): u64 { 19 }
 public fun insufficient_treasury_balance(): u64 { 20 }
 public fun zero_amount(): u64 { 21 }
-public fun count_must_be_positive(): u64 { 22 }
+// 22 retired (count_must_be_positive — dead since create_bucket lost `count`).
 public fun invalid_signing_scheme(): u64 { 23 }
 public fun invalid_pubkey_length(): u64 { 24 }
 public fun strike_scale_too_large(): u64 { 25 }
 public fun bucket_invalidated(): u64 { 26 }
 public fun bucket_not_invalidated(): u64 { 27 }
 public fun treasury_cap_not_fresh(): u64 { 28 }
+public fun protocol_paused(): u64 { 29 }
+public fun org_cap_mismatch(): u64 { 30 }
+public fun bucket_org_mismatch(): u64 { 31 }
+public fun org_name_invalid(): u64 { 32 }
+public fun insufficient_org_balance(): u64 { 33 }

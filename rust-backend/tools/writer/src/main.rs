@@ -140,6 +140,7 @@ async fn main() -> Result<()> {
     // The option coin type is the bucket's third type parameter; read it off
     // the on-chain Bucket<U, S, Call> object.
     let call_type = bucket_call_type(&wrap.client, cli.bucket).await?;
+    let org_id = bucket_org_id(&wrap.client, cli.bucket).await?;
 
     let params = ExecuteWriteParams {
         package,
@@ -150,6 +151,7 @@ async fn main() -> Result<()> {
         underlying_module: &underlying_module,
         underlying_faucet_id: underlying_faucet.faucet()?,
         bucket_id: cli.bucket,
+        org_id,
         protocol_config_id: protocol_config,
         treasury_id: treasury,
         mm_account_id,
@@ -162,15 +164,37 @@ async fn main() -> Result<()> {
         valid_until_ms: best.quote.valid_until_ms,
         nonce: best.quote.nonce,
         signature: best.signature.clone(),
-        position_recipient: writer_addr,
-        // Writer flow requires signer_token_recipient == call_token_recipient.
-        call_token_recipient: signer_token_recipient,
+        // The returned (Position, net premium) route to the writer; the
+        // MM's Coin<Call> is contract-routed to signer_token_recipient.
+        executor_recipient: writer_addr,
         gas_budget: cli.gas_budget,
     };
 
     let resp = execute_writer_flow(&wrap.client, &wrap.signer, &params).await?;
     println!("✓ execute_write digest: {}", resp.digest);
     Ok(())
+}
+
+
+/// Read the bucket's org id off the on-chain object's `org_id` field.
+async fn bucket_org_id(client: &sui_sdk::SuiClient, bucket: ObjectID) -> Result<ObjectID> {
+    use sui_json_rpc_types::SuiData;
+    let resp = client
+        .read_api()
+        .get_object_with_options(
+            bucket,
+            sui_json_rpc_types::SuiObjectDataOptions::new().with_content(),
+        )
+        .await?;
+    let data = resp.data.ok_or_else(|| anyhow!("bucket {bucket} not found on chain"))?;
+    let org = data
+        .content
+        .as_ref()
+        .and_then(|c| c.try_as_move())
+        .and_then(|m| m.fields.field_value("org_id"))
+        .map(|v| v.to_string())
+        .ok_or_else(|| anyhow!("bucket {bucket} content has no org_id field"))?;
+    ObjectID::from_str(&org).context("parsing bucket org_id")
 }
 
 /// Read the bucket's option-coin type (the `Call` in `Bucket<U, S, Call>`)

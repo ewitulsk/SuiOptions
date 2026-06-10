@@ -1,20 +1,27 @@
-// Programmable Transaction Block builder for the Earn (writer) composer.
+// Programmable Transaction Block builders for the Earn (writer) and Buy
+// (trader) composers.
 //
-// Shape mirrors the Move signature in `contracts/sources/bucket.move`:
-//   bucket::execute_write<U, S, Call>(bucket, config, treasury, signer_account,
-//     underlying_in, premium_in, flow, position_recipient,
-//     call_token_recipient, signed_quote, clock, ctx)
+// Shapes mirror the split Move signatures in `contracts/sources/bucket.move`:
+//   bucket::execute_write_writer_flow<U, S, Call>(bucket, org, config,
+//     treasury, signer_account, underlying_in, signed_quote, clock, ctx)
+//       -> (Position, Coin<Settlement>)
+//   bucket::execute_write_trader_flow<U, S, Call>(bucket, org, config,
+//     treasury, signer_account, premium_in, signed_quote, clock, ctx)
+//       -> Coin<Call>
+//
+// The contract RETURNS the executor's side to the PTB; we transfer it to the
+// connected wallet with a trailing `transferObjects`. The signer/MM's side
+// is still routed by the contract to the quote's `signer_token_recipient`.
 //
 // `Quote` / `SignedQuote` are Move structs, not pure args, so we rebuild
 // them on chain from the MM's signed RFQ entry via `quote::new_quote` +
 // `quote::new_signed_quote`. The struct must BCS-encode to the exact bytes
 // the MM signed, so every field is reconstructed verbatim from the quote.
 //
-// Writer-flow invariants enforced by `execute_write_with_quote`
-// (FlowKind::Writer): signer_recipient == call_token_recipient;
-// premium_in.value() == 0; underlying_in.value() == write_amount. The writer
-// (ctx.sender()) receives the net premium and the Position NFT; the MM/buyer
-// (signer_token_recipient) receives the CallOption.
+// NOTE: the gas-station only sponsors PTBs that match its templates
+// (`rust-backend/crates/sui-tx/src/tx/template.rs`). Any change to the
+// shapes built here MUST update those templates in the same change set —
+// see `.claude/ptb-sync.md`.
 
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID, fromHex } from "@mysten/sui/utils";
@@ -38,23 +45,26 @@ function strip0x(s: string): string {
 export type WriteParams = {
   /** Chosen MM quote (default: the best, `quotes[0]`). */
   entry: RfqQuoteEntry;
+  /** The bucket's Org (shared object; org fee is deposited into it). */
+  orgId: string;
   /** `series.asset_coin_type` — the `Underlying` type arg. */
   underlyingCoinType: string;
   /** `series.settlement_coin_type` — the `Settlement` type arg. */
   settlementCoinType: string;
   /** The bucket's per-bucket option coin type (`Call` type arg). */
   callCoinType: string;
-  /** Connected wallet; receives the Position NFT and net premium. */
+  /** Connected wallet; receives the returned Position NFT and net premium. */
   writer: string;
 };
 
 /**
- * Build a writer-flow `execute_write` PTB from a signed RFQ quote.
+ * Build a writer-flow `execute_write_writer_flow` PTB from a signed RFQ
+ * quote.
  *
  * The signer's `Account` (`signer_account_id`) is a shared object
  * (`account::create_and_share_account` → `transfer::share_object`), so
  * `tx.object(...)` resolves its shared metadata via dapp-kit's SuiClient,
- * the same way the bucket / config / treasury args do elsewhere.
+ * the same way the bucket / org / config / treasury args do elsewhere.
  */
 export function buildWriteTx(p: WriteParams): Transaction {
   const pkg = requirePackage();
@@ -88,38 +98,33 @@ export function buildWriteTx(p: WriteParams): Transaction {
     ],
   });
 
-  const flow = tx.moveCall({ target: `${pkg}::bucket::writer_flow` });
-
-  // Writer supplies exactly write_amount of underlying; the premium side is
-  // a zero Settlement coin (the MM's premium is debited from their Account).
+  // Writer supplies exactly write_amount of underlying; the MM's premium is
+  // debited from their Account inside the contract.
   const underlying = tx.add(
     coinWithBalance({
       balance: BigInt(q.write_amount),
       type: p.underlyingCoinType,
     }),
   );
-  const premiumZero = tx.moveCall({
-    target: "0x2::coin::zero",
-    typeArguments: [p.settlementCoinType],
-  });
 
-  tx.moveCall({
-    target: `${pkg}::bucket::execute_write`,
+  const [position, netPremium] = tx.moveCall({
+    target: `${pkg}::bucket::execute_write_writer_flow`,
     typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.callCoinType],
     arguments: [
       tx.object(q.bucket_id),
+      tx.object(p.orgId),
       tx.object(PROTOCOL_CONFIG_ID),
       tx.object(TREASURY_ID),
       tx.object(q.signer_account_id), // MM Account (shared, mutable)
       underlying,
-      premiumZero,
-      flow,
-      tx.pure.address(p.writer), // position_recipient = the writer
-      tx.pure.address(q.signer_token_recipient), // call_token_recipient = the MM/buyer
       signedQuote,
       tx.object(SUI_CLOCK_OBJECT_ID),
     ],
   });
+
+  // Returned (Position, net premium) → the writer. The MM's Coin<Call> is
+  // contract-routed to the quote's signer_token_recipient.
+  tx.transferObjects([position, netPremium], p.writer);
 
   return tx;
 }
@@ -127,26 +132,26 @@ export function buildWriteTx(p: WriteParams): Transaction {
 export type BuyParams = {
   /** Chosen MM quote (default: the best, `quotes[0]`). */
   entry: RfqQuoteEntry;
+  /** The bucket's Org (shared object; org fee is deposited into it). */
+  orgId: string;
   /** `series.asset_coin_type` — the `Underlying` type arg. */
   underlyingCoinType: string;
   /** `series.settlement_coin_type` — the `Settlement` type arg. */
   settlementCoinType: string;
   /** The bucket's per-bucket option coin type (`Call` type arg). */
   callCoinType: string;
-  /** Connected wallet; pays the premium and receives the CallOption. */
+  /** Connected wallet; pays the premium and receives the returned CallOption. */
   trader: string;
 };
 
 /**
- * Build a trader-flow `execute_write` PTB from a signed RFQ quote.
+ * Build a trader-flow `execute_write_trader_flow` PTB from a signed RFQ
+ * quote.
  *
- * Mirror of {@link buildWriteTx} for the Buy page. Trader-flow invariants
- * enforced by `execute_write_with_quote` (FlowKind::Trader):
- * signer_recipient == position_recipient; underlying_in.value() == 0;
- * premium_in.value() == gross_premium. The Writer MM (signer) supplies the
- * underlying from their Account and receives the Position NFT; the trader
- * (ctx.sender()) pays the premium from their wallet and receives the
- * CallOption coin.
+ * Mirror of {@link buildWriteTx} for the Buy page. The Writer MM (signer)
+ * supplies the underlying from their Account and is contract-routed the
+ * Position NFT; the trader pays the premium from their wallet and receives
+ * the returned `Coin<Call>` via the trailing transfer.
  */
 export function buildBuyTx(p: BuyParams): Transaction {
   const pkg = requirePackage();
@@ -180,38 +185,33 @@ export function buildBuyTx(p: BuyParams): Transaction {
     ],
   });
 
-  const flow = tx.moveCall({ target: `${pkg}::bucket::trader_flow` });
-
-  // Trader pays exactly the premium in settlement; the underlying side is a
-  // zero coin (the MM's underlying is debited from their Account).
+  // Trader pays exactly the premium in settlement; the MM's underlying is
+  // debited from their Account inside the contract.
   const premium = tx.add(
     coinWithBalance({
       balance: BigInt(q.premium),
       type: p.settlementCoinType,
     }),
   );
-  const underlyingZero = tx.moveCall({
-    target: "0x2::coin::zero",
-    typeArguments: [p.underlyingCoinType],
-  });
 
-  tx.moveCall({
-    target: `${pkg}::bucket::execute_write`,
+  const [callCoin] = tx.moveCall({
+    target: `${pkg}::bucket::execute_write_trader_flow`,
     typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.callCoinType],
     arguments: [
       tx.object(q.bucket_id),
+      tx.object(p.orgId),
       tx.object(PROTOCOL_CONFIG_ID),
       tx.object(TREASURY_ID),
       tx.object(q.signer_account_id), // MM Account (shared, mutable)
-      underlyingZero,
       premium,
-      flow,
-      tx.pure.address(q.signer_token_recipient), // position_recipient = the MM/writer
-      tx.pure.address(p.trader), // call_token_recipient = the trader
       signedQuote,
       tx.object(SUI_CLOCK_OBJECT_ID),
     ],
   });
+
+  // Returned Coin<Call> → the trader. The MM's Position is contract-routed
+  // to the quote's signer_token_recipient.
+  tx.transferObjects([callCoin], p.trader);
 
   return tx;
 }

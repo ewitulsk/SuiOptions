@@ -148,13 +148,13 @@ pub struct CreateBucketSpec {
 }
 
 /// Call `bucket::create_bucket<U, S, Call>` once per spec in a single PTB,
-/// consuming each `TreasuryCap` by value and referencing the shared `AdminCap`
+/// consuming each `TreasuryCap` by value and referencing the org's `OrgCap`
 /// across every command.
 pub async fn create_buckets(
     client: &SuiClient,
     signer: &Signer,
     package: ObjectID,
-    admin_cap: ObjectID,
+    org_cap: ObjectID,
     specs: &[CreateBucketSpec],
     gas_budget: u64,
 ) -> Result<SuiTransactionBlockResponse> {
@@ -164,9 +164,9 @@ pub async fn create_buckets(
     info!(%package, buckets = specs.len(), "building create_buckets PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
 
-    // AdminCap is an owned object passed by `&AdminCap`; input it once and
+    // OrgCap is an owned object passed by `&OrgCap`; input it once and
     // reuse the Argument across every create_bucket command.
-    let admin_arg = pt.obj(owned_object_arg(client, admin_cap).await?)?;
+    let org_cap_arg = pt.obj(owned_object_arg(client, org_cap).await?)?;
 
     let bucket_module = Identifier::new("bucket").unwrap();
     let create_fn = Identifier::new("create_bucket").unwrap();
@@ -189,7 +189,7 @@ pub async fn create_buckets(
             bucket_module.clone(),
             create_fn.clone(),
             vec![u_tag, s_tag, c_tag],
-            vec![admin_arg, cap_arg, expiry_arg, strike_arg, scale_arg],
+            vec![org_cap_arg, cap_arg, expiry_arg, strike_arg, scale_arg],
         );
     }
 

@@ -214,6 +214,118 @@ pub async fn create_and_share_treasury(
     Ok(InitOutcome { treasury_id, digest })
 }
 
+pub struct OrgOutcome {
+    pub org_id: ObjectID,
+    pub org_cap_id: ObjectID,
+    pub digest: String,
+}
+
+/// Call `org::create_org(name, fee_bps)` and transfer the returned `OrgCap`
+/// to the deployer. This creates the platform's own org ("SuiOptions") so the
+/// option-scheduler can roll buckets under it. `create_org` is permissionless;
+/// the deploy step just bootstraps the first one and records its ids.
+pub async fn create_platform_org(
+    client: &SuiClient,
+    signer: &Signer,
+    package_id: ObjectID,
+    name: &str,
+    fee_bps: u64,
+    gas_budget: u64,
+) -> Result<OrgOutcome> {
+    use move_core_types::identifier::Identifier;
+    use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
+    use sui_types::transaction::TransactionData;
+
+    // Give the fullnode a beat to index the freshly published package.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let arg_name = pt.pure(name.to_string())?;
+    let arg_fee = pt.pure(fee_bps)?;
+    let cap = pt.programmable_move_call(
+        package_id,
+        Identifier::new("org").unwrap(),
+        Identifier::new("create_org").unwrap(),
+        vec![],
+        vec![arg_name, arg_fee],
+    );
+    pt.transfer_arg(signer.address, cap);
+    let programmable = pt.finish();
+
+    let gas_coin = client
+        .coin_read_api()
+        .get_coins(signer.address, None, None, Some(5))
+        .await
+        .context("listing gas coins")?
+        .data
+        .into_iter()
+        .max_by_key(|c| c.balance)
+        .ok_or_else(|| anyhow!("no SUI coins to pay gas for {}", signer.address))?;
+    let gas_price = client
+        .read_api()
+        .get_reference_gas_price()
+        .await
+        .context("fetching reference gas price")?;
+    let tx_data = TransactionData::new_programmable(
+        signer.address,
+        vec![gas_coin.object_ref()],
+        programmable,
+        gas_budget,
+        gas_price,
+    );
+    let signature = Transaction::signature_from_signer(
+        tx_data.clone(),
+        Intent::sui_transaction(),
+        &signer.keypair,
+    );
+    let tx = Transaction::from_data(tx_data, vec![signature]);
+    let opts = SuiTransactionBlockResponseOptions::new()
+        .with_effects()
+        .with_object_changes();
+
+    tracing::info!(name, fee_bps, "submitting org::create_org tx");
+    let resp = client
+        .quorum_driver_api()
+        .execute_transaction_block(
+            tx,
+            opts,
+            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
+        )
+        .await
+        .context("submitting create_org tx")?;
+    assert_success(&resp)?;
+
+    let digest = resp.digest.to_string();
+    let changes = resp
+        .object_changes
+        .as_ref()
+        .ok_or_else(|| anyhow!("create_org response missing object_changes"))?;
+
+    let mut org_id: Option<ObjectID> = None;
+    let mut org_cap_id: Option<ObjectID> = None;
+    for change in changes {
+        if let ObjectChange::Created {
+            object_id,
+            object_type,
+            ..
+        } = change
+        {
+            match (object_type.module.as_str(), object_type.name.as_str()) {
+                ("org", "Org") => org_id = Some(*object_id),
+                ("org", "OrgCap") => org_cap_id = Some(*object_id),
+                _ => {}
+            }
+        }
+    }
+
+    Ok(OrgOutcome {
+        org_id: org_id.ok_or_else(|| anyhow!("Org object not found in create_org response"))?,
+        org_cap_id: org_cap_id
+            .ok_or_else(|| anyhow!("OrgCap object not found in create_org response"))?,
+        digest,
+    })
+}
+
 /// Symbol → (module name, decimals). Hardcoded because Move modules name
 /// their OTW after the module in uppercase, so module="tusdc" implies
 /// type="TUSDC". Decimals match the real-world tokens they shadow.

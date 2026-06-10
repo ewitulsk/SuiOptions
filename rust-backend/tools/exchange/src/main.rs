@@ -23,7 +23,7 @@ use clap::Parser;
 
 use token_info_client::{Snapshot, TokenInfoClient};
 use sui_tx::sui_client::SuiClientWrapper;
-use sui_tx::tx::admin::{set_fee_bps, withdraw_treasury};
+use sui_tx::tx::admin::{set_protocol_fee_bps, withdraw_treasury};
 use sui_tx::tx::test_tokens::{mint_and_deposit_into_account, mint_to_sender};
 
 use option_scheduler::roller::{self, RollPlan};
@@ -155,7 +155,7 @@ async fn main() -> Result<()> {
             );
         }
         Command::SetFee { bps } => {
-            let resp = set_fee_bps(
+            let resp = set_protocol_fee_bps(
                 &wrap.client,
                 &wrap.signer,
                 package,

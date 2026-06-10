@@ -1,20 +1,25 @@
 // Programmable Transaction Block builders for the admin page.
 //
+// Two authority levels exist post-orgs:
+//   - Platform admin (`AdminCap`): protocol fee, pause, treasury, and
+//     emergency invalidate/revalidate overrides on ANY org's bucket.
+//   - Org admin (`OrgCap`): gates + cleanup on the org's own buckets —
+//     see `tx/org.ts`.
+//
 // Shapes mirror the Move signatures in:
 //   contracts/sources/admin.move
-//     - admin::set_fee_bps(&AdminCap, &mut ProtocolConfig, new_bps)
+//     - admin::set_protocol_fee_bps(&AdminCap, &mut ProtocolConfig, new_bps)
+//     - admin::set_pause(&AdminCap, &mut ProtocolConfig, paused, ctx)
 //   contracts/sources/bucket.move
-//     - bucket::invalidate_bucket<U, S, Call>(&AdminCap, &mut Bucket, reason, &Clock, ctx)
-//     - bucket::revalidate_bucket<U, S, Call>(&AdminCap, &mut Bucket, reason, &Clock, ctx)
-//     - bucket::cleanup_bucket<U, S, Call>(&AdminCap, Bucket, &Clock)
+//     - bucket::admin_invalidate_bucket<U, S, Call>(&AdminCap, &mut Bucket, reason, &Clock, ctx)
+//     - bucket::admin_revalidate_bucket<U, S, Call>(&AdminCap, &mut Bucket, reason, &Clock, ctx)
 //   contracts/sources/treasury.move
-//     - treasury::withdraw<T>(&AdminCap, &mut Treasury, amount, recipient, ctx)
+//     - treasury::withdraw<T>(&AdminCap, &mut Treasury, amount, ctx): Coin<T>
 //     - treasury::create_and_share(&AdminCap, ctx)
 //
-// Every admin call passes the caller's owned `AdminCap` object id (see
-// `useAdminCap`) as its authorizing argument. Shared objects (Bucket,
-// ProtocolConfig, Treasury) are passed by id; dapp-kit's SuiClient
-// resolves their shared metadata.
+// `treasury::withdraw` RETURNS the coin — the PTB transfers it onward.
+// Shared objects (Bucket, ProtocolConfig, Treasury) are passed by id;
+// dapp-kit's SuiClient resolves their shared metadata.
 
 import { Transaction } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
@@ -45,11 +50,12 @@ export type BucketGateParams = {
   reason: string;
 };
 
+/** Platform-admin override: invalidate ANY org's bucket. */
 export function buildInvalidateBucketTx(p: BucketGateParams): Transaction {
   const pkg = requirePackage();
   const tx = new Transaction();
   tx.moveCall({
-    target: `${pkg}::bucket::invalidate_bucket`,
+    target: `${pkg}::bucket::admin_invalidate_bucket`,
     typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.callCoinType],
     arguments: [
       tx.object(p.adminCapId),
@@ -61,42 +67,17 @@ export function buildInvalidateBucketTx(p: BucketGateParams): Transaction {
   return tx;
 }
 
+/** Platform-admin override: revalidate ANY org's bucket. */
 export function buildRevalidateBucketTx(p: BucketGateParams): Transaction {
   const pkg = requirePackage();
   const tx = new Transaction();
   tx.moveCall({
-    target: `${pkg}::bucket::revalidate_bucket`,
+    target: `${pkg}::bucket::admin_revalidate_bucket`,
     typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.callCoinType],
     arguments: [
       tx.object(p.adminCapId),
       tx.object(p.bucketId),
       tx.pure.vector("u8", reasonBytes(p.reason)),
-      tx.object(SUI_CLOCK_OBJECT_ID),
-    ],
-  });
-  return tx;
-}
-
-export type CleanupBucketParams = {
-  adminCapId: string;
-  bucketId: string;
-  underlyingCoinType: string;
-  settlementCoinType: string;
-  /** The bucket's per-bucket option coin type (`Call` type arg). */
-  callCoinType: string;
-};
-
-export function buildCleanupBucketTx(p: CleanupBucketParams): Transaction {
-  const pkg = requirePackage();
-  const tx = new Transaction();
-  // `cleanup_bucket` takes the Bucket by value (deletes it). It still
-  // resolves as a shared-object arg from its id.
-  tx.moveCall({
-    target: `${pkg}::bucket::cleanup_bucket`,
-    typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.callCoinType],
-    arguments: [
-      tx.object(p.adminCapId),
-      tx.object(p.bucketId),
       tx.object(SUI_CLOCK_OBJECT_ID),
     ],
   });
@@ -113,11 +94,32 @@ export function buildSetFeeBpsTx(p: SetFeeBpsParams): Transaction {
   const pkg = requirePackage();
   const tx = new Transaction();
   tx.moveCall({
-    target: `${pkg}::admin::set_fee_bps`,
+    target: `${pkg}::admin::set_protocol_fee_bps`,
     arguments: [
       tx.object(p.adminCapId),
       tx.object(p.protocolConfigId),
       tx.pure.u64(p.newBps),
+    ],
+  });
+  return tx;
+}
+
+export type SetPauseParams = {
+  adminCapId: string;
+  protocolConfigId: string;
+  paused: boolean;
+};
+
+/** Protocol-wide emergency brake: blocks NEW WRITES only across all orgs. */
+export function buildSetPauseTx(p: SetPauseParams): Transaction {
+  const pkg = requirePackage();
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${pkg}::admin::set_pause`,
+    arguments: [
+      tx.object(p.adminCapId),
+      tx.object(p.protocolConfigId),
+      tx.pure.bool(p.paused),
     ],
   });
   return tx;
@@ -136,16 +138,17 @@ export type WithdrawParams = {
 export function buildWithdrawTx(p: WithdrawParams): Transaction {
   const pkg = requirePackage();
   const tx = new Transaction();
-  tx.moveCall({
+  // `withdraw` returns the coin; the PTB routes it to the recipient.
+  const [coin] = tx.moveCall({
     target: `${pkg}::treasury::withdraw`,
     typeArguments: [p.coinType],
     arguments: [
       tx.object(p.adminCapId),
       tx.object(p.treasuryId),
       tx.pure.u64(p.amountRaw),
-      tx.pure.address(p.recipient),
     ],
   });
+  tx.transferObjects([coin], p.recipient);
   return tx;
 }
 

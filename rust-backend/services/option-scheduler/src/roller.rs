@@ -98,13 +98,13 @@ pub fn classify_error(err: &anyhow::Error) -> ErrorClass {
 pub async fn submit(
     wrap: &SuiClientWrapper,
     package: ObjectID,
-    admin_cap: ObjectID,
+    org_cap: ObjectID,
     plan: &RollPlan,
     gas_budget: u64,
 ) -> Result<RollOutcome> {
     debug!(
         %package,
-        %admin_cap,
+        %org_cap,
         underlying = %plan.underlying_type,
         settlement = %plan.settlement_type,
         expiry_ms = plan.expiry_ms,
@@ -155,7 +155,7 @@ pub async fn submit(
         &wrap.client,
         &wrap.signer,
         package,
-        admin_cap,
+        org_cap,
         &specs,
         gas_budget,
     )

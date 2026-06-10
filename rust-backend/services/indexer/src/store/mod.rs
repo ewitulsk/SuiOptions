@@ -16,13 +16,13 @@ use tracing::{debug, trace};
 use protocol_types::asset::AssetType;
 use protocol_types::events::{
     AccountDeposit, AccountWithdraw, BucketCreated, ChainEvent, DeepBookPoolCreated, Exercised,
-    IndexedEvent, Redeemed, WriteExecuted,
+    IndexedEvent, OrgCreated, Redeemed, WriteExecuted,
 };
 use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::db::models::{
     u128_to_bigdecimal, u64_to_bigdecimal, AccountBalanceRow, AccountRow, BucketRow,
-    DeepBookPoolRow, EventParticipantRow, PositionRow,
+    DeepBookPoolRow, EventParticipantRow, OrgRow, PositionRow,
 };
 use crate::db::{CheckpointBatch, EventBuild, HydratedViews};
 
@@ -40,10 +40,21 @@ pub struct AccountState {
     pub balances: BTreeMap<AssetType, u64>,
 }
 
-/// What we keep per Bucket: cursor state + identity. Strike, scale, and
+/// What we keep per Org: identity + current fee. The indexer records every
+/// org permissionlessly created on-chain; the verified-orgs allowlist that
+/// gates user-facing surfaces lives in token-info.
+#[derive(Clone, Debug)]
+pub struct OrgState {
+    pub name: String,
+    pub fee_bps: u64,
+    pub creator: SuiAddress,
+}
+
+/// What we keep per Bucket: cursor state + identity. Strike, scale, org and
 /// asset types are immutable across the bucket's life.
 #[derive(Clone, Debug)]
 pub struct BucketState {
+    pub org_id: ObjectId,
     pub asset_type: AssetType,
     pub settlement_type: AssetType,
     pub call_type: AssetType,
@@ -99,6 +110,7 @@ struct Inner {
     /// Next sequence to assign. Starts at 1.
     next_sequence: u64,
     accounts: BTreeMap<ObjectId, AccountState>,
+    orgs: BTreeMap<ObjectId, OrgState>,
     buckets: BTreeMap<ObjectId, BucketState>,
     // Positions are keyed off the WriteExecuted's range_start since the
     // position object id isn't in the event payload (Position objects are
@@ -115,6 +127,7 @@ impl Default for Inner {
         Self {
             next_sequence: 1,
             accounts: BTreeMap::new(),
+            orgs: BTreeMap::new(),
             buckets: BTreeMap::new(),
             positions: BTreeMap::new(),
             deepbook_pools: BTreeMap::new(),
@@ -228,6 +241,7 @@ impl Store {
             "hydrating store from postgres"
         );
         inner.accounts = views.accounts;
+        inner.orgs = views.orgs;
         inner.buckets = views.buckets;
         inner.positions = views.positions;
         inner.deepbook_pools = views.deepbook_pools;
@@ -244,6 +258,19 @@ impl Store {
 
     pub fn bucket(&self, id: &ObjectId) -> Option<BucketState> {
         self.inner.read().buckets.get(id).cloned()
+    }
+
+    pub fn org(&self, id: &ObjectId) -> Option<OrgState> {
+        self.inner.read().orgs.get(id).cloned()
+    }
+
+    pub fn all_orgs(&self) -> Vec<(ObjectId, OrgState)> {
+        self.inner
+            .read()
+            .orgs
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect()
     }
 
     /// Resolve a bucket by its call coin type (SO-152: DeepBook pools are
@@ -322,8 +349,10 @@ fn collect_participants(
     };
     match event {
         ChainEvent::WriteExecuted(w) => {
-            push(w.position_recipient.to_hex(), "position_recipient");
-            push(w.call_token_recipient.to_hex(), "call_token_recipient");
+            // Recipient roles are derived from `flow` now that the executor's
+            // side is PTB-routed: best-effort, but matches convention.
+            push(w.position_recipient().to_hex(), "position_recipient");
+            push(w.call_token_recipient().to_hex(), "call_token_recipient");
             push(w.signer_token_recipient.to_hex(), "signer_token_recipient");
             push(w.executor.to_hex(), "executor");
             if let Some(o) = account_owner_hex(inner, &w.signer_account_id) {
@@ -333,8 +362,8 @@ fn collect_participants(
         ChainEvent::Exercised(e) => push(e.exerciser.to_hex(), "exerciser"),
         ChainEvent::Redeemed(r) => push(r.redeemer.to_hex(), "redeemer"),
         ChainEvent::ExpiredOptionBurned(b) => push(b.burner.to_hex(), "burner"),
-        ChainEvent::BucketInvalidated(i) => push(i.admin.to_hex(), "admin"),
-        ChainEvent::BucketRevalidated(r) => push(r.admin.to_hex(), "admin"),
+        ChainEvent::BucketInvalidated(i) => push(i.actor.to_hex(), "actor"),
+        ChainEvent::BucketRevalidated(r) => push(r.actor.to_hex(), "actor"),
         ChainEvent::AccountCreated(a) => push(a.owner.to_hex(), "account_owner"),
         ChainEvent::AccountDeposit(d) => {
             if let Some(o) = account_owner_hex(inner, &d.account_id) {
@@ -351,12 +380,17 @@ fn collect_participants(
                 push(o, "account_owner");
             }
         }
-        ChainEvent::TreasuryWithdrawn(t) => push(t.recipient.to_hex(), "treasury_recipient"),
-        // DeepBookPoolCreated carries no addresses (the creator isn't in the
-        // event payload).
+        ChainEvent::OrgCreated(o) => push(o.creator.to_hex(), "org_creator"),
+        ChainEvent::ProtocolPauseSet(p) => push(p.admin.to_hex(), "admin"),
+        // TreasuryWithdrawn / OrgWithdraw no longer carry a recipient — the
+        // withdrawn coin is returned to the PTB. DeepBookPoolCreated carries
+        // no addresses (the creator isn't in the event payload).
         ChainEvent::BucketCreated(_)
         | ChainEvent::BucketCleaned(_)
-        | ChainEvent::FeeUpdated(_)
+        | ChainEvent::ProtocolFeeUpdated(_)
+        | ChainEvent::TreasuryWithdrawn(_)
+        | ChainEvent::OrgFeeUpdated(_)
+        | ChainEvent::OrgWithdraw(_)
         | ChainEvent::DeepBookPoolCreated(_) => {}
     }
 }
@@ -373,6 +407,16 @@ fn stage_event_into_batch(
     batch: &mut CheckpointBatch,
 ) {
     match event {
+        ChainEvent::OrgCreated(o) => {
+            if let Some(state) = inner.orgs.get(&o.org_id) {
+                batch.orgs.push(org_row(o.org_id, state, sequence));
+            }
+        }
+        ChainEvent::OrgFeeUpdated(o) => {
+            if let Some(state) = inner.orgs.get(&o.org_id) {
+                batch.orgs.push(org_row(o.org_id, state, sequence));
+            }
+        }
         ChainEvent::BucketCreated(b) => {
             if let Some(state) = inner.buckets.get(&b.bucket_id) {
                 batch.buckets.push(bucket_row(b.bucket_id, state, sequence));
@@ -472,17 +516,30 @@ fn stage_event_into_batch(
             }
         }
         ChainEvent::ExpiredOptionBurned(_)
-        | ChainEvent::FeeUpdated(_)
-        | ChainEvent::TreasuryWithdrawn(_) => {
+        | ChainEvent::ProtocolFeeUpdated(_)
+        | ChainEvent::ProtocolPauseSet(_)
+        | ChainEvent::TreasuryWithdrawn(_)
+        | ChainEvent::OrgWithdraw(_) => {
             // No materialised-view change. The event itself still lands in
             // `indexed_events` via the caller.
         }
     }
 }
 
+fn org_row(id: ObjectId, state: &OrgState, sequence: i64) -> OrgRow {
+    OrgRow {
+        org_id: id.to_hex(),
+        name: state.name.clone(),
+        fee_bps: state.fee_bps as i64,
+        creator: state.creator.to_hex(),
+        updated_at_seq: sequence,
+    }
+}
+
 fn bucket_row(id: ObjectId, state: &BucketState, sequence: i64) -> BucketRow {
     BucketRow {
         bucket_id: id.to_hex(),
+        org_id: state.org_id.to_hex(),
         asset_type: state.asset_type.as_str().to_string(),
         settlement_type: state.settlement_type.as_str().to_string(),
         call_type: state.call_type.as_str().to_string(),
@@ -508,7 +565,7 @@ fn write_position_row(
         range_start: u128_to_bigdecimal(w.range_start),
         range_end: u128_to_bigdecimal(w.range_end),
         object_id: w.position_id.to_hex(),
-        recipient: w.position_recipient.to_hex(),
+        recipient: w.position_recipient().to_hex(),
         updated_at_seq: sequence,
         // SO-97 provenance: gross premium the writer received, the
         // counterparty MM account, and the minting tx for explorer links.
@@ -567,6 +624,12 @@ fn balance_row(
 
 fn apply_event(inner: &mut Inner, event: &ChainEvent) {
     match event {
+        ChainEvent::OrgCreated(o) => apply_org_created(inner, o),
+        ChainEvent::OrgFeeUpdated(o) => {
+            if let Some(org) = inner.orgs.get_mut(&o.org_id) {
+                org.fee_bps = o.new_bps;
+            }
+        }
         ChainEvent::BucketCreated(b) => apply_bucket_created(inner, b),
         ChainEvent::WriteExecuted(w) => apply_write_executed(inner, w),
         ChainEvent::Exercised(e) => apply_exercised(inner, e),
@@ -633,14 +696,29 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent) {
                 );
             }
         }
-        ChainEvent::FeeUpdated(_) | ChainEvent::TreasuryWithdrawn(_) => {}
+        ChainEvent::ProtocolFeeUpdated(_)
+        | ChainEvent::ProtocolPauseSet(_)
+        | ChainEvent::TreasuryWithdrawn(_)
+        | ChainEvent::OrgWithdraw(_) => {}
     }
+}
+
+fn apply_org_created(inner: &mut Inner, o: &OrgCreated) {
+    inner.orgs.insert(
+        o.org_id,
+        OrgState {
+            name: o.name.clone(),
+            fee_bps: o.fee_bps,
+            creator: o.creator,
+        },
+    );
 }
 
 fn apply_bucket_created(inner: &mut Inner, b: &BucketCreated) {
     inner.buckets.insert(
         b.bucket_id,
         BucketState {
+            org_id: b.org_id,
             asset_type: b.asset_type.clone(),
             settlement_type: b.settlement_type.clone(),
             call_type: b.call_type.clone(),
@@ -674,13 +752,14 @@ fn apply_write_executed(inner: &mut Inner, w: &WriteExecuted) {
     // about deposits/withdraws to be authoritative for balances — this
     // event only mutates the cursor.
     //
-    // Positions: the Position object goes to `position_recipient`.
+    // Positions: recipient derived from `flow` (executor in writer flow,
+    // quote recipient in trader flow) — see WriteExecuted::position_recipient.
     inner.positions.insert(
         (w.bucket_id, w.range_start),
         PositionState {
             bucket_id: w.bucket_id,
             object_id: w.position_id,
-            recipient: w.position_recipient,
+            recipient: w.position_recipient(),
             range_start: w.range_start,
             range_end: w.range_end,
         },
@@ -747,6 +826,7 @@ mod tests {
     fn bucket_evt(id: u8) -> ChainEvent {
         ChainEvent::BucketCreated(BucketCreated {
             bucket_id: ObjectId::new([id; 32]),
+            org_id: ObjectId::new([0xee; 32]),
             asset_type: AssetType::new("BTC"),
             settlement_type: AssetType::new("USDC"),
             call_type: AssetType::new("0x9::call_0::CALL_0"),
@@ -774,6 +854,7 @@ mod tests {
         store.ingest(
             ChainEvent::BucketCreated(BucketCreated {
                 bucket_id: id,
+                org_id: ObjectId::new([0xee; 32]),
                 asset_type: AssetType::new("BTC"),
                 settlement_type: AssetType::new("USDC"),
                 call_type: AssetType::new("0x9::call_0::CALL_0"),
@@ -786,15 +867,17 @@ mod tests {
         store.ingest(
             ChainEvent::WriteExecuted(WriteExecuted {
                 bucket_id: id,
+                org_id: ObjectId::new([0xee; 32]),
                 signer_account_id: ObjectId::ZERO,
                 signer_token_recipient: SuiAddress::ZERO,
-                executor: SuiAddress::ZERO,
+                // Writer flow → position lands with the executor.
+                executor: SuiAddress::new([0x77; 32]),
                 position_id: ObjectId::new([0x88; 32]),
-                position_recipient: SuiAddress::new([0x77; 32]),
-                call_token_recipient: SuiAddress::ZERO,
+                flow: protocol_types::events::FLOW_WRITER,
                 write_amount: 10,
                 gross_premium: 5,
-                fee: 0,
+                org_fee: 0,
+                protocol_fee: 0,
                 net_premium: 5,
                 range_start: 0,
                 range_end: 10,
@@ -869,7 +952,8 @@ mod tests {
             ChainEvent::BucketInvalidated(BucketInvalidated {
                 bucket_id: id,
                 at_ms: 100,
-                admin: SuiAddress::new([0xa1; 32]),
+                actor: SuiAddress::new([0xa1; 32]),
+                by_admin: false,
                 reason: b"bad config".to_vec(),
             }),
             2,
@@ -880,7 +964,8 @@ mod tests {
             ChainEvent::BucketRevalidated(BucketRevalidated {
                 bucket_id: id,
                 at_ms: 200,
-                admin: SuiAddress::new([0xa1; 32]),
+                actor: SuiAddress::new([0xa1; 32]),
+                by_admin: false,
                 reason: b"resolved".to_vec(),
             }),
             3,
@@ -940,15 +1025,16 @@ mod tests {
         let buyer = SuiAddress::new([0x22; 32]);
         let we = ChainEvent::WriteExecuted(WriteExecuted {
             bucket_id: ObjectId::new([0x11; 32]),
+            org_id: ObjectId::new([0xee; 32]),
             signer_account_id: ObjectId::ZERO,
             signer_token_recipient: buyer,
             executor: writer,
             position_id: ObjectId::new([0x88; 32]),
-            position_recipient: writer,
-            call_token_recipient: buyer,
+            flow: protocol_types::events::FLOW_WRITER,
             write_amount: 10,
             gross_premium: 5,
-            fee: 0,
+            org_fee: 0,
+            protocol_fee: 0,
             net_premium: 5,
             range_start: 0,
             range_end: 10,

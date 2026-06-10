@@ -72,22 +72,31 @@ async fn main() -> Result<()> {
         })?;
 
     let package = snapshot.package()?;
-    let admin_cap = snapshot.admin_cap()?;
     let wrap = SuiClientWrapper::connect(&secrets, cli.network).await?;
 
-    // AdminCap belongs to the deployer only — exchange enforces the same check
-    // (tools/exchange/src/main.rs). A scheduler signed by anyone else is
-    // useless and we'd rather fail loudly at boot than hit a chain revert on
-    // every tick.
-    let deployer = snapshot.deployer_address()?;
-    if wrap.signer.address != deployer {
-        return Err(anyhow!(
-            "configured signer {} ≠ deployer {} from token-info — \
-             only the deployer holds AdminCap",
-            wrap.signer.address,
-            deployer
-        ));
-    }
+    // Resolve the org this scheduler rolls under. Config wins (self-hosted
+    // org schedulers); otherwise default to the platform org recorded at
+    // deploy time and served by token-info.
+    let org_id: sui_types::base_types::ObjectID = match &cfg.org_id {
+        Some(s) => s.parse().context("parsing config org_id")?,
+        None => snapshot.platform_org().context(
+            "no org_id in config and no platformOrgId from token-info — \
+             configure the org this scheduler rolls under",
+        )?,
+    };
+    let org_cap: sui_types::base_types::ObjectID = match &cfg.org_cap_id {
+        Some(s) => s.parse().context("parsing config org_cap_id")?,
+        None => snapshot.platform_org_cap().context(
+            "no org_cap_id in config and no platformOrgCapId from token-info",
+        )?,
+    };
+
+    // Validate the OrgCap at boot: it must exist, be the protocol's
+    // `org::OrgCap` type, be owned by our signer, and point at the
+    // configured org. A scheduler holding the wrong cap is useless and we'd
+    // rather fail loudly here than hit a chain revert on every tick.
+    validate_org_cap(&wrap, package, org_cap, org_id).await?;
+    info!(%org_id, %org_cap, "org cap validated; rolling under this org");
 
     if cfg.pairs.is_empty() {
         return Err(anyhow!(
@@ -198,7 +207,9 @@ async fn main() -> Result<()> {
         let interval = Duration::from_secs(cfg.reconciler_interval_secs.max(1));
         tokio::spawn(async move {
             loop {
-                if let Err(e) = run_reconciler(&pool, &indexer, &pair_keys, safety_margin).await {
+                if let Err(e) =
+                    run_reconciler(&pool, &indexer, &pair_keys, org_id, safety_margin).await
+                {
                     warn!(error = %e, "reconciler tick errored");
                 }
                 sleep(interval).await;
@@ -228,7 +239,7 @@ async fn main() -> Result<()> {
             &http_client,
             &wrap,
             package,
-            admin_cap,
+            org_cap,
             &db_pool,
         )
         .await
@@ -259,7 +270,7 @@ async fn tick_once(
     http_client: &reqwest::Client,
     wrap: &SuiClientWrapper,
     package: sui_types::base_types::ObjectID,
-    admin_cap: sui_types::base_types::ObjectID,
+    org_cap: sui_types::base_types::ObjectID,
     db_pool: &db::DbPool,
 ) -> Result<()> {
     let now = now_ms();
@@ -417,7 +428,7 @@ async fn tick_once(
         }
 
         // ── Phase 2 step 3: submit + classify ──────────────────────
-        match roller::submit(wrap, package, admin_cap, &plan, cli.gas_budget).await {
+        match roller::submit(wrap, package, org_cap, &plan, cli.gas_budget).await {
             Ok(out) => {
                 info!(
                     digest = %out.digest,
@@ -486,9 +497,10 @@ async fn run_reconciler(
     pool: &db::DbPool,
     indexer: &IndexerClient,
     pair_keys: &[PairKey],
+    org_id: sui_types::base_types::ObjectID,
     safety_margin: u64,
 ) -> Result<()> {
-    confirm_landed_rolls(pool, indexer, pair_keys).await?;
+    confirm_landed_rolls(pool, indexer, pair_keys, org_id).await?;
 
     let rows = db::needs_reconciliation_rows(pool)?;
     if rows.is_empty() {
@@ -529,14 +541,21 @@ async fn confirm_landed_rolls(
     pool: &db::DbPool,
     indexer: &IndexerClient,
     pair_keys: &[PairKey],
+    org_id: sui_types::base_types::ObjectID,
 ) -> Result<()> {
     let rows = db::all_active_rows(pool)?;
+    // Scope confirmation to OUR org's buckets. Orgs are permissionless:
+    // another org listing the same pair/expiry would otherwise falsely
+    // "confirm" our roll and the family would never get created.
+    let org_filter = [org_id.to_hex_uncompressed()];
     for row in rows {
         if !matches!(row.state.as_str(), "submitted" | "needs_reconciliation") {
             continue;
         }
         let expiry = row.expiry_ms as u64;
-        let buckets = indexer.buckets(false, None, None, Some(expiry)).await?;
+        let buckets = indexer
+            .buckets(false, Some(&org_filter), None, None, Some(expiry))
+            .await?;
         for b in buckets {
             // A bucket at this expiry could belong to a different configured
             // pair; confirm only against the pair that actually matches this
@@ -559,6 +578,74 @@ async fn confirm_landed_rolls(
                 )?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Boot-time validation of the configured OrgCap: exists on chain, is this
+/// package's `org::OrgCap`, is owned by our signer, and authorizes the
+/// configured org. Mirrors the spirit of the old "signer == deployer"
+/// assertion — fail loudly at boot instead of reverting on every tick.
+async fn validate_org_cap(
+    wrap: &SuiClientWrapper,
+    package: sui_types::base_types::ObjectID,
+    org_cap: sui_types::base_types::ObjectID,
+    org_id: sui_types::base_types::ObjectID,
+) -> Result<()> {
+    use sui_json_rpc_types::{SuiData, SuiObjectDataOptions};
+
+    let resp = wrap
+        .client
+        .read_api()
+        .get_object_with_options(
+            org_cap,
+            SuiObjectDataOptions::new()
+                .with_owner()
+                .with_type()
+                .with_content(),
+        )
+        .await
+        .context("fetching OrgCap object")?;
+    let data = resp
+        .data
+        .ok_or_else(|| anyhow!("OrgCap {org_cap} not found on chain"))?;
+
+    let expected_type = format!("{}::org::OrgCap", package.to_hex_uncompressed());
+    let actual_type = data
+        .type_
+        .as_ref()
+        .map(|t| t.to_string())
+        .unwrap_or_default();
+    if protocol_types::asset::canonicalize_move_type(&actual_type)
+        != protocol_types::asset::canonicalize_move_type(&expected_type)
+    {
+        return Err(anyhow!(
+            "object {org_cap} is a {actual_type}, expected {expected_type}"
+        ));
+    }
+
+    match data.owner {
+        Some(sui_types::object::Owner::AddressOwner(addr)) if addr == wrap.signer.address => {}
+        other => {
+            return Err(anyhow!(
+                "OrgCap {org_cap} is not owned by signer {} (owner: {other:?})",
+                wrap.signer.address
+            ));
+        }
+    }
+
+    let cap_org = data
+        .content
+        .as_ref()
+        .and_then(|c| c.try_as_move())
+        .and_then(|m| m.fields.field_value("org_id"))
+        .map(|v| v.to_string())
+        .ok_or_else(|| anyhow!("OrgCap {org_cap} content has no org_id field"))?;
+    let want = org_id.to_hex_uncompressed();
+    if cap_org.trim_start_matches("0x") != want.trim_start_matches("0x") {
+        return Err(anyhow!(
+            "OrgCap {org_cap} authorizes org {cap_org}, but the scheduler is configured for {want}"
+        ));
     }
     Ok(())
 }

@@ -51,6 +51,10 @@ pub enum QuoteRejection {
     /// on chain. Defense-in-depth against a race between the MM signing
     /// and the BucketInvalidated event landing.
     BucketInvalidated,
+    /// The bucket's org is not on the verified allowlist; the service does
+    /// not broker quotes for it. Defense-in-depth — retail.rs already
+    /// refuses the RFQ up front.
+    OrgNotVerified,
 }
 
 impl From<ProtocolError> for QuoteRejection {
@@ -133,6 +137,9 @@ pub fn validate_and_reserve(
     if bucket.invalidated {
         return Err(QuoteRejection::BucketInvalidated);
     }
+    if !state.verified_orgs.is_verified(&bucket.org_id.to_hex()) {
+        return Err(QuoteRejection::OrgNotVerified);
+    }
     let (asset, amount) = reservation_for(side, bucket, quote);
     if state.available(account, &asset) < amount {
         return Err(QuoteRejection::InsufficientAvailableBalance);
@@ -214,9 +221,14 @@ pub async fn orchestrate(
 
     // The bucket is fetched JIT by the caller (retail.rs) so the broadcast can
     // include its strike + expiry — MMs price against these instead of
-    // guessing. Defense-in-depth against direct callers: refuse invalidated.
+    // guessing. Defense-in-depth against direct callers: refuse invalidated
+    // buckets and unverified orgs.
     if bucket.invalidated {
         debug!(%bucket_id, "rfq for invalidated bucket — returning empty");
+        return Vec::new();
+    }
+    if !state.verified_orgs.is_verified(&bucket.org_id.to_hex()) {
+        debug!(%bucket_id, "rfq for unverified org's bucket — returning empty");
         return Vec::new();
     }
 
@@ -335,7 +347,18 @@ mod tests {
     /// tests pass the bucket + account in directly. The URL is unreachable on
     /// purpose: any test that actually hit it would be a bug.
     fn test_state() -> AppState {
-        AppState::with_global_rfq_cap(256, "http://127.0.0.1:1/graphql".into())
+        // The fixture bucket's org ([0xee; 32]) is pre-verified so the
+        // existing validation tests exercise their own concern, not the
+        // org gate. See `rejects_quote_for_unverified_org`.
+        AppState::with_global_rfq_cap(
+            256,
+            "http://127.0.0.1:1/graphql".into(),
+            token_info_client::VerifiedOrgsWatcher::fixed(vec![token_info_client::VerifiedOrg {
+                org_id: ObjectId::new([0xee; 32]).to_hex(),
+                name: "test-org".into(),
+                enabled: true,
+            }]),
+        )
     }
 
     fn mk_account(mm: ObjectId, signing_pubkey: Vec<u8>, balance: u64) -> Account {
@@ -351,6 +374,7 @@ mod tests {
     fn mk_bucket() -> Bucket {
         Bucket {
             bucket_id: ObjectId::new([0x99; 32]),
+            org_id: ObjectId::new([0xee; 32]),
             asset_type: AssetType::new("BTC"),
             settlement_type: AssetType::new("USDC"),
             call_type: AssetType::new("0x9::call_0::CALL_0"),
@@ -361,6 +385,7 @@ mod tests {
             exercise_cursor: 0,
             cleaned: false,
             invalidated: false,
+            deepbook_pool_id: None,
         }
     }
 
@@ -500,6 +525,25 @@ mod tests {
             validate_and_reserve(&state, Side::Writer, &bucket, &account, 100, &p, mm, b"P", 0)
                 .unwrap_err(),
             QuoteRejection::BucketInvalidated,
+        );
+        assert_eq!(state.reservations.len(), 0);
+    }
+
+    #[test]
+    fn rejects_quote_for_unverified_org() {
+        // Verified-only surface: a bucket whose org isn't on the allowlist
+        // must never get a reservation, even if retail.rs let it through.
+        let sk = SigningKey::generate(&mut OsRng);
+        let mm = ObjectId::new([0x01; 32]);
+        let state = test_state();
+        let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec(), 10_000);
+        let mut bucket = mk_bucket();
+        bucket.org_id = ObjectId::new([0x66; 32]); // not on the fixed allowlist
+        let p = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 500, 1);
+        assert_eq!(
+            validate_and_reserve(&state, Side::Writer, &bucket, &account, 100, &p, mm, b"P", 0)
+                .unwrap_err(),
+            QuoteRejection::OrgNotVerified,
         );
         assert_eq!(state.reservations.len(), 0);
     }

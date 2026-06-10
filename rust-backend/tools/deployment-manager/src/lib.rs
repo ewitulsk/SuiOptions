@@ -53,10 +53,20 @@ pub struct Cli {
     #[arg(long, default_value_t = 500_000_000)]
     pub gas_budget: u64,
 
-    /// Skip the post-publish `treasury::create_and_share` call. Use when
-    /// re-publishing for testing and you don't need a fresh Treasury.
+    /// Skip the post-publish init calls (`treasury::create_and_share` and
+    /// `org::create_org` for the platform org). Use when re-publishing for
+    /// testing and you don't need a fresh Treasury/Org.
     #[arg(long)]
     pub skip_init: bool,
+
+    /// Name of the platform org created post-publish (recorded as
+    /// platformOrgId / platformOrgCapId in deployments.json).
+    #[arg(long, default_value = "SuiOptions")]
+    pub org_name: String,
+
+    /// Initial org fee (bps of gross premium) for the platform org.
+    #[arg(long, default_value_t = 0)]
+    pub org_fee_bps: u64,
 
     /// Also publish the test-tokens package (TUSDC/TBTC/TWAL/TDEEP) and
     /// record the faucet IDs in deployments.json. Each run publishes a

@@ -14,11 +14,11 @@ use protocol_types::asset::AssetType;
 use protocol_types::events::ChainEvent;
 use protocol_types::ids::{ObjectId, SuiAddress};
 
-use crate::store::{AccountState, BucketState, DeepBookPoolState, PositionState};
+use crate::store::{AccountState, BucketState, DeepBookPoolState, OrgState, PositionState};
 
 use super::schema::{
     account_balances, accounts, bucket_deepbook_pools, buckets, event_participants,
-    indexed_events, indexer_progress, positions,
+    indexed_events, indexer_progress, orgs, positions,
 };
 
 // ---------- indexer_progress ----------
@@ -89,8 +89,12 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::AccountDeposit(_) => "AccountDeposit",
         ChainEvent::AccountWithdraw(_) => "AccountWithdraw",
         ChainEvent::SigningKeyRotated(_) => "SigningKeyRotated",
-        ChainEvent::FeeUpdated(_) => "FeeUpdated",
+        ChainEvent::ProtocolFeeUpdated(_) => "ProtocolFeeUpdated",
+        ChainEvent::ProtocolPauseSet(_) => "ProtocolPauseSet",
         ChainEvent::TreasuryWithdrawn(_) => "TreasuryWithdrawn",
+        ChainEvent::OrgCreated(_) => "OrgCreated",
+        ChainEvent::OrgFeeUpdated(_) => "OrgFeeUpdated",
+        ChainEvent::OrgWithdraw(_) => "OrgWithdraw",
         ChainEvent::DeepBookPoolCreated(_) => "DeepBookPoolCreated",
     }
 }
@@ -121,6 +125,36 @@ pub struct AccountBalanceRow {
     pub updated_at_seq: i64,
 }
 
+// ---------- orgs ----------
+
+#[derive(Queryable, Identifiable, Insertable, AsChangeset, Debug, Clone)]
+#[diesel(table_name = orgs)]
+#[diesel(primary_key(org_id))]
+pub struct OrgRow {
+    pub org_id: String,
+    pub name: String,
+    pub fee_bps: i64,
+    pub creator: String,
+    pub updated_at_seq: i64,
+}
+
+impl OrgRow {
+    pub fn into_state(self) -> anyhow::Result<(ObjectId, OrgState)> {
+        let id = ObjectId::from_hex(&self.org_id)
+            .map_err(|e| anyhow::anyhow!("org_id {}: {e}", self.org_id))?;
+        let creator = SuiAddress::from_hex(&self.creator)
+            .map_err(|e| anyhow::anyhow!("org creator {}: {e}", self.creator))?;
+        Ok((
+            id,
+            OrgState {
+                name: self.name,
+                fee_bps: self.fee_bps as u64,
+                creator,
+            },
+        ))
+    }
+}
+
 // ---------- buckets ----------
 
 #[derive(Queryable, Identifiable, Insertable, AsChangeset, Debug, Clone)]
@@ -139,6 +173,9 @@ pub struct BucketRow {
     pub cleaned: bool,
     pub invalidated: bool,
     pub updated_at_seq: i64,
+    /// Org that created the bucket. Field last to match the `table!` column
+    /// order (the column was ALTERed in after the original schema).
+    pub org_id: String,
 }
 
 // ---------- bucket_deepbook_pools ----------
@@ -212,9 +249,18 @@ impl BucketRow {
     pub fn into_state(self) -> anyhow::Result<(ObjectId, BucketState)> {
         let id = ObjectId::from_hex(&self.bucket_id)
             .map_err(|e| anyhow::anyhow!("bucket_id {}: {e}", self.bucket_id))?;
+        // Pre-org rows (old package) carry the migration default '' — map to
+        // ObjectId::ZERO so hydration doesn't fail on legacy staging data.
+        let org_id = if self.org_id.is_empty() {
+            ObjectId::ZERO
+        } else {
+            ObjectId::from_hex(&self.org_id)
+                .map_err(|e| anyhow::anyhow!("bucket org_id {}: {e}", self.org_id))?
+        };
         Ok((
             id,
             BucketState {
+                org_id,
                 asset_type: AssetType::new(self.asset_type),
                 settlement_type: AssetType::new(self.settlement_type),
                 call_type: AssetType::new(self.call_type),

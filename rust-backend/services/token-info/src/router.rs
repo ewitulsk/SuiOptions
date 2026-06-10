@@ -20,7 +20,7 @@ use tracing::info;
 
 use auth_client::AuthClient;
 
-use crate::handlers::tokens;
+use crate::handlers::{orgs, tokens};
 use crate::state::AppState;
 
 /// Public API: open reads + JWT-gated writes. `auth` points at auth-service's
@@ -40,6 +40,11 @@ pub fn public_router(
             "/tokens/:coin_type",
             put(tokens::update_token).delete(tokens::delete_token),
         )
+        .route("/orgs", post(orgs::create_org))
+        .route(
+            "/orgs/:org_id",
+            put(orgs::update_org).delete(orgs::delete_org),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             auth,
             auth_client::require_auth,
@@ -49,6 +54,8 @@ pub fn public_router(
         .route("/health", get(health))
         .route("/tokens", get(tokens::list_tokens))
         .route("/tokens/:coin_type", get(tokens::get_token))
+        .route("/orgs", get(orgs::list_orgs))
+        .route("/orgs/:org_id", get(orgs::get_org))
         .route("/package-info", get(tokens::package_info));
 
     Ok(reads.merge(writes).with_state(state).layer(cors))
@@ -61,6 +68,9 @@ pub fn internal_router(state: Arc<AppState>) -> Router {
         .route("/tokens", post(tokens::create_token))
         .route("/tokens/:coin_type", put(tokens::update_token))
         .route("/tokens/:coin_type", delete(tokens::delete_token))
+        .route("/orgs", post(orgs::create_org))
+        .route("/orgs/:org_id", put(orgs::update_org))
+        .route("/orgs/:org_id", delete(orgs::delete_org))
         .with_state(state)
 }
 

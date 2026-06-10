@@ -19,9 +19,19 @@ async fn main() -> Result<()> {
             .await
             .with_context(|| format!("loading config from {cfg_path}"))?,
     );
+    // Verified-orgs allowlist: fail-closed at boot, then polled in the
+    // background. RFQs for unverified orgs' buckets are refused.
+    let verified_orgs = token_info_client::VerifiedOrgsWatcher::start(
+        token_info_client::TokenInfoClient::new(&cfg.token_info_url),
+        Duration::from_secs(30),
+    )
+    .await
+    .context("loading verified-orgs allowlist from token-info")?;
+
     let app = Arc::new(AppState::with_global_rfq_cap(
         cfg.max_inflight_rfqs_global,
         cfg.indexer_graphql_url.clone(),
+        verified_orgs,
     ));
 
     state::spawn_reservation_evictor(Arc::clone(&app), Duration::from_millis(250));

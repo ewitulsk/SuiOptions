@@ -4279,6 +4279,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "token-info-client",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tracing",
@@ -10516,6 +10517,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "deployments",
+ "parking_lot 0.12.5",
  "protocol-types",
  "reqwest",
  "serde",

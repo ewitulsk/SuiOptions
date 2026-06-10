@@ -27,7 +27,9 @@ use axum::{Extension, Router};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
-use crate::db::models::{AccountBalanceRow, AccountRow, BucketRow, IndexedEventRow, PositionRow};
+use crate::db::models::{
+    AccountBalanceRow, AccountRow, BucketRow, IndexedEventRow, OrgRow, PositionRow,
+};
 use crate::db::{BucketQuery, EventFilter, EventQuery, Repo};
 use crate::progress::{ProgressSnapshot, ProgressState};
 
@@ -112,6 +114,8 @@ impl From<IndexedEventRow> for EventGql {
 #[derive(SimpleObject)]
 pub struct BucketGql {
     pub bucket_id: String,
+    /// Org that created (and administers) this bucket.
+    pub org_id: String,
     pub asset_type: String,
     pub settlement_type: String,
     pub call_type: String,
@@ -131,6 +135,7 @@ impl BucketGql {
     fn from_row(b: BucketRow, deepbook_pool_id: Option<String>) -> Self {
         BucketGql {
             bucket_id: b.bucket_id,
+            org_id: b.org_id,
             asset_type: b.asset_type,
             settlement_type: b.settlement_type,
             call_type: b.call_type,
@@ -142,6 +147,27 @@ impl BucketGql {
             cleaned: b.cleaned,
             invalidated: b.invalidated,
             deepbook_pool_id,
+        }
+    }
+}
+
+/// One org from the materialized view. The indexer records every org created
+/// on-chain; verification status lives in token-info, not here.
+#[derive(SimpleObject)]
+pub struct OrgGql {
+    pub org_id: String,
+    pub name: String,
+    pub fee_bps: String,
+    pub creator: String,
+}
+
+impl From<OrgRow> for OrgGql {
+    fn from(r: OrgRow) -> Self {
+        OrgGql {
+            org_id: r.org_id,
+            name: r.name,
+            fee_bps: r.fee_bps.to_string(),
+            creator: r.creator,
         }
     }
 }
@@ -304,13 +330,35 @@ impl QueryRoot {
         Ok(row.map(|(b, pool_id)| BucketGql::from_row(b, pool_id)))
     }
 
+    /// JIT: one org by id, or null if unknown.
+    async fn org(&self, ctx: &Context<'_>, id: String) -> async_graphql::Result<Option<OrgGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let row = tokio::task::spawn_blocking(move || repo.org_by_id(&id))
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(row.map(OrgGql::from))
+    }
+
+    /// JIT: every org the indexer has seen (verification is a token-info
+    /// concern; consumers join against the allowlist).
+    async fn orgs(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<OrgGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let rows = tokio::task::spawn_blocking(move || repo.orgs_query())
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(rows.into_iter().map(OrgGql::from).collect())
+    }
+
     /// JIT: buckets matching the given filters (all ANDed). `activeOnly`
-    /// drops cleaned buckets.
+    /// drops cleaned buckets; `orgIds` restricts to those orgs' buckets.
     async fn buckets(
         &self,
         ctx: &Context<'_>,
         active_only: Option<bool>,
         ids: Option<Vec<String>>,
+        org_ids: Option<Vec<String>>,
         asset_type: Option<String>,
         settlement_type: Option<String>,
         expiry_ms: Option<String>,
@@ -325,6 +373,7 @@ impl QueryRoot {
         let q = BucketQuery {
             active_only: active_only.unwrap_or(false),
             ids,
+            org_ids,
             asset_type,
             settlement_type,
             expiry_ms,

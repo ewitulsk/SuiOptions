@@ -13,7 +13,7 @@ use clap::Parser;
 use sui_sdk::SuiClientBuilder;
 
 use deployment_manager::deploy::{
-    create_and_share_treasury, publish_package, publish_test_tokens,
+    create_and_share_treasury, create_platform_org, publish_package, publish_test_tokens,
 };
 use deployment_manager::json_store::{
     Deployments, NetworkDeployment, PackageInfo, TestTokenRecord, TestTokensRecord, TokenSpec,
@@ -83,6 +83,8 @@ async fn main() -> Result<()> {
         previous_deepbook,
         cli.gas_budget,
         cli.skip_init,
+        &cli.org_name,
+        cli.org_fee_bps,
     )
     .await
     .with_context(|| format!("deploying env {env_key} to {network}"))?;
@@ -105,6 +107,8 @@ async fn deploy_one(
     previous_deepbook: Option<serde_json::Value>,
     gas_budget: u64,
     skip_init: bool,
+    org_name: &str,
+    org_fee_bps: u64,
 ) -> Result<NetworkDeployment> {
     tracing::info!(network = %network, rpc = network.rpc_url(), "starting deployment");
 
@@ -141,6 +145,26 @@ async fn deploy_one(
         .with_context(|| format!("initializing treasury on {network}"))?;
         tracing::info!(treasury = %init.treasury_id, "treasury created");
         (Some(init.treasury_id.to_string()), Some(init.digest))
+    };
+
+    let (platform_org_id, platform_org_cap_id) = if skip_init {
+        (None, None)
+    } else {
+        let org = create_platform_org(
+            &client,
+            &signer,
+            publish.package_id,
+            org_name,
+            org_fee_bps,
+            gas_budget,
+        )
+        .await
+        .with_context(|| format!("creating platform org on {network}"))?;
+        tracing::info!(org = %org.org_id, org_cap = %org.org_cap_id, "platform org created");
+        (
+            Some(org.org_id.to_string()),
+            Some(org.org_cap_id.to_string()),
+        )
     };
 
     let test_tokens = if let Some(path) = test_tokens_path {
@@ -215,6 +239,8 @@ async fn deploy_one(
             treasury_id,
             publish_digest: publish.digest,
             init_digest,
+            platform_org_id,
+            platform_org_cap_id,
             deployer: signer.address.to_string(),
             deployed_at: chrono::Utc::now().to_rfc3339(),
             network: network.as_str().to_owned(),

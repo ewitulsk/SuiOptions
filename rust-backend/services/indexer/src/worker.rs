@@ -228,6 +228,7 @@ mod tests {
 
         let evt = BucketCreated {
             bucket_id: ObjectId::new([0x99; 32]),
+            org_id: ObjectId::new([0xee; 32]),
             asset_type: AssetType::new("BTC"),
             settlement_type: AssetType::new("USDC"),
             call_type: AssetType::new("0x9::call_0::CALL_0"),
@@ -267,6 +268,7 @@ mod tests {
         store.ingest(
             protocol_types::events::ChainEvent::BucketCreated(BucketCreated {
                 bucket_id: ObjectId::new([0x11; 32]),
+                org_id: ObjectId::new([0xee; 32]),
                 asset_type: AssetType::new("TBTC"),
                 settlement_type: AssetType::new("0x9::tusdc::TUSDC"),
                 call_type: AssetType::new("0x9::call_0::CALL_0"),

@@ -61,6 +61,14 @@ export type Bucket = {
  * Strikes within a series are the user-facing selection axis.
  */
 export type Series = {
+  /**
+   * Org that created every bucket in this series. Series are keyed by org
+   * on the backend — two orgs listing the same asset/expiry stay separate.
+   * Pass as the shared `Org` object arg when building write/buy PTBs.
+   */
+  org_id: string;
+  /** Display name from the verified-orgs allowlist; null if unnamed. */
+  org_name: string | null;
   /** Friendly symbol (e.g. `"TBTC"`) or raw Move type if unknown. */
   asset_symbol: string;
   asset_decimals: number | null;
@@ -80,6 +88,25 @@ export type Series = {
 export type BucketsResponse = {
   series: Series[];
 };
+
+/** One verified org, from `GET /orgs` (the platform allowlist). */
+export type VerifiedOrg = {
+  org_id: string;
+  name: string;
+};
+
+export type OrgsResponse = {
+  orgs: VerifiedOrg[];
+};
+
+export async function fetchOrgs(): Promise<VerifiedOrg[]> {
+  const res = await fetch(`${API_BASE_URL}/orgs`);
+  if (!res.ok) {
+    throw new Error(`GET /orgs failed: ${res.status} ${res.statusText}`);
+  }
+  const body: OrgsResponse = await res.json();
+  return body.orgs;
+}
 
 export async function fetchBuckets(): Promise<Series[]> {
   const res = await fetch(`${API_BASE_URL}/buckets`);

@@ -135,28 +135,27 @@ pub fn protocol_templates(
     deepbook: Option<ObjectID>,
 ) -> Vec<PtbTemplate> {
     let t = |module: &str, function: &str| MoveTarget::new(protocol, module, function);
-    let coin_zero = MoveTarget::new(framework(), "coin", "zero");
 
-    // write / buy differ only by writer_flow vs trader_flow.
-    let execute_write_flow = |name: &str, flow: &str| {
+    // write / buy target the split execute_write entry points. The returned
+    // executor-side objects (Position + net premium / Coin<Call>) are routed
+    // by a trailing TransferObjects, which `matches` treats as benign.
+    let execute_write_flow = |name: &str, entry: &str| {
         let targets = vec![
             t("quote", "new_quote"),
             t("quote", "new_signed_quote"),
-            t("bucket", flow),
-            coin_zero.clone(),
-            t("bucket", "execute_write"),
+            t("bucket", entry),
         ];
         PtbTemplate {
             name: name.to_owned(),
             required: targets.clone(),
             allowed: targets,
-            arities: vec![(t("bucket", "execute_write"), 3)],
+            arities: vec![(t("bucket", entry), 3)],
         }
     };
 
     let mut templates = vec![
-        execute_write_flow("write", "writer_flow"),
-        execute_write_flow("buy", "trader_flow"),
+        execute_write_flow("write", "execute_write_writer_flow"),
+        execute_write_flow("buy", "execute_write_trader_flow"),
         PtbTemplate {
             name: "exercise".to_owned(),
             required: vec![t("bucket", "exercise")],
@@ -316,13 +315,15 @@ mod tests {
 
     #[test]
     fn write_flow_matches() {
+        // Mirrors frontend buildWriteTx: coinWithBalance prelude, quote
+        // reconstruction, the split writer entry point, then a trailing
+        // TransferObjects of the returned (Position, net premium) — modeled
+        // by `build`'s benign SplitCoins (TransferObjects is equally benign).
         let pt = build(
             &[
                 (target("quote", "new_quote"), 0),
                 (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "writer_flow"), 0),
-                (MoveTarget::new(framework(), "coin", "zero"), 1),
-                (target("bucket", "execute_write"), 3),
+                (target("bucket", "execute_write_writer_flow"), 3),
             ],
             true,
         );
@@ -335,13 +336,44 @@ mod tests {
             &[
                 (target("quote", "new_quote"), 0),
                 (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "trader_flow"), 0),
-                (MoveTarget::new(framework(), "coin", "zero"), 1),
-                (target("bucket", "execute_write"), 3),
+                (target("bucket", "execute_write_trader_flow"), 3),
             ],
             true,
         );
         assert_eq!(match_any(&templates(), &pt), Some("buy"));
+    }
+
+    #[test]
+    fn write_flow_with_trailing_transfer_objects_matches() {
+        // The real frontend PTB ends with TransferObjects of the returned
+        // executor-side values — assert the matcher tolerates it explicitly.
+        let mut b = ProgrammableTransactionBuilder::new();
+        for (t, n) in [
+            (target("quote", "new_quote"), 0usize),
+            (target("quote", "new_signed_quote"), 0),
+            (target("bucket", "execute_write_writer_flow"), 3),
+        ] {
+            let type_args: Vec<TypeTag> = (0..n).map(|_| TypeTag::U64).collect();
+            b.programmable_move_call(
+                t.package,
+                Identifier::new(t.module.clone()).unwrap(),
+                Identifier::new(t.function.clone()).unwrap(),
+                type_args,
+                vec![],
+            );
+        }
+        let recipient = b
+            .pure(sui_types::base_types::SuiAddress::ZERO)
+            .unwrap();
+        b.command(Command::TransferObjects(
+            vec![
+                sui_types::transaction::Argument::NestedResult(2, 0),
+                sui_types::transaction::Argument::NestedResult(2, 1),
+            ],
+            recipient,
+        ));
+        let pt = b.finish();
+        assert_eq!(match_any(&templates(), &pt), Some("write"));
     }
 
     #[test]
@@ -514,10 +546,8 @@ mod tests {
             &[
                 (target("quote", "new_quote"), 0),
                 (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "writer_flow"), 0),
-                (MoveTarget::new(framework(), "coin", "zero"), 1),
                 (MoveTarget::new(evil, "drain", "all"), 0),
-                (target("bucket", "execute_write"), 3),
+                (target("bucket", "execute_write_writer_flow"), 3),
             ],
             false,
         );
@@ -525,15 +555,15 @@ mod tests {
     }
 
     #[test]
-    fn framework_call_other_than_coin_zero_rejected() {
-        // Proves we whitelist `0x2::coin::zero`, not all of `0x2`.
+    fn framework_call_rejected_in_write_flow() {
+        // Framework Move calls (even coin::zero) are no longer in the write
+        // template's allowed set — the split entry points need no empty coin.
         let pt = build(
             &[
                 (target("quote", "new_quote"), 0),
                 (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "writer_flow"), 0),
-                (MoveTarget::new(framework(), "transfer", "public_transfer"), 1),
-                (target("bucket", "execute_write"), 3),
+                (MoveTarget::new(framework(), "coin", "zero"), 1),
+                (target("bucket", "execute_write_writer_flow"), 3),
             ],
             false,
         );
@@ -548,7 +578,7 @@ mod tests {
 
     #[test]
     fn admin_call_rejected() {
-        let pt = build(&[(target("admin", "set_fee_bps"), 0)], false);
+        let pt = build(&[(target("admin", "set_protocol_fee_bps"), 0)], false);
         assert_eq!(match_any(&templates(), &pt), None);
         let withdraw = build(&[(target("treasury", "withdraw"), 1)], false);
         assert_eq!(match_any(&templates(), &withdraw), None);

@@ -8,8 +8,9 @@ use anyhow::{Context, Result};
 use diesel::prelude::*;
 use diesel::upsert::excluded;
 
-use super::models::{TokenRow, UpsertToken};
+use super::models::{OrgRow, TokenRow, UpsertOrg, UpsertToken};
 use super::schema::supported_tokens as st;
+use super::schema::verified_orgs as vo;
 use super::DbPool;
 
 #[derive(Clone)]
@@ -72,5 +73,55 @@ impl Repo {
         diesel::delete(st::table.find(coin_type))
             .execute(&mut conn)
             .context("deleting token")
+    }
+
+    // ----------------------------------------------------- verified orgs
+
+    /// All allowlist rows, name-sorted. `enabled_only` filters to enabled
+    /// ("verified" = present AND enabled).
+    pub fn list_orgs(&self, enabled_only: bool) -> Result<Vec<OrgRow>> {
+        let mut conn = self.pool.get().context("checkout conn")?;
+        let mut q = vo::table.into_boxed();
+        if enabled_only {
+            q = q.filter(vo::enabled.eq(true));
+        }
+        q.order(vo::name.asc())
+            .load::<OrgRow>(&mut conn)
+            .context("listing verified orgs")
+    }
+
+    /// One allowlist row by org id, or `None`.
+    pub fn get_org(&self, org_id: &str) -> Result<Option<OrgRow>> {
+        let mut conn = self.pool.get().context("checkout conn")?;
+        vo::table
+            .find(org_id)
+            .first::<OrgRow>(&mut conn)
+            .optional()
+            .context("getting verified org")
+    }
+
+    /// Insert or update an allowlist row. On conflict on `org_id`, every
+    /// non-key field is overwritten and `updated_at` is bumped.
+    pub fn upsert_org(&self, o: UpsertOrg) -> Result<OrgRow> {
+        let mut conn = self.pool.get().context("checkout conn")?;
+        diesel::insert_into(vo::table)
+            .values(&o)
+            .on_conflict(vo::org_id)
+            .do_update()
+            .set((
+                vo::name.eq(excluded(vo::name)),
+                vo::enabled.eq(excluded(vo::enabled)),
+                vo::updated_at.eq(diesel::dsl::now),
+            ))
+            .get_result::<OrgRow>(&mut conn)
+            .context("upserting verified org")
+    }
+
+    /// Delete an allowlist row. Returns the number of rows removed.
+    pub fn delete_org(&self, org_id: &str) -> Result<usize> {
+        let mut conn = self.pool.get().context("checkout conn")?;
+        diesel::delete(vo::table.find(org_id))
+            .execute(&mut conn)
+            .context("deleting verified org")
     }
 }

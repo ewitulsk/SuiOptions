@@ -87,7 +87,7 @@ pub async fn list_call_token_lots(
         })?;
     let buckets: BTreeMap<ObjectId, indexer_graphql::Bucket> = state
         .indexer
-        .buckets(false, None, None, None)
+        .buckets(false, None, None, None, None)
         .await
         .map_err(|e| {
             tracing::warn!(error = %e, "indexer buckets query failed");

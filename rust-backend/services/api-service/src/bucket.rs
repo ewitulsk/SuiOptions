@@ -2,6 +2,8 @@ use protocol_types::asset::AssetType;
 
 #[derive(Clone, Debug)]
 pub struct Bucket {
+    /// Org that created (and administers) this bucket, hex object id.
+    pub org_id: String,
     pub asset_type: AssetType,
     pub settlement_type: AssetType,
     /// Fully-qualified type of the per-bucket fungible option coin.

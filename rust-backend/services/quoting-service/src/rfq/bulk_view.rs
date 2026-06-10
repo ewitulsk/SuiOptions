@@ -258,12 +258,14 @@ mod tests {
         Arc::new(AppState::with_global_rfq_cap(
             256,
             "http://127.0.0.1:1/graphql".into(),
+            token_info_client::VerifiedOrgsWatcher::fixed(vec![]),
         ))
     }
 
     fn mk_bucket(tag: u8) -> Bucket {
         Bucket {
             bucket_id: ObjectId::new([tag; 32]),
+            org_id: ObjectId::new([0xee; 32]),
             asset_type: AssetType::new("BTC"),
             settlement_type: AssetType::new("USDC"),
             call_type: AssetType::new("0x9::call_0::CALL_0"),
@@ -274,6 +276,7 @@ mod tests {
             exercise_cursor: 0,
             cleaned: false,
             invalidated: false,
+            deepbook_pool_id: None,
         }
     }
 

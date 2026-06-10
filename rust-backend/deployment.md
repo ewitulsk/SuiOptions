@@ -336,12 +336,42 @@ export DB_PASSWORD=$(aws secretsmanager get-secret-value \
 
 1. Developer runs `cargo run -p deploy -- ...` locally targeting a
    specific network. The deploy tool writes `deployments.json`.
+   Post-publish it also creates the **platform org** ("SuiOptions" — name
+   via `--org-name`, fee via `--org-fee-bps`) and records
+   `platformOrgId` / `platformOrgCapId` alongside the package ids.
 2. Developer commits `deployments.json` + pushes to `staging` (for
    devnet/testnet redeploys) or `main` (for mainnet).
 3. CI builds new images that bake the updated `deployments.json` in.
 4. Deploy step rolls services on the EC2.
 
 Contract publishes are **not** in CI — too easy to misfire on mainnet.
+
+### Org-aware redeploy checklist (post-orgs protocol)
+
+A fresh contract publish changes the package id, so the indexer must start
+on a **fresh DB** (old events aren't re-ingested; old JSONB payloads predate
+the org fields and won't deserialize into the new structs). Then:
+
+1. **Seed the verified-orgs allowlist**: POST the platform org to
+   token-info's internal router so the user-facing surfaces serve it —
+   `curl -X POST http://<token-info-internal>:9006/orgs -H 'content-type:
+   application/json' -d '{"org_id":"<platformOrgId>","name":"SuiOptions",
+   "enabled":true}'`. api-service and quoting-service **fail closed at
+   boot** if token-info's `/orgs` is unreachable, so deploy token-info
+   (with its `verified_orgs` migration) before them.
+2. **option-scheduler** now authorizes with the platform **OrgCap** (read
+   from token-info by default; self-hosted org schedulers set `org_id` /
+   `org_cap_id` in their config TOML). The old "signer == deployer"
+   assertion is replaced by an on-chain OrgCap ownership check at boot.
+3. **gas-station + frontend must roll in the same window**: the write/buy
+   PTB shapes changed (split `execute_write_*` entry points + trailing
+   `TransferObjects`); mismatched templates silently refuse sponsorship.
+   See `.claude/ptb-sync.md`.
+4. Other orgs onboard with zero platform involvement on-chain
+   (`org::create_org` is permissionless; they self-host a scheduler), but
+   their buckets only appear in the platform UI/API/quoting after the
+   platform admin verifies them (Admin → Verified orgs, or the token-info
+   internal `/orgs` route).
 
 ---
 

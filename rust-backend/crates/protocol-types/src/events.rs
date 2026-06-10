@@ -18,6 +18,8 @@ use super::ids::{ObjectId, SuiAddress};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BucketCreated {
     pub bucket_id: ObjectId,
+    /// Org the bucket belongs to (creator's OrgCap.org_id).
+    pub org_id: ObjectId,
     pub asset_type: AssetType,
     pub settlement_type: AssetType,
     /// Fully-qualified type of the per-bucket fungible option coin
@@ -42,21 +44,33 @@ impl BucketCreated {
     }
 }
 
+/// `flow` values mirroring `bucket.move`'s FLOW_WRITER / FLOW_TRADER.
+pub const FLOW_WRITER: u8 = 0;
+pub const FLOW_TRADER: u8 = 1;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriteExecuted {
     pub bucket_id: ObjectId,
+    pub org_id: ObjectId,
     pub signer_account_id: ObjectId,
+    /// Where the contract transferred the signer's minted asset (Coin<Call>
+    /// in writer flow, Position in trader flow). The executor's side is
+    /// returned to the PTB, so its final destination is PTB-decided and not
+    /// recorded on-chain.
     pub signer_token_recipient: SuiAddress,
     pub executor: SuiAddress,
     pub position_id: ObjectId,
-    pub position_recipient: SuiAddress,
-    pub call_token_recipient: SuiAddress,
+    /// 0 = writer flow, 1 = trader flow (see FLOW_WRITER / FLOW_TRADER).
+    pub flow: u8,
     #[serde(with = "u64_string")]
     pub write_amount: u64,
     #[serde(with = "u64_string")]
     pub gross_premium: u64,
+    /// Org fee → Org balances; protocol fee → global Treasury.
     #[serde(with = "u64_string")]
-    pub fee: u64,
+    pub org_fee: u64,
+    #[serde(with = "u64_string")]
+    pub protocol_fee: u64,
     #[serde(with = "u64_string")]
     pub net_premium: u64,
     #[serde(with = "u128_string")]
@@ -65,6 +79,34 @@ pub struct WriteExecuted {
     pub range_end: u128,
     #[serde(with = "u64_string")]
     pub nonce: u64,
+}
+
+impl WriteExecuted {
+    /// Combined fee taken from the gross premium.
+    pub fn total_fee(&self) -> u64 {
+        self.org_fee + self.protocol_fee
+    }
+
+    /// The Position lands with the executor's PTB in writer flow and with
+    /// the quote's recipient (the writer MM) in trader flow. Best-effort —
+    /// in writer flow the PTB could route elsewhere, but conventionally the
+    /// executor keeps it.
+    pub fn position_recipient(&self) -> SuiAddress {
+        if self.flow == FLOW_TRADER {
+            self.signer_token_recipient
+        } else {
+            self.executor
+        }
+    }
+
+    /// Mirror of `position_recipient` for the option coin side.
+    pub fn call_token_recipient(&self) -> SuiAddress {
+        if self.flow == FLOW_TRADER {
+            self.executor
+        } else {
+            self.signer_token_recipient
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,7 +154,10 @@ pub struct BucketInvalidated {
     pub bucket_id: ObjectId,
     #[serde(with = "u64_string")]
     pub at_ms: u64,
-    pub admin: SuiAddress,
+    pub actor: SuiAddress,
+    /// true when gated by the protocol AdminCap override; false when by the
+    /// bucket's OrgCap.
+    pub by_admin: bool,
     #[serde(with = "crate::coding::bytes_hex")]
     pub reason: Vec<u8>,
 }
@@ -122,9 +167,42 @@ pub struct BucketRevalidated {
     pub bucket_id: ObjectId,
     #[serde(with = "u64_string")]
     pub at_ms: u64,
-    pub admin: SuiAddress,
+    pub actor: SuiAddress,
+    pub by_admin: bool,
     #[serde(with = "crate::coding::bytes_hex")]
     pub reason: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgCreated {
+    pub org_id: ObjectId,
+    pub name: String,
+    #[serde(with = "u64_string")]
+    pub fee_bps: u64,
+    pub creator: SuiAddress,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgFeeUpdated {
+    pub org_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub old_bps: u64,
+    #[serde(with = "u64_string")]
+    pub new_bps: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgWithdraw {
+    pub org_id: ObjectId,
+    pub asset_type: AssetType,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolPauseSet {
+    pub paused: bool,
+    pub admin: SuiAddress,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,19 +241,20 @@ pub struct SigningKeyRotated {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FeeUpdated {
+pub struct ProtocolFeeUpdated {
     #[serde(with = "u64_string")]
     pub old_bps: u64,
     #[serde(with = "u64_string")]
     pub new_bps: u64,
 }
 
+/// No `recipient`: the withdrawn coin is returned to the PTB on-chain, so
+/// the final destination is PTB-decided.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TreasuryWithdrawn {
     pub asset_type: AssetType,
     #[serde(with = "u64_string")]
     pub amount: u64,
-    pub recipient: SuiAddress,
 }
 
 /// A DeepBook v3 pool created for one of OUR buckets' call coins (SO-152).
@@ -225,8 +304,12 @@ pub enum ChainEvent {
     AccountDeposit(AccountDeposit),
     AccountWithdraw(AccountWithdraw),
     SigningKeyRotated(SigningKeyRotated),
-    FeeUpdated(FeeUpdated),
+    ProtocolFeeUpdated(ProtocolFeeUpdated),
+    ProtocolPauseSet(ProtocolPauseSet),
     TreasuryWithdrawn(TreasuryWithdrawn),
+    OrgCreated(OrgCreated),
+    OrgFeeUpdated(OrgFeeUpdated),
+    OrgWithdraw(OrgWithdraw),
     DeepBookPoolCreated(DeepBookPoolCreated),
 }
 
@@ -250,6 +333,7 @@ mod tests {
     fn chain_event_tagged_envelope() {
         let evt = ChainEvent::BucketCreated(BucketCreated {
             bucket_id: ObjectId::new([0x01; 32]),
+            org_id: ObjectId::new([0x0a; 32]),
             asset_type: AssetType::new("BTC"),
             settlement_type: AssetType::new("USDC"),
             call_type: AssetType::new("0x9::call_0::CALL_0"),
@@ -271,6 +355,7 @@ mod tests {
     fn strike_as_f64_applies_scale() {
         let ev = BucketCreated {
             bucket_id: ObjectId::new([0; 32]),
+            org_id: ObjectId::new([0; 32]),
             asset_type: AssetType::new("DEEP"),
             settlement_type: AssetType::new("USDC"),
             call_type: AssetType::new("0x9::call_0::CALL_0"),
@@ -287,10 +372,57 @@ mod tests {
         let env = IndexedEvent {
             sequence: 42,
             timestamp_ms: 1,
-            event: ChainEvent::FeeUpdated(FeeUpdated { old_bps: 0, new_bps: 50 }),
+            event: ChainEvent::ProtocolFeeUpdated(ProtocolFeeUpdated { old_bps: 0, new_bps: 50 }),
         };
         let j = serde_json::to_string(&env).unwrap();
         let back: IndexedEvent = serde_json::from_str(&j).unwrap();
         assert_eq!(back, env);
+    }
+
+    #[test]
+    fn org_created_envelope_round_trips() {
+        let env = IndexedEvent {
+            sequence: 1,
+            timestamp_ms: 2,
+            event: ChainEvent::OrgCreated(OrgCreated {
+                org_id: ObjectId::new([0x07; 32]),
+                name: "acme".to_string(),
+                fee_bps: 30,
+                creator: SuiAddress::new([0x08; 32]),
+            }),
+        };
+        let v: serde_json::Value = serde_json::to_value(&env).unwrap();
+        assert_eq!(v["event"]["type"], "OrgCreated");
+        assert_eq!(v["event"]["payload"]["name"], "acme");
+        assert_eq!(v["event"]["payload"]["fee_bps"], "30");
+        let back: IndexedEvent = serde_json::from_value(v).unwrap();
+        assert_eq!(back, env);
+    }
+
+    #[test]
+    fn write_executed_recipient_helpers_follow_flow() {
+        let mut ev = WriteExecuted {
+            bucket_id: ObjectId::new([0x11; 32]),
+            org_id: ObjectId::new([0x12; 32]),
+            signer_account_id: ObjectId::new([0x22; 32]),
+            signer_token_recipient: SuiAddress::new([0x33; 32]),
+            executor: SuiAddress::new([0x44; 32]),
+            position_id: ObjectId::new([0xaa; 32]),
+            flow: FLOW_WRITER,
+            write_amount: 10_000,
+            gross_premium: 500,
+            org_fee: 3,
+            protocol_fee: 5,
+            net_premium: 492,
+            range_start: 0,
+            range_end: 10_000,
+            nonce: 7,
+        };
+        assert_eq!(ev.total_fee(), 8);
+        assert_eq!(ev.position_recipient(), ev.executor);
+        assert_eq!(ev.call_token_recipient(), ev.signer_token_recipient);
+        ev.flow = FLOW_TRADER;
+        assert_eq!(ev.position_recipient(), ev.signer_token_recipient);
+        assert_eq!(ev.call_token_recipient(), ev.executor);
     }
 }

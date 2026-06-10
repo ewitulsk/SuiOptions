@@ -31,16 +31,16 @@ use tracing::{debug, info, trace};
 use protocol_types::events::ChainEvent;
 use protocol_types::ids::ObjectId;
 
-use crate::store::{AccountState, BucketState, DeepBookPoolState, PositionState};
+use crate::store::{AccountState, BucketState, DeepBookPoolState, OrgState, PositionState};
 
 use super::models::{
     account_row_into_state, bigdecimal_to_u128, event_type_tag, AccountBalanceRow, AccountRow,
-    BucketRow, DeepBookPoolRow, EventParticipantRow, IndexedEventRow, NewIndexedEventRow,
+    BucketRow, DeepBookPoolRow, EventParticipantRow, IndexedEventRow, NewIndexedEventRow, OrgRow,
     PositionRow, ProgressRow,
 };
 use super::schema::{
     account_balances, accounts, bucket_deepbook_pools, buckets, event_participants,
-    indexed_events, indexer_progress, positions,
+    indexed_events, indexer_progress, orgs, positions,
 };
 use super::DbPool;
 
@@ -57,6 +57,7 @@ pub struct CheckpointBatch {
     pub events: Vec<NewIndexedEventRow>,
     pub accounts: Vec<AccountRow>,
     pub account_balances: Vec<AccountBalanceRow>,
+    pub orgs: Vec<OrgRow>,
     pub buckets: Vec<BucketRow>,
     /// Bucket → DeepBook venue rows (SO-152). Insert-only, first pool wins.
     pub deepbook_pools: Vec<DeepBookPoolRow>,
@@ -75,6 +76,7 @@ impl CheckpointBatch {
             events: Vec::new(),
             accounts: Vec::new(),
             account_balances: Vec::new(),
+            orgs: Vec::new(),
             buckets: Vec::new(),
             deepbook_pools: Vec::new(),
             position_upserts: Vec::new(),
@@ -87,6 +89,7 @@ impl CheckpointBatch {
         self.events.is_empty()
             && self.accounts.is_empty()
             && self.account_balances.is_empty()
+            && self.orgs.is_empty()
             && self.buckets.is_empty()
             && self.deepbook_pools.is_empty()
             && self.position_upserts.is_empty()
@@ -126,6 +129,7 @@ impl EventBuild {
 /// so the boot path can move it straight in.
 pub struct HydratedViews {
     pub accounts: BTreeMap<ObjectId, AccountState>,
+    pub orgs: BTreeMap<ObjectId, OrgState>,
     pub buckets: BTreeMap<ObjectId, BucketState>,
     pub positions: BTreeMap<(ObjectId, u128), PositionState>,
     pub deepbook_pools: BTreeMap<ObjectId, DeepBookPoolState>,
@@ -205,6 +209,19 @@ impl Repo {
                     ))
                     .execute(conn)
                     .context("upserting account_balances")?;
+            }
+
+            for org in &batch.orgs {
+                diesel::insert_into(orgs::table)
+                    .values(org)
+                    .on_conflict(orgs::org_id)
+                    .do_update()
+                    .set((
+                        orgs::fee_bps.eq(org.fee_bps),
+                        orgs::updated_at_seq.eq(org.updated_at_seq),
+                    ))
+                    .execute(conn)
+                    .context("upserting orgs")?;
             }
 
             for bkt in &batch.buckets {
@@ -353,6 +370,12 @@ impl Repo {
             }
         }
 
+        let mut org_map: BTreeMap<ObjectId, OrgState> = BTreeMap::new();
+        for row in orgs::table.load::<OrgRow>(&mut conn).context("loading orgs")? {
+            let (id, state) = row.into_state()?;
+            org_map.insert(id, state);
+        }
+
         let mut bucket_map: BTreeMap<ObjectId, BucketState> = BTreeMap::new();
         for row in buckets::table
             .load::<BucketRow>(&mut conn)
@@ -382,6 +405,7 @@ impl Repo {
 
         debug!(
             accounts = acct_map.len(),
+            orgs = org_map.len(),
             buckets = bucket_map.len(),
             positions = position_map.len(),
             deepbook_pools = deepbook_map.len(),
@@ -389,6 +413,7 @@ impl Repo {
         );
         Ok(HydratedViews {
             accounts: acct_map,
+            orgs: org_map,
             buckets: bucket_map,
             positions: position_map,
             deepbook_pools: deepbook_map,
@@ -449,6 +474,26 @@ impl Repo {
             .context("loading bucket")
     }
 
+    /// JIT point-lookup: one org by id. Backs the GraphQL `org(id)` query.
+    pub fn org_by_id(&self, org_id: &str) -> Result<Option<OrgRow>> {
+        let mut conn = self.conn()?;
+        orgs::table
+            .find(org_id)
+            .first::<OrgRow>(&mut conn)
+            .optional()
+            .context("loading org")
+    }
+
+    /// JIT list of every org the indexer has seen. Backs the GraphQL `orgs`
+    /// query (api-service joins this against the verified allowlist).
+    pub fn orgs_query(&self) -> Result<Vec<OrgRow>> {
+        let mut conn = self.conn()?;
+        orgs::table
+            .order(orgs::org_id.asc())
+            .load::<OrgRow>(&mut conn)
+            .context("loading orgs")
+    }
+
     /// JIT list query over the bucket view. All filters are ANDed; `None`
     /// means "don't constrain". `active_only` drops cleaned buckets. Backs
     /// the GraphQL `buckets(...)` query (api-service catalog + option-scheduler
@@ -482,6 +527,9 @@ impl Repo {
         }
         if let Some(ids) = &f.ids {
             q = q.filter(buckets::bucket_id.eq_any(ids.clone()));
+        }
+        if let Some(org_ids) = &f.org_ids {
+            q = q.filter(buckets::org_id.eq_any(org_ids.clone()));
         }
         if let Some(a) = &f.asset_type {
             q = q.filter(buckets::asset_type.eq(a.clone()));
@@ -591,6 +639,8 @@ pub struct BucketQuery {
     /// Drop cleaned buckets when true.
     pub active_only: bool,
     pub ids: Option<Vec<String>>,
+    /// Restrict to buckets belonging to these orgs (verified-only surfaces).
+    pub org_ids: Option<Vec<String>>,
     pub asset_type: Option<String>,
     pub settlement_type: Option<String>,
     pub expiry_ms: Option<i64>,

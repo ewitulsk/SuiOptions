@@ -67,6 +67,20 @@ impl SupportedToken {
     }
 }
 
+/// One verified-org allowlist entry as served by `GET /orgs`.
+///
+/// Orgs are created permissionlessly on-chain; this allowlist (operated by
+/// the platform via token-info's JWT-gated mutate routes) decides which
+/// orgs' buckets the user-facing surfaces serve. "Verified" = present AND
+/// `enabled`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedOrg {
+    pub org_id: String,
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
 /// An immutable view of token-info's state at fetch time: the protocol
 /// `package_info` for the configured network plus the full token catalog.
 #[derive(Debug, Clone)]
@@ -95,6 +109,26 @@ impl Snapshot {
             .ok_or_else(|| anyhow!("treasury_id missing from token-info package_info"))?;
         ObjectID::from_str_checked(id, "treasury_id")
     }
+    /// The platform's own shared Org object ("SuiOptions").
+    pub fn platform_org(&self) -> Result<ObjectID> {
+        let id = self
+            .package_info
+            .platform_org_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("platformOrgId missing from token-info package_info"))?;
+        ObjectID::from_str_checked(id, "platform_org_id")
+    }
+
+    /// The platform org's OrgCap (owned by the deployer).
+    pub fn platform_org_cap(&self) -> Result<ObjectID> {
+        let id = self
+            .package_info
+            .platform_org_cap_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("platformOrgCapId missing from token-info package_info"))?;
+        ObjectID::from_str_checked(id, "platform_org_cap_id")
+    }
+
     pub fn deployer_address(&self) -> Result<SuiAddress> {
         use std::str::FromStr;
         SuiAddress::from_str(&self.package_info.deployer).context("parsing deployer")
@@ -253,6 +287,15 @@ impl TokenInfoClient {
             .with_context(|| format!("token-info at {} unreachable after {max_attempts} attempts", self.base_url))
     }
 
+    /// Fetch the verified-orgs allowlist (enabled rows only). Unlike the boot
+    /// snapshot this is runtime-mutable state — consumers poll it via
+    /// [`VerifiedOrgsWatcher`] rather than caching it once.
+    pub async fn fetch_verified_orgs(&self) -> Result<Vec<VerifiedOrg>> {
+        self.get_json::<Vec<VerifiedOrg>>("/orgs?enabled=true")
+            .await
+            .context("fetching /orgs from token-info")
+    }
+
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self.http.get(&url).send().await?;
@@ -263,6 +306,87 @@ impl TokenInfoClient {
         }
         resp.json::<T>().await.with_context(|| format!("decoding {url}"))
     }
+}
+
+/// A polling view of the verified-orgs allowlist, shared by api-service and
+/// quoting-service ("verified-only surfaces").
+///
+/// Semantics:
+/// - **Fail-closed at boot**: [`VerifiedOrgsWatcher::start`] errors if the
+///   first fetch fails — consistent with the hard-cutover ethos (no surface
+///   should come up serving an unknown allowlist).
+/// - **Keep-last-good on refresh failure**: once running, a failed refresh
+///   logs and keeps the previous set (fail-open-on-stale, never
+///   serve-everything).
+#[derive(Clone)]
+pub struct VerifiedOrgsWatcher {
+    inner: std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, VerifiedOrg>>>,
+}
+
+impl VerifiedOrgsWatcher {
+    /// Fetch once (fail-closed), then refresh every `interval` in a background
+    /// task for the life of the process.
+    pub async fn start(client: TokenInfoClient, interval: Duration) -> Result<Self> {
+        let initial = client
+            .fetch_verified_orgs()
+            .await
+            .context("initial verified-orgs fetch (fail-closed at boot)")?;
+        info!(orgs = initial.len(), "verified-orgs allowlist loaded");
+        let inner = std::sync::Arc::new(parking_lot::RwLock::new(index_orgs(initial)));
+        let weak = std::sync::Arc::downgrade(&inner);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let Some(strong) = weak.upgrade() else { break };
+                match client.fetch_verified_orgs().await {
+                    Ok(orgs) => *strong.write() = index_orgs(orgs),
+                    Err(e) => warn!(error = %e, "verified-orgs refresh failed; keeping last good set"),
+                }
+            }
+        });
+        Ok(Self { inner })
+    }
+
+    /// Build a watcher from a fixed set — for tests and tools that don't poll.
+    pub fn fixed(orgs: Vec<VerifiedOrg>) -> Self {
+        Self {
+            inner: std::sync::Arc::new(parking_lot::RwLock::new(index_orgs(orgs))),
+        }
+    }
+
+    /// Is this org id on the allowlist (and enabled)?
+    pub fn is_verified(&self, org_id: &str) -> bool {
+        self.inner.read().contains_key(&normalize_id(org_id))
+    }
+
+    /// Display name for a verified org, if known.
+    pub fn name_of(&self, org_id: &str) -> Option<String> {
+        self.inner.read().get(&normalize_id(org_id)).map(|o| o.name.clone())
+    }
+
+    /// Snapshot of the current allowlist (enabled rows only).
+    pub fn all(&self) -> Vec<VerifiedOrg> {
+        self.inner.read().values().cloned().collect()
+    }
+
+    /// Normalized org ids of the current allowlist.
+    pub fn ids(&self) -> Vec<String> {
+        self.inner.read().keys().cloned().collect()
+    }
+}
+
+fn index_orgs(orgs: Vec<VerifiedOrg>) -> std::collections::HashMap<String, VerifiedOrg> {
+    orgs.into_iter()
+        .filter(|o| o.enabled)
+        .map(|o| (normalize_id(&o.org_id), o))
+        .collect()
+}
+
+/// Normalize an object id for comparison: strip `0x`, lowercase, left-pad to
+/// 64 hex chars — different sources render ids with/without padding.
+fn normalize_id(s: &str) -> String {
+    let stripped = s.strip_prefix("0x").unwrap_or(s).to_ascii_lowercase();
+    format!("0x{:0>64}", stripped)
 }
 
 /// Normalize a Move type string so address-format differences don't break
@@ -315,6 +439,10 @@ mod tests {
                 treasury_id: Some("0x6".into()),
                 publish_digest: "x".into(),
                 init_digest: None,
+                platform_org_id: Some(
+                    "0x8a094ab9d022f51ef18271e1226c32405df85b4fada60492383de59324b191c9".into(),
+                ),
+                platform_org_cap_id: Some("0x9".into()),
                 deployer: "0x7".into(),
                 deployed_at: "".into(),
                 network: "testnet".into(),
@@ -359,6 +487,37 @@ mod tests {
             s.token_by_coin_type("pkg::tbtc::TBTC").unwrap().ticker,
             "TBTC"
         );
+    }
+
+    #[test]
+    fn platform_org_accessors_parse() {
+        let s = snap();
+        assert!(s.platform_org().is_ok());
+        assert!(s.platform_org_cap().is_ok());
+    }
+
+    #[test]
+    fn verified_orgs_watcher_normalizes_ids() {
+        let w = VerifiedOrgsWatcher::fixed(vec![
+            VerifiedOrg {
+                org_id: "0xabc".into(),
+                name: "acme".into(),
+                enabled: true,
+            },
+            VerifiedOrg {
+                org_id: "0xdef".into(),
+                name: "disabled-org".into(),
+                enabled: false,
+            },
+        ]);
+        // Padded and unpadded forms match the same entry.
+        assert!(w.is_verified("0xabc"));
+        assert!(w.is_verified(&format!("0x{:0>64}", "abc")));
+        assert_eq!(w.name_of("0xabc").as_deref(), Some("acme"));
+        // Disabled rows are not verified.
+        assert!(!w.is_verified("0xdef"));
+        assert!(!w.is_verified("0x123"));
+        assert_eq!(w.all().len(), 1);
     }
 
     #[test]

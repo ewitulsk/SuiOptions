@@ -42,6 +42,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    orgs (org_id) {
+        org_id         -> Text,
+        name           -> Text,
+        fee_bps        -> Int8,
+        creator        -> Text,
+        updated_at_seq -> Int8,
+    }
+}
+
+diesel::table! {
     buckets (bucket_id) {
         bucket_id       -> Text,
         asset_type      -> Text,
@@ -55,6 +65,7 @@ diesel::table! {
         cleaned         -> Bool,
         invalidated     -> Bool,
         updated_at_seq  -> Int8,
+        org_id          -> Text,
     }
 }
 
@@ -107,6 +118,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     indexed_events,
     accounts,
     account_balances,
+    orgs,
     buckets,
     positions,
     bucket_deepbook_pools,

@@ -26,6 +26,7 @@ use protocol_types::ids::ObjectId;
 use protocol_types::sides::Side;
 
 pub use indexer_graphql::{Account, Bucket, IndexerClient};
+pub use token_info_client::VerifiedOrgsWatcher;
 pub use mm_registry::{MmConnection, MmRegistry};
 pub use reputation::{ReputationStats, ReputationStore};
 pub use reservations::{InsertOutcome, Reservation, ReservationTable};
@@ -95,10 +96,17 @@ pub struct AppState {
     /// [`RfqObservation`] per incoming RFQ; subscribers are best-effort and
     /// may miss messages under backlog (the broadcast channel drops oldest).
     pub rfq_observers: broadcast::Sender<RfqObservation>,
+    /// Verified-orgs allowlist (polled from token-info). RFQs against
+    /// buckets of unverified orgs are refused — the verified-only surface.
+    pub verified_orgs: VerifiedOrgsWatcher,
 }
 
 impl AppState {
-    pub fn with_global_rfq_cap(cap: usize, indexer_graphql_url: String) -> Self {
+    pub fn with_global_rfq_cap(
+        cap: usize,
+        indexer_graphql_url: String,
+        verified_orgs: VerifiedOrgsWatcher,
+    ) -> Self {
         let (rfq_observers, _) = broadcast::channel(256);
         Self {
             reservations: ReservationTable::default(),
@@ -111,6 +119,7 @@ impl AppState {
             bulk_view_refreshing: DashMap::new(),
             rfq_global_inflight: Arc::new(Semaphore::new(cap)),
             rfq_observers,
+            verified_orgs,
         }
     }
 
@@ -205,7 +214,11 @@ mod tests {
 
     #[test]
     fn available_subtracts_active_reservations() {
-        let s = AppState::with_global_rfq_cap(8, "http://127.0.0.1:1/graphql".into());
+        let s = AppState::with_global_rfq_cap(
+            8,
+            "http://127.0.0.1:1/graphql".into(),
+            VerifiedOrgsWatcher::fixed(vec![]),
+        );
         let account = ObjectId::new([0x01; 32]);
         let acct = account_with(account, 1_000);
         assert_eq!(s.available(&acct, &AssetType::new("USDC")), 1_000);

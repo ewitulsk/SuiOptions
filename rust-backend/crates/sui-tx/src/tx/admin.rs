@@ -1,9 +1,10 @@
-//! Admin-cap-gated PTBs: `new_call_option`, `set_fee_bps`, `withdraw_treasury`.
+//! Admin-cap-gated PTBs: `set_protocol_fee_bps`, `set_pause`,
+//! `withdraw_treasury`.
 //!
-//! All three are simple Move calls — no coin manipulation — so they go
-//! through the high-level `client.transaction_builder().move_call(...)`
-//! builder. The same builder auto-selects a gas coin and computes the
-//! reference gas price.
+//! The fee/pause setters are simple Move calls and go through the high-level
+//! `client.transaction_builder().move_call(...)` builder. `withdraw_treasury`
+//! drops to a raw PTB because `treasury::withdraw` now RETURNS the coin —
+//! the PTB must transfer it to the recipient itself.
 
 use anyhow::{Context, Result};
 use shared_crypto::intent::Intent;
@@ -86,8 +87,8 @@ async fn execute_move_call(
     Ok(resp)
 }
 
-/// Calls `admin::set_fee_bps(&AdminCap, &mut ProtocolConfig, new_bps)`.
-pub async fn set_fee_bps(
+/// Calls `admin::set_protocol_fee_bps(&AdminCap, &mut ProtocolConfig, new_bps)`.
+pub async fn set_protocol_fee_bps(
     client: &SuiClient,
     signer: &Signer,
     package: ObjectID,
@@ -101,7 +102,7 @@ pub async fn set_fee_bps(
         signer,
         package,
         "admin",
-        "set_fee_bps",
+        "set_protocol_fee_bps",
         vec![],
         vec![
             SuiJsonValue::from_object_id(admin_cap),
@@ -113,8 +114,37 @@ pub async fn set_fee_bps(
     .await
 }
 
-/// Calls `treasury::withdraw<T>(&AdminCap, &mut Treasury, amount, recipient,
-/// ctx)`.
+/// Calls `admin::set_pause(&AdminCap, &mut ProtocolConfig, paused, ctx)` —
+/// the protocol-wide emergency brake on new writes.
+pub async fn set_pause(
+    client: &SuiClient,
+    signer: &Signer,
+    package: ObjectID,
+    admin_cap: ObjectID,
+    protocol_config: ObjectID,
+    paused: bool,
+    gas_budget: u64,
+) -> Result<SuiTransactionBlockResponse> {
+    execute_move_call(
+        client,
+        signer,
+        package,
+        "admin",
+        "set_pause",
+        vec![],
+        vec![
+            SuiJsonValue::from_object_id(admin_cap),
+            SuiJsonValue::from_object_id(protocol_config),
+            SuiJsonValue::new(serde_json::Value::Bool(paused))?,
+        ],
+        gas_budget,
+    )
+    .await
+}
+
+/// `treasury::withdraw<T>(&AdminCap, &mut Treasury, amount, ctx): Coin<T>` —
+/// the coin is RETURNED, so this builds a raw PTB that transfers it to
+/// `recipient`.
 pub async fn withdraw_treasury(
     client: &SuiClient,
     signer: &Signer,
@@ -126,20 +156,73 @@ pub async fn withdraw_treasury(
     recipient: SuiAddress,
     gas_budget: u64,
 ) -> Result<SuiTransactionBlockResponse> {
-    execute_move_call(
-        client,
-        signer,
+    use move_core_types::identifier::Identifier;
+    use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
+    use sui_types::transaction::TransactionData;
+    use sui_types::TypeTag as MoveTypeTag;
+
+    use crate::tx::{owned_object_arg, shared_object_arg};
+
+    info!(%package, asset_type, amount, %recipient, "building treasury withdraw PTB");
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let cap_arg = pt.obj(owned_object_arg(client, admin_cap).await?)?;
+    let treasury_arg = pt.obj(shared_object_arg(client, treasury, true).await?)?;
+    let amount_arg = pt.pure(amount)?;
+    let t_tag = MoveTypeTag::from_str(asset_type)
+        .with_context(|| format!("parsing asset type {asset_type}"))?;
+    let coin = pt.programmable_move_call(
         package,
-        "treasury",
-        "withdraw",
-        vec![asset_type],
-        vec![
-            SuiJsonValue::from_object_id(admin_cap),
-            SuiJsonValue::from_object_id(treasury),
-            SuiJsonValue::new(serde_json::Value::String(amount.to_string()))?,
-            SuiJsonValue::new(serde_json::Value::String(recipient.to_string()))?,
-        ],
+        Identifier::new("treasury").unwrap(),
+        Identifier::new("withdraw").unwrap(),
+        vec![t_tag],
+        vec![cap_arg, treasury_arg, amount_arg],
+    );
+    pt.transfer_args(recipient, vec![coin]);
+    let programmable = pt.finish();
+
+    let gas_coin = client
+        .coin_read_api()
+        .get_coins(signer.address, None, None, Some(5))
+        .await
+        .context("listing gas coins")?
+        .data
+        .into_iter()
+        .max_by_key(|c| c.balance)
+        .ok_or_else(|| anyhow::anyhow!("no SUI coins to pay gas for {}", signer.address))?;
+    let gas_price = client
+        .read_api()
+        .get_reference_gas_price()
+        .await
+        .context("fetching reference gas price")?;
+    let tx_data = TransactionData::new_programmable(
+        signer.address,
+        vec![gas_coin.object_ref()],
+        programmable,
         gas_budget,
-    )
-    .await
+        gas_price,
+    );
+    let sig = Transaction::signature_from_signer(
+        tx_data.clone(),
+        Intent::sui_transaction(),
+        &signer.keypair,
+    );
+    let tx = Transaction::from_data(tx_data, vec![sig]);
+    let opts = SuiTransactionBlockResponseOptions::new()
+        .with_effects()
+        .with_object_changes();
+    let resp = client
+        .quorum_driver_api()
+        .execute_transaction_block(
+            tx,
+            opts,
+            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
+        )
+        .await
+        .context("submitting treasury withdraw tx")?;
+    let effects = resp.effects.as_ref().context("response missing effects")?;
+    if effects.status().is_err() {
+        anyhow::bail!("treasury::withdraw reverted: {:?}", effects.status());
+    }
+    debug!(digest = %resp.digest, "treasury withdraw succeeded");
+    Ok(resp)
 }

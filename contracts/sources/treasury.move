@@ -30,21 +30,21 @@ public(package) fun deposit_balance<T>(treasury: &mut Treasury, bal_in: Balance<
     };
 }
 
+/// Returns the withdrawn coin to the calling PTB; routing is the PTB's job.
 public fun withdraw<T>(
     _: &AdminCap,
     treasury: &mut Treasury,
     amount: u64,
-    recipient: address,
     ctx: &mut TxContext,
-) {
+): Coin<T> {
     let key = BalanceKey<T> {};
     assert!(df::exists(&treasury.id, key), errors::insufficient_treasury_balance());
     let bal: &mut Balance<T> = df::borrow_mut(&mut treasury.id, key);
     assert!(bal.value() >= amount, errors::insufficient_treasury_balance());
     let withdrawn = bal.split(amount);
     let out: Coin<T> = coin::from_balance(withdrawn, ctx);
-    transfer::public_transfer(out, recipient);
-    events::emit_treasury_withdrawn(type_name::with_defining_ids<T>(), amount, recipient);
+    events::emit_treasury_withdrawn(type_name::with_defining_ids<T>(), amount);
+    out
 }
 
 public fun balance_of<T>(treasury: &Treasury): u64 {

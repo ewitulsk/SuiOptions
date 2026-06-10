@@ -39,6 +39,14 @@ pub struct PackageInfo {
     pub publish_digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub init_digest: Option<String>,
+    /// The platform's own Org ("SuiOptions") created at deploy time. Orgs are
+    /// permissionless; these just record the one the option-scheduler rolls
+    /// buckets under. Absent when deployed with `--skip-init`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_org_id: Option<String>,
+    /// The OrgCap for the platform org (owned by the deployer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_org_cap_id: Option<String>,
     pub deployer: String,
     pub deployed_at: String, // RFC 3339
     pub network: String,

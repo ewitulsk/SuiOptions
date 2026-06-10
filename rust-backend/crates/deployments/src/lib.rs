@@ -176,6 +176,14 @@ pub struct PackageInfo {
     pub treasury_id: Option<String>,
     pub publish_digest: String,
     pub init_digest: Option<String>,
+    /// The platform's own Org ("SuiOptions"), created at deploy time. Orgs
+    /// are permissionless; this records the one the platform's
+    /// option-scheduler rolls buckets under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_org_id: Option<String>,
+    /// OrgCap for the platform org (owned by the deployer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_org_cap_id: Option<String>,
     pub deployer: String,
     pub deployed_at: String,
     pub network: String,
@@ -251,8 +259,28 @@ impl NetworkDeployment {
         SuiAddress::from_str(&self.package_info.deployer).context("parsing deployer")
     }
 
+    /// The platform's own shared Org object.
+    pub fn platform_org(&self) -> Result<ObjectID> {
+        let id = self
+            .package_info
+            .platform_org_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("platformOrgId missing from deployments"))?;
+        ObjectID::from_str(id).context("parsing platform_org_id")
+    }
+
+    /// The platform org's OrgCap (owned by the deployer).
+    pub fn platform_org_cap(&self) -> Result<ObjectID> {
+        let id = self
+            .package_info
+            .platform_org_cap_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("platformOrgCapId missing from deployments"))?;
+        ObjectID::from_str(id).context("parsing platform_org_cap_id")
+    }
+
     /// Raw bytes of the AdminCap id — the domain separator the chain
-    /// compares every `Quote.protocol_id` against (`admin.move:20`).
+    /// compares every `Quote.protocol_id` against (`admin.move`).
     pub fn protocol_id_bytes(&self) -> Result<Vec<u8>> {
         Ok(self.admin_cap()?.into_bytes().to_vec())
     }
@@ -347,6 +375,8 @@ mod tests {
                 treasury_id: None,
                 publish_digest: "x".into(),
                 init_digest: None,
+                platform_org_id: None,
+                platform_org_cap_id: None,
                 deployer: "0x0".into(),
                 deployed_at: "".into(),
                 network: "testnet".into(),

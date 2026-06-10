@@ -103,7 +103,7 @@ fn rows_for(event: &ChainEvent, wallet: &SuiAddress) -> Vec<Row> {
     let mut out = Vec::new();
     match event {
         ChainEvent::WriteExecuted(w) => {
-            if w.position_recipient == *wallet {
+            if w.position_recipient() == *wallet {
                 // Writer opened a position, received net premium.
                 out.push(Row {
                     event_type: "position_opened",
@@ -115,7 +115,7 @@ fn rows_for(event: &ChainEvent, wallet: &SuiAddress) -> Vec<Row> {
                     value_asset: ValueAsset::BucketSettlement,
                 });
             }
-            if w.call_token_recipient == *wallet {
+            if w.call_token_recipient() == *wallet {
                 // Buyer bought the call, paid the gross premium.
                 out.push(Row {
                     event_type: "position_opened",
@@ -195,7 +195,7 @@ pub async fn list_events(
     // Buckets are fetched once and joined locally for symbol/strike/expiry.
     let buckets: BTreeMap<ObjectId, indexer_graphql::Bucket> = state
         .indexer
-        .buckets(false, None, None, None)
+        .buckets(false, None, None, None, None)
         .await
         .map_err(|e| {
             tracing::warn!(error = %e, "indexer buckets query failed");
@@ -286,17 +286,20 @@ mod tests {
         let bucket = ObjectId::new([0xc1; 32]);
         let writer = SuiAddress::new([0x11; 32]);
         let buyer = SuiAddress::new([0x22; 32]);
+        // Writer flow: executor (writer) keeps the returned Position/net
+        // premium; the signer's recipient (buyer) gets the Coin<Call>.
         let we = ChainEvent::WriteExecuted(WriteExecuted {
             bucket_id: bucket,
+            org_id: ObjectId::new([0xee; 32]),
             signer_account_id: ObjectId::new([0x33; 32]),
             signer_token_recipient: buyer,
             executor: writer,
             position_id: ObjectId::new([0x44; 32]),
-            position_recipient: writer,
-            call_token_recipient: buyer,
+            flow: protocol_types::events::FLOW_WRITER,
             write_amount: 100,
             gross_premium: 90,
-            fee: 5,
+            org_fee: 2,
+            protocol_fee: 3,
             net_premium: 85,
             range_start: 0,
             range_end: 100,

@@ -37,7 +37,7 @@ pub struct Cli {
     pub token_info_url: String,
 
     /// Per-binary secrets TOML. Holds the Sui signing key. No env-var
-    /// fallback. Must hold the deployer key — AdminCap is non-transferable.
+    /// fallback. Must hold the key that owns the configured OrgCap.
     #[arg(
         short = 's',
         long,
@@ -62,8 +62,8 @@ cli_spec::define_program! {
     id          = "option-scheduler",
     cargo_pkg   = "option-scheduler",
     working_dir = ".",
-    description = "Owns the protocol's bucket-creation lifecycle. Tracks live bucket families per \
-                   (underlying, settlement) pair via the indexer, and submits new_call_option \
-                   when the latest family is inside the roll-threshold window. Holds AdminCap.",
+    description = "Owns an org's bucket-creation lifecycle. Tracks live bucket families per \
+                   (underlying, settlement) pair via the indexer, and rolls new bucket sets \
+                   when the latest family is inside the roll-threshold window. Holds the OrgCap.",
     cli         = crate::Cli,
 }

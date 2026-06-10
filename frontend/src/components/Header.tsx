@@ -14,7 +14,7 @@ import {
   useSponsorHealth,
   setSponsorEnabled,
 } from "../state/sponsor";
-import { useAdminCap } from "../api/useAdminCap";
+import { useAdminCap, useOrgCaps } from "../api/useAdminCap";
 import { ENV } from "../config";
 
 function shortAddress(addr: string): string {
@@ -196,7 +196,11 @@ export function Header() {
   const account = useCurrentAccount();
   const [pickerOpen, setPickerOpen] = useState(false);
   const adminCap = useAdminCap(account?.address ?? null);
-  const isAdmin = adminCap.data?.isAdmin ?? false;
+  const orgCaps = useOrgCaps(account?.address ?? null);
+  // The /admin console serves both the platform admin (AdminCap) and org
+  // admins (any OrgCap holder).
+  const isAdmin =
+    (adminCap.data?.isAdmin ?? false) || (orgCaps.data?.length ?? 0) > 0;
 
   return (
     <header className="header">

@@ -9,6 +9,7 @@ use options_protocol::account::{Self, Account};
 use options_protocol::admin::{Self, AdminCap, ProtocolConfig};
 use options_protocol::errors;
 use options_protocol::events;
+use options_protocol::org::{Self, Org, OrgCap};
 use options_protocol::position::{Self, Position};
 use options_protocol::quote::{Self, Quote, SignedQuote};
 use options_protocol::treasury::{Self, Treasury};
@@ -22,6 +23,9 @@ use options_protocol::treasury::{Self, Treasury};
 /// isolation a type-system guarantee rather than a runtime `bucket_id` check.
 public struct Bucket<phantom Underlying, phantom Settlement, phantom Call> has key {
     id: UID,
+    /// Org that created (and administers) this bucket. Org fees on writes
+    /// flow to this org; bucket lifecycle is gated by its OrgCap.
+    org_id: ID,
     asset_type: TypeName,
     settlement_type: TypeName,
     call_type: TypeName,
@@ -40,9 +44,9 @@ public struct Bucket<phantom Underlying, phantom Settlement, phantom Call> has k
     /// Sole mint/burn authority for the option coin. Held for the bucket's
     /// whole life; never exposed by reference outside this module.
     call_treasury: TreasuryCap<Call>,
-    /// Admin-controlled freeze on new writes. Exercises and redeems are
-    /// unaffected — invalidation only blocks `execute_write`. Toggleable
-    /// pre-expiry via `invalidate_bucket` / `revalidate_bucket`.
+    /// Freeze on new writes, toggleable pre-expiry by the bucket's OrgCap
+    /// or the protocol AdminCap override. Exercises and redeems are
+    /// unaffected — invalidation only blocks the write entry points.
     invalidated: bool,
 }
 
@@ -51,6 +55,10 @@ public struct Bucket<phantom Underlying, phantom Settlement, phantom Call> has k
 /// passing 39 would abort inside the loop's multiply, so we cap one below
 /// that on a dedicated assert for a cleaner error.
 const MAX_STRIKE_SCALE: u8 = 38;
+
+/// WriteExecuted.flow discriminator values.
+const FLOW_WRITER: u8 = 0;
+const FLOW_TRADER: u8 = 1;
 
 /// 10^exp for exp ∈ [0, MAX_STRIKE_SCALE]. Aborts if exp exceeds the cap
 /// — keeps `pow10` cheap and guarantees the result fits in u128.
@@ -78,20 +86,13 @@ fun apply_strike(amount: u128, strike: u128, strike_scale: u8): u64 {
     ((numerator + half) / divisor) as u64
 }
 
-public enum FlowKind has copy, drop, store {
-    Writer,
-    Trader,
-}
-
-public fun writer_flow(): FlowKind { FlowKind::Writer }
-
-public fun trader_flow(): FlowKind { FlowKind::Trader }
-
 /// Create a single bucket for the (Underlying, Settlement, Call) triple,
-/// taking ownership of the option coin's `TreasuryCap`.
+/// taking ownership of the option coin's `TreasuryCap`. Permissionless:
+/// any OrgCap holder can create buckets; the bucket is stamped with the
+/// cap's org so fees and lifecycle authority route to that org.
 ///
-/// One bucket per call (rather than the old `count` loop) because each
-/// bucket needs a *distinct* `Call` coin type, and a generic function is
+/// One bucket per call (rather than a `count` loop) because each bucket
+/// needs a *distinct* `Call` coin type, and a generic function is
 /// monomorphic in its type arguments per invocation. The options-scheduler
 /// fans a bucket set out off-chain: it publishes one package containing N
 /// One-Time-Witness coin modules, then issues N `create_bucket` calls in a
@@ -100,7 +101,7 @@ public fun trader_flow(): FlowKind { FlowKind::Trader }
 /// The cap must be fresh (zero supply) so the supply==outstanding-options
 /// invariant holds from genesis.
 public fun create_bucket<Underlying, Settlement, Call>(
-    _: &AdminCap,
+    cap: &OrgCap,
     call_treasury: TreasuryCap<Call>,
     expiry_ms: u64,
     strike: u128,
@@ -112,11 +113,13 @@ public fun create_bucket<Underlying, Settlement, Call>(
     assert!(strike_scale <= MAX_STRIKE_SCALE, errors::strike_scale_too_large());
     assert!(coin::total_supply(&call_treasury) == 0, errors::treasury_cap_not_fresh());
 
+    let org_id = org::cap_org_id(cap);
     let asset_type = type_name::with_defining_ids<Underlying>();
     let settlement_type = type_name::with_defining_ids<Settlement>();
     let call_type = type_name::with_defining_ids<Call>();
     let bucket = Bucket<Underlying, Settlement, Call> {
         id: object::new(ctx),
+        org_id,
         asset_type,
         settlement_type,
         call_type,
@@ -133,6 +136,7 @@ public fun create_bucket<Underlying, Settlement, Call>(
     let bucket_id = object::id(&bucket);
     events::emit_bucket_created(
         bucket_id,
+        org_id,
         asset_type,
         settlement_type,
         call_type,
@@ -143,147 +147,163 @@ public fun create_bucket<Underlying, Settlement, Call>(
     transfer::share_object(bucket);
 }
 
-public fun execute_write<Underlying, Settlement, Call>(
+/// Writer flow: the executor is the retail writer supplying underlying; the
+/// signer is the trader MM (buyer) whose Account is debited the gross
+/// premium. The MM's `Coin<Call>` is transferred by the contract to
+/// `quote.signer_token_recipient` — the signed quote's routing guarantee —
+/// while the writer's `(Position, net premium)` are returned to the PTB.
+public fun execute_write_writer_flow<Underlying, Settlement, Call>(
     bucket: &mut Bucket<Underlying, Settlement, Call>,
+    org: &mut Org,
     config: &ProtocolConfig,
     treasury: &mut Treasury,
     signer_account: &mut Account,
     underlying_in: Coin<Underlying>,
-    premium_in: Coin<Settlement>,
-    flow: FlowKind,
-    position_recipient: address,
-    call_token_recipient: address,
     signed_quote: SignedQuote,
     clock: &Clock,
     ctx: &mut TxContext,
-) {
+): (Position, Coin<Settlement>) {
     let q = quote::verify_and_consume_quote(signer_account, config, &signed_quote, clock);
-    execute_write_with_quote<Underlying, Settlement, Call>(
-        bucket,
-        config,
-        treasury,
-        signer_account,
-        underlying_in,
-        premium_in,
-        flow,
-        position_recipient,
-        call_token_recipient,
-        q,
-        clock,
-        ctx,
-    );
+    writer_flow_with_quote(
+        bucket, org, config, treasury, signer_account, underlying_in, q, clock, ctx,
+    )
+}
+
+/// Trader flow: the executor is the retail trader supplying the gross
+/// premium; the signer is the writer MM whose Account is debited the
+/// underlying and credited the net premium. The MM's `Position` is
+/// transferred by the contract to `quote.signer_token_recipient`; the
+/// trader's `Coin<Call>` is returned to the PTB.
+public fun execute_write_trader_flow<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    org: &mut Org,
+    config: &ProtocolConfig,
+    treasury: &mut Treasury,
+    signer_account: &mut Account,
+    premium_in: Coin<Settlement>,
+    signed_quote: SignedQuote,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): Coin<Call> {
+    let q = quote::verify_and_consume_quote(signer_account, config, &signed_quote, clock);
+    trader_flow_with_quote(
+        bucket, org, config, treasury, signer_account, premium_in, q, clock, ctx,
+    )
 }
 
 #[test_only]
-public fun execute_write_for_testing<Underlying, Settlement, Call>(
+public fun execute_write_writer_flow_for_testing<Underlying, Settlement, Call>(
     bucket: &mut Bucket<Underlying, Settlement, Call>,
+    org: &mut Org,
     config: &ProtocolConfig,
     treasury: &mut Treasury,
     signer_account: &mut Account,
     underlying_in: Coin<Underlying>,
-    premium_in: Coin<Settlement>,
-    flow: FlowKind,
-    position_recipient: address,
-    call_token_recipient: address,
     signed_quote: SignedQuote,
     clock: &Clock,
     ctx: &mut TxContext,
-) {
+): (Position, Coin<Settlement>) {
     let q = quote::verify_skip_sig(signer_account, config, &signed_quote, clock);
-    execute_write_with_quote<Underlying, Settlement, Call>(
-        bucket,
-        config,
-        treasury,
-        signer_account,
-        underlying_in,
-        premium_in,
-        flow,
-        position_recipient,
-        call_token_recipient,
-        q,
-        clock,
-        ctx,
-    );
+    writer_flow_with_quote(
+        bucket, org, config, treasury, signer_account, underlying_in, q, clock, ctx,
+    )
 }
 
-#[allow(lint(self_transfer))]
-fun execute_write_with_quote<Underlying, Settlement, Call>(
+#[test_only]
+public fun execute_write_trader_flow_for_testing<Underlying, Settlement, Call>(
     bucket: &mut Bucket<Underlying, Settlement, Call>,
+    org: &mut Org,
+    config: &ProtocolConfig,
+    treasury: &mut Treasury,
+    signer_account: &mut Account,
+    premium_in: Coin<Settlement>,
+    signed_quote: SignedQuote,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): Coin<Call> {
+    let q = quote::verify_skip_sig(signer_account, config, &signed_quote, clock);
+    trader_flow_with_quote(
+        bucket, org, config, treasury, signer_account, premium_in, q, clock, ctx,
+    )
+}
+
+/// Preconditions shared by both write flows. Pause and invalidation gate
+/// writes ONLY — exercise/redeem/burn/cleanup never check them.
+fun check_write_preconditions<U, S, C>(
+    bucket: &Bucket<U, S, C>,
+    org: &Org,
+    config: &ProtocolConfig,
+    q: &Quote,
+    clock: &Clock,
+) {
+    assert!(!admin::is_paused(config), errors::protocol_paused());
+    assert!(quote::bucket_id(q) == object::id(bucket), errors::quote_bucket_mismatch());
+    assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
+    assert!(!bucket.invalidated, errors::bucket_invalidated());
+    assert!(object::id(org) == bucket.org_id, errors::bucket_org_mismatch());
+    assert!(quote::write_amount(q) > 0, errors::zero_amount());
+}
+
+/// Both fees are floored independently from gross, so rounding dust (≤ 2
+/// smallest-units) stays in net_premium — never lost, and conservation
+/// holds exactly: gross == org_fee + protocol_fee + net.
+fun fee_split(gross: u64, org: &Org, config: &ProtocolConfig): (u64, u64) {
+    let org_fee = (((gross as u128) * (org::fee_bps(org) as u128)) / 10000) as u64;
+    let protocol_fee =
+        (((gross as u128) * (admin::protocol_fee_bps(config) as u128)) / 10000) as u64;
+    (org_fee, protocol_fee)
+}
+
+/// Skim both fees out of the premium balance. Zero fees skip the split so
+/// no empty dynamic-field Balance is ever created on the Org/Treasury.
+fun skim_fees<Settlement>(
+    premium: &mut Balance<Settlement>,
+    org: &mut Org,
+    treasury: &mut Treasury,
+    org_fee: u64,
+    protocol_fee: u64,
+) {
+    if (org_fee > 0) {
+        org::deposit_balance(org, premium.split(org_fee));
+    };
+    if (protocol_fee > 0) {
+        treasury::deposit_balance(treasury, premium.split(protocol_fee));
+    };
+}
+
+fun writer_flow_with_quote<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    org: &mut Org,
     config: &ProtocolConfig,
     treasury: &mut Treasury,
     signer_account: &mut Account,
     underlying_in: Coin<Underlying>,
-    premium_in: Coin<Settlement>,
-    flow: FlowKind,
-    position_recipient: address,
-    call_token_recipient: address,
     q: Quote,
     clock: &Clock,
     ctx: &mut TxContext,
-) {
+): (Position, Coin<Settlement>) {
+    check_write_preconditions(bucket, org, config, &q, clock);
     let bucket_id = object::id(bucket);
-    assert!(quote::bucket_id(&q) == bucket_id, errors::quote_bucket_mismatch());
-    assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
-    assert!(!bucket.invalidated, errors::bucket_invalidated());
 
     let write_amount = quote::write_amount(&q);
     let gross_premium = quote::premium(&q);
     let signer_recipient = quote::signer_token_recipient(&q);
-    assert!(write_amount > 0, errors::zero_amount());
+    assert!(underlying_in.value() == write_amount, errors::amount_mismatch());
 
-    let fee = (((gross_premium as u128) * (admin::fee_bps(config) as u128)) / 10000) as u64;
-    let net_premium = gross_premium - fee;
+    let (org_fee, protocol_fee) = fee_split(gross_premium, org, config);
+    let net_premium = gross_premium - org_fee - protocol_fee;
 
-    match (flow) {
-        FlowKind::Writer => {
-            // Signer is the trader MM (the buyer of the option).
-            // Signer-supplied side: premium (Settlement) debited from their Account.
-            // Executor-supplied side: underlying matching write_amount.
-            assert!(signer_recipient == call_token_recipient, errors::quote_recipient_mismatch());
-            assert!(premium_in.value() == 0, errors::amount_mismatch());
-            assert!(underlying_in.value() == write_amount, errors::amount_mismatch());
+    // Signer (trader MM) pays the gross premium from their Account.
+    let premium_coin = account::withdraw_internal<Settlement>(
+        signer_account,
+        gross_premium,
+        ctx,
+    );
+    let mut premium_balance = premium_coin.into_balance();
+    skim_fees(&mut premium_balance, org, treasury, org_fee, protocol_fee);
+    let net_coin = coin::from_balance(premium_balance, ctx);
 
-            let premium_coin = account::withdraw_internal<Settlement>(
-                signer_account,
-                gross_premium,
-                ctx,
-            );
-            let mut premium_balance = premium_coin.into_balance();
-            if (fee > 0) {
-                let fee_balance = premium_balance.split(fee);
-                treasury::deposit_balance(treasury, fee_balance);
-            };
-            let net_coin = coin::from_balance(premium_balance, ctx);
-            transfer::public_transfer(net_coin, ctx.sender());
-
-            bucket.underlying_balance.join(underlying_in.into_balance());
-            premium_in.destroy_zero();
-        },
-        FlowKind::Trader => {
-            // Signer is the writer MM (the seller of the option).
-            // Signer-supplied side: underlying debited from their Account.
-            // Executor-supplied side: premium matching gross_premium.
-            assert!(signer_recipient == position_recipient, errors::quote_recipient_mismatch());
-            assert!(underlying_in.value() == 0, errors::amount_mismatch());
-            assert!(premium_in.value() == gross_premium, errors::amount_mismatch());
-
-            let underlying_coin = account::withdraw_internal<Underlying>(
-                signer_account,
-                write_amount,
-                ctx,
-            );
-            bucket.underlying_balance.join(underlying_coin.into_balance());
-
-            let mut premium_balance = premium_in.into_balance();
-            if (fee > 0) {
-                let fee_balance = premium_balance.split(fee);
-                treasury::deposit_balance(treasury, fee_balance);
-            };
-            account::deposit_balance(signer_account, premium_balance);
-
-            underlying_in.destroy_zero();
-        },
-    };
+    bucket.underlying_balance.join(underlying_in.into_balance());
 
     let range_start = bucket.total_written;
     let range_end = range_start + (write_amount as u128);
@@ -291,28 +311,97 @@ fun execute_write_with_quote<Underlying, Settlement, Call>(
 
     let position = position::mint(bucket_id, range_start, range_end, ctx);
     let position_id = object::id(&position);
-    transfer::public_transfer(position, position_recipient);
 
-    // Mint the option as a fungible coin from the bucket's own treasury.
+    // The signer's side keeps its contract-enforced routing: the quote's
+    // recipient gets the option coin regardless of what the executor's PTB
+    // does with the returned values.
     let call = coin::mint(&mut bucket.call_treasury, write_amount, ctx);
-    transfer::public_transfer(call, call_token_recipient);
+    transfer::public_transfer(call, signer_recipient);
 
     events::emit_write_executed(
         bucket_id,
+        bucket.org_id,
         quote::signer_account_id(&q),
         signer_recipient,
         ctx.sender(),
         position_id,
-        position_recipient,
-        call_token_recipient,
+        FLOW_WRITER,
         write_amount,
         gross_premium,
-        fee,
+        org_fee,
+        protocol_fee,
         net_premium,
         range_start,
         range_end,
         quote::nonce(&q),
     );
+
+    (position, net_coin)
+}
+
+fun trader_flow_with_quote<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    org: &mut Org,
+    config: &ProtocolConfig,
+    treasury: &mut Treasury,
+    signer_account: &mut Account,
+    premium_in: Coin<Settlement>,
+    q: Quote,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): Coin<Call> {
+    check_write_preconditions(bucket, org, config, &q, clock);
+    let bucket_id = object::id(bucket);
+
+    let write_amount = quote::write_amount(&q);
+    let gross_premium = quote::premium(&q);
+    let signer_recipient = quote::signer_token_recipient(&q);
+    assert!(premium_in.value() == gross_premium, errors::amount_mismatch());
+
+    let (org_fee, protocol_fee) = fee_split(gross_premium, org, config);
+    let net_premium = gross_premium - org_fee - protocol_fee;
+
+    // Signer (writer MM) provides the underlying from their Account.
+    let underlying_coin = account::withdraw_internal<Underlying>(
+        signer_account,
+        write_amount,
+        ctx,
+    );
+    bucket.underlying_balance.join(underlying_coin.into_balance());
+
+    let mut premium_balance = premium_in.into_balance();
+    skim_fees(&mut premium_balance, org, treasury, org_fee, protocol_fee);
+    account::deposit_balance(signer_account, premium_balance);
+
+    let range_start = bucket.total_written;
+    let range_end = range_start + (write_amount as u128);
+    bucket.total_written = range_end;
+
+    let position = position::mint(bucket_id, range_start, range_end, ctx);
+    let position_id = object::id(&position);
+    transfer::public_transfer(position, signer_recipient);
+
+    let call = coin::mint(&mut bucket.call_treasury, write_amount, ctx);
+
+    events::emit_write_executed(
+        bucket_id,
+        bucket.org_id,
+        quote::signer_account_id(&q),
+        signer_recipient,
+        ctx.sender(),
+        position_id,
+        FLOW_TRADER,
+        write_amount,
+        gross_premium,
+        org_fee,
+        protocol_fee,
+        net_premium,
+        range_start,
+        range_end,
+        quote::nonce(&q),
+    );
+
+    call
 }
 
 public fun exercise<Underlying, Settlement, Call>(
@@ -420,16 +509,21 @@ public fun burn_expired_option<Underlying, Settlement, Call>(
     events::emit_expired_option_burned(bucket_id, ctx.sender(), amount);
 }
 
-#[allow(lint(self_transfer))]
+/// Destroy a drained, expired bucket. Gated by the bucket's OrgCap — no
+/// AdminCap override, which would hand an arbitrary org's `TreasuryCap` to
+/// the protocol admin. Returns the option coin's `TreasuryCap` to the PTB:
+/// it can't be dropped (no `drop`), and outstanding option coins may still
+/// exist (holders who never exercised or burned).
 public fun cleanup_bucket<Underlying, Settlement, Call>(
-    _: &AdminCap,
+    cap: &OrgCap,
     bucket: Bucket<Underlying, Settlement, Call>,
     clock: &Clock,
-    ctx: &mut TxContext,
-) {
+): TreasuryCap<Call> {
+    org::assert_cap(cap, bucket.org_id);
     assert!(clock.timestamp_ms() >= bucket.expiry_ms, errors::bucket_not_expired());
     let Bucket {
         id,
+        org_id: _,
         asset_type: _,
         settlement_type: _,
         call_type: _,
@@ -447,43 +541,86 @@ public fun cleanup_bucket<Underlying, Settlement, Call>(
     assert!(settlement_balance.value() == 0, errors::bucket_not_drained());
     underlying_balance.destroy_zero();
     settlement_balance.destroy_zero();
-    // The TreasuryCap can't be dropped (no `drop`), and outstanding option
-    // coins may still exist (holders who never exercised or burned). Hand
-    // the cap back to the admin rather than forcing supply to zero.
-    transfer::public_transfer(call_treasury, ctx.sender());
     let bucket_id = id.to_inner();
     id.delete();
     events::emit_bucket_cleaned(bucket_id);
+    call_treasury
 }
 
 public fun invalidate_bucket<Underlying, Settlement, Call>(
+    cap: &OrgCap,
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    reason: vector<u8>,
+    clock: &Clock,
+    ctx: &TxContext,
+) {
+    org::assert_cap(cap, bucket.org_id);
+    do_invalidate(bucket, reason, clock, ctx.sender(), false);
+}
+
+public fun revalidate_bucket<Underlying, Settlement, Call>(
+    cap: &OrgCap,
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    reason: vector<u8>,
+    clock: &Clock,
+    ctx: &TxContext,
+) {
+    org::assert_cap(cap, bucket.org_id);
+    do_revalidate(bucket, reason, clock, ctx.sender(), false);
+}
+
+/// Protocol-admin override: gate any org's bucket in an emergency. Note
+/// `invalidated` is a single flag — an org can re-validate a bucket the
+/// admin invalidated (and vice versa); last writer wins.
+public fun admin_invalidate_bucket<Underlying, Settlement, Call>(
     _: &AdminCap,
     bucket: &mut Bucket<Underlying, Settlement, Call>,
     reason: vector<u8>,
     clock: &Clock,
     ctx: &TxContext,
+) {
+    do_invalidate(bucket, reason, clock, ctx.sender(), true);
+}
+
+public fun admin_revalidate_bucket<Underlying, Settlement, Call>(
+    _: &AdminCap,
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    reason: vector<u8>,
+    clock: &Clock,
+    ctx: &TxContext,
+) {
+    do_revalidate(bucket, reason, clock, ctx.sender(), true);
+}
+
+fun do_invalidate<U, S, C>(
+    bucket: &mut Bucket<U, S, C>,
+    reason: vector<u8>,
+    clock: &Clock,
+    actor: address,
+    by_admin: bool,
 ) {
     let now = clock.timestamp_ms();
     assert!(now < bucket.expiry_ms, errors::bucket_expired());
     assert!(!bucket.invalidated, errors::bucket_invalidated());
     bucket.invalidated = true;
-    events::emit_bucket_invalidated(object::id(bucket), now, ctx.sender(), reason);
+    events::emit_bucket_invalidated(object::id(bucket), now, actor, by_admin, reason);
 }
 
-public fun revalidate_bucket<Underlying, Settlement, Call>(
-    _: &AdminCap,
-    bucket: &mut Bucket<Underlying, Settlement, Call>,
+fun do_revalidate<U, S, C>(
+    bucket: &mut Bucket<U, S, C>,
     reason: vector<u8>,
     clock: &Clock,
-    ctx: &TxContext,
+    actor: address,
+    by_admin: bool,
 ) {
     let now = clock.timestamp_ms();
     assert!(now < bucket.expiry_ms, errors::bucket_expired());
     assert!(bucket.invalidated, errors::bucket_not_invalidated());
     bucket.invalidated = false;
-    events::emit_bucket_revalidated(object::id(bucket), now, ctx.sender(), reason);
+    events::emit_bucket_revalidated(object::id(bucket), now, actor, by_admin, reason);
 }
 
+public fun org_id<U, S, C>(bucket: &Bucket<U, S, C>): ID { bucket.org_id }
 public fun expiry_ms<U, S, C>(bucket: &Bucket<U, S, C>): u64 { bucket.expiry_ms }
 public fun invalidated<U, S, C>(bucket: &Bucket<U, S, C>): bool { bucket.invalidated }
 public fun strike<U, S, C>(bucket: &Bucket<U, S, C>): u128 { bucket.strike }

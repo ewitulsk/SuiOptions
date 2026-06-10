@@ -69,6 +69,7 @@ impl Harness {
             store.ingest(
                 ChainEvent::BucketCreated(BucketCreated {
                     bucket_id: bucket,
+                    org_id: ObjectId::new([0xee; 32]),
                     asset_type: AssetType::new("BTC"),
                     settlement_type: AssetType::new("USDC"),
                     call_type: AssetType::new("0x9::call_0::CALL_0"),
@@ -101,6 +102,12 @@ impl Harness {
         let app = Arc::new(quoting_service::AppState::with_global_rfq_cap(
             cfg.max_inflight_rfqs_global,
             cfg.indexer_graphql_url.clone(),
+            // Seeded bucket belongs to org [0xee; 32] — pre-verify it.
+            token_info_client::VerifiedOrgsWatcher::fixed(vec![token_info_client::VerifiedOrg {
+                org_id: ObjectId::new([0xee; 32]).to_hex(),
+                name: "test-org".into(),
+                enabled: true,
+            }]),
         ));
 
         // Quoting WS server: rebind on ephemeral.
@@ -202,6 +209,7 @@ fn account_json(id: &str, a: &indexer::AccountState) -> serde_json::Value {
 fn bucket_json(id: &str, b: &indexer::BucketState) -> serde_json::Value {
     serde_json::json!({
         "bucketId": id,
+        "orgId": b.org_id.to_hex(),
         "assetType": b.asset_type.as_str(),
         "settlementType": b.settlement_type.as_str(),
         "callType": b.call_type.as_str(),

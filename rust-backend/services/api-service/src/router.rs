@@ -24,6 +24,7 @@ pub async fn serve(
     let app = Router::new()
         .route("/health", get(health))
         .route("/buckets", get(handlers::buckets::list_buckets))
+        .route("/orgs", get(handlers::orgs::list_orgs))
         .route("/buckets/:bucket_id", get(handlers::buckets::get_bucket))
         .route("/positions", get(handlers::positions::list_positions))
         .route(

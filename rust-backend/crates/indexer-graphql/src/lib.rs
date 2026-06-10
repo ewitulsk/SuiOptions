@@ -39,6 +39,8 @@ pub struct IndexerClient {
 #[derive(Clone, Debug)]
 pub struct Bucket {
     pub bucket_id: ObjectId,
+    /// Org that created (and administers) this bucket.
+    pub org_id: ObjectId,
     pub asset_type: AssetType,
     pub settlement_type: AssetType,
     /// Fully-qualified type of the per-bucket fungible option coin.
@@ -53,6 +55,16 @@ pub struct Bucket {
     /// DeepBook pool trading this bucket's call coin (SO-152); `None` until
     /// a venue is created.
     pub deepbook_pool_id: Option<ObjectId>,
+}
+
+/// An org from the indexer's materialized view. The indexer records every
+/// org created on-chain; verification status lives in token-info.
+#[derive(Clone, Debug)]
+pub struct Org {
+    pub org_id: ObjectId,
+    pub name: String,
+    pub fee_bps: u64,
+    pub creator: SuiAddress,
 }
 
 /// An account's registered signing key + per-asset balances. `signing_scheme`
@@ -127,7 +139,7 @@ impl IndexerClient {
 
     /// One bucket by id, or `None` if the indexer doesn't know it.
     pub async fn bucket(&self, bucket_id: ObjectId) -> Result<Option<Bucket>> {
-        const Q: &str = "query($id:String!){bucket(id:$id){bucketId assetType settlementType \
+        const Q: &str = "query($id:String!){bucket(id:$id){bucketId orgId assetType settlementType \
             callType strikeRaw strikeScale expiryMs totalWrittenRaw exerciseCursorRaw cleaned \
             invalidated deepbookPoolId}}";
         let data: BucketWrap = self
@@ -136,26 +148,43 @@ impl IndexerClient {
         data.bucket.map(Bucket::try_from).transpose()
     }
 
-    /// Buckets matching the filters (all ANDed). `active_only` drops cleaned.
+    /// Buckets matching the filters (all ANDed). `active_only` drops cleaned;
+    /// `org_ids` restricts to those orgs' buckets (verified-only surfaces).
     pub async fn buckets(
         &self,
         active_only: bool,
+        org_ids: Option<&[String]>,
         asset_type: Option<&AssetType>,
         settlement_type: Option<&AssetType>,
         expiry_ms: Option<u64>,
     ) -> Result<Vec<Bucket>> {
-        const Q: &str = "query($a:Boolean,$u:String,$s:String,$e:String){\
-            buckets(activeOnly:$a,assetType:$u,settlementType:$s,expiryMs:$e){\
-            bucketId assetType settlementType callType strikeRaw strikeScale expiryMs \
+        const Q: &str = "query($a:Boolean,$o:[String!],$u:String,$s:String,$e:String){\
+            buckets(activeOnly:$a,orgIds:$o,assetType:$u,settlementType:$s,expiryMs:$e){\
+            bucketId orgId assetType settlementType callType strikeRaw strikeScale expiryMs \
             totalWrittenRaw exerciseCursorRaw cleaned invalidated deepbookPoolId}}";
         let vars = json!({
             "a": active_only,
+            "o": org_ids,
             "u": asset_type.map(|a| a.as_str()),
             "s": settlement_type.map(|a| a.as_str()),
             "e": expiry_ms.map(|e| e.to_string()),
         });
         let data: BucketsWrap = self.gql(Q, vars).await?;
         data.buckets.into_iter().map(Bucket::try_from).collect()
+    }
+
+    /// One org by id, or `None` if the indexer doesn't know it.
+    pub async fn org(&self, org_id: ObjectId) -> Result<Option<Org>> {
+        const Q: &str = "query($id:String!){org(id:$id){orgId name feeBps creator}}";
+        let data: OrgWrap = self.gql(Q, json!({ "id": org_id.to_hex() })).await?;
+        data.org.map(Org::try_from).transpose()
+    }
+
+    /// Every org the indexer has seen (verification is a token-info concern).
+    pub async fn orgs(&self) -> Result<Vec<Org>> {
+        const Q: &str = "query{orgs{orgId name feeBps creator}}";
+        let data: OrgsWrap = self.gql(Q, json!({})).await?;
+        data.orgs.into_iter().map(Org::try_from).collect()
     }
 
     /// One account (signing key + balances), or `None` if unknown.
@@ -239,18 +268,26 @@ impl IndexerClient {
         Ok(out)
     }
 
-    /// All `WriteExecuted` events whose `call_token_recipient` is `wallet`, in
+    /// All `WriteExecuted` events whose call-token recipient is `wallet`, in
     /// ascending order. Backs the api-service call-token "lot" provenance list.
+    ///
+    /// The event no longer carries a `call_token_recipient` field (the
+    /// executor's side is PTB-routed): the coin lands with the executor in
+    /// trader flow (flow=1) and with the quote's `signer_token_recipient` in
+    /// writer flow (flow=0), so this is an OR over the two flow shapes.
     pub async fn write_executed_for_recipient(
         &self,
         wallet: SuiAddress,
     ) -> Result<Vec<IndexedEvent>> {
-        // Match nests under `payload` — the column stores the tagged
+        // Matches nest under `payload` — the column stores the tagged
         // `ChainEvent` envelope (`{"type":…,"payload":{…}}`), not the bare
         // event fields. See `write_executed_for_account_since`.
         let filter = json!({
             "eventType": ["WriteExecuted"],
-            "payloadContains": { "payload": { "call_token_recipient": wallet.to_hex() } },
+            "or": [
+                { "payloadContains": { "payload": { "flow": 1, "executor": wallet.to_hex() } } },
+                { "payloadContains": { "payload": { "flow": 0, "signer_token_recipient": wallet.to_hex() } } },
+            ],
         });
         self.scan_events(filter, 0).await
     }
@@ -361,6 +398,14 @@ struct AccountWrap {
     account: Option<AccountJson>,
 }
 #[derive(Deserialize)]
+struct OrgWrap {
+    org: Option<OrgJson>,
+}
+#[derive(Deserialize)]
+struct OrgsWrap {
+    orgs: Vec<OrgJson>,
+}
+#[derive(Deserialize)]
 struct PositionsWrap {
     positions: Vec<PositionJson>,
 }
@@ -403,8 +448,18 @@ impl EventNodeJson {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct OrgJson {
+    org_id: String,
+    name: String,
+    fee_bps: String,
+    creator: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BucketJson {
     bucket_id: String,
+    org_id: String,
     asset_type: String,
     settlement_type: String,
     call_type: String,
@@ -475,11 +530,29 @@ fn parse_u8(v: i32) -> Result<u8> {
     u8::try_from(v).map_err(|_| anyhow!("value {v} out of u8 range"))
 }
 
+impl TryFrom<OrgJson> for Org {
+    type Error = anyhow::Error;
+    fn try_from(o: OrgJson) -> Result<Self> {
+        Ok(Org {
+            org_id: parse_object_id(&o.org_id)?,
+            name: o.name,
+            fee_bps: parse_u64(&o.fee_bps)?,
+            creator: parse_address(&o.creator)?,
+        })
+    }
+}
+
 impl TryFrom<BucketJson> for Bucket {
     type Error = anyhow::Error;
     fn try_from(b: BucketJson) -> Result<Self> {
         Ok(Bucket {
             bucket_id: parse_object_id(&b.bucket_id)?,
+            org_id: if b.org_id.is_empty() {
+                // Pre-org rows (legacy package) carry '' — map to zero.
+                ObjectId::ZERO
+            } else {
+                parse_object_id(&b.org_id)?
+            },
             asset_type: AssetType::new(b.asset_type),
             settlement_type: AssetType::new(b.settlement_type),
             call_type: AssetType::new(b.call_type),
