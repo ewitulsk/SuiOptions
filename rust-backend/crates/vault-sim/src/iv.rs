@@ -21,6 +21,12 @@ pub trait IvProvider {
     fn iv(&self, ctx: &MarketCtx, tenor_years: f64, delta: f64) -> f64;
 }
 
+impl<P: IvProvider + ?Sized> IvProvider for Box<P> {
+    fn iv(&self, ctx: &MarketCtx, tenor_years: f64, delta: f64) -> f64 {
+        (**self).iv(ctx, tenor_years, delta)
+    }
+}
+
 /// Annualized close-to-close realized vol over the trailing `window` bars
 /// ending at `idx`. Sample stddev (N−1) of log returns × √bars_per_year —
 /// the same convention as `pyth-client::vol::realized_vol`, reimplemented
