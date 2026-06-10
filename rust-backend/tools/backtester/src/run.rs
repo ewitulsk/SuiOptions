@@ -4,7 +4,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use vault_sim::engine::{run_path, EngineParams, PremiumPolicy};
+use vault_sim::engine::{run_path, EngineParams, FlowSchedule, PremiumPolicy};
 use vault_sim::exercise::{EarlyIntrinsic, ExercisePolicy, Partial, RationalExpiry};
 use vault_sim::iv::{BetaScaled, DeribitDvol, IvProvider, MarketCtx, RealizedOnly, VrpTransfer};
 use vault_sim::ledger::LedgerConfig;
@@ -237,6 +237,13 @@ fn engine_params(meta: &Meta, cell: &Cell) -> Result<EngineParams> {
             round_ms: meta.round_bars as u64 * DAY_MS,
         },
         swap_slippage_bps: cell.slippage_bps,
+        flows: FlowSchedule {
+            deposit_per_round: (meta.deposit_tokens_per_round
+                * 10f64.powi(under_dec as i32)) as u64,
+            withdraw_fraction_bps: meta.withdraw_fraction_bps,
+            stress_round: meta.stress_round,
+            stress_fraction_bps: meta.stress_fraction_bps,
+        },
     })
 }
 

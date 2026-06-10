@@ -19,10 +19,18 @@ DATA_DIR = "data"
 DAY_MS = 86_400_000
 
 CANDLES = [
-    # (coinbase product, output file, first day)
-    ("BTC-USD", "btc_usd_1d.csv", "2019-01-01"),
-    ("ETH-USD", "eth_usd_1d.csv", "2019-01-01"),
+    # (coinbase product, output file, first day) — daily, full listing history.
+    ("BTC-USD", "btc_usd_1d.csv", "2015-01-15"),
+    ("ETH-USD", "eth_usd_1d.csv", "2016-06-01"),
     ("SUI-USD", "sui_usd_1d.csv", "2023-05-18"),
+]
+HOURLY = [
+    # Hourly bars sharpen the early-exercise paths (intra-week spikes
+    # through the strike that daily closes miss). DVOL-era onward for
+    # BTC/ETH keeps the request count sane; SUI gets its whole life.
+    ("BTC-USD", "btc_usd_1h.csv", "2021-03-24"),
+    ("ETH-USD", "eth_usd_1h.csv", "2021-03-24"),
+    ("SUI-USD", "sui_usd_1h.csv", "2023-05-18"),
 ]
 DVOL = [
     # (deribit currency, output file, first day)
@@ -45,18 +53,21 @@ def get_json(url: str):
             time.sleep(wait)
 
 
-def fetch_candles(product: str, out_name: str, start_day: str) -> None:
+def fetch_candles(
+    product: str, out_name: str, start_day: str, granularity: int = 86400
+) -> None:
     start = datetime.fromisoformat(start_day).replace(tzinfo=timezone.utc)
     end_of_data = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
+    window = timedelta(seconds=granularity * 299)  # 300 bars per request
     rows = {}
     cur = start
     while cur < end_of_data:
-        window_end = min(cur + timedelta(days=299), end_of_data)
+        window_end = min(cur + window, end_of_data)
         qs = urllib.parse.urlencode(
             {
-                "granularity": 86400,
+                "granularity": granularity,
                 "start": cur.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "end": window_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
@@ -65,7 +76,7 @@ def fetch_candles(product: str, out_name: str, start_day: str) -> None:
         # Rows are [t_secs, low, high, open, close, volume], newest first.
         for t, low, high, open_, close, _vol in get_json(url):
             rows[int(t) * 1000] = (open_, high, low, close)
-        cur = window_end + timedelta(days=1)
+        cur = window_end + timedelta(seconds=granularity)
         time.sleep(0.25)  # public rate limit headroom
 
     path = f"{DATA_DIR}/{out_name}"
@@ -75,7 +86,7 @@ def fetch_candles(product: str, out_name: str, start_day: str) -> None:
         for ts in sorted(rows):
             o, h, l, c = rows[ts]
             w.writerow([ts, o, h, l, c])
-    print(f"{path}: {len(rows)} bars ({product})")
+    print(f"{path}: {len(rows)} bars ({product} @ {granularity}s)")
 
 
 def fetch_dvol(currency: str, out_name: str, start_day: str) -> None:
@@ -119,6 +130,10 @@ def main() -> None:
         if only and only.lower() not in product.lower():
             continue
         fetch_candles(product, out, start)
+    for product, out, start in HOURLY:
+        if only and only.lower() not in product.lower():
+            continue
+        fetch_candles(product, out, start, granularity=3600)
     for currency, out, start in DVOL:
         if only and only.lower() not in currency.lower():
             continue

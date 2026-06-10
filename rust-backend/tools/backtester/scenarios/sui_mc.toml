@@ -19,10 +19,10 @@ premium_policy = ["at_roll", "hold_usdc"]
 
 [premium]
 iv_provider = "vrp_transfer"
-vrp_ratio = 1.15
-skew_bps = [0]
+vrp_ratio = 1.19
+skew_bps = [-600]
 mechanism = "onchain_auction"
-haircut_bps = [500, 1000]
+haircut_bps = [1500, 2500, 3500]
 n_bidders_mean = [1, 3, 6]
 
 [exercise]

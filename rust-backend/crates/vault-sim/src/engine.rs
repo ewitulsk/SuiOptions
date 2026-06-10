@@ -48,6 +48,69 @@ pub struct EngineParams {
     pub initial_deposit: UnderlyingAmt,
     pub ledger: LedgerConfig,
     pub swap_slippage_bps: u64,
+    pub flows: FlowSchedule,
+}
+
+/// Scenario-driven deposit/withdraw flows (doc 06 §6 step 2): the engine
+/// plays an aggregate LP alongside the initial deposit, stressing the
+/// queue accounting every round instead of only at genesis.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FlowSchedule {
+    /// Underlying smallest-units deposited each round (growth scenario).
+    pub deposit_per_round: u64,
+    /// Fraction of the LP's held shares queued for withdrawal each round,
+    /// bps.
+    pub withdraw_fraction_bps: u64,
+    /// One-time mass redemption (bank-run stress): at this round number,
+    /// queue `stress_fraction_bps` of held shares on top of the steady
+    /// trickle.
+    pub stress_round: Option<u64>,
+    pub stress_fraction_bps: u64,
+}
+
+/// The aggregate LP driven by a [`FlowSchedule`]: queues deposits and
+/// withdrawals during each round, claims/completes after each finalize.
+#[derive(Default)]
+struct LpState {
+    pending_claims: Vec<crate::ledger::DepositReceipt>,
+    held: crate::types::ShareAmt,
+    pending_withdrawals: Vec<crate::ledger::WithdrawReceipt>,
+}
+
+impl LpState {
+    /// User actions that happen *during* the round (before its finalize):
+    /// the deposit queues for the next round, the withdrawal settles with
+    /// this one (Ribbon semantics).
+    fn before_finalize(&mut self, ledger: &mut Ledger, flows: &FlowSchedule) {
+        if flows.deposit_per_round > 0 {
+            self.pending_claims
+                .push(ledger.deposit(UnderlyingAmt(flows.deposit_per_round)));
+        }
+        let mut frac_bps = flows.withdraw_fraction_bps;
+        if flows.stress_round == Some(ledger.round()) {
+            frac_bps += flows.stress_fraction_bps;
+        }
+        let to_queue = (self.held.get() as u128 * frac_bps.min(10_000) as u128 / 10_000) as u64;
+        if to_queue > 0 {
+            self.held -= crate::types::ShareAmt(to_queue);
+            self.pending_withdrawals
+                .push(ledger.initiate_withdraw(crate::types::ShareAmt(to_queue)));
+        }
+    }
+
+    /// Claim newly-priced deposit shares and collect payable withdrawals.
+    fn after_finalize(&mut self, ledger: &mut Ledger) {
+        let held = &mut self.held;
+        self.pending_claims.retain(|r| match ledger.claim_shares(*r) {
+            Ok(shares) => {
+                *held += shares;
+                false
+            }
+            Err(_) => true,
+        });
+        self.pending_withdrawals
+            .retain(|w| ledger.complete_withdraw(*w).is_err());
+    }
 }
 
 /// Map an f64 chain-cross strike to the integer `(strike, strike_scale)`
@@ -85,10 +148,14 @@ pub fn run_path(
     let swap = SwapModel { slippage_bps: params.swap_slippage_bps };
 
     let mut ledger = Ledger::new(params.ledger);
+    let mut lp = LpState::default();
     if params.initial_deposit.get() > 0 {
-        ledger.deposit(params.initial_deposit);
+        // The LP owns the genesis deposit too, so flow schedules can
+        // redeem out of it.
+        lp.pending_claims.push(ledger.deposit(params.initial_deposit));
     }
     ledger.finalize_round(UnderlyingAmt::ZERO, UnderlyingAmt::ZERO); // genesis
+    lp.after_finalize(&mut ledger);
 
     let mut records = Vec::new();
     let mut i = 0usize;
@@ -109,7 +176,9 @@ pub fn run_path(
         // No usable vol (e.g. warm-up bars of a replay) or nothing to
         // deploy: idle round — hold to expiry and finalize flat.
         if sigma_iv <= 0.0 || deployable.get() == 0 {
+            lp.before_finalize(&mut ledger, &params.flows);
             let out = ledger.finalize_round(deployable, UnderlyingAmt::ZERO);
+            lp.after_finalize(&mut ledger);
             records.push(RoundRecord {
                 round: out.round,
                 spot_0,
@@ -208,7 +277,9 @@ pub fn run_path(
 
         let aum =
             UnderlyingAmt(deployable.get() - written) + u_back + premium_u + exercise_u;
+        lp.before_finalize(&mut ledger, &params.flows);
         let out = ledger.finalize_round(aum, premium_u);
+        lp.after_finalize(&mut ledger);
 
         records.push(RoundRecord {
             round: out.round,
@@ -263,6 +334,7 @@ mod tests {
                 round_ms: 604_800_000,
             },
             swap_slippage_bps: 0,
+            flows: FlowSchedule::default(),
         }
     }
 
@@ -465,6 +537,73 @@ mod tests {
             pps_early > pps_rational,
             "early {pps_early:?} must beat rational {pps_rational:?} on a spike-and-collapse path"
         );
+    }
+
+    #[test]
+    fn flow_schedule_grows_and_shrinks_supply() {
+        // Steady deposits + a withdrawal trickle on a flat path: supply
+        // tracks the flows, every queue clears, nothing panics.
+        let mut p = params();
+        p.flows = FlowSchedule {
+            deposit_per_round: 100_000_000_000, // 100 SUI per round
+            withdraw_fraction_bps: 500,         // 5% of held shares
+            stress_round: None,
+            stress_fraction_bps: 0,
+        };
+        let path = path_with_tail(&[3.5; 8]);
+        let records = run_path(
+            &p,
+            &selector(),
+            &path,
+            &RealizedOnly { window: 30, bars_per_year: 365.0 },
+            &BlackScholesMid,
+            &mut RfqBatch { haircut_bps: 0 },
+            &mut RationalExpiry,
+        );
+        // Supply reflects both flows: well above the initial 1000 SUI
+        // (deposits dominate) but visibly below the deposit-only ~1600
+        // (the 5% trickle is draining).
+        let last = records.last().unwrap();
+        assert!(
+            last.shares.get() > 1_150_000_000_000 && last.shares.get() < 1_450_000_000_000,
+            "supply {} should sit between deposit growth and trickle drain",
+            last.shares.get()
+        );
+        // Withdrawals were funded every round (no panic == pool solvent).
+        assert!(last.aum.get() > 0);
+    }
+
+    #[test]
+    fn stress_redemption_stays_solvent() {
+        // An 80% bank-run at round 3 on top of the trickle: the queue
+        // pays out at the locked pps and the vault keeps running.
+        let mut p = params();
+        p.flows = FlowSchedule {
+            deposit_per_round: 0,
+            withdraw_fraction_bps: 100,
+            stress_round: Some(3),
+            stress_fraction_bps: 8_000,
+        };
+        let path = path_with_tail(&[3.5; 8]);
+        let records = run_path(
+            &p,
+            &selector(),
+            &path,
+            &RealizedOnly { window: 30, bars_per_year: 365.0 },
+            &BlackScholesMid,
+            &mut RfqBatch { haircut_bps: 0 },
+            &mut RationalExpiry,
+        );
+        let peak = records.iter().map(|r| r.shares.get()).max().unwrap();
+        let last = records.last().unwrap().shares.get();
+        assert!(
+            last < peak / 4,
+            "post-stress supply {last} should be well under the {peak} peak"
+        );
+        // Flat path ⇒ the run never went insolvent and pps never fell.
+        for w in records.windows(2) {
+            assert!(w[1].pps >= w[0].pps);
+        }
     }
 
     #[test]

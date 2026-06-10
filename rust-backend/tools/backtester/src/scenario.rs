@@ -77,6 +77,16 @@ pub struct Meta {
     /// Trailing realized-vol window, bars.
     #[serde(default = "default_rv_window")]
     pub rv_window: usize,
+    /// LP flow schedule (doc 06 §6 step 2): steady deposits, a steady
+    /// withdrawal trickle, and an optional one-round redemption stress.
+    #[serde(default)]
+    pub deposit_tokens_per_round: f64,
+    #[serde(default)]
+    pub withdraw_fraction_bps: u64,
+    #[serde(default)]
+    pub stress_round: Option<u64>,
+    #[serde(default)]
+    pub stress_fraction_bps: u64,
     /// Grid-vol clamp (scheduler's vol_floor / vol_ceiling).
     #[serde(default = "default_vol_floor")]
     pub vol_floor: f64,

@@ -15,6 +15,7 @@ mod data;
 mod report;
 mod run;
 mod scenario;
+mod validate;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -65,6 +66,39 @@ enum Command {
         #[arg(long, default_value = "apy_p5")]
         rank: String,
     },
+    /// Milestone-2 validation (doc 06 §9.4): replay Ribbon's scraped
+    /// round history; compare our modeled strategy against their realized
+    /// track and fit the premium model. Data: fetch_ribbon.py.
+    ValidateRibbon {
+        /// datasets/ribbon_rounds.csv from fetch_ribbon.py.
+        #[arg(long, default_value = "datasets/ribbon_rounds.csv")]
+        rounds: PathBuf,
+        /// T-ETH-C | T-WBTC-C
+        #[arg(long, default_value = "T-ETH-C")]
+        vault: String,
+        #[arg(long)]
+        candles: PathBuf,
+        #[arg(long)]
+        dvol: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// Premium-model parameters to validate (0/0 = uncalibrated).
+        #[arg(long, default_value_t = 0)]
+        skew_bps: i64,
+        #[arg(long, default_value_t = 0)]
+        haircut_bps: u64,
+    },
+    /// Milestone-3 calibration (doc 06 §9.4): the 10Δ-weekly wing IV vs
+    /// the DVOL index, from the free first-of-month Deribit chain
+    /// snapshots. Data: fetch_chain_snapshots.py.
+    CalibrateSkew {
+        #[arg(long, default_value = "datasets/chain_snapshots.csv")]
+        snapshots: PathBuf,
+        #[arg(long)]
+        dvol: PathBuf,
+        #[arg(long, default_value = "BTC")]
+        currency: String,
+    },
     /// Calibrate the IV/RV ratio (the keeper's iv_ratio and the
     /// vrp_transfer provider's vrp_ratio): vol-index / trailing realized
     /// vol over the overlap of the two series (doc 06 §5).
@@ -87,6 +121,12 @@ fn main() -> Result<()> {
         }
         Command::Report { in_dir, format, top, rank } => cmd_report(&in_dir, &format, top, &rank),
         Command::Calibrate { candles, dvol, window } => cmd_calibrate(&candles, &dvol, window),
+        Command::ValidateRibbon { rounds, vault, candles, dvol, out, skew_bps, haircut_bps } => {
+            validate::cmd_validate_ribbon(&rounds, &vault, &candles, &dvol, &out, skew_bps, haircut_bps)
+        }
+        Command::CalibrateSkew { snapshots, dvol, currency } => {
+            validate::cmd_calibrate_skew(&snapshots, &dvol, &currency)
+        }
     }
 }
 
