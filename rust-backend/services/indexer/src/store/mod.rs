@@ -248,13 +248,17 @@ impl Store {
 
     /// Resolve a bucket by its call coin type (SO-152: DeepBook pools are
     /// tied to buckets via `PoolCreated`'s base asset). Linear scan — the
-    /// bucket set is small (a handful per active series).
+    /// bucket set is small (a handful per active series). Compares canonical
+    /// forms: stored call_types are chain `TypeName`s (no `0x`), while a
+    /// pool's base asset arrives `0x`-prefixed from the event type string
+    /// (SO-163).
     pub fn bucket_by_call_type(&self, call_type: &AssetType) -> Option<(ObjectId, BucketState)> {
+        let target = call_type.to_canonical();
         self.inner
             .read()
             .buckets
             .iter()
-            .find(|(_, b)| b.call_type == *call_type)
+            .find(|(_, b)| b.call_type.to_canonical() == target)
             .map(|(id, b)| (*id, b.clone()))
     }
 
