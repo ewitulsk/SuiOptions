@@ -4,6 +4,10 @@ Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-s
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
+**Project rules:**
+- [move-type-normalization.md](move-type-normalization.md) — Move/coin type strings arrive in two non-byte-equal forms (chain `TypeName` without `0x` vs event type string with `0x`); always compare via `to_canonical()` / `canonicalize_move_type`.
+- [PRs.md](PRs.md) — Jira ticket + PR workflow for this repo.
+
 ## 1. Think Before Coding
 
 **Don't assume. Don't hide confusion. Surface tradeoffs.**

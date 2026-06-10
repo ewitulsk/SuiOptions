@@ -57,25 +57,30 @@ impl ProtocolEventWorker {
 /// Promote a decoded DeepBook `PoolCreated` into a `ChainEvent` if its base
 /// asset is one of OUR bucket call coins; `None` for foreign pools. Buckets
 /// created earlier in the same checkpoint are visible via `local_buckets`
-/// (call_type → (bucket_id, settlement_type)) since the store only applies
-/// events at stage time.
+/// (canonical call_type → (bucket_id, settlement_type)) since the store only
+/// applies events at stage time. The map is keyed by the *canonical*
+/// (`0x`-prefixed, padded) call_type so it matches the pool's type-string form.
 fn resolve_deepbook_pool(
     store: &Store,
     local_buckets: &std::collections::HashMap<
-        protocol_types::asset::AssetType,
+        String,
         (protocol_types::ids::ObjectId, protocol_types::asset::AssetType),
     >,
     partial: event_types::DeepBookPoolCreatedPartial,
 ) -> Option<protocol_types::events::ChainEvent> {
+    // A pool's base/quote come from the event type string (`0x`-prefixed),
+    // while bucket call/settlement types are chain `TypeName`s (no `0x`).
+    // Canonicalize before every comparison so the two forms match (SO-163).
+    let base_canonical = partial.base_asset_type.to_canonical();
     let (bucket_id, settlement_type) = local_buckets
-        .get(&partial.base_asset_type)
+        .get(&base_canonical)
         .cloned()
         .or_else(|| {
             store
                 .bucket_by_call_type(&partial.base_asset_type)
                 .map(|(id, b)| (id, b.settlement_type))
         })?;
-    if partial.quote_asset_type != settlement_type {
+    if partial.quote_asset_type.to_canonical() != settlement_type.to_canonical() {
         tracing::warn!(
             pool = %partial.pool_id.to_hex(),
             bucket = %bucket_id.to_hex(),
@@ -132,8 +137,10 @@ impl Worker for ProtocolEventWorker {
                             "picked up event"
                         );
                         if let protocol_types::events::ChainEvent::BucketCreated(b) = &parsed {
+                            // Key by the canonical call_type so a same-checkpoint
+                            // pool (type-string form, `0x`-prefixed) still hits.
                             local_buckets.insert(
-                                b.call_type.clone(),
+                                b.call_type.to_canonical(),
                                 (b.bucket_id, b.settlement_type.clone()),
                             );
                         }
@@ -303,7 +310,7 @@ mod tests {
         let fresh = Store::new();
         let mut local2 = std::collections::HashMap::new();
         local2.insert(
-            AssetType::new("0x9::call_1::CALL_1"),
+            AssetType::new("0x9::call_1::CALL_1").to_canonical(),
             (ObjectId::new([0x22; 32]), AssetType::new("0x9::tusdc::TUSDC")),
         );
         let ev = resolve_deepbook_pool(
@@ -315,6 +322,64 @@ mod tests {
         match ev {
             protocol_types::events::ChainEvent::DeepBookPoolCreated(p) => {
                 assert_eq!(p.bucket_id, ObjectId::new([0x22; 32]));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// Real chain forms disagree on the `0x` prefix: `BucketCreated`'s
+    /// `TypeName` fields arrive WITHOUT `0x` (`93c0…::call_1::CALL_1`), while a
+    /// DeepBook `PoolCreated`'s base/quote are parsed from the event type
+    /// string WITH `0x` (`0x93c0…::call_1::CALL_1`). Resolution must
+    /// canonicalize both sides — before this fix the byte-exact compare never
+    /// matched and every pool was silently dropped as "foreign".
+    #[test]
+    fn deepbook_pool_resolves_across_0x_prefix_mismatch() {
+        let call_chain =
+            "93c0cc25b8a167a537e3f116cdc339a61e7dd25355cc3c6f640362f41d0f6d78::call_1::CALL_1";
+        let usdc_chain =
+            "9b72409a9f38a8784420d17577aa6dbe5aa2ab4224cd04c44d8b515f6c97ba86::tusdc::TUSDC";
+        let call_0x = format!("0x{call_chain}");
+        let usdc_0x = format!("0x{usdc_chain}");
+
+        // Store path: bucket persisted with chain-form (no `0x`) types; pool
+        // partial carries the `0x`-prefixed forms from the event type string.
+        let store = Store::new();
+        store.ingest(
+            protocol_types::events::ChainEvent::BucketCreated(BucketCreated {
+                bucket_id: ObjectId::new([0x33; 32]),
+                asset_type: AssetType::new("tbtc"),
+                settlement_type: AssetType::new(usdc_chain),
+                call_type: AssetType::new(call_chain),
+                expiry_ms: 1,
+                strike: 1,
+                strike_scale: 0,
+            }),
+            1,
+        );
+        let local = Default::default();
+        let ev = resolve_deepbook_pool(&store, &local, partial(&call_0x, &usdc_0x))
+            .expect("store-resolved pool matches across 0x-prefix mismatch");
+        match ev {
+            protocol_types::events::ChainEvent::DeepBookPoolCreated(p) => {
+                assert_eq!(p.bucket_id, ObjectId::new([0x33; 32]));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // Same-checkpoint path: the worker keys the local map by the
+        // canonical call_type, so the lookup still matches the 0x-form pool.
+        let fresh = Store::new();
+        let mut local2 = std::collections::HashMap::new();
+        local2.insert(
+            call_0x.clone(),
+            (ObjectId::new([0x44; 32]), AssetType::new(&usdc_0x)),
+        );
+        let ev = resolve_deepbook_pool(&fresh, &local2, partial(&call_0x, &usdc_0x))
+            .expect("local-resolved pool matches across 0x-prefix mismatch");
+        match ev {
+            protocol_types::events::ChainEvent::DeepBookPoolCreated(p) => {
+                assert_eq!(p.bucket_id, ObjectId::new([0x44; 32]));
             }
             other => panic!("unexpected {other:?}"),
         }
