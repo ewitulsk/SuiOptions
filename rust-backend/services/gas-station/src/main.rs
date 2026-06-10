@@ -59,13 +59,22 @@ async fn main() -> Result<()> {
         }
     }
 
-    let templates = protocol_templates(protocol, &test_tokens, allow_faucet);
+    // DeepBook PTBs (SO-154) sponsor only where token-info reports a
+    // deployment; calls target the upgraded package id.
+    let deepbook = snapshot
+        .deepbook()
+        .map(|d| d.package())
+        .transpose()
+        .context("deepbook package id from token-info")?;
+
+    let templates = protocol_templates(protocol, &test_tokens, allow_faucet, deepbook);
 
     info!(
         environment = %cfg.environment,
         network = %cfg.network,
         sponsor = %sui.signer.address,
         templates = templates.len(),
+        deepbook = deepbook.is_some(),
         faucet_tokens = test_tokens.len(),
         threshold_mist = cfg.min_balance_threshold_mist,
         max_gas_budget_mist = cfg.max_gas_budget_mist,
