@@ -122,4 +122,18 @@ $NETWORK = "$SUI_KEY"
 EOF
 fi
 
+# ---- price-charting secret -> sourced into .env by deploy.sh -------------
+# Tiger Data TimescaleDB connection URL. Absent in envs without the
+# service (e.g. dev) — silently skipped like mm-bot.
+if CHART_JSON=$(fetch price-charting 2>/dev/null); then
+  CHART_DB_URL=$(echo "$CHART_JSON" | jq -r '.database_url')
+  if [ -z "$CHART_DB_URL" ] || [ "$CHART_DB_URL" = "null" ] || [ "$CHART_DB_URL" = "REPLACE_ME" ]; then
+    echo "missing database_url in options/$ENV/price-charting" >&2
+    exit 1
+  fi
+  umask 077
+  echo "$CHART_DB_URL" > "$DIR/.chart_database_url"
+  chmod 600 "$DIR/.chart_database_url"
+fi
+
 echo "render-secrets: ok ($ENV)"

@@ -20,6 +20,7 @@ members = [
     "services/token-info",
     "services/auth-service",
     "services/gas-station",
+    "services/price-charting",
     "tools/deployment-manager",
     "tools/exchange",
     "tools/writer",

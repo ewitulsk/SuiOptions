@@ -122,3 +122,28 @@ resource "aws_secretsmanager_secret_version" "gas_station_placeholder" {
     ignore_changes = [secret_string]
   }
 }
+
+# price-charting secret — the Tiger Data TimescaleDB connection URL for the
+# OHLC store (SO-156). One Tiger instance per env; no dev instance is
+# provisioned (devnet has no DeepBook), so no dev secret. Placeholder shape;
+# put the real URL by hand after apply:
+#   aws secretsmanager put-secret-value --secret-id options/<env>/price-charting \
+#     --secret-string '{"database_url":"postgres://..."}'
+resource "aws_secretsmanager_secret" "price_charting" {
+  for_each                = toset(["staging", "prod"])
+  name                    = "options/${each.key}/price-charting"
+  description             = "price-charting TimescaleDB URL (JSON: database_url)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "price_charting_placeholder" {
+  for_each  = aws_secretsmanager_secret.price_charting
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    database_url = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}
