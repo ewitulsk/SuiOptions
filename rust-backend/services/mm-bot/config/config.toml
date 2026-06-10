@@ -25,7 +25,7 @@ signing_scheme     = "ed25519"
 # `deployments.testTokens.tokens.<SYMBOL>`, and each entry there must
 # carry a `pythFeedId` — the bot pulls live USD prices for both legs and
 # computes the cross + scale into the bucket's on-chain units.
-underlying_symbol  = "TBTC"
+underlying_symbols = ["TBTC", "TDEEP", "TWAL"]
 settlement_symbol  = "TUSDC"
 
 # Annualized risk-free rate. Pyth doesn't model the curve; this stays a

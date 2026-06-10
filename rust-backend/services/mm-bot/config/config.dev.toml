@@ -8,7 +8,7 @@ quoting_url        = "ws://quoting:9002/"
 
 signing_scheme     = "ed25519"
 
-underlying_symbol  = "TBTC"
+underlying_symbols = ["TBTC", "TDEEP", "TWAL"]
 settlement_symbol  = "TUSDC"
 
 rate               = 0.05

@@ -153,7 +153,7 @@ fn main() -> Result<()> {
 
 fn print_human(
     decision: &PriceDecision,
-    spot_scaled: u64,
+    spot_scaled: f64,
     inputs: &RfqPricingInputs,
     now: u64,
     args: &Args,
@@ -197,7 +197,7 @@ fn print_human(
     }
 }
 
-fn print_json(decision: &PriceDecision, spot_scaled: u64, inputs: &RfqPricingInputs, now: u64) {
+fn print_json(decision: &PriceDecision, spot_scaled: f64, inputs: &RfqPricingInputs, now: u64) {
     // Hand-roll the JSON so we don't take a serde_json dep just for this.
     print!("{{");
     print!("\"now_ms\":{now},");
