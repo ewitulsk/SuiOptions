@@ -7,6 +7,8 @@ import { AmountInput } from "../components/AmountInput";
 import { Tideline } from "../components/Tideline";
 import { WriterPanels, TraderPanels } from "../components/Panels";
 import { CreateVenueCard } from "../components/CreateVenueCard";
+import { ChartPanel } from "../components/ChartPanel";
+import { TradePanel } from "../components/TradePanel";
 import { QuoteFeed } from "../components/QuoteFeed";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { Toast } from "../components/Toast";
@@ -97,6 +99,33 @@ export function Composer({ initialView }: Props) {
             view={s.view}
           />
         )}
+
+        {/* Secondary market (SO-157): when the selected bucket has a live
+            DeepBook venue, show its chart + trade panel above the RFQ mint
+            flow — both prices visible, user picks the path. */}
+        {s.view === "trader" &&
+          s.apiBucket?.tradeable &&
+          s.apiBucket.deepbook_pool_id &&
+          s.series && (
+            <>
+              <ChartPanel
+                key={`chart-${s.apiBucket.bucket_id}`}
+                poolId={s.apiBucket.deepbook_pool_id}
+                strike={s.apiBucket.strike}
+                settlementSymbol={s.series.settlement_symbol}
+              />
+              <div style={{ marginTop: 12 }}>
+                <TradePanel
+                  key={`trade-${s.apiBucket.bucket_id}`}
+                  bucket={s.apiBucket}
+                  series={s.series}
+                />
+              </div>
+              <div className="composer-status" style={{ margin: "14px 0 2px" }}>
+                — or mint a brand-new option below at the market makers' quoted premium —
+              </div>
+            </>
+          )}
 
         <AmountInput
           amount={s.amount}
