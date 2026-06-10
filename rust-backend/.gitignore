@@ -41,3 +41,6 @@ tarpaulin-report.html
 # run outputs. Only the small fixtures/ files are committed.
 tools/backtester/data/
 tools/backtester/out/
+
+# Python bytecode from the backtester fetch scripts.
+__pycache__/
