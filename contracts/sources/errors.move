@@ -34,3 +34,8 @@ public fun rfq_bid_too_low(): u64 { 31 }
 public fun rfq_bucket_mismatch(): u64 { 32 }
 public fun rfq_too_close_to_expiry(): u64 { 33 }
 public fun rfq_duration_too_short(): u64 { 34 }
+// 35–48 reserved for vault.move (doc 03 §10).
+public fun oracle_feed_mismatch(): u64 { 49 }
+public fun oracle_price_stale(): u64 { 50 }
+public fun oracle_confidence(): u64 { 51 }
+public fun oracle_price_invalid(): u64 { 52 }
