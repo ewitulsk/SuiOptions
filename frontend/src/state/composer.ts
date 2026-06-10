@@ -15,7 +15,7 @@ import { useRfq } from "../api/useRfq";
 import { useBulkView } from "../api/useBulkView";
 import { buildBuyTx, buildWriteTx } from "../tx/composer";
 import type { ToastState } from "../components/Toast";
-import type { Series } from "../api/client";
+import type { Bucket as ApiBucket, Series } from "../api/client";
 import type { RfqQuoteEntry, Side as ProtocolSide } from "../api/quoting";
 import type {
   Bucket,
@@ -131,6 +131,11 @@ export type ComposerState = {
   btcBalance: number;
   usdcBalance: number;
   bucket: Bucket;
+  /**
+   * Selected bucket exactly as served by `/buckets` (carries
+   * `deepbook_pool_id` / `tradeable`, SO-154). Null until a strike is picked.
+   */
+  apiBucket: ApiBucket | null;
   confirmStage: ConfirmStage;
   confirmSummary: ConfirmSummary | null;
   submit: () => void;
@@ -388,6 +393,13 @@ export function useComposerState({
     return { cursor, queued, cap };
   }, [series, selectedBucketId, amount]);
 
+  // The selected bucket exactly as `/buckets` served it — the trade-venue UI
+  // needs its `deepbook_pool_id` / `tradeable` fields verbatim (SO-154).
+  const apiBucket: ApiBucket | null = useMemo(
+    () => series?.buckets.find((x) => x.bucket_id === selectedBucketId) ?? null,
+    [series, selectedBucketId],
+  );
+
   const submitTx = useSubmitTransaction();
   const queryClient = useQueryClient();
 
@@ -502,6 +514,7 @@ export function useComposerState({
     btcBalance,
     usdcBalance,
     bucket,
+    apiBucket,
     confirmStage,
     confirmSummary,
     submit,

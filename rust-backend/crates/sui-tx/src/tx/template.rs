@@ -122,13 +122,17 @@ fn framework() -> ObjectID {
 
 /// Build the sponsored-PTB templates for the protocol frontend.
 ///
-/// Mirrors the builders in `frontend/src/tx/{composer,dashboard,faucet}.ts`.
+/// Mirrors the builders in `frontend/src/tx/{composer,dashboard,faucet,deepbook}.ts`.
 /// `test_tokens` is the `(package, module)` of each faucet token (e.g.
 /// `(0xpkg, "tbtc")`), only used when `allow_faucet` is set (dev/staging).
+/// `deepbook` is DeepBook's UPGRADED package id (the one Move calls target,
+/// from token-info); `None` on networks without a DeepBook deployment —
+/// no DeepBook PTBs are sponsored there.
 pub fn protocol_templates(
     protocol: ObjectID,
     test_tokens: &[(ObjectID, String)],
     allow_faucet: bool,
+    deepbook: Option<ObjectID>,
 ) -> Vec<PtbTemplate> {
     let t = |module: &str, function: &str| MoveTarget::new(protocol, module, function);
     let coin_zero = MoveTarget::new(framework(), "coin", "zero");
@@ -179,6 +183,20 @@ pub fn protocol_templates(
         }
     }
 
+    // SO-154: create a DeepBook permissionless pool for a bucket's call coin.
+    // The user's own 500-DEEP creation fee rides in via `coinWithBalance`
+    // (benign SplitCoins/MergeCoins prelude); the sponsor only risks gas.
+    // The closed `allowed` set means no other DeepBook function can tag along.
+    if let Some(db) = deepbook {
+        let create = MoveTarget::new(db, "pool", "create_permissionless_pool");
+        templates.push(PtbTemplate {
+            name: "deepbook_create_pool".to_owned(),
+            required: vec![create.clone()],
+            allowed: vec![create.clone()],
+            arities: vec![(create, 2)],
+        });
+    }
+
     templates
 }
 
@@ -220,8 +238,17 @@ mod tests {
         b.finish()
     }
 
+    fn deepbook_pkg() -> ObjectID {
+        ObjectID::from_hex_literal("0x22be4c").unwrap()
+    }
+
     fn templates() -> Vec<PtbTemplate> {
-        protocol_templates(pkg(), &[(pkg(), "tbtc".to_owned())], true)
+        protocol_templates(
+            pkg(),
+            &[(pkg(), "tbtc".to_owned())],
+            true,
+            Some(deepbook_pkg()),
+        )
     }
 
     fn target(module: &str, function: &str) -> MoveTarget {
@@ -274,9 +301,61 @@ mod tests {
 
     #[test]
     fn faucet_rejected_when_disabled() {
-        let no_faucet = protocol_templates(pkg(), &[(pkg(), "tbtc".to_owned())], false);
+        let no_faucet =
+            protocol_templates(pkg(), &[(pkg(), "tbtc".to_owned())], false, None);
         let pt = build(&[(target("tbtc", "mint_to_sender"), 0)], false);
         assert_eq!(match_any(&no_faucet, &pt), None);
+    }
+
+    #[test]
+    fn deepbook_create_pool_matches_with_coin_prelude() {
+        // Mirrors frontend buildCreateVenueTx: a coinWithBalance prelude
+        // (benign SplitCoins) then create_permissionless_pool<CALL, TUSDC>.
+        let pt = build(
+            &[(
+                MoveTarget::new(deepbook_pkg(), "pool", "create_permissionless_pool"),
+                2,
+            )],
+            true,
+        );
+        assert_eq!(match_any(&templates(), &pt), Some("deepbook_create_pool"));
+    }
+
+    #[test]
+    fn deepbook_create_pool_rejects_riders_arity_and_unconfigured() {
+        // A second DeepBook function riding along is refused.
+        let with_rider = build(
+            &[
+                (
+                    MoveTarget::new(deepbook_pkg(), "pool", "create_permissionless_pool"),
+                    2,
+                ),
+                (MoveTarget::new(deepbook_pkg(), "pool", "place_limit_order"), 2),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &with_rider), None);
+
+        // Wrong type-arg arity is refused.
+        let bad_arity = build(
+            &[(
+                MoveTarget::new(deepbook_pkg(), "pool", "create_permissionless_pool"),
+                3,
+            )],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &bad_arity), None);
+
+        // No deepbook configured (devnet) → never sponsored.
+        let no_db = protocol_templates(pkg(), &[], false, None);
+        let pt = build(
+            &[(
+                MoveTarget::new(deepbook_pkg(), "pool", "create_permissionless_pool"),
+                2,
+            )],
+            false,
+        );
+        assert_eq!(match_any(&no_db, &pt), None);
     }
 
     #[test]

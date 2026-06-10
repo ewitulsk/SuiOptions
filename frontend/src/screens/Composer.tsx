@@ -6,6 +6,7 @@ import { StrikeTiles } from "../components/StrikeTiles";
 import { AmountInput } from "../components/AmountInput";
 import { Tideline } from "../components/Tideline";
 import { WriterPanels, TraderPanels } from "../components/Panels";
+import { CreateVenueCard } from "../components/CreateVenueCard";
 import { QuoteFeed } from "../components/QuoteFeed";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { Toast } from "../components/Toast";
@@ -135,6 +136,14 @@ export function Composer({ initialView }: Props) {
             amount={s.amount}
             strike={s.selected.strike}
             spot={s.spot}
+          />
+        )}
+
+        {s.view === "trader" && s.apiBucket && s.series && (
+          <CreateVenueCard
+            key={s.apiBucket.bucket_id}
+            bucket={s.apiBucket}
+            series={s.series}
           />
         )}
 
