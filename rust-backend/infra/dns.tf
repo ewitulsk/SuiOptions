@@ -8,6 +8,11 @@ resource "aws_acm_certificate" "alb" {
   domain_name       = var.domain_name
   validation_method = "DNS"
 
+  # Gatus serves the public status page on its own hostname (host-header
+  # ALB rule) because it can't live under a path prefix — gatus removed
+  # web.context-root and its SPA loads assets/API from absolute paths.
+  subject_alternative_names = ["status.${var.domain_name}"]
+
   lifecycle {
     create_before_destroy = true
   }
@@ -40,6 +45,19 @@ resource "aws_route53_record" "alb_alias" {
   count   = var.route53_zone_id == "" ? 0 : 1
   zone_id = var.route53_zone_id
   name    = var.domain_name
+  type    = "A"
+  alias {
+    name                   = aws_lb.alb.dns_name
+    zone_id                = aws_lb.alb.zone_id
+    evaluate_target_health = true
+  }
+}
+
+# Gatus status page hostname (see the SAN comment on the cert above).
+resource "aws_route53_record" "status_alias" {
+  count   = var.route53_zone_id == "" ? 0 : 1
+  zone_id = var.route53_zone_id
+  name    = "status.${var.domain_name}"
   type    = "A"
   alias {
     name                   = aws_lb.alb.dns_name

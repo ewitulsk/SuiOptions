@@ -73,6 +73,11 @@ output "grafana_url" {
   value       = "https://${var.domain_name}/grafana/"
 }
 
+output "status_url" {
+  description = "Gatus public status page (host-header routed)."
+  value       = "https://status.${var.domain_name}/"
+}
+
 output "loki_bucket" {
   description = "S3 bucket backing Loki chunk + index storage."
   value       = aws_s3_bucket.loki.bucket
