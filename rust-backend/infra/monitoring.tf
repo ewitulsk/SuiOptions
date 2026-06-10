@@ -190,13 +190,17 @@ resource "aws_lb_target_group_attachment" "gatus" {
   port             = 8080
 }
 
+# Host-header rule, not a path rule: gatus can't be served under a path
+# prefix (web.context-root was removed upstream and the SPA requests
+# assets + /api/* from absolute root paths), so it gets its own
+# hostname and serves at / as it expects.
 resource "aws_lb_listener_rule" "gatus" {
   listener_arn = aws_lb_listener.https.arn
   priority     = 4
 
   condition {
-    path_pattern {
-      values = ["/status", "/status/*"]
+    host_header {
+      values = ["status.${var.domain_name}"]
     }
   }
 
