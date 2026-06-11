@@ -14,7 +14,7 @@
 
 use std::str::FromStr;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
 use shared_crypto::intent::Intent;
@@ -25,12 +25,12 @@ use sui_json_rpc_types::{
 use sui_sdk::SuiClient;
 use sui_types::base_types::{ObjectID, ObjectRef};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
-use sui_types::transaction::{ObjectArg, Transaction, TransactionData};
+use sui_types::transaction::{Argument, Command, ObjectArg, Transaction, TransactionData};
 use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
 use tracing::{debug, info};
 
 use crate::sui_client::Signer;
-use crate::tx::owned_object_arg;
+use crate::tx::{owned_object_arg, shared_object_arg};
 
 /// A `TreasuryCap<Call>` harvested from a publish, paired with the Call type
 /// it mints. `call_type` is the fully-qualified type string
@@ -147,31 +147,78 @@ pub struct CreateBucketSpec {
     pub strike_scale: u8,
 }
 
+/// DeepBook pool-creation parameters for a roll (SO-173). When passed to
+/// [`create_buckets_and_pools`], every bucket's call coin also gets a
+/// permissionless pool against the settlement asset in the SAME PTB — so
+/// buckets and pools land atomically (a pool failure rolls the whole family
+/// back, and the scheduler re-rolls next tick). All pools in a roll share one
+/// tick/lot/min grid because they share base (call, = underlying decimals) and
+/// quote (settlement) decimals.
+pub struct PoolCreation {
+    /// Upgraded DeepBook package — pool calls target this.
+    pub deepbook_package: ObjectID,
+    /// Shared DeepBook `Registry`.
+    pub registry: ObjectID,
+    /// DEEP coin type the creation fee is paid in.
+    pub deep_coin_type: String,
+    /// Creation fee per pool, in DEEP atomic units.
+    pub fee: u64,
+    pub tick: u64,
+    pub lot: u64,
+    pub min: u64,
+}
+
 /// Call `bucket::create_bucket<U, S, Call>` once per spec in a single PTB,
 /// consuming each `TreasuryCap` by value and referencing the shared `AdminCap`
-/// across every command.
-pub async fn create_buckets(
+/// across every command. When `pools` is `Some`, the same PTB also calls
+/// `pool::create_permissionless_pool<Call, S>` for each bucket — buckets and
+/// pools are created atomically (SO-173).
+pub async fn create_buckets_and_pools(
     client: &SuiClient,
     signer: &Signer,
     package: ObjectID,
     admin_cap: ObjectID,
     specs: &[CreateBucketSpec],
+    pools: Option<&PoolCreation>,
     gas_budget: u64,
 ) -> Result<SuiTransactionBlockResponse> {
     if specs.is_empty() {
         return Err(anyhow!("create_buckets called with no specs"));
     }
-    info!(%package, buckets = specs.len(), "building create_buckets PTB");
+    info!(
+        %package,
+        buckets = specs.len(),
+        pools = pools.is_some(),
+        "building create_buckets PTB"
+    );
     let mut pt = ProgrammableTransactionBuilder::new();
 
     // AdminCap is an owned object passed by `&AdminCap`; input it once and
     // reuse the Argument across every create_bucket command.
     let admin_arg = pt.obj(owned_object_arg(client, admin_cap).await?)?;
 
+    // Pool prelude: the shared registry, the (roll-wide) grid params, and one
+    // DEEP fee coin per pool — all set up once before the per-strike loop.
+    let pool_ctx = match pools {
+        Some(p) => {
+            let registry = pt.obj(shared_object_arg(client, p.registry, true).await?)?;
+            let tick = pt.pure(&p.tick)?;
+            let lot = pt.pure(&p.lot)?;
+            let min = pt.pure(&p.min)?;
+            let fee_coins =
+                split_deep_fees(client, signer, &mut pt, &p.deep_coin_type, p.fee, specs.len())
+                    .await?;
+            Some((p.deepbook_package, registry, tick, lot, min, fee_coins))
+        }
+        None => None,
+    };
+
     let bucket_module = Identifier::new("bucket").unwrap();
     let create_fn = Identifier::new("create_bucket").unwrap();
+    let pool_module = Identifier::new("pool").unwrap();
+    let create_pool_fn = Identifier::new("create_permissionless_pool").unwrap();
 
-    for spec in specs {
+    for (i, spec) in specs.iter().enumerate() {
         let u_tag = TypeTag::from_str(&spec.underlying_type)
             .with_context(|| format!("parsing underlying type {}", spec.underlying_type))?;
         let s_tag = TypeTag::from_str(&spec.settlement_type)
@@ -188,9 +235,21 @@ pub async fn create_buckets(
             package,
             bucket_module.clone(),
             create_fn.clone(),
-            vec![u_tag, s_tag, c_tag],
+            vec![u_tag, s_tag.clone(), c_tag.clone()],
             vec![admin_arg, cap_arg, expiry_arg, strike_arg, scale_arg],
         );
+
+        // Same PTB: create this call coin's DeepBook pool (base = call, quote =
+        // settlement), paid from the i-th split DEEP fee coin.
+        if let Some((db_pkg, registry, tick, lot, min, fee_coins)) = &pool_ctx {
+            pt.programmable_move_call(
+                *db_pkg,
+                pool_module.clone(),
+                create_pool_fn.clone(),
+                vec![c_tag, s_tag],
+                vec![*registry, *tick, *lot, *min, fee_coins[i]],
+            );
+        }
     }
 
     let programmable = pt.finish();
@@ -238,6 +297,47 @@ pub async fn create_buckets(
     assert_success(&resp, "create_buckets")?;
     debug!(digest = %resp.digest, "create_buckets succeeded");
     Ok(resp)
+}
+
+/// Merge the signer's DEEP coins and split off `count` coins of exactly `fee`
+/// each — one per pool-creation call in the same PTB. Returns the per-pool coin
+/// Arguments (the `NestedResult`s of the SplitCoins command).
+async fn split_deep_fees(
+    client: &SuiClient,
+    signer: &Signer,
+    pt: &mut ProgrammableTransactionBuilder,
+    deep_coin_type: &str,
+    fee: u64,
+    count: usize,
+) -> Result<Vec<Argument>> {
+    let coins = client
+        .coin_read_api()
+        .get_coins(signer.address, Some(deep_coin_type.to_string()), None, Some(50))
+        .await
+        .with_context(|| format!("listing {deep_coin_type} coins"))?
+        .data;
+    let total: u128 = coins.iter().map(|c| c.balance as u128).sum();
+    let need = fee as u128 * count as u128;
+    if total < need {
+        bail!("wallet holds {total} of {deep_coin_type}, need {need} for {count} pool fees");
+    }
+    let mut refs = coins.into_iter().map(|c| c.object_ref());
+    let first = refs.next().ok_or_else(|| anyhow!("no {deep_coin_type} coins"))?;
+    let primary = pt.obj(ObjectArg::ImmOrOwnedObject(first))?;
+    let rest: Vec<Argument> = refs
+        .map(|r| pt.obj(ObjectArg::ImmOrOwnedObject(r)))
+        .collect::<Result<_, _>>()?;
+    if !rest.is_empty() {
+        pt.command(Command::MergeCoins(primary, rest));
+    }
+    // One amount Argument reused `count` times (pure inputs aren't consumed).
+    let amt = pt.pure(&fee)?;
+    let split = pt.command(Command::SplitCoins(primary, vec![amt; count]));
+    let base = match split {
+        Argument::Result(i) => i,
+        other => bail!("SplitCoins returned unexpected argument {other:?}"),
+    };
+    Ok((0..count as u16).map(|j| Argument::NestedResult(base, j)).collect())
 }
 
 fn assert_success(resp: &SuiTransactionBlockResponse, what: &str) -> Result<()> {

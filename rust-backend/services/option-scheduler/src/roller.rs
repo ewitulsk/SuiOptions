@@ -59,10 +59,6 @@ impl RollPlan {
 pub struct RollOutcome {
     pub digest: String,
     pub bucket_ids: Vec<ObjectID>,
-    /// The Call coin types created this roll (one per strike). The base side
-    /// of each bucket's DeepBook pool — created best-effort after the buckets
-    /// land (see `main::create_pools_for_roll`).
-    pub call_types: Vec<String>,
 }
 
 /// Classification of a submit error for the local-rolls retry policy.
@@ -108,6 +104,7 @@ pub async fn submit(
     package: ObjectID,
     admin_cap: ObjectID,
     plan: &RollPlan,
+    pools: Option<&coin_pkg::PoolCreation>,
     gas_budget: u64,
 ) -> Result<RollOutcome> {
     debug!(
@@ -157,15 +154,16 @@ pub async fn submit(
         "coin package published"
     );
 
-    // 4. pair each cap to its strike and create the buckets.
+    // 4. pair each cap to its strike, then create the buckets and (when a
+    //    DeepBook deployment is configured) their pools in one atomic PTB.
     let specs = pair_caps_to_strikes(plan, &published.caps)?;
-    let call_types: Vec<String> = specs.iter().map(|s| s.call_type.clone()).collect();
-    let resp = coin_pkg::create_buckets(
+    let resp = coin_pkg::create_buckets_and_pools(
         &wrap.client,
         &wrap.signer,
         package,
         admin_cap,
         &specs,
+        pools,
         gas_budget,
     )
     .await
@@ -181,7 +179,7 @@ pub async fn submit(
         );
     }
     info!(digest, bucket_count = bucket_ids.len(), "roll submitted");
-    Ok(RollOutcome { digest, bucket_ids, call_types })
+    Ok(RollOutcome { digest, bucket_ids })
 }
 
 /// Pair each harvested `TreasuryCap` to the strike its module was generated

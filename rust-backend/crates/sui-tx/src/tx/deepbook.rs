@@ -473,6 +473,149 @@ pub async fn refresh_pool_quotes(
     submit(client, signer, pt, gas_budget).await
 }
 
+/// One pool's desired resting quote, for a batched multi-pool refresh.
+#[derive(Debug, Clone)]
+pub struct PoolRefresh {
+    pub pool_id: ObjectID,
+    /// Pool base = the bucket's call coin.
+    pub base_coin_type: String,
+    /// Pool quote = the settlement asset.
+    pub quote_coin_type: String,
+    pub plan: QuotePlan,
+}
+
+/// Refresh many pools' quotes in as few transactions as possible (SO-173).
+///
+/// One BalanceManager backs every pool, so `deposits` (already aggregated per
+/// coin type across the whole batch — you can't gather the same coins twice in
+/// one PTB) fund it once in the first tx, and a single trade proof is generated
+/// per tx and reused across every pool in it. Pools are packed
+/// `max_pools_per_tx` at a time to stay under PTB limits; later chunks spend the
+/// balance the first chunk's deposits left in the shared BM. Each chunk runs
+/// `withdraw_settled → cancel_all → place bid/ask` per pool — a pool with an
+/// empty plan is therefore a cancel-only entry. Every submit is dry-run gated;
+/// returns one response per chunk.
+pub async fn refresh_pools_batched(
+    client: &SuiClient,
+    signer: &Signer,
+    handles: &DeepBookHandles,
+    bm_id: ObjectID,
+    deposits: &[(String, u64)],
+    refreshes: &[PoolRefresh],
+    max_pools_per_tx: usize,
+    gas_budget: u64,
+) -> Result<Vec<SuiTransactionBlockResponse>> {
+    if refreshes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let chunk = max_pools_per_tx.max(1);
+    let mut responses = Vec::with_capacity(refreshes.len() / chunk + 1);
+
+    for (ci, group) in refreshes.chunks(chunk).enumerate() {
+        let mut pt = ProgrammableTransactionBuilder::new();
+        let bm = pt.obj(shared_object_arg(client, bm_id, true).await?)?;
+
+        // Deposits ride in the first tx only; the BM is shared, so later chunks
+        // spend the funded balance.
+        if ci == 0 {
+            for (coin_type, amount) in deposits {
+                if *amount == 0 {
+                    continue;
+                }
+                let coin_arg =
+                    gather_exact_coin(client, signer, &mut pt, coin_type, *amount).await?;
+                let tag = TypeTag::from_str(coin_type)
+                    .with_context(|| format!("parsing deposit type {coin_type}"))?;
+                pt.programmable_move_call(
+                    handles.package,
+                    Identifier::new("balance_manager").unwrap(),
+                    Identifier::new("deposit").unwrap(),
+                    vec![tag],
+                    vec![bm, coin_arg],
+                );
+            }
+        }
+
+        // One proof per tx, reused across every pool (it's bound to the BM, not
+        // a pool, and place/cancel take it by reference).
+        let proof = pt.programmable_move_call(
+            handles.package,
+            Identifier::new("balance_manager").unwrap(),
+            Identifier::new("generate_proof_as_owner").unwrap(),
+            vec![],
+            vec![bm],
+        );
+        let clock = pt.obj(shared_object_arg(client, SUI_CLOCK_OBJECT_ID, false).await?)?;
+
+        for r in group {
+            let base_tag = TypeTag::from_str(&r.base_coin_type)
+                .with_context(|| format!("parsing base type {}", r.base_coin_type))?;
+            let quote_tag = TypeTag::from_str(&r.quote_coin_type)
+                .with_context(|| format!("parsing quote type {}", r.quote_coin_type))?;
+            let pool = pt.obj(shared_object_arg(client, r.pool_id, true).await?)?;
+
+            pt.programmable_move_call(
+                handles.package,
+                Identifier::new("pool").unwrap(),
+                Identifier::new("withdraw_settled_amounts").unwrap(),
+                vec![base_tag.clone(), quote_tag.clone()],
+                vec![pool, bm, proof],
+            );
+            pt.programmable_move_call(
+                handles.package,
+                Identifier::new("pool").unwrap(),
+                Identifier::new("cancel_all_orders").unwrap(),
+                vec![base_tag.clone(), quote_tag.clone()],
+                vec![pool, bm, proof, clock],
+            );
+
+            let place = |pt: &mut ProgrammableTransactionBuilder,
+                         side: QuoteSide,
+                         is_bid: bool|
+             -> Result<()> {
+                let client_order_id = pt.pure(&r.plan.expire_timestamp_ms)?;
+                let order_type = pt.pure(&ORDER_TYPE_POST_ONLY)?;
+                let self_matching = pt.pure(&SELF_MATCHING_CANCEL_TAKER)?;
+                let price = pt.pure(&side.price_raw)?;
+                let qty = pt.pure(&side.quantity)?;
+                let is_bid_arg = pt.pure(&is_bid)?;
+                let pay_with_deep = pt.pure(&false)?;
+                let expire = pt.pure(&r.plan.expire_timestamp_ms)?;
+                pt.programmable_move_call(
+                    handles.package,
+                    Identifier::new("pool").unwrap(),
+                    Identifier::new("place_limit_order").unwrap(),
+                    vec![base_tag.clone(), quote_tag.clone()],
+                    vec![
+                        pool,
+                        bm,
+                        proof,
+                        client_order_id,
+                        order_type,
+                        self_matching,
+                        price,
+                        qty,
+                        is_bid_arg,
+                        pay_with_deep,
+                        expire,
+                        clock,
+                    ],
+                );
+                Ok(())
+            };
+            if let Some(bid) = r.plan.bid {
+                place(&mut pt, bid, true)?;
+            }
+            if let Some(ask) = r.plan.ask {
+                place(&mut pt, ask, false)?;
+            }
+        }
+
+        responses.push(submit(client, signer, pt, gas_budget).await?);
+    }
+    Ok(responses)
+}
+
 /// Cancel everything the BM has resting on `pool` (shutdown / pool-exit path).
 pub async fn cancel_all_on_pool(
     client: &SuiClient,

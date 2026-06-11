@@ -187,7 +187,7 @@ async fn localnet_roll_creates_per_bucket_coins() -> Result<()> {
         signer,
         network: Network::Devnet,
     };
-    let out = roller::submit(&wrap, package, admin_cap, &plan, GAS).await?;
+    let out = roller::submit(&wrap, package, admin_cap, &plan, None, GAS).await?;
     eprintln!("roll digest = {}, buckets = {:?}", out.digest, out.bucket_ids);
     assert_eq!(out.bucket_ids.len(), 2, "expected two buckets");
 
