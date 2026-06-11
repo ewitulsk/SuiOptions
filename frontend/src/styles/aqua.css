@@ -459,6 +459,25 @@
   background: transparent; border: none; outline: none; padding: 0;
   letter-spacing: -0.02em;
 }
+/* Drop the native number spinner; replaced by .amount__stepper. */
+[data-theme="aqua"] .amount__input::-webkit-outer-spin-button,
+[data-theme="aqua"] .amount__input::-webkit-inner-spin-button {
+  -webkit-appearance: none; margin: 0;
+}
+[data-theme="aqua"] .amount__input { -moz-appearance: textfield; appearance: textfield; }
+[data-theme="aqua"] .amount__stepper {
+  display: flex; flex-direction: column; gap: 3px;
+}
+[data-theme="aqua"] .amount__step {
+  display: flex; align-items: center; justify-content: center;
+  width: 26px; height: 17px; padding: 0;
+  color: var(--aqua-sui-deep);
+  background: rgba(77,162,255,0.10);
+  border: none; border-radius: 7px; cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
+}
+[data-theme="aqua"] .amount__step:hover { background: rgba(77,162,255,0.18); }
+[data-theme="aqua"] .amount__step:active { background: rgba(77,162,255,0.26); }
 [data-theme="aqua"] .amount__max {
   font-family: "JetBrains Mono", monospace; font-size: 10px; font-weight: 700;
   letter-spacing: 0.10em; text-transform: uppercase;
