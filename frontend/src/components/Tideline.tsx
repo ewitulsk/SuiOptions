@@ -1,8 +1,9 @@
 import type { Bucket } from "../types";
 
-type Props = { bucket: Bucket; amount: number };
+type Props = { bucket: Bucket; amount: number; assetSymbol: string | null };
 
-export function Tideline({ bucket, amount }: Props) {
+export function Tideline({ bucket, amount, assetSymbol }: Props) {
+  const asset = assetSymbol ?? "—";
   const { cursor, queued, cap } = bucket;
   const writtenStart = cursor + queued;
   const pct = (x: number) => Math.min(100, Math.max(0, (x / cap) * 100));
@@ -12,7 +13,7 @@ export function Tideline({ bucket, amount }: Props) {
         <div className="cursorbar__title">your place in the queue</div>
         <div className="cursorbar__sub">
           cursor at <b>{cursor.toFixed(3)}</b> · you're queued{" "}
-          <b>{queued.toFixed(3)} BTC</b> behind
+          <b>{queued.toFixed(3)} {asset}</b> behind
         </div>
       </div>
       <div className="tideline">
@@ -38,7 +39,7 @@ export function Tideline({ bucket, amount }: Props) {
           className="tideline__zone tideline__zone--you"
           style={{ left: `${pct(writtenStart)}%`, width: `${pct(amount)}%` }}
         >
-          <span className="tideline__you-label">you · {amount.toFixed(4)} BTC</span>
+          <span className="tideline__you-label">you · {amount.toFixed(4)} {asset}</span>
         </div>
         <div className="tideline__cursor" style={{ left: `${pct(cursor)}%` }}>
           <div className="tideline__cursor-dot"></div>

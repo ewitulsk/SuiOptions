@@ -1,9 +1,15 @@
 const fmt = (n: number) =>
   n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 
-type WriterProps = { premium: number; amount: number; strike: number };
+type WriterProps = {
+  premium: number;
+  amount: number;
+  strike: number;
+  assetSymbol: string | null;
+};
 
-export function WriterPanels({ premium, amount, strike }: WriterProps) {
+export function WriterPanels({ premium, amount, strike, assetSymbol }: WriterProps) {
+  const asset = assetSymbol ?? "—";
   return (
     <div className="panels">
       <div className="panel">
@@ -27,20 +33,20 @@ export function WriterPanels({ premium, amount, strike }: WriterProps) {
           style={{ margin: 0, padding: 0, background: "transparent", border: "none" }}
         >
           <div className="panel__split-cell">
-            <div className="panel__split-label">if BTC ≥ ${strike.toLocaleString("en-US")}</div>
+            <div className="panel__split-label">if {asset} ≥ ${strike.toLocaleString("en-US")}</div>
             <div className="panel__split-val">
               {fmt(amount * strike)}
               <span style={{ fontSize: 11, color: "var(--aqua-ink-3)", marginLeft: 4 }}>USDC</span>
             </div>
             <div className="panel__split-sub">
-              your {fmt(amount)} BTC is sold at strike
+              your {fmt(amount)} {asset} is sold at strike
             </div>
           </div>
           <div className="panel__split-cell">
-            <div className="panel__split-label">if BTC &lt; ${strike.toLocaleString("en-US")}</div>
+            <div className="panel__split-label">if {asset} &lt; ${strike.toLocaleString("en-US")}</div>
             <div className="panel__split-val">
               {fmt(amount)}
-              <span style={{ fontSize: 11, color: "var(--aqua-ink-3)", marginLeft: 4 }}>BTC</span>
+              <span style={{ fontSize: 11, color: "var(--aqua-ink-3)", marginLeft: 4 }}>{asset}</span>
             </div>
             <div className="panel__split-sub">your collateral returns to you</div>
           </div>
@@ -50,9 +56,16 @@ export function WriterPanels({ premium, amount, strike }: WriterProps) {
   );
 }
 
-type TraderProps = { premium: number; amount: number; strike: number; spot: number };
+type TraderProps = {
+  premium: number;
+  amount: number;
+  strike: number;
+  spot: number;
+  assetSymbol: string | null;
+};
 
-export function TraderPanels({ premium, amount, strike, spot }: TraderProps) {
+export function TraderPanels({ premium, amount, strike, spot, assetSymbol }: TraderProps) {
+  const asset = assetSymbol ?? "—";
   const breakeven = strike + premium / amount;
   const upside = Math.max(0, (spot * 1.2 - strike) * amount - premium);
   return (
@@ -67,7 +80,7 @@ export function TraderPanels({ premium, amount, strike, spot }: TraderProps) {
             <span className="unit">USDC</span>
           </div>
           <div className="panel__sub">
-            For the right to buy <b>{fmt(amount)} BTC</b> at{" "}
+            For the right to buy <b>{fmt(amount)} {asset}</b> at{" "}
             <b>${strike.toLocaleString("en-US")}</b> any time before Jun 26th.
           </div>
         </div>
@@ -90,7 +103,7 @@ export function TraderPanels({ premium, amount, strike, spot }: TraderProps) {
               <div className="panel__split-label">receive</div>
               <div className="panel__split-val panel__split-val--pos">
                 {fmt(amount)}
-                <span style={{ fontSize: 11, color: "var(--aqua-ink-3)", marginLeft: 4 }}>BTC</span>
+                <span style={{ fontSize: 11, color: "var(--aqua-ink-3)", marginLeft: 4 }}>{asset}</span>
               </div>
             </div>
           </div>
@@ -105,13 +118,13 @@ export function TraderPanels({ premium, amount, strike, spot }: TraderProps) {
         <div className="exercise__cell">
           <div className="exercise__label">max loss</div>
           <div className="exercise__value exercise__value--neg">−{fmt(premium)}</div>
-          <div className="exercise__sub">if BTC ≤ ${strike.toLocaleString("en-US")} at expiry</div>
+          <div className="exercise__sub">if {asset} ≤ ${strike.toLocaleString("en-US")} at expiry</div>
         </div>
         <div className="exercise__cell">
           <div className="exercise__label">at +20% spot</div>
           <div className="exercise__value exercise__value--pos">+{fmt(upside)}</div>
           <div className="exercise__sub">
-            P/L if BTC reaches ${Math.round(spot * 1.2).toLocaleString("en-US")}
+            P/L if {asset} reaches ${Math.round(spot * 1.2).toLocaleString("en-US")}
           </div>
         </div>
       </div>

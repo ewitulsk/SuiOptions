@@ -23,7 +23,7 @@ import { useBuckets } from "../api/useBuckets";
 import { useOwnedCallOptions } from "../api/useOwnedCallOptions";
 import { useCallTokenLots } from "../api/useCallTokenLots";
 import { useOwnedPositions, type OwnedPositionObj } from "../api/useOwnedPositions";
-import { usePythPrice } from "../api/usePythPrice";
+import { usePythPrices } from "../api/usePythPrice";
 import { fetchEnrichedPositions } from "../api/client";
 import type { CallTokenLot, EnrichedPosition, Position, Series } from "../api/client";
 import type { OwnedCallOption } from "../api/useOwnedCallOptions";
@@ -330,15 +330,20 @@ export function useDashboardState(): DashboardState {
     queryFn: () => fetchEnrichedPositions(positionIds),
   });
 
-  const btcLive = usePythPrice("BTC");
-  const suiLive = usePythPrice("SUI");
-  const spots = useMemo<DashboardSpots>(
-    () => ({
-      BTC: btcLive?.price ?? null,
-      SUI: suiLive?.price ?? null,
-    }),
-    [btcLive?.price, suiLive?.price],
-  );
+  // Spot feeds follow the assets the protocol actually offers — one Pyth
+  // subscription per distinct display-asset across all series, keyed by the
+  // same display symbol the rows resolve against (`spots[p.asset]`).
+  const assetSymbols = useMemo<string[]>(() => {
+    const set = new Set<string>();
+    for (const s of buckets.data ?? []) set.add(displayAsset(s.asset_symbol));
+    return Array.from(set).sort();
+  }, [buckets.data]);
+  const livePrices = usePythPrices(assetSymbols);
+  const spots = useMemo<DashboardSpots>(() => {
+    const out: DashboardSpots = {};
+    for (const sym of assetSymbols) out[sym] = livePrices[sym]?.price ?? null;
+    return out;
+  }, [assetSymbols, livePrices]);
 
   const [tab, setTab] = useState<"owned" | "written">("owned");
   const [modal, setModal] = useState<DashboardModal>(null);
