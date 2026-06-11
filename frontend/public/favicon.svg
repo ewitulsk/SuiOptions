@@ -1,0 +1,32 @@
+<svg width="44" height="44" viewBox="10 10 44 44" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tideline">
+  <!--
+    Tideline "ebb & flow" mark.
+
+    CONSTRUCTION (this is the whole recipe - replicate it exactly elsewhere):
+      1. One swoosh shape is defined once as #tl-swoosh.
+      2. It is painted TWICE:
+           - top wave    = the swoosh as-is, filled with #tl-grad-top (deeper blue)
+           - bottom wave = the SAME swoosh rotated 180 degrees about the centre
+                           (32,32), filled with #tl-grad-bottom (lighter blue)
+      3. The two interlock to read as an incoming + outgoing tide.
+
+    To reuse: keep the single #tl-swoosh path, the rotate(180 32 32) transform,
+    and the two gradients (top darker, bottom lighter for depth). Recolour by
+    editing only the gradient stops. Paths live in a 0-64 space centred on
+    (32,32); the viewBox crops to the artwork.
+  -->
+  <defs>
+    <linearGradient id="tl-grad-top" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7CC4FF"/>
+      <stop offset="1" stop-color="#2872D1"/>
+    </linearGradient>
+    <linearGradient id="tl-grad-bottom" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#AEDCFF"/>
+      <stop offset="1" stop-color="#4DA2FF"/>
+    </linearGradient>
+    <path id="tl-swoosh" d="M12 30 C 26 30 31 20 50 20 C 39 24 35 34 16 35 Z"/>
+  </defs>
+
+  <use href="#tl-swoosh" fill="url(#tl-grad-top)"/>
+  <use href="#tl-swoosh" fill="url(#tl-grad-bottom)" transform="rotate(180 32 32)"/>
+</svg>

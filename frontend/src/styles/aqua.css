@@ -112,16 +112,8 @@
   letter-spacing: -0.02em; color: var(--aqua-ink-1);
 }
 [data-theme="aqua"] .header__brand-mark {
-  width: 28px; height: 28px; border-radius: 999px;
-  background: radial-gradient(circle at 35% 30%, #93D2FF 0%, #4DA2FF 50%, #2872D1 100%);
-  box-shadow: 0 4px 12px var(--aqua-sui-glow), inset 0 -2px 4px rgba(var(--aqua-surface-rgb),0.4);
-  position: relative;
-}
-[data-theme="aqua"] .header__brand-mark::after {
-  content: ""; position: absolute; left: 50%; top: 50%;
-  transform: translate(-50%,-50%);
-  width: 14px; height: 1.5px; background: #fff; border-radius: 2px;
-  box-shadow: 0 0 6px rgba(var(--aqua-surface-rgb),0.8);
+  width: 36px; height: 36px; display: block;
+  filter: drop-shadow(0 4px 12px var(--aqua-sui-glow));
 }
 [data-theme="aqua"] .header__nav {
   display: flex; gap: 4px; flex: 1;
