@@ -47,7 +47,7 @@ export function ConfirmModal({ stage, summary, view, onClose }: Props) {
                   </div>
                   <div className="modal__list-row">
                     <span>collateral locked</span>
-                    <b>{summary.amount.toFixed(4)} BTC</b>
+                    <b>{summary.amount.toFixed(4)} {summary.asset}</b>
                   </div>
                 </>
               ) : (
@@ -55,7 +55,7 @@ export function ConfirmModal({ stage, summary, view, onClose }: Props) {
                   <div className="modal__list-row">
                     <span>call options minted</span>
                     <b>
-                      {summary.amount.toFixed(4)} BTC @ ${summary.strike.toLocaleString("en-US")}
+                      {summary.amount.toFixed(4)} {summary.asset} @ ${summary.strike.toLocaleString("en-US")}
                     </b>
                   </div>
                   <div className="modal__list-row">

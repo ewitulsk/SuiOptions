@@ -500,7 +500,7 @@ export function useComposerState({
         message:
           view === "writer"
             ? `position opened · +${s.premium.toFixed(2)} ${settlementSymbol} received`
-            : `call purchased · ${s.amount.toFixed(4)} ${series?.asset_symbol ?? "BTC"} strike $${s.strike.toLocaleString("en-US")}`,
+            : `call purchased · ${s.amount.toFixed(4)} ${s.asset} strike $${s.strike.toLocaleString("en-US")}`,
         variant: "success",
       });
       setTimeout(() => setToast(null), 4500);

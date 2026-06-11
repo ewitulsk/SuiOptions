@@ -135,7 +135,7 @@ export function Composer({ initialView }: Props) {
           error={
             s.view === "writer"
               ? s.insufficientBtc
-                ? "INSUFFICIENT BTC BALANCE"
+                ? `INSUFFICIENT ${s.selectedAsset ?? ""} BALANCE`.replace(/\s+/g, " ").trim()
                 : ""
               : s.insufficientUsdc
                 ? `INSUFFICIENT USDC · NEED ${s.bestPremium.toFixed(2)}`
@@ -149,13 +149,16 @@ export function Composer({ initialView }: Props) {
           </div>
         )}
 
-        {s.view === "writer" && <Tideline bucket={s.bucket} amount={s.amount} />}
+        {s.view === "writer" && (
+          <Tideline bucket={s.bucket} amount={s.amount} assetSymbol={s.selectedAsset} />
+        )}
 
         {s.view === "writer" ? (
           <WriterPanels
             premium={s.bestPremium}
             amount={s.amount}
             strike={s.selected.strike}
+            assetSymbol={s.selectedAsset}
           />
         ) : (
           <TraderPanels
@@ -163,6 +166,7 @@ export function Composer({ initialView }: Props) {
             amount={s.amount}
             strike={s.selected.strike}
             spot={s.spot}
+            assetSymbol={s.selectedAsset}
           />
         )}
 
