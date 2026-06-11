@@ -15,6 +15,8 @@ import {
   setSponsorEnabled,
 } from "../state/sponsor";
 import { useAdminCap } from "../api/useAdminCap";
+import { useSession } from "../session/store";
+import { ConnectMenu, SessionMenu } from "./SessionMenu";
 import { ENV } from "../config";
 
 function shortAddress(addr: string): string {
@@ -194,6 +196,7 @@ export function Header() {
   const navigate = useNavigate();
   const { pathname } = useLocation();
   const account = useCurrentAccount();
+  const session = useSession();
   const [pickerOpen, setPickerOpen] = useState(false);
   const adminCap = useAdminCap(account?.address ?? null);
   const isAdmin = adminCap.data?.isAdmin ?? false;
@@ -273,10 +276,10 @@ export function Header() {
       <ThemeToggle />
       {account ? (
         <WalletMenu />
+      ) : session.phase === "active" ? (
+        <SessionMenu />
       ) : (
-        <button className="header__connect" onClick={() => setPickerOpen(true)}>
-          Connect wallet
-        </button>
+        <ConnectMenu onSuiWallet={() => setPickerOpen(true)} />
       )}
 
       {/* Single stable ConnectModal mount, controlled by `pickerOpen`.

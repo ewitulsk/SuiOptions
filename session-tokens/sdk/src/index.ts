@@ -57,6 +57,8 @@ export {
   resolveAccountId,
 } from "./reads.js";
 
+export { clearSession } from "./store.js";
+
 export type {
   Network,
   SolanaSignMessage,

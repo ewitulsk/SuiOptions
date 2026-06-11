@@ -15,7 +15,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useCurrentAccount } from "@mysten/dapp-kit";
+import { addSessionExercise, addSessionRedeem } from "../tx/session";
+import { useUserIdentity } from "../session/identity";
+import { executeWithSession } from "../session/store";
 import { useSubmitTransaction } from "../tx/submit";
 
 import type { ToastState } from "../components/Toast";
@@ -305,17 +307,25 @@ export type DashboardState = {
 };
 
 export function useDashboardState(): DashboardState {
-  const account = useCurrentAccount();
-  const wallet = account?.address ?? null;
+  const identity = useUserIdentity();
+  const sessionState = identity?.kind === "session" ? identity.session : null;
+  const wallet = identity?.address ?? null;
   const connected = wallet !== null;
 
   // Written positions: the wallet is the authoritative list (transfer-correct,
   // no projection snapshot bound), enriched by object id via api-service.
-  const ownedPositions = useOwnedPositions(wallet);
+  const ownedPositions = useOwnedPositions(
+    wallet,
+    sessionState ? sessionState.positionIds : null,
+  );
   const buckets = useBuckets();
   // Option coins live in per-roll packages; the bucket list supplies the
   // coin-type→bucket mapping the owned-call query needs.
-  const owned = useOwnedCallOptions(wallet, buckets.data);
+  const owned = useOwnedCallOptions(
+    wallet,
+    buckets.data,
+    sessionState ? sessionState.balances : null,
+  );
   // Per-purchase provenance for owned calls (boughtFrom / premiumPaid / boughtAt).
   const lots = useCallTokenLots(wallet);
 
@@ -474,17 +484,29 @@ export function useDashboardState(): DashboardState {
         const scale = BigInt(10) ** BigInt(bucket.strike_scale);
         const settlementAmountRaw = (exerciseAmountRaw * strikeRaw) / scale;
 
-        const tx = buildExerciseTx({
-          bucketId: ownedObj.bucket_id,
-          callCoinType: ownedObj.coin_type,
-          exerciseAmountRaw,
-          settlementAmountRaw,
-          underlyingCoinType: series.asset_coin_type,
-          settlementCoinType: series.settlement_coin_type,
-          recipient: wallet,
-        });
         setModal({ ...captured, stage: "broadcast" } as DashboardModal);
-        await submitTx(tx);
+        if (sessionState) {
+          await executeWithSession("exercising", (tx, ctx) =>
+            addSessionExercise(tx, ctx, {
+              bucketId: ownedObj.bucket_id,
+              callCoinType: ownedObj.coin_type,
+              underlyingCoinType: series.asset_coin_type,
+              settlementCoinType: series.settlement_coin_type,
+              exerciseAmountRaw,
+            }),
+          );
+        } else {
+          const tx = buildExerciseTx({
+            bucketId: ownedObj.bucket_id,
+            callCoinType: ownedObj.coin_type,
+            exerciseAmountRaw,
+            settlementAmountRaw,
+            underlyingCoinType: series.asset_coin_type,
+            settlementCoinType: series.settlement_coin_type,
+            recipient: wallet,
+          });
+          await submitTx(tx);
+        }
         setModal({ ...captured, stage: "confirmed" } as DashboardModal);
       } else if (captured.kind === "claim") {
         const { position: p } = captured;
@@ -497,16 +519,28 @@ export function useDashboardState(): DashboardState {
         if (!matchPos || !bucketInfo) {
           throw new Error("missing on-chain reference for claim");
         }
-        const tx = buildRedeemTx({
-          bucketId: matchPos.bucket_id,
-          positionObjectId: matchPos.object_id,
-          callCoinType: bucketInfo.b.call_coin_type,
-          underlyingCoinType: bucketInfo.series.asset_coin_type,
-          settlementCoinType: bucketInfo.series.settlement_coin_type,
-          recipient: wallet,
-        });
         setModal({ ...captured, stage: "broadcast" } as DashboardModal);
-        await submitTx(tx);
+        if (sessionState) {
+          await executeWithSession("redeeming", (tx, ctx) =>
+            addSessionRedeem(tx, ctx, {
+              bucketId: matchPos.bucket_id,
+              positionObjectId: matchPos.object_id,
+              callCoinType: bucketInfo.b.call_coin_type,
+              underlyingCoinType: bucketInfo.series.asset_coin_type,
+              settlementCoinType: bucketInfo.series.settlement_coin_type,
+            }),
+          );
+        } else {
+          const tx = buildRedeemTx({
+            bucketId: matchPos.bucket_id,
+            positionObjectId: matchPos.object_id,
+            callCoinType: bucketInfo.b.call_coin_type,
+            underlyingCoinType: bucketInfo.series.asset_coin_type,
+            settlementCoinType: bucketInfo.series.settlement_coin_type,
+            recipient: wallet,
+          });
+          await submitTx(tx);
+        }
         setModal({ ...captured, stage: "confirmed" } as DashboardModal);
       }
     } catch (err) {

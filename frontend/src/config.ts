@@ -61,6 +61,12 @@ export let DEEPBOOK_PACKAGE_ID: string | undefined;
 export let DEEPBOOK_ORIGINAL_PACKAGE_ID: string | undefined;
 export let DEEPBOOK_REGISTRY_ID: string | undefined;
 
+// siws_session (session-tokens) deployment — wallet-rooted session login
+// (Phantom / MetaMask). Both `undefined` where session login isn't deployed;
+// the sign-in options simply don't render there.
+export let SESSION_PACKAGE_ID: string | undefined;
+export let SESSION_REGISTRY_ID: string | undefined;
+
 // Testnet faucet tokens (SO-93). Each is a shared `Faucet` with a public
 // `mint_to_sender`. Only the testnet/dev deployment publishes these; on
 // mainnet this stays `[]` and the faucet page shows a "testnet only" state.
@@ -128,6 +134,10 @@ type PackageInfoDto = {
     deepCoinType: string;
     poolCreationFee: string;
   } | null;
+  sessionTokens?: {
+    packageId: string;
+    registryId: string;
+  } | null;
 };
 
 type SupportedTokenDto = {
@@ -165,6 +175,9 @@ export async function initConfig(): Promise<void> {
   DEEPBOOK_PACKAGE_ID = db?.packageId;
   DEEPBOOK_ORIGINAL_PACKAGE_ID = db?.originalPackageId;
   DEEPBOOK_REGISTRY_ID = db?.registryId;
+
+  SESSION_PACKAGE_ID = info.sessionTokens?.packageId;
+  SESSION_REGISTRY_ID = info.sessionTokens?.registryId;
 
   const tt = info.testTokens;
   TEST_TOKENS = tt
