@@ -55,3 +55,5 @@ public fun oracle_price_invalid(): u64 { 52 }
 public fun vault_proceeds_unswapped(): u64 { 53 }
 public fun vault_config_invalid(): u64 { 54 }
 public fun vault_wrong_pool(): u64 { 55 }
+public fun session_mismatch(): u64 { 56 }
+public fun position_not_found(): u64 { 57 }

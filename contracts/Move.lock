@@ -17,7 +17,7 @@ manifest_digest = "C4FE4C91DE74CBF223B2E380AE40F592177D21870DC2D7EB6227D2D694E05
 deps = {}
 
 [pinned.testnet.MoveStdlib_2]
-source = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/move-stdlib", rev = "718ae563a42fb4ba0d055588f81c704dcef58c25" }
+source = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/move-stdlib", rev = "22f9fc9781732d651e18384c9a8eb1dabddf73a6" }
 use_environment = "testnet"
 manifest_digest = "C4FE4C91DE74CBF223B2E380AE40F592177D21870DC2D7EB6227D2D694E05363"
 deps = {}
@@ -41,7 +41,7 @@ manifest_digest = "7AFB66695545775FBFBB2D3078ADFD084244D5002392E837FDE21D9EA1C6D
 deps = { MoveStdlib = "MoveStdlib" }
 
 [pinned.testnet.Sui_2]
-source = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "718ae563a42fb4ba0d055588f81c704dcef58c25" }
+source = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "22f9fc9781732d651e18384c9a8eb1dabddf73a6" }
 use_environment = "testnet"
 manifest_digest = "7AFB66695545775FBFBB2D3078ADFD084244D5002392E837FDE21D9EA1C6D01C"
 deps = { MoveStdlib = "MoveStdlib_2" }
@@ -61,8 +61,14 @@ deps = { std = "MoveStdlib_2", sui = "Sui_2", token = "token" }
 [pinned.testnet.options_protocol]
 source = { root = true }
 use_environment = "testnet"
-manifest_digest = "05937D73C432803984B88BCC226BF1D4B5C1B3DA91E0FC838472451C3A1B7446"
-deps = { MoveStdlib = "MoveStdlib", Pyth = "Pyth", Sui = "Sui_1", deepbook = "deepbook" }
+manifest_digest = "F874E4892A313CC688DEC03CD0C1DDAAE4D0FF9914EAA0F1CD1862D3C0C38528"
+deps = { MoveStdlib = "MoveStdlib", Pyth = "Pyth", Sui = "Sui_1", deepbook = "deepbook", siws_session = "siws_session" }
+
+[pinned.testnet.siws_session]
+source = { local = "../session-tokens/contracts" }
+use_environment = "testnet"
+manifest_digest = "DEE42C89BB3F8EC67C17BC4AE0CEBE14A28F4FA787E857046EAF0FA38D556496"
+deps = { Sui = "Sui_1" }
 
 [pinned.testnet.token]
 source = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/token", rev = "e6da254cedc1f7c1adcec59b5c6edf907d513421" }

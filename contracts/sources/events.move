@@ -274,6 +274,20 @@ public struct SigningKeyRotated has copy, drop {
     new_pubkey: vector<u8>,
 }
 
+/// A Position object entered the account's custody (session flows: positions
+/// are held by the account object, not a wallet address).
+public struct AccountPositionDeposit has copy, drop {
+    account_id: ID,
+    position_id: ID,
+    bucket_id: ID,
+}
+
+/// A Position object left the account's custody (redeemed or withdrawn).
+public struct AccountPositionWithdraw has copy, drop {
+    account_id: ID,
+    position_id: ID,
+}
+
 public struct FeeUpdated has copy, drop {
     old_bps: u64,
     new_bps: u64,
@@ -658,6 +672,18 @@ public(package) fun emit_signing_key_rotated(
     new_pubkey: vector<u8>,
 ) {
     event::emit(SigningKeyRotated { account_id, new_scheme, new_pubkey });
+}
+
+public(package) fun emit_account_position_deposit(
+    account_id: ID,
+    position_id: ID,
+    bucket_id: ID,
+) {
+    event::emit(AccountPositionDeposit { account_id, position_id, bucket_id });
+}
+
+public(package) fun emit_account_position_withdraw(account_id: ID, position_id: ID) {
+    event::emit(AccountPositionWithdraw { account_id, position_id });
 }
 
 public(package) fun emit_fee_updated(old_bps: u64, new_bps: u64) {
