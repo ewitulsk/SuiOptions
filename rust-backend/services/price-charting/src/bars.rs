@@ -107,6 +107,52 @@ pub fn align_down(ms: i64, step_ms: i64) -> i64 {
     (ms / step_ms) * step_ms
 }
 
+/// One served midpoint. `t` = bucket start (unix ms); `m` = mid in display
+/// units (quote per base). Maps onto a Lightweight Charts line-series point.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct MidPoint {
+    pub t: i64,
+    pub m: f64,
+}
+
+/// A sample-bearing midpoint bucket from SQL, already aligned to the grid.
+#[derive(Debug, Clone, Copy)]
+pub struct SampledMid {
+    pub t: i64,
+    pub m: f64,
+}
+
+/// Fill `[from_ms, to_ms)` on the interval grid — the mid-line counterpart
+/// of [`carry_forward`]: empty buckets carry the previous mid, leading
+/// buckets before the first sample ever are omitted unless seeded.
+pub fn carry_forward_mids(
+    sampled: &[SampledMid],
+    interval: Interval,
+    from_ms: i64,
+    to_ms: i64,
+    seed_mid: Option<f64>,
+) -> Vec<MidPoint> {
+    let step = interval.ms();
+    let mut out = Vec::new();
+    let mut prev = seed_mid;
+    let mut idx = 0usize;
+
+    let mut t = align_down(from_ms, step);
+    while t < to_ms {
+        if idx < sampled.len() && sampled[idx].t == t {
+            let m = sampled[idx].m;
+            out.push(MidPoint { t, m });
+            prev = Some(m);
+            idx += 1;
+        } else if let Some(m) = prev {
+            out.push(MidPoint { t, m });
+        }
+        // else: before the first sample ever — emit nothing.
+        t += step;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +197,25 @@ mod tests {
         assert_eq!(seeded.len(), 3);
         assert_eq!(seeded[0], Bar { t: 0, o: 4.0, h: 4.0, l: 4.0, c: 4.0, v: 0.0 });
         assert_eq!(seeded[2].c, 5.0);
+    }
+
+    #[test]
+    fn mid_gaps_carry_forward_and_leading_gap_respects_seed() {
+        let step = Interval::M1.ms();
+        let sampled = [SampledMid { t: 2 * step, m: 7.5 }];
+
+        // Without a seed, nothing before the first sample ever.
+        let no_seed = carry_forward_mids(&sampled, Interval::M1, 0, 4 * step, None);
+        assert_eq!(no_seed.len(), 2);
+        assert_eq!(no_seed[0], MidPoint { t: 2 * step, m: 7.5 });
+        assert_eq!(no_seed[1], MidPoint { t: 3 * step, m: 7.5 }); // carried
+
+        // With a seed, leading buckets carry it until the first sample.
+        let seeded = carry_forward_mids(&sampled, Interval::M1, 0, 4 * step, Some(7.0));
+        assert_eq!(seeded.len(), 4);
+        assert_eq!(seeded[0], MidPoint { t: 0, m: 7.0 });
+        assert_eq!(seeded[1].m, 7.0);
+        assert_eq!(seeded[2].m, 7.5);
     }
 
     #[test]

@@ -19,6 +19,9 @@ fn default_poll_interval_ms() -> u64 {
 fn default_ttl_hours() -> i64 {
     168 // 7 days
 }
+fn default_mid_sample_interval_secs() -> u64 {
+    10
+}
 fn default_origins() -> Vec<String> {
     vec!["*".to_string()]
 }
@@ -47,6 +50,9 @@ pub struct Config {
     pub discovery_interval_secs: u64,
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
+    /// How often the order-book midpoint is sampled per watched pool.
+    #[serde(default = "default_mid_sample_interval_secs")]
+    pub mid_sample_interval_secs: u64,
     /// Trades for pools that left the tradeable set are dropped once their
     /// newest fill is older than this.
     #[serde(default = "default_ttl_hours")]

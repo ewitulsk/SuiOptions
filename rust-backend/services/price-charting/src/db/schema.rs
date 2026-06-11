@@ -1,4 +1,4 @@
-//! Hand-written diesel schema; kept in sync with `migrations/000001_init`.
+//! Hand-written diesel schema; kept in sync with `migrations/`.
 
 diesel::table! {
     pool_trades (pool_id, tx_digest, event_index) {
@@ -17,6 +17,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    pool_mids (pool_id, time) {
+        time      -> Timestamptz,
+        pool_id   -> Text,
+        bucket_id -> Text,
+        best_bid  -> Double,
+        best_ask  -> Double,
+        mid       -> Double,
+    }
+}
+
+diesel::table! {
     watch_cursor (id) {
         id         -> Int2,
         cursor_tx  -> Text,
@@ -25,4 +36,4 @@ diesel::table! {
     }
 }
 
-diesel::allow_tables_to_appear_in_same_query!(pool_trades, watch_cursor);
+diesel::allow_tables_to_appear_in_same_query!(pool_trades, pool_mids, watch_cursor);

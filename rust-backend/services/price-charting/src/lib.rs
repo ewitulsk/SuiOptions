@@ -12,6 +12,7 @@ use clap::Parser;
 pub mod bars;
 pub mod config;
 pub mod db;
+pub mod mid_sampler;
 pub mod router;
 pub mod state;
 pub mod watcher;

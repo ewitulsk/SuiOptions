@@ -2,11 +2,13 @@
 //!
 //! - `GET /health` — liveness.
 //! - `GET /pools` — watched pools with last price / 24h volume.
-//! - `GET /bars?pool_id&interval&from_ms&to_ms` — carry-forward OHLC,
-//!   capped at 1000 bars (the range is clamped, newest-first priority).
+//! - `GET /bars?pool_id&interval&from_ms&to_ms` — carry-forward OHLC plus
+//!   the order-book midpoint line on the same grid, capped at 1000 bars
+//!   (the range is clamped, newest-first priority).
 //! - `GET /ws` — subscribe `{"type":"subscribe","pool_id":…,"interval":…}`;
 //!   the server pushes `{"type":"bar",…}` with the updated current bar on
-//!   every fill for a subscribed pool.
+//!   every fill, and `{"type":"mid",…}` with the current bucket's midpoint
+//!   on every book sample, for a subscribed pool.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -23,9 +25,11 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, info, warn};
 
-use crate::bars::{align_down, carry_forward, Bar, Interval, TradedBar};
+use crate::bars::{
+    align_down, carry_forward, carry_forward_mids, Bar, Interval, MidPoint, SampledMid, TradedBar,
+};
 use crate::db::repo::Repo;
-use crate::state::{AppState, TradeMsg};
+use crate::state::{AppState, MidMsg, TradeMsg};
 
 const MAX_BARS: i64 = 1_000;
 
@@ -102,6 +106,8 @@ struct BarsQuery {
 #[derive(Serialize)]
 struct BarsResponse {
     bars: Vec<Bar>,
+    /// Order-book midpoint line on the same interval grid.
+    mids: Vec<MidPoint>,
 }
 
 async fn get_bars(
@@ -121,7 +127,10 @@ async fn get_bars(
     let bars = compute_bars(&state.repo, &q.pool_id, interval, from, to)
         .await
         .map_err(db_err)?;
-    Ok(Json(BarsResponse { bars }))
+    let mids = compute_mids(&state.repo, &q.pool_id, interval, from, to)
+        .await
+        .map_err(db_err)?;
+    Ok(Json(BarsResponse { bars, mids }))
 }
 
 async fn compute_bars(
@@ -152,6 +161,27 @@ async fn compute_bars(
     .await?
 }
 
+async fn compute_mids(
+    repo: &Repo,
+    pool_id: &str,
+    interval: Interval,
+    from_ms: i64,
+    to_ms: i64,
+) -> anyhow::Result<Vec<MidPoint>> {
+    let repo = repo.clone();
+    let pool = pool_id.to_string();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MidPoint>> {
+        let raw = repo.raw_mids(&pool, interval.secs(), from_ms, to_ms)?;
+        let seed = repo.last_mid_before(&pool, align_down(from_ms, interval.ms()))?;
+        let sampled: Vec<SampledMid> = raw
+            .into_iter()
+            .map(|r| SampledMid { t: r.bucket.timestamp_millis(), m: r.mid })
+            .collect();
+        Ok(carry_forward_mids(&sampled, interval, from_ms, to_ms, seed))
+    })
+    .await?
+}
+
 fn db_err(e: anyhow::Error) -> StatusCode {
     warn!(error = %format!("{e:#}"), "charts query failed");
     StatusCode::BAD_GATEWAY
@@ -174,6 +204,11 @@ enum ServerMsg<'a> {
         interval: &'a str,
         bar: Bar,
     },
+    Mid {
+        pool_id: &'a str,
+        interval: &'a str,
+        point: MidPoint,
+    },
     Error {
         message: String,
     },
@@ -186,6 +221,7 @@ async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) ->
 async fn ws_session(state: Arc<AppState>, mut socket: WebSocket) {
     let mut subs: HashSet<(String, Interval)> = HashSet::new();
     let mut trades = state.trades_tx.subscribe();
+    let mut mids = state.mids_tx.subscribe();
     let mut ping = tokio::time::interval(std::time::Duration::from_secs(15));
 
     loop {
@@ -236,6 +272,18 @@ async fn ws_session(state: Arc<AppState>, mut socket: WebSocket) {
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
+            mid = mids.recv() => {
+                match mid {
+                    Ok(m) => {
+                        if let Err(e) = push_mid(&mut socket, &subs, &m).await {
+                            debug!(error = %e, "ws mid push failed; closing session");
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
             _ = ping.tick() => {
                 if socket.send(Message::Ping(Vec::new())).await.is_err() {
                     break;
@@ -267,6 +315,31 @@ async fn push_updates(
             )
             .await?;
         }
+    }
+    Ok(())
+}
+
+/// On a book sample, serve the now-current bucket's midpoint to every
+/// matching subscription. The latest sample IS the bucket's `last(mid)`,
+/// so no DB round-trip is needed.
+async fn push_mid(
+    socket: &mut WebSocket,
+    subs: &HashSet<(String, Interval)>,
+    m: &MidMsg,
+) -> anyhow::Result<()> {
+    for (pool, iv) in subs {
+        if pool != &m.pool_id {
+            continue;
+        }
+        send_json(
+            socket,
+            &ServerMsg::Mid {
+                pool_id: pool,
+                interval: interval_name(*iv),
+                point: MidPoint { t: align_down(m.ts_ms, iv.ms()), m: m.mid },
+            },
+        )
+        .await?;
     }
     Ok(())
 }
