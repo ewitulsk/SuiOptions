@@ -40,8 +40,8 @@ use protocol_types::sides::Side;
 use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
 use sui_tx::sui_client::{Network, SuiClientWrapper};
 use sui_tx::tx::deepbook::{
-    bm_balance, cancel_all_on_pool, create_balance_manager, find_balance_manager,
-    refresh_pool_quotes, DeepBookHandles, QuotePlan, QuoteSide,
+    bm_balance, cancel_all_on_pool, create_balance_manager, derived_pool_params,
+    find_balance_manager, refresh_pool_quotes, DeepBookHandles, QuotePlan, QuoteSide,
 };
 
 use crate::pricing::{
@@ -156,18 +156,6 @@ pub struct QuoterParams {
 struct LastQuote {
     mid_raw: u64,
     at_ms: u64,
-}
-
-/// Pool sizing the quoter rounds against. Our venues are created by the
-/// frontend's `deriveVenueParams` (SO-154); this mirrors that formula. A
-/// pool created with different params makes a refresh fail its dry run
-/// (price off tick), which logs loudly and leaves the book untouched.
-fn derived_pool_params(base_decimals: u8, quote_decimals: u8) -> (u64, u64, u64) {
-    let price_exp = 9i32 - base_decimals as i32 + quote_decimals as i32;
-    let tick = 10u64.pow((price_exp - 2).max(0) as u32);
-    let lot = 10u64.pow((base_decimals as i32 - 5).max(3) as u32);
-    let min = 10 * lot;
-    (tick, lot, min)
 }
 
 fn now_ms() -> u64 {
@@ -548,17 +536,6 @@ async fn quote_one(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn derived_params_match_frontend_for_tbtc_tusdc() {
-        // 8-dec base / 6-dec quote: price exponent 7 → tick 1e5 ($0.01),
-        // lot 1e3, min 1e4 — same numbers `deriveVenueParams` produces.
-        assert_eq!(derived_pool_params(8, 6), (100_000, 1_000, 10_000));
-        // 9-dec base (TWAL-style): exponent 6 → tick 1e4, lot 1e4, min 1e5.
-        assert_eq!(derived_pool_params(9, 6), (10_000, 10_000, 100_000));
-    }
-
     #[test]
     fn tick_rounding_moves_away_from_mid() {
         let tick = 100_000u64;

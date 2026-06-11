@@ -400,6 +400,20 @@ export function useComposerState({
     [series, selectedBucketId],
   );
 
+  // Safety net (SO-171): the scheduler creates a DeepBook pool for every bucket
+  // at deploy time, so a live strike is normally tradeable. If the selected
+  // strike is somehow not tradeable (expired/cleaned, or a pool that never
+  // landed), surface it as an error toast rather than silently hiding the
+  // chart + trade panel. Keyed on primitives so it fires once per strike, not
+  // on every /buckets poll.
+  const selectedTradeable = apiBucket?.tradeable ?? true;
+  useEffect(() => {
+    if (view !== "trader" || selectedBucketId == null || selectedTradeable) return;
+    setToast({ message: "this strike isn't tradeable right now", variant: "error" });
+    const t = setTimeout(() => setToast(null), 5000);
+    return () => clearTimeout(t);
+  }, [view, selectedBucketId, selectedTradeable]);
+
   const submitTx = useSubmitTransaction();
   const queryClient = useQueryClient();
 

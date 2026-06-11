@@ -6,7 +6,6 @@ import { StrikeTiles } from "../components/StrikeTiles";
 import { AmountInput } from "../components/AmountInput";
 import { Tideline } from "../components/Tideline";
 import { WriterPanels, TraderPanels } from "../components/Panels";
-import { CreateVenueCard } from "../components/CreateVenueCard";
 import { ChartPanel } from "../components/ChartPanel";
 import { TradePanel } from "../components/TradePanel";
 import { QuoteFeed } from "../components/QuoteFeed";
@@ -100,13 +99,12 @@ export function Composer({ initialView }: Props) {
           />
         )}
 
-        {/* Secondary market (SO-157): when the selected bucket has a live
-            DeepBook venue, show its chart + trade panel above the RFQ mint
-            flow — both prices visible, user picks the path. */}
-        {s.view === "trader" &&
-          s.apiBucket?.tradeable &&
-          s.apiBucket.deepbook_pool_id &&
-          s.series && (
+        {/* Secondary market (SO-157): pools are created by the scheduler at
+            bucket-deploy time (SO-171), so a live bucket always has one — show
+            its chart + trade panel above the RFQ mint flow regardless of the
+            `tradeable` flag. A non-tradeable strike (expired/cleaned) keeps its
+            chart and surfaces an error toast instead of vanishing. */}
+        {s.view === "trader" && s.apiBucket?.deepbook_pool_id && s.series && (
             <>
               <ChartPanel
                 key={`chart-${s.apiBucket.bucket_id}`}
@@ -165,14 +163,6 @@ export function Composer({ initialView }: Props) {
             amount={s.amount}
             strike={s.selected.strike}
             spot={s.spot}
-          />
-        )}
-
-        {s.view === "trader" && s.apiBucket && s.series && (
-          <CreateVenueCard
-            key={s.apiBucket.bucket_id}
-            bucket={s.apiBucket}
-            series={s.series}
           />
         )}
 

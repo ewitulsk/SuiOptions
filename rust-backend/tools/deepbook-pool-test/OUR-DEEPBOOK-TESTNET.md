@@ -45,6 +45,25 @@ the only change is `deepbook` links against *our* DEEP instead of Mysten's.
 | taker / maker fee | `0.1%` / `0.05%` |
 | create digest | `EDR2ryuZooBkvnw36aCqatbuWNcEherpdaiwCU6TZY6f` |
 
+## Required one-time post-publish admin step
+
+`registry::init()` does NOT create the `BalanceManagerKey` table — that field is
+added only by the admin-gated `registry::init_balance_manager_map(registry, &DeepbookAdminCap)`.
+Until it's called, `register_balance_manager` (our enable-trading PTB) aborts at
+`0x2::dynamic_field::borrow_child_object_mut` (EFieldDoesNotExist) the moment it
+hits `add_balance_manager`. Pool creation is unaffected (it uses the `pools` Bag
+inside `RegistryInner`). Run once per fresh DeepBook publish, signed by the admin
+that holds the `DeepbookAdminCap`:
+
+```
+sui client call --package <deepbook_pkg> --module registry \
+  --function init_balance_manager_map \
+  --args <registry_id> <admin_cap_id>
+```
+
+Testnet deploy: done in tx `DpxXWwybPCkmggnfufi2UksHTdQfinZUYoZpjdi2mhJc`.
+**The prod DeepBook deploy must repeat this step.**
+
 ## To point `deepbook-pool-test` (or any integration) at this deployment
 
 Swap these constants in `src/main.rs`:

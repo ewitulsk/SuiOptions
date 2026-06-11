@@ -60,9 +60,6 @@ export let DEEPBOOK_PACKAGE_ID: string | undefined;
  * `DEEPBOOK_PACKAGE_ID`. */
 export let DEEPBOOK_ORIGINAL_PACKAGE_ID: string | undefined;
 export let DEEPBOOK_REGISTRY_ID: string | undefined;
-export let DEEP_COIN_TYPE: string | undefined;
-/** `pool::create_permissionless_pool` fee in DEEP atomic units (6 decimals). */
-export let DEEPBOOK_POOL_CREATION_FEE: bigint | undefined;
 
 // Testnet faucet tokens (SO-93). Each is a shared `Faucet` with a public
 // `mint_to_sender`. Only the testnet/dev deployment publishes these; on
@@ -168,8 +165,6 @@ export async function initConfig(): Promise<void> {
   DEEPBOOK_PACKAGE_ID = db?.packageId;
   DEEPBOOK_ORIGINAL_PACKAGE_ID = db?.originalPackageId;
   DEEPBOOK_REGISTRY_ID = db?.registryId;
-  DEEP_COIN_TYPE = db?.deepCoinType;
-  DEEPBOOK_POOL_CREATION_FEE = db ? BigInt(db.poolCreationFee) : undefined;
 
   const tt = info.testTokens;
   TEST_TOKENS = tt
