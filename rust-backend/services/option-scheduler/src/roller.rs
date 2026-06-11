@@ -33,6 +33,10 @@ pub struct RollPlan {
     /// Underlying decimals — the option coin mints with the same decimals so
     /// one option smallest-unit == one underlying smallest-unit.
     pub underlying_decimals: u8,
+    /// Settlement decimals — the DeepBook pool's quote side. Paired with the
+    /// call coin (base, which inherits `underlying_decimals`) to derive the
+    /// pool's tick/lot/min grid.
+    pub settlement_decimals: u8,
     pub expiry_ms: u64,
     pub grid: StrikeGrid,
 }
@@ -55,6 +59,10 @@ impl RollPlan {
 pub struct RollOutcome {
     pub digest: String,
     pub bucket_ids: Vec<ObjectID>,
+    /// The Call coin types created this roll (one per strike). The base side
+    /// of each bucket's DeepBook pool — created best-effort after the buckets
+    /// land (see `main::create_pools_for_roll`).
+    pub call_types: Vec<String>,
 }
 
 /// Classification of a submit error for the local-rolls retry policy.
@@ -151,6 +159,7 @@ pub async fn submit(
 
     // 4. pair each cap to its strike and create the buckets.
     let specs = pair_caps_to_strikes(plan, &published.caps)?;
+    let call_types: Vec<String> = specs.iter().map(|s| s.call_type.clone()).collect();
     let resp = coin_pkg::create_buckets(
         &wrap.client,
         &wrap.signer,
@@ -172,7 +181,7 @@ pub async fn submit(
         );
     }
     info!(digest, bucket_count = bucket_ids.len(), "roll submitted");
-    Ok(RollOutcome { digest, bucket_ids })
+    Ok(RollOutcome { digest, bucket_ids, call_types })
 }
 
 /// Pair each harvested `TreasuryCap` to the strike its module was generated

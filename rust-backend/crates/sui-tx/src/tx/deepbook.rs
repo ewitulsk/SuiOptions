@@ -18,7 +18,7 @@ use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
 use shared_crypto::intent::Intent;
 use sui_json_rpc_types::{
-    EventFilter, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
+    EventFilter, ObjectChange, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
     SuiTransactionBlockResponseOptions,
 };
 use sui_sdk::SuiClient;
@@ -166,6 +166,83 @@ pub async fn create_balance_manager(
         .ok_or_else(|| anyhow!("create tx succeeded but no BalanceManager in object changes"))?;
     info!(balance_manager = %created, "BalanceManager created + registered + shared");
     Ok(created)
+}
+
+/// DeepBook pool sizing derived from the pair's decimals. Kept in lockstep
+/// with the frontend's `deriveVenueParams` (SO-154) and the mm-bot quoter so
+/// every actor rounds prices/sizes onto the same grid — a mismatch makes an
+/// order's dry run fail (price off tick). `tick` is a $0.01 price step
+/// (scaled), `lot` an order-size step in base atomic units (10^3 floor),
+/// `min` ten lots. Verified against live fills (DEEPBOOK-FINDINGS.md §C).
+pub fn derived_pool_params(base_decimals: u8, quote_decimals: u8) -> (u64, u64, u64) {
+    let price_exp = 9i32 - base_decimals as i32 + quote_decimals as i32;
+    let tick = 10u64.pow((price_exp - 2).max(0) as u32);
+    let lot = 10u64.pow((base_decimals as i32 - 5).max(3) as u32);
+    let min = 10 * lot;
+    (tick, lot, min)
+}
+
+/// Create a DeepBook permissionless pool for `base`/`quote` (base = the
+/// bucket's Call coin, quote = the settlement asset). Gathers the fixed DEEP
+/// creation fee from the signer's wallet, dry-run-gates the submit, and
+/// returns the new shared Pool's id. Note the contract sends the fee to the
+/// registry's `treasury_address`; on our self-owned deployment that is the
+/// deployer, so the fee recycles (net-zero beyond gas). Dry-run reverts with
+/// `EPoolAlreadyExists` if a pool for this pair already exists.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_pool(
+    client: &SuiClient,
+    signer: &Signer,
+    handles: &DeepBookHandles,
+    deep_coin_type: &str,
+    pool_creation_fee: u64,
+    base_coin_type: &str,
+    quote_coin_type: &str,
+    base_decimals: u8,
+    quote_decimals: u8,
+    gas_budget: u64,
+) -> Result<ObjectID> {
+    let (tick, lot, min) = derived_pool_params(base_decimals, quote_decimals);
+    let base_tag = TypeTag::from_str(base_coin_type)
+        .with_context(|| format!("parsing base type {base_coin_type}"))?;
+    let quote_tag = TypeTag::from_str(quote_coin_type)
+        .with_context(|| format!("parsing quote type {quote_coin_type}"))?;
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let registry = pt.obj(shared_object_arg(client, handles.registry, true).await?)?;
+    let tick_arg = pt.pure(&tick)?;
+    let lot_arg = pt.pure(&lot)?;
+    let min_arg = pt.pure(&min)?;
+    let fee_coin =
+        gather_exact_coin(client, signer, &mut pt, deep_coin_type, pool_creation_fee).await?;
+    pt.programmable_move_call(
+        handles.package,
+        Identifier::new("pool").unwrap(),
+        Identifier::new("create_permissionless_pool").unwrap(),
+        vec![base_tag, quote_tag],
+        vec![registry, tick_arg, lot_arg, min_arg, fee_coin],
+    );
+
+    info!(base = %base_coin_type, quote = %quote_coin_type, tick, lot, min, "creating DeepBook pool");
+    let resp = submit(client, signer, pt, gas_budget).await?;
+    let pool = pool_id_from_changes(resp.object_changes.as_deref().unwrap_or(&[]))
+        .ok_or_else(|| anyhow!("create_permissionless_pool succeeded but no Pool in object changes"))?;
+    info!(pool = %pool, digest = %resp.digest, "DeepBook pool created");
+    Ok(pool)
+}
+
+/// Pull the created `pool::Pool<_, _>` object id out of a tx's ObjectChanges.
+fn pool_id_from_changes(changes: &[ObjectChange]) -> Option<ObjectID> {
+    changes.iter().find_map(|c| match c {
+        ObjectChange::Created {
+            object_id,
+            object_type,
+            ..
+        } if object_type.module.as_str() == "pool" && object_type.name.as_str() == "Pool" => {
+            Some(*object_id)
+        }
+        _ => None,
+    })
 }
 
 /// Read `balance_manager::balance<T>(&BM)` via dev-inspect (no gas, no
@@ -464,4 +541,19 @@ async fn submit(
     }
     debug!(digest = %resp.digest, "deepbook tx succeeded");
     Ok(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derived_params_match_frontend_grid() {
+        // 8-dec base / 6-dec quote: price exponent 7 → tick 1e5 ($0.01),
+        // lot 1e3, min 1e4 — the numbers `deriveVenueParams` produces and the
+        // mm-bot quoter rounds against.
+        assert_eq!(derived_pool_params(8, 6), (100_000, 1_000, 10_000));
+        // 9-dec base (TWAL-style): exponent 6 → tick 1e4, lot 1e4, min 1e5.
+        assert_eq!(derived_pool_params(9, 6), (10_000, 10_000, 100_000));
+    }
 }

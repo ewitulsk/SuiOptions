@@ -172,6 +172,7 @@ async fn localnet_roll_creates_per_bucket_coins() -> Result<()> {
         underlying_type: "0x2::sui::SUI".into(),
         settlement_type: "0x2::sui::SUI".into(),
         underlying_decimals: 9,
+        settlement_decimals: 9,
         expiry_ms: 7_000_000_000_000,
         grid: StrikeGrid {
             start_strike: 50_000,

@@ -33,6 +33,7 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use sui_tx::sui_client::SuiClientWrapper;
+use sui_tx::tx::deepbook::{create_pool, DeepBookHandles};
 use token_info_client::TokenInfoClient;
 
 use indexer_graphql::IndexerClient;
@@ -95,6 +96,39 @@ async fn main() -> Result<()> {
             cli.config.display()
         ));
     }
+
+    // DeepBook pool creation (SO-171). The scheduler now creates the
+    // permissionless pool for each call coin it mints, so the frontend no
+    // longer has to. Optional: a network without a DeepBook deployment in
+    // token-info still rolls buckets, just without pools. The deployer signer
+    // holds DEEP and the creation fee recycles to it (registry treasury), so
+    // pools cost only gas.
+    let deepbook_cfg = match snapshot.deepbook() {
+        Some(db) => {
+            let pool_cfg = DeepBookPoolCfg {
+                handles: DeepBookHandles {
+                    package: db.package()?,
+                    original_package: db.original_package()?,
+                    registry: db.registry()?,
+                },
+                deep_coin_type: db.deep_coin_type.clone(),
+                pool_creation_fee: db.pool_creation_fee_units()?,
+            };
+            info!(
+                package = %pool_cfg.handles.package,
+                registry = %pool_cfg.handles.registry,
+                fee = pool_cfg.pool_creation_fee,
+                "deepbook pool creation enabled"
+            );
+            Some(pool_cfg)
+        }
+        None => {
+            warn!(
+                "token-info reports no DeepBook deployment — rolling buckets without pools"
+            );
+            None
+        }
+    };
 
     // HTTP client shared by every Pyth lookup. Pyth's public Hermes
     // endpoint applies a 10-req-per-10-second cap per source IP, so a
@@ -230,6 +264,7 @@ async fn main() -> Result<()> {
             package,
             admin_cap,
             &db_pool,
+            deepbook_cfg.as_ref(),
         )
         .await
         {
@@ -251,6 +286,13 @@ struct PairMeta {
     spot: ResolvedSpotSource,
 }
 
+/// DeepBook pool-creation context, resolved from token-info at boot.
+struct DeepBookPoolCfg {
+    handles: DeepBookHandles,
+    deep_coin_type: String,
+    pool_creation_fee: u64,
+}
+
 async fn tick_once(
     cli: &Cli,
     cfg: &SchedulerConfig,
@@ -261,6 +303,7 @@ async fn tick_once(
     package: sui_types::base_types::ObjectID,
     admin_cap: sui_types::base_types::ObjectID,
     db_pool: &db::DbPool,
+    deepbook: Option<&DeepBookPoolCfg>,
 ) -> Result<()> {
     let now = now_ms();
     for meta in pairs {
@@ -400,6 +443,7 @@ async fn tick_once(
             underlying_type: meta.underlying_type.clone(),
             settlement_type: meta.settlement_type.clone(),
             underlying_decimals: meta.underlying_decimals,
+            settlement_decimals: meta.settlement_decimals,
             expiry_ms: next_expiry,
             grid,
         };
@@ -438,6 +482,24 @@ async fn tick_once(
                 ) {
                     warn!(error = %e, "mark_submitted failed");
                 }
+
+                // Buckets are committed and recorded — now create each call
+                // coin's DeepBook pool, best-effort. Pool creation is a
+                // separate tx, so a failure here can never unwind the roll; a
+                // missed pool is logged for manual backfill (the bucket stays
+                // untradeable until then).
+                if let Some(db) = deepbook {
+                    create_pools_for_roll(
+                        wrap,
+                        db,
+                        &out.call_types,
+                        &meta.settlement_type,
+                        meta.underlying_decimals,
+                        meta.settlement_decimals,
+                        cli.gas_budget,
+                    )
+                    .await;
+                }
             }
             Err(e) => {
                 let class = roller::classify_error(&e);
@@ -470,6 +532,83 @@ async fn tick_once(
         }
     }
     Ok(())
+}
+
+/// Best-effort: create one DeepBook pool per call coin the roll just minted
+/// (base = call coin, quote = settlement). Never returns an error — a failed
+/// pool is logged for manual backfill and never affects the committed roll.
+async fn create_pools_for_roll(
+    wrap: &SuiClientWrapper,
+    deepbook: &DeepBookPoolCfg,
+    call_types: &[String],
+    settlement_type: &str,
+    base_decimals: u8,
+    quote_decimals: u8,
+    gas_budget: u64,
+) {
+    for call_type in call_types {
+        match create_one_pool(
+            wrap,
+            deepbook,
+            call_type,
+            settlement_type,
+            base_decimals,
+            quote_decimals,
+            gas_budget,
+        )
+        .await
+        {
+            Ok(pool) => info!(%call_type, %pool, "deepbook pool created for new bucket"),
+            Err(e) => warn!(
+                error = %format!("{e:#}"),
+                %call_type,
+                "deepbook pool creation failed; bucket left for manual backfill"
+            ),
+        }
+    }
+}
+
+/// Create a single pool with a bounded retry. A dry-run revert is
+/// deterministic (pool already exists, or bad params) and is not retried;
+/// transient transport/gas errors get a few attempts.
+async fn create_one_pool(
+    wrap: &SuiClientWrapper,
+    deepbook: &DeepBookPoolCfg,
+    call_type: &str,
+    settlement_type: &str,
+    base_decimals: u8,
+    quote_decimals: u8,
+    gas_budget: u64,
+) -> Result<sui_types::base_types::ObjectID> {
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match create_pool(
+            &wrap.client,
+            &wrap.signer,
+            &deepbook.handles,
+            &deepbook.deep_coin_type,
+            deepbook.pool_creation_fee,
+            call_type,
+            settlement_type,
+            base_decimals,
+            quote_decimals,
+            gas_budget,
+        )
+        .await
+        {
+            Ok(pool) => return Ok(pool),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if msg.contains("dry-run reverted") || attempt >= MAX_ATTEMPTS {
+                    return Err(e);
+                }
+                warn!(error = %msg, %call_type, attempt, "pool creation attempt failed; retrying");
+                sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
 }
 
 /// Confirmation + reconciliation pass (JIT).
