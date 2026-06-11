@@ -1,9 +1,13 @@
 // On-chain read helpers. The registry's `accounts` map and the account's
-// `spent` ledger are Move `Table`s, i.e. collections of dynamic fields. We walk
-// them to resolve a user's Account, its live generation, and per-cap spend.
+// `spent` ledger are Move `Table`s, i.e. collections of dynamic fields; the
+// account's balances are `Balance<T>` dynamic fields keyed by
+// `account::BalanceKey<T>`. We walk them to resolve a user's Account, its live
+// generation, per-type balances, and per-(cap, type) spend.
 //
 // All reads are defensive: a brand-new user has no Account yet, so "not found"
 // is a normal result (treated as generation 0 / spend 0), not an error.
+
+import { normalizeStructTag } from "@mysten/sui/utils";
 
 import type { SuiRpcClient } from "./client.js";
 
@@ -25,18 +29,18 @@ async function tableId(
   return table?.fields?.id?.id ?? null;
 }
 
-/** Resolve the Account object id for a Solana pubkey, or null if none yet. */
+/** Resolve the Account object id for a root identity, or null if none yet. */
 export async function resolveAccountId(
   client: SuiRpcClient,
   registryId: string,
-  solanaPk: Uint8Array,
+  identity: Uint8Array,
 ): Promise<string | null> {
   const accountsTable = await tableId(client, registryId, "accounts");
   if (!accountsTable) return null;
   try {
     const entry = await client.getDynamicFieldObject({
       parentId: accountsTable,
-      name: { type: "vector<u8>", value: Array.from(solanaPk) },
+      name: { type: "vector<u8>", value: Array.from(identity) },
     });
     const fields = fieldsOf(entry.data?.content);
     // Table<vector<u8>, ID> -> Field.value is the account object id.
@@ -57,38 +61,74 @@ export async function readGeneration(
 }
 
 /**
- * The `Coin<T>` balance held inside the Account's `funds` (the spendable
- * treasury), in the coin's base units. 0 if the object can't be read.
- *
- * Note this is NOT `client.getBalance({ owner: accountId })` — the funds live
- * as a `Balance<T>` field inside the shared object, not as owned coins.
+ * All coin balances held inside the Account, keyed by canonical coin type.
+ * The balances are `Balance<T>` dynamic fields on the account object itself
+ * (NOT owned coins — `client.getBalance({ owner: accountId })` sees nothing).
  */
+export async function readAccountBalances(
+  client: SuiRpcClient,
+  accountId: string,
+): Promise<Record<string, bigint>> {
+  const out: Record<string, bigint> = {};
+  let cursor: string | null | undefined = undefined;
+  do {
+    const page = await client.getDynamicFields({ parentId: accountId, cursor });
+    for (const entry of page.data) {
+      const m = /::account::BalanceKey<(.+)>$/.exec(entry.name?.type ?? "");
+      if (!m) continue;
+      const obj = await client.getObject({
+        id: entry.objectId,
+        options: { showContent: true },
+      });
+      const fields = fieldsOf(obj.data?.content);
+      const value = fields?.value;
+      const raw =
+        typeof value === "string" || typeof value === "number"
+          ? value
+          : (value?.fields?.value ?? value?.value ?? 0);
+      out[normalizeStructTag(m[1])] = BigInt(raw);
+    }
+    cursor = page.hasNextPage ? page.nextCursor : null;
+  } while (cursor);
+  return out;
+}
+
+/** Balance of one coin type held inside the Account (0 when absent). */
 export async function readAccountBalance(
   client: SuiRpcClient,
   accountId: string,
+  coinType: string,
 ): Promise<bigint> {
-  const obj = await client.getObject({ id: accountId, options: { showContent: true } });
-  const fields = fieldsOf(obj.data?.content);
-  const funds = fields?.funds;
-  if (funds == null) return 0n;
-  // `Balance<T>` renders either as the raw value string or as
-  // `{ fields: { value } }` depending on the node — handle both.
-  if (typeof funds === "string" || typeof funds === "number") return BigInt(funds);
-  return BigInt(funds.fields?.value ?? funds.value ?? 0);
+  const balances = await readAccountBalances(client, accountId);
+  return balances[normalizeStructTag(coinType)] ?? 0n;
 }
 
-/** Cumulative spend recorded for a cap on an Account (0 if absent). */
+/**
+ * Cumulative spend recorded for (cap, coin type) on an Account (0 if absent).
+ * `packageId` must be the package id that DEFINES `account::SpendKey` (the
+ * original publish id — equal to the current id until the package is
+ * upgraded).
+ */
 export async function readSpent(
   client: SuiRpcClient,
+  packageId: string,
   accountId: string,
   capId: string,
+  coinType: string,
 ): Promise<bigint> {
   const spentTable = await tableId(client, accountId, "spent");
   if (!spentTable) return 0n;
   try {
+    const canonical = normalizeStructTag(coinType);
     const entry = await client.getDynamicFieldObject({
       parentId: spentTable,
-      name: { type: "0x2::object::ID", value: capId },
+      name: {
+        type: `${packageId}::account::SpendKey`,
+        value: {
+          cap_id: capId,
+          coin_type: Array.from(new TextEncoder().encode(canonical)),
+        },
+      },
     });
     const fields = fieldsOf(entry.data?.content);
     return BigInt(fields?.value ?? 0);
@@ -97,13 +137,13 @@ export async function readSpent(
   }
 }
 
-/** Current generation for a Solana pubkey — 0 for a never-seen user. */
+/** Current generation for a root identity — 0 for a never-seen user. */
 export async function fetchGeneration(
   client: SuiRpcClient,
   registryId: string,
-  solanaPk: Uint8Array,
+  identity: Uint8Array,
 ): Promise<number> {
-  const accountId = await resolveAccountId(client, registryId, solanaPk);
+  const accountId = await resolveAccountId(client, registryId, identity);
   if (!accountId) return 0;
   return readGeneration(client, accountId);
 }

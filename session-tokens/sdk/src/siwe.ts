@@ -9,6 +9,8 @@
 import { keccak_256 } from "@noble/hashes/sha3.js";
 import { normalizeSuiAddress } from "@mysten/sui/utils";
 
+import { encodeLimits, type SpendLimit } from "./message.js";
+
 // dApp display fields — MUST match siwe.move.
 const DOMAIN = "siws-session.demo";
 const URI = "https://siws-session.demo";
@@ -56,6 +58,8 @@ export interface SiweSessionFields {
   chainId: number;
   /** ISO-8601 timestamp string (verbatim). */
   issuedAt: string;
+  /** Per-coin-type spend limits — rendered as a final `limits` resource. */
+  limits: SpendLimit[];
 }
 
 export interface SiweRevokeFields {
@@ -99,16 +103,18 @@ function build(
 }
 
 export function buildSiweSessionMessage(f: SiweSessionFields): string {
-  return build(
-    SIGNIN_STATEMENT,
-    f.registryDomain,
-    f.ethAddress,
-    f.sessionKey,
-    f.generation,
-    f.nonce,
-    f.expiresAtMs,
-    f.chainId,
-    f.issuedAt,
+  return (
+    build(
+      SIGNIN_STATEMENT,
+      f.registryDomain,
+      f.ethAddress,
+      f.sessionKey,
+      f.generation,
+      f.nonce,
+      f.expiresAtMs,
+      f.chainId,
+      f.issuedAt,
+    ) + `\n- siws-session://limits/${encodeLimits(f.limits)}`
   );
 }
 

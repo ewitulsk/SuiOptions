@@ -1,17 +1,18 @@
 // Sponsored-transaction execution (spec §2.5).
 //
 // The sponsor pays gas and co-signs; it CANNOT move user funds (that requires
-// the SessionCap, which the sponsor never holds). Two implementations:
+// the SessionCap, which the sponsor never holds).
 //
-//   - HttpSponsorClient: production shape. Hands the tx *kind* to a backend
-//     relayer you run; the relayer attaches gas, signs the gas, and returns the
-//     full tx bytes + sponsor signature. The client then signs those same bytes
-//     with the session key and submits. The relayer enforces its own call
-//     allowlist (defense in depth).
+// The production shape is `GasStationSponsorClient`: it owns the pipeline that
+// must never vary between integrations — set sender → build the tx *kind* →
+// obtain a gas reservation → sign the sponsor's EXACT bytes with the session
+// key → submit both signatures — and delegates only the reservation step to a
+// `GasStationAdapter`. Any backend that can take kind-bytes and return signed
+// full-tx bytes plugs in as an adapter; `suiOptionsGasStation` ships the
+// adapter for the SuiOptions rust gas-station wire format.
 //
-//   - LocalSponsorClient: dev/demo only. Plays the relayer role in-process with
-//     a local gas keypair. Convenient for running the demo end-to-end without a
-//     separate service. DO NOT ship a gas key to the browser in production.
+// `LocalSponsorClient` is dev/demo only: it plays the relayer role in-process
+// with a local gas keypair. DO NOT ship a gas key to the browser in production.
 
 import type { Signer } from "@mysten/sui/cryptography";
 import { Transaction } from "@mysten/sui/transactions";
@@ -33,6 +34,135 @@ const RESPONSE_OPTIONS = {
   showEffects: true,
   showObjectChanges: true,
 } as const;
+
+// ----------------------------------------------------------- external station
+
+/** What a gas station returns for a kind-only tx. */
+export interface SponsoredReservation {
+  /** Base64 full transaction bytes (sender + gas data filled in). */
+  txBytes: string;
+  /** The sponsor's signature over `txBytes`. */
+  sponsorSignature: string;
+}
+
+export interface GasStationHealth {
+  ok: boolean;
+  /** Sponsor balance in MIST, when the station reports one. */
+  balanceMist?: bigint;
+}
+
+/**
+ * The integration contract for an external gas station: attach gas to and
+ * sponsor-sign a kind-only transaction. Implement `reserve` against your
+ * station's wire format; the SDK owns everything else.
+ */
+export interface GasStationAdapter {
+  reserve(sender: string, txKindBytes: Uint8Array): Promise<SponsoredReservation>;
+  /** Optional: sponsor health, for UI (e.g. a balance indicator). */
+  health?(): Promise<GasStationHealth>;
+}
+
+/**
+ * Thrown when the gas station refuses or fails a reservation. Session keys
+ * own no gas, so there is no wallet-pays fallback — surface this to the user.
+ */
+export class SponsorUnavailableError extends Error {
+  constructor(message: string, readonly cause?: unknown) {
+    super(message);
+    this.name = "SponsorUnavailableError";
+  }
+}
+
+export class GasStationSponsorClient implements SponsorClient {
+  constructor(
+    private readonly client: SuiRpcClient,
+    readonly adapter: GasStationAdapter,
+  ) {}
+
+  async executeSponsored(
+    tx: Transaction,
+    signer: Signer,
+  ): Promise<SuiTransactionBlockResponse> {
+    const sender = signer.toSuiAddress();
+    tx.setSender(sender);
+    const txKindBytes = await tx.build({
+      client: this.client,
+      onlyTransactionKind: true,
+    });
+
+    let reservation: SponsoredReservation;
+    try {
+      reservation = await this.adapter.reserve(sender, txKindBytes);
+    } catch (e) {
+      throw e instanceof SponsorUnavailableError
+        ? e
+        : new SponsorUnavailableError(
+            `gas station reservation failed: ${e instanceof Error ? e.message : String(e)}`,
+            e,
+          );
+    }
+
+    // Sign the SAME bytes the sponsor signed.
+    const userSig = (await signer.signTransaction(
+      fromBase64(reservation.txBytes),
+    )).signature;
+
+    return this.client.executeTransactionBlock({
+      transactionBlock: reservation.txBytes,
+      signature: [userSig, reservation.sponsorSignature],
+      options: RESPONSE_OPTIONS,
+    });
+  }
+}
+
+export interface SuiOptionsGasStationOptions {
+  /** Extra headers (bearer token / api key). */
+  headers?: Record<string, string>;
+}
+
+/**
+ * Adapter for the SuiOptions rust gas-station service
+ * (`rust-backend/services/gas-station`): `POST /sponsor` with
+ * `{ sender, kind_bytes }`, `GET /balance` for health. The station validates
+ * the PTB against its template allowlist and dry-runs before signing.
+ */
+export function suiOptionsGasStation(
+  baseUrl: string,
+  options: SuiOptionsGasStationOptions = {},
+): GasStationAdapter {
+  const base = baseUrl.replace(/\/+$/, "");
+  return {
+    async reserve(sender, txKindBytes) {
+      const res = await fetch(`${base}/sponsor`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...options.headers },
+        body: JSON.stringify({ sender, kind_bytes: toBase64(txKindBytes) }),
+      });
+      if (!res.ok) {
+        throw new SponsorUnavailableError(
+          `gas station refused sponsorship: ${res.status} ${await res.text()}`,
+        );
+      }
+      const body = (await res.json()) as {
+        tx_bytes: string;
+        sponsor_signature: string;
+      };
+      return { txBytes: body.tx_bytes, sponsorSignature: body.sponsor_signature };
+    },
+    async health() {
+      try {
+        const res = await fetch(`${base}/balance`, { headers: options.headers });
+        if (!res.ok) return { ok: false };
+        const body = (await res.json()) as { balance_mist: string; healthy: boolean };
+        return { ok: body.healthy, balanceMist: BigInt(body.balance_mist) };
+      } catch {
+        return { ok: false };
+      }
+    },
+  };
+}
+
+// ------------------------------------------------------------------ dev/demo
 
 /** Extract `pkg::module::function` targets from a tx for allowlist checks. */
 function moveCallTargets(tx: Transaction): string[] {
@@ -102,64 +232,6 @@ export class LocalSponsorClient implements SponsorClient {
     return this.client.executeTransactionBlock({
       transactionBlock: bytes,
       signature: [userSig, sponsorSig],
-      options: RESPONSE_OPTIONS,
-    });
-  }
-}
-
-/** What a relayer backend returns for a kind-only tx. */
-export interface SponsoredReservation {
-  /** Base64 full transaction bytes (sender + gas data filled in). */
-  txBytes: string;
-  /** The sponsor's signature over `txBytes`. */
-  sponsorSignature: string;
-}
-
-export interface HttpSponsorOptions {
-  /** POST endpoint that accepts `{ txKindBytes, sender, allowedTargets }`. */
-  endpoint: string;
-  /** Optional bearer token / api key. */
-  headers?: Record<string, string>;
-}
-
-export class HttpSponsorClient implements SponsorClient {
-  constructor(
-    private readonly client: SuiRpcClient,
-    private readonly options: HttpSponsorOptions,
-  ) {}
-
-  async executeSponsored(
-    tx: Transaction,
-    signer: Signer,
-  ): Promise<SuiTransactionBlockResponse> {
-    const sender = signer.toSuiAddress();
-    tx.setSender(sender);
-    const txKindBytes = await tx.build({
-      client: this.client,
-      onlyTransactionKind: true,
-    });
-
-    const res = await fetch(this.options.endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...this.options.headers },
-      body: JSON.stringify({
-        sender,
-        txKindBytes: toBase64(txKindBytes),
-      }),
-    });
-    if (!res.ok) {
-      throw new Error(`sponsor request failed: ${res.status} ${await res.text()}`);
-    }
-    const reservation = (await res.json()) as SponsoredReservation;
-
-    // Sign the SAME bytes the sponsor signed.
-    const userSig = (await signer.signTransaction(
-      fromBase64(reservation.txBytes),
-    )).signature;
-
-    return this.client.executeTransactionBlock({
-      transactionBlock: reservation.txBytes,
-      signature: [userSig, reservation.sponsorSignature],
       options: RESPONSE_OPTIONS,
     });
   }

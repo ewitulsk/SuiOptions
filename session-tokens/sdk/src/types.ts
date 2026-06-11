@@ -1,6 +1,7 @@
 // Shared types for the SDK surface.
 
 import type { SuiRpcClient } from "./client.js";
+import type { SpendLimit } from "./message.js";
 import type { SponsorClient } from "./sponsor.js";
 
 export type Network = "mainnet" | "testnet" | "devnet" | "localnet";
@@ -39,18 +40,17 @@ export interface SessionConfig {
   packageId: string;
   /** Shared Registry object id (also the message `domain`). */
   registryId: string;
-  /** Fully-qualified coin type backing the Account, e.g. "0x2::sui::SUI". */
-  coinType: string;
   /** Pays gas + co-signs. Cannot move funds. */
   sponsor: SponsorClient;
 }
 
 export interface CreateSessionOptions extends SessionConfig {
   solanaWallet: SolanaSignMessage;
-  /** Max cumulative spend over the cap's life. */
-  spendCap: bigint;
-  /** Per-transaction max. */
-  perTxCap: bigint;
+  /**
+   * Per-coin-type spend limits the cap will carry — covered by the root
+   * signature. A type with no entry cannot be spent at all.
+   */
+  limits: SpendLimit[];
   /** Cap lifetime in milliseconds. Keep short. */
   ttlMs: number;
   /** Full `pkg::module::function` selectors this cap may call. */
@@ -59,12 +59,21 @@ export interface CreateSessionOptions extends SessionConfig {
   persist?: boolean;
 }
 
+/** Live per-type budget state for an active cap. */
+export interface SpendLimitStatus {
+  /** Canonical coin type. */
+  coinType: string;
+  perTx: bigint;
+  total: bigint;
+  spent: bigint;
+  remaining: bigint;
+}
+
 export interface SessionStatus {
   capId: string;
   accountId: string;
   expiresAt: number;
-  spent: bigint;
-  remaining: bigint;
+  limits: SpendLimitStatus[];
   /** Cap generation; compare with `accountGeneration` to detect revocation. */
   generation: number;
   accountGeneration: number;
