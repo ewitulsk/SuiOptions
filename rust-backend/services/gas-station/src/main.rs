@@ -67,7 +67,15 @@ async fn main() -> Result<()> {
         .transpose()
         .context("deepbook package id from token-info")?;
 
-    let templates = protocol_templates(protocol, &test_tokens, allow_faucet, deepbook);
+    // Session-login PTBs (siws_session) sponsor only where token-info
+    // reports the session package.
+    let session = snapshot
+        .session_tokens()
+        .map(|s| s.package())
+        .transpose()
+        .context("sessionTokens package id from token-info")?;
+
+    let templates = protocol_templates(protocol, &test_tokens, allow_faucet, deepbook, session);
 
     info!(
         environment = %cfg.environment,
@@ -75,6 +83,7 @@ async fn main() -> Result<()> {
         sponsor = %sui.signer.address,
         templates = templates.len(),
         deepbook = deepbook.is_some(),
+        session = session.is_some(),
         faucet_tokens = test_tokens.len(),
         threshold_mist = cfg.min_balance_threshold_mist,
         max_gas_budget_mist = cfg.max_gas_budget_mist,

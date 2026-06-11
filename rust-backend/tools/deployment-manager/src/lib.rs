@@ -67,6 +67,19 @@ pub struct Cli {
     /// Path to the test-tokens Move package.
     #[arg(long, default_value = "../test-tokens")]
     pub test_tokens: PathBuf,
+
+    /// Also publish the siws_session (session-tokens) package the protocol
+    /// depends on, BEFORE the protocol publish. Rewrites the session
+    /// package's Move.toml address to the fresh id so the protocol links
+    /// against it, and records the package + Registry ids in
+    /// deployments.json. Required the first time a protocol build that
+    /// depends on a changed session package is deployed.
+    #[arg(long)]
+    pub deploy_session: bool,
+
+    /// Path to the siws_session Move package.
+    #[arg(long, default_value = "../session-tokens/contracts")]
+    pub session_contracts: PathBuf,
 }
 
 cli_spec::define_program! {

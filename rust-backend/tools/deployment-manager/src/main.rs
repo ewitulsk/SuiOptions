@@ -13,10 +13,11 @@ use clap::Parser;
 use sui_sdk::SuiClientBuilder;
 
 use deployment_manager::deploy::{
-    create_and_share_treasury, publish_package, publish_test_tokens,
+    create_and_share_treasury, publish_package, publish_session_package, publish_test_tokens,
 };
 use deployment_manager::json_store::{
-    Deployments, NetworkDeployment, PackageInfo, TestTokenRecord, TestTokensRecord, TokenSpec,
+    Deployments, NetworkDeployment, PackageInfo, SessionTokensRecord, TestTokenRecord,
+    TestTokensRecord, TokenSpec,
 };
 use deployment_manager::network::Network;
 use deployment_manager::signer::Signer;
@@ -46,6 +47,16 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+    let session_path = if cli.deploy_session {
+        Some(cli.session_contracts.canonicalize().with_context(|| {
+            format!(
+                "resolving session-contracts path {}",
+                cli.session_contracts.display()
+            )
+        })?)
+    } else {
+        None
+    };
     let output_path = cli.output;
 
     let secrets = runtime_config::Secrets::load(&cli.secrets)
@@ -72,15 +83,21 @@ async fn main() -> Result<()> {
         .envs
         .get(&env_key)
         .and_then(|d| d.package_info.deepbook.clone());
+    let previous_session = store
+        .envs
+        .get(&env_key)
+        .and_then(|d| d.package_info.session_tokens.clone());
 
     let record = deploy_one(
         network,
         &secrets,
         &contracts_path,
         test_tokens_path.as_deref(),
+        session_path.as_deref(),
         previous_tokens,
         previous_token_info,
         previous_deepbook,
+        previous_session,
         cli.gas_budget,
         cli.skip_init,
     )
@@ -100,9 +117,11 @@ async fn deploy_one(
     secrets: &runtime_config::Secrets,
     contracts_path: &std::path::Path,
     test_tokens_path: Option<&std::path::Path>,
+    session_path: Option<&std::path::Path>,
     previous_tokens: Option<TestTokensRecord>,
     previous_token_info: BTreeMap<String, TokenSpec>,
     previous_deepbook: Option<serde_json::Value>,
+    previous_session: Option<SessionTokensRecord>,
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
@@ -115,6 +134,38 @@ async fn deploy_one(
         .build(network.rpc_url())
         .await
         .with_context(|| format!("building Sui client for {network}"))?;
+
+    // The protocol package links against siws_session, so the session
+    // package publishes FIRST (rewriting its Move.toml to the fresh id).
+    let session_tokens = if let Some(path) = session_path {
+        let outcome = publish_session_package(&client, &signer, path, gas_budget)
+            .await
+            .with_context(|| format!("publishing siws_session to {network}"))?;
+        tracing::info!(
+            package = %outcome.package_id,
+            registry = %outcome.registry_id,
+            "siws_session published"
+        );
+        Some(SessionTokensRecord {
+            package_id: outcome.package_id.to_string(),
+            registry_id: outcome.registry_id.to_string(),
+            upgrade_cap_id: outcome.upgrade_cap_id.to_string(),
+            publish_digest: outcome.digest,
+            deployed_at: chrono::Utc::now().to_rfc3339(),
+        })
+    } else if let Some(prev) = previous_session {
+        tracing::info!(
+            package = %prev.package_id,
+            "preserving existing sessionTokens record (use --deploy-session to refresh)"
+        );
+        Some(prev)
+    } else {
+        tracing::warn!(
+            "no sessionTokens record and --deploy-session not set; the protocol publish \
+             links against whatever the session package's Move.toml currently points at"
+        );
+        None
+    };
 
     let publish = publish_package(&client, &signer, contracts_path, gas_budget)
         .await
@@ -220,6 +271,7 @@ async fn deploy_one(
             network: network.as_str().to_owned(),
             test_tokens,
             deepbook: previous_deepbook,
+            session_tokens,
         },
         token_info,
     })
