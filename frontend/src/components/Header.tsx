@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   ConnectModal,
@@ -198,6 +198,31 @@ export function Header() {
   const adminCap = useAdminCap(account?.address ?? null);
   const isAdmin = adminCap.data?.isAdmin ?? false;
 
+  const navRef = useRef<HTMLElement>(null);
+  const [pill, setPill] = useState({ left: 0, width: 0, ready: false });
+  // Suppress the slide/fade on first paint so a refresh snaps the pill onto
+  // the active tab; transitions turn on once mounted for subsequent switches.
+  const [animated, setAnimated] = useState(false);
+
+  useLayoutEffect(() => {
+    const sync = () => {
+      const nav = navRef.current;
+      const active = nav?.querySelector<HTMLButtonElement>("button.is-active");
+      if (!active) {
+        setPill((p) => ({ ...p, ready: false }));
+        return;
+      }
+      setPill({ left: active.offsetLeft, width: active.offsetWidth, ready: true });
+    };
+    sync();
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
+  }, [pathname, isAdmin]);
+
+  useEffect(() => {
+    setAnimated(true);
+  }, []);
+
   return (
     <header className="header">
       <div className="header__waves" aria-hidden>
@@ -226,7 +251,17 @@ export function Header() {
         <img className="header__brand-mark" src="/tideline-mark.svg" width={36} height={36} alt="" />
         tideline
       </div>
-      <nav className="header__nav">
+      <nav className="header__nav" ref={navRef}>
+        <span
+          className="header__nav-pill"
+          aria-hidden
+          style={{
+            transform: `translateX(${pill.left}px)`,
+            width: pill.width,
+            opacity: pill.ready ? 1 : 0,
+            transition: animated ? undefined : "none",
+          }}
+        />
         <button
           className={pathname === "/earn" ? "is-active" : ""}
           onClick={() => navigate("/earn")}

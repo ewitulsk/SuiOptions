@@ -1,6 +1,5 @@
 import { useNavigate } from "react-router-dom";
 import { useDashboardState, shortAccount } from "../state/dashboard";
-import { Header } from "../components/Header";
 import { Toast } from "../components/Toast";
 import { ActionModal } from "../components/ActionModal";
 import { OwnedCard, WrittenCard } from "../components/PositionCards";
@@ -105,8 +104,6 @@ export function Dashboard() {
 
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
-      <Header />
-
       <div className="app__wrap">
         <div className="dash-hero">
           <div className="dash-hero__eyebrow">your account</div>
