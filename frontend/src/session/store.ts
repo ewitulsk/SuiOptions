@@ -253,7 +253,7 @@ export async function ensureOptionsAccount(): Promise<string> {
   try {
     const result = await handle.execute((tx, ctx) => {
       tx.moveCall({
-        target: `${PACKAGE_ID}::account::create_and_share_account_with_session`,
+        target: `${PACKAGE_ID}::session_account::create_and_share_account_with_session`,
         arguments: [
           tx.object(ctx.capId),
           tx.object(ctx.accountId),
@@ -322,7 +322,7 @@ export async function withdrawFromCustody(
   try {
     await handle.execute((tx, ctx) => {
       const coin = tx.moveCall({
-        target: `${PACKAGE_ID}::account::withdraw_with_session`,
+        target: `${PACKAGE_ID}::session_account::withdraw_with_session`,
         typeArguments: [coinType],
         arguments: [
           tx.object(optionsAccountId),

@@ -68,7 +68,7 @@ export async function readCustodyPositionIds(
       cursor,
     });
     for (const entry of page.data) {
-      if (!entry.name?.type?.endsWith("::account::PositionIndexKey")) continue;
+      if (!entry.name?.type?.endsWith("::session_account::PositionIndexKey")) continue;
       const obj = await client.getObject({
         id: entry.objectId,
         options: { showContent: true },

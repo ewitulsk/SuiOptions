@@ -14,23 +14,23 @@ export const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h
 
 /**
  * Selectors the cap may call — must match the `SEL_*` constants in
- * `contracts/sources/{account,bucket}.move` byte-for-byte.
+ * `contracts/sources/session_{account,bucket,vault}.move` byte-for-byte.
  */
 export const SESSION_ALLOWED: string[] = [
-  "options_protocol::account::create_and_share_account_with_session",
-  "options_protocol::account::withdraw_with_session",
-  "options_protocol::account::set_quote_signing_key_with_session",
-  "options_protocol::bucket::execute_write_with_session",
-  "options_protocol::bucket::exercise_with_session",
-  "options_protocol::bucket::redeem_position_with_session",
-  "options_protocol::bucket::burn_expired_option_with_session",
+  "options_protocol::session_account::create_and_share_account_with_session",
+  "options_protocol::session_account::withdraw_with_session",
+  "options_protocol::session_account::set_quote_signing_key_with_session",
+  "options_protocol::session_bucket::execute_write_with_session",
+  "options_protocol::session_bucket::exercise_with_session",
+  "options_protocol::session_bucket::redeem_position_with_session",
+  "options_protocol::session_bucket::burn_expired_option_with_session",
   // Covered-call vault twins — allowed now so caps minted today can use the
   // vault once its UI ships (the allowlist is fixed at sign-in).
-  "options_protocol::vault::deposit_with_session",
-  "options_protocol::vault::claim_shares_with_session",
-  "options_protocol::vault::initiate_withdraw_with_session",
-  "options_protocol::vault::complete_withdraw_with_session",
-  "options_protocol::vault::instant_withdraw_pending_with_session",
+  "options_protocol::session_vault::deposit_with_session",
+  "options_protocol::session_vault::claim_shares_with_session",
+  "options_protocol::session_vault::initiate_withdraw_with_session",
+  "options_protocol::session_vault::complete_withdraw_with_session",
+  "options_protocol::session_vault::instant_withdraw_pending_with_session",
 ];
 
 /**

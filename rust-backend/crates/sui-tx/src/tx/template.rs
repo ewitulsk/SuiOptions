@@ -213,7 +213,7 @@ pub fn protocol_templates(
             });
         }
 
-        let create_account = t("account", "create_and_share_account_with_session");
+        let create_account = t("session_account", "create_and_share_account_with_session");
         templates.push(PtbTemplate {
             name: "session_account_create".to_owned(),
             required: vec![create_account.clone()],
@@ -228,33 +228,33 @@ pub fn protocol_templates(
                 t("quote", "new_quote"),
                 t("quote", "new_signed_quote"),
                 t("bucket", flow),
-                t("bucket", "execute_write_with_session"),
+                t("session_bucket", "execute_write_with_session"),
             ];
             PtbTemplate {
                 name: name.to_owned(),
                 required: targets.clone(),
                 allowed: targets,
-                arities: vec![(t("bucket", "execute_write_with_session"), 3)],
+                arities: vec![(t("session_bucket", "execute_write_with_session"), 3)],
             }
         };
         templates.push(session_write_flow("session_write", "writer_flow"));
         templates.push(session_write_flow("session_buy", "trader_flow"));
 
-        let exercise = t("bucket", "exercise_with_session");
+        let exercise = t("session_bucket", "exercise_with_session");
         templates.push(PtbTemplate {
             name: "session_exercise".to_owned(),
             required: vec![exercise.clone()],
             allowed: vec![exercise.clone()],
             arities: vec![(exercise, 3)],
         });
-        let redeem = t("bucket", "redeem_position_with_session");
+        let redeem = t("session_bucket", "redeem_position_with_session");
         templates.push(PtbTemplate {
             name: "session_redeem".to_owned(),
             required: vec![redeem.clone()],
             allowed: vec![redeem.clone()],
             arities: vec![(redeem, 3)],
         });
-        let burn = t("bucket", "burn_expired_option_with_session");
+        let burn = t("session_bucket", "burn_expired_option_with_session");
         templates.push(PtbTemplate {
             name: "session_burn_expired".to_owned(),
             required: vec![burn.clone()],
@@ -264,7 +264,7 @@ pub fn protocol_templates(
 
         // Withdraw from custody to an external address (TransferObjects of
         // the returned coin is a benign command).
-        let withdraw = t("account", "withdraw_with_session");
+        let withdraw = t("session_account", "withdraw_with_session");
         templates.push(PtbTemplate {
             name: "session_withdraw".to_owned(),
             required: vec![withdraw.clone()],
@@ -305,7 +305,7 @@ pub fn protocol_templates(
             "complete_withdraw_with_session",
             "instant_withdraw_pending_with_session",
         ] {
-            let target = t("vault", function);
+            let target = t("session_vault", function);
             templates.push(PtbTemplate {
                 name: format!("session_vault:{function}"),
                 required: vec![target.clone()],
@@ -666,7 +666,7 @@ mod tests {
     fn session_flows_match_their_frontend_shapes() {
         // account create
         let create = build(
-            &[(target("account", "create_and_share_account_with_session"), 0)],
+            &[(target("session_account", "create_and_share_account_with_session"), 0)],
             false,
         );
         assert_eq!(match_any(&templates(), &create), Some("session_account_create"));
@@ -678,7 +678,7 @@ mod tests {
                 (target("quote", "new_quote"), 0),
                 (target("quote", "new_signed_quote"), 0),
                 (target("bucket", "writer_flow"), 0),
-                (target("bucket", "execute_write_with_session"), 3),
+                (target("session_bucket", "execute_write_with_session"), 3),
             ],
             false,
         );
@@ -688,25 +688,25 @@ mod tests {
                 (target("quote", "new_quote"), 0),
                 (target("quote", "new_signed_quote"), 0),
                 (target("bucket", "trader_flow"), 0),
-                (target("bucket", "execute_write_with_session"), 3),
+                (target("session_bucket", "execute_write_with_session"), 3),
             ],
             false,
         );
         assert_eq!(match_any(&templates(), &buy), Some("session_buy"));
 
         // exercise / redeem / burn twins.
-        let ex = build(&[(target("bucket", "exercise_with_session"), 3)], false);
+        let ex = build(&[(target("session_bucket", "exercise_with_session"), 3)], false);
         assert_eq!(match_any(&templates(), &ex), Some("session_exercise"));
-        let rd = build(&[(target("bucket", "redeem_position_with_session"), 3)], false);
+        let rd = build(&[(target("session_bucket", "redeem_position_with_session"), 3)], false);
         assert_eq!(match_any(&templates(), &rd), Some("session_redeem"));
         let burn = build(
-            &[(target("bucket", "burn_expired_option_with_session"), 3)],
+            &[(target("session_bucket", "burn_expired_option_with_session"), 3)],
             false,
         );
         assert_eq!(match_any(&templates(), &burn), Some("session_burn_expired"));
 
         // withdraw (+ benign TransferObjects of the returned coin) / deposit.
-        let wd = build(&[(target("account", "withdraw_with_session"), 1)], false);
+        let wd = build(&[(target("session_account", "withdraw_with_session"), 1)], false);
         assert_eq!(match_any(&templates(), &wd), Some("session_withdraw"));
         let dep = build(&[(target("account", "deposit"), 1)], true);
         assert_eq!(match_any(&templates(), &dep), Some("session_deposit"));
@@ -729,13 +729,13 @@ mod tests {
             "complete_withdraw_with_session",
             "instant_withdraw_pending_with_session",
         ] {
-            let pt = build(&[(target("vault", f), 3)], false);
+            let pt = build(&[(target("session_vault", f), 3)], false);
             assert_eq!(
                 match_any(&templates(), &pt),
                 Some(format!("session_vault:{f}").as_str()),
             );
             // wrong arity refused
-            let bad = build(&[(target("vault", f), 2)], false);
+            let bad = build(&[(target("session_vault", f), 2)], false);
             assert_eq!(match_any(&templates(), &bad), None);
         }
         // the wallet-facing vault functions are NOT sponsored.
@@ -751,8 +751,8 @@ mod tests {
                 (target("quote", "new_quote"), 0),
                 (target("quote", "new_signed_quote"), 0),
                 (target("bucket", "trader_flow"), 0),
-                (target("bucket", "execute_write_with_session"), 3),
-                (target("account", "withdraw_with_session"), 1),
+                (target("session_bucket", "execute_write_with_session"), 3),
+                (target("session_account", "withdraw_with_session"), 1),
             ],
             false,
         );
@@ -766,7 +766,7 @@ mod tests {
                 (target("quote", "new_signed_quote"), 0),
                 (target("bucket", "writer_flow"), 0),
                 (target("bucket", "execute_write"), 3),
-                (target("bucket", "execute_write_with_session"), 3),
+                (target("session_bucket", "execute_write_with_session"), 3),
             ],
             false,
         );

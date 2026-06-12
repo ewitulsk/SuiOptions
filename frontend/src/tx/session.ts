@@ -87,7 +87,7 @@ export function addSessionTrade(
   });
 
   tx.moveCall({
-    target: `${pkg}::bucket::execute_write_with_session`,
+    target: `${pkg}::session_bucket::execute_write_with_session`,
     typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.callCoinType],
     arguments: [
       tx.object(q.bucket_id),
@@ -124,7 +124,7 @@ export function addSessionExercise(
 ): void {
   const pkg = requirePackage();
   tx.moveCall({
-    target: `${pkg}::bucket::exercise_with_session`,
+    target: `${pkg}::session_bucket::exercise_with_session`,
     typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.callCoinType],
     arguments: [
       tx.object(p.bucketId),
@@ -156,7 +156,7 @@ export function addSessionRedeem(
 ): void {
   const pkg = requirePackage();
   tx.moveCall({
-    target: `${pkg}::bucket::redeem_position_with_session`,
+    target: `${pkg}::session_bucket::redeem_position_with_session`,
     typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.callCoinType],
     arguments: [
       tx.object(p.bucketId),
