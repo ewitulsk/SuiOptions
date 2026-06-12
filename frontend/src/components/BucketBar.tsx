@@ -6,7 +6,6 @@ import type { AssetOption, ExpiryOption } from "../state/composer";
 
 type Props = {
   symbol: string | null | undefined;
-  capPct: number;
   assets: AssetOption[];
   selectedAsset: string | null;
   onSelectAsset: (symbol: string) => void;
@@ -18,7 +17,6 @@ type Props = {
 
 export function BucketBar({
   symbol,
-  capPct,
   assets,
   selectedAsset,
   onSelectAsset,
@@ -27,8 +25,6 @@ export function BucketBar({
   onSelectExpiry,
   settlementSymbol,
 }: Props) {
-  const r = 12;
-  const c = 2 * Math.PI * r;
   const live = usePythPrice(symbol);
   const priceLabel = live ? `$${formatPrice(live.price, { grouping: true })}` : "—";
 
@@ -128,28 +124,6 @@ export function BucketBar({
         <div>
           <div className="bbar__price-val">{priceLabel}</div>
           <div className="bbar__price-tick">{live ? "spot live · pyth" : "connecting…"}</div>
-        </div>
-        <div className="bbar__cap">
-          <div className="bbar__cap-ring">
-            <svg width="32" height="32" viewBox="0 0 32 32">
-              <circle cx="16" cy="16" r={r} fill="none" stroke="rgba(11,37,69,0.10)" strokeWidth="3" />
-              <circle
-                cx="16"
-                cy="16"
-                r={r}
-                fill="none"
-                stroke="var(--aqua-sui)"
-                strokeWidth="3"
-                strokeDasharray={`${(c * capPct) / 100} ${c}`}
-                strokeLinecap="round"
-              />
-            </svg>
-          </div>
-          <div className="bbar__cap-text">
-            <b>{capPct}%</b>
-            <br />
-            of cap
-          </div>
         </div>
       </div>
     </div>
