@@ -152,11 +152,12 @@ services:
     networks: [net]
 
   # Permissionless covered-call vault crank (guide doc 04). Holds only a
-  # gas wallet (/run/secrets/keeper.toml, from options/prod/keeper);
-  # idles with /health up while config.prod.toml has no [[vaults]] —
-  # enable vaults there once the prod vault objects exist on chain.
-  # Unlike mm-bot/option-scheduler (commented out above), the keeper is
-  # safe to run vault-less, so the deploy wiring stays live.
+  # gas wallet (/run/secrets/keeper.toml, from options/prod/keeper).
+  # Vaults are auto-discovered from the indexer's vaults view — a vault
+  # created on chain is picked up on the next tick, no config change;
+  # with none on chain the keeper idles with /health up. Unlike
+  # mm-bot/option-scheduler (commented out above), the keeper is safe to
+  # run vault-less, so the deploy wiring stays live.
   keeper:
     image: ${ECR}/options/keeper:${KEEPER_TAG}
     environment:

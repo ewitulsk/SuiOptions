@@ -14,6 +14,7 @@ use clap::Parser;
 use sui_tx::sui_client::Network;
 
 pub mod config;
+pub mod discovery;
 pub mod planner;
 pub mod slicing;
 pub mod state;

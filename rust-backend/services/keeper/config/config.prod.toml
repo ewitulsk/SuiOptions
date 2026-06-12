@@ -1,13 +1,13 @@
 # vault-keeper config — prod env (Sui testnet, a distinct deployment
-# from staging; flip network handling together with render-secrets.sh
-# and the Dockerfile.keeper APP_ENV mapping if prod ever moves to
-# mainnet).
+# from staging; flip the [pyth] block to the mainnet ids + stable hermes
+# together with render-secrets.sh and the Dockerfile.keeper APP_ENV
+# mapping if prod ever moves to mainnet).
 #
-# Ships with an EMPTY vault list: no covered-call vault object exists on
-# chain yet, and the keeper idles healthily until one is configured here
-# (mirrors the scheduler's empty prod [[pairs]] pattern). To enable a
-# vault, copy the [[vaults]] template from config.staging.toml, fill the
-# object ids from the prod vault deployment, and roll the keeper.
+# Vaults are NOT configured here: the keeper discovers them from the
+# indexer's `vaults` view and resolves feeds/decimals/PriceInfoObjects
+# from chain state (src/discovery.rs). As soon as a prod vault is
+# created on chain, the next tick picks it up — no config edit, no
+# redeploy. With no vaults on chain, the keeper idles with /health up.
 
 indexer_graphql_url = "http://indexer:9002/graphql"
 
@@ -15,7 +15,10 @@ tick_secs   = 15
 health_addr = "0.0.0.0:8086"
 
 [pyth]
-hermes_url     = "https://hermes.pyth.network"
+# Sui TESTNET PriceInfoObjects are keyed by the BETA feed set; update
+# data must come from hermes-beta (see config.staging.toml for the
+# verification notes). Benchmarks is stable-only → sigma_fallback.
+hermes_url     = "https://hermes-beta.pyth.network"
 benchmarks_url = "https://benchmarks.pyth.network"
 # Sui TESTNET Pyth + Wormhole deployment (prod runs testnet today), per
 # https://docs.pyth.network/price-feeds/contract-addresses/sui
@@ -27,4 +30,14 @@ pyth_state_id       = "0x243759059f4c3111179da5878c12f68d612c21a8d54d85edc86164b
 wormhole_state_id   = "0x31358d198147da50db32eda2562951d53973a0c0ad5ed738e9b17d88b213d790"
 update_fee_mist     = 1
 
-# No [[vaults]] entries — see header.
+# Strategy defaults for every discovered vault — launch-memo values
+# (guide doc 08).
+[vault_defaults]
+iv_ratio = 1.15
+target_delta = 0.20
+sigma_fallback = 0.85  # load-bearing on testnet (benchmarks is stable-only)
+vol_window_days = 30
+
+[vault_defaults.slicing]
+slices = 4
+stagger_minutes = 90

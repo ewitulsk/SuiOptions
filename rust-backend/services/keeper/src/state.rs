@@ -35,7 +35,8 @@ pub struct VaultView {
     pub config: VaultConfigView,
 }
 
-/// The slice of `VaultConfig` the keeper plans against.
+/// The slice of `VaultConfig` the keeper plans against, plus the pinned
+/// oracle identity discovery resolves `PriceInfoObject`s from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VaultConfigView {
     pub min_strike_bps_over_spot: u64,
@@ -47,6 +48,12 @@ pub struct VaultConfigView {
     pub round_ms: u64,
     pub hold_premium_in_settlement: bool,
     pub deepbook_pool_id: Option<ObjectID>,
+    /// Pinned Pyth feed ids (32 raw bytes each) — what `oracle::spot_cross`
+    /// enforces, so discovery treats them as authoritative.
+    pub underlying_feed_id: Vec<u8>,
+    pub settlement_feed_id: Vec<u8>,
+    pub underlying_decimals: u8,
+    pub settlement_decimals: u8,
 }
 
 /// One live vault-coupled auction (the object still exists ⇒ unsettled).
@@ -103,6 +110,36 @@ fn u64_field(v: &Value, name: &str) -> Result<u64> {
     as_u64(field(v, name)?).with_context(|| format!("field {name}"))
 }
 
+fn u8_field(v: &Value, name: &str) -> Result<u8> {
+    u8::try_from(u64_field(v, name)?).with_context(|| format!("field {name} out of u8 range"))
+}
+
+/// `vector<u8>` renders as a JSON array of numbers; tolerate a hex
+/// string too.
+fn bytes_field(v: &Value, name: &str) -> Result<Vec<u8>> {
+    match field(v, name)? {
+        Value::Array(items) => items
+            .iter()
+            .map(|i| {
+                i.as_u64()
+                    .and_then(|n| u8::try_from(n).ok())
+                    .ok_or_else(|| anyhow!("field {name}: non-byte element {i}"))
+            })
+            .collect(),
+        Value::String(s) => {
+            let s = s.strip_prefix("0x").unwrap_or(s);
+            (0..s.len())
+                .step_by(2)
+                .map(|i| {
+                    u8::from_str_radix(s.get(i..i + 2).unwrap_or(""), 16)
+                        .with_context(|| format!("field {name}: bad hex"))
+                })
+                .collect()
+        }
+        other => Err(anyhow!("field {name}: expected bytes, got {other}")),
+    }
+}
+
 // ── parsers ────────────────────────────────────────────────────────────
 
 /// Parse a `Vault` object's parsed-JSON field map.
@@ -149,6 +186,10 @@ pub fn parse_vault_view(fields: &Value) -> Result<VaultView> {
                 .map(as_id)
                 .transpose()
                 .context("field deepbook_pool_id")?,
+            underlying_feed_id: bytes_field(config, "underlying_feed_id")?,
+            settlement_feed_id: bytes_field(config, "settlement_feed_id")?,
+            underlying_decimals: u8_field(config, "underlying_decimals")?,
+            settlement_decimals: u8_field(config, "settlement_decimals")?,
         },
     })
 }
@@ -279,6 +320,10 @@ mod tests {
                 "round_ms": "604800000",
                 "hold_premium_in_settlement": false,
                 "deepbook_pool_id": POOL,
+                "underlying_feed_id": vec![0x50u8; 32],
+                "settlement_feed_id": vec![0x41u8; 32],
+                "underlying_decimals": 9,
+                "settlement_decimals": 6,
             },
         })
     }
@@ -296,6 +341,10 @@ mod tests {
         assert_eq!(v.config.max_open_rfqs, 2);
         assert_eq!(v.config.deepbook_pool_id, Some(POOL.parse().unwrap()));
         assert!(!v.config.hold_premium_in_settlement);
+        assert_eq!(v.config.underlying_feed_id, vec![0x50u8; 32]);
+        assert_eq!(v.config.settlement_feed_id, vec![0x41u8; 32]);
+        assert_eq!(v.config.underlying_decimals, 9);
+        assert_eq!(v.config.settlement_decimals, 6);
     }
 
     #[test]

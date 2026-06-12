@@ -1,27 +1,29 @@
 //! TOML config for the vault-keeper (README §11).
 //!
+//! Vaults are **discovered**, not configured: the tick loop reads the
+//! indexer's `vaults` view (fed by `VaultCreated`) and resolves each
+//! vault's pinned feeds / decimals from its chain object and its
+//! `PriceInfoObject`s from the Pyth state table (`src/discovery.rs`).
+//! The config carries only the endpoints, the Pyth deployment handles,
+//! and the strategy defaults applied to every discovered vault.
+//!
 //! ```toml
 //! indexer_graphql_url = "http://127.0.0.1:9002/graphql"
 //! tick_secs = 15
 //!
 //! [pyth]
-//! hermes_url          = "https://hermes.pyth.network"
+//! hermes_url          = "https://hermes-beta.pyth.network"  # testnet = beta feeds
 //! benchmarks_url      = "https://benchmarks.pyth.network"
 //! pyth_package_id     = "0x…"   # latest (upgraded) pyth package
 //! wormhole_package_id = "0x…"
 //! pyth_state_id       = "0x…"
 //! wormhole_state_id   = "0x…"
 //!
-//! [[vaults]]
-//! vault_id   = "0x…"
-//! underlying = "SUI"            # token-info tickers (types/decimals/feeds)
-//! settlement = "USDC"
-//! share_type = "0x…::vshare::VSHARE"
-//! underlying_price_info = "0x…" # shared PriceInfoObject ids
-//! settlement_price_info = "0x…"
+//! [vault_defaults]
 //! iv_ratio = 1.15
+//! target_delta = 0.20
 //! sigma_fallback = 0.85
-//! [vaults.slicing]
+//! [vault_defaults.slicing]
 //! slices = 4
 //! stagger_minutes = 90
 //! ```
@@ -72,24 +74,30 @@ pub struct KeeperConfig {
     #[serde(default = "default_tick_secs")]
     pub tick_secs: u64,
 
-    /// Indexer GraphQL endpoint — bucket candidates for strike selection
-    /// and the call type of the round's current bucket.
+    /// Indexer GraphQL endpoint — vault discovery (`vaults` view),
+    /// bucket candidates for strike selection, and the call type of the
+    /// round's current bucket.
     pub indexer_graphql_url: String,
 
     pub pyth: PythKeeperConfig,
 
-    /// Vaults to crank. May be empty (the deployed default until vault
-    /// objects exist on chain): the keeper then idles with /health up.
+    /// Strategy knobs applied to every discovered vault.
     #[serde(default)]
-    pub vaults: Vec<VaultEntry>,
+    pub vault_defaults: VaultDefaults,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PythKeeperConfig {
+    /// Hermes endpoint serving the SAME feed set the network's
+    /// PriceInfoObjects are keyed by: `hermes-beta.pyth.network` for Sui
+    /// testnet (beta feed ids), `hermes.pyth.network` for mainnet.
     #[serde(default = "default_hermes_url")]
     pub hermes_url: String,
 
     /// Historical daily closes for the realized-vol estimate (README §9).
+    /// Benchmarks serves the *stable* feed set only — on testnet (beta
+    /// feed ids) the lookup fails and `vault_defaults.sigma_fallback`
+    /// takes over.
     #[serde(default = "default_benchmarks_url")]
     pub benchmarks_url: String,
 
@@ -105,21 +113,27 @@ pub struct PythKeeperConfig {
     pub update_fee_mist: u64,
 }
 
+/// Strategy defaults applied to every discovered vault (the per-vault
+/// chain identity — types, feeds, decimals, price-info objects — is
+/// resolved by `discovery.rs`, not configured).
 #[derive(Debug, Clone, Deserialize)]
-pub struct VaultEntry {
-    pub vault_id: String,
+#[serde(default)]
+pub struct VaultDefaults {
+    /// IV ≈ realized σ × this ratio (calibrated: BTC 1.19, ETH 1.08).
+    pub iv_ratio: f64,
 
-    /// token-info tickers; resolve coin types, decimals, and Pyth feed
-    /// ids from the catalog.
-    pub underlying: String,
-    pub settlement: String,
+    /// Strike-selection delta target. 0.10 is the doc 04 design point;
+    /// the SUI launch memo (guide doc 08) picks 0.20 — at 0.10 the grid
+    /// snap-up plus the auction haircut leaves too little premium above
+    /// the reserve floor.
+    pub target_delta: f64,
 
-    /// Fully-qualified VShare coin type (the vault's third generic).
-    pub share_type: String,
+    /// σ when the Benchmarks fetch fails (always, on testnet — beta
+    /// feed ids aren't served there). No fallback ⇒ the vault skips
+    /// strike selection that tick.
+    pub sigma_fallback: Option<f64>,
 
-    /// Shared `PriceInfoObject` ids for the two pinned feeds.
-    pub underlying_price_info: String,
-    pub settlement_price_info: String,
+    pub vol_window_days: u32,
 
     /// Keeper-owned `Coin<DEEP>` to fund DeepBook taker fees on
     /// `swap_proceeds`, plus the amount to split per swap. `None` ⇒ a
@@ -127,26 +141,21 @@ pub struct VaultEntry {
     pub deep_funding_coin: Option<String>,
     pub deep_fee_per_swap: Option<u64>,
 
-    /// IV ≈ realized σ × this ratio (calibrated: BTC 1.19, ETH 1.08).
-    #[serde(default = "default_iv_ratio")]
-    pub iv_ratio: f64,
-
-    /// Strike-selection delta target. 0.10 is the doc 04 design point;
-    /// the SUI launch memo (guide doc 08) picks 0.20 — at 0.10 the grid
-    /// snap-up plus the auction haircut leaves too little premium above
-    /// the reserve floor.
-    #[serde(default = "default_target_delta")]
-    pub target_delta: f64,
-
-    /// σ when the Benchmarks fetch fails. No fallback ⇒ the vault skips
-    /// strike selection that tick.
-    pub sigma_fallback: Option<f64>,
-
-    #[serde(default = "default_vol_window_days")]
-    pub vol_window_days: u32,
-
-    #[serde(default)]
     pub slicing: SlicingConfig,
+}
+
+impl Default for VaultDefaults {
+    fn default() -> Self {
+        Self {
+            iv_ratio: default_iv_ratio(),
+            target_delta: default_target_delta(),
+            sigma_fallback: None,
+            vol_window_days: default_vol_window_days(),
+            deep_funding_coin: None,
+            deep_fee_per_swap: None,
+            slicing: SlicingConfig::default(),
+        }
+    }
 }
 
 /// RFQ slice schedule (README §6). The keeper opens one auction at a
@@ -181,9 +190,10 @@ mod tests {
     use super::*;
 
     /// The shipped per-env configs must deserialize — they're what the
-    /// Dockerfile entrypoint loads on the deployed box. Both ship with
-    /// an empty vault list (no vault objects on chain yet) and the
-    /// verified Sui-testnet Pyth/Wormhole ids.
+    /// Dockerfile entrypoint loads on the deployed box. Vault identity
+    /// is discovered, so neither carries vault entries; both pin the
+    /// verified Sui-testnet Pyth/Wormhole ids and the BETA Hermes (the
+    /// feed set testnet PriceInfoObjects are keyed by).
     #[test]
     fn shipped_env_configs_parse() {
         for (env, raw) in [
@@ -195,24 +205,32 @@ mod tests {
             assert_eq!(cfg.indexer_graphql_url, "http://indexer:9002/graphql", "{env}");
             assert_eq!(cfg.tick_secs, 15, "{env}");
             assert_eq!(cfg.health_addr.port(), 8086, "{env}");
-            assert!(cfg.vaults.is_empty(), "{env}: ships vault-less");
+            assert_eq!(
+                cfg.pyth.hermes_url, "https://hermes-beta.pyth.network",
+                "{env}: testnet PriceInfoObjects are keyed by BETA feed ids"
+            );
             assert!(cfg.pyth.pyth_state_id.starts_with("0x243759"), "{env}");
             assert!(cfg.pyth.wormhole_state_id.starts_with("0x31358d"), "{env}");
             assert_eq!(cfg.pyth.update_fee_mist, 1, "{env}");
+            // Launch-memo strategy defaults (guide doc 08).
+            assert_eq!(cfg.vault_defaults.target_delta, 0.20, "{env}");
+            assert_eq!(cfg.vault_defaults.iv_ratio, 1.15, "{env}");
+            assert_eq!(
+                cfg.vault_defaults.sigma_fallback,
+                Some(0.85),
+                "{env}: benchmarks can't serve beta ids — fallback is load-bearing"
+            );
+            assert_eq!(cfg.vault_defaults.slicing.slices, 4, "{env}");
+            assert_eq!(cfg.vault_defaults.slicing.stagger_minutes, 90, "{env}");
         }
     }
 
-    /// The example config (a filled-in [[vaults]] entry) must also parse —
-    /// it's the template operators copy from when enabling a vault.
+    /// The example config (local dev) must also parse.
     #[test]
-    fn example_config_parses_with_a_vault() {
+    fn example_config_parses() {
         let cfg: KeeperConfig =
             toml::from_str(include_str!("../config/config.example.toml")).unwrap();
-        assert_eq!(cfg.vaults.len(), 1);
-        let v = &cfg.vaults[0];
-        assert_eq!(v.underlying, "SUI");
-        assert_eq!(v.target_delta, 0.20);
-        assert_eq!(v.slicing.slices, 4);
-        assert_eq!(v.slicing.stagger_minutes, 90);
+        assert_eq!(cfg.vault_defaults.target_delta, 0.20);
+        assert_eq!(cfg.vault_defaults.slicing.slices, 4);
     }
 }

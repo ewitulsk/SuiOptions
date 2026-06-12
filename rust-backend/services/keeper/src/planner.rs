@@ -169,6 +169,10 @@ mod tests {
             round_ms: 7 * 24 * HOUR,
             hold_premium_in_settlement: false,
             deepbook_pool_id: Some(id(0xd1)),
+            underlying_feed_id: vec![0u8; 32],
+            settlement_feed_id: vec![0u8; 32],
+            underlying_decimals: 9,
+            settlement_decimals: 6,
         }
     }
 
