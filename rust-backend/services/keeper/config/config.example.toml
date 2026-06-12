@@ -1,0 +1,36 @@
+# vault-keeper example config (README §11). Copy to config.toml and fill
+# in the network's object ids.
+
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
+tick_secs = 15
+health_addr = "0.0.0.0:8086"
+
+[pyth]
+hermes_url     = "https://hermes.pyth.network"
+benchmarks_url = "https://benchmarks.pyth.network"
+# Latest (post-upgrade) packages the entry calls target, plus the state
+# objects. Testnet values: see https://docs.pyth.network/price-feeds/contract-addresses/sui
+pyth_package_id     = "0x0000000000000000000000000000000000000000000000000000000000000000"
+wormhole_package_id = "0x0000000000000000000000000000000000000000000000000000000000000000"
+pyth_state_id       = "0x0000000000000000000000000000000000000000000000000000000000000000"
+wormhole_state_id   = "0x0000000000000000000000000000000000000000000000000000000000000000"
+update_fee_mist     = 1
+
+[[vaults]]
+vault_id   = "0x0000000000000000000000000000000000000000000000000000000000000000"
+underlying = "SUI"     # token-info tickers — coin types, decimals, and
+settlement = "USDC"    # Pyth feed ids resolve from the catalog
+share_type = "0x0::vshare_sui::VSHARE_SUI"
+underlying_price_info = "0x0000000000000000000000000000000000000000000000000000000000000000"
+settlement_price_info = "0x0000000000000000000000000000000000000000000000000000000000000000"
+# Owned Coin<DEEP> + amount split per swap_proceeds; omit both for a
+# zero coin (whitelisted pools).
+# deep_funding_coin = "0x…"
+# deep_fee_per_swap = 1000000
+iv_ratio = 1.15        # calibrated: BTC 1.19, ETH 1.08 (backtester, Jun 2026)
+sigma_fallback = 0.85
+vol_window_days = 30
+
+[vaults.slicing]
+slices = 4
+stagger_minutes = 90

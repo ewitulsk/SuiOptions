@@ -1,0 +1,41 @@
+[package]
+name = "keeper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "keeper"
+path = "src/main.rs"
+
+[dependencies]
+protocol-types = { workspace = true }
+runtime-config = { workspace = true }
+cli-spec       = { workspace = true }
+sui-tx         = { workspace = true }
+pyth-client    = { workspace = true }
+pricing        = { workspace = true }
+token-info-client = { workspace = true }
+indexer-graphql = { workspace = true }
+
+sui-types = { workspace = true }
+sui-json-rpc-types = { workspace = true }
+sui-sdk = { workspace = true }
+# Event-filter StructTags for RfqCreated discovery.
+move-core-types = { workspace = true }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+# Strike-selection goldens shared with the backtester (doc 04 §5).
+vault-sim = { workspace = true }

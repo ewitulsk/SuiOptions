@@ -4758,6 +4758,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "keeper"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "cli-spec",
+ "indexer-graphql",
+ "move-core-types",
+ "pricing",
+ "protocol-types",
+ "pyth-client",
+ "reqwest",
+ "runtime-config",
+ "serde",
+ "serde_json",
+ "sui-json-rpc-types",
+ "sui-sdk",
+ "sui-tx",
+ "sui-types",
+ "token-info-client",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "vault-sim",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7692,6 +7719,7 @@ name = "pyth-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "dashmap 6.1.0",
  "futures",
  "hex",

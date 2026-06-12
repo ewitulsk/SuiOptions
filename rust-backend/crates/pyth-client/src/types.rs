@@ -65,12 +65,24 @@ impl PriceUpdate {
 }
 
 /// Top-level shape of `/v2/updates/price/latest` and each `data:` line of
-/// `/v2/updates/price/stream`. The `binary` field is captured opaquely
-/// because we don't consume it.
+/// `/v2/updates/price/stream`. The `binary` field carries the accumulator
+/// update payload meant for on-chain verification — consumed by the
+/// vault-keeper's Pyth PTB prefix, ignored by the price-only callers.
 #[derive(Clone, Debug, Deserialize)]
 pub struct HermesEnvelope {
     #[serde(default)]
     pub parsed: Vec<PriceUpdate>,
+    #[serde(default)]
+    pub binary: Option<HermesBinary>,
+}
+
+/// The `binary` block of a Hermes response: one or more encoded update
+/// payloads (with `encoding=base64`, each entry is a base64 accumulator
+/// message covering every requested feed).
+#[derive(Clone, Debug, Deserialize)]
+pub struct HermesBinary {
+    pub encoding: String,
+    pub data: Vec<String>,
 }
 
 #[cfg(test)]

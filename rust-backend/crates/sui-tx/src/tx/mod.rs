@@ -18,6 +18,7 @@ pub mod admin;
 pub mod coin_pkg;
 pub mod deepbook;
 pub mod execute_write;
+pub mod pyth_update;
 pub mod rfq;
 pub mod sponsor;
 pub mod template;
@@ -80,8 +81,10 @@ pub async fn shared_object_arg(
 }
 
 /// Gas-select, sign, submit, and assert success for a finished PTB. Shared
-/// by the rfq / vault builders; the older modules keep their local copies.
-pub(crate) async fn submit_ptb(
+/// by the rfq / vault builders (and the keeper, which prepends a Pyth
+/// price update before the crank call); the older modules keep their
+/// local copies.
+pub async fn submit_ptb(
     client: &SuiClient,
     signer: &Signer,
     pt: ProgrammableTransactionBuilder,

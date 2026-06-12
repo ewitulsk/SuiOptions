@@ -15,6 +15,7 @@ members = [
     "crates/vault-sim",
     "crates/observability",
     "services/indexer",
+    "services/keeper",
     "services/quoting-service",
     "services/mm-bot",
     "services/option-scheduler",

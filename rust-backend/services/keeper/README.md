@@ -1,11 +1,16 @@
 # vault-keeper — implementation guide
 
-> Status: **not yet implemented.** This README is the build spec for
-> ticket D1, updated from
-> [`docs/vault-implementation-guide/04-vault-keeper.md`](../../../docs/vault-implementation-guide/04-vault-keeper.md)
-> to match what actually shipped on-chain (PR #148). Everything the
-> keeper depends on — the vault cranks, the PTB builders, the strike
-> math — is already merged; this service is pure wiring.
+> Status: **implemented** (ticket D1). The crate in this directory
+> follows the spec below; deviations from the original sketch are noted
+> inline (planner returns one action per tick and signals
+> `SelectBucketNeeded` for the tick loop to resolve; slicing is
+> clock-derived rather than counted; metrics are structured log lines —
+> the per-round σ/K*/strike/delta "strike pick" line is the calibration
+> trail — with Prometheus counters still TODO). Spec originally derived
+> from
+> [`docs/vault-implementation-guide/04-vault-keeper.md`](../../../docs/vault-implementation-guide/04-vault-keeper.md),
+> updated to match what shipped on-chain (PR #148). Remaining: the §12
+> localnet e2e (ticket E1).
 
 ## 1. Trust model (read this first)
 
