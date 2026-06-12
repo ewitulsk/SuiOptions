@@ -53,17 +53,12 @@ const RFQ_LOOKBACK_ROUNDS: u64 = 2;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    let _obs = observability::init("keeper");
 
     let cli = Cli::parse();
     let cfg = KeeperConfig::load(&cli.config)
         .with_context(|| format!("loading {}", cli.config.display()))?;
-    runtime_config::health::spawn(cfg.health_addr);
+    observability::ops::spawn(cfg.health_addr);
     let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
     let snapshot = TokenInfoClient::new(&cli.token_info_url)
@@ -121,8 +116,11 @@ async fn main() -> Result<()> {
     let tick = Duration::from_secs(cfg.tick_secs.max(1));
     info!(tick_secs = cfg.tick_secs, dry_run = cli.dry_run, "tick loop starting");
     loop {
+        metrics::counter!("keeper_ticks_total").increment(1);
+        let tick_started = std::time::Instant::now();
         discover_new_vaults(&wrap, &indexer, &pyth_handles, &mut price_table, &mut vaults, &halted)
             .await;
+        metrics::gauge!("keeper_vaults_discovered").set(vaults.len() as f64);
 
         for (id, meta) in &vaults {
             if halted.contains(id) {
@@ -152,6 +150,7 @@ async fn main() -> Result<()> {
                 },
             }
         }
+        metrics::histogram!("keeper_tick_duration_seconds").record(tick_started.elapsed().as_secs_f64());
         sleep(tick).await;
     }
 }

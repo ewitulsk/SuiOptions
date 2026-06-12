@@ -171,6 +171,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
     "keeper": [
         "rust-backend/services/keeper/**",
         "rust-backend/Dockerfile.keeper",
+        "rust-backend/crates/observability/**",
         "rust-backend/crates/protocol-types/**",
         "rust-backend/crates/runtime-config/**",
         "rust-backend/crates/cli-spec/**",

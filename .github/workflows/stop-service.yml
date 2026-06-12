@@ -33,6 +33,8 @@ on:
           - api-service
           - price-charting
           - gas-station
+          - balance-monitor
+          - keeper
           - nginx
 
 permissions:
