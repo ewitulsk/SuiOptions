@@ -5,7 +5,7 @@ use siws_session::siwe;
 
 // Reference vector generated with a real secp256k1 key (priv = 0x01 * 32) over
 // the EIP-191 personal_sign of the message below. Mirrored byte-for-byte in
-// `sdk/src/siwe.test.ts`. Regenerate with `sdk/gen-siwe.mjs`.
+// `frontend/siws-session-sdk/src/siwe.test.ts`. Regenerate with `frontend/siws-session-sdk/gen-siwe.mjs`.
 
 const ETH_ADDRESS: vector<u8> = x"1a642f0e3c3af545e7acbd38b07251b3990914f1";
 const SIG65: vector<u8> = x"d6ccd719f17ee783d234ce54502d4ce1de7c30ce71f9f824238b85dd47ab2d541f13be8689030032d7ac8ff193a6726d5965f4c1767824357fa5985f81bfb51901";

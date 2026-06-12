@@ -43,7 +43,7 @@ fun sui_limit(per_tx: u64, total: u64): vector<SpendLimit> {
 }
 
 // --- serializer pins (must match the SDK reference vectors byte-for-byte;
-// --- regenerate with `sdk/gen-siwe.mjs`) ---
+// --- regenerate with `frontend/siws-session-sdk/gen-siwe.mjs`) ---
 
 #[test]
 fun test_session_message_reference() {
