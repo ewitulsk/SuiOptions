@@ -655,6 +655,38 @@
   font-family: "JetBrains Mono", monospace; font-size: 18px; font-weight: 500;
   color: var(--aqua-ink-3); margin-left: 8px; letter-spacing: 0;
 }
+/* Cresting-wave loader that stands in for the hero premium while quoting. */
+[data-theme="aqua"] .wave-loader {
+  display: inline-flex; align-items: center;
+  width: 168px; height: 44px; vertical-align: middle; overflow: hidden;
+  /* Soft-clip the left/right edges so crests dissolve instead of hitting a
+     hard vertical cut as they drift in and out of the window. */
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 16%, #000 84%, transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 16%, #000 84%, transparent 100%);
+}
+[data-theme="aqua"] .wave-loader__svg {
+  width: 200%; height: 64%; overflow: visible;
+  transform-origin: center;
+  animation: aqua-wave-swell 2.4s ease-in-out infinite;
+}
+[data-theme="aqua"] .wave-loader__wave {
+  fill: none; stroke: var(--aqua-sui); stroke-width: 2.5; stroke-linecap: round;
+  transform-box: view-box;
+  filter: drop-shadow(0 1px 4px var(--aqua-sui-glow));
+  animation: aqua-wave 3.6s linear infinite;
+}
+[data-theme="aqua"] .wave-loader__wave--back {
+  stroke: var(--aqua-t3); opacity: 0.45; stroke-width: 1.75;
+  animation-duration: 5.6s; animation-direction: reverse;
+}
+@keyframes aqua-wave-swell {
+  0%, 100% { transform: scaleY(0.78); }
+  50%      { transform: scaleY(1.18); }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="aqua"] .wave-loader__svg,
+  [data-theme="aqua"] .wave-loader__wave { animation: none; }
+}
 [data-theme="aqua"] .panel__sub {
   font-size: 13px; color: var(--aqua-ink-3);
   margin-top: 8px; line-height: 1.5;
