@@ -21,11 +21,21 @@ public crank that `vault.move` validates on-chain:
 - everything else (`crank_redeem`, `settle_rfq`, `finalize_round`) has
   no degrees of freedom at all.
 
-A malicious keeper's worst case is a *slightly suboptimal strike inside
-the band*; a lazy keeper's worst case is a delayed round. N keepers can
-run concurrently and merely waste gas racing — lost races abort with
-clear error codes. Anyone can run this binary; the team runs ≥ 2
-instances on independent infra.
+A malicious keeper cannot sell below the on-chain floors, but the floors
+are not tight: the realistic worst case is picking the **lowest in-band
+strike** (the +3% band edge instead of the ~0.10Δ target) **and** timing
+the auction so only a colluding bidder shows up, who then pays exactly
+the reserve. The leak per round is bounded by
+`fair_premium(K_band_edge) − reserve_premium` on one slice — roughly
+2–3% of the sliced notional at a 10 bps reserve. Mitigations: set
+`min_reserve_premium_bps` to **50–100 bps** at vault creation (a weekly
+~0.10Δ call is worth well over that, so honest auctions are unaffected
+while a quiet auction leaks far less), and alert when a round's clearing
+premium lands below the model price (the per-round σ/K/premium metrics
+in §11 exist for exactly this). A lazy keeper's worst case is a delayed
+round. N keepers can run concurrently and merely waste gas racing — lost
+races abort with clear error codes. Anyone can run this binary; the team
+runs ≥ 2 instances on independent infra.
 
 ## 2. Crate layout
 

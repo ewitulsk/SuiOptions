@@ -128,7 +128,8 @@ public struct VaultConfig has copy, drop, store {
     max_expiry_lead_ms: u64,           // bucket expiry ≤ now + cap  (e.g. 9 days)
 
     // RFQ slice guardrails
-    min_reserve_premium_bps: u64,      // reserve ≥ bps × spot-notional (e.g. 10 bps)
+    min_reserve_premium_bps: u64,      // reserve ≥ bps × spot-notional (launch: 50–100 bps —
+                                       // the reserve is the only floor under a lone bidder)
     max_slice_amount: u64,             // underlying units per RFQ
     max_open_rfqs: u64,
     rfq_duration_ms: u64,
