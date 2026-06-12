@@ -24,6 +24,13 @@ export const SESSION_ALLOWED: string[] = [
   "options_protocol::bucket::exercise_with_session",
   "options_protocol::bucket::redeem_position_with_session",
   "options_protocol::bucket::burn_expired_option_with_session",
+  // Covered-call vault twins — allowed now so caps minted today can use the
+  // vault once its UI ships (the allowlist is fixed at sign-in).
+  "options_protocol::vault::deposit_with_session",
+  "options_protocol::vault::claim_shares_with_session",
+  "options_protocol::vault::initiate_withdraw_with_session",
+  "options_protocol::vault::complete_withdraw_with_session",
+  "options_protocol::vault::instant_withdraw_pending_with_session",
 ];
 
 /**

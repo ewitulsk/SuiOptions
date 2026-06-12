@@ -288,6 +288,20 @@ public struct AccountPositionWithdraw has copy, drop {
     position_id: ID,
 }
 
+/// Any other object (vault receipt, …) entered the account's custody.
+public struct AccountObjectDeposit has copy, drop {
+    account_id: ID,
+    object_id: ID,
+    object_type: TypeName,
+}
+
+/// A custodied object left the account's custody.
+public struct AccountObjectWithdraw has copy, drop {
+    account_id: ID,
+    object_id: ID,
+    object_type: TypeName,
+}
+
 public struct FeeUpdated has copy, drop {
     old_bps: u64,
     new_bps: u64,
@@ -684,6 +698,22 @@ public(package) fun emit_account_position_deposit(
 
 public(package) fun emit_account_position_withdraw(account_id: ID, position_id: ID) {
     event::emit(AccountPositionWithdraw { account_id, position_id });
+}
+
+public(package) fun emit_account_object_deposit(
+    account_id: ID,
+    object_id: ID,
+    object_type: TypeName,
+) {
+    event::emit(AccountObjectDeposit { account_id, object_id, object_type });
+}
+
+public(package) fun emit_account_object_withdraw(
+    account_id: ID,
+    object_id: ID,
+    object_type: TypeName,
+) {
+    event::emit(AccountObjectWithdraw { account_id, object_id, object_type });
 }
 
 public(package) fun emit_fee_updated(old_bps: u64, new_bps: u64) {

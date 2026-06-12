@@ -40,6 +40,10 @@ use deepbook::pool::Pool;
 use pyth::price_info::PriceInfoObject;
 use token::deep::DEEP;
 
+use siws_session::account::Account as SessionAccount;
+use siws_session::session::{Self, SessionCap};
+
+use options_protocol::account::{Self, Account};
 use options_protocol::admin::{AdminCap, ProtocolConfig};
 use options_protocol::bucket::{Self, Bucket};
 use options_protocol::errors;
@@ -415,6 +419,140 @@ public fun instant_withdraw_pending<U, S, V>(
     assert!(round > vault.round, errors::vault_receipt_round_mismatch());
     events::emit_instant_withdraw(object::id(vault), ctx.sender(), vault.round, amount);
     coin::from_balance(vault.pending_deposits.split(amount), ctx)
+}
+
+// ═══════════ session-gated user flows (siws_session integration) ═══════════
+//
+// Twins of the user deposit/withdraw functions for session-rooted users
+// (see `bucket.move`'s session section). Coins are sourced from and settle
+// into the user's session-linked options `Account`; receipt objects are
+// custodied on it. Only `deposit` spends against the cap's per-type limits
+// — every other flow moves value that remains the user's (escrowed shares /
+// receipts redeemable only back into the same custody).
+//
+// The lifecycle cranks (`crank_redeem`, `swap_proceeds`, `finalize_round`,
+// `select_bucket`, `open_rfq`, `settle_rfq*`) are permissionless keeper
+// functions and `rfq::bid` is MM-facing — none of them move user custody,
+// so they get no session twins.
+
+const SEL_DEPOSIT: vector<u8> = b"options_protocol::vault::deposit_with_session";
+const SEL_CLAIM_SHARES: vector<u8> = b"options_protocol::vault::claim_shares_with_session";
+const SEL_INITIATE_WITHDRAW: vector<u8> =
+    b"options_protocol::vault::initiate_withdraw_with_session";
+const SEL_COMPLETE_WITHDRAW: vector<u8> =
+    b"options_protocol::vault::complete_withdraw_with_session";
+const SEL_INSTANT_WITHDRAW: vector<u8> =
+    b"options_protocol::vault::instant_withdraw_pending_with_session";
+
+public fun deposit_selector(): vector<u8> { SEL_DEPOSIT }
+public fun claim_shares_selector(): vector<u8> { SEL_CLAIM_SHARES }
+public fun initiate_withdraw_selector(): vector<u8> { SEL_INITIATE_WITHDRAW }
+public fun complete_withdraw_selector(): vector<u8> { SEL_COMPLETE_WITHDRAW }
+public fun instant_withdraw_selector(): vector<u8> { SEL_INSTANT_WITHDRAW }
+
+/// Session twin of `deposit`: underlying out of custody (charged against the
+/// cap's limit for `U`), the `DepositReceipt` custodied on the account.
+public fun deposit_with_session<U, S, V>(
+    vault: &mut Vault<U, S, V>,
+    user_account: &mut Account,
+    cap: &SessionCap,
+    session_account: &mut SessionAccount,
+    amount: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    account::assert_session_linked(user_account, cap);
+    session::authorize_spend<U>(
+        cap, session_account, clock, amount, SEL_DEPOSIT, ctx.sender(),
+    );
+    let coin = account::withdraw_internal<U>(user_account, amount, ctx);
+    events::emit_account_withdraw(
+        object::id(user_account),
+        type_name::with_defining_ids<U>(),
+        amount,
+    );
+    let receipt = deposit(vault, coin, ctx);
+    account::store_object(user_account, receipt);
+}
+
+/// Session twin of `claim_shares`: converts a custodied receipt; the share
+/// coins settle into custody. No value leaves the user — `authorize`-gated.
+public fun claim_shares_with_session<U, S, V>(
+    vault: &mut Vault<U, S, V>,
+    user_account: &mut Account,
+    cap: &SessionCap,
+    session_account: &SessionAccount,
+    receipt_id: ID,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    account::assert_session_linked(user_account, cap);
+    session::authorize(cap, session_account, clock, SEL_CLAIM_SHARES, ctx.sender());
+    let receipt = account::take_object<DepositReceipt>(user_account, receipt_id);
+    let shares = claim_shares(vault, receipt, ctx);
+    account::deposit_balance(user_account, shares.into_balance());
+}
+
+/// Session twin of `initiate_withdraw`: escrows custodied shares for the
+/// two-step withdrawal; the `WithdrawReceipt` is custodied. The escrowed
+/// value stays the user's (redeemable only back into this custody), so this
+/// is `authorize`-gated — per-vault share types can't be enumerated in a
+/// cap's limits anyway.
+public fun initiate_withdraw_with_session<U, S, V>(
+    vault: &mut Vault<U, S, V>,
+    user_account: &mut Account,
+    cap: &SessionCap,
+    session_account: &SessionAccount,
+    shares: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    account::assert_session_linked(user_account, cap);
+    session::authorize(cap, session_account, clock, SEL_INITIATE_WITHDRAW, ctx.sender());
+    let share_coin = account::withdraw_internal<V>(user_account, shares, ctx);
+    events::emit_account_withdraw(
+        object::id(user_account),
+        type_name::with_defining_ids<V>(),
+        shares,
+    );
+    let receipt = initiate_withdraw(vault, share_coin, ctx);
+    account::store_object(user_account, receipt);
+}
+
+/// Session twin of `complete_withdraw`: pays a finalized withdrawal into
+/// custody. `authorize`-gated (funds land back in the account).
+public fun complete_withdraw_with_session<U, S, V>(
+    vault: &mut Vault<U, S, V>,
+    user_account: &mut Account,
+    cap: &SessionCap,
+    session_account: &SessionAccount,
+    receipt_id: ID,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    account::assert_session_linked(user_account, cap);
+    session::authorize(cap, session_account, clock, SEL_COMPLETE_WITHDRAW, ctx.sender());
+    let receipt = account::take_object<WithdrawReceipt>(user_account, receipt_id);
+    let owed = complete_withdraw(vault, receipt, ctx);
+    account::deposit_balance(user_account, owed.into_balance());
+}
+
+/// Session twin of `instant_withdraw_pending`: cancels a not-yet-started
+/// deposit; the refund lands back in custody. `authorize`-gated.
+public fun instant_withdraw_pending_with_session<U, S, V>(
+    vault: &mut Vault<U, S, V>,
+    user_account: &mut Account,
+    cap: &SessionCap,
+    session_account: &SessionAccount,
+    receipt_id: ID,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    account::assert_session_linked(user_account, cap);
+    session::authorize(cap, session_account, clock, SEL_INSTANT_WITHDRAW, ctx.sender());
+    let receipt = account::take_object<DepositReceipt>(user_account, receipt_id);
+    let refund = instant_withdraw_pending(vault, receipt, ctx);
+    account::deposit_balance(user_account, refund.into_balance());
 }
 
 // ════════════════════ lifecycle cranks (permissionless) ════════════════════

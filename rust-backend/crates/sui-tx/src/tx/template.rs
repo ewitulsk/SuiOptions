@@ -295,6 +295,24 @@ pub fn protocol_templates(
                 });
             }
         }
+
+        // Vault session twins (covered-call vault, doc 03): each is a single
+        // custody-funded call with the vault's 3 type args.
+        for function in [
+            "deposit_with_session",
+            "claim_shares_with_session",
+            "initiate_withdraw_with_session",
+            "complete_withdraw_with_session",
+            "instant_withdraw_pending_with_session",
+        ] {
+            let target = t("vault", function);
+            templates.push(PtbTemplate {
+                name: format!("session_vault:{function}"),
+                required: vec![target.clone()],
+                allowed: vec![target.clone()],
+                arities: vec![(target, 3)],
+            });
+        }
     }
 
     // DeepBook PTB shapes (SO-154 venue creation + SO-157 trading). Coin
@@ -702,6 +720,27 @@ mod tests {
             false,
         );
         assert_eq!(match_any(&templates(), &fund), Some("session_fund:tbtc"));
+
+        // vault twins: one custody-funded call each, 3 type args.
+        for f in [
+            "deposit_with_session",
+            "claim_shares_with_session",
+            "initiate_withdraw_with_session",
+            "complete_withdraw_with_session",
+            "instant_withdraw_pending_with_session",
+        ] {
+            let pt = build(&[(target("vault", f), 3)], false);
+            assert_eq!(
+                match_any(&templates(), &pt),
+                Some(format!("session_vault:{f}").as_str()),
+            );
+            // wrong arity refused
+            let bad = build(&[(target("vault", f), 2)], false);
+            assert_eq!(match_any(&templates(), &bad), None);
+        }
+        // the wallet-facing vault functions are NOT sponsored.
+        let wallet_deposit = build(&[(target("vault", "deposit"), 3)], false);
+        assert_eq!(match_any(&templates(), &wallet_deposit), None);
     }
 
     #[test]

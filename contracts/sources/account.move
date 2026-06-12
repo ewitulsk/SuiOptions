@@ -180,6 +180,17 @@ public struct PositionKey has copy, drop, store {
 /// so custody can be enumerated on-chain and read in one RPC call.
 public struct PositionIndexKey has copy, drop, store {}
 
+/// Dynamic-object-field key for any other custodied object (vault
+/// deposit/withdraw receipts, …). Generic custody for `key + store` objects
+/// that session flows mint to the user.
+public struct ObjectKey has copy, drop, store {
+    object_id: ID,
+}
+
+/// Index of custodied object ids (`vector<ID>`) — consumers fetch the
+/// objects to learn their types.
+public struct ObjectIndexKey has copy, drop, store {}
+
 const SEL_CREATE_ACCOUNT: vector<u8> =
     b"options_protocol::account::create_and_share_account_with_session";
 const SEL_WITHDRAW: vector<u8> = b"options_protocol::account::withdraw_with_session";
@@ -318,6 +329,54 @@ public fun has_position(account: &Account, position_id: ID): bool {
 /// Ids of every custodied Position (empty for non-custody accounts).
 public fun position_ids(account: &Account): vector<ID> {
     let key = PositionIndexKey {};
+    if (df::exists_(&account.id, key)) {
+        *df::borrow(&account.id, key)
+    } else {
+        vector[]
+    }
+}
+
+// --- generic object custody (vault receipts, …) ---
+
+public(package) fun store_object<O: key + store>(account: &mut Account, obj: O) {
+    let object_id = object::id(&obj);
+    events::emit_account_object_deposit(
+        object::id(account),
+        object_id,
+        type_name::with_defining_ids<O>(),
+    );
+    let index_key = ObjectIndexKey {};
+    if (df::exists_(&account.id, index_key)) {
+        let index: &mut vector<ID> = df::borrow_mut(&mut account.id, index_key);
+        index.push_back(object_id);
+    } else {
+        df::add(&mut account.id, index_key, vector[object_id]);
+    };
+    dof::add(&mut account.id, ObjectKey { object_id }, obj);
+}
+
+public(package) fun take_object<O: key + store>(account: &mut Account, object_id: ID): O {
+    let key = ObjectKey { object_id };
+    assert!(dof::exists_(&account.id, key), errors::object_not_found());
+    events::emit_account_object_withdraw(
+        object::id(account),
+        object_id,
+        type_name::with_defining_ids<O>(),
+    );
+    let index: &mut vector<ID> = df::borrow_mut(&mut account.id, ObjectIndexKey {});
+    let (found, i) = index.index_of(&object_id);
+    assert!(found, errors::object_not_found());
+    index.swap_remove(i);
+    dof::remove(&mut account.id, key)
+}
+
+public fun has_object(account: &Account, object_id: ID): bool {
+    dof::exists_(&account.id, ObjectKey { object_id })
+}
+
+/// Ids of every custodied non-Position object (empty when none).
+public fun object_ids(account: &Account): vector<ID> {
+    let key = ObjectIndexKey {};
     if (df::exists_(&account.id, key)) {
         *df::borrow(&account.id, key)
     } else {

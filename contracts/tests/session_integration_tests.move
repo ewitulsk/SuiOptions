@@ -14,6 +14,7 @@ use options_protocol::admin;
 use options_protocol::bucket::{Self, Bucket};
 use options_protocol::quote;
 use options_protocol::test_helpers::{Self as th, BTC, USDC, CALL};
+use options_protocol::vault;
 
 const STRIKE: u128 = 50_000;
 const STRIKE_SCALE: u8 = 0;
@@ -38,6 +39,11 @@ fun allowlist(): vector<vector<u8>> {
         bucket::exercise_selector(),
         bucket::redeem_selector(),
         bucket::burn_expired_selector(),
+        vault::deposit_selector(),
+        vault::claim_shares_selector(),
+        vault::initiate_withdraw_selector(),
+        vault::complete_withdraw_selector(),
+        vault::instant_withdraw_selector(),
     ]
 }
 
@@ -149,7 +155,7 @@ fun test_withdraw_with_session_wrong_sender_aborts() {
 }
 
 #[test]
-#[expected_failure(abort_code = 29, location = options_protocol::account)] // session_mismatch
+#[expected_failure(abort_code = 56, location = options_protocol::account)] // session_mismatch
 fun test_with_session_on_unlinked_account_aborts() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
@@ -373,6 +379,148 @@ fun test_redeem_with_session_after_expiry() {
 
     ts::return_shared(b);
     ts::return_shared(user_acc);
+    test_utils::destroy(sess);
+    test_utils::destroy(cap);
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+// --- vault flows: deposit/claim/withdraw entirely from custody ---
+
+/// Share coin for the session vault tests.
+public struct VSH has drop {}
+
+const WEEK_MS: u64 = 604_800_000;
+const DAY_MS: u64 = 86_400_000;
+const VAULT_SPOT: u128 = 47_619_000_000_000_000;
+const VAULT_SPOT_SCALE: u8 = 12;
+
+/// Mirror of `vault_tests::default_config`.
+fun vault_config(): vault::VaultConfig {
+    vault::new_config(
+        200, 1_000, WEEK_MS, 12 * 60 * 60 * 1_000, 300, 6_000,
+        3 * DAY_MS, 9 * DAY_MS, 10, 1_000_000_000_000, 4,
+        400_000, 60_000, 120_000, 100_000, 500,
+        false, 50, option::none(),
+        b"underlying-feed", b"settlement-feed", 60, 100, 9, 6,
+    )
+}
+
+fun setup_vault(scenario: &mut Scenario) {
+    ts::next_tx(scenario, th::admin_addr());
+    let cap = th::take_admin_cap(scenario);
+    let tcap = coin::create_treasury_cap_for_testing<VSH>(scenario.ctx());
+    vault::create_vault<BTC, USDC, VSH>(&cap, tcap, vault_config(), scenario.ctx());
+    th::return_admin_cap(scenario, cap);
+}
+
+fun finalize_vault(scenario: &mut Scenario, clock: &Clock) {
+    ts::next_tx(scenario, th::stranger_addr());
+    let mut v = ts::take_shared<vault::Vault<BTC, USDC, VSH>>(scenario);
+    let mut treasury = th::take_treasury(scenario);
+    vault::finalize_round_with_spot_for_testing(
+        &mut v, &mut treasury, VAULT_SPOT, VAULT_SPOT_SCALE, clock, scenario.ctx(),
+    );
+    ts::return_shared(v);
+    ts::return_shared(treasury);
+}
+
+#[test]
+fun test_vault_deposit_and_instant_cancel_with_session() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_vault(&mut scenario);
+    let (mut sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
+    fund_session_user<BTC>(&mut scenario, account_id, 1_000);
+
+    ts::next_tx(&mut scenario, HOLDER);
+    let mut v = ts::take_shared<vault::Vault<BTC, USDC, VSH>>(&scenario);
+    let mut acc = th::take_account_by_id(&scenario, account_id);
+
+    vault::deposit_with_session(
+        &mut v, &mut acc, &cap, &mut sess, 700, &clock, scenario.ctx(),
+    );
+    // Underlying left custody (charged against the cap); the receipt is
+    // custodied + indexed on the account.
+    assert!(account::balance_of<BTC>(&acc) == 300, 0);
+    assert!(session_account::spent_of<BTC>(&sess, object::id(&cap)) == 700, 0);
+    let objects = account::object_ids(&acc);
+    assert!(objects.length() == 1, 0);
+    let receipt_id = objects[0];
+    assert!(account::has_object(&acc, receipt_id), 0);
+
+    // Round hasn't started: cancel refunds straight back into custody.
+    vault::instant_withdraw_pending_with_session(
+        &mut v, &mut acc, &cap, &sess, receipt_id, &clock, scenario.ctx(),
+    );
+    assert!(account::balance_of<BTC>(&acc) == 1_000, 0);
+    assert!(account::object_ids(&acc).is_empty(), 0);
+
+    ts::return_shared(v);
+    ts::return_shared(acc);
+    test_utils::destroy(sess);
+    test_utils::destroy(cap);
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+fun test_vault_full_cycle_with_session() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_vault(&mut scenario);
+    let (mut sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
+    fund_session_user<BTC>(&mut scenario, account_id, 1_000);
+
+    // Genesis deposit from custody (receipt round 1).
+    ts::next_tx(&mut scenario, HOLDER);
+    let mut v = ts::take_shared<vault::Vault<BTC, USDC, VSH>>(&scenario);
+    let mut acc = th::take_account_by_id(&scenario, account_id);
+    vault::deposit_with_session(
+        &mut v, &mut acc, &cap, &mut sess, 700, &clock, scenario.ctx(),
+    );
+    let receipt_id = account::object_ids(&acc)[0];
+    ts::return_shared(v);
+    ts::return_shared(acc);
+
+    // First finalize activates round 1 at pps[0] = 1.0.
+    finalize_vault(&mut scenario, &clock);
+
+    // Claim shares at pps[0]: 700 shares settle into custody.
+    ts::next_tx(&mut scenario, HOLDER);
+    let mut v = ts::take_shared<vault::Vault<BTC, USDC, VSH>>(&scenario);
+    let mut acc = th::take_account_by_id(&scenario, account_id);
+    vault::claim_shares_with_session(
+        &mut v, &mut acc, &cap, &sess, receipt_id, &clock, scenario.ctx(),
+    );
+    assert!(account::balance_of<VSH>(&acc) == 700, 0);
+    assert!(account::object_ids(&acc).is_empty(), 0);
+
+    // Queue a 300-share withdrawal (escrowed; receipt custodied).
+    vault::initiate_withdraw_with_session(
+        &mut v, &mut acc, &cap, &sess, 300, &clock, scenario.ctx(),
+    );
+    assert!(account::balance_of<VSH>(&acc) == 400, 0);
+    let wreceipt_id = account::object_ids(&acc)[0];
+    ts::return_shared(v);
+    ts::return_shared(acc);
+
+    // No bucket selected in round 1 ⇒ finalize is legal immediately; the
+    // flat round pays 300 × 1.0 back into custody.
+    finalize_vault(&mut scenario, &clock);
+
+    ts::next_tx(&mut scenario, HOLDER);
+    let mut v = ts::take_shared<vault::Vault<BTC, USDC, VSH>>(&scenario);
+    let mut acc = th::take_account_by_id(&scenario, account_id);
+    let btc_before = account::balance_of<BTC>(&acc);
+    vault::complete_withdraw_with_session(
+        &mut v, &mut acc, &cap, &sess, wreceipt_id, &clock, scenario.ctx(),
+    );
+    assert!(account::balance_of<BTC>(&acc) == btc_before + 300, 0);
+    assert!(account::object_ids(&acc).is_empty(), 0);
+
+    ts::return_shared(v);
+    ts::return_shared(acc);
     test_utils::destroy(sess);
     test_utils::destroy(cap);
     clock.destroy_for_testing();
