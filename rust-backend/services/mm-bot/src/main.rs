@@ -256,11 +256,11 @@ struct Market {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    runtime_config::logging::init();
+    let _obs = observability::init("mm-bot");
 
     let cli = Cli::parse();
     let cfg = load_config(&cli.config)?;
-    runtime_config::health::spawn(cfg.health_addr);
+    observability::ops::spawn(cfg.health_addr);
     let secrets_loaded = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
     // Resolve the token catalog from token-info. Hard cutover: if token-info
@@ -383,6 +383,7 @@ async fn main() -> Result<()> {
         spawn_vol_task(
             http_client.clone(),
             cfg.pyth.clone(),
+            m.symbol.clone(),
             m.feed,
             price_cache.clone(),
             Arc::clone(&m.vol_buf),
@@ -561,6 +562,16 @@ async fn main() -> Result<()> {
                     break 'serve;
                 }
             };
+            let frame_type = match &frame {
+                ServiceToMm::RFQBroadcast { .. } => "rfq_broadcast",
+                ServiceToMm::BulkViewRFQBroadcast { .. } => "bulk_view_rfq_broadcast",
+                ServiceToMm::Ping => "ping",
+                ServiceToMm::AccountStateUpdate { .. } => "account_state_update",
+                ServiceToMm::ReservationConfirmed { .. } => "reservation_confirmed",
+                ServiceToMm::ReservationReleased { .. } => "reservation_released",
+                _ => "other",
+            };
+            metrics::counter!("mm_bot_ws_messages_total", "type" => frame_type).increment(1);
             match frame {
                 ServiceToMm::RFQBroadcast {
                     request_id,
@@ -572,6 +583,7 @@ async fn main() -> Result<()> {
                         write_amount = payload.write_amount,
                         "received rfq broadcast"
                     );
+                    let rfq_start = std::time::Instant::now();
                     let now = now_ms();
 
                     // Resolve the bucket's true pricing inputs from api-service
@@ -585,6 +597,8 @@ async fn main() -> Result<()> {
                                 Err(e) => format!("bucket lookup failed: {e:#}"),
                                 Ok(Some(_)) => unreachable!(),
                             };
+                            metrics::counter!("mm_bot_quote_failures_total", "reason" => "bucket_lookup")
+                                .increment(1);
                             tracing::debug!(?request_id, %reason, "declining");
                             if let Err(e) = ws_client::send_json(
                                 &mut ws,
@@ -611,6 +625,8 @@ async fn main() -> Result<()> {
                                 "pair not served: {}/{}",
                                 bucket.asset_coin_type, bucket.settlement_coin_type
                             );
+                            metrics::counter!("mm_bot_quote_failures_total", "reason" => "pair_not_served")
+                                .increment(1);
                             tracing::debug!(?request_id, %reason, "declining");
                             if let Err(e) = ws_client::send_json(
                                 &mut ws,
@@ -642,6 +658,8 @@ async fn main() -> Result<()> {
                         Ok(s) => s,
                         Err(e) => {
                             let reason: &'static str = e.as_str();
+                            metrics::counter!("mm_bot_quote_failures_total", "reason" => "stale_price")
+                                .increment(1);
                             tracing::debug!(?request_id, reason, "declining: stale market data");
                             if let Err(e) = ws_client::send_json(
                                 &mut ws,
@@ -723,9 +741,14 @@ async fn main() -> Result<()> {
                                 tracing::warn!(error = %e, "ws send (quote) failed; reconnecting");
                                 break 'serve;
                             }
+                            metrics::counter!("mm_bot_quotes_signed_total").increment(1);
+                            metrics::histogram!("mm_bot_rfq_response_duration_seconds")
+                                .record(rfq_start.elapsed().as_secs_f64());
                             tracing::info!(premium, nonce = nonce_counter, "quote sent");
                         }
                         PriceDecision::Decline { reason } => {
+                            metrics::counter!("mm_bot_quote_failures_total", "reason" => "price_declined")
+                                .increment(1);
                             tracing::debug!(?request_id, %reason, "declining");
                             if let Err(e) = ws_client::send_json(
                                 &mut ws,
@@ -1188,6 +1211,7 @@ fn spawn_replenish_task(p: ReplenishParams) {
 fn spawn_vol_task(
     client: reqwest::Client,
     cfg: PythConfig,
+    symbol: String,
     underlying_feed: PriceFeedId,
     cache: PriceCache,
     buf: Arc<RwLock<RollingVolBuffer>>,
@@ -1229,6 +1253,10 @@ fn spawn_vol_task(
             let Some(cp) = cache.peek(underlying_feed) else {
                 continue;
             };
+            // Pyth publisher age as seen at this sample (now - publish_time).
+            let age_s = (now_ms() as i64).saturating_sub(cp.publish_time_ms) as f64 / 1000.0;
+            metrics::gauge!("mm_bot_pyth_price_age_seconds", "symbol" => symbol.clone())
+                .set(age_s);
             // Only sample if we recently observed something — avoid
             // re-pushing a stale price during a stream outage.
             if cp.observed_at.elapsed() > Duration::from_millis(cfg.max_price_age_ms) {

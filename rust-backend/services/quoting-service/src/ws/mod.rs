@@ -75,6 +75,23 @@ struct PeekedRequest {
     is_ws_upgrade: bool,
 }
 
+/// RAII guard for the `quoting_ws_connections` gauge: increments on accept,
+/// decrements on drop so abnormal disconnects decrement too.
+pub(crate) struct ConnGauge(&'static str);
+
+impl ConnGauge {
+    pub(crate) fn new(role: &'static str) -> Self {
+        metrics::gauge!("quoting_ws_connections", "role" => role).increment(1.0);
+        Self(role)
+    }
+}
+
+impl Drop for ConnGauge {
+    fn drop(&mut self) {
+        metrics::gauge!("quoting_ws_connections", "role" => self.0).decrement(1.0);
+    }
+}
+
 /// Best-effort peek at the first ~1KB of the TCP stream to identify the
 /// HTTP request line and headers. Returns `None` if not enough data has
 /// arrived yet (the caller falls through to `accept_async`, which will
@@ -124,6 +141,14 @@ async fn handle_plain_http(
     let body = if req.path == "/health" || req.path.ends_with("/health") {
         b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
             .to_vec()
+    } else if req.path == "/metrics" || req.path.ends_with("/metrics") {
+        let rendered = observability::metrics::render();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            rendered.len(),
+            rendered
+        )
+        .into_bytes()
     } else {
         b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
     };

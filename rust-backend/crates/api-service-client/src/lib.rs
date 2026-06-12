@@ -86,12 +86,11 @@ impl ApiServiceClient {
         }
 
         let url = format!("{}/buckets/{}", self.base_url, id.to_hex());
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .with_context(|| format!("GET {url}"))?;
+        let resp = observability::client::instrumented("api-service", "GET /buckets/:id", |h| {
+            self.http.get(&url).headers(h).send()
+        })
+        .await
+        .with_context(|| format!("GET {url}"))?;
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             debug!(bucket = %id.to_hex(), "api-service: bucket not found");
@@ -124,17 +123,16 @@ impl ApiServiceClient {
     /// SO-158).
     pub async fn tradeable_buckets(&self) -> Result<Vec<TradeableBucket>> {
         let url = format!("{}/buckets", self.base_url);
-        let wire: BucketsWire = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .with_context(|| format!("GET {url}"))?
-            .error_for_status()
-            .with_context(|| format!("GET {url} returned an error status"))?
-            .json()
-            .await
-            .with_context(|| format!("decoding buckets from {url}"))?;
+        let wire: BucketsWire = observability::client::instrumented("api-service", "GET /buckets", |h| {
+            self.http.get(&url).headers(h).send()
+        })
+        .await
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()
+        .with_context(|| format!("GET {url} returned an error status"))?
+        .json()
+        .await
+        .with_context(|| format!("decoding buckets from {url}"))?;
 
         let mut out = Vec::new();
         for series in wire.series {

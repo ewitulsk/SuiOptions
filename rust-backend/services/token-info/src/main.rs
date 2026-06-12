@@ -10,7 +10,7 @@ use token_info::{overlay, router, AppState, Cli, Config};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    runtime_config::logging::init();
+    let _obs = observability::init("token-info");
 
     let cli = Cli::parse();
     let cfg_path = cli.config.to_string_lossy().into_owned();

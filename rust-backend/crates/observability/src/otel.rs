@@ -22,7 +22,9 @@ pub(crate) fn init<S>(
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_err() {
+    // Empty counts as unset so compose files can pass `${OTEL_ENDPOINT:-}`.
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").unwrap_or_default();
+    if endpoint.is_empty() {
         return (None, None);
     }
 

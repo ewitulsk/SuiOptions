@@ -16,7 +16,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
@@ -24,7 +24,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Semaphore};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Instrument};
 
 use protocol_types::messages::{
     BucketUpdatePayload, BulkViewRfqResponsePayload, ErrorPayload, HelloAckPayload,
@@ -41,6 +41,7 @@ pub async fn handle(
     cfg: Arc<Config>,
     _hello: RetailHelloPayload,
 ) -> Result<()> {
+    let _conn_gauge = super::ConnGauge::new("retail");
     let (mut sink, mut stream) = ws.split();
     let session_id = uuid::Uuid::new_v4().to_string();
     sink.send(Message::Text(serde_json::to_string(&ServiceToRetail::HelloAck {
@@ -66,6 +67,7 @@ pub async fn handle(
                     continue;
                 }
             };
+            metrics::counter!("quoting_ws_messages_total", "role" => "retail", "direction" => "out", "type" => out_type(&msg)).increment(1);
             if let Err(e) = sink.send(Message::Text(text)).await {
                 debug!(error = %e, "retail sink closed");
                 break;
@@ -94,6 +96,7 @@ pub async fn handle(
                 continue;
             }
         };
+        metrics::counter!("quoting_ws_messages_total", "role" => "retail", "direction" => "in", "type" => in_type(&msg)).increment(1);
         match msg {
             RetailToService::SubscribeBuckets { payload } => {
                 debug!(buckets = payload.bucket_ids.len(), "retail subscribe buckets");
@@ -120,6 +123,24 @@ pub async fn handle(
                     write_amount = payload.write_amount,
                     "retail rfq request"
                 );
+                // Root span for the whole RFQ round trip; the orchestration
+                // task below runs inside it so quote validation etc. show up
+                // as child spans in Tempo. `trace_id` is only assigned once
+                // the span is entered (otel layer), hence the record-after.
+                let rfq_span = tracing::info_span!(
+                    "rfq",
+                    request_id = %request_id,
+                    bucket_id = %payload.bucket_id,
+                    trace_id = tracing::field::Empty,
+                );
+                let trace_id = {
+                    let _enter = rfq_span.enter();
+                    observability::current_trace_id()
+                };
+                if let Some(id) = &trace_id {
+                    rfq_span.record("trace_id", id.as_str());
+                }
+                let rfq_started = Instant::now();
                 // Best-effort observer fan-out (rfq-monitor and friends).
                 // Fire before the rate-limit checks so operators see the
                 // actual incoming traffic, including requests we then
@@ -266,7 +287,9 @@ pub async fn handle(
                             },
                         })
                         .await;
-                });
+                    metrics::histogram!("quoting_rfq_roundtrip_duration_seconds")
+                        .record(rfq_started.elapsed().as_secs_f64());
+                }.instrument(rfq_span));
             }
             RetailToService::BulkViewRFQRequest { request_id, payload } => {
                 debug!(
@@ -342,6 +365,28 @@ pub async fn handle(
 
     write_task.abort();
     Ok(())
+}
+
+/// Variant name for the `type` label on `quoting_ws_messages_total`.
+fn in_type(m: &RetailToService) -> &'static str {
+    match m {
+        RetailToService::Hello { .. } => "Hello",
+        RetailToService::SubscribeBuckets { .. } => "SubscribeBuckets",
+        RetailToService::RFQRequest { .. } => "RFQRequest",
+        RetailToService::BulkViewRFQRequest { .. } => "BulkViewRFQRequest",
+        RetailToService::Pong => "Pong",
+    }
+}
+
+fn out_type(m: &ServiceToRetail) -> &'static str {
+    match m {
+        ServiceToRetail::HelloAck { .. } => "HelloAck",
+        ServiceToRetail::BucketUpdate { .. } => "BucketUpdate",
+        ServiceToRetail::RFQResponse { .. } => "RFQResponse",
+        ServiceToRetail::BulkViewRFQResponse { .. } => "BulkViewRFQResponse",
+        ServiceToRetail::Error { .. } => "Error",
+        ServiceToRetail::Ping => "Ping",
+    }
 }
 
 fn now_ms() -> u64 {

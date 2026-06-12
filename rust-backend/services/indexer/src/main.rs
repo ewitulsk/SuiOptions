@@ -24,7 +24,7 @@ use indexer::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    runtime_config::logging::init_with(&["sui_data_ingestion_core=off"]);
+    let _obs = observability::init_with("indexer", &["sui_data_ingestion_core=off"]);
 
     let cli = Cli::parse();
     let cfg_path = cli.config.to_string_lossy().into_owned();
@@ -67,16 +67,35 @@ async fn main() -> Result<()> {
     let repo = Repo::new(Arc::clone(&pool));
     info!(pool_size = cfg.db_pool_size, "postgres pool ready");
 
+    // r2d2 pool gauges (SO-180): sample idle/in-use counts every 15s.
+    {
+        let pool = Arc::clone(&pool);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                ticker.tick().await;
+                let state = pool.state();
+                let idle = f64::from(state.idle_connections);
+                metrics::gauge!("indexer_db_pool_connections", "state" => "idle").set(idle);
+                metrics::gauge!("indexer_db_pool_connections", "state" => "in_use")
+                    .set(f64::from(state.connections) - idle);
+            }
+        });
+    }
+
     let store = Arc::new(Store::new());
 
     // Hydrate the in-memory views from Postgres. After this call the store
     // looks identical to the one we'd have built by replaying every event
     // through `Store::ingest` — `bucket()` / `account()` work immediately.
     let progress = repo.load_progress().context("load_progress")?;
+    let hydrate_start = std::time::Instant::now();
     let views = repo.hydrate().context("hydrate views")?;
     let last_persisted_sequence = progress.as_ref().map(|p| p.last_sequence as u64).unwrap_or(0);
     let persisted_last_checkpoint = progress.as_ref().map(|p| p.last_checkpoint as u64);
     store.hydrate(views, last_persisted_sequence);
+    metrics::gauge!("indexer_hydrate_duration_seconds")
+        .set(hydrate_start.elapsed().as_secs_f64());
     info!(
         accounts = store.account_count(),
         buckets = store.bucket_count(),
@@ -173,7 +192,7 @@ async fn main() -> Result<()> {
     .await
     .context("setup_single_workflow")?;
 
-    runtime_config::health::spawn(cfg.health_addr);
+    observability::ops::spawn(cfg.health_addr);
 
     // GraphQL query API (SO-97). Consumers read protocol state just-in-time
     // from here; it's the indexer's only outbound query surface.

@@ -82,7 +82,8 @@ impl Repo {
     /// Conflicting rows (replays) are skipped; returns how many were new.
     pub fn insert_trades(&self, trades: &[TradeRow], cursor: (String, i64)) -> Result<usize> {
         let mut conn = self.conn()?;
-        conn.transaction::<_, anyhow::Error, _>(|conn| {
+        let start = std::time::Instant::now();
+        let res = conn.transaction::<_, anyhow::Error, _>(|conn| {
             let inserted = if trades.is_empty() {
                 0
             } else {
@@ -109,7 +110,10 @@ impl Repo {
                 .execute(conn)
                 .context("advancing watch_cursor")?;
             Ok(inserted)
-        })
+        });
+        metrics::histogram!("price_charting_db_write_duration_seconds")
+            .record(start.elapsed().as_secs_f64());
+        res
     }
 
     /// Trade-bearing OHLC buckets for `[from, to)`, ascending.

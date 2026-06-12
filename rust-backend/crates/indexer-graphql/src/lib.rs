@@ -301,12 +301,11 @@ impl IndexerClient {
 
     /// Checkpoint-ingestion progress (`GET /progress`).
     pub async fn progress(&self) -> Result<Progress> {
-        let resp = self
-            .http
-            .get(&self.progress_url)
-            .send()
-            .await?
-            .error_for_status()?;
+        let resp = observability::client::instrumented("indexer", "GET /progress", |h| {
+            self.http.get(&self.progress_url).headers(h).send()
+        })
+        .await?
+        .error_for_status()?;
         Ok(resp.json().await?)
     }
 
@@ -319,15 +318,17 @@ impl IndexerClient {
         variables: serde_json::Value,
     ) -> Result<T> {
         let body = json!({ "query": query, "variables": variables });
-        let resp = self
-            .http
-            .post(&self.graphql_url)
-            .json(&body)
-            .send()
-            .await
-            .context("sending graphql request")?
-            .error_for_status()
-            .context("graphql http status")?;
+        let resp = observability::client::instrumented("indexer", "POST /graphql", |h| {
+            self.http
+                .post(&self.graphql_url)
+                .headers(h)
+                .json(&body)
+                .send()
+        })
+        .await
+        .context("sending graphql request")?
+        .error_for_status()
+        .context("graphql http status")?;
         let parsed: GqlEnvelope<T> = resp.json().await.context("decoding graphql response")?;
         if let Some(errors) = parsed.errors {
             if !errors.is_empty() {

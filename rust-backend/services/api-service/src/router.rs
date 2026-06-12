@@ -40,6 +40,10 @@ pub async fn serve(
         )
         .route("/events", get(handlers::events::list_events))
         .with_state(state)
+        .merge(observability::middleware::metrics_route())
+        .layer(axum::middleware::from_fn(
+            observability::middleware::http_obs,
+        ))
         .layer(cors);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

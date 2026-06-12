@@ -156,9 +156,17 @@ impl Repo {
             return self.advance_progress(batch.checkpoint, batch.last_sequence);
         }
 
+        // Child spans per statement group so a checkpoint's Tempo trace shows
+        // where the transaction spends its time (SO-180). The worker enters a
+        // `checkpoint` span on this thread before calling us, so these parent
+        // correctly.
+        let _apply = tracing::info_span!("apply_checkpoint", checkpoint = batch.checkpoint)
+            .entered();
         let mut conn = self.conn()?;
         conn.transaction::<_, anyhow::Error, _>(|conn| {
             if !batch.events.is_empty() {
+                let _s = tracing::info_span!("db_query", query = "insert_indexed_events")
+                    .entered();
                 diesel::insert_into(indexed_events::table)
                     .values(&batch.events)
                     .on_conflict_do_nothing()
@@ -169,6 +177,8 @@ impl Repo {
             if !batch.event_participants.is_empty() {
                 // Inserted after indexed_events (FK). on_conflict_do_nothing
                 // keeps checkpoint reprocessing idempotent.
+                let _s = tracing::info_span!("db_query", query = "insert_event_participants")
+                    .entered();
                 diesel::insert_into(event_participants::table)
                     .values(&batch.event_participants)
                     .on_conflict_do_nothing()
@@ -176,56 +186,68 @@ impl Repo {
                     .context("inserting event_participants")?;
             }
 
-            for acct in &batch.accounts {
-                diesel::insert_into(accounts::table)
-                    .values(acct)
-                    .on_conflict(accounts::account_id)
-                    .do_update()
-                    .set((
-                        accounts::owner.eq(&acct.owner),
-                        accounts::signing_pubkey.eq(&acct.signing_pubkey),
-                        accounts::signing_scheme.eq(acct.signing_scheme),
-                        accounts::updated_at_seq.eq(acct.updated_at_seq),
-                    ))
-                    .execute(conn)
-                    .context("upserting accounts")?;
+            if !batch.accounts.is_empty() {
+                let _s = tracing::info_span!("db_query", query = "upsert_accounts").entered();
+                for acct in &batch.accounts {
+                    diesel::insert_into(accounts::table)
+                        .values(acct)
+                        .on_conflict(accounts::account_id)
+                        .do_update()
+                        .set((
+                            accounts::owner.eq(&acct.owner),
+                            accounts::signing_pubkey.eq(&acct.signing_pubkey),
+                            accounts::signing_scheme.eq(acct.signing_scheme),
+                            accounts::updated_at_seq.eq(acct.updated_at_seq),
+                        ))
+                        .execute(conn)
+                        .context("upserting accounts")?;
+                }
             }
 
-            for bal in &batch.account_balances {
-                diesel::insert_into(account_balances::table)
-                    .values(bal)
-                    .on_conflict((
-                        account_balances::account_id,
-                        account_balances::asset_type,
-                    ))
-                    .do_update()
-                    .set((
-                        account_balances::balance.eq(&bal.balance),
-                        account_balances::updated_at_seq.eq(bal.updated_at_seq),
-                    ))
-                    .execute(conn)
-                    .context("upserting account_balances")?;
+            if !batch.account_balances.is_empty() {
+                let _s = tracing::info_span!("db_query", query = "upsert_account_balances")
+                    .entered();
+                for bal in &batch.account_balances {
+                    diesel::insert_into(account_balances::table)
+                        .values(bal)
+                        .on_conflict((
+                            account_balances::account_id,
+                            account_balances::asset_type,
+                        ))
+                        .do_update()
+                        .set((
+                            account_balances::balance.eq(&bal.balance),
+                            account_balances::updated_at_seq.eq(bal.updated_at_seq),
+                        ))
+                        .execute(conn)
+                        .context("upserting account_balances")?;
+                }
             }
 
-            for bkt in &batch.buckets {
-                diesel::insert_into(buckets::table)
-                    .values(bkt)
-                    .on_conflict(buckets::bucket_id)
-                    .do_update()
-                    .set((
-                        buckets::total_written.eq(&bkt.total_written),
-                        buckets::exercise_cursor.eq(&bkt.exercise_cursor),
-                        buckets::cleaned.eq(bkt.cleaned),
-                        buckets::invalidated.eq(bkt.invalidated),
-                        buckets::updated_at_seq.eq(bkt.updated_at_seq),
-                    ))
-                    .execute(conn)
-                    .context("upserting buckets")?;
+            if !batch.buckets.is_empty() {
+                let _s = tracing::info_span!("db_query", query = "upsert_buckets").entered();
+                for bkt in &batch.buckets {
+                    diesel::insert_into(buckets::table)
+                        .values(bkt)
+                        .on_conflict(buckets::bucket_id)
+                        .do_update()
+                        .set((
+                            buckets::total_written.eq(&bkt.total_written),
+                            buckets::exercise_cursor.eq(&bkt.exercise_cursor),
+                            buckets::cleaned.eq(bkt.cleaned),
+                            buckets::invalidated.eq(bkt.invalidated),
+                            buckets::updated_at_seq.eq(bkt.updated_at_seq),
+                        ))
+                        .execute(conn)
+                        .context("upserting buckets")?;
+                }
             }
 
             if !batch.deepbook_pools.is_empty() {
                 // First pool wins: conflicts on bucket_id (duplicate venue)
                 // or pool_id (replay) are silently skipped.
+                let _s = tracing::info_span!("db_query", query = "insert_deepbook_pools")
+                    .entered();
                 diesel::insert_into(bucket_deepbook_pools::table)
                     .values(&batch.deepbook_pools)
                     .on_conflict_do_nothing()
@@ -233,34 +255,41 @@ impl Repo {
                     .context("inserting bucket_deepbook_pools")?;
             }
 
-            for pos in &batch.position_upserts {
-                diesel::insert_into(positions::table)
-                    .values(pos)
-                    .on_conflict((positions::bucket_id, positions::range_start))
-                    .do_update()
-                    .set((
-                        positions::range_end.eq(&pos.range_end),
-                        positions::recipient.eq(&pos.recipient),
-                        positions::updated_at_seq.eq(pos.updated_at_seq),
-                    ))
-                    .execute(conn)
-                    .context("upserting positions")?;
+            if !batch.position_upserts.is_empty() {
+                let _s = tracing::info_span!("db_query", query = "upsert_positions").entered();
+                for pos in &batch.position_upserts {
+                    diesel::insert_into(positions::table)
+                        .values(pos)
+                        .on_conflict((positions::bucket_id, positions::range_start))
+                        .do_update()
+                        .set((
+                            positions::range_end.eq(&pos.range_end),
+                            positions::recipient.eq(&pos.recipient),
+                            positions::updated_at_seq.eq(pos.updated_at_seq),
+                        ))
+                        .execute(conn)
+                        .context("upserting positions")?;
+                }
             }
 
-            for (bucket_hex, range_start) in &batch.position_deletes {
-                diesel::delete(
-                    positions::table.filter(
-                        positions::bucket_id
-                            .eq(bucket_hex)
-                            .and(positions::range_start.eq(range_start)),
-                    ),
-                )
-                .execute(conn)
-                .context("deleting positions")?;
+            if !batch.position_deletes.is_empty() {
+                let _s = tracing::info_span!("db_query", query = "delete_positions").entered();
+                for (bucket_hex, range_start) in &batch.position_deletes {
+                    diesel::delete(
+                        positions::table.filter(
+                            positions::bucket_id
+                                .eq(bucket_hex)
+                                .and(positions::range_start.eq(range_start)),
+                        ),
+                    )
+                    .execute(conn)
+                    .context("deleting positions")?;
+                }
             }
 
             // Singleton progress row. The first checkpoint creates it; later
             // ones just update.
+            let _s = tracing::info_span!("db_query", query = "upsert_indexer_progress").entered();
             diesel::insert_into(indexer_progress::table)
                 .values(ProgressRow {
                     id: 1,

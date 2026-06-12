@@ -78,11 +78,16 @@ pub async fn sponsor(
     State(s): State<Arc<AppState>>,
     Json(req): Json<SponsorReq>,
 ) -> Result<Json<SponsorResp>, ApiError> {
-    let sender = SuiAddress::from_str(req.sender.trim())
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid sender: {e}")))?;
+    let sender = SuiAddress::from_str(req.sender.trim()).map_err(|e| {
+        metrics::counter!("gas_station_sponsorships_total", "outcome" => "error").increment(1);
+        (StatusCode::BAD_REQUEST, format!("invalid sender: {e}"))
+    })?;
     let kind_bytes = base64::engine::general_purpose::STANDARD
         .decode(req.kind_bytes.trim())
-        .map_err(|_| (StatusCode::BAD_REQUEST, "kind_bytes is not base64".into()))?;
+        .map_err(|_| {
+            metrics::counter!("gas_station_sponsorships_total", "outcome" => "error").increment(1);
+            (StatusCode::BAD_REQUEST, "kind_bytes is not base64".into())
+        })?;
 
     let out = sponsor::sponsor_transaction(
         &s.sui.client,
@@ -95,8 +100,12 @@ pub async fn sponsor(
     .await
     .map_err(|e| {
         warn!(%sender, error = %e, "sponsorship refused");
+        metrics::counter!("gas_station_sponsorships_total", "outcome" => "rejected").increment(1);
         (StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
     })?;
+
+    metrics::counter!("gas_station_sponsorships_total", "outcome" => "ok").increment(1);
+    metrics::histogram!("gas_station_sponsor_gas_budget").record(out.gas_budget as f64);
 
     Ok(Json(SponsorResp {
         tx_bytes: out.tx_bytes_b64,

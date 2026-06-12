@@ -223,6 +223,7 @@ async fn ingest_once(
         if inserted > 0 {
             debug!(inserted, "ingested fills");
         }
+        metrics::counter!("price_charting_bars_broadcast_total").increment(msgs.len() as u64);
         for m in msgs {
             let _ = p.state.trades_tx.send(m); // no subscribers is fine
         }
