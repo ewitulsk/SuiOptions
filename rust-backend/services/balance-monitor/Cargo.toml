@@ -1,0 +1,28 @@
+[package]
+name = "balance-monitor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "balance-monitor"
+path = "src/main.rs"
+
+[dependencies]
+observability  = { workspace = true }
+runtime-config = { workspace = true }
+cli-spec       = { workspace = true }
+sui-tx         = { workspace = true }
+
+clap = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+metrics = { workspace = true }
+
+sui-sdk = { workspace = true }
+sui-types = { workspace = true }

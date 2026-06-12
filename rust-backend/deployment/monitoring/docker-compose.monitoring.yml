@@ -1,6 +1,13 @@
-# Monitoring stack: Grafana + Loki.
+# Monitoring stack: Grafana + Loki + Prometheus + Tempo.
 # Runs on the services EC2 alongside the per-env compose stacks.
 # Promtail (in docker-compose.promtail.yml) joins the same network.
+#
+# Prometheus and Tempo also join options-staging_net so Prometheus can
+# scrape the staging services by compose DNS name and the services can
+# push OTLP spans to `tempo:4318` (same pattern as gatus). The prod host
+# pushes both signals over the VPC instead: Promtail→Loki:3100,
+# prom-agent→Prometheus:9090, OTLP→Tempo:4318 — all SG-gated to co-SG
+# hosts, never public.
 
 name: options-monitoring
 
@@ -38,6 +45,40 @@ services:
     depends_on: [loki]
     restart: unless-stopped
     networks: [monitoring]
+
+  prometheus:
+    image: prom/prometheus:v3.4.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=90d
+      # The prod host's agent remote-writes here.
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ${DATA_DIR}/prometheus/config:/etc/prometheus:ro
+      - ${DATA_DIR}/prometheus/data:/prometheus
+    ports:
+      # All-interfaces bind for the prod host's remote_write over the
+      # private VPC IP; SG allows 9090 only between co-SG hosts.
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - monitoring
+      - options-staging_net
+
+  tempo:
+    image: grafana/tempo:2.8.0
+    command: -config.file=/etc/tempo/tempo-config.yml
+    volumes:
+      - ${DATA_DIR}/tempo/config:/etc/tempo:ro
+      - ${DATA_DIR}/tempo/data:/tempo
+    ports:
+      # OTLP/HTTP ingest from the prod host over the private VPC IP;
+      # SG allows 4318 only between co-SG hosts.
+      - "4318:4318"
+    restart: unless-stopped
+    networks:
+      - monitoring
+      - options-staging_net
 
   gatus:
     image: twinproduction/gatus:v5.17.0

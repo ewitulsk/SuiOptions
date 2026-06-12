@@ -24,6 +24,10 @@ pub async fn serve(
         .route("/balance", get(handlers::balance))
         .route("/sponsor", post(handlers::sponsor))
         .with_state(state)
+        .merge(observability::middleware::metrics_route())
+        .layer(axum::middleware::from_fn(
+            observability::middleware::http_obs,
+        ))
         .layer(cors);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

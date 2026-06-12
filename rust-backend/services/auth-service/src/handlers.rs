@@ -32,6 +32,7 @@ pub struct ChallengeResp {
 
 /// `GET /challenge` — mint a single-use message to sign.
 pub async fn challenge(State(state): State<Arc<AppState>>) -> Json<ChallengeResp> {
+    metrics::counter!("auth_challenges_issued_total").increment(1);
     Json(ChallengeResp {
         message: state.challenges.issue(),
     })
@@ -62,6 +63,22 @@ pub async fn login(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<LoginReq>,
+) -> Result<Json<TokenResp>, ApiError> {
+    let res = login_inner(state, peer, headers, req).await;
+    let outcome = match &res {
+        Ok(_) => "ok",
+        Err((code, _)) if code.is_server_error() => "error",
+        Err(_) => "rejected",
+    };
+    metrics::counter!("auth_logins_total", "outcome" => outcome).increment(1);
+    res
+}
+
+async fn login_inner(
+    state: Arc<AppState>,
+    peer: SocketAddr,
+    headers: HeaderMap,
+    req: LoginReq,
 ) -> Result<Json<TokenResp>, ApiError> {
     use base64::Engine;
 
@@ -165,12 +182,18 @@ pub async fn verify(
     Json(req): Json<VerifyReq>,
 ) -> Json<VerifyResp> {
     match jwt::verify(&req.token, &state.jwt_secret, true) {
-        Ok(claims) => Json(VerifyResp {
-            valid: true,
-            address: Some(claims.sub),
-            exp: Some(claims.exp),
-        }),
-        Err(_) => Json(VerifyResp { valid: false, address: None, exp: None }),
+        Ok(claims) => {
+            metrics::counter!("auth_verifies_total", "outcome" => "ok").increment(1);
+            Json(VerifyResp {
+                valid: true,
+                address: Some(claims.sub),
+                exp: Some(claims.exp),
+            })
+        }
+        Err(_) => {
+            metrics::counter!("auth_verifies_total", "outcome" => "invalid").increment(1);
+            Json(VerifyResp { valid: false, address: None, exp: None })
+        }
     }
 }
 

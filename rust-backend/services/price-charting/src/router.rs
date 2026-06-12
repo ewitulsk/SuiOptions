@@ -40,8 +40,12 @@ pub async fn serve(addr: SocketAddr, state: Arc<AppState>, allowed_origins: &[St
         .route("/pools", get(list_pools))
         .route("/bars", get(get_bars))
         .route("/ws", get(ws_upgrade))
-        .layer(cors)
-        .with_state(state);
+        .with_state(state)
+        .merge(observability::middleware::metrics_route())
+        .layer(axum::middleware::from_fn(
+            observability::middleware::http_obs,
+        ))
+        .layer(cors);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, "price-charting listening");
     axum::serve(listener, app).await?;
@@ -244,11 +248,15 @@ async fn ws_session(state: Arc<AppState>, mut socket: WebSocket) {
                                     pool_id: &pool_id, interval: &interval, bar,
                                 }).await;
                             }
-                            subs.insert((pool_id, iv));
+                            if subs.insert((pool_id, iv)) {
+                                metrics::gauge!("price_charting_ws_subscribers").increment(1.0);
+                            }
                         }
                         Ok(ClientMsg::Unsubscribe { pool_id, interval }) => {
                             if let Some(iv) = Interval::parse(&interval) {
-                                subs.remove(&(pool_id, iv));
+                                if subs.remove(&(pool_id, iv)) {
+                                    metrics::gauge!("price_charting_ws_subscribers").decrement(1.0);
+                                }
                             }
                         }
                         Err(e) => {
@@ -291,6 +299,7 @@ async fn ws_session(state: Arc<AppState>, mut socket: WebSocket) {
             }
         }
     }
+    metrics::gauge!("price_charting_ws_subscribers").decrement(subs.len() as f64);
 }
 
 /// On a fill, re-serve the now-current bar to every matching subscription.

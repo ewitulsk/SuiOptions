@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 runtime-config = { workspace = true }
+observability  = { workspace = true, features = ["axum"] }
 cli-spec       = { workspace = true }
 protocol-types = { workspace = true }
 
@@ -33,6 +34,7 @@ anyhow = { workspace = true }
 
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+metrics = { workspace = true }
 
 # Challenge nonce store.
 dashmap = { workspace = true }

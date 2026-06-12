@@ -10,7 +10,7 @@ use token_info_client::TokenInfoClient;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    runtime_config::logging::init();
+    let _obs = observability::init("api-service");
 
     let cli = Cli::parse();
     let cfg_path = cli.config.to_string_lossy().into_owned();

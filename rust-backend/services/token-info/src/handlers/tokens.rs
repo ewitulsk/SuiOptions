@@ -54,6 +54,7 @@ pub async fn list_tokens(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<SupportedToken>>, ApiError> {
+    metrics::counter!("token_info_requests_total", "op" => "list").increment(1);
     let enabled_only = q.enabled.unwrap_or(false);
 
     // Fetch ALL DB rows so the suppression set covers disabled rows too — a DB
@@ -149,6 +150,7 @@ pub async fn create_token(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpsertTokenReq>,
 ) -> Result<Json<SupportedToken>, ApiError> {
+    metrics::counter!("token_info_requests_total", "op" => "create").increment(1);
     let coin_type = req.coin_type.clone();
     let row = state.repo.upsert(req.into_row()).map_err(internal_err)?;
     info!(%coin_type, "token upserted via internal API");
@@ -162,6 +164,7 @@ pub async fn update_token(
     Path(coin_type): Path<String>,
     Json(mut req): Json<UpsertTokenReq>,
 ) -> Result<Json<SupportedToken>, ApiError> {
+    metrics::counter!("token_info_requests_total", "op" => "update").increment(1);
     req.coin_type = coin_type.clone();
     let row = state.repo.upsert(req.into_row()).map_err(internal_err)?;
     info!(%coin_type, "token updated via internal API");
@@ -174,6 +177,7 @@ pub async fn delete_token(
     State(state): State<Arc<AppState>>,
     Path(coin_type): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    metrics::counter!("token_info_requests_total", "op" => "delete").increment(1);
     let removed = state.repo.delete(&coin_type).map_err(internal_err)?;
     if removed == 0 {
         return Err((StatusCode::NOT_FOUND, format!("no token {coin_type}")));

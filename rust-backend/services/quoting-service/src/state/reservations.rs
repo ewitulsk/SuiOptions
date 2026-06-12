@@ -63,6 +63,7 @@ impl ReservationTable {
         }
         trace!(account = %r.account_id, nonce = r.nonce, amount = r.amount, %r.asset_type, valid_until_ms = r.valid_until_ms, "inserting reservation");
         g.insert(key, r);
+        metrics::gauge!("quoting_active_reservations").set(g.len() as f64);
         InsertOutcome::Inserted
     }
 
@@ -72,6 +73,7 @@ impl ReservationTable {
         let removed = g.remove(&(account_id, nonce));
         if removed.is_some() {
             trace!(%account_id, nonce, "released reservation");
+            metrics::gauge!("quoting_active_reservations").set(g.len() as f64);
         }
         removed
     }
@@ -99,10 +101,15 @@ impl ReservationTable {
         if !expired.is_empty() {
             debug!(count = expired.len(), now_ms, "evicting expired reservations");
         }
-        expired
+        let evicted: Vec<_> = expired
             .into_iter()
             .filter_map(|k| g.remove(&k))
-            .collect()
+            .collect();
+        if !evicted.is_empty() {
+            metrics::counter!("quoting_reservation_evictions_total").increment(evicted.len() as u64);
+            metrics::gauge!("quoting_active_reservations").set(g.len() as f64);
+        }
+        evicted
     }
 
     pub fn len(&self) -> usize {

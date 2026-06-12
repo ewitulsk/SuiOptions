@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 deployments    = { workspace = true }
 protocol-types = { workspace = true }
+observability  = { workspace = true }
 
 reqwest = { workspace = true }
 serde = { workspace = true }

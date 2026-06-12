@@ -223,6 +223,7 @@ pub async fn orchestrate(
     let mm_role = side.counterparty_mm();
     let mms = state.mms.all_for_role(mm_role);
     debug!(?side, mms = mms.len(), request_id = %request_id, "rfq broadcast");
+    metrics::counter!("quoting_rfq_broadcasts_total").increment(1);
 
     // Floor capacity at 8 so a single-MM deployment still has headroom for
     // the response burst; without this the channel is `channel(1)` and
@@ -267,7 +268,10 @@ pub async fn orchestrate(
     // once every MM that's going to answer has done so.
     drop(input);
 
-    let raw_responses = collector.await.unwrap_or(MatcherOutput::default()).responses;
+    let collected = collector.await.unwrap_or(MatcherOutput::default());
+    metrics::counter!("quoting_quotes_received_total", "outcome" => "declined")
+        .increment(collected.declines.len() as u64);
+    let raw_responses = collected.responses;
     debug!(request_id = %request_id, responses = raw_responses.len(), "rfq collection complete");
     // Once the deadline closes the receiver, remove the routing entry.
     state.pending_rfqs.remove(&request_id);
@@ -284,27 +288,40 @@ pub async fn orchestrate(
             Ok(Some(a)) => a,
             Ok(None) => {
                 debug!(mm = %mm_id, "rfq quote from signer the indexer doesn't know — rejecting");
+                metrics::counter!("quoting_quotes_received_total", "outcome" => "invalid")
+                    .increment(1);
                 continue;
             }
             Err(e) => {
                 warn!(mm = %mm_id, error = %e, "indexer account lookup failed; rejecting quote");
+                metrics::counter!("quoting_quotes_received_total", "outcome" => "invalid")
+                    .increment(1);
                 continue;
             }
         };
-        match validate_and_reserve(
-            &state,
-            side,
-            &bucket,
-            &account,
-            write_amount,
-            &payload,
-            mm_id,
-            &protocol_id,
-            now_ms,
-        ) {
-            Ok(entry) => accepted.push(entry),
+        let validate_span = tracing::info_span!("validate_quote", mm = %mm_id);
+        match validate_span.in_scope(|| {
+            validate_and_reserve(
+                &state,
+                side,
+                &bucket,
+                &account,
+                write_amount,
+                &payload,
+                mm_id,
+                &protocol_id,
+                now_ms,
+            )
+        }) {
+            Ok(entry) => {
+                metrics::counter!("quoting_quotes_received_total", "outcome" => "valid")
+                    .increment(1);
+                accepted.push(entry);
+            }
             Err(rej) => {
                 debug!(mm = %mm_id, rejection = ?rej, "rfq quote rejected");
+                metrics::counter!("quoting_quotes_received_total", "outcome" => "invalid")
+                    .increment(1);
             }
         }
     }

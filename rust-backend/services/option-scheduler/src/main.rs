@@ -50,17 +50,12 @@ use option_scheduler::Cli;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    let _obs = observability::init("option-scheduler");
 
     let cli = Cli::parse();
     let cfg = SchedulerConfig::load(&cli.config)
         .with_context(|| format!("loading {}", cli.config.display()))?;
-    runtime_config::health::spawn(cfg.health_addr);
+    observability::ops::spawn(cfg.health_addr);
     let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
     // Fetch the protocol ids + supported-token catalog from token-info.
@@ -233,9 +228,13 @@ async fn main() -> Result<()> {
         let interval = Duration::from_secs(cfg.reconciler_interval_secs.max(1));
         tokio::spawn(async move {
             loop {
+                metrics::counter!("scheduler_runs_total", "job" => "reconcile").increment(1);
+                let started = std::time::Instant::now();
                 if let Err(e) = run_reconciler(&pool, &indexer, &pair_keys, safety_margin).await {
                     warn!(error = %e, "reconciler tick errored");
                 }
+                metrics::histogram!("scheduler_job_duration_seconds", "job" => "reconcile")
+                    .record(started.elapsed().as_secs_f64());
                 sleep(interval).await;
             }
         });
@@ -255,6 +254,8 @@ async fn main() -> Result<()> {
     );
 
     loop {
+        metrics::counter!("scheduler_runs_total", "job" => "roll").increment(1);
+        let started = std::time::Instant::now();
         if let Err(e) = tick_once(
             &cli,
             &cfg,
@@ -271,6 +272,8 @@ async fn main() -> Result<()> {
         {
             warn!(error = %e, "tick errored");
         }
+        metrics::histogram!("scheduler_job_duration_seconds", "job" => "roll")
+            .record(started.elapsed().as_secs_f64());
         sleep(tick).await;
     }
 }
@@ -562,6 +565,8 @@ async fn tick_once(
         .await
         {
             Ok(out) => {
+                metrics::counter!("scheduler_tx_total", "job" => "roll", "outcome" => "ok")
+                    .increment(1);
                 info!(
                     digest = %out.digest,
                     bucket_count = out.bucket_ids.len(),
@@ -583,6 +588,8 @@ async fn tick_once(
                 }
             }
             Err(e) => {
+                metrics::counter!("scheduler_tx_total", "job" => "roll", "outcome" => "error")
+                    .increment(1);
                 let class = roller::classify_error(&e);
                 warn!(
                     error = %e,

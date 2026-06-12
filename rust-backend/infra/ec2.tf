@@ -35,8 +35,11 @@ locals {
     promtail_config        = file("${path.module}/../deployment/monitoring/promtail-config.yml")
     promtail_compose       = file("${path.module}/../deployment/monitoring/docker-compose.promtail.yml")
     loki_config            = file("${path.module}/../deployment/monitoring/loki-config.yml")
+    prometheus_config      = file("${path.module}/../deployment/monitoring/prometheus.yml")
+    tempo_config           = file("${path.module}/../deployment/monitoring/tempo-config.yml")
     monitoring_compose     = file("${path.module}/../deployment/monitoring/docker-compose.monitoring.yml")
     grafana_ds             = file("${path.module}/../deployment/monitoring/grafana-datasources.yml")
+    grafana_alerting       = file("${path.module}/../deployment/monitoring/grafana-alerting.yml")
     gatus_config           = file("${path.module}/../deployment/monitoring/gatus-config.yml")
     loki_bucket            = aws_s3_bucket.loki.bucket
     aws_region             = var.aws_region
@@ -95,10 +98,16 @@ locals {
     compose_prod      = file("${path.module}/../deployment/compose/docker-compose.prod.yml")
     promtail_config   = file("${path.module}/../deployment/monitoring/promtail-config.yml")
     promtail_compose  = file("${path.module}/../deployment/monitoring/docker-compose.promtail.yml")
+    prom_agent_config = file("${path.module}/../deployment/monitoring/prometheus-agent.yml")
+    prom_agent_compose = file("${path.module}/../deployment/monitoring/docker-compose.prom-agent.yml")
     aws_region        = var.aws_region
     # Ship logs to the central Loki on the shared host, reachable over the
     # private VPC IP (SG self-ingress on 3100, see security_groups.tf).
-    loki_url = "http://${aws_instance.host.private_ip}:3100"
+    # Metrics and traces follow the same pattern (SO-180): the prom agent
+    # remote-writes to 9090, the services push OTLP spans to Tempo on 4318.
+    loki_url         = "http://${aws_instance.host.private_ip}:3100"
+    remote_write_url = "http://${aws_instance.host.private_ip}:9090/api/v1/write"
+    otel_url         = "http://${aws_instance.host.private_ip}:4318"
   })
 }
 

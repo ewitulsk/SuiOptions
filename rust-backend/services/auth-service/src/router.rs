@@ -24,6 +24,9 @@ pub fn public_router(state: Arc<AppState>, allowed_origins: &[String]) -> Result
         .route("/login", post(handlers::login))
         .route("/refresh", post(handlers::refresh))
         .with_state(state)
+        .layer(axum::middleware::from_fn(
+            observability::middleware::http_obs,
+        ))
         .layer(cors))
 }
 
@@ -32,6 +35,10 @@ pub fn internal_router(state: Arc<AppState>) -> Router {
         .route("/health", get(handlers::health))
         .route("/verify", post(handlers::verify))
         .with_state(state)
+        .merge(observability::middleware::metrics_route())
+        .layer(axum::middleware::from_fn(
+            observability::middleware::http_obs,
+        ))
 }
 
 pub async fn serve_public(

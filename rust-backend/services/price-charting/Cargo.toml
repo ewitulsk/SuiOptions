@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 runtime-config = { workspace = true }
+observability = { workspace = true, features = ["axum"] }
 cli-spec = { workspace = true }
 api-service-client = { workspace = true }
 token-info-client = { workspace = true }
@@ -25,6 +26,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+metrics = { workspace = true }
 parking_lot = { workspace = true }
 chrono = { workspace = true }
 

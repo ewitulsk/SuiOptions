@@ -22,6 +22,7 @@ use tracing::{debug, error, info};
 use sui_data_ingestion_core::Worker;
 use sui_types::full_checkpoint_content::CheckpointData;
 
+use crate::db::models::event_type_tag;
 use crate::db::Repo;
 use crate::event_types::{self, EventTypes};
 use crate::progress::ProgressState;
@@ -113,6 +114,10 @@ impl Worker for ProtocolEventWorker {
         let seq = checkpoint.checkpoint_summary.sequence_number;
         let ts_ms = checkpoint.checkpoint_summary.timestamp_ms;
 
+        // One trace per checkpoint (SO-180). The body below is fully
+        // synchronous (no awaits), so holding the entered guard is safe.
+        let _cp = tracing::info_span!("checkpoint", seq).entered();
+
         // Decode pass — collect everything we recognise in checkpoint order
         // before touching the store. Keeps the lock window in step 2 small.
         let mut decoded: Vec<(protocol_types::events::ChainEvent, String, i32)> =
@@ -144,6 +149,11 @@ impl Worker for ProtocolEventWorker {
                                 (b.bucket_id, b.settlement_type.clone()),
                             );
                         }
+                        metrics::counter!(
+                            "indexer_events_decoded_total",
+                            "event_type" => event_type_tag(&parsed),
+                        )
+                        .increment(1);
                         decoded.push((parsed, tx_digest.clone(), idx as i32));
                         continue;
                     }
@@ -176,6 +186,11 @@ impl Worker for ProtocolEventWorker {
                                 event = ?ev,
                                 "picked up DeepBook pool for a bucket call coin"
                             );
+                            metrics::counter!(
+                                "indexer_events_decoded_total",
+                                "event_type" => event_type_tag(&ev),
+                            )
+                            .increment(1);
                             decoded.push((ev, tx_digest.clone(), idx as i32));
                         }
                     }
@@ -198,9 +213,13 @@ impl Worker for ProtocolEventWorker {
         // retries; on a hard crash, boot-time hydration from `indexer_progress`
         // corrects any in-memory drift.
         let staged = self.store.stage_batch(seq, ts_ms, decoded)?;
+        let apply_start = std::time::Instant::now();
         self.repo
             .apply_checkpoint(&staged.db_batch)
             .with_context(|| format!("persisting checkpoint {seq}"))?;
+        metrics::histogram!("indexer_checkpoint_apply_duration_seconds")
+            .record(apply_start.elapsed().as_secs_f64());
+        metrics::gauge!("indexer_checkpoint_height").set(seq as f64);
         self.progress.record_checkpoint(seq);
 
         if !staged.indexed.is_empty() {

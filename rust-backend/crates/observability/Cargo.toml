@@ -1,0 +1,38 @@
+[package]
+name = "observability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# axum middleware (HTTP metrics + per-request trace spans). Off by default so
+# non-axum consumers (quoting-service, client crates, tools) don't pull axum.
+axum = ["dep:axum"]
+
+[dependencies]
+runtime-config = { workspace = true }
+
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry-http = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+
+reqwest = { workspace = true }
+http = "1"
+
+axum = { workspace = true, optional = true, features = ["matched-path"] }
+
+# Process metrics (CPU, RSS, FDs). Linux-only: the containers are linux and
+# the macOS backend (libproc) doesn't build on dev machines.
+[target.'cfg(target_os = "linux")'.dependencies]
+metrics-process = { workspace = true }

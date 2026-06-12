@@ -1,0 +1,13 @@
+# balance-monitor config — local dev.
+
+environment = "dev"
+network     = "testnet"
+ops_addr    = "127.0.0.1:9012"
+
+poll_interval_secs = 60
+
+# Local dev: point at the workspace secrets file (same key in every slot).
+[[watch]]
+name = "dev-wallet"
+secrets_file = "secrets.toml"
+low_balance_sui = 1.0

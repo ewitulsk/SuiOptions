@@ -68,15 +68,17 @@ impl AuthClient {
     /// reports the token invalid; `Err` only on a transport/upstream failure.
     pub async fn verify(&self, token: &str) -> anyhow::Result<Option<VerifiedClaims>> {
         let url = format!("{}/verify", self.base_url);
-        let resp = self
-            .http
-            .post(&url)
-            .json(&serde_json::json!({ "token": token }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<VerifyResp>()
-            .await?;
+        let resp = observability::client::instrumented("auth-service", "POST /verify", |h| {
+            self.http
+                .post(&url)
+                .headers(h)
+                .json(&serde_json::json!({ "token": token }))
+                .send()
+        })
+        .await?
+        .error_for_status()?
+        .json::<VerifyResp>()
+        .await?;
         if resp.valid {
             Ok(Some(VerifiedClaims {
                 address: resp.address.unwrap_or_default(),

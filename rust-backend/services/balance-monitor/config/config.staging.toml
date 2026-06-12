@@ -1,0 +1,29 @@
+# balance-monitor config — staging env (testnet).
+
+environment = "staging"
+network     = "testnet"
+ops_addr    = "0.0.0.0:9012"
+
+poll_interval_secs = 60
+
+# Addresses derive from the same rendered secrets the services mount
+# (render-secrets.sh outputs under /opt/options/staging/secrets, mounted at
+# /run/secrets). A missing file skips that watch with a warning.
+
+[[watch]]
+name = "gas-station"
+secrets_file = "/run/secrets/gas-station.toml"
+low_balance_sui = 5.0
+
+[[watch]]
+name = "option-scheduler"
+secrets_file = "/run/secrets/scheduler.toml"
+low_balance_sui = 2.0
+
+[[watch]]
+name = "mm-bot"
+secrets_file = "/run/secrets/mm-bot.toml"
+low_balance_sui = 2.0
+
+# Keeper (SO-177 follow-up): add its watch here once it has a wallet —
+# either a secrets_file like the above or an explicit `address = "0x..."`.

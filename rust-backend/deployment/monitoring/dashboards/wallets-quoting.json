@@ -1,0 +1,84 @@
+{
+  "uid": "options-wallets-quoting",
+  "title": "Wallets & Quoting",
+  "tags": ["options", "so-180"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(sui_balance_sui, env)",
+        "current": { "text": "staging", "value": "staging" },
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "SUI balance by wallet",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "max by (service) (sui_balance_sui{env=\"$env\"})", "legendFormat": "{{service}}" }]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Wallets below threshold",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum (max by (service) (sui_balance_low{env=\"$env\"}))", "legendFormat": "low wallets" }]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Quoting WS connections",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "max by (role) (quoting_ws_connections{env=\"$env\"})", "legendFormat": "{{role}}" }]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "RFQ broadcasts / quotes by outcome",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum (rate(quoting_rfq_broadcasts_total{env=\"$env\"}[5m]))", "legendFormat": "broadcasts" },
+        { "refId": "B", "expr": "sum by (outcome) (rate(quoting_quotes_received_total{env=\"$env\"}[5m]))", "legendFormat": "quotes {{outcome}}" }
+      ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "RFQ round-trip p95",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(quoting_rfq_roundtrip_duration_seconds_bucket{env=\"$env\"}[5m])))", "legendFormat": "p95" }]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Active reservations / evictions",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "max (quoting_active_reservations{env=\"$env\"})", "legendFormat": "active" },
+        { "refId": "B", "expr": "sum (rate(quoting_reservation_evictions_total{env=\"$env\"}[5m]))", "legendFormat": "evictions/s" }
+      ]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "mm-bot quotes signed / failures",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum (rate(mm_bot_quotes_signed_total{env=\"$env\"}[5m]))", "legendFormat": "signed" },
+        { "refId": "B", "expr": "sum by (reason) (rate(mm_bot_quote_failures_total{env=\"$env\"}[5m]))", "legendFormat": "fail {{reason}}" }
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Scheduler jobs / tx outcomes",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (job) (rate(scheduler_runs_total{env=\"$env\"}[1h]))", "legendFormat": "runs {{job}}" },
+        { "refId": "B", "expr": "sum by (outcome) (rate(scheduler_tx_total{env=\"$env\"}[1h]))", "legendFormat": "tx {{outcome}}" }
+      ]
+    }
+  ]
+}

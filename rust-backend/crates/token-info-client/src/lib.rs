@@ -209,11 +209,11 @@ impl TokenInfoClient {
     /// unreachable or returns non-2xx — the caller is expected to crash.
     pub async fn fetch(&self) -> Result<Snapshot> {
         let package_info = self
-            .get_json::<PackageInfo>("/package-info")
+            .get_json::<PackageInfo>("/package-info", "GET /package-info")
             .await
             .context("fetching /package-info from token-info")?;
         let tokens = self
-            .get_json::<Vec<SupportedToken>>("/tokens")
+            .get_json::<Vec<SupportedToken>>("/tokens", "GET /tokens")
             .await
             .context("fetching /tokens from token-info")?;
         info!(
@@ -260,9 +260,16 @@ impl TokenInfoClient {
             .with_context(|| format!("token-info at {} unreachable after {max_attempts} attempts", self.base_url))
     }
 
-    async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        op: &'static str,
+    ) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
-        let resp = self.http.get(&url).send().await?;
+        let resp = observability::client::instrumented("token-info", op, |h| {
+            self.http.get(&url).headers(h).send()
+        })
+        .await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();

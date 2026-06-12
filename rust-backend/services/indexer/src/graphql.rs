@@ -264,6 +264,31 @@ impl EventFilterInput {
     }
 }
 
+/// Run a blocking Diesel query off the async runtime. `spawn_blocking` breaks
+/// span parenting, so capture the resolver's current span (the request span
+/// from `http_obs`) and re-enter it inside the closure — the `db_query` child
+/// span then lands in the request's Tempo trace. Also records the query
+/// duration in `indexer_db_query_duration_seconds{query}`.
+async fn db_query<T, F>(query: &'static str, f: F) -> async_graphql::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    let span = tracing::Span::current();
+    tokio::task::spawn_blocking(move || {
+        let _e = span.enter();
+        let _q = tracing::info_span!("db_query", query).entered();
+        let start = std::time::Instant::now();
+        let result = f();
+        metrics::histogram!("indexer_db_query_duration_seconds", "query" => query)
+            .record(start.elapsed().as_secs_f64());
+        result
+    })
+    .await
+    .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+    .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))
+}
+
 pub struct QueryRoot;
 
 #[Object]
@@ -276,10 +301,10 @@ impl QueryRoot {
         object_ids: Vec<String>,
     ) -> async_graphql::Result<Vec<PositionGql>> {
         let repo = ctx.data_unchecked::<Repo>().clone();
-        let rows = tokio::task::spawn_blocking(move || repo.positions_by_object_ids(&object_ids))
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
-            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        let rows = db_query("positions_by_object_ids", move || {
+            repo.positions_by_object_ids(&object_ids)
+        })
+        .await?;
         Ok(rows.into_iter().map(PositionGql::from).collect())
     }
 
@@ -290,7 +315,7 @@ impl QueryRoot {
         id: String,
     ) -> async_graphql::Result<Option<BucketGql>> {
         let repo = ctx.data_unchecked::<Repo>().clone();
-        let row = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let row = db_query("bucket_by_id", move || -> anyhow::Result<_> {
             let Some(row) = repo.bucket_by_id(&id)? else {
                 return Ok(None);
             };
@@ -298,9 +323,7 @@ impl QueryRoot {
             let pool_id = pools.get(&row.bucket_id).cloned();
             Ok(Some((row, pool_id)))
         })
-        .await
-        .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
-        .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        .await?;
         Ok(row.map(|(b, pool_id)| BucketGql::from_row(b, pool_id)))
     }
 
@@ -330,7 +353,7 @@ impl QueryRoot {
             expiry_ms,
         };
         let repo = ctx.data_unchecked::<Repo>().clone();
-        let rows = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let rows = db_query("buckets_query", move || -> anyhow::Result<_> {
             let rows = repo.buckets_query(q)?;
             let ids: Vec<String> = rows.iter().map(|b| b.bucket_id.clone()).collect();
             let mut pools = repo.deepbook_pool_ids(&ids)?;
@@ -342,9 +365,7 @@ impl QueryRoot {
                 })
                 .collect::<Vec<_>>())
         })
-        .await
-        .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
-        .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        .await?;
         Ok(rows)
     }
 
@@ -355,10 +376,7 @@ impl QueryRoot {
         id: String,
     ) -> async_graphql::Result<Option<AccountGql>> {
         let repo = ctx.data_unchecked::<Repo>().clone();
-        let row = tokio::task::spawn_blocking(move || repo.account_by_id(&id))
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
-            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        let row = db_query("account_by_id", move || repo.account_by_id(&id)).await?;
         Ok(row.map(|(acct, bals)| AccountGql::build(acct, bals)))
     }
 
@@ -369,10 +387,10 @@ impl QueryRoot {
         recipient: String,
     ) -> async_graphql::Result<Vec<PositionGql>> {
         let repo = ctx.data_unchecked::<Repo>().clone();
-        let rows = tokio::task::spawn_blocking(move || repo.positions_by_recipient(&recipient))
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
-            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        let rows = db_query("positions_by_recipient", move || {
+            repo.positions_by_recipient(&recipient)
+        })
+        .await?;
         Ok(rows.into_iter().map(PositionGql::from).collect())
     }
 
@@ -402,10 +420,7 @@ impl QueryRoot {
             after_sequence,
             limit,
         };
-        let rows = tokio::task::spawn_blocking(move || repo.query_events(q))
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
-            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        let rows = db_query("query_events", move || repo.query_events(q)).await?;
         // Full page ⇒ there may be more; cursor is the last sequence seen.
         let next_cursor = (rows.len() as i64 == limit)
             .then(|| rows.last().map(|r| r.sequence.to_string()))
@@ -480,7 +495,8 @@ pub async fn serve(
         .route("/graphql", graphql_route)
         .route("/progress", get(progress))
         .layer(Extension(progress_state))
-        .layer(cors);
+        .layer(cors)
+        .layer(axum::middleware::from_fn(observability::middleware::http_obs));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, expose_playground, "indexer graphql listening");
     axum::serve(listener, app).await?;

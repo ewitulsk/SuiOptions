@@ -1,0 +1,45 @@
+# Prometheus configuration — central server on the shared services EC2.
+#
+# Scrapes every staging service's /metrics over the options-staging_net
+# docker network (Prometheus joins it, see docker-compose.monitoring.yml).
+# The dedicated prod host runs a Prometheus agent (docker-compose.prom-agent.yml)
+# that remote-writes here with env=prod external labels — this server has
+# --web.enable-remote-write-receiver for that.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: services-staging
+    static_configs:
+      - targets: ["indexer:8081"]
+        labels: { env: staging, service: indexer }
+      - targets: ["quoting:9002"]
+        labels: { env: staging, service: quoting }
+      - targets: ["api-service:9003"]
+        labels: { env: staging, service: api-service }
+      - targets: ["token-info:9006"] # internal port; /metrics is never public
+        labels: { env: staging, service: token-info }
+      - targets: ["auth-service:9008"] # internal port
+        labels: { env: staging, service: auth-service }
+      - targets: ["gas-station:9009"]
+        labels: { env: staging, service: gas-station }
+      - targets: ["price-charting:9011"]
+        labels: { env: staging, service: price-charting }
+      - targets: ["option-scheduler:8083"]
+        labels: { env: staging, service: option-scheduler }
+      - targets: ["mm-bot:8084"]
+        labels: { env: staging, service: mm-bot }
+      - targets: ["balance-monitor:9012"]
+        labels: { env: staging, service: balance-monitor }
+
+  # The monitoring stack watches itself.
+  - job_name: monitoring
+    static_configs:
+      - targets: ["prometheus:9090"]
+        labels: { env: monitoring, service: prometheus }
+      - targets: ["loki:3100"]
+        labels: { env: monitoring, service: loki }
+      - targets: ["tempo:3200"]
+        labels: { env: monitoring, service: tempo }

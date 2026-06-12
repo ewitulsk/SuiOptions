@@ -36,6 +36,7 @@ pub async fn handle(
     _cfg: Arc<Config>,
     hello: MmHelloPayload,
 ) -> Result<()> {
+    let _conn_gauge = super::ConnGauge::new("mm");
     let (mut sink, mut stream) = ws.split();
 
     // -- Auth -------------------------------------------------------------
@@ -116,6 +117,7 @@ pub async fn handle(
             reason = ?reason,
             "mm auth rejected"
         );
+        metrics::counter!("quoting_mm_auth_total", "outcome" => "failed").increment(1);
         sink.send(Message::Text(serde_json::to_string(&ServiceToMm::Error {
             request_id: None,
             payload: protocol_types::messages::ErrorPayload {
@@ -131,6 +133,7 @@ pub async fn handle(
         ));
     }
 
+    metrics::counter!("quoting_mm_auth_total", "outcome" => "ok").increment(1);
     let session_id = uuid::Uuid::new_v4().to_string();
     sink.send(Message::Text(serde_json::to_string(&ServiceToMm::AuthAck {
         payload: AuthAckPayload {
@@ -160,6 +163,7 @@ pub async fn handle(
                     continue;
                 }
             };
+            metrics::counter!("quoting_ws_messages_total", "role" => "mm", "direction" => "out", "type" => out_type(&msg)).increment(1);
             if let Err(e) = sink.send(Message::Text(text)).await {
                 debug!(error = %e, "mm sink closed");
                 break;
@@ -186,6 +190,7 @@ pub async fn handle(
                     continue;
                 }
             };
+            metrics::counter!("quoting_ws_messages_total", "role" => "mm", "direction" => "in", "type" => in_type(&msg)).increment(1);
             match msg {
                 MmToService::Quote { request_id, payload } => {
                     trace!(mm = %account_id, request_id, premium = payload.quote.premium, nonce = payload.quote.nonce, "received mm quote");
@@ -241,6 +246,32 @@ pub async fn handle(
     state.mms.remove(&account_id);
     write_task.abort();
     read_result
+}
+
+/// Variant name for the `type` label on `quoting_ws_messages_total`.
+fn in_type(m: &MmToService) -> &'static str {
+    match m {
+        MmToService::Hello { .. } => "Hello",
+        MmToService::AuthResponse { .. } => "AuthResponse",
+        MmToService::Quote { .. } => "Quote",
+        MmToService::BulkViewQuote { .. } => "BulkViewQuote",
+        MmToService::Decline { .. } => "Decline",
+        MmToService::Pong => "Pong",
+    }
+}
+
+fn out_type(m: &ServiceToMm) -> &'static str {
+    match m {
+        ServiceToMm::AuthChallenge { .. } => "AuthChallenge",
+        ServiceToMm::AuthAck { .. } => "AuthAck",
+        ServiceToMm::RFQBroadcast { .. } => "RFQBroadcast",
+        ServiceToMm::BulkViewRFQBroadcast { .. } => "BulkViewRFQBroadcast",
+        ServiceToMm::AccountStateUpdate { .. } => "AccountStateUpdate",
+        ServiceToMm::ReservationConfirmed { .. } => "ReservationConfirmed",
+        ServiceToMm::ReservationReleased { .. } => "ReservationReleased",
+        ServiceToMm::Error { .. } => "Error",
+        ServiceToMm::Ping => "Ping",
+    }
 }
 
 fn msg_to_text(m: Message) -> Result<String> {

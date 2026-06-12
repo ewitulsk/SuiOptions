@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 protocol-types = { workspace = true }
+observability = { workspace = true }
 
 anyhow = { workspace = true }
 reqwest = { workspace = true }

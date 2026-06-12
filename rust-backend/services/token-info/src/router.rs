@@ -51,7 +51,13 @@ pub fn public_router(
         .route("/tokens/:coin_type", get(tokens::get_token))
         .route("/package-info", get(tokens::package_info));
 
-    Ok(reads.merge(writes).with_state(state).layer(cors))
+    Ok(reads
+        .merge(writes)
+        .with_state(state)
+        .layer(axum::middleware::from_fn(
+            observability::middleware::http_obs,
+        ))
+        .layer(cors))
 }
 
 /// Mutating internal API. No CORS layer — not browser-facing.
@@ -62,6 +68,10 @@ pub fn internal_router(state: Arc<AppState>) -> Router {
         .route("/tokens/:coin_type", put(tokens::update_token))
         .route("/tokens/:coin_type", delete(tokens::delete_token))
         .with_state(state)
+        .merge(observability::middleware::metrics_route())
+        .layer(axum::middleware::from_fn(
+            observability::middleware::http_obs,
+        ))
 }
 
 pub async fn serve_public(
