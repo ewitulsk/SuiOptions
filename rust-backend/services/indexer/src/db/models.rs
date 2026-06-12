@@ -14,11 +14,15 @@ use protocol_types::asset::AssetType;
 use protocol_types::events::ChainEvent;
 use protocol_types::ids::{ObjectId, SuiAddress};
 
-use crate::store::{AccountState, BucketState, DeepBookPoolState, PositionState};
+use crate::store::{
+    AccountState, BucketState, DeepBookPoolState, PositionState, ReceiptState, RfqState,
+    RfqStatus, VaultRoundState, VaultState,
+};
 
 use super::schema::{
     account_balances, accounts, bucket_deepbook_pools, buckets, event_participants,
-    indexed_events, indexer_progress, positions,
+    indexed_events, indexer_progress, positions, rfq_bids, rfqs, vault_rounds,
+    vault_user_receipts, vaults,
 };
 
 // ---------- indexer_progress ----------
@@ -302,6 +306,200 @@ pub fn account_row_into_state(row: AccountRow) -> anyhow::Result<(ObjectId, Acco
             balances: Default::default(),
         },
     ))
+}
+
+// ---------- rfqs / rfq_bids (C3) ----------
+
+#[derive(Queryable, Identifiable, Insertable, AsChangeset, Debug, Clone)]
+#[diesel(table_name = rfqs)]
+#[diesel(primary_key(rfq_id))]
+pub struct RfqRow {
+    pub rfq_id: String,
+    pub bucket_id: String,
+    pub origin: String,
+    pub amount: BigDecimal,
+    pub reserve_premium: BigDecimal,
+    pub deadline_ms: i64,
+    pub best_premium: Option<BigDecimal>,
+    pub best_bidder: Option<String>,
+    pub status: String,
+    pub winner: Option<String>,
+    pub net_premium: Option<BigDecimal>,
+    pub position_id: Option<String>,
+    pub updated_at_seq: i64,
+}
+
+impl RfqRow {
+    pub fn into_state(self) -> anyhow::Result<(ObjectId, RfqState)> {
+        let id = ObjectId::from_hex(&self.rfq_id)
+            .map_err(|e| anyhow::anyhow!("rfq_id {}: {e}", self.rfq_id))?;
+        let opt_addr = |s: &Option<String>| -> anyhow::Result<Option<SuiAddress>> {
+            s.as_deref()
+                .map(SuiAddress::from_hex)
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("rfq {} address: {e}", self.rfq_id))
+        };
+        Ok((
+            id,
+            RfqState {
+                bucket_id: ObjectId::from_hex(&self.bucket_id)
+                    .map_err(|e| anyhow::anyhow!("rfq bucket_id {}: {e}", self.bucket_id))?,
+                origin: ObjectId::from_hex(&self.origin)
+                    .map_err(|e| anyhow::anyhow!("rfq origin {}: {e}", self.origin))?,
+                amount: bigdecimal_to_u64(&self.amount)?,
+                reserve_premium: bigdecimal_to_u64(&self.reserve_premium)?,
+                deadline_ms: self.deadline_ms as u64,
+                best_premium: self.best_premium.as_ref().map(bigdecimal_to_u64).transpose()?,
+                best_bidder: opt_addr(&self.best_bidder)?,
+                status: RfqStatus::from_str_tag(&self.status)?,
+                winner: opt_addr(&self.winner)?,
+                net_premium: self.net_premium.as_ref().map(bigdecimal_to_u64).transpose()?,
+                position_id: self
+                    .position_id
+                    .as_deref()
+                    .map(ObjectId::from_hex)
+                    .transpose()
+                    .map_err(|e| anyhow::anyhow!("rfq position_id: {e}"))?,
+            },
+        ))
+    }
+}
+
+#[derive(Queryable, Insertable, Debug, Clone)]
+#[diesel(table_name = rfq_bids)]
+pub struct RfqBidRow {
+    pub rfq_id: String,
+    pub sequence: i64,
+    pub bidder: String,
+    pub call_recipient: String,
+    pub premium: BigDecimal,
+}
+
+// ---------- vaults / vault_rounds / vault_user_receipts (D2) ----------
+
+#[derive(Queryable, Identifiable, Insertable, AsChangeset, Debug, Clone)]
+#[diesel(table_name = vaults)]
+#[diesel(primary_key(vault_id))]
+pub struct VaultRow {
+    pub vault_id: String,
+    pub underlying_type: String,
+    pub settlement_type: String,
+    pub share_type: String,
+    pub round: i64,
+    pub current_bucket: Option<String>,
+    pub latest_pps: Option<BigDecimal>,
+    pub total_shares: BigDecimal,
+    pub pending_deposits: BigDecimal,
+    pub deposits_paused: bool,
+    pub updated_at_seq: i64,
+}
+
+impl VaultRow {
+    pub fn into_state(self) -> anyhow::Result<(ObjectId, VaultState)> {
+        let id = ObjectId::from_hex(&self.vault_id)
+            .map_err(|e| anyhow::anyhow!("vault_id {}: {e}", self.vault_id))?;
+        Ok((
+            id,
+            VaultState {
+                underlying_type: AssetType::new(self.underlying_type),
+                settlement_type: AssetType::new(self.settlement_type),
+                share_type: AssetType::new(self.share_type),
+                round: self.round as u64,
+                current_bucket: self
+                    .current_bucket
+                    .as_deref()
+                    .map(ObjectId::from_hex)
+                    .transpose()
+                    .map_err(|e| anyhow::anyhow!("vault current_bucket: {e}"))?,
+                latest_pps: self.latest_pps.as_ref().map(bigdecimal_to_u128).transpose()?,
+                total_shares: bigdecimal_to_u64(&self.total_shares)?,
+                pending_deposits: bigdecimal_to_u64(&self.pending_deposits)?,
+                deposits_paused: self.deposits_paused,
+            },
+        ))
+    }
+}
+
+#[derive(Queryable, Identifiable, Insertable, AsChangeset, Debug, Clone)]
+#[diesel(table_name = vault_rounds)]
+#[diesel(primary_key(vault_id, round))]
+pub struct VaultRoundRow {
+    pub vault_id: String,
+    pub round: i64,
+    pub bucket_id: Option<String>,
+    pub strike: Option<BigDecimal>,
+    pub strike_scale: Option<i16>,
+    pub expiry_ms: Option<i64>,
+    pub pps: Option<BigDecimal>,
+    pub aum: Option<BigDecimal>,
+    pub shares: Option<BigDecimal>,
+    pub premium_collected: Option<BigDecimal>,
+    pub mgmt_fee: Option<BigDecimal>,
+    pub perf_fee: Option<BigDecimal>,
+    pub finalized_at_ms: Option<i64>,
+    pub updated_at_seq: i64,
+}
+
+impl VaultRoundRow {
+    pub fn into_state(self) -> anyhow::Result<((ObjectId, u64), VaultRoundState)> {
+        let id = ObjectId::from_hex(&self.vault_id)
+            .map_err(|e| anyhow::anyhow!("round vault_id {}: {e}", self.vault_id))?;
+        Ok((
+            (id, self.round as u64),
+            VaultRoundState {
+                bucket_id: self
+                    .bucket_id
+                    .as_deref()
+                    .map(ObjectId::from_hex)
+                    .transpose()
+                    .map_err(|e| anyhow::anyhow!("round bucket_id: {e}"))?,
+                strike: self.strike.as_ref().map(bigdecimal_to_u128).transpose()?,
+                strike_scale: self
+                    .strike_scale
+                    .map(|s| u8::try_from(s).map_err(|_| anyhow::anyhow!("strike_scale {s}")))
+                    .transpose()?,
+                expiry_ms: self.expiry_ms.map(|v| v as u64),
+                pps: self.pps.as_ref().map(bigdecimal_to_u128).transpose()?,
+                aum: self.aum.as_ref().map(bigdecimal_to_u64).transpose()?,
+                shares: self.shares.as_ref().map(bigdecimal_to_u64).transpose()?,
+                premium_collected: self
+                    .premium_collected
+                    .as_ref()
+                    .map(bigdecimal_to_u64)
+                    .transpose()?,
+                mgmt_fee: self.mgmt_fee.as_ref().map(bigdecimal_to_u64).transpose()?,
+                perf_fee: self.perf_fee.as_ref().map(bigdecimal_to_u64).transpose()?,
+                finalized_at_ms: self.finalized_at_ms.map(|v| v as u64),
+            },
+        ))
+    }
+}
+
+#[derive(Queryable, Identifiable, Insertable, AsChangeset, Debug, Clone)]
+#[diesel(table_name = vault_user_receipts)]
+#[diesel(primary_key(vault_id, owner, round, kind))]
+pub struct VaultReceiptRow {
+    pub vault_id: String,
+    pub owner: String,
+    pub round: i64,
+    pub kind: String,
+    pub amount: BigDecimal,
+    pub settled: BigDecimal,
+    pub updated_at_seq: i64,
+}
+
+impl VaultReceiptRow {
+    pub fn into_state(self) -> anyhow::Result<((ObjectId, String, u64, String), ReceiptState)> {
+        let id = ObjectId::from_hex(&self.vault_id)
+            .map_err(|e| anyhow::anyhow!("receipt vault_id {}: {e}", self.vault_id))?;
+        Ok((
+            (id, self.owner, self.round as u64, self.kind),
+            ReceiptState {
+                amount: bigdecimal_to_u64(&self.amount)?,
+                settled: bigdecimal_to_u64(&self.settled)?,
+            },
+        ))
+    }
 }
 
 // ---------- numeric helpers ----------

@@ -91,6 +91,81 @@ diesel::table! {
 }
 
 diesel::table! {
+    rfqs (rfq_id) {
+        rfq_id          -> Text,
+        bucket_id       -> Text,
+        origin          -> Text,
+        amount          -> Numeric,
+        reserve_premium -> Numeric,
+        deadline_ms     -> Int8,
+        best_premium    -> Nullable<Numeric>,
+        best_bidder     -> Nullable<Text>,
+        status          -> Text,
+        winner          -> Nullable<Text>,
+        net_premium     -> Nullable<Numeric>,
+        position_id     -> Nullable<Text>,
+        updated_at_seq  -> Int8,
+    }
+}
+
+diesel::table! {
+    rfq_bids (rfq_id, sequence) {
+        rfq_id         -> Text,
+        sequence       -> Int8,
+        bidder         -> Text,
+        call_recipient -> Text,
+        premium        -> Numeric,
+    }
+}
+
+diesel::table! {
+    vaults (vault_id) {
+        vault_id         -> Text,
+        underlying_type  -> Text,
+        settlement_type  -> Text,
+        share_type       -> Text,
+        round            -> Int8,
+        current_bucket   -> Nullable<Text>,
+        latest_pps       -> Nullable<Numeric>,
+        total_shares     -> Numeric,
+        pending_deposits -> Numeric,
+        deposits_paused  -> Bool,
+        updated_at_seq   -> Int8,
+    }
+}
+
+diesel::table! {
+    vault_rounds (vault_id, round) {
+        vault_id          -> Text,
+        round             -> Int8,
+        bucket_id         -> Nullable<Text>,
+        strike            -> Nullable<Numeric>,
+        strike_scale      -> Nullable<Int2>,
+        expiry_ms         -> Nullable<Int8>,
+        pps               -> Nullable<Numeric>,
+        aum               -> Nullable<Numeric>,
+        shares            -> Nullable<Numeric>,
+        premium_collected -> Nullable<Numeric>,
+        mgmt_fee          -> Nullable<Numeric>,
+        perf_fee          -> Nullable<Numeric>,
+        finalized_at_ms   -> Nullable<Int8>,
+        updated_at_seq    -> Int8,
+    }
+}
+
+diesel::table! {
+    vault_user_receipts (vault_id, owner, round, kind) {
+        vault_id       -> Text,
+        owner          -> Text,
+        round          -> Int8,
+        kind           -> Text,
+        amount         -> Numeric,
+        settled        -> Numeric,
+        updated_at_seq -> Int8,
+    }
+}
+
+diesel::table! {
     event_participants (sequence, address, role) {
         sequence -> Int8,
         address  -> Text,
@@ -101,6 +176,7 @@ diesel::table! {
 diesel::joinable!(account_balances -> accounts (account_id));
 diesel::joinable!(event_participants -> indexed_events (sequence));
 diesel::joinable!(bucket_deepbook_pools -> buckets (bucket_id));
+diesel::joinable!(rfq_bids -> indexed_events (sequence));
 diesel::allow_tables_to_appear_in_same_query!(
     event_participants,
     indexer_progress,
@@ -110,4 +186,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     buckets,
     positions,
     bucket_deepbook_pools,
+    rfqs,
+    rfq_bids,
+    vaults,
+    vault_rounds,
+    vault_user_receipts,
 );

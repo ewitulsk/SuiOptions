@@ -96,6 +96,84 @@ pub struct Position {
     pub minted_at_ms: u64,
 }
 
+/// One on-chain RFQ auction from the indexer's materialized view (C3).
+#[derive(Clone, Debug)]
+pub struct Rfq {
+    pub rfq_id: ObjectId,
+    pub bucket_id: ObjectId,
+    /// Vault id (coupled auctions) or seller-address-as-id.
+    pub origin: ObjectId,
+    pub amount: u64,
+    pub reserve_premium: u64,
+    pub deadline_ms: u64,
+    pub best_premium: Option<u64>,
+    pub best_bidder: Option<SuiAddress>,
+    /// `open` | `settled` | `expired_unsold`.
+    pub status: String,
+    pub winner: Option<SuiAddress>,
+    pub net_premium: Option<u64>,
+    pub position_id: Option<ObjectId>,
+}
+
+/// One bid in an auction's history (C3).
+#[derive(Clone, Debug)]
+pub struct RfqBid {
+    pub rfq_id: ObjectId,
+    pub sequence: u64,
+    pub bidder: SuiAddress,
+    pub call_recipient: SuiAddress,
+    pub premium: u64,
+}
+
+/// One covered-call vault's headline state (D2).
+#[derive(Clone, Debug)]
+pub struct Vault {
+    pub vault_id: ObjectId,
+    pub underlying_type: AssetType,
+    pub settlement_type: AssetType,
+    pub share_type: AssetType,
+    /// Current round (last finalized + 1; 0 = pre-genesis).
+    pub round: u64,
+    pub current_bucket: Option<ObjectId>,
+    pub latest_pps: Option<u128>,
+    pub total_shares: u64,
+    pub pending_deposits: u64,
+    pub deposits_paused: bool,
+}
+
+/// One round of a vault's track record (D2). Selection fields land at
+/// `select_bucket`; pps/aum/premium at finalize.
+#[derive(Clone, Debug)]
+pub struct VaultRound {
+    pub vault_id: ObjectId,
+    pub round: u64,
+    pub bucket_id: Option<ObjectId>,
+    pub strike: Option<u128>,
+    pub strike_scale: Option<u8>,
+    pub expiry_ms: Option<u64>,
+    pub pps: Option<u128>,
+    pub aum: Option<u64>,
+    pub shares: Option<u64>,
+    pub premium_collected: Option<u64>,
+    pub mgmt_fee: Option<u64>,
+    pub perf_fee: Option<u64>,
+    pub finalized_at_ms: Option<u64>,
+}
+
+/// One (vault, owner, round, kind) receipt aggregate (D2).
+#[derive(Clone, Debug)]
+pub struct VaultReceipt {
+    pub vault_id: ObjectId,
+    pub owner: SuiAddress,
+    pub round: u64,
+    /// `deposit` | `withdraw`.
+    pub kind: String,
+    /// Queued underlying (deposits) / escrowed shares (withdrawals).
+    pub amount: u64,
+    /// Claimed / completed so far.
+    pub settled: u64,
+}
+
 /// Checkpoint-ingestion progress (the `/progress` REST endpoint). `Serialize`
 /// so a proxying service (api-service Debug page) can re-emit it unchanged.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
@@ -194,6 +272,73 @@ impl IndexerClient {
             mintedAtMs}}";
         let data: PositionsWrap = self.gql(Q, json!({ "ids": object_ids })).await?;
         data.positions.into_iter().map(Position::try_from).collect()
+    }
+
+    // ── rfq / vault views (C3 / D2) ───────────────────────────────────────
+
+    /// RFQ auctions, optionally filtered by status
+    /// (`open` | `settled` | `expired_unsold`) and/or origin (vault id).
+    pub async fn rfqs(
+        &self,
+        status: Option<&str>,
+        origin: Option<ObjectId>,
+    ) -> Result<Vec<Rfq>> {
+        const Q: &str = "query($s:String,$o:String){rfqs(status:$s,origin:$o){rfqId bucketId \
+            origin amountRaw reservePremiumRaw deadlineMs bestPremiumRaw bestBidder status \
+            winner netPremiumRaw positionId}}";
+        let vars = json!({ "s": status, "o": origin.map(|o| o.to_hex()) });
+        let data: RfqsWrap = self.gql(Q, vars).await?;
+        data.rfqs.into_iter().map(Rfq::try_from).collect()
+    }
+
+    /// Bid history for one auction, ascending.
+    pub async fn rfq_bids(&self, rfq_id: ObjectId) -> Result<Vec<RfqBid>> {
+        const Q: &str = "query($id:String!){rfqBids(rfqId:$id){rfqId sequence bidder \
+            callRecipient premiumRaw}}";
+        let data: RfqBidsWrap = self.gql(Q, json!({ "id": rfq_id.to_hex() })).await?;
+        data.rfq_bids.into_iter().map(RfqBid::try_from).collect()
+    }
+
+    /// All covered-call vaults.
+    pub async fn vaults(&self) -> Result<Vec<Vault>> {
+        const Q: &str = "query{vaults{vaultId underlyingType settlementType shareType round \
+            currentBucket latestPpsRaw totalSharesRaw pendingDepositsRaw depositsPaused}}";
+        let data: VaultsWrap = self.gql(Q, json!({})).await?;
+        data.vaults.into_iter().map(Vault::try_from).collect()
+    }
+
+    /// One vault by id, or `None` if unknown.
+    pub async fn vault(&self, vault_id: ObjectId) -> Result<Option<Vault>> {
+        const Q: &str = "query($id:String!){vault(id:$id){vaultId underlyingType settlementType \
+            shareType round currentBucket latestPpsRaw totalSharesRaw pendingDepositsRaw \
+            depositsPaused}}";
+        let data: VaultWrap = self.gql(Q, json!({ "id": vault_id.to_hex() })).await?;
+        data.vault.map(Vault::try_from).transpose()
+    }
+
+    /// One vault's round history, ascending (the track record).
+    pub async fn vault_rounds(&self, vault_id: ObjectId) -> Result<Vec<VaultRound>> {
+        const Q: &str = "query($id:String!){vaultRounds(vaultId:$id){vaultId round bucketId \
+            strikeRaw strikeScale expiryMs ppsRaw aumRaw sharesRaw premiumCollectedRaw \
+            mgmtFeeRaw perfFeeRaw finalizedAtMs}}";
+        let data: VaultRoundsWrap = self.gql(Q, json!({ "id": vault_id.to_hex() })).await?;
+        data.vault_rounds.into_iter().map(VaultRound::try_from).collect()
+    }
+
+    /// Receipt aggregates for one vault, optionally scoped to an owner.
+    pub async fn vault_receipts(
+        &self,
+        vault_id: ObjectId,
+        owner: Option<SuiAddress>,
+    ) -> Result<Vec<VaultReceipt>> {
+        const Q: &str = "query($id:String!,$o:String){vaultReceipts(vaultId:$id,owner:$o){\
+            vaultId owner round kind amountRaw settledRaw}}";
+        let vars = json!({ "id": vault_id.to_hex(), "o": owner.map(|o| o.to_hex()) });
+        let data: VaultReceiptsWrap = self.gql(Q, vars).await?;
+        data.vault_receipts
+            .into_iter()
+            .map(VaultReceipt::try_from)
+            .collect()
     }
 
     // ── event-log scans ───────────────────────────────────────────────────
@@ -374,6 +519,33 @@ struct PositionsByRecipientWrap {
 struct EventsWrap {
     events: EventConnectionJson,
 }
+#[derive(Deserialize)]
+struct RfqsWrap {
+    rfqs: Vec<RfqJson>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RfqBidsWrap {
+    rfq_bids: Vec<RfqBidJson>,
+}
+#[derive(Deserialize)]
+struct VaultsWrap {
+    vaults: Vec<VaultJson>,
+}
+#[derive(Deserialize)]
+struct VaultWrap {
+    vault: Option<VaultJson>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultRoundsWrap {
+    vault_rounds: Vec<VaultRoundJson>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultReceiptsWrap {
+    vault_receipts: Vec<VaultReceiptJson>,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -456,6 +628,77 @@ struct PositionJson {
     mm_account_id: String,
     tx_digest: String,
     minted_at_ms: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RfqJson {
+    rfq_id: String,
+    bucket_id: String,
+    origin: String,
+    amount_raw: String,
+    reserve_premium_raw: String,
+    deadline_ms: String,
+    best_premium_raw: Option<String>,
+    best_bidder: Option<String>,
+    status: String,
+    winner: Option<String>,
+    net_premium_raw: Option<String>,
+    position_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RfqBidJson {
+    rfq_id: String,
+    sequence: String,
+    bidder: String,
+    call_recipient: String,
+    premium_raw: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultJson {
+    vault_id: String,
+    underlying_type: String,
+    settlement_type: String,
+    share_type: String,
+    round: String,
+    current_bucket: Option<String>,
+    latest_pps_raw: Option<String>,
+    total_shares_raw: String,
+    pending_deposits_raw: String,
+    deposits_paused: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultRoundJson {
+    vault_id: String,
+    round: String,
+    bucket_id: Option<String>,
+    strike_raw: Option<String>,
+    strike_scale: Option<i32>,
+    expiry_ms: Option<String>,
+    pps_raw: Option<String>,
+    aum_raw: Option<String>,
+    shares_raw: Option<String>,
+    premium_collected_raw: Option<String>,
+    mgmt_fee_raw: Option<String>,
+    perf_fee_raw: Option<String>,
+    finalized_at_ms: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultReceiptJson {
+    vault_id: String,
+    owner: String,
+    round: String,
+    kind: String,
+    amount_raw: String,
+    settled_raw: String,
 }
 
 // ── parsing wire → domain ──────────────────────────────────────────────────
@@ -541,6 +784,96 @@ impl TryFrom<PositionJson> for Position {
             mm_account_id: parse_object_id(&p.mm_account_id)?,
             tx_digest: p.tx_digest,
             minted_at_ms: parse_u64(&p.minted_at_ms)?,
+        })
+    }
+}
+
+impl TryFrom<RfqJson> for Rfq {
+    type Error = anyhow::Error;
+    fn try_from(r: RfqJson) -> Result<Self> {
+        Ok(Rfq {
+            rfq_id: parse_object_id(&r.rfq_id)?,
+            bucket_id: parse_object_id(&r.bucket_id)?,
+            origin: parse_object_id(&r.origin)?,
+            amount: parse_u64(&r.amount_raw)?,
+            reserve_premium: parse_u64(&r.reserve_premium_raw)?,
+            deadline_ms: parse_u64(&r.deadline_ms)?,
+            best_premium: r.best_premium_raw.as_deref().map(parse_u64).transpose()?,
+            best_bidder: r.best_bidder.as_deref().map(parse_address).transpose()?,
+            status: r.status,
+            winner: r.winner.as_deref().map(parse_address).transpose()?,
+            net_premium: r.net_premium_raw.as_deref().map(parse_u64).transpose()?,
+            position_id: r.position_id.as_deref().map(parse_object_id).transpose()?,
+        })
+    }
+}
+
+impl TryFrom<RfqBidJson> for RfqBid {
+    type Error = anyhow::Error;
+    fn try_from(b: RfqBidJson) -> Result<Self> {
+        Ok(RfqBid {
+            rfq_id: parse_object_id(&b.rfq_id)?,
+            sequence: parse_u64(&b.sequence)?,
+            bidder: parse_address(&b.bidder)?,
+            call_recipient: parse_address(&b.call_recipient)?,
+            premium: parse_u64(&b.premium_raw)?,
+        })
+    }
+}
+
+impl TryFrom<VaultJson> for Vault {
+    type Error = anyhow::Error;
+    fn try_from(v: VaultJson) -> Result<Self> {
+        Ok(Vault {
+            vault_id: parse_object_id(&v.vault_id)?,
+            underlying_type: AssetType::new(v.underlying_type),
+            settlement_type: AssetType::new(v.settlement_type),
+            share_type: AssetType::new(v.share_type),
+            round: parse_u64(&v.round)?,
+            current_bucket: v.current_bucket.as_deref().map(parse_object_id).transpose()?,
+            latest_pps: v.latest_pps_raw.as_deref().map(parse_u128).transpose()?,
+            total_shares: parse_u64(&v.total_shares_raw)?,
+            pending_deposits: parse_u64(&v.pending_deposits_raw)?,
+            deposits_paused: v.deposits_paused,
+        })
+    }
+}
+
+impl TryFrom<VaultRoundJson> for VaultRound {
+    type Error = anyhow::Error;
+    fn try_from(r: VaultRoundJson) -> Result<Self> {
+        Ok(VaultRound {
+            vault_id: parse_object_id(&r.vault_id)?,
+            round: parse_u64(&r.round)?,
+            bucket_id: r.bucket_id.as_deref().map(parse_object_id).transpose()?,
+            strike: r.strike_raw.as_deref().map(parse_u128).transpose()?,
+            strike_scale: r.strike_scale.map(parse_u8).transpose()?,
+            expiry_ms: r.expiry_ms.as_deref().map(parse_u64).transpose()?,
+            pps: r.pps_raw.as_deref().map(parse_u128).transpose()?,
+            aum: r.aum_raw.as_deref().map(parse_u64).transpose()?,
+            shares: r.shares_raw.as_deref().map(parse_u64).transpose()?,
+            premium_collected: r
+                .premium_collected_raw
+                .as_deref()
+                .map(parse_u64)
+                .transpose()?,
+            mgmt_fee: r.mgmt_fee_raw.as_deref().map(parse_u64).transpose()?,
+            perf_fee: r.perf_fee_raw.as_deref().map(parse_u64).transpose()?,
+            finalized_at_ms: r.finalized_at_ms.as_deref().map(parse_u64).transpose()?,
+        })
+    }
+}
+
+impl TryFrom<VaultReceiptJson> for VaultReceipt {
+    type Error = anyhow::Error;
+    fn try_from(r: VaultReceiptJson) -> Result<Self> {
+        Ok(VaultReceipt {
+            vault_id: parse_object_id(&r.vault_id)?,
+            owner: parse_address(&r.owner)?,
+            round: parse_u64(&r.round)?,
+            kind: r.kind,
+            amount: parse_u64(&r.amount_raw)?,
+            settled: parse_u64(&r.settled_raw)?,
         })
     }
 }

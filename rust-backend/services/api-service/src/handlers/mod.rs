@@ -4,3 +4,5 @@ pub mod dashboard;
 pub mod events;
 pub mod indexer_progress;
 pub mod positions;
+pub mod rfqs;
+pub mod vaults;

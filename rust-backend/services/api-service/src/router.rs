@@ -39,6 +39,17 @@ pub async fn serve(
             get(handlers::indexer_progress::get_progress),
         )
         .route("/events", get(handlers::events::list_events))
+        .route("/rfqs", get(handlers::rfqs::list_rfqs))
+        .route("/vaults", get(handlers::vaults::list_vaults))
+        .route("/vaults/:vault_id", get(handlers::vaults::get_vault))
+        .route(
+            "/vaults/:vault_id/rounds",
+            get(handlers::vaults::list_vault_rounds),
+        )
+        .route(
+            "/vaults/:vault_id/receipts",
+            get(handlers::vaults::list_vault_receipts),
+        )
         .with_state(state)
         .merge(observability::middleware::metrics_route())
         .layer(axum::middleware::from_fn(

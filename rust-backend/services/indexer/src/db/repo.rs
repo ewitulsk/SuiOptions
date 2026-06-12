@@ -31,16 +31,20 @@ use tracing::{debug, info, trace};
 use protocol_types::events::ChainEvent;
 use protocol_types::ids::ObjectId;
 
-use crate::store::{AccountState, BucketState, DeepBookPoolState, PositionState};
+use crate::store::{
+    AccountState, BucketState, DeepBookPoolState, PositionState, ReceiptKey, ReceiptState,
+    RfqState, VaultRoundState, VaultState,
+};
 
 use super::models::{
     account_row_into_state, bigdecimal_to_u128, event_type_tag, AccountBalanceRow, AccountRow,
     BucketRow, DeepBookPoolRow, EventParticipantRow, IndexedEventRow, NewIndexedEventRow,
-    PositionRow, ProgressRow,
+    PositionRow, ProgressRow, RfqBidRow, RfqRow, VaultReceiptRow, VaultRoundRow, VaultRow,
 };
 use super::schema::{
     account_balances, accounts, bucket_deepbook_pools, buckets, event_participants,
-    indexed_events, indexer_progress, positions,
+    indexed_events, indexer_progress, positions, rfq_bids, rfqs, vault_rounds,
+    vault_user_receipts, vaults,
 };
 use super::DbPool;
 
@@ -65,6 +69,16 @@ pub struct CheckpointBatch {
     pub position_deletes: Vec<(String, BigDecimal)>,
     /// Per-event (address, role) edges for the `participant` query filter.
     pub event_participants: Vec<EventParticipantRow>,
+    /// RFQ auction snapshots (C3). Upsert per touching event.
+    pub rfqs: Vec<RfqRow>,
+    /// Append-only bid history (C3).
+    pub rfq_bids: Vec<RfqBidRow>,
+    /// Vault headline snapshots (D2).
+    pub vaults: Vec<VaultRow>,
+    /// Vault round track-record snapshots (D2).
+    pub vault_rounds: Vec<VaultRoundRow>,
+    /// Per-(vault, owner, round, kind) receipt aggregates (D2).
+    pub vault_receipts: Vec<VaultReceiptRow>,
 }
 
 impl CheckpointBatch {
@@ -80,6 +94,11 @@ impl CheckpointBatch {
             position_upserts: Vec::new(),
             position_deletes: Vec::new(),
             event_participants: Vec::new(),
+            rfqs: Vec::new(),
+            rfq_bids: Vec::new(),
+            vaults: Vec::new(),
+            vault_rounds: Vec::new(),
+            vault_receipts: Vec::new(),
         }
     }
 
@@ -92,6 +111,11 @@ impl CheckpointBatch {
             && self.position_upserts.is_empty()
             && self.position_deletes.is_empty()
             && self.event_participants.is_empty()
+            && self.rfqs.is_empty()
+            && self.rfq_bids.is_empty()
+            && self.vaults.is_empty()
+            && self.vault_rounds.is_empty()
+            && self.vault_receipts.is_empty()
     }
 }
 
@@ -129,6 +153,10 @@ pub struct HydratedViews {
     pub buckets: BTreeMap<ObjectId, BucketState>,
     pub positions: BTreeMap<(ObjectId, u128), PositionState>,
     pub deepbook_pools: BTreeMap<ObjectId, DeepBookPoolState>,
+    pub rfqs: BTreeMap<ObjectId, RfqState>,
+    pub vaults: BTreeMap<ObjectId, VaultState>,
+    pub vault_rounds: BTreeMap<(ObjectId, u64), VaultRoundState>,
+    pub vault_receipts: BTreeMap<ReceiptKey, ReceiptState>,
 }
 
 #[derive(Clone)]
@@ -287,6 +315,94 @@ impl Repo {
                 }
             }
 
+            for rfq in &batch.rfqs {
+                diesel::insert_into(rfqs::table)
+                    .values(rfq)
+                    .on_conflict(rfqs::rfq_id)
+                    .do_update()
+                    .set((
+                        rfqs::deadline_ms.eq(rfq.deadline_ms),
+                        rfqs::best_premium.eq(&rfq.best_premium),
+                        rfqs::best_bidder.eq(&rfq.best_bidder),
+                        rfqs::status.eq(&rfq.status),
+                        rfqs::winner.eq(&rfq.winner),
+                        rfqs::net_premium.eq(&rfq.net_premium),
+                        rfqs::position_id.eq(&rfq.position_id),
+                        rfqs::updated_at_seq.eq(rfq.updated_at_seq),
+                    ))
+                    .execute(conn)
+                    .context("upserting rfqs")?;
+            }
+
+            if !batch.rfq_bids.is_empty() {
+                // Append-only; replays dedup on (rfq_id, sequence).
+                diesel::insert_into(rfq_bids::table)
+                    .values(&batch.rfq_bids)
+                    .on_conflict_do_nothing()
+                    .execute(conn)
+                    .context("inserting rfq_bids")?;
+            }
+
+            for vault in &batch.vaults {
+                diesel::insert_into(vaults::table)
+                    .values(vault)
+                    .on_conflict(vaults::vault_id)
+                    .do_update()
+                    .set((
+                        vaults::round.eq(vault.round),
+                        vaults::current_bucket.eq(&vault.current_bucket),
+                        vaults::latest_pps.eq(&vault.latest_pps),
+                        vaults::total_shares.eq(&vault.total_shares),
+                        vaults::pending_deposits.eq(&vault.pending_deposits),
+                        vaults::deposits_paused.eq(vault.deposits_paused),
+                        vaults::updated_at_seq.eq(vault.updated_at_seq),
+                    ))
+                    .execute(conn)
+                    .context("upserting vaults")?;
+            }
+
+            for round in &batch.vault_rounds {
+                diesel::insert_into(vault_rounds::table)
+                    .values(round)
+                    .on_conflict((vault_rounds::vault_id, vault_rounds::round))
+                    .do_update()
+                    .set((
+                        vault_rounds::bucket_id.eq(&round.bucket_id),
+                        vault_rounds::strike.eq(&round.strike),
+                        vault_rounds::strike_scale.eq(round.strike_scale),
+                        vault_rounds::expiry_ms.eq(round.expiry_ms),
+                        vault_rounds::pps.eq(&round.pps),
+                        vault_rounds::aum.eq(&round.aum),
+                        vault_rounds::shares.eq(&round.shares),
+                        vault_rounds::premium_collected.eq(&round.premium_collected),
+                        vault_rounds::mgmt_fee.eq(&round.mgmt_fee),
+                        vault_rounds::perf_fee.eq(&round.perf_fee),
+                        vault_rounds::finalized_at_ms.eq(round.finalized_at_ms),
+                        vault_rounds::updated_at_seq.eq(round.updated_at_seq),
+                    ))
+                    .execute(conn)
+                    .context("upserting vault_rounds")?;
+            }
+
+            for receipt in &batch.vault_receipts {
+                diesel::insert_into(vault_user_receipts::table)
+                    .values(receipt)
+                    .on_conflict((
+                        vault_user_receipts::vault_id,
+                        vault_user_receipts::owner,
+                        vault_user_receipts::round,
+                        vault_user_receipts::kind,
+                    ))
+                    .do_update()
+                    .set((
+                        vault_user_receipts::amount.eq(&receipt.amount),
+                        vault_user_receipts::settled.eq(&receipt.settled),
+                        vault_user_receipts::updated_at_seq.eq(receipt.updated_at_seq),
+                    ))
+                    .execute(conn)
+                    .context("upserting vault_user_receipts")?;
+            }
+
             // Singleton progress row. The first checkpoint creates it; later
             // ones just update.
             let _s = tracing::info_span!("db_query", query = "upsert_indexer_progress").entered();
@@ -409,11 +525,43 @@ impl Repo {
             deepbook_map.insert(bucket, state);
         }
 
+        let mut rfq_map: BTreeMap<ObjectId, RfqState> = BTreeMap::new();
+        for row in rfqs::table.load::<RfqRow>(&mut conn).context("loading rfqs")? {
+            let (id, state) = row.into_state()?;
+            rfq_map.insert(id, state);
+        }
+
+        let mut vault_map: BTreeMap<ObjectId, VaultState> = BTreeMap::new();
+        for row in vaults::table.load::<VaultRow>(&mut conn).context("loading vaults")? {
+            let (id, state) = row.into_state()?;
+            vault_map.insert(id, state);
+        }
+
+        let mut round_map: BTreeMap<(ObjectId, u64), VaultRoundState> = BTreeMap::new();
+        for row in vault_rounds::table
+            .load::<VaultRoundRow>(&mut conn)
+            .context("loading vault_rounds")?
+        {
+            let (key, state) = row.into_state()?;
+            round_map.insert(key, state);
+        }
+
+        let mut receipt_map: BTreeMap<ReceiptKey, ReceiptState> = BTreeMap::new();
+        for row in vault_user_receipts::table
+            .load::<VaultReceiptRow>(&mut conn)
+            .context("loading vault_user_receipts")?
+        {
+            let (key, state) = row.into_state()?;
+            receipt_map.insert(key, state);
+        }
+
         debug!(
             accounts = acct_map.len(),
             buckets = bucket_map.len(),
             positions = position_map.len(),
             deepbook_pools = deepbook_map.len(),
+            rfqs = rfq_map.len(),
+            vaults = vault_map.len(),
             "hydration complete"
         );
         Ok(HydratedViews {
@@ -421,7 +569,84 @@ impl Repo {
             buckets: bucket_map,
             positions: position_map,
             deepbook_pools: deepbook_map,
+            rfqs: rfq_map,
+            vaults: vault_map,
+            vault_rounds: round_map,
+            vault_receipts: receipt_map,
         })
+    }
+
+    /// JIT list of RFQ auctions, optionally filtered by status and/or
+    /// origin (vault id). Backs the GraphQL `rfqs(...)` query (mm-bot
+    /// discovery fallback, dashboards).
+    pub fn rfqs_query(&self, status: Option<&str>, origin: Option<&str>) -> Result<Vec<RfqRow>> {
+        let mut conn = self.conn()?;
+        let mut q = rfqs::table.into_boxed();
+        if let Some(s) = status {
+            q = q.filter(rfqs::status.eq(s.to_string()));
+        }
+        if let Some(o) = origin {
+            q = q.filter(rfqs::origin.eq(o.to_string()));
+        }
+        q.order(rfqs::deadline_ms.asc())
+            .load::<RfqRow>(&mut conn)
+            .context("loading rfqs")
+    }
+
+    /// Bid history for one auction, ascending.
+    pub fn rfq_bids_for(&self, rfq_id: &str) -> Result<Vec<RfqBidRow>> {
+        let mut conn = self.conn()?;
+        rfq_bids::table
+            .filter(rfq_bids::rfq_id.eq(rfq_id))
+            .order(rfq_bids::sequence.asc())
+            .load::<RfqBidRow>(&mut conn)
+            .context("loading rfq_bids")
+    }
+
+    /// All vaults (the protocol runs a handful).
+    pub fn vaults_query(&self) -> Result<Vec<VaultRow>> {
+        let mut conn = self.conn()?;
+        vaults::table
+            .order(vaults::vault_id.asc())
+            .load::<VaultRow>(&mut conn)
+            .context("loading vaults")
+    }
+
+    pub fn vault_by_id(&self, vault_id: &str) -> Result<Option<VaultRow>> {
+        let mut conn = self.conn()?;
+        vaults::table
+            .find(vault_id)
+            .first::<VaultRow>(&mut conn)
+            .optional()
+            .context("loading vault")
+    }
+
+    /// Round history for one vault, ascending — the track record.
+    pub fn vault_rounds_for(&self, vault_id: &str) -> Result<Vec<VaultRoundRow>> {
+        let mut conn = self.conn()?;
+        vault_rounds::table
+            .filter(vault_rounds::vault_id.eq(vault_id))
+            .order(vault_rounds::round.asc())
+            .load::<VaultRoundRow>(&mut conn)
+            .context("loading vault_rounds")
+    }
+
+    /// Receipt aggregates for one vault, optionally scoped to an owner.
+    pub fn vault_receipts_for(
+        &self,
+        vault_id: &str,
+        owner: Option<&str>,
+    ) -> Result<Vec<VaultReceiptRow>> {
+        let mut conn = self.conn()?;
+        let mut q = vault_user_receipts::table
+            .filter(vault_user_receipts::vault_id.eq(vault_id.to_string()))
+            .into_boxed();
+        if let Some(o) = owner {
+            q = q.filter(vault_user_receipts::owner.eq(o.to_string()));
+        }
+        q.order((vault_user_receipts::round.asc(), vault_user_receipts::owner.asc()))
+            .load::<VaultReceiptRow>(&mut conn)
+            .context("loading vault_user_receipts")
     }
 
     /// SO-97: enriched positions for a set of on-chain object ids — the
