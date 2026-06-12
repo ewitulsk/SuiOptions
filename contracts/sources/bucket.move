@@ -231,10 +231,7 @@ fun execute_write_with_quote<Underlying, Settlement, Call>(
     let signer_recipient = quote::signer_token_recipient(&q);
     assert!(write_amount > 0, errors::zero_amount());
 
-    let fee = (((gross_premium as u128) * (admin::fee_bps(config) as u128)) / 10000) as u64;
-    let net_premium = gross_premium - fee;
-
-    match (flow) {
+    let (underlying, fee) = match (flow) {
         FlowKind::Writer => {
             // Signer is the trader MM (the buyer of the option).
             // Signer-supplied side: premium (Settlement) debited from their Account.
@@ -248,16 +245,12 @@ fun execute_write_with_quote<Underlying, Settlement, Call>(
                 gross_premium,
                 ctx,
             );
-            let mut premium_balance = premium_coin.into_balance();
-            if (fee > 0) {
-                let fee_balance = premium_balance.split(fee);
-                treasury::deposit_balance(treasury, fee_balance);
-            };
-            let net_coin = coin::from_balance(premium_balance, ctx);
+            let (net_balance, fee) = skim_fee(config, treasury, premium_coin.into_balance());
+            let net_coin = coin::from_balance(net_balance, ctx);
             transfer::public_transfer(net_coin, ctx.sender());
 
-            bucket.underlying_balance.join(underlying_in.into_balance());
             premium_in.destroy_zero();
+            (underlying_in.into_balance(), fee)
         },
         FlowKind::Trader => {
             // Signer is the writer MM (the seller of the option).
@@ -272,29 +265,20 @@ fun execute_write_with_quote<Underlying, Settlement, Call>(
                 write_amount,
                 ctx,
             );
-            bucket.underlying_balance.join(underlying_coin.into_balance());
-
-            let mut premium_balance = premium_in.into_balance();
-            if (fee > 0) {
-                let fee_balance = premium_balance.split(fee);
-                treasury::deposit_balance(treasury, fee_balance);
-            };
-            account::deposit_balance(signer_account, premium_balance);
+            let (net_balance, fee) = skim_fee(config, treasury, premium_in.into_balance());
+            account::deposit_balance(signer_account, net_balance);
 
             underlying_in.destroy_zero();
+            (underlying_coin.into_balance(), fee)
         },
     };
+    let net_premium = gross_premium - fee;
 
-    let range_start = bucket.total_written;
-    let range_end = range_start + (write_amount as u128);
-    bucket.total_written = range_end;
-
-    let position = position::mint(bucket_id, range_start, range_end, ctx);
+    let (position, call) = do_write(bucket, underlying, ctx);
+    let range_start = position::range_start(&position);
+    let range_end = position::range_end(&position);
     let position_id = object::id(&position);
     transfer::public_transfer(position, position_recipient);
-
-    // Mint the option as a fungible coin from the bucket's own treasury.
-    let call = coin::mint(&mut bucket.call_treasury, write_amount, ctx);
     transfer::public_transfer(call, call_token_recipient);
 
     events::emit_write_executed(
@@ -313,6 +297,86 @@ fun execute_write_with_quote<Underlying, Settlement, Call>(
         range_end,
         quote::nonce(&q),
     );
+}
+
+/// Core covered-write: escrow `underlying_in` in the bucket and mint the
+/// corresponding `Position` + `Coin<Call>`, returned to the caller (no
+/// transfers). Premium negotiation is a venue-layer concern.
+///
+/// Safe to expose `public`: this mints no free optionality. The caller
+/// fully collateralizes every option unit minted, and until they part with
+/// the `Coin<Call>` they hold both sides of the trade — economically a
+/// no-op. It is exactly the "self-write" primitive that lets anyone build
+/// a venue (auction, AMM listing, OTC) on top of the protocol.
+public fun write_collateralized<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    underlying_in: Coin<Underlying>,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): (Position, Coin<Call>) {
+    write_collateralized_balance(bucket, underlying_in.into_balance(), clock, ctx)
+}
+
+/// `Balance`-accepting sibling of `write_collateralized`, for venues in
+/// this package (e.g. the on-chain RFQ) whose escrow lives as a `Balance`.
+/// Same checks, same event.
+public(package) fun write_collateralized_balance<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    underlying: Balance<Underlying>,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): (Position, Coin<Call>) {
+    assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
+    assert!(!bucket.invalidated, errors::bucket_invalidated());
+    let amount = underlying.value();
+    assert!(amount > 0, errors::zero_amount());
+    let (position, call) = do_write(bucket, underlying, ctx);
+    events::emit_collateralized_write(
+        object::id(bucket),
+        ctx.sender(),
+        amount,
+        position::range_start(&position),
+        position::range_end(&position),
+    );
+    (position, call)
+}
+
+/// Bucket mechanics shared by every write venue: escrow the underlying,
+/// advance the write cursor, mint the `Position` + `Coin<Call>` pair. The
+/// caller has already performed venue checks (expiry, invalidation,
+/// amount > 0).
+fun do_write<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    underlying: Balance<Underlying>,
+    ctx: &mut TxContext,
+): (Position, Coin<Call>) {
+    let write_amount = underlying.value();
+    bucket.underlying_balance.join(underlying);
+
+    let range_start = bucket.total_written;
+    let range_end = range_start + (write_amount as u128);
+    bucket.total_written = range_end;
+
+    let position = position::mint(object::id(bucket), range_start, range_end, ctx);
+    // Mint the option as a fungible coin from the bucket's own treasury.
+    let call = coin::mint(&mut bucket.call_treasury, write_amount, ctx);
+    (position, call)
+}
+
+/// Splits the protocol fee out of `premium` into the treasury; returns the
+/// net premium balance and the fee taken. Fee = floor(premium × fee_bps /
+/// 10_000), computed in u128 — matches the historical inline math exactly.
+public(package) fun skim_fee<Settlement>(
+    config: &ProtocolConfig,
+    treasury: &mut Treasury,
+    mut premium: Balance<Settlement>,
+): (Balance<Settlement>, u64) {
+    let gross = premium.value();
+    let fee = (((gross as u128) * (admin::fee_bps(config) as u128)) / 10000) as u64;
+    if (fee > 0) {
+        treasury::deposit_balance(treasury, premium.split(fee));
+    };
+    (premium, fee)
 }
 
 public fun exercise<Underlying, Settlement, Call>(

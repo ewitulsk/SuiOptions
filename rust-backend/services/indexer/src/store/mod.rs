@@ -356,12 +356,37 @@ fn collect_participants(
             }
         }
         ChainEvent::TreasuryWithdrawn(t) => push(t.recipient.to_hex(), "treasury_recipient"),
+        ChainEvent::CollateralizedWrite(w) => push(w.writer.to_hex(), "writer"),
+        ChainEvent::RfqBid(b) => {
+            push(b.bidder.to_hex(), "bidder");
+            push(b.call_recipient.to_hex(), "call_recipient");
+        }
+        ChainEvent::RfqSettled(s) => {
+            push(s.winner.to_hex(), "winner");
+            push(s.call_recipient.to_hex(), "call_recipient");
+            push(s.position_recipient.to_hex(), "position_recipient");
+        }
+        ChainEvent::VaultDeposit(d) => push(d.depositor.to_hex(), "depositor"),
+        ChainEvent::SharesClaimed(c) => push(c.owner.to_hex(), "owner"),
+        ChainEvent::WithdrawInitiated(w) => push(w.owner.to_hex(), "owner"),
+        ChainEvent::WithdrawCompleted(w) => push(w.owner.to_hex(), "owner"),
+        ChainEvent::InstantWithdraw(w) => push(w.owner.to_hex(), "owner"),
+        ChainEvent::VaultProceedsSwapped(s) => push(s.filler.to_hex(), "filler"),
         // DeepBookPoolCreated carries no addresses (the creator isn't in the
         // event payload).
         ChainEvent::BucketCreated(_)
         | ChainEvent::BucketCleaned(_)
         | ChainEvent::FeeUpdated(_)
-        | ChainEvent::DeepBookPoolCreated(_) => {}
+        | ChainEvent::DeepBookPoolCreated(_)
+        | ChainEvent::RfqCreated(_)
+        | ChainEvent::RfqExpiredUnsold(_)
+        | ChainEvent::VaultCreated(_)
+        | ChainEvent::VaultBucketSelected(_)
+        | ChainEvent::VaultPositionRedeemed(_)
+        | ChainEvent::VaultFeesCharged(_)
+        | ChainEvent::VaultRoundFinalized(_)
+        | ChainEvent::VaultConfigUpdated(_)
+        | ChainEvent::VaultDepositsPaused(_) => {}
     }
 }
 
@@ -475,11 +500,37 @@ fn stage_event_into_batch(
                 ));
             }
         }
+        ChainEvent::CollateralizedWrite(w) => {
+            // A venue write moved the bucket's cursor (RfqSettled carries
+            // its own CollateralizedWrite alongside, emitted by the shared
+            // write core, so the bucket row refresh happens here for both).
+            if let Some(state) = inner.buckets.get(&w.bucket_id) {
+                batch.buckets.push(bucket_row(w.bucket_id, state, sequence));
+            }
+        }
         ChainEvent::ExpiredOptionBurned(_)
         | ChainEvent::FeeUpdated(_)
-        | ChainEvent::TreasuryWithdrawn(_) => {
-            // No materialised-view change. The event itself still lands in
-            // `indexed_events` via the caller.
+        | ChainEvent::TreasuryWithdrawn(_)
+        | ChainEvent::RfqCreated(_)
+        | ChainEvent::RfqBid(_)
+        | ChainEvent::RfqSettled(_)
+        | ChainEvent::RfqExpiredUnsold(_)
+        | ChainEvent::VaultCreated(_)
+        | ChainEvent::VaultDeposit(_)
+        | ChainEvent::SharesClaimed(_)
+        | ChainEvent::WithdrawInitiated(_)
+        | ChainEvent::WithdrawCompleted(_)
+        | ChainEvent::InstantWithdraw(_)
+        | ChainEvent::VaultBucketSelected(_)
+        | ChainEvent::VaultPositionRedeemed(_)
+        | ChainEvent::VaultProceedsSwapped(_)
+        | ChainEvent::VaultFeesCharged(_)
+        | ChainEvent::VaultRoundFinalized(_)
+        | ChainEvent::VaultConfigUpdated(_)
+        | ChainEvent::VaultDepositsPaused(_) => {
+            // No materialised-view change yet. The event itself still
+            // lands in `indexed_events` via the caller; the rfq/vault
+            // tables + GraphQL land with guide tickets C3/D2 (doc 05 §1).
         }
     }
 }
@@ -637,7 +688,32 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent) {
                 );
             }
         }
-        ChainEvent::FeeUpdated(_) | ChainEvent::TreasuryWithdrawn(_) => {}
+        ChainEvent::CollateralizedWrite(w) => {
+            // Venue writes (RFQ settles, self-writes) advance the bucket
+            // cursor exactly like signed-quote writes.
+            if let Some(b) = inner.buckets.get_mut(&w.bucket_id) {
+                b.total_written = w.range_end;
+            }
+        }
+        ChainEvent::FeeUpdated(_)
+        | ChainEvent::TreasuryWithdrawn(_)
+        | ChainEvent::RfqCreated(_)
+        | ChainEvent::RfqBid(_)
+        | ChainEvent::RfqSettled(_)
+        | ChainEvent::RfqExpiredUnsold(_)
+        | ChainEvent::VaultCreated(_)
+        | ChainEvent::VaultDeposit(_)
+        | ChainEvent::SharesClaimed(_)
+        | ChainEvent::WithdrawInitiated(_)
+        | ChainEvent::WithdrawCompleted(_)
+        | ChainEvent::InstantWithdraw(_)
+        | ChainEvent::VaultBucketSelected(_)
+        | ChainEvent::VaultPositionRedeemed(_)
+        | ChainEvent::VaultProceedsSwapped(_)
+        | ChainEvent::VaultFeesCharged(_)
+        | ChainEvent::VaultRoundFinalized(_)
+        | ChainEvent::VaultConfigUpdated(_)
+        | ChainEvent::VaultDepositsPaused(_) => {}
     }
 }
 

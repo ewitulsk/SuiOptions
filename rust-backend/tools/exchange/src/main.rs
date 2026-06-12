@@ -90,23 +90,36 @@ async fn main() -> Result<()> {
                 .token_spec(&underlying)
                 .with_context(|| format!("underlying {underlying} not in token-info catalog"))?;
             let s_type = resolve_coin_type(&snapshot, &settlement)?;
+            // Settlement decimals feed the DeepBook pool grid; catalog
+            // tokens carry them, raw coin-type inputs fall back to the
+            // 9-decimal Sui convention.
+            let settlement_decimals = snapshot
+                .token_spec(&settlement)
+                .map(|s| s.decimals)
+                .unwrap_or(9);
             // Drive the same per-roll codegen→publish→create_bucket pipeline
             // the scheduler uses, so manual buckets get per-bucket option coins.
+            let grid = StrikeGrid {
+                start_strike,
+                strike_interval,
+                count,
+                strike_scale,
+            };
             let plan = RollPlan {
                 underlying_symbol: underlying.clone(),
                 settlement_symbol: settlement.clone(),
                 underlying_type: u_spec.coin_type.clone(),
                 settlement_type: s_type,
                 underlying_decimals: u_spec.decimals,
+                settlement_decimals,
                 expiry_ms,
-                grid: StrikeGrid {
-                    start_strike,
-                    strike_interval,
-                    count,
-                    strike_scale,
-                },
+                strikes: grid.strikes(),
+                strike_scale,
             };
-            let out = roller::submit(&wrap, package, admin_cap, &plan, cli.gas_budget).await?;
+            // The manual tool rolls buckets only; pool creation stays with
+            // the scheduler (pass None).
+            let out =
+                roller::submit(&wrap, package, admin_cap, &plan, None, cli.gas_budget).await?;
             println!("✓ create-buckets digest: {}", out.digest);
             for id in &out.bucket_ids {
                 println!("  bucket: {id}");

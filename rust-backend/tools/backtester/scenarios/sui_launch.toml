@@ -1,0 +1,44 @@
+# SUI covered-call launch-parameter sweep (doc 06 §7). Run after
+# ./fetch-data.sh:
+#
+#   backtester sweep --scenario scenarios/sui_launch.toml \
+#       --out out/sui_launch/ --top 20 --rank apy_p5
+#
+# Replay answers "what would the strategy have done on real history";
+# pair it with scenarios/sui_mc.toml for the forward-looking bands.
+
+[scenario]
+asset = "SUI"
+paths = "replay"
+candles = "data/sui_usd_1d.csv"
+
+[strategy]
+delta_target = [0.05, 0.10, 0.20, 0.30]
+deploy_fraction = 1.0
+slices = [1, 4]
+premium_policy = ["at_roll", "at_expiry", "hold_usdc"]
+
+[premium]
+iv_provider = ["vrp_transfer", "realized_only"]
+# Calibrated from free data (see README):
+#   vrp_ratio   — `backtester calibrate` on BTC DVOL/RV30 (median 1.19)
+#   skew_bps    — `backtester calibrate-skew` on 60 monthly Deribit chain
+#                 snapshots: the 10Δ weekly wing prices BELOW the 30d
+#                 index (p25/median/p75 ≈ -1100/-600/0)
+#   haircut_bps — Ribbon's Gnosis auctions cleared 17-35% under the
+#                 wing-IV mark (`backtester validate-ribbon`)
+vrp_ratio = 1.19
+skew_bps = [-1100, -600, 0]
+mechanism = ["rfq_batch", "onchain_auction"]
+haircut_bps = [1500, 2500, 3500]
+n_bidders_mean = [1, 3, 6]
+
+[exercise]
+policy = ["rational", "early_500", "partial_60"]
+
+[fees]
+mgmt_bps_annual = [0, 200]
+perf_bps = [0, 1000]
+
+[swap]
+slippage_bps = [10, 50]

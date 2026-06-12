@@ -66,3 +66,20 @@ interval_pct        = 10.0
   [pairs.spot]
   source = "static"
   usd    = 0.15
+
+# Grid v2 (vault-implementation-guide doc 05 §4.2): add a `[pairs.grid]`
+# table to place strikes at standard-deviation multiples instead of fixed
+# percentages, so the covered-call vault's 0.1-delta strike (z = 1.30) is
+# on-grid by construction. `strikes_below`/`strikes_above`/`interval_pct`
+# are ignored for such pairs. σ = realized vol from Pyth Benchmarks
+# (daily closes over `vol_window_days`), clamped to
+# [vol_floor, vol_ceiling]; `sigma_fallback` covers static-spot pairs and
+# benchmark outages.
+#
+#   [pairs.grid]
+#   mode            = "z_ladder"
+#   ladder          = [0.0, 0.65, 1.3, 1.95, 2.6]   # 7-point ladder for BTC
+#   vol_window_days = 30
+#   vol_floor       = 0.2
+#   vol_ceiling     = 3.0
+#   sigma_fallback  = 0.85

@@ -174,12 +174,14 @@ async fn localnet_roll_creates_per_bucket_coins() -> Result<()> {
         underlying_decimals: 9,
         settlement_decimals: 9,
         expiry_ms: 7_000_000_000_000,
-        grid: StrikeGrid {
+        strikes: StrikeGrid {
             start_strike: 50_000,
             strike_interval: 1_000,
             count: 2,
             strike_scale: 0,
-        },
+        }
+        .strikes(),
+        strike_scale: 0,
     };
 
     let wrap = SuiClientWrapper {

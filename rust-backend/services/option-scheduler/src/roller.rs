@@ -22,7 +22,6 @@ use sui_tx::sui_client::SuiClientWrapper;
 use sui_tx::tx::coin_pkg::{self, CreateBucketSpec};
 
 use crate::codegen;
-use crate::strike_grid::StrikeGrid;
 
 #[derive(Debug, Clone)]
 pub struct RollPlan {
@@ -38,7 +37,11 @@ pub struct RollPlan {
     /// pool's tick/lot/min grid.
     pub settlement_decimals: u8,
     pub expiry_ms: u64,
-    pub grid: StrikeGrid,
+    /// Explicit per-bucket strikes, ascending, in scaled chain units. The
+    /// percent grid expands via `StrikeGrid::strikes()`; the z-ladder is
+    /// non-uniform by design.
+    pub strikes: Vec<u128>,
+    pub strike_scale: u8,
 }
 
 impl RollPlan {
@@ -46,10 +49,9 @@ impl RollPlan {
         info!(
             pair = %format!("{}/{}", self.underlying_symbol, self.settlement_symbol),
             expiry_ms = self.expiry_ms,
-            start_strike = %self.grid.start_strike,
-            strike_interval = %self.grid.strike_interval,
-            count = self.grid.count,
-            strike_scale = self.grid.strike_scale,
+            strikes = ?self.strikes,
+            count = self.strikes.len(),
+            strike_scale = self.strike_scale,
             dry_run,
             "rolling new bucket family"
         );
@@ -113,7 +115,7 @@ pub async fn submit(
         underlying = %plan.underlying_type,
         settlement = %plan.settlement_type,
         expiry_ms = plan.expiry_ms,
-        count = plan.grid.count,
+        count = plan.strikes.len(),
         gas_budget,
         "submitting roll"
     );
@@ -123,7 +125,7 @@ pub async fn submit(
         "{}-{}@{}",
         plan.underlying_symbol, plan.settlement_symbol, plan.expiry_ms
     );
-    let pkg = codegen::generate(plan.grid.count, plan.underlying_decimals, &label)
+    let pkg = codegen::generate(plan.strikes.len() as u64, plan.underlying_decimals, &label)
         .context("generating coin package")?;
     let compiled = BuildConfig::new_for_testing()
         .build(&pkg.dir)
@@ -184,37 +186,36 @@ pub async fn submit(
 
 /// Pair each harvested `TreasuryCap` to the strike its module was generated
 /// for. The cap's call type encodes the module index (`…::call_<i>::CALL_<I>`),
-/// which maps to `start_strike + i * strike_interval`.
+/// which maps to `strikes[i]`.
 fn pair_caps_to_strikes(
     plan: &RollPlan,
     caps: &[coin_pkg::HarvestedCap],
 ) -> Result<Vec<CreateBucketSpec>> {
-    if caps.len() as u64 != plan.grid.count {
+    if caps.len() != plan.strikes.len() {
         anyhow::bail!(
             "harvested {} treasury caps but grid wanted {} buckets",
             caps.len(),
-            plan.grid.count
+            plan.strikes.len()
         );
     }
     let mut specs = Vec::with_capacity(caps.len());
     for cap in caps {
         let i = codegen::call_index(&cap.call_type)
             .with_context(|| format!("indexing cap {}", cap.call_type))?;
-        if i >= plan.grid.count {
+        if i as usize >= plan.strikes.len() {
             anyhow::bail!(
                 "cap index {i} out of range for grid count {}",
-                plan.grid.count
+                plan.strikes.len()
             );
         }
-        let strike = plan.grid.start_strike + (i as u128) * plan.grid.strike_interval;
         specs.push(CreateBucketSpec {
             underlying_type: plan.underlying_type.clone(),
             settlement_type: plan.settlement_type.clone(),
             call_type: cap.call_type.clone(),
             cap_ref: cap.cap_ref,
             expiry_ms: plan.expiry_ms,
-            strike,
-            strike_scale: plan.grid.strike_scale,
+            strike: plan.strikes[i as usize],
+            strike_scale: plan.strike_scale,
         });
     }
     Ok(specs)

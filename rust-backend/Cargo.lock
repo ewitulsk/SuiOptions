@@ -988,6 +988,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backtester"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "csv",
+ "pricing",
+ "rayon",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+ "vault-sim",
+]
+
+[[package]]
 name = "base-x"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6483,6 +6498,7 @@ dependencies = [
  "diesel_migrations",
  "indexer-graphql",
  "move-core-types",
+ "pricing",
  "protocol-types",
  "pyth-client",
  "r2d2",
@@ -11320,6 +11336,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "vault-sim"
+version = "0.1.0"
+dependencies = [
+ "pricing",
+ "rand 0.8.6",
+ "rand_chacha 0.3.1",
+ "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

@@ -18,18 +18,31 @@ pub mod admin;
 pub mod coin_pkg;
 pub mod deepbook;
 pub mod execute_write;
+pub mod rfq;
 pub mod sponsor;
 pub mod template;
 pub mod test_tokens;
+pub mod vault;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
+use shared_crypto::intent::Intent;
+use sui_json_rpc_types::{
+    SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
+    SuiTransactionBlockResponseOptions,
+};
 use sui_types::base_types::ObjectID;
 use sui_types::object::Owner;
-use sui_types::transaction::{ObjectArg, SharedObjectMutability};
+use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
+use sui_types::transaction::{
+    ObjectArg, SharedObjectMutability, Transaction, TransactionData,
+};
+use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
 use tracing::{debug, trace};
 
 use sui_sdk::SuiClient;
 use sui_json_rpc_types::SuiObjectDataOptions;
+
+use crate::sui_client::Signer;
 
 /// Build a `SharedObject` `ObjectArg` from a current chain read. Needed by
 /// PTBs that mutate shared objects (Bucket, ProtocolConfig, Treasury,
@@ -64,6 +77,65 @@ pub async fn shared_object_arg(
         }),
         other => Err(anyhow!("object {id} is not shared: {:?}", other)),
     }
+}
+
+/// Gas-select, sign, submit, and assert success for a finished PTB. Shared
+/// by the rfq / vault builders; the older modules keep their local copies.
+pub(crate) async fn submit_ptb(
+    client: &SuiClient,
+    signer: &Signer,
+    pt: ProgrammableTransactionBuilder,
+    gas_budget: u64,
+    label: &str,
+) -> Result<SuiTransactionBlockResponse> {
+    let programmable = pt.finish();
+
+    let gas_coin = client
+        .coin_read_api()
+        .get_coins(signer.address, None, None, Some(10))
+        .await
+        .context("listing gas coins")?
+        .data
+        .into_iter()
+        .max_by_key(|c| c.balance)
+        .ok_or_else(|| anyhow!("no SUI coins to pay gas for {}", signer.address))?;
+    let gas_price = client
+        .read_api()
+        .get_reference_gas_price()
+        .await
+        .context("fetching reference gas price")?;
+
+    let tx_data = TransactionData::new_programmable(
+        signer.address,
+        vec![gas_coin.object_ref()],
+        programmable,
+        gas_budget,
+        gas_price,
+    );
+    let sig = Transaction::signature_from_signer(
+        tx_data.clone(),
+        Intent::sui_transaction(),
+        &signer.keypair,
+    );
+    let tx = Transaction::from_data(tx_data, vec![sig]);
+    let opts = SuiTransactionBlockResponseOptions::new()
+        .with_effects()
+        .with_object_changes();
+    let resp = client
+        .quorum_driver_api()
+        .execute_transaction_block(
+            tx,
+            opts,
+            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
+        )
+        .await
+        .with_context(|| format!("submitting {label} tx"))?;
+    let effects = resp.effects.as_ref().context("response missing effects")?;
+    if effects.status().is_err() {
+        anyhow::bail!("{label} reverted: {:?}", effects.status());
+    }
+    debug!(digest = %resp.digest, label, "tx succeeded");
+    Ok(resp)
 }
 
 /// Build an owned-object `ObjectArg` (e.g. an AdminCap held by the deployer).

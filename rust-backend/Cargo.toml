@@ -12,6 +12,7 @@ members = [
     "crates/api-service-client",
     "crates/indexer-graphql",
     "crates/auth-client",
+    "crates/vault-sim",
     "services/indexer",
     "services/quoting-service",
     "services/mm-bot",
@@ -29,6 +30,7 @@ members = [
     "tools/control-panel",
     "tools/mm-quote",
     "tools/deepbook-pool-test",
+    "tools/backtester",
     "tests",
 ]
 
@@ -49,6 +51,7 @@ token-info-client = { path = "crates/token-info-client" }
 api-service-client = { path = "crates/api-service-client" }
 indexer-graphql = { path = "crates/indexer-graphql" }
 auth-client    = { path = "crates/auth-client" }
+vault-sim      = { path = "crates/vault-sim" }
 
 # Pinned to match sui-keys's exact requirement on the framework/mainnet branch.
 tokio = { version = "=1.49.0", features = ["full"] }
@@ -61,8 +64,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bcs = "0.1"
 
+# backtester: scenario files, data loaders, parallel sweeps.
+toml = "0.8"
+csv = "1"
+rayon = "1"
+
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
+# vault-sim synthetic path generation: seeded, reproducible streams.
+rand_chacha = "0.3"
 hex = "0.4"
 sha2 = "0.10"
 # auth-service: HS256 JWT signing (hmac+sha2), Sui personal-message digest

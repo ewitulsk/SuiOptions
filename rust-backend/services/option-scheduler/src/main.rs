@@ -39,13 +39,13 @@ use token_info_client::TokenInfoClient;
 
 use indexer_graphql::IndexerClient;
 
-use option_scheduler::config::{PairConfig, SchedulerConfig};
+use option_scheduler::config::{GridConfig, PairConfig, SchedulerConfig};
 use option_scheduler::db;
 use option_scheduler::families::{CanonicalType, PairKey};
 use option_scheduler::roller::{self, ErrorClass, RollPlan};
 use option_scheduler::schedule::{decide_tick, SkipReason, TickDecision};
 use option_scheduler::spot::ResolvedSpotSource;
-use option_scheduler::strike_grid::build_strike_grid_for_pair;
+use option_scheduler::strike_grid::{build_strike_grid_for_pair, build_z_ladder_for_pair};
 use option_scheduler::Cli;
 
 #[tokio::main]
@@ -294,6 +294,80 @@ struct DeepBookPoolCfg {
     pool_creation_fee: u64,
 }
 
+/// Resolve the per-roll strike set: the legacy percentage grid, or the
+/// vol-aware z-ladder when `[pairs.grid]` is configured (doc 05 §4.2).
+async fn resolve_strikes(
+    pyth_cfg: &option_scheduler::config::PythGlobalConfig,
+    meta: &PairMeta,
+    http_client: &reqwest::Client,
+    spot_usd_cross: f64,
+    next_expiry_ms: u64,
+) -> Result<(Vec<u128>, u8)> {
+    let Some(GridConfig::ZLadder {
+        ladder,
+        vol_window_days,
+        vol_floor,
+        vol_ceiling,
+        sigma_fallback,
+    }) = &meta.cfg.grid
+    else {
+        let g = build_strike_grid_for_pair(
+            spot_usd_cross,
+            meta.underlying_decimals,
+            meta.settlement_decimals,
+            meta.cfg.strikes_below,
+            meta.cfg.strikes_above,
+            meta.cfg.interval_pct,
+        )?;
+        return Ok((g.strikes(), g.strike_scale));
+    };
+
+    let now_ms = now_ms() as i64;
+    // σ: realized vol from Pyth Benchmarks for live pairs; the configured
+    // fallback covers static (test-token) pairs and benchmark outages.
+    let sigma = match &meta.spot {
+        ResolvedSpotSource::Pyth { underlying_feed, .. } => {
+            match option_scheduler::sigma::realized_sigma_from_benchmarks(
+                http_client,
+                &pyth_cfg.benchmarks_url,
+                *underlying_feed,
+                *vol_window_days,
+                now_ms / 1000,
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    let fallback = sigma_fallback.ok_or_else(|| {
+                        anyhow!("realized vol fetch failed and no sigma_fallback: {e:#}")
+                    })?;
+                    warn!(error = %e, fallback, "realized vol fetch failed; using sigma_fallback");
+                    fallback
+                }
+            }
+        }
+        ResolvedSpotSource::Static { .. } => sigma_fallback.ok_or_else(|| {
+            anyhow!("z-ladder grid on a static-spot pair requires sigma_fallback")
+        })?,
+    };
+    let sigma = sigma.clamp(*vol_floor, *vol_ceiling);
+
+    let tau_ms = next_expiry_ms.saturating_sub(now_ms as u64);
+    if tau_ms == 0 {
+        return Err(anyhow!("next expiry {next_expiry_ms} is not in the future"));
+    }
+    let tau_years = tau_ms as f64 / (365.0 * 86_400_000.0);
+
+    build_z_ladder_for_pair(
+        spot_usd_cross,
+        sigma,
+        tau_years,
+        ladder,
+        meta.underlying_decimals,
+        meta.settlement_decimals,
+    )
+}
+
 async fn tick_once(
     cli: &Cli,
     cfg: &SchedulerConfig,
@@ -417,26 +491,22 @@ async fn tick_once(
                 continue;
             }
         };
-        let grid = match build_strike_grid_for_pair(
-            spot_usd_cross,
-            meta.underlying_decimals,
-            meta.settlement_decimals,
-            meta.cfg.strikes_below,
-            meta.cfg.strikes_above,
-            meta.cfg.interval_pct,
-        ) {
-            Ok(g) => g,
-            Err(e) => {
-                warn!(error = %e, pair = %pair_label, "strike grid invalid; skipping");
-                let _ = db::delete_pending(
-                    db_pool,
-                    &meta.cfg.underlying,
-                    &meta.cfg.settlement,
-                    next_expiry,
-                );
-                continue;
-            }
-        };
+        let (strikes, strike_scale) =
+            match resolve_strikes(&cfg.pyth, meta, http_client, spot_usd_cross, next_expiry)
+                .await
+            {
+                Ok(g) => g,
+                Err(e) => {
+                    warn!(error = %e, pair = %pair_label, "strike grid invalid; skipping");
+                    let _ = db::delete_pending(
+                        db_pool,
+                        &meta.cfg.underlying,
+                        &meta.cfg.settlement,
+                        next_expiry,
+                    );
+                    continue;
+                }
+            };
 
         let plan = RollPlan {
             underlying_symbol: meta.cfg.underlying.clone(),
@@ -446,7 +516,8 @@ async fn tick_once(
             underlying_decimals: meta.underlying_decimals,
             settlement_decimals: meta.settlement_decimals,
             expiry_ms: next_expiry,
-            grid,
+            strikes,
+            strike_scale,
         };
         plan.log_intent(cli.dry_run);
 

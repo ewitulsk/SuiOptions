@@ -33,6 +33,19 @@ public struct WriteExecuted has copy, drop {
     nonce: u64,
 }
 
+/// Emitted by `bucket::write_collateralized` (self-writes / venue escrow
+/// writes). Deliberately distinct from `WriteExecuted`: it has no premium
+/// and no signer — the indexer treats it as a new event type, existing
+/// consumers of `WriteExecuted` are unaffected.
+public struct CollateralizedWrite has copy, drop {
+    bucket_id: ID,
+    /// Tx sender (the venue or self-writer).
+    writer: address,
+    amount: u64,
+    range_start: u128,
+    range_end: u128,
+}
+
 public struct Exercised has copy, drop {
     bucket_id: ID,
     exerciser: address,
@@ -73,6 +86,167 @@ public struct BucketRevalidated has copy, drop {
     at_ms: u64,
     admin: address,
     reason: vector<u8>,
+}
+
+public struct RfqCreated has copy, drop {
+    rfq_id: ID,
+    bucket_id: ID,
+    /// Originating object (vault ID, or seller address-as-ID for
+    /// standalone use). Indexing/attribution only.
+    origin: ID,
+    amount: u64,
+    reserve_premium: u64,
+    deadline_ms: u64,
+    max_deadline_ms: u64,
+    min_increment_bps: u64,
+}
+
+public struct RfqBid has copy, drop {
+    rfq_id: ID,
+    bidder: address,
+    call_recipient: address,
+    premium: u64,
+    /// 0 if this is the first bid.
+    previous_premium: u64,
+    /// Post-anti-snipe deadline.
+    new_deadline_ms: u64,
+}
+
+/// Mirrors `WriteExecuted`'s economic fields so the indexer's positions
+/// materializer can treat both as "a position was minted with premium X".
+public struct RfqSettled has copy, drop {
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    winner: address,
+    call_recipient: address,
+    position_id: ID,
+    position_recipient: address,
+    amount: u64,
+    gross_premium: u64,
+    fee: u64,
+    net_premium: u64,
+    range_start: u128,
+    range_end: u128,
+}
+
+/// Emitted when an auction resolves without a write: no bids, or the
+/// bucket expired/was invalidated mid-auction (both escrows refunded).
+public struct RfqExpiredUnsold has copy, drop {
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    amount: u64,
+    reserve_premium: u64,
+}
+
+public struct VaultCreated has copy, drop {
+    vault_id: ID,
+    underlying_type: TypeName,
+    settlement_type: TypeName,
+    share_type: TypeName,
+}
+
+public struct VaultDeposit has copy, drop {
+    vault_id: ID,
+    depositor: address,
+    /// The round the deposit participates from (receipt round).
+    round: u64,
+    amount: u64,
+}
+
+public struct SharesClaimed has copy, drop {
+    vault_id: ID,
+    owner: address,
+    round: u64,
+    amount: u64,
+    shares: u64,
+}
+
+public struct WithdrawInitiated has copy, drop {
+    vault_id: ID,
+    owner: address,
+    /// The round the withdrawal settles with (receipt round).
+    round: u64,
+    shares: u64,
+}
+
+public struct WithdrawCompleted has copy, drop {
+    vault_id: ID,
+    owner: address,
+    round: u64,
+    shares: u64,
+    amount: u64,
+}
+
+public struct InstantWithdraw has copy, drop {
+    vault_id: ID,
+    owner: address,
+    round: u64,
+    amount: u64,
+}
+
+public struct VaultBucketSelected has copy, drop {
+    vault_id: ID,
+    round: u64,
+    bucket_id: ID,
+    strike: u128,
+    strike_scale: u8,
+    expiry_ms: u64,
+    selling_ends_ms: u64,
+    /// Pyth cross at selection (oracle scale).
+    spot: u128,
+    spot_scale: u8,
+}
+
+public struct VaultPositionRedeemed has copy, drop {
+    vault_id: ID,
+    round: u64,
+    position_id: ID,
+    underlying_returned: u64,
+    settlement_returned: u64,
+}
+
+public struct VaultProceedsSwapped has copy, drop {
+    vault_id: ID,
+    round: u64,
+    filler: address,
+    settlement_out: u64,
+    underlying_in: u64,
+}
+
+public struct VaultFeesCharged has copy, drop {
+    vault_id: ID,
+    round: u64,
+    mgmt_fee: u64,
+    perf_fee: u64,
+}
+
+public struct VaultRoundFinalized has copy, drop {
+    vault_id: ID,
+    /// The round that was finalized (the pps index).
+    round: u64,
+    pps: u128,
+    aum: u64,
+    /// Live shares the round's P&L accrued to (supply + queued).
+    shares: u64,
+    premium_collected: u64,
+    premium_underlying: u64,
+    withdrawals_owed: u64,
+    shares_burned: u64,
+    deposits_processed: u64,
+    shares_minted: u64,
+}
+
+public struct VaultConfigUpdated has copy, drop {
+    vault_id: ID,
+    /// Configs apply at the next finalize; this is the current round.
+    round: u64,
+}
+
+public struct VaultDepositsPaused has copy, drop {
+    vault_id: ID,
+    paused: bool,
 }
 
 public struct AccountCreated has copy, drop {
@@ -165,6 +339,16 @@ public(package) fun emit_write_executed(
     });
 }
 
+public(package) fun emit_collateralized_write(
+    bucket_id: ID,
+    writer: address,
+    amount: u64,
+    range_start: u128,
+    range_end: u128,
+) {
+    event::emit(CollateralizedWrite { bucket_id, writer, amount, range_start, range_end });
+}
+
 public(package) fun emit_exercised(
     bucket_id: ID,
     exerciser: address,
@@ -225,6 +409,219 @@ public(package) fun emit_bucket_revalidated(
     event::emit(BucketRevalidated { bucket_id, at_ms, admin, reason });
 }
 
+public(package) fun emit_rfq_created(
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    amount: u64,
+    reserve_premium: u64,
+    deadline_ms: u64,
+    max_deadline_ms: u64,
+    min_increment_bps: u64,
+) {
+    event::emit(RfqCreated {
+        rfq_id,
+        bucket_id,
+        origin,
+        amount,
+        reserve_premium,
+        deadline_ms,
+        max_deadline_ms,
+        min_increment_bps,
+    });
+}
+
+public(package) fun emit_rfq_bid(
+    rfq_id: ID,
+    bidder: address,
+    call_recipient: address,
+    premium: u64,
+    previous_premium: u64,
+    new_deadline_ms: u64,
+) {
+    event::emit(RfqBid {
+        rfq_id,
+        bidder,
+        call_recipient,
+        premium,
+        previous_premium,
+        new_deadline_ms,
+    });
+}
+
+public(package) fun emit_rfq_settled(
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    winner: address,
+    call_recipient: address,
+    position_id: ID,
+    position_recipient: address,
+    amount: u64,
+    gross_premium: u64,
+    fee: u64,
+    net_premium: u64,
+    range_start: u128,
+    range_end: u128,
+) {
+    event::emit(RfqSettled {
+        rfq_id,
+        bucket_id,
+        origin,
+        winner,
+        call_recipient,
+        position_id,
+        position_recipient,
+        amount,
+        gross_premium,
+        fee,
+        net_premium,
+        range_start,
+        range_end,
+    });
+}
+
+public(package) fun emit_rfq_expired_unsold(
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    amount: u64,
+    reserve_premium: u64,
+) {
+    event::emit(RfqExpiredUnsold { rfq_id, bucket_id, origin, amount, reserve_premium });
+}
+
+public(package) fun emit_vault_created(
+    vault_id: ID,
+    underlying_type: TypeName,
+    settlement_type: TypeName,
+    share_type: TypeName,
+) {
+    event::emit(VaultCreated { vault_id, underlying_type, settlement_type, share_type });
+}
+
+public(package) fun emit_vault_deposit(vault_id: ID, depositor: address, round: u64, amount: u64) {
+    event::emit(VaultDeposit { vault_id, depositor, round, amount });
+}
+
+public(package) fun emit_shares_claimed(
+    vault_id: ID,
+    owner: address,
+    round: u64,
+    amount: u64,
+    shares: u64,
+) {
+    event::emit(SharesClaimed { vault_id, owner, round, amount, shares });
+}
+
+public(package) fun emit_withdraw_initiated(vault_id: ID, owner: address, round: u64, shares: u64) {
+    event::emit(WithdrawInitiated { vault_id, owner, round, shares });
+}
+
+public(package) fun emit_withdraw_completed(
+    vault_id: ID,
+    owner: address,
+    round: u64,
+    shares: u64,
+    amount: u64,
+) {
+    event::emit(WithdrawCompleted { vault_id, owner, round, shares, amount });
+}
+
+public(package) fun emit_instant_withdraw(vault_id: ID, owner: address, round: u64, amount: u64) {
+    event::emit(InstantWithdraw { vault_id, owner, round, amount });
+}
+
+public(package) fun emit_vault_bucket_selected(
+    vault_id: ID,
+    round: u64,
+    bucket_id: ID,
+    strike: u128,
+    strike_scale: u8,
+    expiry_ms: u64,
+    selling_ends_ms: u64,
+    spot: u128,
+    spot_scale: u8,
+) {
+    event::emit(VaultBucketSelected {
+        vault_id,
+        round,
+        bucket_id,
+        strike,
+        strike_scale,
+        expiry_ms,
+        selling_ends_ms,
+        spot,
+        spot_scale,
+    });
+}
+
+public(package) fun emit_vault_position_redeemed(
+    vault_id: ID,
+    round: u64,
+    position_id: ID,
+    underlying_returned: u64,
+    settlement_returned: u64,
+) {
+    event::emit(VaultPositionRedeemed {
+        vault_id,
+        round,
+        position_id,
+        underlying_returned,
+        settlement_returned,
+    });
+}
+
+public(package) fun emit_vault_proceeds_swapped(
+    vault_id: ID,
+    round: u64,
+    filler: address,
+    settlement_out: u64,
+    underlying_in: u64,
+) {
+    event::emit(VaultProceedsSwapped { vault_id, round, filler, settlement_out, underlying_in });
+}
+
+public(package) fun emit_vault_fees_charged(vault_id: ID, round: u64, mgmt_fee: u64, perf_fee: u64) {
+    event::emit(VaultFeesCharged { vault_id, round, mgmt_fee, perf_fee });
+}
+
+public(package) fun emit_vault_round_finalized(
+    vault_id: ID,
+    round: u64,
+    pps: u128,
+    aum: u64,
+    shares: u64,
+    premium_collected: u64,
+    premium_underlying: u64,
+    withdrawals_owed: u64,
+    shares_burned: u64,
+    deposits_processed: u64,
+    shares_minted: u64,
+) {
+    event::emit(VaultRoundFinalized {
+        vault_id,
+        round,
+        pps,
+        aum,
+        shares,
+        premium_collected,
+        premium_underlying,
+        withdrawals_owed,
+        shares_burned,
+        deposits_processed,
+        shares_minted,
+    });
+}
+
+public(package) fun emit_vault_config_updated(vault_id: ID, round: u64) {
+    event::emit(VaultConfigUpdated { vault_id, round });
+}
+
+public(package) fun emit_vault_deposits_paused(vault_id: ID, paused: bool) {
+    event::emit(VaultDepositsPaused { vault_id, paused });
+}
+
 public(package) fun emit_account_created(
     account_id: ID,
     owner: address,
@@ -273,4 +670,60 @@ public(package) fun emit_treasury_withdrawn(
     recipient: address,
 ) {
     event::emit(TreasuryWithdrawn { asset_type, amount, recipient });
+}
+
+/// Test-only constructors so tests can assert emitted event *contents*
+/// (via `sui::event::events_by_type` + `==`), not just emission counts.
+#[test_only]
+public fun new_write_executed_for_testing(
+    bucket_id: ID,
+    signer_account_id: ID,
+    signer_token_recipient: address,
+    executor: address,
+    position_id: ID,
+    position_recipient: address,
+    call_token_recipient: address,
+    write_amount: u64,
+    gross_premium: u64,
+    fee: u64,
+    net_premium: u64,
+    range_start: u128,
+    range_end: u128,
+    nonce: u64,
+): WriteExecuted {
+    WriteExecuted {
+        bucket_id,
+        signer_account_id,
+        signer_token_recipient,
+        executor,
+        position_id,
+        position_recipient,
+        call_token_recipient,
+        write_amount,
+        gross_premium,
+        fee,
+        net_premium,
+        range_start,
+        range_end,
+        nonce,
+    }
+}
+
+/// The one `WriteExecuted` field a test cannot know up front (the Position
+/// is minted inside the call): expose it so the expected struct can be
+/// completed, then cross-checked against the recipient's inventory.
+#[test_only]
+public fun write_executed_position_id(e: &WriteExecuted): ID {
+    e.position_id
+}
+
+#[test_only]
+public fun new_collateralized_write_for_testing(
+    bucket_id: ID,
+    writer: address,
+    amount: u64,
+    range_start: u128,
+    range_end: u128,
+): CollateralizedWrite {
+    CollateralizedWrite { bucket_id, writer, amount, range_start, range_end }
 }
