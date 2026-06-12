@@ -1,0 +1,39 @@
+# Multi-stage build for the vault-keeper.
+#
+# The builder runs under the target platform set by bake.hcl. Do NOT
+# add `--platform=$BUILDPLATFORM` here — that would pin the builder to
+# the GH runner's native arch and produce a binary that doesn't match
+# the image manifest's arch.
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev clang cmake protobuf-compiler git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+RUN cargo build --release -p keeper
+
+FROM debian:bookworm-slim
+# Unlike the scheduler image: no libpq5 (the keeper has no Postgres
+# connection — chain + indexer GraphQL + token-info only) and no git
+# (no in-process Move builds). curl stays for ad-hoc health probes.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /src/target/release/keeper /usr/local/bin/keeper
+COPY services/keeper/config/ /app/config/
+
+ENV APP_ENV=staging
+# The keeper holds a plain gas wallet (no capability objects); the key is
+# rendered to /run/secrets/keeper.toml at deploy time by render-secrets.sh
+# from `options/<env>/keeper` in Secrets Manager.
+#
+# --network: BOTH envs map to testnet today — prod is a distinct testnet
+# deployment (see render-secrets.sh, gas-station/indexer prod configs).
+# The secrets TOML's `[sui]` slot is keyed by the same mapping in
+# render-secrets.sh; flip the two together when prod moves to mainnet.
+# token-info resolves via the TOKEN_INFO_URL env var (set in compose,
+# like mm-bot) rather than a baked-in flag, so per-env overrides live in
+# one place.
+ENTRYPOINT ["/bin/sh", "-c", "case \"$APP_ENV\" in staging|prod) NET=testnet ;; *) echo \"unknown APP_ENV: $APP_ENV\" >&2; exit 1 ;; esac; exec /usr/local/bin/keeper --config /app/config/config.${APP_ENV}.toml --secrets /run/secrets/keeper.toml --network $NET"]

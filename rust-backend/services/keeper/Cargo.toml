@@ -39,3 +39,5 @@ reqwest = { workspace = true }
 [dev-dependencies]
 # Strike-selection goldens shared with the backtester (doc 04 §5).
 vault-sim = { workspace = true }
+# Parse-validate the shipped per-env config TOMLs in unit tests.
+toml = { workspace = true }

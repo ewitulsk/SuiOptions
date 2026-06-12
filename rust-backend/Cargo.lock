@@ -4779,6 +4779,7 @@ dependencies = [
  "sui-types",
  "token-info-client",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
  "vault-sim",

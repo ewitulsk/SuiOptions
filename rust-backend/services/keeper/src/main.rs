@@ -71,10 +71,13 @@ async fn main() -> Result<()> {
     info!(signer = %wrap.signer.address, "keeper wallet connected (gas only)");
 
     if cfg.vaults.is_empty() {
-        return Err(anyhow!(
-            "no [[vaults]] configured in {} — the keeper would have nothing to do",
+        // Deploy wiring ships before any vault object exists on chain
+        // (mirrors the scheduler's empty prod [[pairs]]): boot, keep
+        // /health up, and idle until a config with [[vaults]] is rolled.
+        warn!(
+            "no [[vaults]] configured in {} — idling (health endpoint stays up)",
             cli.config.display()
-        ));
+        );
     }
 
     let pyth_handles = PythHandles {

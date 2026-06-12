@@ -78,6 +78,9 @@ pub struct KeeperConfig {
 
     pub pyth: PythKeeperConfig,
 
+    /// Vaults to crank. May be empty (the deployed default until vault
+    /// objects exist on chain): the keeper then idles with /health up.
+    #[serde(default)]
     pub vaults: Vec<VaultEntry>,
 }
 
@@ -170,5 +173,46 @@ impl Default for SlicingConfig {
 impl KeeperConfig {
     pub fn load(path: &Path) -> Result<Self> {
         config_load::load_toml(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped per-env configs must deserialize — they're what the
+    /// Dockerfile entrypoint loads on the deployed box. Both ship with
+    /// an empty vault list (no vault objects on chain yet) and the
+    /// verified Sui-testnet Pyth/Wormhole ids.
+    #[test]
+    fn shipped_env_configs_parse() {
+        for (env, raw) in [
+            ("staging", include_str!("../config/config.staging.toml")),
+            ("prod", include_str!("../config/config.prod.toml")),
+        ] {
+            let cfg: KeeperConfig =
+                toml::from_str(raw).unwrap_or_else(|e| panic!("config.{env}.toml: {e}"));
+            assert_eq!(cfg.indexer_graphql_url, "http://indexer:9002/graphql", "{env}");
+            assert_eq!(cfg.tick_secs, 15, "{env}");
+            assert_eq!(cfg.health_addr.port(), 8086, "{env}");
+            assert!(cfg.vaults.is_empty(), "{env}: ships vault-less");
+            assert!(cfg.pyth.pyth_state_id.starts_with("0x243759"), "{env}");
+            assert!(cfg.pyth.wormhole_state_id.starts_with("0x31358d"), "{env}");
+            assert_eq!(cfg.pyth.update_fee_mist, 1, "{env}");
+        }
+    }
+
+    /// The example config (a filled-in [[vaults]] entry) must also parse —
+    /// it's the template operators copy from when enabling a vault.
+    #[test]
+    fn example_config_parses_with_a_vault() {
+        let cfg: KeeperConfig =
+            toml::from_str(include_str!("../config/config.example.toml")).unwrap();
+        assert_eq!(cfg.vaults.len(), 1);
+        let v = &cfg.vaults[0];
+        assert_eq!(v.underlying, "SUI");
+        assert_eq!(v.target_delta, 0.20);
+        assert_eq!(v.slicing.slices, 4);
+        assert_eq!(v.slicing.stagger_minutes, 90);
     }
 }

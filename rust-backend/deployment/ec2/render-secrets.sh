@@ -121,6 +121,33 @@ $NETWORK = "$SUI_KEY"
 EOF
 fi
 
+# ---- vault-keeper secret -> rendered TOML ---------------------------------
+# Plain gas wallet (NOT the deployer key — the keeper holds no capability
+# objects; vault.move validates every crank on-chain). One Sui key per
+# env, in the network slot the keeper's --network expects (staging/prod
+# → testnet; the Dockerfile.keeper APP_ENV mapping mirrors this).
+#
+# NOTE: unlike the optional services above, the keeper IS declared in
+# both envs' compose files — if this secret is absent the container
+# crash-loops on a missing /run/secrets/keeper.toml and the deploy's
+# health gate rolls the env back. Create `options/<env>/keeper` with
+# {"sui_key": "suiprivkey1..."} before the first deploy that includes
+# the keeper.
+if KEEPER_JSON=$(fetch keeper 2>/dev/null); then
+  SUI_KEY=$(echo "$KEEPER_JSON" | jq -r '.sui_key')
+  if [ -z "$SUI_KEY" ] || [ "$SUI_KEY" = "null" ]; then
+    echo "missing sui_key in options/$ENV/keeper" >&2
+    exit 1
+  fi
+  umask 077
+  cat > "$DIR/keeper.toml" <<EOF
+[sui]
+$NETWORK = "$SUI_KEY"
+EOF
+else
+  echo "WARNING: options/$ENV/keeper secret not found — keeper will fail its health check if deployed" >&2
+fi
+
 # ---- price-charting secret -> sourced into .env by deploy.sh -------------
 # Tiger Data TimescaleDB connection URL. Absent in envs without the
 # service — silently skipped like mm-bot.

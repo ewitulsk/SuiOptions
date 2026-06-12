@@ -149,6 +149,23 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # Permissionless covered-call vault crank (guide doc 04). Holds only a
+  # gas wallet (/run/secrets/keeper.toml, from options/staging/keeper);
+  # idles with /health up while config.staging.toml has no [[vaults]] —
+  # enable vaults there once the vault objects exist on chain.
+  keeper:
+    image: ${ECR}/options/keeper:${KEEPER_TAG}
+    environment:
+      APP_ENV: staging
+      TOKEN_INFO_URL: http://token-info:9005
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      RUST_LOG: info,keeper=debug
+    volumes:
+      - /opt/options/staging/secrets:/run/secrets:ro
+    depends_on: [indexer, token-info]
+    restart: unless-stopped
+    networks: [net]
+
   # Single public entrypoint per env. Strips the /staging/{quoting,api,indexer,scheduler,mm-bot}
   # prefix before forwarding. depends_on is start-order only; nginx
   # tolerates backends being briefly unreachable on first boot.
@@ -165,7 +182,7 @@ services:
     volumes:
       - /opt/options/staging/nginx/:/etc/nginx/options/:ro
     command: ["nginx", "-c", "/etc/nginx/options/nginx.conf", "-g", "daemon off;"]
-    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station]
+    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, keeper]
     restart: unless-stopped
     networks: [net]
 

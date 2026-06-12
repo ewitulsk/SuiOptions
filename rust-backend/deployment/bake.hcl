@@ -99,6 +99,14 @@ target "gas-station" {
   cache-to   = [{ type = "gha", mode = "max", scope = "gas-station" }]
 }
 
+target "keeper" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.keeper"
+  tags       = ["${ECR}/options/keeper:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "keeper" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "keeper" }]
+}
+
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper"]
 }

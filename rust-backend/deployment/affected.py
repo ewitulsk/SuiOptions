@@ -34,7 +34,7 @@ from typing import Iterable
 
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor", "keeper"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -67,6 +67,9 @@ REBUILD_ALL_GLOBS = [
 #   auth-service     : runtime-config, cli-spec, protocol-types
 #   gas-station      : runtime-config, cli-spec, sui-tx
 #   balance-monitor  : runtime-config, cli-spec, sui-tx, observability
+#   keeper           : protocol-types, runtime-config, cli-spec, sui-tx,
+#                      pyth-client, pricing, token-info-client,
+#                      indexer-graphql, observability
 #   (every service also depends on observability)
 SERVICE_GLOBS: dict[str, list[str]] = {
     "indexer": [
@@ -164,6 +167,18 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/observability/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/sui-tx/**",
+    ],
+    "keeper": [
+        "rust-backend/services/keeper/**",
+        "rust-backend/Dockerfile.keeper",
+        "rust-backend/crates/protocol-types/**",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/sui-tx/**",
+        "rust-backend/crates/pyth-client/**",
+        "rust-backend/crates/pricing/**",
+        "rust-backend/crates/token-info-client/**",
+        "rust-backend/crates/indexer-graphql/**",
     ],
 }
 

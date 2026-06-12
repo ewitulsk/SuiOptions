@@ -68,6 +68,14 @@ endpoints:
       - "[STATUS] == 200"
       - "[BODY] == ok"
 
+  - name: Vault Keeper
+    group: staging
+    url: http://options-staging-keeper-1:8086/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
   - name: Nginx Gateway
     group: staging
     url: http://options-staging-nginx-1:80/staging/health
