@@ -6,9 +6,10 @@ type WriterProps = {
   amount: number;
   strike: number;
   assetSymbol: string | null;
+  expiryLabel: string;
 };
 
-export function WriterPanels({ premium, amount, strike, assetSymbol }: WriterProps) {
+export function WriterPanels({ premium, amount, strike, assetSymbol, expiryLabel }: WriterProps) {
   const asset = assetSymbol ?? "—";
   return (
     <div className="panels">
@@ -26,7 +27,7 @@ export function WriterPanels({ premium, amount, strike, assetSymbol }: WriterPro
       </div>
       <div className="panel">
         <div className="panel__head">
-          <span className="panel__head-dot"></span>on expiry · jun 26
+          <span className="panel__head-dot"></span>on expiry · {expiryLabel}
         </div>
         <div
           className="panel__split"
@@ -62,9 +63,10 @@ type TraderProps = {
   strike: number;
   spot: number;
   assetSymbol: string | null;
+  expiryLabel: string;
 };
 
-export function TraderPanels({ premium, amount, strike, spot, assetSymbol }: TraderProps) {
+export function TraderPanels({ premium, amount, strike, spot, assetSymbol, expiryLabel }: TraderProps) {
   const asset = assetSymbol ?? "—";
   const breakeven = strike + premium / amount;
   const upside = Math.max(0, (spot * 1.2 - strike) * amount - premium);
@@ -81,12 +83,12 @@ export function TraderPanels({ premium, amount, strike, spot, assetSymbol }: Tra
           </div>
           <div className="panel__sub">
             For the right to buy <b>{fmt(amount)} {asset}</b> at{" "}
-            <b>${strike.toLocaleString("en-US")}</b> any time before Jun 26th.
+            <b>${strike.toLocaleString("en-US")}</b> any time before {expiryLabel}.
           </div>
         </div>
         <div className="panel">
           <div className="panel__head">
-            <span className="panel__head-dot"></span>exercise · anytime before jun 26
+            <span className="panel__head-dot"></span>exercise · anytime before {expiryLabel}
           </div>
           <div
             className="panel__split"
