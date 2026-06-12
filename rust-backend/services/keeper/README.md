@@ -1,0 +1,289 @@
+# vault-keeper — implementation guide
+
+> Status: **not yet implemented.** This README is the build spec for
+> ticket D1, updated from
+> [`docs/vault-implementation-guide/04-vault-keeper.md`](../../../docs/vault-implementation-guide/04-vault-keeper.md)
+> to match what actually shipped on-chain (PR #148). Everything the
+> keeper depends on — the vault cranks, the PTB builders, the strike
+> math — is already merged; this service is pure wiring.
+
+## 1. Trust model (read this first)
+
+The keeper holds **only a gas wallet**. Every action it submits is a
+public crank that `vault.move` validates on-chain:
+
+- which bucket may be selected is bounded by the Pyth strike band and
+  expiry-lead window (`vault::select_bucket`),
+- the auction reserve floor is derived from Pyth inside
+  `vault::open_rfq`,
+- the proceeds-swap price is Pyth-bounded inside
+  `vault::fill_proceeds_swap`,
+- everything else (`crank_redeem`, `settle_rfq`, `finalize_round`) has
+  no degrees of freedom at all.
+
+A malicious keeper's worst case is a *slightly suboptimal strike inside
+the band*; a lazy keeper's worst case is a delayed round. N keepers can
+run concurrently and merely waste gas racing — lost races abort with
+clear error codes. Anyone can run this binary; the team runs ≥ 2
+instances on independent infra.
+
+## 2. Crate layout
+
+Mirror the option-scheduler's structure (boot → tick loop →
+classify/submit) — it solves the same problem:
+
+```
+services/keeper/
+├── src/
+│   ├── main.rs       # config, boot checks, tick loop (tick_secs ≈ 15)
+│   ├── config.rs     # vault ids, types, feeds, slicing, vol source
+│   ├── state.rs      # VaultView: fetch + decode chain objects via RPC
+│   ├── planner.rs    # PURE: (VaultView, now) → Vec<Action>
+│   ├── strike.rs     # PURE: delta-target bucket choice (§5)
+│   ├── slicing.rs    # PURE: slice schedule (§6)
+│   ├── submit.rs     # Action → PTB via sui-tx builders; error classes
+│   └── pyth.rs       # Hermes VAA → update_price_feeds PTB prefix (§7)
+└── Cargo.toml        # sui-tx, pricing, pyth-client, runtime-config,
+                      # token-info-client, api-service-client
+```
+
+The **planner is a pure function** — that is the testing surface.
+Everything async (RPC reads, Hermes fetches, submission) stays outside
+it.
+
+## 3. State reading (`state.rs`)
+
+Build a `VaultView` per configured vault each tick, via
+`sui_sdk` object reads (the vault exposes every field the planner
+needs as a public getter — see `contracts/sources/vault.move` §getters):
+
+```rust
+struct VaultView {
+    round: u64,
+    settling: bool,            // is_settling()
+    current_bucket: Option<ObjectID>,
+    current_expiry_ms: u64,    // 0 ⇒ no bucket was selected this round
+    selling_ends_ms: u64,
+    open_rfqs: u64,
+    pending_positions: u64,    // positions_tail − positions_head
+    deployable: u64,
+    proceeds_settlement: u64,
+    // plus, fetched alongside:
+    live_buckets: Vec<BucketView>,   // from api-service /buckets (pair-filtered)
+    open_auctions: Vec<RfqView>,     // vault-coupled RfqAuction objects
+}
+```
+
+Decode the raw Move structs with BCS via `sui_sdk`'s
+`get_object_with_options(..., bcs)` or read fields through the
+`SuiParsedData` JSON — either is fine; pick one and golden-test it
+against a localnet object. Auction discovery: subscribe to `RfqCreated`
+events filtered by `origin == vault_id` (indexer GraphQL once C3 lands;
+poll `api-service /rfqs?status=open` as fallback), or track the IDs
+returned by our own `open_rfq` submissions and recover unknown ones from
+events on restart.
+
+## 4. The planner (`planner.rs`)
+
+```rust
+enum Action {
+    CrankRedeem   { vault, bucket },             // batch ≤ K per PTB
+    SettleRfq     { vault, rfq, bucket },
+    SettleRfqExpired { vault, rfq, bucket },     // bucket died mid-auction
+    FillProceedsSwap { vault, max_settlement_out }, // see §8
+    FinalizeRound { vault },
+    SelectBucket  { vault, bucket },             // chosen by strike.rs
+    OpenRfq       { vault, bucket, slice_amount },
+}
+```
+
+Tick logic, matching the as-built phase machine (note: a round that
+never selected a bucket has `current_expiry_ms == 0` and is finalizable
+immediately — `vault::maybe_enter_settling` flips the phase on the way
+in, the keeper doesn't need a separate transition action):
+
+```
+if settling || now ≥ current_expiry_ms (incl. the ==0 idle case):
+    if pending_positions > 0            → CrankRedeem
+    elif open_rfqs > 0:
+        for each tracked auction:
+            bucket expired/invalidated  → SettleRfqExpired
+            deadline passed             → SettleRfq
+        (auctions can't be live here — create() enforced
+         deadline + buffer ≤ expiry — but handle it anyway)
+    elif proceeds_settlement > 0        → FillProceedsSwap   (§8)
+    else                                → FinalizeRound
+else (active, pre-expiry):
+    if current_bucket.is_none()         → SelectBucket(strike.rs pick)
+    elif now < selling_ends_ms          → OpenRfq per slicing.rs
+    for each auction past its deadline  → SettleRfq
+```
+
+Stateless by design: the planner recomputes "what should exist by now"
+from chain state alone, so keeper restarts and keeper races are
+harmless.
+
+## 5. Strike selection (`strike.rs`)
+
+The contract enforces the band; the keeper picks the point in it.
+All math already exists:
+
+```rust
+let sigma_iv = realized_vol * cfg.iv_ratio;          // §9 vol source
+let k_star = pricing::strike_for_delta(spot, sigma_iv, tau, 0.0, 0.10);
+// candidates: live buckets of the right pair whose expiry fits the
+// vault's lead window; pick the SMALLEST strike ≥ k_star (snap up ⇒
+// delta ≤ target ⇒ conservative). None ≥ k_star? take the highest
+// in-band strike and log GridCoverageMiss (feeds the scheduler-grid
+// alert, doc 05 §4.4).
+```
+
+This must stay behaviorally identical to
+`vault_sim::strategy::StrikeSelector` (same `pricing::grid` ladder, same
+snap rule) — that equivalence is what made the Ribbon validation
+transferable. Add a test that runs both on shared vectors. Log
+`(σ, K*, snapped strike, model delta)` with every `SelectBucket`: those
+logs are the milestone-4 forward-shadow dataset
+([06-vault-sim.md §9.4](../../../docs/vault-implementation-guide/06-vault-sim.md)).
+
+## 6. Slicing (`slicing.rs`)
+
+```toml
+[slicing]
+slices = 4            # RFQ slices per round
+stagger_minutes = 90  # slice i opens at selling_start + i × stagger
+retry_unsold = true   # re-open a failed slice once, same reserve
+```
+
+Pure schedule: from `selling_ends_ms`, `open_rfqs`, and remaining
+`deployable`, compute "slices that should be open by now but aren't".
+Slice size = `deployable / slices_remaining`, clamped to the vault's
+`max_slice_amount`. The backtester swept slices ∈ {1, 4} — revisit the
+default against `out/sui_launch` before launch.
+
+## 7. Pyth price updates (`pyth.rs`) — the one new technical piece
+
+`select_bucket`, `open_rfq`, `fill_proceeds_swap`, and `finalize_round`
+take two `&PriceInfoObject`s and enforce `max_price_age_secs` (config:
+60s). The keeper must prepend a price update **in the same PTB**:
+
+1. Fetch the latest VAA for both feeds from Hermes
+   (`pyth-client::http` already wraps the REST endpoint; the update
+   payload is `/v2/updates/price/latest?ids[]=…&encoding=base64`).
+2. PTB prefix, mirroring the standard Pyth Sui flow:
+   `wormhole::vaa::parse_and_verify(wormhole_state, vaa_bytes, clock)`
+   → `pyth::pyth::create_price_infos_hot_potato(pyth_state, vec<VAA>, clock)`
+   → `pyth::pyth::update_single_price_feed(pyth_state, potato,
+   price_info_object, fee_coin, clock)` per feed (fee: split a few MIST
+   from gas) → destroy the hot potato.
+3. Then the vault crank call, reusing the same `PriceInfoObject` args
+   (`sui_tx::tx::vault::PriceInfoRefs`).
+
+Add this as `sui_tx::tx::pyth_update::prepend(pt, …)` so the mm-bot can
+reuse it later. Object IDs needed in config: `pyth_state_id`,
+`wormhole_state_id`, and the two `price_info_object_id`s per vault
+(discoverable once from the feed ids via Pyth's state table; pin them in
+config like the scheduler pins feeds).
+
+## 8. Proceeds conversion (`FillProceedsSwap`)
+
+Until the DeepBook adapter lands, conversion is
+`vault::fill_proceeds_swap`: an open, Pyth-bounded atomic swap — the
+filler pays underlying worth ≥ the Pyth cross less
+`max_swap_slippage_bps` and receives the vault's settlement balance.
+**The keeper is the filler of last resort**: it should hold (or acquire
+via its operator) a small underlying float, fill the swap itself, and
+recycle the received USDC. `finalize_round` refuses to run with
+unswapped proceeds (`vault_proceeds_unswapped`), so this action gates
+round turnover. Config: `max_fill_per_tx`, `fill_float_warning`
+threshold metric. When the DeepBook adapter ships, this becomes "swap
+USDC back via the pool" instead of "hold a float" — the planner action
+is unchanged.
+
+## 9. Vol source for `iv_ratio`
+
+σ = 30-day realized vol from Pyth Benchmarks daily closes — **reuse
+`option_scheduler::sigma::realized_sigma_from_benchmarks`** (move it to
+`pyth-client` if the dependency feels wrong) — times the configured
+`iv_ratio`. Calibrated values from the backtester (June 2026): BTC
+DVOL/RV₃₀ median **1.19**, ETH **1.08**; default `iv_ratio = 1.15`
+sits between. Static fallback per asset for benchmark outages, same
+pattern as the scheduler's `sigma_fallback`.
+
+## 10. Submission & error classes (`submit.rs`)
+
+Copy `option-scheduler/src/roller.rs::classify_error`'s shape:
+
+| Class | Meaning | Examples | Response |
+|---|---|---|---|
+| `Benign` | another keeper won the race, or state moved | aborts 35 `vault_wrong_phase`, 36/37 bucket sel., 30 `rfq_not_closed`, 39/40 ordering | drop, next tick |
+| `Retry` | transient | RPC timeout, gas-object contention, Hermes 5xx | backoff, retry |
+| `Fatal` | config bug | type-tag parse, feed mismatch (49), unknown object | alert + halt that vault |
+
+Gas: one owned gas coin per keeper instance; never share a wallet
+between instances (object contention).
+
+## 11. Config sketch
+
+```toml
+tick_secs = 15
+health_addr = "0.0.0.0:8086"
+
+[pyth]
+hermes_url = "https://hermes.pyth.network"
+benchmarks_url = "https://benchmarks.pyth.network"
+pyth_state_id = "0x…"
+wormhole_state_id = "0x…"
+
+[[vaults]]
+vault_id = "0x…"
+underlying = "SUI"            # resolves types/decimals via token-info
+settlement = "USDC"
+call_type_source = "api"      # bucket call types come from /buckets
+underlying_price_info = "0x…" # PriceInfoObject ids
+settlement_price_info = "0x…"
+iv_ratio = 1.15
+sigma_fallback = 0.85
+[vaults.slicing]
+slices = 4
+stagger_minutes = 90
+retry_unsold = true
+```
+
+Plus the standard `--dry-run` flag (full planning, log intents, submit
+nothing) and Prometheus metrics: actions submitted/won/lost-race, redeem
+backlog, time-to-finalize per round, grid-coverage misses, per-round
+σ/K/premium (the calibration trail).
+
+## 12. Tests
+
+- **Planner tables** (pure): every phase/state corner — mid-settling
+  restart, expired-but-unredeemed, unsold slices at window end,
+  zero-deposit round, stale-view races, idle round
+  (`current_expiry_ms == 0`), auction past deadline during Active.
+- **Strike goldens**: (S, σ, τ) → K* vectors shared with
+  `vault_sim::strategy`; snap-up; band-edge fallback.
+- **Slicing**: schedule recomputation idempotence under restarts.
+- **E2E (extends `rust-backend/tests`)**: localnet — scheduler creates a
+  z-ladder family → users deposit → keeper (real binary) runs genesis
+  finalize → select → 2 slices → scripted bidder (incl. a snipe; assert
+  the deadline extension) → settle → warp past expiry → exercise 40% →
+  redeem/fill/finalize → assert PPS, treasury fees, receipt payouts —
+  and feed the same inputs to the backtester for the golden-file ledger
+  diff ([06 §9.3](../../../docs/vault-implementation-guide/06-vault-sim.md)).
+
+## 13. Build order
+
+1. `config.rs` + `state.rs` (read a localnet vault end to end)
+2. `planner.rs` + tests (pure, fastest feedback)
+3. `pyth.rs` (the Hermes→PTB prefix) + one oracle-gated crank on testnet
+4. `strike.rs` / `slicing.rs` + goldens
+5. `submit.rs` classification + metrics + `--dry-run`
+6. the §12 e2e
+
+Already done, do not rebuild: the PTB builders
+(`crates/sui-tx/src/tx/vault.rs` — `crank_redeem`, `select_bucket`,
+`open_rfq`, `settle_rfq`, `settle_rfq_expired`, `fill_proceeds_swap`,
+`finalize_round`, plus `PriceInfoRefs`/`VaultRefs`), the strike math
+(`pricing::{strike_for_delta, grid}`), and the vol fetch
+(`option_scheduler::sigma`).
