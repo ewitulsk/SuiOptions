@@ -11,6 +11,7 @@ import { TradePanel } from "../components/TradePanel";
 import { QuoteFeed } from "../components/QuoteFeed";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { Toast } from "../components/Toast";
+import { formatPrice } from "../format";
 import type { View } from "../types";
 import type { ComposerState } from "../state/composer";
 
@@ -39,15 +40,15 @@ export function Composer({ initialView }: Props) {
       ? "Insufficient balance"
       : s.quotes.length === 0
         ? "Waiting on MMs…"
-        : `Earn ${s.bestPremium.toFixed(2)} USDC upfront →`;
+        : `Earn ${formatPrice(s.bestPremium)} USDC upfront →`;
 
   const traderCtaLabel = !s.connected
     ? "Connect to buy"
     : s.insufficientUsdc
-      ? `Insufficient USDC · need ${s.bestPremium.toFixed(2)}`
+      ? `Insufficient USDC · need ${formatPrice(s.bestPremium)}`
       : s.quotes.length === 0
         ? "Waiting on MMs…"
-        : `Buy call · pay ${s.bestPremium.toFixed(2)} USDC →`;
+        : `Buy call · pay ${formatPrice(s.bestPremium)} USDC →`;
 
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
@@ -138,7 +139,7 @@ export function Composer({ initialView }: Props) {
                 ? `INSUFFICIENT ${s.selectedAsset ?? ""} BALANCE`.replace(/\s+/g, " ").trim()
                 : ""
               : s.insufficientUsdc
-                ? `INSUFFICIENT USDC · NEED ${s.bestPremium.toFixed(2)}`
+                ? `INSUFFICIENT USDC · NEED ${formatPrice(s.bestPremium)}`
                 : ""
           }
         />

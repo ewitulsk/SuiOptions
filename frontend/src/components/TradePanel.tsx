@@ -20,6 +20,7 @@ import {
   type PoolRef,
 } from "../api/deepbook";
 import { useCoinBalance } from "../api/useCoinBalance";
+import { formatPrice } from "../format";
 import {
   bidNotional,
   buildCancelAllTx,
@@ -212,7 +213,7 @@ export function TradePanel({ bucket, series }: Props) {
     baseCoinType: pool.baseCoinType,
     quoteCoinType: pool.quoteCoinType,
   };
-  const fmtQuote = (raw: bigint) => (Number(raw) / 10 ** quoteDec).toFixed(2);
+  const fmtQuote = (raw: bigint) => formatPrice(Number(raw) / 10 ** quoteDec);
   const fmtBase = (raw: bigint) => (Number(raw) / 10 ** baseDec).toString();
 
   return (
@@ -255,14 +256,14 @@ export function TradePanel({ bucket, series }: Props) {
         <div style={{ fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
           {(book.data?.asks ?? []).slice(0, 5).reverse().map((l, i) => (
             <div key={`a${i}`} style={{ display: "flex", justifyContent: "space-between", color: "var(--aqua-down, #e15d6b)" }}>
-              <span>{l.price.toFixed(2)}</span>
+              <span>{formatPrice(l.price)}</span>
               <span style={{ opacity: 0.7 }}>{l.qty}</span>
             </div>
           ))}
           <div style={{ borderTop: "1px solid var(--aqua-line, rgba(92,107,122,0.2))", margin: "4px 0" }} />
           {(book.data?.bids ?? []).slice(0, 5).map((l, i) => (
             <div key={`b${i}`} style={{ display: "flex", justifyContent: "space-between", color: "var(--aqua-up, #1fbf75)" }}>
-              <span>{l.price.toFixed(2)}</span>
+              <span>{formatPrice(l.price)}</span>
               <span style={{ opacity: 0.7 }}>{l.qty}</span>
             </div>
           ))}
@@ -316,7 +317,7 @@ export function TradePanel({ bucket, series }: Props) {
                 value={priceStr}
                 onChange={(e) => setPriceStr(e.target.value)}
                 inputMode="decimal"
-                placeholder={book.data?.asks[0] ? book.data.asks[0].price.toFixed(2) : ""}
+                placeholder={book.data?.asks[0] ? formatPrice(book.data.asks[0].price) : ""}
                 style={{ width: "100%", padding: 6, borderRadius: 6, border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))", background: "transparent", color: "inherit" }}
               />
             </label>
@@ -334,7 +335,7 @@ export function TradePanel({ bucket, series }: Props) {
               </select>
               {marketEstimate && (
                 <div style={{ marginTop: 4 }}>
-                  est. {side === "buy" ? "cost" : "proceeds"}: {marketEstimate.cost.toFixed(2)} {settle}
+                  est. {side === "buy" ? "cost" : "proceeds"}: {formatPrice(marketEstimate.cost)} {settle}
                   {marketEstimate.partial && " · book too thin for full size"}
                 </div>
               )}

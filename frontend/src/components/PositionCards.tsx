@@ -1,4 +1,5 @@
 import type { OwnedPosition, WrittenPosition } from "../types";
+import { formatPrice } from "../format";
 import { TokenLogo } from "./TokenLogo";
 
 function AssetGlyph({ asset }: { asset: string }) {
@@ -30,11 +31,11 @@ function StatusPill({ status }: { status: string }) {
 
 const fmtAmt = (asset: string, n: number) => (asset === "BTC" ? n.toFixed(4) : n.toFixed(0));
 const fmtStrike = (asset: string, n: number) =>
-  asset === "BTC" ? `$${(n / 1000).toFixed(0)}k` : `$${n.toFixed(2)}`;
+  asset === "BTC" ? `$${(n / 1000).toFixed(0)}k` : `$${formatPrice(n)}`;
 const fmtSpot = (asset: string, n: number) =>
   asset === "BTC"
     ? `$${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
-    : `$${n.toFixed(4)}`;
+    : `$${formatPrice(n)}`;
 
 export function OwnedCard({
   p,
@@ -77,15 +78,10 @@ export function OwnedCard({
             <span className="pos-card__metric-unit"> {p.asset} call</span>
           </div>
           <div className="pos-card__metric-sub">
-            paid {p.premiumPaid.toFixed(2)} USDC · {p.boughtFrom}
+            paid {formatPrice(p.premiumPaid)} USDC · {p.boughtFrom}
           </div>
           <div className="pos-card__metric-sub">
-            exercise cost{" "}
-            {(p.amount * p.strike).toLocaleString("en-US", {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 2,
-            })}{" "}
-            USDC
+            exercise cost {formatPrice(p.amount * p.strike, { grouping: true })} USDC
           </div>
         </div>
         <div className="pos-card__metric">
@@ -102,12 +98,12 @@ export function OwnedCard({
           </div>
           <div className={"pos-card__metric-val " + (p.pnl >= 0 ? "is-pos" : "is-neg")}>
             {p.pnl >= 0 ? "+" : "−"}
-            {Math.abs(p.pnl).toFixed(2)}
+            {formatPrice(Math.abs(p.pnl))}
             <span className="pos-card__metric-unit"> USDC</span>
           </div>
           <div className="pos-card__metric-sub">
             {isItm
-              ? `intrinsic ${p.intrinsicNow.toFixed(2)} − premium ${p.premiumPaid.toFixed(2)}`
+              ? `intrinsic ${formatPrice(p.intrinsicNow)} − premium ${formatPrice(p.premiumPaid)}`
               : `OTM · would lose premium`}
           </div>
         </div>
@@ -146,7 +142,7 @@ export function OwnedCard({
             className="pos-card__cta pos-card__cta--primary"
             onClick={() => onExercise(p)}
           >
-            Auto-settle → +{p.pnl.toFixed(2)} USDC
+            Auto-settle → +{formatPrice(p.pnl)} USDC
           </button>
         )}
         {p.status === "active_otm" && (
@@ -217,7 +213,7 @@ export function WrittenCard({
         <div className="pos-card__metric">
           <div className="pos-card__metric-label">Premium kept</div>
           <div className="pos-card__metric-val is-pos">
-            +{p.premiumReceived.toFixed(2)}
+            +{formatPrice(p.premiumReceived)}
             <span className="pos-card__metric-unit"> USDC</span>
           </div>
           <div className="pos-card__metric-sub">yours regardless</div>
@@ -262,10 +258,10 @@ export function WrittenCard({
             onClick={() => onClaim(p)}
           >
             Claim settlement → +
-            {(
-              p.exercisedQty * p.strike +
-              (p.totalQty - p.exercisedQty) * p.spot
-            ).toFixed(2)}{" "}
+            {formatPrice(
+              p.exercisedQty * p.strike + (p.totalQty - p.exercisedQty) * p.spot,
+              { grouping: true },
+            )}{" "}
             USD equivalent
           </button>
         )}

@@ -1,3 +1,4 @@
+import { formatPrice } from "../format";
 import type { ConfirmStage, ConfirmSummary, View } from "../types";
 
 type Props = {
@@ -37,7 +38,7 @@ export function ConfirmModal({ stage, summary, view, onClose }: Props) {
                 <>
                   <div className="modal__list-row">
                     <span>premium received</span>
-                    <b>+{summary.premium.toFixed(2)} USDC</b>
+                    <b>+{formatPrice(summary.premium)} USDC</b>
                   </div>
                   <div className="modal__list-row">
                     <span>your range</span>
@@ -55,12 +56,12 @@ export function ConfirmModal({ stage, summary, view, onClose }: Props) {
                   <div className="modal__list-row">
                     <span>call options minted</span>
                     <b>
-                      {summary.amount.toFixed(4)} {summary.asset} @ ${summary.strike.toLocaleString("en-US")}
+                      {summary.amount.toFixed(4)} {summary.asset} @ ${formatPrice(summary.strike, { grouping: true })}
                     </b>
                   </div>
                   <div className="modal__list-row">
                     <span>premium paid</span>
-                    <b>−{summary.premium.toFixed(2)} USDC</b>
+                    <b>−{formatPrice(summary.premium)} USDC</b>
                   </div>
                   <div className="modal__list-row">
                     <span>expiry</span>

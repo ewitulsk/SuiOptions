@@ -1,5 +1,11 @@
+import { formatPremiumFull, formatPrice } from "../format";
+
+// Token quantities keep up to 4 decimals; USD prices go through formatPrice.
 const fmt = (n: number) =>
   n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+const usd = (n: number) => formatPrice(n, { grouping: true });
+// Premiums show the exact amount paid/earned, never rounded to the cent.
+const premiumFull = (n: number) => formatPremiumFull(n, { grouping: true });
 
 type WriterProps = {
   premium: number;
@@ -18,7 +24,7 @@ export function WriterPanels({ premium, amount, strike, assetSymbol, expiryLabel
           <span className="panel__head-dot"></span>now · premium
         </div>
         <div className="panel__hero">
-          {fmt(premium)}
+          {premiumFull(premium)}
           <span className="unit">USDC</span>
         </div>
         <div className="panel__sub">
@@ -34,9 +40,9 @@ export function WriterPanels({ premium, amount, strike, assetSymbol, expiryLabel
           style={{ margin: 0, padding: 0, background: "transparent", border: "none" }}
         >
           <div className="panel__split-cell">
-            <div className="panel__split-label">if {asset} ≥ ${strike.toLocaleString("en-US")}</div>
+            <div className="panel__split-label">if {asset} ≥ ${usd(strike)}</div>
             <div className="panel__split-val">
-              {fmt(amount * strike)}
+              {usd(amount * strike)}
               <span style={{ fontSize: 11, color: "var(--aqua-ink-3)", marginLeft: 4 }}>USDC</span>
             </div>
             <div className="panel__split-sub">
@@ -44,7 +50,7 @@ export function WriterPanels({ premium, amount, strike, assetSymbol, expiryLabel
             </div>
           </div>
           <div className="panel__split-cell">
-            <div className="panel__split-label">if {asset} &lt; ${strike.toLocaleString("en-US")}</div>
+            <div className="panel__split-label">if {asset} &lt; ${usd(strike)}</div>
             <div className="panel__split-val">
               {fmt(amount)}
               <span style={{ fontSize: 11, color: "var(--aqua-ink-3)", marginLeft: 4 }}>{asset}</span>
@@ -78,12 +84,12 @@ export function TraderPanels({ premium, amount, strike, spot, assetSymbol, expir
             <span className="panel__head-dot"></span>you pay · now
           </div>
           <div className="panel__hero">
-            −{fmt(premium)}
+            −{premiumFull(premium)}
             <span className="unit">USDC</span>
           </div>
           <div className="panel__sub">
             For the right to buy <b>{fmt(amount)} {asset}</b> at{" "}
-            <b>${strike.toLocaleString("en-US")}</b> any time before {expiryLabel}.
+            <b>${usd(strike)}</b> any time before {expiryLabel}.
           </div>
         </div>
         <div className="panel">
@@ -97,7 +103,7 @@ export function TraderPanels({ premium, amount, strike, spot, assetSymbol, expir
             <div className="panel__split-cell">
               <div className="panel__split-label">pay</div>
               <div className="panel__split-val">
-                {fmt(strike * amount)}
+                {usd(strike * amount)}
                 <span style={{ fontSize: 11, color: "var(--aqua-ink-3)", marginLeft: 4 }}>USDC</span>
               </div>
             </div>
@@ -114,19 +120,19 @@ export function TraderPanels({ premium, amount, strike, spot, assetSymbol, expir
       <div className="exercise">
         <div className="exercise__cell">
           <div className="exercise__label">breakeven</div>
-          <div className="exercise__value">${Math.round(breakeven).toLocaleString("en-US")}</div>
+          <div className="exercise__value">${usd(breakeven)}</div>
           <div className="exercise__sub">spot needs to close above this</div>
         </div>
         <div className="exercise__cell">
           <div className="exercise__label">max loss</div>
-          <div className="exercise__value exercise__value--neg">−{fmt(premium)}</div>
-          <div className="exercise__sub">if {asset} ≤ ${strike.toLocaleString("en-US")} at expiry</div>
+          <div className="exercise__value exercise__value--neg">−{premiumFull(premium)}</div>
+          <div className="exercise__sub">if {asset} ≤ ${usd(strike)} at expiry</div>
         </div>
         <div className="exercise__cell">
           <div className="exercise__label">at +20% spot</div>
-          <div className="exercise__value exercise__value--pos">+{fmt(upside)}</div>
+          <div className="exercise__value exercise__value--pos">+{usd(upside)}</div>
           <div className="exercise__sub">
-            P/L if {asset} reaches ${Math.round(spot * 1.2).toLocaleString("en-US")}
+            P/L if {asset} reaches ${usd(spot * 1.2)}
           </div>
         </div>
       </div>

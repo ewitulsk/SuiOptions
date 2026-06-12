@@ -1,11 +1,10 @@
+import { formatPrice } from "../format";
 import type { Strike, View } from "../types";
 
-// Format a strike for the tile. Large strikes get `$85k` shorthand;
-// small strikes (e.g. seeded test buckets at $0.13) get full precision.
+// Full strike price — no abbreviation, so the tile matches the "on expiry"
+// panel exactly. Sub-penny strikes still extend so they never read $0.
 function formatStrike(s: number): string {
-  if (s >= 1000) return `$${(s / 1000).toFixed(0)}k`;
-  if (s >= 1) return `$${s.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-  return `$${s.toLocaleString(undefined, { maximumFractionDigits: 4 })}`;
+  return `$${formatPrice(s, { grouping: true })}`;
 }
 
 // Tier ramp — writer view goes hot→cool (deep ITM = hot premium); trader inverts.
