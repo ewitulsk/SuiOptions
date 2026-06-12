@@ -7,7 +7,6 @@ import {
   useActivityState,
   type ActivityFilter,
 } from "../state/activity";
-import { Header } from "../components/Header";
 import { formatPrice } from "../format";
 import type { ActivityEvent, ActivityTotals } from "../types";
 
@@ -142,8 +141,6 @@ export function Activity() {
 
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
-      <Header />
-
       <div className="app__wrap">
         <div className="dash-hero">
           <div className="dash-hero__eyebrow">on-chain log · indexer-backed</div>

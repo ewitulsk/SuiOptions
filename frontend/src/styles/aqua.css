@@ -116,18 +116,31 @@
   filter: drop-shadow(0 4px 12px var(--aqua-sui-glow));
 }
 [data-theme="aqua"] .header__nav {
-  display: flex; gap: 4px; flex: 1;
+  display: flex; gap: 4px; flex: 1; position: relative;
+}
+[data-theme="aqua"] .header__nav-pill {
+  position: absolute; left: 0; top: 0; height: 100%;
+  border-radius: 999px; background: var(--aqua-glass-3);
+  box-shadow: 0 1px 0 rgba(var(--aqua-shadow-rgb),0.04), 0 2px 8px rgba(77,162,255,0.18);
+  pointer-events: none;
+  transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    width 280ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease;
 }
 [data-theme="aqua"] .header__nav button {
+  position: relative; z-index: 1;
   font-family: inherit; font-size: 13px; font-weight: 500;
   color: var(--aqua-ink-2); background: transparent; border: none;
   padding: 8px 14px; border-radius: 999px;
   transition: background 160ms ease, color 160ms ease;
 }
-[data-theme="aqua"] .header__nav button:hover { background: rgba(77,162,255,0.08); color: var(--aqua-ink-1); }
+[data-theme="aqua"] .header__nav button:not(.is-active):hover {
+  background: rgba(77,162,255,0.08); color: var(--aqua-ink-1);
+}
 [data-theme="aqua"] .header__nav button.is-active {
-  color: var(--aqua-ink-1); background: var(--aqua-glass-3);
-  box-shadow: 0 1px 0 rgba(var(--aqua-shadow-rgb),0.04), 0 2px 8px rgba(77,162,255,0.18);
+  color: var(--aqua-ink-1);
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="aqua"] .header__nav-pill { transition: opacity 160ms ease; }
 }
 /* Plain technical connection readout (debug page). */
 [data-theme="aqua"] .conn-status {

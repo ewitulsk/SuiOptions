@@ -9,7 +9,6 @@ import { useCurrentAccount } from "@mysten/dapp-kit";
 import type { Transaction } from "@mysten/sui/transactions";
 import { useSubmitTransaction } from "../tx/submit";
 
-import { Header } from "../components/Header";
 import { Toast } from "../components/Toast";
 import { ENV, TEST_TOKENS } from "../config";
 import { buildMintTx } from "../tx/faucet";
@@ -54,8 +53,6 @@ export function Faucet() {
 
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
-      <Header />
-
       <div className="app__wrap">
         <div className="dash-hero">
           <div className="dash-hero__eyebrow">testnet · developer tooling</div>
