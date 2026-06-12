@@ -41,7 +41,8 @@ use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
 use sui_tx::sui_client::{Network, SuiClientWrapper};
 use sui_tx::tx::deepbook::{
     bm_balance, cancel_all_on_pool, create_balance_manager, derived_pool_params,
-    find_balance_manager, refresh_pool_quotes, DeepBookHandles, QuotePlan, QuoteSide,
+    find_balance_manager, refresh_pools_batched, DeepBookHandles, PoolRefresh, QuotePlan,
+    QuoteSide,
 };
 
 use crate::pricing::{
@@ -52,7 +53,7 @@ use crate::pricing::{
 // -- Config ----------------------------------------------------------------
 
 fn default_quote_interval_secs() -> u64 {
-    30
+    86_400 // once a day (SO-173): on-chain quotes are refreshed daily
 }
 fn default_max_quote_age_secs() -> u64 {
     120
@@ -64,13 +65,16 @@ fn default_expiry_cutoff_secs() -> u64 {
     3_600
 }
 fn default_order_lifetime_secs() -> u64 {
-    600
+    86_400 // match the refresh cadence: orders self-expire by the next update
 }
 fn default_quote_size() -> u64 {
     1_000_000
 }
 fn default_tusdc_deposit_chunk() -> u64 {
     1_000_000_000 // 1,000 TUSDC (6 dec)
+}
+fn default_max_pools_per_tx() -> usize {
+    12 // pack up to this many pools' refreshes into one PTB before chunking
 }
 
 /// `[deepbook]` section of the bot config. Disabled by default — flipping
@@ -106,6 +110,9 @@ pub struct DeepBookQuoterConfig {
     /// Top the BM's settlement balance up from the wallet in chunks of this
     /// many atomic units whenever it can't fund the bid.
     pub tusdc_deposit_chunk: u64,
+    /// Max pools packed into one refresh PTB before spilling into another tx
+    /// ("all prices at once, or until we hit max tx size").
+    pub max_pools_per_tx: usize,
     pub gas_budget: u64,
 }
 
@@ -122,6 +129,7 @@ impl Default for DeepBookQuoterConfig {
             quote_size: default_quote_size(),
             quote_full_inventory: false,
             tusdc_deposit_chunk: default_tusdc_deposit_chunk(),
+            max_pools_per_tx: default_max_pools_per_tx(),
             gas_budget: 200_000_000,
         }
     }
@@ -337,228 +345,247 @@ async fn cycle(
         });
     }
 
-    for (b, mi) in ours {
-        let Some(Some((spot_scaled, sigma))) = spots.get(&mi) else {
-            continue;
-        };
-        if let Err(e) = quote_one(
-            p, wrap, api, bm_id, last, quoted_pools, b, mi, *spot_scaled, *sigma, now,
-        )
-        .await
-        {
-            tracing::warn!(
-                bucket = %b.bucket_id.to_hex(),
-                pool = %b.pool_id,
-                error = %format!("{e:#}"),
-                "deepbook: refresh failed for pool; continuing"
-            );
-        }
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn quote_one(
-    p: &QuoterParams,
-    wrap: &SuiClientWrapper,
-    _api: &ApiServiceClient,
-    bm_id: ObjectID,
-    last: &mut HashMap<String, LastQuote>,
-    quoted_pools: &mut HashMap<String, (String, String)>,
-    b: &TradeableBucket,
-    market_idx: usize,
-    spot_scaled: f64,
-    sigma: f64,
-    now: u64,
-) -> anyhow::Result<()> {
-    let pool_key = b.pool_id.clone();
-    let pool_id = ObjectID::from_hex_literal(&b.pool_id)
-        .map_err(|e| anyhow::anyhow!("bad pool id {}: {e}", b.pool_id))?;
-
-    // Too close to expiry: cancel anything resting and stand down.
-    let cutoff_ms = p.cfg.expiry_cutoff_secs.saturating_mul(1_000);
-    if b.expiry_ms.saturating_sub(now) < cutoff_ms {
-        if quoted_pools.remove(&pool_key).is_some() {
-            last.remove(&pool_key);
-            tracing::info!(pool = %pool_key, "expiry cutoff reached; cancelling quotes");
-            cancel_all_on_pool(
-                &wrap.client, &wrap.signer, &p.handles,
-                pool_id, &b.call_coin_type, &b.settlement_coin_type, bm_id, p.cfg.gas_budget,
-            )
-            .await?;
-        }
-        return Ok(());
-    }
-
-    // Fair value: same engine, both sides. Side::Trader carries the ask
-    // markup, Side::Writer the bid markdown.
-    let price_for = |side: Side| -> Option<f64> {
-        let inputs = RfqPricingInputs {
-            write_amount: p.cfg.quote_size,
-            side,
-            strike: b.strike_raw,
-            strike_scale: b.strike_scale,
-            expiry_ms: b.expiry_ms,
-        };
-        match price_rfq(&p.pricing, &inputs, spot_scaled, sigma, now) {
-            PriceDecision::Quote { per_unit, .. } => Some(per_unit),
-            PriceDecision::Decline { .. } => None,
-        }
-    };
-    let (Some(ask_unit), Some(bid_unit)) = (price_for(Side::Trader), price_for(Side::Writer))
-    else {
-        tracing::debug!(pool = %pool_key, "priced to zero; not quoting");
-        return Ok(());
-    };
-
-    let market = &p.markets[market_idx];
-    let base_dec = b.asset_decimals.unwrap_or(market.decimals);
-    let quote_dec = b.settlement_decimals.unwrap_or(p.settlement_decimals);
-    let (tick, lot, min_size) = derived_pool_params(base_dec, quote_dec);
-
-    // per_unit (quote-atomic per base-atomic) → DeepBook raw price (×1e9),
-    // rounded away from mid and onto the tick grid.
-    let ask_raw = {
-        let raw = (ask_unit * 1e9).ceil() as u64;
-        raw.div_ceil(tick).max(1) * tick
-    };
-    let bid_raw = ((bid_unit * 1e9).floor() as u64 / tick) * tick;
-    if bid_raw == 0 {
-        tracing::debug!(pool = %pool_key, "bid rounds to zero; not quoting");
-        return Ok(());
-    }
-    let mid_raw = (ask_raw + bid_raw) / 2;
-
-    // Call-coin inventory (BM + wallet) is read before the skip check: in
-    // full-inventory mode the ask target tracks it, so newly swept fills
-    // force a re-quote instead of waiting out max_quote_age.
-    let bm_base =
-        bm_balance(&wrap.client, wrap.signer.address, &p.handles, bm_id, &b.call_coin_type).await?;
-    let wallet_base: u64 = wrap
-        .client
-        .coin_read_api()
-        .get_balance(wrap.signer.address, Some(b.call_coin_type.clone()))
-        .await
-        .map(|bal| bal.total_balance.min(u64::MAX as u128) as u64)
-        .unwrap_or(0);
-    let ask_inventory = bm_base.saturating_add(wallet_base);
-    let (ask_target, bid_target) = size_targets(&p.cfg, ask_inventory);
-
-    // Skip if our standing quotes are fresh, the fair hasn't moved, and the
-    // target size is what's already resting.
-    if let Some(prev) = last.get(&pool_key) {
-        let age_ms = now.saturating_sub(prev.at_ms);
-        let drift_bps = (mid_raw.abs_diff(prev.mid_raw) as u128)
-            .saturating_mul(10_000)
-            .checked_div(prev.mid_raw.max(1) as u128)
-            .unwrap_or(u128::MAX);
-        if age_ms < p.cfg.max_quote_age_secs.saturating_mul(1_000)
-            && drift_bps < p.cfg.requote_drift_bps as u128
-            && ask_target == prev.ask_target
-        {
-            return Ok(());
-        }
-    }
-
-    // Inventory: BM settlement balance + wallet sweep/top-up plans.
+    // Planning pass (SO-173): compute every pool's desired quote first, then
+    // place them all in one (or a few) batched txs instead of one tx per pool.
+    // A single BalanceManager backs every pool, so the bid (settlement) funding
+    // is allocated from one shared budget; call-coin ask inventory is distinct
+    // per pool and swept individually.
+    let now_expire = now + p.cfg.order_lifetime_secs.saturating_mul(1_000);
     let bm_quote = bm_balance(
         &wrap.client,
         wrap.signer.address,
         &p.handles,
         bm_id,
-        &b.settlement_coin_type,
+        &p.settlement_coin_type,
     )
-    .await?;
+    .await
+    .unwrap_or(0);
+    let wallet_quote: u64 = wrap
+        .client
+        .coin_read_api()
+        .get_balance(wrap.signer.address, Some(p.settlement_coin_type.clone()))
+        .await
+        .map(|bal| bal.total_balance.min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    // Settlement we can commit across every bid this cycle: BM balance + wallet.
+    let mut quote_budget: u128 = bm_quote as u128 + wallet_quote as u128;
+    let mut quote_used: u128 = 0;
 
-    let mut deposits: Vec<(String, u64)> = Vec::new();
-    // Sweep the wallet's call coins — they arrive whenever the bot buys
-    // options as the Trader MM and are useless sitting in the wallet.
-    if wallet_base > 0 {
-        deposits.push((b.call_coin_type.clone(), wallet_base));
-    }
-    // Bid funding: top the BM up from the wallet in config-sized chunks.
-    let bid_notional = (bid_target as u128 * bid_raw as u128 / 1_000_000_000) as u64;
-    if bm_quote < bid_notional {
-        let wallet_quote: u64 = wrap
+    let mut refreshes: Vec<PoolRefresh> = Vec::new();
+    let mut deposits: HashMap<String, u64> = HashMap::new();
+    // (pool_key, Some((mid_raw, ask_target, call, settlement)) = placed; None = cancel-only)
+    let mut book: Vec<(String, Option<(u64, u64, String, String)>)> = Vec::new();
+
+    for (b, mi) in &ours {
+        let Some(Some((spot_scaled, sigma))) = spots.get(mi) else {
+            continue;
+        };
+        let pool_key = b.pool_id.clone();
+        let pool_id = match ObjectID::from_hex_literal(&b.pool_id) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(pool = %pool_key, error = %e, "bad pool id; skipping");
+                continue;
+            }
+        };
+
+        // Too close to expiry: cancel anything resting, don't re-quote.
+        let cutoff_ms = p.cfg.expiry_cutoff_secs.saturating_mul(1_000);
+        if b.expiry_ms.saturating_sub(now) < cutoff_ms {
+            if quoted_pools.contains_key(&pool_key) {
+                refreshes.push(PoolRefresh {
+                    pool_id,
+                    base_coin_type: b.call_coin_type.clone(),
+                    quote_coin_type: b.settlement_coin_type.clone(),
+                    plan: QuotePlan { bid: None, ask: None, expire_timestamp_ms: now_expire },
+                });
+                book.push((pool_key, None));
+            }
+            continue;
+        }
+
+        // Fair value: same engine, both sides.
+        let price_for = |side: Side| -> Option<f64> {
+            let inputs = RfqPricingInputs {
+                write_amount: p.cfg.quote_size,
+                side,
+                strike: b.strike_raw,
+                strike_scale: b.strike_scale,
+                expiry_ms: b.expiry_ms,
+            };
+            match price_rfq(&p.pricing, &inputs, *spot_scaled, *sigma, now) {
+                PriceDecision::Quote { per_unit, .. } => Some(per_unit),
+                PriceDecision::Decline { .. } => None,
+            }
+        };
+        let (Some(ask_unit), Some(bid_unit)) = (price_for(Side::Trader), price_for(Side::Writer))
+        else {
+            tracing::debug!(pool = %pool_key, "priced to zero; not quoting");
+            continue;
+        };
+
+        let base_dec = b.asset_decimals.unwrap_or(p.markets[*mi].decimals);
+        let quote_dec = b.settlement_decimals.unwrap_or(p.settlement_decimals);
+        let (tick, lot, min_size) = derived_pool_params(base_dec, quote_dec);
+
+        let ask_raw = {
+            let raw = (ask_unit * 1e9).ceil() as u64;
+            raw.div_ceil(tick).max(1) * tick
+        };
+        let bid_raw = ((bid_unit * 1e9).floor() as u64 / tick) * tick;
+        if bid_raw == 0 {
+            tracing::debug!(pool = %pool_key, "bid rounds to zero; not quoting");
+            continue;
+        }
+        let mid_raw = (ask_raw + bid_raw) / 2;
+
+        // Call-coin inventory (BM + wallet), distinct per pool. Read before the
+        // skip check so a change in inventory (newly swept fills) forces a
+        // re-quote in full-inventory mode (SO-161).
+        let bm_base = bm_balance(
+            &wrap.client,
+            wrap.signer.address,
+            &p.handles,
+            bm_id,
+            &b.call_coin_type,
+        )
+        .await
+        .unwrap_or(0);
+        let wallet_base: u64 = wrap
             .client
             .coin_read_api()
-            .get_balance(wrap.signer.address, Some(b.settlement_coin_type.clone()))
+            .get_balance(wrap.signer.address, Some(b.call_coin_type.clone()))
             .await
             .map(|bal| bal.total_balance.min(u64::MAX as u128) as u64)
             .unwrap_or(0);
-        let want = p
-            .cfg
-            .tusdc_deposit_chunk
-            .max(bid_notional.saturating_sub(bm_quote));
-        let take = want.min(wallet_quote);
-        if take > 0 {
-            deposits.push((b.settlement_coin_type.clone(), take));
+        let ask_inventory = bm_base.saturating_add(wallet_base);
+        let (ask_target, bid_target) = size_targets(&p.cfg, ask_inventory);
+
+        // Skip if our standing quotes are fresh, the fair hasn't moved, and the
+        // target size is unchanged. At the daily cadence the previous quote is a
+        // day old so this never fires, but it keeps a sub-daily cadence cheap.
+        if let Some(prev) = last.get(&pool_key) {
+            let age_ms = now.saturating_sub(prev.at_ms);
+            let drift_bps = (mid_raw.abs_diff(prev.mid_raw) as u128)
+                .saturating_mul(10_000)
+                .checked_div(prev.mid_raw.max(1) as u128)
+                .unwrap_or(u128::MAX);
+            if age_ms < p.cfg.max_quote_age_secs.saturating_mul(1_000)
+                && drift_bps < p.cfg.requote_drift_bps as u128
+                && ask_target == prev.ask_target
+            {
+                continue;
+            }
         }
+
+        // Sweep this pool's wallet call coins into the BM so the ask can rest
+        // them (they arrive when the bot buys options as the Trader MM).
+        if wallet_base > 0 {
+            *deposits.entry(b.call_coin_type.clone()).or_default() += wallet_base;
+        }
+        let ask_qty = (ask_target.min(ask_inventory) / lot) * lot;
+
+        // Bid sizing from the shared settlement budget — clamps the cumulative
+        // bid notional to what the BM + wallet can fund across all pools. The
+        // target is `bid_target` (mirrors the ask in full-inventory mode).
+        let want_notional = bid_target as u128 * bid_raw as u128 / 1_000_000_000;
+        let give = want_notional.min(quote_budget);
+        let affordable = (give * 1_000_000_000 / bid_raw as u128).min(u64::MAX as u128) as u64;
+        let bid_qty = (bid_target.min(affordable) / lot) * lot;
+        let used = bid_qty as u128 * bid_raw as u128 / 1_000_000_000;
+        quote_budget = quote_budget.saturating_sub(used);
+        quote_used = quote_used.saturating_add(used);
+
+        let plan = QuotePlan {
+            ask: (ask_qty >= min_size).then_some(QuoteSide { price_raw: ask_raw, quantity: ask_qty }),
+            bid: (bid_qty >= min_size).then_some(QuoteSide { price_raw: bid_raw, quantity: bid_qty }),
+            expire_timestamp_ms: now_expire,
+        };
+
+        if plan.bid.is_none() && plan.ask.is_none() {
+            if quoted_pools.contains_key(&pool_key) {
+                refreshes.push(PoolRefresh {
+                    pool_id,
+                    base_coin_type: b.call_coin_type.clone(),
+                    quote_coin_type: b.settlement_coin_type.clone(),
+                    plan,
+                });
+                book.push((pool_key, None));
+            }
+            continue;
+        }
+
+        refreshes.push(PoolRefresh {
+            pool_id,
+            base_coin_type: b.call_coin_type.clone(),
+            quote_coin_type: b.settlement_coin_type.clone(),
+            plan,
+        });
+        book.push((
+            pool_key,
+            Some((
+                mid_raw,
+                ask_target,
+                b.call_coin_type.clone(),
+                b.settlement_coin_type.clone(),
+            )),
+        ));
     }
 
-    // Sizes, clamped to post-deposit inventory and the lot grid.
-    let ask_qty = (ask_target.min(ask_inventory) / lot) * lot;
-    let quote_after_deposit = bm_quote.saturating_add(
-        deposits
-            .iter()
-            .filter(|(t, _)| *t == b.settlement_coin_type)
-            .map(|(_, a)| *a)
-            .sum::<u64>(),
-    );
-    let affordable = ((quote_after_deposit as u128 * 1_000_000_000 / bid_raw.max(1) as u128)
-        .min(u64::MAX as u128)) as u64;
-    let bid_qty = (bid_target.min(affordable) / lot) * lot;
+    // Settlement deposit = total bid notional beyond what the BM already holds,
+    // capped by the wallet (bid sizes were already clamped to this budget).
+    let quote_deposit = quote_used.saturating_sub(bm_quote as u128).min(wallet_quote as u128) as u64;
+    if quote_deposit > 0 {
+        deposits.insert(p.settlement_coin_type.clone(), quote_deposit);
+    }
 
-    let plan = QuotePlan {
-        ask: (ask_qty >= min_size).then_some(QuoteSide { price_raw: ask_raw, quantity: ask_qty }),
-        bid: (bid_qty >= min_size).then_some(QuoteSide { price_raw: bid_raw, quantity: bid_qty }),
-        expire_timestamp_ms: now + p.cfg.order_lifetime_secs.saturating_mul(1_000),
-    };
-
-    let had_quotes = quoted_pools.contains_key(&pool_key);
-    if plan.bid.is_none() && plan.ask.is_none() {
-        if had_quotes {
-            quoted_pools.remove(&pool_key);
-            last.remove(&pool_key);
-            tracing::info!(pool = %pool_key, "no inventory on either side; cancelling quotes");
-            cancel_all_on_pool(
-                &wrap.client, &wrap.signer, &p.handles,
-                pool_id, &b.call_coin_type, &b.settlement_coin_type, bm_id, p.cfg.gas_budget,
-            )
-            .await?;
-        } else {
-            tracing::debug!(pool = %pool_key, "no inventory on either side; nothing to quote");
-        }
+    if refreshes.is_empty() {
         return Ok(());
     }
-
-    let resp = refresh_pool_quotes(
+    let deposits_vec: Vec<(String, u64)> = deposits.into_iter().collect();
+    match refresh_pools_batched(
         &wrap.client,
         &wrap.signer,
         &p.handles,
-        pool_id,
-        &b.call_coin_type,
-        &b.settlement_coin_type,
         bm_id,
-        &deposits,
-        plan,
+        &deposits_vec,
+        &refreshes,
+        p.cfg.max_pools_per_tx,
         p.cfg.gas_budget,
     )
-    .await?;
-
-    tracing::info!(
-        pool = %pool_key,
-        bucket = %b.bucket_id.to_hex(),
-        bid = ?plan.bid.map(|s| (s.price_raw, s.quantity)),
-        ask = ?plan.ask.map(|s| (s.price_raw, s.quantity)),
-        digest = %resp.digest,
-        "deepbook quotes refreshed"
-    );
-    last.insert(pool_key.clone(), LastQuote { mid_raw, ask_target, at_ms: now });
-    quoted_pools.insert(
-        pool_key,
-        (b.call_coin_type.clone(), b.settlement_coin_type.clone()),
-    );
+    .await
+    {
+        Ok(resps) => {
+            for (pool_key, upd) in book {
+                match upd {
+                    Some((mid_raw, ask_target, call, settle)) => {
+                        last.insert(
+                            pool_key.clone(),
+                            LastQuote { mid_raw, ask_target, at_ms: now },
+                        );
+                        quoted_pools.insert(pool_key, (call, settle));
+                    }
+                    None => {
+                        last.remove(&pool_key);
+                        quoted_pools.remove(&pool_key);
+                    }
+                }
+            }
+            tracing::info!(
+                pools = refreshes.len(),
+                txs = resps.len(),
+                deposits = deposits_vec.len(),
+                "deepbook quotes refreshed (batched)"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %format!("{e:#}"),
+                pools = refreshes.len(),
+                "batched deepbook refresh failed; leaving books as-is"
+            );
+        }
+    }
     Ok(())
 }
 

@@ -43,11 +43,15 @@ fallback_vol           = 0.6
 #   balance_manager_id = "0x…"
 [deepbook]
 enabled             = true
-quote_interval_secs = 30
+# SO-173: refresh on-chain quotes once a day, and place every pool's quotes in
+# one (chunked) tx. order_lifetime matches the cadence, so a missed daily
+# refresh simply lets the orders self-expire.
+quote_interval_secs = 86_400
+order_lifetime_secs = 86_400
+max_pools_per_tx    = 12
 max_quote_age_secs  = 120
 requote_drift_bps   = 50
 expiry_cutoff_secs  = 3600
-order_lifetime_secs = 600
 # Per-side size in call-coin atomic units (8-dec TBTC calls: 0.01 / side).
 # With quote_full_inventory on, this is the bid-side floor instead.
 quote_size          = 1_000_000
