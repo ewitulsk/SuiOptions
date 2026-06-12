@@ -63,6 +63,10 @@ async fn main() -> Result<()> {
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
 
     let network = cli.network;
+    let rpc_url = cli
+        .rpc
+        .clone()
+        .unwrap_or_else(|| network.rpc_url().to_owned());
     let env_key = cli.env.to_ascii_lowercase();
 
     let mut store = Deployments::load_or_default(&output_path)?;
@@ -90,6 +94,7 @@ async fn main() -> Result<()> {
 
     let record = deploy_one(
         network,
+        &rpc_url,
         &secrets,
         &contracts_path,
         test_tokens_path.as_deref(),
@@ -114,6 +119,7 @@ async fn main() -> Result<()> {
 
 async fn deploy_one(
     network: Network,
+    rpc_url: &str,
     secrets: &runtime_config::Secrets,
     contracts_path: &std::path::Path,
     test_tokens_path: Option<&std::path::Path>,
@@ -125,22 +131,23 @@ async fn deploy_one(
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
-    tracing::info!(network = %network, rpc = network.rpc_url(), "starting deployment");
+    tracing::info!(network = %network, rpc = %rpc_url, "starting deployment");
 
     let signer = Signer::from_secrets(secrets, network).context("loading signer")?;
     tracing::info!(deployer = %signer.address, "signer loaded");
 
     let client = SuiClientBuilder::default()
-        .build(network.rpc_url())
+        .build(rpc_url)
         .await
         .with_context(|| format!("building Sui client for {network}"))?;
 
     // The protocol package links against siws_session, so the session
     // package publishes FIRST (rewriting its Move.toml to the fresh id).
     let session_tokens = if let Some(path) = session_path {
-        let outcome = publish_session_package(&client, &signer, path, gas_budget)
-            .await
-            .with_context(|| format!("publishing siws_session to {network}"))?;
+        let outcome =
+            publish_session_package(&client, &signer, path, network.as_str(), gas_budget)
+                .await
+                .with_context(|| format!("publishing siws_session to {network}"))?;
         tracing::info!(
             package = %outcome.package_id,
             registry = %outcome.registry_id,

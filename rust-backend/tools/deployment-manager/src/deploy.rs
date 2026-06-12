@@ -221,28 +221,39 @@ pub struct SessionOutcome {
     pub digest: String,
 }
 
-/// Publish the siws_session package and point its Move.toml at the fresh id.
+/// Publish the siws_session package and point its publish metadata at the
+/// fresh id.
 ///
 /// The protocol package depends on siws_session through a local Move.toml
-/// dependency, so the session package's `[addresses] siws_session` entry is
-/// what the protocol build links against. Publishing requires that entry to
-/// be `0x0`; the subsequent protocol build requires it to be the freshly
-/// published id. We therefore rewrite the manifest around the publish:
-///   1. set `siws_session = "0x0"` + drop `published-at`, build, publish
-///   2. on success, write `siws_session = "<new id>"` + `published-at`
-///   3. on failure, restore the original manifest
+/// dependency. The package resolver reads a dependency's published address
+/// from its `Published.toml` (falling back to the legacy `published-at` /
+/// `[addresses]` manifest fields), so both must be absent for the publish
+/// build to compile at `0x0`, and both are rewritten to the fresh id for the
+/// protocol build that follows:
+///   1. set `siws_session = "0x0"`, drop `published-at`, delete
+///      `Published.toml`; build + publish
+///   2. on success, write the fresh id into the manifest AND a fresh
+///      `Published.toml` entry for this environment
+///   3. on failure, restore both files
 pub async fn publish_session_package(
     client: &SuiClient,
     signer: &Signer,
     session_path: &Path,
+    env_name: &str,
     gas_budget: u64,
 ) -> Result<SessionOutcome> {
     let manifest_path = session_path.join("Move.toml");
+    let pubfile_path = session_path.join("Published.toml");
     let original = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let original_pubfile = std::fs::read_to_string(&pubfile_path).ok();
 
     std::fs::write(&manifest_path, manifest_for_publish(&original))
         .with_context(|| format!("rewriting {} for publish", manifest_path.display()))?;
+    if original_pubfile.is_some() {
+        std::fs::remove_file(&pubfile_path)
+            .with_context(|| format!("removing {} for publish", pubfile_path.display()))?;
+    }
 
     let result = publish_session_inner(client, signer, session_path, gas_budget).await;
 
@@ -253,15 +264,36 @@ pub async fn publish_session_package(
                 .with_context(|| {
                     format!("writing published id into {}", manifest_path.display())
                 })?;
+            let chain_id = client
+                .read_api()
+                .get_chain_identifier()
+                .await
+                .context("fetching chain identifier for Published.toml")?;
+            std::fs::write(
+                &pubfile_path,
+                pubfile_for_published(
+                    original_pubfile.as_deref(),
+                    env_name,
+                    &chain_id,
+                    &pkg,
+                ),
+            )
+            .with_context(|| {
+                format!("writing published id into {}", pubfile_path.display())
+            })?;
             tracing::info!(
                 manifest = %manifest_path.display(),
+                pubfile = %pubfile_path.display(),
                 package = %pkg,
-                "session Move.toml updated to the published id"
+                "session publish metadata updated to the published id"
             );
         }
         Err(_) => {
             // Best-effort restore so a failed run leaves the tree clean.
             let _ = std::fs::write(&manifest_path, &original);
+            if let Some(pubfile) = &original_pubfile {
+                let _ = std::fs::write(&pubfile_path, pubfile);
+            }
         }
     }
     result
@@ -308,6 +340,47 @@ fn manifest_for_published(original: &str, package_id: &str) -> String {
             out.push(format!("published-at = \"{package_id}\""));
         }
     }
+    out.join("\n") + "\n"
+}
+
+/// `Published.toml` with the `[published.<env>]` section replaced (or
+/// appended) to point at the fresh package id. Other environments' sections
+/// are preserved verbatim.
+fn pubfile_for_published(
+    original: Option<&str>,
+    env_name: &str,
+    chain_id: &str,
+    package_id: &str,
+) -> String {
+    let header = format!("[published.{env_name}]");
+    let mut out: Vec<String> = Vec::new();
+    let mut skipping = false;
+    for l in original.unwrap_or_default().lines() {
+        let t = l.trim();
+        if t == header {
+            skipping = true;
+            continue;
+        }
+        if skipping {
+            if t.starts_with('[') {
+                skipping = false;
+            } else {
+                continue;
+            }
+        }
+        out.push(l.to_owned());
+    }
+    while matches!(out.last(), Some(l) if l.trim().is_empty()) {
+        out.pop();
+    }
+    if !out.is_empty() {
+        out.push(String::new());
+    }
+    out.push(header);
+    out.push(format!("chain-id = \"{chain_id}\""));
+    out.push(format!("published-at = \"{package_id}\""));
+    out.push(format!("original-id = \"{package_id}\""));
+    out.push("version = 1".to_owned());
     out.join("\n") + "\n"
 }
 
@@ -539,4 +612,28 @@ fn assert_success(resp: &SuiTransactionBlockResponse) -> Result<()> {
         bail!("tx failed: {:?}", effects.status());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pubfile_for_published;
+
+    #[test]
+    fn pubfile_replaces_existing_env_section() {
+        let original = "# header comment\n[published.testnet]\nchain-id = \"4c78adac\"\npublished-at = \"0xold\"\noriginal-id = \"0xold\"\nversion = 1\ntoolchain-version = \"1.63.2\"\n\n[published.mainnet]\nchain-id = \"35834a8a\"\npublished-at = \"0xmain\"\noriginal-id = \"0xmain\"\nversion = 1\n";
+        let out = pubfile_for_published(Some(original), "testnet", "4c78adac", "0xnew");
+        assert!(!out.contains("0xold"));
+        assert!(out.contains("[published.mainnet]"));
+        assert!(out.contains("0xmain"));
+        assert!(out.contains("[published.testnet]\nchain-id = \"4c78adac\"\npublished-at = \"0xnew\"\noriginal-id = \"0xnew\"\nversion = 1\n"));
+    }
+
+    #[test]
+    fn pubfile_appends_when_missing() {
+        let out = pubfile_for_published(None, "testnet", "4c78adac", "0xnew");
+        assert_eq!(
+            out,
+            "[published.testnet]\nchain-id = \"4c78adac\"\npublished-at = \"0xnew\"\noriginal-id = \"0xnew\"\nversion = 1\n"
+        );
+    }
 }

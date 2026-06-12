@@ -47,6 +47,16 @@ on:
         required: false
         type: boolean
         default: true
+      deploy_session:
+        description: 'Also publish the siws_session (session-tokens) package the protocol links against'
+        required: false
+        type: boolean
+        default: true
+      rpc_url:
+        description: 'JSON-RPC URL for publish + checkpoint resolution (blank = network default public fullnode)'
+        required: false
+        type: string
+        default: ''
       rebuild_manager:
         description: 'Force-rebuild the deployment-manager binary (ignore the cached one)'
         required: false
@@ -191,6 +201,7 @@ jobs:
         env:
           NETWORK: ${{ steps.net.outputs.network }}
           ENV: ${{ inputs.environment }}
+          RPC_URL: ${{ inputs.rpc_url }}
         run: |
           ARGS=(
             --env     "$ENV"
@@ -201,6 +212,12 @@ jobs:
           if [ "${{ inputs.deploy_tokens }}" = "true" ]; then
             ARGS+=(--deploy-tokens)
           fi
+          if [ "${{ inputs.deploy_session }}" = "true" ]; then
+            ARGS+=(--deploy-session)
+          fi
+          if [ -n "$RPC_URL" ]; then
+            ARGS+=(--rpc "$RPC_URL")
+          fi
           ./target/release/deploy "${ARGS[@]}"
 
       # ── 8. Resolve the deployment checkpoint from the tx digest ──
@@ -209,6 +226,7 @@ jobs:
         env:
           NETWORK: ${{ steps.net.outputs.network }}
           ENV: ${{ inputs.environment }}
+          RPC_URL: ${{ inputs.rpc_url }}
         run: |
           # deployments.json is keyed by env now; the network only picks the RPC.
           DIGEST=$(jq -r ".[\"$ENV\"].package_info.publishDigest" \
@@ -217,6 +235,8 @@ jobs:
           case "$NETWORK" in
             testnet) RPC="https://fullnode.testnet.sui.io:443" ;;
           esac
+          # A custom RPC overrides the network default for both publish + lookup.
+          if [ -n "$RPC_URL" ]; then RPC="$RPC_URL"; fi
 
           # Retry a few times — the RPC may lag behind the publish.
           for attempt in 1 2 3 4 5; do
@@ -426,6 +446,9 @@ jobs:
 
           git add rust-backend/deployments.json
           git add "rust-backend/services/indexer/config/config.${ENV}.toml"
+          # A session republish rewrites the package's publish metadata to the
+          # fresh id; keep the repo's record in sync with what's live.
+          git add session-tokens/contracts/Move.toml session-tokens/contracts/Published.toml
 
           git commit -m "[redeploy] Fresh ${ENV} contract deployment" \
             -m "Network: ${{ steps.net.outputs.network }}" \

@@ -4,11 +4,17 @@ version = "0.0.1"
 edition = "2024.beta"
 
 [dependencies]
-Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/mainnet", override = true }
-MoveStdlib = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/move-stdlib", rev = "framework/mainnet", override = true }
-Pyth = { git = "https://github.com/pyth-network/pyth-crosschain.git", subdir = "target_chains/sui/contracts", rev = "sui-contract-mainnet" }
-deepbook = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook", rev = "v8.0.0" }
+pyth = { git = "https://github.com/pyth-network/pyth-crosschain.git", subdir = "target_chains/sui/contracts", rev = "sui-contract-mainnet" }
+# deepbook + DEEP are vendored (see vendor/…/Move.toml): testnet links our
+# self-hosted deployment, mainnet the official packages — the resolver reads a
+# dep's on-chain addresses only from its own Published.toml, so address-only
+# [dep-replacements] entries are silently ignored.
+deepbook = { local = "./vendor/deepbookv3/packages/deepbook" }
+token = { local = "./vendor/deepbookv3/packages/token" }
 siws_session = { local = "../session-tokens/contracts" }
 
-[addresses]
-options_protocol = "0x0"
+# Pyth ships separate testnet/mainnet contracts (different on-chain package
+# IDs, declared in each branch's own manifest). The default above targets
+# mainnet; swap the source branch for testnet builds.
+[dep-replacements]
+testnet.pyth = { git = "https://github.com/pyth-network/pyth-crosschain.git", subdir = "target_chains/sui/contracts", rev = "sui-contract-testnet" }
