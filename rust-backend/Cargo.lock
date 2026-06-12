@@ -5386,6 +5386,8 @@ dependencies = [
  "runtime-config",
  "serde",
  "serde_json",
+ "sui-json-rpc-types",
+ "sui-sdk",
  "sui-tx",
  "sui-types",
  "token-info-client",
