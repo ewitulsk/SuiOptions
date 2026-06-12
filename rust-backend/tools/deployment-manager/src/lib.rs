@@ -34,6 +34,12 @@ pub struct Cli {
     #[arg(short, long, value_enum)]
     pub network: Network,
 
+    /// Override the JSON-RPC URL used to publish. Defaults to the network's
+    /// public fullnode (picked by `--network`). Pass a private/dedicated RPC
+    /// here when the public endpoint is rate-limiting or timing out.
+    #[arg(long)]
+    pub rpc: Option<String>,
+
     /// Path to the Move package containing the contracts.
     /// Default assumes the manager is run from `rust-backend/`.
     #[arg(short, long, default_value = "../contracts")]

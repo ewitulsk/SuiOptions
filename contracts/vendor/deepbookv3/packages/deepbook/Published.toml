@@ -1,0 +1,14 @@
+# Where this package lives on each chain. testnet is OUR self-hosted DeepBook
+# (rust-backend/deployments.json — deployed unmodified from the vendored rev,
+# version 1, so published-at == original-id); mainnet is the official DeepBook.
+[published.testnet]
+chain-id = "4c78adac"
+published-at = "0x725378acc0bb8b9273cef82171f64f87d5c0348b189318d3f682db5024f42431"
+original-id = "0x725378acc0bb8b9273cef82171f64f87d5c0348b189318d3f682db5024f42431"
+version = 1
+
+[published.mainnet]
+chain-id = "35834a8a"
+published-at = "0x0e735f8c93a95722efd73521aca7a7652c0bb71ed1daf41b26dfd7d1ff71f748"
+original-id = "0x2c8d603bc51326b8c13cef9dd07031a408a48dddb541963357661df5d3204809"
+version = 8
