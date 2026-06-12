@@ -1,0 +1,24 @@
+# balance-monitor config — prod env (testnet, same as staging for now).
+
+environment = "prod"
+network     = "testnet"
+ops_addr    = "0.0.0.0:9012"
+
+poll_interval_secs = 60
+
+[[watch]]
+name = "gas-station"
+secrets_file = "/run/secrets/gas-station.toml"
+low_balance_sui = 5.0
+
+[[watch]]
+name = "option-scheduler"
+secrets_file = "/run/secrets/scheduler.toml"
+low_balance_sui = 2.0
+
+# mm-bot is optional in prod (render-secrets.sh skips absent secrets); the
+# watch is skipped with a warning when the file isn't rendered.
+[[watch]]
+name = "mm-bot"
+secrets_file = "/run/secrets/mm-bot.toml"
+low_balance_sui = 2.0
