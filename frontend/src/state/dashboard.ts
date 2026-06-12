@@ -516,6 +516,7 @@ export function useDashboardState(): DashboardState {
           qty,
           pnl: captured.position.pnl,
           wallet_address: wallet,
+          auth: sessionState ? "session" : "wallet",
         });
       } else if (captured.kind === "claim") {
         const { position: p } = captured;
@@ -558,6 +559,7 @@ export function useDashboardState(): DashboardState {
           premium_received: captured.position.premiumReceived,
           exercised_pct: captured.position.exercisedPct,
           wallet_address: wallet,
+          auth: sessionState ? "session" : "wallet",
         });
       }
     } catch (err) {
@@ -565,6 +567,7 @@ export function useDashboardState(): DashboardState {
       posthog.captureException(err, {
         action: captured?.kind,
         wallet_address: wallet,
+        auth: sessionState ? "session" : "wallet",
       });
       setToast({ message: `failed · ${message}`, variant: "error" });
       setTimeout(() => setToast(null), 6000);

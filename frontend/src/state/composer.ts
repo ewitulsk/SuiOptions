@@ -524,7 +524,8 @@ export function useComposerState({
         amount,
         premium: bestPremium,
         settlement_symbol: series.settlement_symbol,
-        wallet_address: account.address,
+        wallet_address: wallet,
+        auth: sessionState ? "session" : "wallet",
       });
       // Reflect the new position on the Dashboard without a manual refresh.
       queryClient.invalidateQueries({ queryKey: ["buckets"] });
@@ -533,7 +534,8 @@ export function useComposerState({
       const message = err instanceof Error ? err.message : String(err);
       posthog.captureException(err, {
         action: view === "writer" ? "option_written" : "option_purchased",
-        wallet_address: account.address,
+        wallet_address: wallet,
+        auth: sessionState ? "session" : "wallet",
       });
       setToast({ message: `failed · ${message}`, variant: "error" });
       setTimeout(() => setToast(null), 6000);

@@ -40,6 +40,7 @@ import {
 } from "./accounts";
 import { SESSION_ALLOWED, SESSION_TTL_MS, defaultLimits } from "./policy";
 import { connectMetaMask, connectPhantom } from "./wallets";
+import { posthog } from "../lib/posthog";
 
 export type SessionPhase = "idle" | "restoring" | "signing-in" | "active";
 
@@ -137,7 +138,9 @@ export async function initSession(): Promise<void> {
       return;
     }
     await activate(handle);
+    posthog.capture("session_restored", { scheme: handle.scheme });
   } catch (err) {
+    posthog.captureException(err, { action: "session_restore" });
     console.warn("session restore failed:", err);
     set({ phase: "idle" });
   }
@@ -156,7 +159,9 @@ export async function signInWithPhantom(): Promise<void> {
       persist: true,
     });
     await activate(handle);
+    posthog.capture("session_signed_in", { scheme: "solana" });
   } catch (err) {
+    posthog.captureException(err, { action: "session_sign_in", scheme: "solana" });
     set({ phase: "idle", error: message(err) });
     throw err;
   }
@@ -176,7 +181,9 @@ export async function signInWithMetaMask(): Promise<void> {
       persist: true,
     });
     await activate(handle);
+    posthog.capture("session_signed_in", { scheme: "ethereum" });
   } catch (err) {
+    posthog.captureException(err, { action: "session_sign_in", scheme: "ethereum" });
     set({ phase: "idle", error: message(err) });
     throw err;
   }
@@ -184,6 +191,13 @@ export async function signInWithMetaMask(): Promise<void> {
 
 async function activate(handle: SessionHandle): Promise<void> {
   const ownerAddress = ownerAddressOf(handle);
+  // Session users have no dapp-kit wallet; identify by the session's owner
+  // address (the address custody balances/positions are attributed to).
+  posthog.identify(ownerAddress, {
+    wallet_address: ownerAddress,
+    auth: "session",
+    scheme: handle.scheme,
+  });
   set({ phase: "active", handle, ownerAddress, error: null });
   const optionsAccountId = await resolveOptionsAccountId(
     client,
@@ -201,6 +215,8 @@ async function activate(handle: SessionHandle): Promise<void> {
 
 /** Forget the local session (the cap simply expires on chain). */
 export async function signOutSession(): Promise<void> {
+  posthog.capture("session_signed_out", { scheme: snap.handle?.scheme });
+  posthog.reset();
   await clearSession().catch(() => {});
   set({
     phase: "idle",
@@ -233,8 +249,10 @@ export async function revokeSession(): Promise<void> {
       }
     }
     await handle.revoke();
+    posthog.capture("session_revoked", { scheme: handle.scheme });
     await signOutSession();
   } catch (err) {
+    posthog.captureException(err, { action: "session_revoke", scheme: handle.scheme });
     set({ busy: null, error: message(err) });
     throw err;
   }
@@ -274,8 +292,10 @@ export async function ensureOptionsAccount(): Promise<string> {
     }
     cacheOptionsAccountId(handle.accountId, created.objectId);
     set({ optionsAccountId: created.objectId, busy: null });
+    posthog.capture("session_account_created", { account_id: created.objectId });
     return created.objectId;
   } catch (err) {
+    posthog.captureException(err, { action: "session_account_create" });
     set({ busy: null, error: message(err) });
     throw err;
   }
@@ -302,8 +322,13 @@ export async function fundFromFaucet(token: TestToken, amountRaw: bigint): Promi
       });
     });
     set({ busy: null });
+    posthog.capture("custody_funded", {
+      token_symbol: token.symbol,
+      amount: Number(amountRaw) / 10 ** token.decimals,
+    });
     await refreshSession();
   } catch (err) {
+    posthog.captureException(err, { action: "custody_fund", token_symbol: token.symbol });
     set({ busy: null, error: message(err) });
     throw err;
   }
@@ -335,8 +360,13 @@ export async function withdrawFromCustody(
       tx.transferObjects([coin], recipient);
     });
     set({ busy: null });
+    posthog.capture("custody_withdrawn", {
+      coin_type: coinType,
+      amount_raw: amountRaw.toString(),
+    });
     await refreshSession();
   } catch (err) {
+    posthog.captureException(err, { action: "custody_withdraw", coin_type: coinType });
     set({ busy: null, error: message(err) });
     throw err;
   }
