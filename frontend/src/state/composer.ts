@@ -14,6 +14,7 @@ import { usePythPrice } from "../api/usePythPrice";
 import { useRfq } from "../api/useRfq";
 import { useBulkView } from "../api/useBulkView";
 import { buildBuyTx, buildWriteTx } from "../tx/composer";
+import { formatPrice } from "../format";
 import type { ToastState } from "../components/Toast";
 import type { Bucket as ApiBucket, Series } from "../api/client";
 import type { RfqQuoteEntry, Side as ProtocolSide } from "../api/quoting";
@@ -499,8 +500,8 @@ export function useComposerState({
       setToast({
         message:
           view === "writer"
-            ? `position opened · +${s.premium.toFixed(2)} ${settlementSymbol} received`
-            : `call purchased · ${s.amount.toFixed(4)} ${s.asset} strike $${s.strike.toLocaleString("en-US")}`,
+            ? `position opened · +${formatPrice(s.premium)} ${settlementSymbol} received`
+            : `call purchased · ${s.amount.toFixed(4)} ${s.asset} strike $${formatPrice(s.strike, { grouping: true })}`,
         variant: "success",
       });
       setTimeout(() => setToast(null), 4500);

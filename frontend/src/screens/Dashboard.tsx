@@ -4,6 +4,7 @@ import { Header } from "../components/Header";
 import { Toast } from "../components/Toast";
 import { ActionModal } from "../components/ActionModal";
 import { OwnedCard, WrittenCard } from "../components/PositionCards";
+import { formatPrice } from "../format";
 import type { DashboardTotals } from "../types";
 
 function DashSummary({
@@ -29,7 +30,7 @@ function DashSummary({
         <div className="dash-summary__cell">
           <div className="dash-summary__label">Notional</div>
           <div className="dash-summary__val">
-            {totals.ownedNotional.toLocaleString("en-US", { maximumFractionDigits: 0 })}
+            {formatPrice(totals.ownedNotional, { grouping: true })}
             <span className="dash-summary__unit"> USD</span>
           </div>
           <div className="dash-summary__sub">at current spot</div>
@@ -37,7 +38,7 @@ function DashSummary({
         <div className="dash-summary__cell">
           <div className="dash-summary__label">Premium paid</div>
           <div className="dash-summary__val">
-            {totals.ownedPaid.toFixed(2)}
+            {formatPrice(totals.ownedPaid, { grouping: true })}
             <span className="dash-summary__unit"> USDC</span>
           </div>
           <div className="dash-summary__sub">total cost basis</div>
@@ -46,7 +47,7 @@ function DashSummary({
           <div className="dash-summary__label">If exercised now</div>
           <div className={"dash-summary__val " + (profit >= 0 ? "is-pos" : "is-neg")}>
             {profit >= 0 ? "+" : "−"}
-            {Math.abs(profit).toFixed(2)}
+            {formatPrice(Math.abs(profit), { grouping: true })}
             <span className="dash-summary__unit"> USDC</span>
           </div>
           <div className="dash-summary__sub">net of premium paid</div>
@@ -64,7 +65,7 @@ function DashSummary({
       <div className="dash-summary__cell">
         <div className="dash-summary__label">Notional written</div>
         <div className="dash-summary__val">
-          {totals.writtenNotional.toLocaleString("en-US", { maximumFractionDigits: 0 })}
+          {formatPrice(totals.writtenNotional, { grouping: true })}
           <span className="dash-summary__unit"> USD</span>
         </div>
         <div className="dash-summary__sub">at current spot</div>
@@ -72,7 +73,7 @@ function DashSummary({
       <div className="dash-summary__cell">
         <div className="dash-summary__label">Premium earned</div>
         <div className="dash-summary__val is-pos">
-          +{totals.premiumEarned.toFixed(2)}
+          +{formatPrice(totals.premiumEarned, { grouping: true })}
           <span className="dash-summary__unit"> USDC</span>
         </div>
         <div className="dash-summary__sub">across {writtenCount} positions</div>

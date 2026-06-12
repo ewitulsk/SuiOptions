@@ -378,9 +378,9 @@
 [data-theme="aqua"] .tiles::-webkit-scrollbar { display: none; }
 [data-theme="aqua"] .tile {
   position: relative; display: flex; flex-direction: column; align-items: flex-start;
-  flex: 0 0 148px;
+  flex: 0 0 auto; min-width: 168px;
   scroll-snap-align: center;
-  padding: 18px 16px 16px;
+  padding: 18px 20px 16px;
   background: var(--aqua-glass-2);
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
   border: 1px solid var(--aqua-line);
@@ -417,6 +417,7 @@
   font-variant-numeric: tabular-nums; color: var(--aqua-ink-1);
   letter-spacing: -0.02em;
   margin-bottom: 8px;
+  white-space: nowrap;
 }
 [data-theme="aqua"] .tile__premium {
   font-family: "JetBrains Mono", monospace; font-size: 12px; font-weight: 600;

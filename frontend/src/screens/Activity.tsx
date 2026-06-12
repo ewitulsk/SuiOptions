@@ -8,6 +8,7 @@ import {
   type ActivityFilter,
 } from "../state/activity";
 import { Header } from "../components/Header";
+import { formatPrice } from "../format";
 import type { ActivityEvent, ActivityTotals } from "../types";
 
 function shortAddress(addr: string): string {
@@ -29,21 +30,21 @@ function ActivitySummary({ totals }: { totals: ActivityTotals }) {
         <div className="dash-summary__label">Calls written</div>
         <div className="dash-summary__val">{totals.writes}</div>
         <div className="dash-summary__sub">
-          +{totals.premiumIn.toFixed(2)} USDC premium received
+          +{formatPrice(totals.premiumIn, { grouping: true })} USDC premium received
         </div>
       </div>
       <div className="dash-summary__cell">
         <div className="dash-summary__label">Calls bought</div>
         <div className="dash-summary__val">{totals.buys}</div>
         <div className="dash-summary__sub">
-          −{totals.premiumOut.toFixed(2)} USDC premium paid
+          −{formatPrice(totals.premiumOut, { grouping: true })} USDC premium paid
         </div>
       </div>
       <div className="dash-summary__cell">
         <div className="dash-summary__label">Net premium</div>
         <div className={"dash-summary__val " + (net >= 0 ? "is-pos" : "is-neg")}>
           {net >= 0 ? "+" : "−"}
-          {Math.abs(net).toFixed(2)}
+          {formatPrice(Math.abs(net), { grouping: true })}
           <span className="dash-summary__unit"> USDC</span>
         </div>
         <div className="dash-summary__sub">lifetime · written − bought</div>
@@ -122,9 +123,9 @@ function EventRow({ e, now }: { e: ActivityEvent; now: number }) {
         {e.value && (
           <div className={"act-row__delta " + (isPos ? "is-pos" : isNeg ? "is-neg" : "")}>
             {isPos ? "+" : isNeg ? "−" : ""}
-            {Math.abs(e.value.delta).toLocaleString("en-US", {
-              maximumFractionDigits: e.value.unit === "BTC" ? 4 : 2,
-            })}
+            {e.value.unit === "BTC"
+              ? Math.abs(e.value.delta).toLocaleString("en-US", { maximumFractionDigits: 4 })
+              : formatPrice(Math.abs(e.value.delta), { grouping: true })}
             <span className="act-row__delta-unit"> {e.value.unit}</span>
           </div>
         )}

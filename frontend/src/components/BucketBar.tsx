@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { usePythPrice } from "../api/usePythPrice";
+import { formatPrice } from "../format";
 import { TokenLogo } from "./TokenLogo";
 import type { AssetOption, ExpiryOption } from "../state/composer";
 
@@ -29,9 +30,7 @@ export function BucketBar({
   const r = 12;
   const c = 2 * Math.PI * r;
   const live = usePythPrice(symbol);
-  const priceLabel = live
-    ? `$${live.price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-    : "—";
+  const priceLabel = live ? `$${formatPrice(live.price, { grouping: true })}` : "—";
 
   const assetLabel = selectedAsset ?? "—";
   const expiryLabel =

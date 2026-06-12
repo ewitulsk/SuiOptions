@@ -1,3 +1,4 @@
+import { formatPrice } from "../format";
 import type { Quote, View } from "../types";
 
 type Props = { quotes: Quote[]; view: View; onClose: () => void };
@@ -36,7 +37,7 @@ export function QuoteFeed({ quotes, view, onClose }: Props) {
               </div>
             </div>
             <div>
-              <div className="qrow__premium">{q.premium.toFixed(2)}</div>
+              <div className="qrow__premium">{formatPrice(q.premium)}</div>
               <div className="qrow__ttl">ttl {q.ttl}s</div>
             </div>
           </div>

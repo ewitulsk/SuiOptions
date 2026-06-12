@@ -1,3 +1,4 @@
+import { formatPrice } from "../format";
 import type { DashboardModal, DashboardSpots } from "../types";
 
 type Props = {
@@ -32,7 +33,7 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
               </div>
               <div className="modal__title">
                 Exercise {qty.toFixed(p.asset === "BTC" ? 4 : 0)} {p.asset} call at $
-                {p.strike.toLocaleString("en-US")}
+                {formatPrice(p.strike, { grouping: true })}
               </div>
               <div className="modal__sub">
                 tideline · bucket {p.asset.toLowerCase()}_{p.strike}_
@@ -41,7 +42,7 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
               <div className="modal__list">
                 <div className="modal__list-row">
                   <span>strike (you pay)</span>
-                  <b>−{usdcOut.toLocaleString("en-US", { maximumFractionDigits: 2 })} USDC</b>
+                  <b>−{formatPrice(usdcOut, { grouping: true })} USDC</b>
                 </div>
                 <div className="modal__list-row">
                   <span>{p.asset} received</span>
@@ -50,22 +51,22 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
                 <div className="modal__list-row">
                   <span>{p.asset} value at spot</span>
                   <b>
-                    {usdcValueAtSpot.toLocaleString("en-US", { maximumFractionDigits: 2 })} USDC
+                    {formatPrice(usdcValueAtSpot, { grouping: true })} USDC
                   </b>
                 </div>
                 <div className="modal__list-row">
                   <span>intrinsic captured</span>
-                  <b className="modal__list-val--pos">+{intrinsic.toFixed(2)} USDC</b>
+                  <b className="modal__list-val--pos">+{formatPrice(intrinsic)} USDC</b>
                 </div>
                 <div className="modal__list-row modal__list-row--quiet">
                   <span>premium paid (sunk)</span>
-                  <span>−{p.premiumPaid.toFixed(2)} USDC</span>
+                  <span>−{formatPrice(p.premiumPaid)} USDC</span>
                 </div>
                 <div className="modal__list-row modal__list-row--total">
                   <span>net P/L</span>
                   <b className={p.pnl >= 0 ? "modal__list-val--pos" : "modal__list-val--neg"}>
                     {p.pnl >= 0 ? "+" : "−"}
-                    {Math.abs(p.pnl).toFixed(2)} USDC
+                    {formatPrice(Math.abs(p.pnl))} USDC
                   </b>
                 </div>
               </div>
@@ -108,7 +109,7 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
               <div className="modal__list">
                 <div className="modal__list-row">
                   <span>paid</span>
-                  <b>−{usdcOut.toLocaleString("en-US", { maximumFractionDigits: 2 })} USDC</b>
+                  <b>−{formatPrice(usdcOut, { grouping: true })} USDC</b>
                 </div>
                 <div className="modal__list-row">
                   <span>received</span>
@@ -118,7 +119,7 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
                   <span>net P/L</span>
                   <b className={p.pnl >= 0 ? "modal__list-val--pos" : "modal__list-val--neg"}>
                     {p.pnl >= 0 ? "+" : "−"}
-                    {Math.abs(p.pnl).toFixed(2)} USDC
+                    {formatPrice(Math.abs(p.pnl))} USDC
                   </b>
                 </div>
               </div>
@@ -162,7 +163,7 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
                 <div className="modal__list-row">
                   <span>USDC from exercise</span>
                   <b className="modal__list-val--pos">
-                    +{usdcFromExercise.toLocaleString("en-US", { maximumFractionDigits: 2 })} USDC
+                    +{formatPrice(usdcFromExercise, { grouping: true })} USDC
                   </b>
                 </div>
                 <div className="modal__list-row">
@@ -173,7 +174,7 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
                 </div>
                 <div className="modal__list-row modal__list-row--quiet">
                   <span>premium previously received</span>
-                  <span>+{p.premiumReceived.toFixed(2)} USDC (already yours)</span>
+                  <span>+{formatPrice(p.premiumReceived)} USDC (already yours)</span>
                 </div>
               </div>
               <div className="modal__note">
@@ -209,7 +210,7 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
                 <div className="modal__list-row">
                   <span>USDC credited</span>
                   <b className="modal__list-val--pos">
-                    +{usdcFromExercise.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                    +{formatPrice(usdcFromExercise, { grouping: true })}
                   </b>
                 </div>
                 <div className="modal__list-row">
