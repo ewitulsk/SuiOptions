@@ -14,9 +14,13 @@ SUI or signing each Sui transaction.
 
 Full design: [`sui-siws-session-key-spec.md`](./sui-siws-session-key-spec.md).
 
-> **Status:** experimental. Deployed and verified on Sui **testnet** (see
-> [Deployment](#deployment)). Isolated under `session-tokens/`; touches no other
-> service in the repo.
+> **Status:** experimental, and now **integrated into the options protocol**:
+> `contracts/` (options_protocol) depends on this package and defines
+> `_with_session` twins of every user-facing entrypoint, the gas station
+> sponsors the session PTB shapes, and the frontend's account dropdown owns
+> the whole session lifecycle. The on-chain testnet deployment below predates
+> the v2 (multi-asset, per-type-limit) rework — redeploy via
+> `deployment-manager --deploy-session` before using it.
 
 ---
 
@@ -55,9 +59,17 @@ Full design: [`sui-siws-session-key-spec.md`](./sui-siws-session-key-spec.md).
 
 | Folder | What |
 |--------|------|
-| [`contracts/`](./contracts) | Move package. `registry` (identity → account map + nonce set), `account` (per-user shared treasury), `session` (cap mint + verify + revoke + the shared `authorize` enforcement), `message` (canonical SIWS serializer), `siwe` (EIP-4361 builder + EIP-191 + `ecrecover`), `app_example`, `errors`. `sui move test` (11 tests). |
-| [`sdk/`](./sdk) | TypeScript browser SDK. Non-extractable WebCrypto session key, `createSession` (Solana) / `createSessionEth` (Ethereum) / `execute` / `status` / `revoke` / `restoreSession`, local + http sponsor clients. Both serializers are byte-exact with the Move side, pinned both ways. |
+| [`contracts/`](./contracts) | Move package. `registry` (identity → account map + nonce set), `account` (per-user shared **multi-asset** treasury + per-(cap, coin-type) spend ledger), `session` (cap mint + verify + revoke + the **public** `authorize` / `authorize_spend<T>` target packages call from their own cap-gated entrypoints), `message` (canonical SIWS serializer, `siws-session-v2` with signed per-type limits), `siwe` (EIP-4361 builder + EIP-191 + `ecrecover`), `app_example`, `errors`. `sui move test` (14 tests, incl. the expire→re-sign-in→same-account pin). |
+| [`../frontend/siws-session-sdk/`](../frontend/siws-session-sdk) | TypeScript browser SDK (lives under `frontend/` so the app's single `npm install` resolves its imports — it's consumed from source). Non-extractable WebCrypto session key, `createSession` (Solana) / `createSessionEth` (Ethereum) / `execute` / `status` / `revoke` / `restoreSession`. External gas stations plug in through `GasStationAdapter` + `GasStationSponsorClient` (the co-sign-the-sponsor's-exact-bytes pipeline lives in the SDK once); `suiOptionsGasStation` ships the adapter for `rust-backend/services/gas-station`. Both serializers are byte-exact with the Move side, pinned both ways (`gen-siwe.mjs` regenerates the shared vectors). |
 | [`demo-frontend/`](./demo-frontend) | Vite + React + dapp-kit demo (same stack as `../frontend`). Connect Phantom **or** MetaMask, open a session, fund the account, auto-signed withdraws, sweep stray coins, revoke, with Suiscan tx toasts. |
+
+**The real integration** lives in the main app: `contracts/` defines
+`_with_session` twins (account create/withdraw/key-rotate, write, buy,
+exercise, redeem, burn-expired) that source funds from — and settle outputs
+into — the user's options `Account` custody under the cap's per-type limits;
+`rust-backend` gains `session_*` gas-station templates and
+`deployment-manager --deploy-session`; `frontend/src/session/` + the nav-bar
+account dropdown own sign-in/restore/fund/withdraw/revoke.
 
 ### Run it
 
@@ -66,7 +78,7 @@ Full design: [`sui-siws-session-key-spec.md`](./sui-siws-session-key-spec.md).
 cd contracts && sui move test && sui move build
 
 # 2. SDK — its serializer-parity tests mirror the Move reference vectors.
-cd ../sdk && npm install && npm test && npm run build
+cd ../../frontend/siws-session-sdk && npm install && npm test
 
 # 3. Demo — point .env.local at the deployed package (see demo-frontend/README.md),
 #    fund the sponsor address it shows from the testnet faucet, then:
@@ -100,8 +112,8 @@ exact signed bytes from on-chain/checked values and verifies against that. So
 the SDK and the Move package must serialize **byte-for-byte identically**, or
 sign-in silently breaks.
 
-- SIWS: `contracts/sources/message.move` ↔ `sdk/src/message.ts`
-- SIWE: `contracts/sources/siwe.move` ↔ `sdk/src/siwe.ts`
+- SIWS: `contracts/sources/message.move` ↔ `../frontend/siws-session-sdk/src/message.ts`
+- SIWE: `contracts/sources/siwe.move` ↔ `../frontend/siws-session-sdk/src/siwe.ts`
 
 Each pair is pinned against the **same reference vectors** in both test suites
 (`*_tests.move` / `*.test.ts`). The SIWE vector uses a **real** signature so the

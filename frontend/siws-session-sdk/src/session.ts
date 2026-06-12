@@ -3,14 +3,19 @@
 //   createSessionEth(opts)     -> SessionHandle  (Ethereum / SIWE root)
 //   SessionHandle.execute(fn)  -> auto-signed, sponsored app call
 //   SessionHandle.revoke()     -> root-signed generation bump
-//   SessionHandle.status()     -> { expiresAt, spent, remaining, generation }
+//   SessionHandle.status()     -> { expiresAt, limits (per-type spend), … }
 //   restoreSession(config)     -> SessionHandle | null
 
 import { Transaction } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
 
 import type { SuiTransactionBlockResponse } from "./client.js";
-import { serializeRevokeMessage, serializeSessionMessage } from "./message.js";
+import {
+  canonicalCoinType,
+  serializeRevokeMessage,
+  serializeSessionMessage,
+  type SpendLimit,
+} from "./message.js";
 import { fetchGeneration, readGeneration, readSpent, resolveAccountId } from "./reads.js";
 import {
   buildSiweRevokeMessage,
@@ -31,6 +36,7 @@ import type {
   SessionConfig,
   SessionStatus,
   SolanaSignMessage,
+  SpendLimitStatus,
 } from "./types.js";
 
 export class SessionExpiredError extends Error {
@@ -54,9 +60,28 @@ function randomNonce(): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(32));
 }
 
-function toBytes(selectors: string[]): number[][] {
-  const enc = new TextEncoder();
-  return selectors.map((s) => Array.from(enc.encode(s)));
+const enc = new TextEncoder();
+
+function toBytes(strings: string[]): number[][] {
+  return strings.map((s) => Array.from(enc.encode(s)));
+}
+
+/** Normalize every limit's coin type to the canonical on-chain form once. */
+function canonicalizeLimits(limits: SpendLimit[]): SpendLimit[] {
+  return limits.map((l) => ({
+    coinType: canonicalCoinType(l.coinType),
+    perTx: BigInt(l.perTx),
+    total: BigInt(l.total),
+  }));
+}
+
+/** Append the limit args (parallel vectors, entry-fun friendly) to a call. */
+function limitArgs(tx: Transaction, limits: SpendLimit[]) {
+  return [
+    tx.pure.vector("vector<u8>", toBytes(limits.map((l) => l.coinType))),
+    tx.pure.vector("u64", limits.map((l) => l.perTx)),
+    tx.pure.vector("u64", limits.map((l) => l.total)),
+  ];
 }
 
 function findCreatedObject(
@@ -78,8 +103,7 @@ interface HandleParams extends SessionConfig {
   accountId: string;
   generation: number;
   expiresAtMs: number;
-  spendCap: bigint;
-  perTxCap: bigint;
+  limits: SpendLimit[];
   allowed: string[];
   /** Digest of the sign-in tx (undefined for restored sessions). */
   openDigest?: string;
@@ -117,6 +141,11 @@ export class SessionHandle {
     return this.#p.root.identity;
   }
 
+  /** The cap's per-type spend limits (canonical coin types). */
+  get limits(): SpendLimit[] {
+    return this.#p.limits;
+  }
+
   /** True once a root wallet is attached — i.e. `revoke()` is callable. */
   get canRevoke(): boolean {
     return this.#p.root.wallet !== undefined;
@@ -142,18 +171,33 @@ export class SessionHandle {
   }
 
   async status(): Promise<SessionStatus> {
-    const { client } = this.#p;
+    const { client, packageId } = this.#p;
     const accountGeneration = await readGeneration(client, this.accountId);
-    const spent = await readSpent(client, this.accountId, this.capId);
-    const remaining = this.#p.spendCap > spent ? this.#p.spendCap - spent : 0n;
+    const limits: SpendLimitStatus[] = await Promise.all(
+      this.#p.limits.map(async (l) => {
+        const spent = await readSpent(
+          client,
+          packageId,
+          this.accountId,
+          this.capId,
+          l.coinType,
+        );
+        return {
+          coinType: l.coinType,
+          perTx: l.perTx,
+          total: l.total,
+          spent,
+          remaining: l.total > spent ? l.total - spent : 0n,
+        };
+      }),
+    );
     const active =
       Date.now() < this.expiresAtMs && accountGeneration === this.#p.generation;
     return {
       capId: this.capId,
       accountId: this.accountId,
       expiresAt: this.expiresAtMs,
-      spent,
-      remaining,
+      limits,
       generation: this.#p.generation,
       accountGeneration,
       active,
@@ -162,7 +206,7 @@ export class SessionHandle {
 
   /** Root-signed revocation: bumps generation, killing every cap at once. */
   async revoke(): Promise<SuiTransactionBlockResponse> {
-    const { root, registryId, packageId, coinType, sponsor, client } = this.#p;
+    const { root, registryId, packageId, sponsor, client } = this.#p;
     if (!root.wallet) {
       throw new Error("revoke requires the root wallet (not available after restore)");
     }
@@ -182,7 +226,6 @@ export class SessionHandle {
       const { signature } = await root.wallet.signMessage(message);
       tx.moveCall({
         target: `${packageId}::session::revoke_all`,
-        typeArguments: [coinType],
         arguments: [
           tx.object(registryId),
           tx.object(this.accountId),
@@ -210,7 +253,6 @@ export class SessionHandle {
       const sig = ethSignatureToSui(await root.wallet.personalSign(message));
       tx.moveCall({
         target: `${packageId}::session::revoke_all_eth`,
-        typeArguments: [coinType],
         arguments: [
           tx.object(registryId),
           tx.object(this.accountId),
@@ -220,7 +262,7 @@ export class SessionHandle {
           tx.pure.vector("u8", Array.from(nonce)),
           tx.pure.u64(BigInt(expiresAtMs)),
           tx.pure.u64(BigInt(root.chainId)),
-          tx.pure.vector("u8", Array.from(new TextEncoder().encode(issuedAt))),
+          tx.pure.vector("u8", Array.from(enc.encode(issuedAt))),
         ],
       });
     }
@@ -241,8 +283,7 @@ async function finalizeOpen(
   fields: {
     generation: number;
     expiresAtMs: number;
-    spendCap: bigint;
-    perTxCap: bigint;
+    limits: SpendLimit[];
     allowed: string[];
     persist?: boolean;
   },
@@ -262,8 +303,7 @@ async function finalizeOpen(
     accountId,
     generation: fields.generation,
     expiresAtMs: fields.expiresAtMs,
-    spendCap: fields.spendCap,
-    perTxCap: fields.perTxCap,
+    limits: fields.limits,
     allowed: fields.allowed,
     openDigest: result.digest,
   });
@@ -274,7 +314,6 @@ async function finalizeOpen(
       await saveSession({
         packageId: config.packageId,
         registryId: config.registryId,
-        coinType: config.coinType,
         network: config.network,
         scheme: root.scheme,
         chainId: root.scheme === "ethereum" ? root.chainId : undefined,
@@ -284,8 +323,11 @@ async function finalizeOpen(
         identity: Array.from(root.identity),
         generation: fields.generation,
         expiresAtMs: fields.expiresAtMs,
-        spendCap: fields.spendCap.toString(),
-        perTxCap: fields.perTxCap.toString(),
+        limits: fields.limits.map((l) => ({
+          coinType: l.coinType,
+          perTx: l.perTx.toString(),
+          total: l.total.toString(),
+        })),
         allowed: fields.allowed,
         cryptoKey: signer.cryptoKey,
       });
@@ -302,7 +344,7 @@ async function finalizeOpen(
 // --- Solana (ed25519) sign-in ---
 
 export async function createSession(opts: CreateSessionOptions): Promise<SessionHandle> {
-  const { client, network, packageId, registryId, coinType, solanaWallet } = opts;
+  const { client, network, packageId, registryId, solanaWallet } = opts;
 
   const signer = await makeSessionSigner();
   const sessionKey = signer.toSuiAddress();
@@ -310,6 +352,7 @@ export async function createSession(opts: CreateSessionOptions): Promise<Session
   const nonce = randomNonce();
   const expiresAtMs = Date.now() + opts.ttlMs;
   const generation = await fetchGeneration(client, registryId, solanaPk);
+  const limits = canonicalizeLimits(opts.limits);
 
   const message = serializeSessionMessage({
     domain: registryId,
@@ -319,13 +362,13 @@ export async function createSession(opts: CreateSessionOptions): Promise<Session
     generation,
     nonce,
     expiresAtMs,
+    limits,
   });
   const { signature } = await solanaWallet.signMessage(message);
 
   const tx = new Transaction();
   tx.moveCall({
     target: `${packageId}::session::verify_and_open_session`,
-    typeArguments: [coinType],
     arguments: [
       tx.object(registryId),
       tx.object(SUI_CLOCK_OBJECT_ID),
@@ -335,8 +378,7 @@ export async function createSession(opts: CreateSessionOptions): Promise<Session
       tx.pure.u64(BigInt(generation)),
       tx.pure.vector("u8", Array.from(nonce)),
       tx.pure.u64(BigInt(expiresAtMs)),
-      tx.pure.u64(opts.spendCap),
-      tx.pure.u64(opts.perTxCap),
+      ...limitArgs(tx, limits),
       tx.pure.vector("vector<u8>", toBytes(opts.allowed)),
     ],
   });
@@ -349,8 +391,7 @@ export async function createSession(opts: CreateSessionOptions): Promise<Session
     {
       generation,
       expiresAtMs,
-      spendCap: opts.spendCap,
-      perTxCap: opts.perTxCap,
+      limits,
       allowed: opts.allowed,
       persist: opts.persist,
     },
@@ -363,8 +404,7 @@ export interface CreateSessionEthOptions extends SessionConfig {
   ethereumWallet: EthereumSignMessage;
   /** EVM chain id rendered in the SIWE message (e.g. 1, 11155111). */
   chainId: number;
-  spendCap: bigint;
-  perTxCap: bigint;
+  limits: SpendLimit[];
   ttlMs: number;
   allowed: string[];
   persist?: boolean;
@@ -373,7 +413,7 @@ export interface CreateSessionEthOptions extends SessionConfig {
 export async function createSessionEth(
   opts: CreateSessionEthOptions,
 ): Promise<SessionHandle> {
-  const { client, packageId, registryId, coinType, ethereumWallet, chainId } = opts;
+  const { client, packageId, registryId, ethereumWallet, chainId } = opts;
 
   const signer = await makeSessionSigner();
   const sessionKey = signer.toSuiAddress();
@@ -382,6 +422,7 @@ export async function createSessionEth(
   const expiresAtMs = Date.now() + opts.ttlMs;
   const issuedAt = new Date().toISOString();
   const generation = await fetchGeneration(client, registryId, ethAddress);
+  const limits = canonicalizeLimits(opts.limits);
 
   const message = buildSiweSessionMessage({
     registryDomain: registryId,
@@ -392,13 +433,13 @@ export async function createSessionEth(
     expiresAtMs,
     chainId,
     issuedAt,
+    limits,
   });
   const sig = ethSignatureToSui(await ethereumWallet.personalSign(message));
 
   const tx = new Transaction();
   tx.moveCall({
     target: `${packageId}::session::verify_and_open_session_eth`,
-    typeArguments: [coinType],
     arguments: [
       tx.object(registryId),
       tx.object(SUI_CLOCK_OBJECT_ID),
@@ -409,9 +450,8 @@ export async function createSessionEth(
       tx.pure.vector("u8", Array.from(nonce)),
       tx.pure.u64(BigInt(expiresAtMs)),
       tx.pure.u64(BigInt(chainId)),
-      tx.pure.vector("u8", Array.from(new TextEncoder().encode(issuedAt))),
-      tx.pure.u64(opts.spendCap),
-      tx.pure.u64(opts.perTxCap),
+      tx.pure.vector("u8", Array.from(enc.encode(issuedAt))),
+      ...limitArgs(tx, limits),
       tx.pure.vector("vector<u8>", toBytes(opts.allowed)),
     ],
   });
@@ -424,8 +464,7 @@ export async function createSessionEth(
     {
       generation,
       expiresAtMs,
-      spendCap: opts.spendCap,
-      perTxCap: opts.perTxCap,
+      limits,
       allowed: opts.allowed,
       persist: opts.persist,
     },
@@ -479,7 +518,6 @@ export async function restoreSession(
     network: config.network as Network,
     packageId: config.packageId,
     registryId: config.registryId,
-    coinType: config.coinType,
     sponsor: config.sponsor,
     signer,
     root,
@@ -487,8 +525,11 @@ export async function restoreSession(
     accountId: p.accountId,
     generation: p.generation,
     expiresAtMs: p.expiresAtMs,
-    spendCap: BigInt(p.spendCap),
-    perTxCap: BigInt(p.perTxCap),
+    limits: p.limits.map((l) => ({
+      coinType: l.coinType,
+      perTx: BigInt(l.perTx),
+      total: BigInt(l.total),
+    })),
     allowed: p.allowed,
   });
 }

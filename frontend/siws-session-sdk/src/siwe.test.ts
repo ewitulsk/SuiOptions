@@ -2,13 +2,24 @@ import { describe, expect, it } from "vitest";
 import { buildSiweSessionMessage, ethSignatureToSui } from "./siwe.js";
 
 // Byte-for-byte identical to the literal asserted in
-// `contracts/tests/siwe_tests.move` (and the message viem signed in the
-// reference vector). Change both sides together if the format changes.
+// `contracts/tests/siwe_tests.move` (and the message the reference secp256k1
+// key signed in that vector). Change both sides together if the format
+// changes; regenerate with `gen-siwe.mjs`.
 
 const ETH = Uint8Array.from(
   "1a642f0e3c3af545e7acbd38b07251b3990914f1".match(/../g)!.map((h) => parseInt(h, 16)),
 );
 const nonce = new Uint8Array(32).fill(0x22);
+
+const LIMITS = [
+  { coinType: "0x2::sui::SUI", perTx: 200n, total: 500n },
+  {
+    coinType:
+      "0x00000000000000000000000000000000000000000000000000000000000000aa::tusdc::TUSDC",
+    perTx: 1000000n,
+    total: 5000000n,
+  },
+];
 
 const SIWE_REF =
   "siws-session.demo wants you to sign in with your Ethereum account:\n" +
@@ -23,7 +34,9 @@ const SIWE_REF =
   "- siws-session://sui-registry/0x0000000000000000000000000000000000000000000000000000000000000001\n" +
   "- siws-session://session-key/0x0000000000000000000000000000000000000000000000000000000000000002\n" +
   "- siws-session://generation/0\n" +
-  "- siws-session://expires/1700000000000";
+  "- siws-session://expires/1700000000000\n" +
+  "- siws-session://limits/0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI=200/500," +
+  "0x00000000000000000000000000000000000000000000000000000000000000aa::tusdc::TUSDC=1000000/5000000";
 
 describe("SIWE serializer", () => {
   it("matches the on-chain EIP-4361 message byte-for-byte (incl. EIP-55)", () => {
@@ -36,6 +49,7 @@ describe("SIWE serializer", () => {
       expiresAtMs: 1700000000000,
       chainId: 1,
       issuedAt: "2026-06-09T00:00:00.000Z",
+      limits: LIMITS,
     });
     expect(msg).toBe(SIWE_REF);
   });

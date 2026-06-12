@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use sui_types::base_types::{ObjectID, SuiAddress};
 use tracing::{info, warn};
 
-pub use deployments::{DeepBookInfo, PackageInfo, TestTokens, TokenInfo};
+pub use deployments::{DeepBookInfo, PackageInfo, SessionTokensInfo, TestTokens, TokenInfo};
 
 /// One supported-token catalog entry as served by `GET /tokens`.
 ///
@@ -119,6 +119,13 @@ impl Snapshot {
     /// degrade gracefully rather than crash.
     pub fn deepbook(&self) -> Option<&DeepBookInfo> {
         self.package_info.deepbook.as_ref()
+    }
+
+    /// siws_session package + registry for wallet-rooted session login.
+    /// `None` where session login isn't deployed — session features must
+    /// degrade gracefully rather than crash.
+    pub fn session_tokens(&self) -> Option<&SessionTokensInfo> {
+        self.package_info.session_tokens.as_ref()
     }
 
     // --- faucet accessors (testTokens passthrough) -------------------------
@@ -320,6 +327,7 @@ mod tests {
                 network: "testnet".into(),
                 test_tokens: None,
                 deepbook: None,
+                session_tokens: None,
             },
             tokens: vec![
                 tok(

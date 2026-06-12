@@ -14,3 +14,4 @@ public fun not_allowed(): u64 { 9 }
 public fun not_owner(): u64 { 10 }
 public fun invalid_pubkey_length(): u64 { 11 }
 public fun invalid_signature_length(): u64 { 12 }
+public fun limits_arity_mismatch(): u64 { 13 }

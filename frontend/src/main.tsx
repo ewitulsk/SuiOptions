@@ -8,6 +8,7 @@ import "@mysten/dapp-kit/dist/index.css";
 import { App } from "./App";
 import { ENV, TOKEN_INFO_URL, initConfig } from "./config";
 import { initSponsorHealth } from "./state/sponsor";
+import { initSession } from "./session/store";
 import "./theme";
 import "./styles/aqua.css";
 import "./styles/global.css";
@@ -51,7 +52,14 @@ function renderBootError(err: unknown) {
 
 // Hard cutover: fetch config from token-info before rendering. No
 // deployments.json fallback — if token-info is down, the app shows a boot error.
-initConfig().then(renderApp).catch(renderBootError);
+initConfig()
+  .then(() => {
+    // Non-blocking: restore a persisted session login (needs the session
+    // package ids from config, hence after initConfig).
+    void initSession();
+    renderApp();
+  })
+  .catch(renderBootError);
 
 // Non-blocking: seed the sponsor toggle's default from the gas station's
 // balance. The gas station being down must NOT fail boot (unlike token-info).

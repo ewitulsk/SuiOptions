@@ -33,6 +33,9 @@ export type OwnedCallOption = {
 export function useOwnedCallOptions(
   wallet: string | null,
   series: Series[] | undefined,
+  /** Session custody balances (canonical type → raw) — used instead of
+   *  address-owned balances when the user is a session login. */
+  custodyBalances?: Record<string, bigint> | null,
 ) {
   const client = useSuiClient();
 
@@ -48,12 +51,28 @@ export function useOwnedCallOptions(
   // Stable key so the query refetches when the known coin-type set changes.
   const typesKey = Array.from(callTypeToBucket.keys()).sort().join(",");
 
+  const custodyKey = custodyBalances
+    ? Object.entries(custodyBalances)
+        .map(([t, v]) => `${t}:${v}`)
+        .sort()
+        .join(",")
+    : null;
+
   return useQuery<OwnedCallOption[], Error>({
-    queryKey: ["owned-call-options", wallet, typesKey],
+    queryKey: ["owned-call-options", wallet, typesKey, custodyKey],
     enabled: wallet !== null && callTypeToBucket.size > 0,
     refetchInterval: 5_000,
     queryFn: async () => {
       if (!wallet) return [];
+      if (custodyBalances) {
+        const out: OwnedCallOption[] = [];
+        for (const [type, raw] of Object.entries(custodyBalances)) {
+          const bucket_id = callTypeToBucket.get(normalizeStructTag(type));
+          if (!bucket_id || raw <= 0n) continue;
+          out.push({ coin_type: normalizeStructTag(type), bucket_id, amount_raw: raw.toString() });
+        }
+        return out;
+      }
       const balances = await client.getAllBalances({ owner: wallet });
       const out: OwnedCallOption[] = [];
       for (const bal of balances) {

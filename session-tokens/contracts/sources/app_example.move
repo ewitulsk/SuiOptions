@@ -1,6 +1,7 @@
-/// Example scoped entrypoint (spec §1.6). A real dApp would replace `withdraw`
-/// with its own functions, each declaring its full selector and delegating the
-/// cap checks to `session::authorize`.
+/// Example scoped entrypoint (spec §1.6). A real dApp (see `options_protocol`)
+/// defines `_with_session` variants of its own functions, each declaring its
+/// full selector and delegating the cap checks to `session::authorize` /
+/// `session::authorize_spend`.
 module siws_session::app_example;
 
 use sui::clock::Clock;
@@ -11,17 +12,18 @@ use siws_session::session::{Self, SessionCap};
 /// Full `pkg::module::function` selector the SDK must include in `allowed`.
 const SEL_WITHDRAW: vector<u8> = b"siws_session::app_example::withdraw";
 
-/// Move `amount` of the account's funds to `recipient`, gated by the cap.
+/// Move `amount` of the account's `T` balance to `recipient`, gated by the cap
+/// (including the cap's per-type spend limit for `T`).
 public entry fun withdraw<T>(
     cap: &SessionCap,
-    account: &mut Account<T>,
+    account: &mut Account,
     clock: &Clock,
     amount: u64,
     recipient: address,
     ctx: &mut TxContext,
 ) {
-    session::authorize(cap, account, clock, amount, SEL_WITHDRAW, ctx.sender());
-    let coin = account.take(amount, ctx);
+    session::authorize_spend<T>(cap, account, clock, amount, SEL_WITHDRAW, ctx.sender());
+    let coin = account.take<T>(amount, ctx);
     transfer::public_transfer(coin, recipient);
 }
 

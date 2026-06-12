@@ -48,20 +48,37 @@ public fun create_account(
     signing_pubkey: vector<u8>,
     ctx: &mut TxContext,
 ): Account {
+    new_with_owner(ctx.sender(), signing_scheme, signing_pubkey, ctx)
+}
+
+/// Owner-parameterized constructor for in-package venues whose accounts are
+/// not rooted at the tx sender (see `session_account`).
+public(package) fun new_with_owner(
+    owner: address,
+    signing_scheme: u8,
+    signing_pubkey: vector<u8>,
+    ctx: &mut TxContext,
+): Account {
     assert_scheme_pubkey(signing_scheme, &signing_pubkey);
     let account = Account {
         id: object::new(ctx),
-        owner: ctx.sender(),
+        owner,
         signing_scheme,
         signing_pubkey,
     };
     events::emit_account_created(
         object::id(&account),
-        ctx.sender(),
+        owner,
         signing_scheme,
         signing_pubkey,
     );
     account
+}
+
+/// Sharing a `key`-only object is only permitted in its defining module —
+/// in-package creators (see `session_account`) share through this.
+public(package) fun share_account(account: Account) {
+    transfer::share_object(account);
 }
 
 public fun create_and_share_account(
@@ -124,6 +141,15 @@ public fun set_quote_signing_key(
     ctx: &mut TxContext,
 ) {
     assert!(ctx.sender() == account.owner, errors::not_owner());
+    rotate_signing_key(account, new_scheme, new_pubkey);
+}
+
+/// Validate + rotate the quote-signing key (no auth — callers gate).
+public(package) fun rotate_signing_key(
+    account: &mut Account,
+    new_scheme: u8,
+    new_pubkey: vector<u8>,
+) {
     assert_scheme_pubkey(new_scheme, &new_pubkey);
     account.signing_scheme = new_scheme;
     account.signing_pubkey = new_pubkey;
@@ -165,3 +191,9 @@ public fun balance_of<T>(account: &Account): u64 {
 public fun account_id(account: &Account): ID {
     object::id(account)
 }
+
+/// UID access for in-package custody storage (see `session_account`, which
+/// keeps Positions/receipts as dynamic fields on the account).
+public(package) fun uid(account: &Account): &UID { &account.id }
+
+public(package) fun uid_mut(account: &mut Account): &mut UID { &mut account.id }

@@ -8,10 +8,16 @@
 // Software (extractable) keypairs are deliberately NOT persisted; restoring
 // them would require storing the raw secret, so those sessions die on reload.
 
+export interface PersistedSpendLimit {
+  /** Canonical coin type. */
+  coinType: string;
+  perTx: string;
+  total: string;
+}
+
 export interface PersistedSession {
   packageId: string;
   registryId: string;
-  coinType: string;
   network: string;
   /** Root scheme — determines which revoke path to use. */
   scheme: "solana" | "ethereum";
@@ -24,8 +30,7 @@ export interface PersistedSession {
   identity: number[];
   generation: number;
   expiresAtMs: number;
-  spendCap: string;
-  perTxCap: string;
+  limits: PersistedSpendLimit[];
   allowed: string[];
   /** Present only for non-extractable WebCrypto sessions. */
   cryptoKey?: CryptoKeyPair;

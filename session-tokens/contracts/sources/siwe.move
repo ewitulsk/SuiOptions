@@ -15,6 +15,8 @@ use sui::ecdsa_k1;
 use sui::hash;
 use sui::hex;
 
+use siws_session::message;
+
 /// dApp display fields — MUST match `siwe.ts`.
 const DOMAIN: vector<u8> = b"siws-session.demo";
 const URI: vector<u8> = b"https://siws-session.demo";
@@ -30,7 +32,9 @@ const ETH_SIG_LEN: u64 = 65;
 public fun eth_address_len(): u64 { ETH_ADDRESS_LEN }
 public fun eth_sig_len(): u64 { ETH_SIG_LEN }
 
-/// Sign-in message. See `sdk/src/siwe.ts::serializeSiweSessionMessage`.
+/// Sign-in message. See `sdk/src/siwe.ts::buildSiweSessionMessage`. The
+/// per-type spend limits are rendered as a final `limits` resource so the
+/// root signature covers them.
 public fun build_message(
     registry_domain: address,
     eth_address: vector<u8>,
@@ -40,8 +44,11 @@ public fun build_message(
     expires_at_ms: u64,
     chain_id: u64,
     issued_at: vector<u8>,
+    limit_types: &vector<vector<u8>>,
+    limit_per_tx: &vector<u64>,
+    limit_total: &vector<u64>,
 ): vector<u8> {
-    build(
+    let mut m = build(
         SIGNIN_STATEMENT,
         registry_domain,
         eth_address,
@@ -51,7 +58,10 @@ public fun build_message(
         expires_at_ms,
         chain_id,
         issued_at,
-    )
+    );
+    m.append(b"\n- siws-session://limits/");
+    m.append(message::encode_limits(limit_types, limit_per_tx, limit_total));
+    m
 }
 
 /// Revoke message — same shape, different statement and the `session-key`

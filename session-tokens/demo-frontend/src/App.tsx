@@ -101,7 +101,7 @@ export function App() {
       if (accountId) {
         // Funds live as a Balance<T> inside the shared Account object, not as
         // owned coins — read the object field, not getBalance(owner).
-        setAccountBal(await readAccountBalance(client, accountId));
+        setAccountBal(await readAccountBalance(client, accountId, COIN_TYPE));
         // Coins wallet-transferred to the id sit "at" the address, awaiting a sweep.
         setStray(await strayCoins(client, accountId));
       }
@@ -120,7 +120,6 @@ export function App() {
         network: NETWORK,
         packageId: PACKAGE_ID,
         registryId: REGISTRY_ID,
-        coinType: COIN_TYPE,
         sponsor,
       });
       if (handle) {
@@ -183,10 +182,9 @@ export function App() {
         network: NETWORK,
         packageId: PACKAGE_ID,
         registryId: REGISTRY_ID,
-        coinType: COIN_TYPE,
         sponsor,
-        spendCap: SPEND_CAP,
-        perTxCap: PER_TX_CAP,
+        // Per-coin-type spend limits, covered by the root signature (v2).
+        limits: [{ coinType: COIN_TYPE, perTx: PER_TX_CAP, total: SPEND_CAP }],
         ttlMs: TTL_MS,
         allowed: [WITHDRAW_SELECTOR],
         persist: true,
@@ -209,7 +207,8 @@ export function App() {
       const s = await session.status();
       setStatus(s);
       await refreshBalances(session.accountId);
-      append(`✓ status — spent ${toSui(s.spent)} / remaining ${toSui(s.remaining)} SUI`);
+      const sui = s.limits[0];
+      append(`✓ status — spent ${toSui(sui?.spent ?? 0n)} / remaining ${toSui(sui?.remaining ?? 0n)} SUI`);
     });
 
   const fund = () =>
@@ -357,8 +356,11 @@ export function App() {
             />
             {status && (
               <>
-                <Row k="spent / cap" v={`${toSui(status.spent)} / ${toSui(SPEND_CAP)} SUI`} />
-                <Row k="remaining" v={`${toSui(status.remaining)} SUI`} />
+                <Row
+                  k="spent / cap"
+                  v={`${toSui(status.limits[0]?.spent ?? 0n)} / ${toSui(SPEND_CAP)} SUI`}
+                />
+                <Row k="remaining" v={`${toSui(status.limits[0]?.remaining ?? 0n)} SUI`} />
                 <Row
                   k="generation"
                   v={`cap ${status.generation} · account ${status.accountGeneration}`}
@@ -408,7 +410,7 @@ export function App() {
           </button>
           <p className="muted small">
             account balance: {toSui(accountBal)} SUI · cap budget remaining:{" "}
-            {status ? toSui(status.remaining) : "—"} SUI
+            {status ? toSui(status.limits[0]?.remaining ?? 0n) : "—"} SUI
           </p>
         </section>
       )}

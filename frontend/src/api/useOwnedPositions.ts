@@ -20,17 +20,49 @@ export type OwnedPositionObj = {
 };
 
 /**
- * Lists `Position` objects the wallet currently holds. Empty when `wallet`
+ * Lists `Position` objects the user currently holds. Empty when `wallet`
  * is null or no package id is configured. Mirrors `useOwnedCallOptions`.
+ *
+ * Session logins hold positions in their options Account custody (dynamic
+ * object fields), not at an address — pass `custodyPositionIds` (from the
+ * on-account index) and the hook reads those objects by id instead of
+ * querying address ownership.
  */
-export function useOwnedPositions(wallet: string | null) {
+export function useOwnedPositions(
+  wallet: string | null,
+  custodyPositionIds?: string[] | null,
+) {
   const client = useSuiClient();
+  const custodyKey = custodyPositionIds ? custodyPositionIds.slice().sort().join(",") : null;
   return useQuery<OwnedPositionObj[], Error>({
-    queryKey: ["owned-positions", wallet, PACKAGE_ID],
+    queryKey: ["owned-positions", wallet, PACKAGE_ID, custodyKey],
     enabled: wallet !== null && !!PACKAGE_ID,
     refetchInterval: 5_000,
     queryFn: async () => {
       if (!wallet || !PACKAGE_ID) return [];
+      if (custodyPositionIds) {
+        if (custodyPositionIds.length === 0) return [];
+        const objs = await client.multiGetObjects({
+          ids: custodyPositionIds,
+          options: { showContent: true },
+        });
+        const out: OwnedPositionObj[] = [];
+        for (const item of objs) {
+          const data = item.data;
+          if (!data || !data.content || data.content.dataType !== "moveObject")
+            continue;
+          const fields = (data.content as unknown as {
+            fields: { bucket_id: string; range_start: string; range_end: string };
+          }).fields;
+          out.push({
+            object_id: data.objectId,
+            bucket_id: fields.bucket_id,
+            range_start_raw: fields.range_start,
+            range_end_raw: fields.range_end,
+          });
+        }
+        return out;
+      }
       const structType = `${PACKAGE_ID}::position::Position`;
       const result: OwnedPositionObj[] = [];
       let cursor: string | null | undefined = undefined;

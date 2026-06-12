@@ -10,8 +10,11 @@ export {
 } from "./session.js";
 
 export {
+  canonicalCoinType,
+  encodeLimits,
   serializeSessionMessage,
   serializeRevokeMessage,
+  type SpendLimit,
   type SessionMessageFields,
   type RevokeMessageFields,
 } from "./message.js";
@@ -33,21 +36,28 @@ export {
 } from "./signer.js";
 
 export {
+  GasStationSponsorClient,
   LocalSponsorClient,
-  HttpSponsorClient,
+  SponsorUnavailableError,
+  suiOptionsGasStation,
+  type GasStationAdapter,
+  type GasStationHealth,
   type SponsorClient,
   type LocalSponsorOptions,
-  type HttpSponsorOptions,
   type SponsoredReservation,
+  type SuiOptionsGasStationOptions,
 } from "./sponsor.js";
 
 export {
   fetchGeneration,
   readAccountBalance,
+  readAccountBalances,
   readGeneration,
   readSpent,
   resolveAccountId,
 } from "./reads.js";
+
+export { clearSession } from "./store.js";
 
 export type {
   Network,
@@ -57,4 +67,5 @@ export type {
   SessionConfig,
   CreateSessionOptions,
   SessionStatus,
+  SpendLimitStatus,
 } from "./types.js";

@@ -214,6 +214,188 @@ pub async fn create_and_share_treasury(
     Ok(InitOutcome { treasury_id, digest })
 }
 
+pub struct SessionOutcome {
+    pub package_id: ObjectID,
+    pub registry_id: ObjectID,
+    pub upgrade_cap_id: ObjectID,
+    pub digest: String,
+}
+
+/// Publish the siws_session package and point its Move.toml at the fresh id.
+///
+/// The protocol package depends on siws_session through a local Move.toml
+/// dependency, so the session package's `[addresses] siws_session` entry is
+/// what the protocol build links against. Publishing requires that entry to
+/// be `0x0`; the subsequent protocol build requires it to be the freshly
+/// published id. We therefore rewrite the manifest around the publish:
+///   1. set `siws_session = "0x0"` + drop `published-at`, build, publish
+///   2. on success, write `siws_session = "<new id>"` + `published-at`
+///   3. on failure, restore the original manifest
+pub async fn publish_session_package(
+    client: &SuiClient,
+    signer: &Signer,
+    session_path: &Path,
+    gas_budget: u64,
+) -> Result<SessionOutcome> {
+    let manifest_path = session_path.join("Move.toml");
+    let original = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+
+    std::fs::write(&manifest_path, manifest_for_publish(&original))
+        .with_context(|| format!("rewriting {} for publish", manifest_path.display()))?;
+
+    let result = publish_session_inner(client, signer, session_path, gas_budget).await;
+
+    match &result {
+        Ok(outcome) => {
+            let pkg = outcome.package_id.to_hex_uncompressed();
+            std::fs::write(&manifest_path, manifest_for_published(&original, &pkg))
+                .with_context(|| {
+                    format!("writing published id into {}", manifest_path.display())
+                })?;
+            tracing::info!(
+                manifest = %manifest_path.display(),
+                package = %pkg,
+                "session Move.toml updated to the published id"
+            );
+        }
+        Err(_) => {
+            // Best-effort restore so a failed run leaves the tree clean.
+            let _ = std::fs::write(&manifest_path, &original);
+        }
+    }
+    result
+}
+
+/// `[addresses] siws_session` zeroed + `published-at` dropped.
+fn manifest_for_publish(original: &str) -> String {
+    original
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("published-at"))
+        .map(|l| {
+            if l.trim_start().starts_with("siws_session = \"") {
+                "siws_session = \"0x0\"".to_owned()
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// `[addresses] siws_session` + `published-at` set to the fresh package id.
+fn manifest_for_published(original: &str, package_id: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut wrote_published_at = false;
+    for l in original.lines() {
+        let t = l.trim_start();
+        if t.starts_with("published-at") {
+            out.push(format!("published-at = \"{package_id}\""));
+            wrote_published_at = true;
+        } else if t.starts_with("siws_session = \"") {
+            out.push(format!("siws_session = \"{package_id}\""));
+        } else {
+            out.push(l.to_owned());
+        }
+    }
+    if !wrote_published_at {
+        // Keep `published-at` adjacent to the [package] header block.
+        if let Some(pos) = out.iter().position(|l| l.trim() == "[dependencies]") {
+            out.insert(pos, format!("published-at = \"{package_id}\""));
+            out.insert(pos + 1, String::new());
+        } else {
+            out.push(format!("published-at = \"{package_id}\""));
+        }
+    }
+    out.join("\n") + "\n"
+}
+
+async fn publish_session_inner(
+    client: &SuiClient,
+    signer: &Signer,
+    session_path: &Path,
+    gas_budget: u64,
+) -> Result<SessionOutcome> {
+    tracing::info!(path = %session_path.display(), "compiling siws_session package");
+    let compiled = BuildConfig::new_for_testing()
+        .build(session_path)
+        .with_context(|| {
+            format!("compiling siws_session package at {}", session_path.display())
+        })?;
+    let modules = compiled.get_package_bytes(false);
+    let deps = compiled.get_dependency_storage_package_ids();
+
+    let tx_data = client
+        .transaction_builder()
+        .publish(signer.address, modules, deps, None, gas_budget)
+        .await
+        .context("building siws_session publish tx")?;
+    let signature = Transaction::signature_from_signer(
+        tx_data.clone(),
+        Intent::sui_transaction(),
+        &signer.keypair,
+    );
+    let tx = Transaction::from_data(tx_data, vec![signature]);
+    let opts = SuiTransactionBlockResponseOptions::new()
+        .with_effects()
+        .with_object_changes();
+
+    tracing::info!("submitting siws_session publish tx");
+    let resp = client
+        .quorum_driver_api()
+        .execute_transaction_block(
+            tx,
+            opts,
+            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
+        )
+        .await
+        .context("submitting siws_session publish tx")?;
+    assert_success(&resp)?;
+
+    let digest = resp.digest.to_string();
+    let changes = resp
+        .object_changes
+        .as_ref()
+        .ok_or_else(|| anyhow!("siws_session publish response missing object_changes"))?;
+
+    let mut package_id: Option<ObjectID> = None;
+    let mut registry_id: Option<ObjectID> = None;
+    let mut upgrade_cap_id: Option<ObjectID> = None;
+    for change in changes {
+        match change {
+            ObjectChange::Published { package_id: pid, .. } => package_id = Some(*pid),
+            ObjectChange::Created {
+                object_id,
+                object_type,
+                ..
+            } => {
+                if object_type.address == SUI_FRAMEWORK_ADDRESS
+                    && object_type.module.as_str() == "package"
+                    && object_type.name.as_str() == "UpgradeCap"
+                {
+                    upgrade_cap_id = Some(*object_id);
+                } else if object_type.module.as_str() == "registry"
+                    && object_type.name.as_str() == "Registry"
+                {
+                    registry_id = Some(*object_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(SessionOutcome {
+        package_id: package_id
+            .ok_or_else(|| anyhow!("siws_session publish: no Published change"))?,
+        registry_id: registry_id
+            .ok_or_else(|| anyhow!("siws_session publish: no Registry created"))?,
+        upgrade_cap_id: upgrade_cap_id
+            .ok_or_else(|| anyhow!("siws_session publish: no UpgradeCap created"))?,
+        digest,
+    })
+}
+
 /// Symbol → (module name, decimals). Hardcoded because Move modules name
 /// their OTW after the module in uppercase, so module="tusdc" implies
 /// type="TUSDC". Decimals match the real-world tokens they shadow.

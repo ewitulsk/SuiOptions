@@ -163,6 +163,29 @@ impl DeepBookInfo {
     }
 }
 
+/// The siws_session (session-tokens) package backing wallet-rooted session
+/// sign-in (SIWS/SIWE). Published alongside the protocol package, which
+/// depends on it for the `_with_session` entrypoints. Absent where session
+/// login isn't deployed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTokensInfo {
+    /// Published siws_session package id.
+    pub package_id: String,
+    /// Shared `registry::Registry` object created at publish (also the
+    /// signed-message `domain`).
+    pub registry_id: String,
+}
+
+impl SessionTokensInfo {
+    pub fn package(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.package_id).context("parsing sessionTokens packageId")
+    }
+    pub fn registry(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.registry_id).context("parsing sessionTokens registryId")
+    }
+}
+
 /// On-chain artifacts from publishing the protocol Move package (and,
 /// on testnet, the test-tokens package).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +208,10 @@ pub struct PackageInfo {
     /// deployed (devnet) — consumers must treat it as optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deepbook: Option<DeepBookInfo>,
+    /// siws_session package + registry for wallet-rooted session login.
+    /// Optional — consumers must degrade gracefully where absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_tokens: Option<SessionTokensInfo>,
 }
 
 /// Off-chain token catalog entry. One per supported ticker, replicated
@@ -351,6 +378,7 @@ mod tests {
                 network: "testnet".into(),
                 test_tokens: None,
                 deepbook: None,
+                session_tokens: None,
             },
             token_info: BTreeMap::new(),
         };

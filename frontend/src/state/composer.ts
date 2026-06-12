@@ -5,8 +5,8 @@
 // cursor/queue from the `/buckets` response. The hook keeps a single return
 // shape so UI components don't change.
 import { useEffect, useMemo, useState } from "react";
-import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useQueryClient } from "@tanstack/react-query";
+import { normalizeStructTag } from "@mysten/sui/utils";
 import { useSubmitTransaction } from "../tx/submit";
 import { useBuckets } from "../api/useBuckets";
 import { useCoinBalance } from "../api/useCoinBalance";
@@ -15,6 +15,9 @@ import { useRfq } from "../api/useRfq";
 import { useBulkView } from "../api/useBulkView";
 import { buildBuyTx, buildWriteTx } from "../tx/composer";
 import { formatPrice } from "../format";
+import { addSessionTrade } from "../tx/session";
+import { useUserIdentity } from "../session/identity";
+import { executeWithSession } from "../session/store";
 import type { ToastState } from "../components/Toast";
 import type { Bucket as ApiBucket, Series } from "../api/client";
 import type { RfqQuoteEntry, Side as ProtocolSide } from "../api/quoting";
@@ -166,9 +169,12 @@ export function useComposerState({
   initialIdx = 2,
 }: ComposerStateOpts = {}): ComposerState {
   const [view, setView] = useState<View>(initialView);
-  const account = useCurrentAccount();
-  const connected = !!account;
-  const wallet = account?.address ?? null;
+  // Wallet user or session login — both can trade. For sessions, balances
+  // live in the options Account custody rather than at an address.
+  const identity = useUserIdentity();
+  const sessionState = identity?.kind === "session" ? identity.session : null;
+  const connected = !!identity;
+  const wallet = identity?.address ?? null;
   const [amount, setAmount] = useState(initialAmount);
   const [selectedIdx, setSelectedIdx] = useState(initialIdx);
   const [confirmStage, setConfirmStage] = useState<ConfirmStage>(null);
@@ -252,10 +258,24 @@ export function useComposerState({
 
   // Wallet balances from on-chain `getBalance`, scaled by each side's
   // decimals. Resolve coin types from the selected series.
-  const underlyingBal = useCoinBalance(wallet, series?.asset_coin_type ?? null);
-  const settlementBal = useCoinBalance(wallet, series?.settlement_coin_type ?? null);
-  const btcBalance = scaleRaw(underlyingBal.data ?? "0", series?.asset_decimals ?? null);
-  const usdcBalance = scaleRaw(settlementBal.data ?? "0", series?.settlement_decimals ?? null);
+  const underlyingBal = useCoinBalance(
+    sessionState ? null : wallet,
+    series?.asset_coin_type ?? null,
+  );
+  const settlementBal = useCoinBalance(
+    sessionState ? null : wallet,
+    series?.settlement_coin_type ?? null,
+  );
+  const custodyRaw = (coinType: string | undefined | null): string =>
+    coinType
+      ? (sessionState?.balances[normalizeStructTag(coinType)] ?? 0n).toString()
+      : "0";
+  const btcBalance = sessionState
+    ? scaleRaw(custodyRaw(series?.asset_coin_type), series?.asset_decimals ?? null)
+    : scaleRaw(underlyingBal.data ?? "0", series?.asset_decimals ?? null);
+  const usdcBalance = sessionState
+    ? scaleRaw(custodyRaw(series?.settlement_coin_type), series?.settlement_decimals ?? null)
+    : scaleRaw(settlementBal.data ?? "0", series?.settlement_decimals ?? null);
 
   const settlementSymbol = series?.settlement_symbol ?? "USDC";
 
@@ -419,7 +439,7 @@ export function useComposerState({
   const queryClient = useQueryClient();
 
   const submit = async () => {
-    if (insufficient || !connected || rfqEntries.length === 0 || !series || !account)
+    if (insufficient || !connected || rfqEntries.length === 0 || !series || !wallet)
       return;
     const entry = rfqEntries[0]; // best-price-first
 
@@ -448,24 +468,38 @@ export function useComposerState({
         setTimeout(() => setToast(null), 4000);
         return;
       }
-      const tx =
-        view === "trader"
-          ? buildBuyTx({
-              entry,
-              underlyingCoinType: series.asset_coin_type,
-              settlementCoinType: series.settlement_coin_type,
-              callCoinType,
-              trader: account.address,
-            })
-          : buildWriteTx({
-              entry,
-              underlyingCoinType: series.asset_coin_type,
-              settlementCoinType: series.settlement_coin_type,
-              callCoinType,
-              writer: account.address,
-            });
       setConfirmStage("broadcast");
-      await submitTx(tx);
+      if (sessionState) {
+        // Session login: custody-funded `_with_session` flow, sponsored and
+        // signed by the ephemeral key.
+        await executeWithSession(view === "trader" ? "buying" : "writing", (tx, ctx) =>
+          addSessionTrade(tx, ctx, {
+            entry,
+            underlyingCoinType: series.asset_coin_type,
+            settlementCoinType: series.settlement_coin_type,
+            callCoinType,
+            flow: view === "trader" ? "trader" : "writer",
+          }),
+        );
+      } else {
+        const tx =
+          view === "trader"
+            ? buildBuyTx({
+                entry,
+                underlyingCoinType: series.asset_coin_type,
+                settlementCoinType: series.settlement_coin_type,
+                callCoinType,
+                trader: wallet,
+              })
+            : buildWriteTx({
+                entry,
+                underlyingCoinType: series.asset_coin_type,
+                settlementCoinType: series.settlement_coin_type,
+                callCoinType,
+                writer: wallet,
+              });
+        await submitTx(tx);
+      }
 
       const rangeStart = bucket.cursor + bucket.queued;
       const asset = series.asset_symbol;
@@ -484,7 +518,7 @@ export function useComposerState({
       setConfirmStage("confirmed");
       // Reflect the new position on the Dashboard without a manual refresh.
       queryClient.invalidateQueries({ queryKey: ["buckets"] });
-      queryClient.invalidateQueries({ queryKey: ["positions", account.address] });
+      queryClient.invalidateQueries({ queryKey: ["positions", wallet] });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setToast({ message: `failed · ${message}`, variant: "error" });
@@ -512,7 +546,7 @@ export function useComposerState({
     view,
     setView,
     connected,
-    address: account?.address ?? null,
+    address: wallet,
     spot,
     spotUnavailable,
     amount,

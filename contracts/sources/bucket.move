@@ -87,6 +87,15 @@ public fun writer_flow(): FlowKind { FlowKind::Writer }
 
 public fun trader_flow(): FlowKind { FlowKind::Trader }
 
+/// Enum variants can only be matched in their defining module; out-of-module
+/// venues (see `session_bucket`) branch through this instead.
+public fun is_writer(flow: &FlowKind): bool {
+    match (flow) {
+        FlowKind::Writer => true,
+        FlowKind::Trader => false,
+    }
+}
+
 /// Create a single bucket for the (Underlying, Settlement, Call) triple,
 /// taking ownership of the option coin's `TreasuryCap`.
 ///
@@ -345,7 +354,7 @@ public(package) fun write_collateralized_balance<Underlying, Settlement, Call>(
 /// advance the write cursor, mint the `Position` + `Coin<Call>` pair. The
 /// caller has already performed venue checks (expiry, invalidation,
 /// amount > 0).
-fun do_write<Underlying, Settlement, Call>(
+public(package) fun do_write<Underlying, Settlement, Call>(
     bucket: &mut Bucket<Underlying, Settlement, Call>,
     underlying: Balance<Underlying>,
     ctx: &mut TxContext,
@@ -376,8 +385,7 @@ public(package) fun skim_fee<Settlement>(
     if (fee > 0) {
         treasury::deposit_balance(treasury, premium.split(fee));
     };
-    (premium, fee)
-}
+    (premium, fee)}
 
 public fun exercise<Underlying, Settlement, Call>(
     bucket: &mut Bucket<Underlying, Settlement, Call>,
@@ -546,6 +554,12 @@ public fun revalidate_bucket<Underlying, Settlement, Call>(
     assert!(bucket.invalidated, errors::bucket_not_invalidated());
     bucket.invalidated = false;
     events::emit_bucket_revalidated(object::id(bucket), now, ctx.sender(), reason);
+}
+
+/// Strike cost for exercising `amount` option units, with the bucket's
+/// round-half-up scaling (see `apply_strike`).
+public(package) fun required_settlement<U, S, C>(bucket: &Bucket<U, S, C>, amount: u64): u64 {
+    apply_strike(amount as u128, bucket.strike, bucket.strike_scale)
 }
 
 public fun expiry_ms<U, S, C>(bucket: &Bucket<U, S, C>): u64 { bucket.expiry_ms }
