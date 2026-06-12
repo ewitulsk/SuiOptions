@@ -107,6 +107,14 @@ target "keeper" {
   cache-to   = [{ type = "gha", mode = "max", scope = "keeper" }]
 }
 
+target "balance-monitor" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.balance-monitor"
+  tags       = ["${ECR}/options/balance-monitor:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "balance-monitor" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "balance-monitor" }]
+}
+
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper", "balance-monitor"]
 }
