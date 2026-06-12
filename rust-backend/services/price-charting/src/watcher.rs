@@ -109,6 +109,8 @@ async fn refresh_watched(p: &WatcherParams) -> Result<()> {
                 bucket_id: b.bucket_id.to_hex(),
                 base_decimals: b.asset_decimals.unwrap_or(8),
                 quote_decimals: b.settlement_decimals.unwrap_or(6),
+                base_coin_type: b.call_coin_type.clone(),
+                quote_coin_type: b.settlement_coin_type.clone(),
             },
         );
     }

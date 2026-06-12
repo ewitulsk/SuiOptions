@@ -1,9 +1,11 @@
-// price-charting client (SO-157): REST history + WS live bar updates.
+// price-charting client (SO-157): REST history + WS live updates.
 //
-// `useBars(poolId, interval)` fetches the last ~300 bars, then keeps the tail
-// fresh over the WS — the server re-sends the CURRENT bar on every fill (and
-// on subscribe), so merging is a simple upsert-by-timestamp. On reconnect the
-// REST tail is re-fetched to heal anything missed while disconnected.
+// `useBars(poolId, interval)` fetches the last ~300 bars (trade candles AND
+// the order-book midpoint line), then keeps the tail fresh over the WS — the
+// server re-sends the CURRENT bar on every fill (and on subscribe) and the
+// current bucket's midpoint on every book sample, so merging is a simple
+// upsert-by-timestamp. On reconnect the REST tail is re-fetched to heal
+// anything missed while disconnected.
 
 import { useEffect, useRef, useState } from "react";
 
@@ -18,6 +20,13 @@ export type ChartBar = {
   c: number;
   /** Base volume in display units. */
   v: number;
+};
+
+export type ChartMid = {
+  /** Bucket start, unix ms. */
+  t: number;
+  /** Order-book midpoint in display units (quote per base). */
+  m: number;
 };
 
 export type ChartInterval = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
@@ -35,19 +44,21 @@ const INTERVAL_MS: Record<ChartInterval, number> = {
 
 const HISTORY_BARS = 300;
 
+export type ChartHistory = { bars: ChartBar[]; mids: ChartMid[] };
+
 export async function fetchBars(
   poolId: string,
   interval: ChartInterval,
   signal?: AbortSignal,
-): Promise<ChartBar[]> {
+): Promise<ChartHistory> {
   const base = CHARTS_URL.replace(/\/$/, "");
   const to = Date.now() + INTERVAL_MS[interval];
   const from = to - HISTORY_BARS * INTERVAL_MS[interval];
   const url = `${base}/bars?pool_id=${encodeURIComponent(poolId)}&interval=${interval}&from_ms=${from}&to_ms=${to}`;
   const res = await fetch(url, { signal });
   if (!res.ok) throw new Error(`charts /bars → ${res.status}`);
-  const body = (await res.json()) as { bars: ChartBar[] };
-  return body.bars;
+  const body = (await res.json()) as { bars: ChartBar[]; mids?: ChartMid[] };
+  return { bars: body.bars, mids: body.mids ?? [] };
 }
 
 function wsUrl(): string {
@@ -55,12 +66,25 @@ function wsUrl(): string {
   return `${base}/ws`;
 }
 
+/** Insert-or-replace by bucket timestamp, keeping ascending order. */
+function upsertByT<T extends { t: number }>(prev: T[], next: T): T[] {
+  const i = prev.findIndex((p) => p.t === next.t);
+  if (i >= 0) {
+    const out = prev.slice();
+    out[i] = next;
+    return out;
+  }
+  return [...prev, next].sort((a, b) => a.t - b.t);
+}
+
 /**
- * Live bar series for one (pool, interval). `bars` is sorted ascending by
- * `t`; the last element mutates in place as fills land.
+ * Live series for one (pool, interval). `bars` (trade candles) and `mids`
+ * (order-book midpoint line) are sorted ascending by `t`; the last element
+ * of each mutates in place as fills / book samples land.
  */
 export function useBars(poolId: string | null, interval: ChartInterval) {
   const [bars, setBars] = useState<ChartBar[]>([]);
+  const [mids, setMids] = useState<ChartMid[]>([]);
   const [loading, setLoading] = useState(true);
   // Bump to force a reconnect-and-refetch cycle after a WS drop.
   const [epoch, setEpoch] = useState(0);
@@ -69,6 +93,7 @@ export function useBars(poolId: string | null, interval: ChartInterval) {
   useEffect(() => {
     if (!poolId) {
       setBars([]);
+      setMids([]);
       setLoading(false);
       return;
     }
@@ -77,9 +102,10 @@ export function useBars(poolId: string | null, interval: ChartInterval) {
     setLoading(true);
 
     fetchBars(poolId, interval, abort.signal)
-      .then((b) => {
+      .then((h) => {
         if (alive) {
-          setBars(b);
+          setBars(h.bars);
+          setMids(h.mids);
           setLoading(false);
           retryRef.current = 0;
         }
@@ -100,17 +126,11 @@ export function useBars(poolId: string | null, interval: ChartInterval) {
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data as string);
-          if (msg.type === "bar" && msg.pool_id === poolId && msg.interval === interval) {
-            const bar = msg.bar as ChartBar;
-            setBars((prev) => {
-              const i = prev.findIndex((b) => b.t === bar.t);
-              if (i >= 0) {
-                const next = prev.slice();
-                next[i] = bar;
-                return next;
-              }
-              return [...prev, bar].sort((a, b) => a.t - b.t);
-            });
+          if (msg.pool_id !== poolId || msg.interval !== interval) return;
+          if (msg.type === "bar") {
+            setBars((prev) => upsertByT(prev, msg.bar as ChartBar));
+          } else if (msg.type === "mid") {
+            setMids((prev) => upsertByT(prev, msg.point as ChartMid));
           }
         } catch {
           // non-JSON frame (ping); ignore
@@ -136,5 +156,5 @@ export function useBars(poolId: string | null, interval: ChartInterval) {
     };
   }, [poolId, interval, epoch]);
 
-  return { bars, loading };
+  return { bars, mids, loading };
 }

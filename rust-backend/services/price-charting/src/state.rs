@@ -14,6 +14,9 @@ pub struct PoolMeta {
     pub bucket_id: String,
     pub base_decimals: u8,
     pub quote_decimals: u8,
+    /// Pool coin types — the mid sampler's devInspect needs them as type args.
+    pub base_coin_type: String,
+    pub quote_coin_type: String,
 }
 
 /// One ingested fill, fanned out to WS subscribers as it lands.
@@ -27,6 +30,15 @@ pub struct TradeMsg {
     pub taker_is_bid: bool,
 }
 
+/// One order-book midpoint sample, fanned out to WS subscribers as it lands.
+#[derive(Debug, Clone, Serialize)]
+pub struct MidMsg {
+    pub pool_id: String,
+    pub ts_ms: i64,
+    /// Midpoint in display units (quote per base).
+    pub mid: f64,
+}
+
 pub struct AppState {
     pub repo: Repo,
     /// pool_id → metadata for every pool currently in the tradeable set.
@@ -34,15 +46,19 @@ pub struct AppState {
     pub watched: RwLock<HashMap<String, PoolMeta>>,
     /// Live fill fan-out for the WS layer.
     pub trades_tx: broadcast::Sender<TradeMsg>,
+    /// Live midpoint fan-out for the WS layer.
+    pub mids_tx: broadcast::Sender<MidMsg>,
 }
 
 impl AppState {
     pub fn new(repo: Repo) -> Self {
         let (trades_tx, _) = broadcast::channel(1024);
+        let (mids_tx, _) = broadcast::channel(1024);
         Self {
             repo,
             watched: RwLock::new(HashMap::new()),
             trades_tx,
+            mids_tx,
         }
     }
 }

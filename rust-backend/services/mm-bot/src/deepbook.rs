@@ -98,6 +98,11 @@ pub struct DeepBookQuoterConfig {
     /// Per-side order size in base (call-coin) atomic units, clamped by
     /// inventory and rounded down to the pool's lot.
     pub quote_size: u64,
+    /// Rest the bot's ENTIRE call-coin inventory (BM + wallet sweep) as the
+    /// ask instead of `quote_size`, with the bid sized to the same quantity
+    /// (floored at `quote_size` so a fresh book is still two-sided). A change
+    /// in inventory forces a re-quote so swept fills get listed promptly.
+    pub quote_full_inventory: bool,
     /// Top the BM's settlement balance up from the wallet in chunks of this
     /// many atomic units whenever it can't fund the bid.
     pub tusdc_deposit_chunk: u64,
@@ -115,6 +120,7 @@ impl Default for DeepBookQuoterConfig {
             expiry_cutoff_secs: default_expiry_cutoff_secs(),
             order_lifetime_secs: default_order_lifetime_secs(),
             quote_size: default_quote_size(),
+            quote_full_inventory: false,
             tusdc_deposit_chunk: default_tusdc_deposit_chunk(),
             gas_budget: 200_000_000,
         }
@@ -155,7 +161,22 @@ pub struct QuoterParams {
 #[derive(Debug, Clone, Copy)]
 struct LastQuote {
     mid_raw: u64,
+    /// Ask size targeted at quote time — in full-inventory mode a change
+    /// here (new inventory) forces a re-quote even without drift.
+    ask_target: u64,
     at_ms: u64,
+}
+
+/// Per-side size targets for one refresh. Fixed `quote_size` by default; in
+/// full-inventory mode the ask targets the whole call-coin inventory and the
+/// bid mirrors it ("pair it with the equivalent settlement"), floored at
+/// `quote_size` so an empty-inventory book still bids.
+fn size_targets(cfg: &DeepBookQuoterConfig, call_inventory: u64) -> (u64, u64) {
+    if cfg.quote_full_inventory {
+        (call_inventory, call_inventory.max(cfg.quote_size))
+    } else {
+        (cfg.quote_size, cfg.quote_size)
+    }
 }
 
 fn now_ms() -> u64 {
@@ -408,7 +429,23 @@ async fn quote_one(
     }
     let mid_raw = (ask_raw + bid_raw) / 2;
 
-    // Skip if our standing quotes are fresh and the fair hasn't moved.
+    // Call-coin inventory (BM + wallet) is read before the skip check: in
+    // full-inventory mode the ask target tracks it, so newly swept fills
+    // force a re-quote instead of waiting out max_quote_age.
+    let bm_base =
+        bm_balance(&wrap.client, wrap.signer.address, &p.handles, bm_id, &b.call_coin_type).await?;
+    let wallet_base: u64 = wrap
+        .client
+        .coin_read_api()
+        .get_balance(wrap.signer.address, Some(b.call_coin_type.clone()))
+        .await
+        .map(|bal| bal.total_balance.min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    let ask_inventory = bm_base.saturating_add(wallet_base);
+    let (ask_target, bid_target) = size_targets(&p.cfg, ask_inventory);
+
+    // Skip if our standing quotes are fresh, the fair hasn't moved, and the
+    // target size is what's already resting.
     if let Some(prev) = last.get(&pool_key) {
         let age_ms = now.saturating_sub(prev.at_ms);
         let drift_bps = (mid_raw.abs_diff(prev.mid_raw) as u128)
@@ -417,14 +454,13 @@ async fn quote_one(
             .unwrap_or(u128::MAX);
         if age_ms < p.cfg.max_quote_age_secs.saturating_mul(1_000)
             && drift_bps < p.cfg.requote_drift_bps as u128
+            && ask_target == prev.ask_target
         {
             return Ok(());
         }
     }
 
-    // Inventory: BM balances + wallet sweep/top-up plans.
-    let bm_base =
-        bm_balance(&wrap.client, wrap.signer.address, &p.handles, bm_id, &b.call_coin_type).await?;
+    // Inventory: BM settlement balance + wallet sweep/top-up plans.
     let bm_quote = bm_balance(
         &wrap.client,
         wrap.signer.address,
@@ -437,18 +473,11 @@ async fn quote_one(
     let mut deposits: Vec<(String, u64)> = Vec::new();
     // Sweep the wallet's call coins — they arrive whenever the bot buys
     // options as the Trader MM and are useless sitting in the wallet.
-    let wallet_base: u64 = wrap
-        .client
-        .coin_read_api()
-        .get_balance(wrap.signer.address, Some(b.call_coin_type.clone()))
-        .await
-        .map(|bal| bal.total_balance.min(u64::MAX as u128) as u64)
-        .unwrap_or(0);
     if wallet_base > 0 {
         deposits.push((b.call_coin_type.clone(), wallet_base));
     }
     // Bid funding: top the BM up from the wallet in config-sized chunks.
-    let bid_notional = (p.cfg.quote_size as u128 * bid_raw as u128 / 1_000_000_000) as u64;
+    let bid_notional = (bid_target as u128 * bid_raw as u128 / 1_000_000_000) as u64;
     if bm_quote < bid_notional {
         let wallet_quote: u64 = wrap
             .client
@@ -468,8 +497,7 @@ async fn quote_one(
     }
 
     // Sizes, clamped to post-deposit inventory and the lot grid.
-    let ask_inventory = bm_base.saturating_add(wallet_base);
-    let ask_qty = (p.cfg.quote_size.min(ask_inventory) / lot) * lot;
+    let ask_qty = (ask_target.min(ask_inventory) / lot) * lot;
     let quote_after_deposit = bm_quote.saturating_add(
         deposits
             .iter()
@@ -479,7 +507,7 @@ async fn quote_one(
     );
     let affordable = ((quote_after_deposit as u128 * 1_000_000_000 / bid_raw.max(1) as u128)
         .min(u64::MAX as u128)) as u64;
-    let bid_qty = (p.cfg.quote_size.min(affordable) / lot) * lot;
+    let bid_qty = (bid_target.min(affordable) / lot) * lot;
 
     let plan = QuotePlan {
         ask: (ask_qty >= min_size).then_some(QuoteSide { price_raw: ask_raw, quantity: ask_qty }),
@@ -526,7 +554,7 @@ async fn quote_one(
         digest = %resp.digest,
         "deepbook quotes refreshed"
     );
-    last.insert(pool_key.clone(), LastQuote { mid_raw, at_ms: now });
+    last.insert(pool_key.clone(), LastQuote { mid_raw, ask_target, at_ms: now });
     quoted_pools.insert(
         pool_key,
         (b.call_coin_type.clone(), b.settlement_coin_type.clone()),
@@ -536,6 +564,31 @@ async fn quote_one(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn size_targets_default_mode_is_fixed_quote_size() {
+        let cfg = DeepBookQuoterConfig::default();
+        // Inventory is ignored: both sides target quote_size.
+        assert_eq!(size_targets(&cfg, 0), (cfg.quote_size, cfg.quote_size));
+        assert_eq!(size_targets(&cfg, 99_000_000), (cfg.quote_size, cfg.quote_size));
+    }
+
+    #[test]
+    fn size_targets_full_inventory_lists_everything_and_mirrors_bid() {
+        let cfg = DeepBookQuoterConfig {
+            quote_full_inventory: true,
+            ..DeepBookQuoterConfig::default()
+        };
+        // Ask = whole inventory; bid mirrors it.
+        assert_eq!(size_targets(&cfg, 50_000_000), (50_000_000, 50_000_000));
+        // Empty inventory: no ask, but the bid floors at quote_size so the
+        // book stays two-sided and the bot can still acquire inventory.
+        assert_eq!(size_targets(&cfg, 0), (0, cfg.quote_size));
+        // Inventory below quote_size: ask lists it all, bid keeps the floor.
+        assert_eq!(size_targets(&cfg, 1_000), (1_000, cfg.quote_size));
+    }
+
     #[test]
     fn tick_rounding_moves_away_from_mid() {
         let tick = 100_000u64;

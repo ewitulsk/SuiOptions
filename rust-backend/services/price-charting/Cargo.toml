@@ -12,6 +12,7 @@ token-info-client = { workspace = true }
 
 sui-sdk = { workspace = true }
 sui-types = { workspace = true }
+sui-tx = { workspace = true }
 
 clap = { workspace = true }
 tokio = { workspace = true }

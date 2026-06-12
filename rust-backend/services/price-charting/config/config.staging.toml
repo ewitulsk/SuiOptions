@@ -14,6 +14,7 @@ token_info_url  = "http://token-info:9005"
 
 discovery_interval_secs = 15
 poll_interval_ms        = 2000
+mid_sample_interval_secs = 10
 ttl_hours               = 168
 
 allowed_origins = ["*"]

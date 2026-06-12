@@ -46,3 +46,19 @@ vol_sample_interval_ms = 60_000
 bootstrap_samples      = 24
 bootstrap_interval_secs = 3_600
 fallback_vol           = 0.6
+
+# DeepBook quoting — parity with staging (mm-bot is not in the prod compose
+# yet; see the faucet warning above, this section is dormant until then).
+[deepbook]
+enabled             = true
+quote_interval_secs = 30
+max_quote_age_secs  = 120
+requote_drift_bps   = 50
+expiry_cutoff_secs  = 3600
+order_lifetime_secs = 600
+# Bid-side floor when quote_full_inventory is on.
+quote_size          = 1_000_000
+quote_full_inventory = true
+# BM settlement top-up chunk, atomic (1,000 USDC).
+tusdc_deposit_chunk = 1_000_000_000
+gas_budget          = 200_000_000

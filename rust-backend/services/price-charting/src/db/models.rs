@@ -4,7 +4,7 @@ use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 
-use super::schema::{pool_trades, watch_cursor};
+use super::schema::{pool_mids, pool_trades, watch_cursor};
 
 #[derive(Insertable, Queryable, Debug, Clone)]
 #[diesel(table_name = pool_trades)]
@@ -20,6 +20,17 @@ pub struct TradeRow {
     pub taker_is_bid: bool,
     pub tx_digest: String,
     pub event_index: i64,
+}
+
+#[derive(Insertable, Queryable, Debug, Clone)]
+#[diesel(table_name = pool_mids)]
+pub struct MidRow {
+    pub time: DateTime<Utc>,
+    pub pool_id: String,
+    pub bucket_id: String,
+    pub best_bid: f64,
+    pub best_ask: f64,
+    pub mid: f64,
 }
 
 #[derive(Insertable, Queryable, AsChangeset, Debug, Clone)]

@@ -16,7 +16,7 @@ use api_service_client::ApiServiceClient;
 use price_charting::config::Config;
 use price_charting::db::{establish_pool, repo::Repo, run_migrations};
 use price_charting::state::AppState;
-use price_charting::{router, watcher, Cli};
+use price_charting::{mid_sampler, router, watcher, Cli};
 use sui_sdk::SuiClientBuilder;
 use token_info_client::TokenInfoClient;
 
@@ -40,6 +40,9 @@ async fn main() -> Result<()> {
         .deepbook()
         .context("token-info reports no DeepBook deployment for this network")?;
     let original_package = deepbook.original_package_id.clone();
+    // The CURRENT (upgraded) package id — the mid sampler's dev-inspect
+    // calls execute there, while events keep resolving to the original.
+    let current_package = deepbook.package()?;
 
     let pool = Arc::new(establish_pool(&cfg.database_url, cfg.db_pool_size)?);
     run_migrations(&pool).context("running charts DB migrations")?;
@@ -55,19 +58,26 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState::new(repo));
     watcher::spawn(watcher::WatcherParams {
         state: Arc::clone(&state),
-        sui,
+        sui: sui.clone(),
         api: ApiServiceClient::new(&cfg.api_service_url),
         deepbook_original_package: original_package,
         discovery_interval: Duration::from_secs(cfg.discovery_interval_secs.max(5)),
         poll_interval: Duration::from_millis(cfg.poll_interval_ms.max(500)),
         ttl_hours: cfg.ttl_hours,
     });
+    mid_sampler::spawn(mid_sampler::MidSamplerParams {
+        state: Arc::clone(&state),
+        sui,
+        deepbook_package: current_package,
+        sample_interval: Duration::from_secs(cfg.mid_sample_interval_secs.max(2)),
+    });
     info!(
         environment = %cfg.environment,
         api_service = %cfg.api_service_url,
         rpc = %rpc,
         ttl_hours = cfg.ttl_hours,
-        "watcher running"
+        mid_sample_interval_secs = cfg.mid_sample_interval_secs,
+        "watcher + mid sampler running"
     );
 
     router::serve(cfg.bind_addr, state, &cfg.allowed_origins).await

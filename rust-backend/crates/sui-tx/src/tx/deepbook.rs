@@ -287,6 +287,76 @@ pub async fn bm_balance(
     bcs::from_bytes::<u64>(bytes).context("decoding balance u64")
 }
 
+/// Best bid/ask of one pool, in DeepBook raw price units. `None` on an
+/// empty side — expected for fresh or one-sided books.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TopOfBook {
+    pub best_bid_raw: Option<u64>,
+    pub best_ask_raw: Option<u64>,
+}
+
+/// Read the top of one pool's book via dev-inspect (no gas, no signature).
+/// Uses `pool::get_level2_ticks_from_mid(pool, 1, clock)` rather than
+/// `pool::mid_price`, which aborts when either side is empty.
+pub async fn top_of_book(
+    client: &SuiClient,
+    sender: sui_types::base_types::SuiAddress,
+    deepbook_package: ObjectID,
+    pool_id: ObjectID,
+    base_coin_type: &str,
+    quote_coin_type: &str,
+) -> Result<TopOfBook> {
+    let base_tag = TypeTag::from_str(base_coin_type)
+        .with_context(|| format!("parsing base type {base_coin_type}"))?;
+    let quote_tag = TypeTag::from_str(quote_coin_type)
+        .with_context(|| format!("parsing quote type {quote_coin_type}"))?;
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let pool = pt.obj(shared_object_arg(client, pool_id, false).await?)?;
+    let ticks = pt.pure(&1u64)?;
+    let clock = pt.obj(shared_object_arg(client, SUI_CLOCK_OBJECT_ID, false).await?)?;
+    pt.programmable_move_call(
+        deepbook_package,
+        Identifier::new("pool").unwrap(),
+        Identifier::new("get_level2_ticks_from_mid").unwrap(),
+        vec![base_tag, quote_tag],
+        vec![pool, ticks, clock],
+    );
+    let res = client
+        .read_api()
+        .dev_inspect_transaction_block(
+            sender,
+            TransactionKind::ProgrammableTransaction(pt.finish()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .context("dev-inspecting pool::get_level2_ticks_from_mid")?;
+    if let Some(err) = res.error {
+        bail!("level2 dev-inspect failed: {err}");
+    }
+    // Returns four vectors: bid prices, bid quantities, ask prices, ask
+    // quantities — best-first, so element 0 is the top of each side.
+    let results = res.results.unwrap_or_default();
+    let values = &results
+        .last()
+        .ok_or_else(|| anyhow!("level2 dev-inspect returned no results"))?
+        .return_values;
+    if values.len() < 4 {
+        bail!("level2 dev-inspect returned {} values, expected 4", values.len());
+    }
+    let first_of = |i: usize| -> Result<Option<u64>> {
+        let prices: Vec<u64> =
+            bcs::from_bytes(&values[i].0).context("decoding level2 price vector")?;
+        Ok(prices.first().copied())
+    };
+    Ok(TopOfBook {
+        best_bid_raw: first_of(0)?,
+        best_ask_raw: first_of(2)?,
+    })
+}
+
 /// Atomically refresh the bot's resting quotes on one pool:
 /// deposits (wallet → BM) → owner proof → settle → cancel-all → place bid/ask.
 /// Every submit is dry-run gated; a refused refresh leaves the previous

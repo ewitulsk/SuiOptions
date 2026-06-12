@@ -7086,6 +7086,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sui-sdk",
+ "sui-tx",
  "sui-types",
  "token-info-client",
  "tokio",
