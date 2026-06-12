@@ -153,6 +153,7 @@ export function Composer({ initialView }: Props) {
         {s.view === "writer" ? (
           <WriterPanels
             premium={s.bestPremium}
+            premiumLoading={s.premiumLoading}
             amount={s.amount}
             strike={s.selected.strike}
             assetSymbol={s.selectedAsset}
@@ -161,6 +162,7 @@ export function Composer({ initialView }: Props) {
         ) : (
           <TraderPanels
             premium={s.bestPremium}
+            premiumLoading={s.premiumLoading}
             amount={s.amount}
             strike={s.selected.strike}
             spot={s.spot}

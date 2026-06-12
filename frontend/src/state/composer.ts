@@ -128,6 +128,8 @@ export type ComposerState = {
   setSelectedIdx: (n: number) => void;
   quotes: Quote[];
   bestPremium: number;
+  /** True while a firm RFQ quote for the selected strike is in flight. */
+  premiumLoading: boolean;
   selected: Strike;
   strikes: Strike[];
   insufficient: boolean;
@@ -327,7 +329,7 @@ export function useComposerState({
   );
 
   const rfqSide: ProtocolSide = view; // View ⊂ Side at the value level.
-  const { quotes: rfqEntries, refresh: refreshRfq } = useRfq({
+  const { quotes: rfqEntries, status: rfqStatus, refresh: refreshRfq } = useRfq({
     bucketId: selectedBucketId,
     writeAmountRaw,
     side: rfqSide,
@@ -340,6 +342,10 @@ export function useComposerState({
   );
 
   const bestPremium = quotes[0]?.premium ?? 0;
+
+  // A firm RFQ for the selected strike is in flight — drives the hero-premium
+  // wave loader so we show motion instead of a stale "0" while quoting.
+  const premiumLoading = rfqStatus === "pending";
 
   // The signed RFQ for the selected tile returns a firm premium that
   // supersedes its indicative bulk-view average; show it on that tile once it
@@ -571,6 +577,7 @@ export function useComposerState({
     setSelectedIdx,
     quotes,
     bestPremium,
+    premiumLoading,
     selected,
     strikes,
     insufficient,

@@ -1,4 +1,5 @@
 import { formatPremiumFull, formatPrice } from "../format";
+import { WaveLoader } from "./WaveLoader";
 
 // Token quantities keep up to 4 decimals; USD prices go through formatPrice.
 const fmt = (n: number) =>
@@ -9,13 +10,14 @@ const premiumFull = (n: number) => formatPremiumFull(n, { grouping: true });
 
 type WriterProps = {
   premium: number;
+  premiumLoading: boolean;
   amount: number;
   strike: number;
   assetSymbol: string | null;
   expiryLabel: string;
 };
 
-export function WriterPanels({ premium, amount, strike, assetSymbol, expiryLabel }: WriterProps) {
+export function WriterPanels({ premium, premiumLoading, amount, strike, assetSymbol, expiryLabel }: WriterProps) {
   const asset = assetSymbol ?? "—";
   return (
     <div className="panels">
@@ -24,7 +26,7 @@ export function WriterPanels({ premium, amount, strike, assetSymbol, expiryLabel
           <span className="panel__head-dot"></span>now · premium
         </div>
         <div className="panel__hero">
-          {premiumFull(premium)}
+          {premiumLoading ? <WaveLoader /> : premiumFull(premium)}
           <span className="unit">USDC</span>
         </div>
         <div className="panel__sub">
@@ -65,6 +67,7 @@ export function WriterPanels({ premium, amount, strike, assetSymbol, expiryLabel
 
 type TraderProps = {
   premium: number;
+  premiumLoading: boolean;
   amount: number;
   strike: number;
   spot: number;
@@ -72,7 +75,7 @@ type TraderProps = {
   expiryLabel: string;
 };
 
-export function TraderPanels({ premium, amount, strike, spot, assetSymbol, expiryLabel }: TraderProps) {
+export function TraderPanels({ premium, premiumLoading, amount, strike, spot, assetSymbol, expiryLabel }: TraderProps) {
   const asset = assetSymbol ?? "—";
   const breakeven = strike + premium / amount;
   const upside = Math.max(0, (spot * 1.2 - strike) * amount - premium);
@@ -84,7 +87,7 @@ export function TraderPanels({ premium, amount, strike, spot, assetSymbol, expir
             <span className="panel__head-dot"></span>you pay · now
           </div>
           <div className="panel__hero">
-            −{premiumFull(premium)}
+            {premiumLoading ? <WaveLoader /> : <>−{premiumFull(premium)}</>}
             <span className="unit">USDC</span>
           </div>
           <div className="panel__sub">
