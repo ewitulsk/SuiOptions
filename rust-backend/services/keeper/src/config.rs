@@ -51,6 +51,9 @@ fn default_update_fee_mist() -> u64 {
 fn default_iv_ratio() -> f64 {
     1.15
 }
+fn default_target_delta() -> f64 {
+    0.10
+}
 fn default_vol_window_days() -> u32 {
     30
 }
@@ -124,6 +127,13 @@ pub struct VaultEntry {
     /// IV ≈ realized σ × this ratio (calibrated: BTC 1.19, ETH 1.08).
     #[serde(default = "default_iv_ratio")]
     pub iv_ratio: f64,
+
+    /// Strike-selection delta target. 0.10 is the doc 04 design point;
+    /// the SUI launch memo (guide doc 08) picks 0.20 — at 0.10 the grid
+    /// snap-up plus the auction haircut leaves too little premium above
+    /// the reserve floor.
+    #[serde(default = "default_target_delta")]
+    pub target_delta: f64,
 
     /// σ when the Benchmarks fetch fails. No fallback ⇒ the vault skips
     /// strike selection that tick.

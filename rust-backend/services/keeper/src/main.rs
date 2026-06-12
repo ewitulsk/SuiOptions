@@ -39,9 +39,6 @@ use keeper::strike::{pick_bucket, BucketCandidate};
 use keeper::submit::{classify, execute, execute_select_bucket, ErrorClass, SubmitCtx};
 use keeper::Cli;
 
-/// The keeper targets the vault's designed 0.10Δ strike (doc 04 §3).
-const TARGET_DELTA: f64 = 0.10;
-
 /// How far back to scan RfqCreated events for live auctions: auctions
 /// can't outlive a round, so two round lengths is generous.
 const RFQ_LOOKBACK_ROUNDS: u64 = 2;
@@ -303,7 +300,7 @@ async fn select_bucket_or_finalize(
         &view.config,
         meta.underlying_decimals,
         meta.settlement_decimals,
-        TARGET_DELTA,
+        meta.entry.target_delta,
     );
 
     match pick {

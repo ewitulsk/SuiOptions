@@ -28,6 +28,8 @@ settlement_price_info = "0x00000000000000000000000000000000000000000000000000000
 # deep_funding_coin = "0x…"
 # deep_fee_per_swap = 1000000
 iv_ratio = 1.15        # calibrated: BTC 1.19, ETH 1.08 (backtester, Jun 2026)
+target_delta = 0.20    # launch memo (guide doc 08): 0.10 leaves too little
+                       # premium above the reserve after snap-up + haircut
 sigma_fallback = 0.85
 vol_window_days = 30
 
