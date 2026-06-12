@@ -378,41 +378,60 @@ pub async fn settle_rfq_expired(
     submit_ptb(client, signer, pt, gas_budget, "vault::settle_rfq_expired").await
 }
 
-/// `vault::fill_proceeds_swap`: buy the vault's settlement proceeds for
-/// underlying at the Pyth-bounded price; the purchased `Coin<Settlement>`
-/// transfers to the signer.
+/// `vault::swap_proceeds`: convert the vault's settlement proceeds to
+/// underlying through the config-pinned DeepBook pool, price-bounded by
+/// Pyth. `deep_funding`: an owned `Coin<DEEP>` to pay DeepBook's taker
+/// fee from (`None` ⇒ a zero coin — fine on whitelisted pools); the
+/// unused remainder transfers back to the signer.
 #[allow(clippy::too_many_arguments)]
-pub async fn fill_proceeds_swap(
+pub async fn swap_proceeds(
     client: &SuiClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
-    funding_coin: ObjectID,
-    underlying_in: u64,
-    max_settlement_out: u64,
+    pool_id: ObjectID,
+    deep_type: &str,
+    deep_funding: Option<(ObjectID, u64)>,
+    max_settlement_in: u64,
     prices: &PriceInfoRefs,
     gas_budget: u64,
 ) -> Result<SuiTransactionBlockResponse> {
     info!(
         vault = %refs.vault_id,
-        underlying_in,
-        max_settlement_out,
-        "building vault::fill_proceeds_swap PTB"
+        %pool_id,
+        max_settlement_in,
+        "building vault::swap_proceeds PTB"
     );
+    let deep_tag = TypeTag::from_str(deep_type)
+        .with_context(|| format!("parsing DEEP type {deep_type}"))?;
     let mut pt = ProgrammableTransactionBuilder::new();
     let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
-    let funding = pt.obj(owned_object_arg(client, funding_coin).await?)?;
-    let amount = pt.pure(&underlying_in)?;
-    let max_out = pt.pure(&max_settlement_out)?;
+    let pool = pt.obj(shared_object_arg(client, pool_id, true).await?)?;
+
+    let deep_fee = match deep_funding {
+        Some((coin_id, amount)) => {
+            let funding = pt.obj(owned_object_arg(client, coin_id).await?)?;
+            let amount = pt.pure(&amount)?;
+            pt.command(Command::SplitCoins(funding, vec![amount]))
+        }
+        None => pt.programmable_move_call(
+            sui_types::SUI_FRAMEWORK_PACKAGE_ID,
+            Identifier::new("coin").unwrap(),
+            Identifier::new("zero").unwrap(),
+            vec![deep_tag],
+            vec![],
+        ),
+    };
+
+    let max_in = pt.pure(&max_settlement_in)?;
     let (u_info, s_info) = prices.args(client, &mut pt).await?;
     let clock = clock_arg(&mut pt)?;
-    let payment = pt.command(Command::SplitCoins(funding, vec![amount]));
-    let bought = vault_call(
+    let deep_remainder = vault_call(
         &mut pt,
         refs.package,
-        "fill_proceeds_swap",
+        "swap_proceeds",
         refs.tags()?,
-        vec![vault, payment, max_out, u_info, s_info, clock],
+        vec![vault, pool, deep_fee, max_in, u_info, s_info, clock],
     );
-    transfer_to_sender(&mut pt, signer, bought)?;
-    submit_ptb(client, signer, pt, gas_budget, "vault::fill_proceeds_swap").await
+    transfer_to_sender(&mut pt, signer, deep_remainder)?;
+    submit_ptb(client, signer, pt, gas_budget, "vault::swap_proceeds").await
 }

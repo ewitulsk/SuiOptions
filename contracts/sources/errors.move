@@ -54,3 +54,4 @@ public fun oracle_confidence(): u64 { 51 }
 public fun oracle_price_invalid(): u64 { 52 }
 public fun vault_proceeds_unswapped(): u64 { 53 }
 public fun vault_config_invalid(): u64 { 54 }
+public fun vault_wrong_pool(): u64 { 55 }

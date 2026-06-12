@@ -17,7 +17,7 @@ public crank that `vault.move` validates on-chain:
 - the auction reserve floor is derived from Pyth inside
   `vault::open_rfq`,
 - the proceeds-swap price is Pyth-bounded inside
-  `vault::fill_proceeds_swap`,
+  `vault::swap_proceeds`,
 - everything else (`crank_redeem`, `settle_rfq`, `finalize_round`) has
   no degrees of freedom at all.
 
@@ -90,7 +90,7 @@ enum Action {
     CrankRedeem   { vault, bucket },             // batch ≤ K per PTB
     SettleRfq     { vault, rfq, bucket },
     SettleRfqExpired { vault, rfq, bucket },     // bucket died mid-auction
-    FillProceedsSwap { vault, max_settlement_out }, // see §8
+    SwapProceeds  { vault, pool, max_settlement_in }, // see §8
     FinalizeRound { vault },
     SelectBucket  { vault, bucket },             // chosen by strike.rs
     OpenRfq       { vault, bucket, slice_amount },
@@ -111,7 +111,7 @@ if settling || now ≥ current_expiry_ms (incl. the ==0 idle case):
             deadline passed             → SettleRfq
         (auctions can't be live here — create() enforced
          deadline + buffer ≤ expiry — but handle it anyway)
-    elif proceeds_settlement > 0        → FillProceedsSwap   (§8)
+    elif proceeds_settlement > 0        → SwapProceeds       (§8)
     else                                → FinalizeRound
 else (active, pre-expiry):
     if current_bucket.is_none()         → SelectBucket(strike.rs pick)
@@ -163,7 +163,7 @@ default against `out/sui_launch` before launch.
 
 ## 7. Pyth price updates (`pyth.rs`) — the one new technical piece
 
-`select_bucket`, `open_rfq`, `fill_proceeds_swap`, and `finalize_round`
+`select_bucket`, `open_rfq`, `swap_proceeds`, and `finalize_round`
 take two `&PriceInfoObject`s and enforce `max_price_age_secs` (config:
 60s). The keeper must prepend a price update **in the same PTB**:
 
@@ -185,20 +185,24 @@ reuse it later. Object IDs needed in config: `pyth_state_id`,
 (discoverable once from the feed ids via Pyth's state table; pin them in
 config like the scheduler pins feeds).
 
-## 8. Proceeds conversion (`FillProceedsSwap`)
+## 8. Proceeds conversion (`SwapProceeds`)
 
-Until the DeepBook adapter lands, conversion is
-`vault::fill_proceeds_swap`: an open, Pyth-bounded atomic swap — the
-filler pays underlying worth ≥ the Pyth cross less
-`max_swap_slippage_bps` and receives the vault's settlement balance.
-**The keeper is the filler of last resort**: it should hold (or acquire
-via its operator) a small underlying float, fill the swap itself, and
-recycle the received USDC. `finalize_round` refuses to run with
-unswapped proceeds (`vault_proceeds_unswapped`), so this action gates
-round turnover. Config: `max_fill_per_tx`, `fill_float_warning`
-threshold metric. When the DeepBook adapter ships, this becomes "swap
-USDC back via the pool" instead of "hold a float" — the planner action
-is unchanged.
+`vault::swap_proceeds` is a real DeepBook v3 market order: the vault
+sells its settlement proceeds for underlying against the **config-pinned
+`Pool<Underlying, Settlement>`** (e.g. the canonical SUI/USDC pool — not
+the call-coin pools), and the executed price must clear the Pyth cross
+less `max_swap_slippage_bps` or the call aborts. Partial fills at a fair
+price succeed (the bound applies to the executed portion); an empty book
+aborts with `vault_proceeds_unswapped` — retry next tick. Because
+`finalize_round` refuses unswapped proceeds, this action gates round
+turnover.
+
+The keeper supplies the **DEEP fee budget**: pass an owned `Coin<DEEP>`
+(builder arg `deep_funding`; the unused remainder comes straight back),
+or `None` for a zero coin on whitelisted pools. Keep a small DEEP
+balance funded and alert on `deep_balance_low`. The pool object id comes
+from config and must match the vault's pinned `deepbook_pool_id`
+(`vault_wrong_pool` otherwise).
 
 ## 9. Vol source for `iv_ratio`
 
@@ -242,6 +246,8 @@ settlement = "USDC"
 call_type_source = "api"      # bucket call types come from /buckets
 underlying_price_info = "0x…" # PriceInfoObject ids
 settlement_price_info = "0x…"
+deepbook_pool_id = "0x…"      # must equal the vault's pinned pool
+deep_coin_type = "0x…::deep::DEEP"
 iv_ratio = 1.15
 sigma_fallback = 0.85
 [vaults.slicing]
@@ -283,7 +289,7 @@ backlog, time-to-finalize per round, grid-coverage misses, per-round
 
 Already done, do not rebuild: the PTB builders
 (`crates/sui-tx/src/tx/vault.rs` — `crank_redeem`, `select_bucket`,
-`open_rfq`, `settle_rfq`, `settle_rfq_expired`, `fill_proceeds_swap`,
+`open_rfq`, `settle_rfq`, `settle_rfq_expired`, `swap_proceeds`,
 `finalize_round`, plus `PriceInfoRefs`/`VaultRefs`), the strike math
 (`pricing::{strike_for_delta, grid}`), and the vol fetch
 (`option_scheduler::sigma`).

@@ -53,6 +53,7 @@ fun default_config(): vault::VaultConfig {
         500, // 5% min increment
         false, // hold_premium_in_settlement
         50, // 50 bps swap slippage
+        option::none(), // no DeepBook pool: tests use the injected-swap hook
         b"underlying-feed",
         b"settlement-feed",
         60,
@@ -278,7 +279,7 @@ fun test_full_round_lifecycle_with_partial_exercise() {
     // fair = round(10_030_000 / 47_619) = 211; min after 50 bps = 209.
     ts::next_tx(&mut scenario, keeper());
     let mut v = take_vault(&scenario);
-    let bought = vault::fill_proceeds_swap_with_spot_for_testing<BTC, USDC, VSHARE>(
+    let bought = vault::record_swap_for_testing<BTC, USDC, VSHARE>(
         &mut v,
         coin::mint_for_testing<BTC>(210, scenario.ctx()),
         10_030_000,
@@ -454,7 +455,7 @@ fun test_fee_cap_clamps_to_round_profit() {
     // filler pays fair (min after 50 bps = 995).
     ts::next_tx(&mut scenario, keeper());
     let mut v = take_vault(&scenario);
-    let bought = vault::fill_proceeds_swap_with_spot_for_testing<BTC, USDC, VSHARE>(
+    let bought = vault::record_swap_for_testing<BTC, USDC, VSHARE>(
         &mut v,
         coin::mint_for_testing<BTC>(1_000, scenario.ctx()),
         47_619_000,
@@ -807,6 +808,7 @@ fun test_config_hard_caps_enforced() {
         500,
         false,
         50,
+        option::none(),
         b"underlying-feed",
         b"settlement-feed",
         60,
@@ -851,6 +853,7 @@ fun test_config_update_applies_at_next_finalize() {
         500,
         false,
         50,
+        option::none(),
         b"underlying-feed",
         b"settlement-feed",
         60,
@@ -889,4 +892,217 @@ use fun burn_receipt as DepositReceipt.burn_for_testing;
 /// Park an unwanted receipt (tests that don't exercise the claim path).
 fun burn_receipt(receipt: DepositReceipt) {
     transfer::public_transfer(receipt, @0x0);
+}
+
+// ═══════════════ real DeepBook proceeds swap (doc 03 §7.3) ═══════════════
+
+use deepbook::balance_manager_tests::USDC as DBUSDC;
+use deepbook::pool::Pool;
+use deepbook::pool_tests;
+use sui::sui::SUI;
+use token::deep::DEEP;
+
+// The DeepBook test book: 1000 base ask @ 2.0, 1000 base bid @ 1.0.
+// Spot pinned to the ask so the executed price exactly meets fair value.
+const SPOT2: u128 = 2_000_000_000_000;
+
+fun deepbook_config(pool_id: Option<ID>): vault::VaultConfig {
+    vault::new_config(
+        200,
+        1_000,
+        WEEK_MS,
+        12 * 60 * 60 * 1_000,
+        300,
+        6_000,
+        3 * DAY_MS,
+        9 * DAY_MS,
+        10,
+        1_000_000_000_000,
+        4,
+        400_000,
+        60_000,
+        120_000,
+        100_000,
+        500,
+        false,
+        50,
+        pool_id,
+        b"underlying-feed",
+        b"settlement-feed",
+        60,
+        100,
+        9,
+        9,
+    )
+}
+
+#[test]
+fun test_swap_proceeds_through_real_deepbook_pool() {
+    let mut scenario = ts::begin(th::admin_addr());
+    // A real DeepBook v3 pool (registry, balance manager, reference pool,
+    // resting orders) via deepbook's own test harness.
+    let pool_id = pool_tests::setup_everything<SUI, DBUSDC, SUI, DEEP>(&mut scenario);
+
+    let mut clock = th::init_protocol(&mut scenario);
+    // Strike 2.1 (21 at scale 1): 5% over the 2.0 spot, inside the band.
+    th::new_bucket<SUI, DBUSDC, CALL>(&mut scenario, EXPIRY_MS, 21, 1);
+
+    ts::next_tx(&mut scenario, th::admin_addr());
+    let cap = th::take_admin_cap(&scenario);
+    let tcap = coin::create_treasury_cap_for_testing<VSHARE>(scenario.ctx());
+    vault::create_vault<SUI, DBUSDC, VSHARE>(
+        &cap,
+        tcap,
+        deepbook_config(option::some(pool_id)),
+        scenario.ctx(),
+    );
+    th::return_admin_cap(&scenario, cap);
+
+    // Genesis: 1000 SUI deposited and activated.
+    ts::next_tx(&mut scenario, user_a());
+    let mut v = ts::take_shared<Vault<SUI, DBUSDC, VSHARE>>(&scenario);
+    let receipt = vault::deposit(
+        &mut v,
+        coin::mint_for_testing<SUI>(1_000_000_000_000, scenario.ctx()),
+        scenario.ctx(),
+    );
+    transfer::public_transfer(receipt, user_a());
+    let mut treasury = th::take_treasury(&scenario);
+    vault::finalize_round_with_spot_for_testing(
+        &mut v,
+        &mut treasury,
+        SPOT2,
+        SPOT_SCALE,
+        &clock,
+        scenario.ctx(),
+    );
+    ts::return_shared(treasury);
+
+    // Sell a 600-SUI slice; the MM wins at 20 USDC.
+    let b = ts::take_shared<Bucket<SUI, DBUSDC, CALL>>(&scenario);
+    vault::select_bucket_with_spot_for_testing(&mut v, &b, SPOT2, SPOT_SCALE, &clock);
+    let rfq_id = vault::open_rfq_with_spot_for_testing(
+        &mut v,
+        &b,
+        600_000_000_000,
+        SPOT2,
+        SPOT_SCALE,
+        &clock,
+        scenario.ctx(),
+    );
+    ts::return_shared(b);
+    ts::return_shared(v);
+
+    ts::next_tx(&mut scenario, mm());
+    let mut a = ts::take_shared_by_id<RfqAuction<SUI, DBUSDC, CALL>>(&scenario, rfq_id);
+    rfq::bid(
+        &mut a,
+        coin::mint_for_testing<DBUSDC>(20_000_000_000, scenario.ctx()),
+        mm(),
+        &clock,
+        scenario.ctx(),
+    );
+    ts::return_shared(a);
+
+    clock.set_for_testing(400_000);
+    ts::next_tx(&mut scenario, keeper());
+    let mut v = ts::take_shared<Vault<SUI, DBUSDC, VSHARE>>(&scenario);
+    let a = ts::take_shared_by_id<RfqAuction<SUI, DBUSDC, CALL>>(&scenario, rfq_id);
+    let mut b = ts::take_shared<Bucket<SUI, DBUSDC, CALL>>(&scenario);
+    let config = th::take_config(&scenario);
+    let mut treasury = th::take_treasury(&scenario);
+    vault::settle_rfq(&mut v, a, &mut b, &config, &mut treasury, &clock, scenario.ctx());
+    ts::return_shared(b);
+    ts::return_shared(config);
+    ts::return_shared(treasury);
+    assert!(vault::proceeds_settlement(&v) == 20_000_000_000, 0);
+
+    // The real swap: 20 USDC of proceeds against the live book's 2.0 ask
+    // → 10 SUI, exactly the Pyth fair value at SPOT2 (bound satisfied).
+    let mut pool = ts::take_shared_by_id<Pool<SUI, DBUSDC>>(&scenario, pool_id);
+    let deep_remainder = vault::swap_proceeds_with_spot_for_testing(
+        &mut v,
+        &mut pool,
+        coin::mint_for_testing<DEEP>(1_000_000_000_000, scenario.ctx()),
+        20_000_000_000,
+        SPOT2,
+        SPOT_SCALE,
+        &clock,
+        scenario.ctx(),
+    );
+    ts::return_shared(pool);
+    // DeepBook charged its taker fee from the DEEP budget.
+    assert!(deep_remainder.value() < 1_000_000_000_000, 0);
+    coin::burn_for_testing(deep_remainder);
+
+    assert!(vault::proceeds_settlement(&v) == 0, 0);
+    // 400 SUI unsold + 10 SUI bought back.
+    assert!(vault::deployable(&v) == 410_000_000_000, 0);
+    ts::return_shared(v);
+
+    // The round still closes: expiry → redeem → finalize, pps reflects
+    // the swapped premium.
+    clock.set_for_testing(EXPIRY_MS);
+    ts::next_tx(&mut scenario, keeper());
+    let mut v = ts::take_shared<Vault<SUI, DBUSDC, VSHARE>>(&scenario);
+    let mut b = ts::take_shared<Bucket<SUI, DBUSDC, CALL>>(&scenario);
+    vault::crank_redeem(&mut v, &mut b, &clock, scenario.ctx());
+    ts::return_shared(b);
+    let mut treasury = th::take_treasury(&scenario);
+    vault::finalize_round_with_spot_for_testing(
+        &mut v,
+        &mut treasury,
+        SPOT2,
+        SPOT_SCALE,
+        &clock,
+        scenario.ctx(),
+    );
+    ts::return_shared(treasury);
+    assert!(vault::round(&v) == 2, 0);
+    assert!(vault::pps_at(&v, 1) > PPS_SCALE, 0); // premium net of fees
+    ts::return_shared(v);
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = 55, location = options_protocol::vault)] // vault_wrong_pool
+fun test_swap_proceeds_rejects_unpinned_pool() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let pool_id = pool_tests::setup_everything<SUI, DBUSDC, SUI, DEEP>(&mut scenario);
+
+    let clock = th::init_protocol(&mut scenario);
+    ts::next_tx(&mut scenario, th::admin_addr());
+    let cap = th::take_admin_cap(&scenario);
+    let tcap = coin::create_treasury_cap_for_testing<VSHARE>(scenario.ctx());
+    // Vault with NO pinned pool: every swap attempt must be rejected,
+    // whatever pool the caller routes in.
+    vault::create_vault<SUI, DBUSDC, VSHARE>(
+        &cap,
+        tcap,
+        deepbook_config(option::none()),
+        scenario.ctx(),
+    );
+    th::return_admin_cap(&scenario, cap);
+
+    ts::next_tx(&mut scenario, keeper());
+    let mut v = ts::take_shared<Vault<SUI, DBUSDC, VSHARE>>(&scenario);
+    let mut pool = ts::take_shared_by_id<Pool<SUI, DBUSDC>>(&scenario, pool_id);
+    let deep_remainder = vault::swap_proceeds_with_spot_for_testing(
+        &mut v,
+        &mut pool,
+        coin::zero<DEEP>(scenario.ctx()),
+        1,
+        SPOT2,
+        SPOT_SCALE,
+        &clock,
+        scenario.ctx(),
+    );
+    coin::burn_for_testing(deep_remainder);
+    ts::return_shared(pool);
+    ts::return_shared(v);
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
 }
