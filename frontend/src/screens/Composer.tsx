@@ -159,6 +159,7 @@ export function Composer({ initialView }: Props) {
             amount={s.amount}
             strike={s.selected.strike}
             assetSymbol={s.selectedAsset}
+            expiryLabel={expiryLabel(s)}
           />
         ) : (
           <TraderPanels
@@ -167,6 +168,7 @@ export function Composer({ initialView }: Props) {
             strike={s.selected.strike}
             spot={s.spot}
             assetSymbol={s.selectedAsset}
+            expiryLabel={expiryLabel(s)}
           />
         )}
 
