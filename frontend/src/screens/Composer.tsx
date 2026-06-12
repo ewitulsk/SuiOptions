@@ -54,7 +54,6 @@ export function Composer({ initialView }: Props) {
       <div className="app__wrap">
         <BucketBar
           symbol={s.selectedAsset}
-          capPct={43}
           assets={s.assets}
           selectedAsset={s.selectedAsset}
           onSelectAsset={s.selectAsset}
