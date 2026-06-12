@@ -18,6 +18,7 @@ import { toBase64 } from "@mysten/sui/utils";
 
 import { requestSponsorship } from "../api/sponsor";
 import { isSponsorEnabled } from "../state/sponsor";
+import { posthog } from "../lib/posthog";
 
 export function useSubmitTransaction() {
   const account = useCurrentAccount();
@@ -53,7 +54,9 @@ export function useSubmitTransaction() {
       });
     } catch (err) {
       // Graceful fallback to wallet-paid: gas station down, balance too low, or
-      // the tx targets a non-allow-listed package (e.g. faucet/admin).
+      // the tx targets a non-allow-listed package (e.g. faucet/admin). The
+      // fallback hides gas-station degradation from users, so report it.
+      posthog.captureException(err, { source: "sponsorship_fallback" });
       console.warn("sponsorship failed, falling back to wallet-paid:", err);
       await signAndExecute({ transaction: tx });
     }

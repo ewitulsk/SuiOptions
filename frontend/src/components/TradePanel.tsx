@@ -12,6 +12,7 @@ import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useQueryClient } from "@tanstack/react-query";
 
 import type { Bucket, Series } from "../api/client";
+import { posthog } from "../lib/posthog";
 import {
   useBalanceManager,
   useBmBalances,
@@ -107,14 +108,25 @@ export function TradePanel({ bucket, series }: Props) {
     return { cost, partial: false };
   }, [book.data, side, qty]);
 
-  const run = async (label: string, build: () => Parameters<typeof submitTx>[0]) => {
+  const run = async (
+    label: string,
+    build: () => Parameters<typeof submitTx>[0],
+    event?: { name: string; props?: Record<string, unknown> },
+  ) => {
     setBusy(true);
     setNote(null);
     try {
       await submitTx(build());
+      if (event) {
+        posthog.capture(event.name, { ...event.props, wallet_address: addr });
+      }
       setNote(`${label} submitted`);
       refreshAll();
     } catch (e) {
+      posthog.captureException(e, {
+        action: label,
+        wallet_address: addr,
+      });
       setNote(`${label} failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
@@ -138,11 +150,13 @@ export function TradePanel({ bucket, series }: Props) {
           className="cta"
           style={{ width: "auto", padding: "10px 18px" }}
           disabled={!account || busy}
-          onClick={() =>
-            run("enable trading", () => buildEnableTradingTx()).then(() =>
+          onClick={() => {
+            run("enable trading", () => buildEnableTradingTx(), {
+              name: "deepbook_trading_enabled",
+            }).then(() =>
               queryClient.invalidateQueries({ queryKey: ["deepbook-bm"] }),
-            )
-          }
+            );
+          }}
         >
           {!account ? "Connect to trade" : busy ? "Setting up…" : "Enable trading"}
         </button>
@@ -167,17 +181,30 @@ export function TradePanel({ bucket, series }: Props) {
             return { type: pool.quoteCoinType, amount: cap > bmQuote ? cap - bmQuote : 0n };
           })()
         : { type: pool.baseCoinType, amount: qtyRaw > bmBase ? qtyRaw - bmBase : 0n };
-    void run(`market ${side}`, () =>
-      buildPlaceMarketOrderTx({
-        poolId: pool.poolId,
-        bmId,
-        baseCoinType: pool.baseCoinType,
-        quoteCoinType: pool.quoteCoinType,
-        isBid: side === "buy",
-        qtyRaw,
-        depositCoinType: deposit.type,
-        depositAmount: deposit.amount,
-      }),
+    void run(
+      `market ${side}`,
+      () =>
+        buildPlaceMarketOrderTx({
+          poolId: pool.poolId,
+          bmId,
+          baseCoinType: pool.baseCoinType,
+          quoteCoinType: pool.quoteCoinType,
+          isBid: side === "buy",
+          qtyRaw,
+          depositCoinType: deposit.type,
+          depositAmount: deposit.amount,
+        }),
+      {
+        name: "deepbook_order_placed",
+        props: {
+          order_type: "market",
+          side,
+          qty,
+          estimated_cost: marketEstimate.cost,
+          slippage_pct: slippagePct,
+          pool_id: pool.poolId,
+        },
+      },
     );
   };
 
@@ -192,18 +219,31 @@ export function TradePanel({ bucket, series }: Props) {
             return { type: pool.quoteCoinType, amount: need > bmQuote ? need - bmQuote : 0n };
           })()
         : { type: pool.baseCoinType, amount: qtyRaw > bmBase ? qtyRaw - bmBase : 0n };
-    void run(`limit ${side}`, () =>
-      buildPlaceLimitOrderTx({
-        poolId: pool.poolId,
-        bmId,
-        baseCoinType: pool.baseCoinType,
-        quoteCoinType: pool.quoteCoinType,
-        isBid: side === "buy",
-        qtyRaw,
-        priceRaw,
-        depositCoinType: deposit.type,
-        depositAmount: deposit.amount,
-      }),
+    void run(
+      `limit ${side}`,
+      () =>
+        buildPlaceLimitOrderTx({
+          poolId: pool.poolId,
+          bmId,
+          baseCoinType: pool.baseCoinType,
+          quoteCoinType: pool.quoteCoinType,
+          isBid: side === "buy",
+          qtyRaw,
+          priceRaw,
+          depositCoinType: deposit.type,
+          depositAmount: deposit.amount,
+        }),
+      {
+        name: "deepbook_order_placed",
+        props: {
+          order_type: "limit",
+          side,
+          qty,
+          limit_price: limitPrice,
+          notional: qty * limitPrice,
+          pool_id: pool.poolId,
+        },
+      },
     );
   };
 
@@ -375,7 +415,12 @@ export function TradePanel({ bucket, series }: Props) {
             {(openOrders.data?.length ?? 0) > 0 && (
               <button
                 disabled={busy}
-                onClick={() => void run("cancel all", () => buildCancelAllTx(poolRef))}
+                onClick={() =>
+                  void run("cancel all", () => buildCancelAllTx(poolRef), {
+                    name: "deepbook_order_cancelled",
+                    props: { scope: "all", pool_id: pool.poolId },
+                  })
+                }
                 style={{ fontSize: 11, cursor: "pointer", background: "transparent", border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))", borderRadius: 6, padding: "2px 8px", color: "inherit" }}
               >
                 cancel all
@@ -384,11 +429,13 @@ export function TradePanel({ bucket, series }: Props) {
             {(bmBase > 0n || bmQuote > 0n) && account && (
               <button
                 disabled={busy}
-                onClick={() =>
-                  void run("withdraw", () =>
-                    buildWithdrawAllTx({ ...poolRef, recipient: account.address }),
-                  )
-                }
+                onClick={() => {
+                  void run(
+                    "withdraw",
+                    () => buildWithdrawAllTx({ ...poolRef, recipient: account.address }),
+                    { name: "deepbook_funds_withdrawn", props: { pool_id: pool.poolId } },
+                  );
+                }}
                 style={{ fontSize: 11, cursor: "pointer", background: "transparent", border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))", borderRadius: 6, padding: "2px 8px", color: "inherit" }}
               >
                 withdraw all
@@ -402,7 +449,10 @@ export function TradePanel({ bucket, series }: Props) {
             <button
               disabled={busy}
               onClick={() =>
-                void run("cancel", () => buildCancelOrderTx({ ...poolRef, orderId: BigInt(id) }))
+                void run("cancel", () => buildCancelOrderTx({ ...poolRef, orderId: BigInt(id) }), {
+                  name: "deepbook_order_cancelled",
+                  props: { scope: "single", order_id: id, pool_id: pool.poolId },
+                })
               }
               style={{ fontSize: 11, cursor: "pointer", background: "transparent", border: "none", color: "var(--aqua-down, #e15d6b)" }}
             >

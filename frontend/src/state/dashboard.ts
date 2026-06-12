@@ -19,6 +19,7 @@ import { addSessionExercise, addSessionRedeem } from "../tx/session";
 import { useUserIdentity } from "../session/identity";
 import { executeWithSession } from "../session/store";
 import { useSubmitTransaction } from "../tx/submit";
+import { posthog } from "../lib/posthog";
 
 import type { ToastState } from "../components/Toast";
 import { useBuckets } from "../api/useBuckets";
@@ -508,6 +509,15 @@ export function useDashboardState(): DashboardState {
           await submitTx(tx);
         }
         setModal({ ...captured, stage: "confirmed" } as DashboardModal);
+        posthog.capture("option_exercised", {
+          asset: captured.position.asset,
+          strike: captured.position.strike,
+          expiry: captured.position.expiry,
+          qty,
+          pnl: captured.position.pnl,
+          wallet_address: wallet,
+          auth: sessionState ? "session" : "wallet",
+        });
       } else if (captured.kind === "claim") {
         const { position: p } = captured;
         // Resolve the on-chain object from the wallet (authoritative) and the
@@ -542,9 +552,23 @@ export function useDashboardState(): DashboardState {
           await submitTx(tx);
         }
         setModal({ ...captured, stage: "confirmed" } as DashboardModal);
+        posthog.capture("position_claimed", {
+          asset: captured.position.asset,
+          strike: captured.position.strike,
+          expiry: captured.position.expiry,
+          premium_received: captured.position.premiumReceived,
+          exercised_pct: captured.position.exercisedPct,
+          wallet_address: wallet,
+          auth: sessionState ? "session" : "wallet",
+        });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      posthog.captureException(err, {
+        action: captured?.kind,
+        wallet_address: wallet,
+        auth: sessionState ? "session" : "wallet",
+      });
       setToast({ message: `failed · ${message}`, variant: "error" });
       setTimeout(() => setToast(null), 6000);
       setModal(null);

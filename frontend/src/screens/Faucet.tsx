@@ -12,6 +12,7 @@ import { useSubmitTransaction } from "../tx/submit";
 import { Toast } from "../components/Toast";
 import { ENV, TEST_TOKENS } from "../config";
 import { buildMintTx } from "../tx/faucet";
+import { posthog } from "../lib/posthog";
 
 /** Display-units → raw smallest-units. Safe well past any faucet amount. */
 function toRaw(amount: string, decimals: number): bigint {
@@ -37,13 +38,19 @@ export function Faucet() {
     setTimeout(() => setToast(null), 5000);
   };
 
-  const run = async (key: string, build: () => Transaction, ok: string) => {
+  const run = async (key: string, build: () => Transaction, ok: string, symbol?: string, amount?: string) => {
     setBusy(key);
     try {
       const tx = build();
       await submitTx(tx);
+      posthog.capture("faucet_tokens_minted", {
+        token_symbol: symbol,
+        amount: amount ? Number(amount) : undefined,
+        wallet_address: wallet,
+      });
       flash(`✓ ${ok}`);
     } catch (err) {
+      posthog.captureException(err, { action: "faucet_tokens_minted", token_symbol: symbol, wallet_address: wallet });
       const message = err instanceof Error ? err.message : String(err);
       flash(`failed · ${message}`);
     } finally {
@@ -123,6 +130,8 @@ export function Faucet() {
                                 amountRaw: toRaw(amount, t.decimals),
                               }),
                             `minted ${amount} ${t.symbol}`,
+                            t.symbol,
+                            amount,
                           )
                         }
                       >

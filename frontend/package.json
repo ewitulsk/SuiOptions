@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node scripts/posthog-sourcemaps.mjs",
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit"
   },
@@ -15,11 +15,13 @@
     "@yourorg/sui-siws-session": "file:./siws-session-sdk",
     "@tanstack/react-query": "^5.100.11",
     "lightweight-charts": "^5.2.0",
+    "posthog-js": "^1.386.6",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^7.15.1"
   },
   "devDependencies": {
+    "@posthog/cli": "^0.7.22",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.3",
