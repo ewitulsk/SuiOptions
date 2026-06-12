@@ -34,7 +34,7 @@ from typing import Iterable
 
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -66,12 +66,15 @@ REBUILD_ALL_GLOBS = [
 #                      auth-client
 #   auth-service     : runtime-config, cli-spec, protocol-types
 #   gas-station      : runtime-config, cli-spec, sui-tx
+#   balance-monitor  : runtime-config, cli-spec, sui-tx, observability
+#   (every service also depends on observability)
 SERVICE_GLOBS: dict[str, list[str]] = {
     "indexer": [
         "rust-backend/services/indexer/**",
         "rust-backend/Dockerfile.indexer",
         "rust-backend/crates/protocol-types/**",
         "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/deployments/**",
     ],
@@ -80,6 +83,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/Dockerfile.quoting",
         "rust-backend/crates/protocol-types/**",
         "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/indexer-graphql/**",
     ],
@@ -88,6 +92,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/Dockerfile.mm-bot",
         "rust-backend/crates/protocol-types/**",
         "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/sui-tx/**",
         "rust-backend/crates/pyth-client/**",
@@ -100,6 +105,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/Dockerfile.scheduler",
         "rust-backend/crates/protocol-types/**",
         "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/sui-tx/**",
         "rust-backend/crates/pyth-client/**",
@@ -111,6 +117,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/Dockerfile.api-service",
         "rust-backend/crates/protocol-types/**",
         "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/indexer-graphql/**",
         "rust-backend/crates/deployments/**",
@@ -119,6 +126,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/services/token-info/**",
         "rust-backend/Dockerfile.token-info",
         "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/deployments/**",
         "rust-backend/crates/token-info-client/**",
@@ -128,6 +136,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/services/auth-service/**",
         "rust-backend/Dockerfile.auth-service",
         "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/protocol-types/**",
     ],
@@ -135,6 +144,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/services/price-charting/**",
         "rust-backend/Dockerfile.price-charting",
         "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/api-service-client/**",
         "rust-backend/crates/token-info-client/**",
@@ -143,6 +153,15 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/services/gas-station/**",
         "rust-backend/Dockerfile.gas-station",
         "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/sui-tx/**",
+    ],
+    "balance-monitor": [
+        "rust-backend/services/balance-monitor/**",
+        "rust-backend/Dockerfile.balance-monitor",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/sui-tx/**",
     ],

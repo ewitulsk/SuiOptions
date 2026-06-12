@@ -1,0 +1,75 @@
+{
+  "uid": "options-services-overview",
+  "title": "Services Overview",
+  "tags": ["options", "so-180"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-3h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(http_requests_total, env)",
+        "current": { "text": "staging", "value": "staging" },
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "HTTP request rate by service",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum by (service) (rate(http_requests_total{env=\"$env\"}[5m]))", "legendFormat": "{{service}}" }]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "HTTP p95 latency by service",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{env=\"$env\"}[5m])))", "legendFormat": "{{service}}" }]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "HTTP 5xx rate by service / route",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum by (service, route) (rate(http_requests_total{env=\"$env\", status=~\"5..\"}[5m]))", "legendFormat": "{{service}} {{route}}" }]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Slowest routes (p95)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "topk(10, histogram_quantile(0.95, sum by (service, route, le) (rate(http_request_duration_seconds_bucket{env=\"$env\"}[5m]))))", "legendFormat": "{{service}} {{route}}" }]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Inter-service client p95 (by target/op)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "histogram_quantile(0.95, sum by (client, op, le) (rate(client_request_duration_seconds_bucket{env=\"$env\"}[5m])))", "legendFormat": "{{client}} {{op}}" }]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Inter-service client errors",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum by (client, op, status) (rate(client_requests_total{env=\"$env\", status!~\"2..\"}[5m]))", "legendFormat": "{{client}} {{op}} {{status}}" }]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Process RSS by service",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "max by (service) (process_resident_memory_bytes{env=\"$env\"})", "legendFormat": "{{service}}" }]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Process CPU by service",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum by (service) (rate(process_cpu_seconds_total{env=\"$env\"}[5m]))", "legendFormat": "{{service}}" }]
+    }
+  ]
+}

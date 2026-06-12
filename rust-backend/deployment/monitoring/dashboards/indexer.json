@@ -1,0 +1,77 @@
+{
+  "uid": "options-indexer",
+  "title": "Indexer",
+  "tags": ["options", "so-180"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-3h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(indexer_checkpoint_height, env)",
+        "current": { "text": "staging", "value": "staging" },
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Checkpoint height",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "indexer_checkpoint_height{env=\"$env\"}", "legendFormat": "height" }]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Checkpoints/sec",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "rate(indexer_checkpoint_height{env=\"$env\"}[5m])", "legendFormat": "cps" }]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "DB query duration p95 (by query)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "histogram_quantile(0.95, sum by (query, le) (rate(indexer_db_query_duration_seconds_bucket{env=\"$env\"}[5m])))", "legendFormat": "{{query}}" }]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Checkpoint apply duration p95",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(indexer_checkpoint_apply_duration_seconds_bucket{env=\"$env\"}[5m])))", "legendFormat": "p95" }]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Events decoded (by type)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum by (event_type) (rate(indexer_events_decoded_total{env=\"$env\"}[5m]))", "legendFormat": "{{event_type}}" }]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "DB pool connections",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "indexer_db_pool_connections{env=\"$env\"}", "legendFormat": "{{state}}" }]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "GraphQL p95 latency (http_request span metrics)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "histogram_quantile(0.95, sum by (route, le) (rate(http_request_duration_seconds_bucket{env=\"$env\", service=\"indexer\"}[5m])))", "legendFormat": "{{route}}" }]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "GraphQL request rate / errors",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum (rate(http_requests_total{env=\"$env\", service=\"indexer\"}[5m]))", "legendFormat": "requests" },
+        { "refId": "B", "expr": "sum (rate(http_requests_total{env=\"$env\", service=\"indexer\", status=~\"5..\"}[5m]))", "legendFormat": "5xx" }
+      ]
+    }
+  ]
+}

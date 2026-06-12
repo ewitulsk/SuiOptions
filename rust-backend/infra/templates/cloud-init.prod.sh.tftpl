@@ -32,13 +32,19 @@ ${render_secrets_sh}
 RENDER_EOF
 chmod +x /opt/options/prod/render-secrets.sh
 
-# ---- Promtail (ships container logs to the central Loki) --------------------
+# OTLP trace endpoint for the prod services (SO-180): the central Tempo on
+# the shared host, over the private VPC IP. deploy.sh reads this file into
+# the compose .env (OTEL_ENDPOINT).
+echo "${otel_url}" > /opt/options/prod/otel-endpoint
+
+# ---- Promtail + Prometheus agent (ship logs/metrics to the shared host) ----
 # Promtail discovers Docker containers via the socket and pushes to the
-# remote Loki at LOKI_URL — it does not need the monitoring Docker network
-# or a local Loki. The server stack (Loki/Grafana/Gatus) is NOT run here.
+# remote Loki at LOKI_URL. The Prometheus agent scrapes the prod services
+# over options-prod_net and remote-writes to the central Prometheus. The
+# server stack (Loki/Grafana/Prometheus/Tempo/Gatus) is NOT run here.
 
 MONITORING_DIR=/opt/options/monitoring
-mkdir -p "$MONITORING_DIR/promtail/config"
+mkdir -p "$MONITORING_DIR"/{promtail/config,prom-agent/config,prom-agent/data}
 
 cat > "$MONITORING_DIR/promtail/config/promtail-config.yml" <<'PROMTAIL_CFG_EOF'
 ${promtail_config}
@@ -48,19 +54,37 @@ cat > "$MONITORING_DIR/docker-compose.promtail.yml" <<'PROMTAIL_COMPOSE_EOF'
 ${promtail_compose}
 PROMTAIL_COMPOSE_EOF
 
-# .env for the promtail compose. DATA_DIR locates the bind-mounted config;
-# LOKI_URL points at the shared host's Loki.
+cat > "$MONITORING_DIR/prom-agent/config/prometheus-agent.yml" <<'PROM_AGENT_CFG_EOF'
+${prom_agent_config}
+PROM_AGENT_CFG_EOF
+
+cat > "$MONITORING_DIR/docker-compose.prom-agent.yml" <<'PROM_AGENT_COMPOSE_EOF'
+${prom_agent_compose}
+PROM_AGENT_COMPOSE_EOF
+
+# Prometheus agent runs as uid 65534 (nobody).
+chown -R 65534:65534 "$MONITORING_DIR/prom-agent/data"
+
+# .env for the shipper composes. DATA_DIR locates the bind-mounted configs;
+# LOKI_URL / REMOTE_WRITE_URL point at the shared host.
 cat > "$MONITORING_DIR/.env" <<EOF
 DATA_DIR=$MONITORING_DIR
 AWS_REGION=${aws_region}
 LOKI_URL=${loki_url}
+REMOTE_WRITE_URL=${remote_write_url}
 EOF
 chmod 600 "$MONITORING_DIR/.env"
 
-# Start Promtail. Best-effort: a logging failure must never abort the
-# bootstrap and leave the prod stack undeployed.
+# Start the shippers. Best-effort: a telemetry failure must never abort the
+# bootstrap and leave the prod stack undeployed. The prom agent needs
+# options-prod_net, which exists only after the first prod deploy — rerun
+#   docker compose -f /opt/options/monitoring/docker-compose.prom-agent.yml up -d
+# after it (or any reboot/deploy reconciles it).
 cd "$MONITORING_DIR"
 docker compose -f docker-compose.promtail.yml pull || true
 docker compose -f docker-compose.promtail.yml up -d || true
+docker compose -f docker-compose.prom-agent.yml pull || true
+docker compose -f docker-compose.prom-agent.yml up -d || \
+  echo "prom-agent skipped (options-prod_net missing — start it after the first prod deploy)"
 
 echo "options prod host bootstrap: complete"

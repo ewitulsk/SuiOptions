@@ -1,0 +1,120 @@
+# Grafana alert-rule provisioning (SO-180).
+#
+# Three rules:
+#  1. alert-id-errors — ANY error!() log carrying an `alert_id` field, in any
+#     service, fires within a minute, grouped by alert_id. Adding a new alert
+#     is purely `error!(alert_id = "stable-id", ...)` in code — no infra.
+#  2. low-sui-balance — balance-monitor's `sui_balance_low` gauge.
+#  3. scrape-target-down — Prometheus `up == 0` for any service.
+#
+# Contact points / notification policies are NOT provisioned — configure
+# them in the Grafana UI (they persist in the grafana data volume); these
+# rules route through the default policy.
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: options-alerts
+    folder: Options
+    interval: 1m
+    rules:
+      - uid: alert-id-errors
+        title: Tagged error logs (alert_id)
+        condition: B
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: 'error!() with alert_id={{ $labels.alert_id }} in {{ $labels.service }} ({{ $labels.env }})'
+        labels:
+          source: alert_id_logs
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: loki
+            model:
+              expr: 'sum by (env, service, alert_id) (count_over_time({service=~".+"} | json | fields_alert_id != `` | label_format alert_id=fields_alert_id [5m]))'
+              queryType: instant
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [A] }
+                  reducer: { type: last, params: [] }
+
+      - uid: low-sui-balance
+        title: Low SUI balance
+        condition: B
+        for: 5m
+        noDataState: NoData
+        execErrState: Error
+        annotations:
+          summary: '{{ $labels.service }} wallet ({{ $labels.env }}) is below its SUI threshold'
+        labels:
+          source: balance_monitor
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'max by (env, service) (sui_balance_low) > 0'
+              instant: true
+              intervalMs: 15000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [A] }
+                  reducer: { type: last, params: [] }
+
+      - uid: scrape-target-down
+        title: Service metrics target down
+        condition: B
+        for: 3m
+        noDataState: NoData
+        execErrState: Error
+        annotations:
+          summary: '{{ $labels.service }} ({{ $labels.env }}) /metrics is unreachable'
+        labels:
+          source: prometheus_up
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'max by (env, service) (up{job=~"services-.*"}) == 0'
+              instant: true
+              intervalMs: 15000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+                  operator: { type: and }
+                  query: { params: [A] }
+                  reducer: { type: last, params: [] }

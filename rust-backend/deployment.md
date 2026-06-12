@@ -892,79 +892,95 @@ Combine with plan A if you want full prod isolation in one stroke.
 
 ---
 
-## 15. Scaling plan C — observability with Grafana + Loki
+## 15. Observability (implemented — SO-180)
 
-Trigger: you need cross-service search ("show me every error from the
-quoting-service in the last hour, grouped by env"), or you want graphs
-of indexer checkpoint lag and RFQ throughput, or you've been SSH'ing
-into the box to grep logs more than twice a week.
+Logs (Loki), metrics (Prometheus), traces (Tempo), all in the Grafana on
+the shared host (`https://<domain>/grafana/`). Originally "scaling plan C";
+implemented in SO-180.
 
-Today: logs live in `docker logs` on the host. Fine for one operator
-who knows where to look. Bad when you grow past that.
-
-### Target setup
+### Architecture
 
 ```
-            ┌────────────────────────────────────────────┐
-            │              Grafana (UI)                  │
-            │  dashboards: indexer lag, RFQ flow, errors │
-            └──────┬─────────────────────┬───────────────┘
-                   │ logs                │ metrics
-                   ▼                     ▼
-               ┌──────┐              ┌────────────┐
-               │ Loki │              │ Prometheus │
-               └───▲──┘              └─────▲──────┘
-                   │                       │
-            ┌──────┴───────────┐    ┌──────┴───────────────┐
-            │  Promtail        │    │  service-exposed     │
-            │  (one per EC2)   │    │  /metrics endpoints  │
-            └──────────────────┘    └──────────────────────┘
+   Grafana ── Loki (logs) ─ Prometheus (metrics) ─ Tempo (traces)
+                ▲                  ▲                   ▲
+   shared host: │ promtail         │ scrape over       │ OTLP 4318 over
+                │ (docker SD)      │ options-staging_  │ options-staging_net
+                │                  │ net DNS           │
+   prod host:   │ promtail         │ prom-agent        │ services push OTLP
+                │ push :3100       │ remote-write      │ to <shared-ip>:4318
+                │ (VPC, SG-gated)  │ :9090 (VPC)       │ (VPC, SG-gated)
 ```
 
-### Steps
+Every service initializes through `crates/observability`
+(`observability::init("<service>")`): JSON logs when stdout isn't a TTY
+(`OBS_LOG_FORMAT` overrides), a Prometheus recorder served at `/metrics`
+(either on the axum router's internal port or the ops server that replaced
+the old health server), and an OTel layer exporting OTLP/HTTP when
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set (deploy.sh writes `OTEL_ENDPOINT`
+into each env's `.env`: `http://tempo:4318` on the shared host, the
+central Tempo's VPC address on the prod host).
 
-1. **Stand up Grafana.** Two options:
-   - **AWS Managed Grafana**: ~$9/user/mo, no infra to run. Auth via IAM
-     Identity Center. Recommended.
-   - **Self-host Grafana on a small EC2** (t3.small, $15/mo + EBS). More
-     control, more ops burden.
-2. **Stand up Loki.** Self-host on the Grafana box or as a separate
-   small EC2. S3-backed Loki keeps storage costs near zero. Single-binary
-   mode is enough for this scale.
-3. **Add Promtail** to each services EC2 (the shared box, and the
-   prod-only box after plan A). It tails `docker logs` via the docker
-   service discovery plugin and ships to Loki with labels
-   `env=<staging|prod>`, `service=<indexer|quoting|mm-bot>`.
-4. **Add a `/metrics` endpoint** to each service (Prometheus text
-   format). The `metrics` crate or `prometheus` crate plus a small
-   warp/axum handler is ~30 lines per service. Useful first metrics:
-   - **indexer**: checkpoint lag (latest seen − latest processed), DB
-     pool utilization, events/sec.
-   - **quoting-service**: in-flight RFQs, RFQs/sec, quote latency
-     histogram, connected MMs, reservation TTL evictions.
-   - **mm-bot**: quotes sent, quote signing errors, Pyth price staleness,
-     bootstrap status.
-5. **Add Prometheus** alongside Loki, scraping the EC2 boxes' `/metrics`
-   endpoints (one scrape job per env). Or use the Loki agent in
-   metrics-collection mode to avoid running both.
-6. **Dashboards.** Build per-env panels for the metrics above, plus
-   a single "errors" log panel filtered to `level=ERROR`.
-7. **Alerts.** First three worth setting up:
-   - Indexer checkpoint lag > 60s for 5 min.
-   - Quoting-service connected-MMs drops to zero (means dev pushed a
-     bug that broke MM auth).
-   - Any service container restart loop (`container_restart_count > 3`
-     in 5 min).
+### Conventions
 
-### What this replaces
+- **Alerting from code**: `error!(alert_id = "stable-id", ...)` anywhere
+  fires the provisioned "Tagged error logs" Grafana rule within ~1 min,
+  grouped by `alert_id`. No infra change per alert. Test the pipeline
+  end-to-end with `ALERT_TEST=1` on balance-monitor, which emits
+  `alert_id = "this-is-a-test-alert"` at boot.
+- **HTTP servers** get `http_requests_total` / `http_request_duration_seconds`
+  / `http_requests_in_flight` (method × route × status) plus a per-request
+  span continuing the caller's W3C `traceparent`; the trace id is stamped
+  on every log line inside the request and echoed as `x-trace-id`.
+- **Inter-service calls** go through `observability::client::instrumented`
+  in the four client crates — they propagate `traceparent` (so Tempo shows
+  frontend → api-service → indexer → DB in one waterfall) and record
+  `client_request*` metrics.
+- **Indexer DB calls** are wrapped in `db_query` spans (Diesel work inside
+  `spawn_blocking` re-enters the request span) + an
+  `indexer_db_query_duration_seconds{query}` histogram — open any slow
+  GraphQL trace in Tempo to see exactly which query burned the time.
+- **Wallet balances**: the `balance-monitor` service polls the gas-station /
+  scheduler / mm-bot wallets (addresses derived from the same rendered
+  secrets the services mount; keeper = one more `[[watch]]` in its config)
+  and exports `sui_balance_sui` / `sui_balance_low`; the "Low SUI balance"
+  rule alerts on the latter.
 
-Nothing — it's purely additive. `docker logs` and `docker compose
-restart` keep working.
+### Contact points
 
-### Phasing
+Alert RULES are provisioned from
+`deployment/monitoring/grafana-alerting.yml`; contact points and
+notification policies are deliberately UI-managed (they persist in the
+grafana data volume) — set them up under Alerting → Contact points.
 
-- **Phase C1** (≤ 1 day work): Grafana + Loki + Promtail. Logs only,
-  no metrics. Get cross-service search.
-- **Phase C2** (1-2 days per service): `/metrics` endpoints, Prometheus
-  scrape, first dashboards.
-- **Phase C3** (1 day): alerting rules + a Slack/PagerDuty receiver.
+### Dashboards
+
+`deployment/monitoring/dashboards/*.json`, deployed via the Grafana API
+(no host bounce):
+
+```
+GRAFANA_URL=https://<domain>/grafana GRAFANA_PASSWORD=... \
+  deployment/monitoring/push-dashboards.sh
+```
+
+### Rolling config changes to EXISTING hosts
+
+The monitoring configs feed cloud-init `user_data`, which only runs at
+first boot (editing it via Terraform would bounce the hosts). To apply
+changes to a live host, copy the changed files from
+`deployment/monitoring/` to `/opt/options/monitoring/...` via SSM, then:
+
+- shared host: append `PROMETHEUS_*`/`TEMPO_*` paths as laid out in
+  `cloud-init.sh.tftpl` (configs under `prometheus/config/`,
+  `tempo/config/`, grafana provisioning under
+  `grafana/provisioning/{datasources,alerting}/`), then
+  `/opt/options/monitoring/monitoring-up.sh` (+ `docker compose restart
+  grafana` for provisioning changes).
+- prod host: prom-agent config under `prom-agent/config/`, add
+  `REMOTE_WRITE_URL=http://<shared-ip>:9090/api/v1/write` to
+  `/opt/options/monitoring/.env`, write the central Tempo address to
+  `/opt/options/prod/otel-endpoint`, then bring up
+  `docker-compose.prom-agent.yml` (needs `options-prod_net`, i.e. after a
+  prod deploy).
+
+Keep the repo files and the hosts in sync — the repo copy is what new
+hosts boot with.

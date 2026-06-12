@@ -1,10 +1,58 @@
-# Grafana provisioning: auto-configure Loki as the default datasource.
+# Grafana provisioning: Loki (logs) + Prometheus (metrics) + Tempo (traces).
+#
+# Cross-links (SO-180):
+#  - Loki derived field: any JSON log line containing "trace_id":"…" gets a
+#    one-click jump to its Tempo trace (the field is recorded on request /
+#    message root spans by the observability crate).
+#  - Tempo trace → logs (Loki, by service label around the span time) and
+#    trace → RED metrics (Prometheus, via the metrics-generator).
 apiVersion: 1
 
 datasources:
   - name: Loki
+    uid: loki
     type: loki
     access: proxy
     url: http://loki:3100
     isDefault: true
     editable: true
+    jsonData:
+      derivedFields:
+        - name: TraceID
+          matcherRegex: '"trace_id":"([0-9a-f]+)"'
+          url: '$${__value.raw}'
+          datasourceUid: tempo
+
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    editable: true
+    jsonData:
+      httpMethod: POST
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: true
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: '-5m'
+        spanEndTimeShift: '5m'
+        tags:
+          - key: service.name
+            value: service
+        filterByTraceID: true
+      tracesToMetrics:
+        datasourceUid: prometheus
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true

@@ -84,6 +84,26 @@ resource "aws_security_group" "ec2" {
     self        = true
   }
 
+  # Central Tempo OTLP/HTTP ingest. Prod services push trace spans to the
+  # Tempo on the shared host, same pattern as Loki above (SO-180).
+  ingress {
+    description = "Tempo OTLP from co-SG hosts (prod services to shared tempo)"
+    from_port   = 4318
+    to_port     = 4318
+    protocol    = "tcp"
+    self        = true
+  }
+
+  # Central Prometheus remote-write receiver. The prod host's Prometheus
+  # agent pushes scraped metrics to the shared host (SO-180).
+  ingress {
+    description = "Prometheus remote-write from co-SG hosts (prod prom-agent)"
+    from_port   = 9090
+    to_port     = 9090
+    protocol    = "tcp"
+    self        = true
+  }
+
   egress {
     from_port   = 0
     to_port     = 0

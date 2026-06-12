@@ -50,7 +50,7 @@ COMPOSE_FILE="docker-compose.${ENV}.yml"
 # Canonical service set + their .env tag-variable names + the compose
 # service name (mostly identical to the cargo crate name, except
 # quoting-service is referenced as `quoting` in compose).
-ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station price-charting)
+ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station price-charting balance-monitor)
 
 tag_var_for() {
   case "$1" in
@@ -63,6 +63,7 @@ tag_var_for() {
     auth-service)     echo AUTH_SERVICE_TAG ;;
     gas-station)      echo GAS_STATION_TAG ;;
     price-charting)   echo PRICE_CHARTING_TAG ;;
+    balance-monitor)  echo BALANCE_MONITOR_TAG ;;
     *) return 1 ;;
   esac
 }
@@ -77,6 +78,7 @@ compose_name_for() {
     auth-service)     echo auth-service ;;
     gas-station)      echo gas-station ;;
     price-charting)   echo price-charting ;;
+    balance-monitor)  echo balance-monitor ;;
     *) return 1 ;;
   esac
 }
@@ -129,6 +131,14 @@ if [ -f "secrets/.chart_database_url" ]; then
   CHART_DATABASE_URL=$(cat "secrets/.chart_database_url")
 fi
 
+# OTLP trace endpoint (SO-180). On the shared host the services reach the
+# co-located Tempo by docker DNS; the dedicated prod host gets the central
+# Tempo's VPC address dropped in `otel-endpoint` by cloud-init.
+OTEL_ENDPOINT="http://tempo:4318"
+if [ -f "otel-endpoint" ]; then
+  OTEL_ENDPOINT=$(cat "otel-endpoint")
+fi
+
 # Snapshot prior tags for rollback.
 declare -A PREV_TAG
 for svc in "${PLANNED[@]}"; do
@@ -155,6 +165,7 @@ trap 'rm -f "$NEW_ENV"' EXIT
   if [ -n "$CHART_DATABASE_URL" ]; then
     echo "CHART_DATABASE_URL=$CHART_DATABASE_URL"
   fi
+  echo "OTEL_ENDPOINT=$OTEL_ENDPOINT"
   for svc in "${ALL_SERVICES[@]}"; do
     v=$(tag_var_for "$svc")
     val="${NEW_TAG[$v]:-}"

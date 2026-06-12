@@ -1,0 +1,38 @@
+# Prometheus agent-mode configuration — dedicated prod host.
+#
+# Scrapes the prod services' /metrics over options-prod_net and
+# remote-writes everything to the central Prometheus on the shared
+# services host (REMOTE_WRITE_URL, expanded at runtime; SG allows 9090
+# only between co-SG hosts). Mirrors the Promtail push pattern.
+
+global:
+  scrape_interval: 15s
+  external_labels:
+    env: prod
+
+scrape_configs:
+  - job_name: services-prod
+    static_configs:
+      - targets: ["indexer:8081"]
+        labels: { service: indexer }
+      - targets: ["quoting:9002"]
+        labels: { service: quoting }
+      - targets: ["api-service:9003"]
+        labels: { service: api-service }
+      - targets: ["token-info:9006"]
+        labels: { service: token-info }
+      - targets: ["auth-service:9008"]
+        labels: { service: auth-service }
+      - targets: ["gas-station:9009"]
+        labels: { service: gas-station }
+      - targets: ["price-charting:9011"]
+        labels: { service: price-charting }
+      - targets: ["option-scheduler:8083"]
+        labels: { service: option-scheduler }
+      - targets: ["mm-bot:8084"]
+        labels: { service: mm-bot }
+      - targets: ["balance-monitor:9012"]
+        labels: { service: balance-monitor }
+
+remote_write:
+  - url: ${REMOTE_WRITE_URL}

@@ -18,6 +18,7 @@ services:
     image: ${ECR}/options/token-info:${TOKEN_INFO_TAG}
     environment:
       APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       DB_PASSWORD: ${DB_PASSWORD}
       DB_HOST: ${DB_HOST}
       RUST_LOG: info,token_info=info
@@ -32,6 +33,7 @@ services:
     image: ${ECR}/options/auth-service:${AUTH_SERVICE_TAG}
     environment:
       APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       RUST_LOG: info,auth_service=info
     volumes:
       - /opt/options/prod/secrets:/run/secrets:ro
@@ -42,6 +44,7 @@ services:
     image: ${ECR}/options/indexer:${INDEXER_TAG}
     environment:
       APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       DB_PASSWORD: ${DB_PASSWORD}
       DB_HOST: ${DB_HOST}
       RUST_LOG: info,indexer=info
@@ -53,6 +56,7 @@ services:
     image: ${ECR}/options/quoting-service:${QUOTING_TAG}
     environment:
       APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       RUST_LOG: info,quoting_service=info
     depends_on: [indexer, token-info]
     restart: unless-stopped
@@ -100,6 +104,7 @@ services:
     image: ${ECR}/options/api-service:${API_SERVICE_TAG}
     environment:
       APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       RUST_LOG: info,api_service=info
     depends_on: [indexer, token-info]
     restart: unless-stopped
@@ -112,6 +117,7 @@ services:
     image: ${ECR}/options/price-charting:${PRICE_CHARTING_TAG}
     environment:
       APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       CHART_DATABASE_URL: ${CHART_DATABASE_URL}
       RUST_LOG: info,price_charting=debug
     depends_on: [token-info, api-service]
@@ -124,7 +130,22 @@ services:
     image: ${ECR}/options/gas-station:${GAS_STATION_TAG}
     environment:
       APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       RUST_LOG: info,gas_station=info
+    volumes:
+      - /opt/options/prod/secrets:/run/secrets:ro
+    restart: unless-stopped
+    networks: [net]
+
+  # SUI balance gauges + low-balance alerts for the operational wallets
+  # (SO-180). Derives addresses from the same rendered secrets the services
+  # mount; scraped by the Prometheus agent on 9012. Not proxied by nginx.
+  balance-monitor:
+    image: ${ECR}/options/balance-monitor:${BALANCE_MONITOR_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      RUST_LOG: info,balance_monitor=debug
     volumes:
       - /opt/options/prod/secrets:/run/secrets:ro
     restart: unless-stopped
