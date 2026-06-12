@@ -1,11 +1,16 @@
 # vault-keeper — implementation guide
 
-> Status: **not yet implemented.** This README is the build spec for
-> ticket D1, updated from
-> [`docs/vault-implementation-guide/04-vault-keeper.md`](../../../docs/vault-implementation-guide/04-vault-keeper.md)
-> to match what actually shipped on-chain (PR #148). Everything the
-> keeper depends on — the vault cranks, the PTB builders, the strike
-> math — is already merged; this service is pure wiring.
+> Status: **implemented** (ticket D1). The crate in this directory
+> follows the spec below; deviations from the original sketch are noted
+> inline (planner returns one action per tick and signals
+> `SelectBucketNeeded` for the tick loop to resolve; slicing is
+> clock-derived rather than counted; metrics are structured log lines —
+> the per-round σ/K*/strike/delta "strike pick" line is the calibration
+> trail — with Prometheus counters still TODO). Spec originally derived
+> from
+> [`docs/vault-implementation-guide/04-vault-keeper.md`](../../../docs/vault-implementation-guide/04-vault-keeper.md),
+> updated to match what shipped on-chain (PR #148). Remaining: the §12
+> localnet e2e (ticket E1).
 
 ## 1. Trust model (read this first)
 
@@ -21,11 +26,22 @@ public crank that `vault.move` validates on-chain:
 - everything else (`crank_redeem`, `settle_rfq`, `finalize_round`) has
   no degrees of freedom at all.
 
-A malicious keeper's worst case is a *slightly suboptimal strike inside
-the band*; a lazy keeper's worst case is a delayed round. N keepers can
-run concurrently and merely waste gas racing — lost races abort with
-clear error codes. Anyone can run this binary; the team runs ≥ 2
-instances on independent infra.
+A malicious keeper cannot sell below the on-chain floors, but the floors
+are not tight: the realistic worst case is picking the **lowest in-band
+strike** (the +3% band edge instead of the ~0.10Δ target) **and** timing
+the auction so only a colluding bidder shows up, who then pays exactly
+the reserve. The leak per round is bounded by
+`fair_premium(K_band_edge) − reserve_premium` on one slice — roughly
+2–3% of the sliced notional at a 10 bps reserve. Mitigations: set
+`min_reserve_premium_bps` to sit just under the strategy's expected
+clearing premium — **30–50 bps at the Δ = 0.20 launch target** (guide
+doc 08; note a 0.10Δ target snaps to strikes worth only ~10–15 bps, so
+a high reserve and a low delta target cannot be combined) — and alert
+when a round's clearing premium lands below the model price (the
+per-round σ/K/premium metrics in §11 exist for exactly this). A lazy keeper's worst case is a delayed
+round. N keepers can run concurrently and merely waste gas racing — lost
+races abort with clear error codes. Anyone can run this binary; the team
+runs ≥ 2 instances on independent infra.
 
 ## 2. Crate layout
 
@@ -36,7 +52,8 @@ classify/submit) — it solves the same problem:
 services/keeper/
 ├── src/
 │   ├── main.rs       # config, boot checks, tick loop (tick_secs ≈ 15)
-│   ├── config.rs     # vault ids, types, feeds, slicing, vol source
+│   ├── config.rs     # endpoints, pyth handles, strategy defaults
+│   ├── discovery.rs  # vault auto-discovery + PriceInfoObject lookup
 │   ├── state.rs      # VaultView: fetch + decode chain objects via RPC
 │   ├── planner.rs    # PURE: (VaultView, now) → Vec<Action>
 │   ├── strike.rs     # PURE: delta-target bucket choice (§5)
@@ -229,31 +246,42 @@ between instances (object contention).
 
 ## 11. Config sketch
 
+Vaults are **discovered, not configured** (`src/discovery.rs`): the
+tick loop reads the indexer's `vaults` view (fed by `VaultCreated`),
+takes the pinned feed ids + decimals from each vault object, and
+resolves the two `PriceInfoObject`s through the Pyth state's
+`b"price_info"` table — the same lookup pyth-sui-js's
+`getPriceFeedObjectId` does. A vault created on chain is picked up on
+the next tick; with none on chain, the keeper idles with `/health` up.
+The pinned DeepBook pool comes from the vault's own config; the DEEP
+coin type from token-info. What remains in the TOML:
+
 ```toml
+indexer_graphql_url = "http://indexer:9002/graphql"
 tick_secs = 15
 health_addr = "0.0.0.0:8086"
 
 [pyth]
-hermes_url = "https://hermes.pyth.network"
+# Hermes must serve the SAME feed set the network's PriceInfoObjects
+# are keyed by: Sui testnet = hermes-BETA, mainnet = stable. Benchmarks
+# is stable-only, so on testnet sigma_fallback is load-bearing.
+hermes_url = "https://hermes-beta.pyth.network"
 benchmarks_url = "https://benchmarks.pyth.network"
-pyth_state_id = "0x…"
-wormhole_state_id = "0x…"
+pyth_package_id     = "0x…"   # latest (upgraded) package
+wormhole_package_id = "0x…"
+pyth_state_id       = "0x…"
+wormhole_state_id   = "0x…"
 
-[[vaults]]
-vault_id = "0x…"
-underlying = "SUI"            # resolves types/decimals via token-info
-settlement = "USDC"
-call_type_source = "api"      # bucket call types come from /buckets
-underlying_price_info = "0x…" # PriceInfoObject ids
-settlement_price_info = "0x…"
-deepbook_pool_id = "0x…"      # must equal the vault's pinned pool
-deep_coin_type = "0x…::deep::DEEP"
+[vault_defaults]                # strategy knobs, applied to every vault
 iv_ratio = 1.15
+target_delta = 0.20             # launch memo (guide doc 08)
 sigma_fallback = 0.85
-[vaults.slicing]
+vol_window_days = 30
+# deep_funding_coin = "0x…"     # keeper-owned Coin<DEEP> for swap fees
+# deep_fee_per_swap = 1000000
+[vault_defaults.slicing]
 slices = 4
 stagger_minutes = 90
-retry_unsold = true
 ```
 
 Plus the standard `--dry-run` flag (full planning, log intents, submit

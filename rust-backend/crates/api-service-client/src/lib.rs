@@ -39,6 +39,10 @@ use tracing::debug;
 pub struct BucketPricing {
     pub asset_coin_type: String,
     pub settlement_coin_type: String,
+    /// The bucket's fungible option-coin type — the `Call` type argument
+    /// for bid/write PTBs. Empty when talking to an api-service that
+    /// predates the field.
+    pub call_coin_type: String,
     pub strike: u128,
     pub strike_scale: u8,
     pub expiry_ms: u64,
@@ -50,6 +54,8 @@ pub struct BucketPricing {
 struct BucketDetailWire {
     asset_coin_type: String,
     settlement_coin_type: String,
+    #[serde(default)]
+    call_coin_type: String,
     strike_raw: String,
     strike_scale: u8,
     expiry_ms: i64,
@@ -107,6 +113,11 @@ impl ApiServiceClient {
         let pricing = BucketPricing {
             asset_coin_type: canonicalize_move_type(&wire.asset_coin_type),
             settlement_coin_type: canonicalize_move_type(&wire.settlement_coin_type),
+            call_coin_type: if wire.call_coin_type.is_empty() {
+                String::new()
+            } else {
+                canonicalize_move_type(&wire.call_coin_type)
+            },
             strike: wire
                 .strike_raw
                 .parse::<u128>()
@@ -116,6 +127,44 @@ impl ApiServiceClient {
         };
         self.cache.write().insert(id, pricing.clone());
         Ok(Some(pricing))
+    }
+
+    /// Open RFQ auctions from `GET /rfqs?status=open` — the on-chain
+    /// bidder's discovery poll (vault-implementation-guide doc 05 §3.1).
+    /// Never cached: deadlines and best bids move with every block.
+    pub async fn open_rfqs(&self) -> Result<Vec<OpenRfq>> {
+        let url = format!("{}/rfqs?status=open", self.base_url);
+        let wire: RfqsWire = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("GET {url} returned an error status"))?
+            .json()
+            .await
+            .with_context(|| format!("decoding rfqs from {url}"))?;
+        wire.rfqs
+            .into_iter()
+            .map(|r| {
+                Ok(OpenRfq {
+                    rfq_id: ObjectId::from_hex(&r.rfq_id)
+                        .map_err(|e| anyhow::anyhow!("rfq_id {}: {e}", r.rfq_id))?,
+                    bucket_id: ObjectId::from_hex(&r.bucket_id)
+                        .map_err(|e| anyhow::anyhow!("bucket_id {}: {e}", r.bucket_id))?,
+                    origin: r.origin,
+                    amount: r
+                        .amount_raw
+                        .parse()
+                        .with_context(|| format!("parsing amount_raw {:?}", r.amount_raw))?,
+                    reserve_premium: r.reserve_premium_raw.parse().with_context(|| {
+                        format!("parsing reserve_premium_raw {:?}", r.reserve_premium_raw)
+                    })?,
+                    deadline_ms: r.deadline_ms.max(0) as u64,
+                })
+            })
+            .collect()
     }
 
     /// All buckets with a live DeepBook venue, fresh from `GET /buckets`
@@ -182,6 +231,37 @@ pub struct TradeableBucket {
     pub invalidated: bool,
 }
 
+/// One open auction from `GET /rfqs?status=open`, trimmed to discovery
+/// fields. Live bid state (best premium / deadline extensions /
+/// min-increment) is read from the auction object itself — the indexer
+/// may lag bids.
+#[derive(Clone, Debug)]
+pub struct OpenRfq {
+    pub rfq_id: ObjectId,
+    pub bucket_id: ObjectId,
+    /// Vault id (coupled auctions) or seller-address-as-id, hex.
+    pub origin: String,
+    /// Underlying escrowed in the slice.
+    pub amount: u64,
+    pub reserve_premium: u64,
+    pub deadline_ms: u64,
+}
+
+#[derive(Deserialize)]
+struct RfqsWire {
+    rfqs: Vec<RfqWire>,
+}
+
+#[derive(Deserialize)]
+struct RfqWire {
+    rfq_id: String,
+    bucket_id: String,
+    origin: String,
+    amount_raw: String,
+    reserve_premium_raw: String,
+    deadline_ms: i64,
+}
+
 #[derive(Deserialize)]
 struct BucketsWire {
     series: Vec<SeriesWire>,
@@ -234,10 +314,12 @@ mod tests {
         let p = BucketPricing {
             asset_coin_type: canonicalize_move_type(&wire.asset_coin_type),
             settlement_coin_type: canonicalize_move_type(&wire.settlement_coin_type),
+            call_coin_type: wire.call_coin_type.clone(), // absent pre-C2 → empty
             strike: wire.strike_raw.parse().unwrap(),
             strike_scale: wire.strike_scale,
             expiry_ms: wire.expiry_ms.max(0) as u64,
         };
+        assert!(p.call_coin_type.is_empty());
         assert_eq!(
             p.asset_coin_type,
             "0x0000000000000000000000000000000000000000000000000000000000009b72::twal::TWAL"

@@ -18,6 +18,8 @@ use anyhow::{anyhow, Context, Result};
 use reqwest::{Client, StatusCode};
 use tracing::{debug, warn};
 
+use base64::Engine as _;
+
 use super::types::{HermesEnvelope, PriceFeedId, PriceUpdate};
 
 const MAX_RETRIES: u32 = 5;
@@ -38,6 +40,44 @@ pub async fn latest(
     let query: Vec<(&str, String)> = ids.iter().map(|i| ("ids[]", i.to_hex())).collect();
     let env: HermesEnvelope = get_with_backoff(client, &url, &query).await?;
     Ok(env.parsed)
+}
+
+/// Latest prices *plus* the binary accumulator update payload for the
+/// requested feeds — the bytes the vault-keeper feeds to
+/// `pyth::pyth::create_authenticated_price_infos_using_accumulator` on
+/// Sui. With `encoding=base64`, Hermes returns a single accumulator
+/// message covering every requested feed.
+pub async fn latest_with_update_data(
+    client: &Client,
+    hermes_url: &str,
+    ids: &[PriceFeedId],
+) -> Result<(Vec<Vec<u8>>, Vec<PriceUpdate>)> {
+    if ids.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let url = format!("{}/v2/updates/price/latest", hermes_url.trim_end_matches('/'));
+    let mut query: Vec<(&str, String)> =
+        ids.iter().map(|i| ("ids[]", i.to_hex())).collect();
+    query.push(("encoding", "base64".to_string()));
+    let env: HermesEnvelope = get_with_backoff(client, &url, &query).await?;
+    let binary = env
+        .binary
+        .ok_or_else(|| anyhow!("hermes response has no binary block"))?;
+    if binary.encoding != "base64" {
+        return Err(anyhow!(
+            "hermes returned encoding {} instead of base64",
+            binary.encoding
+        ));
+    }
+    let mut payloads = Vec::with_capacity(binary.data.len());
+    for entry in &binary.data {
+        payloads.push(
+            base64::engine::general_purpose::STANDARD
+                .decode(entry)
+                .context("decoding hermes binary payload")?,
+        );
+    }
+    Ok((payloads, env.parsed))
 }
 
 /// One historical observation at-or-before `unix_seconds` for a single

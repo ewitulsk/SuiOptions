@@ -157,6 +157,11 @@ struct BotConfig {
     /// carry a DeepBook deployment in token-info.
     #[serde(default)]
     deepbook: mm_bot::deepbook::DeepBookQuoterConfig,
+
+    /// On-chain RFQ bidder (doc 05 Â§3) â the buy side of the vault's
+    /// weekly call-slice auctions. Off by default.
+    #[serde(default)]
+    onchain_rfq: mm_bot::onchain_rfq::OnchainRfqConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -461,6 +466,37 @@ async fn main() -> Result<()> {
                 "deepbook.enabled set but token-info reports no DeepBook deployment; quoting disabled"
             ),
         }
+    }
+
+    // On-chain RFQ bidder (C2): poll open auctions, price them with the
+    // same brain, bid from the wallet under the escrow cap.
+    if cfg.onchain_rfq.enabled {
+        let bidder_markets = markets
+            .iter()
+            .map(|m| mm_bot::onchain_rfq::BidderMarket {
+                symbol: m.symbol.clone(),
+                coin_type: m.coin_type.clone(),
+                feed: m.feed,
+                decimals: m.decimals,
+                vol_buf: Arc::clone(&m.vol_buf),
+            })
+            .collect();
+        mm_bot::onchain_rfq::spawn_bidder(mm_bot::onchain_rfq::BidderParams {
+            cfg: cfg.onchain_rfq.clone(),
+            secrets: secrets_loaded.clone(),
+            network: cfg.network,
+            package: snapshot.package()?,
+            api_url: cli.api_url.clone(),
+            price_cache: price_cache.clone(),
+            markets: bidder_markets,
+            settlement_feed,
+            settlement_coin_type: settlement_coin_type.clone(),
+            settlement_decimals,
+            pricing: pricing_cfg,
+            staleness,
+            fallback_vol: cfg.pyth.fallback_vol,
+        });
+        tracing::info!("onchain rfq bidder enabled");
     }
 
     // nonce is monotonic for the bot's lifetime — keep it across reconnects.

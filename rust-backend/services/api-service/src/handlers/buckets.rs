@@ -193,6 +193,9 @@ pub struct BucketDetailDto {
     /// `100 * exercise_cursor / total_written`. `0.0` when nothing's been
     /// written; `null` when underlying decimals are unknown.
     pub fill_pct: Option<f64>,
+    /// Fully-qualified type of the bucket's fungible option coin — the
+    /// `Call` type argument for write/bid/exercise PTBs.
+    pub call_coin_type: String,
     /// DeepBook pool for this bucket (SO-153); `null` if none.
     pub deepbook_pool_id: Option<String>,
     /// Pool exists, bucket not cleaned, not expired (see `/buckets`).
@@ -262,6 +265,7 @@ fn detail_dto_from(b: &IndexerBucket, catalog: &TokenCatalog, now_ms: i64) -> Bu
         queued_ahead,
         queued_ahead_raw: queued_ahead_raw.to_string(),
         fill_pct,
+        call_coin_type: b.call_type.to_canonical(),
         deepbook_pool_id: b.deepbook_pool_id.as_ref().map(|p| p.to_hex()),
         tradeable: is_tradeable(b.deepbook_pool_id.is_some(), b.cleaned, b.expiry_ms, now_ms),
     }

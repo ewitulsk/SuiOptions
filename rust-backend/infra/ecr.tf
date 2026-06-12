@@ -1,5 +1,10 @@
 locals {
-  service_repos = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting"]
+  # NOTE: balance-monitor's repo may already exist in AWS (it was deployed
+  # by SO-180 without a terraform entry). If `apply` reports the repo
+  # already exists, import it first:
+  #   terraform import 'aws_ecr_repository.svc["balance-monitor"]' options/balance-monitor
+  # (the lifecycle policy attaches on the next apply).
+  service_repos = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor", "keeper"]
 }
 
 resource "aws_ecr_repository" "svc" {

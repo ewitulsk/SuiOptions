@@ -673,8 +673,11 @@ fun finalize_round_internal<U, S, V>(
 }
 
 /// Pick the round's bucket (doc 03 §7.5): expiry inside the configured
-/// lead window, strike inside the Pyth band — a hostile keeper's worst
-/// case is "slightly suboptimal strike inside the band", not theft.
+/// lead window, strike inside the Pyth band. The band bounds — not
+/// eliminates — keeper discretion: a hostile keeper can still pick the
+/// band-edge strike and rely on a quiet auction clearing at the reserve
+/// floor, so `min_reserve_premium_bps` is the real per-slice loss bound
+/// (set it accordingly; see the keeper README trust model).
 public fun select_bucket<U, S, V, C>(
     vault: &mut Vault<U, S, V>,
     bucket: &Bucket<U, S, C>,

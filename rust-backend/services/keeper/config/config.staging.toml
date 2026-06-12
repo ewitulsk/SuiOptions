@@ -1,0 +1,54 @@
+# vault-keeper config — staging env (Sui testnet).
+#
+# Vaults are NOT configured here: the keeper discovers them from the
+# indexer's `vaults` view (fed by the on-chain VaultCreated event) and
+# resolves each vault's pinned Pyth feeds, decimals, and PriceInfoObject
+# ids from chain state (src/discovery.rs). As soon as a vault is created
+# on chain, the next tick picks it up — no config edit, no redeploy.
+# With no vaults on chain yet, the keeper idles with /health up.
+#
+# The Sui gas key comes from /run/secrets/keeper.toml (rendered by
+# render-secrets.sh from `options/staging/keeper` in Secrets Manager).
+
+# GraphQL endpoint of the indexer inside the compose stack — vault
+# discovery, bucket candidates, and the current bucket's call type.
+indexer_graphql_url = "http://indexer:9002/graphql"
+
+tick_secs   = 15
+health_addr = "0.0.0.0:8086"
+
+[pyth]
+# Sui TESTNET's on-chain PriceInfoObjects are keyed by the BETA feed set
+# (verified against the live Pyth state table: the stable SUI/USD id is
+# absent; the beta ids resolve). Update data must therefore come from
+# hermes-BETA — stable hermes VAAs don't correspond to these objects.
+hermes_url     = "https://hermes-beta.pyth.network"
+# Benchmarks serves the STABLE feed set only, so realized-vol lookups
+# for beta feed ids fail and vault_defaults.sigma_fallback takes over.
+benchmarks_url = "https://benchmarks.pyth.network"
+# Sui TESTNET Pyth + Wormhole deployment, per
+# https://docs.pyth.network/price-feeds/contract-addresses/sui
+# (verified against the live fullnode: both packages exist and both
+# state objects are typed at these package addresses).
+pyth_package_id     = "0xabf837e98c26087cba0883c0a7a28326b1fa3c5e1e2c5abdb486f9e8f594c837"
+wormhole_package_id = "0xf47329f4344f3bf0f8e436e2f7b485466cff300f12a166563995d3888c296a94"
+pyth_state_id       = "0x243759059f4c3111179da5878c12f68d612c21a8d54d85edc86164bb18be1c7c"
+wormhole_state_id   = "0x31358d198147da50db32eda2562951d53973a0c0ad5ed738e9b17d88b213d790"
+update_fee_mist     = 1
+
+# Strategy defaults for every discovered vault — launch-memo values
+# (guide doc 08): Δ target 0.20, 4 slices / 90 min stagger.
+[vault_defaults]
+iv_ratio = 1.15        # calibrated: BTC 1.19, ETH 1.08 (backtester, Jun 2026)
+target_delta = 0.20    # doc 08: 0.10 leaves too little premium above the
+                       # reserve after snap-up + haircut
+sigma_fallback = 0.85  # load-bearing on testnet (see benchmarks_url note)
+vol_window_days = 30
+# Keeper-owned Coin<DEEP> + amount split per swap_proceeds; omit both
+# for a zero coin (whitelisted pools).
+# deep_funding_coin = "0x…"
+# deep_fee_per_swap = 1000000
+
+[vault_defaults.slicing]
+slices = 4
+stagger_minutes = 90

@@ -19,8 +19,12 @@ use serde::Deserialize;
 use protocol_types::asset::AssetType;
 use protocol_types::events::{
     AccountCreated, AccountDeposit, AccountWithdraw, BucketCleaned, BucketCreated,
-    BucketInvalidated, BucketRevalidated, ChainEvent, Exercised, ExpiredOptionBurned, FeeUpdated,
-    Redeemed, SigningKeyRotated, TreasuryWithdrawn, WriteExecuted,
+    BucketInvalidated, BucketRevalidated, ChainEvent, CollateralizedWrite, Exercised,
+    ExpiredOptionBurned, FeeUpdated, InstantWithdraw, Redeemed, RfqBid, RfqCreated,
+    RfqExpiredUnsold, RfqSettled, SharesClaimed, SigningKeyRotated, TreasuryWithdrawn,
+    VaultBucketSelected, VaultConfigUpdated, VaultCreated, VaultDeposit, VaultDepositsPaused,
+    VaultFeesCharged, VaultPositionRedeemed, VaultProceedsSwapped, VaultRoundFinalized,
+    WithdrawCompleted, WithdrawInitiated, WriteExecuted,
 };
 use protocol_types::ids::{ObjectId, SuiAddress};
 
@@ -44,6 +48,26 @@ pub struct EventTypes {
     pub signing_key_rotated: String,
     pub fee_updated: String,
     pub treasury_withdrawn: String,
+    // Write-core / RFQ events (guide docs 01–02).
+    pub collateralized_write: String,
+    pub rfq_created: String,
+    pub rfq_bid: String,
+    pub rfq_settled: String,
+    pub rfq_expired_unsold: String,
+    // Vault events (guide doc 03).
+    pub vault_created: String,
+    pub vault_deposit: String,
+    pub shares_claimed: String,
+    pub withdraw_initiated: String,
+    pub withdraw_completed: String,
+    pub instant_withdraw: String,
+    pub vault_bucket_selected: String,
+    pub vault_position_redeemed: String,
+    pub vault_proceeds_swapped: String,
+    pub vault_fees_charged: String,
+    pub vault_round_finalized: String,
+    pub vault_config_updated: String,
+    pub vault_deposits_paused: String,
     /// Prefix of DeepBook's generic `pool::PoolCreated<Base, Quote>` event
     /// (SO-152). Built from DeepBook's ORIGINAL package id — Sui resolves
     /// event/struct types to the first publish, not the upgraded package
@@ -69,12 +93,30 @@ impl EventTypes {
             signing_key_rotated: mk("SigningKeyRotated"),
             fee_updated: mk("FeeUpdated"),
             treasury_withdrawn: mk("TreasuryWithdrawn"),
+            collateralized_write: mk("CollateralizedWrite"),
+            rfq_created: mk("RfqCreated"),
+            rfq_bid: mk("RfqBid"),
+            rfq_settled: mk("RfqSettled"),
+            rfq_expired_unsold: mk("RfqExpiredUnsold"),
+            vault_created: mk("VaultCreated"),
+            vault_deposit: mk("VaultDeposit"),
+            shares_claimed: mk("SharesClaimed"),
+            withdraw_initiated: mk("WithdrawInitiated"),
+            withdraw_completed: mk("WithdrawCompleted"),
+            instant_withdraw: mk("InstantWithdraw"),
+            vault_bucket_selected: mk("VaultBucketSelected"),
+            vault_position_redeemed: mk("VaultPositionRedeemed"),
+            vault_proceeds_swapped: mk("VaultProceedsSwapped"),
+            vault_fees_charged: mk("VaultFeesCharged"),
+            vault_round_finalized: mk("VaultRoundFinalized"),
+            vault_config_updated: mk("VaultConfigUpdated"),
+            vault_deposits_paused: mk("VaultDepositsPaused"),
             deepbook_pool_created_prefix: deepbook_original_package_id
                 .map(|pkg| format!("{pkg}::pool::PoolCreated<")),
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 14] {
+    pub fn all_strings(&self) -> [&str; 32] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -90,6 +132,24 @@ impl EventTypes {
             &self.signing_key_rotated,
             &self.fee_updated,
             &self.treasury_withdrawn,
+            &self.collateralized_write,
+            &self.rfq_created,
+            &self.rfq_bid,
+            &self.rfq_settled,
+            &self.rfq_expired_unsold,
+            &self.vault_created,
+            &self.vault_deposit,
+            &self.shares_claimed,
+            &self.withdraw_initiated,
+            &self.withdraw_completed,
+            &self.instant_withdraw,
+            &self.vault_bucket_selected,
+            &self.vault_position_redeemed,
+            &self.vault_proceeds_swapped,
+            &self.vault_fees_charged,
+            &self.vault_round_finalized,
+            &self.vault_config_updated,
+            &self.vault_deposits_paused,
         ]
     }
 }
@@ -136,6 +196,42 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(FeeUpdated, FeeUpdated)
     } else if type_str == types.treasury_withdrawn {
         decode!(TreasuryWithdrawn, TreasuryWithdrawn)
+    } else if type_str == types.collateralized_write {
+        decode!(CollateralizedWrite, CollateralizedWrite)
+    } else if type_str == types.rfq_created {
+        decode!(RfqCreated, RfqCreated)
+    } else if type_str == types.rfq_bid {
+        decode!(RfqBid, RfqBid)
+    } else if type_str == types.rfq_settled {
+        decode!(RfqSettled, RfqSettled)
+    } else if type_str == types.rfq_expired_unsold {
+        decode!(RfqExpiredUnsold, RfqExpiredUnsold)
+    } else if type_str == types.vault_created {
+        decode!(VaultCreated, VaultCreated)
+    } else if type_str == types.vault_deposit {
+        decode!(VaultDeposit, VaultDeposit)
+    } else if type_str == types.shares_claimed {
+        decode!(SharesClaimed, SharesClaimed)
+    } else if type_str == types.withdraw_initiated {
+        decode!(WithdrawInitiated, WithdrawInitiated)
+    } else if type_str == types.withdraw_completed {
+        decode!(WithdrawCompleted, WithdrawCompleted)
+    } else if type_str == types.instant_withdraw {
+        decode!(InstantWithdraw, InstantWithdraw)
+    } else if type_str == types.vault_bucket_selected {
+        decode!(VaultBucketSelected, VaultBucketSelected)
+    } else if type_str == types.vault_position_redeemed {
+        decode!(VaultPositionRedeemed, VaultPositionRedeemed)
+    } else if type_str == types.vault_proceeds_swapped {
+        decode!(VaultProceedsSwapped, VaultProceedsSwapped)
+    } else if type_str == types.vault_fees_charged {
+        decode!(VaultFeesCharged, VaultFeesCharged)
+    } else if type_str == types.vault_round_finalized {
+        decode!(VaultRoundFinalized, VaultRoundFinalized)
+    } else if type_str == types.vault_config_updated {
+        decode!(VaultConfigUpdated, VaultConfigUpdated)
+    } else if type_str == types.vault_deposits_paused {
+        decode!(VaultDepositsPaused, VaultDepositsPaused)
     } else {
         Ok(None)
     }
@@ -311,6 +407,49 @@ mod tests {
         match got {
             Some(ChainEvent::WriteExecuted(decoded)) => assert_eq!(decoded, evt),
             other => panic!("expected WriteExecuted, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_rfq_created() {
+        let t = types();
+        let evt = RfqCreated {
+            rfq_id: ObjectId::new([0xaa; 32]),
+            bucket_id: ObjectId::new([0xb1; 32]),
+            origin: ObjectId::new([0xf0; 32]),
+            amount: 250_000_000,
+            reserve_premium: 47_619_000,
+            deadline_ms: 1_700_000_900_000,
+            max_deadline_ms: 1_700_001_500_000,
+            min_increment_bps: 100,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        match dispatch(&t, &t.rfq_created, &bytes).unwrap() {
+            Some(ChainEvent::RfqCreated(decoded)) => assert_eq!(decoded, evt),
+            other => panic!("expected RfqCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_vault_round_finalized() {
+        let t = types();
+        let evt = protocol_types::events::VaultRoundFinalized {
+            vault_id: ObjectId::new([0xf1; 32]),
+            round: 3,
+            pps: 1_020_000_000_000,
+            aum: 5_100_000_000,
+            shares: 5_000_000_000,
+            premium_collected: 80_000_000,
+            premium_underlying: 23_000_000,
+            withdrawals_owed: 102_000_000,
+            shares_burned: 100_000_000,
+            deposits_processed: 700_000_000,
+            shares_minted: 686_274_509,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        match dispatch(&t, &t.vault_round_finalized, &bytes).unwrap() {
+            Some(ChainEvent::VaultRoundFinalized(decoded)) => assert_eq!(decoded, evt),
+            other => panic!("expected VaultRoundFinalized, got {other:?}"),
         }
     }
 

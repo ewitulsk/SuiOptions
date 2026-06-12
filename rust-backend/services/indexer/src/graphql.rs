@@ -27,7 +27,10 @@ use axum::{Extension, Router};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
-use crate::db::models::{AccountBalanceRow, AccountRow, BucketRow, IndexedEventRow, PositionRow};
+use crate::db::models::{
+    AccountBalanceRow, AccountRow, BucketRow, IndexedEventRow, PositionRow, RfqBidRow, RfqRow,
+    VaultReceiptRow, VaultRoundRow, VaultRow,
+};
 use crate::db::{BucketQuery, EventFilter, EventQuery, Repo};
 use crate::progress::{ProgressSnapshot, ProgressState};
 
@@ -195,6 +198,165 @@ fn hex_encode(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+/// One on-chain RFQ auction (C3). Numeric fields are decimal strings.
+#[derive(SimpleObject)]
+pub struct RfqGql {
+    pub rfq_id: String,
+    pub bucket_id: String,
+    /// Vault id (coupled auctions) or seller-address-as-id.
+    pub origin: String,
+    pub amount_raw: String,
+    pub reserve_premium_raw: String,
+    pub deadline_ms: String,
+    pub best_premium_raw: Option<String>,
+    pub best_bidder: Option<String>,
+    /// open | settled | expired_unsold.
+    pub status: String,
+    pub winner: Option<String>,
+    pub net_premium_raw: Option<String>,
+    pub position_id: Option<String>,
+}
+
+impl From<RfqRow> for RfqGql {
+    fn from(r: RfqRow) -> Self {
+        RfqGql {
+            rfq_id: r.rfq_id,
+            bucket_id: r.bucket_id,
+            origin: r.origin,
+            amount_raw: r.amount.to_string(),
+            reserve_premium_raw: r.reserve_premium.to_string(),
+            deadline_ms: r.deadline_ms.to_string(),
+            best_premium_raw: r.best_premium.map(|v| v.to_string()),
+            best_bidder: r.best_bidder,
+            status: r.status,
+            winner: r.winner,
+            net_premium_raw: r.net_premium.map(|v| v.to_string()),
+            position_id: r.position_id,
+        }
+    }
+}
+
+/// One bid in an auction's history (C3).
+#[derive(SimpleObject)]
+pub struct RfqBidGql {
+    pub rfq_id: String,
+    pub sequence: String,
+    pub bidder: String,
+    pub call_recipient: String,
+    pub premium_raw: String,
+}
+
+impl From<RfqBidRow> for RfqBidGql {
+    fn from(r: RfqBidRow) -> Self {
+        RfqBidGql {
+            rfq_id: r.rfq_id,
+            sequence: r.sequence.to_string(),
+            bidder: r.bidder,
+            call_recipient: r.call_recipient,
+            premium_raw: r.premium.to_string(),
+        }
+    }
+}
+
+/// One covered-call vault's headline state (D2).
+#[derive(SimpleObject)]
+pub struct VaultGql {
+    pub vault_id: String,
+    pub underlying_type: String,
+    pub settlement_type: String,
+    pub share_type: String,
+    /// Current round (last finalized + 1; 0 = pre-genesis).
+    pub round: String,
+    pub current_bucket: Option<String>,
+    pub latest_pps_raw: Option<String>,
+    pub total_shares_raw: String,
+    pub pending_deposits_raw: String,
+    pub deposits_paused: bool,
+}
+
+impl From<VaultRow> for VaultGql {
+    fn from(v: VaultRow) -> Self {
+        VaultGql {
+            vault_id: v.vault_id,
+            underlying_type: v.underlying_type,
+            settlement_type: v.settlement_type,
+            share_type: v.share_type,
+            round: v.round.to_string(),
+            current_bucket: v.current_bucket,
+            latest_pps_raw: v.latest_pps.map(|p| p.to_string()),
+            total_shares_raw: v.total_shares.to_string(),
+            pending_deposits_raw: v.pending_deposits.to_string(),
+            deposits_paused: v.deposits_paused,
+        }
+    }
+}
+
+/// One round in a vault's track record (D2). Selection fields land at
+/// `select_bucket`; pps/aum/premium at finalize.
+#[derive(SimpleObject)]
+pub struct VaultRoundGql {
+    pub vault_id: String,
+    pub round: String,
+    pub bucket_id: Option<String>,
+    pub strike_raw: Option<String>,
+    pub strike_scale: Option<i32>,
+    pub expiry_ms: Option<String>,
+    pub pps_raw: Option<String>,
+    pub aum_raw: Option<String>,
+    pub shares_raw: Option<String>,
+    pub premium_collected_raw: Option<String>,
+    pub mgmt_fee_raw: Option<String>,
+    pub perf_fee_raw: Option<String>,
+    pub finalized_at_ms: Option<String>,
+}
+
+impl From<VaultRoundRow> for VaultRoundGql {
+    fn from(r: VaultRoundRow) -> Self {
+        VaultRoundGql {
+            vault_id: r.vault_id,
+            round: r.round.to_string(),
+            bucket_id: r.bucket_id,
+            strike_raw: r.strike.map(|v| v.to_string()),
+            strike_scale: r.strike_scale.map(|v| v as i32),
+            expiry_ms: r.expiry_ms.map(|v| v.to_string()),
+            pps_raw: r.pps.map(|v| v.to_string()),
+            aum_raw: r.aum.map(|v| v.to_string()),
+            shares_raw: r.shares.map(|v| v.to_string()),
+            premium_collected_raw: r.premium_collected.map(|v| v.to_string()),
+            mgmt_fee_raw: r.mgmt_fee.map(|v| v.to_string()),
+            perf_fee_raw: r.perf_fee.map(|v| v.to_string()),
+            finalized_at_ms: r.finalized_at_ms.map(|v| v.to_string()),
+        }
+    }
+}
+
+/// One (vault, owner, round, kind) receipt aggregate (D2). `amount` is
+/// queued underlying for deposits / escrowed shares for withdrawals;
+/// `settled` what's been claimed / completed so far.
+#[derive(SimpleObject)]
+pub struct VaultReceiptGql {
+    pub vault_id: String,
+    pub owner: String,
+    pub round: String,
+    /// deposit | withdraw.
+    pub kind: String,
+    pub amount_raw: String,
+    pub settled_raw: String,
+}
+
+impl From<VaultReceiptRow> for VaultReceiptGql {
+    fn from(r: VaultReceiptRow) -> Self {
+        VaultReceiptGql {
+            vault_id: r.vault_id,
+            owner: r.owner,
+            round: r.round.to_string(),
+            kind: r.kind,
+            amount_raw: r.amount.to_string(),
+            settled_raw: r.settled.to_string(),
+        }
+    }
 }
 
 #[derive(SimpleObject)]
@@ -392,6 +554,93 @@ impl QueryRoot {
         })
         .await?;
         Ok(rows.into_iter().map(PositionGql::from).collect())
+    }
+
+    /// JIT: RFQ auctions, optionally filtered by status
+    /// (open | settled | expired_unsold) and/or origin (vault id).
+    async fn rfqs(
+        &self,
+        ctx: &Context<'_>,
+        status: Option<String>,
+        origin: Option<String>,
+    ) -> async_graphql::Result<Vec<RfqGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let rows = tokio::task::spawn_blocking(move || {
+            repo.rfqs_query(status.as_deref(), origin.as_deref())
+        })
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+        .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(rows.into_iter().map(RfqGql::from).collect())
+    }
+
+    /// JIT: bid history for one auction, ascending.
+    async fn rfq_bids(
+        &self,
+        ctx: &Context<'_>,
+        rfq_id: String,
+    ) -> async_graphql::Result<Vec<RfqBidGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let rows = tokio::task::spawn_blocking(move || repo.rfq_bids_for(&rfq_id))
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(rows.into_iter().map(RfqBidGql::from).collect())
+    }
+
+    /// JIT: all covered-call vaults.
+    async fn vaults(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<VaultGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let rows = tokio::task::spawn_blocking(move || repo.vaults_query())
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(rows.into_iter().map(VaultGql::from).collect())
+    }
+
+    /// JIT: one vault by id, or null if unknown.
+    async fn vault(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+    ) -> async_graphql::Result<Option<VaultGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let row = tokio::task::spawn_blocking(move || repo.vault_by_id(&id))
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(row.map(VaultGql::from))
+    }
+
+    /// JIT: one vault's round history, ascending (the track record).
+    async fn vault_rounds(
+        &self,
+        ctx: &Context<'_>,
+        vault_id: String,
+    ) -> async_graphql::Result<Vec<VaultRoundGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let rows = tokio::task::spawn_blocking(move || repo.vault_rounds_for(&vault_id))
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(rows.into_iter().map(VaultRoundGql::from).collect())
+    }
+
+    /// JIT: receipt aggregates for one vault, optionally scoped to an owner.
+    async fn vault_receipts(
+        &self,
+        ctx: &Context<'_>,
+        vault_id: String,
+        owner: Option<String>,
+    ) -> async_graphql::Result<Vec<VaultReceiptGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let rows = tokio::task::spawn_blocking(move || {
+            repo.vault_receipts_for(&vault_id, owner.as_deref())
+        })
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+        .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(rows.into_iter().map(VaultReceiptGql::from).collect())
     }
 
     /// Generalized event query over the full `indexed_events` log.

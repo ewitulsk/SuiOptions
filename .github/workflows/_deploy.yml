@@ -125,7 +125,7 @@ jobs:
             # Keep this in sync with ALL_SERVICES in deployment/ec2/deploy.sh
             # and affected.py — a service missing here is never tag-seeded on
             # force_all, so deploy.sh rejects the deploy on a fresh box.
-            services='["indexer","quoting-service","mm-bot","option-scheduler","api-service","token-info","auth-service","gas-station","price-charting"]'
+            services='["indexer","quoting-service","mm-bot","option-scheduler","api-service","token-info","auth-service","gas-station","price-charting","balance-monitor","keeper"]'
             echo "force_all or image_tag override → rolling all services"
           else
             services=$(printf '%s\n' "$CHANGED_FILES" \

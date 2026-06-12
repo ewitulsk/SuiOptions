@@ -22,7 +22,8 @@ use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::db::models::{
     u128_to_bigdecimal, u64_to_bigdecimal, AccountBalanceRow, AccountRow, BucketRow,
-    DeepBookPoolRow, EventParticipantRow, PositionRow,
+    DeepBookPoolRow, EventParticipantRow, PositionRow, RfqBidRow, RfqRow, VaultReceiptRow,
+    VaultRoundRow, VaultRow,
 };
 use crate::db::{CheckpointBatch, EventBuild, HydratedViews};
 
@@ -86,6 +87,104 @@ pub struct PositionState {
     pub range_end: u128,
 }
 
+/// Lifecycle of an on-chain RFQ auction (C3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RfqStatus {
+    Open,
+    Settled,
+    ExpiredUnsold,
+}
+
+impl RfqStatus {
+    pub fn tag(self) -> &'static str {
+        match self {
+            RfqStatus::Open => "open",
+            RfqStatus::Settled => "settled",
+            RfqStatus::ExpiredUnsold => "expired_unsold",
+        }
+    }
+
+    pub fn from_str_tag(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "open" => Ok(RfqStatus::Open),
+            "settled" => Ok(RfqStatus::Settled),
+            "expired_unsold" => Ok(RfqStatus::ExpiredUnsold),
+            other => Err(anyhow::anyhow!("unknown rfq status {other:?}")),
+        }
+    }
+}
+
+/// One RFQ auction's lifecycle, from `RfqCreated` through `RfqBid`s to
+/// its terminal `RfqSettled` / `RfqExpiredUnsold` (C3).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RfqState {
+    pub bucket_id: ObjectId,
+    pub origin: ObjectId,
+    pub amount: u64,
+    pub reserve_premium: u64,
+    /// Tracks anti-snipe extensions via `RfqBid.new_deadline_ms`.
+    pub deadline_ms: u64,
+    pub best_premium: Option<u64>,
+    pub best_bidder: Option<SuiAddress>,
+    pub status: RfqStatus,
+    pub winner: Option<SuiAddress>,
+    pub net_premium: Option<u64>,
+    pub position_id: Option<ObjectId>,
+}
+
+/// One covered-call vault's headline state, assembled from its event
+/// stream (D2). Balance-precise fields (deployable etc.) are deliberately
+/// not modeled — they need object reads; consumers wanting them ask the
+/// chain. What's here is exactly what the events state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VaultState {
+    pub underlying_type: AssetType,
+    pub settlement_type: AssetType,
+    pub share_type: AssetType,
+    /// Current round: last finalized + 1 (0 = pre-genesis settling).
+    pub round: u64,
+    pub current_bucket: Option<ObjectId>,
+    pub latest_pps: Option<u128>,
+    /// Share supply after the last finalize (burn + mint applied).
+    pub total_shares: u64,
+    /// Deposits queued for the next round.
+    pub pending_deposits: u64,
+    pub deposits_paused: bool,
+}
+
+/// Per-round track record (D2): selection fields land first, fees and
+/// the finalize economics fill in as the round progresses.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VaultRoundState {
+    pub bucket_id: Option<ObjectId>,
+    pub strike: Option<u128>,
+    pub strike_scale: Option<u8>,
+    pub expiry_ms: Option<u64>,
+    pub pps: Option<u128>,
+    pub aum: Option<u64>,
+    pub shares: Option<u64>,
+    pub premium_collected: Option<u64>,
+    pub mgmt_fee: Option<u64>,
+    pub perf_fee: Option<u64>,
+    pub finalized_at_ms: Option<u64>,
+}
+
+/// Aggregated deposit/withdraw receipts per (vault, owner, round, kind).
+/// The receipt events don't carry object ids, so per-object rows aren't
+/// possible; `amount` is queued underlying (deposits) or escrowed shares
+/// (withdrawals), `settled` what's been claimed/completed so far.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReceiptState {
+    pub amount: u64,
+    pub settled: u64,
+}
+
+/// Key for the receipts view: (vault, owner hex, round, kind tag).
+pub type ReceiptKey = (ObjectId, String, u64, String);
+
+pub const RECEIPT_DEPOSIT: &str = "deposit";
+pub const RECEIPT_WITHDRAW: &str = "withdraw";
+
 /// Output of [`Store::stage_batch`]. The `indexed` events carry the assigned
 /// sequences (used for logging); `db_batch` is what
 /// [`crate::db::Repo::apply_checkpoint`] writes.
@@ -108,6 +207,14 @@ struct Inner {
     positions: BTreeMap<(ObjectId, u128), PositionState>,
     /// bucket_id → its DeepBook venue (SO-152).
     deepbook_pools: BTreeMap<ObjectId, DeepBookPoolState>,
+    /// rfq_id → auction lifecycle (C3).
+    rfqs: BTreeMap<ObjectId, RfqState>,
+    /// vault_id → headline state (D2).
+    vaults: BTreeMap<ObjectId, VaultState>,
+    /// (vault_id, round) → track record (D2).
+    vault_rounds: BTreeMap<(ObjectId, u64), VaultRoundState>,
+    /// (vault, owner, round, kind) → receipt aggregate (D2).
+    vault_receipts: BTreeMap<ReceiptKey, ReceiptState>,
 }
 
 impl Default for Inner {
@@ -118,6 +225,10 @@ impl Default for Inner {
             buckets: BTreeMap::new(),
             positions: BTreeMap::new(),
             deepbook_pools: BTreeMap::new(),
+            rfqs: BTreeMap::new(),
+            vaults: BTreeMap::new(),
+            vault_rounds: BTreeMap::new(),
+            vault_receipts: BTreeMap::new(),
         }
     }
 }
@@ -140,7 +251,7 @@ impl Store {
         let sequence = inner.next_sequence;
         inner.next_sequence += 1;
         trace!(sequence, timestamp_ms, event_type = ?std::mem::discriminant(&event), "ingesting event");
-        apply_event(&mut inner, &event);
+        apply_event(&mut inner, &event, timestamp_ms);
         IndexedEvent {
             sequence,
             timestamp_ms,
@@ -180,7 +291,7 @@ impl Store {
         for (event, tx_digest, event_index) in events {
             let sequence = inner.next_sequence;
             inner.next_sequence += 1;
-            apply_event(&mut inner, &event);
+            apply_event(&mut inner, &event, timestamp_ms);
             // Snapshot whatever views the event touched into the DB batch.
             // tx_digest + timestamp are needed to denormalize position
             // provenance (SO-97), so pass them through before `tx_digest`
@@ -231,6 +342,10 @@ impl Store {
         inner.buckets = views.buckets;
         inner.positions = views.positions;
         inner.deepbook_pools = views.deepbook_pools;
+        inner.rfqs = views.rfqs;
+        inner.vaults = views.vaults;
+        inner.vault_rounds = views.vault_rounds;
+        inner.vault_receipts = views.vault_receipts;
         inner.next_sequence = last_sequence + 1;
     }
 
@@ -284,6 +399,21 @@ impl Store {
             .iter()
             .map(|(k, v)| (*k, v.clone()))
             .collect()
+    }
+
+    /// One auction's lifecycle state (C3).
+    pub fn rfq(&self, id: &ObjectId) -> Option<RfqState> {
+        self.inner.read().rfqs.get(id).cloned()
+    }
+
+    /// One vault's headline state (D2).
+    pub fn vault(&self, id: &ObjectId) -> Option<VaultState> {
+        self.inner.read().vaults.get(id).cloned()
+    }
+
+    /// One vault round's track-record entry (D2).
+    pub fn vault_round(&self, vault: &ObjectId, round: u64) -> Option<VaultRoundState> {
+        self.inner.read().vault_rounds.get(&(*vault, round)).cloned()
     }
 
     pub fn account_count(&self) -> usize {
@@ -508,30 +638,105 @@ fn stage_event_into_batch(
                 batch.buckets.push(bucket_row(w.bucket_id, state, sequence));
             }
         }
+        // ── RFQ lifecycle (C3): snapshot the post-apply auction state ──
+        ChainEvent::RfqCreated(r) => {
+            if let Some(state) = inner.rfqs.get(&r.rfq_id) {
+                batch.rfqs.push(rfq_row(r.rfq_id, state, sequence));
+            }
+        }
+        ChainEvent::RfqBid(b) => {
+            if let Some(state) = inner.rfqs.get(&b.rfq_id) {
+                batch.rfqs.push(rfq_row(b.rfq_id, state, sequence));
+            }
+            batch.rfq_bids.push(RfqBidRow {
+                rfq_id: b.rfq_id.to_hex(),
+                sequence,
+                bidder: b.bidder.to_hex(),
+                call_recipient: b.call_recipient.to_hex(),
+                premium: u64_to_bigdecimal(b.premium),
+            });
+        }
+        ChainEvent::RfqSettled(s) => {
+            if let Some(state) = inner.rfqs.get(&s.rfq_id) {
+                batch.rfqs.push(rfq_row(s.rfq_id, state, sequence));
+            }
+        }
+        ChainEvent::RfqExpiredUnsold(e) => {
+            if let Some(state) = inner.rfqs.get(&e.rfq_id) {
+                batch.rfqs.push(rfq_row(e.rfq_id, state, sequence));
+            }
+        }
+        // ── vault lifecycle (D2) ────────────────────────────────────
+        ChainEvent::VaultCreated(v) => {
+            if let Some(state) = inner.vaults.get(&v.vault_id) {
+                batch.vaults.push(vault_row(v.vault_id, state, sequence));
+            }
+        }
+        ChainEvent::VaultDeposit(d) => {
+            stage_vault(inner, d.vault_id, sequence, batch);
+            stage_receipt(inner, (d.vault_id, d.depositor.to_hex(), d.round, RECEIPT_DEPOSIT.into()), sequence, batch);
+        }
+        ChainEvent::InstantWithdraw(w) => {
+            stage_vault(inner, w.vault_id, sequence, batch);
+            stage_receipt(inner, (w.vault_id, w.owner.to_hex(), w.round, RECEIPT_DEPOSIT.into()), sequence, batch);
+        }
+        ChainEvent::SharesClaimed(c) => {
+            stage_receipt(inner, (c.vault_id, c.owner.to_hex(), c.round, RECEIPT_DEPOSIT.into()), sequence, batch);
+        }
+        ChainEvent::WithdrawInitiated(w) => {
+            stage_receipt(inner, (w.vault_id, w.owner.to_hex(), w.round, RECEIPT_WITHDRAW.into()), sequence, batch);
+        }
+        ChainEvent::WithdrawCompleted(w) => {
+            stage_receipt(inner, (w.vault_id, w.owner.to_hex(), w.round, RECEIPT_WITHDRAW.into()), sequence, batch);
+        }
+        ChainEvent::VaultBucketSelected(s) => {
+            stage_vault(inner, s.vault_id, sequence, batch);
+            stage_vault_round(inner, s.vault_id, s.round, sequence, batch);
+        }
+        ChainEvent::VaultFeesCharged(f) => {
+            stage_vault_round(inner, f.vault_id, f.round, sequence, batch);
+        }
+        ChainEvent::VaultRoundFinalized(f) => {
+            stage_vault(inner, f.vault_id, sequence, batch);
+            stage_vault_round(inner, f.vault_id, f.round, sequence, batch);
+        }
+        ChainEvent::VaultDepositsPaused(p) => {
+            stage_vault(inner, p.vault_id, sequence, batch);
+        }
         ChainEvent::ExpiredOptionBurned(_)
         | ChainEvent::FeeUpdated(_)
         | ChainEvent::TreasuryWithdrawn(_)
-        | ChainEvent::RfqCreated(_)
-        | ChainEvent::RfqBid(_)
-        | ChainEvent::RfqSettled(_)
-        | ChainEvent::RfqExpiredUnsold(_)
-        | ChainEvent::VaultCreated(_)
-        | ChainEvent::VaultDeposit(_)
-        | ChainEvent::SharesClaimed(_)
-        | ChainEvent::WithdrawInitiated(_)
-        | ChainEvent::WithdrawCompleted(_)
-        | ChainEvent::InstantWithdraw(_)
-        | ChainEvent::VaultBucketSelected(_)
         | ChainEvent::VaultPositionRedeemed(_)
         | ChainEvent::VaultProceedsSwapped(_)
-        | ChainEvent::VaultFeesCharged(_)
-        | ChainEvent::VaultRoundFinalized(_)
-        | ChainEvent::VaultConfigUpdated(_)
-        | ChainEvent::VaultDepositsPaused(_) => {
-            // No materialised-view change yet. The event itself still
-            // lands in `indexed_events` via the caller; the rfq/vault
-            // tables + GraphQL land with guide tickets C3/D2 (doc 05 §1).
+        | ChainEvent::VaultConfigUpdated(_) => {
+            // Log-only events: no materialised view to refresh.
         }
+    }
+}
+
+fn stage_vault(inner: &Inner, vault_id: ObjectId, sequence: i64, batch: &mut CheckpointBatch) {
+    if let Some(state) = inner.vaults.get(&vault_id) {
+        batch.vaults.push(vault_row(vault_id, state, sequence));
+    }
+}
+
+fn stage_vault_round(
+    inner: &Inner,
+    vault_id: ObjectId,
+    round: u64,
+    sequence: i64,
+    batch: &mut CheckpointBatch,
+) {
+    if let Some(state) = inner.vault_rounds.get(&(vault_id, round)) {
+        batch
+            .vault_rounds
+            .push(vault_round_row(vault_id, round, state, sequence));
+    }
+}
+
+fn stage_receipt(inner: &Inner, key: ReceiptKey, sequence: i64, batch: &mut CheckpointBatch) {
+    if let Some(state) = inner.vault_receipts.get(&key) {
+        batch.vault_receipts.push(receipt_row(&key, state, sequence));
     }
 }
 
@@ -596,6 +801,76 @@ fn deepbook_pool_row(
     }
 }
 
+fn rfq_row(id: ObjectId, state: &RfqState, sequence: i64) -> RfqRow {
+    RfqRow {
+        rfq_id: id.to_hex(),
+        bucket_id: state.bucket_id.to_hex(),
+        origin: state.origin.to_hex(),
+        amount: u64_to_bigdecimal(state.amount),
+        reserve_premium: u64_to_bigdecimal(state.reserve_premium),
+        deadline_ms: state.deadline_ms as i64,
+        best_premium: state.best_premium.map(u64_to_bigdecimal),
+        best_bidder: state.best_bidder.map(|a| a.to_hex()),
+        status: state.status.tag().to_string(),
+        winner: state.winner.map(|a| a.to_hex()),
+        net_premium: state.net_premium.map(u64_to_bigdecimal),
+        position_id: state.position_id.map(|p| p.to_hex()),
+        updated_at_seq: sequence,
+    }
+}
+
+fn vault_row(id: ObjectId, state: &VaultState, sequence: i64) -> VaultRow {
+    VaultRow {
+        vault_id: id.to_hex(),
+        underlying_type: state.underlying_type.as_str().to_string(),
+        settlement_type: state.settlement_type.as_str().to_string(),
+        share_type: state.share_type.as_str().to_string(),
+        round: state.round as i64,
+        current_bucket: state.current_bucket.map(|b| b.to_hex()),
+        latest_pps: state.latest_pps.map(u128_to_bigdecimal),
+        total_shares: u64_to_bigdecimal(state.total_shares),
+        pending_deposits: u64_to_bigdecimal(state.pending_deposits),
+        deposits_paused: state.deposits_paused,
+        updated_at_seq: sequence,
+    }
+}
+
+fn vault_round_row(
+    vault_id: ObjectId,
+    round: u64,
+    state: &VaultRoundState,
+    sequence: i64,
+) -> VaultRoundRow {
+    VaultRoundRow {
+        vault_id: vault_id.to_hex(),
+        round: round as i64,
+        bucket_id: state.bucket_id.map(|b| b.to_hex()),
+        strike: state.strike.map(u128_to_bigdecimal),
+        strike_scale: state.strike_scale.map(|s| s as i16),
+        expiry_ms: state.expiry_ms.map(|v| v as i64),
+        pps: state.pps.map(u128_to_bigdecimal),
+        aum: state.aum.map(u64_to_bigdecimal),
+        shares: state.shares.map(u64_to_bigdecimal),
+        premium_collected: state.premium_collected.map(u64_to_bigdecimal),
+        mgmt_fee: state.mgmt_fee.map(u64_to_bigdecimal),
+        perf_fee: state.perf_fee.map(u64_to_bigdecimal),
+        finalized_at_ms: state.finalized_at_ms.map(|v| v as i64),
+        updated_at_seq: sequence,
+    }
+}
+
+fn receipt_row(key: &ReceiptKey, state: &ReceiptState, sequence: i64) -> VaultReceiptRow {
+    VaultReceiptRow {
+        vault_id: key.0.to_hex(),
+        owner: key.1.clone(),
+        round: key.2 as i64,
+        kind: key.3.clone(),
+        amount: u64_to_bigdecimal(state.amount),
+        settled: u64_to_bigdecimal(state.settled),
+        updated_at_seq: sequence,
+    }
+}
+
 fn account_row(id: ObjectId, state: &AccountState, sequence: i64) -> AccountRow {
     AccountRow {
         account_id: id.to_hex(),
@@ -620,7 +895,7 @@ fn balance_row(
     }
 }
 
-fn apply_event(inner: &mut Inner, event: &ChainEvent) {
+fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
     match event {
         ChainEvent::BucketCreated(b) => apply_bucket_created(inner, b),
         ChainEvent::WriteExecuted(w) => apply_write_executed(inner, w),
@@ -695,25 +970,149 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent) {
                 b.total_written = w.range_end;
             }
         }
+        // ── RFQ lifecycle (C3) ──────────────────────────────────────
+        ChainEvent::RfqCreated(r) => {
+            inner.rfqs.insert(
+                r.rfq_id,
+                RfqState {
+                    bucket_id: r.bucket_id,
+                    origin: r.origin,
+                    amount: r.amount,
+                    reserve_premium: r.reserve_premium,
+                    deadline_ms: r.deadline_ms,
+                    best_premium: None,
+                    best_bidder: None,
+                    status: RfqStatus::Open,
+                    winner: None,
+                    net_premium: None,
+                    position_id: None,
+                },
+            );
+        }
+        ChainEvent::RfqBid(b) => {
+            if let Some(rfq) = inner.rfqs.get_mut(&b.rfq_id) {
+                rfq.best_premium = Some(b.premium);
+                rfq.best_bidder = Some(b.bidder);
+                rfq.deadline_ms = b.new_deadline_ms;
+            }
+        }
+        ChainEvent::RfqSettled(s) => {
+            if let Some(rfq) = inner.rfqs.get_mut(&s.rfq_id) {
+                rfq.status = RfqStatus::Settled;
+                rfq.winner = Some(s.winner);
+                rfq.net_premium = Some(s.net_premium);
+                rfq.position_id = Some(s.position_id);
+            }
+        }
+        ChainEvent::RfqExpiredUnsold(e) => {
+            if let Some(rfq) = inner.rfqs.get_mut(&e.rfq_id) {
+                rfq.status = RfqStatus::ExpiredUnsold;
+            }
+        }
+        // ── vault lifecycle (D2) ────────────────────────────────────
+        ChainEvent::VaultCreated(v) => {
+            inner.vaults.insert(
+                v.vault_id,
+                VaultState {
+                    underlying_type: v.underlying_type.clone(),
+                    settlement_type: v.settlement_type.clone(),
+                    share_type: v.share_type.clone(),
+                    round: 0,
+                    current_bucket: None,
+                    latest_pps: None,
+                    total_shares: 0,
+                    pending_deposits: 0,
+                    deposits_paused: false,
+                },
+            );
+        }
+        ChainEvent::VaultDeposit(d) => {
+            if let Some(v) = inner.vaults.get_mut(&d.vault_id) {
+                v.pending_deposits = v.pending_deposits.saturating_add(d.amount);
+            }
+            let r = inner
+                .vault_receipts
+                .entry((d.vault_id, d.depositor.to_hex(), d.round, RECEIPT_DEPOSIT.into()))
+                .or_default();
+            r.amount = r.amount.saturating_add(d.amount);
+        }
+        ChainEvent::InstantWithdraw(w) => {
+            if let Some(v) = inner.vaults.get_mut(&w.vault_id) {
+                v.pending_deposits = v.pending_deposits.saturating_sub(w.amount);
+            }
+            let r = inner
+                .vault_receipts
+                .entry((w.vault_id, w.owner.to_hex(), w.round, RECEIPT_DEPOSIT.into()))
+                .or_default();
+            r.settled = r.settled.saturating_add(w.amount);
+        }
+        ChainEvent::SharesClaimed(c) => {
+            let r = inner
+                .vault_receipts
+                .entry((c.vault_id, c.owner.to_hex(), c.round, RECEIPT_DEPOSIT.into()))
+                .or_default();
+            r.settled = r.settled.saturating_add(c.amount);
+        }
+        ChainEvent::WithdrawInitiated(w) => {
+            let r = inner
+                .vault_receipts
+                .entry((w.vault_id, w.owner.to_hex(), w.round, RECEIPT_WITHDRAW.into()))
+                .or_default();
+            r.amount = r.amount.saturating_add(w.shares);
+        }
+        ChainEvent::WithdrawCompleted(w) => {
+            let r = inner
+                .vault_receipts
+                .entry((w.vault_id, w.owner.to_hex(), w.round, RECEIPT_WITHDRAW.into()))
+                .or_default();
+            r.settled = r.settled.saturating_add(w.shares);
+        }
+        ChainEvent::VaultBucketSelected(s) => {
+            if let Some(v) = inner.vaults.get_mut(&s.vault_id) {
+                v.current_bucket = Some(s.bucket_id);
+                v.round = s.round;
+            }
+            let r = inner.vault_rounds.entry((s.vault_id, s.round)).or_default();
+            r.bucket_id = Some(s.bucket_id);
+            r.strike = Some(s.strike);
+            r.strike_scale = Some(s.strike_scale);
+            r.expiry_ms = Some(s.expiry_ms);
+        }
+        ChainEvent::VaultFeesCharged(f) => {
+            let r = inner.vault_rounds.entry((f.vault_id, f.round)).or_default();
+            r.mgmt_fee = Some(f.mgmt_fee);
+            r.perf_fee = Some(f.perf_fee);
+        }
+        ChainEvent::VaultRoundFinalized(f) => {
+            if let Some(v) = inner.vaults.get_mut(&f.vault_id) {
+                v.round = f.round + 1;
+                v.current_bucket = None;
+                v.latest_pps = Some(f.pps);
+                // Supply after the finalize's burn + mint. `f.shares` is the
+                // pps denominator (pre burn/mint).
+                v.total_shares = f
+                    .shares
+                    .saturating_sub(f.shares_burned)
+                    .saturating_add(f.shares_minted);
+                v.pending_deposits = v.pending_deposits.saturating_sub(f.deposits_processed);
+            }
+            let r = inner.vault_rounds.entry((f.vault_id, f.round)).or_default();
+            r.pps = Some(f.pps);
+            r.aum = Some(f.aum);
+            r.shares = Some(f.shares);
+            r.premium_collected = Some(f.premium_collected);
+            r.finalized_at_ms = Some(timestamp_ms);
+        }
+        ChainEvent::VaultDepositsPaused(p) => {
+            if let Some(v) = inner.vaults.get_mut(&p.vault_id) {
+                v.deposits_paused = p.paused;
+            }
+        }
         ChainEvent::FeeUpdated(_)
         | ChainEvent::TreasuryWithdrawn(_)
-        | ChainEvent::RfqCreated(_)
-        | ChainEvent::RfqBid(_)
-        | ChainEvent::RfqSettled(_)
-        | ChainEvent::RfqExpiredUnsold(_)
-        | ChainEvent::VaultCreated(_)
-        | ChainEvent::VaultDeposit(_)
-        | ChainEvent::SharesClaimed(_)
-        | ChainEvent::WithdrawInitiated(_)
-        | ChainEvent::WithdrawCompleted(_)
-        | ChainEvent::InstantWithdraw(_)
-        | ChainEvent::VaultBucketSelected(_)
         | ChainEvent::VaultPositionRedeemed(_)
         | ChainEvent::VaultProceedsSwapped(_)
-        | ChainEvent::VaultFeesCharged(_)
-        | ChainEvent::VaultRoundFinalized(_)
-        | ChainEvent::VaultConfigUpdated(_)
-        | ChainEvent::VaultDepositsPaused(_) => {}
+        | ChainEvent::VaultConfigUpdated(_) => {}
     }
 }
 
@@ -966,6 +1365,181 @@ mod tests {
             3,
         );
         assert!(!store.bucket(&id).unwrap().invalidated);
+    }
+
+    #[test]
+    fn rfq_lifecycle_created_bid_settled() {
+        use protocol_types::events::{RfqBid, RfqCreated, RfqSettled};
+        let store = Store::default();
+        let rfq = ObjectId::new([0xaa; 32]);
+        let bidder = SuiAddress::new([0x01; 32]);
+        let sniper = SuiAddress::new([0x02; 32]);
+
+        store.ingest(
+            ChainEvent::RfqCreated(RfqCreated {
+                rfq_id: rfq,
+                bucket_id: ObjectId::new([0xb1; 32]),
+                origin: ObjectId::new([0xf0; 32]),
+                amount: 250_000_000,
+                reserve_premium: 47_619_000,
+                deadline_ms: 1_000_000,
+                max_deadline_ms: 1_600_000,
+                min_increment_bps: 100,
+            }),
+            1,
+        );
+        assert_eq!(store.rfq(&rfq).unwrap().status, RfqStatus::Open);
+
+        store.ingest(
+            ChainEvent::RfqBid(RfqBid {
+                rfq_id: rfq,
+                bidder,
+                call_recipient: bidder,
+                premium: 50_000_000,
+                previous_premium: 0,
+                new_deadline_ms: 1_000_000,
+            }),
+            2,
+        );
+        // Snipe: higher bid pushes the deadline.
+        store.ingest(
+            ChainEvent::RfqBid(RfqBid {
+                rfq_id: rfq,
+                bidder: sniper,
+                call_recipient: sniper,
+                premium: 51_000_000,
+                previous_premium: 50_000_000,
+                new_deadline_ms: 1_120_000,
+            }),
+            3,
+        );
+        let s = store.rfq(&rfq).unwrap();
+        assert_eq!(s.best_premium, Some(51_000_000));
+        assert_eq!(s.best_bidder, Some(sniper));
+        assert_eq!(s.deadline_ms, 1_120_000);
+
+        store.ingest(
+            ChainEvent::RfqSettled(RfqSettled {
+                rfq_id: rfq,
+                bucket_id: ObjectId::new([0xb1; 32]),
+                origin: ObjectId::new([0xf0; 32]),
+                winner: sniper,
+                call_recipient: sniper,
+                position_id: ObjectId::new([0x99; 32]),
+                position_recipient: SuiAddress::new([0xf0; 32]),
+                amount: 250_000_000,
+                gross_premium: 51_000_000,
+                fee: 510_000,
+                net_premium: 50_490_000,
+                range_start: 0,
+                range_end: 250_000_000,
+            }),
+            4,
+        );
+        let s = store.rfq(&rfq).unwrap();
+        assert_eq!(s.status, RfqStatus::Settled);
+        assert_eq!(s.winner, Some(sniper));
+        assert_eq!(s.net_premium, Some(50_490_000));
+        assert_eq!(s.position_id, Some(ObjectId::new([0x99; 32])));
+    }
+
+    #[test]
+    fn vault_lifecycle_deposit_select_finalize() {
+        use protocol_types::events::{
+            VaultBucketSelected, VaultCreated, VaultDeposit, VaultRoundFinalized,
+        };
+        let store = Store::default();
+        let vault = ObjectId::new([0xf0; 32]);
+        let lp = SuiAddress::new([0x07; 32]);
+
+        store.ingest(
+            ChainEvent::VaultCreated(VaultCreated {
+                vault_id: vault,
+                underlying_type: AssetType::new("0x2::sui::SUI"),
+                settlement_type: AssetType::new("0x9::usdc::USDC"),
+                share_type: AssetType::new("0x9::vshare::VSHARE"),
+            }),
+            1,
+        );
+        store.ingest(
+            ChainEvent::VaultDeposit(VaultDeposit {
+                vault_id: vault,
+                depositor: lp,
+                round: 1,
+                amount: 700_000_000,
+            }),
+            2,
+        );
+        let v = store.vault(&vault).unwrap();
+        assert_eq!(v.round, 0);
+        assert_eq!(v.pending_deposits, 700_000_000);
+
+        // Genesis finalize (round 0): deposits convert, shares mint.
+        store.ingest(
+            ChainEvent::VaultRoundFinalized(VaultRoundFinalized {
+                vault_id: vault,
+                round: 0,
+                pps: 1_000_000_000_000,
+                aum: 0,
+                shares: 0,
+                premium_collected: 0,
+                premium_underlying: 0,
+                withdrawals_owed: 0,
+                shares_burned: 0,
+                deposits_processed: 700_000_000,
+                shares_minted: 700_000_000,
+            }),
+            3,
+        );
+        let v = store.vault(&vault).unwrap();
+        assert_eq!(v.round, 1);
+        assert_eq!(v.total_shares, 700_000_000);
+        assert_eq!(v.pending_deposits, 0);
+        assert_eq!(v.latest_pps, Some(1_000_000_000_000));
+
+        store.ingest(
+            ChainEvent::VaultBucketSelected(VaultBucketSelected {
+                vault_id: vault,
+                round: 1,
+                bucket_id: ObjectId::new([0xb1; 32]),
+                strike: 40_500,
+                strike_scale: 7,
+                expiry_ms: 2_000_000,
+                selling_ends_ms: 1_500_000,
+                spot: 3_470_000_000_000,
+                spot_scale: 12,
+            }),
+            4,
+        );
+        let v = store.vault(&vault).unwrap();
+        assert_eq!(v.current_bucket, Some(ObjectId::new([0xb1; 32])));
+        let r = store.vault_round(&vault, 1).unwrap();
+        assert_eq!(r.strike, Some(40_500));
+        assert_eq!(r.expiry_ms, Some(2_000_000));
+        assert_eq!(r.pps, None, "not finalized yet");
+
+        // Receipt aggregate for the LP's genesis deposit.
+        let staged = store
+            .stage_batch(
+                9,
+                5_000,
+                vec![(
+                    ChainEvent::VaultDeposit(VaultDeposit {
+                        vault_id: vault,
+                        depositor: lp,
+                        round: 2,
+                        amount: 100,
+                    }),
+                    "0xd".to_string(),
+                    0,
+                )],
+            )
+            .unwrap();
+        assert_eq!(staged.db_batch.vaults.len(), 1);
+        assert_eq!(staged.db_batch.vault_receipts.len(), 1);
+        let receipt = &staged.db_batch.vault_receipts[0];
+        assert_eq!(receipt.kind, RECEIPT_DEPOSIT);
+        assert_eq!(receipt.round, 2);
     }
 
     #[test]

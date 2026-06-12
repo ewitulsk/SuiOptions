@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS vault_user_receipts;
+DROP TABLE IF EXISTS vault_rounds;
+DROP TABLE IF EXISTS vaults;
+DROP TABLE IF EXISTS rfq_bids;
+DROP TABLE IF EXISTS rfqs;
