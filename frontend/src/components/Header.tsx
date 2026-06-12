@@ -18,6 +18,11 @@ import { useAdminCap } from "../api/useAdminCap";
 import { useSession } from "../session/store";
 import { ConnectMenu, SessionMenu } from "./SessionMenu";
 import { ENV } from "../config";
+import { posthog } from "../lib/posthog";
+
+// Module scope: every screen mounts its own <Header>, so a per-mount ref would
+// re-fire identify + wallet_connected on each route change.
+let identifiedAddress: string | null = null;
 
 function shortAddress(addr: string): string {
   if (addr.length <= 12) return addr;
@@ -47,6 +52,16 @@ function WalletMenu() {
   const { mutate: disconnect } = useDisconnectWallet();
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+
+  const handleDisconnect = () => {
+    setOpen(false);
+    posthog.capture("wallet_disconnected", {
+      wallet_address: account?.address,
+      wallet_name: currentWallet?.name,
+    });
+    posthog.reset();
+    disconnect();
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -123,10 +138,7 @@ function WalletMenu() {
           <button
             className="wallet-menu__item wallet-menu__item--danger"
             role="menuitem"
-            onClick={() => {
-              setOpen(false);
-              disconnect();
-            }}
+            onClick={handleDisconnect}
           >
             Disconnect
           </button>
@@ -200,6 +212,15 @@ export function Header() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const adminCap = useAdminCap(account?.address ?? null);
   const isAdmin = adminCap.data?.isAdmin ?? false;
+
+  useEffect(() => {
+    const addr = account?.address ?? null;
+    if (addr && addr !== identifiedAddress) {
+      posthog.identify(addr, { wallet_address: addr });
+      posthog.capture("wallet_connected", { wallet_address: addr });
+    }
+    identifiedAddress = addr;
+  }, [account?.address]);
 
   const navRef = useRef<HTMLElement>(null);
   const [pill, setPill] = useState({ left: 0, width: 0, ready: false });

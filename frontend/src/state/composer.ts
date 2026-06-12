@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { normalizeStructTag } from "@mysten/sui/utils";
 import { useSubmitTransaction } from "../tx/submit";
+import { posthog } from "../lib/posthog";
 import { useBuckets } from "../api/useBuckets";
 import { useCoinBalance } from "../api/useCoinBalance";
 import { usePythPrice } from "../api/usePythPrice";
@@ -516,11 +517,24 @@ export function useComposerState({
         expiry,
       });
       setConfirmStage("confirmed");
+      posthog.capture(view === "writer" ? "option_written" : "option_purchased", {
+        asset: series.asset_symbol,
+        strike: selected.strike,
+        expiry: series.expiry_iso,
+        amount,
+        premium: bestPremium,
+        settlement_symbol: series.settlement_symbol,
+        wallet_address: account.address,
+      });
       // Reflect the new position on the Dashboard without a manual refresh.
       queryClient.invalidateQueries({ queryKey: ["buckets"] });
       queryClient.invalidateQueries({ queryKey: ["positions", wallet] });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      posthog.captureException(err, {
+        action: view === "writer" ? "option_written" : "option_purchased",
+        wallet_address: account.address,
+      });
       setToast({ message: `failed · ${message}`, variant: "error" });
       setTimeout(() => setToast(null), 6000);
       setConfirmStage(null);

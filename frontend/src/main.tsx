@@ -1,6 +1,8 @@
+import { posthog } from "./lib/posthog";
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { PostHogErrorBoundary, PostHogProvider } from "posthog-js/react";
+import { QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SuiClientProvider, WalletProvider, createNetworkConfig } from "@mysten/dapp-kit";
 import { getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { BrowserRouter } from "react-router-dom";
@@ -19,25 +21,58 @@ const { networkConfig } = createNetworkConfig({
   devnet: { network: "devnet", url: getJsonRpcFullnodeUrl("devnet") },
 });
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  queryCache: new QueryCache({
+    // Mutation (tx) errors are captured at their call sites; failed reads
+    // (RPC/API) would otherwise vanish into per-component error state.
+    onError: (error, query) =>
+      posthog.captureException(error, {
+        source: "query",
+        query_key: JSON.stringify(query.queryKey),
+      }),
+  }),
+});
+
+const crashFallback = (
+  <div
+    style={{
+      maxWidth: 560,
+      margin: "15vh auto",
+      padding: "0 24px",
+      fontFamily: "ui-sans-serif,system-ui,sans-serif",
+      color: "#cdd6e0",
+    }}
+  >
+    <h1 style={{ fontSize: 18, margin: "0 0 8px" }}>Something went wrong</h1>
+    <p style={{ fontSize: 14, lineHeight: 1.5, color: "#8b97a6" }}>
+      The error has been reported. Reload the page to continue.
+    </p>
+  </div>
+);
 
 function renderApp() {
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
-      <QueryClientProvider client={queryClient}>
-        <SuiClientProvider networks={networkConfig} defaultNetwork={ENV}>
-          <WalletProvider autoConnect>
-            <BrowserRouter>
-              <App />
-            </BrowserRouter>
-          </WalletProvider>
-        </SuiClientProvider>
-      </QueryClientProvider>
+      <PostHogProvider client={posthog}>
+        <PostHogErrorBoundary fallback={crashFallback}>
+          <QueryClientProvider client={queryClient}>
+            <SuiClientProvider networks={networkConfig} defaultNetwork={ENV}>
+              <WalletProvider autoConnect>
+                <BrowserRouter>
+                  <App />
+                </BrowserRouter>
+              </WalletProvider>
+            </SuiClientProvider>
+          </QueryClientProvider>
+        </PostHogErrorBoundary>
+      </PostHogProvider>
     </React.StrictMode>,
   );
 }
 
 function renderBootError(err: unknown) {
+  // The most user-visible outage mode: token-info down means no app at all.
+  posthog.captureException(err, { source: "boot", token_info_url: TOKEN_INFO_URL });
   const root = document.getElementById("root")!;
   root.innerHTML = `
     <div style="max-width:560px;margin:15vh auto;padding:0 24px;font-family:ui-sans-serif,system-ui,sans-serif;color:#cdd6e0;">
