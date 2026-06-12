@@ -28,6 +28,14 @@ const OUR_CRATES: &[&str] = &[
     "api_service",
     "token_info",
     "token_info_client",
+    "auth_service",
+    "auth_client",
+    "gas_station",
+    "price_charting",
+    "balance_monitor",
+    "observability",
+    "api_service_client",
+    "indexer_graphql",
     "deployment_manager",
     "exchange",
     "writer",
@@ -49,7 +57,10 @@ pub fn init_with(extra_directives: &[&str]) {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
-fn build_filter(rust_log: Option<&str>, extras: &[&str]) -> EnvFilter {
+/// Build the workspace-aware `EnvFilter` without installing a subscriber.
+/// Used by the `observability` crate, which layers its own formatters and
+/// OpenTelemetry export on top of the same filter semantics.
+pub fn build_filter(rust_log: Option<&str>, extras: &[&str]) -> EnvFilter {
     // Power-user form: a directive list. Hand it to EnvFilter verbatim.
     if let Some(v) = rust_log {
         if v.contains('=') || v.contains(',') {

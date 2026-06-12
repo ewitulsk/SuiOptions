@@ -13,6 +13,7 @@ members = [
     "crates/indexer-graphql",
     "crates/auth-client",
     "crates/vault-sim",
+    "crates/observability",
     "services/indexer",
     "services/quoting-service",
     "services/mm-bot",
@@ -22,6 +23,7 @@ members = [
     "services/auth-service",
     "services/gas-station",
     "services/price-charting",
+    "services/balance-monitor",
     "tools/deployment-manager",
     "tools/exchange",
     "tools/writer",
@@ -52,6 +54,7 @@ api-service-client = { path = "crates/api-service-client" }
 indexer-graphql = { path = "crates/indexer-graphql" }
 auth-client    = { path = "crates/auth-client" }
 vault-sim      = { path = "crates/vault-sim" }
+observability  = { path = "crates/observability" }
 
 # Pinned to match sui-keys's exact requirement on the framework/mainnet branch.
 tokio = { version = "=1.49.0", features = ["full"] }
@@ -85,7 +88,19 @@ thiserror = "1"
 anyhow = "1"
 
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+# Observability (SO-180): Prometheus metrics + OpenTelemetry traces (Tempo).
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.17", default-features = false }
+metrics-process = "2"
+opentelemetry = "0.30"
+opentelemetry_sdk = "0.30"
+# OTLP over HTTP (Tempo :4318) — no tonic, avoids gRPC version clashes with
+# the pinned Sui crates.
+opentelemetry-otlp = { version = "0.30", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+opentelemetry-http = "0.30"
+tracing-opentelemetry = "0.31"
 
 dashmap = "6"
 uuid = { version = "1", features = ["v4"] }
