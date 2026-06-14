@@ -2,11 +2,13 @@ import { useState } from "react";
 import { useComposerState } from "../state/composer";
 import { BucketBar } from "../components/BucketBar";
 import { StrikeTiles } from "../components/StrikeTiles";
+import { BucketList } from "../components/BucketList";
 import { AmountInput } from "../components/AmountInput";
 import { Tideline } from "../components/Tideline";
 import { WriterPanels, TraderPanels } from "../components/Panels";
 import { ChartPanel } from "../components/ChartPanel";
 import { TradePanel } from "../components/TradePanel";
+import { Orderbook } from "../components/Orderbook";
 import { QuoteFeed } from "../components/QuoteFeed";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { Toast } from "../components/Toast";
@@ -32,6 +34,9 @@ type Props = {
 export function Composer({ initialView }: Props) {
   const s = useComposerState({ initialView });
   const [feedOpen, setFeedOpen] = useState(false);
+  // SO-170: on /buy, switch the whole lower area between buying on DeepBook
+  // (chart + order book + trade form) and minting from the market makers (RFQ).
+  const [buyMode, setBuyMode] = useState<"deepbook" | "mm">("deepbook");
 
   const writerCtaLabel = !s.connected
     ? "Connect to write"
@@ -49,9 +54,18 @@ export function Composer({ initialView }: Props) {
         ? "Waiting on MMs…"
         : `Buy call · pay ${formatPrice(s.bestPremium)} USDC →`;
 
+  const ctaDisabled =
+    !s.connected ||
+    s.insufficient ||
+    s.quotes.length === 0 ||
+    s.bucketsLoading ||
+    s.bucketsEmpty ||
+    s.confirmStage === "signing" ||
+    s.confirmStage === "broadcast";
+
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
-      <div className="app__wrap">
+      <div className={"app__wrap" + (s.view === "trader" ? " app__wrap--buy" : "")}>
         <BucketBar
           symbol={s.selectedAsset}
           assets={s.assets}
@@ -68,19 +82,189 @@ export function Composer({ initialView }: Props) {
             <>
               What strike are you happy to <b>sell</b> {assetLabel(s)} at on {expiryLabel(s)}?
               <span className="qsub">
-                Pick a tile. You earn the premium upfront either way.
+                Pick a strike. You earn the premium upfront either way.
               </span>
             </>
           ) : (
             <>
               What strike do you want the right to <b>buy</b> {assetLabel(s)} at, before {expiryLabel(s)}?
               <span className="qsub">
-                Pick a tile. You pay the premium upfront, exercise anytime.
+                Pick a strike from the left. Trade it on DeepBook, or mint a fresh one at the MMs' quote.
               </span>
             </>
           )}
         </div>
 
+        {s.view === "trader"
+          ? renderTrader()
+          : renderWriter()}
+      </div>
+
+      {/* Writer keeps the floating quote-feed overlay; the trader feed is docked
+          into the RFQ section below (SO-170). */}
+      {s.view === "writer" &&
+        (feedOpen ? (
+          <QuoteFeed quotes={s.quotes} view={s.view} onClose={() => setFeedOpen(false)} />
+        ) : (
+          <button className="feed-toggle" onClick={() => setFeedOpen(true)}>
+            {s.quotes.length} MM quote{s.quotes.length === 1 ? "" : "s"} live
+          </button>
+        ))}
+
+      {s.confirmStage && (
+        <ConfirmModal
+          stage={s.confirmStage}
+          summary={s.confirmSummary}
+          view={s.view}
+          onClose={s.closeConfirm}
+        />
+      )}
+      {s.toast && <Toast message={s.toast.message} variant={s.toast.variant} />}
+    </div>
+  );
+
+  // ---- Trader (/buy): toggle between DeepBook and Market-Maker buy paths ----
+  function renderTrader() {
+    const live = s.apiBucket?.deepbook_pool_id && s.series;
+
+    const buckets = (
+      <aside className="buy-grid__buckets">
+        {s.bucketsLoading ? (
+          <div className="composer-status">loading strikes from indexer…</div>
+        ) : s.bucketsEmpty ? (
+          <div className="composer-status">
+            no buckets yet — the option-scheduler hasn't created any for this series
+          </div>
+        ) : (
+          <BucketList
+            strikes={s.strikes}
+            selectedIdx={s.selectedIdx}
+            onSelect={s.setSelectedIdx}
+            view={s.view}
+          />
+        )}
+      </aside>
+    );
+
+    const chart = live ? (
+      <ChartPanel
+        key={`chart-${s.apiBucket!.bucket_id}`}
+        poolId={s.apiBucket!.deepbook_pool_id!}
+        strike={s.apiBucket!.strike}
+        settlementSymbol={s.series!.settlement_symbol}
+      />
+    ) : (
+      !s.bucketsLoading &&
+      !s.bucketsEmpty && (
+        <div className="composer-status">select a strike to see its market</div>
+      )
+    );
+
+    const toggle = (
+      <div className="buy-toggle" role="tablist">
+        {(["deepbook", "mm"] as const).map((m) => (
+          <button
+            key={m}
+            role="tab"
+            aria-selected={buyMode === m}
+            className={"buy-toggle__btn" + (buyMode === m ? " is-active" : "")}
+            onClick={() => setBuyMode(m)}
+          >
+            {m === "deepbook" ? "Trade on DeepBook" : "Buy from market makers"}
+          </button>
+        ))}
+      </div>
+    );
+
+    return (
+      <>
+        {toggle}
+
+        {buyMode === "deepbook" ? (
+          <div className="buy-grid">
+            {buckets}
+            <main className="buy-grid__center">
+              {live ? (
+                <>
+                  {chart}
+                  <div className="buy-grid__trade">
+                    <TradePanel
+                      key={`trade-${s.apiBucket!.bucket_id}`}
+                      bucket={s.apiBucket!}
+                      series={s.series!}
+                    />
+                  </div>
+                </>
+              ) : (
+                chart
+              )}
+            </main>
+            <aside className="buy-grid__book">
+              {live && <Orderbook bucket={s.apiBucket!} series={s.series!} />}
+            </aside>
+          </div>
+        ) : (
+          <>
+            <div className="buy-grid buy-grid--mm">
+              {buckets}
+              <main className="buy-grid__center">{chart}</main>
+            </div>
+
+            <section className="rfq">
+              <div className="rfq__body">
+                <div className="rfq__main">
+                  <AmountInput
+                    amount={s.amount}
+                    setAmount={s.setAmount}
+                    view={s.view}
+                    assetSymbol={s.selectedAsset}
+                    btcBalance={s.btcBalance}
+                    usdcBalance={s.usdcBalance}
+                    spot={s.spot}
+                    settlementSymbol={s.series?.settlement_symbol ?? "USDC"}
+                    error={
+                      s.insufficientUsdc
+                        ? `INSUFFICIENT USDC · NEED ${formatPrice(s.bestPremium)}`
+                        : ""
+                    }
+                  />
+
+                  {s.spotUnavailable && (
+                    <div className="composer-status">
+                      spot price unavailable — live feed not yet connected for {s.selectedAsset}
+                    </div>
+                  )}
+
+                  <TraderPanels
+                    premium={s.bestPremium}
+                    premiumLoading={s.premiumLoading}
+                    amount={s.amount}
+                    strike={s.selected.strike}
+                    spot={s.spot}
+                    assetSymbol={s.selectedAsset}
+                    expiryLabel={expiryLabel(s)}
+                  />
+
+                  <button className="cta" onClick={s.submit} disabled={ctaDisabled}>
+                    {traderCtaLabel}
+                  </button>
+                </div>
+
+                <div className="rfq__feed">
+                  <QuoteFeed quotes={s.quotes} view={s.view} docked />
+                </div>
+              </div>
+            </section>
+          </>
+        )}
+      </>
+    );
+  }
+
+  // ---- Writer (/earn): unchanged vertical stack ----------------------------
+  function renderWriter() {
+    return (
+      <>
         {s.bucketsLoading ? (
           <div className="composer-status">loading strikes from indexer…</div>
         ) : s.bucketsEmpty ? (
@@ -96,32 +280,6 @@ export function Composer({ initialView }: Props) {
           />
         )}
 
-        {/* Secondary market (SO-157): pools are created by the scheduler at
-            bucket-deploy time (SO-171), so a live bucket always has one — show
-            its chart + trade panel above the RFQ mint flow regardless of the
-            `tradeable` flag. A non-tradeable strike (expired/cleaned) keeps its
-            chart and surfaces an error toast instead of vanishing. */}
-        {s.view === "trader" && s.apiBucket?.deepbook_pool_id && s.series && (
-            <>
-              <ChartPanel
-                key={`chart-${s.apiBucket.bucket_id}`}
-                poolId={s.apiBucket.deepbook_pool_id}
-                strike={s.apiBucket.strike}
-                settlementSymbol={s.series.settlement_symbol}
-              />
-              <div style={{ marginTop: 12 }}>
-                <TradePanel
-                  key={`trade-${s.apiBucket.bucket_id}`}
-                  bucket={s.apiBucket}
-                  series={s.series}
-                />
-              </div>
-              <div className="composer-status" style={{ margin: "14px 0 2px" }}>
-                — or mint a brand-new option below at the market makers' quoted premium —
-              </div>
-            </>
-          )}
-
         <AmountInput
           amount={s.amount}
           setAmount={s.setAmount}
@@ -132,81 +290,27 @@ export function Composer({ initialView }: Props) {
           spot={s.spot}
           settlementSymbol={s.series?.settlement_symbol ?? "USDC"}
           error={
-            s.view === "writer"
-              ? s.insufficientBtc
-                ? `INSUFFICIENT ${s.selectedAsset ?? ""} BALANCE`.replace(/\s+/g, " ").trim()
-                : ""
-              : s.insufficientUsdc
-                ? `INSUFFICIENT USDC · NEED ${formatPrice(s.bestPremium)}`
-                : ""
+            s.insufficientBtc
+              ? `INSUFFICIENT ${s.selectedAsset ?? ""} BALANCE`.replace(/\s+/g, " ").trim()
+              : ""
           }
         />
 
-        {s.view === "trader" && s.spotUnavailable && (
-          <div className="composer-status">
-            spot price unavailable — live feed not yet connected for {s.selectedAsset}
-          </div>
-        )}
+        <Tideline bucket={s.bucket} amount={s.amount} assetSymbol={s.selectedAsset} />
 
-        {s.view === "writer" && (
-          <Tideline bucket={s.bucket} amount={s.amount} assetSymbol={s.selectedAsset} />
-        )}
-
-        {s.view === "writer" ? (
-          <WriterPanels
-            premium={s.bestPremium}
-            premiumLoading={s.premiumLoading}
-            amount={s.amount}
-            strike={s.selected.strike}
-            assetSymbol={s.selectedAsset}
-            expiryLabel={expiryLabel(s)}
-          />
-        ) : (
-          <TraderPanels
-            premium={s.bestPremium}
-            premiumLoading={s.premiumLoading}
-            amount={s.amount}
-            strike={s.selected.strike}
-            spot={s.spot}
-            assetSymbol={s.selectedAsset}
-            expiryLabel={expiryLabel(s)}
-          />
-        )}
-
-        <button
-          className="cta"
-          onClick={s.submit}
-          disabled={
-            !s.connected ||
-            s.insufficient ||
-            s.quotes.length === 0 ||
-            s.bucketsLoading ||
-            s.bucketsEmpty ||
-            s.confirmStage === "signing" ||
-            s.confirmStage === "broadcast"
-          }
-        >
-          {s.view === "writer" ? writerCtaLabel : traderCtaLabel}
-        </button>
-      </div>
-
-      {feedOpen ? (
-        <QuoteFeed quotes={s.quotes} view={s.view} onClose={() => setFeedOpen(false)} />
-      ) : (
-        <button className="feed-toggle" onClick={() => setFeedOpen(true)}>
-          {s.quotes.length} MM quote{s.quotes.length === 1 ? "" : "s"} live
-        </button>
-      )}
-
-      {s.confirmStage && (
-        <ConfirmModal
-          stage={s.confirmStage}
-          summary={s.confirmSummary}
-          view={s.view}
-          onClose={s.closeConfirm}
+        <WriterPanels
+          premium={s.bestPremium}
+          premiumLoading={s.premiumLoading}
+          amount={s.amount}
+          strike={s.selected.strike}
+          assetSymbol={s.selectedAsset}
+          expiryLabel={expiryLabel(s)}
         />
-      )}
-      {s.toast && <Toast message={s.toast.message} variant={s.toast.variant} />}
-    </div>
-  );
+
+        <button className="cta" onClick={s.submit} disabled={ctaDisabled}>
+          {writerCtaLabel}
+        </button>
+      </>
+    );
+  }
 }
