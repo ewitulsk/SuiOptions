@@ -168,3 +168,145 @@ export function addSessionRedeem(
     ],
   });
 }
+
+// ─────────────────────────── covered-call vault ───────────────────────────
+//
+// Session twins of `vault::*` (`contracts/sources/session_vault.move`). The
+// underlying/share coins are sourced from — and all outputs (receipts, claimed
+// shares, refunds) land back in — the user's options Account custody, gated by
+// the SessionCap. Argument order matches each `*_with_session` signature:
+//   (vault, user_account, cap, session_account, <amount|receipt_id>, clock).
+
+/** The three vault type args `<U, S, V>`. */
+export type SessionVaultTypes = {
+  underlyingCoinType: string;
+  settlementCoinType: string;
+  shareType: string;
+};
+
+function vaultTypeArgs(t: SessionVaultTypes): string[] {
+  return [t.underlyingCoinType, t.settlementCoinType, t.shareType];
+}
+
+export type SessionVaultDepositParams = SessionVaultTypes & {
+  vaultId: string;
+  /** Underlying to deposit, smallest units (charged against the cap's limit). */
+  amountRaw: bigint;
+};
+
+/** Append `deposit_with_session`: custodied underlying → vault; receipt custodied. */
+export function addSessionVaultDeposit(
+  tx: Transaction,
+  ctx: SessionCtx,
+  p: SessionVaultDepositParams,
+): void {
+  const pkg = requirePackage();
+  tx.moveCall({
+    target: `${pkg}::session_vault::deposit_with_session`,
+    typeArguments: vaultTypeArgs(p),
+    arguments: [
+      tx.object(p.vaultId),
+      tx.object(ctx.optionsAccountId),
+      tx.object(ctx.capId),
+      tx.object(ctx.accountId),
+      tx.pure.u64(p.amountRaw),
+      tx.object(SUI_CLOCK_OBJECT_ID),
+    ],
+  });
+}
+
+export type SessionVaultReceiptParams = SessionVaultTypes & {
+  vaultId: string;
+  /** The custodied `DepositReceipt` / `WithdrawReceipt` object id. */
+  receiptId: string;
+};
+
+/** Append `claim_shares_with_session`: custodied receipt → shares into custody. */
+export function addSessionVaultClaimShares(
+  tx: Transaction,
+  ctx: SessionCtx,
+  p: SessionVaultReceiptParams,
+): void {
+  const pkg = requirePackage();
+  tx.moveCall({
+    target: `${pkg}::session_vault::claim_shares_with_session`,
+    typeArguments: vaultTypeArgs(p),
+    arguments: [
+      tx.object(p.vaultId),
+      tx.object(ctx.optionsAccountId),
+      tx.object(ctx.capId),
+      tx.object(ctx.accountId),
+      tx.pure.id(p.receiptId),
+      tx.object(SUI_CLOCK_OBJECT_ID),
+    ],
+  });
+}
+
+export type SessionVaultInitiateWithdrawParams = SessionVaultTypes & {
+  vaultId: string;
+  /** Shares to escrow, smallest units. */
+  sharesRaw: bigint;
+};
+
+/** Append `initiate_withdraw_with_session`: custodied shares escrowed; receipt custodied. */
+export function addSessionVaultInitiateWithdraw(
+  tx: Transaction,
+  ctx: SessionCtx,
+  p: SessionVaultInitiateWithdrawParams,
+): void {
+  const pkg = requirePackage();
+  tx.moveCall({
+    target: `${pkg}::session_vault::initiate_withdraw_with_session`,
+    typeArguments: vaultTypeArgs(p),
+    arguments: [
+      tx.object(p.vaultId),
+      tx.object(ctx.optionsAccountId),
+      tx.object(ctx.capId),
+      tx.object(ctx.accountId),
+      tx.pure.u64(p.sharesRaw),
+      tx.object(SUI_CLOCK_OBJECT_ID),
+    ],
+  });
+}
+
+/** Append `complete_withdraw_with_session`: finalized withdrawal paid into custody. */
+export function addSessionVaultCompleteWithdraw(
+  tx: Transaction,
+  ctx: SessionCtx,
+  p: SessionVaultReceiptParams,
+): void {
+  const pkg = requirePackage();
+  tx.moveCall({
+    target: `${pkg}::session_vault::complete_withdraw_with_session`,
+    typeArguments: vaultTypeArgs(p),
+    arguments: [
+      tx.object(p.vaultId),
+      tx.object(ctx.optionsAccountId),
+      tx.object(ctx.capId),
+      tx.object(ctx.accountId),
+      tx.pure.id(p.receiptId),
+      tx.object(SUI_CLOCK_OBJECT_ID),
+    ],
+  });
+}
+
+/** Append `instant_withdraw_pending_with_session`: cancel a queued deposit; refund into custody. */
+export function addSessionVaultInstantWithdraw(
+  tx: Transaction,
+  ctx: SessionCtx,
+  p: SessionVaultReceiptParams,
+): void {
+  const pkg = requirePackage();
+  tx.moveCall({
+    target: `${pkg}::session_vault::instant_withdraw_pending_with_session`,
+    typeArguments: vaultTypeArgs(p),
+    arguments: [
+      tx.object(p.vaultId),
+      tx.object(ctx.optionsAccountId),
+      tx.object(ctx.capId),
+      tx.object(ctx.accountId),
+      tx.pure.id(p.receiptId),
+      tx.object(SUI_CLOCK_OBJECT_ID),
+    ],
+  });
+}

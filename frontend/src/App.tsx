@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { Header } from "./components/Header";
 import { Composer } from "./screens/Composer";
 import { Dashboard } from "./screens/Dashboard";
+import { VaultScreen } from "./screens/Vault";
 import { Activity } from "./screens/Activity";
 import { Admin } from "./screens/Admin";
 import { Debug } from "./screens/Debug";
@@ -19,6 +20,7 @@ export function App() {
         {/* key= forces a fresh Composer (and its useComposerState) when toggling views */}
         <Route path="/earn" element={<Composer key="writer" initialView="writer" />} />
         <Route path="/buy" element={<Composer key="trader" initialView="trader" />} />
+        <Route path="/vault" element={<VaultScreen />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/activity" element={<Activity />} />
         {/* Admin self-gates on AdminCap and redirects non-admins to /earn. */}

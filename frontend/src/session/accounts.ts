@@ -61,6 +61,28 @@ export async function readCustodyPositionIds(
   client: SuiJsonRpcClient,
   optionsAccountId: string,
 ): Promise<string[]> {
+  return readCustodyIndex(client, optionsAccountId, "::session_account::PositionIndexKey");
+}
+
+/**
+ * Ids of every generic custodied object on the options Account, from the
+ * on-account `ObjectIndexKey` dynamic field (`session_account::store_object`).
+ * Vault `DepositReceipt` / `WithdrawReceipt` objects land here for session
+ * users — fetch + filter these by type to drive the vault claim/withdraw UI.
+ */
+export async function readCustodyObjectIds(
+  client: SuiJsonRpcClient,
+  optionsAccountId: string,
+): Promise<string[]> {
+  return readCustodyIndex(client, optionsAccountId, "::session_account::ObjectIndexKey");
+}
+
+/** Read a `vector<ID>` custody index dynamic field by its key-type suffix. */
+async function readCustodyIndex(
+  client: SuiJsonRpcClient,
+  optionsAccountId: string,
+  keyTypeSuffix: string,
+): Promise<string[]> {
   let cursor: string | null | undefined;
   do {
     const page = await client.getDynamicFields({
@@ -68,7 +90,7 @@ export async function readCustodyPositionIds(
       cursor,
     });
     for (const entry of page.data) {
-      if (!entry.name?.type?.endsWith("::session_account::PositionIndexKey")) continue;
+      if (!entry.name?.type?.endsWith(keyTypeSuffix)) continue;
       const obj = await client.getObject({
         id: entry.objectId,
         options: { showContent: true },
