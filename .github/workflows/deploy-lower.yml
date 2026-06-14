@@ -19,7 +19,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write   # _deploy.yml advances the `deployed-staging` marker tag
   id-token: write
 
 jobs:

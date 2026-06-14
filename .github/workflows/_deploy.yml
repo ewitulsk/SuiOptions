@@ -84,23 +84,42 @@ jobs:
         if: ${{ !inputs.force_all && !inputs.image_tag }}
         env:
           PUSH_BEFORE: ${{ github.event.before }}
+          DEPLOY_ENVS: ${{ inputs.envs }}
         run: |
-          # github.event.before is a push-only field. deploy-lower.yml is
-          # workflow_dispatch-only, so on a lower-env deploy it is empty;
-          # on a branch's first push it is all-zeros. Diffing against
-          # either yields an empty change set, so affected.py sees nothing
-          # and the deploy silently no-ops (build/deploy gate on
-          # services != '[]'). Fall back to HEAD^ so a manual dispatch
-          # still diffs its triggering commit. Multi-commit manual deploys
-          # should use force_all.
+          # Diff base, in priority order:
+          #   1. push 'before' — deploy-prod.yml (push to main) gets an exact
+          #      range here, so prod is unaffected by the rest of this logic.
+          #   2. the `deployed-<env>` marker tag the last successful deploy
+          #      moved (see the "Advance deploy marker" step). This is the
+          #      manual-dispatch path: diffing against the last *deployed*
+          #      commit covers EVERY commit merged since, so a multi-PR manual
+          #      deploy rolls all affected services.
+          #   3. HEAD^ — first-ever deploy, before any marker exists.
+          #
+          # The old fallback was HEAD^ directly, which only ever saw the
+          # single triggering commit: merge two PRs then dispatch and only the
+          # last PR's services rolled, silently skipping the earlier one.
           if [ -n "$PUSH_BEFORE" ] \
             && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ] \
             && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
             base="$PUSH_BEFORE"
             echo "diff base: push before ($base)"
           else
-            base="$(git rev-parse HEAD^)"
-            echo "diff base: HEAD^ ($base) — no valid push 'before' (manual dispatch?)"
+            # Marker is per-env; only meaningful for a single-env deploy (all
+            # current callers are single-env). Fetch it explicitly in case the
+            # shallow-ish clone didn't bring tags.
+            env_count="$(echo "$DEPLOY_ENVS" | jq 'length')"
+            marker_env="$(echo "$DEPLOY_ENVS" | jq -r '.[0]')"
+            marker="deployed-${marker_env}"
+            git fetch --quiet origin "refs/tags/${marker}:refs/tags/${marker}" 2>/dev/null || true
+            if [ "$env_count" = "1" ] \
+              && git rev-parse -q --verify "refs/tags/${marker}^{commit}" >/dev/null 2>&1; then
+              base="$(git rev-parse "refs/tags/${marker}")"
+              echo "diff base: ${marker} marker ($base)"
+            else
+              base="$(git rev-parse HEAD^)"
+              echo "diff base: HEAD^ ($base) — no ${marker} marker yet (first deploy?)"
+            fi
           fi
           echo "sha=$base" >> "$GITHUB_OUTPUT"
 
@@ -169,6 +188,12 @@ jobs:
 
   deploy:
     needs: [affected, build]
+    # contents: write so a successful deploy can advance the `deployed-<env>`
+    # marker tag (see the final step). The affected/build jobs keep the
+    # workflow-default read.
+    permissions:
+      contents: write
+      id-token: write
     if: |
       always()
       && needs.affected.outputs.services != '[]'
@@ -330,4 +355,22 @@ jobs:
               --instance-id "$EC2_INSTANCE_ID" \
               --query StandardErrorContent --output text
             exit 1
+          fi
+
+      - name: Advance deploy marker
+        # Record the commit just deployed so the NEXT manual dispatch diffs
+        # against it (not HEAD^). Only runs after the deploy step above
+        # succeeded. Skipped for image_tag rollbacks — those roll an older
+        # tag, which must not become the "last deployed" baseline.
+        # Best-effort: a marker hiccup must never fail an already-good deploy.
+        if: ${{ !inputs.image_tag }}
+        env:
+          DEPLOY_ENV: ${{ matrix.env }}
+        run: |
+          marker="deployed-${DEPLOY_ENV}"
+          git tag -f "$marker" HEAD
+          if git push -f origin "refs/tags/${marker}"; then
+            echo "advanced ${marker} → $(git rev-parse HEAD)"
+          else
+            echo "::warning::failed to push ${marker} marker (next manual deploy falls back to HEAD^)"
           fi
