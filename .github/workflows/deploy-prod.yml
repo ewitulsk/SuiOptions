@@ -24,7 +24,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write   # _deploy.yml advances the `deployed-prod` marker tag
   id-token: write
 
 jobs:
