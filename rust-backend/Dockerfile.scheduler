@@ -37,8 +37,9 @@ ENV APP_ENV=staging
 # /run/secrets/scheduler.toml is rendered at deploy time by
 # render-secrets.sh from `options/<env>/scheduler` in Secrets Manager.
 #
-# --network is derived from APP_ENV (staging→testnet, prod→mainnet) so
-# the scheduler resolves the right deployments.json slot without a
-# separate config knob. Mapping matches deployment.md and the network
-# field in indexer/mm-bot/api-service configs.
-ENTRYPOINT ["/bin/sh", "-c", "case \"$APP_ENV\" in staging) NET=testnet ;; prod) NET=mainnet ;; *) echo \"unknown APP_ENV: $APP_ENV\" >&2; exit 1 ;; esac; exec /usr/local/bin/option-scheduler --config /app/config/config.${APP_ENV}.toml --token-info-url http://token-info:9005 --secrets /run/secrets/scheduler.toml --network $NET"]
+# --network is derived from APP_ENV so the scheduler resolves the right
+# deployments.json slot without a separate config knob. BOTH envs map to
+# testnet today — prod is a distinct testnet deployment, not mainnet (see
+# Dockerfile.keeper, config.prod.toml network = "testnet"); flip the two
+# together when prod moves to mainnet.
+ENTRYPOINT ["/bin/sh", "-c", "case \"$APP_ENV\" in staging|prod) NET=testnet ;; *) echo \"unknown APP_ENV: $APP_ENV\" >&2; exit 1 ;; esac; exec /usr/local/bin/option-scheduler --config /app/config/config.${APP_ENV}.toml --token-info-url http://token-info:9005 --secrets /run/secrets/scheduler.toml --network $NET"]
