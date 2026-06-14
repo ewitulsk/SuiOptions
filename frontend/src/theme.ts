@@ -9,7 +9,7 @@ function readStored(): ThemeMode {
     const v = localStorage.getItem(STORAGE_KEY);
     if (v === "light" || v === "dark") return v;
   } catch {}
-  return "light";
+  return "dark";
 }
 
 let currentMode: ThemeMode = readStored();
