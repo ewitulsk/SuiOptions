@@ -5370,6 +5370,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "api-service-client",
+ "async-trait",
  "bcs",
  "chrono",
  "clap",

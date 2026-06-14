@@ -36,6 +36,7 @@ use serde::Deserialize;
 use sui_types::base_types::ObjectID;
 
 use api_service_client::{ApiServiceClient, TradeableBucket};
+use protocol_types::asset::canonicalize_move_type;
 use protocol_types::sides::Side;
 use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
 use sui_tx::sui_client::{Network, SuiClientWrapper};
@@ -45,6 +46,7 @@ use sui_tx::tx::deepbook::{
     QuoteSide,
 };
 
+use crate::liquidity::LiquiditySource;
 use crate::pricing::{
     compute_spot_from_cache, price_rfq, resolve_sigma, PriceDecision, PricingConfig,
     RfqPricingInputs, Staleness,
@@ -75,6 +77,9 @@ fn default_tusdc_deposit_chunk() -> u64 {
 }
 fn default_max_pools_per_tx() -> usize {
     12 // pack up to this many pools' refreshes into one PTB before chunking
+}
+fn default_inventory_poll_secs() -> u64 {
+    10 // watch the wallet this often for newly-settled call-coin inventory
 }
 
 /// `[deepbook]` section of the bot config. Disabled by default — flipping
@@ -110,9 +115,22 @@ pub struct DeepBookQuoterConfig {
     /// Top the BM's settlement balance up from the wallet in chunks of this
     /// many atomic units whenever it can't fund the bid.
     pub tusdc_deposit_chunk: u64,
+    /// Pull settlement (TUSDC) from the configured liquidity source before
+    /// quoting so the bids can mirror the asks. Disable for a market maker
+    /// that pre-funds its wallet out-of-band.
+    pub settlement_topup_enabled: bool,
+    /// Buffer added to the summed bid notional when sourcing settlement —
+    /// covers bid lot/tick rounding and the placement's settlement-side fee
+    /// headroom (a full-inventory ask deposit alone leaves no slack for fees).
+    pub settlement_topup_buffer_bps: u64,
     /// Max pools packed into one refresh PTB before spilling into another tx
     /// ("all prices at once, or until we hit max tx size").
     pub max_pools_per_tx: usize,
+    /// How often to poll the wallet for newly-settled call-coin inventory and
+    /// re-quote the affected buckets right away (the keeper settles won RFQ
+    /// auctions asynchronously, so inventory arrives off the daily cadence).
+    /// `0` disables the watcher — quotes refresh only on the daily tick.
+    pub inventory_poll_secs: u64,
     pub gas_budget: u64,
 }
 
@@ -129,7 +147,10 @@ impl Default for DeepBookQuoterConfig {
             quote_size: default_quote_size(),
             quote_full_inventory: false,
             tusdc_deposit_chunk: default_tusdc_deposit_chunk(),
+            settlement_topup_enabled: true,
+            settlement_topup_buffer_bps: 100,
             max_pools_per_tx: default_max_pools_per_tx(),
+            inventory_poll_secs: default_inventory_poll_secs(),
             gas_budget: 200_000_000,
         }
     }
@@ -164,6 +185,10 @@ pub struct QuoterParams {
     pub pricing: PricingConfig,
     pub staleness: Staleness,
     pub fallback_vol: f64,
+    /// Pulls settlement (and, via the same trait, any coin the bot needs)
+    /// before quoting. Defaults to the test-token faucet; a real market maker
+    /// swaps in their own funding source.
+    pub liquidity: Arc<dyn LiquiditySource>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -173,6 +198,34 @@ struct LastQuote {
     /// here (new inventory) forces a re-quote even without drift.
     ask_target: u64,
     at_ms: u64,
+}
+
+/// What kicked off a quote cycle, deciding which pools it re-quotes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    /// The daily ticker — reprice every pool (full refresh).
+    Scheduled,
+    /// Newly-settled inventory landed in the wallet — re-quote only the
+    /// bucket(s) whose inventory changed, leaving the rest on the daily price.
+    InventoryArrival,
+}
+
+/// A pool's priced quote, captured in the planning pass. The ask is already
+/// inventory-sized; the bid is sized against the shared settlement budget in
+/// the placement pass, after the liquidity top-up has run.
+struct PoolPlan {
+    pool_id: ObjectID,
+    pool_key: String,
+    base_coin_type: String,
+    quote_coin_type: String,
+    ask_raw: u64,
+    bid_raw: u64,
+    ask_qty: u64,
+    bid_target: u64,
+    min_size: u64,
+    lot: u64,
+    mid_raw: u64,
+    ask_target: u64,
 }
 
 /// Per-side size targets for one refresh. Fixed `quote_size` by default; in
@@ -236,11 +289,39 @@ async fn run(p: QuoterParams) -> anyhow::Result<()> {
         tokio::time::interval(Duration::from_secs(p.cfg.quote_interval_secs.max(5)));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Watch the wallet for newly-settled inventory between daily refreshes.
+    let inv_enabled = p.cfg.inventory_poll_secs > 0;
+    let mut inv_ticker =
+        tokio::time::interval(Duration::from_secs(p.cfg.inventory_poll_secs.max(1)));
+    inv_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Wallet call-coin total at the last poll; a rise means fresh inventory.
+    let mut last_wallet_inv: u64 = 0;
+
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                if let Err(e) = cycle(&p, &wrap, &api, bm_id, &mut last, &mut quoted_pools).await {
+                if let Err(e) = cycle(&p, &wrap, &api, bm_id, &mut last, &mut quoted_pools, Trigger::Scheduled).await {
                     tracing::warn!(error = %format!("{e:#}"), "deepbook quote cycle failed; retrying next tick");
+                }
+                // The daily cycle sweeps the wallet into the BM, so reset the
+                // baseline; the next poll re-reads what's actually there.
+                last_wallet_inv = 0;
+            }
+            _ = inv_ticker.tick(), if inv_enabled => {
+                match wallet_call_inventory(&p, &wrap, &api).await {
+                    Ok(cur) => {
+                        if cur > last_wallet_inv {
+                            tracing::info!(inventory = cur, "new wallet inventory; re-quoting affected pools");
+                            if let Err(e) = cycle(&p, &wrap, &api, bm_id, &mut last, &mut quoted_pools, Trigger::InventoryArrival).await {
+                                tracing::warn!(error = %format!("{e:#}"), "inventory re-quote failed; retrying next tick");
+                            }
+                        }
+                        // Track the reading either way: a successful sweep drops
+                        // `cur` below this, so we don't re-fire; un-sweepable
+                        // residual stays equal, so we don't spin.
+                        last_wallet_inv = cur;
+                    }
+                    Err(e) => tracing::debug!(error = %format!("{e:#}"), "inventory poll failed; next tick"),
                 }
             }
             _ = tokio::signal::ctrl_c() => {
@@ -261,6 +342,37 @@ async fn run(p: QuoterParams) -> anyhow::Result<()> {
     }
 }
 
+/// Total wallet balance of the bot's call coins across the buckets it makes
+/// markets in. A rise between polls means freshly-settled inventory has landed
+/// (the keeper settles won auctions into the wallet) and should be listed.
+async fn wallet_call_inventory(
+    p: &QuoterParams,
+    wrap: &SuiClientWrapper,
+    api: &ApiServiceClient,
+) -> anyhow::Result<u64> {
+    let buckets = api.tradeable_buckets().await?;
+    // Canonical call-coin types for the pairs we quote (same predicate as `cycle`).
+    let ours: std::collections::HashSet<String> = buckets
+        .iter()
+        .filter(|b| b.settlement_coin_type == p.settlement_coin_type)
+        .filter(|b| p.markets.iter().any(|m| m.coin_type == b.asset_coin_type))
+        .map(|b| canonicalize_move_type(&b.call_coin_type))
+        .collect();
+    if ours.is_empty() {
+        return Ok(0);
+    }
+    let total: u128 = wrap
+        .client
+        .coin_read_api()
+        .get_all_balances(wrap.signer.address)
+        .await?
+        .into_iter()
+        .filter(|bal| ours.contains(&canonicalize_move_type(&bal.coin_type)))
+        .map(|bal| bal.total_balance)
+        .sum();
+    Ok(total.min(u64::MAX as u128) as u64)
+}
+
 async fn cycle(
     p: &QuoterParams,
     wrap: &SuiClientWrapper,
@@ -268,6 +380,7 @@ async fn cycle(
     bm_id: ObjectID,
     last: &mut HashMap<String, LastQuote>,
     quoted_pools: &mut HashMap<String, (String, String)>,
+    trigger: Trigger,
 ) -> anyhow::Result<()> {
     let buckets = api.tradeable_buckets().await?;
     let now = now_ms();
@@ -345,36 +458,23 @@ async fn cycle(
         });
     }
 
-    // Planning pass (SO-173): compute every pool's desired quote first, then
-    // place them all in one (or a few) batched txs instead of one tx per pool.
-    // A single BalanceManager backs every pool, so the bid (settlement) funding
-    // is allocated from one shared budget; call-coin ask inventory is distinct
-    // per pool and swept individually.
+    // Planning pass (SO-173): price every pool first, then place them all in
+    // one (or a few) batched txs instead of one tx per pool. A single
+    // BalanceManager backs every pool, so the bid (settlement) funding is
+    // allocated from one shared budget; call-coin ask inventory is distinct
+    // per pool and swept individually. Settlement is sourced between the
+    // pricing and placement passes, once the bid demand is known.
     let now_expire = now + p.cfg.order_lifetime_secs.saturating_mul(1_000);
-    let bm_quote = bm_balance(
-        &wrap.client,
-        wrap.signer.address,
-        &p.handles,
-        bm_id,
-        &p.settlement_coin_type,
-    )
-    .await
-    .unwrap_or(0);
-    let wallet_quote: u64 = wrap
-        .client
-        .coin_read_api()
-        .get_balance(wrap.signer.address, Some(p.settlement_coin_type.clone()))
-        .await
-        .map(|bal| bal.total_balance.min(u64::MAX as u128) as u64)
-        .unwrap_or(0);
-    // Settlement we can commit across every bid this cycle: BM balance + wallet.
-    let mut quote_budget: u128 = bm_quote as u128 + wallet_quote as u128;
-    let mut quote_used: u128 = 0;
 
     let mut refreshes: Vec<PoolRefresh> = Vec::new();
     let mut deposits: HashMap<String, u64> = HashMap::new();
     // (pool_key, Some((mid_raw, ask_target, call, settlement)) = placed; None = cancel-only)
     let mut book: Vec<(String, Option<(u64, u64, String, String)>)> = Vec::new();
+    let mut plans: Vec<PoolPlan> = Vec::new();
+    // Settlement the bot wants to commit across every bid this cycle. In
+    // full-inventory mode the bids mirror the asks, so this is the amount of
+    // TUSDC to source before placing.
+    let mut desired_bid_notional: u128 = 0;
 
     for (b, mi) in &ours {
         let Some(Some((spot_scaled, sigma))) = spots.get(mi) else {
@@ -461,20 +561,34 @@ async fn cycle(
         let ask_inventory = bm_base.saturating_add(wallet_base);
         let (ask_target, bid_target) = size_targets(&p.cfg, ask_inventory);
 
-        // Skip if our standing quotes are fresh, the fair hasn't moved, and the
-        // target size is unchanged. At the daily cadence the previous quote is a
-        // day old so this never fires, but it keeps a sub-daily cadence cheap.
-        if let Some(prev) = last.get(&pool_key) {
-            let age_ms = now.saturating_sub(prev.at_ms);
-            let drift_bps = (mid_raw.abs_diff(prev.mid_raw) as u128)
-                .saturating_mul(10_000)
-                .checked_div(prev.mid_raw.max(1) as u128)
-                .unwrap_or(u128::MAX);
-            if age_ms < p.cfg.max_quote_age_secs.saturating_mul(1_000)
-                && drift_bps < p.cfg.requote_drift_bps as u128
-                && ask_target == prev.ask_target
-            {
-                continue;
+        match trigger {
+            // Inventory arrival: re-quote ONLY buckets whose ask inventory
+            // changed since last placement (a fresh bucket has no `last`, so a
+            // non-zero inventory counts as a change). Everything else keeps its
+            // daily price.
+            Trigger::InventoryArrival => {
+                if last.get(&pool_key).map(|q| q.ask_target).unwrap_or(0) == ask_target {
+                    continue;
+                }
+            }
+            // Daily refresh: skip pools whose quotes are fresh, the fair hasn't
+            // moved, and the target size is unchanged. At the daily cadence the
+            // previous quote is a day old so this never fires (full reprice),
+            // but it keeps a sub-daily scheduled cadence cheap.
+            Trigger::Scheduled => {
+                if let Some(prev) = last.get(&pool_key) {
+                    let age_ms = now.saturating_sub(prev.at_ms);
+                    let drift_bps = (mid_raw.abs_diff(prev.mid_raw) as u128)
+                        .saturating_mul(10_000)
+                        .checked_div(prev.mid_raw.max(1) as u128)
+                        .unwrap_or(u128::MAX);
+                    if age_ms < p.cfg.max_quote_age_secs.saturating_mul(1_000)
+                        && drift_bps < p.cfg.requote_drift_bps as u128
+                        && ask_target == prev.ask_target
+                    {
+                        continue;
+                    }
+                }
             }
         }
 
@@ -485,50 +599,102 @@ async fn cycle(
         }
         let ask_qty = (ask_target.min(ask_inventory) / lot) * lot;
 
-        // Bid sizing from the shared settlement budget — clamps the cumulative
-        // bid notional to what the BM + wallet can fund across all pools. The
-        // target is `bid_target` (mirrors the ask in full-inventory mode).
-        let want_notional = bid_target as u128 * bid_raw as u128 / 1_000_000_000;
+        // Bid demand (mirrors the ask in full-inventory mode); summed so we can
+        // source the settlement to fund it before placing.
+        desired_bid_notional = desired_bid_notional
+            .saturating_add(bid_target as u128 * bid_raw as u128 / 1_000_000_000);
+
+        plans.push(PoolPlan {
+            pool_id,
+            pool_key,
+            base_coin_type: b.call_coin_type.clone(),
+            quote_coin_type: b.settlement_coin_type.clone(),
+            ask_raw,
+            bid_raw,
+            ask_qty,
+            bid_target,
+            min_size,
+            lot,
+            mid_raw,
+            ask_target,
+        });
+    }
+
+    // Pull settlement (TUSDC) from the liquidity source so the bids can mirror
+    // the asks. Target the desired bid notional plus a buffer covering bid
+    // rounding and the placement's settlement-side fee headroom. Best effort:
+    // a source that can't supply just leaves the budget where it is.
+    if p.cfg.settlement_topup_enabled && desired_bid_notional > 0 {
+        let buffer = desired_bid_notional
+            .saturating_mul(p.cfg.settlement_topup_buffer_bps as u128)
+            / 10_000;
+        let target = desired_bid_notional.saturating_add(buffer).min(u64::MAX as u128) as u64;
+        p.liquidity
+            .ensure_wallet_balance(&wrap.client, &wrap.signer, &p.settlement_coin_type, target)
+            .await;
+    }
+
+    // Settlement we can commit across every bid this cycle: BM balance + wallet
+    // (now topped up). Read after the top-up so the budget reflects it.
+    let bm_quote = bm_balance(
+        &wrap.client,
+        wrap.signer.address,
+        &p.handles,
+        bm_id,
+        &p.settlement_coin_type,
+    )
+    .await
+    .unwrap_or(0);
+    let wallet_quote: u64 = wrap
+        .client
+        .coin_read_api()
+        .get_balance(wrap.signer.address, Some(p.settlement_coin_type.clone()))
+        .await
+        .map(|bal| bal.total_balance.min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    let mut quote_budget: u128 = bm_quote as u128 + wallet_quote as u128;
+    let mut quote_used: u128 = 0;
+
+    // Placement pass: size each bid against the shared budget, then emit.
+    for plan in plans {
+        let want_notional = plan.bid_target as u128 * plan.bid_raw as u128 / 1_000_000_000;
         let give = want_notional.min(quote_budget);
-        let affordable = (give * 1_000_000_000 / bid_raw as u128).min(u64::MAX as u128) as u64;
-        let bid_qty = (bid_target.min(affordable) / lot) * lot;
-        let used = bid_qty as u128 * bid_raw as u128 / 1_000_000_000;
+        let affordable = (give * 1_000_000_000 / plan.bid_raw as u128).min(u64::MAX as u128) as u64;
+        let bid_qty = (plan.bid_target.min(affordable) / plan.lot) * plan.lot;
+        let used = bid_qty as u128 * plan.bid_raw as u128 / 1_000_000_000;
         quote_budget = quote_budget.saturating_sub(used);
         quote_used = quote_used.saturating_add(used);
 
-        let plan = QuotePlan {
-            ask: (ask_qty >= min_size).then_some(QuoteSide { price_raw: ask_raw, quantity: ask_qty }),
-            bid: (bid_qty >= min_size).then_some(QuoteSide { price_raw: bid_raw, quantity: bid_qty }),
+        let quote_plan = QuotePlan {
+            ask: (plan.ask_qty >= plan.min_size)
+                .then_some(QuoteSide { price_raw: plan.ask_raw, quantity: plan.ask_qty }),
+            bid: (bid_qty >= plan.min_size)
+                .then_some(QuoteSide { price_raw: plan.bid_raw, quantity: bid_qty }),
             expire_timestamp_ms: now_expire,
         };
 
-        if plan.bid.is_none() && plan.ask.is_none() {
-            if quoted_pools.contains_key(&pool_key) {
+        if quote_plan.bid.is_none() && quote_plan.ask.is_none() {
+            if quoted_pools.contains_key(&plan.pool_key) {
                 refreshes.push(PoolRefresh {
-                    pool_id,
-                    base_coin_type: b.call_coin_type.clone(),
-                    quote_coin_type: b.settlement_coin_type.clone(),
-                    plan,
+                    pool_id: plan.pool_id,
+                    base_coin_type: plan.base_coin_type.clone(),
+                    quote_coin_type: plan.quote_coin_type.clone(),
+                    plan: quote_plan,
                 });
-                book.push((pool_key, None));
+                book.push((plan.pool_key, None));
             }
             continue;
         }
 
         refreshes.push(PoolRefresh {
-            pool_id,
-            base_coin_type: b.call_coin_type.clone(),
-            quote_coin_type: b.settlement_coin_type.clone(),
-            plan,
+            pool_id: plan.pool_id,
+            base_coin_type: plan.base_coin_type.clone(),
+            quote_coin_type: plan.quote_coin_type.clone(),
+            plan: quote_plan,
         });
         book.push((
-            pool_key,
-            Some((
-                mid_raw,
-                ask_target,
-                b.call_coin_type.clone(),
-                b.settlement_coin_type.clone(),
-            )),
+            plan.pool_key,
+            Some((plan.mid_raw, plan.ask_target, plan.base_coin_type, plan.quote_coin_type)),
         ));
     }
 
