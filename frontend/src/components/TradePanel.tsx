@@ -291,28 +291,8 @@ export function TradePanel({ bucket, series }: Props) {
         </span>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1.4fr)", gap: 14 }}>
-        {/* order book */}
-        <div style={{ fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
-          {(book.data?.asks ?? []).slice(0, 5).reverse().map((l, i) => (
-            <div key={`a${i}`} style={{ display: "flex", justifyContent: "space-between", color: "var(--aqua-down, #e15d6b)" }}>
-              <span>{formatPrice(l.price)}</span>
-              <span style={{ opacity: 0.7 }}>{l.qty}</span>
-            </div>
-          ))}
-          <div style={{ borderTop: "1px solid var(--aqua-line, rgba(92,107,122,0.2))", margin: "4px 0" }} />
-          {(book.data?.bids ?? []).slice(0, 5).map((l, i) => (
-            <div key={`b${i}`} style={{ display: "flex", justifyContent: "space-between", color: "var(--aqua-up, #1fbf75)" }}>
-              <span>{formatPrice(l.price)}</span>
-              <span style={{ opacity: 0.7 }}>{l.qty}</span>
-            </div>
-          ))}
-          {(book.data?.asks?.length ?? 0) + (book.data?.bids?.length ?? 0) === 0 && (
-            <div className="panel__sub">book is empty</div>
-          )}
-        </div>
-
-        {/* order form */}
+      {/* order form (order book now lives in the Buy screen's right rail, SO-170) */}
+      <div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ display: "flex", gap: 6 }}>
             {(["buy", "sell"] as Side[]).map((s) => (

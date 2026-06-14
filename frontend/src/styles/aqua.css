@@ -431,6 +431,114 @@
   color: var(--aqua-ink-4); letter-spacing: 0.04em;
 }
 
+/* ---------- Buy screen 3-column market layout (SO-170) ---------- */
+/* Wider wrap so the chart in the middle column has room to breathe. */
+[data-theme="aqua"] .app__wrap--buy { max-width: 1420px; }
+
+/* DeepBook / Market-maker mode toggle — segmented control in the buy header. */
+[data-theme="aqua"] .buy-toggle {
+  display: flex; width: fit-content; gap: 2px; margin: 0 auto 24px; padding: 4px;
+  background: var(--aqua-glass-2);
+  border: 1px solid var(--aqua-line); border-radius: 14px;
+}
+[data-theme="aqua"] .buy-toggle__btn {
+  border: none; background: transparent; cursor: pointer;
+  padding: 9px 22px; border-radius: 10px;
+  font-family: "Sora", system-ui, sans-serif; font-size: 13px; font-weight: 600;
+  color: var(--aqua-ink-3);
+  transition: background 180ms ease, color 180ms ease;
+}
+[data-theme="aqua"] .buy-toggle__btn.is-active {
+  background: var(--aqua-surface, rgba(255,255,255,0.7));
+  color: var(--aqua-sui-deep);
+  box-shadow: 0 2px 8px rgba(var(--aqua-shadow-rgb),0.10);
+}
+
+[data-theme="aqua"] .buy-grid {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr) 300px;
+  gap: 18px;
+  align-items: start;
+  margin-bottom: 28px;
+}
+/* Market-maker mode drops the order-book rail — strikes + chart only. */
+[data-theme="aqua"] .buy-grid--mm { grid-template-columns: 260px minmax(0, 1fr); }
+[data-theme="aqua"] .buy-grid__center { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+[data-theme="aqua"] .buy-grid__trade { min-width: 0; }
+/* Sticky rails so the strike list and book stay in view while the center
+   column scrolls. */
+[data-theme="aqua"] .buy-grid__buckets,
+[data-theme="aqua"] .buy-grid__book { position: sticky; top: 88px; }
+
+/* Vertical bucket list — replaces the tile carousel on /buy. */
+[data-theme="aqua"] .bucketlist { display: flex; flex-direction: column; gap: 6px; }
+[data-theme="aqua"] .bucketlist__label {
+  font-family: "JetBrains Mono", monospace; font-size: 10px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--aqua-ink-4); padding: 0 4px 4px;
+}
+[data-theme="aqua"] .bucketrow {
+  position: relative; display: flex; align-items: baseline; justify-content: space-between;
+  gap: 10px; padding: 12px 14px 12px 18px;
+  background: var(--aqua-glass-2);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--aqua-line); border-radius: 12px;
+  cursor: pointer; text-align: left;
+  transition: transform 180ms cubic-bezier(0.16,1,0.3,1), border-color 180ms ease, box-shadow 180ms ease;
+}
+[data-theme="aqua"] .bucketrow::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+  border-radius: 12px 0 0 12px;
+  background: var(--tier-ink, var(--aqua-t3));
+}
+[data-theme="aqua"] .bucketrow:hover {
+  transform: translateX(2px); border-color: var(--tier-ink, var(--aqua-t3));
+}
+[data-theme="aqua"] .bucketrow.is-selected {
+  background: linear-gradient(90deg, rgba(77,162,255,0.12) 0%, rgba(var(--aqua-surface-rgb),0.72) 100%);
+  border-color: var(--aqua-sui);
+  box-shadow: 0 0 0 2px rgba(77,162,255,0.15);
+}
+[data-theme="aqua"] .bucketrow__strike {
+  font-family: "JetBrains Mono", monospace; font-size: 16px; font-weight: 700;
+  font-variant-numeric: tabular-nums; color: var(--aqua-ink-1); letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+[data-theme="aqua"] .bucketrow__premium {
+  font-family: "JetBrains Mono", monospace; font-size: 12px; font-weight: 600;
+  font-variant-numeric: tabular-nums; color: var(--aqua-sui-deep); white-space: nowrap;
+}
+[data-theme="aqua"] .bucketrow__premium--neg { color: var(--aqua-coral); }
+
+/* Order book rail. */
+[data-theme="aqua"] .orderbook__rows {
+  font-family: "JetBrains Mono", monospace; font-size: 12px;
+  font-variant-numeric: tabular-nums; margin-top: 8px;
+}
+[data-theme="aqua"] .orderbook__row { display: flex; justify-content: space-between; padding: 2px 0; }
+[data-theme="aqua"] .orderbook__row--ask { color: var(--aqua-down, #e15d6b); }
+[data-theme="aqua"] .orderbook__row--bid { color: var(--aqua-up, #1fbf75); }
+[data-theme="aqua"] .orderbook__qty { opacity: 0.7; }
+[data-theme="aqua"] .orderbook__mid {
+  border-top: 1px solid var(--aqua-line, rgba(92,107,122,0.2)); margin: 6px 0;
+}
+
+/* RFQ mint flow — full-width section under the market grid. */
+[data-theme="aqua"] .rfq { border-top: 1px solid var(--aqua-line); padding-top: 22px; }
+[data-theme="aqua"] .rfq__intro { margin: 0 0 18px; }
+[data-theme="aqua"] .rfq__body {
+  display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 22px; align-items: start;
+}
+[data-theme="aqua"] .rfq__main { display: flex; flex-direction: column; gap: 18px; }
+
+/* Stack to a single column on narrow viewports — falls back to the original
+   vertical flow. */
+@media (max-width: 1080px) {
+  [data-theme="aqua"] .buy-grid { grid-template-columns: 1fr; }
+  [data-theme="aqua"] .buy-grid__buckets,
+  [data-theme="aqua"] .buy-grid__book { position: static; }
+  [data-theme="aqua"] .rfq__body { grid-template-columns: 1fr; }
+}
+
 /* ---------- Amount input ---------- */
 [data-theme="aqua"] .amount {
   display: flex; align-items: stretch;
@@ -814,6 +922,11 @@
   border: 1px solid var(--aqua-line); border-radius: 20px;
   box-shadow: 0 12px 40px rgba(var(--aqua-shadow-rgb),0.12);
   z-index: 40; overflow: hidden;
+}
+/* Docked variant (SO-170): inline in the RFQ section rather than the floating
+   overlay. Sits in the normal flow, full column width, sticky next to the form. */
+[data-theme="aqua"] .feed--docked {
+  position: sticky; top: 88px; right: auto; width: auto;
 }
 [data-theme="aqua"] .feed__head {
   display: flex; align-items: center; justify-content: space-between;
