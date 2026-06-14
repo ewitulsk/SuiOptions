@@ -51,6 +51,7 @@ use sui_tx::tx::account::{account_balance_of, create_and_share_account, find_acc
 use sui_tx::tx::test_tokens::mint_and_deposit_into_account;
 use sui_tx::ws_client;
 
+use mm_bot::liquidity::{FaucetLiquiditySource, LiquiditySource};
 use mm_bot::pricing::{
     compute_spot_from_cache, price_rfq, resolve_sigma, serves_pair, PriceDecision, PricingConfig,
     RfqPricingInputs, Staleness,
@@ -338,6 +339,15 @@ async fn main() -> Result<()> {
     tracing::info!(account_id = %account_id, "mm account ready");
     let account_id_pt = pt_object_id_from_sui(account_id);
 
+    // Liquidity source: pulls settlement (and, via the same trait, any coin the
+    // bot needs) before quoting. Default = the test-token faucet; a real market
+    // maker swaps in their own funding source at this one site.
+    let liquidity: Arc<dyn LiquiditySource> = Arc::new(FaucetLiquiditySource::new(
+        snapshot.maybe_test_tokens(),
+        snapshot.package()?,
+        cli.gas_budget,
+    ));
+
     // Keep each underlying's inventory topped up so the writer-MM (ask) side
     // never runs dry mid-test. One task per underlying. Only relevant if we
     // advertise writer_mm and auto-replenish is enabled.
@@ -345,21 +355,17 @@ async fn main() -> Result<()> {
         let package = snapshot.package()?;
         for sym in &cfg.underlying_symbols {
             let underlying = snapshot.faucet_token(sym)?;
-            let (u_tokens_pkg, u_module) = underlying.module_path()?;
             spawn_replenish_task(ReplenishParams {
                 secrets: secrets_loaded.clone(),
                 network: cfg.network,
                 package,
                 account_id,
-                tokens_pkg: u_tokens_pkg,
-                module: u_module,
-                faucet_id: underlying.faucet()?,
                 coin_type: underlying.coin_type.clone(),
                 symbol: sym.clone(),
                 threshold: cfg.underlying_replenish_threshold,
                 top_up: cfg.underlying_replenish_amount,
                 interval_secs: cfg.underlying_replenish_interval_secs,
-                gas_budget: cli.gas_budget,
+                liquidity: Arc::clone(&liquidity),
             });
         }
     }
@@ -459,6 +465,7 @@ async fn main() -> Result<()> {
                     pricing: pricing_cfg,
                     staleness,
                     fallback_vol: cfg.pyth.fallback_vol,
+                    liquidity: Arc::clone(&liquidity),
                 });
                 tracing::info!(markets = cfg.underlying_symbols.len(), "deepbook quoting enabled");
             }
@@ -1165,15 +1172,14 @@ struct ReplenishParams {
     network: Network,
     package: ObjectID,
     account_id: ObjectID,
-    tokens_pkg: ObjectID,
-    module: String,
-    faucet_id: ObjectID,
     coin_type: String,
     symbol: String,
     threshold: u64,
     top_up: u64,
     interval_secs: u64,
-    gas_budget: u64,
+    /// Source the top-up is pulled from (faucet by default). The faucet id /
+    /// module / gas are resolved inside the source from `coin_type`.
+    liquidity: Arc<dyn LiquiditySource>,
 }
 
 /// Periodically read the Account's underlying balance (via devInspect, no gas)
@@ -1220,22 +1226,18 @@ fn spawn_replenish_task(p: ReplenishParams) {
                 symbol = %p.symbol,
                 "replenish: underlying below threshold; minting top-up"
             );
-            match mint_and_deposit_into_account(
-                &wrap.client,
-                &wrap.signer,
-                p.tokens_pkg,
-                &p.module,
-                p.faucet_id,
-                &p.coin_type,
-                p.account_id,
-                p.package,
-                p.top_up,
-                p.gas_budget,
-            )
-            .await
+            if p
+                .liquidity
+                .ensure_account_balance(
+                    &wrap.client,
+                    &wrap.signer,
+                    p.account_id,
+                    &p.coin_type,
+                    p.top_up,
+                )
+                .await
             {
-                Ok(resp) => tracing::info!(digest = %resp.digest, amount = p.top_up, symbol = %p.symbol, "replenish: topped up underlying"),
-                Err(e) => tracing::warn!(error = %format!("{e:#}"), "replenish: top-up tx failed; retrying next tick"),
+                tracing::info!(amount = p.top_up, symbol = %p.symbol, "replenish: topped up underlying");
             }
         }
     });

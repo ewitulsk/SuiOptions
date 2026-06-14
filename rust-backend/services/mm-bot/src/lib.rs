@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 pub mod deepbook;
+pub mod liquidity;
 pub mod onchain_rfq;
 pub mod pricing;
 
