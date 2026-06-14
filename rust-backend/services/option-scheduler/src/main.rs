@@ -25,7 +25,7 @@
 //! a restart — can no longer cause a duplicate family.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
@@ -39,13 +39,14 @@ use token_info_client::TokenInfoClient;
 
 use indexer_graphql::IndexerClient;
 
-use option_scheduler::config::{GridConfig, PairConfig, SchedulerConfig};
+use option_scheduler::config::{GridConfig, PairConfig, SchedulerConfig, VaultTemplate};
 use option_scheduler::db;
 use option_scheduler::families::{CanonicalType, PairKey};
 use option_scheduler::roller::{self, ErrorClass, RollPlan};
 use option_scheduler::schedule::{decide_tick, SkipReason, TickDecision};
 use option_scheduler::spot::ResolvedSpotSource;
 use option_scheduler::strike_grid::{build_strike_grid_for_pair, build_z_ladder_for_pair};
+use option_scheduler::vault_roller::{self, VaultPairSpec};
 use option_scheduler::Cli;
 
 #[tokio::main]
@@ -140,6 +141,10 @@ async fn main() -> Result<()> {
     // first tick.
     let mut pair_keys: Vec<PairKey> = Vec::with_capacity(cfg.pairs.len());
     let mut pair_meta: Vec<PairMeta> = Vec::with_capacity(cfg.pairs.len());
+    // Vault-eligible pairs: those with a Pyth feed on BOTH legs (a vault pins
+    // feed ids for its oracle reads, so feedless test-token pairs get buckets
+    // but no vault). Empty unless `[vault_template]` is configured.
+    let mut vault_entries: Vec<VaultEntry> = Vec::new();
     for pair in &cfg.pairs {
         let u_spec = snapshot.token_spec(&pair.underlying).with_context(|| {
             format!("underlying {} not in token-info catalog", pair.underlying)
@@ -154,12 +159,34 @@ async fn main() -> Result<()> {
                     pair.underlying, pair.settlement
                 )
             })?;
-        pair_keys.push(PairKey {
+        let pair_key = PairKey {
             underlying_symbol: pair.underlying.clone(),
             settlement_symbol: pair.settlement.clone(),
             underlying: CanonicalType::parse(&u_spec.coin_type)?,
             settlement: CanonicalType::parse(&s_spec.coin_type)?,
-        });
+        };
+        if cfg.vault_template.is_some() {
+            match (u_spec.pyth_feed(), s_spec.pyth_feed()) {
+                (Ok(u_feed), Ok(s_feed)) => vault_entries.push(VaultEntry {
+                    key: pair_key.clone(),
+                    spec: VaultPairSpec {
+                        underlying_symbol: pair.underlying.clone(),
+                        settlement_symbol: pair.settlement.clone(),
+                        underlying_type: u_spec.coin_type.clone(),
+                        settlement_type: s_spec.coin_type.clone(),
+                        underlying_decimals: u_spec.decimals,
+                        settlement_decimals: s_spec.decimals,
+                        underlying_feed_id: u_feed.0.to_vec(),
+                        settlement_feed_id: s_feed.0.to_vec(),
+                    },
+                }),
+                _ => info!(
+                    pair = %format!("{}/{}", pair.underlying, pair.settlement),
+                    "no Pyth feed on one or both legs — skipping vault creation for this pair"
+                ),
+            }
+        }
+        pair_keys.push(pair_key);
         pair_meta.push(PairMeta {
             cfg: pair.clone(),
             underlying_type: u_spec.coin_type.clone(),
@@ -214,6 +241,20 @@ async fn main() -> Result<()> {
         }
         Err(e) => warn!(error = %e, "failed to read active rolls at boot"),
     }
+    match db::all_active_vault_rows(&db_pool) {
+        Ok(rows) => {
+            for row in &rows {
+                info!(
+                    id = row.id,
+                    pair = %format!("{}/{}", row.underlying_symbol, row.settlement_symbol),
+                    state = %row.state,
+                    vault_id = ?row.vault_id,
+                    "active vault at boot"
+                );
+            }
+        }
+        Err(e) => warn!(error = %e, "failed to read active vaults at boot"),
+    }
 
     // ── Confirmation + reconciler task ──────────────────────────────
     // Periodically: (1) confirm submitted rolls whose bucket the indexer now
@@ -246,13 +287,18 @@ async fn main() -> Result<()> {
     }
 
     let tick = Duration::from_secs(cfg.tick_secs.max(1));
+    let vault_interval = Duration::from_millis(cfg.vault_check_interval_ms.max(1));
     info!(
         tick_secs = cfg.tick_secs,
         roll_threshold_ms = cfg.roll_threshold_ms,
+        vault_check_interval_ms = cfg.vault_check_interval_ms,
+        vault_pairs = vault_entries.len(),
         dry_run = cli.dry_run,
         "tick loop starting"
     );
 
+    // Run the first vault pass on the opening tick (None ⇒ due).
+    let mut last_vault_check: Option<Instant> = None;
     loop {
         metrics::counter!("scheduler_runs_total", "job" => "roll").increment(1);
         let started = std::time::Instant::now();
@@ -274,8 +320,88 @@ async fn main() -> Result<()> {
         }
         metrics::histogram!("scheduler_job_duration_seconds", "job" => "roll")
             .record(started.elapsed().as_secs_f64());
+
+        // Vault-ensure pass, gated to `vault_check_interval_ms`. Independent of
+        // the bucket-roll cadence above. Disabled unless `[vault_template]` is
+        // set and at least one pair is vault-eligible.
+        if let Some(template) = cfg.vault_template.as_ref() {
+            if !vault_entries.is_empty()
+                && last_vault_check.is_none_or(|t| t.elapsed() >= vault_interval)
+            {
+                last_vault_check = Some(Instant::now());
+                metrics::counter!("scheduler_runs_total", "job" => "vault").increment(1);
+                let started = Instant::now();
+                if let Err(e) = vault_pass(
+                    &cli,
+                    &indexer,
+                    &vault_entries,
+                    &wrap,
+                    package,
+                    admin_cap,
+                    &db_pool,
+                    template,
+                )
+                .await
+                {
+                    warn!(error = %format!("{e:#}"), "vault pass errored");
+                }
+                metrics::histogram!("scheduler_job_duration_seconds", "job" => "vault")
+                    .record(started.elapsed().as_secs_f64());
+            }
+        }
+
         sleep(tick).await;
     }
+}
+
+/// Vault-ensure pass: query the indexer's vault set once, then for each
+/// vault-eligible pair create a vault if one doesn't already exist. Per-pair
+/// errors are logged and don't abort the pass.
+#[allow(clippy::too_many_arguments)]
+async fn vault_pass(
+    cli: &Cli,
+    indexer: &IndexerClient,
+    entries: &[VaultEntry],
+    wrap: &SuiClientWrapper,
+    package: sui_types::base_types::ObjectID,
+    admin_cap: sui_types::base_types::ObjectID,
+    db_pool: &db::DbPool,
+    template: &VaultTemplate,
+) -> Result<()> {
+    let vaults = indexer
+        .vaults()
+        .await
+        .context("listing vaults for vault pass")?;
+    for entry in entries {
+        let existing = vaults
+            .iter()
+            .find(|v| {
+                entry
+                    .key
+                    .matches_assets(&v.underlying_type, &v.settlement_type)
+            })
+            .map(|v| v.vault_id.to_hex());
+        if let Err(e) = vault_roller::ensure_vault(
+            wrap,
+            package,
+            admin_cap,
+            db_pool,
+            &entry.spec,
+            template,
+            existing,
+            cli.dry_run,
+            cli.gas_budget,
+        )
+        .await
+        {
+            warn!(
+                pair = %format!("{}/{}", entry.spec.underlying_symbol, entry.spec.settlement_symbol),
+                error = %format!("{e:#}"),
+                "ensure_vault failed"
+            );
+        }
+    }
+    Ok(())
 }
 
 struct PairMeta {
@@ -295,6 +421,13 @@ struct DeepBookPoolCfg {
     handles: DeepBookHandles,
     deep_coin_type: String,
     pool_creation_fee: u64,
+}
+
+/// A vault-eligible pair: the canonical key (to match the indexer's `vaults`
+/// view) plus everything `ensure_vault` needs to create one.
+struct VaultEntry {
+    key: PairKey,
+    spec: VaultPairSpec,
 }
 
 /// Resolve the per-roll strike set: the legacy percentage grid, or the
