@@ -5,10 +5,11 @@ import { normalizeStructTag } from "@mysten/sui/utils";
 import { PACKAGE_ID } from "../config";
 import {
   fetchVault,
+  fetchVaultApy,
   fetchVaultRounds,
   fetchVaults,
   type Vault,
-  type VaultApyPoint,
+  type VaultApySeries,
   type VaultRound,
 } from "./vaults";
 
@@ -41,23 +42,16 @@ export function useVaultRounds(vaultId: string | null) {
 }
 
 /**
- * The vault's APY-over-time curve.
- *
- * ⚠️ MOCK / PLACEHOLDER: no endpoint serves this yet. The api-service computes
- * only a single trailing APY on `Vault.apy`; it stores no timeseries. This hook
- * returns `[]` so the chart renders its empty "coming soon" state, leaving the
- * UI wired and ready for the real endpoint (proposed: `GET /vaults/:id/apy`,
- * see the PR's "endpoints to build" section). When that lands, swap the
- * `queryFn` to fetch it — nothing else in the page changes.
+ * The vault's APY-over-time curve: realized (indexer) + predicted (worker).
+ * Predicted is empty when derived-metric-worker isn't deployed, so the chart
+ * shows realized-only until then.
  */
 export function useVaultApyHistory(vaultId: string | null) {
-  return useQuery<VaultApyPoint[], Error>({
+  return useQuery<VaultApySeries, Error>({
     queryKey: ["vault-apy-history", vaultId],
     enabled: vaultId !== null,
-    // No network call — there is nothing to fetch yet. Returning a resolved
-    // empty array keeps the chart's loading/empty branches honest.
-    queryFn: async () => [] as VaultApyPoint[],
-    staleTime: Infinity,
+    queryFn: () => fetchVaultApy(vaultId as string),
+    refetchInterval: 60_000,
   });
 }
 

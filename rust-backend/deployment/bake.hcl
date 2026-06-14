@@ -115,6 +115,14 @@ target "balance-monitor" {
   cache-to   = [{ type = "gha", mode = "max", scope = "balance-monitor" }]
 }
 
+target "derived-metric-worker" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.derived-metric-worker"
+  tags       = ["${ECR}/options/derived-metric-worker:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "derived-metric-worker" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "derived-metric-worker" }]
+}
+
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper", "balance-monitor"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper", "balance-monitor", "derived-metric-worker"]
 }

@@ -195,6 +195,108 @@ pub async fn list_vault_rounds(
     Ok(Json(VaultRoundsResponse { vault_id, rounds }))
 }
 
+/// One point on either the realized or predicted APY curve. `kind` /
+/// `confidence` are populated for predicted points only.
+#[derive(Serialize)]
+pub struct ApyPointDto {
+    pub t_ms: i64,
+    pub apy: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+}
+
+#[derive(Serialize)]
+pub struct VaultApyResponse {
+    pub vault_id: String,
+    /// Annualized pps growth per finalized round (chain data, via the indexer).
+    pub realized: Vec<ApyPointDto>,
+    /// Forward-looking premium-yield APY (derived-metric-worker). Empty when
+    /// the worker isn't configured or has no snapshot yet.
+    pub predicted: Vec<ApyPointDto>,
+}
+
+/// Worker read-API shapes (`GET /vault-apy/:id`).
+#[derive(Deserialize)]
+struct WorkerApy {
+    predicted: Vec<WorkerPoint>,
+}
+#[derive(Deserialize)]
+struct WorkerPoint {
+    t_ms: i64,
+    apy: f64,
+    kind: String,
+    confidence: f64,
+}
+
+/// `GET /vaults/:id/apy` — realized (indexer) + predicted (worker), composed.
+pub async fn get_vault_apy(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<String>,
+) -> Result<Json<VaultApyResponse>, StatusCode> {
+    let id = parse_vault_id(&vault_id)?;
+    let realized = state
+        .indexer
+        .vault_apy(id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "indexer vault_apy query failed");
+            StatusCode::BAD_GATEWAY
+        })?
+        .into_iter()
+        .map(|p| ApyPointDto {
+            t_ms: p.t_ms as i64,
+            apy: p.apy,
+            kind: None,
+            confidence: None,
+        })
+        .collect();
+
+    // Predicted is best-effort: a worker outage degrades to realized-only
+    // rather than failing the whole endpoint.
+    let predicted = fetch_predicted(&state, &vault_id).await;
+
+    Ok(Json(VaultApyResponse {
+        vault_id,
+        realized,
+        predicted,
+    }))
+}
+
+async fn fetch_predicted(state: &AppState, vault_id: &str) -> Vec<ApyPointDto> {
+    let Some(base) = state.derived_metrics_url.as_deref() else {
+        return Vec::new();
+    };
+    let url = format!("{base}/vault-apy/{vault_id}");
+    match state.http.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<WorkerApy>().await {
+            Ok(body) => body
+                .predicted
+                .into_iter()
+                .map(|p| ApyPointDto {
+                    t_ms: p.t_ms,
+                    apy: p.apy,
+                    kind: Some(p.kind),
+                    confidence: Some(p.confidence),
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "decoding derived-metrics predicted apy");
+                Vec::new()
+            }
+        },
+        Ok(resp) => {
+            tracing::warn!(status = %resp.status(), "derived-metrics apy non-2xx");
+            Vec::new()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "derived-metrics apy request failed");
+            Vec::new()
+        }
+    }
+}
+
 pub async fn list_vault_receipts(
     State(state): State<Arc<AppState>>,
     Path(vault_id): Path<String>,

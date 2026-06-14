@@ -1,0 +1,39 @@
+[package]
+name = "derived-metric-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "derived-metric-worker"
+path = "src/main.rs"
+
+[dependencies]
+observability   = { workspace = true }
+runtime-config  = { workspace = true }
+cli-spec        = { workspace = true }
+indexer-graphql = { workspace = true }
+token-info-client = { workspace = true }
+pyth-client     = { workspace = true }
+pricing         = { workspace = true }
+protocol-types  = { workspace = true }
+
+clap = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+metrics = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+axum = { workspace = true }
+
+# Owns its own Postgres DB (predicted-APY snapshots).
+diesel = { workspace = true }
+diesel_migrations = { workspace = true }
+r2d2 = { workspace = true }

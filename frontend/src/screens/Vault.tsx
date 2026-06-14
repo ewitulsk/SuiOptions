@@ -129,7 +129,11 @@ function VaultDetail({ vaultId }: { vaultId: string }) {
       <VaultStats vault={vault} rounds={rounds} />
       <div className="vault-grid">
         <div className="vault-grid__main">
-          <VaultApyChart points={apyQ.data ?? []} loading={apyQ.isLoading} />
+          <VaultApyChart
+            realized={apyQ.data?.realized ?? []}
+            predicted={apyQ.data?.predicted ?? []}
+            loading={apyQ.isLoading}
+          />
           <StrategyCard vault={vault} />
           <CurrentRoundCard vault={vault} rounds={rounds} />
           <TrackRecord vault={vault} rounds={rounds} />

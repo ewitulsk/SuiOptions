@@ -2104,3 +2104,10 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
   [data-theme="aqua"] .vault-grid { grid-template-columns: 1fr; }
   [data-theme="aqua"] .vault-grid__side { position: static; }
 }
+
+/* Vault APY chart legend */
+[data-theme="aqua"] .vault-chart__legend { display: flex; gap: 12px; font-size: 11px; text-transform: none; letter-spacing: 0; color: var(--aqua-ink-3); }
+[data-theme="aqua"] .vault-chart__legend-item { display: inline-flex; align-items: center; gap: 5px; }
+[data-theme="aqua"] .vault-chart__swatch { display: inline-block; width: 14px; height: 0; border-top-width: 2px; border-top-style: solid; }
+[data-theme="aqua"] .vault-chart__swatch--realized { border-top-color: var(--aqua-up, #1fbf75); }
+[data-theme="aqua"] .vault-chart__swatch--predicted { border-top-style: dashed; border-top-color: var(--aqua-accent, #2f81f7); }

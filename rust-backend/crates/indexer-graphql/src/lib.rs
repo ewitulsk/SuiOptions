@@ -160,6 +160,15 @@ pub struct VaultRound {
     pub finalized_at_ms: Option<u64>,
 }
 
+/// One realized-APY point: annualized pps growth landing at a finalized
+/// round's finalize time.
+#[derive(Clone, Debug)]
+pub struct VaultApyPoint {
+    pub round: u64,
+    pub t_ms: u64,
+    pub apy: f64,
+}
+
 /// One (vault, owner, round, kind) receipt aggregate (D2).
 #[derive(Clone, Debug)]
 pub struct VaultReceipt {
@@ -323,6 +332,14 @@ impl IndexerClient {
             mgmtFeeRaw perfFeeRaw finalizedAtMs}}";
         let data: VaultRoundsWrap = self.gql(Q, json!({ "id": vault_id.to_hex() })).await?;
         data.vault_rounds.into_iter().map(VaultRound::try_from).collect()
+    }
+
+    /// One vault's realized-APY series (annualized pps growth per finalized
+    /// round), computed indexer-side from chain data.
+    pub async fn vault_apy(&self, vault_id: ObjectId) -> Result<Vec<VaultApyPoint>> {
+        const Q: &str = "query($id:String!){vaultApy(vaultId:$id){round tMs apy}}";
+        let data: VaultApyWrap = self.gql(Q, json!({ "id": vault_id.to_hex() })).await?;
+        data.vault_apy.into_iter().map(VaultApyPoint::try_from).collect()
     }
 
     /// Receipt aggregates for one vault, optionally scoped to an owner.
@@ -546,6 +563,11 @@ struct VaultRoundsWrap {
 struct VaultReceiptsWrap {
     vault_receipts: Vec<VaultReceiptJson>,
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultApyWrap {
+    vault_apy: Vec<VaultApyJson>,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -699,6 +721,25 @@ struct VaultReceiptJson {
     kind: String,
     amount_raw: String,
     settled_raw: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultApyJson {
+    round: String,
+    t_ms: String,
+    apy: f64,
+}
+
+impl TryFrom<VaultApyJson> for VaultApyPoint {
+    type Error = anyhow::Error;
+    fn try_from(p: VaultApyJson) -> Result<Self> {
+        Ok(VaultApyPoint {
+            round: parse_u64(&p.round)?,
+            t_ms: parse_u64(&p.t_ms)?,
+            apy: p.apy,
+        })
+    }
 }
 
 // ── parsing wire → domain ──────────────────────────────────────────────────

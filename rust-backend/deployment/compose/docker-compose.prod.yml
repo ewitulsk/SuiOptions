@@ -151,6 +151,21 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # Predicted-APY worker (vault analytics). Owns derived_metrics_prod;
+  # recomputes per-vault forecasts on a timer. Scraped by the Prometheus
+  # agent on 9013; read API on 9014 (api-service composes it). Not nginx-proxied.
+  derived-metric-worker:
+    image: ${ECR}/options/derived-metric-worker:${DERIVED_METRIC_WORKER_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      RUST_LOG: info,derived_metric_worker=debug
+    depends_on: [indexer, token-info]
+    restart: unless-stopped
+    networks: [net]
+
   # Permissionless covered-call vault crank (guide doc 04). Holds only a
   # gas wallet (/run/secrets/keeper.toml, from options/prod/keeper).
   # Vaults are auto-discovered from the indexer's vaults view — a vault

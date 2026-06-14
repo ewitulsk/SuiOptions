@@ -54,11 +54,12 @@ esac
 
 # DB name and owning role both follow the `<service>_<env>` convention.
 case "$SERVICE" in
-  indexer)    DB_PREFIX=indexer ;;
-  scheduler)  DB_PREFIX=scheduler ;;
-  token-info) DB_PREFIX=token_info ;;
+  indexer)         DB_PREFIX=indexer ;;
+  scheduler)       DB_PREFIX=scheduler ;;
+  token-info)      DB_PREFIX=token_info ;;
+  derived-metrics) DB_PREFIX=derived_metrics ;;
   *)
-    echo "FATAL: unknown service '$SERVICE' (expected indexer|scheduler|token-info)"
+    echo "FATAL: unknown service '$SERVICE' (expected indexer|scheduler|token-info|derived-metrics)"
     exit 1
     ;;
 esac

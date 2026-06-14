@@ -149,6 +149,22 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # Predicted-APY worker (vault analytics). Owns its own Postgres DB
+  # (derived_metrics_staging); recomputes per-vault forecasts on a timer from
+  # Pyth spot+vol. Scraped by Prometheus on 9013; serves its read API on 9014
+  # (api-service composes it into /vaults/:id/apy). Not proxied by nginx.
+  derived-metric-worker:
+    image: ${ECR}/options/derived-metric-worker:${DERIVED_METRIC_WORKER_TAG}
+    environment:
+      APP_ENV: staging
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      RUST_LOG: info,derived_metric_worker=debug
+    depends_on: [indexer, token-info]
+    restart: unless-stopped
+    networks: [net]
+
   # Permissionless covered-call vault crank (guide doc 04). Holds only a
   # gas wallet (/run/secrets/keeper.toml, from options/staging/keeper).
   # Vaults are auto-discovered from the indexer's vaults view — a vault

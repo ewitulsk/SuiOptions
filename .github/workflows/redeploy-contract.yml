@@ -364,8 +364,8 @@ jobs:
                 "COMPOSE_FILE=\"docker-compose.\($env).yml\"",
 
                 "# ── 1. Stop the services whose DBs we wipe ──",
-                "docker compose -f \"$COMPOSE_FILE\" stop indexer option-scheduler || true",
-                "echo \"indexer + option-scheduler stopped\"",
+                "docker compose -f \"$COMPOSE_FILE\" stop indexer option-scheduler derived-metric-worker || true",
+                "echo \"indexer + option-scheduler + derived-metric-worker stopped\"",
 
                 "# ── 2. Download updated files + provisioning script from S3 ──",
                 "aws s3 cp \"s3://\($bucket)/\($bundle_key)\" /tmp/redeploy-bundle.tgz --region \($region)",
@@ -378,10 +378,12 @@ jobs:
                 "# which wipe-provision-db.sh reads for the per-env role password.",
                 "/tmp/redeploy/render-secrets.sh \($env | @sh)",
 
-                "# ── 4. Wipe + provision the indexer and scheduler DBs (shared script) ──",
+                "# ── 4. Wipe + provision the indexer, scheduler, and derived-metrics DBs ──",
                 "# A freshly published contract has no buckets; the scheduler only re-rolls",
                 "# when its rolls DB is also wiped (it is DB-authoritative — see SO-80).",
-                "for svc in indexer scheduler; do DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/redeploy/wipe-provision-db.sh \($env | @sh) \"$svc\"; done",
+                "# derived-metrics holds per-vault predicted-APY rows that reference the",
+                "# old vaults — wipe so the worker repopulates against the new ones.",
+                "for svc in indexer scheduler derived-metrics; do DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/redeploy/wipe-provision-db.sh \($env | @sh) \"$svc\"; done",
 
                 "# The mm-bot needs no reset — it resolves its Account from",
                 "# chain state for the current package on boot, bootstrapping a",

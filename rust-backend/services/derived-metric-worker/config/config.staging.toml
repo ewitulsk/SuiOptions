@@ -1,0 +1,28 @@
+# derived-metric-worker config — staging env (testnet).
+# ${DB_PASSWORD}/${DB_HOST} are injected by the compose env and expanded at
+# load time (same pattern as indexer/option-scheduler).
+
+environment = "staging"
+ops_addr    = "0.0.0.0:9013"
+read_addr   = "0.0.0.0:9014"
+
+indexer_graphql_url = "http://indexer:9002/graphql"
+token_info_url      = "http://token-info:9005"
+database_url        = "postgresql://derived_metrics_staging:${DB_PASSWORD}@${DB_HOST}:5432/derived_metrics_staging"
+
+tick_secs = 120
+
+[pyth]
+hermes_url      = "https://hermes.pyth.network"
+benchmarks_url  = "https://benchmarks.pyth.network"
+vol_window_days = 30
+max_publish_lag_ms = 30_000
+max_conf_bps       = 100
+
+[model]
+forecast_horizon = 4
+delta_target     = 0.10
+default_round_ms = 604_800_000
+# MOCK until the on-chain VaultConfig is served by an endpoint:
+mgmt_fee_bps_annual = 200
+perf_fee_bps        = 1000

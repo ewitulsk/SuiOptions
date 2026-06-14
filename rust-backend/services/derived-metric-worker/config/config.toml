@@ -1,0 +1,25 @@
+# derived-metric-worker config — local dev.
+
+environment = "dev"
+ops_addr    = "127.0.0.1:9013"
+read_addr   = "127.0.0.1:9014"
+
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
+token_info_url      = "http://127.0.0.1:9005"
+database_url        = "postgresql://derived_metrics_dev:dev@127.0.0.1:5432/derived_metrics_dev"
+
+tick_secs = 120
+
+[pyth]
+hermes_url      = "https://hermes.pyth.network"
+benchmarks_url  = "https://benchmarks.pyth.network"
+vol_window_days = 30
+
+[model]
+forecast_horizon = 4
+delta_target     = 0.10
+# round_ms is derived from observed finalize spacing; this is the fallback.
+default_round_ms = 604_800_000
+# MOCK until the on-chain VaultConfig is served by an endpoint:
+mgmt_fee_bps_annual = 200
+perf_fee_bps        = 1000

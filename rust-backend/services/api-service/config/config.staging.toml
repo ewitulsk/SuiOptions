@@ -19,3 +19,7 @@ allowed_origins  = ["*"]
 
 # token-info public API over the compose-internal network.
 token_info_url   = "http://token-info:9005"
+
+# derived-metric-worker read API: predicted-APY series composed into
+# /vaults/:id/apy. Omit to serve realized-only.
+derived_metrics_url = "http://derived-metric-worker:9014"
