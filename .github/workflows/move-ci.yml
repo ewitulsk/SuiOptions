@@ -1,0 +1,57 @@
+name: Move CI
+
+# Build + unit-test the options_protocol Move package on every change to the
+# contracts. There was no Move CI before, so latent compile/test breaks (e.g. a
+# missing type annotation, a test out of sync with a signature change) merged
+# undetected — this catches them.
+#
+# The sui CLI is pinned to 1.71.1, the SAME framework the Rust workspace pins
+# (`sui-move-build` @ branch framework/mainnet, rev 2f5992f1), which is what
+# actually compiles the package at publish time. Keep SUI_VERSION in lockstep
+# with that rev — a newer CLI can accept code the deploy compiler rejects.
+
+on:
+  push:
+    branches: [staging, main]
+    paths:
+      - 'contracts/**'
+      - 'session-tokens/contracts/**'
+      - '.github/workflows/move-ci.yml'
+  pull_request:
+    paths:
+      - 'contracts/**'
+      - 'session-tokens/contracts/**'
+      - '.github/workflows/move-ci.yml'
+
+permissions:
+  contents: read
+
+env:
+  SUI_VERSION: mainnet-1.71.1
+  # Authenticated release downloads (suiup + the Move git deps) dodge anon rate limits.
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  move:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install suiup
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/MystenLabs/suiup/main/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install sui ${{ env.SUI_VERSION }}
+        run: suiup install "sui@${SUI_VERSION}" -y
+
+      - name: Version
+        run: sui --version
+
+      - name: Build
+        working-directory: contracts
+        run: sui move build
+
+      - name: Test
+        working-directory: contracts
+        run: sui move test

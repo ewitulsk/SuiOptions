@@ -497,7 +497,9 @@ fun open_swap_rfq_internal<U, S, V>(
     assert!(reserve > 0, errors::vault_proceeds_unswapped());
 
     let settlement = vault.proceeds_settlement.split(s_in);
-    let swap_id = swap_auction::create_coupled(
+    // `Underlying` only appears in the phantom `SwapAuction<U, S>`, so it can't
+    // be inferred from the args — annotate it explicitly.
+    let swap_id = swap_auction::create_coupled<U, S>(
         settlement,
         reserve,
         vault.config.rfq_duration_ms,
