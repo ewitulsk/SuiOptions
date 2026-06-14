@@ -461,8 +461,6 @@
   align-items: start;
   margin-bottom: 28px;
 }
-/* Market-maker mode drops the order-book rail — strikes + chart only. */
-[data-theme="aqua"] .buy-grid--mm { grid-template-columns: 260px minmax(0, 1fr); }
 [data-theme="aqua"] .buy-grid__center { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 [data-theme="aqua"] .buy-grid__trade { min-width: 0; }
 /* Sticky rails so the strike list and book stay in view while the center
