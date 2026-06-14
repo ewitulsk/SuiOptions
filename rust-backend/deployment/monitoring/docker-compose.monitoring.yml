@@ -70,7 +70,7 @@ services:
     command: -config.file=/etc/tempo/tempo-config.yml
     volumes:
       - ${DATA_DIR}/tempo/config:/etc/tempo:ro
-      - ${DATA_DIR}/tempo/data:/tempo
+      - ${DATA_DIR}/tempo/data:/var/tempo
     ports:
       # OTLP/HTTP ingest from the prod host over the private VPC IP;
       # SG allows 4318 only between co-SG hosts.
