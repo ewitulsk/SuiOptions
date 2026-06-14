@@ -115,7 +115,7 @@ jobs:
                 "echo Waiting for grafana /api/health ...",
                 "ok=0; for i in $(seq 1 20); do if curl -fsS http://localhost:3000/api/health >/dev/null 2>&1; then ok=1; break; fi; sleep 2; done",
                 "if [ \"$ok\" -ne 1 ]; then echo \"grafana health probe failed\" >&2; exit 1; fi",
-                "echo Pushing dashboards (Part B)...",
+                "echo Pushing dashboards...",
                 "GRAFANA_PASSWORD=$(grep ^GRAFANA_ADMIN_PASSWORD= .env | cut -d= -f2-)",
                 "GRAFANA_URL=http://localhost:3000 GRAFANA_PASSWORD=\"$GRAFANA_PASSWORD\" bash push-dashboards.sh",
                 "echo Monitoring containers:",
