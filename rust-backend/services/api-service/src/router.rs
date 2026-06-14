@@ -46,6 +46,7 @@ pub async fn serve(
             "/vaults/:vault_id/rounds",
             get(handlers::vaults::list_vault_rounds),
         )
+        .route("/vaults/:vault_id/apy", get(handlers::vaults::get_vault_apy))
         .route(
             "/vaults/:vault_id/receipts",
             get(handlers::vaults::list_vault_receipts),

@@ -52,6 +52,18 @@ pub struct VaultDto {
     /// two rounds exist.
     pub apy: Option<f64>,
     pub deposits_paused: bool,
+    /// Live round phase, derived from `current_bucket` + the current round's
+    /// expiry: `active` (selling/holding) vs `settling` (between rounds /
+    /// past expiry, redeeming). No mock — computed from indexed state.
+    pub phase: String,
+    // Active VaultConfig (consumer-facing subset), served in display units.
+    // `None` until the config-carrying events are indexed for this vault.
+    pub mgmt_fee_pct: Option<f64>,
+    pub perf_fee_pct: Option<f64>,
+    pub min_strike_over_spot_pct: Option<f64>,
+    pub max_strike_over_spot_pct: Option<f64>,
+    pub round_ms: Option<i64>,
+    pub selling_window_ms: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -195,6 +207,108 @@ pub async fn list_vault_rounds(
     Ok(Json(VaultRoundsResponse { vault_id, rounds }))
 }
 
+/// One point on either the realized or predicted APY curve. `kind` /
+/// `confidence` are populated for predicted points only.
+#[derive(Serialize)]
+pub struct ApyPointDto {
+    pub t_ms: i64,
+    pub apy: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+}
+
+#[derive(Serialize)]
+pub struct VaultApyResponse {
+    pub vault_id: String,
+    /// Annualized pps growth per finalized round (chain data, via the indexer).
+    pub realized: Vec<ApyPointDto>,
+    /// Forward-looking premium-yield APY (derived-metric-worker). Empty when
+    /// the worker isn't configured or has no snapshot yet.
+    pub predicted: Vec<ApyPointDto>,
+}
+
+/// Worker read-API shapes (`GET /vault-apy/:id`).
+#[derive(Deserialize)]
+struct WorkerApy {
+    predicted: Vec<WorkerPoint>,
+}
+#[derive(Deserialize)]
+struct WorkerPoint {
+    t_ms: i64,
+    apy: f64,
+    kind: String,
+    confidence: f64,
+}
+
+/// `GET /vaults/:id/apy` — realized (indexer) + predicted (worker), composed.
+pub async fn get_vault_apy(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<String>,
+) -> Result<Json<VaultApyResponse>, StatusCode> {
+    let id = parse_vault_id(&vault_id)?;
+    let realized = state
+        .indexer
+        .vault_apy(id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "indexer vault_apy query failed");
+            StatusCode::BAD_GATEWAY
+        })?
+        .into_iter()
+        .map(|p| ApyPointDto {
+            t_ms: p.t_ms as i64,
+            apy: p.apy,
+            kind: None,
+            confidence: None,
+        })
+        .collect();
+
+    // Predicted is best-effort: a worker outage degrades to realized-only
+    // rather than failing the whole endpoint.
+    let predicted = fetch_predicted(&state, &vault_id).await;
+
+    Ok(Json(VaultApyResponse {
+        vault_id,
+        realized,
+        predicted,
+    }))
+}
+
+async fn fetch_predicted(state: &AppState, vault_id: &str) -> Vec<ApyPointDto> {
+    let Some(base) = state.derived_metrics_url.as_deref() else {
+        return Vec::new();
+    };
+    let url = format!("{base}/vault-apy/{vault_id}");
+    match state.http.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<WorkerApy>().await {
+            Ok(body) => body
+                .predicted
+                .into_iter()
+                .map(|p| ApyPointDto {
+                    t_ms: p.t_ms,
+                    apy: p.apy,
+                    kind: Some(p.kind),
+                    confidence: Some(p.confidence),
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "decoding derived-metrics predicted apy");
+                Vec::new()
+            }
+        },
+        Ok(resp) => {
+            tracing::warn!(status = %resp.status(), "derived-metrics apy non-2xx");
+            Vec::new()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "derived-metrics apy request failed");
+            Vec::new()
+        }
+    }
+}
+
 pub async fn list_vault_receipts(
     State(state): State<Arc<AppState>>,
     Path(vault_id): Path<String>,
@@ -297,6 +411,31 @@ fn vault_dto(state: &AppState, v: &Vault, rounds: &[VaultRound]) -> VaultDto {
         pending_deposits_raw: v.pending_deposits.to_string(),
         apy: apy_from_rounds(rounds),
         deposits_paused: v.deposits_paused,
+        phase: vault_phase(v, rounds),
+        mgmt_fee_pct: v.mgmt_fee_bps_annual.map(|b| b as f64 / 100.0),
+        perf_fee_pct: v.perf_fee_bps.map(|b| b as f64 / 100.0),
+        min_strike_over_spot_pct: v.min_strike_bps_over_spot.map(|b| b as f64 / 100.0),
+        max_strike_over_spot_pct: v.max_strike_bps_over_spot.map(|b| b as f64 / 100.0),
+        round_ms: v.round_ms.map(|m| m as i64),
+        selling_window_ms: v.selling_window_ms.map(|m| m as i64),
+    }
+}
+
+/// Live round phase from indexed state (no mock): a selected bucket whose
+/// current round hasn't passed expiry is `active` (selling/holding); otherwise
+/// the vault is `settling` (between rounds, or past expiry redeeming).
+fn vault_phase(v: &Vault, rounds: &[VaultRound]) -> String {
+    if v.current_bucket.is_none() {
+        return "settling".to_string();
+    }
+    let expiry = rounds
+        .iter()
+        .find(|r| r.round == v.round)
+        .and_then(|r| r.expiry_ms);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    match expiry {
+        Some(e) if now_ms >= e as i64 => "settling".to_string(),
+        _ => "active".to_string(),
     }
 }
 

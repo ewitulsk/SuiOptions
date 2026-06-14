@@ -26,7 +26,11 @@ async fn main() -> Result<()> {
         .with_context(|| format!("fetching catalog from token-info at {}", cfg.token_info_url))?;
     let catalog = TokenCatalog::from_tokens(snapshot.tokens());
 
-    let state = Arc::new(AppState::new(catalog, cfg.indexer_graphql_url.clone()));
+    let state = Arc::new(AppState::new(
+        catalog,
+        cfg.indexer_graphql_url.clone(),
+        cfg.derived_metrics_url.clone(),
+    ));
 
     router::serve(cfg.bind_addr, state, &cfg.allowed_origins).await
 }

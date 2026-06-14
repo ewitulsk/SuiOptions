@@ -42,6 +42,17 @@ export type Vault = {
    *  finalized rounds exist. */
   apy: number | null;
   deposits_paused: boolean;
+  /** Live round phase, derived server-side from indexed state: "active"
+   *  (selling/holding) | "settling" (between rounds / past expiry). */
+  phase: string;
+  /** Active on-chain VaultConfig (consumer-facing subset), in display units.
+   *  `null` until the config-carrying events are indexed for this vault. */
+  mgmt_fee_pct: number | null;
+  perf_fee_pct: number | null;
+  min_strike_over_spot_pct: number | null;
+  max_strike_over_spot_pct: number | null;
+  round_ms: number | null;
+  selling_window_ms: number | null;
 };
 
 export type VaultsResponse = { vaults: Vault[] };
@@ -126,12 +137,33 @@ export async function fetchVaultReceipts(
 }
 
 /**
- * One point on the vault's APY-over-time curve.
- *
- * NOTE: there is NO endpoint serving this yet. The api-service only computes a
- * single trailing APY (latest two finalized rounds) on `Vault.apy`; it does not
- * store or serve a timeseries. `useVaultApyHistory` returns `[]` until such an
- * endpoint exists — the chart renders an empty "coming soon" state. See the
- * "endpoints to build" section in the PR description for the proposed shape.
+ * One point on the vault's APY-over-time curve. `kind`/`confidence` are
+ * present on predicted points only (realized points omit them).
  */
-export type VaultApyPoint = { t_ms: number; apy: number };
+export type VaultApyPoint = {
+  t_ms: number;
+  apy: number;
+  /** "current" (Tier 1) | "forecast" (Tier 2) — predicted points only. */
+  kind?: string;
+  confidence?: number;
+};
+
+/**
+ * `GET /vaults/:id/apy` — realized (annualized pps growth per finalized round,
+ * from the indexer) plus predicted (forward premium-yield, from
+ * derived-metric-worker). `predicted` is empty when the worker isn't deployed.
+ * Mirrors `api-service::handlers::vaults::VaultApyResponse`.
+ */
+export type VaultApySeries = {
+  vault_id: string;
+  realized: VaultApyPoint[];
+  predicted: VaultApyPoint[];
+};
+
+export async function fetchVaultApy(vaultId: string): Promise<VaultApySeries> {
+  const res = await fetch(`${API_BASE_URL}/vaults/${encodeURIComponent(vaultId)}/apy`);
+  if (!res.ok) {
+    throw new Error(`GET /vaults/:id/apy failed: ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as VaultApySeries;
+}

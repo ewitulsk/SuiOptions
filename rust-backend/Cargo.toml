@@ -25,6 +25,7 @@ members = [
     "services/gas-station",
     "services/price-charting",
     "services/balance-monitor",
+    "services/derived-metric-worker",
     "tools/deployment-manager",
     "tools/exchange",
     "tools/writer",

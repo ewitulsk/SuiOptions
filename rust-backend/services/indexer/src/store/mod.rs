@@ -150,6 +150,14 @@ pub struct VaultState {
     /// Deposits queued for the next round.
     pub pending_deposits: u64,
     pub deposits_paused: bool,
+    /// Active VaultConfig snapshot (consumer-facing subset), from
+    /// VaultCreated (genesis) then VaultConfigApplied (each finalize).
+    pub mgmt_fee_bps_annual: Option<u64>,
+    pub perf_fee_bps: Option<u64>,
+    pub round_ms: Option<u64>,
+    pub selling_window_ms: Option<u64>,
+    pub min_strike_bps_over_spot: Option<u64>,
+    pub max_strike_bps_over_spot: Option<u64>,
 }
 
 /// Per-round track record (D2): selection fields land first, fees and
@@ -519,6 +527,7 @@ fn collect_participants(
         | ChainEvent::VaultFeesCharged(_)
         | ChainEvent::VaultRoundFinalized(_)
         | ChainEvent::VaultConfigUpdated(_)
+        | ChainEvent::VaultConfigApplied(_)
         | ChainEvent::VaultDepositsPaused(_) => {}
     }
 }
@@ -706,6 +715,9 @@ fn stage_event_into_batch(
         ChainEvent::VaultDepositsPaused(p) => {
             stage_vault(inner, p.vault_id, sequence, batch);
         }
+        ChainEvent::VaultConfigApplied(c) => {
+            stage_vault(inner, c.vault_id, sequence, batch);
+        }
         ChainEvent::ExpiredOptionBurned(_)
         | ChainEvent::FeeUpdated(_)
         | ChainEvent::TreasuryWithdrawn(_)
@@ -840,6 +852,12 @@ fn vault_row(id: ObjectId, state: &VaultState, sequence: i64) -> VaultRow {
         pending_deposits: u64_to_bigdecimal(state.pending_deposits),
         deposits_paused: state.deposits_paused,
         updated_at_seq: sequence,
+        mgmt_fee_bps_annual: state.mgmt_fee_bps_annual.map(|x| x as i64),
+        perf_fee_bps: state.perf_fee_bps.map(|x| x as i64),
+        round_ms: state.round_ms.map(|x| x as i64),
+        selling_window_ms: state.selling_window_ms.map(|x| x as i64),
+        min_strike_bps_over_spot: state.min_strike_bps_over_spot.map(|x| x as i64),
+        max_strike_bps_over_spot: state.max_strike_bps_over_spot.map(|x| x as i64),
     }
 }
 
@@ -1031,8 +1049,24 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                     total_shares: 0,
                     pending_deposits: 0,
                     deposits_paused: false,
+                    mgmt_fee_bps_annual: Some(v.mgmt_fee_bps_annual),
+                    perf_fee_bps: Some(v.perf_fee_bps),
+                    round_ms: Some(v.round_ms),
+                    selling_window_ms: Some(v.selling_window_ms),
+                    min_strike_bps_over_spot: Some(v.min_strike_bps_over_spot),
+                    max_strike_bps_over_spot: Some(v.max_strike_bps_over_spot),
                 },
             );
+        }
+        ChainEvent::VaultConfigApplied(c) => {
+            if let Some(v) = inner.vaults.get_mut(&c.vault_id) {
+                v.mgmt_fee_bps_annual = Some(c.mgmt_fee_bps_annual);
+                v.perf_fee_bps = Some(c.perf_fee_bps);
+                v.round_ms = Some(c.round_ms);
+                v.selling_window_ms = Some(c.selling_window_ms);
+                v.min_strike_bps_over_spot = Some(c.min_strike_bps_over_spot);
+                v.max_strike_bps_over_spot = Some(c.max_strike_bps_over_spot);
+            }
         }
         ChainEvent::VaultDeposit(d) => {
             if let Some(v) = inner.vaults.get_mut(&d.vault_id) {
@@ -1469,6 +1503,12 @@ mod tests {
                 underlying_type: AssetType::new("0x2::sui::SUI"),
                 settlement_type: AssetType::new("0x9::usdc::USDC"),
                 share_type: AssetType::new("0x9::vshare::VSHARE"),
+                mgmt_fee_bps_annual: 200,
+                perf_fee_bps: 1000,
+                round_ms: 604_800_000,
+                selling_window_ms: 43_200_000,
+                min_strike_bps_over_spot: 300,
+                max_strike_bps_over_spot: 6000,
             }),
             1,
         );

@@ -19,6 +19,11 @@ pub struct Config {
     /// token-info public base URL. The coin-type → {symbol, decimals} catalog
     /// is fetched from here at boot (replaces reading `deployments.json`).
     pub token_info_url: String,
+    /// derived-metric-worker read-API base URL (e.g.
+    /// `http://derived-metric-worker:9014`). When unset, `/vaults/:id/apy`
+    /// serves realized points only and an empty predicted series.
+    #[serde(default)]
+    pub derived_metrics_url: Option<String>,
 }
 
 fn default_indexer_graphql_url() -> String {

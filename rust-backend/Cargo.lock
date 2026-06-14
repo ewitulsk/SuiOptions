@@ -321,6 +321,7 @@ dependencies = [
  "indexer-graphql",
  "observability",
  "protocol-types",
+ "reqwest",
  "runtime-config",
  "serde",
  "serde_json",
@@ -2595,6 +2596,34 @@ dependencies = [
  "quote",
  "syn 2.0.117",
  "unicode-xid",
+]
+
+[[package]]
+name = "derived-metric-worker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "chrono",
+ "clap",
+ "cli-spec",
+ "diesel",
+ "diesel_migrations",
+ "indexer-graphql",
+ "metrics",
+ "observability",
+ "pricing",
+ "protocol-types",
+ "pyth-client",
+ "r2d2",
+ "reqwest",
+ "runtime-config",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "token-info-client",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

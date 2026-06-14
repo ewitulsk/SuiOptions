@@ -139,6 +139,14 @@ pub struct Vault {
     pub total_shares: u64,
     pub pending_deposits: u64,
     pub deposits_paused: bool,
+    /// Active VaultConfig snapshot (consumer-facing subset). `None` until the
+    /// config-carrying events are indexed.
+    pub mgmt_fee_bps_annual: Option<u64>,
+    pub perf_fee_bps: Option<u64>,
+    pub round_ms: Option<u64>,
+    pub selling_window_ms: Option<u64>,
+    pub min_strike_bps_over_spot: Option<u64>,
+    pub max_strike_bps_over_spot: Option<u64>,
 }
 
 /// One round of a vault's track record (D2). Selection fields land at
@@ -158,6 +166,15 @@ pub struct VaultRound {
     pub mgmt_fee: Option<u64>,
     pub perf_fee: Option<u64>,
     pub finalized_at_ms: Option<u64>,
+}
+
+/// One realized-APY point: annualized pps growth landing at a finalized
+/// round's finalize time.
+#[derive(Clone, Debug)]
+pub struct VaultApyPoint {
+    pub round: u64,
+    pub t_ms: u64,
+    pub apy: f64,
 }
 
 /// One (vault, owner, round, kind) receipt aggregate (D2).
@@ -302,7 +319,9 @@ impl IndexerClient {
     /// All covered-call vaults.
     pub async fn vaults(&self) -> Result<Vec<Vault>> {
         const Q: &str = "query{vaults{vaultId underlyingType settlementType shareType round \
-            currentBucket latestPpsRaw totalSharesRaw pendingDepositsRaw depositsPaused}}";
+            currentBucket latestPpsRaw totalSharesRaw pendingDepositsRaw depositsPaused \
+            mgmtFeeBpsAnnual perfFeeBps roundMs sellingWindowMs minStrikeBpsOverSpot \
+            maxStrikeBpsOverSpot}}";
         let data: VaultsWrap = self.gql(Q, json!({})).await?;
         data.vaults.into_iter().map(Vault::try_from).collect()
     }
@@ -311,7 +330,8 @@ impl IndexerClient {
     pub async fn vault(&self, vault_id: ObjectId) -> Result<Option<Vault>> {
         const Q: &str = "query($id:String!){vault(id:$id){vaultId underlyingType settlementType \
             shareType round currentBucket latestPpsRaw totalSharesRaw pendingDepositsRaw \
-            depositsPaused}}";
+            depositsPaused mgmtFeeBpsAnnual perfFeeBps roundMs sellingWindowMs \
+            minStrikeBpsOverSpot maxStrikeBpsOverSpot}}";
         let data: VaultWrap = self.gql(Q, json!({ "id": vault_id.to_hex() })).await?;
         data.vault.map(Vault::try_from).transpose()
     }
@@ -323,6 +343,14 @@ impl IndexerClient {
             mgmtFeeRaw perfFeeRaw finalizedAtMs}}";
         let data: VaultRoundsWrap = self.gql(Q, json!({ "id": vault_id.to_hex() })).await?;
         data.vault_rounds.into_iter().map(VaultRound::try_from).collect()
+    }
+
+    /// One vault's realized-APY series (annualized pps growth per finalized
+    /// round), computed indexer-side from chain data.
+    pub async fn vault_apy(&self, vault_id: ObjectId) -> Result<Vec<VaultApyPoint>> {
+        const Q: &str = "query($id:String!){vaultApy(vaultId:$id){round tMs apy}}";
+        let data: VaultApyWrap = self.gql(Q, json!({ "id": vault_id.to_hex() })).await?;
+        data.vault_apy.into_iter().map(VaultApyPoint::try_from).collect()
     }
 
     /// Receipt aggregates for one vault, optionally scoped to an owner.
@@ -546,6 +574,11 @@ struct VaultRoundsWrap {
 struct VaultReceiptsWrap {
     vault_receipts: Vec<VaultReceiptJson>,
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultApyWrap {
+    vault_apy: Vec<VaultApyJson>,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -670,6 +703,18 @@ struct VaultJson {
     total_shares_raw: String,
     pending_deposits_raw: String,
     deposits_paused: bool,
+    #[serde(default)]
+    mgmt_fee_bps_annual: Option<String>,
+    #[serde(default)]
+    perf_fee_bps: Option<String>,
+    #[serde(default)]
+    round_ms: Option<String>,
+    #[serde(default)]
+    selling_window_ms: Option<String>,
+    #[serde(default)]
+    min_strike_bps_over_spot: Option<String>,
+    #[serde(default)]
+    max_strike_bps_over_spot: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -699,6 +744,25 @@ struct VaultReceiptJson {
     kind: String,
     amount_raw: String,
     settled_raw: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultApyJson {
+    round: String,
+    t_ms: String,
+    apy: f64,
+}
+
+impl TryFrom<VaultApyJson> for VaultApyPoint {
+    type Error = anyhow::Error;
+    fn try_from(p: VaultApyJson) -> Result<Self> {
+        Ok(VaultApyPoint {
+            round: parse_u64(&p.round)?,
+            t_ms: parse_u64(&p.t_ms)?,
+            apy: p.apy,
+        })
+    }
 }
 
 // ── parsing wire → domain ──────────────────────────────────────────────────
@@ -835,6 +899,20 @@ impl TryFrom<VaultJson> for Vault {
             total_shares: parse_u64(&v.total_shares_raw)?,
             pending_deposits: parse_u64(&v.pending_deposits_raw)?,
             deposits_paused: v.deposits_paused,
+            mgmt_fee_bps_annual: v.mgmt_fee_bps_annual.as_deref().map(parse_u64).transpose()?,
+            perf_fee_bps: v.perf_fee_bps.as_deref().map(parse_u64).transpose()?,
+            round_ms: v.round_ms.as_deref().map(parse_u64).transpose()?,
+            selling_window_ms: v.selling_window_ms.as_deref().map(parse_u64).transpose()?,
+            min_strike_bps_over_spot: v
+                .min_strike_bps_over_spot
+                .as_deref()
+                .map(parse_u64)
+                .transpose()?,
+            max_strike_bps_over_spot: v
+                .max_strike_bps_over_spot
+                .as_deref()
+                .map(parse_u64)
+                .transpose()?,
         })
     }
 }

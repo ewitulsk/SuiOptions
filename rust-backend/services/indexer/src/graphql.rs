@@ -274,6 +274,14 @@ pub struct VaultGql {
     pub total_shares_raw: String,
     pub pending_deposits_raw: String,
     pub deposits_paused: bool,
+    // Active VaultConfig snapshot (consumer-facing subset). Null until the
+    // config-carrying events have been indexed for this vault.
+    pub mgmt_fee_bps_annual: Option<String>,
+    pub perf_fee_bps: Option<String>,
+    pub round_ms: Option<String>,
+    pub selling_window_ms: Option<String>,
+    pub min_strike_bps_over_spot: Option<String>,
+    pub max_strike_bps_over_spot: Option<String>,
 }
 
 impl From<VaultRow> for VaultGql {
@@ -289,6 +297,12 @@ impl From<VaultRow> for VaultGql {
             total_shares_raw: v.total_shares.to_string(),
             pending_deposits_raw: v.pending_deposits.to_string(),
             deposits_paused: v.deposits_paused,
+            mgmt_fee_bps_annual: v.mgmt_fee_bps_annual.map(|x| x.to_string()),
+            perf_fee_bps: v.perf_fee_bps.map(|x| x.to_string()),
+            round_ms: v.round_ms.map(|x| x.to_string()),
+            selling_window_ms: v.selling_window_ms.map(|x| x.to_string()),
+            min_strike_bps_over_spot: v.min_strike_bps_over_spot.map(|x| x.to_string()),
+            max_strike_bps_over_spot: v.max_strike_bps_over_spot.map(|x| x.to_string()),
         }
     }
 }
@@ -330,6 +344,47 @@ impl From<VaultRoundRow> for VaultRoundGql {
             finalized_at_ms: r.finalized_at_ms.map(|v| v.to_string()),
         }
     }
+}
+
+/// One realized-APY point: the annualized pps growth from the previous
+/// finalized round to `round`, landing at that round's finalize time. Computed
+/// from `vault_rounds` (chain data) — the forward-looking *predicted* APY is a
+/// separate series served by derived-metric-worker.
+#[derive(SimpleObject)]
+pub struct VaultApyPointGql {
+    pub round: String,
+    pub t_ms: String,
+    pub apy: f64,
+}
+
+/// Annualize pps growth between consecutive finalized rounds. The 1e12 pps
+/// scale cancels in the ratio, so raw values are fine.
+fn realized_apy_points(rows: &[VaultRoundRow]) -> Vec<VaultApyPointGql> {
+    use bigdecimal::ToPrimitive;
+    const YEAR_MS: f64 = 365.25 * 86_400_000.0;
+    let mut fin: Vec<(i64, f64, i64)> = rows
+        .iter()
+        .filter_map(|r| Some((r.round, r.pps.as_ref()?.to_f64()?, r.finalized_at_ms?)))
+        .collect();
+    fin.sort_by_key(|(round, _, _)| *round);
+    let mut out = Vec::new();
+    for w in fin.windows(2) {
+        let (_, p0, t0) = w[0];
+        let (round1, p1, t1) = w[1];
+        if p0 <= 0.0 || t1 <= t0 {
+            continue;
+        }
+        let periods = YEAR_MS / (t1 - t0) as f64;
+        let apy = (p1 / p0).powf(periods) - 1.0;
+        if apy.is_finite() {
+            out.push(VaultApyPointGql {
+                round: round1.to_string(),
+                t_ms: t1.to_string(),
+                apy,
+            });
+        }
+    }
+    out
 }
 
 /// One (vault, owner, round, kind) receipt aggregate (D2). `amount` is
@@ -624,6 +679,21 @@ impl QueryRoot {
             .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
             .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
         Ok(rows.into_iter().map(VaultRoundGql::from).collect())
+    }
+
+    /// JIT: one vault's realized-APY series (annualized pps growth per
+    /// finalized round). Empty until two rounds have finalized.
+    async fn vault_apy(
+        &self,
+        ctx: &Context<'_>,
+        vault_id: String,
+    ) -> async_graphql::Result<Vec<VaultApyPointGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let rows = tokio::task::spawn_blocking(move || repo.vault_rounds_for(&vault_id))
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(realized_apy_points(&rows))
     }
 
     /// JIT: receipt aggregates for one vault, optionally scoped to an owner.

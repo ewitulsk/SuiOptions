@@ -238,6 +238,12 @@ public fun create_vault<Underlying, Settlement, VShare>(
         type_name::with_defining_ids<Underlying>(),
         type_name::with_defining_ids<Settlement>(),
         type_name::with_defining_ids<VShare>(),
+        vault.config.mgmt_fee_bps_annual,
+        vault.config.perf_fee_bps,
+        vault.config.round_ms,
+        vault.config.selling_window_ms,
+        vault.config.min_strike_bps_over_spot,
+        vault.config.max_strike_bps_over_spot,
     );
     transfer::share_object(vault);
     vault_id
@@ -491,7 +497,9 @@ fun open_swap_rfq_internal<U, S, V>(
     assert!(reserve > 0, errors::vault_proceeds_unswapped());
 
     let settlement = vault.proceeds_settlement.split(s_in);
-    let swap_id = swap_auction::create_coupled(
+    // `Underlying` only appears in the phantom `SwapAuction<U, S>`, so it can't
+    // be inferred from the args — annotate it explicitly.
+    let swap_id = swap_auction::create_coupled<U, S>(
         settlement,
         reserve,
         vault.config.rfq_duration_ms,
@@ -715,6 +723,19 @@ fun finalize_round_internal<U, S, V>(
     if (vault.pending_config.is_some()) {
         vault.config = vault.pending_config.extract();
     };
+
+    // Record the active config for this round (post-apply) so off-chain
+    // services serve real values instead of hard-coded fees/cadence.
+    events::emit_vault_config_applied(
+        object::id(vault),
+        round,
+        vault.config.mgmt_fee_bps_annual,
+        vault.config.perf_fee_bps,
+        vault.config.round_ms,
+        vault.config.selling_window_ms,
+        vault.config.min_strike_bps_over_spot,
+        vault.config.max_strike_bps_over_spot,
+    );
 
     events::emit_vault_round_finalized(
         object::id(vault),

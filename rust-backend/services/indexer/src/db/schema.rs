@@ -131,6 +131,12 @@ diesel::table! {
         pending_deposits -> Numeric,
         deposits_paused  -> Bool,
         updated_at_seq   -> Int8,
+        mgmt_fee_bps_annual      -> Nullable<Int8>,
+        perf_fee_bps             -> Nullable<Int8>,
+        round_ms                 -> Nullable<Int8>,
+        selling_window_ms        -> Nullable<Int8>,
+        min_strike_bps_over_spot -> Nullable<Int8>,
+        max_strike_bps_over_spot -> Nullable<Int8>,
     }
 }
 
