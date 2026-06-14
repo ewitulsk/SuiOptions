@@ -419,89 +419,80 @@ pub async fn settle_rfq_expired(
     submit_ptb(client, signer, pt, gas_budget, "vault::settle_rfq_expired").await
 }
 
-/// Add the `vault::swap_proceeds` call to an in-progress PTB. The DEEP
-/// remainder coin transfers back to `signer` (the keeper's wallet).
-#[allow(clippy::too_many_arguments)]
-pub async fn build_swap_proceeds(
+/// Add `vault::open_swap_rfq` to an in-progress PTB (the keeper prepends a
+/// Pyth update). Escrows up to `amount_s` of the vault's settlement
+/// proceeds into a coupled swap auction; MMs then bid underlying for it.
+pub async fn build_open_swap_rfq(
     client: &SuiClient,
     pt: &mut ProgrammableTransactionBuilder,
-    signer: &Signer,
     refs: &VaultRefs<'_>,
-    pool_id: ObjectID,
-    deep_type: &str,
-    deep_funding: Option<(ObjectID, u64)>,
-    max_settlement_in: u64,
+    amount_s: u64,
     prices: &PriceInfoRefs,
 ) -> Result<()> {
-    let deep_tag = TypeTag::from_str(deep_type)
-        .with_context(|| format!("parsing DEEP type {deep_type}"))?;
     let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
-    let pool = pt.obj(shared_object_arg(client, pool_id, true).await?)?;
-
-    let deep_fee = match deep_funding {
-        Some((coin_id, amount)) => {
-            let funding = pt.obj(owned_object_arg(client, coin_id).await?)?;
-            let amount = pt.pure(&amount)?;
-            pt.command(Command::SplitCoins(funding, vec![amount]))
-        }
-        None => pt.programmable_move_call(
-            sui_types::SUI_FRAMEWORK_PACKAGE_ID,
-            Identifier::new("coin").unwrap(),
-            Identifier::new("zero").unwrap(),
-            vec![deep_tag],
-            vec![],
-        ),
-    };
-
-    let max_in = pt.pure(&max_settlement_in)?;
+    let amount = pt.pure(&amount_s)?;
     let (u_info, s_info) = prices.args(client, pt).await?;
     let clock = clock_arg(pt)?;
-    let deep_remainder = vault_call(
+    vault_call(
         pt,
         refs.package,
-        "swap_proceeds",
+        "open_swap_rfq",
         refs.tags()?,
-        vec![vault, pool, deep_fee, max_in, u_info, s_info, clock],
+        vec![vault, amount, u_info, s_info, clock],
     );
-    transfer_to_sender(pt, signer, deep_remainder)?;
     Ok(())
 }
 
-/// `vault::swap_proceeds`: convert the vault's settlement proceeds to
-/// underlying through the config-pinned DeepBook pool, price-bounded by
-/// Pyth. `deep_funding`: an owned `Coin<DEEP>` to pay DeepBook's taker
-/// fee from (`None` ⇒ a zero coin — fine on whitelisted pools); the
-/// unused remainder transfers back to the signer.
-#[allow(clippy::too_many_arguments)]
-pub async fn swap_proceeds(
+/// `vault::open_swap_rfq`: open a proceeds-swap auction.
+pub async fn open_swap_rfq(
     client: &SuiClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
-    pool_id: ObjectID,
-    deep_type: &str,
-    deep_funding: Option<(ObjectID, u64)>,
-    max_settlement_in: u64,
+    amount_s: u64,
     prices: &PriceInfoRefs,
     gas_budget: u64,
 ) -> Result<SuiTransactionBlockResponse> {
-    info!(
-        vault = %refs.vault_id,
-        %pool_id,
-        max_settlement_in,
-        "building vault::swap_proceeds PTB"
-    );
+    info!(vault = %refs.vault_id, amount_s, "building vault::open_swap_rfq PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
-    build_swap_proceeds(
-        client,
-        &mut pt,
-        signer,
-        refs,
-        pool_id,
-        deep_type,
-        deep_funding,
-        max_settlement_in,
-        prices,
-    )
-    .await?;
-    submit_ptb(client, signer, pt, gas_budget, "vault::swap_proceeds").await
+    build_open_swap_rfq(client, &mut pt, refs, amount_s, prices).await?;
+    submit_ptb(client, signer, pt, gas_budget, "vault::open_swap_rfq").await
+}
+
+/// Add `vault::settle_swap_rfq` to an in-progress PTB. Resolves a coupled
+/// swap auction: the winning bid is re-checked against the fresh Pyth
+/// cross prepended to the same PTB.
+pub async fn build_settle_swap_rfq(
+    client: &SuiClient,
+    pt: &mut ProgrammableTransactionBuilder,
+    refs: &VaultRefs<'_>,
+    swap_rfq_id: ObjectID,
+    prices: &PriceInfoRefs,
+) -> Result<()> {
+    let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
+    let auction = pt.obj(shared_object_arg(client, swap_rfq_id, true).await?)?;
+    let (u_info, s_info) = prices.args(client, pt).await?;
+    let clock = clock_arg(pt)?;
+    vault_call(
+        pt,
+        refs.package,
+        "settle_swap_rfq",
+        refs.tags()?,
+        vec![vault, auction, u_info, s_info, clock],
+    );
+    Ok(())
+}
+
+/// `vault::settle_swap_rfq`: resolve a proceeds-swap auction.
+pub async fn settle_swap_rfq(
+    client: &SuiClient,
+    signer: &Signer,
+    refs: &VaultRefs<'_>,
+    swap_rfq_id: ObjectID,
+    prices: &PriceInfoRefs,
+    gas_budget: u64,
+) -> Result<SuiTransactionBlockResponse> {
+    info!(vault = %refs.vault_id, %swap_rfq_id, "building vault::settle_swap_rfq PTB");
+    let mut pt = ProgrammableTransactionBuilder::new();
+    build_settle_swap_rfq(client, &mut pt, refs, swap_rfq_id, prices).await?;
+    submit_ptb(client, signer, pt, gas_budget, "vault::settle_swap_rfq").await
 }

@@ -10,6 +10,7 @@ use clap::Parser;
 
 pub mod deepbook;
 pub mod onchain_rfq;
+pub mod onchain_swap;
 pub mod pricing;
 
 #[derive(Parser, Debug)]

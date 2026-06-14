@@ -42,7 +42,7 @@ use keeper::discovery::{
     resolve_price_info_table, resolve_vault, DiscoveredVault, PriceInfoTable,
 };
 use keeper::planner::{plan, Action, BucketMeta, PlanInput};
-use keeper::state::{discover_open_rfqs, fetch_vault_view, VaultView};
+use keeper::state::{discover_open_rfqs, discover_open_swap_rfqs, fetch_vault_view, VaultView};
 use keeper::strike::{pick_bucket, BucketCandidate};
 use keeper::submit::{classify, execute, execute_select_bucket, ErrorClass, SubmitCtx};
 use keeper::Cli;
@@ -69,7 +69,6 @@ async fn main() -> Result<()> {
     let package = snapshot.package()?;
     let protocol_config_id = snapshot.protocol_config()?;
     let treasury_id = snapshot.treasury()?;
-    let deep_coin_type = snapshot.deepbook().map(|db| db.deep_coin_type.clone());
     let wrap = SuiClientWrapper::connect(&secrets, cli.network).await?;
     info!(signer = %wrap.signer.address, "keeper wallet connected (gas only)");
 
@@ -80,19 +79,6 @@ async fn main() -> Result<()> {
         wormhole_state_id: parse_id(&cfg.pyth.wormhole_state_id, "wormhole_state_id")?,
         update_fee_mist: cfg.pyth.update_fee_mist,
     };
-    let deep_funding = match (
-        &cfg.vault_defaults.deep_funding_coin,
-        cfg.vault_defaults.deep_fee_per_swap,
-    ) {
-        (Some(coin), Some(amount)) => Some((parse_id(coin, "deep_funding_coin")?, amount)),
-        (None, None) => None,
-        _ => {
-            return Err(anyhow::anyhow!(
-                "deep_funding_coin and deep_fee_per_swap must be set together"
-            ))
-        }
-    };
-
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -130,9 +116,7 @@ async fn main() -> Result<()> {
                 package,
                 protocol_config_id,
                 treasury_id,
-                deep_coin_type: deep_coin_type.as_deref(),
                 defaults: &cfg.vault_defaults,
-                deep_funding,
             };
             match tick_vault(&cli, &cfg, &wrap, &http, &indexer, &pyth_handles, meta, ctx).await {
                 Ok(()) => {}
@@ -214,9 +198,7 @@ struct TickCtx<'a> {
     package: ObjectID,
     protocol_config_id: ObjectID,
     treasury_id: ObjectID,
-    deep_coin_type: Option<&'a str>,
     defaults: &'a VaultDefaults,
-    deep_funding: Option<(ObjectID, u64)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -234,9 +216,14 @@ async fn tick_vault(
     let view = fetch_vault_view(&wrap.client, meta.vault_id).await?;
 
     let lookback = view.config.round_ms.saturating_mul(RFQ_LOOKBACK_ROUNDS);
+    let cutoff = now.saturating_sub(lookback);
     let auctions = if view.open_rfqs > 0 {
-        discover_open_rfqs(&wrap.client, ids.package, meta.vault_id, now.saturating_sub(lookback))
-            .await?
+        discover_open_rfqs(&wrap.client, ids.package, meta.vault_id, cutoff).await?
+    } else {
+        Vec::new()
+    };
+    let swap_auctions = if view.open_swap_rfqs > 0 {
+        discover_open_swap_rfqs(&wrap.client, ids.package, meta.vault_id, cutoff).await?
     } else {
         Vec::new()
     };
@@ -251,6 +238,7 @@ async fn tick_vault(
         view: &view,
         now_ms: now,
         auctions: &auctions,
+        swap_auctions: &swap_auctions,
         bucket_meta: bucket_meta.as_ref(),
         stagger_ms: ids.defaults.slicing.stagger_minutes * 60_000,
         max_slices: ids.defaults.slicing.slices,
@@ -273,9 +261,6 @@ async fn tick_vault(
         settlement_feed: meta.settlement_feed,
         underlying_price_info: meta.underlying_price_info,
         settlement_price_info: meta.settlement_price_info,
-        deepbook_pool_id: view.config.deepbook_pool_id,
-        deep_coin_type: ids.deep_coin_type,
-        deep_funding: ids.deep_funding,
         gas_budget: cli.gas_budget,
     };
 

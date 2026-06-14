@@ -35,8 +35,11 @@ Per-asset covered-call vault, weekly cadence aligned to the option-scheduler's b
    the vault escrows underlying slices, MMs bid premium, the best bid wins, the vault
    receives the `Position` + premium, the winner receives `Coin<Call>`.
 3. At expiry, the vault redeems its positions: unexercised underlying comes back; exercised
-   amounts come back as `strike × amount` USDC, which is swapped back to underlying via
-   DeepBook (pool address supplied by api-service — being built in parallel).
+   amounts come back as `strike × amount` USDC, which is converted back to underlying through
+   an **on-chain swap auction** (`swap_auction.move`, doc 03 §7.3) — MMs bid underlying for
+   the proceeds, and the winning rate must clear a fresh Pyth band at settle. (This replaces
+   the original DeepBook plan, which assumed a `Pool<Underlying, Settlement>` the protocol
+   never mints.)
 4. Round P&L rolls into the share price; Ribbon-style fees (2% mgmt / 10% performance,
    profitable rounds only) go to the protocol treasury; queued deposits/withdrawals process.
 
@@ -130,7 +133,7 @@ premium denomination) before the contracts are finished.
 | Keeper | Fully permissionless — no trusted admin in the round lifecycle |
 | Premium denomination | Backtest parameter; on-chain vault has a config flag; pick empirically |
 | Strike grid | ~5 buckets per expiry (7 for BTC), vol-aware spacing so the 0.1-delta strike is on-grid |
-| DEX dependency | DeepBook; api-service will expose a pool address (built in parallel — **not** covered by this guide) |
+| Proceeds conversion | On-chain swap auction (`swap_auction.move`, doc 03 §7.3) — a Pyth-bounded reverse auction, **no DEX dependency**. (DeepBook is still used only as the optional frontend trading venue for `Coin<Call>`.) |
 | Backtest stack | Rust |
 | Premium model | Black-Scholes + proxy IV surface + MM haircut, swept as scenarios |
 | Exercise model | Scenario-swept policies; rational-at-expiry is the conservative anchor |

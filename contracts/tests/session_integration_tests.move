@@ -404,7 +404,7 @@ fun vault_config(): vault::VaultConfig {
         200, 1_000, WEEK_MS, 12 * 60 * 60 * 1_000, 300, 6_000,
         3 * DAY_MS, 9 * DAY_MS, 10, 1_000_000_000_000, 4,
         400_000, 60_000, 120_000, 100_000, 500,
-        false, 50, option::none(),
+        false, 50,
         b"underlying-feed", b"settlement-feed", 60, 100, 9, 6,
     )
 }

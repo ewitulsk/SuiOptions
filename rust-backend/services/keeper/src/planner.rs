@@ -8,7 +8,7 @@
 use sui_types::base_types::ObjectID;
 
 use crate::slicing;
-use crate::state::{RfqView, VaultView};
+use crate::state::{RfqView, SwapRfqView, VaultView};
 
 /// What the keeper knows about the round's current bucket (from the
 /// indexer), beyond its id.
@@ -25,7 +25,10 @@ pub enum Action {
     CrankRedeem { bucket: ObjectID, call_type: String },
     SettleRfq { rfq: ObjectID, bucket: ObjectID, call_type: String },
     SettleRfqExpired { rfq: ObjectID, bucket: ObjectID, call_type: String },
-    SwapProceeds { max_settlement_in: u64 },
+    /// Escrow the vault's proceeds into a swap auction (MMs bid underlying).
+    OpenSwapRfq { amount_s: u64 },
+    /// Resolve a closed swap auction (re-checked against fresh Pyth at settle).
+    SettleSwapRfq { swap_rfq: ObjectID },
     FinalizeRound,
     /// Active round, no bucket: the tick loop resolves a strike pick
     /// (σ, spot, candidates) and submits `select_bucket` — or falls back
@@ -40,8 +43,10 @@ pub enum Action {
 pub struct PlanInput<'a> {
     pub view: &'a VaultView,
     pub now_ms: u64,
-    /// Live (object-still-exists) vault-coupled auctions.
+    /// Live (object-still-exists) vault-coupled call auctions.
     pub auctions: &'a [RfqView],
+    /// Live (object-still-exists) vault-coupled proceeds-swap auctions.
+    pub swap_auctions: &'a [SwapRfqView],
     /// Meta for `view.current_bucket`, when one is selected and known.
     pub bucket_meta: Option<&'a BucketMeta>,
     pub stagger_ms: u64,
@@ -72,13 +77,24 @@ pub fn plan(input: &PlanInput<'_>) -> Action {
             // (event lag) — wait rather than mis-finalize.
             return Action::Idle;
         }
+        // Convert proceeds via swap auction: settle any closed one, then
+        // open a fresh one for the remaining proceeds. A round can't
+        // finalize with proceeds outstanding (non-hold-premium), so it
+        // simply stalls here until an MM bids in-band.
+        if let Some(action) = settle_due_swap(input) {
+            return action;
+        }
         if v.proceeds_settlement > 0 && !v.config.hold_premium_in_settlement {
-            if v.config.deepbook_pool_id.is_none() {
-                // finalize would abort vault_proceeds_unswapped; this is
-                // a vault-config problem the keeper can't fix.
-                return Action::Idle;
+            if v.open_swap_rfqs == 0 {
+                return Action::OpenSwapRfq { amount_s: v.proceeds_settlement };
             }
-            return Action::SwapProceeds { max_settlement_in: v.proceeds_settlement };
+            // A swap auction is open but not yet due/discovered — wait.
+            return Action::Idle;
+        }
+        if v.open_swap_rfqs > 0 {
+            // Swap auction still open (e.g. carrying only-just-refunded
+            // dust or under hold-premium) — can't finalize yet.
+            return Action::Idle;
         }
         return Action::FinalizeRound;
     }
@@ -112,13 +128,27 @@ pub fn plan(input: &PlanInput<'_>) -> Action {
     }
     // Mid-round premium conversion: keeps proceeds compounding into
     // later slices instead of waiting for settling.
+    if let Some(action) = settle_due_swap(input) {
+        return action;
+    }
     if v.proceeds_settlement > 0
         && !v.config.hold_premium_in_settlement
-        && v.config.deepbook_pool_id.is_some()
+        && v.open_swap_rfqs == 0
     {
-        return Action::SwapProceeds { max_settlement_in: v.proceeds_settlement };
+        return Action::OpenSwapRfq { amount_s: v.proceeds_settlement };
     }
     Action::Idle
+}
+
+/// First closed swap auction that needs settling. Swap auctions have no
+/// bucket, so there is no recovery path — settle is always reachable once
+/// the deadline passes.
+fn settle_due_swap(input: &PlanInput<'_>) -> Option<Action> {
+    input
+        .swap_auctions
+        .iter()
+        .find(|s| input.now_ms >= s.deadline_ms)
+        .map(|s| Action::SettleSwapRfq { swap_rfq: s.swap_id })
 }
 
 /// First discovered auction that needs resolving. During settling
@@ -168,7 +198,6 @@ mod tests {
             max_open_rfqs: 4,
             round_ms: 7 * 24 * HOUR,
             hold_premium_in_settlement: false,
-            deepbook_pool_id: Some(id(0xd1)),
             underlying_feed_id: vec![0u8; 32],
             settlement_feed_id: vec![0u8; 32],
             underlying_decimals: 9,
@@ -185,6 +214,7 @@ mod tests {
             current_expiry_ms: NOW + 5 * 24 * HOUR,
             selling_ends_ms: NOW + 6 * HOUR,
             open_rfqs: 0,
+            open_swap_rfqs: 0,
             pending_positions: 0,
             deployable: 1_000_000,
             proceeds_settlement: 0,
@@ -207,6 +237,23 @@ mod tests {
             view,
             now_ms: NOW,
             auctions,
+            swap_auctions: &[],
+            bucket_meta: meta,
+            stagger_ms: 90 * 60_000,
+            max_slices: 4,
+        })
+    }
+
+    fn plan_with_swaps(
+        view: &VaultView,
+        swap_auctions: &[SwapRfqView],
+        meta: Option<&BucketMeta>,
+    ) -> Action {
+        plan(&PlanInput {
+            view,
+            now_ms: NOW,
+            auctions: &[],
+            swap_auctions,
             bucket_meta: meta,
             stagger_ms: 90 * 60_000,
             max_slices: 4,
@@ -215,6 +262,10 @@ mod tests {
 
     fn rfq(deadline_ms: u64) -> RfqView {
         RfqView { rfq_id: id(0xaa), bucket_id: id(0xb1), deadline_ms, amount: 250_000 }
+    }
+
+    fn swap_rfq(deadline_ms: u64) -> SwapRfqView {
+        SwapRfqView { swap_id: id(0xcc), deadline_ms, amount_s: 4_200 }
     }
 
     // ── settling ladder ────────────────────────────────────────────
@@ -261,15 +312,39 @@ mod tests {
     }
 
     #[test]
-    fn settling_swaps_then_finalizes() {
+    fn settling_opens_swap_then_finalizes() {
         let mut v = settling_view();
         v.proceeds_settlement = 4_200;
         assert_eq!(
             plan_with(&v, &[], Some(&meta())),
-            Action::SwapProceeds { max_settlement_in: 4_200 }
+            Action::OpenSwapRfq { amount_s: 4_200 }
         );
         v.proceeds_settlement = 0;
         assert_eq!(plan_with(&v, &[], Some(&meta())), Action::FinalizeRound);
+    }
+
+    #[test]
+    fn settling_settles_closed_swap_before_opening_another() {
+        let mut v = settling_view();
+        v.open_swap_rfqs = 1;
+        v.proceeds_settlement = 0; // escrowed into the open auction
+        // A closed swap auction settles…
+        assert_eq!(
+            plan_with_swaps(&v, &[swap_rfq(NOW - 1)], Some(&meta())),
+            Action::SettleSwapRfq { swap_rfq: id(0xcc) }
+        );
+        // …still open (deadline future) ⇒ wait, don't finalize.
+        assert_eq!(plan_with_swaps(&v, &[swap_rfq(NOW + HOUR)], Some(&meta())), Action::Idle);
+    }
+
+    #[test]
+    fn settling_waits_while_swap_open_with_proceeds() {
+        // Proceeds already escrowed into an open (not-yet-due) auction:
+        // don't open a second, don't finalize.
+        let mut v = settling_view();
+        v.open_swap_rfqs = 1;
+        v.proceeds_settlement = 0;
+        assert_eq!(plan_with_swaps(&v, &[swap_rfq(NOW + HOUR)], Some(&meta())), Action::Idle);
     }
 
     #[test]
@@ -278,15 +353,6 @@ mod tests {
         v.proceeds_settlement = 4_200;
         v.config.hold_premium_in_settlement = true;
         assert_eq!(plan_with(&v, &[], Some(&meta())), Action::FinalizeRound);
-    }
-
-    #[test]
-    fn unswappable_proceeds_idle_not_finalize() {
-        // No pinned pool + proceeds + hold=false: finalize would abort.
-        let mut v = settling_view();
-        v.proceeds_settlement = 4_200;
-        v.config.deepbook_pool_id = None;
-        assert_eq!(plan_with(&v, &[], Some(&meta())), Action::Idle);
     }
 
     #[test]
@@ -344,13 +410,13 @@ mod tests {
     }
 
     #[test]
-    fn active_after_window_swaps_midround_premium() {
+    fn active_after_window_opens_midround_swap() {
         let mut v = active_view();
         v.selling_ends_ms = NOW - 1; // window over, holding to expiry
         v.proceeds_settlement = 999;
         assert_eq!(
             plan_with(&v, &[], Some(&meta())),
-            Action::SwapProceeds { max_settlement_in: 999 }
+            Action::OpenSwapRfq { amount_s: 999 }
         );
         v.proceeds_settlement = 0;
         assert_eq!(plan_with(&v, &[], Some(&meta())), Action::Idle);

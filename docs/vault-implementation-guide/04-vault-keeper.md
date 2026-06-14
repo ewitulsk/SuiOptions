@@ -31,7 +31,8 @@ with actions:
 ```rust
 enum Action {
     CrankRedeem { vault, bucket, n_remaining },
-    SwapProceeds { vault, pool },
+    OpenSwapRfq { vault, amount_s },         // escrow proceeds; MMs bid underlying
+    SettleSwapRfq { vault, swap_rfq },       // fresh-Pyth band re-check at settle
     FinalizeRound { vault },
     SelectBucket { vault, bucket },          // chosen by strike.rs
     OpenRfq { vault, bucket, slice_amount },
@@ -40,6 +41,12 @@ enum Action {
 }
 ```
 
+Proceeds conversion is an **on-chain swap auction** (doc 03 §7.3), not a DEX swap — the keeper
+opens one for the round's proceeds, then settles it after its deadline; both cranks prepend a
+fresh Pyth update. A swap auction that draws no in-band bid leaves proceeds outstanding, so the
+round simply stalls at finalize until an MM bids — the keeper re-opens each cycle (stateless,
+so restarts/races are harmless). No DEEP funding or pinned pool is configured anymore.
+
 ## 2. Tick logic (planner)
 
 ```
@@ -47,13 +54,16 @@ match vault.phase:
   Settling:
     if positions_head < positions_tail        → CrankRedeem (batch up to K per PTB)
     elif open_rfqs > 0                        → Settle{,Expired}Rfq for each due auction
-    elif proceeds_settlement > 0 and swap due → SwapProceeds
+    elif a swap auction's deadline passed     → SettleSwapRfq
+    elif proceeds_settlement > 0 (no swap open)→ OpenSwapRfq (else wait — round stalls
+                                                 until an MM bids in-band)
     else                                      → FinalizeRound
   Active:
     if bucket expired (now ≥ current_expiry)  → CrankRedeem (flips phase on-chain)
     elif current_bucket is none               → SelectBucket(best candidate)
     elif now < selling_ends_ms                → OpenRfq per slicing schedule (§4)
     settle any rfq whose deadline passed      → SettleRfq
+    convert mid-round premium                 → SettleSwapRfq / OpenSwapRfq
 ```
 
 Pyth: cranks that take `PriceInfoObject`s need a fresh on-chain price — prepend the standard

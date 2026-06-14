@@ -501,7 +501,8 @@ fn collect_participants(
         ChainEvent::WithdrawInitiated(w) => push(w.owner.to_hex(), "owner"),
         ChainEvent::WithdrawCompleted(w) => push(w.owner.to_hex(), "owner"),
         ChainEvent::InstantWithdraw(w) => push(w.owner.to_hex(), "owner"),
-        ChainEvent::VaultProceedsSwapped(s) => push(s.filler.to_hex(), "filler"),
+        ChainEvent::SwapRfqBid(b) => push(b.bidder.to_hex(), "bidder"),
+        ChainEvent::SwapRfqSettled(s) => push(s.winner.to_hex(), "winner"),
         // DeepBookPoolCreated carries no addresses (the creator isn't in the
         // event payload).
         ChainEvent::BucketCreated(_)
@@ -510,6 +511,8 @@ fn collect_participants(
         | ChainEvent::DeepBookPoolCreated(_)
         | ChainEvent::RfqCreated(_)
         | ChainEvent::RfqExpiredUnsold(_)
+        | ChainEvent::SwapRfqCreated(_)
+        | ChainEvent::SwapRfqUnfilled(_)
         | ChainEvent::VaultCreated(_)
         | ChainEvent::VaultBucketSelected(_)
         | ChainEvent::VaultPositionRedeemed(_)
@@ -707,9 +710,14 @@ fn stage_event_into_batch(
         | ChainEvent::FeeUpdated(_)
         | ChainEvent::TreasuryWithdrawn(_)
         | ChainEvent::VaultPositionRedeemed(_)
-        | ChainEvent::VaultProceedsSwapped(_)
+        | ChainEvent::SwapRfqCreated(_)
+        | ChainEvent::SwapRfqBid(_)
+        | ChainEvent::SwapRfqSettled(_)
+        | ChainEvent::SwapRfqUnfilled(_)
         | ChainEvent::VaultConfigUpdated(_) => {
-            // Log-only events: no materialised view to refresh.
+            // Log-only events: no materialised view to refresh (the swap
+            // auction's effect on the vault is picked up at finalize, as
+            // the old VaultProceedsSwapped path was).
         }
     }
 }
@@ -1111,7 +1119,10 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
         ChainEvent::FeeUpdated(_)
         | ChainEvent::TreasuryWithdrawn(_)
         | ChainEvent::VaultPositionRedeemed(_)
-        | ChainEvent::VaultProceedsSwapped(_)
+        | ChainEvent::SwapRfqCreated(_)
+        | ChainEvent::SwapRfqBid(_)
+        | ChainEvent::SwapRfqSettled(_)
+        | ChainEvent::SwapRfqUnfilled(_)
         | ChainEvent::VaultConfigUpdated(_) => {}
     }
 }

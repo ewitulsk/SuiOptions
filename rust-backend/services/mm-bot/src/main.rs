@@ -162,6 +162,11 @@ struct BotConfig {
     /// weekly call-slice auctions. Off by default.
     #[serde(default)]
     onchain_rfq: mm_bot::onchain_rfq::OnchainRfqConfig,
+
+    /// On-chain proceeds-swap bidder (doc 05 §3.1) — the buy side of the
+    /// vault's settlement→underlying swap auctions. Off by default.
+    #[serde(default)]
+    onchain_swap: mm_bot::onchain_swap::OnchainSwapConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -497,6 +502,35 @@ async fn main() -> Result<()> {
             fallback_vol: cfg.pyth.fallback_vol,
         });
         tracing::info!("onchain rfq bidder enabled");
+    }
+
+    // On-chain swap bidder: the buy side of the vault's proceeds-swap
+    // auctions (settlement → underlying), discovered straight from
+    // SwapRfqCreated events.
+    if cfg.onchain_swap.bidder.enabled {
+        let swap_markets = markets
+            .iter()
+            .map(|m| mm_bot::onchain_rfq::BidderMarket {
+                symbol: m.symbol.clone(),
+                coin_type: m.coin_type.clone(),
+                feed: m.feed,
+                decimals: m.decimals,
+                vol_buf: Arc::clone(&m.vol_buf),
+            })
+            .collect();
+        mm_bot::onchain_swap::spawn_bidder(mm_bot::onchain_swap::SwapBidderParams {
+            cfg: cfg.onchain_swap.clone(),
+            secrets: secrets_loaded.clone(),
+            network: cfg.network,
+            package: snapshot.package()?,
+            price_cache: price_cache.clone(),
+            markets: swap_markets,
+            settlement_feed,
+            settlement_coin_type: settlement_coin_type.clone(),
+            settlement_decimals,
+            staleness,
+        });
+        tracing::info!("onchain swap bidder enabled");
     }
 
     // nonce is monotonic for the bot's lifetime — keep it across reconnects.

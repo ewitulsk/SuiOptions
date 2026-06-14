@@ -135,12 +135,6 @@ pub struct VaultDefaults {
 
     pub vol_window_days: u32,
 
-    /// Keeper-owned `Coin<DEEP>` to fund DeepBook taker fees on
-    /// `swap_proceeds`, plus the amount to split per swap. `None` ⇒ a
-    /// zero coin (fine on whitelisted pools).
-    pub deep_funding_coin: Option<String>,
-    pub deep_fee_per_swap: Option<u64>,
-
     pub slicing: SlicingConfig,
 }
 
@@ -151,8 +145,6 @@ impl Default for VaultDefaults {
             target_delta: default_target_delta(),
             sigma_fallback: None,
             vol_window_days: default_vol_window_days(),
-            deep_funding_coin: None,
-            deep_fee_per_swap: None,
             slicing: SlicingConfig::default(),
         }
     }

@@ -22,11 +22,14 @@
 /// share mint at finalize so unclaimed deposit shares count toward
 /// supply.
 ///
-/// Proceeds conversion goes through DeepBook v3 (`swap_proceeds`): a
-/// permissionless market order against the config-pinned
-/// `Pool<Underlying, Settlement>`, with the executed price bounded by
-/// the Pyth cross less `max_swap_slippage_bps` — the venue is fixed by
-/// admin config, the price by the oracle, so the crank chooses nothing.
+/// Proceeds conversion goes through an on-chain swap auction
+/// (`open_swap_rfq` / `settle_swap_rfq`, `swap_auction.move`): the vault
+/// escrows its settlement proceeds, market makers bid underlying for it,
+/// and the winning rate must clear a *fresh* Pyth cross less
+/// `max_swap_slippage_bps` at settle — no DEX, no pinned pool, and the
+/// crank still chooses nothing. A round can't finalize until its
+/// proceeds convert, so an empty auction simply stalls the round until a
+/// market maker bids in-band (no value can leak in the meantime).
 module options_protocol::vault;
 
 use std::type_name;
@@ -36,9 +39,7 @@ use sui::coin::{Self, Coin, TreasuryCap};
 use sui::object_table::{Self, ObjectTable};
 use sui::table::{Self, Table};
 
-use deepbook::pool::Pool;
 use pyth::price_info::PriceInfoObject;
-use token::deep::DEEP;
 
 use options_protocol::admin::{AdminCap, ProtocolConfig};
 use options_protocol::bucket::{Self, Bucket};
@@ -47,6 +48,7 @@ use options_protocol::events;
 use options_protocol::oracle;
 use options_protocol::position::{Self, Position};
 use options_protocol::rfq::{Self, RfqAuction};
+use options_protocol::swap_auction::{Self, SwapAuction};
 use options_protocol::treasury::{Self, Treasury};
 
 /// Price-per-share fixed point: pps of `PPS_SCALE` ⇒ 1 share == 1
@@ -103,12 +105,10 @@ public struct VaultConfig has copy, drop, store {
 
     // Proceeds / swap policy.
     hold_premium_in_settlement: bool,
+    /// Band the swap auction's winning rate must clear at settle: the
+    /// fill must deliver ≥ Pyth value × (1 − max_swap_slippage_bps).
+    /// Also seeds each auction's reserve floor at open.
     max_swap_slippage_bps: u64,
-    /// The DeepBook v3 `Pool<Underlying, Settlement>` proceeds swap
-    /// against. `None` ⇒ swapping is unavailable: run the vault with
-    /// `hold_premium_in_settlement = true` or finalize will refuse
-    /// unswapped proceeds.
-    deepbook_pool_id: Option<ID>,
 
     // Oracle pinning.
     underlying_feed_id: vector<u8>,
@@ -134,6 +134,9 @@ public struct Vault<phantom Underlying, phantom Settlement, phantom VShare> has 
     current_expiry_ms: u64,
     /// `open_rfq` forbidden after this.
     selling_ends_ms: u64,
+    /// Coupled proceeds-swap auctions created and not yet settled. Must
+    /// be 0 before finalize, like `open_rfqs`.
+    open_swap_rfqs: u64,
 
     // ---- share accounting ----
     share_treasury: TreasuryCap<VShare>,
@@ -211,6 +214,7 @@ public fun create_vault<Underlying, Settlement, VShare>(
         current_bucket: option::none(),
         current_expiry_ms: 0,
         selling_ends_ms: 0,
+        open_swap_rfqs: 0,
         share_treasury,
         pps: table::new(ctx),
         claimable_shares: balance::zero(),
@@ -259,7 +263,6 @@ public fun new_config(
     rfq_min_increment_bps: u64,
     hold_premium_in_settlement: bool,
     max_swap_slippage_bps: u64,
-    deepbook_pool_id: Option<ID>,
     underlying_feed_id: vector<u8>,
     settlement_feed_id: vector<u8>,
     max_price_age_secs: u64,
@@ -286,7 +289,6 @@ public fun new_config(
         rfq_min_increment_bps,
         hold_premium_in_settlement,
         max_swap_slippage_bps,
-        deepbook_pool_id,
         underlying_feed_id,
         settlement_feed_id,
         max_price_age_secs,
@@ -451,86 +453,142 @@ public fun crank_redeem<U, S, V, C>(
     vault.proceeds_settlement.join(settlement.into_balance());
 }
 
-/// Convert proceeds (premium + exercise settlement) back to underlying
-/// through DeepBook v3 (doc 03 §7.3). Permissionless: the venue is the
-/// config-pinned `Pool<U, S>` and the executed price must clear the
-/// Pyth cross less `max_swap_slippage_bps` — the crank chooses nothing.
-/// Legal in any phase (mid-round premium conversion included).
-///
-/// `deep_fee` funds DeepBook's taker fee; pass a zero coin on
-/// whitelisted pools. The unused remainder returns to the caller, as
-/// does any settlement the book couldn't fill (it rejoins the vault's
-/// proceeds balance, not the caller).
-public fun swap_proceeds<U, S, V>(
+/// Escrow up to `amount_s` of the vault's settlement proceeds into a
+/// coupled swap auction (doc 03 §7.3). MMs then bid underlying for it;
+/// `settle_swap_rfq` resolves it after the deadline. The reserve floor is
+/// the Pyth value of the escrowed proceeds less `max_swap_slippage_bps`;
+/// the *binding* band check is re-applied against a fresh cross at
+/// settle. Permissionless and legal in any phase (mid-round premium
+/// conversion under the non-hold-premium policy, or post-expiry exercise
+/// proceeds in Settling).
+public fun open_swap_rfq<U, S, V>(
     vault: &mut Vault<U, S, V>,
-    pool: &mut Pool<U, S>,
-    deep_fee: Coin<DEEP>,
-    max_settlement_in: u64,
+    amount_s: u64,
     underlying_info: &PriceInfoObject,
     settlement_info: &PriceInfoObject,
     clock: &Clock,
     ctx: &mut TxContext,
-): Coin<DEEP> {
+): ID {
     let (spot, spot_scale) = vault_spot(vault, underlying_info, settlement_info, clock);
-    swap_proceeds_internal(vault, pool, deep_fee, max_settlement_in, spot, spot_scale, clock, ctx)
+    open_swap_rfq_internal(vault, amount_s, spot, spot_scale, clock, ctx)
 }
 
-fun swap_proceeds_internal<U, S, V>(
+fun open_swap_rfq_internal<U, S, V>(
     vault: &mut Vault<U, S, V>,
-    pool: &mut Pool<U, S>,
-    deep_fee: Coin<DEEP>,
-    max_settlement_in: u64,
+    amount_s: u64,
     spot: u128,
     spot_scale: u8,
     clock: &Clock,
     ctx: &mut TxContext,
-): Coin<DEEP> {
-    assert!(
-        vault.config.deepbook_pool_id.contains(&object::id(pool)),
-        errors::vault_wrong_pool(),
-    );
-    let s_in = max_settlement_in.min(vault.proceeds_settlement.value());
+): ID {
+    assert!(vault.open_swap_rfqs < vault.config.max_open_rfqs, errors::vault_too_many_rfqs());
+    let s_in = amount_s.min(vault.proceeds_settlement.value());
     assert!(s_in > 0, errors::zero_amount());
-    let quote_in = coin::from_balance(vault.proceeds_settlement.split(s_in), ctx);
 
-    // Market order. The price bound is enforced on the *executed*
-    // portion in `absorb_swap` (so partial fills at a fair price
-    // succeed), hence min_base_out = 0 here.
-    let (base_out, quote_remainder, deep_remainder) =
-        pool.swap_exact_quote_for_base(quote_in, deep_fee, 0, clock, ctx);
+    // Reserve = the band floor on the open-time cross. > 0 guards against
+    // dust proceeds that round to nothing (re-checked fresh at settle).
+    let reserve = swap_floor(vault, s_in, spot, spot_scale);
+    assert!(reserve > 0, errors::vault_proceeds_unswapped());
 
-    let s_spent = s_in - quote_remainder.value();
-    vault.proceeds_settlement.join(quote_remainder.into_balance());
-    absorb_swap(vault, base_out.into_balance(), s_spent, spot, spot_scale, ctx);
-    deep_remainder
+    let settlement = vault.proceeds_settlement.split(s_in);
+    let swap_id = swap_auction::create_coupled(
+        settlement,
+        reserve,
+        vault.config.rfq_duration_ms,
+        vault.config.rfq_snipe_window_ms,
+        vault.config.rfq_snipe_extension_ms,
+        vault.config.rfq_max_extension_ms,
+        vault.config.rfq_min_increment_bps,
+        object::id(vault),
+        clock,
+        ctx,
+    );
+    vault.open_swap_rfqs = vault.open_swap_rfqs + 1;
+    swap_id
 }
 
-/// Shared accounting + the oracle price bound for a proceeds swap:
-/// `underlying_in` must be worth at least the Pyth value of `s_spent`
-/// less the configured slippage.
-fun absorb_swap<U, S, V>(
+/// Resolve one of the vault's swap auctions. The winning bid is re-checked
+/// against a *fresh* Pyth cross: if it still clears the band, the winner
+/// takes the settlement and the vault absorbs the underlying (recording
+/// the round's realized swap rate for the perf fee); if the price moved
+/// out of band, or there were no bids, the settlement returns to proceeds
+/// for re-auction and the bid (if any) is refunded. Permissionless — a
+/// fresh Pyth push is required in the same PTB (the keeper prepends it).
+public fun settle_swap_rfq<U, S, V>(
     vault: &mut Vault<U, S, V>,
-    underlying_in: Balance<U>,
-    s_spent: u64,
+    auction: SwapAuction<U, S>,
+    underlying_info: &PriceInfoObject,
+    settlement_info: &PriceInfoObject,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    let (spot, spot_scale) = vault_spot(vault, underlying_info, settlement_info, clock);
+    settle_swap_rfq_internal(vault, auction, spot, spot_scale, clock, ctx)
+}
+
+fun settle_swap_rfq_internal<U, S, V>(
+    vault: &mut Vault<U, S, V>,
+    auction: SwapAuction<U, S>,
     spot: u128,
     spot_scale: u8,
-    ctx: &TxContext,
+    clock: &Clock,
+    ctx: &mut TxContext,
 ) {
-    // An empty book (or sub-lot dust) executes nothing — abort so the
-    // crank retries later instead of recording a no-op swap.
-    assert!(s_spent > 0, errors::vault_proceeds_unswapped());
-    let u_fair = settlement_to_underlying(s_spent, spot, spot_scale);
-    let u_min = ((
+    assert!(swap_auction::origin(&auction) == object::id(vault), errors::vault_wrong_origin());
+    let (mut winner, settlement, receipt) = swap_auction::finalize(auction, clock);
+    let swap_id = swap_auction::receipt_swap_id(&receipt);
+    let amount_s = swap_auction::receipt_amount_s(&receipt);
+
+    if (winner.is_some()) {
+        let (bidder, underlying) = swap_auction::unpack_swap(winner.extract());
+        winner.destroy_none();
+        let u_in = underlying.value();
+        let u_min = swap_floor(vault, amount_s, spot, spot_scale);
+        if (u_min > 0 && u_in >= u_min) {
+            // Band cleared: hand the settlement to the winner, absorb the
+            // underlying, record the realized rate (premium→underlying).
+            transfer::public_transfer(coin::from_balance(settlement, ctx), bidder);
+            vault.deployable.join(underlying);
+            vault.round_swap_settlement_out = vault.round_swap_settlement_out + amount_s;
+            vault.round_swap_underlying_in = vault.round_swap_underlying_in + u_in;
+            events::emit_swap_rfq_settled(
+                swap_id,
+                object::id(vault),
+                vault.round,
+                bidder,
+                amount_s,
+                u_in,
+            );
+        } else {
+            // Price moved out of band before settle: no swap. Refund the
+            // bidder, return the settlement to proceeds; the keeper
+            // re-opens (the round stalls until an in-band bid lands).
+            transfer::public_transfer(coin::from_balance(underlying, ctx), bidder);
+            vault.proceeds_settlement.join(settlement);
+            events::emit_swap_rfq_unfilled(swap_id, object::id(vault), vault.round, amount_s);
+        }
+    } else {
+        winner.destroy_none();
+        vault.proceeds_settlement.join(settlement);
+        events::emit_swap_rfq_unfilled(swap_id, object::id(vault), vault.round, amount_s);
+    };
+    vault.open_swap_rfqs = vault.open_swap_rfqs - 1;
+}
+
+/// The fresh-Pyth band floor for converting `amount_s` settlement: the
+/// minimum underlying a fill must deliver = Pyth value × (1 − slippage).
+/// Floors against the vault (settlement_to_underlying floors).
+fun swap_floor<U, S, V>(
+    vault: &Vault<U, S, V>,
+    amount_s: u64,
+    spot: u128,
+    spot_scale: u8,
+): u64 {
+    let u_fair = settlement_to_underlying(amount_s, spot, spot_scale);
+    ((
         (u_fair as u128) * (BPS_DENOM - (vault.config.max_swap_slippage_bps as u128))
             / BPS_DENOM
-    ) as u64);
-    let u_in = underlying_in.value();
-    assert!(u_in >= u_min && u_min > 0, errors::vault_proceeds_unswapped());
-
-    vault.deployable.join(underlying_in);
-    vault.round_swap_settlement_out = vault.round_swap_settlement_out + s_spent;
-    vault.round_swap_underlying_in = vault.round_swap_underlying_in + u_in;
-    events::emit_vault_proceeds_swapped(object::id(vault), vault.round, ctx.sender(), s_spent, u_in);
+    ) as u64)
 }
 
 /// The accounting heart (doc 03 §7.4): lock pps, charge fees on
@@ -560,6 +618,7 @@ fun finalize_round_internal<U, S, V>(
     assert!(vault.phase == Phase::Settling, errors::vault_wrong_phase());
     assert!(vault.positions_head == vault.positions_tail, errors::vault_positions_pending());
     assert!(vault.open_rfqs == 0, errors::vault_rfqs_open());
+    assert!(vault.open_swap_rfqs == 0, errors::vault_rfqs_open());
 
     // Proceeds policy: under hold-premium the residual settlement is
     // valued at the Pyth cross; otherwise it must have been swapped.
@@ -977,6 +1036,7 @@ public fun current_bucket<U, S, V>(vault: &Vault<U, S, V>): Option<ID> { vault.c
 public fun current_expiry_ms<U, S, V>(vault: &Vault<U, S, V>): u64 { vault.current_expiry_ms }
 public fun selling_ends_ms<U, S, V>(vault: &Vault<U, S, V>): u64 { vault.selling_ends_ms }
 public fun open_rfqs<U, S, V>(vault: &Vault<U, S, V>): u64 { vault.open_rfqs }
+public fun open_swap_rfqs<U, S, V>(vault: &Vault<U, S, V>): u64 { vault.open_swap_rfqs }
 public fun deployable<U, S, V>(vault: &Vault<U, S, V>): u64 { vault.deployable.value() }
 public fun pending_deposits<U, S, V>(vault: &Vault<U, S, V>): u64 {
     vault.pending_deposits.value()
@@ -1054,35 +1114,38 @@ public fun open_rfq_with_spot_for_testing<U, S, V, C>(
     open_rfq_internal(vault, bucket, slice_amount, spot, spot_scale, clock, ctx)
 }
 
-/// Inject a swap result with a forged spot: exercises `absorb_swap`'s
-/// price bound and accounting without a live `Pool`/`PriceInfoObject`
-/// (the full DeepBook leg is covered by the real-pool test + localnet
-/// e2e). Returns the settlement taken, like the swap would.
+/// Drop settlement straight into the proceeds balance, so swap-auction
+/// tests don't have to run a whole premium/exercise round to fund one.
 #[test_only]
-public fun record_swap_for_testing<U, S, V>(
-    vault: &mut Vault<U, S, V>,
-    underlying_in: Coin<U>,
-    settlement_out: u64,
-    spot: u128,
-    spot_scale: u8,
-    ctx: &mut TxContext,
-): Coin<S> {
-    let s_out = settlement_out.min(vault.proceeds_settlement.value());
-    let taken = coin::from_balance(vault.proceeds_settlement.split(s_out), ctx);
-    absorb_swap(vault, underlying_in.into_balance(), s_out, spot, spot_scale, ctx);
-    taken
+public fun inject_proceeds_for_testing<U, S, V>(vault: &mut Vault<U, S, V>, coin: Coin<S>) {
+    vault.proceeds_settlement.join(coin.into_balance());
 }
 
+/// Open a proceeds-swap auction with a forged spot — same internals,
+/// same reserve floor, without a live `PriceInfoObject`.
 #[test_only]
-public fun swap_proceeds_with_spot_for_testing<U, S, V>(
+public fun open_swap_rfq_with_spot_for_testing<U, S, V>(
     vault: &mut Vault<U, S, V>,
-    pool: &mut Pool<U, S>,
-    deep_fee: Coin<DEEP>,
-    max_settlement_in: u64,
+    amount_s: u64,
     spot: u128,
     spot_scale: u8,
     clock: &Clock,
     ctx: &mut TxContext,
-): Coin<DEEP> {
-    swap_proceeds_internal(vault, pool, deep_fee, max_settlement_in, spot, spot_scale, clock, ctx)
+): ID {
+    open_swap_rfq_internal(vault, amount_s, spot, spot_scale, clock, ctx)
+}
+
+/// Settle a proceeds-swap auction with a forged spot: exercises the
+/// fresh-Pyth band check, the fill/refund routing, and the round
+/// accounting without a live `PriceInfoObject`.
+#[test_only]
+public fun settle_swap_rfq_with_spot_for_testing<U, S, V>(
+    vault: &mut Vault<U, S, V>,
+    auction: SwapAuction<U, S>,
+    spot: u128,
+    spot_scale: u8,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    settle_swap_rfq_internal(vault, auction, spot, spot_scale, clock, ctx)
 }

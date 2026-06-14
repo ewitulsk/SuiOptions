@@ -26,6 +26,8 @@ pub struct VaultView {
     pub current_expiry_ms: u64,
     pub selling_ends_ms: u64,
     pub open_rfqs: u64,
+    /// Coupled proceeds-swap auctions not yet settled.
+    pub open_swap_rfqs: u64,
     /// positions_tail − positions_head.
     pub pending_positions: u64,
     pub deployable: u64,
@@ -47,7 +49,6 @@ pub struct VaultConfigView {
     pub max_open_rfqs: u64,
     pub round_ms: u64,
     pub hold_premium_in_settlement: bool,
-    pub deepbook_pool_id: Option<ObjectID>,
     /// Pinned Pyth feed ids (32 raw bytes each) — what `oracle::spot_cross`
     /// enforces, so discovery treats them as authoritative.
     pub underlying_feed_id: Vec<u8>,
@@ -63,6 +64,15 @@ pub struct RfqView {
     pub bucket_id: ObjectID,
     pub deadline_ms: u64,
     pub amount: u64,
+}
+
+/// One live vault-coupled proceeds-swap auction (still exists ⇒ unsettled).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwapRfqView {
+    pub swap_id: ObjectID,
+    pub deadline_ms: u64,
+    /// Settlement escrowed (for logging/metrics).
+    pub amount_s: u64,
 }
 
 // ── JSON field helpers ─────────────────────────────────────────────────
@@ -166,6 +176,7 @@ pub fn parse_vault_view(fields: &Value) -> Result<VaultView> {
         current_expiry_ms: u64_field(fields, "current_expiry_ms")?,
         selling_ends_ms: u64_field(fields, "selling_ends_ms")?,
         open_rfqs: u64_field(fields, "open_rfqs")?,
+        open_swap_rfqs: u64_field(fields, "open_swap_rfqs")?,
         pending_positions: positions_tail
             .checked_sub(positions_head)
             .ok_or_else(|| anyhow!("positions_head {positions_head} > tail {positions_tail}"))?,
@@ -182,10 +193,6 @@ pub fn parse_vault_view(fields: &Value) -> Result<VaultView> {
             max_open_rfqs: u64_field(config, "max_open_rfqs")?,
             round_ms: u64_field(config, "round_ms")?,
             hold_premium_in_settlement: as_bool(field(config, "hold_premium_in_settlement")?)?,
-            deepbook_pool_id: as_opt(field(config, "deepbook_pool_id")?)
-                .map(as_id)
-                .transpose()
-                .context("field deepbook_pool_id")?,
             underlying_feed_id: bytes_field(config, "underlying_feed_id")?,
             settlement_feed_id: bytes_field(config, "settlement_feed_id")?,
             underlying_decimals: u8_field(config, "underlying_decimals")?,
@@ -201,6 +208,15 @@ pub fn parse_rfq_view(rfq_id: ObjectID, fields: &Value) -> Result<RfqView> {
         bucket_id: as_id(field(fields, "bucket_id")?).context("field bucket_id")?,
         deadline_ms: u64_field(fields, "deadline_ms")?,
         amount: u64_field(fields, "amount")?,
+    })
+}
+
+/// Parse a `SwapAuction` object's parsed-JSON field map.
+pub fn parse_swap_rfq_view(swap_id: ObjectID, fields: &Value) -> Result<SwapRfqView> {
+    Ok(SwapRfqView {
+        swap_id,
+        deadline_ms: u64_field(fields, "deadline_ms")?,
+        amount_s: u64_field(fields, "amount_s")?,
     })
 }
 
@@ -286,13 +302,68 @@ pub async fn discover_open_rfqs(
     Ok(open)
 }
 
+/// Discover the vault's live coupled swap auctions, stateless: walk
+/// `SwapRfqCreated` events (newest first) down to `cutoff_ms`, keep those
+/// with `origin == vault_id`, then read each object — still existing ⇒
+/// still open. Mirrors [`discover_open_rfqs`] for the proceeds-swap path.
+pub async fn discover_open_swap_rfqs(
+    client: &SuiClient,
+    package: ObjectID,
+    vault_id: ObjectID,
+    cutoff_ms: u64,
+) -> Result<Vec<SwapRfqView>> {
+    let filter = EventFilter::MoveEventType(StructTag {
+        address: package.into(),
+        module: Identifier::new("events").unwrap(),
+        name: Identifier::new("SwapRfqCreated").unwrap(),
+        type_params: vec![],
+    });
+
+    let vault_hex = vault_id.to_string();
+    let mut candidates: Vec<ObjectID> = Vec::new();
+    let mut cursor = None;
+    'pages: loop {
+        let page = client
+            .event_api()
+            .query_events(filter.clone(), cursor, Some(100), true /* descending */)
+            .await
+            .context("querying SwapRfqCreated events")?;
+        for ev in &page.data {
+            if ev.timestamp_ms.is_some_and(|t| t < cutoff_ms) {
+                break 'pages;
+            }
+            let origin = ev
+                .parsed_json
+                .get("origin")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if origin.eq_ignore_ascii_case(&vault_hex) {
+                if let Some(id) = ev.parsed_json.get("swap_id").and_then(|v| v.as_str()) {
+                    candidates.push(id.parse().context("parsing swap_id from event")?);
+                }
+            }
+        }
+        if !page.has_next_page {
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+
+    let mut open = Vec::new();
+    for swap_id in candidates {
+        if let Some(fields) = fetch_fields(client, swap_id).await? {
+            open.push(parse_swap_rfq_view(swap_id, &fields)?);
+        }
+    }
+    Ok(open)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     const BUCKET: &str = "0x00000000000000000000000000000000000000000000000000000000000000b1";
-    const POOL: &str = "0x00000000000000000000000000000000000000000000000000000000000000d1";
 
     /// A Vault object's parsed-JSON fields exactly as the RPC renders
     /// them (u64s as strings, Balance unwrapped, enum as variant map).
@@ -304,6 +375,7 @@ mod tests {
             "current_expiry_ms": "1700000000000",
             "selling_ends_ms": "1699990000000",
             "open_rfqs": "1",
+            "open_swap_rfqs": "0",
             "positions_head": "2",
             "positions_tail": "4",
             "deployable": "5000000000",
@@ -319,7 +391,6 @@ mod tests {
                 "max_open_rfqs": "2",
                 "round_ms": "604800000",
                 "hold_premium_in_settlement": false,
-                "deepbook_pool_id": POOL,
                 "underlying_feed_id": vec![0x50u8; 32],
                 "settlement_feed_id": vec![0x41u8; 32],
                 "underlying_decimals": 9,
@@ -339,7 +410,6 @@ mod tests {
         assert_eq!(v.pending_deposits, 777);
         assert_eq!(v.queued_withdraw_shares, 88);
         assert_eq!(v.config.max_open_rfqs, 2);
-        assert_eq!(v.config.deepbook_pool_id, Some(POOL.parse().unwrap()));
         assert!(!v.config.hold_premium_in_settlement);
         assert_eq!(v.config.underlying_feed_id, vec![0x50u8; 32]);
         assert_eq!(v.config.settlement_feed_id, vec![0x41u8; 32]);
@@ -348,14 +418,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_settling_vault_without_bucket_or_pool() {
+    fn parses_settling_vault_without_bucket() {
         let mut j = vault_json("Settling", None);
-        j["config"]["deepbook_pool_id"] = Value::Null;
         j["config"]["hold_premium_in_settlement"] = json!(true);
         let v = parse_vault_view(&j).unwrap();
         assert!(v.settling);
         assert_eq!(v.current_bucket, None);
-        assert_eq!(v.config.deepbook_pool_id, None);
         assert!(v.config.hold_premium_in_settlement);
     }
 

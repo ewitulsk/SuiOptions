@@ -24,7 +24,6 @@ fn cfg() -> VaultConfigView {
         max_open_rfqs: 4,
         round_ms: WEEK_MS,
         hold_premium_in_settlement: false,
-        deepbook_pool_id: None,
         underlying_feed_id: vec![0u8; 32],
         settlement_feed_id: vec![0u8; 32],
         underlying_decimals: 9,

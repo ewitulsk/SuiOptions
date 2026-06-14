@@ -44,10 +44,8 @@ target_delta = 0.20    # doc 08: 0.10 leaves too little premium above the
                        # reserve after snap-up + haircut
 sigma_fallback = 0.85  # load-bearing on testnet (see benchmarks_url note)
 vol_window_days = 30
-# Keeper-owned Coin<DEEP> + amount split per swap_proceeds; omit both
-# for a zero coin (whitelisted pools).
-# deep_funding_coin = "0x…"
-# deep_fee_per_swap = 1000000
+# Proceeds are converted via the on-chain swap auction (open_swap_rfq /
+# settle_swap_rfq), not a DEX — no DEEP funding or pool config needed.
 
 [vault_defaults.slicing]
 slices = 4

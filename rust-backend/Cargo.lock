@@ -5380,6 +5380,7 @@ dependencies = [
  "futures-util",
  "hex",
  "metrics",
+ "move-core-types",
  "observability",
  "parking_lot 0.12.5",
  "pricing",
