@@ -1,19 +1,3 @@
-# Ubuntu 22.04 LTS amd64. Matches t3.* (Intel). Keep this filter in
-# sync with ec2_instance_type — switching the instance family without
-# switching the AMI architecture would fail to boot.
-data "aws_ami" "ubuntu" {
-  most_recent = true
-  owners      = ["099720109477"] # Canonical
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
-  }
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-}
-
 resource "aws_key_pair" "host" {
   count      = var.ssh_pubkey == "" ? 0 : 1
   key_name   = "${var.project}-ec2"
@@ -51,7 +35,7 @@ locals {
 }
 
 resource "aws_instance" "host" {
-  ami                         = data.aws_ami.ubuntu.id
+  ami                         = var.host_ami
   instance_type               = var.ec2_instance_type
   subnet_id                   = aws_subnet.public[0].id
   vpc_security_group_ids      = [aws_security_group.ec2.id]
@@ -112,7 +96,7 @@ locals {
 }
 
 resource "aws_instance" "prod_host" {
-  ami                         = data.aws_ami.ubuntu.id
+  ami                         = var.host_ami
   instance_type               = var.ec2_instance_type
   subnet_id                   = aws_subnet.public[0].id
   vpc_security_group_ids      = [aws_security_group.ec2.id]

@@ -43,6 +43,12 @@ variable "route53_zone_id" {
 
 # ---- EC2 --------------------------------------------------------------------
 
+variable "host_ami" {
+  description = "AMI for the EC2 hosts. Pinned (not a most_recent lookup) so a new Canonical release doesn't force-replace the running instances on every apply. Upgrade deliberately: find the newest Ubuntu 22.04 amd64 image with `aws ec2 describe-images --owners 099720109477 --filters 'Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*' --query 'sort_by(Images,&CreationDate)[-1].ImageId'` and set it here. Keep the arch (amd64) in sync with ec2_instance_type."
+  type        = string
+  default     = "ami-02013f5b15758f4d4"
+}
+
 variable "ec2_instance_type" {
   description = "EC2 instance type. x86 (t3.*) so GH-runner builds stay native — no QEMU emulation. Switching to t4g.* (Graviton/ARM) needs a matching change in bake.hcl + the AMI filter in ec2.tf + setup-qemu-action in _deploy.yml."
   type        = string
