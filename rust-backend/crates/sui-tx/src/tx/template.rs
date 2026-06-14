@@ -174,6 +174,28 @@ pub fn protocol_templates(
         },
     ];
 
+    // Wallet-facing covered-call vault flows (doc 03). Each is a single call
+    // with the vault's 3 type args; deposit/initiate_withdraw ride a
+    // `coinWithBalance` prelude. Every asset moved is the user's own (their
+    // own coins in, receipts/shares/refunds back to them), so the sponsor only
+    // risks gas — same posture as the `write`/`buy`/`exercise` wallet flows.
+    // The session twins are sponsored separately under `session_vault:*`.
+    for function in [
+        "deposit",
+        "claim_shares",
+        "initiate_withdraw",
+        "complete_withdraw",
+        "instant_withdraw_pending",
+    ] {
+        let target = t("vault", function);
+        templates.push(PtbTemplate {
+            name: format!("vault:{function}"),
+            required: vec![target.clone()],
+            allowed: vec![target.clone()],
+            arities: vec![(target, 3)],
+        });
+    }
+
     if allow_faucet {
         for (pkg, module) in test_tokens {
             let mint = MoveTarget::new(*pkg, module, "mint_to_sender");
@@ -738,9 +760,20 @@ mod tests {
             let bad = build(&[(target("session_vault", f), 2)], false);
             assert_eq!(match_any(&templates(), &bad), None);
         }
-        // the wallet-facing vault functions are NOT sponsored.
-        let wallet_deposit = build(&[(target("vault", "deposit"), 3)], false);
-        assert_eq!(match_any(&templates(), &wallet_deposit), None);
+        // the wallet-facing vault functions are sponsored under `vault:*`.
+        for f in [
+            "deposit",
+            "claim_shares",
+            "initiate_withdraw",
+            "complete_withdraw",
+            "instant_withdraw_pending",
+        ] {
+            let pt = build(&[(target("vault", f), 3)], false);
+            assert_eq!(match_any(&templates(), &pt), Some(format!("vault:{f}").as_str()));
+            // wrong arity refused
+            let bad = build(&[(target("vault", f), 2)], false);
+            assert_eq!(match_any(&templates(), &bad), None);
+        }
     }
 
     #[test]

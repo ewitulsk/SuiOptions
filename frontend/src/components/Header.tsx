@@ -299,6 +299,12 @@ export function Header() {
           Buy
         </button>
         <button
+          className={pathname === "/vault" ? "is-active" : ""}
+          onClick={() => navigate("/vault")}
+        >
+          Vaults
+        </button>
+        <button
           className={pathname === "/dashboard" ? "is-active" : ""}
           onClick={() => navigate("/dashboard")}
         >
