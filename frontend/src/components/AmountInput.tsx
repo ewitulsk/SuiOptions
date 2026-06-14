@@ -12,7 +12,18 @@ type Props = {
   btcBalance: number;
   usdcBalance: number;
   error: string;
+  /** Live spot price (settlement per 1 underlying). Powers the USDC-denominated
+   *  input on the Buy page; 0/absent disables the toggle. */
+  spot: number;
+  /** Settlement-asset symbol (e.g. `USDC`) for the alternate denomination. */
+  settlementSymbol: string;
 };
+
+type Denom = "underlying" | "stable";
+
+function initialOf(symbol: string | null): string {
+  return (symbol ?? "").replace(/[^A-Za-z0-9]/g, "").charAt(0).toUpperCase() || "?";
+}
 
 export function AmountInput({
   amount,
@@ -22,32 +33,102 @@ export function AmountInput({
   btcBalance,
   usdcBalance,
   error,
+  spot,
+  settlementSymbol,
 }: Props) {
-  const assetName = findToken(assetSymbol)?.name ?? assetSymbol ?? "—";
-  const assetInitial =
-    (assetSymbol ?? "").replace(/[^A-Za-z0-9]/g, "").charAt(0).toUpperCase() || "?";
+  // USDC-denominated entry is a Buy-page convenience: type the underlying
+  // quantity as its spot-notional value instead. `amount` (underlying display
+  // units) stays the source of truth for everything downstream.
+  const [denom, setDenom] = useState<Denom>("underlying");
+  const canDenominate = view === "trader" && spot > 0;
+  const stableMode = canDenominate && denom === "stable";
 
-  // Mirror the input as a raw string so it can be fully cleared. The numeric
-  // `amount` stays the source of truth for everything downstream; an empty (or
-  // partial, e.g. "0.") field maps to 0. Re-sync only when an external write
-  // (e.g. Max) lands a value that the current text doesn't already represent.
-  const [text, setText] = useState(() => (amount === 0 ? "" : String(amount)));
-  if ((Number(text) || 0) !== amount) {
-    setText(amount === 0 ? "" : String(amount));
+  // Display ⇄ underlying conversion. In stable mode the field shows a USDC
+  // figure (underlying × spot); typing divides back out by spot.
+  const toDisplay = (u: number) => (stableMode ? u * spot : u);
+  const fromDisplay = (d: number) => (stableMode ? d / spot : d);
+
+  const unitSymbol = stableMode ? settlementSymbol : assetSymbol;
+  const unitName = findToken(unitSymbol)?.name ?? unitSymbol ?? "—";
+  const unitInitial = initialOf(unitSymbol);
+
+  // Mirror the input as a raw string so it can be fully cleared. We re-sync the
+  // text from `amount` only when an *external* write lands (Max, stepper, denom
+  // switch) — tracked via `synced`, the (amount, stableMode) pair the current
+  // text already represents. Comparing this pair rather than re-deriving the
+  // numeric value avoids float round-trip jitter (and the render loop a
+  // tolerance check would risk).
+  const trim = (n: number) => String(Number(n.toPrecision(12)));
+  const [text, setText] = useState(() => (amount === 0 ? "" : trim(toDisplay(amount))));
+  const [synced, setSynced] = useState({ amount, stableMode });
+  if (synced.amount !== amount || synced.stableMode !== stableMode) {
+    setText(amount === 0 ? "" : trim(toDisplay(amount)));
+    setSynced({ amount, stableMode });
   }
 
   const update = (raw: string) => {
     setText(raw);
-    setAmount(Number(raw) || 0);
+    const u = fromDisplay(Number(raw) || 0);
+    setAmount(u);
+    // Mark this amount as already-reflected so the render-sync above leaves the
+    // user's in-progress text (e.g. "0." or "5000") untouched.
+    setSynced({ amount: u, stableMode });
   };
 
-  // Custom stepper replaces the native number spinner (hidden in CSS). Steps by
-  // the input's `step` and clamps at 0; the render-sync above pushes the new
-  // value back into `text`.
-  const STEP = 0.001;
+  // Custom stepper replaces the native number spinner (hidden in CSS). Steps in
+  // the active denomination ($10 in USDC mode, 0.001 underlying otherwise) and
+  // clamps at 0; the render-sync pushes the new value back into `text`.
   const step = (dir: 1 | -1) => {
-    setAmount(Math.max(0, Number((amount + dir * STEP).toFixed(3))));
+    if (stableMode) {
+      const nextUsd = Math.max(0, Number((toDisplay(amount) + dir * 10).toFixed(2)));
+      setAmount(fromDisplay(nextUsd));
+    } else {
+      setAmount(Math.max(0, Number((amount + dir * 0.001).toFixed(3))));
+    }
   };
+
+  // Balance shown is the side's spending balance: USDC for the trader (in either
+  // denomination), the underlying for the writer.
+  const balLine =
+    view === "writer" ? btcBalance.toFixed(4) : `${usdcBalance.toFixed(2)} USDC`;
+  // The equivalent value in the other unit, so both numbers are always visible.
+  const equivLine = stableMode
+    ? `≈ ${amount.toFixed(4)} ${assetSymbol ?? ""}`.trim()
+    : canDenominate
+      ? `≈ ${(amount * spot).toFixed(2)} ${settlementSymbol}`
+      : null;
+
+  const chipBody = (
+    <>
+      <TokenLogo
+        symbol={unitSymbol}
+        className="amount__asset-icon"
+        fallback={
+          <span className="amount__asset-icon amount__asset-icon--generic">
+            {unitInitial}
+          </span>
+        }
+      />
+      <div>
+        <div className="amount__asset-name">
+          {unitName}
+          {canDenominate && (
+            <svg
+              className="amount__asset-swap"
+              width="11"
+              height="11"
+              viewBox="0 0 12 12"
+              aria-hidden="true"
+            >
+              <path d="M2 4h6.5M7 2.5 8.5 4 7 5.5M10 8H3.5M5 6.5 3.5 8 5 9.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          )}
+        </div>
+        <div className="amount__asset-bal">bal {balLine}</div>
+        {equivLine && <div className="amount__asset-equiv">{equivLine}</div>}
+      </div>
+    </>
+  );
 
   return (
     <div>
@@ -57,7 +138,7 @@ export function AmountInput({
             className="amount__input"
             type="number"
             min="0"
-            step="0.001"
+            step={stableMode ? "0.01" : "0.001"}
             value={text}
             onChange={(e) => update(e.target.value)}
           />
@@ -90,23 +171,19 @@ export function AmountInput({
             Max
           </button>
         </div>
-        <div className="amount__asset">
-          <TokenLogo
-            symbol={assetSymbol}
-            className="amount__asset-icon"
-            fallback={
-              <span className="amount__asset-icon amount__asset-icon--generic">
-                {assetInitial}
-              </span>
-            }
-          />
-          <div>
-            <div className="amount__asset-name">{assetName}</div>
-            <div className="amount__asset-bal">
-              bal {view === "writer" ? btcBalance.toFixed(4) : `${usdcBalance.toFixed(2)} USDC`}
-            </div>
-          </div>
-        </div>
+        {canDenominate ? (
+          <button
+            type="button"
+            className="amount__asset amount__asset--toggle"
+            onClick={() => setDenom((d) => (d === "stable" ? "underlying" : "stable"))}
+            aria-label={`Switch input to ${stableMode ? assetSymbol ?? "underlying" : settlementSymbol}`}
+            title={`Type the amount in ${stableMode ? assetSymbol ?? "the underlying" : settlementSymbol} instead`}
+          >
+            {chipBody}
+          </button>
+        ) : (
+          <div className="amount__asset">{chipBody}</div>
+        )}
       </div>
       <div className="amount__error">{error}</div>
     </div>

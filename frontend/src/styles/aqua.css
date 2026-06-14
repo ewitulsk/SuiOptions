@@ -497,10 +497,27 @@
 }
 [data-theme="aqua"] .amount__asset-name {
   font-weight: 600; font-size: 14px; color: var(--aqua-ink-1);
+  display: flex; align-items: center; gap: 5px;
+}
+[data-theme="aqua"] .amount__asset-swap {
+  color: var(--aqua-sui-deep); opacity: 0.7; flex: none;
 }
 [data-theme="aqua"] .amount__asset-bal {
   font-family: "JetBrains Mono", monospace; font-size: 10px;
   color: var(--aqua-ink-3);
+}
+[data-theme="aqua"] .amount__asset-equiv {
+  font-family: "JetBrains Mono", monospace; font-size: 10px;
+  color: var(--aqua-sui-deep); margin-top: 2px;
+}
+/* The Buy-page denomination toggle: the asset chip doubles as a button that
+   swaps the input between the underlying and USDC. */
+[data-theme="aqua"] .amount__asset--toggle {
+  font: inherit; text-align: left; cursor: pointer;
+  transition: background 160ms ease;
+}
+[data-theme="aqua"] .amount__asset--toggle:hover {
+  background: rgba(77,162,255,0.10);
 }
 [data-theme="aqua"] .amount__error {
   font-family: "JetBrains Mono", monospace; font-size: 10px; font-weight: 700;

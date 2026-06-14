@@ -129,6 +129,8 @@ export function Composer({ initialView }: Props) {
           assetSymbol={s.selectedAsset}
           btcBalance={s.btcBalance}
           usdcBalance={s.usdcBalance}
+          spot={s.spot}
+          settlementSymbol={s.series?.settlement_symbol ?? "USDC"}
           error={
             s.view === "writer"
               ? s.insufficientBtc
