@@ -51,19 +51,23 @@
     "token_info": {
       "TBTC": {
         "coinType": "0x159cc8d63af67b12286a9a7868a40b274ef352960b1a3d9ea31c0169cc3efa73::tbtc::TBTC",
-        "decimals": 8
+        "decimals": 8,
+        "pythFeedId": "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"
       },
       "TDEEP": {
         "coinType": "0x159cc8d63af67b12286a9a7868a40b274ef352960b1a3d9ea31c0169cc3efa73::tdeep::TDEEP",
-        "decimals": 6
+        "decimals": 6,
+        "pythFeedId": "0x29bdd5248234e33bd93d3b81100b5fa32eaa5997843847e2c2cb16d7c6d9f7ff"
       },
       "TUSDC": {
         "coinType": "0x159cc8d63af67b12286a9a7868a40b274ef352960b1a3d9ea31c0169cc3efa73::tusdc::TUSDC",
-        "decimals": 6
+        "decimals": 6,
+        "pythFeedId": "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"
       },
       "TWAL": {
         "coinType": "0x159cc8d63af67b12286a9a7868a40b274ef352960b1a3d9ea31c0169cc3efa73::twal::TWAL",
-        "decimals": 9
+        "decimals": 9,
+        "pythFeedId": "0xeba0732395fae9dec4bae12e52760b35fc1c5671e2da8b449c9af4efe5d54341"
       }
     }
   },

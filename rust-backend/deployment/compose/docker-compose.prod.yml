@@ -2,11 +2,11 @@
 # from staging). Variables come from /opt/options/prod/.env, written by
 # deploy.sh. Runs on the dedicated prod EC2 host (options-prod-host).
 #
-# mm-bot and option-scheduler are commented out until the prod mm-bot
-# bootstrap + deployer-key handling are in place. The indexer and
-# quoting-service deploy cleanly on their own. When deploy.sh is asked to
-# roll a service that isn't declared here it logs and skips, so leaving
-# the blocks commented is the supported way to opt-out per env.
+# Full service stack — mirrors docker-compose.staging.yml so redeploy-contract
+# brings prod up identically (option-scheduler re-rolls buckets for a fresh
+# contract, mm-bot quotes against it). When deploy.sh is asked to roll a
+# service that isn't declared here it logs and skips, so a per-env opt-out is
+# just omitting the block.
 
 name: options-prod
 
@@ -72,33 +72,36 @@ services:
       start_period: 15s
     networks: [net]
 
-  # mm-bot:
-  #   image: ${ECR}/options/mm-bot:${MM_BOT_TAG}
-  #   environment:
-  #     APP_ENV: prod
-  #     TOKEN_INFO_URL: http://token-info:9005
-  #     API_URL: http://api-service:9003
-  #     RUST_LOG: info,mm_bot=info
-  #   volumes:
-  #     - /opt/options/prod/secrets:/run/secrets:ro
-  #   depends_on: [quoting, token-info, api-service]
-  #   restart: unless-stopped
-  #   networks: [net]
+  mm-bot:
+    image: ${ECR}/options/mm-bot:${MM_BOT_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      TOKEN_INFO_URL: http://token-info:9005
+      API_URL: http://api-service:9003
+      RUST_LOG: info,mm_bot=info
+    volumes:
+      - /opt/options/prod/secrets:/run/secrets:ro
+    depends_on: [quoting, token-info, api-service]
+    restart: unless-stopped
+    networks: [net]
 
-  # option-scheduler:
-  #   image: ${ECR}/options/option-scheduler:${SCHEDULER_TAG}
-  #   environment:
-  #     APP_ENV: prod
-  #     # Mandatory: the scheduler refuses to start without its rolls DB.
-  #     # Expanded into scheduler_database_url in config.prod.toml.
-  #     DB_PASSWORD: ${DB_PASSWORD}
-  #     DB_HOST: ${DB_HOST}
-  #     RUST_LOG: info,option_scheduler=info
-  #   volumes:
-  #     - /opt/options/prod/secrets:/run/secrets:ro
-  #   depends_on: [indexer]
-  #   restart: unless-stopped
-  #   networks: [net]
+  option-scheduler:
+    image: ${ECR}/options/option-scheduler:${SCHEDULER_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      # Mandatory: the scheduler refuses to start without its rolls DB.
+      # Expanded into scheduler_database_url in config.prod.toml.
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      TOKEN_INFO_URL: http://token-info:9005
+      RUST_LOG: info,option_scheduler=info
+    volumes:
+      - /opt/options/prod/secrets:/run/secrets:ro
+    depends_on: [indexer, token-info]
+    restart: unless-stopped
+    networks: [net]
 
   api-service:
     image: ${ECR}/options/api-service:${API_SERVICE_TAG}
@@ -155,9 +158,7 @@ services:
   # gas wallet (/run/secrets/keeper.toml, from options/prod/keeper).
   # Vaults are auto-discovered from the indexer's vaults view — a vault
   # created on chain is picked up on the next tick, no config change;
-  # with none on chain the keeper idles with /health up. Unlike
-  # mm-bot/option-scheduler (commented out above), the keeper is safe to
-  # run vault-less, so the deploy wiring stays live.
+  # with none on chain the keeper idles with /health up.
   keeper:
     image: ${ECR}/options/keeper:${KEEPER_TAG}
     environment:
@@ -183,7 +184,7 @@ services:
     volumes:
       - /opt/options/prod/nginx/:/etc/nginx/options/:ro
     command: ["nginx", "-c", "/etc/nginx/options/nginx.conf", "-g", "daemon off;"]
-    depends_on: [quoting, api-service, indexer, token-info, auth-service, gas-station, keeper]
+    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, keeper]
     restart: unless-stopped
     networks: [net]
 
