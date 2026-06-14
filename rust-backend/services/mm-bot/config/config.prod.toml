@@ -1,25 +1,17 @@
-# mm-bot config — prod env (mainnet).
+# mm-bot config — prod env (testnet).
 #
-# WARNING: mm-bot's bootstrap step calls the test-token faucet to mint
-# settlement. There is no faucet on mainnet, so booting this against
-# mainnet will fail unless `bootstrap_settlement_amount` is zero AND the
-# bootstrap code path is changed to skip the faucet call (or the Account
-# is created + funded manually first by the bot's Sui key with its quote
-# pubkey, so the on-chain lookup adopts it instead of bootstrapping).
-#
-# Until that's resolved, the mm-bot service should be commented out of
-# docker-compose.prod.yml. The indexer + quoting-service deploy and run
-# normally on mainnet; mm-bot is the only one that needs the faucet.
+# prod is a distinct testnet deployment from staging; this config mirrors
+# config.staging.toml so the bot makes markets identically against the prod
+# contract. Requires the options/prod/mm-bot secret (sui_key + quote_key).
 
-network            = "mainnet"
+network            = "testnet"
 
 quoting_url        = "ws://quoting:9002/"
 
 signing_scheme     = "ed25519"
 
-# Replace these with the real mainnet pair(s) you intend to make markets on.
-underlying_symbols = ["WBTC"]
-settlement_symbol  = "USDC"
+underlying_symbols = ["TBTC", "TDEEP", "TWAL"]
+settlement_symbol  = "TUSDC"
 
 rate               = 0.05
 quote_ttl_ms       = 30_000
@@ -28,13 +20,14 @@ ask_markup_bps     = 100
 bid_markdown_bps   = 100
 
 roles = ["trader_mm", "writer_mm"]
+bulk_view_enabled = true
 
-# Mainnet: no auto-bootstrap and no faucet-based replenish. Pre-fund the
-# Account (settlement + underlying) out-of-band; keep these at 0 so the bot
-# never reaches for a faucet that doesn't exist on mainnet.
-bootstrap_settlement_amount = 0
-bootstrap_underlying_amount = 0
-underlying_replenish_threshold = 0
+bootstrap_settlement_amount = 1_000_000_000_000
+bootstrap_underlying_amount = 100_000_000_000
+
+underlying_replenish_threshold    = 20_000_000_000
+underlying_replenish_amount       = 100_000_000_000
+underlying_replenish_interval_secs = 60
 
 [pyth]
 hermes_url             = "https://hermes.pyth.network"
@@ -47,18 +40,28 @@ bootstrap_samples      = 24
 bootstrap_interval_secs = 3_600
 fallback_vol           = 0.6
 
-# DeepBook quoting — parity with staging (mm-bot is not in the prod compose
-# yet; see the faucet warning above, this section is dormant until then).
+# DeepBook quoting (SO-158): rest two-sided limit orders on every tradeable
+# bucket pool of the configured pair. The bot finds (or creates+registers)
+# its BalanceManager on first run and logs the id — pin it here afterwards
+# to skip the event scan at boot:
+#   balance_manager_id = "0x…"
 [deepbook]
 enabled             = true
-quote_interval_secs = 30
+# SO-173: refresh on-chain quotes once a day, and place every pool's quotes in
+# one (chunked) tx. order_lifetime matches the cadence, so a missed daily
+# refresh simply lets the orders self-expire.
+quote_interval_secs = 86_400
+order_lifetime_secs = 86_400
+max_pools_per_tx    = 12
 max_quote_age_secs  = 120
 requote_drift_bps   = 50
 expiry_cutoff_secs  = 3600
-order_lifetime_secs = 600
-# Bid-side floor when quote_full_inventory is on.
+# Per-side size in call-coin atomic units (8-dec TBTC calls: 0.01 / side).
+# With quote_full_inventory on, this is the bid-side floor instead.
 quote_size          = 1_000_000
+# Demo mode: rest the bot's ENTIRE call-coin inventory as the ask, bid
+# mirrored to the same quantity (floored at quote_size).
 quote_full_inventory = true
-# BM settlement top-up chunk, atomic (1,000 USDC).
+# BM settlement top-up chunk, atomic (1,000 TUSDC).
 tusdc_deposit_chunk = 1_000_000_000
 gas_budget          = 200_000_000

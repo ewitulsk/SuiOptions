@@ -1,27 +1,65 @@
 # option-scheduler config — prod env (Sui testnet).
 # Chain-side ids (package, AdminCap, deployer address, token coin types,
-# pyth feed ids) come from `deployments.json::prod`.
-#
-# Pairs / cadence intentionally left empty until the prod mm-bot bootstrap
-# is wired up — the scheduler would otherwise create bucket families that
-# no MM is around to quote on. Keep the deploy wiring in place but the
-# [[pairs]] list empty so the binary boots and exits cleanly with "no
-# pairs configured" at startup.
+# pyth feed ids) come from `deployments.json::prod`. Mirrors
+# config.staging.toml so a prod redeploy rolls the same bucket families.
 
+# GraphQL endpoint of the indexer inside the compose stack.
 indexer_graphql_url       = "http://indexer:9002/graphql"
+
 tick_secs         = 60
-roll_threshold_ms = 604_800_000
+roll_threshold_ms = 604_800_000   # 1 week
 
 # Scheduler rolls DB (mandatory). Single source of truth for which
 # (pair, expiry) slots have been rolled; its partial UNIQUE index is the
 # hard guard against duplicate bucket creation. The scheduler fails fast
-# at boot if this is unreachable. (With no [[pairs]] the binary exits at
-# the "no pairs configured" check before connecting, so the prod DB need
-# not exist until pairs are enabled.) ${DB_PASSWORD}/${DB_HOST} are
-# injected by the compose env and expanded at load time.
+# at boot if this is unreachable. ${DB_PASSWORD}/${DB_HOST} are injected
+# by the compose env and expanded at load time.
 scheduler_database_url = "postgresql://scheduler_prod:${DB_PASSWORD}@${DB_HOST}:5432/scheduler_prod"
+reconciler_safety_margin  = 100
+reconciler_interval_secs  = 30
 
 [pyth]
 hermes_url = "https://hermes.pyth.network"
 
-# No [[pairs]] entries — see header.
+[[pairs]]
+underlying          = "TBTC"
+settlement          = "TUSDC"
+expiry_interval_ms  = 604_800_000
+strikes_below       = 2
+strikes_above       = 2
+interval_pct        = 5.0
+
+  [pairs.spot]
+  source             = "pyth"
+  max_publish_lag_ms = 30_000
+  max_conf_bps       = 100
+
+[[pairs]]
+underlying          = "TDEEP"
+settlement          = "TUSDC"
+expiry_interval_ms  = 604_800_000
+strikes_below       = 2
+strikes_above       = 2
+interval_pct        = 10.0
+
+  # DEEP/USD cross via Pyth Hermes. Both legs read their `pythFeedId` from
+  # deployments.json::prod.token_info (TDEEP = DEEP/USD, TUSDC = USDC/USD).
+  [pairs.spot]
+  source             = "pyth"
+  max_publish_lag_ms = 30_000   # decline a roll on prices > 30s stale
+  max_conf_bps       = 100      # decline a roll if conf/price > 1%
+
+[[pairs]]
+underlying          = "TWAL"
+settlement          = "TUSDC"
+expiry_interval_ms  = 604_800_000
+strikes_below       = 2
+strikes_above       = 2
+interval_pct        = 10.0
+
+  # WAL/USD cross via Pyth Hermes. Both legs read their `pythFeedId` from
+  # deployments.json::prod.token_info (TWAL = WAL/USD, TUSDC = USDC/USD).
+  [pairs.spot]
+  source             = "pyth"
+  max_publish_lag_ms = 30_000   # decline a roll on prices > 30s stale
+  max_conf_bps       = 100      # decline a roll if conf/price > 1%

@@ -9,8 +9,10 @@
 #   3. Upload deployment/ec2/wipe-provision-db.sh to S3 (deploy-bundles/).
 #   4. Over SSM on the EC2 host: stop the service → run the script → start it.
 #
-# PRODUCTION IS EXPLICITLY BLOCKED — the choice list offers only staging,
-# and the remote script also guards at runtime.
+# prod is a selectable target but GATED: running it requires typing the env
+# name into `confirm` (it wipes the prod DB, so no accidental dropdown picks).
+# A real-money mainnet/production deployment is still hard-blocked here and in
+# the remote script.
 
 name: Wipe & Provision Service DB
 
@@ -31,6 +33,12 @@ on:
         type: choice
         options:
           - staging
+          - prod
+      confirm:
+        description: "Type the env name to confirm (required for prod — it WIPES the DB)."
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -55,9 +63,15 @@ jobs:
         env:
           ENV: ${{ inputs.environment }}
           SERVICE: ${{ inputs.service }}
+          CONFIRM: ${{ inputs.confirm }}
         run: |
-          if [ "$ENV" = "prod" ] || [ "$ENV" = "production" ] || [ "$ENV" = "mainnet" ]; then
-            echo "::error::REFUSING to touch production"
+          if [ "$ENV" = "production" ] || [ "$ENV" = "mainnet" ]; then
+            echo "::error::REFUSING to touch a mainnet/production deployment"
+            exit 1
+          fi
+          # prod wipes a live DB — require an explicit typed confirmation.
+          if [ "$ENV" = "prod" ] && [ "$CONFIRM" != "prod" ]; then
+            echo "::error::prod requires typing 'prod' into the confirm input"
             exit 1
           fi
           case "$SERVICE" in
@@ -132,7 +146,7 @@ jobs:
             {
               commands: [
                 "set -eu",
-                "if [ \"\($env)\" = \"prod\" ] || [ \"\($env)\" = \"production\" ]; then echo \"FATAL: refusing prod\"; exit 1; fi",
+                "if [ \"\($env)\" = \"production\" ] || [ \"\($env)\" = \"mainnet\" ]; then echo \"FATAL: refusing mainnet/production\"; exit 1; fi",
                 "cd /opt/options/\($env)",
                 "COMPOSE_FILE=\"docker-compose.\($env).yml\"",
 
