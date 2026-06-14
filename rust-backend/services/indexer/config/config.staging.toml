@@ -15,4 +15,4 @@ database_url            = "postgresql://indexer_staging:${DB_PASSWORD}@${DB_HOST
 db_pool_size            = 8
 
 # Auto-set by redeploy-contract workflow.
-start_checkpoint = 347445148
+start_checkpoint = 348222716
