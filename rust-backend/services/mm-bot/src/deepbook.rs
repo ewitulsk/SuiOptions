@@ -119,10 +119,15 @@ pub struct DeepBookQuoterConfig {
     /// quoting so the bids can mirror the asks. Disable for a market maker
     /// that pre-funds its wallet out-of-band.
     pub settlement_topup_enabled: bool,
-    /// Buffer added to the summed bid notional when sourcing settlement —
-    /// covers bid lot/tick rounding and the placement's settlement-side fee
-    /// headroom (a full-inventory ask deposit alone leaves no slack for fees).
-    pub settlement_topup_buffer_bps: u64,
+    /// Maker-fee + rounding headroom reserved on every resting order, in bps.
+    /// DeepBook withdraws `size + maker_fee` from the BalanceManager when an
+    /// order rests (the fee is charged in the *input* coin — base for an ask,
+    /// quote for a bid — because we place with `pay_with_deep=false` on
+    /// non-whitelisted pools), so funding the BM with exactly `size` aborts
+    /// `EBalanceManagerBalanceTooLow`. Applied two ways: the ask is sized to
+    /// leave this fraction of inventory unrested in the BM, and the bid's BM
+    /// deposit (and the wallet top-up that sources it) is grossed up by it.
+    pub fee_headroom_bps: u64,
     /// Max pools packed into one refresh PTB before spilling into another tx
     /// ("all prices at once, or until we hit max tx size").
     pub max_pools_per_tx: usize,
@@ -148,7 +153,7 @@ impl Default for DeepBookQuoterConfig {
             quote_full_inventory: false,
             tusdc_deposit_chunk: default_tusdc_deposit_chunk(),
             settlement_topup_enabled: true,
-            settlement_topup_buffer_bps: 100,
+            fee_headroom_bps: 100,
             max_pools_per_tx: default_max_pools_per_tx(),
             inventory_poll_secs: default_inventory_poll_secs(),
             gas_budget: 200_000_000,
@@ -238,6 +243,15 @@ fn size_targets(cfg: &DeepBookQuoterConfig, call_inventory: u64) -> (u64, u64) {
     } else {
         (cfg.quote_size, cfg.quote_size)
     }
+}
+
+/// The most of `inventory` we can rest while leaving `bps` of it in the BM as
+/// maker-fee headroom. DeepBook withdraws `size + maker_fee` (fee in the input
+/// coin under `pay_with_deep=false`), so resting the full balance leaves
+/// nothing for the fee and aborts `EBalanceManagerBalanceTooLow`.
+fn reserve_fee_headroom(inventory: u64, bps: u64) -> u64 {
+    let keep = 10_000u128.saturating_sub(bps as u128);
+    ((inventory as u128).saturating_mul(keep) / 10_000) as u64
 }
 
 fn now_ms() -> u64 {
@@ -597,7 +611,15 @@ async fn cycle(
         if wallet_base > 0 {
             *deposits.entry(b.call_coin_type.clone()).or_default() += wallet_base;
         }
-        let ask_qty = (ask_target.min(ask_inventory) / lot) * lot;
+        // We deposit the whole inventory but rest a hair less, leaving
+        // `fee_headroom_bps` of it in the BM to cover the input-coin maker fee
+        // DeepBook withdraws on top of the order size — otherwise
+        // place_limit_order aborts EBalanceManagerBalanceTooLow (we can't
+        // deposit more base than we hold, so the ask must be the side that
+        // shrinks). A no-op for a fixed `quote_size` ask, which is already far
+        // below inventory.
+        let ask_ceiling = reserve_fee_headroom(ask_inventory, p.cfg.fee_headroom_bps);
+        let ask_qty = (ask_target.min(ask_ceiling) / lot) * lot;
 
         // Bid demand (mirrors the ask in full-inventory mode); summed so we can
         // source the settlement to fund it before placing.
@@ -626,7 +648,7 @@ async fn cycle(
     // a source that can't supply just leaves the budget where it is.
     if p.cfg.settlement_topup_enabled && desired_bid_notional > 0 {
         let buffer = desired_bid_notional
-            .saturating_mul(p.cfg.settlement_topup_buffer_bps as u128)
+            .saturating_mul(p.cfg.fee_headroom_bps as u128)
             / 10_000;
         let target = desired_bid_notional.saturating_add(buffer).min(u64::MAX as u128) as u64;
         p.liquidity
@@ -698,9 +720,15 @@ async fn cycle(
         ));
     }
 
-    // Settlement deposit = total bid notional beyond what the BM already holds,
-    // capped by the wallet (bid sizes were already clamped to this budget).
-    let quote_deposit = quote_used.saturating_sub(bm_quote as u128).min(wallet_quote as u128) as u64;
+    // Settlement deposit = total bid notional (grossed up by the maker-fee
+    // headroom DeepBook withdraws on top of it) beyond what the BM already
+    // holds, capped by the wallet. The top-up above sourced this buffer into
+    // the wallet; depositing it — rather than leaving it stranded there — is
+    // what gives the resting bid the slack its `withdraw_with_proof` needs.
+    let quote_target = quote_used
+        .saturating_add(quote_used.saturating_mul(p.cfg.fee_headroom_bps as u128) / 10_000);
+    let quote_deposit =
+        quote_target.saturating_sub(bm_quote as u128).min(wallet_quote as u128) as u64;
     if quote_deposit > 0 {
         deposits.insert(p.settlement_coin_type.clone(), quote_deposit);
     }
@@ -793,5 +821,29 @@ mod tests {
         let bid = (((bid_unit * 1e9).floor() as u64) / tick) * tick;
         assert_eq!(bid, 12_300_000); // rounded DOWN to tick
         assert!(ask >= bid);
+    }
+
+    #[test]
+    fn reserve_fee_headroom_leaves_slack_for_the_maker_fee() {
+        // The whole point: rest strictly less than what's deposited, so the BM
+        // still holds the order size + DeepBook's input-coin maker fee.
+        // Default 100 bps reserve dwarfs the ~6.25 bps (5 bps maker × 1.25
+        // non-DEEP penalty) DeepBook actually withdraws.
+        let inventory = 1_000_000_000u64;
+        let reserved = reserve_fee_headroom(inventory, 100);
+        assert_eq!(reserved, 990_000_000); // 1% kept back
+        let maker_fee_bps = 6.25_f64;
+        let fee_on_order = (reserved as f64 * maker_fee_bps / 10_000.0).ceil() as u64;
+        // order + fee must fit inside the deposited inventory.
+        assert!(reserved + fee_on_order <= inventory);
+        // Resting the full inventory (the old behavior) would NOT fit.
+        assert!(inventory + (inventory as f64 * maker_fee_bps / 10_000.0) as u64 > inventory);
+    }
+
+    #[test]
+    fn reserve_fee_headroom_is_noop_at_zero_and_saturates() {
+        assert_eq!(reserve_fee_headroom(1_000_000, 0), 1_000_000);
+        // A pathological >100% reserve can't underflow into a huge size.
+        assert_eq!(reserve_fee_headroom(1_000_000, 20_000), 0);
     }
 }
