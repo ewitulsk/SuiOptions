@@ -52,6 +52,18 @@ pub struct VaultDto {
     /// two rounds exist.
     pub apy: Option<f64>,
     pub deposits_paused: bool,
+    /// Live round phase, derived from `current_bucket` + the current round's
+    /// expiry: `active` (selling/holding) vs `settling` (between rounds /
+    /// past expiry, redeeming). No mock — computed from indexed state.
+    pub phase: String,
+    // Active VaultConfig (consumer-facing subset), served in display units.
+    // `None` until the config-carrying events are indexed for this vault.
+    pub mgmt_fee_pct: Option<f64>,
+    pub perf_fee_pct: Option<f64>,
+    pub min_strike_over_spot_pct: Option<f64>,
+    pub max_strike_over_spot_pct: Option<f64>,
+    pub round_ms: Option<i64>,
+    pub selling_window_ms: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -399,6 +411,31 @@ fn vault_dto(state: &AppState, v: &Vault, rounds: &[VaultRound]) -> VaultDto {
         pending_deposits_raw: v.pending_deposits.to_string(),
         apy: apy_from_rounds(rounds),
         deposits_paused: v.deposits_paused,
+        phase: vault_phase(v, rounds),
+        mgmt_fee_pct: v.mgmt_fee_bps_annual.map(|b| b as f64 / 100.0),
+        perf_fee_pct: v.perf_fee_bps.map(|b| b as f64 / 100.0),
+        min_strike_over_spot_pct: v.min_strike_bps_over_spot.map(|b| b as f64 / 100.0),
+        max_strike_over_spot_pct: v.max_strike_bps_over_spot.map(|b| b as f64 / 100.0),
+        round_ms: v.round_ms.map(|m| m as i64),
+        selling_window_ms: v.selling_window_ms.map(|m| m as i64),
+    }
+}
+
+/// Live round phase from indexed state (no mock): a selected bucket whose
+/// current round hasn't passed expiry is `active` (selling/holding); otherwise
+/// the vault is `settling` (between rounds, or past expiry redeeming).
+fn vault_phase(v: &Vault, rounds: &[VaultRound]) -> String {
+    if v.current_bucket.is_none() {
+        return "settling".to_string();
+    }
+    let expiry = rounds
+        .iter()
+        .find(|r| r.round == v.round)
+        .and_then(|r| r.expiry_ms);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    match expiry {
+        Some(e) if now_ms >= e as i64 => "settling".to_string(),
+        _ => "active".to_string(),
     }
 }
 

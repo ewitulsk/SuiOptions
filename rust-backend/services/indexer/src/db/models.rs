@@ -116,6 +116,7 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::VaultFeesCharged(_) => "VaultFeesCharged",
         ChainEvent::VaultRoundFinalized(_) => "VaultRoundFinalized",
         ChainEvent::VaultConfigUpdated(_) => "VaultConfigUpdated",
+        ChainEvent::VaultConfigApplied(_) => "VaultConfigApplied",
         ChainEvent::VaultDepositsPaused(_) => "VaultDepositsPaused",
     }
 }
@@ -395,6 +396,12 @@ pub struct VaultRow {
     pub pending_deposits: BigDecimal,
     pub deposits_paused: bool,
     pub updated_at_seq: i64,
+    pub mgmt_fee_bps_annual: Option<i64>,
+    pub perf_fee_bps: Option<i64>,
+    pub round_ms: Option<i64>,
+    pub selling_window_ms: Option<i64>,
+    pub min_strike_bps_over_spot: Option<i64>,
+    pub max_strike_bps_over_spot: Option<i64>,
 }
 
 impl VaultRow {
@@ -418,6 +425,12 @@ impl VaultRow {
                 total_shares: bigdecimal_to_u64(&self.total_shares)?,
                 pending_deposits: bigdecimal_to_u64(&self.pending_deposits)?,
                 deposits_paused: self.deposits_paused,
+                mgmt_fee_bps_annual: self.mgmt_fee_bps_annual.map(|x| x as u64),
+                perf_fee_bps: self.perf_fee_bps.map(|x| x as u64),
+                round_ms: self.round_ms.map(|x| x as u64),
+                selling_window_ms: self.selling_window_ms.map(|x| x as u64),
+                min_strike_bps_over_spot: self.min_strike_bps_over_spot.map(|x| x as u64),
+                max_strike_bps_over_spot: self.max_strike_bps_over_spot.map(|x| x as u64),
             },
         ))
     }

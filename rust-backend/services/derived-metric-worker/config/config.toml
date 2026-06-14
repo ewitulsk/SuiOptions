@@ -18,8 +18,3 @@ vol_window_days = 30
 [model]
 forecast_horizon = 4
 delta_target     = 0.10
-# round_ms is derived from observed finalize spacing; this is the fallback.
-default_round_ms = 604_800_000
-# MOCK until the on-chain VaultConfig is served by an endpoint:
-mgmt_fee_bps_annual = 200
-perf_fee_bps        = 1000

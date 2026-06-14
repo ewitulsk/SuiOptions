@@ -359,6 +359,39 @@ pub struct VaultCreated {
     pub underlying_type: AssetType,
     pub settlement_type: AssetType,
     pub share_type: AssetType,
+    // Genesis config snapshot (consumer-facing subset). See `VaultConfigApplied`.
+    #[serde(with = "u64_string")]
+    pub mgmt_fee_bps_annual: u64,
+    #[serde(with = "u64_string")]
+    pub perf_fee_bps: u64,
+    #[serde(with = "u64_string")]
+    pub round_ms: u64,
+    #[serde(with = "u64_string")]
+    pub selling_window_ms: u64,
+    #[serde(with = "u64_string")]
+    pub min_strike_bps_over_spot: u64,
+    #[serde(with = "u64_string")]
+    pub max_strike_bps_over_spot: u64,
+}
+
+/// Active config snapshot at a finalize boundary (`VaultConfigApplied`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultConfigApplied {
+    pub vault_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub round: u64,
+    #[serde(with = "u64_string")]
+    pub mgmt_fee_bps_annual: u64,
+    #[serde(with = "u64_string")]
+    pub perf_fee_bps: u64,
+    #[serde(with = "u64_string")]
+    pub round_ms: u64,
+    #[serde(with = "u64_string")]
+    pub selling_window_ms: u64,
+    #[serde(with = "u64_string")]
+    pub min_strike_bps_over_spot: u64,
+    #[serde(with = "u64_string")]
+    pub max_strike_bps_over_spot: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -541,6 +574,7 @@ pub enum ChainEvent {
     VaultFeesCharged(VaultFeesCharged),
     VaultRoundFinalized(VaultRoundFinalized),
     VaultConfigUpdated(VaultConfigUpdated),
+    VaultConfigApplied(VaultConfigApplied),
     VaultDepositsPaused(VaultDepositsPaused),
 }
 

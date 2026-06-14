@@ -69,28 +69,19 @@ impl Default for PythConfig {
 }
 
 /// Pricing/forecast knobs. The fee + round-cadence values are TEMPORARY
-/// defaults: they live in the on-chain `VaultConfig`, which has no endpoint
-/// yet (see the api-service vault-config gap). When that endpoint ships, read
-/// these per-vault instead of from config. `round_ms` is already derived from
-/// the observed finalize spacing when a vault has ≥2 finalized rounds; this is
-/// only the fallback.
+/// Worker-side model tuning. Note: fees, strike band, and round cadence are
+/// NOT here — they are the vault's on-chain `VaultConfig`, read per-vault from
+/// the served config (a vault whose config isn't indexed yet is skipped, never
+/// guessed). These two are genuine worker knobs, not vault parameters.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelConfig {
     /// Number of future rounds to forecast (Tier 2 horizon, K).
     #[serde(default = "default_horizon")]
     pub forecast_horizon: u32,
-    /// Keeper's delta-target snap (0.10 = 10-delta).
+    /// Strike the Tier-2 forecast prices, as a call delta (the keeper targets
+    /// ~0.10-delta per doc 04). A model assumption, not vault config.
     #[serde(default = "default_delta")]
     pub delta_target: f64,
-    /// Fallback round length when finalize spacing can't be derived.
-    #[serde(default = "default_round_ms")]
-    pub default_round_ms: u64,
-    /// MOCK until the VaultConfig endpoint exists: annualized management fee.
-    #[serde(default = "default_mgmt_bps")]
-    pub mgmt_fee_bps_annual: u64,
-    /// MOCK until the VaultConfig endpoint exists: performance fee on premium.
-    #[serde(default = "default_perf_bps")]
-    pub perf_fee_bps: u64,
 }
 
 impl Default for ModelConfig {
@@ -98,9 +89,6 @@ impl Default for ModelConfig {
         Self {
             forecast_horizon: default_horizon(),
             delta_target: default_delta(),
-            default_round_ms: default_round_ms(),
-            mgmt_fee_bps_annual: default_mgmt_bps(),
-            perf_fee_bps: default_perf_bps(),
         }
     }
 }
@@ -128,15 +116,6 @@ fn default_horizon() -> u32 {
 }
 fn default_delta() -> f64 {
     0.10
-}
-fn default_round_ms() -> u64 {
-    604_800_000
-}
-fn default_mgmt_bps() -> u64 {
-    200
-}
-fn default_perf_bps() -> u64 {
-    1000
 }
 
 impl Config {

@@ -2031,11 +2031,6 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 }
 [data-theme="aqua"] .vault-card__body { font-size: 14px; color: var(--aqua-ink-2); }
 [data-theme="aqua"] .vault-card__foot { margin-top: 12px; font-size: 12px; }
-[data-theme="aqua"] .vault-mock {
-  font-style: normal; font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
-  background: rgba(225,93,107,0.14); color: var(--aqua-down, #e15d6b);
-  border-radius: 4px; padding: 1px 5px; margin-left: 6px; font-weight: 600;
-}
 
 [data-theme="aqua"] .vault-prose p { margin: 0 0 10px; line-height: 1.5; }
 [data-theme="aqua"] .vault-prose ol { margin: 0 0 10px; padding-left: 18px; line-height: 1.6; }

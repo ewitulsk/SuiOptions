@@ -19,10 +19,8 @@ vol_window_days = 30
 max_publish_lag_ms = 30_000
 max_conf_bps       = 100
 
+# Fees, strike band, and round cadence are NOT here — they're the vault's
+# on-chain VaultConfig, read per-vault from the served config.
 [model]
 forecast_horizon = 4
 delta_target     = 0.10
-default_round_ms = 604_800_000
-# MOCK until the on-chain VaultConfig is served by an endpoint:
-mgmt_fee_bps_annual = 200
-perf_fee_bps        = 1000

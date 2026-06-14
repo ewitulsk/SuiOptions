@@ -194,6 +194,30 @@ public struct VaultCreated has copy, drop {
     underlying_type: TypeName,
     settlement_type: TypeName,
     share_type: TypeName,
+    // Active config at genesis (the consumer-facing subset; see
+    // `VaultConfigApplied` for updates). Off-chain services read these so
+    // they never hard-code fees/strike-band/cadence.
+    mgmt_fee_bps_annual: u64,
+    perf_fee_bps: u64,
+    round_ms: u64,
+    selling_window_ms: u64,
+    min_strike_bps_over_spot: u64,
+    max_strike_bps_over_spot: u64,
+}
+
+/// The active config snapshot at a finalize boundary. Emitted every finalize
+/// (config is pending-then-applied, so this records what the round actually
+/// ran with — robust even if `VaultCreated` was missed). Indexer upserts the
+/// current snapshot from these.
+public struct VaultConfigApplied has copy, drop {
+    vault_id: ID,
+    round: u64,
+    mgmt_fee_bps_annual: u64,
+    perf_fee_bps: u64,
+    round_ms: u64,
+    selling_window_ms: u64,
+    min_strike_bps_over_spot: u64,
+    max_strike_bps_over_spot: u64,
 }
 
 public struct VaultDeposit has copy, drop {
@@ -565,8 +589,47 @@ public(package) fun emit_vault_created(
     underlying_type: TypeName,
     settlement_type: TypeName,
     share_type: TypeName,
+    mgmt_fee_bps_annual: u64,
+    perf_fee_bps: u64,
+    round_ms: u64,
+    selling_window_ms: u64,
+    min_strike_bps_over_spot: u64,
+    max_strike_bps_over_spot: u64,
 ) {
-    event::emit(VaultCreated { vault_id, underlying_type, settlement_type, share_type });
+    event::emit(VaultCreated {
+        vault_id,
+        underlying_type,
+        settlement_type,
+        share_type,
+        mgmt_fee_bps_annual,
+        perf_fee_bps,
+        round_ms,
+        selling_window_ms,
+        min_strike_bps_over_spot,
+        max_strike_bps_over_spot,
+    });
+}
+
+public(package) fun emit_vault_config_applied(
+    vault_id: ID,
+    round: u64,
+    mgmt_fee_bps_annual: u64,
+    perf_fee_bps: u64,
+    round_ms: u64,
+    selling_window_ms: u64,
+    min_strike_bps_over_spot: u64,
+    max_strike_bps_over_spot: u64,
+) {
+    event::emit(VaultConfigApplied {
+        vault_id,
+        round,
+        mgmt_fee_bps_annual,
+        perf_fee_bps,
+        round_ms,
+        selling_window_ms,
+        min_strike_bps_over_spot,
+        max_strike_bps_over_spot,
+    });
 }
 
 public(package) fun emit_vault_deposit(vault_id: ID, depositor: address, round: u64, amount: u64) {

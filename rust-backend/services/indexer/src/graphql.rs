@@ -274,6 +274,14 @@ pub struct VaultGql {
     pub total_shares_raw: String,
     pub pending_deposits_raw: String,
     pub deposits_paused: bool,
+    // Active VaultConfig snapshot (consumer-facing subset). Null until the
+    // config-carrying events have been indexed for this vault.
+    pub mgmt_fee_bps_annual: Option<String>,
+    pub perf_fee_bps: Option<String>,
+    pub round_ms: Option<String>,
+    pub selling_window_ms: Option<String>,
+    pub min_strike_bps_over_spot: Option<String>,
+    pub max_strike_bps_over_spot: Option<String>,
 }
 
 impl From<VaultRow> for VaultGql {
@@ -289,6 +297,12 @@ impl From<VaultRow> for VaultGql {
             total_shares_raw: v.total_shares.to_string(),
             pending_deposits_raw: v.pending_deposits.to_string(),
             deposits_paused: v.deposits_paused,
+            mgmt_fee_bps_annual: v.mgmt_fee_bps_annual.map(|x| x.to_string()),
+            perf_fee_bps: v.perf_fee_bps.map(|x| x.to_string()),
+            round_ms: v.round_ms.map(|x| x.to_string()),
+            selling_window_ms: v.selling_window_ms.map(|x| x.to_string()),
+            min_strike_bps_over_spot: v.min_strike_bps_over_spot.map(|x| x.to_string()),
+            max_strike_bps_over_spot: v.max_strike_bps_over_spot.map(|x| x.to_string()),
         }
     }
 }

@@ -5,9 +5,9 @@
 // (deposit / claim / initiate+complete withdraw / cancel) through
 // `useVaultActions`, which routes to the wallet or session-login custody path.
 //
-// Several "informed-decision" fields have NO endpoint yet (fees, strike band,
-// round cadence, live phase). They are rendered from MOCK constants, each
-// flagged `MOCK:` inline — see the "endpoints to build" note in the PR body.
+// All decision-support fields (fees, strike band, round cadence, live phase)
+// are served from the vault's on-chain VaultConfig via api-service — no mocks.
+// Fields render "—" until the config-carrying events are indexed for a vault.
 
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -21,19 +21,6 @@ import { readCustodyObjectIds } from "../session/accounts";
 import { VaultApyChart } from "../components/VaultApyChart";
 import { Toast } from "../components/Toast";
 import { formatPrice } from "../format";
-
-// ─────────────────────── MOCK config (no endpoint yet) ───────────────────────
-// These come from the on-chain `VaultConfig` (contracts/sources/vault.move),
-// which the api-service does NOT serve. Hard-coded here so the page reads as a
-// real product; replace with a `GET /vaults/:id/config` payload when it ships.
-const MOCK_CONFIG = {
-  mgmtFeePct: 2.0, // MOCK: VaultConfig.mgmt_fee_bps_annual (annualized management fee)
-  perfFeePct: 10.0, // MOCK: VaultConfig.perf_fee_bps (performance fee on premium)
-  minStrikeOverSpotPct: 3, // MOCK: VaultConfig.min_strike_bps_over_spot
-  maxStrikeOverSpotPct: 60, // MOCK: VaultConfig.max_strike_bps_over_spot
-  roundCadence: "Weekly", // MOCK: derived from VaultConfig.round_ms
-  capacityUnderlying: null as number | null, // MOCK: vaults have no hard cap on-chain; null = uncapped
-};
 
 function scaled(raw: string | null | undefined, decimals: number | null): number | null {
   if (raw == null || decimals == null) return null;
@@ -54,6 +41,22 @@ function fmtPct(x: number | null | undefined, digits = 2): string {
 function fmtDate(ms: number | null | undefined): string {
   if (ms == null) return "—";
   return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+/** Human cadence from a round length in ms (e.g. 604800000 → "Weekly"). */
+function fmtCadence(ms: number | null | undefined): string {
+  if (ms == null || ms <= 0) return "—";
+  const days = ms / 86_400_000;
+  if (Math.abs(days - 7) < 0.1) return "Weekly";
+  if (Math.abs(days - 1) < 0.1) return "Daily";
+  if (Math.abs(days - 14) < 0.1) return "Biweekly";
+  if (Math.abs(days - 30) < 1) return "Monthly";
+  return days >= 1 ? `${Math.round(days)}d` : `${Math.round(ms / 3_600_000)}h`;
+}
+
+function fmtPctRaw(x: number | null | undefined, digits = 1): string {
+  if (x == null || !Number.isFinite(x)) return "—";
+  return `${x.toFixed(digits)}%`;
 }
 
 export function VaultScreen() {
@@ -218,9 +221,9 @@ function StrategyCard({ vault }: { vault: Vault }) {
 
 function CurrentRoundCard({ vault, rounds }: { vault: Vault; rounds: VaultRound[] }) {
   const current = rounds.find((r) => r.round === vault.round);
-  // MOCK: the api-service exposes no live phase flag. Heuristic only — a
-  // selected bucket means the round is actively selling/holding calls.
-  const phase = vault.current_bucket ? "Active — selling / holding" : "Settling — between rounds";
+  // Live phase is served by api-service (derived from indexed state).
+  const phase =
+    vault.phase === "active" ? "Active — selling / holding" : "Settling — between rounds";
   return (
     <div className="vault-card">
       <div className="vault-card__head">
@@ -230,7 +233,7 @@ function CurrentRoundCard({ vault, rounds }: { vault: Vault; rounds: VaultRound[
       <div className="vault-kv">
         <div className="vault-kv__row">
           <span>Status</span>
-          <span>{phase} <em className="vault-mock">mock</em></span>
+          <span>{phase}</span>
         </div>
         <div className="vault-kv__row">
           <span>Strike</span>
@@ -294,37 +297,42 @@ function TrackRecord({ vault, rounds }: { vault: Vault; rounds: VaultRound[] }) 
 }
 
 function ParamsCard({ vault }: { vault: Vault }) {
+  const band =
+    vault.min_strike_over_spot_pct != null && vault.max_strike_over_spot_pct != null
+      ? `+${fmtPctRaw(vault.min_strike_over_spot_pct)} to +${fmtPctRaw(vault.max_strike_over_spot_pct)} over spot`
+      : "—";
   return (
     <div className="vault-card">
       <div className="vault-card__head">
         <span className="panel__head-dot" />
-        Parameters & fees <em className="vault-mock">mock</em>
+        Parameters & fees
       </div>
       <div className="vault-kv">
         <div className="vault-kv__row">
           <span>Management fee</span>
-          <span>{MOCK_CONFIG.mgmtFeePct.toFixed(1)}% / yr</span>
+          <span>{vault.mgmt_fee_pct != null ? `${fmtPctRaw(vault.mgmt_fee_pct)} / yr` : "—"}</span>
         </div>
         <div className="vault-kv__row">
           <span>Performance fee</span>
-          <span>{MOCK_CONFIG.perfFeePct.toFixed(0)}% of premium</span>
+          <span>
+            {vault.perf_fee_pct != null ? `${fmtPctRaw(vault.perf_fee_pct, 0)} of premium` : "—"}
+          </span>
         </div>
         <div className="vault-kv__row">
           <span>Strike band</span>
-          <span>+{MOCK_CONFIG.minStrikeOverSpotPct}% to +{MOCK_CONFIG.maxStrikeOverSpotPct}% over spot</span>
+          <span>{band}</span>
         </div>
         <div className="vault-kv__row">
           <span>Round cadence</span>
-          <span>{MOCK_CONFIG.roundCadence}</span>
+          <span>{fmtCadence(vault.round_ms)}</span>
         </div>
         <div className="vault-kv__row">
           <span>Capacity</span>
-          <span>{MOCK_CONFIG.capacityUnderlying == null ? "Uncapped" : `${MOCK_CONFIG.capacityUnderlying} ${vault.underlying_symbol}`}</span>
+          <span>Uncapped</span>
         </div>
       </div>
       <div className="vault-card__foot vault-prose__muted">
-        These come from the on-chain <code>VaultConfig</code>, which has no endpoint yet — values
-        shown are placeholders.
+        From the vault's on-chain <code>VaultConfig</code>.
       </div>
     </div>
   );

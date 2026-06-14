@@ -184,11 +184,28 @@ async fn compute_vault(
         }
     };
 
+    // Fees come from the vault's served on-chain config — never guessed. A
+    // vault whose config hasn't been indexed yet is skipped (not faked).
+    let (Some(perf_bps), Some(mgmt_bps)) = (vault.perf_fee_bps, vault.mgmt_fee_bps_annual) else {
+        missing("config");
+        anyhow::bail!("vault config not indexed yet (no fees served)");
+    };
+
     let rounds = indexer.vault_rounds(vault.vault_id).await.context("vault rounds")?;
-    let round_ms = compute::median_round_ms(
-        rounds.iter().filter_map(|r| r.finalized_at_ms).collect(),
-    )
-    .unwrap_or(cfg.model.default_round_ms);
+    // Round length: prefer the served config, else derive from observed
+    // finalize spacing. Both are real; if neither exists, skip the vault.
+    let round_ms = match vault.round_ms {
+        Some(ms) if ms > 0 => ms,
+        _ => match compute::median_round_ms(
+            rounds.iter().filter_map(|r| r.finalized_at_ms).collect(),
+        ) {
+            Some(ms) => ms,
+            None => {
+                missing("round_ms");
+                anyhow::bail!("no round_ms (config absent and < 2 finalized rounds)");
+            }
+        },
+    };
 
     let current_expiry_ms = rounds
         .iter()
@@ -211,8 +228,8 @@ async fn compute_vault(
         current_expiry_ms,
         current_premium_underlying: premium_underlying,
         current_premium_confidence: confidence,
-        perf_fee: cfg.model.perf_fee_bps as f64 / 10_000.0,
-        mgmt_fee_annual: cfg.model.mgmt_fee_bps_annual as f64 / 10_000.0,
+        perf_fee: perf_bps as f64 / 10_000.0,
+        mgmt_fee_annual: mgmt_bps as f64 / 10_000.0,
         horizon: cfg.model.forecast_horizon,
         delta_target: cfg.model.delta_target,
     };

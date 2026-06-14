@@ -42,6 +42,17 @@ export type Vault = {
    *  finalized rounds exist. */
   apy: number | null;
   deposits_paused: boolean;
+  /** Live round phase, derived server-side from indexed state: "active"
+   *  (selling/holding) | "settling" (between rounds / past expiry). */
+  phase: string;
+  /** Active on-chain VaultConfig (consumer-facing subset), in display units.
+   *  `null` until the config-carrying events are indexed for this vault. */
+  mgmt_fee_pct: number | null;
+  perf_fee_pct: number | null;
+  min_strike_over_spot_pct: number | null;
+  max_strike_over_spot_pct: number | null;
+  round_ms: number | null;
+  selling_window_ms: number | null;
 };
 
 export type VaultsResponse = { vaults: Vault[] };
