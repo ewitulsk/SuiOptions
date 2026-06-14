@@ -23,6 +23,7 @@
 //! call token). `roles` in the TOML controls advertised roles to the
 //! quoting service.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -44,7 +45,7 @@ use protocol_types::SigningScheme;
 
 use pyth_client::{self as pyth, PriceCache, PriceFeedId, RollingVolBuffer};
 use api_service_client::ApiServiceClient;
-use token_info_client::TokenInfoClient;
+use token_info_client::{Snapshot, TokenInfoClient};
 use sui_tx::quote_signer::QuoteSigner;
 use sui_tx::sui_client::{Network, SuiClientWrapper};
 use sui_tx::tx::account::{account_balance_of, create_and_share_account, find_account};
@@ -82,14 +83,31 @@ struct BotConfig {
     #[serde(default = "default_scheme")]
     signing_scheme: SigningScheme,
 
-    /// Underlyings to make markets in. Each symbol is looked up in the
-    /// token-info catalog (coin type, decimals, `pythFeedId`) and quoted
-    /// against the shared `settlement_symbol`. The bot subscribes to every
-    /// underlying's Pyth feed, keeps a per-underlying vol buffer, and prices
-    /// each bucket against its own pair's spot. A bucket whose pair isn't in
-    /// this list is declined.
+    /// Explicit allowlist of underlyings to make markets in. Each symbol is
+    /// looked up in the token-info catalog (coin type, decimals, `pythFeedId`)
+    /// and quoted against the shared `settlement_symbol`.
+    ///
+    /// Empty (the default) ⇒ **derive mode**: the bot market-makes every
+    /// enabled token-info token that has a Pyth feed and isn't the settlement
+    /// asset, and a watcher restarts the bot to pick up newly-listed
+    /// underlyings (see `underlying_refresh_secs`). Non-empty ⇒ pin exactly
+    /// these and never auto-pick-up.
     #[serde(default = "default_underlying_symbols")]
     underlying_symbols: Vec<String>,
+
+    /// Tickers to never market-make, even in derive mode (e.g. stablecoins or
+    /// assets we list but don't quote). Case-insensitive. The settlement asset
+    /// is always excluded automatically.
+    #[serde(default)]
+    underlying_exclude: Vec<String>,
+
+    /// Derive mode only: how often to re-fetch token-info and check for a
+    /// newly-listed underlying. A new underlying confirmed across two
+    /// consecutive polls triggers a clean restart so boot rebuilds the market
+    /// set. Default 600s (10 min).
+    #[serde(default = "default_underlying_refresh_secs")]
+    underlying_refresh_secs: u64,
+
     #[serde(default = "default_settlement")]
     settlement_symbol: String,
 
@@ -220,7 +238,11 @@ fn default_scheme() -> SigningScheme {
 }
 
 fn default_underlying_symbols() -> Vec<String> {
-    vec!["TBTC".into()]
+    // Empty ⇒ derive the underlying set from token-info's enabled catalog.
+    Vec::new()
+}
+fn default_underlying_refresh_secs() -> u64 {
+    600
 }
 fn default_settlement() -> String {
     "TUSDC".into()
@@ -263,6 +285,89 @@ struct Market {
     vol_buf: Arc<RwLock<RollingVolBuffer>>,
 }
 
+/// Derive the underlying set from token-info: every enabled token that has a
+/// Pyth feed, excluding the settlement asset and any configured opt-outs.
+/// Sorted + deduped for stable logging and set comparison.
+fn derive_underlyings(snapshot: &Snapshot, settlement: &str, exclude: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = snapshot
+        .tokens()
+        .iter()
+        .filter(|t| t.enabled && t.pyth_feed_id.is_some())
+        .map(|t| t.ticker.clone())
+        .filter(|tk| !tk.eq_ignore_ascii_case(settlement))
+        .filter(|tk| !exclude.iter().any(|x| x.eq_ignore_ascii_case(tk)))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Derive mode only: poll token-info and cleanly restart the process when a new
+/// underlying is listed, so boot rebuilds the market set (the Pyth subscription
+/// and per-market tasks are fixed at boot, so a live add isn't possible).
+/// Debounced — a new underlying must appear on two consecutive polls before we
+/// restart, so a token-info blip never flaps the bot. Removals and fetch
+/// failures never trigger a restart.
+fn spawn_underlying_watcher(
+    token_info_url: String,
+    booted: HashSet<String>,
+    settlement: String,
+    exclude: Vec<String>,
+    interval_secs: u64,
+) {
+    tokio::spawn(async move {
+        let mut pending: HashSet<String> = HashSet::new();
+        let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs.max(1)));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // First tick fires immediately; skip it so we don't re-derive the set
+        // we just booted with.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let snapshot = match TokenInfoClient::new(&token_info_url).fetch().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %format!("{e:#}"),
+                        "underlying watcher: token-info fetch failed; keeping current markets"
+                    );
+                    pending.clear();
+                    continue;
+                }
+            };
+            let current: HashSet<String> = derive_underlyings(&snapshot, &settlement, &exclude)
+                .into_iter()
+                .collect();
+            // React to additions only — never restart on a removal or a blip
+            // that drops the set.
+            let new: HashSet<String> = current.difference(&booted).cloned().collect();
+            if new.is_empty() {
+                pending.clear();
+                continue;
+            }
+            let confirmed: Vec<String> = new.intersection(&pending).cloned().collect();
+            if !confirmed.is_empty() {
+                let mut names = confirmed;
+                names.sort();
+                tracing::warn!(
+                    new_underlyings = ?names,
+                    "new underlying(s) listed in token-info — restarting to make markets in them"
+                );
+                // Clean exit; the container restart policy reboots us and boot
+                // rebuilds the full market set + Pyth subscription.
+                std::process::exit(0);
+            }
+            let mut names: Vec<String> = new.iter().cloned().collect();
+            names.sort();
+            tracing::info!(
+                observed = ?names,
+                "underlying watcher: new underlying(s) seen; will restart if still present next poll"
+            );
+            pending = new;
+        }
+    });
+}
+
 // -- Main loop -----------------------------------------------------------
 
 #[tokio::main]
@@ -285,9 +390,27 @@ async fn main() -> Result<()> {
     // /tokens catalog lookup (coin type, decimals, pyth feed). This is the
     // source the pricing path reads from; the bootstrap path separately looks
     // up the test-token faucet via `snapshot.faucet_token(symbol)`.
-    if cfg.underlying_symbols.is_empty() {
-        anyhow::bail!("no underlying_symbols configured — nothing to make markets in");
+    //
+    // Underlying set: an explicit `underlying_symbols` allowlist, or — when
+    // empty — derived from token-info's enabled catalog (with a watcher that
+    // restarts the bot to pick up new listings).
+    let derive_mode = cfg.underlying_symbols.is_empty();
+    let underlyings = if derive_mode {
+        derive_underlyings(&snapshot, &cfg.settlement_symbol, &cfg.underlying_exclude)
+    } else {
+        cfg.underlying_symbols.clone()
+    };
+    if underlyings.is_empty() {
+        anyhow::bail!(
+            "no underlyings to make markets in ({})",
+            if derive_mode {
+                "token-info has no enabled, Pyth-fed, non-settlement tokens"
+            } else {
+                "underlying_symbols is empty"
+            }
+        );
     }
+    tracing::info!(?underlyings, derive_mode, "resolved underlying set");
     let settlement_spec = snapshot.token_spec(&cfg.settlement_symbol).with_context(|| {
         format!(
             "settlement symbol {} not in token-info catalog",
@@ -306,8 +429,8 @@ async fn main() -> Result<()> {
     let samples_per_year =
         (365.0 * 24.0 * 60.0 * 60.0 * 1000.0) / cfg.pyth.vol_sample_interval_ms as f64;
     let vol_window_ms = cfg.pyth.vol_window_hours.saturating_mul(3_600_000);
-    let mut markets: Vec<Market> = Vec::with_capacity(cfg.underlying_symbols.len());
-    for sym in &cfg.underlying_symbols {
+    let mut markets: Vec<Market> = Vec::with_capacity(underlyings.len());
+    for sym in &underlyings {
         let spec = snapshot
             .token_spec(sym)
             .with_context(|| format!("underlying symbol {sym} not in token-info catalog"))?;
@@ -358,8 +481,20 @@ async fn main() -> Result<()> {
     // advertise writer_mm and auto-replenish is enabled.
     if cfg.roles.contains(&MmRole::WriterMm) && cfg.underlying_replenish_threshold > 0 {
         let package = snapshot.package()?;
-        for sym in &cfg.underlying_symbols {
-            let underlying = snapshot.faucet_token(sym)?;
+        for sym in &underlyings {
+            // A derived underlying might not be a faucet/test token; skip
+            // auto-replenish for it rather than failing boot.
+            let underlying = match snapshot.faucet_token(sym) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(
+                        underlying = %sym,
+                        error = %format!("{e:#}"),
+                        "no faucet token; skipping auto-replenish for this underlying"
+                    );
+                    continue;
+                }
+            };
             spawn_replenish_task(ReplenishParams {
                 secrets: secrets_loaded.clone(),
                 network: cfg.network,
@@ -403,6 +538,22 @@ async fn main() -> Result<()> {
             m.feed,
             price_cache.clone(),
             Arc::clone(&m.vol_buf),
+        );
+    }
+
+    // Derive mode: watch token-info for newly-listed underlyings and restart to
+    // pick them up. No-op when underlyings were pinned explicitly.
+    if derive_mode {
+        spawn_underlying_watcher(
+            cli.token_info_url.clone(),
+            underlyings.iter().cloned().collect(),
+            cfg.settlement_symbol.clone(),
+            cfg.underlying_exclude.clone(),
+            cfg.underlying_refresh_secs,
+        );
+        tracing::info!(
+            refresh_secs = cfg.underlying_refresh_secs,
+            "underlying watcher started (derive mode)"
         );
     }
 

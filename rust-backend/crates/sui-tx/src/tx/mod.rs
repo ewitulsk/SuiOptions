@@ -25,6 +25,7 @@ pub mod swap_auction;
 pub mod template;
 pub mod test_tokens;
 pub mod vault;
+pub mod vault_create;
 
 use anyhow::{anyhow, Context, Result};
 use shared_crypto::intent::Intent;

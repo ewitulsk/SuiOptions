@@ -83,3 +83,23 @@ interval_pct        = 10.0
 #   vol_floor       = 0.2
 #   vol_ceiling     = 3.0
 #   sigma_fallback  = 0.85
+
+# ── Vault auto-provisioning ─────────────────────────────────────────────
+# Presence of this table switches on the hourly vault-ensure pass: the
+# scheduler creates one covered-call vault per configured pair with a Pyth
+# feed on both legs (publishing a fresh 9-decimal share coin per vault).
+# Static-spot pairs (e.g. TDEEP here) have no feed and are skipped. All fields
+# fall back to the contract's reference config; an empty `[vault_template]` is
+# enough to enable creation. Comment this table out to disable vault creation.
+[vault_template]
+mgmt_fee_bps_annual      = 200
+perf_fee_bps             = 1_000
+round_ms                 = 604_800_000
+selling_window_ms        = 43_200_000
+min_strike_bps_over_spot = 300
+max_strike_bps_over_spot = 6_000
+min_expiry_lead_ms       = 259_200_000
+max_expiry_lead_ms       = 777_600_000
+max_swap_slippage_bps    = 50
+max_price_age_secs       = 60
+max_conf_bps             = 100

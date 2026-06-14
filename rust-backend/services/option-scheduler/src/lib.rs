@@ -19,6 +19,7 @@ pub mod schedule;
 pub mod sigma;
 pub mod spot;
 pub mod strike_grid;
+pub mod vault_roller;
 
 #[derive(Parser, Debug)]
 #[command(

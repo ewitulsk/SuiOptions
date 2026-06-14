@@ -16,8 +16,10 @@ use diesel::r2d2::{ConnectionManager, Pool};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use tracing::debug;
 
-use self::models::{NewSchedulerRoll, RollState, SchedulerRollRow};
-use self::schema::scheduler_rolls;
+use self::models::{
+    NewSchedulerRoll, NewSchedulerVault, RollState, SchedulerRollRow, SchedulerVaultRow, VaultState,
+};
+use self::schema::{scheduler_rolls, scheduler_vaults};
 
 pub type DbPool = Pool<ConnectionManager<PgConnection>>;
 pub type ArcPool = Arc<DbPool>;
@@ -248,6 +250,215 @@ pub fn all_active_rows(pool: &DbPool) -> Result<Vec<SchedulerRollRow>> {
         .order(scheduler_rolls::created_at.asc())
         .load(&mut conn)
         .context("all_active_rows: query")
+}
+
+// ════════════════════════════ vaults ════════════════════════════════
+//
+// One row per (underlying, settlement) pair. The partial UNIQUE index on
+// active states is the hard guard against creating a duplicate vault, exactly
+// like `scheduler_rolls_active_slot` does for rolls.
+
+/// The single active vault row for a pair (the index guarantees ≤ 1), or
+/// `None` if the pair has no live vault row.
+pub fn active_vault_row(
+    pool: &DbPool,
+    underlying: &str,
+    settlement: &str,
+) -> Result<Option<SchedulerVaultRow>> {
+    let mut conn = pool.get().context("active_vault_row: pool")?;
+    scheduler_vaults::table
+        .filter(scheduler_vaults::underlying_symbol.eq(underlying))
+        .filter(scheduler_vaults::settlement_symbol.eq(settlement))
+        .filter(
+            scheduler_vaults::state.eq_any(&[
+                VaultState::Pending.as_str(),
+                VaultState::CoinPublished.as_str(),
+                VaultState::Confirmed.as_str(),
+            ]),
+        )
+        .first(&mut conn)
+        .optional()
+        .context("active_vault_row: query")
+}
+
+/// Claim a vault slot: INSERT a `pending` row. `Ok(true)` if inserted,
+/// `Ok(false)` if the partial UNIQUE index blocked us (the pair already has a
+/// live vault row).
+pub fn claim_vault_slot(pool: &DbPool, underlying: &str, settlement: &str) -> Result<bool> {
+    let mut conn = pool.get().context("claim_vault_slot: pool")?;
+    let new = NewSchedulerVault {
+        underlying_symbol: underlying,
+        settlement_symbol: settlement,
+        state: VaultState::Pending.as_str(),
+    };
+    let result = diesel::insert_into(scheduler_vaults::table)
+        .values(&new)
+        .on_conflict_do_nothing()
+        .execute(&mut conn);
+    match result {
+        Ok(n) => {
+            debug!(underlying, settlement, inserted = n, "claim_vault_slot");
+            Ok(n > 0)
+        }
+        Err(e) => {
+            debug!(underlying, settlement, error = %e, "claim_vault_slot: conflict");
+            Ok(false)
+        }
+    }
+}
+
+/// Record the published share coin: move the pair's `pending` row to
+/// `coin_published`, stashing the package, the VShare type, and the harvested
+/// `TreasuryCap` id so a later pass can resume `create_vault` without
+/// re-publishing.
+pub fn mark_vault_coin_published(
+    pool: &DbPool,
+    underlying: &str,
+    settlement: &str,
+    package: &str,
+    coin_type: &str,
+    cap_id: &str,
+    publish_digest: &str,
+) -> Result<()> {
+    let mut conn = pool.get().context("mark_vault_coin_published: pool")?;
+    diesel::update(scheduler_vaults::table)
+        .filter(scheduler_vaults::underlying_symbol.eq(underlying))
+        .filter(scheduler_vaults::settlement_symbol.eq(settlement))
+        .filter(scheduler_vaults::state.eq(VaultState::Pending.as_str()))
+        .set((
+            scheduler_vaults::state.eq(VaultState::CoinPublished.as_str()),
+            scheduler_vaults::share_coin_package.eq(package),
+            scheduler_vaults::share_coin_type.eq(coin_type),
+            scheduler_vaults::share_cap_id.eq(cap_id),
+            scheduler_vaults::publish_digest.eq(publish_digest),
+            scheduler_vaults::updated_at.eq(diesel::dsl::now),
+        ))
+        .execute(&mut conn)
+        .context("mark_vault_coin_published: update")?;
+    Ok(())
+}
+
+/// Move the pair's active row to `confirmed` once `create_vault` lands,
+/// recording the vault id and tx digest.
+pub fn mark_vault_confirmed(
+    pool: &DbPool,
+    underlying: &str,
+    settlement: &str,
+    vault_id: &str,
+    create_digest: &str,
+) -> Result<()> {
+    let mut conn = pool.get().context("mark_vault_confirmed: pool")?;
+    diesel::update(scheduler_vaults::table)
+        .filter(scheduler_vaults::underlying_symbol.eq(underlying))
+        .filter(scheduler_vaults::settlement_symbol.eq(settlement))
+        .filter(
+            scheduler_vaults::state
+                .eq(VaultState::Pending.as_str())
+                .or(scheduler_vaults::state.eq(VaultState::CoinPublished.as_str())),
+        )
+        .set((
+            scheduler_vaults::state.eq(VaultState::Confirmed.as_str()),
+            scheduler_vaults::vault_id.eq(vault_id),
+            scheduler_vaults::create_digest.eq(create_digest),
+            scheduler_vaults::updated_at.eq(diesel::dsl::now),
+        ))
+        .execute(&mut conn)
+        .context("mark_vault_confirmed: update")?;
+    Ok(())
+}
+
+/// Reconcile a vault the indexer reports but our DB has no confirmed row for
+/// (e.g. the scheduler DB was wiped while the chain kept the vault). Update an
+/// existing active row to `confirmed`, or insert a fresh confirmed row. Either
+/// way the pair is never re-created.
+pub fn record_existing_vault(
+    pool: &DbPool,
+    underlying: &str,
+    settlement: &str,
+    vault_id: &str,
+) -> Result<()> {
+    let mut conn = pool.get().context("record_existing_vault: pool")?;
+    let updated = diesel::update(scheduler_vaults::table)
+        .filter(scheduler_vaults::underlying_symbol.eq(underlying))
+        .filter(scheduler_vaults::settlement_symbol.eq(settlement))
+        .filter(
+            scheduler_vaults::state.eq_any(&[
+                VaultState::Pending.as_str(),
+                VaultState::CoinPublished.as_str(),
+            ]),
+        )
+        .set((
+            scheduler_vaults::state.eq(VaultState::Confirmed.as_str()),
+            scheduler_vaults::vault_id.eq(vault_id),
+            scheduler_vaults::updated_at.eq(diesel::dsl::now),
+        ))
+        .execute(&mut conn)
+        .context("record_existing_vault: update")?;
+    if updated == 0 {
+        let new = NewSchedulerVault {
+            underlying_symbol: underlying,
+            settlement_symbol: settlement,
+            state: VaultState::Confirmed.as_str(),
+        };
+        diesel::insert_into(scheduler_vaults::table)
+            .values(&new)
+            .on_conflict_do_nothing()
+            .execute(&mut conn)
+            .context("record_existing_vault: insert")?;
+        diesel::update(scheduler_vaults::table)
+            .filter(scheduler_vaults::underlying_symbol.eq(underlying))
+            .filter(scheduler_vaults::settlement_symbol.eq(settlement))
+            .filter(scheduler_vaults::state.eq(VaultState::Confirmed.as_str()))
+            .filter(scheduler_vaults::vault_id.is_null())
+            .set(scheduler_vaults::vault_id.eq(vault_id))
+            .execute(&mut conn)
+            .context("record_existing_vault: backfill id")?;
+    }
+    Ok(())
+}
+
+/// Give up on the pair's active create attempt: move the row to `failed` so a
+/// later pass can retry with a fresh `pending` claim. Used for unambiguous
+/// failures (build/preflight/revert) where the tx never landed.
+pub fn mark_vault_failed(
+    pool: &DbPool,
+    underlying: &str,
+    settlement: &str,
+    error_msg: &str,
+) -> Result<()> {
+    let mut conn = pool.get().context("mark_vault_failed: pool")?;
+    diesel::update(scheduler_vaults::table)
+        .filter(scheduler_vaults::underlying_symbol.eq(underlying))
+        .filter(scheduler_vaults::settlement_symbol.eq(settlement))
+        .filter(
+            scheduler_vaults::state
+                .eq(VaultState::Pending.as_str())
+                .or(scheduler_vaults::state.eq(VaultState::CoinPublished.as_str())),
+        )
+        .set((
+            scheduler_vaults::state.eq(VaultState::Failed.as_str()),
+            scheduler_vaults::last_error.eq(error_msg),
+            scheduler_vaults::updated_at.eq(diesel::dsl::now),
+        ))
+        .execute(&mut conn)
+        .context("mark_vault_failed: update")?;
+    Ok(())
+}
+
+/// All active vault rows, for boot logging.
+pub fn all_active_vault_rows(pool: &DbPool) -> Result<Vec<SchedulerVaultRow>> {
+    let mut conn = pool.get().context("all_active_vault_rows: pool")?;
+    scheduler_vaults::table
+        .filter(
+            scheduler_vaults::state.eq_any(&[
+                VaultState::Pending.as_str(),
+                VaultState::CoinPublished.as_str(),
+                VaultState::Confirmed.as_str(),
+            ]),
+        )
+        .order(scheduler_vaults::created_at.asc())
+        .load(&mut conn)
+        .context("all_active_vault_rows: query")
 }
 
 #[cfg(test)]

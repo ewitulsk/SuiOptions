@@ -62,3 +62,24 @@ interval_pct        = 10.0
   source             = "pyth"
   max_publish_lag_ms = 30_000   # decline a roll on prices > 30s stale
   max_conf_bps       = 100      # decline a roll if conf/price > 1%
+
+# ── Vault auto-provisioning ─────────────────────────────────────────────
+# Presence of this table switches on the hourly vault-ensure pass: the
+# scheduler creates exactly one covered-call vault per configured pair with a
+# Pyth feed on both legs (publishing a fresh 9-decimal share coin per vault).
+# Per-asset oracle pins (feed ids, decimals) come from token-info; the policy
+# below applies to every vault. All fields are optional and fall back to the
+# contract's reference config, so omitted RFQ-mechanics knobs use sane
+# defaults — an empty `[vault_template]` is enough to enable creation.
+[vault_template]
+mgmt_fee_bps_annual      = 200          # 2%/yr, charged only on profitable rounds
+perf_fee_bps             = 1_000        # 10%
+round_ms                 = 604_800_000  # weekly rounds
+selling_window_ms        = 43_200_000   # 12h RFQ selling window
+min_strike_bps_over_spot = 300          # bucket strike ≥ 1.03× spot
+max_strike_bps_over_spot = 6_000        # bucket strike ≤ 1.60× spot
+min_expiry_lead_ms       = 259_200_000  # bucket expiry ≥ now + 3d
+max_expiry_lead_ms       = 777_600_000  # bucket expiry ≤ now + 9d
+max_swap_slippage_bps    = 50           # proceeds-swap band vs Pyth
+max_price_age_secs       = 60
+max_conf_bps             = 100

@@ -88,6 +88,19 @@ pub struct SchedulerConfig {
     /// How often the reconciler task wakes up, in seconds. Default 30.
     #[serde(default = "default_reconciler_interval_secs")]
     pub reconciler_interval_secs: u64,
+
+    /// How often the vault-ensure pass runs, in milliseconds. Default 1 hour.
+    /// Each pass checks every configured pair and creates a vault for any that
+    /// lacks one (SO vault auto-provisioning).
+    #[serde(default = "default_vault_check_interval_ms")]
+    pub vault_check_interval_ms: u64,
+
+    /// Vault policy template. Present ⇒ the scheduler auto-creates one vault
+    /// per configured pair (publishing a fresh share coin per vault). Absent ⇒
+    /// the vault pass is disabled entirely. Per-asset oracle pins (feed ids,
+    /// decimals) come from token-info; everything else comes from here.
+    #[serde(default)]
+    pub vault_template: Option<VaultTemplate>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -225,6 +238,69 @@ pub enum SpotConfig {
     },
     // Future: `Http { url: String, json_path: String }` for an arbitrary
     // JSON oracle.
+}
+
+/// Per-vault policy applied to every pair the scheduler provisions a vault
+/// for. Mirrors `vault::new_config` minus the per-asset oracle pins, which the
+/// scheduler fills from token-info (feed ids) and the pair's decimals. Every
+/// field has a default (seeded from the contract's reference config) so a bare
+/// `[vault_template]` table is enough to switch vault creation on.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct VaultTemplate {
+    pub mgmt_fee_bps_annual: u64,
+    pub perf_fee_bps: u64,
+    pub round_ms: u64,
+    pub selling_window_ms: u64,
+    pub min_strike_bps_over_spot: u64,
+    pub max_strike_bps_over_spot: u64,
+    pub min_expiry_lead_ms: u64,
+    pub max_expiry_lead_ms: u64,
+    pub min_reserve_premium_bps: u64,
+    pub max_slice_amount: u64,
+    pub max_open_rfqs: u64,
+    pub rfq_duration_ms: u64,
+    pub rfq_snipe_window_ms: u64,
+    pub rfq_snipe_extension_ms: u64,
+    pub rfq_max_extension_ms: u64,
+    pub rfq_min_increment_bps: u64,
+    pub hold_premium_in_settlement: bool,
+    pub max_swap_slippage_bps: u64,
+    pub max_price_age_secs: u64,
+    pub max_conf_bps: u64,
+}
+
+impl Default for VaultTemplate {
+    fn default() -> Self {
+        // Reference config from contracts/tests/vault_tests.move::default_config.
+        const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+        Self {
+            mgmt_fee_bps_annual: 200,                // 2%/yr
+            perf_fee_bps: 1_000,                     // 10%
+            round_ms: 7 * DAY_MS,                    // weekly
+            selling_window_ms: 12 * 60 * 60 * 1_000, // 12h
+            min_strike_bps_over_spot: 300,           // ≥ 1.03× spot
+            max_strike_bps_over_spot: 6_000,         // ≤ 1.60× spot
+            min_expiry_lead_ms: 3 * DAY_MS,
+            max_expiry_lead_ms: 9 * DAY_MS,
+            min_reserve_premium_bps: 10,
+            max_slice_amount: 1_000_000_000_000,
+            max_open_rfqs: 4,
+            rfq_duration_ms: 400_000,
+            rfq_snipe_window_ms: 60_000,
+            rfq_snipe_extension_ms: 120_000,
+            rfq_max_extension_ms: 100_000,
+            rfq_min_increment_bps: 500, // 5%
+            hold_premium_in_settlement: false,
+            max_swap_slippage_bps: 50,
+            max_price_age_secs: 60,
+            max_conf_bps: 100,
+        }
+    }
+}
+
+fn default_vault_check_interval_ms() -> u64 {
+    60 * 60 * 1_000 // 1 hour
 }
 
 fn default_reconciler_safety_margin() -> u64 {
