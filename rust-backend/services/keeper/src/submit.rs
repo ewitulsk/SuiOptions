@@ -1,9 +1,9 @@
 //! Action → PTB submission, plus the error triage (README §10).
 //!
-//! Oracle-gated cranks (`select_bucket`, `open_rfq`, `swap_proceeds`,
-//! `finalize_round`) get a fresh Hermes accumulator update prepended in
-//! the same PTB (`sui_tx::tx::pyth_update`); the rest call the plain
-//! builders.
+//! Oracle-gated cranks (`select_bucket`, `open_rfq`, `open_swap_rfq`,
+//! `settle_swap_rfq`, `finalize_round`) get a fresh Hermes accumulator
+//! update prepended in the same PTB (`sui_tx::tx::pyth_update`); the rest
+//! call the plain builders.
 
 use anyhow::{anyhow, Context, Result};
 use sui_types::base_types::ObjectID;
@@ -35,10 +35,6 @@ pub struct SubmitCtx<'a> {
     pub settlement_feed: PriceFeedId,
     pub underlying_price_info: ObjectID,
     pub settlement_price_info: ObjectID,
-    /// `Some` only when the vault has a pinned pool.
-    pub deepbook_pool_id: Option<ObjectID>,
-    pub deep_coin_type: Option<&'a str>,
-    pub deep_funding: Option<(ObjectID, u64)>,
     pub gas_budget: u64,
 }
 
@@ -114,27 +110,16 @@ pub async fn execute(ctx: &SubmitCtx<'_>, action: &Action) -> Result<()> {
             )
             .await?;
         }
-        Action::SwapProceeds { max_settlement_in } => {
-            let pool_id = ctx
-                .deepbook_pool_id
-                .ok_or_else(|| anyhow!("SwapProceeds planned without a pinned pool"))?;
-            let deep_type = ctx
-                .deep_coin_type
-                .ok_or_else(|| anyhow!("no DEEP coin type configured (token-info deepbook)"))?;
+        Action::OpenSwapRfq { amount_s } => {
             let mut pt = ctx.pt_with_price_update().await?;
-            vault_tx::build_swap_proceeds(
-                client,
-                &mut pt,
-                signer,
-                &refs,
-                pool_id,
-                deep_type,
-                ctx.deep_funding,
-                *max_settlement_in,
-                &ctx.prices(),
-            )
-            .await?;
-            submit_ptb(client, signer, pt, ctx.gas_budget, "vault::swap_proceeds").await?;
+            vault_tx::build_open_swap_rfq(client, &mut pt, &refs, *amount_s, &ctx.prices()).await?;
+            submit_ptb(client, signer, pt, ctx.gas_budget, "vault::open_swap_rfq").await?;
+        }
+        Action::SettleSwapRfq { swap_rfq } => {
+            let mut pt = ctx.pt_with_price_update().await?;
+            vault_tx::build_settle_swap_rfq(client, &mut pt, &refs, *swap_rfq, &ctx.prices())
+                .await?;
+            submit_ptb(client, signer, pt, ctx.gas_budget, "vault::settle_swap_rfq").await?;
         }
         Action::FinalizeRound => {
             let mut pt = ctx.pt_with_price_update().await?;
@@ -233,7 +218,6 @@ const FATAL_ABORTS: &[u64] = &[
     48, // vault_wrong_origin
     49, // oracle_feed_mismatch
     54, // vault_config_invalid
-    55, // vault_wrong_pool
 ];
 
 /// Pull the abort code out of a revert message like
@@ -314,7 +298,7 @@ mod tests {
 
     #[test]
     fn classifies_config_aborts_fatal() {
-        for code in [49, 54, 55] {
+        for code in [49, 54] {
             assert_eq!(classify(&revert(code)), ErrorClass::Fatal, "code {code}");
         }
     }

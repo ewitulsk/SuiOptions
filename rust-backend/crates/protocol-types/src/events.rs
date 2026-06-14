@@ -290,6 +290,67 @@ pub struct RfqExpiredUnsold {
     pub reserve_premium: u64,
 }
 
+// ─── proceeds-swap auction (swap_auction.move) ───
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwapRfqCreated {
+    pub swap_id: ObjectId,
+    /// Originating vault ID.
+    pub origin: ObjectId,
+    #[serde(with = "u64_string")]
+    pub amount_s: u64,
+    #[serde(with = "u64_string")]
+    pub reserve_underlying: u64,
+    #[serde(with = "u64_string")]
+    pub deadline_ms: u64,
+    #[serde(with = "u64_string")]
+    pub max_deadline_ms: u64,
+    #[serde(with = "u64_string")]
+    pub min_increment_bps: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwapRfqBid {
+    pub swap_id: ObjectId,
+    pub bidder: SuiAddress,
+    /// Underlying offered by this bid.
+    #[serde(with = "u64_string")]
+    pub underlying: u64,
+    /// 0 if this was the first bid.
+    #[serde(with = "u64_string")]
+    pub previous_underlying: u64,
+    /// Post-anti-snipe deadline.
+    #[serde(with = "u64_string")]
+    pub new_deadline_ms: u64,
+}
+
+/// A swap auction filled in-band: `vault_id == origin`; carries `round`
+/// for the round-economics materializer (realized swap rate → perf fee).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwapRfqSettled {
+    pub swap_id: ObjectId,
+    pub vault_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub round: u64,
+    pub winner: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub settlement_filled: u64,
+    #[serde(with = "u64_string")]
+    pub underlying_in: u64,
+}
+
+/// A swap auction closed without converting (no bid, or the best bid fell
+/// out of the Pyth band before settle). Settlement returns to proceeds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwapRfqUnfilled {
+    pub swap_id: ObjectId,
+    pub vault_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub round: u64,
+    #[serde(with = "u64_string")]
+    pub amount_s: u64,
+}
+
 // ─── vault events (vault-implementation-guide doc 03) ───
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,18 +448,6 @@ pub struct VaultPositionRedeemed {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VaultProceedsSwapped {
-    pub vault_id: ObjectId,
-    #[serde(with = "u64_string")]
-    pub round: u64,
-    pub filler: SuiAddress,
-    #[serde(with = "u64_string")]
-    pub settlement_out: u64,
-    #[serde(with = "u64_string")]
-    pub underlying_in: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultFeesCharged {
     pub vault_id: ObjectId,
     #[serde(with = "u64_string")]
@@ -477,6 +526,10 @@ pub enum ChainEvent {
     RfqBid(RfqBid),
     RfqSettled(RfqSettled),
     RfqExpiredUnsold(RfqExpiredUnsold),
+    SwapRfqCreated(SwapRfqCreated),
+    SwapRfqBid(SwapRfqBid),
+    SwapRfqSettled(SwapRfqSettled),
+    SwapRfqUnfilled(SwapRfqUnfilled),
     VaultCreated(VaultCreated),
     VaultDeposit(VaultDeposit),
     SharesClaimed(SharesClaimed),
@@ -485,7 +538,6 @@ pub enum ChainEvent {
     InstantWithdraw(InstantWithdraw),
     VaultBucketSelected(VaultBucketSelected),
     VaultPositionRedeemed(VaultPositionRedeemed),
-    VaultProceedsSwapped(VaultProceedsSwapped),
     VaultFeesCharged(VaultFeesCharged),
     VaultRoundFinalized(VaultRoundFinalized),
     VaultConfigUpdated(VaultConfigUpdated),

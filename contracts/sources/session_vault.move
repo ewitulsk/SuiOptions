@@ -7,10 +7,10 @@
 /// remains the user's (escrowed shares / receipts redeemable only back into
 /// the same custody).
 ///
-/// The lifecycle cranks (`crank_redeem`, `swap_proceeds`, `finalize_round`,
-/// `select_bucket`, `open_rfq`, `settle_rfq*`) are permissionless keeper
-/// functions and `rfq::bid` is MM-facing — none of them move user custody,
-/// so they get no session twins.
+/// The lifecycle cranks (`crank_redeem`, `open_swap_rfq`, `settle_swap_rfq`,
+/// `finalize_round`, `select_bucket`, `open_rfq`, `settle_rfq*`) are
+/// permissionless keeper functions and `rfq::bid` / `swap_auction::bid` are
+/// MM-facing — none of them move user custody, so they get no session twins.
 module options_protocol::session_vault;
 
 use std::type_name;

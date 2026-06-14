@@ -140,7 +140,9 @@ public struct VaultConfig has copy, drop, store {
 
     // proceeds / swap policy
     hold_premium_in_settlement: bool,  // backtest-decided (doc 06); false ⇒ swap everything to U
-    max_swap_slippage_bps: u64,        // min_out = pyth_value × (1 − slippage)
+    max_swap_slippage_bps: u64,        // swap-auction band + reserve floor:
+                                       // fill must be ≥ pyth_value × (1 − slippage)
+    // (no deepbook_pool_id — proceeds convert via the on-chain swap auction, §7.3)
 
     // oracle
     underlying_feed_id: vector<u8>,
@@ -282,29 +284,53 @@ public fun crank_redeem<U, S, V, C>(vault, bucket: &mut Bucket<U,S,C>, clock, ct
 (returns the collateral `Coin<U>` to `deployable`, decrements). Both are permissionless, so
 no admin is ever needed to unstick a round.
 
-### 7.3 `swap_proceeds` (DeepBook — interface stub)
+### 7.3 Proceeds swap — a Pyth-bounded on-chain auction (`swap_auction.move`)
 
-> The DeepBook integration is being built in parallel; api-service will expose the pool
-> address per pair. The vault isolates the venue behind one function so the adapter can land
-> independently.
+> **Design note (supersedes the original DeepBook plan).** Converting proceeds back to
+> underlying does *not* go through a DEX. The original design pinned a `Pool<U, S>` and ran a
+> Pyth-bounded market order, but the protocol never mints a `Pool<Underlying, Settlement>`
+> (the scheduler creates `Pool<Call, Settlement>` for the option coin, a different market).
+> Rather than depend on an external pool that may not exist or have depth, the vault runs its
+> **own reverse auction** — the exact mirror of the call-sale RFQ (`rfq.move`), sides flipped.
+
+The vault escrows its settlement proceeds into a coupled `SwapAuction<U, S>`; market makers
+escrow **underlying** bids on-chain, competing to give the vault the most underlying for that
+settlement; after the deadline the vault's `settle_swap_rfq` crank resolves it. Two cranks
+(both `public`, both permissionless, both Pyth-gated):
 
 ```move
-public fun swap_proceeds<U, S, V>(
-    vault: &mut Vault<U, S, V>,
-    pool: &mut Pool<U, S>,             // deepbook::pool::Pool — exact type per DeepBook v3
-    underlying_info: &PriceInfoObject,
-    settlement_info: &PriceInfoObject,
-    clock: &Clock,
-    ctx: &mut TxContext,
-)
+public fun open_swap_rfq<U, S, V>(
+    vault: &mut Vault<U, S, V>, amount_s: u64,
+    underlying_info, settlement_info, clock, ctx): ID
+
+public fun settle_swap_rfq<U, S, V>(
+    vault: &mut Vault<U, S, V>, auction: SwapAuction<U, S>,
+    underlying_info, settlement_info, clock, ctx)
 ```
 
-- Legal in `Settling` (and in `Active` for mid-round premium conversion when
-  `hold_premium_in_settlement == false`).
-- Swaps `proceeds_settlement` → `U` with
-  `min_out = pyth_value × (10⁴ − max_swap_slippage_bps) / 10⁴` — the crank chooses nothing.
-- If `hold_premium_in_settlement == true`, finalize values residual `S` via Pyth instead of
-  requiring a swap (see §7.4) and only exercise proceeds get swapped.
+- **`open_swap_rfq`** — legal in any phase (mid-round premium conversion under
+  non-hold-premium, or post-expiry exercise proceeds in Settling). Splits `min(amount_s,
+  proceeds)` out of `proceeds_settlement`, computes the reserve floor
+  `reserve = settlement_to_underlying(amount_s, spot) × (1 − max_swap_slippage_bps)` from the
+  open-time Pyth cross, and opens the auction. `open_swap_rfqs += 1`.
+- **`settle_swap_rfq`** — after the deadline, re-checks the winning bid against a **fresh**
+  Pyth cross (the keeper prepends a Hermes `update_price_feeds` to the same PTB — Sui's
+  pull-oracle "price push"):
+  - **band cleared** (`u_in ≥ settlement_to_underlying(amount_s, spot_fresh) × (1 −
+    slippage)`): the winner takes the settlement, the vault absorbs the underlying into
+    `deployable`, and records the realized rate (`round_swap_settlement_out/underlying_in`)
+    for the perf-fee conversion.
+  - **band missed** (price moved) **or no bid**: the settlement returns to
+    `proceeds_settlement` and any bid is refunded; the keeper re-opens. `open_swap_rfqs -= 1`.
+
+The one-sided band is intentional: *more* underlying than Pyth is pure upside for the vault;
+only the downside (a lowball fill) needs bounding, exactly as the old DeepBook `min_out` did.
+
+**Liveness:** a round can't `finalize` with proceeds outstanding (non-hold-premium), so an
+auction that draws no in-band bid simply **stalls the round** until a market maker bids —
+the vault never converts at a bad rate, and no admin path is needed. If
+`hold_premium_in_settlement == true`, finalize values residual `S` via Pyth instead of
+requiring a swap (see §7.4); only exercise proceeds then go through the auction.
 
 ### 7.4 `finalize_round` — the accounting heart
 
@@ -444,11 +470,13 @@ public fun pause_deposits / unpause_deposits
 
 ## 10. Events & errors
 
-Events: `VaultCreated`, `VaultDeposit`, `SharesClaimed`, `WithdrawInitiated`,
+Vault events: `VaultCreated`, `VaultDeposit`, `SharesClaimed`, `WithdrawInitiated`,
 `WithdrawCompleted`, `InstantWithdraw`, `VaultBucketSelected`, `VaultPositionRedeemed`,
-`VaultProceedsSwapped`, `VaultFeesCharged`, `VaultRoundFinalized`, `VaultConfigUpdated`,
-`VaultDepositsPaused/Unpaused`. (Field lists follow the patterns above; indexer mapping in
-doc 05 §1.)
+`VaultFeesCharged`, `VaultRoundFinalized`, `VaultConfigUpdated`, `VaultDepositsPaused/Unpaused`.
+Swap-auction events (`swap_auction.move`, replacing the old `VaultProceedsSwapped`):
+`SwapRfqCreated`, `SwapRfqBid`, `SwapRfqSettled` (in-band fill, carries the round for the
+perf-fee rate), `SwapRfqUnfilled` (no bid or band miss). (Field lists follow the patterns
+above; indexer mapping in doc 05 §1.)
 
 Errors (continue the sequence from doc 02): `vault_wrong_phase(35)`,
 `vault_bucket_not_selected(36)`, `vault_bucket_already_selected(37)`,

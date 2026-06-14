@@ -6,6 +6,7 @@ use sui::test_scenario::{Self as ts, Scenario};
 
 use options_protocol::bucket::{Self, Bucket};
 use options_protocol::rfq::{Self, RfqAuction};
+use options_protocol::swap_auction::{Self, SwapAuction};
 use options_protocol::test_helpers::{Self as th, BTC, USDC, CALL};
 use options_protocol::vault::{Self, Vault, DepositReceipt, WithdrawReceipt};
 
@@ -52,8 +53,7 @@ fun default_config(): vault::VaultConfig {
         100_000,
         500, // 5% min increment
         false, // hold_premium_in_settlement
-        50, // 50 bps swap slippage
-        option::none(), // no DeepBook pool: tests use the injected-swap hook
+        50, // 50 bps swap band / reserve slippage
         b"underlying-feed",
         b"settlement-feed",
         60,
@@ -191,6 +191,76 @@ fun crank_redeem_as(scenario: &mut Scenario, who: address, clock: &sui::clock::C
     ts::return_shared(b);
 }
 
+fun open_swap_as(
+    scenario: &mut Scenario,
+    who: address,
+    amount_s: u64,
+    clock: &sui::clock::Clock,
+): ID {
+    ts::next_tx(scenario, who);
+    let mut v = take_vault(scenario);
+    let id = vault::open_swap_rfq_with_spot_for_testing(
+        &mut v,
+        amount_s,
+        SPOT,
+        SPOT_SCALE,
+        clock,
+        scenario.ctx(),
+    );
+    ts::return_shared(v);
+    id
+}
+
+fun swap_bid_as(
+    scenario: &mut Scenario,
+    who: address,
+    swap_id: ID,
+    underlying: u64,
+    clock: &sui::clock::Clock,
+) {
+    ts::next_tx(scenario, who);
+    let mut a = ts::take_shared_by_id<SwapAuction<BTC, USDC>>(scenario, swap_id);
+    swap_auction::bid(
+        &mut a,
+        coin::mint_for_testing<BTC>(underlying, scenario.ctx()),
+        clock,
+        scenario.ctx(),
+    );
+    ts::return_shared(a);
+}
+
+/// Settle a swap auction at an explicit spot (lets band-miss tests move
+/// the price between open and settle).
+fun settle_swap_at(
+    scenario: &mut Scenario,
+    who: address,
+    swap_id: ID,
+    spot: u128,
+    clock: &sui::clock::Clock,
+) {
+    ts::next_tx(scenario, who);
+    let mut v = take_vault(scenario);
+    let a = ts::take_shared_by_id<SwapAuction<BTC, USDC>>(scenario, swap_id);
+    vault::settle_swap_rfq_with_spot_for_testing(&mut v, a, spot, SPOT_SCALE, clock, scenario.ctx());
+    ts::return_shared(v);
+}
+
+/// Convert all the vault's proceeds at the Pyth-bounded auction price: a
+/// keeper opens the swap, an MM wins it, the keeper settles after the
+/// deadline. Mirrors the real keeper crank pair (doc 04 §2).
+fun swap_proceeds_via_auction(
+    scenario: &mut Scenario,
+    amount_s: u64,
+    winning_bid: u64,
+    clock: &mut sui::clock::Clock,
+) {
+    let open_ms = clock.timestamp_ms();
+    let swap_id = open_swap_as(scenario, keeper(), amount_s, clock);
+    swap_bid_as(scenario, mm(), swap_id, winning_bid, clock);
+    clock.set_for_testing(open_ms + 400_000); // past the 400_000 duration
+    settle_swap_at(scenario, keeper(), swap_id, SPOT, clock);
+}
+
 // ═══════════════════════ the full round loop ═══════════════════════
 
 #[test]
@@ -275,22 +345,16 @@ fun test_full_round_lifecycle_with_partial_exercise() {
     assert!(vault::proceeds_settlement(&v) == 30_000 + 200 * 50_000, 0);
     ts::return_shared(v);
 
-    // A filler converts all proceeds at the Pyth-bounded price:
-    // fair = round(10_030_000 / 47_619) = 211; min after 50 bps = 209.
+    // A swap auction converts all proceeds at the Pyth-bounded price:
+    // fair = floor(10_030_000 × 1e12 / 47_619e12) = 210, reserve/min
+    // after 50 bps = 208; the MM wins giving 210 underlying.
+    swap_proceeds_via_auction(&mut scenario, 10_030_000, 210, &mut clock);
+
     ts::next_tx(&mut scenario, keeper());
-    let mut v = take_vault(&scenario);
-    let bought = vault::record_swap_for_testing<BTC, USDC, VSHARE>(
-        &mut v,
-        coin::mint_for_testing<BTC>(210, scenario.ctx()),
-        10_030_000,
-        SPOT,
-        SPOT_SCALE,
-        scenario.ctx(),
-    );
-    assert!(bought.value() == 10_030_000, 0);
-    coin::burn_for_testing(bought);
+    let v = take_vault(&scenario);
+    assert!(vault::open_swap_rfqs(&v) == 0, 0);
     assert!(vault::proceeds_settlement(&v) == 0, 0);
-    assert!(vault::deployable(&v) == 1_010, 0);
+    assert!(vault::deployable(&v) == 1_010, 0); // 800 + 210 bought
     ts::return_shared(v);
 
     // Finalize round 1: aum 1_010 over 1_000 shares; fees too small to
@@ -451,20 +515,9 @@ fun test_fee_cap_clamps_to_round_profit() {
     clock.set_for_testing(EXPIRY_MS);
     crank_redeem_as(&mut scenario, keeper(), &clock); // OTM: all back
 
-    // Swap the premium: fair = round(47_619_000/47_619) = 1_000; the
-    // filler pays fair (min after 50 bps = 995).
-    ts::next_tx(&mut scenario, keeper());
-    let mut v = take_vault(&scenario);
-    let bought = vault::record_swap_for_testing<BTC, USDC, VSHARE>(
-        &mut v,
-        coin::mint_for_testing<BTC>(1_000, scenario.ctx()),
-        47_619_000,
-        SPOT,
-        SPOT_SCALE,
-        scenario.ctx(),
-    );
-    coin::burn_for_testing(bought);
-    ts::return_shared(v);
+    // Swap the premium: fair = floor(47_619_000 × 1e12 / 47_619e12) =
+    // 1_000; the MM wins giving fair (min after 50 bps = 995).
+    swap_proceeds_via_auction(&mut scenario, 47_619_000, 1_000, &mut clock);
 
     finalize_as(&mut scenario, keeper(), &clock);
 
@@ -894,172 +947,102 @@ fun burn_receipt(receipt: DepositReceipt) {
     transfer::public_transfer(receipt, @0x0);
 }
 
-// ═══════════════ real DeepBook proceeds swap (doc 03 §7.3) ═══════════════
+// ═══════════════ proceeds-swap auction (doc 03 §7.3) ═══════════════
 
-use deepbook::balance_manager_tests::USDC as DBUSDC;
-use deepbook::pool::Pool;
-use deepbook::pool_tests;
-use sui::sui::SUI;
-use token::deep::DEEP;
+// fair(amount_s) = floor(amount_s × 1e12 / SPOT); reserve/min = fair ×
+// 0.995. At amount_s = 10_030_000 against SPOT: fair = 210, min = 208.
+const PROCEEDS: u64 = 10_030_000;
 
-// The DeepBook test book: 1000 base ask @ 2.0, 1000 base bid @ 1.0.
-// Spot pinned to the ask so the executed price exactly meets fair value.
-const SPOT2: u128 = 2_000_000_000_000;
-
-fun deepbook_config(pool_id: Option<ID>): vault::VaultConfig {
-    vault::new_config(
-        200,
-        1_000,
-        WEEK_MS,
-        12 * 60 * 60 * 1_000,
-        300,
-        6_000,
-        3 * DAY_MS,
-        9 * DAY_MS,
-        10,
-        1_000_000_000_000,
-        4,
-        400_000,
-        60_000,
-        120_000,
-        100_000,
-        500,
-        false,
-        50,
-        pool_id,
-        b"underlying-feed",
-        b"settlement-feed",
-        60,
-        100,
-        9,
-        9,
-    )
+fun fund_proceeds(scenario: &mut Scenario, amount_s: u64) {
+    ts::next_tx(scenario, keeper());
+    let mut v = take_vault(scenario);
+    vault::inject_proceeds_for_testing(
+        &mut v,
+        coin::mint_for_testing<USDC>(amount_s, scenario.ctx()),
+    );
+    ts::return_shared(v);
 }
 
 #[test]
-fun test_swap_proceeds_through_real_deepbook_pool() {
+fun test_swap_auction_fills_in_band() {
     let mut scenario = ts::begin(th::admin_addr());
-    // A real DeepBook v3 pool (registry, balance manager, reference pool,
-    // resting orders) via deepbook's own test harness.
-    let pool_id = pool_tests::setup_everything<SUI, DBUSDC, SUI, DEEP>(&mut scenario);
+    let mut clock = setup(&mut scenario);
+    fund_proceeds(&mut scenario, PROCEEDS);
 
-    let mut clock = th::init_protocol(&mut scenario);
-    // Strike 2.1 (21 at scale 1): 5% over the 2.0 spot, inside the band.
-    th::new_bucket<SUI, DBUSDC, CALL>(&mut scenario, EXPIRY_MS, 21, 1);
-
-    ts::next_tx(&mut scenario, th::admin_addr());
-    let cap = th::take_admin_cap(&scenario);
-    let tcap = coin::create_treasury_cap_for_testing<VSHARE>(scenario.ctx());
-    vault::create_vault<SUI, DBUSDC, VSHARE>(
-        &cap,
-        tcap,
-        deepbook_config(option::some(pool_id)),
-        scenario.ctx(),
-    );
-    th::return_admin_cap(&scenario, cap);
-
-    // Genesis: 1000 SUI deposited and activated.
-    ts::next_tx(&mut scenario, user_a());
-    let mut v = ts::take_shared<Vault<SUI, DBUSDC, VSHARE>>(&scenario);
-    let receipt = vault::deposit(
-        &mut v,
-        coin::mint_for_testing<SUI>(1_000_000_000_000, scenario.ctx()),
-        scenario.ctx(),
-    );
-    transfer::public_transfer(receipt, user_a());
-    let mut treasury = th::take_treasury(&scenario);
-    vault::finalize_round_with_spot_for_testing(
-        &mut v,
-        &mut treasury,
-        SPOT2,
-        SPOT_SCALE,
-        &clock,
-        scenario.ctx(),
-    );
-    ts::return_shared(treasury);
-
-    // Sell a 600-SUI slice; the MM wins at 20 USDC.
-    let b = ts::take_shared<Bucket<SUI, DBUSDC, CALL>>(&scenario);
-    vault::select_bucket_with_spot_for_testing(&mut v, &b, SPOT2, SPOT_SCALE, &clock);
-    let rfq_id = vault::open_rfq_with_spot_for_testing(
-        &mut v,
-        &b,
-        600_000_000_000,
-        SPOT2,
-        SPOT_SCALE,
-        &clock,
-        scenario.ctx(),
-    );
-    ts::return_shared(b);
-    ts::return_shared(v);
-
-    ts::next_tx(&mut scenario, mm());
-    let mut a = ts::take_shared_by_id<RfqAuction<SUI, DBUSDC, CALL>>(&scenario, rfq_id);
-    rfq::bid(
-        &mut a,
-        coin::mint_for_testing<DBUSDC>(20_000_000_000, scenario.ctx()),
-        mm(),
-        &clock,
-        scenario.ctx(),
-    );
+    let swap_id = open_swap_as(&mut scenario, keeper(), PROCEEDS, &clock);
+    // Reserve floor derived from the open-time Pyth cross.
+    ts::next_tx(&mut scenario, keeper());
+    let a = ts::take_shared_by_id<SwapAuction<BTC, USDC>>(&scenario, swap_id);
+    assert!(swap_auction::reserve_underlying(&a) == 208, 0);
     ts::return_shared(a);
 
+    swap_bid_as(&mut scenario, mm(), swap_id, 210, &clock);
     clock.set_for_testing(400_000);
+    settle_swap_at(&mut scenario, keeper(), swap_id, SPOT, &clock);
+
     ts::next_tx(&mut scenario, keeper());
-    let mut v = ts::take_shared<Vault<SUI, DBUSDC, VSHARE>>(&scenario);
-    let a = ts::take_shared_by_id<RfqAuction<SUI, DBUSDC, CALL>>(&scenario, rfq_id);
-    let mut b = ts::take_shared<Bucket<SUI, DBUSDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
-    let mut treasury = th::take_treasury(&scenario);
-    vault::settle_rfq(&mut v, a, &mut b, &config, &mut treasury, &clock, scenario.ctx());
-    ts::return_shared(b);
-    ts::return_shared(config);
-    ts::return_shared(treasury);
-    assert!(vault::proceeds_settlement(&v) == 20_000_000_000, 0);
-
-    // The real swap: 20 USDC of proceeds against the live book's 2.0 ask
-    // → 10 SUI, exactly the Pyth fair value at SPOT2 (bound satisfied).
-    let mut pool = ts::take_shared_by_id<Pool<SUI, DBUSDC>>(&scenario, pool_id);
-    let deep_remainder = vault::swap_proceeds_with_spot_for_testing(
-        &mut v,
-        &mut pool,
-        coin::mint_for_testing<DEEP>(1_000_000_000_000, scenario.ctx()),
-        20_000_000_000,
-        SPOT2,
-        SPOT_SCALE,
-        &clock,
-        scenario.ctx(),
-    );
-    ts::return_shared(pool);
-    // DeepBook charged its taker fee from the DEEP budget.
-    assert!(deep_remainder.value() < 1_000_000_000_000, 0);
-    coin::burn_for_testing(deep_remainder);
-
+    let v = take_vault(&scenario);
+    assert!(vault::open_swap_rfqs(&v) == 0, 0);
     assert!(vault::proceeds_settlement(&v) == 0, 0);
-    // 400 SUI unsold + 10 SUI bought back.
-    assert!(vault::deployable(&v) == 410_000_000_000, 0);
+    assert!(vault::deployable(&v) == 210, 0); // underlying absorbed
     ts::return_shared(v);
 
-    // The round still closes: expiry → redeem → finalize, pps reflects
-    // the swapped premium.
-    clock.set_for_testing(EXPIRY_MS);
+    // The winning MM received the settlement.
+    ts::next_tx(&mut scenario, mm());
+    let won = ts::take_from_sender<Coin<USDC>>(&scenario);
+    assert!(won.value() == PROCEEDS, 0);
+    coin::burn_for_testing(won);
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+fun test_swap_auction_band_miss_refunds() {
+    // A bid that clears the open-time reserve but falls out of band once
+    // the price moves before settle must not execute: the settlement
+    // returns to proceeds and the bidder is refunded.
+    let mut scenario = ts::begin(th::admin_addr());
+    let mut clock = setup(&mut scenario);
+    fund_proceeds(&mut scenario, PROCEEDS);
+
+    let swap_id = open_swap_as(&mut scenario, keeper(), PROCEEDS, &clock);
+    swap_bid_as(&mut scenario, mm(), swap_id, 210, &clock); // clears reserve 208
+    clock.set_for_testing(400_000);
+    // Settle at a lower spot ⇒ fair jumps to 250, min 248 > the 210 bid.
+    settle_swap_at(&mut scenario, keeper(), swap_id, 40_000_000_000_000_000, &clock);
+
     ts::next_tx(&mut scenario, keeper());
-    let mut v = ts::take_shared<Vault<SUI, DBUSDC, VSHARE>>(&scenario);
-    let mut b = ts::take_shared<Bucket<SUI, DBUSDC, CALL>>(&scenario);
-    vault::crank_redeem(&mut v, &mut b, &clock, scenario.ctx());
-    ts::return_shared(b);
-    let mut treasury = th::take_treasury(&scenario);
-    vault::finalize_round_with_spot_for_testing(
-        &mut v,
-        &mut treasury,
-        SPOT2,
-        SPOT_SCALE,
-        &clock,
-        scenario.ctx(),
-    );
-    ts::return_shared(treasury);
-    assert!(vault::round(&v) == 2, 0);
-    assert!(vault::pps_at(&v, 1) > PPS_SCALE, 0); // premium net of fees
+    let v = take_vault(&scenario);
+    assert!(vault::open_swap_rfqs(&v) == 0, 0);
+    assert!(vault::proceeds_settlement(&v) == PROCEEDS, 0); // restored
+    assert!(vault::deployable(&v) == 0, 0); // nothing absorbed
+    ts::return_shared(v);
+
+    // The bidder got their underlying back.
+    ts::next_tx(&mut scenario, mm());
+    let refund = ts::take_from_sender<Coin<BTC>>(&scenario);
+    assert!(refund.value() == 210, 0);
+    coin::burn_for_testing(refund);
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+fun test_swap_auction_no_bid_returns_proceeds() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let mut clock = setup(&mut scenario);
+    fund_proceeds(&mut scenario, PROCEEDS);
+
+    let swap_id = open_swap_as(&mut scenario, keeper(), PROCEEDS, &clock);
+    clock.set_for_testing(400_000);
+    settle_swap_at(&mut scenario, keeper(), swap_id, SPOT, &clock);
+
+    ts::next_tx(&mut scenario, keeper());
+    let v = take_vault(&scenario);
+    assert!(vault::open_swap_rfqs(&v) == 0, 0);
+    assert!(vault::proceeds_settlement(&v) == PROCEEDS, 0);
     ts::return_shared(v);
 
     clock.destroy_for_testing();
@@ -1067,41 +1050,15 @@ fun test_swap_proceeds_through_real_deepbook_pool() {
 }
 
 #[test]
-#[expected_failure(abort_code = 55, location = options_protocol::vault)] // vault_wrong_pool
-fun test_swap_proceeds_rejects_unpinned_pool() {
+#[expected_failure(abort_code = 40, location = options_protocol::vault)] // vault_rfqs_open
+fun test_finalize_blocked_while_swap_open() {
     let mut scenario = ts::begin(th::admin_addr());
-    let pool_id = pool_tests::setup_everything<SUI, DBUSDC, SUI, DEEP>(&mut scenario);
+    let clock = setup(&mut scenario);
+    fund_proceeds(&mut scenario, PROCEEDS);
 
-    let clock = th::init_protocol(&mut scenario);
-    ts::next_tx(&mut scenario, th::admin_addr());
-    let cap = th::take_admin_cap(&scenario);
-    let tcap = coin::create_treasury_cap_for_testing<VSHARE>(scenario.ctx());
-    // Vault with NO pinned pool: every swap attempt must be rejected,
-    // whatever pool the caller routes in.
-    vault::create_vault<SUI, DBUSDC, VSHARE>(
-        &cap,
-        tcap,
-        deepbook_config(option::none()),
-        scenario.ctx(),
-    );
-    th::return_admin_cap(&scenario, cap);
-
-    ts::next_tx(&mut scenario, keeper());
-    let mut v = ts::take_shared<Vault<SUI, DBUSDC, VSHARE>>(&scenario);
-    let mut pool = ts::take_shared_by_id<Pool<SUI, DBUSDC>>(&scenario, pool_id);
-    let deep_remainder = vault::swap_proceeds_with_spot_for_testing(
-        &mut v,
-        &mut pool,
-        coin::zero<DEEP>(scenario.ctx()),
-        1,
-        SPOT2,
-        SPOT_SCALE,
-        &clock,
-        scenario.ctx(),
-    );
-    coin::burn_for_testing(deep_remainder);
-    ts::return_shared(pool);
-    ts::return_shared(v);
+    let _swap_id = open_swap_as(&mut scenario, keeper(), PROCEEDS, &clock);
+    // An open swap auction blocks finalize (genesis round 0 here).
+    finalize_as(&mut scenario, keeper(), &clock);
 
     clock.destroy_for_testing();
     ts::end(scenario);

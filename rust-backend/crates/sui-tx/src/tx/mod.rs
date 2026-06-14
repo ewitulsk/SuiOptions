@@ -21,6 +21,7 @@ pub mod execute_write;
 pub mod pyth_update;
 pub mod rfq;
 pub mod sponsor;
+pub mod swap_auction;
 pub mod template;
 pub mod test_tokens;
 pub mod vault;

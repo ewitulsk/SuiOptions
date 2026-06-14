@@ -140,6 +140,55 @@ public struct RfqExpiredUnsold has copy, drop {
     reserve_premium: u64,
 }
 
+// ---- proceeds-swap auction (swap_auction.move) ----
+
+/// A vault opened a swap auction: `amount_s` settlement escrowed, bids
+/// (in underlying) must clear `reserve_underlying`.
+public struct SwapRfqCreated has copy, drop {
+    swap_id: ID,
+    /// Originating vault ID.
+    origin: ID,
+    amount_s: u64,
+    reserve_underlying: u64,
+    deadline_ms: u64,
+    max_deadline_ms: u64,
+    min_increment_bps: u64,
+}
+
+public struct SwapRfqBid has copy, drop {
+    swap_id: ID,
+    bidder: address,
+    /// Underlying offered by this bid.
+    underlying: u64,
+    /// 0 if this is the first bid.
+    previous_underlying: u64,
+    /// Post-anti-snipe deadline.
+    new_deadline_ms: u64,
+}
+
+/// A swap auction filled: the winner took `settlement_filled` settlement
+/// for `underlying_in` underlying, which cleared the fresh-Pyth band.
+/// `vault_id == origin`; carries `round` for the round-economics
+/// materializer (the realized swap rate feeds the perf-fee conversion).
+public struct SwapRfqSettled has copy, drop {
+    swap_id: ID,
+    vault_id: ID,
+    round: u64,
+    winner: address,
+    settlement_filled: u64,
+    underlying_in: u64,
+}
+
+/// A swap auction closed without converting: no bids, or the best bid
+/// fell out of the Pyth band before settle (price moved). The settlement
+/// returns to the vault's proceeds for re-auction.
+public struct SwapRfqUnfilled has copy, drop {
+    swap_id: ID,
+    vault_id: ID,
+    round: u64,
+    amount_s: u64,
+}
+
 public struct VaultCreated has copy, drop {
     vault_id: ID,
     underlying_type: TypeName,
@@ -205,14 +254,6 @@ public struct VaultPositionRedeemed has copy, drop {
     position_id: ID,
     underlying_returned: u64,
     settlement_returned: u64,
-}
-
-public struct VaultProceedsSwapped has copy, drop {
-    vault_id: ID,
-    round: u64,
-    filler: address,
-    settlement_out: u64,
-    underlying_in: u64,
 }
 
 public struct VaultFeesCharged has copy, drop {
@@ -600,14 +641,67 @@ public(package) fun emit_vault_position_redeemed(
     });
 }
 
-public(package) fun emit_vault_proceeds_swapped(
+public(package) fun emit_swap_rfq_created(
+    swap_id: ID,
+    origin: ID,
+    amount_s: u64,
+    reserve_underlying: u64,
+    deadline_ms: u64,
+    max_deadline_ms: u64,
+    min_increment_bps: u64,
+) {
+    event::emit(SwapRfqCreated {
+        swap_id,
+        origin,
+        amount_s,
+        reserve_underlying,
+        deadline_ms,
+        max_deadline_ms,
+        min_increment_bps,
+    });
+}
+
+public(package) fun emit_swap_rfq_bid(
+    swap_id: ID,
+    bidder: address,
+    underlying: u64,
+    previous_underlying: u64,
+    new_deadline_ms: u64,
+) {
+    event::emit(SwapRfqBid {
+        swap_id,
+        bidder,
+        underlying,
+        previous_underlying,
+        new_deadline_ms,
+    });
+}
+
+public(package) fun emit_swap_rfq_settled(
+    swap_id: ID,
     vault_id: ID,
     round: u64,
-    filler: address,
-    settlement_out: u64,
+    winner: address,
+    settlement_filled: u64,
     underlying_in: u64,
 ) {
-    event::emit(VaultProceedsSwapped { vault_id, round, filler, settlement_out, underlying_in });
+    event::emit(SwapRfqSettled {
+        swap_id,
+        vault_id,
+        round,
+        winner,
+        settlement_filled,
+        underlying_in,
+    });
+}
+
+public(package) fun emit_swap_rfq_unfilled(
+    swap_id: ID,
+    vault_id: ID,
+    round: u64,
+    amount_s: u64,
+) {
+    event::emit(SwapRfqUnfilled { swap_id, vault_id, round, amount_s });
 }
 
 public(package) fun emit_vault_fees_charged(vault_id: ID, round: u64, mgmt_fee: u64, perf_fee: u64) {

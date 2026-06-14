@@ -9,8 +9,16 @@
 ### 1.1 New events to decode (`src/event_types.rs`)
 
 From doc 01: `CollateralizedWrite`. From doc 02: `RfqCreated`, `RfqBid`, `RfqSettled`,
-`RfqExpiredUnsold`. From doc 03: the 13 vault events. Same BCS-decode + JSONB-payload
-pattern as the existing 14 types; all land in `indexed_events` untouched.
+`RfqExpiredUnsold`. From the proceeds-swap auction (doc 03 §7.3): `SwapRfqCreated`,
+`SwapRfqBid`, `SwapRfqSettled`, `SwapRfqUnfilled` (these replace the old
+`VaultProceedsSwapped`). From doc 03: the remaining vault events. Same BCS-decode +
+JSONB-payload pattern; all land in `indexed_events` untouched.
+
+> A dedicated `swap_rfqs` materialized table (mirroring `rfqs`) and a `/swap-rfqs?status=open`
+> read are useful for dashboards/frontend but are not required for the system to run — the
+> mm-bot's swap bidder and the keeper discover open swap auctions directly from
+> `SwapRfqCreated` events + object reads (the same stateless pattern the keeper already uses
+> for call auctions). Treat the table as follow-on observability work.
 
 ### 1.2 Materializations (new migration)
 
@@ -82,11 +90,11 @@ GET /rfqs?status=open             → open auctions (mm-bot/dashboards poll this
                                     to event subscription)
 ```
 
-**DeepBook pool address** (parallel work, tentative): extend the pair catalog
-(`src/catalog.rs`) so each (underlying, settlement) entry carries
-`deepbook_pool_id: Option<String>`, surfaced in `/buckets` and `/vaults` responses. The
-keeper reads it for `swap_proceeds`; the frontend uses it as the secondary trading venue
-for `Coin<Call>`. Treat absence as "swap crank unavailable" until the integration lands.
+**DeepBook pool address** (frontend trading venue only): extend the pair catalog
+(`src/catalog.rs`) so each entry can carry the `Pool<Call, Settlement>` id for the option
+coin, surfaced in `/buckets` responses for the frontend's secondary `Coin<Call>` trading UI.
+The vault's **proceeds conversion no longer uses DeepBook** — it runs the on-chain swap
+auction (doc 03 §7.3), so the keeper needs no pool and `VaultConfig` has no `deepbook_pool_id`.
 
 ## 3. mm-bot: on-chain bidder
 
@@ -112,6 +120,23 @@ New module `src/onchain_rfq.rs` beside the WS flow; both share `pricing.rs` unch
 4. **Fund** bids from the bot's wallet or from its `Account` (PTB:
    `account::withdraw<S>` → `rfq::bid`); the wallet is simpler — the bot owner choice.
 5. **Settle**: optionally crank `settle` for auctions it won (keeper does it anyway).
+
+### 3.1 Swap-auction bidder (the proceeds buy side)
+
+The vault's proceeds swap (doc 03 §7.3) is the inverse auction: the vault sells **settlement**
+for **underlying**. A second bidder (`src/onchain_swap.rs`, builder `swap_auction::bid`)
+mirrors the call bidder with the coins flipped:
+
+1. **Discover** open `SwapAuction`s from `SwapRfqCreated` events + object reads (self-contained;
+   no api/indexer endpoint needed — same pattern as the keeper).
+2. **Price**: the bot is *buying settlement with underlying*; its max bid (most underlying it
+   will give) = the Pyth value of the settlement × (1 − desired margin). It must clear the
+   auction's `reserve_underlying` floor; competition pushes toward the band edge.
+3. **Bid** `swap_auction::bid` funded from the wallet's underlying coins; rebid/escrow-cap
+   logic is identical to the call bidder.
+
+Without this bidder a vault's rounds stall (by design) until *someone* bids in-band, so the
+team runs it alongside the call bidder.
 
 ## 4. option-scheduler: vol-aware strike grid (v2)
 
@@ -169,11 +194,15 @@ ladder or vol clamp needs retuning.
 ## 5. `crates/sui-tx` additions
 
 New builders (used by mm-bot, keeper, tests): `rfq_create`, `rfq_bid`, `rfq_settle`,
-`rfq_settle_expired`, `vault_deposit`, `vault_claim_shares`, `vault_initiate_withdraw`,
-`vault_complete_withdraw`, and one builder per crank (`crank_redeem`, `swap_proceeds`,
-`finalize_round`, `select_bucket`, `open_rfq`, `settle_rfq`), plus a `pyth_update` helper
-that prepends Hermes price-update calls to a PTB. Mirror the existing
-`execute_write.rs` style (typed args, shared-object resolution via `shared_object_arg`).
+`rfq_settle_expired`, `swap_auction::bid` (the swap-auction buy side), `vault_deposit`,
+`vault_claim_shares`, `vault_initiate_withdraw`, `vault_complete_withdraw`, and one builder
+per crank (`crank_redeem`, `open_swap_rfq`, `settle_swap_rfq`, `finalize_round`,
+`select_bucket`, `open_rfq`, `settle_rfq`), plus a `pyth_update` helper that prepends Hermes
+price-update calls to a PTB. Mirror the existing `execute_write.rs` style (typed args,
+shared-object resolution via `shared_object_arg`).
+
+Proceeds conversion is the on-chain swap auction (doc 03 §7.3); there is no `swap_proceeds`
+DeepBook builder — `open_swap_rfq` / `settle_swap_rfq` replace it.
 
 ## 6. `crates/protocol-types` additions
 

@@ -21,10 +21,10 @@ use protocol_types::events::{
     AccountCreated, AccountDeposit, AccountWithdraw, BucketCleaned, BucketCreated,
     BucketInvalidated, BucketRevalidated, ChainEvent, CollateralizedWrite, Exercised,
     ExpiredOptionBurned, FeeUpdated, InstantWithdraw, Redeemed, RfqBid, RfqCreated,
-    RfqExpiredUnsold, RfqSettled, SharesClaimed, SigningKeyRotated, TreasuryWithdrawn,
-    VaultBucketSelected, VaultConfigUpdated, VaultCreated, VaultDeposit, VaultDepositsPaused,
-    VaultFeesCharged, VaultPositionRedeemed, VaultProceedsSwapped, VaultRoundFinalized,
-    WithdrawCompleted, WithdrawInitiated, WriteExecuted,
+    RfqExpiredUnsold, RfqSettled, SharesClaimed, SigningKeyRotated, SwapRfqBid, SwapRfqCreated,
+    SwapRfqSettled, SwapRfqUnfilled, TreasuryWithdrawn, VaultBucketSelected, VaultConfigUpdated,
+    VaultCreated, VaultDeposit, VaultDepositsPaused, VaultFeesCharged, VaultPositionRedeemed,
+    VaultRoundFinalized, WithdrawCompleted, WithdrawInitiated, WriteExecuted,
 };
 use protocol_types::ids::{ObjectId, SuiAddress};
 
@@ -54,6 +54,11 @@ pub struct EventTypes {
     pub rfq_bid: String,
     pub rfq_settled: String,
     pub rfq_expired_unsold: String,
+    // Proceeds-swap auction events (swap_auction.move).
+    pub swap_rfq_created: String,
+    pub swap_rfq_bid: String,
+    pub swap_rfq_settled: String,
+    pub swap_rfq_unfilled: String,
     // Vault events (guide doc 03).
     pub vault_created: String,
     pub vault_deposit: String,
@@ -98,6 +103,10 @@ impl EventTypes {
             rfq_bid: mk("RfqBid"),
             rfq_settled: mk("RfqSettled"),
             rfq_expired_unsold: mk("RfqExpiredUnsold"),
+            swap_rfq_created: mk("SwapRfqCreated"),
+            swap_rfq_bid: mk("SwapRfqBid"),
+            swap_rfq_settled: mk("SwapRfqSettled"),
+            swap_rfq_unfilled: mk("SwapRfqUnfilled"),
             vault_created: mk("VaultCreated"),
             vault_deposit: mk("VaultDeposit"),
             shares_claimed: mk("SharesClaimed"),
@@ -116,7 +125,7 @@ impl EventTypes {
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 32] {
+    pub fn all_strings(&self) -> [&str; 35] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -137,6 +146,10 @@ impl EventTypes {
             &self.rfq_bid,
             &self.rfq_settled,
             &self.rfq_expired_unsold,
+            &self.swap_rfq_created,
+            &self.swap_rfq_bid,
+            &self.swap_rfq_settled,
+            &self.swap_rfq_unfilled,
             &self.vault_created,
             &self.vault_deposit,
             &self.shares_claimed,
@@ -145,7 +158,6 @@ impl EventTypes {
             &self.instant_withdraw,
             &self.vault_bucket_selected,
             &self.vault_position_redeemed,
-            &self.vault_proceeds_swapped,
             &self.vault_fees_charged,
             &self.vault_round_finalized,
             &self.vault_config_updated,
@@ -206,6 +218,14 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(RfqSettled, RfqSettled)
     } else if type_str == types.rfq_expired_unsold {
         decode!(RfqExpiredUnsold, RfqExpiredUnsold)
+    } else if type_str == types.swap_rfq_created {
+        decode!(SwapRfqCreated, SwapRfqCreated)
+    } else if type_str == types.swap_rfq_bid {
+        decode!(SwapRfqBid, SwapRfqBid)
+    } else if type_str == types.swap_rfq_settled {
+        decode!(SwapRfqSettled, SwapRfqSettled)
+    } else if type_str == types.swap_rfq_unfilled {
+        decode!(SwapRfqUnfilled, SwapRfqUnfilled)
     } else if type_str == types.vault_created {
         decode!(VaultCreated, VaultCreated)
     } else if type_str == types.vault_deposit {
@@ -222,8 +242,6 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(VaultBucketSelected, VaultBucketSelected)
     } else if type_str == types.vault_position_redeemed {
         decode!(VaultPositionRedeemed, VaultPositionRedeemed)
-    } else if type_str == types.vault_proceeds_swapped {
-        decode!(VaultProceedsSwapped, VaultProceedsSwapped)
     } else if type_str == types.vault_fees_charged {
         decode!(VaultFeesCharged, VaultFeesCharged)
     } else if type_str == types.vault_round_finalized {
