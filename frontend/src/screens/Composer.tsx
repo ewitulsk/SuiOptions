@@ -205,9 +205,13 @@ export function Composer({ initialView }: Props) {
           </div>
         ) : (
           <>
-            <div className="buy-grid buy-grid--mm">
+            {/* Keep the 3-column grid (empty right rail) so the chart's middle
+                column is the same width as DeepBook mode and doesn't resize when
+                toggling. */}
+            <div className="buy-grid">
               {buckets}
               <main className="buy-grid__center">{chart}</main>
+              <aside className="buy-grid__book" />
             </div>
 
             <section className="rfq">
