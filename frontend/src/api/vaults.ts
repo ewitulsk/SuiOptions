@@ -53,6 +53,21 @@ export type Vault = {
   max_strike_over_spot_pct: number | null;
   round_ms: number | null;
   selling_window_ms: number | null;
+  /** Config slice guardrails (from the live object read). Detail page only. */
+  max_slice_amount_raw: string | null;
+  max_open_rfqs: number | null;
+  /** Live round state from a `sui_getObject` read in `GET /vaults/:id`. All
+   *  null on the list endpoint and whenever the RPC read is unavailable. */
+  selling_ends_ms: number | null;
+  open_rfqs: number | null;
+  deployable_raw: string | null;
+  proceeds_settlement_raw: string | null;
+  withdrawal_pool_raw: string | null;
+  claimable_shares_raw: string | null;
+  queued_withdraw_shares_raw: string | null;
+  /** Mgmt + perf fees charged since inception, underlying-denominated. */
+  total_fees: number | null;
+  total_fees_raw: string;
 };
 
 export type VaultsResponse = { vaults: Vault[] };
@@ -166,4 +181,43 @@ export async function fetchVaultApy(vaultId: string): Promise<VaultApySeries> {
     throw new Error(`GET /vaults/:id/apy failed: ${res.status} ${res.statusText}`);
   }
   return (await res.json()) as VaultApySeries;
+}
+
+/**
+ * One RFQ auction the vault ran (the vault's id is the auction `origin`).
+ * Mirrors api-service `RfqDto`. `gross_premium_raw` / `fee_raw` / `net_premium_raw`
+ * are present once the auction settled; correlate to a round via `bucket_id`.
+ */
+export type VaultRfq = {
+  rfq_id: string;
+  bucket_id: string;
+  /** open | settled | expired_unsold. */
+  status: string;
+  gross_premium_raw: string | null;
+  fee_raw: string | null;
+  net_premium_raw: string | null;
+};
+
+/** Every RFQ a vault originated, for the per-round premium breakdown. */
+export async function fetchVaultRfqs(vaultId: string): Promise<VaultRfq[]> {
+  const res = await fetch(`${API_BASE_URL}/rfqs?origin=${encodeURIComponent(vaultId)}`);
+  if (!res.ok) throw new Error(`GET /rfqs?origin failed: ${res.status} ${res.statusText}`);
+  const body = (await res.json()) as { rfqs: VaultRfq[] };
+  return body.rfqs;
+}
+
+/** One bid in an auction's history. Mirrors api-service `RfqBidDto`. */
+export type RfqBid = {
+  sequence: number;
+  bidder: string;
+  call_recipient: string;
+  premium_raw: string;
+};
+
+/** Ascending bid history for one auction (`GET /rfqs/:id/bids`). */
+export async function fetchRfqBids(rfqId: string): Promise<RfqBid[]> {
+  const res = await fetch(`${API_BASE_URL}/rfqs/${encodeURIComponent(rfqId)}/bids`);
+  if (!res.ok) throw new Error(`GET /rfqs/:id/bids failed: ${res.status} ${res.statusText}`);
+  const body = (await res.json()) as { bids: RfqBid[] };
+  return body.bids;
 }

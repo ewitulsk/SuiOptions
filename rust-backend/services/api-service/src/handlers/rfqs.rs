@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,10 @@ pub struct RfqDto {
     pub winner: Option<String>,
     pub net_premium_raw: Option<String>,
     pub position_id: Option<String>,
+    /// Premium before the protocol RFQ fee (settled auctions only).
+    pub gross_premium_raw: Option<String>,
+    /// Protocol RFQ fee taken at settle (settled auctions only).
+    pub fee_raw: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -78,7 +82,48 @@ pub async fn list_rfqs(
             winner: r.winner.map(|a| a.to_hex()),
             net_premium_raw: r.net_premium.map(|v| v.to_string()),
             position_id: r.position_id.map(|p| p.to_hex()),
+            gross_premium_raw: r.gross_premium.map(|v| v.to_string()),
+            fee_raw: r.fee.map(|v| v.to_string()),
         })
         .collect();
     Ok(Json(RfqsResponse { rfqs }))
+}
+
+/// One bid in an auction's history, ascending by sequence.
+#[derive(Serialize)]
+pub struct RfqBidDto {
+    pub sequence: i64,
+    pub bidder: String,
+    pub call_recipient: String,
+    pub premium_raw: String,
+}
+
+#[derive(Serialize)]
+pub struct RfqBidsResponse {
+    pub rfq_id: String,
+    pub bids: Vec<RfqBidDto>,
+}
+
+/// `GET /rfqs/:rfq_id/bids` — the ascending bid history for one auction. The
+/// vault track record joins this per round (origin = vault id → its RFQs →
+/// their bids).
+pub async fn list_rfq_bids(
+    State(state): State<Arc<AppState>>,
+    Path(rfq_id): Path<String>,
+) -> Result<Json<RfqBidsResponse>, StatusCode> {
+    let id = ObjectId::from_hex(&rfq_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let bids = state.indexer.rfq_bids(id).await.map_err(|e| {
+        tracing::warn!(error = %e, "indexer rfq_bids query failed");
+        StatusCode::BAD_GATEWAY
+    })?;
+    let bids = bids
+        .into_iter()
+        .map(|b| RfqBidDto {
+            sequence: b.sequence as i64,
+            bidder: b.bidder.to_hex(),
+            call_recipient: b.call_recipient.to_hex(),
+            premium_raw: b.premium.to_string(),
+        })
+        .collect();
+    Ok(Json(RfqBidsResponse { rfq_id, bids }))
 }

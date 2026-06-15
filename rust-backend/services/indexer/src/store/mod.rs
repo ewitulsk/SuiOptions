@@ -130,6 +130,10 @@ pub struct RfqState {
     pub winner: Option<SuiAddress>,
     pub net_premium: Option<u64>,
     pub position_id: Option<ObjectId>,
+    /// Premium before the protocol RFQ fee; set at settle.
+    pub gross_premium: Option<u64>,
+    /// Protocol RFQ fee taken at settle (`gross_premium − net_premium`).
+    pub fee: Option<u64>,
 }
 
 /// One covered-call vault's headline state, assembled from its event
@@ -835,6 +839,8 @@ fn rfq_row(id: ObjectId, state: &RfqState, sequence: i64) -> RfqRow {
         winner: state.winner.map(|a| a.to_hex()),
         net_premium: state.net_premium.map(u64_to_bigdecimal),
         position_id: state.position_id.map(|p| p.to_hex()),
+        gross_premium: state.gross_premium.map(u64_to_bigdecimal),
+        fee: state.fee.map(u64_to_bigdecimal),
         updated_at_seq: sequence,
     }
 }
@@ -1012,6 +1018,8 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                     winner: None,
                     net_premium: None,
                     position_id: None,
+                    gross_premium: None,
+                    fee: None,
                 },
             );
         }
@@ -1028,6 +1036,8 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                 rfq.winner = Some(s.winner);
                 rfq.net_premium = Some(s.net_premium);
                 rfq.position_id = Some(s.position_id);
+                rfq.gross_premium = Some(s.gross_premium);
+                rfq.fee = Some(s.fee);
             }
         }
         ChainEvent::RfqExpiredUnsold(e) => {
@@ -1485,6 +1495,8 @@ mod tests {
         assert_eq!(s.status, RfqStatus::Settled);
         assert_eq!(s.winner, Some(sniper));
         assert_eq!(s.net_premium, Some(50_490_000));
+        assert_eq!(s.gross_premium, Some(51_000_000));
+        assert_eq!(s.fee, Some(510_000));
         assert_eq!(s.position_id, Some(ObjectId::new([0x99; 32])));
     }
 

@@ -22,6 +22,7 @@ use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::handlers::buckets::strike_raw_to_usd;
 use crate::state::AppState;
+use crate::sui_rpc::{self, VaultLive};
 
 /// `vault.move::PPS_SCALE` — pps is a 1e12-scaled underlying-per-share.
 const PPS_SCALE: f64 = 1e12;
@@ -52,9 +53,10 @@ pub struct VaultDto {
     /// two rounds exist.
     pub apy: Option<f64>,
     pub deposits_paused: bool,
-    /// Live round phase, derived from `current_bucket` + the current round's
-    /// expiry: `active` (selling/holding) vs `settling` (between rounds /
-    /// past expiry, redeeming). No mock — computed from indexed state.
+    /// Live round phase. Ground-truth from the on-chain `Phase` enum when the
+    /// `sui_getObject` read succeeds, else derived from `current_bucket` + the
+    /// current round's expiry: `active` (selling/holding) vs `settling`
+    /// (between rounds / past expiry, redeeming).
     pub phase: String,
     // Active VaultConfig (consumer-facing subset), served in display units.
     // `None` until the config-carrying events are indexed for this vault.
@@ -64,6 +66,23 @@ pub struct VaultDto {
     pub max_strike_over_spot_pct: Option<f64>,
     pub round_ms: Option<i64>,
     pub selling_window_ms: Option<i64>,
+    // Config slice guardrails, from the live object read. `None` on the list
+    // endpoint and whenever the RPC read is unavailable.
+    pub max_slice_amount_raw: Option<String>,
+    pub max_open_rfqs: Option<i64>,
+    // Live round state (`sui_getObject`). All `None` on the list endpoint and
+    // whenever the RPC read is unavailable — never a hard error.
+    pub selling_ends_ms: Option<i64>,
+    pub open_rfqs: Option<i64>,
+    pub deployable_raw: Option<String>,
+    pub proceeds_settlement_raw: Option<String>,
+    pub withdrawal_pool_raw: Option<String>,
+    pub claimable_shares_raw: Option<String>,
+    pub queued_withdraw_shares_raw: Option<String>,
+    /// Mgmt + perf fees charged since inception, summed over finalized rounds.
+    /// Underlying-denominated (fees are taken from the vault's underlying).
+    pub total_fees: Option<f64>,
+    pub total_fees_raw: String,
 }
 
 #[derive(Serialize)]
@@ -138,7 +157,9 @@ pub async fn list_vaults(
             tracing::warn!(error = %e, "indexer vault_rounds query failed");
             StatusCode::BAD_GATEWAY
         })?;
-        out.push(vault_dto(&state, &v, &rounds));
+        // The list view skips the per-vault RPC read; live round state is a
+        // detail-page concern (and N getObject calls don't belong here).
+        out.push(vault_dto(&state, &v, &rounds, None));
     }
     Ok(Json(VaultsResponse { vaults: out }))
 }
@@ -161,7 +182,16 @@ pub async fn get_vault(
         tracing::warn!(error = %e, "indexer vault_rounds query failed");
         StatusCode::BAD_GATEWAY
     })?;
-    Ok(Json(vault_dto(&state, &vault, &rounds)))
+    // Live round state is best-effort: an RPC hiccup degrades to omitting the
+    // live fields rather than failing the page (config/history stay served).
+    let live = match sui_rpc::fetch_vault_live(&state.http, &state.sui_rpc_url, &id).await {
+        Ok(live) => live,
+        Err(e) => {
+            tracing::warn!(error = %e, "vault live read failed; serving without live state");
+            None
+        }
+    };
+    Ok(Json(vault_dto(&state, &vault, &rounds, live.as_ref())))
 }
 
 pub async fn list_vault_rounds(
@@ -374,7 +404,12 @@ fn decimals_for(state: &AppState, v: &Vault) -> Option<(u8, u8)> {
     Some((u, s))
 }
 
-fn vault_dto(state: &AppState, v: &Vault, rounds: &[VaultRound]) -> VaultDto {
+fn vault_dto(
+    state: &AppState,
+    v: &Vault,
+    rounds: &[VaultRound],
+    live: Option<&VaultLive>,
+) -> VaultDto {
     let u_meta = state.catalog.lookup(v.underlying_type.as_str());
     let s_meta = state.catalog.lookup(v.settlement_type.as_str());
     let u_dec = u_meta.map(|m| m.decimals);
@@ -384,6 +419,12 @@ fn vault_dto(state: &AppState, v: &Vault, rounds: &[VaultRound]) -> VaultDto {
         let held = (v.total_shares as u128).saturating_mul(pps) / PPS_SCALE as u128;
         held as u64 + v.pending_deposits
     });
+
+    // Fees since inception: mgmt + perf summed over rounds, underlying units.
+    let total_fees_raw: u128 = rounds
+        .iter()
+        .map(|r| r.mgmt_fee.unwrap_or(0) as u128 + r.perf_fee.unwrap_or(0) as u128)
+        .sum();
 
     VaultDto {
         vault_id: v.vault_id.to_hex(),
@@ -411,13 +452,27 @@ fn vault_dto(state: &AppState, v: &Vault, rounds: &[VaultRound]) -> VaultDto {
         pending_deposits_raw: v.pending_deposits.to_string(),
         apy: apy_from_rounds(rounds),
         deposits_paused: v.deposits_paused,
-        phase: vault_phase(v, rounds),
+        // Ground-truth phase from the live read; heuristic fallback otherwise.
+        phase: live
+            .map(|l| l.phase.clone())
+            .unwrap_or_else(|| vault_phase(v, rounds)),
         mgmt_fee_pct: v.mgmt_fee_bps_annual.map(|b| b as f64 / 100.0),
         perf_fee_pct: v.perf_fee_bps.map(|b| b as f64 / 100.0),
         min_strike_over_spot_pct: v.min_strike_bps_over_spot.map(|b| b as f64 / 100.0),
         max_strike_over_spot_pct: v.max_strike_bps_over_spot.map(|b| b as f64 / 100.0),
         round_ms: v.round_ms.map(|m| m as i64),
         selling_window_ms: v.selling_window_ms.map(|m| m as i64),
+        max_slice_amount_raw: live.map(|l| l.max_slice_amount.to_string()),
+        max_open_rfqs: live.map(|l| l.max_open_rfqs as i64),
+        selling_ends_ms: live.map(|l| l.selling_ends_ms as i64),
+        open_rfqs: live.map(|l| l.open_rfqs as i64),
+        deployable_raw: live.map(|l| l.deployable.to_string()),
+        proceeds_settlement_raw: live.map(|l| l.proceeds_settlement.to_string()),
+        withdrawal_pool_raw: live.map(|l| l.withdrawal_pool.to_string()),
+        claimable_shares_raw: live.map(|l| l.claimable_shares.to_string()),
+        queued_withdraw_shares_raw: live.map(|l| l.queued_withdraw_shares.to_string()),
+        total_fees: u_dec.map(|d| total_fees_raw as f64 / 10f64.powi(d as i32)),
+        total_fees_raw: total_fees_raw.to_string(),
     }
 }
 

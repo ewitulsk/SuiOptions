@@ -24,10 +24,20 @@ pub struct Config {
     /// serves realized points only and an empty predicted series.
     #[serde(default)]
     pub derived_metrics_url: Option<String>,
+    /// Sui fullnode JSON-RPC URL. `GET /vaults/:id` does one `sui_getObject`
+    /// against this for the vault's *live* round state (deployable, open RFQs,
+    /// phase, …); a read failure degrades to omitting those fields, never a
+    /// 5xx. Defaults to the public testnet fullnode (staging/prod are testnet).
+    #[serde(default = "default_sui_rpc_url")]
+    pub sui_rpc_url: String,
 }
 
 fn default_indexer_graphql_url() -> String {
     "http://127.0.0.1:9002/graphql".to_string()
+}
+
+fn default_sui_rpc_url() -> String {
+    "https://fullnode.testnet.sui.io:443".to_string()
 }
 
 fn default_cors() -> Vec<String> {
