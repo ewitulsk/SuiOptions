@@ -22,13 +22,15 @@ import {
   fundFromFaucet,
   revokeSession,
   sessionLoginAvailable,
+  signInWithLastEth,
   signInWithMetaMask,
   signInWithPhantom,
+  signInWithWalletConnect,
   signOutSession,
   useSession,
   withdrawFromCustody,
 } from "../session/store";
-import { hasMetaMask, hasPhantom } from "../session/wallets";
+import { hasMetaMask, hasPhantom, hasWalletConnect } from "../session/wallets";
 
 function hex(bytes: Uint8Array): string {
   let out = "0x";
@@ -144,6 +146,16 @@ export function ConnectMenu({ onSuiWallet }: { onSuiWallet: () => void }) {
           >
             MetaMask (Ethereum)
           </button>
+          {hasWalletConnect() && (
+            <button
+              className="wallet-menu__item"
+              role="menuitem"
+              title="Sign in once with any WalletConnect wallet"
+              onClick={() => signIn(signInWithWalletConnect)}
+            >
+              WalletConnect (Ethereum)
+            </button>
+          )}
           {session.error && (
             <div className="wallet-menu__section-label" style={{ color: "var(--danger, #c33)" }}>
               {session.error}
@@ -300,7 +312,7 @@ export function SessionMenu() {
             <button
               className="wallet-menu__item"
               onClick={() =>
-                (handle.scheme === "solana" ? signInWithPhantom() : signInWithMetaMask()).catch(
+                (handle.scheme === "solana" ? signInWithPhantom() : signInWithLastEth()).catch(
                   () => {},
                 )
               }

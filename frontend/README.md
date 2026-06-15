@@ -33,7 +33,7 @@ implementation to real Sui SDK / indexer / WSS calls is a contained change.
 
 ## Environment variables
 
-The frontend reads exactly three `VITE_`-prefixed variables. **All three have
+The frontend reads the following `VITE_`-prefixed variables. **Most have
 defaults wired for local dev, so none are strictly required** — set them to
 point at a non-local environment. Define them in `frontend/.env.local` (Vite
 loads it automatically; not committed).
@@ -43,6 +43,7 @@ loads it automatically; not committed).
 | `VITE_ENVIRONMENT`   | No       | `testnet`                | Selects which deployment block to read from `rust-backend/deployments.json`. One of `mainnet` \| `testnet` \| `devnet`. Drives the package / protocol-config / treasury ids (`src/config.ts`) **and** the wallet's default Sui network (`src/main.tsx`). An environment with no published deployment leaves those ids unset and the app falls back to its empty / "no deployment configured" states. |
 | `VITE_API_BASE_URL`  | No       | `http://127.0.0.1:9003`  | Base URL of the Rust `api-service` (REST). |
 | `VITE_QUOTING_WS_URL`| No       | `ws://127.0.0.1:9002/`   | WebSocket URL of the quoting service. |
+| `VITE_WALLETCONNECT_PROJECT_ID` | No | _(unset)_             | WalletConnect (Reown) projectId from [dashboard.reown.com](https://dashboard.reown.com). Enables the "Sign in with WalletConnect" session login (EIP-4361 / SIWE — same path as MetaMask). When unset, the option doesn't render and the WalletConnect bundle is excluded entirely. |
 
 Contract ids (package, `ProtocolConfig`, `Treasury`) are **not** env vars —
 they come from `deployments.json` keyed by `VITE_ENVIRONMENT`.
