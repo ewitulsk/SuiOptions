@@ -281,11 +281,35 @@ jobs:
           aws s3 cp /tmp/bundle.tgz \
             "s3://$SSM_OUTPUT_BUCKET/deploy-bundles/$TAG-${{ matrix.env }}.tgz"
 
+      # prod ships OTLP spans to the shared host's Tempo over the private VPC
+      # IP. cloud-init seeds /opt/options/prod/otel-endpoint on first boot
+      # only; the live prod host booted before that line landed (SO-180), so
+      # deploy.sh fell back to the docker-DNS default `tempo:4318` — a name
+      # that doesn't resolve on the prod host. Re-assert the file on every
+      # deploy so it self-heals regardless of when the host was provisioned.
+      # Staging reaches Tempo via docker DNS and needs no file.
+      - name: Resolve prod OTLP endpoint
+        id: otel
+        if: matrix.env == 'prod'
+        run: |
+          ip=$(aws ec2 describe-instances \
+            --region "$AWS_REGION" \
+            --filters "Name=tag:Name,Values=options-host" \
+                      "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].PrivateIpAddress' --output text)
+          if [ -z "$ip" ] || [ "$ip" = "None" ] || [ "$(printf '%s' "$ip" | wc -w)" -ne 1 ]; then
+            echo "::error::Could not resolve a single options-host private IP (got: '$ip')"
+            exit 1
+          fi
+          echo "endpoint=http://$ip:4318" >> "$GITHUB_OUTPUT"
+          echo "prod OTLP endpoint → http://$ip:4318"
+
       - name: SSM deploy
         env:
           TAG: ${{ needs.affected.outputs.tag }}
           SERVICES: ${{ needs.affected.outputs.services }}
           DEPLOY_ENV: ${{ matrix.env }}
+          OTEL_ENDPOINT_FILE: ${{ steps.otel.outputs.endpoint }}
         run: |
           # Build the SSM parameter file with jq so JSON escaping is
           # mechanical (the SERVICES variable contains double quotes).
@@ -299,6 +323,7 @@ jobs:
             --arg dbhost "$RDS_HOST" \
             --arg bucket "$SSM_OUTPUT_BUCKET" \
             --arg env "$DEPLOY_ENV" \
+            --arg otel "$OTEL_ENDPOINT_FILE" \
             --arg services "$SERVICES" '
             {
               commands: [
@@ -313,6 +338,9 @@ jobs:
                 "chmod +x /opt/options/\($env)/deploy.sh /opt/options/\($env)/render-secrets.sh",
                 "rm /tmp/bundle.tgz",
                 "cd /opt/options/\($env)",
+                # deploy.sh reads otel-endpoint into OTEL_ENDPOINT; written
+                # only when the resolve step set one (prod). Empty → dropped.
+                (if $otel != "" then "echo \($otel) > /opt/options/\($env)/otel-endpoint" else empty end),
                 "./deploy.sh \($env) " + ($services|@sh)
               ]
             }' > /tmp/ssm-params.json
