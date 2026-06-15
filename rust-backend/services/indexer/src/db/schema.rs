@@ -104,6 +104,8 @@ diesel::table! {
         winner          -> Nullable<Text>,
         net_premium     -> Nullable<Numeric>,
         position_id     -> Nullable<Text>,
+        gross_premium   -> Nullable<Numeric>,
+        fee             -> Nullable<Numeric>,
         updated_at_seq  -> Int8,
     }
 }

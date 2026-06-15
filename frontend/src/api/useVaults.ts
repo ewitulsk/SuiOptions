@@ -4,12 +4,16 @@ import { normalizeStructTag } from "@mysten/sui/utils";
 
 import { PACKAGE_ID } from "../config";
 import {
+  fetchRfqBids,
   fetchVault,
   fetchVaultApy,
+  fetchVaultRfqs,
   fetchVaultRounds,
   fetchVaults,
+  type RfqBid,
   type Vault,
   type VaultApySeries,
+  type VaultRfq,
   type VaultRound,
 } from "./vaults";
 
@@ -52,6 +56,25 @@ export function useVaultApyHistory(vaultId: string | null) {
     enabled: vaultId !== null,
     queryFn: () => fetchVaultApy(vaultId as string),
     refetchInterval: 60_000,
+  });
+}
+
+/** Every RFQ a vault originated — backs the per-round premium breakdown. */
+export function useVaultRfqs(vaultId: string | null) {
+  return useQuery<VaultRfq[], Error>({
+    queryKey: ["vault-rfqs", vaultId],
+    enabled: vaultId !== null,
+    queryFn: () => fetchVaultRfqs(vaultId as string),
+    refetchInterval: 30_000,
+  });
+}
+
+/** Bid history for one auction; lazy — only fetched when `enabled`. */
+export function useRfqBids(rfqId: string | null, enabled: boolean) {
+  return useQuery<RfqBid[], Error>({
+    queryKey: ["rfq-bids", rfqId],
+    enabled: enabled && rfqId !== null,
+    queryFn: () => fetchRfqBids(rfqId as string),
   });
 }
 

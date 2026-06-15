@@ -21,3 +21,8 @@ token_info_url   = "http://token-info:9005"
 # derived-metric-worker read API: predicted-APY series composed into
 # /vaults/:id/apy. Omit to serve realized-only.
 derived_metrics_url = "http://derived-metric-worker:9014"
+
+# Sui fullnode JSON-RPC for the live-vault read in GET /vaults/:id. prod runs
+# on testnet (the deployed vault package lives there); point at mainnet only
+# once it does. A read failure degrades to omitting live state, not a 5xx.
+sui_rpc_url = "https://fullnode.testnet.sui.io:443"

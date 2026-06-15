@@ -113,6 +113,10 @@ pub struct Rfq {
     pub winner: Option<SuiAddress>,
     pub net_premium: Option<u64>,
     pub position_id: Option<ObjectId>,
+    /// Premium before the protocol RFQ fee (settled auctions only).
+    pub gross_premium: Option<u64>,
+    /// Protocol RFQ fee taken at settle (settled auctions only).
+    pub fee: Option<u64>,
 }
 
 /// One bid in an auction's history (C3).
@@ -302,7 +306,7 @@ impl IndexerClient {
     ) -> Result<Vec<Rfq>> {
         const Q: &str = "query($s:String,$o:String){rfqs(status:$s,origin:$o){rfqId bucketId \
             origin amountRaw reservePremiumRaw deadlineMs bestPremiumRaw bestBidder status \
-            winner netPremiumRaw positionId}}";
+            winner netPremiumRaw positionId grossPremiumRaw feeRaw}}";
         let vars = json!({ "s": status, "o": origin.map(|o| o.to_hex()) });
         let data: RfqsWrap = self.gql(Q, vars).await?;
         data.rfqs.into_iter().map(Rfq::try_from).collect()
@@ -678,6 +682,10 @@ struct RfqJson {
     winner: Option<String>,
     net_premium_raw: Option<String>,
     position_id: Option<String>,
+    #[serde(default)]
+    gross_premium_raw: Option<String>,
+    #[serde(default)]
+    fee_raw: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -868,6 +876,8 @@ impl TryFrom<RfqJson> for Rfq {
             winner: r.winner.as_deref().map(parse_address).transpose()?,
             net_premium: r.net_premium_raw.as_deref().map(parse_u64).transpose()?,
             position_id: r.position_id.as_deref().map(parse_object_id).transpose()?,
+            gross_premium: r.gross_premium_raw.as_deref().map(parse_u64).transpose()?,
+            fee: r.fee_raw.as_deref().map(parse_u64).transpose()?,
         })
     }
 }

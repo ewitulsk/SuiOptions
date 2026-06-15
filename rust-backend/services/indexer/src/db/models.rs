@@ -330,6 +330,8 @@ pub struct RfqRow {
     pub winner: Option<String>,
     pub net_premium: Option<BigDecimal>,
     pub position_id: Option<String>,
+    pub gross_premium: Option<BigDecimal>,
+    pub fee: Option<BigDecimal>,
     pub updated_at_seq: i64,
 }
 
@@ -364,6 +366,8 @@ impl RfqRow {
                     .map(ObjectId::from_hex)
                     .transpose()
                     .map_err(|e| anyhow::anyhow!("rfq position_id: {e}"))?,
+                gross_premium: self.gross_premium.as_ref().map(bigdecimal_to_u64).transpose()?,
+                fee: self.fee.as_ref().map(bigdecimal_to_u64).transpose()?,
             },
         ))
     }

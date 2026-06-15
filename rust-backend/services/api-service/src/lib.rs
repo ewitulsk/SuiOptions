@@ -2,7 +2,8 @@
 //!
 //! Every read is a just-in-time GraphQL query to the indexer — api-service
 //! holds no protocol state of its own. Holds no funds, signs nothing —
-//! strictly a read/query layer.
+//! strictly a read/query layer. (One exception: a read-only `sui_getObject`
+//! for live vault round state; see [`sui_rpc`].)
 
 pub mod bucket;
 pub mod catalog;
@@ -10,6 +11,7 @@ pub mod config;
 pub mod handlers;
 pub mod router;
 pub mod state;
+pub mod sui_rpc;
 
 pub use config::Config;
 pub use state::AppState;

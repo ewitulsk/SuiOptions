@@ -13,8 +13,8 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSuiClient } from "@mysten/dapp-kit";
 
-import type { Vault, VaultRound, VaultApyPoint } from "../api/vaults";
-import { useVault, useVaultRounds, useVaultApyHistory, useOwnedVaultReceipts, useShareBalance, useVaults } from "../api/useVaults";
+import type { Vault, VaultRound, VaultApyPoint, VaultRfq } from "../api/vaults";
+import { useVault, useVaultRounds, useVaultApyHistory, useOwnedVaultReceipts, useShareBalance, useVaults, useVaultRfqs, useRfqBids } from "../api/useVaults";
 import { useVaultActions } from "../state/vault";
 import { useUserIdentity } from "../session/identity";
 import { readCustodyObjectIds } from "../session/accounts";
@@ -44,6 +44,27 @@ function fmtDate(ms: number | null | undefined): string {
   return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
+/** Date + time of day — for within-round timestamps like the selling window. */
+function fmtDateTime(ms: number | null | undefined): string {
+  if (ms == null || ms <= 0) return "—";
+  return new Date(ms).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/** A scaled raw amount with its unit, or "—" when missing. */
+function fmtAmt(
+  raw: string | null | undefined,
+  decimals: number | null,
+  unit: string,
+): string {
+  const v = scaled(raw, decimals);
+  return v != null ? `${formatPrice(v, { grouping: true })} ${unit}` : "—";
+}
+
 /** Human cadence from a round length in ms (e.g. 604800000 → "Weekly"). */
 function fmtCadence(ms: number | null | undefined): string {
   if (ms == null || ms <= 0) return "—";
@@ -58,6 +79,11 @@ function fmtCadence(ms: number | null | undefined): string {
 function fmtPctRaw(x: number | null | undefined, digits = 1): string {
   if (x == null || !Number.isFinite(x)) return "—";
   return `${x.toFixed(digits)}%`;
+}
+
+/** Abbreviate a 0x id/address for dense tables: 0x1234…cdef. */
+function shortHex(s: string): string {
+  return s.length > 12 ? `${s.slice(0, 6)}…${s.slice(-4)}` : s;
 }
 
 /** APY of the most recent point in a series (by timestamp), or null when empty. */
@@ -266,9 +292,14 @@ function StrategyCard({ vault }: { vault: Vault }) {
 
 function CurrentRoundCard({ vault, rounds }: { vault: Vault; rounds: VaultRound[] }) {
   const current = rounds.find((r) => r.round === vault.round);
-  // Live phase is served by api-service (derived from indexed state).
+  // Phase is ground-truth from the live on-chain read (heuristic fallback).
   const phase =
     vault.phase === "active" ? "Active — selling / holding" : "Settling — between rounds";
+  const uDec = vault.underlying_decimals;
+  const sDec = vault.settlement_decimals;
+  // Live round state arrives from the detail endpoint's sui_getObject read;
+  // it's absent on a degraded read, so each row falls back to "—".
+  const hasLive = vault.open_rfqs != null || vault.deployable_raw != null;
   return (
     <div className="vault-card">
       <div className="vault-card__head">
@@ -290,10 +321,44 @@ function CurrentRoundCard({ vault, rounds }: { vault: Vault; rounds: VaultRound[
           <span>Expiry</span>
           <span>{fmtDate(current?.expiry_ms ?? null)}</span>
         </div>
+        {vault.phase === "active" && (
+          <div className="vault-kv__row">
+            <span>Selling window ends</span>
+            <span>{fmtDateTime(vault.selling_ends_ms)}</span>
+          </div>
+        )}
+        <div className="vault-kv__row">
+          <span>Open RFQs</span>
+          <span>{vault.open_rfqs != null ? vault.open_rfqs : "—"}</span>
+        </div>
         <div className="vault-kv__row">
           <span>Deposits</span>
           <span>{vault.deposits_paused ? "Paused" : "Open"}</span>
         </div>
+        {hasLive && (
+          <>
+            <div className="vault-kv__row">
+              <span>Deployable</span>
+              <span>{fmtAmt(vault.deployable_raw, uDec, vault.underlying_symbol)}</span>
+            </div>
+            <div className="vault-kv__row">
+              <span>Proceeds awaiting swap</span>
+              <span>{fmtAmt(vault.proceeds_settlement_raw, sDec, vault.settlement_symbol)}</span>
+            </div>
+            <div className="vault-kv__row">
+              <span>Withdrawal pool</span>
+              <span>{fmtAmt(vault.withdrawal_pool_raw, uDec, vault.underlying_symbol)}</span>
+            </div>
+            <div className="vault-kv__row">
+              <span>Claimable shares</span>
+              <span>{fmtAmt(vault.claimable_shares_raw, uDec, "shares")}</span>
+            </div>
+            <div className="vault-kv__row">
+              <span>Queued withdrawals</span>
+              <span>{fmtAmt(vault.queued_withdraw_shares_raw, uDec, "shares")}</span>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -301,7 +366,15 @@ function CurrentRoundCard({ vault, rounds }: { vault: Vault; rounds: VaultRound[
 
 function TrackRecord({ vault, rounds }: { vault: Vault; rounds: VaultRound[] }) {
   const finalized = rounds.filter((r) => r.pps != null).sort((a, b) => b.round - a.round);
-  const sDec = vault.settlement_decimals;
+  const rfqsQ = useVaultRfqs(vault.vault_id);
+  // bucket_id → its settled RFQs; a round may slice inventory into several.
+  const byBucket = new Map<string, VaultRfq[]>();
+  for (const r of rfqsQ.data ?? []) {
+    if (r.status !== "settled") continue;
+    const list = byBucket.get(r.bucket_id) ?? [];
+    list.push(r);
+    byBucket.set(r.bucket_id, list);
+  }
   return (
     <div className="vault-card">
       <div className="vault-card__head">
@@ -319,24 +392,89 @@ function TrackRecord({ vault, rounds }: { vault: Vault; rounds: VaultRound[] }) 
             <span>Strike</span>
             <span>Expiry</span>
             <span>PPS</span>
-            <span>Premium</span>
+            <span>Premium (net)</span>
           </div>
-          {finalized.map((r) => {
-            const premium = scaled(r.premium_collected_raw, sDec);
-            return (
-              <div className="vault-table__row" key={r.round}>
-                <span>#{r.round}</span>
-                <span>{r.strike != null ? `$${formatPrice(r.strike)}` : "—"}</span>
-                <span>{fmtDate(r.expiry_ms)}</span>
-                <span>{r.pps != null ? r.pps.toFixed(6) : "—"}</span>
-                <span className="is-pos">
-                  {premium != null ? `+${formatPrice(premium)} ${vault.settlement_symbol}` : "—"}
-                </span>
-              </div>
-            );
-          })}
+          {finalized.map((r) => (
+            <RoundRow
+              key={r.round}
+              round={r}
+              vault={vault}
+              rfqs={r.bucket_id ? byBucket.get(r.bucket_id) ?? [] : []}
+            />
+          ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** One track-record row; expands to the round's RFQ gross/fee + bid history. */
+function RoundRow({ round, vault, rfqs }: { round: VaultRound; vault: Vault; rfqs: VaultRfq[] }) {
+  const [open, setOpen] = useState(false);
+  const sDec = vault.settlement_decimals;
+  const net = scaled(round.premium_collected_raw, sDec);
+  const sumRaw = (pick: (r: VaultRfq) => string | null) =>
+    rfqs.reduce((a, r) => a + BigInt(pick(r) ?? "0"), 0n);
+  const hasRfqs = rfqs.length > 0;
+  const gross = hasRfqs && sDec != null ? Number(sumRaw((r) => r.gross_premium_raw)) / 10 ** sDec : null;
+  const fee = hasRfqs && sDec != null ? Number(sumRaw((r) => r.fee_raw)) / 10 ** sDec : null;
+  return (
+    <>
+      <div
+        className="vault-table__row"
+        onClick={hasRfqs ? () => setOpen((o) => !o) : undefined}
+        style={hasRfqs ? { cursor: "pointer" } : undefined}
+      >
+        <span>{hasRfqs ? (open ? "▾ " : "▸ ") : ""}#{round.round}</span>
+        <span>{round.strike != null ? `$${formatPrice(round.strike)}` : "—"}</span>
+        <span>{fmtDate(round.expiry_ms)}</span>
+        <span>{round.pps != null ? round.pps.toFixed(6) : "—"}</span>
+        <span className="is-pos">
+          {net != null ? `+${formatPrice(net)} ${vault.settlement_symbol}` : "—"}
+          {gross != null && (
+            <span className="vault-bids__sub">
+              {" "}
+              gross {formatPrice(gross)} · fee {formatPrice(fee ?? 0)}
+            </span>
+          )}
+        </span>
+      </div>
+      {open && (
+        <div className="vault-bids">
+          {rfqs.map((r) => (
+            <RfqBidList key={r.rfq_id} rfq={r} vault={vault} />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Bid ladder for one settled RFQ slice (lazy — fetched on expand). */
+function RfqBidList({ rfq, vault }: { rfq: VaultRfq; vault: Vault }) {
+  const sDec = vault.settlement_decimals;
+  const bidsQ = useRfqBids(rfq.rfq_id, true);
+  const bids = bidsQ.data ?? [];
+  return (
+    <div className="vault-bids__group">
+      <div className="vault-bids__title">
+        Auction {shortHex(rfq.rfq_id)} · {bids.length} bid{bids.length === 1 ? "" : "s"}
+      </div>
+      {bidsQ.isLoading && <div className="vault-bids__bid vault-prose__muted">loading bids…</div>}
+      {!bidsQ.isLoading && bids.length === 0 && (
+        <div className="vault-bids__bid vault-prose__muted">no bids recorded</div>
+      )}
+      {bids.map((b) => {
+        const premium = scaled(b.premium_raw, sDec);
+        return (
+          <div className="vault-bids__bid" key={b.sequence}>
+            <span>{shortHex(b.bidder)}</span>
+            <span className="is-pos">
+              {premium != null ? `${formatPrice(premium)} ${vault.settlement_symbol}` : "—"}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -372,12 +510,24 @@ function ParamsCard({ vault }: { vault: Vault }) {
           <span>{fmtCadence(vault.round_ms)}</span>
         </div>
         <div className="vault-kv__row">
-          <span>Capacity</span>
-          <span>Uncapped</span>
+          <span>Max RFQ slice</span>
+          <span>{fmtAmt(vault.max_slice_amount_raw, vault.underlying_decimals, vault.underlying_symbol)}</span>
+        </div>
+        <div className="vault-kv__row">
+          <span>Max open RFQs</span>
+          <span>{vault.max_open_rfqs != null ? vault.max_open_rfqs : "—"}</span>
+        </div>
+        <div className="vault-kv__row">
+          <span>Fees to date</span>
+          <span>
+            {vault.total_fees != null
+              ? `${formatPrice(vault.total_fees, { grouping: true })} ${vault.underlying_symbol}`
+              : "—"}
+          </span>
         </div>
       </div>
       <div className="vault-card__foot vault-prose__muted">
-        From the vault's on-chain <code>VaultConfig</code>.
+        From the vault's on-chain <code>VaultConfig</code>. This vault is uncapped.
       </div>
     </div>
   );

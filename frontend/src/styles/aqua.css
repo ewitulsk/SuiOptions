@@ -2088,6 +2088,17 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 [data-theme="aqua"] .vault-table__row { border-bottom: 1px solid var(--aqua-line); color: var(--aqua-ink-1); font-variant-numeric: tabular-nums; }
 [data-theme="aqua"] .vault-table__row .is-pos { color: var(--aqua-up, #1fbf75); }
 
+/* Per-round premium breakdown: gross/fee subline + expandable bid ladder. */
+[data-theme="aqua"] .vault-bids__sub { display: block; color: var(--aqua-ink-3); font-size: 11px; }
+[data-theme="aqua"] .vault-bids { padding: 6px 0 10px; }
+[data-theme="aqua"] .vault-bids__group { padding: 6px 0; }
+[data-theme="aqua"] .vault-bids__title { color: var(--aqua-ink-3); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; margin-bottom: 4px; }
+[data-theme="aqua"] .vault-bids__bid {
+  display: flex; justify-content: space-between; font-size: 12px;
+  font-variant-numeric: tabular-nums; padding: 2px 0; color: var(--aqua-ink-1);
+}
+[data-theme="aqua"] .vault-bids__bid .is-pos { color: var(--aqua-up, #1fbf75); }
+
 [data-theme="aqua"] .vault-invest__tabs { display: flex; gap: 4px; margin-bottom: 14px; }
 [data-theme="aqua"] .vault-invest__tab {
   flex: 1; border: 1px solid var(--aqua-line); background: transparent; color: var(--aqua-ink-2);

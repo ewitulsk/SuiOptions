@@ -40,6 +40,10 @@ pub async fn serve(
         )
         .route("/events", get(handlers::events::list_events))
         .route("/rfqs", get(handlers::rfqs::list_rfqs))
+        .route(
+            "/rfqs/:rfq_id/bids",
+            get(handlers::rfqs::list_rfq_bids),
+        )
         .route("/vaults", get(handlers::vaults::list_vaults))
         .route("/vaults/:vault_id", get(handlers::vaults::get_vault))
         .route(

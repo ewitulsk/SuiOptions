@@ -217,6 +217,10 @@ pub struct RfqGql {
     pub winner: Option<String>,
     pub net_premium_raw: Option<String>,
     pub position_id: Option<String>,
+    /// Premium before the protocol RFQ fee (settled auctions only).
+    pub gross_premium_raw: Option<String>,
+    /// Protocol RFQ fee taken at settle (settled auctions only).
+    pub fee_raw: Option<String>,
 }
 
 impl From<RfqRow> for RfqGql {
@@ -234,6 +238,8 @@ impl From<RfqRow> for RfqGql {
             winner: r.winner,
             net_premium_raw: r.net_premium.map(|v| v.to_string()),
             position_id: r.position_id,
+            gross_premium_raw: r.gross_premium.map(|v| v.to_string()),
+            fee_raw: r.fee.map(|v| v.to_string()),
         }
     }
 }
