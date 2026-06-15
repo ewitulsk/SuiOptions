@@ -286,3 +286,32 @@ export function buildWithdrawAllTx(p: PoolRefParams & { recipient: string }): Tr
   tx.transferObjects([base, quote], p.recipient);
   return tx;
 }
+
+/**
+ * Settle pool-held fills into the BM, then drain ONLY the base (the position
+ * token) back to the wallet — leaving any settlement/quote in the BM for other
+ * trades. The "withdraw this specific position token from DeepBook" action.
+ *
+ * Same call shape as `buildWithdrawAllTx` minus the second `withdraw_all`, so
+ * it matches the gas station's existing `deepbook_withdraw` template.
+ */
+export function buildWithdrawBaseTx(p: PoolRefParams & { recipient: string }): Transaction {
+  const { pkg } = requireDeepbook();
+  const tx = new Transaction();
+  const proof = tx.moveCall({
+    target: `${pkg}::balance_manager::generate_proof_as_owner`,
+    arguments: [tx.object(p.bmId)],
+  });
+  tx.moveCall({
+    target: `${pkg}::pool::withdraw_settled_amounts`,
+    typeArguments: [p.baseCoinType, p.quoteCoinType],
+    arguments: [tx.object(p.poolId), tx.object(p.bmId), proof],
+  });
+  const base = tx.moveCall({
+    target: `${pkg}::balance_manager::withdraw_all`,
+    typeArguments: [p.baseCoinType],
+    arguments: [tx.object(p.bmId)],
+  });
+  tx.transferObjects([base], p.recipient);
+  return tx;
+}

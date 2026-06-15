@@ -40,11 +40,14 @@ const fmtSpot = (asset: string, n: number) =>
 export function OwnedCard({
   p,
   onExercise,
+  onWithdraw,
 }: {
   p: OwnedPosition;
   onExercise: (p: OwnedPosition) => void;
+  onWithdraw: (p: OwnedPosition) => void;
 }) {
   const isItm = p.itm;
+  const inDeepbook = p.tradingAccountAmount > 0;
   return (
     <div className={"pos-card pos-card--owned " + (isItm ? "is-itm" : "is-otm")}>
       <div className="pos-card__head">
@@ -83,6 +86,26 @@ export function OwnedCard({
           <div className="pos-card__metric-sub">
             exercise cost {formatPrice(p.amount * p.strike, { grouping: true })} USDC
           </div>
+          {inDeepbook && (
+            <div className="pos-card__metric-sub is-info">
+              {fmtAmt(p.asset, p.tradingAccountAmount)} in trading account ·{" "}
+              <button
+                onClick={() => onWithdraw(p)}
+                title="Withdraw this position token from DeepBook to your wallet"
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  padding: 0,
+                  font: "inherit",
+                  color: "inherit",
+                  textDecoration: "underline",
+                  cursor: "pointer",
+                }}
+              >
+                withdraw
+              </button>
+            </div>
+          )}
         </div>
         <div className="pos-card__metric">
           <div className="pos-card__metric-label">Spot now</div>
