@@ -1994,14 +1994,40 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 /* ───────────────────────────── Vault page (SO vault) ───────────────────────────── */
 [data-theme="aqua"] .vault-note { color: var(--aqua-ink-3); padding: 24px 0; font-size: 14px; }
 
-[data-theme="aqua"] .vault-picker { display: flex; gap: 8px; margin: 8px 0 20px; flex-wrap: wrap; }
-[data-theme="aqua"] .vault-picker__item {
-  border: 1px solid var(--aqua-line); background: var(--aqua-glass); color: var(--aqua-ink-2);
-  border-radius: 999px; padding: 8px 16px; cursor: pointer; font-size: 13px; font-weight: 500;
+/* Vault selection screen — one tile per vault (logo + realized/projected APY). */
+[data-theme="aqua"] .vault-tiles {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px; margin: 8px 0 20px;
 }
-[data-theme="aqua"] .vault-picker__item.is-active {
-  background: var(--aqua-sui, #4DA2FF); color: #fff; border-color: transparent;
+[data-theme="aqua"] .vault-tile {
+  display: flex; flex-direction: column; gap: 16px; text-align: left;
+  border: 1px solid var(--aqua-line); background: var(--aqua-glass); border-radius: 14px;
+  padding: 18px; cursor: pointer; transition: border-color .15s, transform .15s, box-shadow .15s;
 }
+[data-theme="aqua"] .vault-tile:hover {
+  border-color: var(--aqua-sui, #4DA2FF); transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(var(--aqua-shadow-rgb),0.10);
+}
+[data-theme="aqua"] .vault-tile__head { display: flex; align-items: center; gap: 12px; }
+[data-theme="aqua"] .vault-tile__sym { font-size: 17px; font-weight: 650; color: var(--aqua-ink-1); }
+[data-theme="aqua"] .vault-tile__sub {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--aqua-ink-3);
+}
+[data-theme="aqua"] .vault-tile__apys { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+[data-theme="aqua"] .vault-tile__apy-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--aqua-ink-3);
+}
+[data-theme="aqua"] .vault-tile__apy-val {
+  font-size: 22px; font-weight: 650; color: var(--aqua-ink-1); margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+[data-theme="aqua"] .vault-tile__apy-val.is-pos { color: var(--aqua-up, #1fbf75); }
+
+[data-theme="aqua"] .vault-back {
+  border: none; background: transparent; color: var(--aqua-ink-2); cursor: pointer;
+  font-size: 13px; font-weight: 500; padding: 0; margin: 0 0 16px;
+}
+[data-theme="aqua"] .vault-back:hover { color: var(--aqua-sui, #4DA2FF); }
 
 [data-theme="aqua"] .vault-stats {
   display: grid; grid-template-columns: 1.2fr 1fr 1fr 1fr; gap: 12px; margin-bottom: 20px;

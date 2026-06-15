@@ -9,16 +9,17 @@
 // are served from the vault's on-chain VaultConfig via api-service — no mocks.
 // Fields render "—" until the config-carrying events are indexed for a vault.
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSuiClient } from "@mysten/dapp-kit";
 
-import type { Vault, VaultRound } from "../api/vaults";
+import type { Vault, VaultRound, VaultApyPoint } from "../api/vaults";
 import { useVault, useVaultRounds, useVaultApyHistory, useOwnedVaultReceipts, useShareBalance, useVaults } from "../api/useVaults";
 import { useVaultActions } from "../state/vault";
 import { useUserIdentity } from "../session/identity";
 import { readCustodyObjectIds } from "../session/accounts";
 import { VaultApyChart } from "../components/VaultApyChart";
+import { TokenLogo } from "../components/TokenLogo";
 import { Toast } from "../components/Toast";
 import { formatPrice } from "../format";
 
@@ -59,16 +60,28 @@ function fmtPctRaw(x: number | null | undefined, digits = 1): string {
   return `${x.toFixed(digits)}%`;
 }
 
+/** APY of the most recent point in a series (by timestamp), or null when empty. */
+function latestApy(pts: VaultApyPoint[]): number | null {
+  if (pts.length === 0) return null;
+  return pts.reduce((a, b) => (b.t_ms > a.t_ms ? b : a)).apy;
+}
+
+/** Underlying asset logo, falling back to a glyph when token-info has none. */
+function AssetGlyph({ asset }: { asset: string }) {
+  const fallback =
+    asset === "BTC" ? (
+      <span className="asset-glyph asset-glyph--btc">₿</span>
+    ) : asset === "SUI" ? (
+      <span className="asset-glyph asset-glyph--sui">≈</span>
+    ) : (
+      <span className="asset-glyph">{asset[0]}</span>
+    );
+  return <TokenLogo symbol={asset} className="asset-glyph" fallback={fallback} />;
+}
+
 export function VaultScreen() {
   const vaults = useVaults();
   const [selected, setSelected] = useState<string | null>(null);
-
-  // Default to the first vault once the list loads.
-  useEffect(() => {
-    if (!selected && vaults.data && vaults.data.length > 0) {
-      setSelected(vaults.data[0].vault_id);
-    }
-  }, [vaults.data, selected]);
 
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
@@ -96,23 +109,55 @@ export function VaultScreen() {
           </div>
         )}
 
-        {vaults.data && vaults.data.length > 1 && (
-          <div className="vault-picker">
-            {vaults.data.map((v) => (
-              <button
-                key={v.vault_id}
-                className={"vault-picker__item" + (v.vault_id === selected ? " is-active" : "")}
-                onClick={() => setSelected(v.vault_id)}
-              >
-                {v.underlying_symbol} covered call
-              </button>
-            ))}
-          </div>
+        {/* Selection screen: a tile per vault (asset logo + realized & projected
+            APY). Picking one drills into its detail; the back link returns here. */}
+        {selected ? (
+          <>
+            <button className="vault-back" onClick={() => setSelected(null)}>
+              ← All vaults
+            </button>
+            <VaultDetail vaultId={selected} />
+          </>
+        ) : (
+          vaults.data &&
+          vaults.data.length > 0 && (
+            <div className="vault-tiles">
+              {vaults.data.map((v) => (
+                <VaultTile key={v.vault_id} vault={v} onSelect={() => setSelected(v.vault_id)} />
+              ))}
+            </div>
+          )
         )}
-
-        {selected && <VaultDetail vaultId={selected} />}
       </div>
     </div>
+  );
+}
+
+function VaultTile({ vault, onSelect }: { vault: Vault; onSelect: () => void }) {
+  const apyQ = useVaultApyHistory(vault.vault_id);
+  const realized = latestApy(apyQ.data?.realized ?? []) ?? vault.apy;
+  const projected = latestApy(apyQ.data?.predicted ?? []);
+
+  return (
+    <button className="vault-tile" onClick={onSelect}>
+      <div className="vault-tile__head">
+        <AssetGlyph asset={vault.underlying_symbol} />
+        <div className="vault-tile__title">
+          <div className="vault-tile__sym">{vault.underlying_symbol}</div>
+          <div className="vault-tile__sub">covered call</div>
+        </div>
+      </div>
+      <div className="vault-tile__apys">
+        <div className="vault-tile__apy">
+          <div className="vault-tile__apy-label">Realized APY</div>
+          <div className="vault-tile__apy-val is-pos">{fmtPct(realized)}</div>
+        </div>
+        <div className="vault-tile__apy">
+          <div className="vault-tile__apy-label">Projected APY</div>
+          <div className="vault-tile__apy-val">{fmtPct(projected)}</div>
+        </div>
+      </div>
+    </button>
   );
 }
 
