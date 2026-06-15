@@ -2106,3 +2106,74 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 [data-theme="aqua"] .vault-chart__swatch { display: inline-block; width: 14px; height: 0; border-top-width: 2px; border-top-style: solid; }
 [data-theme="aqua"] .vault-chart__swatch--realized { border-top-color: var(--aqua-up, #1fbf75); }
 [data-theme="aqua"] .vault-chart__swatch--predicted { border-top-style: dashed; border-top-color: var(--aqua-accent, #2f81f7); }
+
+/* ============================================================
+   MOBILE — phone-width layout (≤640px). Layout-only: reflow
+   rows that were built for desktop so nothing overflows the
+   viewport and text stays readable on iPhone-class screens.
+   ============================================================ */
+@media (max-width: 640px) {
+  /* Header collapses: brand + controls share the top row, the nav
+     drops to its own full-width horizontally-scrollable row. */
+  [data-theme="aqua"] .header {
+    flex-wrap: wrap;
+    gap: 10px 12px;
+    padding: 10px 16px;
+  }
+  [data-theme="aqua"] .header__brand { font-size: 16px; gap: 8px; }
+  [data-theme="aqua"] .header__brand-mark { width: 28px; height: 28px; }
+  /* Push the toggles/wallet to the right edge of the top row. */
+  [data-theme="aqua"] .header__sponsor { margin-left: auto; }
+  [data-theme="aqua"] .header__nav {
+    order: 10;
+    flex: 1 0 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  [data-theme="aqua"] .header__nav::-webkit-scrollbar { display: none; }
+  [data-theme="aqua"] .header__nav button { flex: 0 0 auto; white-space: nowrap; }
+
+  /* Tighter page gutters on phones. */
+  [data-theme="aqua"] .app__wrap { padding: 0 16px 64px; }
+
+  /* Config bar wraps to multiple rows instead of clipping. */
+  [data-theme="aqua"] .bbar { flex-wrap: wrap; }
+  [data-theme="aqua"] .bbar__spacer { display: none; }
+  [data-theme="aqua"] .bbar__sel { padding: 12px 16px; }
+  [data-theme="aqua"] .bbar__sel-btn { padding: 12px 16px; }
+  [data-theme="aqua"] .bbar__price { padding: 10px 16px; }
+
+  /* Headline scales down so it doesn't dominate the viewport. */
+  [data-theme="aqua"] .question {
+    font-size: 23px;
+    margin: 20px auto 24px;
+  }
+
+  /* Multi-column metric/panel grids stack (or halve) on phones. */
+  [data-theme="aqua"] .panels { grid-template-columns: 1fr; }
+  [data-theme="aqua"] .panel { padding: 20px; }
+  [data-theme="aqua"] .panel__hero { font-size: 44px; }
+  [data-theme="aqua"] .exercise { grid-template-columns: 1fr; }
+  [data-theme="aqua"] .dash-summary { grid-template-columns: 1fr 1fr; }
+  [data-theme="aqua"] .pos-card__body { grid-template-columns: 1fr 1fr; }
+  [data-theme="aqua"] .debug-stats { grid-template-columns: 1fr 1fr; }
+
+  /* Activity rows: tighter fixed columns + a wrappable value give the
+     description column room to breathe on a narrow screen. */
+  [data-theme="aqua"] .act-row {
+    grid-template-columns: 60px 44px minmax(0, 1fr) auto;
+    gap: 10px;
+    padding: 14px;
+  }
+  [data-theme="aqua"] .act-row__value { white-space: normal; }
+
+  /* Wide fixed tables scroll horizontally rather than squashing. */
+  [data-theme="aqua"] .admin-table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  [data-theme="aqua"] .admin-table__row { min-width: 640px; }
+  [data-theme="aqua"] .vault-table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  [data-theme="aqua"] .vault-table__head,
+  [data-theme="aqua"] .vault-table__row { min-width: 560px; }
+}
