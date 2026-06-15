@@ -146,6 +146,8 @@ export type OrderCommonParams = {
   /** Top up the BM from the wallet before placing; 0 = skip. */
   depositCoinType?: string;
   depositAmount?: bigint;
+  /** When set, drain filled proceeds from the BM to this address in the same tx. */
+  recipient?: string;
 };
 
 function startOrderTx(p: OrderCommonParams): { tx: Transaction; proof: ReturnType<Transaction["moveCall"]> } {
@@ -210,6 +212,31 @@ export function buildPlaceMarketOrderTx(p: OrderCommonParams): Transaction {
       tx.object(SUI_CLOCK_OBJECT_ID),
     ],
   });
+  // A market order settles fills into the BM, not the wallet. Drain both assets
+  // back out so a "market buy/sell" delivers proceeds to the wallet atomically.
+  if (p.recipient) {
+    // place_market_order consumed the proof above; mint a fresh one.
+    const settleProof = tx.moveCall({
+      target: `${pkg}::balance_manager::generate_proof_as_owner`,
+      arguments: [tx.object(p.bmId)],
+    });
+    tx.moveCall({
+      target: `${pkg}::pool::withdraw_settled_amounts`,
+      typeArguments: [p.baseCoinType, p.quoteCoinType],
+      arguments: [tx.object(p.poolId), tx.object(p.bmId), settleProof],
+    });
+    const base = tx.moveCall({
+      target: `${pkg}::balance_manager::withdraw_all`,
+      typeArguments: [p.baseCoinType],
+      arguments: [tx.object(p.bmId)],
+    });
+    const quote = tx.moveCall({
+      target: `${pkg}::balance_manager::withdraw_all`,
+      typeArguments: [p.quoteCoinType],
+      arguments: [tx.object(p.bmId)],
+    });
+    tx.transferObjects([base, quote], p.recipient);
+  }
   return tx;
 }
 
