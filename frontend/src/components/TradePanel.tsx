@@ -193,6 +193,7 @@ export function TradePanel({ bucket, series }: Props) {
           qtyRaw,
           depositCoinType: deposit.type,
           depositAmount: deposit.amount,
+          recipient: addr ?? undefined,
         }),
       {
         name: "deepbook_order_placed",
