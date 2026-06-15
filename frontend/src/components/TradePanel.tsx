@@ -21,6 +21,7 @@ import {
   type PoolRef,
 } from "../api/deepbook";
 import { useCoinBalance } from "../api/useCoinBalance";
+import { TokenLogo } from "./TokenLogo";
 import { formatPrice } from "../format";
 import {
   bidNotional,
@@ -385,13 +386,38 @@ export function TradePanel({ bucket, series }: Props) {
         </div>
       </div>
 
-      {/* open orders + settled funds */}
+      {/* trading-account holdings — what the user has parked in DeepBook */}
+      <div
+        style={{
+          marginTop: 10,
+          padding: "8px 10px",
+          borderRadius: 8,
+          border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))",
+          background: "rgba(92,107,122,0.06)",
+        }}
+      >
+        <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 0.5, opacity: 0.6 }}>
+          in DeepBook trading account
+        </div>
+        <div style={{ display: "flex", gap: 16, marginTop: 4, alignItems: "center" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 14 }}>
+            <TokenLogo
+              symbol={settle}
+              className="asset-glyph asset-glyph--sm"
+              fallback={<span className="asset-glyph">{settle[0]}</span>}
+            />
+            <b>{fmtQuote(bmQuote)}</b> {settle}
+          </span>
+          <span style={{ fontSize: 14, opacity: 0.85 }}>
+            <b>{fmtBase(bmBase)}</b> options
+          </span>
+        </div>
+      </div>
+
+      {/* open orders + withdraw / cancel controls */}
       <div style={{ marginTop: 10, fontSize: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ opacity: 0.8 }}>
-            open orders: {openOrders.data?.length ?? 0} · in trading account:{" "}
-            {fmtQuote(bmQuote)} {settle} + {fmtBase(bmBase)} options
-          </span>
+          <span style={{ opacity: 0.8 }}>open orders: {openOrders.data?.length ?? 0}</span>
           <span style={{ display: "flex", gap: 6 }}>
             {(openOrders.data?.length ?? 0) > 0 && (
               <button

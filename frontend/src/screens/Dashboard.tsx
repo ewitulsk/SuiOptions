@@ -3,6 +3,7 @@ import { useDashboardState, shortAccount } from "../state/dashboard";
 import { Toast } from "../components/Toast";
 import { ActionModal } from "../components/ActionModal";
 import { OwnedCard, WrittenCard } from "../components/PositionCards";
+import { TokenLogo } from "../components/TokenLogo";
 import { formatPrice } from "../format";
 import type { DashboardTotals } from "../types";
 
@@ -169,11 +170,45 @@ export function Dashboard() {
             </div>
           ) : (
             <>
+              {d.tab === "owned" && d.tradingAccountSettlements.length > 0 && (
+                <div
+                  className="dash-trading-account"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    flexWrap: "wrap",
+                    margin: "0 0 12px",
+                    fontSize: 12,
+                    opacity: 0.85,
+                  }}
+                >
+                  <span style={{ opacity: 0.7 }}>in DeepBook trading account</span>
+                  {d.tradingAccountSettlements.map((s) => (
+                    <span
+                      key={s.coinType}
+                      style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+                    >
+                      <TokenLogo
+                        symbol={s.symbol}
+                        className="asset-glyph asset-glyph--sm"
+                        fallback={<span className="asset-glyph">{s.symbol[0]}</span>}
+                      />
+                      <b>{s.amount.toLocaleString("en-US", { maximumFractionDigits: 4 })}</b> {s.symbol}
+                    </span>
+                  ))}
+                </div>
+              )}
               {d.tab === "owned" &&
                 (d.ownedRows.length === 0
                   ? empty("calls owned")
                   : d.ownedRows.map((p) => (
-                      <OwnedCard key={p.id} p={p} onExercise={d.openExercise} />
+                      <OwnedCard
+                        key={p.id}
+                        p={p}
+                        onExercise={d.openExercise}
+                        onWithdraw={d.withdrawFromTradingAccount}
+                      />
                     )))}
               {d.tab === "written" &&
                 (d.writtenRows.length === 0

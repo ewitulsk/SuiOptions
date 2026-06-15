@@ -1216,6 +1216,8 @@
 }
 [data-theme="aqua"] .asset-glyph--btc { background: linear-gradient(135deg, #F7931A 0%, #FFB74D 100%); }
 [data-theme="aqua"] .asset-glyph--sui { background: linear-gradient(135deg, var(--aqua-sui) 0%, var(--aqua-sui-deep) 100%); font-size: 22px; }
+/* Inline-sized glyph for token chips (trading-account balances). */
+[data-theme="aqua"] .asset-glyph--sm { width: 18px; height: 18px; font-size: 10px; box-shadow: none; }
 
 /* Served token logo (token-info logoUri) — fills its circular icon container.
    Drop the per-symbol gradient so transparent logo PNGs sit on a clean disc. */

@@ -12,7 +12,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useSuiClient } from "@mysten/dapp-kit";
 import { bcs } from "@mysten/sui/bcs";
 import { Transaction } from "@mysten/sui/transactions";
-import { SUI_CLOCK_OBJECT_ID, normalizeSuiAddress } from "@mysten/sui/utils";
+import { SUI_CLOCK_OBJECT_ID, normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils";
 
 import { DEEPBOOK_ORIGINAL_PACKAGE_ID, DEEPBOOK_PACKAGE_ID } from "../config";
 import { fromRawPrice } from "../tx/deepbook";
@@ -199,6 +199,44 @@ export function useBmBalances(pool: PoolRef | null, bmId: string | null, viewer:
         return bytes ? BigInt(bcs.u64().parse(bytes)) : 0n;
       };
       return { baseRaw: parse(0), quoteRaw: parse(1) };
+    },
+  });
+}
+
+/**
+ * The BM's available balance for an arbitrary set of coin types, keyed by the
+ * normalized type. One devInspect calls `balance_manager::balance<T>` per type.
+ * Used by the dashboard to surface position tokens (and settlement) the user
+ * left sitting in their trading account rather than their wallet.
+ */
+export function useBmCoinBalances(
+  bmId: string | null,
+  coinTypes: string[],
+  viewer: string | null,
+) {
+  const client = useSuiClient();
+  // Stable, de-duplicated type list so the query key is order-independent.
+  const types = Array.from(new Set(coinTypes.map((t) => normalizeStructTag(t)))).sort();
+  return useQuery<Record<string, bigint>, Error>({
+    queryKey: ["deepbook-bm-coin-balances", bmId, types.join(",")],
+    enabled: Boolean(bmId && types.length > 0 && DEEPBOOK_PACKAGE_ID),
+    refetchInterval: 5_000,
+    queryFn: async () => {
+      const results = await devInspect(client, viewer, (tx) => {
+        for (const t of types) {
+          tx.moveCall({
+            target: `${DEEPBOOK_PACKAGE_ID}::balance_manager::balance`,
+            typeArguments: [t],
+            arguments: [tx.object(bmId!)],
+          });
+        }
+      });
+      const out: Record<string, bigint> = {};
+      types.forEach((t, i) => {
+        const bytes = results[i]?.[0];
+        out[t] = bytes ? BigInt(bcs.u64().parse(bytes)) : 0n;
+      });
+      return out;
     },
   });
 }

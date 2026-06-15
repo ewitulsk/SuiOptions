@@ -398,15 +398,32 @@ pub fn protocol_templates(
             arities: vec![(cancel_all, 2)],
         });
 
-        // Settle + drain both assets back to the wallet (TransferObjects is
-        // a benign command).
+        // Settle + drain assets back to the wallet (TransferObjects is a benign
+        // command). Covers both "withdraw all" (base + quote) and the
+        // single-asset "withdraw this position token" — the latter is the same
+        // shape with one `withdraw_all` instead of two.
         let settle = d("pool", "withdraw_settled_amounts");
         let withdraw_all = d("balance_manager", "withdraw_all");
         templates.push(PtbTemplate {
             name: "deepbook_withdraw".to_owned(),
             required: vec![proof.clone(), settle.clone()],
-            allowed: vec![proof, settle.clone(), withdraw_all.clone()],
-            arities: vec![(settle, 2), (withdraw_all, 1)],
+            allowed: vec![proof.clone(), settle.clone(), withdraw_all.clone()],
+            arities: vec![(settle.clone(), 2), (withdraw_all.clone(), 1)],
+        });
+
+        // Exercise an option whose coin the user parked in their DeepBook
+        // trading account: settle + withdraw the option coin out of the BM, then
+        // `bucket::exercise`. This is the one shape that legitimately crosses
+        // the protocol/DeepBook boundary — every asset moved is still the
+        // user's own (their BM coin out, underlying back to them), so the
+        // sponsor only risks gas. The closed `allowed` set keeps anything else
+        // from riding along.
+        let exercise = t("bucket", "exercise");
+        templates.push(PtbTemplate {
+            name: "exercise_with_bm_withdraw".to_owned(),
+            required: vec![proof.clone(), settle.clone(), withdraw_all.clone(), exercise.clone()],
+            allowed: vec![proof, settle.clone(), withdraw_all.clone(), exercise.clone()],
+            arities: vec![(settle, 2), (withdraw_all, 1), (exercise, 3)],
         });
     }
 
@@ -603,6 +620,66 @@ mod tests {
             false,
         );
         assert_eq!(match_any(&templates(), &withdraw), Some("deepbook_withdraw"));
+
+        // Single-asset withdraw (buildWithdrawBaseTx): proof → settle →
+        // withdraw_all ×1 — the "withdraw this position token" button. Same
+        // template, one fewer withdraw_all.
+        let withdraw_base = build(
+            &[
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "withdraw_settled_amounts"), 2),
+                (d("balance_manager", "withdraw_all"), 1),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &withdraw_base), Some("deepbook_withdraw"));
+    }
+
+    #[test]
+    fn exercise_with_bm_withdraw_matches_and_rejects_riders() {
+        let d = |module: &str, function: &str| MoveTarget::new(deepbook_pkg(), module, function);
+        // buildExerciseTx with bmWithdraw: settle + withdraw the option coin out
+        // of the BM, then bucket::exercise (+ benign split/merge/transfer).
+        let ex = build(
+            &[
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "withdraw_settled_amounts"), 2),
+                (d("balance_manager", "withdraw_all"), 1),
+                (target("bucket", "exercise"), 3),
+            ],
+            true,
+        );
+        assert_eq!(match_any(&templates(), &ex), Some("exercise_with_bm_withdraw"));
+
+        // A plain exercise (no BM withdraw) still matches the wallet `exercise`
+        // template, not this one.
+        let plain = build(&[(target("bucket", "exercise"), 3)], true);
+        assert_eq!(match_any(&templates(), &plain), Some("exercise"));
+
+        // Withdraw without the exercise must NOT match the combined template
+        // (it requires `exercise`); it falls through to `deepbook_withdraw`.
+        let no_exercise = build(
+            &[
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "withdraw_settled_amounts"), 2),
+                (d("balance_manager", "withdraw_all"), 1),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &no_exercise), Some("deepbook_withdraw"));
+
+        // A foreign DeepBook call cannot ride along with the exercise.
+        let rider = build(
+            &[
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "withdraw_settled_amounts"), 2),
+                (d("balance_manager", "withdraw_all"), 1),
+                (d("pool", "place_market_order"), 2),
+                (target("bucket", "exercise"), 3),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &rider), None);
     }
 
     #[test]
