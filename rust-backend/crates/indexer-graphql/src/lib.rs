@@ -444,6 +444,16 @@ impl IndexerClient {
         self.scan_events(filter, 0).await
     }
 
+    /// Every `DeepBookOrderFilled` touching BalanceManager `bm` (as taker or
+    /// maker BM), ascending by sequence (SO-209). A BM id only ever shows up as
+    /// a fill participant, so the participant filter alone yields exactly the
+    /// fills — the api-service maps a wallet's BM id to this to attribute
+    /// DeepBook cost basis without a BM→owner table.
+    pub async fn deepbook_fills_for_bm(&self, bm: ObjectId) -> Result<Vec<IndexedEvent>> {
+        let filter = json!({ "participant": bm.to_hex() });
+        self.scan_events(filter, 0).await
+    }
+
     /// Paginate the `events` query (ascending) for `filter`, starting after
     /// `after`, decoding each node's payload into a typed `IndexedEvent`.
     async fn scan_events(

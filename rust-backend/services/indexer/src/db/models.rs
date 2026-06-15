@@ -96,6 +96,7 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::FeeUpdated(_) => "FeeUpdated",
         ChainEvent::TreasuryWithdrawn(_) => "TreasuryWithdrawn",
         ChainEvent::DeepBookPoolCreated(_) => "DeepBookPoolCreated",
+        ChainEvent::DeepBookOrderFilled(_) => "DeepBookOrderFilled",
         ChainEvent::CollateralizedWrite(_) => "CollateralizedWrite",
         ChainEvent::RfqCreated(_) => "RfqCreated",
         ChainEvent::RfqBid(_) => "RfqBid",

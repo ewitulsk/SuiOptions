@@ -205,6 +205,43 @@ pub struct DeepBookPoolCreated {
     pub maker_fee: u64,
 }
 
+/// A DeepBook v3 `order_info::OrderFilled` for one of OUR buckets' call coins,
+/// enriched off-chain (SO-209). One on-chain fill emits one of these per maker
+/// order crossed. Like [`DeepBookPoolCreated`] this is NOT a raw BCS mirror:
+/// `bucket_id` is resolved by the indexer (pool → bucket), and only fills on a
+/// known bucket's pool are emitted. The taker/maker `BalanceManager` ids are
+/// the on-chain trading-account handles — the api-service maps them back to a
+/// wallet (the frontend passes its own BM id) to attribute cost basis.
+///
+/// Side semantics: `taker_is_bid` true ⇒ the taker BOUGHT `base_quantity` for
+/// `quote_quantity` (maker sold); false ⇒ the maker bought (taker sold). Fees
+/// are charged amounts (not rates), in DEEP when the matching `*_fee_is_deep`
+/// is true, else in the input token (settlement coin) — so a settlement-token
+/// fee adds to a buyer's cost / subtracts from a seller's proceeds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeepBookOrderFilled {
+    pub pool_id: ObjectId,
+    /// Resolved off-chain: the bucket whose `call_type` is the pool's base.
+    pub bucket_id: ObjectId,
+    pub taker_balance_manager_id: ObjectId,
+    pub maker_balance_manager_id: ObjectId,
+    pub taker_is_bid: bool,
+    #[serde(with = "u64_string")]
+    pub base_quantity: u64,
+    #[serde(with = "u64_string")]
+    pub quote_quantity: u64,
+    #[serde(with = "u64_string")]
+    pub price: u64,
+    #[serde(with = "u64_string")]
+    pub taker_fee: u64,
+    pub taker_fee_is_deep: bool,
+    #[serde(with = "u64_string")]
+    pub maker_fee: u64,
+    pub maker_fee_is_deep: bool,
+    #[serde(with = "u64_string")]
+    pub timestamp_ms: u64,
+}
+
 // ─── write-core / RFQ events (vault-implementation-guide docs 01–02) ───
 
 /// Self-write / venue escrow write (`bucket::write_collateralized`).
@@ -554,6 +591,7 @@ pub enum ChainEvent {
     FeeUpdated(FeeUpdated),
     TreasuryWithdrawn(TreasuryWithdrawn),
     DeepBookPoolCreated(DeepBookPoolCreated),
+    DeepBookOrderFilled(DeepBookOrderFilled),
     CollateralizedWrite(CollateralizedWrite),
     RfqCreated(RfqCreated),
     RfqBid(RfqBid),

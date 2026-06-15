@@ -50,7 +50,23 @@ function DashSummary({
             {formatPrice(Math.abs(profit), { grouping: true })}
             <span className="dash-summary__unit"> USDC</span>
           </div>
-          <div className="dash-summary__sub">net of premium paid</div>
+          <div className="dash-summary__sub">unrealized · net of cost basis</div>
+        </div>
+        <div className="dash-summary__cell">
+          <div className="dash-summary__label">Total PnL</div>
+          <div
+            className={
+              "dash-summary__val " + (totals.ownedTotalPnl >= 0 ? "is-pos" : "is-neg")
+            }
+          >
+            {totals.ownedTotalPnl >= 0 ? "+" : "−"}
+            {formatPrice(Math.abs(totals.ownedTotalPnl), { grouping: true })}
+            <span className="dash-summary__unit"> USDC</span>
+          </div>
+          <div className="dash-summary__sub">
+            incl. {totals.ownedRealized >= 0 ? "+" : "−"}
+            {formatPrice(Math.abs(totals.ownedRealized), { grouping: true })} realized
+          </div>
         </div>
       </div>
     );

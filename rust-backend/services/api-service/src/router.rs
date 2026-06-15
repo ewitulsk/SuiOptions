@@ -34,6 +34,7 @@ pub async fn serve(
             "/dashboard/positions",
             post(handlers::dashboard::enrich_positions),
         )
+        .route("/dashboard/pnl", get(handlers::pnl::dashboard_pnl))
         .route(
             "/indexer/progress",
             get(handlers::indexer_progress::get_progress),
