@@ -30,6 +30,11 @@ pub struct Config {
     /// 5xx. Defaults to the public testnet fullnode (staging/prod are testnet).
     #[serde(default = "default_sui_rpc_url")]
     pub sui_rpc_url: String,
+    /// price-charting read-API base URL (e.g. `http://price-charting:9013`).
+    /// When set, the FIFO PnL ledger marks exercises at the option-pool price
+    /// at exercise time (SO-209); when unset, exercises are left unpriced.
+    #[serde(default)]
+    pub price_charting_url: Option<String>,
 }
 
 fn default_indexer_graphql_url() -> String {

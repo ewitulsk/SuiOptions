@@ -17,6 +17,10 @@ pub struct AppState {
     pub derived_metrics_url: Option<String>,
     /// Sui fullnode JSON-RPC URL for the live-vault `sui_getObject` read.
     pub sui_rpc_url: String,
+    /// price-charting read-API base URL (e.g. `http://price-charting:9013`).
+    /// Used to mark exercises at the option-pool price at exercise time in the
+    /// FIFO PnL ledger (SO-209). `None` → exercises are left unpriced.
+    pub price_charting_url: Option<String>,
     /// Shared HTTP client for composing the worker's read API + the RPC read.
     pub http: reqwest::Client,
 }
@@ -27,12 +31,14 @@ impl AppState {
         indexer_graphql_url: String,
         derived_metrics_url: Option<String>,
         sui_rpc_url: String,
+        price_charting_url: Option<String>,
     ) -> Self {
         Self {
             catalog,
             indexer: IndexerClient::new(indexer_graphql_url),
             derived_metrics_url: derived_metrics_url.map(|u| u.trim_end_matches('/').to_string()),
             sui_rpc_url,
+            price_charting_url: price_charting_url.map(|u| u.trim_end_matches('/').to_string()),
             http: reqwest::Client::new(),
         }
     }

@@ -106,6 +106,40 @@ fn resolve_deepbook_pool(
     ))
 }
 
+/// Promote a decoded DeepBook `OrderFilled` into a `ChainEvent` if its pool is
+/// one of OUR bucket venues; `None` for fills on foreign pools (SO-209). A
+/// same-checkpoint `PoolCreated` is visible via `local_pools`.
+fn resolve_deepbook_fill(
+    store: &Store,
+    local_pools: &std::collections::HashMap<
+        protocol_types::ids::ObjectId,
+        protocol_types::ids::ObjectId,
+    >,
+    partial: event_types::DeepBookOrderFilledPartial,
+) -> Option<protocol_types::events::ChainEvent> {
+    let bucket_id = local_pools
+        .get(&partial.pool_id)
+        .copied()
+        .or_else(|| store.bucket_by_pool_id(&partial.pool_id))?;
+    Some(protocol_types::events::ChainEvent::DeepBookOrderFilled(
+        protocol_types::events::DeepBookOrderFilled {
+            pool_id: partial.pool_id,
+            bucket_id,
+            taker_balance_manager_id: partial.taker_balance_manager_id,
+            maker_balance_manager_id: partial.maker_balance_manager_id,
+            taker_is_bid: partial.taker_is_bid,
+            base_quantity: partial.base_quantity,
+            quote_quantity: partial.quote_quantity,
+            price: partial.price,
+            taker_fee: partial.taker_fee,
+            taker_fee_is_deep: partial.taker_fee_is_deep,
+            maker_fee: partial.maker_fee,
+            maker_fee_is_deep: partial.maker_fee_is_deep,
+            timestamp_ms: partial.timestamp_ms,
+        },
+    ))
+}
+
 #[async_trait]
 impl Worker for ProtocolEventWorker {
     type Result = ();
@@ -126,6 +160,12 @@ impl Worker for ProtocolEventWorker {
         // same checkpoint can still resolve (the store only applies events at
         // stage time). call_type → (bucket_id, settlement_type).
         let mut local_buckets: std::collections::HashMap<_, _> = Default::default();
+        // Pools created earlier in THIS checkpoint, so a same-checkpoint
+        // OrderFilled can resolve its bucket (SO-209). pool_id → bucket_id.
+        let mut local_pools: std::collections::HashMap<
+            protocol_types::ids::ObjectId,
+            protocol_types::ids::ObjectId,
+        > = Default::default();
         for tx in &checkpoint.transactions {
             let Some(events) = &tx.events else { continue };
             let tx_digest = tx.transaction.digest().base58_encode();
@@ -179,6 +219,9 @@ impl Worker for ProtocolEventWorker {
                         if let Some(ev) =
                             resolve_deepbook_pool(&self.store, &local_buckets, partial)
                         {
+                            if let protocol_types::events::ChainEvent::DeepBookPoolCreated(p) = &ev {
+                                local_pools.insert(p.pool_id, p.bucket_id);
+                            }
                             debug!(
                                 checkpoint = seq,
                                 tx = %tx_digest,
@@ -193,6 +236,7 @@ impl Worker for ProtocolEventWorker {
                             .increment(1);
                             decoded.push((ev, tx_digest.clone(), idx as i32));
                         }
+                        continue;
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -203,6 +247,43 @@ impl Worker for ProtocolEventWorker {
                             tx = %tx_digest,
                             event_type = %type_str,
                             "failed to decode DeepBook PoolCreated; skipping"
+                        );
+                        continue;
+                    }
+                }
+                // …or a DeepBook OrderFilled on one of our bucket pools (SO-209).
+                // Fills on foreign pools resolve to None and are dropped.
+                match event_types::parse_deepbook_order_filled(
+                    &self.types,
+                    &type_str,
+                    &event.contents,
+                ) {
+                    Ok(Some(partial)) => {
+                        if let Some(ev) =
+                            resolve_deepbook_fill(&self.store, &local_pools, partial)
+                        {
+                            debug!(
+                                checkpoint = seq,
+                                tx = %tx_digest,
+                                event_idx = idx,
+                                event = ?ev,
+                                "picked up DeepBook fill on a bucket pool"
+                            );
+                            metrics::counter!(
+                                "indexer_events_decoded_total",
+                                "event_type" => event_type_tag(&ev),
+                            )
+                            .increment(1);
+                            decoded.push((ev, tx_digest.clone(), idx as i32));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            tx = %tx_digest,
+                            event_type = %type_str,
+                            "failed to decode DeepBook OrderFilled; skipping"
                         );
                     }
                 }

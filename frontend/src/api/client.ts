@@ -157,6 +157,48 @@ export type CallTokenLot = {
 
 export type CallTokenLotsResponse = { lots: CallTokenLot[] };
 
+// ── dashboard PnL (SO-209) — FIFO cost-basis lots + realized PnL ──────────
+//
+// Mirrors `api-service::handlers::pnl`. Amounts are display units (underlying
+// tokens / settlement USD), so the dashboard renders them directly. `source`
+// is `rfq`|`deepbook` from the backend; the frontend appends `transfer` rows
+// when reconciling against current holdings.
+
+export type PnlLotSource = "rfq" | "deepbook" | "transfer";
+
+export type PnlLot = {
+  amount: number;
+  cost: number;
+  source: PnlLotSource;
+  acquired_at_ms: number;
+};
+
+export type BucketPnl = {
+  bucket_id: string;
+  asset_decimals: number;
+  settlement_decimals: number;
+  remaining_lots: PnlLot[];
+  realized_pnl: number;
+  unpriced_exercise_amount: number;
+};
+
+export type DashboardPnlResponse = { buckets: BucketPnl[] };
+
+export async function fetchDashboardPnl(
+  wallet: string,
+  bm: string | null,
+): Promise<BucketPnl[]> {
+  const bmParam = bm ? `&bm=${encodeURIComponent(bm)}` : "";
+  const res = await fetch(
+    `${API_BASE_URL}/dashboard/pnl?wallet=${encodeURIComponent(wallet)}${bmParam}`,
+  );
+  if (!res.ok) {
+    throw new Error(`GET /dashboard/pnl failed: ${res.status} ${res.statusText}`);
+  }
+  const body: DashboardPnlResponse = await res.json();
+  return body.buckets;
+}
+
 export async function fetchCallTokenLots(wallet: string): Promise<CallTokenLot[]> {
   const res = await fetch(
     `${API_BASE_URL}/call-token-lots?wallet=${encodeURIComponent(wallet)}`,

@@ -45,6 +45,15 @@ export type ConfirmSummary = {
 
 // Dashboard
 
+/** One FIFO cost lot of a held option (SO-209). A `transfer` lot is a token
+ *  the user acquired off-venue (transfer/gift) at $0 cost — its own row. */
+export type OwnedLot = {
+  amount: number;
+  cost: number;
+  source: "rfq" | "deepbook" | "transfer";
+  acquiredAtMs: number;
+};
+
 export type OwnedPosition = {
   id: string;
   side: "owned";
@@ -52,6 +61,8 @@ export type OwnedPosition = {
   strike: number;
   expiry: string;
   amount: number;
+  /** Cost basis of the currently-held lots (settlement units). Premium paid
+   *  for RFQ lots + amount paid for DeepBook buys; $0 for transferred-in. */
   premiumPaid: number;
   boughtFrom: string;
   boughtAt: string;
@@ -59,13 +70,22 @@ export type OwnedPosition = {
   /** Portion of `amount` sitting in the user's DeepBook trading account (BM),
    *  in display units. 0 when the whole holding is in the wallet. */
   tradingAccountAmount: number;
+  /** FIFO cost lots making up the current holding (incl. $0 transfer lots). */
+  lots: OwnedLot[];
   // decorated
   spot: number;
   dte: number;
   itm: boolean;
   moneyness: number;
   intrinsicNow: number;
+  /** Unrealized PnL if exercised now: `intrinsicNow − costBasis`. */
   pnl: number;
+  /** Realized PnL from past DeepBook sells / exercises / expiries in this bucket. */
+  realizedPnl: number;
+  /** `realizedPnl + pnl` — true options PnL to date. */
+  totalPnl: number;
+  /** Exercised tokens that couldn't be priced (excluded from realizedPnl). */
+  unpricedExerciseAmount: number;
   status:
     | "exercisable"
     | "active_otm"
@@ -104,6 +124,10 @@ export type DashboardTotals = {
   ownedNotional: number;
   ownedPaid: number;
   ownedPnl: number;
+  /** Realized PnL across owned buckets (closed sells/exercises/expiries). */
+  ownedRealized: number;
+  /** ownedRealized + ownedPnl — total options PnL to date. */
+  ownedTotalPnl: number;
   writtenNotional: number;
   premiumEarned: number;
   claimable: number;

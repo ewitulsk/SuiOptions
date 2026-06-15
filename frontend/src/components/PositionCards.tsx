@@ -30,6 +30,11 @@ function StatusPill({ status }: { status: string }) {
 }
 
 const fmtAmt = (asset: string, n: number) => (asset === "BTC" ? n.toFixed(4) : n.toFixed(0));
+const LOT_SOURCE_LABEL: Record<string, string> = {
+  rfq: "market maker",
+  deepbook: "DeepBook",
+  transfer: "transferred in",
+};
 const fmtStrike = (asset: string, n: number) =>
   asset === "BTC" ? `$${(n / 1000).toFixed(0)}k` : `$${formatPrice(n)}`;
 const fmtSpot = (asset: string, n: number) =>
@@ -81,8 +86,16 @@ export function OwnedCard({
             <span className="pos-card__metric-unit"> {p.asset} call</span>
           </div>
           <div className="pos-card__metric-sub">
-            paid {formatPrice(p.premiumPaid)} USDC · {p.boughtFrom}
+            cost basis {formatPrice(p.premiumPaid)} USDC
           </div>
+          {p.lots.map((lot, i) => (
+            <div className="pos-card__metric-sub dim" key={i}>
+              {fmtAmt(p.asset, lot.amount)} ·{" "}
+              {lot.source === "transfer"
+                ? "transferred in · $0"
+                : `${formatPrice(lot.cost)} USDC · ${LOT_SOURCE_LABEL[lot.source] ?? lot.source}`}
+            </div>
+          ))}
           <div className="pos-card__metric-sub">
             exercise cost {formatPrice(p.amount * p.strike, { grouping: true })} USDC
           </div>
@@ -126,9 +139,23 @@ export function OwnedCard({
           </div>
           <div className="pos-card__metric-sub">
             {isItm
-              ? `intrinsic ${formatPrice(p.intrinsicNow)} − premium ${formatPrice(p.premiumPaid)}`
-              : `OTM · would lose premium`}
+              ? `intrinsic ${formatPrice(p.intrinsicNow)} − cost ${formatPrice(p.premiumPaid)}`
+              : `OTM · would lose cost basis`}
           </div>
+          {(p.realizedPnl !== 0 || p.unpricedExerciseAmount > 0) && (
+            <div className="pos-card__metric-sub">
+              realized {p.realizedPnl >= 0 ? "+" : "−"}
+              {formatPrice(Math.abs(p.realizedPnl))} · total{" "}
+              <span className={p.totalPnl >= 0 ? "is-pos" : "is-neg"}>
+                {p.totalPnl >= 0 ? "+" : "−"}
+                {formatPrice(Math.abs(p.totalPnl))}
+              </span>{" "}
+              USDC
+              {p.unpricedExerciseAmount > 0
+                ? ` · ${fmtAmt(p.asset, p.unpricedExerciseAmount)} exercised unpriced`
+                : ""}
+            </div>
+          )}
         </div>
       </div>
 

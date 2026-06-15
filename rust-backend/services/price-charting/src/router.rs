@@ -39,6 +39,7 @@ pub async fn serve(addr: SocketAddr, state: Arc<AppState>, allowed_origins: &[St
         .route("/health", get(|| async { "ok" }))
         .route("/pools", get(list_pools))
         .route("/bars", get(get_bars))
+        .route("/price-at", get(get_price_at))
         .route("/ws", get(ws_upgrade))
         .with_state(state)
         .merge(observability::middleware::metrics_route())
@@ -184,6 +185,43 @@ async fn compute_mids(
         Ok(carry_forward_mids(&sampled, interval, from_ms, to_ms, seed))
     })
     .await?
+}
+
+// ---- /price-at -------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct PriceAtQuery {
+    pool_id: String,
+    ms: i64,
+}
+
+/// Last known per-token price of a pool's base coin (the option token, quoted
+/// in settlement) at or before `ms`. `mid` is the order-book midpoint (a
+/// continuous fair value); `close` is the last traded price. Either may be
+/// `null` if the pool had no book/trade data before `ms`. Backs the
+/// api-service's exercise mark in the FIFO PnL ledger (SO-209).
+#[derive(Serialize)]
+struct PriceAtResponse {
+    pool_id: String,
+    ms: i64,
+    mid: Option<f64>,
+    close: Option<f64>,
+}
+
+async fn get_price_at(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<PriceAtQuery>,
+) -> Result<Json<PriceAtResponse>, StatusCode> {
+    let repo = state.repo.clone();
+    let pool = q.pool_id.clone();
+    let ms = q.ms;
+    let (mid, close) = tokio::task::spawn_blocking(move || -> anyhow::Result<(Option<f64>, Option<f64>)> {
+        Ok((repo.last_mid_before(&pool, ms)?, repo.last_close_before(&pool, ms)?))
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(db_err)?;
+    Ok(Json(PriceAtResponse { pool_id: q.pool_id, ms: q.ms, mid, close }))
 }
 
 fn db_err(e: anyhow::Error) -> StatusCode {

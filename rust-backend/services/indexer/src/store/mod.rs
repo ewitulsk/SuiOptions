@@ -394,6 +394,17 @@ impl Store {
         self.inner.read().deepbook_pools.get(bucket_id).cloned()
     }
 
+    /// The bucket whose DeepBook venue is `pool_id` (SO-209). Linear scan over
+    /// the small pool set, mirroring [`bucket_by_call_type`](Self::bucket_by_call_type).
+    pub fn bucket_by_pool_id(&self, pool_id: &ObjectId) -> Option<ObjectId> {
+        self.inner
+            .read()
+            .deepbook_pools
+            .iter()
+            .find(|(_, p)| p.pool_id == *pool_id)
+            .map(|(bucket_id, _)| *bucket_id)
+    }
+
     pub fn positions_for_recipient(&self, recipient: &SuiAddress) -> Vec<PositionState> {
         self.inner
             .read()
@@ -515,6 +526,13 @@ fn collect_participants(
         ChainEvent::InstantWithdraw(w) => push(w.owner.to_hex(), "owner"),
         ChainEvent::SwapRfqBid(b) => push(b.bidder.to_hex(), "bidder"),
         ChainEvent::SwapRfqSettled(s) => push(s.winner.to_hex(), "winner"),
+        // Fills are attributed by BalanceManager id, not wallet — the api-service
+        // maps a wallet's BM back to it for cost-basis (SO-209). Both sides are
+        // fanned out so a buy or a sell by either party is matchable.
+        ChainEvent::DeepBookOrderFilled(f) => {
+            push(f.taker_balance_manager_id.to_hex(), "deepbook_taker_bm");
+            push(f.maker_balance_manager_id.to_hex(), "deepbook_maker_bm");
+        }
         // DeepBookPoolCreated carries no addresses (the creator isn't in the
         // event payload).
         ChainEvent::BucketCreated(_)
@@ -730,10 +748,12 @@ fn stage_event_into_batch(
         | ChainEvent::SwapRfqBid(_)
         | ChainEvent::SwapRfqSettled(_)
         | ChainEvent::SwapRfqUnfilled(_)
+        | ChainEvent::DeepBookOrderFilled(_)
         | ChainEvent::VaultConfigUpdated(_) => {
             // Log-only events: no materialised view to refresh (the swap
             // auction's effect on the vault is picked up at finalize, as
-            // the old VaultProceedsSwapped path was).
+            // the old VaultProceedsSwapped path was). DeepBook fills live only
+            // in the event log + participants (SO-209), read on demand.
         }
     }
 }
@@ -934,6 +954,7 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
         ChainEvent::Exercised(e) => apply_exercised(inner, e),
         ChainEvent::Redeemed(r) => apply_redeemed(inner, r),
         ChainEvent::ExpiredOptionBurned(_) => {} // no state change
+        ChainEvent::DeepBookOrderFilled(_) => {} // log-only (SO-209)
         ChainEvent::BucketCleaned(c) => {
             if let Some(b) = inner.buckets.get_mut(&c.bucket_id) {
                 b.cleaned = true;

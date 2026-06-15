@@ -26,11 +26,12 @@ import type { ToastState } from "../components/Toast";
 import { useBuckets } from "../api/useBuckets";
 import { useOwnedCallOptions } from "../api/useOwnedCallOptions";
 import { useCallTokenLots } from "../api/useCallTokenLots";
+import { useDashboardPnl } from "../api/useDashboardPnl";
 import { useOwnedPositions, type OwnedPositionObj } from "../api/useOwnedPositions";
 import { usePythPrices } from "../api/usePythPrice";
 import { useBalanceManager, useBmCoinBalances } from "../api/deepbook";
 import { fetchEnrichedPositions } from "../api/client";
-import type { CallTokenLot, EnrichedPosition, Position, Series } from "../api/client";
+import type { BucketPnl, CallTokenLot, EnrichedPosition, Position, Series } from "../api/client";
 import type { OwnedCallOption } from "../api/useOwnedCallOptions";
 import { buildExerciseTx, buildRedeemTx } from "../tx/dashboard";
 import { buildWithdrawBaseTx } from "../tx/deepbook";
@@ -38,6 +39,7 @@ import type {
   DashboardModal,
   DashboardSpots,
   DashboardTotals,
+  OwnedLot,
   OwnedPosition,
   WrittenPosition,
 } from "../types";
@@ -159,9 +161,12 @@ function degradedPosition(
   };
 }
 
+const FIFO_EPS = 1e-9;
+
 function buildOwnedRow(
   obj: OwnedCallOption,
   lotsByBucket: Map<string, CallTokenLot[]>,
+  pnlByBucket: Map<string, BucketPnl>,
   bucketIdx: Map<string, { series: Series; bucket: Series["buckets"][number] }>,
   spot: number,
   now: number,
@@ -172,10 +177,9 @@ function buildOwnedRow(
   if (!bucketInfo) return null;
   const { series } = bucketInfo;
 
-  // Provenance: option coins are fungible (no per-object id), so we attribute
-  // at the bucket level — all WriteExecuted lots for this bucket. `bucketLots`
-  // is newest-first; `provenance` (the most recent) drives the single-value
-  // `boughtFrom`/`boughtAt` display, while `premiumPaid` aggregates every lot.
+  // Provenance headline: option coins are fungible, so we show the most-recent
+  // WriteExecuted lot's seller for `boughtFrom`/`boughtAt` (per-lot cost basis
+  // comes from the FIFO ledger below, not this list).
   const bucketLots = lotsByBucket.get(obj.bucket_id) ?? [];
   const provenance = bucketLots.length > 0 ? bucketLots[0] : null;
 
@@ -186,21 +190,42 @@ function buildOwnedRow(
   const itm = spot > 0 && spot > strike;
   const moneyness = strike > 0 ? ((spot - strike) / strike) * 100 : 0;
   const intrinsicNow = Math.max(0, (spot - strike) * amount);
-  // Premium attribution (true cost basis): sum premium + amount across all
-  // lots for this bucket, then pro-rate to the currently-held `amount`. The
-  // pro-rate covers the case where holdings don't match lot totals (splits,
-  // partial transfers). Best-effort; not exact for split children.
-  const totalLotAmount = bucketLots.reduce(
-    (sum, lot) => sum + scaleU64(lot.amount_raw, series.asset_decimals),
-    0,
-  );
-  const totalLotPremium = bucketLots.reduce(
-    (sum, lot) => sum + scaleU64(lot.premium_paid_raw, series.settlement_decimals),
-    0,
-  );
-  const premiumPaid =
-    totalLotAmount > 0 ? (totalLotPremium * amount) / totalLotAmount : 0;
-  const pnl = intrinsicNow - premiumPaid;
+
+  // True cost basis (SO-209): start from the backend's FIFO remaining lots
+  // (RFQ + DeepBook acquisitions net of tracked sells/exercises/burns), then
+  // reconcile against the actual current holding `amount`:
+  //   surplus → tokens transferred in off-venue, a $0-cost lot (its own row);
+  //   deficit → an untracked transfer-out, consumed FIFO at $0 proceeds (a
+  //   realized loss equal to the consumed cost).
+  const bucketPnl = pnlByBucket.get(obj.bucket_id);
+  const lots: OwnedLot[] = (bucketPnl?.remaining_lots ?? []).map((l) => ({
+    amount: l.amount,
+    cost: l.cost,
+    source: l.source,
+    acquiredAtMs: l.acquired_at_ms,
+  }));
+  let realizedPnl = bucketPnl?.realized_pnl ?? 0;
+
+  const trackedAmount = lots.reduce((sum, l) => sum + l.amount, 0);
+  if (amount > trackedAmount + FIFO_EPS) {
+    lots.push({ amount: amount - trackedAmount, cost: 0, source: "transfer", acquiredAtMs: 0 });
+  } else if (amount < trackedAmount - FIFO_EPS) {
+    let deficit = trackedAmount - amount;
+    while (deficit > FIFO_EPS && lots.length > 0) {
+      const lot = lots[0];
+      const take = Math.min(deficit, lot.amount);
+      const costTake = lot.amount > FIFO_EPS ? lot.cost * (take / lot.amount) : 0;
+      lot.amount -= take;
+      lot.cost -= costTake;
+      realizedPnl -= costTake; // transfer-out: $0 proceeds → realize the cost
+      deficit -= take;
+      if (lot.amount <= FIFO_EPS) lots.shift();
+    }
+  }
+
+  const costBasis = lots.reduce((sum, l) => sum + l.cost, 0);
+  const pnl = intrinsicNow - costBasis;
+  const totalPnl = realizedPnl + pnl;
   const status: OwnedPosition["status"] = expired
     ? itm
       ? "expired_itm"
@@ -217,16 +242,20 @@ function buildOwnedRow(
     expiry: isoDate(series.expiry_ms),
     amount,
     tradingAccountAmount: scaleU64(bmAmountRaw.toString(), series.asset_decimals),
-    premiumPaid,
+    premiumPaid: costBasis,
     boughtFrom: provenance ? shortAccount(provenance.seller_account_id) : "—",
     boughtAt: provenance ? isoDate(provenance.timestamp_ms) : "",
     rangeId: shortAccount(obj.bucket_id),
+    lots,
     spot,
     dte,
     itm,
     moneyness,
     intrinsicNow,
     pnl,
+    realizedPnl,
+    totalPnl,
+    unpricedExerciseAmount: bucketPnl?.unpriced_exercise_amount ?? 0,
     status,
   };
 }
@@ -351,6 +380,8 @@ export function useDashboardState(): DashboardState {
   // sitting in their balance manager rather than the wallet. Wallet-login only
   // — session users trade out of custody, not a personal BM.
   const bmId = useBalanceManager(sessionState ? null : wallet);
+  // True cost-basis PnL (FIFO lots + realized), attributed to the wallet's BM.
+  const pnl = useDashboardPnl(wallet, bmId.data ?? null);
   const bmQueryTypes = useMemo<string[]>(() => {
     const set = new Set<string>();
     for (const s of buckets.data ?? []) {
@@ -411,6 +442,9 @@ export function useDashboardState(): DashboardState {
       if (list) list.push(lot);
       else lotsByBucket.set(lot.bucket_id, [lot]);
     }
+    // FIFO cost-basis ledger per bucket (SO-209).
+    const pnlByBucket = new Map<string, BucketPnl>();
+    for (const b of pnl.data ?? []) pnlByBucket.set(b.bucket_id, b);
 
     // Normalized option-coin type → bucket id.
     const callTypeToBucket = new Map<string, string>();
@@ -444,6 +478,7 @@ export function useDashboardState(): DashboardState {
       const row = buildOwnedRow(
         { coin_type: type, bucket_id, amount_raw: total.toString() },
         lotsByBucket,
+        pnlByBucket,
         bucketIdx,
         spot,
         now,
@@ -452,7 +487,7 @@ export function useDashboardState(): DashboardState {
       if (row) rows.push(row);
     }
     return rows;
-  }, [owned.data, bmBalances.data, buckets.data, lots.data, spots, now]);
+  }, [owned.data, bmBalances.data, buckets.data, lots.data, pnl.data, spots, now]);
 
   // Settlement balances sitting in the trading account (BM), for the dashboard
   // "in DeepBook" section — one entry per distinct settlement token held.
@@ -504,6 +539,8 @@ export function useDashboardState(): DashboardState {
     );
     const ownedPaid = ownedRows.reduce((sum, p) => sum + p.premiumPaid, 0);
     const ownedPnl = ownedRows.reduce((sum, p) => sum + p.pnl, 0);
+    const ownedRealized = ownedRows.reduce((sum, p) => sum + p.realizedPnl, 0);
+    const ownedTotalPnl = ownedRows.reduce((sum, p) => sum + p.totalPnl, 0);
     const writtenNotional = writtenRows.reduce(
       (sum, p) => sum + p.spot * (p.totalQty || 0),
       0,
@@ -518,6 +555,8 @@ export function useDashboardState(): DashboardState {
       ownedNotional,
       ownedPaid,
       ownedPnl,
+      ownedRealized,
+      ownedTotalPnl,
       writtenNotional,
       premiumEarned,
       claimable,

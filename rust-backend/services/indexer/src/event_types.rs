@@ -78,6 +78,9 @@ pub struct EventTypes {
     /// event/struct types to the first publish, not the upgraded package
     /// that calls target. `None` on networks without a DeepBook deployment.
     pub deepbook_pool_created_prefix: Option<String>,
+    /// DeepBook's non-generic `order_info::OrderFilled` type string (SO-209).
+    /// Exact-matchable (zero type params); `None` without a DeepBook deploy.
+    pub deepbook_order_filled: Option<String>,
 }
 
 impl EventTypes {
@@ -122,6 +125,8 @@ impl EventTypes {
             vault_deposits_paused: mk("VaultDepositsPaused"),
             deepbook_pool_created_prefix: deepbook_original_package_id
                 .map(|pkg| format!("{pkg}::pool::PoolCreated<")),
+            deepbook_order_filled: deepbook_original_package_id
+                .map(|pkg| format!("{pkg}::order_info::OrderFilled")),
         }
     }
 
@@ -327,6 +332,86 @@ pub fn parse_deepbook_pool_created(
         min_size: raw.min_size,
         taker_fee: raw.taker_fee,
         maker_fee: raw.maker_fee,
+    }))
+}
+
+/// DeepBook `OrderFilled` decoded but not yet tied to a bucket (SO-209). The
+/// worker resolves `pool_id` against known bucket pools and either promotes it
+/// into `ChainEvent::DeepBookOrderFilled` or drops it (a fill on a foreign pool).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeepBookOrderFilledPartial {
+    pub pool_id: ObjectId,
+    pub taker_balance_manager_id: ObjectId,
+    pub maker_balance_manager_id: ObjectId,
+    pub taker_is_bid: bool,
+    pub base_quantity: u64,
+    pub quote_quantity: u64,
+    pub price: u64,
+    pub taker_fee: u64,
+    pub taker_fee_is_deep: bool,
+    pub maker_fee: u64,
+    pub maker_fee_is_deep: bool,
+    pub timestamp_ms: u64,
+}
+
+/// Raw BCS mirror of DeepBook's `order_info::OrderFilled` payload. Field order
+/// verified against the deployed testnet package (DEEPBOOK-FINDINGS.md §B and
+/// `tools/deepbook-pool-test/fixtures/order_filled.testnet.json`). Non-generic,
+/// so the type params live nowhere — an exact type-string match suffices.
+#[derive(Debug, Deserialize)]
+struct RawOrderFilled {
+    pool_id: ObjectId,
+    #[allow(dead_code)]
+    maker_order_id: u128,
+    #[allow(dead_code)]
+    taker_order_id: u128,
+    #[allow(dead_code)]
+    maker_client_order_id: u64,
+    #[allow(dead_code)]
+    taker_client_order_id: u64,
+    price: u64,
+    taker_is_bid: bool,
+    taker_fee: u64,
+    taker_fee_is_deep: bool,
+    maker_fee: u64,
+    maker_fee_is_deep: bool,
+    base_quantity: u64,
+    quote_quantity: u64,
+    maker_balance_manager_id: ObjectId,
+    taker_balance_manager_id: ObjectId,
+    timestamp: u64,
+}
+
+/// Try to parse `type_str` + `contents` as a DeepBook `OrderFilled` event.
+/// `Ok(None)` if the type doesn't match (or DeepBook isn't configured);
+/// `Err` if it matches but the BCS payload is malformed.
+pub fn parse_deepbook_order_filled(
+    types: &EventTypes,
+    type_str: &str,
+    contents: &[u8],
+) -> Result<Option<DeepBookOrderFilledPartial>> {
+    let Some(expected) = types.deepbook_order_filled.as_deref() else {
+        return Ok(None);
+    };
+    if type_str != expected {
+        return Ok(None);
+    }
+    let raw: RawOrderFilled = bcs::from_bytes(contents).with_context(|| {
+        format!("bcs decode of DeepBook OrderFilled ({} bytes)", contents.len())
+    })?;
+    Ok(Some(DeepBookOrderFilledPartial {
+        pool_id: raw.pool_id,
+        taker_balance_manager_id: raw.taker_balance_manager_id,
+        maker_balance_manager_id: raw.maker_balance_manager_id,
+        taker_is_bid: raw.taker_is_bid,
+        base_quantity: raw.base_quantity,
+        quote_quantity: raw.quote_quantity,
+        price: raw.price,
+        taker_fee: raw.taker_fee,
+        taker_fee_is_deep: raw.taker_fee_is_deep,
+        maker_fee: raw.maker_fee,
+        maker_fee_is_deep: raw.maker_fee_is_deep,
+        timestamp_ms: raw.timestamp,
     }))
 }
 
