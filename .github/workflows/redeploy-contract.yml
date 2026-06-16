@@ -1,6 +1,10 @@
-# Redeploy the options-protocol Move package to staging or prod, then
-# rebuild + roll out EVERY service so each one boots against the new
-# contract's deployments.json (which is baked into the image at build).
+# Redeploy the options-protocol Move package to staging or prod, then roll
+# out the services so they run against the new contract's deployments.json.
+#
+# deployments.json is NOT baked into images: token-info reads it from a host
+# bind-mount (/opt/options/<env>/deployments/), and the deploy bundle ships
+# the file from the redeploy commit. So a redeploy only needs to drop the new
+# file + restart token-info — it does NOT need to rebuild every service.
 #
 # Steps (in order):
 #   1. Build + run the deployment-manager → publishes the Move package
@@ -14,16 +18,15 @@
 #      (The mm-bot needs no reset — it resolves its Account from chain state
 #      for the current package on boot, bootstrapping a fresh one if none.)
 #   5. Commit the updated deployments.json + indexer config to git.
-#   6. Call _deploy.yml with force_all + ref=<the commit just pushed>: every
-#      service image is rebuilt (baking the new deployments.json), pushed to
-#      ECR, and rolled out via deploy.sh (pull + up -d + migrations + health
-#      checks). This brings the stopped indexer/scheduler back up on fresh
-#      images + DBs and recreates the rest on the new deployment.
-#
-# Why rebuild instead of `docker cp`-ing the file in: baking keeps the ECR
-# images and the committed deployments.json in lockstep, so a later
-# container recreation (a normal deploy, a box reboot) can't silently
-# revert a service to a stale AdminCap id.
+#   6. Call _deploy.yml with ref=<the commit just pushed> per build_strategy:
+#        - rebuild-all              : rebuild + roll every service (original).
+#        - latest                   : skip builds, roll the last deployed
+#                                     images; the bundle still ships the new
+#                                     deployments.json.
+#        - latest-build-token-info  : roll the stack on latest images, then
+#                                     rebuild + roll only token-info.
+#      deploy.sh pulls + up -d + runs migrations + health checks, bringing the
+#      stopped indexer/scheduler back up on the wiped DBs.
 #
 # prod is a testnet deployment, so it IS a valid target here (it publishes
 # to testnet and wipes the prod testnet DBs). What stays EXPLICITLY BLOCKED
@@ -62,6 +65,25 @@ on:
         required: false
         type: boolean
         default: false
+      build_strategy:
+        description: 'How to source service images for the rollout'
+        required: false
+        type: choice
+        default: rebuild-all
+        options:
+          # Rebuild + roll every service from the redeploy commit (the original
+          # behavior — slowest, but always valid incl. a fresh box).
+          - rebuild-all
+          # Skip all builds: roll every service on the last successfully
+          # deployed images (the deployed-<env> marker's sha). The new
+          # deployments.json still reaches token-info via the deploy bundle.
+          # Requires a prior deploy on this env.
+          - latest
+          # Roll the whole stack on latest images, then rebuild + roll ONLY
+          # token-info at the redeploy commit. Use when token-info code changed
+          # (or to first cold-boot the bind-mount wiring) without waiting on a
+          # full 12-service rebuild.
+          - latest-build-token-info
 
 permissions:
   contents: write    # push updated deployments.json + config
@@ -79,8 +101,12 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       # The commit this job pushes (new deployments.json + indexer config).
-      # The deploy job checks this out so the rebuilt images bake it.
+      # The deploy job checks this out so its bundle ships the new file.
       new_sha: ${{ steps.commit.outputs.sha }}
+      # Image tag for the `latest`/`latest-build-token-info` strategies: the sha
+      # of the last successful deploy (the deployed-<env> marker). Empty on
+      # rebuild-all.
+      latest_tag: ${{ steps.latest.outputs.tag }}
     steps:
       # ── 0. Checkout ──────────────────────────────────────────────
       - uses: actions/checkout@v4
@@ -97,6 +123,32 @@ jobs:
               exit 1
               ;;
           esac
+
+      # ── 1b. Resolve the "latest build" image tag (fail-fast) ─────
+      # For the latest* strategies we roll the images from the last successful
+      # deploy, identified by the deployed-<env> marker tag the deploy workflow
+      # advances. Resolve it BEFORE publishing/wiping so a missing marker aborts
+      # the run before it does anything destructive. rebuild-all ignores this.
+      - name: Resolve latest build tag
+        id: latest
+        env:
+          ENV: ${{ inputs.environment }}
+          STRATEGY: ${{ inputs.build_strategy }}
+        run: |
+          marker="deployed-${ENV}"
+          git fetch --quiet origin "refs/tags/${marker}:refs/tags/${marker}" 2>/dev/null || true
+          if git rev-parse -q --verify "refs/tags/${marker}^{commit}" >/dev/null 2>&1; then
+            tag="$(git rev-parse --short=12 "refs/tags/${marker}")"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "latest build tag for ${ENV}: $tag (from ${marker})"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            if [ "$STRATEGY" != "rebuild-all" ]; then
+              echo "::error::build_strategy=$STRATEGY needs a prior successful deploy, but no ${marker} marker exists. Use rebuild-all for the first deploy on this env."
+              exit 1
+            fi
+            echo "no ${marker} marker yet — fine for rebuild-all"
+          fi
 
       # ── 2. AWS credentials (OIDC) ───────────────────────────────
       - uses: aws-actions/configure-aws-credentials@v4
@@ -288,9 +340,10 @@ jobs:
             "$START" >> "$CONFIG"
 
       # ── 10. Upload the DB-wipe script to S3 for EC2 ─────────────
-      # Only the provisioning script needs to reach the box now — the new
-      # deployments.json and indexer config are baked into the rebuilt
-      # images by the deploy job, not docker-cp'd in.
+      # Only the provisioning script needs to reach the box here. The new
+      # deployments.json rides along in the deploy job's bundle (which checks
+      # out this commit via `ref`) and lands on the host bind-mount; the indexer
+      # config is read from the image config dir as before.
       - name: Upload redeploy bundle
         id: bundle
         env:
@@ -389,8 +442,9 @@ jobs:
                 "# chain state for the current package on boot, bootstrapping a",
                 "# fresh one if none exists yet.",
                 "# indexer + option-scheduler are left STOPPED on purpose — the",
-                "# deploy job rebuilds every image (baking the new deployments.json",
-                "# + indexer config) and `docker compose up -d`s the whole stack,",
+                "# deploy job rolls the whole stack (rebuilding or pulling the",
+                "# latest images per build_strategy, and dropping the new",
+                "# deployments.json on the host) and `docker compose up -d`s it,",
                 "# starting them fresh on the wiped DBs (migrations run on connect).",
                 "# Cleanup",
                 "rm -rf /tmp/redeploy /tmp/redeploy-bundle.tgz",
@@ -436,8 +490,8 @@ jobs:
 
       # ── 12. Commit and push changes to git ──────────────────────
       # Must push BEFORE the deploy job runs: that job checks out this exact
-      # commit (via the `ref` it receives) so the rebuilt images bake this
-      # deployments.json + indexer config.
+      # commit (via the `ref` it receives) so its bundle ships this
+      # deployments.json + the rebuilt images carry the indexer config.
       - name: Commit updated files
         id: commit
         env:
@@ -459,17 +513,48 @@ jobs:
           git push
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  # ── Rebuild + roll out EVERY service on the new deployment ──────
-  # force_all rebuilds all five images from the commit `publish` just
-  # pushed (ref), baking the new deployments.json, and deploy.sh pulls +
-  # `up -d`s the whole stack — starting the stopped indexer/scheduler on
-  # the wiped DBs and recreating the rest. Gated on `publish` so the DB
-  # wipe + commit are done before any new image comes up.
-  deploy:
+  # ── Roll out the stack on the new deployment ───────────────────
+  # Three mutually exclusive strategies, selected by build_strategy. All check
+  # out the commit `publish` just pushed (ref) so the deploy bundle ships the
+  # new deployments.json onto the host bind-mount, and all are gated on
+  # `publish` so the DB wipe + commit are done before any container comes up.
+
+  # rebuild-all: rebuild every image from the redeploy commit and roll the
+  # whole stack — the original behavior, and the only valid choice on a fresh
+  # box (no prior images to fall back to).
+  deploy-rebuild-all:
+    if: ${{ inputs.build_strategy == 'rebuild-all' }}
     needs: publish
     uses: ./.github/workflows/_deploy.yml
     secrets: inherit
     with:
       envs: ${{ format('["{0}"]', inputs.environment) }}
       force_all: true
+      ref: ${{ needs.publish.outputs.new_sha }}
+
+  # latest / latest-build-token-info (pass 1): skip all builds and roll every
+  # service on the last deployed images (deployed-<env> sha). The new
+  # deployments.json still reaches token-info via the bundle, so the stack is
+  # correct against the fresh contract without a single rebuild.
+  deploy-latest:
+    if: ${{ inputs.build_strategy == 'latest' || inputs.build_strategy == 'latest-build-token-info' }}
+    needs: publish
+    uses: ./.github/workflows/_deploy.yml
+    secrets: inherit
+    with:
+      envs: ${{ format('["{0}"]', inputs.environment) }}
+      image_tag: ${{ needs.publish.outputs.latest_tag }}
+      ref: ${{ needs.publish.outputs.new_sha }}
+
+  # latest-build-token-info (pass 2): after the latest-image roll, rebuild +
+  # roll ONLY token-info from the redeploy commit. Sequenced after deploy-latest
+  # so token-info ends on the freshly built image.
+  deploy-token-info:
+    if: ${{ inputs.build_strategy == 'latest-build-token-info' }}
+    needs: [publish, deploy-latest]
+    uses: ./.github/workflows/_deploy.yml
+    secrets: inherit
+    with:
+      envs: ${{ format('["{0}"]', inputs.environment) }}
+      only_services: '["token-info"]'
       ref: ${{ needs.publish.outputs.new_sha }}

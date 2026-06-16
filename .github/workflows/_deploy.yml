@@ -38,7 +38,12 @@ on:
         type: boolean
         default: false
       ref:
-        description: 'Git ref/SHA to check out for build + deploy bundle. Empty = the commit that triggered the run (normal path). The redeploy-contract workflow passes the commit it just pushed so the rebuilt images bake the new deployments.json.'
+        description: 'Git ref/SHA to check out for build + deploy bundle. Empty = the commit that triggered the run (normal path). The redeploy-contract workflow passes the commit it just pushed so the deploy bundle ships its new deployments.json.'
+        required: false
+        type: string
+        default: ''
+      only_services:
+        description: 'JSON array of service names to build + roll, bypassing the changed-paths filter (e.g. ''["token-info"]''). Empty = normal selection. Unlike force_all this restricts the set to exactly these services; used by redeploy-contract to rebuild just token-info on top of a latest-build roll.'
         required: false
         type: string
         default: ''
@@ -81,7 +86,7 @@ jobs:
           fi
 
       - id: base
-        if: ${{ !inputs.force_all && !inputs.image_tag }}
+        if: ${{ !inputs.force_all && !inputs.image_tag && !inputs.only_services }}
         env:
           PUSH_BEFORE: ${{ github.event.before }}
           DEPLOY_ENVS: ${{ inputs.envs }}
@@ -124,7 +129,7 @@ jobs:
           echo "sha=$base" >> "$GITHUB_OUTPUT"
 
       - id: changed
-        if: ${{ !inputs.force_all && !inputs.image_tag }}
+        if: ${{ !inputs.force_all && !inputs.image_tag && !inputs.only_services }}
         uses: tj-actions/changed-files@v44
         with:
           base_sha: ${{ steps.base.outputs.sha }}
@@ -134,9 +139,16 @@ jobs:
         env:
           FORCE_ALL: ${{ inputs.force_all }}
           OVERRIDE_TAG: ${{ inputs.image_tag }}
+          ONLY_SERVICES: ${{ inputs.only_services }}
           CHANGED_FILES: ${{ steps.changed.outputs.all_changed_files }}
         run: |
-          if [ "$FORCE_ALL" = "true" ] || [ -n "$OVERRIDE_TAG" ]; then
+          if [ -n "$ONLY_SERVICES" ]; then
+            # Explicit service list — build + roll exactly these, ignoring the
+            # changed-paths filter. With no image_tag the `tag` step left
+            # skip_build=false, so these get built at the current sha.
+            services="$ONLY_SERVICES"
+            echo "only_services override → $services"
+          elif [ "$FORCE_ALL" = "true" ] || [ -n "$OVERRIDE_TAG" ]; then
             # force_all OR a tag override (rollback) → roll every service.
             # For rollbacks the user normally wants to bring the whole
             # stack to a known-good tag; if they want one service only,
@@ -266,10 +278,16 @@ jobs:
           # Bundle only the files the box needs to run deploy.sh for
           # this env. Per-env compose files are split so each env's
           # bundle carries only its own compose.
-          mkdir -p /tmp/bundle/nginx
+          mkdir -p /tmp/bundle/nginx /tmp/bundle/deployments
           cp deployment/ec2/deploy.sh         /tmp/bundle/
           cp deployment/ec2/render-secrets.sh /tmp/bundle/
           cp deployment/compose/docker-compose.${{ matrix.env }}.yml /tmp/bundle/
+          # deployments.json is no longer baked into the token-info image; it's
+          # a runtime file mounted from /opt/options/<env>/deployments/. Ship it
+          # in the bundle so the host file self-heals to the deployed commit on
+          # every deploy (the redeploy-contract workflow checks out its new
+          # commit via `ref`, so its fresh deployments.json rides along here).
+          cp deployments.json /tmp/bundle/deployments/deployments.json
           # nginx sidecar config — shipped inside a `nginx/` directory so
           # compose can bind-mount the directory (and nginx -c picks the
           # file out of it). Mounting the directory instead of the file

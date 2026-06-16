@@ -40,10 +40,14 @@ ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
 # scripts that all services depend on, and changes to the affected.py
 # logic itself (so the workflow re-validates with the new rules).
+#
+# deployments.json is deliberately NOT here: it's no longer baked into any
+# image (token-info reads it from a host bind-mount, shipped by the deploy
+# bundle), so a change to it rebuilds nothing. It only ever changes via the
+# redeploy-contract workflow, which deploys explicitly.
 REBUILD_ALL_GLOBS = [
     "rust-backend/Cargo.lock",
     "rust-backend/Cargo.toml",
-    "rust-backend/deployments.json",
     "rust-backend/deployment/**",
     "rust-backend/infra/**",
     ".github/workflows/**",
