@@ -40,6 +40,10 @@ pub async fn serve(
             get(handlers::indexer_progress::get_progress),
         )
         .route("/events", get(handlers::events::list_events))
+        .route(
+            "/options/metrics",
+            get(handlers::option_metrics::option_metrics),
+        )
         .route("/rfqs", get(handlers::rfqs::list_rfqs))
         .route(
             "/rfqs/:rfq_id/bids",

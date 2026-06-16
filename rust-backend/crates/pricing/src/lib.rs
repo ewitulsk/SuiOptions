@@ -91,6 +91,121 @@ pub fn strike_for_delta(spot: f64, sigma: f64, t_years: f64, r: f64, delta: f64)
     spot * ((r + 0.5 * sigma * sigma) * t_years - d1 * sigma * t_years.sqrt()).exp()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Greeks {
+    pub delta: f64,
+    pub gamma: f64,
+    /// ∂price/∂σ per 1.00 (=100%) vol. Divide by 100 for per-1%-vol.
+    pub vega: f64,
+    /// Per-CALENDAR-DAY theta (annual θ ÷ 365) to match retail screens.
+    pub theta: f64,
+    /// ∂price/∂r per 1.00 (=100%) rate. Divide by 100 for per-1%-rate.
+    pub rho: f64,
+}
+
+/// Analytic Black-Scholes call greeks. Conventions match `call_price_per_unit`
+/// / `call_delta`: at expiry or zero vol the option is deterministic, so the
+/// smooth greeks vanish and delta is the (forward) intrinsic indicator.
+pub fn call_greeks(i: CallInputs) -> Greeks {
+    if i.t_years <= 0.0 || i.sigma <= 0.0 {
+        return Greeks {
+            delta: call_delta(i),
+            gamma: 0.0,
+            vega: 0.0,
+            theta: 0.0,
+            rho: 0.0,
+        };
+    }
+    let sqrt_t = i.t_years.sqrt();
+    let d1 = ((i.spot / i.strike).ln() + (i.r + 0.5 * i.sigma * i.sigma) * i.t_years)
+        / (i.sigma * sqrt_t);
+    let d2 = d1 - i.sigma * sqrt_t;
+    let pdf_d1 = norm_pdf(d1);
+    let disc = (-i.r * i.t_years).exp();
+
+    let delta = norm_cdf(d1);
+    let gamma = pdf_d1 / (i.spot * i.sigma * sqrt_t);
+    let vega = i.spot * pdf_d1 * sqrt_t;
+    // Annualized call theta, then converted to per-day below.
+    let theta_annual =
+        -(i.spot * pdf_d1 * i.sigma) / (2.0 * sqrt_t) - i.r * i.strike * disc * norm_cdf(d2);
+    let rho = i.strike * i.t_years * disc * norm_cdf(d2);
+
+    Greeks { delta, gamma, vega, theta: theta_annual / 365.0, rho }
+}
+
+/// Implied volatility of a call from its observed price, via Newton-Raphson
+/// seeded with the Brenner-Subrahmanyam ATM approximation, with a bisection
+/// fallback if Newton stalls (flat vega / overshoot). `market`, `spot`,
+/// `strike` share one unit. Returns `None` when there is no positive-vol
+/// solution: `market` below the no-arbitrage intrinsic, `market` ≥ `spot`, or
+/// expiry ≤ 0. Result is clamped to (0, 5.0].
+pub fn implied_vol(market: f64, spot: f64, strike: f64, t_years: f64, r: f64) -> Option<f64> {
+    if !market.is_finite() || market <= 0.0 || t_years <= 0.0 || spot <= 0.0 {
+        return None;
+    }
+    // No-arbitrage call bounds: max(S − K·e^(−rτ), 0) ≤ C < S.
+    let intrinsic = (spot - strike * (-r * t_years).exp()).max(0.0);
+    if market < intrinsic || market >= spot {
+        return None;
+    }
+
+    let price_at =
+        |sigma: f64| call_price_per_unit(CallInputs { spot, strike, t_years, r, sigma });
+    let vega_at = |sigma: f64| {
+        let sqrt_t = t_years.sqrt();
+        let d1 = ((spot / strike).ln() + (r + 0.5 * sigma * sigma) * t_years) / (sigma * sqrt_t);
+        spot * norm_pdf(d1) * sqrt_t
+    };
+
+    // Brenner-Subrahmanyam seed: σ₀ ≈ √(2π/τ)·(C/S). Good near ATM.
+    let mut sigma =
+        ((2.0 * std::f64::consts::PI / t_years).sqrt() * market / spot).clamp(1e-3, 5.0);
+
+    for _ in 0..100 {
+        let diff = price_at(sigma) - market;
+        if diff.abs() < 1e-9 {
+            return Some(sigma.clamp(1e-6, 5.0));
+        }
+        let v = vega_at(sigma);
+        if !v.is_finite() || v < 1e-12 {
+            break; // vega too flat — hand off to bisection
+        }
+        let next = sigma - diff / v;
+        if !next.is_finite() {
+            break;
+        }
+        sigma = next.clamp(1e-6, 5.0);
+    }
+
+    // Bisection on [1e-6, 5.0]; price is monotone increasing in σ.
+    let (mut lo, mut hi) = (1e-6_f64, 5.0_f64);
+    if price_at(lo) > market || price_at(hi) < market {
+        return None; // outside the bracket we can solve
+    }
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        let p = price_at(mid);
+        if (p - market).abs() < 1e-9 {
+            return Some(mid);
+        }
+        if p < market {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Some(0.5 * (lo + hi))
+}
+
+/// Break-even underlying price for a long call held to expiry:
+/// `strike + premium_per_unit`. The caller chooses which premium to pass —
+/// the live mid for a pre-trade quote, or the average cost for an open
+/// position (the latter is what produces the screenshot's 537.15 = 500 + 37.15).
+pub fn break_even(strike: f64, premium_per_unit: f64) -> f64 {
+    strike + premium_per_unit
+}
+
 /// Inverse standard normal CDF via Acklam's rational approximation
 /// (relative error < 1.15e-9 over the open unit interval). Returns ±∞ at
 /// p = 0 / 1 and NaN outside [0, 1].
@@ -153,6 +268,11 @@ pub fn norm_cdf_inv(p: f64) -> f64 {
         -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
             / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
     }
+}
+
+/// Standard normal PDF φ(x) = e^(−x²/2) / √(2π).
+fn norm_pdf(x: f64) -> f64 {
+    (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt()
 }
 
 /// Standard normal CDF via Abramowitz-Stegun 26.2.17.
@@ -366,5 +486,132 @@ mod tests {
         let hundred = premium_for_write(p, 100);
         assert_eq!(one, 10);
         assert!((1040..=1050).contains(&hundred));
+    }
+
+    /// Finite-difference check with a relative floor: the A-S `norm_cdf`'s
+    /// ~7e-8 absolute error scales with price (and thus with spot), so a
+    /// large-spot vega/rho carries proportionally larger FD noise than the
+    /// flat 2e-4 a small fixture allows. `2e-4 + 2e-4·|expected|` keeps the
+    /// tight floor on near-zero greeks (gamma) while admitting it on big ones.
+    fn close_greek(a: f64, b: f64) {
+        let eps = 2e-4 + 2e-4 * b.abs();
+        assert!((a - b).abs() < eps, "{a} vs {b}, eps {eps}");
+    }
+
+    #[test]
+    fn call_greeks_match_bump_and_reprice() {
+        // Analytic greeks vs central finite differences on call_price_per_unit.
+        // Tolerance is looser than delta's (2e-5) because gamma is a second
+        // derivative and the A-S norm_cdf error compounds across the higher-
+        // order bumps.
+        let cases = [
+            (100.0, 100.0, 1.0, 0.05, 0.20),
+            (100.0, 130.0, 7.0 / 365.0, 0.0, 0.60),
+            (3.5, 4.2, 14.0 / 365.0, 0.03, 0.90),
+            (77_000.0, 90_000.0, 30.0 / 365.0, 0.04, 0.45),
+        ];
+        for (spot, strike, t_years, r, sigma) in cases {
+            let i = CallInputs { spot, strike, t_years, r, sigma };
+            let g = call_greeks(i);
+
+            // gamma ≈ ∂²price/∂S².
+            let hs = spot * 1e-4;
+            let p_up = call_price_per_unit(CallInputs { spot: spot + hs, ..i });
+            let p_mid = call_price_per_unit(i);
+            let p_dn = call_price_per_unit(CallInputs { spot: spot - hs, ..i });
+            let gamma_num = (p_up - 2.0 * p_mid + p_dn) / (hs * hs);
+            close_greek(g.gamma, gamma_num);
+
+            // vega ≈ ∂price/∂σ.
+            let hv = sigma * 1e-4;
+            let v_up = call_price_per_unit(CallInputs { sigma: sigma + hv, ..i });
+            let v_dn = call_price_per_unit(CallInputs { sigma: sigma - hv, ..i });
+            let vega_num = (v_up - v_dn) / (2.0 * hv);
+            close_greek(g.vega, vega_num);
+
+            // theta_annual ≈ −∂price/∂τ; greeks.theta is per-day.
+            let ht = t_years * 1e-4;
+            let t_up = call_price_per_unit(CallInputs { t_years: t_years + ht, ..i });
+            let t_dn = call_price_per_unit(CallInputs { t_years: t_years - ht, ..i });
+            let theta_annual_num = -(t_up - t_dn) / (2.0 * ht);
+            close_greek(g.theta * 365.0, theta_annual_num);
+
+            // rho ≈ ∂price/∂r.
+            let hr = 1e-5;
+            let r_up = call_price_per_unit(CallInputs { r: r + hr, ..i });
+            let r_dn = call_price_per_unit(CallInputs { r: r - hr, ..i });
+            let rho_num = (r_up - r_dn) / (2.0 * hr);
+            close_greek(g.rho, rho_num);
+        }
+    }
+
+    #[test]
+    fn implied_vol_round_trips() {
+        for (spot, strike, t_years, r, sigma) in [
+            (100.0, 100.0, 1.0, 0.05, 0.20),
+            (100.0, 80.0, 0.5, 0.03, 0.35),  // ITM
+            (100.0, 130.0, 0.25, 0.0, 0.60), // OTM, short
+            (3.5, 4.2, 14.0 / 365.0, 0.03, 0.90),
+            (100.0, 100.0, 2.0, 0.04, 0.15), // long τ
+        ] {
+            let price = call_price_per_unit(CallInputs { spot, strike, t_years, r, sigma });
+            let iv = implied_vol(price, spot, strike, t_years, r)
+                .expect("priced call must have an implied vol");
+            close(iv, sigma, 1e-6);
+        }
+    }
+
+    #[test]
+    fn implied_vol_screenshot_shape() {
+        // Loose regime check against the competitor screenshot: OTM call, rate
+        // ignored. The screenshot pins the regime (IV≈0.35, delta≈0.24,
+        // theta≈−0.07/day); for the mark 12.78 that regime is reproduced at
+        // τ≈0.72y, not the ticket's literal ~1.6 (which would give IV≈0.23,
+        // theta≈−0.03 for the same mark). We assert the regime, not figures.
+        let iv = implied_vol(12.78, 387.70, 500.0, 0.72, 0.0).expect("should solve");
+        assert!((0.33..=0.37).contains(&iv), "iv {iv} out of regime");
+        let g = call_greeks(CallInputs {
+            spot: 387.70,
+            strike: 500.0,
+            t_years: 0.72,
+            r: 0.0,
+            sigma: iv,
+        });
+        assert!((0.22..=0.26).contains(&g.delta), "delta {} out of regime", g.delta);
+        assert!((-0.09..=-0.05).contains(&g.theta), "theta {} out of regime", g.theta);
+    }
+
+    #[test]
+    fn implied_vol_no_solution() {
+        // market ≥ spot.
+        assert!(implied_vol(100.0, 100.0, 90.0, 1.0, 0.0).is_none());
+        // market below intrinsic (S=110, K=100, r=0 → intrinsic 10).
+        assert!(implied_vol(5.0, 110.0, 100.0, 1.0, 0.0).is_none());
+        // expiry ≤ 0.
+        assert!(implied_vol(5.0, 100.0, 100.0, 0.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn call_greeks_degenerate() {
+        // Expired: smooth greeks vanish, delta is the intrinsic indicator.
+        let expired = CallInputs { spot: 105.0, strike: 100.0, t_years: 0.0, r: 0.05, sigma: 0.5 };
+        let g = call_greeks(expired);
+        close(g.delta, 1.0, 1e-12);
+        close(g.gamma, 0.0, 1e-12);
+        close(g.vega, 0.0, 1e-12);
+        close(g.theta, 0.0, 1e-12);
+        close(g.rho, 0.0, 1e-12);
+
+        // Zero vol: indicator on the forward.
+        let zero_vol = CallInputs { spot: 100.0, strike: 101.0, t_years: 1.0, r: 0.05, sigma: 0.0 };
+        let g = call_greeks(zero_vol);
+        close(g.delta, 1.0, 1e-12); // fwd ≈ 105.13 > 101
+        close(g.gamma, 0.0, 1e-12);
+        close(g.vega, 0.0, 1e-12);
+    }
+
+    #[test]
+    fn break_even_basic() {
+        close(break_even(500.0, 37.15), 537.15, 1e-12);
     }
 }

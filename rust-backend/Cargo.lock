@@ -320,6 +320,7 @@ dependencies = [
  "config",
  "indexer-graphql",
  "observability",
+ "pricing",
  "protocol-types",
  "reqwest",
  "runtime-config",
