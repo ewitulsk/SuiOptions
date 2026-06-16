@@ -74,9 +74,11 @@ underlying_replenish_interval_secs = 60
 
 # Pyth Hermes/Benchmarks settings. All fields are optional — these are
 # the defaults from `PythConfig::default()` written out explicitly so the
-# knobs are discoverable.
+# knobs are discoverable. Sui testnet feed ids are the BETA set, served only
+# by hermes-beta (stable hermes 404s); benchmarks is stable-only so beta-id
+# vol bootstrap falls back to fallback_vol.
 [pyth]
-hermes_url             = "https://hermes.pyth.network"
+hermes_url             = "https://hermes-beta.pyth.network"
 benchmarks_url         = "https://benchmarks.pyth.network"
 # Reject an RFQ if our last *observation* of either price is older than
 # this. Catches a wedged or disconnected SSE stream.
