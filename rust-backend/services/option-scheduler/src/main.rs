@@ -466,7 +466,8 @@ async fn resolve_strikes(
             match option_scheduler::sigma::realized_sigma_from_benchmarks(
                 http_client,
                 &pyth_cfg.benchmarks_url,
-                *underlying_feed,
+                // Benchmarks serves stable ids only; map beta → stable.
+                pyth_client::benchmark_feed_id(*underlying_feed),
                 *vol_window_days,
                 now_ms / 1000,
             )

@@ -59,7 +59,9 @@ pub async fn resolve_sigma(
     underlying: &SupportedToken,
     window_days: u32,
 ) -> Result<f64> {
-    let uf = underlying.pyth_feed().context("underlying pyth feed")?;
+    // Benchmarks only serves the stable feed set; map the (beta) feed to its
+    // stable equivalent so realized vol uses the real asset's history.
+    let uf = pyth_client::benchmark_feed_id(underlying.pyth_feed().context("underlying pyth feed")?);
     pyth_client::sigma::realized_sigma_from_benchmarks(
         http,
         benchmarks_url,

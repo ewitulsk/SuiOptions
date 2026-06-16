@@ -95,9 +95,10 @@ pub struct PythKeeperConfig {
     pub hermes_url: String,
 
     /// Historical daily closes for the realized-vol estimate (README §9).
-    /// Benchmarks serves the *stable* feed set only — on testnet (beta
-    /// feed ids) the lookup fails and `vault_defaults.sigma_fallback`
-    /// takes over.
+    /// Benchmarks serves the *stable* feed set only; discovered beta feed ids
+    /// are mapped to their stable equivalent (`pyth_client::benchmark_feed_id`)
+    /// before the lookup. `vault_defaults.sigma_fallback` still backstops
+    /// unmapped feeds and benchmark outages.
     #[serde(default = "default_benchmarks_url")]
     pub benchmarks_url: String,
 
@@ -210,7 +211,7 @@ mod tests {
             assert_eq!(
                 cfg.vault_defaults.sigma_fallback,
                 Some(0.85),
-                "{env}: benchmarks can't serve beta ids — fallback is load-bearing"
+                "{env}: sigma_fallback backstops unmapped feeds / benchmark outages"
             );
             assert_eq!(cfg.vault_defaults.slicing.slices, 4, "{env}");
             assert_eq!(cfg.vault_defaults.slicing.stagger_minutes, 90, "{env}");
