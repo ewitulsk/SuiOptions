@@ -104,6 +104,11 @@
             "faucetId": "0xf658332008b0a96fd22cbf522ce7719d9643473bbc706ae507bf19162976be41",
             "decimals": 6
           },
+          "TSUI": {
+            "coinType": "0xc7b13fac3b94b3c6171ff0247b282dc4caeda51b64d2e421f62bfd17004d4e1b::tsui::TSUI",
+            "faucetId": "0x0abb12c5558d4438f7d5fbf5e056dc852a7d00fa3283334979332d335b7e8f32",
+            "decimals": 9
+          },
           "TUSDC": {
             "coinType": "0xc7b13fac3b94b3c6171ff0247b282dc4caeda51b64d2e421f62bfd17004d4e1b::tusdc::TUSDC",
             "faucetId": "0x5f09d4517de9939313131a422a4ddd570373e239a50db6f2b6336112a11be8d3",
@@ -143,7 +148,7 @@
         "pythFeedId": "0xe18bf5fa857d5ca8af1f6a458b26e853ecdc78fc2f3dc17f4821374ad94d8327"
       },
       "TSUI": {
-        "coinType": "0xaf1345304179d6332eb5c99eff630ced815a5e37601a09c15db45599b7c4c4aa::tsui::TSUI",
+        "coinType": "0xc7b13fac3b94b3c6171ff0247b282dc4caeda51b64d2e421f62bfd17004d4e1b::tsui::TSUI",
         "decimals": 9,
         "pythFeedId": "0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744"
       },
