@@ -1,5 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useComposerState } from "../state/composer";
+import { midFromBook, poolRefFor, useOrderBook } from "../api/deepbook";
+import { OptionMetricsPanel } from "../components/OptionMetricsPanel";
 import { BucketBar } from "../components/BucketBar";
 import { StrikeTiles } from "../components/StrikeTiles";
 import { BucketList } from "../components/BucketList";
@@ -33,6 +36,16 @@ type Props = {
 
 export function Composer({ initialView }: Props) {
   const s = useComposerState({ initialView });
+  const account = useCurrentAccount();
+  // Top-of-book mid (settlement per option), shared one source with the order
+  // book rail (same `["deepbook-book", poolId]` query). Feeds the metrics panel
+  // and `/options/metrics` `mark`. `null` until a strike with a two-sided book.
+  const poolRef = useMemo(
+    () => (s.apiBucket && s.series ? poolRefFor(s.apiBucket, s.series) : null),
+    [s.apiBucket, s.series],
+  );
+  const book = useOrderBook(poolRef, account?.address ?? null);
+  const mid = midFromBook(book.data);
   const [feedOpen, setFeedOpen] = useState(false);
   // SO-170: on /buy, switch the whole lower area between buying on DeepBook
   // (chart + order book + trade form) and minting from the market makers (RFQ).
@@ -187,6 +200,14 @@ export function Composer({ initialView }: Props) {
               {live ? (
                 <>
                   {chart}
+                  <OptionMetricsPanel
+                    key={`metrics-${s.apiBucket!.bucket_id}`}
+                    bucket={s.apiBucket!}
+                    series={s.series!}
+                    spot={s.spot}
+                    mid={mid}
+                    wallet={s.address}
+                  />
                   <div className="buy-grid__trade">
                     <TradePanel
                       key={`trade-${s.apiBucket!.bucket_id}`}

@@ -30,6 +30,7 @@ views or event log.
 | `POST` | `/dashboard/positions` | Enrich a wallet's written positions (SO-97). Body `{ "object_ids": ["0x…"] }`. Queries the indexer GraphQL `positions(objectIds)` and layers on catalog symbols/decimals + USD strike. Ids the indexer doesn't know yet are omitted (caller renders them degraded). The authoritative id list comes from the wallet (`getOwnedObjects ::position::Position`), not this service. |
 | `GET` | `/indexer/progress` | Proxies the indexer's checkpoint-ingestion progress for the Debug page. |
 | `GET` | `/events?wallet=0x…` | The wallet's activity feed (writes/buys/exercises/claims/deposits/withdraws), newest first, sourced from the indexer's `events(participant:)` query. `tx_hash` is `null` (digest not carried by `IndexedEvent`). |
+| `GET` | `/options/metrics` | Stateless Black-Scholes greeks, implied vol, fair value & break-even for one call. Pure compute (no indexer/Pyth/DeepBook reads) — the frontend passes in live spot and the order-book mark. See shape below. |
 
 CORS is configured from `allowed_origins` in the config file. Defaults
 allow `http://localhost:5173` (Vite dev server).
@@ -108,6 +109,50 @@ is still visible but flagged as un-renderable.
 | `exercise_cursor` | `number \| null` | Underlying whole units exercised. |
 | `exercise_cursor_raw` | `string` | Raw u128. |
 | `fill_pct` | `number \| null` | `100 * exercise_cursor / total_written`. `0.0` when nothing written. `null` when underlying decimals unknown. |
+
+## `GET /options/metrics` response shape
+
+Black-Scholes greeks, implied vol, fair value, and break-even for a single
+**call**. Stateless: every input is a query param, so api-service does no
+indexer / Pyth / DeepBook reads — the frontend holds live spot (Pyth Hermes)
+and the order-book mark (DeepBook `devInspect`) and passes them in.
+
+### Query params
+
+| Param | Type | Notes |
+|---|---|---|
+| `spot` | `number` | Current underlying price. |
+| `strike` | `number` | Option strike. |
+| `t_years` | `number` | Calendar time to expiry in years (e.g. 30 days → `30/365`). |
+| `mark` | `number` | Observed option price — the order-book mid for a pre-trade quote, or the position's avg cost for break-even. |
+| `r` | `number` | Optional. Annualized continuous risk-free rate. Defaults to `0` (matches a retail screen that ignores rates). |
+
+**UNITS:** `spot`, `strike`, and `mark` MUST share one unit (e.g. settlement
+per option, whole units). Greeks are returned **raw per-1.00**: `vega`/`rho` are
+∂price per 1.00 (=100%) move — divide by 100 in the UI for per-1%. `theta` is
+already **per calendar day** (annual θ ÷ 365), matching retail screens.
+
+### Response
+
+```json
+{
+  "implied_vol": 0.3367,
+  "delta": 0.2274,
+  "gamma": 0.002724,
+  "vega": 99.26,
+  "theta": -0.06359,
+  "rho": 54.27,
+  "break_even": 512.78,
+  "fair_value": 12.78
+}
+```
+
+`implied_vol` is `null` when there's no positive-vol solution — `mark` below the
+no-arbitrage intrinsic, `mark ≥ spot`, or `t_years ≤ 0`. In that case greeks
+fall back to the deterministic (σ=0) case so the row still renders, and
+`fair_value` (the BS price re-priced at the solved IV) is also `null`.
+`break_even` is always `strike + mark`. Example above:
+`spot=387.70, strike=500, t_years=0.72, mark=12.78, r=0`.
 
 ## Architecture notes
 

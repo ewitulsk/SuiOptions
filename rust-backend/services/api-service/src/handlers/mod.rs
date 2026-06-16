@@ -3,6 +3,7 @@ pub mod call_token_lots;
 pub mod dashboard;
 pub mod events;
 pub mod indexer_progress;
+pub mod option_metrics;
 pub mod pnl;
 pub mod positions;
 pub mod rfqs;

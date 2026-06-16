@@ -519,6 +519,10 @@
 [data-theme="aqua"] .orderbook__mid {
   border-top: 1px solid var(--aqua-line, rgba(92,107,122,0.2)); margin: 6px 0;
 }
+[data-theme="aqua"] .orderbook__mid-label {
+  margin-left: auto; color: var(--aqua-ink-2);
+  font-variant-numeric: tabular-nums; letter-spacing: 0;
+}
 
 /* RFQ mint flow — full-width section under the market grid. */
 [data-theme="aqua"] .rfq { border-top: 1px solid var(--aqua-line); padding-top: 22px; }
