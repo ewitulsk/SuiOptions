@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -44,6 +45,10 @@ async fn main() -> Result<()> {
     derived_metric_worker::read_api::spawn(cfg.read_addr, pool.clone());
 
     let http = reqwest::Client::new();
+    // Shared, cached, paced realized-vol client. One instance for the whole
+    // process so its (feed, day) cache and request pacer span every vault and
+    // every tick — the Benchmarks closes it serves are immutable.
+    let benchmark_vol = pyth_client::BenchmarkVol::new(http.clone(), cfg.pyth.benchmarks_url.clone());
     let indexer = IndexerClient::new(cfg.indexer_graphql_url.clone());
     let snapshot = TokenInfoClient::new(cfg.token_info_url.clone())
         .fetch_blocking_until_ready(30, Duration::from_secs(2))
@@ -62,7 +67,7 @@ async fn main() -> Result<()> {
     loop {
         tick.tick().await;
         let started = Instant::now();
-        match tick_once(&cfg, &http, &indexer, &snapshot, &pool).await {
+        match tick_once(&cfg, &http, &benchmark_vol, &indexer, &snapshot, &pool).await {
             Ok(written) => {
                 consecutive_failures = 0;
                 metrics::counter!("dmw_tick_total", "outcome" => "ok").increment(1);
@@ -96,6 +101,7 @@ async fn main() -> Result<()> {
 async fn tick_once(
     cfg: &Config,
     http: &reqwest::Client,
+    benchmark_vol: &pyth_client::BenchmarkVol,
     indexer: &IndexerClient,
     snapshot: &Snapshot,
     pool: &Arc<DbPool>,
@@ -103,8 +109,26 @@ async fn tick_once(
     let vaults = indexer.vaults().await.context("listing vaults")?;
     let mut rows: Vec<NewPrediction> = Vec::new();
 
+    // Resolve realized vol once for the whole tick: collect the distinct
+    // stable benchmark feeds across every vault, then compute their sigmas in
+    // a single shared bulk pass (cached + paced). Vaults sharing an underlying
+    // resolve to one feed, and immutable closes are reused across ticks.
+    let mut feeds: Vec<pyth_client::PriceFeedId> = Vec::new();
     for vault in &vaults {
-        match compute_vault(cfg, http, indexer, snapshot, vault).await {
+        if let Some(u_tok) = snapshot.token_by_coin_type(vault.underlying_type.as_str()) {
+            if let Ok(feed) = spot::benchmark_feed(u_tok) {
+                if !feeds.contains(&feed) {
+                    feeds.push(feed);
+                }
+            }
+        }
+    }
+    let sigmas = benchmark_vol
+        .realized_sigma_bulk(&feeds, cfg.pyth.vol_window_days, now_secs())
+        .await;
+
+    for vault in &vaults {
+        match compute_vault(cfg, http, indexer, snapshot, vault, &sigmas).await {
             Ok(points) => {
                 metrics::counter!("dmw_vault_compute_total", "outcome" => "ok").increment(1);
                 let vid = vault.vault_id.to_hex();
@@ -157,6 +181,7 @@ async fn compute_vault(
     indexer: &IndexerClient,
     snapshot: &Snapshot,
     vault: &Vault,
+    sigmas: &HashMap<pyth_client::PriceFeedId, Result<f64>>,
 ) -> Result<Vec<PredictionPoint>> {
     let u_tok = token_for(snapshot, vault.underlying_type.as_str(), "underlying")?;
     let s_tok = token_for(snapshot, vault.settlement_type.as_str(), "settlement")?;
@@ -174,12 +199,17 @@ async fn compute_vault(
     .inspect_err(|_| missing("spot"))
     .context("resolving spot cross")?;
 
-    // Vol only gates Tier 2; a vol failure still yields the Tier-1 point.
-    let sigma = match spot::resolve_sigma(http, &cfg.pyth.benchmarks_url, u_tok, cfg.pyth.vol_window_days).await {
-        Ok(s) => s,
-        Err(e) => {
+    // Vol only gates Tier 2; a vol failure still yields the Tier-1 point. Sigma
+    // was resolved for the whole tick (bulk + cached); look this vault's feed up.
+    let sigma = match spot::benchmark_feed(u_tok).ok().and_then(|f| sigmas.get(&f)) {
+        Some(Ok(s)) => *s,
+        other => {
             missing("vol");
-            warn!(vault = %vault.vault_id.to_hex(), error = %e, "vol unavailable; Tier 2 forecast skipped");
+            let err = match other {
+                Some(Err(e)) => format!("{e:#}"),
+                _ => "no benchmark feed for underlying".to_string(),
+            };
+            warn!(vault = %vault.vault_id.to_hex(), error = %err, "vol unavailable; Tier 2 forecast skipped");
             0.0
         }
     };

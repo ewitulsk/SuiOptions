@@ -21,6 +21,7 @@
 //! ```
 
 pub mod benchmark;
+pub mod benchmark_cache;
 pub mod cache;
 pub mod http;
 pub mod sigma;
@@ -29,8 +30,9 @@ pub mod types;
 pub mod vol;
 
 pub use benchmark::benchmark_feed_id;
+pub use benchmark_cache::BenchmarkVol;
 pub use cache::{CachedPrice, PriceCache};
-pub use http::{benchmark_at, latest, latest_with_update_data};
+pub use http::{benchmark_at, benchmarks_at, latest, latest_with_update_data};
 pub use stream::{spawn_subscriber, StreamEvent};
 pub use types::{HermesEnvelope, PriceFeedId, PriceUpdate, PythPrice};
 pub use vol::{log_returns, realized_vol, RollingVolBuffer};
