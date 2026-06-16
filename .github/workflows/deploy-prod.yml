@@ -1,15 +1,9 @@
 name: Deploy prod
 
-# Build + selective deploy to prod on every push to main. The actual
-# build/deploy logic lives in _deploy.yml; this file is the trigger +
-# env list.
+# Build + selective deploy to prod. Manual-only. The actual build/deploy
+# logic lives in _deploy.yml; this file is the trigger + env list.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'rust-backend/**'
-      - '.github/workflows/deploy-prod.yml'
   workflow_dispatch:
     inputs:
       image_tag:
