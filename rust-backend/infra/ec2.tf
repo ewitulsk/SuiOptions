@@ -43,8 +43,14 @@ resource "aws_instance" "host" {
   associate_public_ip_address = true
   key_name                    = var.ssh_pubkey == "" ? null : aws_key_pair.host[0].key_name
 
-  # gzip+base64 to stay under EC2's 16 KB user_data limit (cloud-init
-  # transparently decompresses gzipped payloads).
+  # gzip+base64 to keep the first-boot payload small (cloud-init
+  # transparently decompresses gzipped user_data). NOTE: the gzipped
+  # staging payload has crept past EC2's hard 16 KB user_data cap, so a
+  # ModifyInstanceAttribute that includes user_data now fails. cloud-init
+  # only runs user_data once at first boot, so pushing it to a running
+  # instance is a no-op anyway — ignore_changes below stops terraform from
+  # attempting it on every apply. Bootstrap changes still require a
+  # deliberate instance replacement (user_data_replace_on_change = false).
   user_data_base64            = base64gzip(local.bootstrap_user_data)
   user_data_replace_on_change = false
 
@@ -59,6 +65,10 @@ resource "aws_instance" "host" {
     http_endpoint               = "enabled"
     http_tokens                 = "required" # IMDSv2 only
     http_put_response_hop_limit = 2          # docker reaches the IMDS
+  }
+
+  lifecycle {
+    ignore_changes = [user_data_base64]
   }
 
   tags = {
@@ -119,6 +129,14 @@ resource "aws_instance" "prod_host" {
     http_endpoint               = "enabled"
     http_tokens                 = "required" # IMDSv2 only
     http_put_response_hop_limit = 2          # docker reaches the IMDS
+  }
+
+  # Same rationale as the staging host: cloud-init runs user_data once at
+  # first boot, so terraform should not try to push it to a running
+  # instance. prod's payload is still under 16 KB today, but ignore here too
+  # for consistency and to avoid the same failure as it grows.
+  lifecycle {
+    ignore_changes = [user_data_base64]
   }
 
   tags = {
