@@ -32,6 +32,9 @@ metrics_generator:
   registry:
     external_labels:
       source: tempo
+    # Evict series idle >10m (default 15m) so the in-memory registry doesn't
+    # retain stale span/edge series during traffic dips.
+    stale_duration: 10m
   storage:
     path: /var/tempo/generator/wal
     remote_write:
@@ -42,3 +45,8 @@ overrides:
   defaults:
     metrics_generator:
       processors: [service-graphs, span-metrics]
+      # Hard cap on in-memory active series so the generator can't grow
+      # unbounded and OOM the host (SO-210). Excess series are dropped past
+      # the cap; watch tempo_metrics_generator_registry_active_series and
+      # raise this if it's legitimately hit.
+      max_active_series: 20000

@@ -15,7 +15,14 @@ services:
   loki:
     image: grafana/loki:3.4.2
     command: -config.file=/etc/loki/loki-config.yml -config.expand-env=true
+    # Per-container memory ceiling so one stack member can't OOM the whole
+    # 2 GB host (see the 2026-06-15 Tempo OOM that took host networking +
+    # SSM down). GOMEMLIMIT (~90% of the hard cap) makes Go's GC reclaim
+    # before the wall; an actual breach OOM-kills only this container, which
+    # restart: unless-stopped then brings back.
+    mem_limit: 512m
     environment:
+      GOMEMLIMIT: "448MiB"
       LOKI_S3_BUCKET: ${LOKI_S3_BUCKET}
       AWS_REGION: ${AWS_REGION}
     volumes:
@@ -32,7 +39,9 @@ services:
 
   grafana:
     image: grafana/grafana:11.6.0
+    mem_limit: 384m
     environment:
+      GOMEMLIMIT: "345MiB"
       GF_SERVER_ROOT_URL: https://${GRAFANA_DOMAIN}/grafana/
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
@@ -53,6 +62,9 @@ services:
       - --storage.tsdb.retention.time=90d
       # The prod host's agent remote-writes here.
       - --web.enable-remote-write-receiver
+    mem_limit: 512m
+    environment:
+      GOMEMLIMIT: "448MiB"
     volumes:
       - ${DATA_DIR}/prometheus/config:/etc/prometheus:ro
       - ${DATA_DIR}/prometheus/data:/prometheus
@@ -68,6 +80,10 @@ services:
   tempo:
     image: grafana/tempo:2.8.0
     command: -config.file=/etc/tempo/tempo-config.yml
+    # The 2026-06-15 host-OOM culprit (~958 MB RSS, mostly metrics_generator).
+    mem_limit: 768m
+    environment:
+      GOMEMLIMIT: "690MiB"
     volumes:
       - ${DATA_DIR}/tempo/config:/etc/tempo:ro
       - ${DATA_DIR}/tempo/data:/var/tempo
@@ -82,6 +98,7 @@ services:
 
   gatus:
     image: twinproduction/gatus:v5.17.0
+    mem_limit: 128m
     volumes:
       - ${DATA_DIR}/gatus/config:/config:ro
       - ${DATA_DIR}/gatus/data:/data
