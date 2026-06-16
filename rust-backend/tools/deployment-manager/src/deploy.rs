@@ -477,6 +477,7 @@ const TEST_TOKEN_TABLE: &[(&str, &str, u8)] = &[
     ("TBTC", "tbtc", 8),
     ("TWAL", "twal", 9),
     ("TDEEP", "tdeep", 6),
+    ("TSUI", "tsui", 9),
 ];
 
 pub struct TestTokenInfo {

@@ -39,3 +39,4 @@ PRs raised through Claude Code.
 | [#131](https://github.com/ewitulsk/SuiOptions/pull/131) | [SO-141](https://suioptions.atlassian.net/browse/SO-141) | SO-19 Frontend | Consume Token-Info Logo, Name & Pyth Feeds on the Frontend |
 | [#134](https://github.com/ewitulsk/SuiOptions/pull/134) | [SO-145](https://suioptions.atlassian.net/browse/SO-145) | SO-19 Frontend | Fix Hardcoded Bitcoin Logo on Earn Page; Serve TWAL/TDEEP Logos |
 | [#170](https://github.com/ewitulsk/SuiOptions/pull/170) | [SO-182](https://suioptions.atlassian.net/browse/SO-182) | SO-19 Frontend | Integrate PostHog Analytics, Session Replay & Error Tracking |
+| [#208](https://github.com/ewitulsk/SuiOptions/pull/208) | [SO-214](https://suioptions.atlassian.net/browse/SO-214) | SO-11 Contract Deployment Tracking | Add TSUI Test Token to Staging + Prod and Schedule It |
