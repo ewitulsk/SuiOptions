@@ -16,6 +16,7 @@ import { SUI_CLOCK_OBJECT_ID, normalizeStructTag, normalizeSuiAddress } from "@m
 
 import { DEEPBOOK_ORIGINAL_PACKAGE_ID, DEEPBOOK_PACKAGE_ID } from "../config";
 import { fromRawPrice } from "../tx/deepbook";
+import type { Bucket, Series } from "./client";
 
 const BM_CACHE_PREFIX = "tideline-bm-";
 const BOOK_TICKS = 8n;
@@ -110,6 +111,34 @@ export function useBalanceManager(owner: string | null) {
 
 export type BookLevel = { price: number; qty: number };
 export type OrderBook = { bids: BookLevel[]; asks: BookLevel[] };
+
+/**
+ * The `PoolRef` for a bucket's DeepBook venue, or `null` if it has no pool.
+ * One place to map a (`bucket`, `series`) pair to the read-hook identity so
+ * `Orderbook`, the Composer, and the metrics panel all derive the same pool.
+ */
+export function poolRefFor(bucket: Bucket, series: Series): PoolRef | null {
+  if (!bucket.deepbook_pool_id) return null;
+  return {
+    poolId: bucket.deepbook_pool_id,
+    baseCoinType: bucket.call_coin_type,
+    quoteCoinType: series.settlement_coin_type,
+    baseDecimals: series.asset_decimals ?? 8,
+    quoteDecimals: series.settlement_decimals ?? 6,
+  };
+}
+
+/**
+ * Top-of-book mid = (best bid + best ask) / 2 in quote (settlement) units.
+ * `null` when either side is empty — a one-sided book has no mid, and the
+ * metrics endpoint needs a real two-sided mark.
+ */
+export function midFromBook(book: OrderBook | undefined): number | null {
+  const bid = book?.bids[0]?.price;
+  const ask = book?.asks[0]?.price;
+  if (bid == null || ask == null || !(bid > 0) || !(ask > 0)) return null;
+  return (bid + ask) / 2;
+}
 
 /**
  * Top-of-book via `get_level2_ticks_from_mid`, which returns four u64
