@@ -9,7 +9,8 @@
 // are served from the vault's on-chain VaultConfig via api-service — no mocks.
 // Fields render "—" until the config-carrying events are indexed for a vault.
 
-import { useState } from "react";
+import { useState, useEffect, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useSuiClient } from "@mysten/dapp-kit";
 
@@ -20,6 +21,7 @@ import { useUserIdentity } from "../session/identity";
 import { readCustodyObjectIds } from "../session/accounts";
 import { VaultApyChart } from "../components/VaultApyChart";
 import { TokenLogo } from "../components/TokenLogo";
+import { findToken } from "../config";
 import { Toast } from "../components/Toast";
 import { formatPrice } from "../format";
 
@@ -105,21 +107,26 @@ function AssetGlyph({ asset }: { asset: string }) {
   return <TokenLogo symbol={asset} className="asset-glyph" fallback={fallback} />;
 }
 
+const SELECTED_VAULT_KEY = "tideline.selectedVault";
+const FOREGROUND_VAULT_KEY = "tideline.foregroundVault";
+const SEARCH_QUERY_KEY = "tideline.vaultSearch";
+
 export function VaultScreen() {
   const vaults = useVaults();
-  const [selected, setSelected] = useState<string | null>(null);
+  // Persist the open vault across nav-away/back (the screen unmounts on route
+  // change), so returning to Vaults reopens the same detail.
+  const [selected, setSelectedState] = useState<string | null>(
+    () => sessionStorage.getItem(SELECTED_VAULT_KEY),
+  );
+  const setSelected = (id: string | null) => {
+    setSelectedState(id);
+    if (id) sessionStorage.setItem(SELECTED_VAULT_KEY, id);
+    else sessionStorage.removeItem(SELECTED_VAULT_KEY);
+  };
 
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
       <div className="app__wrap">
-        <div className="dash-hero">
-          <div className="dash-hero__eyebrow">automated strategy</div>
-          <h1 className="dash-hero__title">Vaults</h1>
-          <div className="dash-hero__addr">
-            Deposit once; the vault writes covered calls every round and compounds the premium.
-          </div>
-        </div>
-
         {vaults.isLoading && <div className="vault-note">Loading vaults…</div>}
         {vaults.isError && (
           <div className="dash-alert" role="alert">
@@ -135,23 +142,15 @@ export function VaultScreen() {
           </div>
         )}
 
-        {/* Selection screen: a tile per vault (asset logo + realized & projected
-            APY). Picking one drills into its detail; the back link returns here. */}
+        {/* Selection screen: a searchable coverflow carousel of vault cards
+            (asset logo, APY sparkline, realized & projected APY). Picking one
+            drills into its detail; the back link returns here. */}
         {selected ? (
-          <>
-            <button className="vault-back" onClick={() => setSelected(null)}>
-              ← All vaults
-            </button>
-            <VaultDetail vaultId={selected} />
-          </>
+          <VaultDetail vaultId={selected} onBack={() => setSelected(null)} />
         ) : (
           vaults.data &&
           vaults.data.length > 0 && (
-            <div className="vault-tiles">
-              {vaults.data.map((v) => (
-                <VaultTile key={v.vault_id} vault={v} onSelect={() => setSelected(v.vault_id)} />
-              ))}
-            </div>
+            <VaultBrowser vaults={vaults.data} onSelect={setSelected} />
           )
         )}
       </div>
@@ -159,20 +158,301 @@ export function VaultScreen() {
   );
 }
 
-function VaultTile({ vault, onSelect }: { vault: Vault; onSelect: () => void }) {
-  const apyQ = useVaultApyHistory(vault.vault_id);
-  const realized = latestApy(apyQ.data?.realized ?? []) ?? vault.apy;
-  const projected = latestApy(apyQ.data?.predicted ?? []);
+// Search + coverflow carousel. Search filters by asset symbol so the page scales
+// to many vaults; the carousel renders the filtered set.
+function VaultBrowser({
+  vaults,
+  onSelect,
+}: {
+  vaults: Vault[];
+  onSelect: (id: string) => void;
+}) {
+  // Persist the search across nav-away so returning to Vaults keeps the filter.
+  const [query, setQueryState] = useState(() => sessionStorage.getItem(SEARCH_QUERY_KEY) ?? "");
+  const setQuery = (next: string) => {
+    setQueryState(next);
+    if (next) sessionStorage.setItem(SEARCH_QUERY_KEY, next);
+    else sessionStorage.removeItem(SEARCH_QUERY_KEY);
+  };
+  // Normalize away spaces so "testbitcoin" matches the catalog's "Test Bitcoin".
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, "");
+  const q = norm(query.trim());
+  // Match on ticker (TBTC), settlement ticker, and the catalog's full asset
+  // name (e.g. "Test Bitcoin") so users can search by either form.
+  const matches = (v: Vault) => {
+    const fields = [
+      v.underlying_symbol,
+      v.settlement_symbol ?? "",
+      findToken(v.underlying_symbol)?.name ?? "",
+      findToken(v.settlement_symbol)?.name ?? "",
+    ];
+    return fields.some((f) => norm(f).includes(q));
+  };
+  const filtered = q ? vaults.filter(matches) : vaults;
 
   return (
-    <button className="vault-tile" onClick={onSelect}>
+    <>
+      {/* Centered heading (the nav tab already says "Vaults"). Search sits at
+          the opposite end, below the carousel — also centered. */}
+      <div className="vault-browser__head">
+        <span className="vault-head__badge">Covered-call vaults</span>
+        <span className="vault-head__tag">Deposit once and your premium compounds every round.</span>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="vault-empty">
+          <div className="vault-empty__title">No matches</div>
+          <div className="vault-empty__sub">No vault matches “{query}”.</div>
+        </div>
+      ) : (
+        <VaultCarousel vaults={filtered} onSelect={onSelect} />
+      )}
+
+      {vaults.length > 1 && (
+        <div className="vault-browser__search">
+          <div className="vault-search">
+            <span className="vault-search__icon" aria-hidden>⌕</span>
+            <input
+              className="vault-search__input"
+              type="text"
+              placeholder="Search vaults by asset…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {query && (
+              <button
+                className="vault-search__clear"
+                onClick={() => setQuery("")}
+                aria-label="Clear search"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function VaultCarousel({
+  vaults,
+  onSelect,
+}: {
+  vaults: Vault[];
+  onSelect: (id: string) => void;
+}) {
+  // Default to the middle card so the fan is balanced on both sides; fall back
+  // to it when no card is remembered or the remembered one isn't in view.
+  const middle = Math.max(0, Math.floor((vaults.length - 1) / 2));
+  // Resolve the remembered foreground card (by id, since filtering shifts
+  // indices) to its current index, or the middle when absent/filtered out.
+  const restored = () => {
+    const id = sessionStorage.getItem(FOREGROUND_VAULT_KEY);
+    const i = id ? vaults.findIndex((v) => v.vault_id === id) : -1;
+    return i >= 0 ? i : middle;
+  };
+  const [active, setActiveRaw] = useState(restored);
+  const multiple = vaults.length > 1;
+  const ids = vaults.map((v) => v.vault_id).join(",");
+
+  // Remember which card is in the foreground so it persists across nav-away.
+  const setActive = (next: number | ((a: number) => number)) =>
+    setActiveRaw((a) => {
+      const i = typeof next === "function" ? next(a) : next;
+      const v = vaults[i];
+      if (v) sessionStorage.setItem(FOREGROUND_VAULT_KEY, v.vault_id);
+      return i;
+    });
+
+  // When the (filtered) set changes, re-center — but prefer the remembered
+  // card if it's still in view, so clearing a search restores the selection.
+  useEffect(() => {
+    setActiveRaw(restored());
+  }, [ids]);
+
+  const go = (dir: number) =>
+    setActive((a) => Math.max(0, Math.min(vaults.length - 1, a + dir)));
+
+  // ←/→ navigate, but not while typing in the search box.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (e.key === "ArrowLeft") go(-1);
+      else if (e.key === "ArrowRight") go(1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [vaults.length]);
+
+  const VISIBLE = 2; // cards rendered on each side of the active one
+
+  return (
+    <>
+      <div className="vault-coverflow">
+        <div className="vault-coverflow__stage">
+          {vaults.map((v, i) => {
+          const offset = i - active;
+          const abs = Math.abs(offset);
+          const hidden = abs > VISIBLE;
+          const style: CSSProperties = {
+            transform: `translate(-50%, -50%) translateX(${offset * 58}%) scale(${Math.max(
+              1 - abs * 0.14,
+              0.6,
+            )})`,
+            opacity: hidden ? 0 : Math.max(1 - abs * 0.34, 0),
+            zIndex: 50 - abs,
+            pointerEvents: hidden ? "none" : "auto",
+          };
+          return (
+            <div
+              className={"vault-coverflow__item" + (offset === 0 ? " vault-coverflow__item--active" : "")}
+              style={style}
+              key={v.vault_id}
+              aria-hidden={hidden}
+            >
+              <VaultTile
+                vault={v}
+                active={offset === 0}
+                onSelect={() => (offset === 0 ? onSelect(v.vault_id) : setActive(i))}
+              />
+            </div>
+          );
+        })}
+        </div>
+      </div>
+
+      {/* Always rendered (even with one vault) so the row's height is reserved
+          and the search bar below keeps a consistent position. */}
+      <div className="vault-carousel__nav">
+        {multiple && (
+          <>
+            <button
+              className="vault-carousel__arrow vault-carousel__arrow--prev"
+              onClick={() => go(-1)}
+              disabled={active === 0}
+              aria-label="Previous vault"
+            >
+              ‹
+            </button>
+            <button
+              className="vault-carousel__arrow vault-carousel__arrow--next"
+              onClick={() => go(1)}
+              disabled={active === vaults.length - 1}
+              aria-label="Next vault"
+            >
+              ›
+            </button>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+/** Compact APY sparkline for a vault card: solid realized + dashed projected,
+ *  drawn as inline SVG (no per-card chart instances) on a shared time/value
+ *  scale, with a faint area fill under the realized line. */
+function VaultSparkline({
+  realized,
+  predicted,
+}: {
+  realized: VaultApyPoint[];
+  predicted: VaultApyPoint[];
+}) {
+  const W = 100;
+  const H = 40;
+
+  const rSorted = [...realized].sort((a, b) => a.t_ms - b.t_ms);
+  const pSorted = [...predicted].sort((a, b) => a.t_ms - b.t_ms);
+  // Anchor the projected segment to the last realized point so it continues the
+  // curve rather than floating disconnected.
+  const anchor = rSorted.length ? [rSorted[rSorted.length - 1]] : [];
+  const pLine = [...anchor, ...pSorted];
+
+  const all = [...rSorted, ...pLine];
+  if (all.length < 2) {
+    return (
+      <div className="vault-tile__spark vault-tile__spark--empty">
+        APY history fills in as rounds settle
+      </div>
+    );
+  }
+
+  const ts = all.map((p) => p.t_ms);
+  const vs = all.map((p) => p.apy);
+  const tMin = Math.min(...ts);
+  const tMax = Math.max(...ts);
+  const vMin = Math.min(...vs);
+  const vMax = Math.max(...vs);
+  const pad = (vMax - vMin) * 0.18 || Math.abs(vMax) * 0.18 || 0.01;
+  const lo = vMin - pad;
+  const hi = vMax + pad;
+
+  const x = (t: number) => (tMax === tMin ? 0 : ((t - tMin) / (tMax - tMin)) * W);
+  const y = (v: number) => H - ((v - lo) / (hi - lo)) * H;
+  const pts = (arr: VaultApyPoint[]) =>
+    arr.map((p) => `${x(p.t_ms).toFixed(2)},${y(p.apy).toFixed(2)}`);
+
+  const rPts = pts(rSorted);
+  const pPts = pts(pLine);
+  const rPath = rPts.length ? "M" + rPts.join(" L") : "";
+  const pPath = pPts.length ? "M" + pPts.join(" L") : "";
+  const areaPath =
+    rPts.length >= 2 ? `M${rPts[0]} L${rPts.join(" L")} L${x(tMax).toFixed(2)},${H} L${x(rSorted[0].t_ms).toFixed(2)},${H} Z` : "";
+
+  return (
+    <svg
+      className="vault-tile__spark"
+      viewBox={`0 0 ${W} ${H}`}
+      preserveAspectRatio="none"
+      aria-hidden
+    >
+      {areaPath && <path className="vault-tile__spark-area" d={areaPath} />}
+      {rPath && (
+        <path className="vault-tile__spark-line vault-tile__spark-line--realized" d={rPath} vectorEffect="non-scaling-stroke" />
+      )}
+      {pPath && (
+        <path className="vault-tile__spark-line vault-tile__spark-line--predicted" d={pPath} vectorEffect="non-scaling-stroke" />
+      )}
+    </svg>
+  );
+}
+
+function VaultTile({
+  vault,
+  onSelect,
+  active = true,
+}: {
+  vault: Vault;
+  onSelect: () => void;
+  active?: boolean;
+}) {
+  const apyQ = useVaultApyHistory(vault.vault_id);
+  const realizedSeries = apyQ.data?.realized ?? [];
+  const predictedSeries = apyQ.data?.predicted ?? [];
+  const realized = latestApy(realizedSeries) ?? vault.apy;
+  const projected = latestApy(predictedSeries);
+
+  return (
+    <button className="vault-tile" onClick={onSelect} tabIndex={active ? 0 : -1}>
       <div className="vault-tile__head">
         <AssetGlyph asset={vault.underlying_symbol} />
         <div className="vault-tile__title">
           <div className="vault-tile__sym">{vault.underlying_symbol}</div>
           <div className="vault-tile__sub">covered call</div>
         </div>
+        {vault.tvl != null && (
+          <div className="vault-tile__tvl">
+            <div className="vault-tile__tvl-val">{formatPrice(vault.tvl, { grouping: true })}</div>
+            <div className="vault-tile__tvl-label">TVL · {vault.underlying_symbol}</div>
+          </div>
+        )}
       </div>
+
+      <VaultSparkline realized={realizedSeries} predicted={predictedSeries} />
+
       <div className="vault-tile__apys">
         <div className="vault-tile__apy">
           <div className="vault-tile__apy-label">Realized APY</div>
@@ -183,23 +463,34 @@ function VaultTile({ vault, onSelect }: { vault: Vault; onSelect: () => void }) 
           <div className="vault-tile__apy-val">{fmtPct(projected)}</div>
         </div>
       </div>
+
+      <span className="vault-tile__cta">View vault →</span>
     </button>
   );
 }
 
-function VaultDetail({ vaultId }: { vaultId: string }) {
+function VaultDetail({ vaultId, onBack }: { vaultId: string; onBack: () => void }) {
   const vaultQ = useVault(vaultId);
   const roundsQ = useVaultRounds(vaultId);
   const apyQ = useVaultApyHistory(vaultId);
 
   if (vaultQ.isLoading || !vaultQ.data) {
-    return <div className="vault-note">Loading vault…</div>;
+    return (
+      <>
+        <button className="vault-back" onClick={onBack}>← All vaults</button>
+        <div className="vault-note">Loading vault…</div>
+      </>
+    );
   }
   const vault = vaultQ.data;
   const rounds = roundsQ.data ?? [];
 
   return (
     <>
+      <div className="vault-detail__bar">
+        <button className="vault-back" onClick={onBack}>← All vaults</button>
+        <StrategyInfo vault={vault} />
+      </div>
       <VaultStats vault={vault} rounds={rounds} />
       <div className="vault-grid">
         <div className="vault-grid__main">
@@ -208,7 +499,6 @@ function VaultDetail({ vaultId }: { vaultId: string }) {
             predicted={apyQ.data?.predicted ?? []}
             loading={apyQ.isLoading}
           />
-          <StrategyCard vault={vault} />
           <CurrentRoundCard vault={vault} rounds={rounds} />
           <TrackRecord vault={vault} rounds={rounds} />
         </div>
@@ -261,31 +551,77 @@ function VaultStats({ vault, rounds }: { vault: Vault; rounds: VaultRound[] }) {
   );
 }
 
-function StrategyCard({ vault }: { vault: Vault }) {
+// Compact "How this vault works" affordance: a pill in the detail toolbar that
+// opens the strategy explainer in a centered modal, so the long-form copy is one
+// tap away without permanently occupying a column slot. The modal is portaled to
+// <body> so its backdrop dims the whole app (header included) rather than sitting
+// inside the page's themed/stacked container.
+function StrategyInfo({ vault }: { vault: Vault }) {
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [open]);
+
   return (
-    <div className="vault-card">
-      <div className="vault-card__head">
-        <span className="panel__head-dot" />
+    <div className="vault-howto">
+      <button
+        className="vault-howto__trigger"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <span className="vault-howto__icon" aria-hidden>i</span>
         How this vault works
-      </div>
-      <div className="vault-card__body vault-prose">
-        <p>
-          Each round, the vault writes covered calls on its {vault.underlying_symbol} against{" "}
-          {vault.settlement_symbol}. It sells the calls to market makers via on-chain RFQ auctions
-          and collects the premium up front.
-        </p>
-        <ol>
-          <li><b>Deposit</b> {vault.underlying_symbol} — it's queued for the next round (never exposed to the round already running).</li>
-          <li>When the round finalizes, your deposit mints <b>shares</b> at that round's price-per-share. Claim them anytime.</li>
-          <li>The vault's price-per-share rises by the net premium each successful round; that's your yield.</li>
-          <li>To exit, <b>initiate a withdrawal</b> (escrows shares for the current round's P&L), then <b>complete</b> it once the round finalizes.</li>
-        </ol>
-        <p className="vault-prose__muted">
-          Covered calls cap upside above the strike: in a sharp rally the vault may be assigned and
-          forgo gains beyond the strike, keeping the premium. Principal is exposed to{" "}
-          {vault.underlying_symbol} price like any spot holding.
-        </p>
-      </div>
+      </button>
+      {open &&
+        createPortal(
+          // display:contents → carries the aqua theme variables (incl. dark-mode
+          // swaps) to the children without generating a box or stacking context.
+          <div data-theme="aqua" style={{ display: "contents" }}>
+            <div className="vault-modal__scrim" onClick={() => setOpen(false)} />
+            <div className="vault-modal" role="dialog" aria-modal="true" aria-label="How this vault works">
+              <div className="vault-modal__head">
+                <span>How this vault works</span>
+                <button
+                  className="vault-modal__close"
+                  onClick={() => setOpen(false)}
+                  aria-label="Close"
+                >
+                  ×
+                </button>
+              </div>
+              <div className="vault-modal__body vault-prose">
+                <p>
+                  Each round, the vault writes covered calls on its {vault.underlying_symbol} against{" "}
+                  {vault.settlement_symbol}. It sells the calls to market makers via on-chain RFQ auctions
+                  and collects the premium up front.
+                </p>
+                <ol>
+                  <li><b>Deposit</b> {vault.underlying_symbol} — it's queued for the next round (never exposed to the round already running).</li>
+                  <li>When the round finalizes, your deposit mints <b>shares</b> at that round's price-per-share. Claim them anytime.</li>
+                  <li>The vault's price-per-share rises by the net premium each successful round; that's your yield.</li>
+                  <li>To exit, <b>initiate a withdrawal</b> (escrows shares for the current round's P&L), then <b>complete</b> it once the round finalizes.</li>
+                </ol>
+                <p className="vault-prose__muted">
+                  Covered calls cap upside above the strike: in a sharp rally the vault may be assigned and
+                  forgo gains beyond the strike, keeping the premium. Principal is exposed to{" "}
+                  {vault.underlying_symbol} price like any spot holding.
+                </p>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
