@@ -318,8 +318,8 @@ function CurrentRoundCard({ vault, rounds }: { vault: Vault; rounds: VaultRound[
           </span>
         </div>
         <div className="vault-kv__row">
-          <span>Expiry</span>
-          <span>{fmtDate(current?.expiry_ms ?? null)}</span>
+          <span>Round ends</span>
+          <span>{current?.expiry_ms != null ? `~${fmtDate(current.expiry_ms)}` : "—"}</span>
         </div>
         {vault.phase === "active" && (
           <div className="vault-kv__row">
