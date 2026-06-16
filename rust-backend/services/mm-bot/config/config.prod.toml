@@ -33,8 +33,10 @@ underlying_replenish_threshold    = 20_000_000_000
 underlying_replenish_amount       = 100_000_000_000
 underlying_replenish_interval_secs = 60
 
+# BETA hermes — prod is a distinct testnet; feed ids are the beta set,
+# served only by hermes-beta (stable hermes 404s). Benchmarks is stable-only.
 [pyth]
-hermes_url             = "https://hermes.pyth.network"
+hermes_url             = "https://hermes-beta.pyth.network"
 benchmarks_url         = "https://benchmarks.pyth.network"
 max_price_age_ms       = 5_000
 max_publish_lag_ms     = 10_000

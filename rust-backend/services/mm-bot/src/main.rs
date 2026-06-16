@@ -280,6 +280,9 @@ struct Market {
     /// matched against to pick this market.
     coin_type: String,
     feed: PriceFeedId,
+    /// Stable-feed equivalent of `feed` for the Benchmarks vol bootstrap
+    /// (Benchmarks serves stable ids only). Falls back to `feed` if unmapped.
+    benchmark_feed: PriceFeedId,
     decimals: u8,
     /// Realized-vol buffer fed from this underlying's USD price.
     vol_buf: Arc<RwLock<RollingVolBuffer>>,
@@ -442,6 +445,7 @@ async fn main() -> Result<()> {
             symbol: sym.clone(),
             coin_type: protocol_types::asset::canonicalize_move_type(&spec.coin_type),
             feed,
+            benchmark_feed: pyth::benchmark_feed_id(feed),
             decimals: spec.decimals,
             vol_buf: Arc::new(RwLock::new(RollingVolBuffer::new(
                 vol_window_ms,
@@ -536,6 +540,7 @@ async fn main() -> Result<()> {
             cfg.pyth.clone(),
             m.symbol.clone(),
             m.feed,
+            m.benchmark_feed,
             price_cache.clone(),
             Arc::clone(&m.vol_buf),
         );
@@ -1435,7 +1440,10 @@ fn spawn_vol_task(
     client: reqwest::Client,
     cfg: PythConfig,
     symbol: String,
-    underlying_feed: PriceFeedId,
+    // Live cache is keyed by the (beta) `feed`; the Benchmarks bootstrap uses
+    // its stable `benchmark_feed` equivalent.
+    feed: PriceFeedId,
+    benchmark_feed: PriceFeedId,
     cache: PriceCache,
     buf: Arc<RwLock<RollingVolBuffer>>,
 ) {
@@ -1446,7 +1454,7 @@ fn spawn_vol_task(
         let now_secs = (now_ms() / 1000) as i64;
         for i in (0..cfg.bootstrap_samples).rev() {
             let ts = now_secs - (i as i64) * cfg.bootstrap_interval_secs as i64;
-            match pyth::benchmark_at(&client, &cfg.benchmarks_url, underlying_feed, ts).await {
+            match pyth::benchmark_at(&client, &cfg.benchmarks_url, benchmark_feed, ts).await {
                 Ok(upd) => match upd.price.price_f64() {
                     Ok(p) => {
                         let ts_ms = (ts as u64).saturating_mul(1000);
@@ -1473,7 +1481,7 @@ fn spawn_vol_task(
         let mut vol_log_counter: u64 = 0;
         loop {
             ticker.tick().await;
-            let Some(cp) = cache.peek(underlying_feed) else {
+            let Some(cp) = cache.peek(feed) else {
                 continue;
             };
             // Pyth publisher age as seen at this sample (now - publish_time).

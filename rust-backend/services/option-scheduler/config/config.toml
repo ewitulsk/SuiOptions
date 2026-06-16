@@ -26,9 +26,10 @@ roll_threshold_ms = 604_800_000
 
 # Pyth Hermes endpoint. One HTTP `GET /v2/updates/price/latest` is issued
 # per pair per roll — no SSE, no long-lived connection. Override for a
-# private mirror.
+# private mirror. Sui testnet feed ids are the BETA set, served only by
+# hermes-beta — stable hermes 404s on them (see keeper config for details).
 [pyth]
-hermes_url = "https://hermes.pyth.network"
+hermes_url = "https://hermes-beta.pyth.network"
 
 # Each pair gets its own roll cadence + strike grid + spot source.
 [[pairs]]

@@ -458,7 +458,9 @@ async fn fetch_sigma(
     match pyth_client::sigma::realized_sigma_from_benchmarks(
         http,
         &cfg.pyth.benchmarks_url,
-        meta.underlying_feed,
+        // The discovered feed is a beta id; Benchmarks only serves stable, so
+        // map it across. Unmapped ids pass through and fall back as before.
+        pyth_client::benchmark_feed_id(meta.underlying_feed),
         defaults.vol_window_days,
         (now / 1000) as i64,
     )

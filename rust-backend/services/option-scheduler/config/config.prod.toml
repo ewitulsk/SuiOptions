@@ -18,8 +18,11 @@ scheduler_database_url = "postgresql://scheduler_prod:${DB_PASSWORD}@${DB_HOST}:
 reconciler_safety_margin  = 100
 reconciler_interval_secs  = 30
 
+# BETA hermes — prod is a distinct testnet; feed ids are the beta set,
+# served only by hermes-beta (stable hermes 404s). Flip to stable hermes
+# only when moving prod to mainnet feeds.
 [pyth]
-hermes_url = "https://hermes.pyth.network"
+hermes_url = "https://hermes-beta.pyth.network"
 
 [[pairs]]
 underlying          = "TBTC"

@@ -10,8 +10,10 @@ database_url        = "postgresql://derived_metrics_prod:${DB_PASSWORD}@${DB_HOS
 
 tick_secs = 120
 
+# BETA hermes — prod is a distinct testnet; feed ids are the beta set,
+# served only by hermes-beta (stable hermes 404s). Benchmarks is stable-only.
 [pyth]
-hermes_url      = "https://hermes.pyth.network"
+hermes_url      = "https://hermes-beta.pyth.network"
 benchmarks_url  = "https://benchmarks.pyth.network"
 vol_window_days = 30
 max_publish_lag_ms = 30_000
