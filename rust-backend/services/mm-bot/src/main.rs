@@ -532,19 +532,24 @@ async fn main() -> Result<()> {
     );
     price_cache.spawn_updater(stream_rx);
 
-    // One vol sampler per underlying — vol is keyed off each underlying's own
-    // USD price. Annualization factor follows the sample cadence.
-    for m in &markets {
-        spawn_vol_task(
-            http_client.clone(),
-            cfg.pyth.clone(),
-            m.symbol.clone(),
-            m.feed,
-            m.benchmark_feed,
-            price_cache.clone(),
-            Arc::clone(&m.vol_buf),
-        );
-    }
+    // Vol is keyed off each underlying's own USD price (annualization factor
+    // follows the sample cadence). A single shared task bootstraps every
+    // market's buffer from Benchmarks with one multi-id request per timestamp,
+    // then fans out a live sampler per underlying.
+    spawn_vol_tasks(
+        http_client.clone(),
+        cfg.pyth.clone(),
+        markets
+            .iter()
+            .map(|m| VolMarket {
+                symbol: m.symbol.clone(),
+                feed: m.feed,
+                benchmark_feed: m.benchmark_feed,
+                buf: Arc::clone(&m.vol_buf),
+            })
+            .collect(),
+        price_cache.clone(),
+    );
 
     // Derive mode: watch token-info for newly-listed underlyings and restart to
     // pick them up. No-op when underlyings were pinned explicitly.
@@ -1433,49 +1438,104 @@ fn spawn_replenish_task(p: ReplenishParams) {
     });
 }
 
-/// Bootstrap the vol buffer from Pyth Benchmarks (one historical sample
-/// per hour by default), then maintain it by sampling the live cache on
-/// the configured cadence. The whole thing lives in a single tokio task.
-fn spawn_vol_task(
-    client: reqwest::Client,
-    cfg: PythConfig,
+/// Per-market inputs for the vol tasks: the live (beta) `feed` drives the
+/// cache sampler, its stable `benchmark_feed` drives the Benchmarks
+/// bootstrap, and `buf` is the shared rolling buffer both feed into.
+struct VolMarket {
     symbol: String,
-    // Live cache is keyed by the (beta) `feed`; the Benchmarks bootstrap uses
-    // its stable `benchmark_feed` equivalent.
     feed: PriceFeedId,
     benchmark_feed: PriceFeedId,
-    cache: PriceCache,
     buf: Arc<RwLock<RollingVolBuffer>>,
+}
+
+/// Bootstrap every market's vol buffer from Pyth Benchmarks in one shared,
+/// ordered pass, then fan out the per-market live samplers.
+///
+/// The bootstrap walks back `bootstrap_samples` points spaced by
+/// `bootstrap_interval_secs`, fetching *all* markets' benchmark feeds in a
+/// single multi-id request per timestamp and pacing at ~1 request/1.1s — so
+/// the whole bot stays under the 10-req/10s Benchmarks cap no matter how many
+/// markets it makes. (Previously each market ran its own bootstrap loop
+/// concurrently, so N markets meant ~N requests/second and a 429 storm at
+/// startup.)
+///
+/// Live samplers start only after the bootstrap finishes: a live `now` sample
+/// pushed ahead of an older bootstrap sample would sit out of order in the
+/// buffer and corrupt the realized-vol series.
+fn spawn_vol_tasks(
+    client: reqwest::Client,
+    cfg: PythConfig,
+    markets: Vec<VolMarket>,
+    cache: PriceCache,
 ) {
     tokio::spawn(async move {
-        // --- bootstrap from Benchmarks --------------------------------------
+        // Distinct benchmark feed ids — one multi-id request covers them all.
+        let mut ids: Vec<PriceFeedId> = Vec::new();
+        for m in &markets {
+            if !ids.contains(&m.benchmark_feed) {
+                ids.push(m.benchmark_feed);
+            }
+        }
+
+        // --- shared bootstrap from Benchmarks -------------------------------
         // Walk back N points spaced by `bootstrap_interval_secs`. Pace at one
-        // call per second so we stay under the 10-req/10s ceiling.
+        // request per ~1.1s so we stay under the 10-req/10s ceiling.
         let now_secs = (now_ms() / 1000) as i64;
         for i in (0..cfg.bootstrap_samples).rev() {
             let ts = now_secs - (i as i64) * cfg.bootstrap_interval_secs as i64;
-            match pyth::benchmark_at(&client, &cfg.benchmarks_url, benchmark_feed, ts).await {
-                Ok(upd) => match upd.price.price_f64() {
-                    Ok(p) => {
-                        let ts_ms = (ts as u64).saturating_mul(1000);
-                        buf.write().push(ts_ms, p);
-                        tracing::debug!(ts, price = p, "vol bootstrap sample");
+            match pyth::benchmarks_at(&client, &cfg.benchmarks_url, &ids, ts).await {
+                Ok(updates) => {
+                    let ts_ms = (ts as u64).saturating_mul(1000);
+                    for upd in &updates {
+                        let Ok(feed) = upd.feed_id() else { continue };
+                        let price = match upd.price.price_f64() {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tracing::debug!(error = %e, "vol bootstrap parse failed");
+                                continue;
+                            }
+                        };
+                        // A stable feed may back more than one market; fill
+                        // every buffer keyed to it.
+                        for m in &markets {
+                            if m.benchmark_feed == feed {
+                                m.buf.write().push(ts_ms, price);
+                            }
+                        }
                     }
-                    Err(e) => tracing::debug!(error = %e, "vol bootstrap parse failed"),
-                },
+                    tracing::debug!(ts, feeds = updates.len(), "vol bootstrap sample");
+                }
                 Err(e) => {
                     tracing::warn!(error = %format!("{e:#}"), ts, "vol bootstrap fetch failed");
                 }
             }
             tokio::time::sleep(Duration::from_millis(1_100)).await;
         }
-        if let Some(sigma) = buf.read().current_annualized() {
-            tracing::info!(sigma, "vol buffer bootstrapped");
-        } else {
-            tracing::warn!("vol bootstrap produced too few samples; using fallback until live data fills the window");
+        for m in &markets {
+            if let Some(sigma) = m.buf.read().current_annualized() {
+                tracing::info!(symbol = %m.symbol, sigma, "vol buffer bootstrapped");
+            } else {
+                tracing::warn!(symbol = %m.symbol, "vol bootstrap produced too few samples; using fallback until live data fills the window");
+            }
         }
 
-        // --- maintain from the live cache -----------------------------------
+        // --- fan out the live samplers --------------------------------------
+        for m in markets {
+            spawn_vol_sampler(cfg.clone(), m.symbol, m.feed, cache.clone(), m.buf);
+        }
+    });
+}
+
+/// Maintain one market's vol buffer from the live price cache on the
+/// configured cadence. Assumes the buffer has already been bootstrapped.
+fn spawn_vol_sampler(
+    cfg: PythConfig,
+    symbol: String,
+    feed: PriceFeedId,
+    cache: PriceCache,
+    buf: Arc<RwLock<RollingVolBuffer>>,
+) {
+    tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_millis(cfg.vol_sample_interval_ms));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut vol_log_counter: u64 = 0;

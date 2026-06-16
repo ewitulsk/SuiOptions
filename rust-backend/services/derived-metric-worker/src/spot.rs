@@ -52,25 +52,13 @@ pub async fn resolve_cross(
     Ok(cross)
 }
 
-/// Annualized realized vol for the underlying leg, from Pyth Benchmarks.
-pub async fn resolve_sigma(
-    http: &reqwest::Client,
-    benchmarks_url: &str,
-    underlying: &SupportedToken,
-    window_days: u32,
-) -> Result<f64> {
-    // Benchmarks only serves the stable feed set; map the (beta) feed to its
-    // stable equivalent so realized vol uses the real asset's history.
-    let uf = pyth_client::benchmark_feed_id(underlying.pyth_feed().context("underlying pyth feed")?);
-    pyth_client::sigma::realized_sigma_from_benchmarks(
-        http,
-        benchmarks_url,
-        uf,
-        window_days,
-        now_secs(),
-    )
-    .await
-    .context("realized vol from benchmarks")
+/// The stable Benchmarks feed id for an underlying's realized-vol lookup.
+/// Benchmarks only serves the stable feed set, so the (beta) feed is mapped
+/// to its stable equivalent; realized vol then uses the real asset's history.
+pub fn benchmark_feed(underlying: &SupportedToken) -> Result<pyth_client::PriceFeedId> {
+    Ok(pyth_client::benchmark_feed_id(
+        underlying.pyth_feed().context("underlying pyth feed")?,
+    ))
 }
 
 fn find_price<'a>(updates: &'a [PriceUpdate], id_hex: &str) -> Option<&'a PriceUpdate> {
@@ -81,13 +69,6 @@ fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
 

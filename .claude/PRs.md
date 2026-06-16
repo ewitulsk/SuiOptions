@@ -41,3 +41,4 @@ PRs raised through Claude Code.
 | [#170](https://github.com/ewitulsk/SuiOptions/pull/170) | [SO-182](https://suioptions.atlassian.net/browse/SO-182) | SO-19 Frontend | Integrate PostHog Analytics, Session Replay & Error Tracking |
 | [#208](https://github.com/ewitulsk/SuiOptions/pull/208) | [SO-214](https://suioptions.atlassian.net/browse/SO-214) | SO-11 Contract Deployment Tracking | Add TSUI Test Token to Staging + Prod and Schedule It |
 | [#214](https://github.com/ewitulsk/SuiOptions/pull/214) | [SO-219](https://suioptions.atlassian.net/browse/SO-219) | SO-11 Contract Deployment Tracking | Fix Staging TSUI deployments.json Catalog Entry |
+| [#220](https://github.com/ewitulsk/SuiOptions/pull/220) | [SO-223](https://suioptions.atlassian.net/browse/SO-223) | SO-32 Data Layer | Fix Pyth Benchmarks Rate-Limiting via Bulk Fetch, Caching & Paced Requests |

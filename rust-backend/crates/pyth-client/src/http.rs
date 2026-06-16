@@ -105,6 +105,35 @@ pub async fn benchmark_at(
         .ok_or_else(|| anyhow!("benchmarks returned no parsed entries for {id} @ {unix_seconds}"))
 }
 
+/// Historical observations at-or-before `unix_seconds` for many feeds in a
+/// single request. Lets a caller that needs several feeds at the same time
+/// (e.g. bootstrapping per-market vol buffers) collapse what would be one
+/// request per feed into one request, staying well under the shared
+/// 10-req/10s cap.
+///
+/// Like [`benchmark_at`], the Benchmarks v1 endpoint takes repeated bare
+/// `ids` query params (Hermes v2 uses `ids[]`). Returns the `parsed` array;
+/// the caller demuxes by [`PriceUpdate::feed_id`]. A feed with no observation
+/// at that timestamp is simply absent from the response.
+pub async fn benchmarks_at(
+    client: &Client,
+    benchmarks_url: &str,
+    ids: &[PriceFeedId],
+    unix_seconds: i64,
+) -> Result<Vec<PriceUpdate>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let url = format!(
+        "{}/v1/updates/price/{}",
+        benchmarks_url.trim_end_matches('/'),
+        unix_seconds
+    );
+    let query: Vec<(&str, String)> = ids.iter().map(|i| ("ids", i.to_hex())).collect();
+    let env: HermesEnvelope = get_with_backoff(client, &url, &query).await?;
+    Ok(env.parsed)
+}
+
 async fn get_with_backoff<Q, T>(client: &Client, url: &str, query: &Q) -> Result<T>
 where
     Q: serde::Serialize + ?Sized,
