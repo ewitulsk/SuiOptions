@@ -938,6 +938,48 @@ fun test_config_update_applies_at_next_finalize() {
     ts::end(scenario);
 }
 
+#[test]
+fun test_update_oracle_feeds_applies_immediately() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = setup(&mut scenario);
+
+    // Genesis: the vault sits in Settling with the (wrong) default feeds.
+    ts::next_tx(&mut scenario, th::admin_addr());
+    let cap = th::take_admin_cap(&scenario);
+    let mut v = take_vault(&scenario);
+    assert!(vault::is_settling(&v), 0);
+    assert!(vault::underlying_feed_id_for_testing(&v) == b"underlying-feed", 1);
+
+    vault::update_oracle_feeds(&cap, &mut v, b"beta-underlying", b"beta-settlement");
+
+    // Active config rewritten in place — no finalize required, so a vault
+    // wedged on an unresolvable feed set is recoverable.
+    assert!(vault::underlying_feed_id_for_testing(&v) == b"beta-underlying", 2);
+    assert!(vault::settlement_feed_id_for_testing(&v) == b"beta-settlement", 3);
+
+    th::return_admin_cap(&scenario, cap);
+    ts::return_shared(v);
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = 35, location = options_protocol::vault)] // vault_wrong_phase
+fun test_update_oracle_feeds_rejected_when_active() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = setup(&mut scenario);
+    finalize_as(&mut scenario, keeper(), &clock); // genesis → round 1 Active
+
+    ts::next_tx(&mut scenario, th::admin_addr());
+    let cap = th::take_admin_cap(&scenario);
+    let mut v = take_vault(&scenario);
+    vault::update_oracle_feeds(&cap, &mut v, b"x", b"y"); // aborts: not Settling
+    th::return_admin_cap(&scenario, cap);
+    ts::return_shared(v);
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
 use fun burn_receipt as DepositReceipt.burn_for_testing;
 
 /// Park an unwanted receipt (tests that don't exercise the claim path).

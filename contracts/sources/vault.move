@@ -333,6 +333,33 @@ public fun update_config<U, S, V>(
     events::emit_vault_config_updated(object::id(vault), vault.round);
 }
 
+/// Admin escape hatch for an immediate oracle-feed migration. Unlike
+/// `update_config` (which defers to `finalize_round`), this rewrites the
+/// active feed ids in place. The lifecycle cranks resolve the oracle from
+/// the *active* config (`select_bucket`/`finalize_round` → `vault_spot`),
+/// so a vault pinned to a feed set with no `PriceInfoObject` on this
+/// network is otherwise wedged: the crank that would apply replacement
+/// feeds via `update_config` can never resolve the old ones to run. This
+/// breaks that deadlock. Restricted to `Settling` so it can't move the
+/// reference market a live round is already selling against; any queued
+/// `pending_config` is kept in sync so the next finalize can't revert it.
+public fun update_oracle_feeds<U, S, V>(
+    _: &AdminCap,
+    vault: &mut Vault<U, S, V>,
+    underlying_feed_id: vector<u8>,
+    settlement_feed_id: vector<u8>,
+) {
+    assert!(vault.phase == Phase::Settling, errors::vault_wrong_phase());
+    vault.config.underlying_feed_id = underlying_feed_id;
+    vault.config.settlement_feed_id = settlement_feed_id;
+    if (vault.pending_config.is_some()) {
+        let pending = vault.pending_config.borrow_mut();
+        pending.underlying_feed_id = underlying_feed_id;
+        pending.settlement_feed_id = settlement_feed_id;
+    };
+    events::emit_vault_config_updated(object::id(vault), vault.round);
+}
+
 public fun pause_deposits<U, S, V>(_: &AdminCap, vault: &mut Vault<U, S, V>) {
     vault.paused_deposits = true;
     events::emit_vault_deposits_paused(object::id(vault), true);
@@ -1093,6 +1120,16 @@ public fun receipt_round(receipt: &DepositReceipt): u64 { receipt.round }
 public fun receipt_amount(receipt: &DepositReceipt): u64 { receipt.amount }
 public fun withdraw_receipt_round(receipt: &WithdrawReceipt): u64 { receipt.round }
 public fun withdraw_receipt_shares(receipt: &WithdrawReceipt): u64 { receipt.shares }
+
+#[test_only]
+public fun underlying_feed_id_for_testing<U, S, V>(vault: &Vault<U, S, V>): vector<u8> {
+    vault.config.underlying_feed_id
+}
+
+#[test_only]
+public fun settlement_feed_id_for_testing<U, S, V>(vault: &Vault<U, S, V>): vector<u8> {
+    vault.config.settlement_feed_id
+}
 
 // ════════════════════════════ test hooks ════════════════════════════
 // PriceInfoObject cannot be forged outside the pyth package, so the
