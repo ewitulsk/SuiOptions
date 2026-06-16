@@ -22,6 +22,13 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       DB_HOST: ${DB_HOST}
       RUST_LOG: info,token_info=info
+    # deployments.json is mounted from the host (the deploy bundle drops it
+    # there) instead of baked into the image. Bind-mount the DIRECTORY, not the
+    # file, so the bundle's tar unlink+create doesn't orphan the container's
+    # view of the inode — same trap nginx avoids. config.prod.toml points
+    # deployments_path at /app/deployments/deployments.json.
+    volumes:
+      - /opt/options/prod/deployments/:/app/deployments/:ro
     depends_on: [auth-service]
     restart: unless-stopped
     networks: [net]
