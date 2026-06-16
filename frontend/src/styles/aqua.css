@@ -56,16 +56,6 @@
   overflow: hidden;
 }
 
-/* Faint ripple noise overlay (multiple repeating gradients) */
-[data-theme="aqua"]::before {
-  content: "";
-  position: absolute; inset: 0; pointer-events: none; z-index: 0;
-  background-image:
-    repeating-linear-gradient(0deg, transparent 0, transparent 32px, rgba(77,162,255,0.025) 32px, rgba(77,162,255,0.025) 33px),
-    repeating-linear-gradient(90deg, transparent 0, transparent 80px, rgba(var(--aqua-shadow-rgb),0.018) 80px, rgba(var(--aqua-shadow-rgb),0.018) 81px);
-  mix-blend-mode: multiply;
-}
-
 [data-theme="aqua"] .app__wrap {
   position: relative; z-index: 1;
   max-width: 1180px; margin: 0 auto; padding: 0 32px 96px;
