@@ -48,6 +48,7 @@ pub struct VaultConfigView {
     pub max_slice_amount: u64,
     pub max_open_rfqs: u64,
     pub round_ms: u64,
+    pub selling_window_ms: u64,
     pub hold_premium_in_settlement: bool,
     /// Pinned Pyth feed ids (32 raw bytes each) — what `oracle::spot_cross`
     /// enforces, so discovery treats them as authoritative.
@@ -192,6 +193,7 @@ pub fn parse_vault_view(fields: &Value) -> Result<VaultView> {
             max_slice_amount: u64_field(config, "max_slice_amount")?,
             max_open_rfqs: u64_field(config, "max_open_rfqs")?,
             round_ms: u64_field(config, "round_ms")?,
+            selling_window_ms: u64_field(config, "selling_window_ms")?,
             hold_premium_in_settlement: as_bool(field(config, "hold_premium_in_settlement")?)?,
             underlying_feed_id: bytes_field(config, "underlying_feed_id")?,
             settlement_feed_id: bytes_field(config, "settlement_feed_id")?,
@@ -390,6 +392,7 @@ mod tests {
                 "max_slice_amount": "2000000000",
                 "max_open_rfqs": "2",
                 "round_ms": "604800000",
+                "selling_window_ms": "43200000",
                 "hold_premium_in_settlement": false,
                 "underlying_feed_id": vec![0x50u8; 32],
                 "settlement_feed_id": vec![0x41u8; 32],

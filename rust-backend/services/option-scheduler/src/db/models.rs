@@ -50,6 +50,7 @@ pub struct SchedulerRollRow {
     pub underlying_symbol: String,
     pub settlement_symbol: String,
     pub expiry_ms: i64,
+    pub expiry_interval_ms: i64,
     pub state: String,
     pub tx_digest: Option<String>,
     pub bucket_ids: Option<serde_json::Value>,
@@ -73,6 +74,7 @@ pub struct NewSchedulerRoll<'a> {
     pub underlying_symbol: &'a str,
     pub settlement_symbol: &'a str,
     pub expiry_ms: i64,
+    pub expiry_interval_ms: i64,
     pub state: &'a str,
     pub submit_anchor_seq: Option<i64>,
 }
@@ -119,6 +121,7 @@ pub struct SchedulerVaultRow {
     pub id: i64,
     pub underlying_symbol: String,
     pub settlement_symbol: String,
+    pub round_ms: i64,
     pub state: String,
     pub share_coin_package: Option<String>,
     pub share_coin_type: Option<String>,
@@ -142,5 +145,6 @@ impl SchedulerVaultRow {
 pub struct NewSchedulerVault<'a> {
     pub underlying_symbol: &'a str,
     pub settlement_symbol: &'a str,
+    pub round_ms: i64,
     pub state: &'a str,
 }

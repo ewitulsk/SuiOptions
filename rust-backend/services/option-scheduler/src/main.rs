@@ -165,7 +165,13 @@ async fn main() -> Result<()> {
             underlying: CanonicalType::parse(&u_spec.coin_type)?,
             settlement: CanonicalType::parse(&s_spec.coin_type)?,
         };
-        if cfg.vault_template.is_some() {
+        // Effective vault template: per-pair override wins, else the global
+        // template. Absent on both ⇒ no vault for this pair.
+        if let Some(template) = pair
+            .vault_template
+            .clone()
+            .or_else(|| cfg.vault_template.clone())
+        {
             match (u_spec.pyth_feed(), s_spec.pyth_feed()) {
                 (Ok(u_feed), Ok(s_feed)) => vault_entries.push(VaultEntry {
                     key: pair_key.clone(),
@@ -179,6 +185,7 @@ async fn main() -> Result<()> {
                         underlying_feed_id: u_feed.0.to_vec(),
                         settlement_feed_id: s_feed.0.to_vec(),
                     },
+                    template,
                 }),
                 _ => info!(
                     pair = %format!("{}/{}", pair.underlying, pair.settlement),
@@ -322,32 +329,30 @@ async fn main() -> Result<()> {
             .record(started.elapsed().as_secs_f64());
 
         // Vault-ensure pass, gated to `vault_check_interval_ms`. Independent of
-        // the bucket-roll cadence above. Disabled unless `[vault_template]` is
-        // set and at least one pair is vault-eligible.
-        if let Some(template) = cfg.vault_template.as_ref() {
-            if !vault_entries.is_empty()
-                && last_vault_check.is_none_or(|t| t.elapsed() >= vault_interval)
+        // the bucket-roll cadence above. `vault_entries` is non-empty only for
+        // pairs with an effective template (per-pair or global) and Pyth feeds
+        // on both legs; each entry carries its own policy.
+        if !vault_entries.is_empty()
+            && last_vault_check.is_none_or(|t| t.elapsed() >= vault_interval)
+        {
+            last_vault_check = Some(Instant::now());
+            metrics::counter!("scheduler_runs_total", "job" => "vault").increment(1);
+            let started = Instant::now();
+            if let Err(e) = vault_pass(
+                &cli,
+                &indexer,
+                &vault_entries,
+                &wrap,
+                package,
+                admin_cap,
+                &db_pool,
+            )
+            .await
             {
-                last_vault_check = Some(Instant::now());
-                metrics::counter!("scheduler_runs_total", "job" => "vault").increment(1);
-                let started = Instant::now();
-                if let Err(e) = vault_pass(
-                    &cli,
-                    &indexer,
-                    &vault_entries,
-                    &wrap,
-                    package,
-                    admin_cap,
-                    &db_pool,
-                    template,
-                )
-                .await
-                {
-                    warn!(error = %format!("{e:#}"), "vault pass errored");
-                }
-                metrics::histogram!("scheduler_job_duration_seconds", "job" => "vault")
-                    .record(started.elapsed().as_secs_f64());
+                warn!(error = %format!("{e:#}"), "vault pass errored");
             }
+            metrics::histogram!("scheduler_job_duration_seconds", "job" => "vault")
+                .record(started.elapsed().as_secs_f64());
         }
 
         sleep(tick).await;
@@ -366,19 +371,22 @@ async fn vault_pass(
     package: sui_types::base_types::ObjectID,
     admin_cap: sui_types::base_types::ObjectID,
     db_pool: &db::DbPool,
-    template: &VaultTemplate,
 ) -> Result<()> {
     let vaults = indexer
         .vaults()
         .await
         .context("listing vaults for vault pass")?;
     for entry in entries {
+        // Match the on-chain vault by assets AND round cadence: a weekly and
+        // an hourly vault for the same pair are distinct, so the existence
+        // check must not treat one as satisfying the other.
         let existing = vaults
             .iter()
             .find(|v| {
                 entry
                     .key
                     .matches_assets(&v.underlying_type, &v.settlement_type)
+                    && v.round_ms == Some(entry.template.round_ms)
             })
             .map(|v| v.vault_id.to_hex());
         if let Err(e) = vault_roller::ensure_vault(
@@ -387,7 +395,7 @@ async fn vault_pass(
             admin_cap,
             db_pool,
             &entry.spec,
-            template,
+            &entry.template,
             existing,
             cli.dry_run,
             cli.gas_budget,
@@ -428,6 +436,10 @@ struct DeepBookPoolCfg {
 struct VaultEntry {
     key: PairKey,
     spec: VaultPairSpec,
+    /// Effective vault policy for this pair (per-pair override or global).
+    /// Its `round_ms` is also the cadence key that lets a weekly and an
+    /// hourly vault for the same pair coexist.
+    template: VaultTemplate,
 }
 
 /// Resolve the per-roll strike set: the legacy percentage grid, or the
@@ -531,6 +543,7 @@ async fn tick_once(
             db_pool,
             &meta.cfg.underlying,
             &meta.cfg.settlement,
+            meta.cfg.expiry_interval_ms,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -539,10 +552,13 @@ async fn tick_once(
             }
         };
 
+        // Per-pair roll threshold wins over the global default, so a fast
+        // cadence on the same instance rolls on a tight window.
+        let roll_threshold_ms = meta.cfg.roll_threshold_ms.unwrap_or(cfg.roll_threshold_ms);
         let decision = decide_tick(
             latest_expiry,
             now,
-            cfg.roll_threshold_ms,
+            roll_threshold_ms,
             meta.cfg.expiry_interval_ms,
         );
         debug!(
@@ -591,6 +607,7 @@ async fn tick_once(
             &meta.cfg.underlying,
             &meta.cfg.settlement,
             next_expiry,
+            meta.cfg.expiry_interval_ms,
             anchor_seq,
         ) {
             Ok(true) => {

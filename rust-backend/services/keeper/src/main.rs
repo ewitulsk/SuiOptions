@@ -234,13 +234,21 @@ async fn tick_vault(
         None => None,
     };
 
+    // Cap the configured stagger to this vault's selling window so an hourly
+    // round's short window still opens multiple slices (weekly unchanged).
+    let stagger_ms = keeper::slicing::effective_stagger_ms(
+        ids.defaults.slicing.stagger_minutes * 60_000,
+        view.config.selling_window_ms,
+        ids.defaults.slicing.slices,
+    );
+
     let action = plan(&PlanInput {
         view: &view,
         now_ms: now,
         auctions: &auctions,
         swap_auctions: &swap_auctions,
         bucket_meta: bucket_meta.as_ref(),
-        stagger_ms: ids.defaults.slicing.stagger_minutes * 60_000,
+        stagger_ms,
         max_slices: ids.defaults.slicing.slices,
     });
     debug!(vault = %meta.vault_id, round = view.round, ?action, "planned");

@@ -73,8 +73,11 @@ pub async fn ensure_vault(
     let u = spec.underlying_symbol.as_str();
     let s = spec.settlement_symbol.as_str();
     let pair_label = format!("{u}/{s}");
+    // Round cadence is the per-pair vault discriminator: a weekly and an hourly
+    // vault for the same pair are distinct rows / distinct on-chain vaults.
+    let round_ms = template.round_ms;
 
-    let row = db::active_vault_row(db_pool, u, s)?;
+    let row = db::active_vault_row(db_pool, u, s, round_ms)?;
     // A confirmed row is authoritative: we created it. Trust the DB even if the
     // indexer briefly lags right after creation.
     if row
@@ -87,8 +90,8 @@ pub async fn ensure_vault(
     // On chain already but no confirmed row (e.g. the scheduler DB was wiped):
     // record it confirmed and never recreate.
     if let Some(vault_id) = existing_vault_id {
-        info!(pair = %pair_label, %vault_id, "vault already on chain; recording confirmed");
-        db::record_existing_vault(db_pool, u, s, &vault_id)?;
+        info!(pair = %pair_label, %vault_id, round_ms, "vault already on chain; recording confirmed");
+        db::record_existing_vault(db_pool, u, s, round_ms, &vault_id)?;
         return Ok(());
     }
 
@@ -115,14 +118,20 @@ pub async fn ensure_vault(
             }
             _ => {
                 warn!(pair = %pair_label, "coin_published row missing share cap fields; failing for retry");
-                db::mark_vault_failed(db_pool, u, s, "coin_published row missing share cap fields")?;
+                db::mark_vault_failed(
+                    db_pool,
+                    u,
+                    s,
+                    round_ms,
+                    "coin_published row missing share cap fields",
+                )?;
                 return Ok(());
             }
         }
     }
 
     // Fresh create. Claim the slot if we don't already own a `pending` row.
-    if row.is_none() && !db::claim_vault_slot(db_pool, u, s)? {
+    if row.is_none() && !db::claim_vault_slot(db_pool, u, s, round_ms)? {
         debug!(pair = %pair_label, "vault slot already claimed; skipping");
         return Ok(());
     }
@@ -136,7 +145,7 @@ pub async fn ensure_vault(
         Ok(c) => c,
         Err(e) => {
             pkg_gen.cleanup();
-            db::mark_vault_failed(db_pool, u, s, &format!("compiling vshare: {e:#}"))?;
+            db::mark_vault_failed(db_pool, u, s, round_ms, &format!("compiling vshare: {e:#}"))?;
             return Err(e.context("compiling vshare package"));
         }
     };
@@ -157,7 +166,7 @@ pub async fn ensure_vault(
         Ok(p) => p,
         Err(e) => {
             warn!(pair = %pair_label, error = %format!("{e:#}"), "vshare publish failed");
-            db::mark_vault_failed(db_pool, u, s, &format!("publishing vshare: {e:#}"))?;
+            db::mark_vault_failed(db_pool, u, s, round_ms, &format!("publishing vshare: {e:#}"))?;
             return Err(e.context("publishing vshare package"));
         }
     };
@@ -178,6 +187,7 @@ pub async fn ensure_vault(
         db_pool,
         u,
         s,
+        round_ms,
         &published.package_id.to_string(),
         &cap.call_type,
         &cap_id,
@@ -217,6 +227,7 @@ async fn finish_create(
     let u = spec.underlying_symbol.as_str();
     let s = spec.settlement_symbol.as_str();
     let pair_label = format!("{u}/{s}");
+    let round_ms = template.round_ms;
 
     let share_cap_id = ObjectID::from_str(cap_id)
         .with_context(|| format!("parsing stored share_cap_id {cap_id}"))?;
@@ -241,8 +252,8 @@ async fn finish_create(
         Ok(out) => {
             metrics::counter!("scheduler_tx_total", "job" => "vault", "outcome" => "ok")
                 .increment(1);
-            info!(pair = %pair_label, vault_id = %out.vault_id, digest = %out.digest, "vault created");
-            db::mark_vault_confirmed(db_pool, u, s, &out.vault_id.to_string(), &out.digest)?;
+            info!(pair = %pair_label, vault_id = %out.vault_id, digest = %out.digest, round_ms, "vault created");
+            db::mark_vault_confirmed(db_pool, u, s, round_ms, &out.vault_id.to_string(), &out.digest)?;
             Ok(())
         }
         Err(e) => {
