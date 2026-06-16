@@ -238,6 +238,19 @@ health_path_for() {
   esac
 }
 
+# Per-service health-probe budget, in attempts (each attempt is followed by a
+# 2s sleep). Most services answer /health within seconds, so 30 (~60s) is
+# plenty. option-scheduler is the exception on a contract redeploy: its DB is
+# wiped, so on first boot it creates DeepBook pools + vaults + rolls on-chain
+# before it settles, which can take a few minutes. Give it a wider window so a
+# redeploy doesn't roll the whole stack back on a near-miss timeout.
+health_attempts_for() {
+  case "$1" in
+    option-scheduler) echo 150 ;;  # ~5 min
+    *)                echo 30 ;;   # ~60s
+  esac
+}
+
 rollback() {
   echo "rolling planned services back to prior tags" >&2
   for svc in "${PLANNED[@]}"; do
@@ -270,9 +283,10 @@ for svc in "${PLANNED[@]}"; do
     continue
   fi
   URL="http://localhost:$NGINX_PORT$path"
+  attempts=$(health_attempts_for "$svc")
   echo "waiting for $svc /health via nginx: $URL ..."
   healthy=0
-  for i in $(seq 1 30); do
+  for i in $(seq 1 "$attempts"); do
     if curl -fsS "$URL" >/dev/null 2>&1; then
       healthy=1
       break
