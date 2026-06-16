@@ -68,6 +68,11 @@
         "coinType": "0x159cc8d63af67b12286a9a7868a40b274ef352960b1a3d9ea31c0169cc3efa73::twal::TWAL",
         "decimals": 9,
         "pythFeedId": "0xa6ba0195b5364be116059e401fb71484ed3400d4d9bfbdf46bd11eab4f9b7cea"
+      },
+      "TSUI": {
+        "coinType": "0x159cc8d63af67b12286a9a7868a40b274ef352960b1a3d9ea31c0169cc3efa73::tsui::TSUI",
+        "decimals": 9,
+        "pythFeedId": "0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744"
       }
     }
   },
@@ -146,6 +151,11 @@
         "coinType": "0xaf1345304179d6332eb5c99eff630ced815a5e37601a09c15db45599b7c4c4aa::twal::TWAL",
         "decimals": 9,
         "pythFeedId": "0xa6ba0195b5364be116059e401fb71484ed3400d4d9bfbdf46bd11eab4f9b7cea"
+      },
+      "TSUI": {
+        "coinType": "0xaf1345304179d6332eb5c99eff630ced815a5e37601a09c15db45599b7c4c4aa::tsui::TSUI",
+        "decimals": 9,
+        "pythFeedId": "0x23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744"
       }
     }
   }

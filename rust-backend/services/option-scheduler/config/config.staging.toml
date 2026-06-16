@@ -63,6 +63,21 @@ interval_pct        = 10.0
   max_publish_lag_ms = 30_000   # decline a roll on prices > 30s stale
   max_conf_bps       = 100      # decline a roll if conf/price > 1%
 
+[[pairs]]
+underlying          = "TSUI"
+settlement          = "TUSDC"
+expiry_interval_ms  = 604_800_000
+strikes_below       = 2
+strikes_above       = 2
+interval_pct        = 10.0
+
+  # SUI/USD cross via Pyth Hermes. Both legs read their `pythFeedId` from
+  # deployments.json::staging.token_info (TSUI = SUI/USD, TUSDC = USDC/USD).
+  [pairs.spot]
+  source             = "pyth"
+  max_publish_lag_ms = 30_000   # decline a roll on prices > 30s stale
+  max_conf_bps       = 100      # decline a roll if conf/price > 1%
+
 # ── Vault auto-provisioning ─────────────────────────────────────────────
 # Presence of this table switches on the hourly vault-ensure pass: the
 # scheduler creates exactly one covered-call vault per configured pair with a
