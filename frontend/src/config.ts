@@ -44,6 +44,12 @@ export const GAS_STATION_URL: string =
 export const CHARTS_URL: string =
   (import.meta.env.VITE_CHARTS_URL as string | undefined) ?? "http://127.0.0.1:9011";
 
+// WalletConnect projectId (from dashboard.reown.com). Required to offer the
+// "Sign in with WalletConnect" session login; when unset the option simply
+// doesn't render (same gating pattern as the session deployment ids).
+export const WALLETCONNECT_PROJECT_ID: string | undefined = import.meta.env
+  .VITE_WALLETCONNECT_PROJECT_ID as string | undefined;
+
 // Populated by `initConfig()`. Exported as live bindings — consumers that
 // `import { PACKAGE_ID }` see the value once initialization completes (which
 // happens before the first render).

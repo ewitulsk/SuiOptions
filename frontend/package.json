@@ -12,6 +12,7 @@
   "dependencies": {
     "@mysten/dapp-kit": "^1.0.6",
     "@mysten/sui": "^2.17.0",
+    "@walletconnect/ethereum-provider": "^2.23.9",
     "@yourorg/sui-siws-session": "file:./siws-session-sdk",
     "@tanstack/react-query": "^5.100.11",
     "lightweight-charts": "^5.2.0",

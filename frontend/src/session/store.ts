@@ -39,7 +39,7 @@ import {
   resolveOptionsAccountId,
 } from "./accounts";
 import { SESSION_ALLOWED, SESSION_TTL_MS, defaultLimits } from "./policy";
-import { connectMetaMask, connectPhantom } from "./wallets";
+import { connectMetaMask, connectPhantom, connectWalletConnect } from "./wallets";
 import { posthog } from "../lib/posthog";
 
 export type SessionPhase = "idle" | "restoring" | "signing-in" | "active";
@@ -167,10 +167,41 @@ export async function signInWithPhantom(): Promise<void> {
   }
 }
 
-export async function signInWithMetaMask(): Promise<void> {
+// The persisted session records only scheme="ethereum" — it can't tell which
+// Ethereum connector signed in. Remember it so revoke / re-sign-in after a
+// reload reconnect the SAME root wallet; a different connector would yield a
+// different address and resolve to the wrong (or no) account.
+type EthConnector = "metamask" | "walletconnect";
+const ETH_CONNECTOR_KEY = "siws.ethConnector";
+
+function rememberEthConnector(c: EthConnector): void {
+  try {
+    localStorage.setItem(ETH_CONNECTOR_KEY, c);
+  } catch {
+    /* private mode / storage disabled — hint is best-effort */
+  }
+}
+
+function lastEthConnector(): EthConnector {
+  try {
+    return localStorage.getItem(ETH_CONNECTOR_KEY) === "walletconnect"
+      ? "walletconnect"
+      : "metamask";
+  } catch {
+    return "metamask";
+  }
+}
+
+function connectEth(c: EthConnector) {
+  return c === "walletconnect" ? connectWalletConnect() : connectMetaMask();
+}
+
+/** Open an Ethereum (SIWE) session via the given connector. */
+async function openEthSession(connector: EthConnector): Promise<void> {
   set({ phase: "signing-in", error: null });
   try {
-    const { adapter, chainId } = await connectMetaMask();
+    const { adapter, chainId } = await connectEth(connector);
+    rememberEthConnector(connector);
     const handle = await createSessionEth({
       ...sessionConfig(),
       ethereumWallet: adapter,
@@ -181,12 +212,29 @@ export async function signInWithMetaMask(): Promise<void> {
       persist: true,
     });
     await activate(handle);
-    posthog.capture("session_signed_in", { scheme: "ethereum" });
+    posthog.capture("session_signed_in", { scheme: "ethereum", connector });
   } catch (err) {
-    posthog.captureException(err, { action: "session_sign_in", scheme: "ethereum" });
+    posthog.captureException(err, {
+      action: "session_sign_in",
+      scheme: "ethereum",
+      connector,
+    });
     set({ phase: "idle", error: message(err) });
     throw err;
   }
+}
+
+export function signInWithMetaMask(): Promise<void> {
+  return openEthSession("metamask");
+}
+
+export function signInWithWalletConnect(): Promise<void> {
+  return openEthSession("walletconnect");
+}
+
+/** Re-open an Ethereum session with whichever connector last signed in. */
+export function signInWithLastEth(): Promise<void> {
+  return openEthSession(lastEthConnector());
 }
 
 async function activate(handle: SessionHandle): Promise<void> {
@@ -245,7 +293,7 @@ export async function revokeSession(): Promise<void> {
       if (handle.scheme === "solana") {
         handle.attachRootWallet(await connectPhantom());
       } else {
-        handle.attachRootWallet((await connectMetaMask()).adapter);
+        handle.attachRootWallet((await connectEth(lastEthConnector())).adapter);
       }
     }
     await handle.revoke();

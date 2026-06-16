@@ -7,6 +7,8 @@ import type {
   SolanaSignMessage,
 } from "@yourorg/sui-siws-session";
 
+import { WALLETCONNECT_PROJECT_ID } from "../config";
+
 // --- Phantom (Solana / SIWS) ---
 
 interface PhantomProvider {
@@ -113,4 +115,89 @@ export async function connectMetaMask(): Promise<{
     adapter: new MetaMaskAdapter(provider, address),
     chainId: parseInt(chainHex, 16),
   };
+}
+
+// --- WalletConnect (Ethereum / SIWE) ---
+//
+// WalletConnect's "Sign In With Ethereum" is the same EIP-4361 path MetaMask
+// uses — an EIP-1193 `personal_sign` over the canonical message — so it reuses
+// the SDK's `EthereumSignMessage` surface and `createSessionEth`. The only
+// difference is the transport: a relay + QR/deeplink modal instead of an
+// injected provider, so any mobile/desktop wallet can be the root.
+
+// Minimal slice of `@walletconnect/ethereum-provider`'s EIP-1193 provider.
+interface WalletConnectProvider {
+  request(args: { method: string; params?: unknown[] }): Promise<unknown>;
+  connect(): Promise<void>;
+  accounts: string[];
+  chainId: number;
+}
+
+// Initialized lazily and once: the heavy provider bundle is dynamically
+// imported only when a user actually picks WalletConnect, and the relay
+// session it holds is reused across sign-in / revoke.
+let wcProvider: WalletConnectProvider | null = null;
+
+export function hasWalletConnect(): boolean {
+  return Boolean(WALLETCONNECT_PROJECT_ID);
+}
+
+async function walletConnectProvider(): Promise<WalletConnectProvider> {
+  if (wcProvider) return wcProvider;
+  if (!WALLETCONNECT_PROJECT_ID) {
+    throw new Error(
+      "WalletConnect is not configured — set VITE_WALLETCONNECT_PROJECT_ID",
+    );
+  }
+  const { EthereumProvider } = await import("@walletconnect/ethereum-provider");
+  wcProvider = (await EthereumProvider.init({
+    projectId: WALLETCONNECT_PROJECT_ID,
+    // Ethereum mainnet is enough to carry the SIWE chain id; `optionalChains`
+    // keeps smart-contract wallets that don't support eth_chainId connectable.
+    optionalChains: [1],
+    showQrModal: true,
+    metadata: {
+      name: "Tideline",
+      description: "Tideline options protocol",
+      url: window.location.origin,
+      icons: [`${window.location.origin}/favicon.ico`],
+    },
+  })) as unknown as WalletConnectProvider;
+  return wcProvider;
+}
+
+export class WalletConnectAdapter implements EthereumSignMessage {
+  constructor(
+    private readonly provider: WalletConnectProvider,
+    private readonly address: string,
+  ) {}
+
+  getAddress(): string {
+    return this.address;
+  }
+
+  async personalSign(message: string): Promise<string> {
+    // Same params as MetaMask: [hex-encoded message, address]. The connected
+    // wallet renders the decoded UTF-8 (the EIP-4361 screen).
+    return (await this.provider.request({
+      method: "personal_sign",
+      params: [utf8ToHex(message), this.address],
+    })) as string;
+  }
+}
+
+export async function connectWalletConnect(): Promise<{
+  adapter: WalletConnectAdapter;
+  chainId: number;
+}> {
+  const provider = await walletConnectProvider();
+  // A persisted relay session reconnects silently; otherwise open the modal.
+  if (provider.accounts.length === 0) {
+    await provider.connect();
+  }
+  const address = provider.accounts[0];
+  if (!address) {
+    throw new Error("WalletConnect returned no account");
+  }
+  return { adapter: new WalletConnectAdapter(provider, address), chainId: provider.chainId };
 }
