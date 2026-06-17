@@ -10,6 +10,9 @@
 //   contracts/sources/treasury.move
 //     - treasury::withdraw<T>(&AdminCap, &mut Treasury, amount, recipient, ctx)
 //     - treasury::create_and_share(&AdminCap, ctx)
+//   contracts/sources/vault.move
+//     - vault::pause_deposits<U, S, V>(&AdminCap, &mut Vault)
+//     - vault::unpause_deposits<U, S, V>(&AdminCap, &mut Vault)
 //
 // Every admin call passes the caller's owned `AdminCap` object id (see
 // `useAdminCap`) as its authorizing argument. Shared objects (Bucket,
@@ -157,4 +160,37 @@ export function buildCreateTreasuryTx(adminCapId: string): Transaction {
     arguments: [tx.object(adminCapId)],
   });
   return tx;
+}
+
+export type VaultPauseParams = {
+  adminCapId: string;
+  vaultId: string;
+  /** The vault's `U` / `S` / `V` type args (from the api-service `Vault`). */
+  underlyingCoinType: string;
+  settlementCoinType: string;
+  shareType: string;
+};
+
+function buildVaultPauseToggleTx(
+  fn: "pause_deposits" | "unpause_deposits",
+  p: VaultPauseParams,
+): Transaction {
+  const pkg = requirePackage();
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${pkg}::vault::${fn}`,
+    typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.shareType],
+    arguments: [tx.object(p.adminCapId), tx.object(p.vaultId)],
+  });
+  return tx;
+}
+
+/** Stop new deposits into a vault. Hard cutover: the backend then ignores it. */
+export function buildPauseDepositsTx(p: VaultPauseParams): Transaction {
+  return buildVaultPauseToggleTx("pause_deposits", p);
+}
+
+/** Re-open deposits on a previously paused vault. */
+export function buildUnpauseDepositsTx(p: VaultPauseParams): Transaction {
+  return buildVaultPauseToggleTx("unpause_deposits", p);
 }

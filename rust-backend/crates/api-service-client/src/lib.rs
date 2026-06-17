@@ -23,7 +23,7 @@
 //! cached forever; the bulk-view path re-prices the same buckets every refresh
 //! and would otherwise hammer api-service.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
@@ -211,6 +211,32 @@ impl ApiServiceClient {
         }
         Ok(out)
     }
+
+    /// Vault ids with deposits paused on-chain, fresh from `GET /vaults`.
+    /// The mm-bot treats a paused vault as decommissioned (hard cutover)
+    /// and skips its RFQ and swap auctions.
+    pub async fn paused_vault_ids(&self) -> Result<HashSet<ObjectId>> {
+        let url = format!("{}/vaults", self.base_url);
+        let wire: VaultsWire = observability::client::instrumented("api-service", "GET /vaults", |h| {
+            self.http.get(&url).headers(h).send()
+        })
+        .await
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()
+        .with_context(|| format!("GET {url} returned an error status"))?
+        .json()
+        .await
+        .with_context(|| format!("decoding vaults from {url}"))?;
+
+        wire.vaults
+            .into_iter()
+            .filter(|v| v.deposits_paused)
+            .map(|v| {
+                ObjectId::from_hex(&v.vault_id)
+                    .map_err(|e| anyhow::anyhow!("vault_id {}: {e}", v.vault_id))
+            })
+            .collect()
+    }
 }
 
 /// One bucket with a live DeepBook venue, flattened from `GET /buckets`
@@ -250,6 +276,17 @@ pub struct OpenRfq {
 #[derive(Deserialize)]
 struct RfqsWire {
     rfqs: Vec<RfqWire>,
+}
+
+#[derive(Deserialize)]
+struct VaultsWire {
+    vaults: Vec<VaultStatusWire>,
+}
+
+#[derive(Deserialize)]
+struct VaultStatusWire {
+    vault_id: String,
+    deposits_paused: bool,
 }
 
 #[derive(Deserialize)]

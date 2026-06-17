@@ -691,6 +691,7 @@ async fn main() -> Result<()> {
             secrets: secrets_loaded.clone(),
             network: cfg.network,
             package: snapshot.package()?,
+            api_url: cli.api_url.clone(),
             price_cache: price_cache.clone(),
             markets: swap_markets,
             settlement_feed,

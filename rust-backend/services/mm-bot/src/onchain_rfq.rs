@@ -317,12 +317,24 @@ async fn tick(
     if open.is_empty() {
         return Ok(());
     }
+    // Hard cutover: drop auctions originating from a paused vault before
+    // any chain read or bid. Uncoupled (seller-origin) auctions never
+    // match a vault id, so they're unaffected.
+    let paused = api
+        .paused_vault_ids()
+        .await
+        .context("polling paused vaults")?;
     let now = now_ms();
 
     // Live views first: locked escrow must be computed across ALL our
     // standing best bids before any new bid is sized.
     let mut views: Vec<(OpenRfq, AuctionView)> = Vec::with_capacity(open.len());
     for rfq in open {
+        if let Ok(vault) = protocol_types::ids::ObjectId::from_hex(&rfq.origin) {
+            if paused.contains(&vault) {
+                continue;
+            }
+        }
         match fetch_auction_view(&wrap.client, sui_object_id(rfq.rfq_id)?).await {
             Ok(Some(view)) => views.push((rfq, view)),
             Ok(None) => {} // settled since the poll
