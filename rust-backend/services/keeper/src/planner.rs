@@ -197,6 +197,7 @@ mod tests {
             max_slice_amount: u64::MAX,
             max_open_rfqs: 4,
             round_ms: 7 * 24 * HOUR,
+            selling_window_ms: 12 * HOUR,
             hold_premium_in_settlement: false,
             underlying_feed_id: vec![0u8; 32],
             settlement_feed_id: vec![0u8; 32],

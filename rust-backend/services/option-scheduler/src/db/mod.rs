@@ -41,17 +41,22 @@ pub fn run_migrations(pool: &DbPool) -> Result<()> {
     Ok(())
 }
 
-/// Highest `expiry_ms` in any active state for a given pair, or `None`.
+/// Highest `expiry_ms` in any active state for a given pair *at a given
+/// cadence*, or `None`. Scoped by `expiry_interval_ms` so a pair running two
+/// cadences (e.g. weekly + hourly TSUI) doesn't let one family's far expiry
+/// suppress the other's roll.
 pub fn latest_active_expiry(
     pool: &DbPool,
     underlying: &str,
     settlement: &str,
+    expiry_interval_ms: u64,
 ) -> Result<Option<u64>> {
     use diesel::dsl::max;
     let mut conn = pool.get().context("latest_active_expiry: pool")?;
     let result: Option<i64> = scheduler_rolls::table
         .filter(scheduler_rolls::underlying_symbol.eq(underlying))
         .filter(scheduler_rolls::settlement_symbol.eq(settlement))
+        .filter(scheduler_rolls::expiry_interval_ms.eq(expiry_interval_ms as i64))
         .filter(
             scheduler_rolls::state.eq_any(&[
                 RollState::Pending.as_str(),
@@ -74,6 +79,7 @@ pub fn claim_slot(
     underlying: &str,
     settlement: &str,
     expiry_ms: u64,
+    expiry_interval_ms: u64,
     anchor_seq: u64,
 ) -> Result<bool> {
     let mut conn = pool.get().context("claim_slot: pool")?;
@@ -81,6 +87,7 @@ pub fn claim_slot(
         underlying_symbol: underlying,
         settlement_symbol: settlement,
         expiry_ms: expiry_ms as i64,
+        expiry_interval_ms: expiry_interval_ms as i64,
         state: RollState::Pending.as_str(),
         submit_anchor_seq: Some(anchor_seq as i64),
     };
@@ -254,21 +261,25 @@ pub fn all_active_rows(pool: &DbPool) -> Result<Vec<SchedulerRollRow>> {
 
 // ════════════════════════════ vaults ════════════════════════════════
 //
-// One row per (underlying, settlement) pair. The partial UNIQUE index on
-// active states is the hard guard against creating a duplicate vault, exactly
-// like `scheduler_rolls_active_slot` does for rolls.
+// One row per (underlying, settlement, round_ms) — i.e. per pair *per cadence*.
+// The partial UNIQUE index on active states is the hard guard against creating
+// a duplicate vault, exactly like `scheduler_rolls_active_slot` does for rolls.
+// Keying on `round_ms` lets a weekly and an hourly vault for the same pair
+// coexist.
 
-/// The single active vault row for a pair (the index guarantees ≤ 1), or
-/// `None` if the pair has no live vault row.
+/// The single active vault row for a pair at a given round cadence (the index
+/// guarantees ≤ 1), or `None` if the pair has no live vault row at that cadence.
 pub fn active_vault_row(
     pool: &DbPool,
     underlying: &str,
     settlement: &str,
+    round_ms: u64,
 ) -> Result<Option<SchedulerVaultRow>> {
     let mut conn = pool.get().context("active_vault_row: pool")?;
     scheduler_vaults::table
         .filter(scheduler_vaults::underlying_symbol.eq(underlying))
         .filter(scheduler_vaults::settlement_symbol.eq(settlement))
+        .filter(scheduler_vaults::round_ms.eq(round_ms as i64))
         .filter(
             scheduler_vaults::state.eq_any(&[
                 VaultState::Pending.as_str(),
@@ -284,11 +295,17 @@ pub fn active_vault_row(
 /// Claim a vault slot: INSERT a `pending` row. `Ok(true)` if inserted,
 /// `Ok(false)` if the partial UNIQUE index blocked us (the pair already has a
 /// live vault row).
-pub fn claim_vault_slot(pool: &DbPool, underlying: &str, settlement: &str) -> Result<bool> {
+pub fn claim_vault_slot(
+    pool: &DbPool,
+    underlying: &str,
+    settlement: &str,
+    round_ms: u64,
+) -> Result<bool> {
     let mut conn = pool.get().context("claim_vault_slot: pool")?;
     let new = NewSchedulerVault {
         underlying_symbol: underlying,
         settlement_symbol: settlement,
+        round_ms: round_ms as i64,
         state: VaultState::Pending.as_str(),
     };
     let result = diesel::insert_into(scheduler_vaults::table)
@@ -315,6 +332,7 @@ pub fn mark_vault_coin_published(
     pool: &DbPool,
     underlying: &str,
     settlement: &str,
+    round_ms: u64,
     package: &str,
     coin_type: &str,
     cap_id: &str,
@@ -324,6 +342,7 @@ pub fn mark_vault_coin_published(
     diesel::update(scheduler_vaults::table)
         .filter(scheduler_vaults::underlying_symbol.eq(underlying))
         .filter(scheduler_vaults::settlement_symbol.eq(settlement))
+        .filter(scheduler_vaults::round_ms.eq(round_ms as i64))
         .filter(scheduler_vaults::state.eq(VaultState::Pending.as_str()))
         .set((
             scheduler_vaults::state.eq(VaultState::CoinPublished.as_str()),
@@ -344,6 +363,7 @@ pub fn mark_vault_confirmed(
     pool: &DbPool,
     underlying: &str,
     settlement: &str,
+    round_ms: u64,
     vault_id: &str,
     create_digest: &str,
 ) -> Result<()> {
@@ -351,6 +371,7 @@ pub fn mark_vault_confirmed(
     diesel::update(scheduler_vaults::table)
         .filter(scheduler_vaults::underlying_symbol.eq(underlying))
         .filter(scheduler_vaults::settlement_symbol.eq(settlement))
+        .filter(scheduler_vaults::round_ms.eq(round_ms as i64))
         .filter(
             scheduler_vaults::state
                 .eq(VaultState::Pending.as_str())
@@ -375,12 +396,14 @@ pub fn record_existing_vault(
     pool: &DbPool,
     underlying: &str,
     settlement: &str,
+    round_ms: u64,
     vault_id: &str,
 ) -> Result<()> {
     let mut conn = pool.get().context("record_existing_vault: pool")?;
     let updated = diesel::update(scheduler_vaults::table)
         .filter(scheduler_vaults::underlying_symbol.eq(underlying))
         .filter(scheduler_vaults::settlement_symbol.eq(settlement))
+        .filter(scheduler_vaults::round_ms.eq(round_ms as i64))
         .filter(
             scheduler_vaults::state.eq_any(&[
                 VaultState::Pending.as_str(),
@@ -398,6 +421,7 @@ pub fn record_existing_vault(
         let new = NewSchedulerVault {
             underlying_symbol: underlying,
             settlement_symbol: settlement,
+            round_ms: round_ms as i64,
             state: VaultState::Confirmed.as_str(),
         };
         diesel::insert_into(scheduler_vaults::table)
@@ -408,6 +432,7 @@ pub fn record_existing_vault(
         diesel::update(scheduler_vaults::table)
             .filter(scheduler_vaults::underlying_symbol.eq(underlying))
             .filter(scheduler_vaults::settlement_symbol.eq(settlement))
+            .filter(scheduler_vaults::round_ms.eq(round_ms as i64))
             .filter(scheduler_vaults::state.eq(VaultState::Confirmed.as_str()))
             .filter(scheduler_vaults::vault_id.is_null())
             .set(scheduler_vaults::vault_id.eq(vault_id))
@@ -424,12 +449,14 @@ pub fn mark_vault_failed(
     pool: &DbPool,
     underlying: &str,
     settlement: &str,
+    round_ms: u64,
     error_msg: &str,
 ) -> Result<()> {
     let mut conn = pool.get().context("mark_vault_failed: pool")?;
     diesel::update(scheduler_vaults::table)
         .filter(scheduler_vaults::underlying_symbol.eq(underlying))
         .filter(scheduler_vaults::settlement_symbol.eq(settlement))
+        .filter(scheduler_vaults::round_ms.eq(round_ms as i64))
         .filter(
             scheduler_vaults::state
                 .eq(VaultState::Pending.as_str())
@@ -495,30 +522,33 @@ mod tests {
         assert_eq!(RollState::parse("bogus"), None);
     }
 
+    const WEEK: u64 = 604_800_000;
+    const HOUR: u64 = 3_600_000;
+
     #[test]
     #[ignore] // requires SCHEDULER_TEST_DATABASE_URL
     fn claim_and_duplicate_blocked() {
         let pool = test_pool();
-        assert!(claim_slot(&pool, "TBTC", "TUSDC", 1_000, 0).unwrap());
+        assert!(claim_slot(&pool, "TBTC", "TUSDC", 1_000, WEEK, 0).unwrap());
         // Same slot: partial UNIQUE index blocks duplicates.
-        assert!(!claim_slot(&pool, "TBTC", "TUSDC", 1_000, 0).unwrap());
+        assert!(!claim_slot(&pool, "TBTC", "TUSDC", 1_000, WEEK, 0).unwrap());
     }
 
     #[test]
     #[ignore]
     fn claim_allowed_after_delete() {
         let pool = test_pool();
-        assert!(claim_slot(&pool, "TBTC", "TUSDC", 2_000, 0).unwrap());
+        assert!(claim_slot(&pool, "TBTC", "TUSDC", 2_000, WEEK, 0).unwrap());
         delete_pending(&pool, "TBTC", "TUSDC", 2_000).unwrap();
         // Row is gone; re-claim succeeds.
-        assert!(claim_slot(&pool, "TBTC", "TUSDC", 2_000, 0).unwrap());
+        assert!(claim_slot(&pool, "TBTC", "TUSDC", 2_000, WEEK, 0).unwrap());
     }
 
     #[test]
     #[ignore]
     fn submit_and_confirm_workflow() {
         let pool = test_pool();
-        assert!(claim_slot(&pool, "TBTC", "TUSDC", 3_000, 42).unwrap());
+        assert!(claim_slot(&pool, "TBTC", "TUSDC", 3_000, WEEK, 42).unwrap());
         mark_submitted(&pool, "TBTC", "TUSDC", 3_000, "0xabc", &["id1".into()]).unwrap();
         confirm_from_indexer(&pool, "TBTC", "TUSDC", 3_000, "id1").unwrap();
         let rows = all_active_rows(&pool).unwrap();
@@ -530,7 +560,7 @@ mod tests {
     #[ignore]
     fn reconciliation_workflow() {
         let pool = test_pool();
-        assert!(claim_slot(&pool, "TBTC", "TUSDC", 4_000, 10).unwrap());
+        assert!(claim_slot(&pool, "TBTC", "TUSDC", 4_000, WEEK, 10).unwrap());
         mark_needs_reconciliation(&pool, "TBTC", "TUSDC", 4_000, "timeout").unwrap();
         let rows = needs_reconciliation_rows(&pool).unwrap();
         assert_eq!(rows.len(), 1);
@@ -542,11 +572,29 @@ mod tests {
     #[ignore]
     fn latest_active_expiry_picks_highest() {
         let pool = test_pool();
-        claim_slot(&pool, "TBTC", "TUSDC", 1_000, 0).unwrap();
-        claim_slot(&pool, "TBTC", "TUSDC", 2_000, 0).unwrap();
+        claim_slot(&pool, "TBTC", "TUSDC", 1_000, WEEK, 0).unwrap();
+        claim_slot(&pool, "TBTC", "TUSDC", 2_000, WEEK, 0).unwrap();
         assert_eq!(
-            latest_active_expiry(&pool, "TBTC", "TUSDC").unwrap(),
+            latest_active_expiry(&pool, "TBTC", "TUSDC", WEEK).unwrap(),
             Some(2_000)
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn latest_active_expiry_is_cadence_scoped() {
+        // A weekly family with a far expiry must NOT suppress the hourly
+        // family's much nearer latest expiry for the same pair.
+        let pool = test_pool();
+        claim_slot(&pool, "TSUI", "TUSDC", 10 * WEEK, WEEK, 0).unwrap();
+        claim_slot(&pool, "TSUI", "TUSDC", 5 * HOUR, HOUR, 0).unwrap();
+        assert_eq!(
+            latest_active_expiry(&pool, "TSUI", "TUSDC", WEEK).unwrap(),
+            Some(10 * WEEK)
+        );
+        assert_eq!(
+            latest_active_expiry(&pool, "TSUI", "TUSDC", HOUR).unwrap(),
+            Some(5 * HOUR)
         );
     }
 }

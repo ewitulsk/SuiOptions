@@ -32,6 +32,30 @@
 //!   source = "static"
 //!   usd    = 50_000.0
 //! ```
+//!
+//! Two cadences for the SAME pair (e.g. a weekly TSUI vault plus an hourly
+//! one) coexist by listing the pair twice with a per-pair `roll_threshold_ms`
+//! and `[pairs.vault_template]` override. The vault's `round_ms` is the
+//! discriminator that keeps the two families/vaults distinct end to end:
+//!
+//! ```toml
+//! [[pairs]]                       # hourly TSUI
+//! underlying          = "TSUI"
+//! settlement          = "TUSDC"
+//! expiry_interval_ms  = 3_600_000 # 1h
+//! roll_threshold_ms   = 1_800_000 # roll the next bucket ~30m before expiry
+//!   [pairs.spot]
+//!   source = "pyth"
+//!   [pairs.grid]
+//!   mode = "z_ladder"
+//!   [pairs.vault_template]        # Path A hourly policy (no contract change)
+//!   round_ms           = 3_600_000
+//!   selling_window_ms  = 1_800_000
+//!   min_expiry_lead_ms = 3_000_000
+//!   max_expiry_lead_ms = 4_500_000
+//!   rfq_duration_ms    = 300_000  # 5m floor (rfq::MIN_DURATION_MS)
+//!   rfq_max_extension_ms = 120_000
+//! ```
 
 use std::path::Path;
 
@@ -170,6 +194,20 @@ pub struct PairConfig {
     /// (kept for test tokens).
     #[serde(default)]
     pub grid: Option<GridConfig>,
+
+    /// Per-pair override of the global `roll_threshold_ms`. Lets a fast
+    /// cadence (e.g. an hourly TSUI family) roll on a tight threshold while
+    /// weekly families on the same instance keep the week-long default.
+    /// Absent ⇒ the global `roll_threshold_ms`.
+    #[serde(default)]
+    pub roll_threshold_ms: Option<u64>,
+
+    /// Per-pair override of the global `[vault_template]`. Lets the same
+    /// scheduler provision an hourly-round vault for this pair while other
+    /// pairs use the weekly global template. Absent ⇒ the global template
+    /// (and the vault pass is disabled for the pair only if both are absent).
+    #[serde(default)]
+    pub vault_template: Option<VaultTemplate>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -537,6 +575,75 @@ interval_pct        = 5.0
                 assert_eq!(*sigma_fallback, Some(0.55));
             }
         }
+    }
+
+    #[test]
+    fn parses_per_pair_roll_threshold_and_vault_template_override() {
+        // Coexistence: an hourly TSUI family on the same instance as weekly
+        // pairs carries its own roll threshold and vault policy.
+        let cfg = parse(
+            r#"
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
+scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler_test"
+roll_threshold_ms = 604800000
+
+[vault_template]
+round_ms = 604800000
+
+[[pairs]]
+underlying          = "TSUI"
+settlement          = "TUSDC"
+expiry_interval_ms  = 3600000
+strikes_below       = 2
+strikes_above       = 2
+interval_pct        = 5.0
+roll_threshold_ms   = 1800000
+
+  [pairs.spot]
+  source = "pyth"
+
+  [pairs.vault_template]
+  round_ms           = 3600000
+  selling_window_ms  = 1800000
+  min_expiry_lead_ms = 3000000
+  max_expiry_lead_ms = 4500000
+"#,
+        );
+        let pair = &cfg.pairs[0];
+        assert_eq!(pair.roll_threshold_ms, Some(1_800_000));
+        let t = pair.vault_template.as_ref().expect("per-pair template");
+        assert_eq!(t.round_ms, 3_600_000);
+        assert_eq!(t.selling_window_ms, 1_800_000);
+        assert_eq!(t.min_expiry_lead_ms, 3_000_000);
+        assert_eq!(t.max_expiry_lead_ms, 4_500_000);
+        // Unspecified fields fall back to the VaultTemplate struct defaults.
+        assert_eq!(t.mgmt_fee_bps_annual, 200);
+        // Global template still parses independently (weekly default).
+        assert_eq!(cfg.vault_template.as_ref().unwrap().round_ms, 604_800_000);
+    }
+
+    #[test]
+    fn pair_without_overrides_leaves_them_none() {
+        let cfg = parse(
+            r#"
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
+scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler_test"
+
+[[pairs]]
+underlying          = "TBTC"
+settlement          = "TUSDC"
+expiry_interval_ms  = 604800000
+strikes_below       = 4
+strikes_above       = 4
+interval_pct        = 5.0
+
+  [pairs.spot]
+  source = "static"
+  usd    = 50000.0
+"#,
+        );
+        assert_eq!(cfg.pairs[0].roll_threshold_ms, None);
+        assert!(cfg.pairs[0].vault_template.is_none());
     }
 
     #[test]
