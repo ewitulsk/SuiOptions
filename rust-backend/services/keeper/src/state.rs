@@ -155,11 +155,31 @@ fn bytes_field(v: &Value, name: &str) -> Result<Vec<u8>> {
 
 /// Parse a `Vault` object's parsed-JSON field map.
 pub fn parse_vault_view(fields: &Value) -> Result<VaultView> {
+    let round = u64_field(fields, "round")?;
+    // Move enums come back from the JSON-RPC parsed content as an *empty*
+    // object on the pinned SDK (sui-sdk 1.71.x / framework-mainnet): the
+    // variant name is dropped, so `phase` deserializes to `{}` — see
+    // `examples/dump_phase.rs`. The variant is therefore only trustworthy
+    // when one is actually present (a string, or an object with a
+    // `variant` key — e.g. an SDK that later fixes this).
     let phase = field(fields, "phase")?;
-    let settling = match phase {
-        Value::String(s) => s == "Settling",
-        Value::Object(m) => m.get("variant").and_then(|v| v.as_str()) == Some("Settling"),
+    let variant = match phase {
+        Value::String(s) => Some(s.as_str()),
+        Value::Object(m) => m.get("variant").and_then(|v| v.as_str()),
         other => return Err(anyhow!("unrecognized phase encoding {other}")),
+    };
+    // When the variant is unreadable (the lossy `{}` form), fall back to
+    // the structural invariant: a vault that has not finalized its first
+    // round (round 0) is in the genesis `Settling` phase — `finalize_round`
+    // is what advances it to round 1 / `Active`, and `select_bucket`
+    // requires `Active`, so no bucket is ever selected while round == 0.
+    // Round ≥ 1 settling always carries a selected bucket, which the
+    // planner detects via `current_bucket` + expiry, so the lossy read is
+    // harmless there. Without this, genesis vaults are mis-read as Active
+    // and the keeper spams `select_bucket` → abort 35 `vault_wrong_phase`.
+    let settling = match variant {
+        Some(v) => v == "Settling",
+        None => round == 0,
     };
     let positions_head = u64_field(fields, "positions_head")?;
     let positions_tail = u64_field(fields, "positions_tail")?;
@@ -168,7 +188,7 @@ pub fn parse_vault_view(fields: &Value) -> Result<VaultView> {
     let config = config.get("fields").unwrap_or(config);
 
     Ok(VaultView {
-        round: u64_field(fields, "round")?,
+        round,
         settling,
         current_bucket: as_opt(field(fields, "current_bucket")?)
             .map(as_id)
@@ -428,6 +448,49 @@ mod tests {
         assert!(v.settling);
         assert_eq!(v.current_bucket, None);
         assert!(v.config.hold_premium_in_settlement);
+    }
+
+    /// The real lossy enum encoding the pinned SDK produces (`phase: {}`,
+    /// variant name dropped). A genesis round (round 0, no bucket) must
+    /// still read as Settling — otherwise the keeper loops on
+    /// `select_bucket` (abort 35 `vault_wrong_phase`). This is the case the
+    /// old `{"variant":…}` fixtures never exercised.
+    #[test]
+    fn lossy_enum_genesis_round_is_settling() {
+        let mut j = vault_json("Active", None);
+        j["phase"] = json!({}); // variant name dropped, as the SDK renders it
+        j["round"] = json!("0");
+        let v = parse_vault_view(&j).unwrap();
+        assert!(v.settling, "genesis (round 0) must read as Settling despite lossy enum");
+        assert_eq!(v.round, 0);
+        assert_eq!(v.current_bucket, None);
+    }
+
+    /// A finalized, active round (round ≥ 1) with the same lossy `{}` enum
+    /// and no bucket yet must read as NOT settling — the legitimate
+    /// select-a-bucket state, distinguished from genesis only by the round.
+    #[test]
+    fn lossy_enum_active_round_without_bucket_is_not_settling() {
+        let mut j = vault_json("Active", None);
+        j["phase"] = json!({});
+        j["round"] = json!("4");
+        let v = parse_vault_view(&j).unwrap();
+        assert!(!v.settling);
+        assert_eq!(v.round, 4);
+    }
+
+    /// When a variant name IS present it wins over the round-0 fallback —
+    /// forward-compatible with an SDK that fixes the enum encoding.
+    #[test]
+    fn readable_variant_overrides_round_fallback() {
+        let v = parse_vault_view(&vault_json("Settling", Some(BUCKET))).unwrap();
+        assert!(v.settling);
+        // Active at round 0 can't happen on-chain, but a readable variant
+        // must still take precedence over the structural fallback.
+        let mut j = vault_json("Active", None);
+        j["round"] = json!("0");
+        let v = parse_vault_view(&j).unwrap();
+        assert!(!v.settling);
     }
 
     #[test]
