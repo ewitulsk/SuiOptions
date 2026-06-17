@@ -107,6 +107,10 @@ async fn tick_once(
     pool: &Arc<DbPool>,
 ) -> Result<usize> {
     let vaults = indexer.vaults().await.context("listing vaults")?;
+    // Skip paused (decommissioned) vaults: a hard-cutover vault shouldn't get
+    // forward-looking APY predictions. Filtering here means neither the feed
+    // collection nor the compute pass touches it.
+    let vaults: Vec<_> = vaults.into_iter().filter(|v| !v.deposits_paused).collect();
     let mut rows: Vec<NewPrediction> = Vec::new();
 
     // Resolve realized vol once for the whole tick: collect the distinct

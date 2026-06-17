@@ -9,7 +9,7 @@
 // are served from the vault's on-chain VaultConfig via api-service — no mocks.
 // Fields render "—" until the config-carrying events are indexed for a vault.
 
-import { useState, useEffect, type CSSProperties } from "react";
+import { useState, useEffect, useMemo, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useSuiClient } from "@mysten/dapp-kit";
@@ -113,6 +113,13 @@ const SEARCH_QUERY_KEY = "tideline.vaultSearch";
 
 export function VaultScreen() {
   const vaults = useVaults();
+  // Hide paused (decommissioned) vaults from the public listing. The admin
+  // page intentionally still sees them (to unpause), so filter here, not in
+  // the shared `useVaults` hook.
+  const visible = useMemo(
+    () => (vaults.data ?? []).filter((v) => !v.deposits_paused),
+    [vaults.data],
+  );
   // Persist the open vault across nav-away/back (the screen unmounts on route
   // change), so returning to Vaults reopens the same detail.
   const [selected, setSelectedState] = useState<string | null>(
@@ -133,7 +140,7 @@ export function VaultScreen() {
             Couldn't load vaults: {vaults.error.message}
           </div>
         )}
-        {vaults.data && vaults.data.length === 0 && (
+        {vaults.data && visible.length === 0 && (
           <div className="dash-empty">
             <div className="dash-empty__title">no vaults yet.</div>
             <div className="dash-empty__sub">
@@ -148,9 +155,8 @@ export function VaultScreen() {
         {selected ? (
           <VaultDetail vaultId={selected} onBack={() => setSelected(null)} />
         ) : (
-          vaults.data &&
-          vaults.data.length > 0 && (
-            <VaultBrowser vaults={vaults.data} onSelect={setSelected} />
+          visible.length > 0 && (
+            <VaultBrowser vaults={visible} onSelect={setSelected} />
           )
         )}
       </div>
