@@ -30,5 +30,3 @@ name     = "Test USDC"
 logo_uri = "https://assets.coingecko.com/coins/images/6319/small/usdc.png"
 [seed_meta.TWAL]
 name = "Test Walrus"
-[seed_meta.TDEEP]
-name = "Test DeepBook"

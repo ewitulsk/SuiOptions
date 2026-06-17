@@ -53,21 +53,6 @@ interval_pct        = 5.0
   max_publish_lag_ms = 30_000   # decline a roll on prices > 30s stale
   max_conf_bps       = 100      # decline a roll if conf/price > 1%
 
-# Synthetic test tokens without a real-world Pyth feed (TDEEP, TWAL) keep
-# using the static spot source — `pythFeedId` is absent for them in
-# deployments.json so the Pyth path would fail at boot.
-[[pairs]]
-underlying          = "TDEEP"
-settlement          = "TUSDC"
-expiry_interval_ms  = 604_800_000
-strikes_below       = 2
-strikes_above       = 2
-interval_pct        = 10.0
-
-  [pairs.spot]
-  source = "static"
-  usd    = 0.15
-
 # Grid v2 (vault-implementation-guide doc 05 §4.2): add a `[pairs.grid]`
 # table to place strikes at standard-deviation multiples instead of fixed
 # percentages, so the covered-call vault's 0.1-delta strike (z = 1.30) is
@@ -89,7 +74,7 @@ interval_pct        = 10.0
 # Presence of this table switches on the hourly vault-ensure pass: the
 # scheduler creates one covered-call vault per configured pair with a Pyth
 # feed on both legs (publishing a fresh 9-decimal share coin per vault).
-# Static-spot pairs (e.g. TDEEP here) have no feed and are skipped. All fields
+# Static-spot pairs have no feed and are skipped. All fields
 # fall back to the contract's reference config; an empty `[vault_template]` is
 # enough to enable creation. Comment this table out to disable vault creation.
 [vault_template]
