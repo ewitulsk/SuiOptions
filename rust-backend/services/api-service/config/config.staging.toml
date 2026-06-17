@@ -20,9 +20,10 @@ allowed_origins  = ["*"]
 # token-info public API over the compose-internal network.
 token_info_url   = "http://token-info:9005"
 
-# derived-metric-worker read API: predicted-APY series composed into
-# /vaults/:id/apy. Omit to serve realized-only.
-derived_metrics_url = "http://derived-metric-worker:9014"
+# Predicted-APY read API, composed into /vaults/:id/apy. Now served by
+# price-charting (the derived-metric-worker was folded into it); the
+# /vault-apy/:id shape is unchanged. Omit to serve realized-only.
+derived_metrics_url = "http://price-charting:9011"
 
 # Sui fullnode JSON-RPC for the live-vault read in GET /vaults/:id (staging is
 # testnet). A read failure degrades to omitting live round state, never a 5xx.

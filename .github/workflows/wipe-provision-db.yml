@@ -27,7 +27,6 @@ on:
           - indexer
           - scheduler
           - token-info
-          - derived-metrics
       environment:
         description: 'Target environment'
         required: true
@@ -79,7 +78,6 @@ jobs:
             indexer)         echo "compose_svc=indexer"               >> "$GITHUB_OUTPUT" ;;
             scheduler)       echo "compose_svc=option-scheduler"      >> "$GITHUB_OUTPUT" ;;
             token-info)      echo "compose_svc=token-info"            >> "$GITHUB_OUTPUT" ;;
-            derived-metrics) echo "compose_svc=derived-metric-worker" >> "$GITHUB_OUTPUT" ;;
             *)
               echo "::error::Invalid service '$SERVICE'"
               exit 1

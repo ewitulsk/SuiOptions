@@ -5,6 +5,9 @@
 //! - `GET /bars?pool_id&interval&from_ms&to_ms` — carry-forward OHLC plus
 //!   the order-book midpoint line on the same grid, capped at 1000 bars
 //!   (the range is clamped, newest-first priority).
+//! - `GET /vault-apy/:vault_id` — latest predicted-APY snapshot for a vault
+//!   (folded in from derived-metric-worker); api-service composes it with the
+//!   indexer's realized series.
 //! - `GET /ws` — subscribe `{"type":"subscribe","pool_id":…,"interval":…}`;
 //!   the server pushes `{"type":"bar",…}` with the updated current bar on
 //!   every fill, and `{"type":"mid",…}` with the current bucket's midpoint
@@ -16,7 +19,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -40,6 +43,7 @@ pub async fn serve(addr: SocketAddr, state: Arc<AppState>, allowed_origins: &[St
         .route("/pools", get(list_pools))
         .route("/bars", get(get_bars))
         .route("/price-at", get(get_price_at))
+        .route("/vault-apy/:vault_id", get(get_vault_apy))
         .route("/ws", get(ws_upgrade))
         .with_state(state)
         .merge(observability::middleware::metrics_route())
@@ -222,6 +226,52 @@ async fn get_price_at(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(db_err)?;
     Ok(Json(PriceAtResponse { pool_id: q.pool_id, ms: q.ms, mid, close }))
+}
+
+// ---- /vault-apy/:vault_id --------------------------------------------------
+
+#[derive(Serialize)]
+struct PredictedApyPoint {
+    t_ms: i64,
+    apy: f64,
+    /// `current` | `forecast`.
+    kind: String,
+    horizon: i32,
+    confidence: f64,
+}
+
+/// Latest predicted-APY snapshot for one vault. Byte-compatible with the
+/// retired derived-metric-worker's read API (`{ vault_id, predicted: [...] }`)
+/// so api-service composes it into `/vaults/:id/apy` unchanged. The realized
+/// series is left to the indexer (api-service reads it there); the persisted
+/// realized history lives in `vault_realized_apy` for direct querying.
+#[derive(Serialize)]
+struct VaultApyResponse {
+    vault_id: String,
+    predicted: Vec<PredictedApyPoint>,
+}
+
+async fn get_vault_apy(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<String>,
+) -> Result<Json<VaultApyResponse>, StatusCode> {
+    let repo = state.repo.clone();
+    let vid = vault_id.clone();
+    let rows = tokio::task::spawn_blocking(move || repo.latest_predicted_apy(&vid))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(db_err)?;
+    let predicted = rows
+        .into_iter()
+        .map(|r| PredictedApyPoint {
+            t_ms: r.t_ms,
+            apy: r.apy,
+            kind: r.kind,
+            horizon: r.horizon,
+            confidence: r.confidence,
+        })
+        .collect();
+    Ok(Json(VaultApyResponse { vault_id, predicted }))
 }
 
 fn db_err(e: anyhow::Error) -> StatusCode {

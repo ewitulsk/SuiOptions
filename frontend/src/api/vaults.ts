@@ -165,8 +165,8 @@ export type VaultApyPoint = {
 
 /**
  * `GET /vaults/:id/apy` — realized (annualized pps growth per finalized round,
- * from the indexer) plus predicted (forward premium-yield, from
- * derived-metric-worker). `predicted` is empty when the worker isn't deployed.
+ * from the indexer) plus predicted (forward premium-yield, from the
+ * price-charting apy sampler). `predicted` is empty when that isn't deployed.
  * Mirrors `api-service::handlers::vaults::VaultApyResponse`.
  */
 export type VaultApySeries = {

@@ -3,7 +3,7 @@
 // Two series share the panel (TradingView Lightweight Charts v5, themed from
 // CSS vars, like `ChartPanel`): a SOLID line for realized APY (annualized pps
 // growth per finalized round, from the indexer) and a DASHED line for
-// predicted APY (forward premium-yield, from derived-metric-worker). The
+// predicted APY (forward premium-yield, from price-charting's apy sampler). The
 // dashed line is anchored to the last realized point so it visually continues
 // the curve into the current/future rounds.
 

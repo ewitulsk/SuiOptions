@@ -8,8 +8,8 @@ use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, PooledConnection};
 use diesel::sql_types::{BigInt, Double, Text, Timestamptz};
 
-use super::models::{CursorRow, MidRow, TradeRow};
-use super::schema::{pool_mids, pool_trades, watch_cursor};
+use super::models::{CursorRow, MidRow, PredictedApyRow, RealizedApyRow, TradeRow};
+use super::schema::{pool_mids, pool_trades, vault_predicted_apy, vault_realized_apy, watch_cursor};
 use super::DbPool;
 
 #[derive(Clone)]
@@ -43,6 +43,22 @@ pub struct RawMid {
     pub bucket: DateTime<Utc>,
     #[diesel(sql_type = Double)]
     pub mid: f64,
+}
+
+/// Latest predicted-APY point per (kind, horizon) for one vault — the snapshot
+/// the read API serves (api-service composes it with the realized series).
+#[derive(QueryableByName, Debug, Clone)]
+pub struct LatestPredictedApy {
+    #[diesel(sql_type = Text)]
+    pub kind: String,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    pub horizon: i32,
+    #[diesel(sql_type = BigInt)]
+    pub t_ms: i64,
+    #[diesel(sql_type = Double)]
+    pub apy: f64,
+    #[diesel(sql_type = Double)]
+    pub confidence: f64,
 }
 
 #[derive(QueryableByName, Debug, Clone)]
@@ -263,6 +279,54 @@ impl Repo {
                 .execute(&mut conn)
                 .context("evicting stale pool mids")?;
         Ok((stale.len(), deleted + deleted_mids))
+    }
+
+    // ── vault APY (SO-folding derived-metric-worker in) ───────────────────
+
+    /// Append a batch of predicted-APY points. The UNIQUE (vault, kind,
+    /// horizon, time) key makes a re-run within the same tick idempotent;
+    /// distinct ticks always insert new history. Returns rows inserted.
+    pub fn insert_predicted_apy(&self, rows: &[PredictedApyRow]) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.conn()?;
+        diesel::insert_into(vault_predicted_apy::table)
+            .values(rows)
+            .on_conflict_do_nothing()
+            .execute(&mut conn)
+            .context("inserting vault_predicted_apy")
+    }
+
+    /// Upsert realized-APY points keyed by (vault, round). A finalized round's
+    /// realized APY never changes, so conflicts are skipped. Returns rows
+    /// inserted (new finalized rounds since the last tick).
+    pub fn insert_realized_apy(&self, rows: &[RealizedApyRow]) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.conn()?;
+        diesel::insert_into(vault_realized_apy::table)
+            .values(rows)
+            .on_conflict_do_nothing()
+            .execute(&mut conn)
+            .context("inserting vault_realized_apy")
+    }
+
+    /// Latest predicted point per (kind, horizon) for one vault, ordered
+    /// (kind, horizon) — the snapshot the read API serves.
+    pub fn latest_predicted_apy(&self, vault_id: &str) -> Result<Vec<LatestPredictedApy>> {
+        let mut conn = self.conn()?;
+        diesel::sql_query(
+            "SELECT DISTINCT ON (kind, horizon) \
+                    kind, horizon, t_ms, apy, confidence \
+             FROM vault_predicted_apy \
+             WHERE vault_id = $1 \
+             ORDER BY kind, horizon, time DESC",
+        )
+        .bind::<Text, _>(vault_id)
+        .load::<LatestPredictedApy>(&mut conn)
+        .context("querying latest predicted apy")
     }
 }
 

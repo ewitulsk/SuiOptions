@@ -11,6 +11,7 @@ db_pool_size  = 4
 
 api_service_url = "http://127.0.0.1:9003"
 token_info_url  = "http://127.0.0.1:9005"
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
 
 discovery_interval_secs = 15
 poll_interval_ms        = 2000
@@ -18,3 +19,18 @@ mid_sample_interval_secs = 10
 ttl_hours               = 168
 
 allowed_origins = ["*"]
+
+# Vault-APY sampler (folded in from derived-metric-worker).
+apy_tick_secs = 120
+
+# BETA hermes — testnet feed ids are the beta set; stable hermes 404s.
+[pyth]
+hermes_url      = "https://hermes-beta.pyth.network"
+benchmarks_url  = "https://benchmarks.pyth.network"
+vol_window_days = 30
+max_publish_lag_ms = 30_000
+max_conf_bps       = 100
+
+[model]
+forecast_horizon = 4
+delta_target     = 0.10

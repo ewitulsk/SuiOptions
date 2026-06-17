@@ -355,7 +355,7 @@ impl From<VaultRoundRow> for VaultRoundGql {
 /// One realized-APY point: the annualized pps growth from the previous
 /// finalized round to `round`, landing at that round's finalize time. Computed
 /// from `vault_rounds` (chain data) — the forward-looking *predicted* APY is a
-/// separate series served by derived-metric-worker.
+/// separate series served by the price-charting apy sampler.
 #[derive(SimpleObject)]
 pub struct VaultApyPointGql {
     pub round: String,

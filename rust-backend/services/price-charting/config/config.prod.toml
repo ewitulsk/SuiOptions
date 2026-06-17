@@ -11,6 +11,7 @@ db_pool_size  = 4
 
 api_service_url = "http://api-service:9003"
 token_info_url  = "http://token-info:9005"
+indexer_graphql_url = "http://indexer:9002/graphql"
 
 discovery_interval_secs = 15
 poll_interval_ms        = 2000
@@ -18,3 +19,23 @@ mid_sample_interval_secs = 10
 ttl_hours               = 168
 
 allowed_origins = ["*"]
+
+# Vault-APY sampler (folded in from derived-metric-worker). Recomputes
+# predicted APY (Pyth spot + vol + Black–Scholes) and mirrors the indexer's
+# realized series into Timescale every tick.
+apy_tick_secs = 120
+
+# BETA hermes — prod is a distinct testnet; feed ids are the beta set, served
+# only by hermes-beta (stable hermes 404s). Benchmarks is stable-only.
+[pyth]
+hermes_url      = "https://hermes-beta.pyth.network"
+benchmarks_url  = "https://benchmarks.pyth.network"
+vol_window_days = 30
+max_publish_lag_ms = 30_000
+max_conf_bps       = 100
+
+# Fees, strike band, and round cadence are NOT here — they're the vault's
+# on-chain VaultConfig, read per-vault from the served config.
+[model]
+forecast_horizon = 4
+delta_target     = 0.10

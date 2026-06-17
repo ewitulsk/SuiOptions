@@ -13,10 +13,11 @@ use clap::Parser;
 use tracing::info;
 
 use api_service_client::ApiServiceClient;
+use indexer_graphql::IndexerClient;
 use price_charting::config::Config;
 use price_charting::db::{establish_pool, repo::Repo, run_migrations};
 use price_charting::state::AppState;
-use price_charting::{mid_sampler, router, watcher, Cli};
+use price_charting::{apy_sampler, mid_sampler, router, watcher, Cli};
 use sui_sdk::SuiClientBuilder;
 use token_info_client::TokenInfoClient;
 
@@ -70,6 +71,21 @@ async fn main() -> Result<()> {
         sui,
         deepbook_package: current_package,
         sample_interval: Duration::from_secs(cfg.mid_sample_interval_secs.max(2)),
+    });
+
+    // Vault-APY sampler (folded in from derived-metric-worker). Reuses the
+    // token catalog snapshot already fetched above; reads vaults/rounds/RFQs
+    // and the realized series from the indexer, Pyth for spot + vol.
+    let http = reqwest::Client::new();
+    apy_sampler::spawn(apy_sampler::ApySamplerParams {
+        state: Arc::clone(&state),
+        indexer: IndexerClient::new(cfg.indexer_graphql_url.clone()),
+        benchmark_vol: pyth_client::BenchmarkVol::new(http.clone(), cfg.pyth.benchmarks_url.clone()),
+        snapshot,
+        http,
+        tick_interval: Duration::from_secs(cfg.apy_tick_secs.max(1)),
+        pyth: cfg.pyth.clone(),
+        model: cfg.model.clone(),
     });
     info!(
         environment = %cfg.environment,

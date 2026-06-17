@@ -3,9 +3,9 @@
 //! [`realized_sigma_from_benchmarks`](crate::sigma::realized_sigma_from_benchmarks)
 //! fetches one daily close per HTTP request, single feed, with no caching and
 //! no inter-request pacing. A caller that recomputes vol on a tick (the
-//! derived-metric-worker, every `tick_secs`) therefore re-fetches the *same*
-//! historical closes every tick, once per vault — a steady 429 storm against
-//! a public endpoint.
+//! price-charting apy sampler, every `apy_tick_secs`) therefore re-fetches the
+//! *same* historical closes every tick, once per vault — a steady 429 storm
+//! against a public endpoint.
 //!
 //! [`BenchmarkVol`] fixes that with the three things the endpoint deserves:
 //!

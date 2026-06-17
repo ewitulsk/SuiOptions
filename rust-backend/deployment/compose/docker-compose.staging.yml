@@ -125,7 +125,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       CHART_DATABASE_URL: ${CHART_DATABASE_URL}
       RUST_LOG: info,price_charting=debug
-    depends_on: [token-info, api-service]
+    depends_on: [token-info, api-service, indexer]
     restart: unless-stopped
     networks: [net]
 
@@ -153,22 +153,6 @@ services:
       RUST_LOG: info,balance_monitor=debug
     volumes:
       - /opt/options/staging/secrets:/run/secrets:ro
-    restart: unless-stopped
-    networks: [net]
-
-  # Predicted-APY worker (vault analytics). Owns its own Postgres DB
-  # (derived_metrics_staging); recomputes per-vault forecasts on a timer from
-  # Pyth spot+vol. Scraped by Prometheus on 9013; serves its read API on 9014
-  # (api-service composes it into /vaults/:id/apy). Not proxied by nginx.
-  derived-metric-worker:
-    image: ${ECR}/options/derived-metric-worker:${DERIVED_METRIC_WORKER_TAG}
-    environment:
-      APP_ENV: staging
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_HOST: ${DB_HOST}
-      RUST_LOG: info,derived_metric_worker=debug
-    depends_on: [indexer, token-info]
     restart: unless-stopped
     networks: [net]
 

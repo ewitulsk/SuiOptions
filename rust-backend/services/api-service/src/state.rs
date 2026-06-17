@@ -12,8 +12,9 @@ pub struct AppState {
     pub catalog: TokenCatalog,
     /// JIT client for the indexer's GraphQL + progress API.
     pub indexer: IndexerClient,
-    /// derived-metric-worker read-API base URL (predicted-APY series). `None`
-    /// on envs without the worker — the apy endpoint serves realized only.
+    /// Predicted-APY read-API base URL (now price-charting's `/vault-apy/:id`,
+    /// after the derived-metric-worker was folded into it). `None` on envs that
+    /// don't run it — the apy endpoint then serves realized only.
     pub derived_metrics_url: Option<String>,
     /// Sui fullnode JSON-RPC URL for the live-vault `sui_getObject` read.
     pub sui_rpc_url: String,

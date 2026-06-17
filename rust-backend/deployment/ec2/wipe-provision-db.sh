@@ -57,9 +57,8 @@ case "$SERVICE" in
   indexer)         DB_PREFIX=indexer ;;
   scheduler)       DB_PREFIX=scheduler ;;
   token-info)      DB_PREFIX=token_info ;;
-  derived-metrics) DB_PREFIX=derived_metrics ;;
   *)
-    echo "FATAL: unknown service '$SERVICE' (expected indexer|scheduler|token-info|derived-metrics)"
+    echo "FATAL: unknown service '$SERVICE' (expected indexer|scheduler|token-info)"
     exit 1
     ;;
 esac

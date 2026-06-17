@@ -254,8 +254,8 @@ pub struct VaultApyResponse {
     pub vault_id: String,
     /// Annualized pps growth per finalized round (chain data, via the indexer).
     pub realized: Vec<ApyPointDto>,
-    /// Forward-looking premium-yield APY (derived-metric-worker). Empty when
-    /// the worker isn't configured or has no snapshot yet.
+    /// Forward-looking premium-yield APY (price-charting's apy sampler). Empty
+    /// when it isn't configured or has no snapshot yet.
     pub predicted: Vec<ApyPointDto>,
 }
 
