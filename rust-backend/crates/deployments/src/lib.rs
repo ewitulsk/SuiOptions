@@ -463,7 +463,7 @@ mod tests {
 
         let tokens = testnet.test_tokens().expect("testTokens populated");
         let _ = tokens.package().unwrap();
-        for expected in ["TBTC", "TDEEP", "TUSDC", "TWAL"] {
+        for expected in ["TBTC", "TUSDC", "TWAL"] {
             let t = tokens.get(expected).unwrap();
             let (_pkg, module) = t.module_path().unwrap();
             assert_eq!(module, expected.to_ascii_lowercase());
@@ -473,6 +473,11 @@ mod tests {
             assert_eq!(spec.coin_type, t.coin_type);
             assert_eq!(spec.decimals, t.decimals);
         }
+        // TDEEP is a faucet-only token: its DEEP/USD Pyth feed is dead on
+        // hermes-beta, so it's de-listed from token_info (no market/roll) while
+        // the test coin stays in testTokens for existing balances.
+        assert!(tokens.get("TDEEP").is_ok());
+        assert!(testnet.token_spec("TDEEP").is_err());
         // DeepBook ids ride along for testnet-backed envs (SO-151).
         let db = testnet
             .package_info
@@ -485,8 +490,8 @@ mod tests {
         assert_eq!(db.pool_creation_fee_units().unwrap(), 500_000_000);
 
         // Pyth feed ids land on the catalog side, not on TokenInfo.
-        // All four staging tokens carry feeds since SO-139/SO-141.
-        for sym in ["TBTC", "TUSDC", "TWAL", "TDEEP"] {
+        // The listed staging tokens carry feeds since SO-139/SO-141.
+        for sym in ["TBTC", "TUSDC", "TWAL"] {
             assert!(testnet.token_spec(sym).unwrap().pyth_feed().is_ok());
         }
         // Case-insensitive symbol lookup.

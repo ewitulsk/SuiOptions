@@ -11,7 +11,7 @@ quoting_url        = "ws://quoting:9002/"
 signing_scheme     = "ed25519"
 
 # Derive mode: `underlying_symbols` left unset, so the bot makes markets in
-# every enabled token-info token with a Pyth feed (currently TBTC, TDEEP, TWAL)
+# every enabled token-info token with a Pyth feed (currently TBTC, TWAL)
 # and a watcher restarts the bot to pick up newly-listed underlyings. Pin an
 # explicit `underlying_symbols = [...]` list to opt out of auto-pickup, or add
 # `underlying_exclude = [...]` to skip specific tickers.

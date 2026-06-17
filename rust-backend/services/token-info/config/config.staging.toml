@@ -26,9 +26,6 @@ logo_uri = "https://assets.coingecko.com/coins/images/6319/small/usdc.png"
 [seed_meta.TWAL]
 name     = "Test Walrus"
 logo_uri = "https://assets.coingecko.com/coins/images/54914/standard/Walrus_Token_Full_Color_200x200.png?1772722407"
-[seed_meta.TDEEP]
-name     = "Test DeepBook"
-logo_uri = "https://assets.coingecko.com/coins/images/50648/standard/DEEP_Logo_256x256_px_%282%29.png?1728612340"
 [seed_meta.TSUI]
 name     = "Test SUI"
 logo_uri = "https://assets.coingecko.com/coins/images/26375/small/sui_asset.jpeg"
