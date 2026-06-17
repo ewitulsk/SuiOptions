@@ -427,8 +427,18 @@ async fn tick(
             }
             Err(e) => {
                 // A lost race (someone outbid between read and submit)
-                // aborts with rfq_bid_too_low — replanned next poll.
-                tracing::warn!(rfq = %rfq.rfq_id.to_hex(), premium, error = %format!("{e:#}"), "bid failed");
+                // aborts with rfq_bid_too_low — replanned next poll, no alert.
+                if crate::is_benign_bid_loss(&e) {
+                    tracing::warn!(rfq = %rfq.rfq_id.to_hex(), premium, error = %format!("{e:#}"), "bid failed (outbid)");
+                } else {
+                    tracing::error!(
+                        alert_id = "tx-failed-mm-bot-rfq",
+                        rfq = %rfq.rfq_id.to_hex(),
+                        premium,
+                        error = %format!("{e:#}"),
+                        "rfq bid tx failed"
+                    );
+                }
             }
         }
     }

@@ -14,6 +14,59 @@ pub mod onchain_rfq;
 pub mod onchain_swap;
 pub mod pricing;
 
+/// Move abort code emitted when a bid is outbid between read and submit
+/// (`errors::rfq_bid_too_low`, shared by `rfq` and `swap_auction`). This is
+/// the expected lost-race outcome, so it stays a `warn!` while every other
+/// bid failure fires the `tx-failed-*` alert.
+const RFQ_BID_TOO_LOW: u64 = 31;
+
+/// Pull the abort code out of a revert message like
+/// `… MoveAbort(MoveLocation { … }, 31) in command 2` (mirrors the keeper's
+/// triage parser: the location debug-print nests braces, so scan every
+/// `}, ` for the one followed by `<digits>)`).
+fn extract_abort_code(msg: &str) -> Option<u64> {
+    let after = &msg[msg.find("MoveAbort(")? + "MoveAbort(".len()..];
+    for (i, _) in after.match_indices("}, ") {
+        let rest = &after[i + 3..];
+        if let Some(end) = rest.find(')') {
+            if let Ok(code) = rest[..end].trim().parse() {
+                return Some(code);
+            }
+        }
+    }
+    None
+}
+
+/// True when a bid failed only because someone outbid us between read and
+/// submit — the benign lost-race path that must not page.
+pub(crate) fn is_benign_bid_loss(err: &anyhow::Error) -> bool {
+    extract_abort_code(&format!("{err:#}")) == Some(RFQ_BID_TOO_LOW)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn revert(code: u64) -> anyhow::Error {
+        anyhow::anyhow!(
+            "rfq::bid reverted: MoveAbort(MoveLocation {{ module: ModuleId {{ \
+             address: abc, name: Identifier(\"rfq\") }}, function: 9, instruction: 12, \
+             function_name: Some(\"bid\") }}, {code}) in command 3"
+        )
+    }
+
+    #[test]
+    fn bid_too_low_is_benign() {
+        assert!(is_benign_bid_loss(&revert(RFQ_BID_TOO_LOW)));
+    }
+
+    #[test]
+    fn other_aborts_are_not_benign() {
+        assert!(!is_benign_bid_loss(&revert(54)));
+        assert!(!is_benign_bid_loss(&anyhow::anyhow!("insufficient gas")));
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "mm-bot", about = "Test market-maker bot for the options protocol")]
 pub struct Cli {

@@ -125,10 +125,22 @@ async fn main() -> Result<()> {
                         debug!(vault = %id, error = %format!("{e:#}"), "lost a race; replanning next tick");
                     }
                     ErrorClass::Retry => {
-                        warn!(vault = %id, error = %format!("{e:#}"), "transient failure; retrying next tick");
+                        error!(
+                            alert_id = "tx-failed-keeper",
+                            vault = %id,
+                            class = "retry",
+                            error = %format!("{e:#}"),
+                            "transient tx failure; retrying next tick"
+                        );
                     }
                     ErrorClass::Fatal => {
-                        error!(vault = %id, error = %format!("{e:#}"), "FATAL: halting this vault until restart");
+                        error!(
+                            alert_id = "tx-failed-keeper",
+                            vault = %id,
+                            class = "fatal",
+                            error = %format!("{e:#}"),
+                            "FATAL: halting this vault until restart"
+                        );
                         halted.insert(*id);
                     }
                 },
