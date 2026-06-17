@@ -115,7 +115,7 @@ export function VaultApyChart({ realized, predicted, loading }: Props) {
         style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
       >
         <span>
-          <span className="panel__head-dot" />
+          
           APY over time
         </span>
         <span className="vault-chart__legend">

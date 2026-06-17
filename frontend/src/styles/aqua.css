@@ -342,6 +342,12 @@
   text-wrap: pretty;
 }
 [data-theme="aqua"] .question b { font-style: normal; font-weight: 500; color: var(--aqua-sui-deep); }
+[data-theme="aqua"] .question__eyebrow {
+  display: block;
+  font-family: "JetBrains Mono", monospace; font-size: 11px; font-weight: 700;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--aqua-sui-deep);
+  margin-bottom: 10px;
+}
 [data-theme="aqua"] .question .qsub {
   display: block; font-family: "Sora", sans-serif;
   font-size: 13px; font-style: normal; font-weight: 400;
@@ -423,81 +429,172 @@
 
 /* ---------- Buy screen 3-column market layout (SO-170) ---------- */
 /* Wider wrap so the chart in the middle column has room to breathe. */
-[data-theme="aqua"] .app__wrap--buy { max-width: 1420px; }
+[data-theme="aqua"] .app__wrap--buy { max-width: 1560px; }
+/* Tighten the buy page's vertical rhythm so the quote, premium, and buy button
+   stay above the fold without scrolling (SO-225). */
+[data-theme="aqua"] .app__wrap--buy .question { font-size: 26px; margin: 16px auto 18px; max-width: 960px; }
+/* Run the sub-line inline with the headline to use the horizontal space and
+   trim the header's vertical footprint. */
+[data-theme="aqua"] .app__wrap--buy .question .qsub {
+  display: inline; margin: 0 0 0 12px; font-size: 16px;
+  vertical-align: baseline;
+}
+[data-theme="aqua"] .app__wrap--buy .buy-toggle { margin-bottom: 18px; }
 
 /* DeepBook / Market-maker mode toggle — segmented control in the buy header. */
+/* Segmented selector — a blue pill slides between the two purchase paths,
+   reusing the header nav's measured-offset animation (SO-225). */
 [data-theme="aqua"] .buy-toggle {
-  display: flex; width: fit-content; gap: 2px; margin: 0 auto 24px; padding: 4px;
+  position: relative; display: flex; width: fit-content; gap: 0;
+  margin: 0 auto 24px; padding: 4px;
   background: var(--aqua-glass-2);
-  border: 1px solid var(--aqua-line); border-radius: 14px;
+  border: 1px solid var(--aqua-line); border-radius: 12px;
+}
+[data-theme="aqua"] .buy-toggle__pill {
+  position: absolute; top: 4px; bottom: 4px; left: 0;
+  border-radius: 9px; background: var(--aqua-sui, #4DA2FF);
+  box-shadow: 0 2px 10px rgba(77,162,255,0.35);
+  pointer-events: none;
+  transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    width 280ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease;
 }
 [data-theme="aqua"] .buy-toggle__btn {
+  position: relative; z-index: 1;
   border: none; background: transparent; cursor: pointer;
-  padding: 9px 22px; border-radius: 10px;
+  padding: 9px 22px; border-radius: 9px; white-space: nowrap;
   font-family: "Sora", system-ui, sans-serif; font-size: 13px; font-weight: 600;
-  color: var(--aqua-ink-3);
-  transition: background 180ms ease, color 180ms ease;
+  color: var(--aqua-ink-2);
+  transition: color 160ms ease;
 }
-[data-theme="aqua"] .buy-toggle__btn.is-active {
-  background: var(--aqua-surface, rgba(255,255,255,0.7));
-  color: var(--aqua-sui-deep);
-  box-shadow: 0 2px 8px rgba(var(--aqua-shadow-rgb),0.10);
+[data-theme="aqua"] .buy-toggle__btn.is-active { color: #fff; }
+[data-theme="aqua"] .buy-toggle__btn:not(.is-active):hover { color: var(--aqua-ink-1); }
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="aqua"] .buy-toggle__pill { transition: opacity 160ms ease; }
 }
 
 [data-theme="aqua"] .buy-grid {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr) 300px;
-  gap: 18px;
+  grid-template-columns: minmax(384px, 420px) minmax(0, 1fr) 280px;
+  gap: 12px;
   align-items: start;
   margin-bottom: 28px;
 }
 [data-theme="aqua"] .buy-grid__center { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-[data-theme="aqua"] .buy-grid__trade { min-width: 0; }
-/* Sticky rails so the strike list and book stay in view while the center
-   column scrolls. */
+/* Sticky rails so the chain and ticket stay in view while the center scrolls. */
 [data-theme="aqua"] .buy-grid__buckets,
-[data-theme="aqua"] .buy-grid__book { position: sticky; top: 88px; }
+[data-theme="aqua"] .buy-grid__ticket { position: sticky; top: 88px; }
 
-/* Vertical bucket list — replaces the tile carousel on /buy. */
-[data-theme="aqua"] .bucketlist { display: flex; flex-direction: column; gap: 6px; }
-[data-theme="aqua"] .bucketlist__label {
-  font-family: "JetBrains Mono", monospace; font-size: 10px; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--aqua-ink-4); padding: 0 4px 4px;
+/* Deepbook buy layout (SO-225): two columns — strikes + detail card on the
+   left, chart + horizontal trade ticket on the right. The chart fills the
+   wide right column where the narrow ticket rail used to sit. */
+[data-theme="aqua"] .buy-grid--deepbook {
+  grid-template-columns: minmax(384px, 420px) minmax(0, 1fr);
 }
-[data-theme="aqua"] .bucketrow {
-  position: relative; display: flex; align-items: baseline; justify-content: space-between;
-  gap: 10px; padding: 12px 14px 12px 18px;
-  background: var(--aqua-glass-2);
+/* Left column now stacks the chain over the detail card, so it scrolls with
+   the page rather than pinning. */
+[data-theme="aqua"] .buy-grid--deepbook .buy-grid__buckets {
+  position: static;
+  display: flex; flex-direction: column; gap: 12px;
+}
+
+/* ---- Options-chain table (SO-225): dense per-strike Bid/Mark/Ask/IV/Δ ---- */
+[data-theme="aqua"] .chain {
+  display: flex; flex-direction: column;
+  background: var(--aqua-glass-3);
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-  border: 1px solid var(--aqua-line); border-radius: 12px;
-  cursor: pointer; text-align: left;
-  transition: transform 180ms cubic-bezier(0.16,1,0.3,1), border-color 180ms ease, box-shadow 180ms ease;
+  border: 1px solid var(--aqua-line); border-radius: 16px;
+  padding: 10px 8px;
+  box-shadow: 0 4px 16px rgba(var(--aqua-shadow-rgb),0.04);
 }
-[data-theme="aqua"] .bucketrow::before {
-  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
-  border-radius: 12px 0 0 12px;
-  background: var(--tier-ink, var(--aqua-t3));
+[data-theme="aqua"] .chain__head,
+[data-theme="aqua"] .chain__row {
+  display: grid;
+  grid-template-columns: minmax(54px, 1.1fr) repeat(5, minmax(38px, 1fr));
+  gap: 4px; align-items: center; text-align: right;
 }
-[data-theme="aqua"] .bucketrow:hover {
-  transform: translateX(2px); border-color: var(--tier-ink, var(--aqua-t3));
+[data-theme="aqua"] .chain__head {
+  padding: 2px 10px 8px;
+  font-family: "JetBrains Mono", monospace; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--aqua-ink-4);
 }
-[data-theme="aqua"] .bucketrow.is-selected {
-  background: linear-gradient(90deg, rgba(77,162,255,0.12) 0%, rgba(var(--aqua-surface-rgb),0.72) 100%);
+[data-theme="aqua"] .chain__head span:first-child { text-align: left; }
+[data-theme="aqua"] .chain__rows { display: flex; flex-direction: column; gap: 1px; }
+[data-theme="aqua"] .chain__row {
+  padding: 7px 10px; border: 1px solid transparent; border-radius: 8px;
+  background: transparent; cursor: pointer;
+  font-family: "JetBrains Mono", monospace; font-size: 12px;
+  font-variant-numeric: tabular-nums; color: var(--aqua-ink-2);
+  transition: background 140ms ease, border-color 140ms ease;
+}
+[data-theme="aqua"] .chain__row:hover { background: var(--aqua-glass-2); }
+[data-theme="aqua"] .chain__row.is-selected {
+  background: linear-gradient(90deg, rgba(77,162,255,0.14), rgba(var(--aqua-surface-rgb),0.4));
   border-color: var(--aqua-sui);
-  box-shadow: 0 0 0 2px rgba(77,162,255,0.15);
 }
-[data-theme="aqua"] .bucketrow__strike {
-  font-family: "JetBrains Mono", monospace; font-size: 16px; font-weight: 700;
-  font-variant-numeric: tabular-nums; color: var(--aqua-ink-1); letter-spacing: -0.02em;
-  white-space: nowrap;
+[data-theme="aqua"] .chain__strike {
+  text-align: left; font-weight: 700; color: var(--aqua-ink-1); letter-spacing: -0.02em;
 }
-[data-theme="aqua"] .bucketrow__premium {
-  font-family: "JetBrains Mono", monospace; font-size: 12px; font-weight: 600;
-  font-variant-numeric: tabular-nums; color: var(--aqua-sui-deep); white-space: nowrap;
+[data-theme="aqua"] .chain__bid { color: var(--aqua-down, #e15d6b); }
+[data-theme="aqua"] .chain__ask { color: var(--aqua-up, #1fbf75); }
+[data-theme="aqua"] .chain__mark { color: var(--aqua-ink-1); font-weight: 600; }
+[data-theme="aqua"] .chain__iv,
+[data-theme="aqua"] .chain__delta { color: var(--aqua-ink-3); }
+[data-theme="aqua"] .chain__divider {
+  display: flex; align-items: center; gap: 8px; margin: 5px 6px;
+  font-family: "JetBrains Mono", monospace; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.02em; color: var(--aqua-sui-deep); white-space: nowrap;
 }
-[data-theme="aqua"] .bucketrow__premium--neg { color: var(--aqua-coral); }
+[data-theme="aqua"] .chain__divider::before,
+[data-theme="aqua"] .chain__divider::after {
+  content: ""; flex: 1; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--aqua-sui), transparent);
+}
 
-/* Order book rail. */
+/* ---- Center detail tabs (SO-225): Payoff · Greeks · Book in one card ---- */
+[data-theme="aqua"] .dtabs__bar {
+  display: flex; gap: 2px; margin-bottom: 16px;
+  border-bottom: 1px solid var(--aqua-line);
+}
+[data-theme="aqua"] .dtabs__tab {
+  border: none; background: transparent; cursor: pointer;
+  padding: 8px 16px; margin-bottom: -1px;
+  font-family: "JetBrains Mono", monospace; font-size: 11px; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--aqua-ink-3);
+  border-bottom: 2px solid transparent;
+  transition: color 140ms ease, border-color 140ms ease;
+}
+[data-theme="aqua"] .dtabs__tab:hover { color: var(--aqua-ink-2); }
+[data-theme="aqua"] .dtabs__tab.is-active {
+  color: var(--aqua-ink-1); border-bottom-color: var(--aqua-sui);
+}
+/* The greeks/details grids sit in the narrow left column, so their numbers
+   shrink and the cells tighten up to stay evenly sized rather than
+   overflowing/cutting off (e.g. the full spot price). */
+[data-theme="aqua"] .dtabs__grid { margin-bottom: 0; gap: 8px; }
+[data-theme="aqua"] .dtabs__grid .exercise__cell { padding: 10px 12px; }
+[data-theme="aqua"] .dtabs__grid .exercise__label { margin-bottom: 5px; }
+[data-theme="aqua"] .dtabs__grid .exercise__value { font-size: 14px; }
+[data-theme="aqua"] .dtabs__grid .exercise__value span { font-size: inherit; }
+/* Open P/L shows the dollar value by default and swaps to the percentage on
+   hover, so the cell stays the same width as its neighbours. The whole cell is
+   the hover target so a shorter/longer swapped value can't move the boundary
+   out from under the cursor and flicker. */
+[data-theme="aqua"] .pnl-swap { cursor: help; }
+[data-theme="aqua"] .pnl-swap__pct { display: none; }
+[data-theme="aqua"] .pnl-swap:hover .pnl-swap__val { display: none; }
+[data-theme="aqua"] .pnl-swap:hover .pnl-swap__pct { display: inline; }
+
+/* ---- Trade ticket horizontal layout (SO-225) ---- */
+/* Under the wide chart the ticket spreads its three blocks side by side: the
+   order form, DeepBook holdings, and open orders. */
+[data-theme="aqua"] .tradepanel__body {
+  display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start;
+}
+[data-theme="aqua"] .tradepanel__form { flex: 1 1 280px; min-width: 240px; }
+[data-theme="aqua"] .tradepanel__holdings { flex: 1 1 200px; }
+[data-theme="aqua"] .tradepanel__orders { flex: 1 1 200px; }
+
+/* Order book — now embedded bare inside the Book tab (no panel chrome). */
 [data-theme="aqua"] .orderbook__rows {
   font-family: "JetBrains Mono", monospace; font-size: 12px;
   font-variant-numeric: tabular-nums; margin-top: 8px;
@@ -514,21 +611,20 @@
   font-variant-numeric: tabular-nums; letter-spacing: 0;
 }
 
-/* RFQ mint flow — full-width section under the market grid. */
-[data-theme="aqua"] .rfq { border-top: 1px solid var(--aqua-line); padding-top: 22px; }
-[data-theme="aqua"] .rfq__intro { margin: 0 0 18px; }
-[data-theme="aqua"] .rfq__body {
-  display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 22px; align-items: start;
-}
-[data-theme="aqua"] .rfq__main { display: flex; flex-direction: column; gap: 18px; }
+/* RFQ mint flow — amount input, premium panels, and buy button (market-maker
+   mode center column, above the chart). */
+[data-theme="aqua"] .rfq__main { display: flex; flex-direction: column; gap: 12px; }
+/* Inside the buy flex column the panel/exercise blocks get their rhythm from the
+   column gap; their earn-page bottom margins would otherwise double the gaps. */
+[data-theme="aqua"] .rfq__main .panels { gap: 12px; margin-bottom: 0; }
+[data-theme="aqua"] .rfq__main .exercise { margin-bottom: 0; }
 
 /* Stack to a single column on narrow viewports — falls back to the original
    vertical flow. */
 @media (max-width: 1080px) {
   [data-theme="aqua"] .buy-grid { grid-template-columns: 1fr; }
   [data-theme="aqua"] .buy-grid__buckets,
-  [data-theme="aqua"] .buy-grid__book { position: static; }
-  [data-theme="aqua"] .rfq__body { grid-template-columns: 1fr; }
+  [data-theme="aqua"] .buy-grid__ticket { position: static; }
 }
 
 /* ---------- Amount input ---------- */
@@ -542,7 +638,7 @@
   overflow: hidden;
 }
 [data-theme="aqua"] .amount__field {
-  flex: 1; display: flex; align-items: center; padding: 18px 24px;
+  flex: 1; min-width: 0; display: flex; align-items: center; padding: 18px 24px;
   gap: 12px;
 }
 [data-theme="aqua"] .amount__input {
@@ -580,12 +676,35 @@
   transition: background 160ms ease;
 }
 [data-theme="aqua"] .amount__max:hover { background: rgba(77,162,255,0.18); }
+/* Seamless with the input field — no divider or shaded panel, same glass. */
 [data-theme="aqua"] .amount__asset {
-  display: flex; align-items: center; gap: 12px;
-  padding: 12px 20px;
-  border-left: 1px solid var(--aqua-line);
-  background: rgba(var(--aqua-surface-rgb),0.4);
+  flex: none;
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 22px 12px 8px;
+  background: transparent;
 }
+[data-theme="aqua"] .amount__asset-meta {
+  display: flex; flex-direction: column; min-width: 0;
+}
+/* Two-disc denomination swap: active disc large/opaque in front, swap-target
+   small/faded peeking behind. Flipping the active/alt classes animates both. */
+[data-theme="aqua"] .amount__coins {
+  position: relative; flex: none; width: 46px; height: 34px;
+}
+[data-theme="aqua"] .amount__coin {
+  position: absolute; top: 1px; left: 0;
+  width: 32px; height: 32px; border-radius: 999px;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 700; font-size: 15px;
+  transition: transform 300ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease;
+}
+[data-theme="aqua"] .amount__coin--active {
+  transform: translate(0, 0) scale(1); opacity: 1; z-index: 2;
+}
+[data-theme="aqua"] .amount__coin--alt {
+  transform: translate(17px, 9px) scale(0.5); opacity: 0.4; z-index: 1;
+}
+[data-theme="aqua"] .amount__asset--toggle:hover .amount__coin--alt { opacity: 0.7; }
 [data-theme="aqua"] .amount__asset-icon {
   width: 32px; height: 32px; border-radius: 999px;
   background: linear-gradient(135deg, #F7931A 0%, #FFB74D 100%);
@@ -597,27 +716,21 @@
 }
 [data-theme="aqua"] .amount__asset-name {
   font-weight: 600; font-size: 14px; color: var(--aqua-ink-1);
-  display: flex; align-items: center; gap: 5px;
-}
-[data-theme="aqua"] .amount__asset-swap {
-  color: var(--aqua-sui-deep); opacity: 0.7; flex: none;
+  white-space: nowrap;
 }
 [data-theme="aqua"] .amount__asset-bal {
   font-family: "JetBrains Mono", monospace; font-size: 10px;
-  color: var(--aqua-ink-3);
+  color: var(--aqua-ink-3); white-space: nowrap;
 }
 [data-theme="aqua"] .amount__asset-equiv {
   font-family: "JetBrains Mono", monospace; font-size: 10px;
-  color: var(--aqua-sui-deep); margin-top: 2px;
+  color: var(--aqua-sui-deep); margin-top: 2px; white-space: nowrap;
 }
 /* The Buy-page denomination toggle: the asset chip doubles as a button that
    swaps the input between the underlying and USDC. */
 [data-theme="aqua"] .amount__asset--toggle {
   font: inherit; text-align: left; cursor: pointer;
-  transition: background 160ms ease;
-}
-[data-theme="aqua"] .amount__asset--toggle:hover {
-  background: rgba(77,162,255,0.10);
+  border: none; outline: none; -webkit-tap-highlight-color: transparent;
 }
 [data-theme="aqua"] .amount__error {
   font-family: "JetBrains Mono", monospace; font-size: 10px; font-weight: 700;
@@ -759,10 +872,6 @@
   color: var(--aqua-ink-3);
   margin-bottom: 14px;
 }
-[data-theme="aqua"] .panel__head-dot {
-  width: 6px; height: 6px; border-radius: 999px; background: var(--aqua-sui);
-  box-shadow: 0 0 0 3px var(--aqua-sui-glow);
-}
 [data-theme="aqua"] .panel__hero {
   font-family: "Sora", system-ui, sans-serif; font-weight: 600;
   font-size: 56px; line-height: 1; letter-spacing: -0.03em;
@@ -772,6 +881,11 @@
   font-family: "JetBrains Mono", monospace; font-size: 18px; font-weight: 500;
   color: var(--aqua-ink-3); margin-left: 8px; letter-spacing: 0;
 }
+/* The buy-page "you pay" hero sits in a half-width card yet shows full
+   settlement precision (up to 8 decimals), so it needs a smaller type size
+   than the wide earn-page hero to avoid clipping. */
+[data-theme="aqua"] .rfq__main .panel__hero { font-size: 34px; }
+[data-theme="aqua"] .rfq__main .panel__hero .unit { font-size: 14px; }
 /* Cresting-wave loader that stands in for the hero premium while quoting. */
 [data-theme="aqua"] .wave-loader {
   display: inline-flex; align-items: center;
@@ -887,6 +1001,10 @@
   box-shadow: none; cursor: not-allowed;
 }
 [data-theme="aqua"] .cta:disabled::before { display: none; }
+/* Buy-call CTA uses the flat tab-switcher blue rather than the earn gradient. */
+[data-theme="aqua"] .rfq__main .cta:not(:disabled) {
+  background: var(--aqua-sui, #4DA2FF);
+}
 
 /* ---------- Quote feed ---------- */
 [data-theme="aqua"] .feed-toggle {

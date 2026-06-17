@@ -145,12 +145,18 @@ export function midFromBook(book: OrderBook | undefined): number | null {
  * vectors: bid prices, bid quantities, ask prices, ask quantities. Converted
  * to display units (prices best-first in both lists).
  */
-export function useOrderBook(pool: PoolRef | null, viewer: string | null) {
+export function useOrderBook(
+  pool: PoolRef | null,
+  viewer: string | null,
+  // Chain-table rows fetch many pools at once; let callers slow their poll so a
+  // wide chain doesn't fan out a devInspect per strike every 3s (SO-225).
+  refetchInterval = 3_000,
+) {
   const client = useSuiClient();
   return useQuery<OrderBook, Error>({
     queryKey: ["deepbook-book", pool?.poolId],
     enabled: Boolean(pool && DEEPBOOK_PACKAGE_ID),
-    refetchInterval: 3_000,
+    refetchInterval,
     queryFn: async () => {
       const p = pool!;
       const results = await devInspect(client, viewer, (tx) => {

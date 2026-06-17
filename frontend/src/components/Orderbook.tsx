@@ -25,9 +25,9 @@ export function Orderbook({ bucket, series }: Props) {
   const mid = midFromBook(book.data);
 
   return (
-    <div className="panel orderbook">
+    <div className="orderbook">
       <div className="panel__head">
-        <span className="panel__head-dot"></span>order book
+        order book
         <span className="orderbook__mid-label">
           mid · {mid != null ? formatPrice(mid) : "—"}
         </span>

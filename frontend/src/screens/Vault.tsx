@@ -639,7 +639,7 @@ function CurrentRoundCard({ vault, rounds }: { vault: Vault; rounds: VaultRound[
   return (
     <div className="vault-card">
       <div className="vault-card__head">
-        <span className="panel__head-dot" />
+        
         Current round · #{vault.round}
       </div>
       <div className="vault-kv">
@@ -714,7 +714,7 @@ function TrackRecord({ vault, rounds }: { vault: Vault; rounds: VaultRound[] }) 
   return (
     <div className="vault-card">
       <div className="vault-card__head">
-        <span className="panel__head-dot" />
+        
         Track record
       </div>
       {finalized.length === 0 ? (
@@ -823,7 +823,7 @@ function ParamsCard({ vault }: { vault: Vault }) {
   return (
     <div className="vault-card">
       <div className="vault-card__head">
-        <span className="panel__head-dot" />
+        
         Parameters & fees
       </div>
       <div className="vault-kv">
@@ -920,7 +920,7 @@ function InvestPanel({ vault }: { vault: Vault }) {
   if (!address) {
     return (
       <div className="vault-card vault-invest">
-        <div className="vault-card__head"><span className="panel__head-dot" />Invest</div>
+        <div className="vault-card__head">Invest</div>
         <div className="vault-card__body vault-prose__muted">
           Connect a wallet or sign in to deposit into this vault.
         </div>

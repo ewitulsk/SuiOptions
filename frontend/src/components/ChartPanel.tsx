@@ -156,13 +156,13 @@ export function ChartPanel({ poolId, strike, settlementSymbol }: Props) {
   const empty = seriesMode === "trades" ? bars.length === 0 : mids.length === 0;
 
   return (
-    <div className="panel" style={{ marginTop: 12 }}>
+    <div className="panel">
       <div
         className="panel__head"
         style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}
       >
         <span>
-          <span className="panel__head-dot"></span>market · {settlementSymbol} per option
+          market · {settlementSymbol} per option
         </span>
         <span style={{ display: "flex", gap: 4, alignItems: "center" }}>
           {(["mid", "trades"] as SeriesMode[]).map((sm) => (

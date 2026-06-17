@@ -98,37 +98,29 @@ export function AmountInput({
       ? `≈ ${(amount * spot).toFixed(2)} ${settlementSymbol}`
       : null;
 
-  const chipBody = (
-    <>
+  const meta = (
+    <div className="amount__asset-meta">
+      <div className="amount__asset-name">{unitName}</div>
+      <div className="amount__asset-bal">bal {balLine}</div>
+      {equivLine && <div className="amount__asset-equiv">{equivLine}</div>}
+    </div>
+  );
+
+  // One token disc. The active denomination renders large/opaque, the swap
+  // target small/faded; both are always mounted so toggling `denom` just flips
+  // the active/alt classes and CSS animates the size+position swap.
+  const coin = (symbol: string | null, active: boolean) => {
+    const cls = "amount__coin " + (active ? "amount__coin--active" : "amount__coin--alt");
+    return (
       <TokenLogo
-        symbol={unitSymbol}
-        className="amount__asset-icon"
+        symbol={symbol}
+        className={cls}
         fallback={
-          <span className="amount__asset-icon amount__asset-icon--generic">
-            {unitInitial}
-          </span>
+          <span className={cls + " amount__asset-icon--generic"}>{initialOf(symbol)}</span>
         }
       />
-      <div>
-        <div className="amount__asset-name">
-          {unitName}
-          {canDenominate && (
-            <svg
-              className="amount__asset-swap"
-              width="11"
-              height="11"
-              viewBox="0 0 12 12"
-              aria-hidden="true"
-            >
-              <path d="M2 4h6.5M7 2.5 8.5 4 7 5.5M10 8H3.5M5 6.5 3.5 8 5 9.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          )}
-        </div>
-        <div className="amount__asset-bal">bal {balLine}</div>
-        {equivLine && <div className="amount__asset-equiv">{equivLine}</div>}
-      </div>
-    </>
-  );
+    );
+  };
 
   return (
     <div>
@@ -179,10 +171,25 @@ export function AmountInput({
             aria-label={`Switch input to ${stableMode ? assetSymbol ?? "underlying" : settlementSymbol}`}
             title={`Type the amount in ${stableMode ? assetSymbol ?? "the underlying" : settlementSymbol} instead`}
           >
-            {chipBody}
+            <span className="amount__coins" aria-hidden="true">
+              {coin(assetSymbol, !stableMode)}
+              {coin(settlementSymbol, stableMode)}
+            </span>
+            {meta}
           </button>
         ) : (
-          <div className="amount__asset">{chipBody}</div>
+          <div className="amount__asset">
+            <TokenLogo
+              symbol={unitSymbol}
+              className="amount__asset-icon"
+              fallback={
+                <span className="amount__asset-icon amount__asset-icon--generic">
+                  {unitInitial}
+                </span>
+              }
+            />
+            {meta}
+          </div>
         )}
       </div>
       <div className="amount__error">{error}</div>

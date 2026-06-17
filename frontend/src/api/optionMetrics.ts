@@ -7,7 +7,7 @@
 // Authoritative response shape: rust-backend/services/api-service/README.md
 // (`GET /options/metrics`). UNITS: spot/strike/mark must share one unit.
 
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 
 const API_BASE_URL: string =
   (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://127.0.0.1:9003";
@@ -60,14 +60,21 @@ export function useOptionMetrics(args: {
   spot: number | null;
   mid: number | null;
   r?: number;
+  // Chain-table rows compute greeks for every strike; let them poll gently
+  // (the selected strike keeps the default 1.5s cadence) — SO-225.
+  refetchInterval?: number;
 }) {
-  const { strike, expiryMs, spot, mid, r } = args;
+  const { strike, expiryMs, spot, mid, r, refetchInterval = 1500 } = args;
   const enabled =
     strike != null && expiryMs != null && spot != null && spot > 0 && mid != null && mid > 0;
   return useQuery({
     queryKey: ["option-metrics", strike, expiryMs, spot, mid, r ?? null],
     enabled,
-    refetchInterval: 1500,
+    // Spot/mid live in the key, so every Pyth tick is a fresh query. Keep the
+    // last result on screen while it refetches so greeks don't flash to "—"
+    // between ticks (SO-225).
+    placeholderData: keepPreviousData,
+    refetchInterval,
     queryFn: () =>
       fetchOptionMetrics({
         spot: spot!,
