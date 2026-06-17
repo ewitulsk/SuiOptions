@@ -1,0 +1,119 @@
+name: Start service
+
+# Manual workflow to start a SINGLE previously-stopped Docker service for a
+# given environment. Uses `docker compose start <service>` so the existing
+# (halted) container is brought back without a full image pull or recreate.
+# To create a missing container instead, run a deploy.
+#
+# The service list is the union across envs (e.g. mm-bot/option-scheduler
+# are staging-only); the chosen service is validated against the target
+# env's compose file on the host before starting.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - prod
+      service:
+        description: 'Service to start'
+        required: true
+        type: choice
+        options:
+          - token-info
+          - auth-service
+          - indexer
+          - quoting
+          - mm-bot
+          - option-scheduler
+          - api-service
+          - price-charting
+          - gas-station
+          - balance-monitor
+          - keeper
+          - nginx
+
+permissions:
+  contents: read
+  id-token: write   # OIDC to AWS
+
+env:
+  AWS_REGION:        ${{ vars.AWS_REGION }}
+  DEPLOY_ROLE_ARN:   ${{ vars.DEPLOY_ROLE_ARN }}
+  SSM_OUTPUT_BUCKET: ${{ vars.SSM_OUTPUT_BUCKET }}
+
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4   # for ./.github/actions/resolve-ec2
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: ./.github/actions/resolve-ec2
+        with:
+          region: ${{ env.AWS_REGION }}
+          env: ${{ inputs.environment }}
+
+      - name: SSM start service
+        env:
+          DEPLOY_ENV: ${{ inputs.environment }}
+          SERVICE: ${{ inputs.service }}
+        run: |
+          jq -nc \
+            --arg env "$DEPLOY_ENV" \
+            --arg svc "$SERVICE" '
+            {
+              commands: [
+                "set -eu",
+                "COMPOSE_FILE=/opt/options/\($env)/docker-compose.\($env).yml",
+                "if [ ! -f \"$COMPOSE_FILE\" ]; then echo \"No compose file at $COMPOSE_FILE\" >&2; exit 1; fi",
+                "if ! docker compose -f \"$COMPOSE_FILE\" config --services | grep -qx \"\($svc)\"; then echo \"Service \($svc) not defined in \($env)\" >&2; exit 1; fi",
+                "echo \"Starting \($svc) in \($env)…\"",
+                "docker compose -f \"$COMPOSE_FILE\" start \($svc)",
+                "echo \"\($svc) started in \($env)\"",
+                "docker compose -f \"$COMPOSE_FILE\" ps"
+              ]
+            }' > /tmp/ssm-params.json
+
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "start $SERVICE $DEPLOY_ENV" \
+            --parameters file:///tmp/ssm-params.json \
+            --output-s3-bucket-name "$SSM_OUTPUT_BUCKET" \
+            --query Command.CommandId --output text)
+          echo "ssm command: $CMD_ID"
+
+          aws ssm wait command-executed \
+            --command-id "$CMD_ID" \
+            --instance-id "$EC2_INSTANCE_ID" || true
+
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --query Status --output text)
+          echo "ssm status: $STATUS"
+
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --query StandardOutputContent --output text
+
+          if [ "$STATUS" != "Success" ]; then
+            aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --query StandardErrorContent --output text
+            exit 1
+          fi
