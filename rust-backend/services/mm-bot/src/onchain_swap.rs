@@ -340,7 +340,19 @@ async fn tick(p: &SwapBidderParams, wrap: &SuiClientWrapper, our_address: SuiAdd
                 );
             }
             Err(e) => {
-                tracing::warn!(swap = %o.swap_id, underlying, error = %format!("{e:#}"), "swap bid failed");
+                // Outbid between read and submit aborts with rfq_bid_too_low
+                // — replanned next poll, no alert.
+                if crate::is_benign_bid_loss(&e) {
+                    tracing::warn!(swap = %o.swap_id, underlying, error = %format!("{e:#}"), "swap bid failed (outbid)");
+                } else {
+                    tracing::error!(
+                        alert_id = "tx-failed-mm-bot-swap",
+                        swap = %o.swap_id,
+                        underlying,
+                        error = %format!("{e:#}"),
+                        "swap bid tx failed"
+                    );
+                }
             }
         }
     }

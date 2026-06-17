@@ -30,7 +30,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use tokio::time::sleep;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use sui_tx::sui_client::SuiClientWrapper;
 use sui_tx::tx::coin_pkg::PoolCreation;
@@ -402,7 +402,8 @@ async fn vault_pass(
         )
         .await
         {
-            warn!(
+            error!(
+                alert_id = "tx-failed-option-scheduler-vault",
                 pair = %format!("{}/{}", entry.spec.underlying_symbol, entry.spec.settlement_symbol),
                 error = %format!("{e:#}"),
                 "ensure_vault failed"
@@ -742,7 +743,8 @@ async fn tick_once(
                 metrics::counter!("scheduler_tx_total", "job" => "roll", "outcome" => "error")
                     .increment(1);
                 let class = roller::classify_error(&e);
-                warn!(
+                error!(
+                    alert_id = "tx-failed-option-scheduler",
                     error = %e,
                     class = ?class,
                     pair = %pair_label,

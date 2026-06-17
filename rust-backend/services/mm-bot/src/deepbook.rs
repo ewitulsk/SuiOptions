@@ -773,10 +773,11 @@ async fn cycle(
             );
         }
         Err(e) => {
-            tracing::warn!(
+            tracing::error!(
+                alert_id = "tx-failed-mm-bot-deepbook",
                 error = %format!("{e:#}"),
                 pools = refreshes.len(),
-                "batched deepbook refresh failed; leaving books as-is"
+                "batched deepbook refresh tx failed; leaving books as-is"
             );
         }
     }
