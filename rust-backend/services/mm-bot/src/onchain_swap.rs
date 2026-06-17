@@ -33,6 +33,7 @@ use pyth_client::{PriceCache, PriceFeedId};
 use sui_tx::sui_client::{Network, SuiClientWrapper};
 use sui_tx::tx::swap_auction::{bid, SwapBidParams};
 
+use api_service_client::ApiServiceClient;
 use crate::onchain_rfq::{decide_bid, AuctionView, BidderMarket, OnchainRfqConfig};
 use crate::pricing::{compute_spot_from_cache, Staleness};
 
@@ -183,7 +184,7 @@ async fn discover_swap_ids(
     client: &sui_sdk::SuiClient,
     package: ObjectID,
     cutoff_ms: u64,
-) -> Result<Vec<ObjectID>> {
+) -> Result<Vec<(ObjectID, String)>> {
     let filter = EventFilter::MoveEventType(StructTag {
         address: package.into(),
         module: Identifier::new("events").unwrap(),
@@ -203,7 +204,13 @@ async fn discover_swap_ids(
                 break 'pages;
             }
             if let Some(id) = ev.parsed_json.get("swap_id").and_then(|v| v.as_str()) {
-                ids.push(id.parse().context("parsing swap_id")?);
+                let origin = ev
+                    .parsed_json
+                    .get("origin")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                ids.push((id.parse().context("parsing swap_id")?, origin));
             }
         }
         if !page.has_next_page {
@@ -221,6 +228,7 @@ pub struct SwapBidderParams {
     pub secrets: runtime_config::Secrets,
     pub network: Network,
     pub package: ObjectID,
+    pub api_url: String,
     pub price_cache: PriceCache,
     pub markets: Vec<BidderMarket>,
     pub settlement_feed: PriceFeedId,
@@ -239,6 +247,7 @@ pub fn spawn_bidder(p: SwapBidderParams) {
 
 async fn run(p: SwapBidderParams) -> Result<()> {
     let wrap = SuiClientWrapper::connect(&p.secrets, p.network).await?;
+    let api = ApiServiceClient::new(&p.api_url);
     let our_address = wrap.signer.address;
     tracing::info!(
         address = %our_address,
@@ -249,20 +258,36 @@ async fn run(p: SwapBidderParams) -> Result<()> {
     );
     let poll = Duration::from_secs(p.cfg.bidder.poll_secs.max(1));
     loop {
-        if let Err(e) = tick(&p, &wrap, our_address).await {
+        if let Err(e) = tick(&p, &wrap, &api, our_address).await {
             tracing::warn!(error = %format!("{e:#}"), "swap bidder tick errored");
         }
         tokio::time::sleep(poll).await;
     }
 }
 
-async fn tick(p: &SwapBidderParams, wrap: &SuiClientWrapper, our_address: SuiAddress) -> Result<()> {
+async fn tick(
+    p: &SwapBidderParams,
+    wrap: &SuiClientWrapper,
+    api: &ApiServiceClient,
+    our_address: SuiAddress,
+) -> Result<()> {
     let now = now_ms();
     let cutoff = now.saturating_sub(p.cfg.lookback_secs.saturating_mul(1_000));
-    let ids = discover_swap_ids(&wrap.client, p.package, cutoff).await?;
+    let candidates = discover_swap_ids(&wrap.client, p.package, cutoff).await?;
+    // Hard cutover: ignore proceeds-swaps from a paused (decommissioned)
+    // vault, keyed off the SwapRfqCreated `origin` (the vault id).
+    let paused = api
+        .paused_vault_ids()
+        .await
+        .context("polling paused vaults")?;
 
     let mut opens: Vec<OpenSwap> = Vec::new();
-    for id in ids {
+    for (id, origin) in candidates {
+        if let Ok(vault) = protocol_types::ids::ObjectId::from_hex(&origin) {
+            if paused.contains(&vault) {
+                continue;
+            }
+        }
         match fetch_open_swap(&wrap.client, id).await {
             Ok(Some(o)) => opens.push(o),
             Ok(None) => {}

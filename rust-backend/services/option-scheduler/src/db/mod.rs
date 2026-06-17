@@ -442,6 +442,33 @@ pub fn record_existing_vault(
     Ok(())
 }
 
+/// Retire the active row whose vault was paused (decommissioned) on-chain:
+/// move it out of the active-slot index so the scheduler rolls a fresh
+/// replacement for the pair (hard cutover). Matched by `vault_id` so only the
+/// paused vault's own row is retired — a row already pointing at a live
+/// replacement is left untouched. Returns the number of rows retired.
+pub fn retire_paused_vault(
+    pool: &DbPool,
+    underlying: &str,
+    settlement: &str,
+    round_ms: u64,
+    vault_id: &str,
+) -> Result<usize> {
+    let mut conn = pool.get().context("retire_paused_vault: pool")?;
+    diesel::update(scheduler_vaults::table)
+        .filter(scheduler_vaults::underlying_symbol.eq(underlying))
+        .filter(scheduler_vaults::settlement_symbol.eq(settlement))
+        .filter(scheduler_vaults::round_ms.eq(round_ms as i64))
+        .filter(scheduler_vaults::vault_id.eq(vault_id))
+        .filter(scheduler_vaults::state.eq(VaultState::Confirmed.as_str()))
+        .set((
+            scheduler_vaults::state.eq(VaultState::Retired.as_str()),
+            scheduler_vaults::updated_at.eq(diesel::dsl::now),
+        ))
+        .execute(&mut conn)
+        .context("retire_paused_vault: update")
+}
+
 /// Give up on the pair's active create attempt: move the row to `failed` so a
 /// later pass can retry with a fresh `pending` claim. Used for unambiguous
 /// failures (build/preflight/revert) where the tx never landed.

@@ -86,6 +86,11 @@ pub enum VaultState {
     CoinPublished,
     Confirmed,
     Failed,
+    /// Terminal: the on-chain vault was paused (decommissioned). Retiring the
+    /// row drops it out of the active-slot index so the scheduler rolls a
+    /// fresh replacement vault for the pair (hard cutover). Not in the partial
+    /// UNIQUE index, so it never blocks a new create.
+    Retired,
 }
 
 impl VaultState {
@@ -95,6 +100,7 @@ impl VaultState {
             Self::CoinPublished => "coin_published",
             Self::Confirmed => "confirmed",
             Self::Failed => "failed",
+            Self::Retired => "retired",
         }
     }
 
@@ -104,6 +110,7 @@ impl VaultState {
             "coin_published" => Some(Self::CoinPublished),
             "confirmed" => Some(Self::Confirmed),
             "failed" => Some(Self::Failed),
+            "retired" => Some(Self::Retired),
             _ => None,
         }
     }

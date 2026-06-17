@@ -377,6 +377,32 @@ async fn vault_pass(
         .await
         .context("listing vaults for vault pass")?;
     for entry in entries {
+        // Hard cutover: retire the DB row of any paused vault for this
+        // pair+cadence so its active slot frees and a fresh replacement
+        // rolls below. Matched by vault id, so a live replacement is safe.
+        for v in vaults.iter().filter(|v| {
+            v.deposits_paused
+                && entry
+                    .key
+                    .matches_assets(&v.underlying_type, &v.settlement_type)
+                && v.round_ms == Some(entry.template.round_ms)
+        }) {
+            match db::retire_paused_vault(
+                db_pool,
+                &entry.spec.underlying_symbol,
+                &entry.spec.settlement_symbol,
+                entry.template.round_ms,
+                &v.vault_id.to_hex(),
+            ) {
+                Ok(n) if n > 0 => info!(
+                    pair = %format!("{}/{}", entry.spec.underlying_symbol, entry.spec.settlement_symbol),
+                    vault_id = %v.vault_id.to_hex(),
+                    "retired paused vault; rolling a fresh replacement"
+                ),
+                Ok(_) => {}
+                Err(e) => warn!(error = %format!("{e:#}"), "retire_paused_vault failed"),
+            }
+        }
         // Match the on-chain vault by assets AND round cadence: a weekly and
         // an hourly vault for the same pair are distinct, so the existence
         // check must not treat one as satisfying the other.
@@ -387,6 +413,9 @@ async fn vault_pass(
                     .key
                     .matches_assets(&v.underlying_type, &v.settlement_type)
                     && v.round_ms == Some(entry.template.round_ms)
+                    // Hard cutover: a paused vault is decommissioned — never
+                    // adopt it as this pair's live vault, so a fresh one rolls.
+                    && !v.deposits_paused
             })
             .map(|v| v.vault_id.to_hex());
         if let Err(e) = vault_roller::ensure_vault(

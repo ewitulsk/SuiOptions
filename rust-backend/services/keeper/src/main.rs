@@ -95,6 +95,10 @@ async fn main() -> Result<()> {
     // halted on a Fatal classification; both cleared only by restart.
     let mut vaults: HashMap<ObjectID, DiscoveredVault> = HashMap::new();
     let mut halted: HashSet<ObjectID> = HashSet::new();
+    // Vaults with deposits paused on-chain: a hard cutover signal — the
+    // keeper ignores them entirely (no cranks of any kind). Rebuilt from
+    // the indexer every tick, so pause/unpause takes effect live.
+    let mut paused: HashSet<ObjectID> = HashSet::new();
     // The Pyth feed → PriceInfoObject table handle, resolved lazily on
     // the first discovery so an indexer-only outage doesn't block boot.
     let mut price_table: Option<PriceInfoTable> = None;
@@ -104,12 +108,20 @@ async fn main() -> Result<()> {
     loop {
         metrics::counter!("keeper_ticks_total").increment(1);
         let tick_started = std::time::Instant::now();
-        discover_new_vaults(&wrap, &indexer, &pyth_handles, &mut price_table, &mut vaults, &halted)
-            .await;
+        discover_new_vaults(
+            &wrap,
+            &indexer,
+            &pyth_handles,
+            &mut price_table,
+            &mut vaults,
+            &halted,
+            &mut paused,
+        )
+        .await;
         metrics::gauge!("keeper_vaults_discovered").set(vaults.len() as f64);
 
         for (id, meta) in &vaults {
-            if halted.contains(id) {
+            if halted.contains(id) || paused.contains(id) {
                 continue;
             }
             let ctx = TickCtx {
@@ -161,6 +173,7 @@ async fn discover_new_vaults(
     price_table: &mut Option<PriceInfoTable>,
     vaults: &mut HashMap<ObjectID, DiscoveredVault>,
     halted: &HashSet<ObjectID>,
+    paused: &mut HashSet<ObjectID>,
 ) {
     let rows = match indexer.vaults().await {
         Ok(rows) => rows,
@@ -169,6 +182,14 @@ async fn discover_new_vaults(
             return;
         }
     };
+    // Refresh the paused set from this tick's snapshot so an admin
+    // pause/unpause is honored without a keeper restart.
+    paused.clear();
+    for row in &rows {
+        if row.deposits_paused {
+            paused.insert(ObjectID::new(*row.vault_id.as_bytes()));
+        }
+    }
     for row in rows {
         let id = ObjectID::new(*row.vault_id.as_bytes());
         if vaults.contains_key(&id) || halted.contains(&id) {
