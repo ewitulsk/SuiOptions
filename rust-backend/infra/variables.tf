@@ -64,7 +64,7 @@ variable "staging_ec2_instance_type" {
 variable "ec2_root_volume_gb" {
   description = "EBS gp3 root volume size in GB."
   type        = number
-  default     = 30
+  default     = 50
 }
 
 variable "ssh_pubkey" {
