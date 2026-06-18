@@ -15,9 +15,10 @@ import { useOptionMetrics } from "../api/optionMetrics";
 import { usePositionEconomics, useDayChange } from "../api/positionEconomics";
 import { formatPrice } from "../format";
 import { Orderbook } from "./Orderbook";
+import { OpenOrdersSection } from "./OpenOrdersSection";
 import { WaveLoader } from "./WaveLoader";
 
-type Tab = "greeks" | "details" | "book";
+type Tab = "greeks" | "details" | "book" | "orders";
 
 type Props = {
   bucket: Bucket;
@@ -73,7 +74,7 @@ export function BuyDetailTabs({ bucket, series, spot, mid, wallet }: Props) {
   return (
     <div className="panel dtabs">
       <div className="dtabs__bar" role="tablist">
-        {(["greeks", "details", "book"] as Tab[]).map((t) => (
+        {(["greeks", "details", "book", "orders"] as Tab[]).map((t) => (
           <button
             key={t}
             role="tab"
@@ -128,6 +129,12 @@ export function BuyDetailTabs({ bucket, series, spot, mid, wallet }: Props) {
       {tab === "book" && (
         <div className="dtabs__book">
           <Orderbook bucket={bucket} series={series} />
+        </div>
+      )}
+
+      {tab === "orders" && (
+        <div className="dtabs__orders">
+          <OpenOrdersSection bucket={bucket} series={series} />
         </div>
       )}
     </div>
