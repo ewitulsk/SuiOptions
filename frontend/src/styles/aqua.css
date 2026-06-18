@@ -2219,10 +2219,11 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
   font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--aqua-ink-3); margin-top: 2px;
 }
 
-/* Projected-APY sparkline */
+/* APY sparkline: realized line (no fill) + projected line with a band */
 [data-theme="aqua"] .vault-tile__spark { width: 100%; height: 64px; display: block; }
 [data-theme="aqua"] .vault-tile__spark-band { fill: var(--aqua-accent, #2f81f7); opacity: 0.12; stroke: none; }
 [data-theme="aqua"] .vault-tile__spark-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+[data-theme="aqua"] .vault-tile__spark-line--realized { stroke: var(--aqua-up, #1fbf75); }
 [data-theme="aqua"] .vault-tile__spark-line--predicted { stroke: var(--aqua-accent, #2f81f7); stroke-dasharray: 4 4; }
 [data-theme="aqua"] .vault-tile__spark--empty {
   height: 64px; display: flex; align-items: center; justify-content: center; text-align: center;

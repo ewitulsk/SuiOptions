@@ -420,34 +420,48 @@ function VaultCarousel({
   );
 }
 
-/** Compact projected-APY sparkline for a vault card: the forecast line with a
- *  confidence band, drawn as inline SVG (no per-card chart instances). */
-function VaultSparkline({ predicted }: { predicted: VaultApyPoint[] }) {
+/** Compact APY sparkline for a vault card: a solid realized line (no fill) and a
+ *  dashed projected line with a confidence band, drawn as inline SVG (no
+ *  per-card chart instances) on a shared time/value scale. */
+function VaultSparkline({
+  realized,
+  predicted,
+}: {
+  realized: VaultApyPoint[];
+  predicted: VaultApyPoint[];
+}) {
   const W = 100;
   const H = 40;
 
+  const rSorted = [...realized].sort((a, b) => a.t_ms - b.t_ms);
   const pSorted = [...predicted].sort((a, b) => a.t_ms - b.t_ms);
-  if (pSorted.length < 2) {
+  // Anchor the projected segment to the last realized point so it continues the
+  // curve rather than floating disconnected.
+  const anchor = rSorted.length ? [rSorted[rSorted.length - 1]] : [];
+  const pLine = [...anchor, ...pSorted];
+
+  const all = [...rSorted, ...pLine];
+  if (all.length < 2) {
     return (
       <div className="vault-tile__spark vault-tile__spark--empty">
-        Projected APY fills in as rounds settle
+        APY history fills in as rounds settle
       </div>
     );
   }
 
-  // Band around the forecast: [apy_low, apy_high] per point, pinched to the line
-  // where the model gives no range.
-  const pBand = pSorted.map((p) => ({
+  // Band over the projected segment: pinched at the realized anchor (no band
+  // there), opening to [apy_low, apy_high] across the forecast.
+  const pBand = pLine.map((p) => ({
     t: p.t_ms,
     blo: p.apy_low ?? p.apy,
     bhi: p.apy_high ?? p.apy,
   }));
   const hasBand = pBand.some((b) => b.bhi - b.blo > 1e-4);
 
-  const ts = pSorted.map((p) => p.t_ms);
+  const ts = all.map((p) => p.t_ms);
   // Include the band extremes in the y-range so a wide band doesn't clip.
   const vs = [
-    ...pSorted.map((p) => p.apy),
+    ...all.map((p) => p.apy),
     ...(hasBand ? pBand.flatMap((b) => [b.blo, b.bhi]) : []),
   ];
   const tMin = Math.min(...ts);
@@ -460,8 +474,12 @@ function VaultSparkline({ predicted }: { predicted: VaultApyPoint[] }) {
 
   const x = (t: number) => (tMax === tMin ? 0 : ((t - tMin) / (tMax - tMin)) * W);
   const y = (v: number) => H - ((v - lo) / (hi - lo)) * H;
+  const pts = (arr: VaultApyPoint[]) =>
+    arr.map((p) => `${x(p.t_ms).toFixed(2)},${y(p.apy).toFixed(2)}`);
 
-  const pPts = pSorted.map((p) => `${x(p.t_ms).toFixed(2)},${y(p.apy).toFixed(2)}`);
+  const rPts = pts(rSorted);
+  const pPts = pts(pLine);
+  const rPath = rPts.length ? "M" + rPts.join(" L") : "";
   const pPath = pPts.length ? "M" + pPts.join(" L") : "";
   // Top edge (highs L→R) then bottom edge (lows R→L), closed into a ribbon.
   const bandHi = pBand.map((b) => `${x(b.t).toFixed(2)},${y(b.bhi).toFixed(2)}`);
@@ -479,6 +497,9 @@ function VaultSparkline({ predicted }: { predicted: VaultApyPoint[] }) {
       aria-hidden
     >
       {bandPath && <path className="vault-tile__spark-band" d={bandPath} />}
+      {rPath && (
+        <path className="vault-tile__spark-line vault-tile__spark-line--realized" d={rPath} vectorEffect="non-scaling-stroke" />
+      )}
       {pPath && (
         <path className="vault-tile__spark-line vault-tile__spark-line--predicted" d={pPath} vectorEffect="non-scaling-stroke" />
       )}
@@ -525,7 +546,7 @@ function VaultTile({
         )}
       </div>
 
-      <VaultSparkline predicted={predictedSeries} />
+      <VaultSparkline realized={realizedSeries} predicted={predictedSeries} />
 
       <div className="vault-tile__apys">
         <div className="vault-tile__apy">
