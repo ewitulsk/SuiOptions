@@ -2394,7 +2394,7 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 [data-theme="aqua"] .vault-table__head {
   color: var(--aqua-ink-3); font-size: 11px; text-transform: uppercase; letter-spacing: .03em;
   border-bottom: 1px solid var(--aqua-line);
-  position: sticky; top: 0; z-index: 1; background: var(--aqua-glass-3);
+  position: sticky; top: 0; z-index: 1; background: var(--aqua-solid-surface);
 }
 /* Cap the row list and scroll it; the sticky column head (inside this same
    container) stays visible and column-aligned with the rows while scrolling. */
