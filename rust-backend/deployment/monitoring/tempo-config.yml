@@ -1,4 +1,4 @@
-# Tempo configuration — single-binary, local storage, 7-day retention.
+# Tempo configuration — single-binary, local storage, 5-day retention.
 #
 # Receives OTLP/HTTP spans on 4318 from the services (staging over the
 # docker network; prod over the VPC private IP, SG-gated like Loki 3100).
@@ -26,7 +26,7 @@ storage:
 
 compactor:
   compaction:
-    block_retention: 168h
+    block_retention: 120h
 
 metrics_generator:
   registry:
