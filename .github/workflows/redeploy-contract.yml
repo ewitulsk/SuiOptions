@@ -434,8 +434,8 @@ jobs:
                 "# ── 4. Wipe + provision the indexer and scheduler DBs ──",
                 "# A freshly published contract has no buckets; the scheduler only re-rolls",
                 "# when its rolls DB is also wiped (it is DB-authoritative — see SO-80).",
-                "# Vault-APY rows now live in price-charting's Timescale DB keyed by the",
-                "# new vault ids; old-vault rows simply orphan (harmless), so there's no",
+                "# Vault-APY rows now live in the price-charting Timescale DB keyed by the",
+                "# new vault ids; old-vault rows simply orphan (harmless), so there is no",
                 "# APY DB to wipe here anymore (folded out of derived-metric-worker).",
                 "for svc in indexer scheduler; do DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/redeploy/wipe-provision-db.sh \($env | @sh) \"$svc\"; done",
 
