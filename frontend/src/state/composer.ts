@@ -56,11 +56,21 @@ function scaleRaw(raw: string, decimals: number | null): number {
   return Number(raw) / 10 ** decimals;
 }
 
-/** Format a tile's premium as a whole-dollar amount (no decimals). */
-function formatPremium(v: number): string {
-  if (!Number.isFinite(v)) return "—";
-  if (v <= 0) return "0";
-  return Math.round(v).toString();
+/**
+ * Format a tile's premium as a percent of the underlying's value.
+ *
+ * The MM-quoted premium scales linearly with the write `amount`, so dividing by
+ * the value of the collateral the writer puts up (`amount * spot`) cancels the
+ * amount out — the tile reads the same regardless of how much the user types.
+ * `premium` is in settlement units; `amount * spot` is the same units, so the
+ * ratio is dimensionless.
+ */
+function formatPremiumPct(premium: number, amount: number, spot: number): string {
+  if (!Number.isFinite(premium) || premium <= 0) return "—";
+  if (!Number.isFinite(amount) || amount <= 0) return "—";
+  if (!Number.isFinite(spot) || spot <= 0) return "—";
+  const pct = (premium / (amount * spot)) * 100;
+  return `${pct.toFixed(2)}%`;
 }
 
 /**
@@ -377,7 +387,7 @@ export function useComposerState({
         strike: b.strike as number,
         perUnit: 0,
         premium: value ?? 0,
-        premiumDisplay: value !== null ? formatPremium(value) : "—",
+        premiumDisplay: value !== null ? formatPremiumPct(value, amount, spot) : "—",
       };
     });
   }, [
@@ -386,6 +396,8 @@ export function useComposerState({
     series?.settlement_decimals,
     selectedBucketId,
     realSelectedPremium,
+    amount,
+    spot,
   ]);
 
   // Clamp selection when the strike list shrinks/grows underneath us
