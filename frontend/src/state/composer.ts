@@ -143,6 +143,9 @@ export type ComposerState = {
    * `deepbook_pool_id` / `tradeable`, SO-154). Null until a strike is picked.
    */
   apiBucket: ApiBucket | null;
+  /** Every strike's bucket in the selected series (parallel to `strikes`),
+   * carrying `deepbook_pool_id` so the chain table can fetch each pool. */
+  apiBuckets: ApiBucket[];
   confirmStage: ConfirmStage;
   confirmSummary: ConfirmSummary | null;
   submit: () => void;
@@ -587,6 +590,7 @@ export function useComposerState({
     usdcBalance,
     bucket,
     apiBucket,
+    apiBuckets: seriesBuckets,
     confirmStage,
     confirmSummary,
     submit,

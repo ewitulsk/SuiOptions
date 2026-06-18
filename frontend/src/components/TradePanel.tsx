@@ -141,7 +141,7 @@ export function TradePanel({ bucket, series }: Props) {
     return (
       <div className="panel">
         <div className="panel__head">
-          <span className="panel__head-dot"></span>trade on deepbook
+          trade on deepbook
         </div>
         <div className="panel__sub" style={{ marginBottom: 10 }}>
           One-time setup: create your DeepBook trading account (a shared
@@ -265,7 +265,7 @@ export function TradePanel({ bucket, series }: Props) {
         style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
       >
         <span>
-          <span className="panel__head-dot"></span>trade on deepbook
+          trade on deepbook
           {bucket.invalidated && (
             <span style={{ marginLeft: 8, fontSize: 10, opacity: 0.8 }}>
               · minting frozen — secondary trading open
@@ -293,8 +293,10 @@ export function TradePanel({ bucket, series }: Props) {
         </span>
       </div>
 
-      {/* order form (order book now lives in the Buy screen's right rail, SO-170) */}
-      <div>
+      {/* Trade ticket sits horizontally under the chart (SO-225): order form,
+          holdings, and open orders side by side instead of a narrow rail. */}
+      <div className="tradepanel__body">
+      <div className="tradepanel__form">
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ display: "flex", gap: 6 }}>
             {(["buy", "sell"] as Side[]).map((s) => (
@@ -388,8 +390,8 @@ export function TradePanel({ bucket, series }: Props) {
 
       {/* trading-account holdings — what the user has parked in DeepBook */}
       <div
+        className="tradepanel__holdings"
         style={{
-          marginTop: 10,
           padding: "8px 10px",
           borderRadius: 8,
           border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))",
@@ -415,7 +417,7 @@ export function TradePanel({ bucket, series }: Props) {
       </div>
 
       {/* open orders + withdraw / cancel controls */}
-      <div style={{ marginTop: 10, fontSize: 12 }}>
+      <div className="tradepanel__orders" style={{ fontSize: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ opacity: 0.8 }}>open orders: {openOrders.data?.length ?? 0}</span>
           <span style={{ display: "flex", gap: 6 }}>
@@ -467,6 +469,7 @@ export function TradePanel({ bucket, series }: Props) {
             </button>
           </div>
         ))}
+      </div>
       </div>
     </div>
   );

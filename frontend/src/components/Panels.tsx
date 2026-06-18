@@ -23,7 +23,7 @@ export function WriterPanels({ premium, premiumLoading, amount, strike, assetSym
     <div className="panels">
       <div className="panel">
         <div className="panel__head">
-          <span className="panel__head-dot"></span>now · premium
+          now · premium
         </div>
         <div className="panel__hero">
           {premiumLoading ? <WaveLoader /> : premiumFull(premium)}
@@ -35,7 +35,7 @@ export function WriterPanels({ premium, premiumLoading, amount, strike, assetSym
       </div>
       <div className="panel">
         <div className="panel__head">
-          <span className="panel__head-dot"></span>on expiry · {expiryLabel}
+          on expiry · {expiryLabel}
         </div>
         <div
           className="panel__split"
@@ -84,10 +84,10 @@ export function TraderPanels({ premium, premiumLoading, amount, strike, spot, as
       <div className="panels">
         <div className="panel">
           <div className="panel__head">
-            <span className="panel__head-dot"></span>you pay · now
+            you pay · now
           </div>
           <div className="panel__hero">
-            {premiumLoading ? <WaveLoader /> : <>−{premiumFull(premium)}</>}
+            {premiumLoading ? <WaveLoader /> : premiumFull(premium)}
             <span className="unit">USDC</span>
           </div>
           <div className="panel__sub">
@@ -97,7 +97,7 @@ export function TraderPanels({ premium, premiumLoading, amount, strike, spot, as
         </div>
         <div className="panel">
           <div className="panel__head">
-            <span className="panel__head-dot"></span>exercise · anytime before {expiryLabel}
+            exercise · anytime before {expiryLabel}
           </div>
           <div
             className="panel__split"
@@ -128,7 +128,7 @@ export function TraderPanels({ premium, premiumLoading, amount, strike, spot, as
         </div>
         <div className="exercise__cell">
           <div className="exercise__label">max loss</div>
-          <div className="exercise__value exercise__value--neg">−{premiumFull(premium)}</div>
+          <div className="exercise__value exercise__value--neg">{premiumFull(premium)}</div>
           <div className="exercise__sub">if {asset} ≤ ${usd(strike)} at expiry</div>
         </div>
         <div className="exercise__cell">

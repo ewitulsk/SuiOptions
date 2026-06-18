@@ -57,9 +57,9 @@ export function PayoffChart({ strike, qty, totalCost, breakEven, spot }: Props) 
   const profitPoly = `${beX},${zeroY} ${p1.x},${p1.y} ${p1.x},${zeroY}`;
 
   return (
-    <div className="panel" style={{ marginTop: 12 }}>
+    <div className="payoff">
       <div className="panel__head">
-        <span className="panel__head-dot"></span>payoff at expiry
+        payoff at expiry
       </div>
       <svg
         viewBox={`0 0 ${W} ${H}`}
