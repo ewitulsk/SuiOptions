@@ -292,14 +292,11 @@ export function TradePanel({ bucket, series }: Props) {
                   flex: 1,
                   padding: "6px 0",
                   borderRadius: 8,
-                  border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))",
+                  border: side === s
+                    ? "1px solid transparent"
+                    : "1px solid var(--aqua-line, rgba(92,107,122,0.25))",
                   cursor: "pointer",
-                  background:
-                    side === s
-                      ? s === "buy"
-                        ? "var(--aqua-up, #1fbf75)"
-                        : "var(--aqua-down, #e15d6b)"
-                      : "transparent",
+                  background: side === s ? "var(--aqua-sui, #4DA2FF)" : "transparent",
                   color: side === s ? "#fff" : "inherit",
                   fontWeight: 600,
                 }}
