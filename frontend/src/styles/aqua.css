@@ -2454,6 +2454,19 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 }
 
 /* Vault APY chart legend */
+/* Per-round assignment-risk readout beneath the projected-APY caveat. */
+[data-theme="aqua"] .vault-chart__risk {
+  display: flex; gap: 28px; margin-top: 10px; padding-top: 10px;
+  border-top: 1px solid var(--aqua-line);
+}
+[data-theme="aqua"] .vault-chart__risk-item { display: flex; flex-direction: column; gap: 2px; }
+[data-theme="aqua"] .vault-chart__risk-val {
+  font-size: 16px; font-weight: 700; color: var(--aqua-ink-1); font-variant-numeric: tabular-nums;
+}
+[data-theme="aqua"] .vault-chart__risk-val.is-neg { color: var(--aqua-down, #e15d6b); }
+[data-theme="aqua"] .vault-chart__risk-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--aqua-ink-3);
+}
 [data-theme="aqua"] .vault-chart__legend { display: flex; gap: 12px; font-size: 11px; text-transform: none; letter-spacing: 0; color: var(--aqua-ink-3); }
 [data-theme="aqua"] .vault-chart__legend-item { display: inline-flex; align-items: center; gap: 5px; }
 [data-theme="aqua"] .vault-chart__swatch { display: inline-block; width: 14px; height: 0; border-top-width: 2px; border-top-style: solid; }

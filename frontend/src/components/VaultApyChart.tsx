@@ -26,6 +26,11 @@ function cssVar(name: string, fallback: string): string {
   return v || fallback;
 }
 
+function pct(x: number | null | undefined, digits = 1): string {
+  if (x == null || !Number.isFinite(x)) return "—";
+  return `${(x * 100).toFixed(digits)}%`;
+}
+
 type Props = {
   realized: VaultApyPoint[];
   predicted: VaultApyPoint[];
@@ -108,6 +113,16 @@ export function VaultApyChart({ realized, predicted, loading }: Props) {
 
   const empty = realized.length === 0 && predicted.length === 0;
 
+  // Latest predicted point carries the per-round assignment risk. Most rounds
+  // the call expires worthless and the vault keeps the premium; in the
+  // assignment_prob share of rounds it's assigned and gives up the downside.
+  const proj = predicted.length
+    ? predicted.reduce((a, b) => (b.t_ms > a.t_ms ? b : a))
+    : null;
+  const assignProb = proj?.assignment_prob;
+  const downside = proj?.downside_round_yield;
+  const hasRisk = assignProb != null && downside != null;
+
   return (
     <div className="vault-card vault-chart">
       <div
@@ -141,9 +156,22 @@ export function VaultApyChart({ realized, predicted, loading }: Props) {
         )}
       </div>
       <div className="vault-card__foot vault-prose__muted">
-        Projected (dashed) is a premium-yield estimate, not a guarantee — it
-        assumes calls expire unassigned; realized may come in lower in a rally.
+        Projected (dashed) is a model estimate, not a guarantee — it's net of
+        the average assignment cost, but a sharp rally can assign the call and
+        cost more than the average in any single round.
       </div>
+      {hasRisk && (
+        <div className="vault-chart__risk">
+          <div className="vault-chart__risk-item">
+            <span className="vault-chart__risk-val">{pct(assignProb)}</span>
+            <span className="vault-chart__risk-label">assignment chance / round</span>
+          </div>
+          <div className="vault-chart__risk-item">
+            <span className="vault-chart__risk-val is-neg">{pct(downside)}</span>
+            <span className="vault-chart__risk-label">round yield if assigned</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
