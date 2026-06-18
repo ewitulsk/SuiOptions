@@ -7,27 +7,30 @@ const fmt = (n: number) =>
 const usd = (n: number) => formatPrice(n, { grouping: true });
 // Premiums show the exact amount paid/earned, never rounded to the cent.
 const premiumFull = (n: number) => formatPremiumFull(n, { grouping: true });
+// Premium-as-yield: two decimals, amount-independent.
+const pct = (n: number) =>
+  n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 type WriterProps = {
-  premium: number;
-  premiumLoading: boolean;
+  premiumPct: number | null;
+  premiumPctLoading: boolean;
   amount: number;
   strike: number;
   assetSymbol: string | null;
   expiryLabel: string;
 };
 
-export function WriterPanels({ premium, premiumLoading, amount, strike, assetSymbol, expiryLabel }: WriterProps) {
+export function WriterPanels({ premiumPct, premiumPctLoading, amount, strike, assetSymbol, expiryLabel }: WriterProps) {
   const asset = assetSymbol ?? "—";
   return (
     <div className="panels">
       <div className="panel">
         <div className="panel__head">
-          now · premium
+          now · premium yield
         </div>
         <div className="panel__hero">
-          {premiumLoading ? <WaveLoader /> : premiumFull(premium)}
-          <span className="unit">USDC</span>
+          {premiumPctLoading ? <WaveLoader /> : premiumPct === null ? "—" : pct(premiumPct)}
+          <span className="unit">%</span>
         </div>
         <div className="panel__sub">
           Paid upfront. Yours to keep regardless of exercise.

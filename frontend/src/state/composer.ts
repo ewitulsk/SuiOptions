@@ -130,6 +130,10 @@ export type ComposerState = {
   bestPremium: number;
   /** True while a firm RFQ quote for the selected strike is in flight. */
   premiumLoading: boolean;
+  /** Selected strike's indicative premium as a % of collateral value (amount × spot); null until priced. */
+  premiumPct: number | null;
+  /** True while the indicative bulk-view premium for the selected strike is loading. */
+  premiumPctLoading: boolean;
   selected: Strike;
   strikes: Strike[];
   insufficient: boolean;
@@ -318,7 +322,7 @@ export function useComposerState({
     () => seriesBuckets.map((b) => b.bucket_id),
     [seriesBuckets],
   );
-  const { premiums: bulkPremiums } = useBulkView({
+  const { premiums: bulkPremiums, status: bulkStatus } = useBulkView({
     bucketIds: bulkBucketIds,
     writeAmountRaw,
     side: view,
@@ -360,6 +364,27 @@ export function useComposerState({
   // arrives (both Buy and Earn sides). Other tiles keep their bulk-view
   // premium.
   const realSelectedPremium = rfqEntries.length > 0 ? bestPremium : null;
+
+  // Earn hero: the selected strike's indicative bulk-view premium expressed as
+  // a percentage of the collateral's USD value (amount × spot). Because the
+  // premium scales with the write amount, the ratio is amount-independent — the
+  // headline yield holds steady as the user resizes their position.
+  const selectedBulkPremium = useMemo<number | null>(() => {
+    const entry = selectedBucketId ? bulkPremiums.get(selectedBucketId) : null;
+    if (!entry) return null;
+    const scale =
+      series?.settlement_decimals != null ? 10 ** series.settlement_decimals : 1;
+    return Number(entry.premium) / scale;
+  }, [bulkPremiums, selectedBucketId, series?.settlement_decimals]);
+
+  const premiumPct =
+    selectedBulkPremium !== null && amount > 0 && spot > 0
+      ? (selectedBulkPremium / (amount * spot)) * 100
+      : null;
+
+  // Indicative premium for the selected strike is still being fetched (bulk-view
+  // in flight with nothing cached yet).
+  const premiumPctLoading = bulkStatus === "pending" && selectedBulkPremium === null;
 
   // Tiles show the indicative bulk-view premium (or the firm RFQ premium for
   // the selected tile), already in settlement display units; placeholder until
@@ -586,6 +611,8 @@ export function useComposerState({
     quotes,
     bestPremium,
     premiumLoading,
+    premiumPct,
+    premiumPctLoading,
     selected,
     strikes,
     insufficient,

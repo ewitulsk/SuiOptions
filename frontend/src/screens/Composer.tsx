@@ -301,8 +301,8 @@ export function Composer({ initialView }: Props) {
         <Tideline bucket={s.bucket} amount={s.amount} assetSymbol={s.selectedAsset} />
 
         <WriterPanels
-          premium={s.bestPremium}
-          premiumLoading={s.premiumLoading}
+          premiumPct={s.premiumPct}
+          premiumPctLoading={s.premiumPctLoading}
           amount={s.amount}
           strike={s.selected.strike}
           assetSymbol={s.selectedAsset}
