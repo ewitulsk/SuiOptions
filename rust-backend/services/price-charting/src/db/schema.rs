@@ -41,13 +41,17 @@ diesel::table! {
 // (vault_id, kind, horizon) read at the latest `time`.
 diesel::table! {
     vault_predicted_apy (vault_id, kind, horizon, time) {
-        time       -> Timestamptz,
-        vault_id   -> Text,
-        kind       -> Text,
-        horizon    -> Int4,
-        t_ms       -> Int8,
-        apy        -> Float8,
-        confidence -> Float8,
+        time                 -> Timestamptz,
+        vault_id             -> Text,
+        kind                 -> Text,
+        horizon              -> Int4,
+        t_ms                 -> Int8,
+        apy                  -> Float8,
+        apy_low              -> Float8,
+        apy_high             -> Float8,
+        assignment_prob      -> Float8,
+        downside_round_yield -> Float8,
+        confidence           -> Float8,
     }
 }
 

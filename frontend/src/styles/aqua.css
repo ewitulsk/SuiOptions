@@ -2219,6 +2219,7 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 /* APY sparkline */
 [data-theme="aqua"] .vault-tile__spark { width: 100%; height: 64px; display: block; }
 [data-theme="aqua"] .vault-tile__spark-area { fill: var(--aqua-up, #1fbf75); opacity: 0.10; }
+[data-theme="aqua"] .vault-tile__spark-band { fill: var(--aqua-accent, #2f81f7); opacity: 0.12; stroke: none; }
 [data-theme="aqua"] .vault-tile__spark-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 [data-theme="aqua"] .vault-tile__spark-line--realized { stroke: var(--aqua-up, #1fbf75); }
 [data-theme="aqua"] .vault-tile__spark-line--predicted { stroke: var(--aqua-accent, #2f81f7); stroke-dasharray: 4 4; }
@@ -2236,6 +2237,13 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
   font-variant-numeric: tabular-nums;
 }
 [data-theme="aqua"] .vault-tile__apy-val.is-pos { color: var(--aqua-up, #1fbf75); }
+/* A predicted range ("12% – 34%") needs to fit the tile column, so it runs
+   smaller than a single APY figure; the mid sits beneath it, muted. */
+[data-theme="aqua"] .vault-tile__apy-val--band { font-size: 18px; }
+[data-theme="aqua"] .vault-tile__apy-band {
+  font-size: 11px; color: var(--aqua-ink-3); margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
 [data-theme="aqua"] .vault-tile__cta {
   font-size: 13px; font-weight: 600; color: var(--aqua-sui, #4DA2FF);
   transition: gap .15s ease;
@@ -2447,6 +2455,19 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 }
 
 /* Vault APY chart legend */
+/* Per-round assignment-risk readout beneath the projected-APY caveat. */
+[data-theme="aqua"] .vault-chart__risk {
+  display: flex; gap: 28px; margin-top: 10px; padding-top: 10px;
+  border-top: 1px solid var(--aqua-line);
+}
+[data-theme="aqua"] .vault-chart__risk-item { display: flex; flex-direction: column; gap: 2px; }
+[data-theme="aqua"] .vault-chart__risk-val {
+  font-size: 16px; font-weight: 700; color: var(--aqua-ink-1); font-variant-numeric: tabular-nums;
+}
+[data-theme="aqua"] .vault-chart__risk-val.is-neg { color: var(--aqua-down, #e15d6b); }
+[data-theme="aqua"] .vault-chart__risk-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--aqua-ink-3);
+}
 [data-theme="aqua"] .vault-chart__legend { display: flex; gap: 12px; font-size: 11px; text-transform: none; letter-spacing: 0; color: var(--aqua-ink-3); }
 [data-theme="aqua"] .vault-chart__legend-item { display: inline-flex; align-items: center; gap: 5px; }
 [data-theme="aqua"] .vault-chart__swatch { display: inline-block; width: 14px; height: 0; border-top-width: 2px; border-top-style: solid; }

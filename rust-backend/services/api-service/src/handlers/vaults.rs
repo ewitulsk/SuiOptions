@@ -243,6 +243,17 @@ pub async fn list_vault_rounds(
 pub struct ApyPointDto {
     pub t_ms: i64,
     pub apy: f64,
+    /// Low/high of the predicted range — predicted points only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apy_low: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apy_high: Option<f64>,
+    /// Per-round probability the call is assigned — predicted points only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignment_prob: Option<f64>,
+    /// Per-round (not annualized) net yield if assigned — predicted points only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downside_round_yield: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -268,6 +279,10 @@ struct WorkerApy {
 struct WorkerPoint {
     t_ms: i64,
     apy: f64,
+    apy_low: f64,
+    apy_high: f64,
+    assignment_prob: f64,
+    downside_round_yield: f64,
     kind: String,
     confidence: f64,
 }
@@ -290,6 +305,10 @@ pub async fn get_vault_apy(
         .map(|p| ApyPointDto {
             t_ms: p.t_ms as i64,
             apy: p.apy,
+            apy_low: None,
+            apy_high: None,
+            assignment_prob: None,
+            downside_round_yield: None,
             kind: None,
             confidence: None,
         })
@@ -319,6 +338,10 @@ async fn fetch_predicted(state: &AppState, vault_id: &str) -> Vec<ApyPointDto> {
                 .map(|p| ApyPointDto {
                     t_ms: p.t_ms,
                     apy: p.apy,
+                    apy_low: Some(p.apy_low),
+                    apy_high: Some(p.apy_high),
+                    assignment_prob: Some(p.assignment_prob),
+                    downside_round_yield: Some(p.downside_round_yield),
                     kind: Some(p.kind),
                     confidence: Some(p.confidence),
                 })

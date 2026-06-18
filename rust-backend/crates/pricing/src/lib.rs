@@ -77,6 +77,27 @@ pub fn call_delta(i: CallInputs) -> f64 {
     norm_cdf(d1)
 }
 
+/// Risk-neutral probability the call finishes in-the-money — i.e. the vault
+/// gets assigned — which is `N(d2)`. Distinct from delta (`N(d1)`): for an OTM
+/// call `N(d2) < N(d1)`, so a 0.10-delta strike has a *lower* assignment
+/// probability than 0.10. Edge conventions match `call_delta`: at expiry or
+/// zero vol the payoff is deterministic, so this collapses to the (forward)
+/// intrinsic indicator.
+pub fn assignment_prob(i: CallInputs) -> f64 {
+    if i.t_years <= 0.0 {
+        return if i.spot > i.strike { 1.0 } else { 0.0 };
+    }
+    if i.sigma <= 0.0 {
+        let fwd = i.spot * (i.r * i.t_years).exp();
+        return if fwd > i.strike { 1.0 } else { 0.0 };
+    }
+    let sqrt_t = i.t_years.sqrt();
+    let d1 = ((i.spot / i.strike).ln() + (i.r + 0.5 * i.sigma * i.sigma) * i.t_years)
+        / (i.sigma * sqrt_t);
+    let d2 = d1 - i.sigma * sqrt_t;
+    norm_cdf(d2)
+}
+
 /// The strike whose call delta equals `delta`, closed form: solving
 /// N(d1) = delta for K gives
 ///
@@ -437,6 +458,32 @@ mod tests {
         let det = CallInputs { spot: 100.0, strike: 101.0, t_years: 1.0, r: 0.05, sigma: 0.0 };
         close(call_delta(det), 1.0, 1e-12); // fwd ≈ 105.13 > 101
         close(call_delta(CallInputs { strike: 110.0, ..det }), 0.0, 1e-12);
+    }
+
+    #[test]
+    fn assignment_prob_is_below_delta_for_otm_call() {
+        // OTM call: N(d2) < N(d1)=delta. The keeper's weekly 0.10-delta strike.
+        let (spot, sigma, t): (f64, f64, f64) = (3.5, 0.60, 7.0 / 365.0);
+        let k = strike_for_delta(spot, sigma, t, 0.0, 0.10);
+        let i = CallInputs { spot, strike: k, t_years: t, r: 0.0, sigma };
+        let prob = assignment_prob(i);
+        let delta = call_delta(i);
+        close(delta, 0.10, 1e-6);
+        assert!(prob > 0.0 && prob < delta, "prob {prob} not in (0, {delta})");
+    }
+
+    #[test]
+    fn assignment_prob_edges() {
+        // Expired / zero-vol: indicator on the (forward) intrinsic.
+        let expired = CallInputs { spot: 105.0, strike: 100.0, t_years: 0.0, r: 0.0, sigma: 0.5 };
+        close(assignment_prob(expired), 1.0, 1e-12);
+        close(assignment_prob(CallInputs { spot: 95.0, ..expired }), 0.0, 1e-12);
+        let zero_vol = CallInputs { spot: 100.0, strike: 101.0, t_years: 1.0, r: 0.05, sigma: 0.0 };
+        close(assignment_prob(zero_vol), 1.0, 1e-12); // fwd ≈ 105.13 > 101
+        // ATM with vol: d2 = −σ√t/2 < 0, so just under 0.5.
+        let atm = CallInputs { spot: 100.0, strike: 100.0, t_years: 1.0, r: 0.0, sigma: 0.2 };
+        let p = assignment_prob(atm);
+        assert!(p > 0.45 && p < 0.5, "atm assignment prob {p}");
     }
 
     #[test]

@@ -34,3 +34,8 @@ max_conf_bps       = 100
 [model]
 forecast_horizon = 4
 delta_target     = 0.10
+# Predicted APY is net of expected assignment, simply annualized and capped.
+apy_cap          = 5.0   # ±500% ceiling
+assumed_vrp      = 0.04  # implied = realized + 4 vol points
+vrp_band         = 0.02  # Tier-2 range: +2…+6 vol points
+vol_band         = 0.25  # Tier-1 range: realized vol ±25%

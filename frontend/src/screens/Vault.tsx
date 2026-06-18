@@ -88,10 +88,15 @@ function shortHex(s: string): string {
   return s.length > 12 ? `${s.slice(0, 6)}…${s.slice(-4)}` : s;
 }
 
+/** The most recent point in a series (by timestamp), or null when empty. */
+function latestApyPoint(pts: VaultApyPoint[]): VaultApyPoint | null {
+  if (pts.length === 0) return null;
+  return pts.reduce((a, b) => (b.t_ms > a.t_ms ? b : a));
+}
+
 /** APY of the most recent point in a series (by timestamp), or null when empty. */
 function latestApy(pts: VaultApyPoint[]): number | null {
-  if (pts.length === 0) return null;
-  return pts.reduce((a, b) => (b.t_ms > a.t_ms ? b : a)).apy;
+  return latestApyPoint(pts)?.apy ?? null;
 }
 
 /** Underlying asset logo, falling back to a glyph when token-info has none. */
@@ -386,8 +391,21 @@ function VaultSparkline({
     );
   }
 
+  // Band over the projected segment: pinched at the realized anchor (no band
+  // there), opening to [apy_low, apy_high] across the forecast.
+  const pBand = pLine.map((p) => ({
+    t: p.t_ms,
+    blo: p.apy_low ?? p.apy,
+    bhi: p.apy_high ?? p.apy,
+  }));
+  const hasBand = pBand.some((b) => b.bhi - b.blo > 1e-4);
+
   const ts = all.map((p) => p.t_ms);
-  const vs = all.map((p) => p.apy);
+  // Include the band extremes in the y-range so a wide band doesn't clip.
+  const vs = [
+    ...all.map((p) => p.apy),
+    ...(hasBand ? pBand.flatMap((b) => [b.blo, b.bhi]) : []),
+  ];
   const tMin = Math.min(...ts);
   const tMax = Math.max(...ts);
   const vMin = Math.min(...vs);
@@ -407,6 +425,13 @@ function VaultSparkline({
   const pPath = pPts.length ? "M" + pPts.join(" L") : "";
   const areaPath =
     rPts.length >= 2 ? `M${rPts[0]} L${rPts.join(" L")} L${x(tMax).toFixed(2)},${H} L${x(rSorted[0].t_ms).toFixed(2)},${H} Z` : "";
+  // Top edge (highs L→R) then bottom edge (lows R→L), closed into a ribbon.
+  const bandHi = pBand.map((b) => `${x(b.t).toFixed(2)},${y(b.bhi).toFixed(2)}`);
+  const bandLo = pBand.map((b) => `${x(b.t).toFixed(2)},${y(b.blo).toFixed(2)}`);
+  const bandPath =
+    hasBand && bandHi.length >= 2
+      ? `M${bandHi.join(" L")} L${bandLo.reverse().join(" L")} Z`
+      : "";
 
   return (
     <svg
@@ -416,6 +441,7 @@ function VaultSparkline({
       aria-hidden
     >
       {areaPath && <path className="vault-tile__spark-area" d={areaPath} />}
+      {bandPath && <path className="vault-tile__spark-band" d={bandPath} />}
       {rPath && (
         <path className="vault-tile__spark-line vault-tile__spark-line--realized" d={rPath} vectorEffect="non-scaling-stroke" />
       )}
@@ -439,7 +465,13 @@ function VaultTile({
   const realizedSeries = apyQ.data?.realized ?? [];
   const predictedSeries = apyQ.data?.predicted ?? [];
   const realized = latestApy(realizedSeries) ?? vault.apy;
-  const projected = latestApy(predictedSeries);
+  const projectedPt = latestApyPoint(predictedSeries);
+  const projected = projectedPt?.apy ?? null;
+  const lo = projectedPt?.apy_low;
+  const hi = projectedPt?.apy_high;
+  // Show a range when the band is present and non-degenerate; the projection is
+  // a model estimate, so the range — not a single number — is the honest read.
+  const hasBand = lo != null && hi != null && hi - lo > 1e-4;
 
   return (
     <button className="vault-tile" onClick={onSelect} tabIndex={active ? 0 : -1}>
@@ -466,7 +498,10 @@ function VaultTile({
         </div>
         <div className="vault-tile__apy">
           <div className="vault-tile__apy-label">Projected APY</div>
-          <div className="vault-tile__apy-val">{fmtPct(projected)}</div>
+          <div className={`vault-tile__apy-val${hasBand ? " vault-tile__apy-val--band" : ""}`}>
+            {hasBand ? `${fmtPct(lo)} – ${fmtPct(hi)}` : fmtPct(projected)}
+          </div>
+          {hasBand && <div className="vault-tile__apy-band">mid {fmtPct(projected)}</div>}
         </div>
       </div>
 

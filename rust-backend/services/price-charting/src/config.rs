@@ -49,6 +49,18 @@ fn default_horizon() -> u32 {
 fn default_delta() -> f64 {
     0.10
 }
+fn default_apy_cap() -> f64 {
+    5.0 // clamp annualized APY to ±500% so a short round can't blow up
+}
+fn default_assumed_vrp() -> f64 {
+    0.04 // mid variance-risk-premium: implied = realized + 4 vol points
+}
+fn default_vrp_band() -> f64 {
+    0.02 // range spans assumed_vrp ± this (→ +2…+6 vol points)
+}
+fn default_vol_band() -> f64 {
+    0.25 // Tier-1 range brackets realized vol by ±25%
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -140,6 +152,23 @@ pub struct ModelConfig {
     /// Strike the Tier-2 forecast prices, as a call delta (~0.10 per doc 04).
     #[serde(default = "default_delta")]
     pub delta_target: f64,
+    /// Clamp annualized APY to ±this fraction (e.g. 5.0 = ±500%). Stops a
+    /// short-cadence (hourly) round's tiny premium from annualizing to absurd
+    /// numbers.
+    #[serde(default = "default_apy_cap")]
+    pub apy_cap: f64,
+    /// Assumed variance risk premium in vol points: the predicted edge comes
+    /// from selling implied vol richer than realized (`implied = realized +
+    /// assumed_vrp`). At 0 the premium exactly offsets expected assignment and
+    /// the net APY is ≈ −fees (no free lunch).
+    #[serde(default = "default_assumed_vrp")]
+    pub assumed_vrp: f64,
+    /// Tier-2 range half-width, in vol points, around `assumed_vrp`.
+    #[serde(default = "default_vrp_band")]
+    pub vrp_band: f64,
+    /// Tier-1 range half-width as a fraction of realized vol (σ bracket).
+    #[serde(default = "default_vol_band")]
+    pub vol_band: f64,
 }
 
 impl Default for ModelConfig {
@@ -147,6 +176,10 @@ impl Default for ModelConfig {
         Self {
             forecast_horizon: default_horizon(),
             delta_target: default_delta(),
+            apy_cap: default_apy_cap(),
+            assumed_vrp: default_assumed_vrp(),
+            vrp_band: default_vrp_band(),
+            vol_band: default_vol_band(),
         }
     }
 }

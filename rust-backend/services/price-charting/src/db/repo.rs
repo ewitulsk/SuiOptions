@@ -58,6 +58,14 @@ pub struct LatestPredictedApy {
     #[diesel(sql_type = Double)]
     pub apy: f64,
     #[diesel(sql_type = Double)]
+    pub apy_low: f64,
+    #[diesel(sql_type = Double)]
+    pub apy_high: f64,
+    #[diesel(sql_type = Double)]
+    pub assignment_prob: f64,
+    #[diesel(sql_type = Double)]
+    pub downside_round_yield: f64,
+    #[diesel(sql_type = Double)]
     pub confidence: f64,
 }
 
@@ -319,7 +327,8 @@ impl Repo {
         let mut conn = self.conn()?;
         diesel::sql_query(
             "SELECT DISTINCT ON (kind, horizon) \
-                    kind, horizon, t_ms, apy, confidence \
+                    kind, horizon, t_ms, apy, apy_low, apy_high, \
+                    assignment_prob, downside_round_yield, confidence \
              FROM vault_predicted_apy \
              WHERE vault_id = $1 \
              ORDER BY kind, horizon, time DESC",

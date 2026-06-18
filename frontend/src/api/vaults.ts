@@ -158,6 +158,13 @@ export async function fetchVaultReceipts(
 export type VaultApyPoint = {
   t_ms: number;
   apy: number;
+  /** Low/high of the predicted range (straddles `apy`) — predicted only. */
+  apy_low?: number;
+  apy_high?: number;
+  /** Per-round probability the call is assigned — predicted only. */
+  assignment_prob?: number;
+  /** Per-round (not annualized) net yield if assigned — predicted only. */
+  downside_round_yield?: number;
   /** "current" (Tier 1) | "forecast" (Tier 2) — predicted points only. */
   kind?: string;
   confidence?: number;
