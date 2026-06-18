@@ -17,6 +17,7 @@ import {
   useBalanceManager,
   useBmBalances,
   useOpenOrders,
+  useOpenOrderDetails,
   useOrderBook,
   type PoolRef,
 } from "../api/deepbook";
@@ -44,10 +45,6 @@ type Props = {
 
 type Tab = "market" | "limit";
 type Side = "buy" | "sell";
-
-function shortId(id: string): string {
-  return id.length > 10 ? `${id.slice(0, 6)}…${id.slice(-4)}` : id;
-}
 
 export function TradePanel({ bucket, series }: Props) {
   const account = useCurrentAccount();
@@ -79,12 +76,13 @@ export function TradePanel({ bucket, series }: Props) {
   const bm = useBalanceManager(addr);
   const book = useOrderBook(pool, addr);
   const openOrders = useOpenOrders(pool, bm.data ?? null, addr);
+  const orderDetails = useOpenOrderDetails(pool, openOrders.data, addr);
   const bmBalances = useBmBalances(pool, bm.data ?? null, addr);
   const walletQuote = useCoinBalance(addr, series.settlement_coin_type);
   const walletBase = useCoinBalance(addr, bucket.call_coin_type);
 
   const refreshAll = () => {
-    for (const key of ["deepbook-book", "deepbook-open-orders", "deepbook-bm-balances", "coin-balance"]) {
+    for (const key of ["deepbook-book", "deepbook-open-orders", "deepbook-open-order-details", "deepbook-bm-balances", "coin-balance"]) {
       queryClient.invalidateQueries({ queryKey: [key] });
     }
   };
@@ -259,6 +257,7 @@ export function TradePanel({ bucket, series }: Props) {
   const fmtBase = (raw: bigint) => (Number(raw) / 10 ** baseDec).toString();
 
   return (
+    <>
     <div className="panel">
       <div
         className="panel__head"
@@ -416,61 +415,104 @@ export function TradePanel({ bucket, series }: Props) {
         </div>
       </div>
 
-      {/* open orders + withdraw / cancel controls */}
-      <div className="tradepanel__orders" style={{ fontSize: 12 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ opacity: 0.8 }}>open orders: {openOrders.data?.length ?? 0}</span>
-          <span style={{ display: "flex", gap: 6 }}>
-            {(openOrders.data?.length ?? 0) > 0 && (
-              <button
-                disabled={busy}
-                onClick={() =>
-                  void run("cancel all", () => buildCancelAllTx(poolRef), {
-                    name: "deepbook_order_cancelled",
-                    props: { scope: "all", pool_id: pool.poolId },
-                  })
-                }
-                style={{ fontSize: 11, cursor: "pointer", background: "transparent", border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))", borderRadius: 6, padding: "2px 8px", color: "inherit" }}
-              >
-                cancel all
-              </button>
-            )}
-            {(bmBase > 0n || bmQuote > 0n) && account && (
-              <button
-                disabled={busy}
-                onClick={() => {
-                  void run(
-                    "withdraw",
-                    () => buildWithdrawAllTx({ ...poolRef, recipient: account.address }),
-                    { name: "deepbook_funds_withdrawn", props: { pool_id: pool.poolId } },
-                  );
-                }}
-                style={{ fontSize: 11, cursor: "pointer", background: "transparent", border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))", borderRadius: 6, padding: "2px 8px", color: "inherit" }}
-              >
-                withdraw all
-              </button>
-            )}
-          </span>
-        </div>
-        {(openOrders.data ?? []).map((id) => (
-          <div key={id} style={{ display: "flex", justifyContent: "space-between", marginTop: 4, opacity: 0.85 }}>
-            <span>#{shortId(id)}</span>
+      </div>
+    </div>
+
+    {/* Open orders — its own panel, separate from the trade ticket (SO). Each
+        row shows what the order actually is: side, size, and price. */}
+    <div className="panel">
+      <div
+        className="panel__head"
+        style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
+      >
+        <span>open orders ({openOrders.data?.length ?? 0})</span>
+        <span style={{ display: "flex", gap: 6 }}>
+          {(openOrders.data?.length ?? 0) > 0 && (
             <button
               disabled={busy}
               onClick={() =>
-                void run("cancel", () => buildCancelOrderTx({ ...poolRef, orderId: BigInt(id) }), {
+                void run("cancel all", () => buildCancelAllTx(poolRef), {
                   name: "deepbook_order_cancelled",
-                  props: { scope: "single", order_id: id, pool_id: pool.poolId },
+                  props: { scope: "all", pool_id: pool.poolId },
                 })
               }
-              style={{ fontSize: 11, cursor: "pointer", background: "transparent", border: "none", color: "var(--aqua-down, #e15d6b)" }}
+              style={{ fontSize: 11, cursor: "pointer", background: "transparent", border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))", borderRadius: 6, padding: "2px 8px", color: "inherit" }}
             >
-              cancel
+              cancel all
             </button>
+          )}
+          {(bmBase > 0n || bmQuote > 0n) && account && (
+            <button
+              disabled={busy}
+              onClick={() => {
+                void run(
+                  "withdraw",
+                  () => buildWithdrawAllTx({ ...poolRef, recipient: account.address }),
+                  { name: "deepbook_funds_withdrawn", props: { pool_id: pool.poolId } },
+                );
+              }}
+              style={{ fontSize: 11, cursor: "pointer", background: "transparent", border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))", borderRadius: 6, padding: "2px 8px", color: "inherit" }}
+            >
+              withdraw all
+            </button>
+          )}
+        </span>
+      </div>
+
+      {(openOrders.data?.length ?? 0) === 0 ? (
+        <div className="panel__sub">no open orders</div>
+      ) : (
+        <div style={{ fontSize: 13 }}>
+          {/* column headers */}
+          <div style={{ display: "flex", opacity: 0.6, fontSize: 10, textTransform: "uppercase", letterSpacing: 0.5, paddingBottom: 4 }}>
+            <span style={{ flex: "0 0 48px" }}>side</span>
+            <span style={{ flex: 1, textAlign: "right" }}>options</span>
+            <span style={{ flex: 1, textAlign: "right" }}>price ({settle})</span>
+            <span style={{ flex: "0 0 56px" }} />
           </div>
-        ))}
-      </div>
-      </div>
+          {(openOrders.data ?? []).map((id) => {
+            const d = orderDetails.data?.find((o) => o.orderId === id);
+            return (
+              <div key={id} style={{ display: "flex", alignItems: "center", marginTop: 4 }}>
+                <span
+                  style={{
+                    flex: "0 0 48px",
+                    fontWeight: 600,
+                    color: d
+                      ? d.isBid
+                        ? "var(--aqua-up, #1fbf75)"
+                        : "var(--aqua-down, #e15d6b)"
+                      : "inherit",
+                  }}
+                >
+                  {d ? (d.isBid ? "buy" : "sell") : "—"}
+                </span>
+                <span style={{ flex: 1, textAlign: "right" }}>
+                  {d ? d.remaining.toLocaleString(undefined, { maximumFractionDigits: 6 }) : "…"}
+                </span>
+                <span style={{ flex: 1, textAlign: "right" }}>
+                  {d ? formatPrice(d.price) : "…"}
+                </span>
+                <span style={{ flex: "0 0 56px", textAlign: "right" }}>
+                  <button
+                    disabled={busy}
+                    onClick={() =>
+                      void run("cancel", () => buildCancelOrderTx({ ...poolRef, orderId: BigInt(id) }), {
+                        name: "deepbook_order_cancelled",
+                        props: { scope: "single", order_id: id, pool_id: pool.poolId },
+                      })
+                    }
+                    style={{ fontSize: 11, cursor: "pointer", background: "transparent", border: "none", color: "var(--aqua-down, #e15d6b)" }}
+                  >
+                    cancel
+                  </button>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
+    </>
   );
 }

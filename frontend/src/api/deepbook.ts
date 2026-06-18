@@ -207,6 +207,87 @@ export function useOpenOrders(pool: PoolRef | null, bmId: string | null, viewer:
   });
 }
 
+/**
+ * One open order with the fields a user actually reads: side, price, and the
+ * still-resting (unfilled) base quantity.
+ *
+ * `account_open_orders` only hands back the encoded order ids, so we decode
+ * side+price straight from the u128 (DeepBook packs them into the high bits —
+ * see utils::decode_order_id) and devInspect `get_order` per id for the
+ * filled/total quantity the id doesn't carry.
+ */
+export type OpenOrder = {
+  orderId: string;
+  isBid: boolean;
+  price: number; // quote (settlement) display units per option
+  remaining: number; // unfilled base quantity, display units
+};
+
+// BCS shape of deepbook `book::order::Order` (returned by `pool::get_order`).
+const ORDER_BCS = bcs.struct("Order", {
+  balance_manager_id: bcs.Address,
+  order_id: bcs.u128(),
+  client_order_id: bcs.u64(),
+  quantity: bcs.u64(),
+  filled_quantity: bcs.u64(),
+  fee_is_deep: bcs.bool(),
+  order_deep_price: bcs.struct("OrderDeepPrice", {
+    asset_is_base: bcs.bool(),
+    deep_per_asset: bcs.u64(),
+  }),
+  epoch: bcs.u64(),
+  status: bcs.u8(),
+  expire_timestamp: bcs.u64(),
+});
+
+/** Split a DeepBook encoded order id into (is_bid, raw price). */
+function decodeOrderId(id: bigint): { isBid: boolean; priceRaw: bigint } {
+  return {
+    isBid: id >> 127n === 0n,
+    priceRaw: (id >> 64n) & ((1n << 63n) - 1n),
+  };
+}
+
+/**
+ * Resolve each open-order id to its side / price / remaining size. Batches one
+ * `get_order` devInspect call per id into a single transaction. Keyed on the id
+ * list so it refetches whenever `useOpenOrders` reports a change.
+ */
+export function useOpenOrderDetails(
+  pool: PoolRef | null,
+  orderIds: string[] | undefined,
+  viewer: string | null,
+) {
+  const client = useSuiClient();
+  const ids = orderIds ?? [];
+  return useQuery<OpenOrder[], Error>({
+    queryKey: ["deepbook-open-order-details", pool?.poolId, ids.join(",")],
+    enabled: Boolean(pool && DEEPBOOK_PACKAGE_ID) && ids.length > 0,
+    refetchInterval: 4_000,
+    queryFn: async () => {
+      const p = pool!;
+      const results = await devInspect(client, viewer, (tx) => {
+        for (const id of ids) {
+          tx.moveCall({
+            target: `${DEEPBOOK_PACKAGE_ID}::pool::get_order`,
+            typeArguments: [p.baseCoinType, p.quoteCoinType],
+            arguments: [tx.object(p.poolId), tx.pure.u128(BigInt(id))],
+          });
+        }
+      });
+      return ids.map((id, i) => {
+        const { isBid, priceRaw } = decodeOrderId(BigInt(id));
+        const price = fromRawPrice(priceRaw, p.baseDecimals, p.quoteDecimals);
+        const bytes = results[i]?.[0];
+        if (!bytes) return { orderId: id, isBid, price, remaining: 0 };
+        const o = ORDER_BCS.parse(bytes);
+        const remaining = (Number(o.quantity) - Number(o.filled_quantity)) / 10 ** p.baseDecimals;
+        return { orderId: id, isBid, price, remaining };
+      });
+    },
+  });
+}
+
 // ---- BM balances ----------------------------------------------------------------
 
 export type BmBalances = { baseRaw: bigint; quoteRaw: bigint };
