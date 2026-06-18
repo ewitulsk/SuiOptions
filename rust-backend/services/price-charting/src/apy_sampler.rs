@@ -163,6 +163,10 @@ async fn tick_once(p: &ApySamplerParams) -> Result<(usize, usize)> {
                         horizon: pt.horizon,
                         t_ms: pt.t_ms,
                         apy: pt.apy,
+                        apy_low: pt.apy_low,
+                        apy_high: pt.apy_high,
+                        assignment_prob: pt.assignment_prob,
+                        downside_round_yield: pt.downside_round_yield,
                         confidence: pt.confidence,
                     });
                 }
@@ -255,12 +259,23 @@ async fn compute_vault(
         },
     };
 
-    let current_expiry_ms = rounds
-        .iter()
-        .find(|r| r.round == vault.round)
+    let current_round = rounds.iter().find(|r| r.round == vault.round);
+    let current_expiry_ms = current_round
         .and_then(|r| r.expiry_ms)
         .map(|e| e as i64)
         .unwrap_or_else(|| now_ms() + round_ms as i64);
+
+    // Strike actually sold this round, in USD-cross units (settlement per
+    // underlying) so it's comparable to `spot`. On-chain `strike` is a scaled
+    // ratio — settle-smallest per under-smallest = strike / 10^strike_scale —
+    // so the whole-unit price is that × 10^(under_dec − settle_dec).
+    let current_strike = current_round.and_then(|r| match (r.strike, r.strike_scale) {
+        (Some(raw), Some(scale)) => {
+            let exp = u_tok.decimals as i32 - s_tok.decimals as i32 - scale as i32;
+            Some(raw as f64 * 10f64.powi(exp))
+        }
+        _ => None,
+    });
 
     let aum_underlying = aum_underlying(vault, u_tok.decimals);
 
@@ -276,10 +291,15 @@ async fn compute_vault(
         current_expiry_ms,
         current_premium_underlying: premium_underlying,
         current_premium_confidence: confidence,
+        current_strike,
         perf_fee: perf_bps as f64 / 10_000.0,
         mgmt_fee_annual: mgmt_bps as f64 / 10_000.0,
         horizon: p.model.forecast_horizon,
         delta_target: p.model.delta_target,
+        apy_cap: p.model.apy_cap,
+        assumed_vrp: p.model.assumed_vrp,
+        vrp_band: p.model.vrp_band,
+        vol_band: p.model.vol_band,
     };
     Ok(compute::predict(&inputs))
 }

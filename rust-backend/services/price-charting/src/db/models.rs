@@ -54,6 +54,13 @@ pub struct PredictedApyRow {
     pub horizon: i32,
     pub t_ms: i64,
     pub apy: f64,
+    /// Low/high of the predicted range (range straddles `apy`).
+    pub apy_low: f64,
+    pub apy_high: f64,
+    /// Per-round probability the call is assigned (N(d2)).
+    pub assignment_prob: f64,
+    /// Per-round (not annualized) net yield conditional on assignment.
+    pub downside_round_yield: f64,
     pub confidence: f64,
 }
 

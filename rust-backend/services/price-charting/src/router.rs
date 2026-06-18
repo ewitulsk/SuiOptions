@@ -234,6 +234,13 @@ async fn get_price_at(
 struct PredictedApyPoint {
     t_ms: i64,
     apy: f64,
+    /// Low/high of the predicted range (straddles `apy`).
+    apy_low: f64,
+    apy_high: f64,
+    /// Per-round probability the call is assigned.
+    assignment_prob: f64,
+    /// Per-round (not annualized) net yield if assigned — the downside scenario.
+    downside_round_yield: f64,
     /// `current` | `forecast`.
     kind: String,
     horizon: i32,
@@ -266,6 +273,10 @@ async fn get_vault_apy(
         .map(|r| PredictedApyPoint {
             t_ms: r.t_ms,
             apy: r.apy,
+            apy_low: r.apy_low,
+            apy_high: r.apy_high,
+            assignment_prob: r.assignment_prob,
+            downside_round_yield: r.downside_round_yield,
             kind: r.kind,
             horizon: r.horizon,
             confidence: r.confidence,
