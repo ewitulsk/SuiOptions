@@ -1006,6 +1006,16 @@
   background: var(--aqua-sui, #4DA2FF);
 }
 
+/* DeepBook market/limit buy button: flat blue, square corners — no gradient,
+   shine sweep, or glow (SO-236). */
+[data-theme="aqua"] .tradepanel__form .cta { border-radius: 0; }
+[data-theme="aqua"] .tradepanel__form .cta::before { display: none; }
+[data-theme="aqua"] .tradepanel__form .cta:not(:disabled) {
+  background: var(--aqua-sui, #4DA2FF);
+  box-shadow: none;
+}
+[data-theme="aqua"] .tradepanel__form .cta:hover { box-shadow: none; }
+
 /* ---------- Quote feed ---------- */
 [data-theme="aqua"] .feed-toggle {
   position: absolute; right: 24px; bottom: 24px; z-index: 30;
