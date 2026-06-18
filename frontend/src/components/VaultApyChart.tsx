@@ -19,7 +19,17 @@ import {
 } from "lightweight-charts";
 
 import type { VaultApyPoint } from "../api/vaults";
+import { ApyBandPrimitive, type BandPoint } from "./apyBandPrimitive";
 import { useThemeMode } from "../theme";
+
+/** Translucent rgba from a #rrggbb / #rgb color, with an accent fallback. */
+function rgba(color: string, alpha: number): string {
+  const hex = color.trim().replace(/^#/, "");
+  const full = hex.length === 3 ? hex.split("").map((c) => c + c).join("") : hex;
+  if (!/^[0-9a-f]{6}$/i.test(full)) return `rgba(47,129,247,${alpha})`;
+  const n = parseInt(full, 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+}
 
 function cssVar(name: string, fallback: string): string {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -43,6 +53,7 @@ export function VaultApyChart({ realized, predicted, loading }: Props) {
   const chartRef = useRef<IChartApi | null>(null);
   const realizedRef = useRef<ISeriesApi<"Line"> | null>(null);
   const predictedRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const bandRef = useRef<ApyBandPrimitive | null>(null);
 
   // Rebuild on theme flip — Lightweight Charts reads colors once.
   useEffect(() => {
@@ -85,14 +96,21 @@ export function VaultApyChart({ realized, predicted, loading }: Props) {
       priceFormat: pctFmt,
     });
 
+    // Confidence-band fill behind the projected line, attached to the predicted
+    // series so it shares its price scale.
+    const band = new ApyBandPrimitive();
+    predictedLine.attachPrimitive(band);
+
     chartRef.current = chart;
     realizedRef.current = realizedLine;
     predictedRef.current = predictedLine;
+    bandRef.current = band;
     return () => {
       chart.remove();
       chartRef.current = null;
       realizedRef.current = null;
       predictedRef.current = null;
+      bandRef.current = null;
     };
   }, [mode]);
 
@@ -109,6 +127,23 @@ export function VaultApyChart({ realized, predicted, loading }: Props) {
     // curve rather than floating disconnected.
     const last = realized.length ? [realized[realized.length - 1]] : [];
     pl.setData(toLine([...last, ...predicted]));
+
+    // Band: same anchored segment, pinched at the realized anchor (low=high=apy
+    // there, since realized points carry no band) and opening to the forecast
+    // range. Hidden when the band is degenerate.
+    const band = bandRef.current;
+    if (band) {
+      const bandData: BandPoint[] = [...last, ...predicted]
+        .map((p) => ({
+          time: (p.t_ms / 1000) as UTCTimestamp,
+          low: p.apy_low ?? p.apy,
+          high: p.apy_high ?? p.apy,
+        }))
+        .sort((a, b) => (a.time as number) - (b.time as number));
+      const hasBand = bandData.some((d) => d.high - d.low > 1e-4);
+      const accent = cssVar("--aqua-accent", "#2f81f7");
+      band.setData(hasBand ? bandData : [], rgba(accent, 0.16));
+    }
   }, [realized, predicted]);
 
   const empty = realized.length === 0 && predicted.length === 0;
