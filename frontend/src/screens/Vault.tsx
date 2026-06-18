@@ -821,21 +821,23 @@ function TrackRecord({ vault, rounds }: { vault: Vault; rounds: VaultRound[] }) 
         </div>
       ) : (
         <div className="vault-table">
-          <div className="vault-table__head">
-            <span>Round</span>
-            <span>Strike</span>
-            <span>Expiry</span>
-            <span>PPS</span>
-            <span>Premium (net)</span>
+          <div className="vault-table__scroll">
+            <div className="vault-table__head">
+              <span>Round</span>
+              <span>Strike</span>
+              <span>Expiry</span>
+              <span>PPS</span>
+              <span>Premium (net)</span>
+            </div>
+            {finalized.map((r) => (
+              <RoundRow
+                key={r.round}
+                round={r}
+                vault={vault}
+                rfqs={r.bucket_id ? byBucket.get(r.bucket_id) ?? [] : []}
+              />
+            ))}
           </div>
-          {finalized.map((r) => (
-            <RoundRow
-              key={r.round}
-              round={r}
-              vault={vault}
-              rfqs={r.bucket_id ? byBucket.get(r.bucket_id) ?? [] : []}
-            />
-          ))}
         </div>
       )}
     </div>
