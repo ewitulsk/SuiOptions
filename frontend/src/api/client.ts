@@ -81,8 +81,9 @@ export type BucketsResponse = {
   series: Series[];
 };
 
-export async function fetchBuckets(): Promise<Series[]> {
-  const res = await fetch(`${API_BASE_URL}/buckets`);
+export async function fetchBuckets(opts?: { excludeExpired?: boolean }): Promise<Series[]> {
+  const qs = opts?.excludeExpired ? "?exclude_expired=true" : "";
+  const res = await fetch(`${API_BASE_URL}/buckets${qs}`);
   if (!res.ok) {
     throw new Error(`GET /buckets failed: ${res.status} ${res.statusText}`);
   }

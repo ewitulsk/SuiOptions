@@ -7,7 +7,7 @@
 // implied vol — plus the position-economics rows once the wallet holds a lot.
 // Both come from `/options/metrics`.
 
-import { useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 
 import type { Bucket, Series } from "../api/client";
 import { useCallTokenLots } from "../api/useCallTokenLots";
@@ -15,9 +15,10 @@ import { useOptionMetrics } from "../api/optionMetrics";
 import { usePositionEconomics, useDayChange } from "../api/positionEconomics";
 import { formatPrice } from "../format";
 import { Orderbook } from "./Orderbook";
+import { OpenOrdersSection } from "./OpenOrdersSection";
 import { WaveLoader } from "./WaveLoader";
 
-type Tab = "greeks" | "details" | "book";
+export type DetailTab = "greeks" | "details" | "book" | "orders";
 
 type Props = {
   bucket: Bucket;
@@ -25,6 +26,10 @@ type Props = {
   spot: number;
   mid: number | null;
   wallet: string | null;
+  // Controlled by the parent so the active tab survives strike-grid clicks
+  // (which remount this component via its `key`).
+  tab: DetailTab;
+  onTabChange: (tab: DetailTab) => void;
 };
 
 const usd = (n: number) => `$${formatPrice(n, { grouping: true })}`;
@@ -55,8 +60,7 @@ function Cell({
   );
 }
 
-export function BuyDetailTabs({ bucket, series, spot, mid, wallet }: Props) {
-  const [tab, setTab] = useState<Tab>("greeks");
+export function BuyDetailTabs({ bucket, series, spot, mid, wallet, tab, onTabChange }: Props) {
   const strike = bucket.strike;
 
   const metrics = useOptionMetrics({ strike, expiryMs: series.expiry_ms, spot, mid });
@@ -73,13 +77,13 @@ export function BuyDetailTabs({ bucket, series, spot, mid, wallet }: Props) {
   return (
     <div className="panel dtabs">
       <div className="dtabs__bar" role="tablist">
-        {(["greeks", "details", "book"] as Tab[]).map((t) => (
+        {(["greeks", "details", "book", "orders"] as DetailTab[]).map((t) => (
           <button
             key={t}
             role="tab"
             aria-selected={tab === t}
             className={"dtabs__tab" + (tab === t ? " is-active" : "")}
-            onClick={() => setTab(t)}
+            onClick={() => onTabChange(t)}
           >
             {t}
           </button>
@@ -128,6 +132,12 @@ export function BuyDetailTabs({ bucket, series, spot, mid, wallet }: Props) {
       {tab === "book" && (
         <div className="dtabs__book">
           <Orderbook bucket={bucket} series={series} />
+        </div>
+      )}
+
+      {tab === "orders" && (
+        <div className="dtabs__orders">
+          <OpenOrdersSection bucket={bucket} series={series} />
         </div>
       )}
     </div>

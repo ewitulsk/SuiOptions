@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useComposerState } from "../state/composer";
 import { midFromBook, poolRefFor, useOrderBook } from "../api/deepbook";
-import { BuyDetailTabs } from "../components/BuyDetailTabs";
+import { BuyDetailTabs, type DetailTab } from "../components/BuyDetailTabs";
 import { BuyModeToggle, type BuyMode } from "../components/BuyModeToggle";
 import { BucketBar } from "../components/BucketBar";
 import { StrikeTiles } from "../components/StrikeTiles";
@@ -50,6 +50,9 @@ export function Composer({ initialView }: Props) {
   // SO-170: on /buy, switch the whole lower area between buying on DeepBook
   // (chart + order book + trade form) and minting from the market makers (RFQ).
   const [buyMode, setBuyMode] = useState<BuyMode>("deepbook");
+  // Lifted out of BuyDetailTabs so the active tab persists as the user clicks
+  // around the strike grid (the panel is keyed per-bucket and remounts).
+  const [detailTab, setDetailTab] = useState<DetailTab>("greeks");
 
   const writerCtaLabel = !s.connected
     ? "Connect to write"
@@ -186,6 +189,8 @@ export function Composer({ initialView }: Props) {
                   spot={s.spot}
                   mid={mid}
                   wallet={s.address}
+                  tab={detailTab}
+                  onTabChange={setDetailTab}
                 />
               )}
             </aside>
