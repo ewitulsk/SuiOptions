@@ -2176,6 +2176,9 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
   gap: 8px; margin: 8px 0 8px; overflow: hidden;
 }
 [data-theme="aqua"] .vault-coverflow__stage { position: relative; flex: 1; height: 380px; }
+/* When any asset stacks multiple cadences vertically, give the stage extra
+   height so the rows above/below the active card peek through the fan. */
+[data-theme="aqua"] .vault-coverflow--stacked .vault-coverflow__stage { height: 540px; }
 [data-theme="aqua"] .vault-carousel__nav {
   display: flex; justify-content: center; align-items: center; gap: 16px;
   min-height: 40px; margin: -32px 0 16px;
@@ -2226,9 +2229,8 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
   font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--aqua-ink-3); margin-top: 2px;
 }
 
-/* APY sparkline */
+/* APY sparkline: realized line (no fill) + projected line with a band */
 [data-theme="aqua"] .vault-tile__spark { width: 100%; height: 64px; display: block; }
-[data-theme="aqua"] .vault-tile__spark-area { fill: var(--aqua-up, #1fbf75); opacity: 0.10; }
 [data-theme="aqua"] .vault-tile__spark-band { fill: var(--aqua-accent, #2f81f7); opacity: 0.12; stroke: none; }
 [data-theme="aqua"] .vault-tile__spark-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 [data-theme="aqua"] .vault-tile__spark-line--realized { stroke: var(--aqua-up, #1fbf75); }
@@ -2262,6 +2264,7 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 @media (max-width: 640px) {
   [data-theme="aqua"] .vault-coverflow__item { width: 78vw; }
   [data-theme="aqua"] .vault-coverflow__stage { height: 360px; }
+  [data-theme="aqua"] .vault-coverflow--stacked .vault-coverflow__stage { height: 500px; }
   [data-theme="aqua"] .vault-tile { padding: 20px; }
 }
 
@@ -2401,7 +2404,11 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 [data-theme="aqua"] .vault-table__head {
   color: var(--aqua-ink-3); font-size: 11px; text-transform: uppercase; letter-spacing: .03em;
   border-bottom: 1px solid var(--aqua-line);
+  position: sticky; top: 0; z-index: 1; background: var(--aqua-solid-surface);
 }
+/* Cap the row list and scroll it; the sticky column head (inside this same
+   container) stays visible and column-aligned with the rows while scrolling. */
+[data-theme="aqua"] .vault-table__scroll { max-height: 340px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 [data-theme="aqua"] .vault-table__row { border-bottom: 1px solid var(--aqua-line); color: var(--aqua-ink-1); font-variant-numeric: tabular-nums; }
 [data-theme="aqua"] .vault-table__row .is-pos { color: var(--aqua-up, #1fbf75); }
 

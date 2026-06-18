@@ -43,3 +43,4 @@ PRs raised through Claude Code.
 | [#214](https://github.com/ewitulsk/SuiOptions/pull/214) | [SO-219](https://suioptions.atlassian.net/browse/SO-219) | SO-11 Contract Deployment Tracking | Fix Staging TSUI deployments.json Catalog Entry |
 | [#220](https://github.com/ewitulsk/SuiOptions/pull/220) | [SO-223](https://suioptions.atlassian.net/browse/SO-223) | SO-32 Data Layer | Fix Pyth Benchmarks Rate-Limiting via Bulk Fetch, Caching & Paced Requests |
 | [#225](https://github.com/ewitulsk/SuiOptions/pull/225) | [SO-228](https://suioptions.atlassian.net/browse/SO-228) | SO-8 Protocol | Fix Keeper Genesis-Vault select_bucket Loop (Move Enum Phase Mis-Parse) |
+| [#234](https://github.com/ewitulsk/SuiOptions/pull/234) | [SO-237](https://suioptions.atlassian.net/browse/SO-237) | SO-19 Frontend | Group Vault Carousel by Asset with Vertical Cadence Coverflow |
