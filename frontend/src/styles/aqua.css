@@ -2166,9 +2166,19 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
   gap: 8px; margin: 8px 0 8px; overflow: hidden;
 }
 [data-theme="aqua"] .vault-coverflow__stage { position: relative; flex: 1; height: 380px; }
+/* When any asset stacks multiple cadences vertically, give the stage extra
+   height so the rows above/below the active card peek through the fan. */
+[data-theme="aqua"] .vault-coverflow--stacked .vault-coverflow__stage { height: 540px; }
 [data-theme="aqua"] .vault-carousel__nav {
   display: flex; justify-content: center; align-items: center; gap: 16px;
   min-height: 40px; margin: -32px 0 16px;
+}
+/* Vertical (cadence) arrows overlay the top/bottom center of the stage. */
+[data-theme="aqua"] .vault-carousel__arrow--up {
+  position: absolute; left: 50%; top: 8px; transform: translateX(-50%);
+}
+[data-theme="aqua"] .vault-carousel__arrow--down {
+  position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%);
 }
 [data-theme="aqua"] .vault-coverflow__item {
   position: absolute; left: 50%; top: 50%; width: 380px;
@@ -2252,6 +2262,7 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 @media (max-width: 640px) {
   [data-theme="aqua"] .vault-coverflow__item { width: 78vw; }
   [data-theme="aqua"] .vault-coverflow__stage { height: 360px; }
+  [data-theme="aqua"] .vault-coverflow--stacked .vault-coverflow__stage { height: 500px; }
   [data-theme="aqua"] .vault-tile { padding: 20px; }
 }
 

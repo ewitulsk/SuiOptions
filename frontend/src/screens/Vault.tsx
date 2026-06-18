@@ -253,105 +253,186 @@ function VaultCarousel({
   vaults: Vault[];
   onSelect: (id: string) => void;
 }) {
-  // Default to the middle card so the fan is balanced on both sides; fall back
-  // to it when no card is remembered or the remembered one isn't in view.
-  const middle = Math.max(0, Math.floor((vaults.length - 1) / 2));
-  // Resolve the remembered foreground card (by id, since filtering shifts
-  // indices) to its current index, or the middle when absent/filtered out.
-  const restored = () => {
+  // Two-axis coverflow: each column is an asset (horizontal), each row a vault
+  // of that asset at a different expiry cadence (vertical). Columns keep their
+  // first-seen order; within a column the shortest cadence sits on top.
+  const groups = useMemo(() => {
+    const by = new Map<string, Vault[]>();
+    const order: string[] = [];
+    for (const v of vaults) {
+      if (!by.has(v.underlying_symbol)) {
+        by.set(v.underlying_symbol, []);
+        order.push(v.underlying_symbol);
+      }
+      by.get(v.underlying_symbol)!.push(v);
+    }
+    const cadence = (v: Vault) => v.round_ms ?? Number.POSITIVE_INFINITY;
+    return order.map((k) =>
+      by.get(k)!.slice().sort((a, b) => cadence(a) - cadence(b)),
+    );
+  }, [vaults]);
+
+  // Default to the middle column so the fan is balanced on both sides.
+  const middle = Math.max(0, Math.floor((groups.length - 1) / 2));
+  const stacked = groups.some((g) => g.length > 1);
+
+  // Resolve the remembered foreground vault (by id, since filtering shifts
+  // indices) to its column+row, or the center column / top row when absent.
+  const locate = () => {
     const id = sessionStorage.getItem(FOREGROUND_VAULT_KEY);
-    const i = id ? vaults.findIndex((v) => v.vault_id === id) : -1;
-    return i >= 0 ? i : middle;
+    if (id) {
+      for (let g = 0; g < groups.length; g++) {
+        const r = groups[g].findIndex((v) => v.vault_id === id);
+        if (r >= 0) return { group: g, row: r };
+      }
+    }
+    return { group: middle, row: 0 };
   };
-  const [active, setActiveRaw] = useState(restored);
-  const multiple = vaults.length > 1;
-  const ids = vaults.map((v) => v.vault_id).join(",");
 
-  // Remember which card is in the foreground so it persists across nav-away.
-  const setActive = (next: number | ((a: number) => number)) =>
-    setActiveRaw((a) => {
-      const i = typeof next === "function" ? next(a) : next;
-      const v = vaults[i];
-      if (v) sessionStorage.setItem(FOREGROUND_VAULT_KEY, v.vault_id);
-      return i;
-    });
+  const [pos, setPosRaw] = useState(locate);
+  const groupsKey = groups.map((g) => g.map((v) => v.vault_id).join("|")).join(",");
 
-  // When the (filtered) set changes, re-center — but prefer the remembered
+  // Remember the foreground vault so it persists across nav-away / filtering.
+  const setPos = (next: { group: number; row: number }) => {
+    const v = groups[next.group]?.[next.row];
+    if (v) sessionStorage.setItem(FOREGROUND_VAULT_KEY, v.vault_id);
+    setPosRaw(next);
+  };
+
+  // When the (filtered) set changes, re-resolve — preferring the remembered
   // card if it's still in view, so clearing a search restores the selection.
   useEffect(() => {
-    setActiveRaw(restored());
-  }, [ids]);
+    setPosRaw(locate());
+  }, [groupsKey]);
 
-  const go = (dir: number) =>
-    setActive((a) => Math.max(0, Math.min(vaults.length - 1, a + dir)));
+  const activeGroup = Math.min(pos.group, groups.length - 1);
+  const column = groups[activeGroup] ?? [];
+  const activeRow = Math.min(pos.row, column.length - 1);
 
-  // ←/→ navigate, but not while typing in the search box.
+  const goH = (dir: number) => {
+    const g = Math.max(0, Math.min(groups.length - 1, activeGroup + dir));
+    setPos({ group: g, row: Math.min(activeRow, groups[g].length - 1) });
+  };
+  const goV = (dir: number) => {
+    const r = Math.max(0, Math.min(column.length - 1, activeRow + dir));
+    setPos({ group: activeGroup, row: r });
+  };
+
+  // ←/→ switch asset, ↑/↓ switch cadence — but not while typing in search.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
-      if (e.key === "ArrowLeft") go(-1);
-      else if (e.key === "ArrowRight") go(1);
+      if (e.key === "ArrowLeft") goH(-1);
+      else if (e.key === "ArrowRight") goH(1);
+      else if (e.key === "ArrowUp") { e.preventDefault(); goV(-1); }
+      else if (e.key === "ArrowDown") { e.preventDefault(); goV(1); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [vaults.length]);
+  }, [activeGroup, activeRow, groups]);
 
-  const VISIBLE = 2; // cards rendered on each side of the active one
+  const HVISIBLE = 2; // asset columns rendered each side of the active one
+  const VVISIBLE = 1; // cadence cards rendered above & below the active one
+
+  // Flatten to renderable cards: every row of the active column (the vertical
+  // fan) plus the top card of each other column (the horizontal fan).
+  const items = groups.flatMap((group, gi) => {
+    const hOffset = gi - activeGroup;
+    const isActiveCol = hOffset === 0;
+    const rows = isActiveCol ? group.map((_, r) => r) : [0];
+    const center = isActiveCol ? activeRow : 0;
+    return rows.map((r) => ({
+      vault: group[r],
+      gi,
+      row: r,
+      hOffset,
+      vOffset: r - center,
+      isActiveCol,
+    }));
+  });
+
+  const multipleAssets = groups.length > 1;
 
   return (
     <>
-      <div className="vault-coverflow">
+      <div className={"vault-coverflow" + (stacked ? " vault-coverflow--stacked" : "")}>
         <div className="vault-coverflow__stage">
-          {vaults.map((v, i) => {
-          const offset = i - active;
-          const abs = Math.abs(offset);
-          const hidden = abs > VISIBLE;
-          const style: CSSProperties = {
-            transform: `translate(-50%, -50%) translateX(${offset * 58}%) scale(${Math.max(
-              1 - abs * 0.14,
-              0.6,
-            )})`,
-            opacity: hidden ? 0 : Math.max(1 - abs * 0.34, 0),
-            zIndex: 50 - abs,
-            pointerEvents: hidden ? "none" : "auto",
-          };
-          return (
-            <div
-              className={"vault-coverflow__item" + (offset === 0 ? " vault-coverflow__item--active" : "")}
-              style={style}
-              key={v.vault_id}
-              aria-hidden={hidden}
-            >
-              <VaultTile
-                vault={v}
-                active={offset === 0}
-                onSelect={() => (offset === 0 ? onSelect(v.vault_id) : setActive(i))}
-              />
-            </div>
-          );
-        })}
+          {items.map(({ vault: v, gi, row, hOffset, vOffset, isActiveCol }) => {
+            const hAbs = Math.abs(hOffset);
+            const vAbs = Math.abs(vOffset);
+            const depth = hAbs + vAbs;
+            const hidden = hAbs > HVISIBLE || vAbs > VVISIBLE;
+            const foreground = isActiveCol && vOffset === 0;
+            const style: CSSProperties = {
+              transform: `translate(-50%, -50%) translateX(${hOffset * 58}%) translateY(${vOffset * 38}%) scale(${Math.max(
+                1 - depth * 0.14,
+                0.58,
+              )})`,
+              opacity: hidden ? 0 : Math.max(1 - depth * 0.36, 0),
+              zIndex: 50 - depth,
+              pointerEvents: hidden ? "none" : "auto",
+            };
+            const onClick = () => {
+              if (foreground) onSelect(v.vault_id);
+              else if (isActiveCol) setPos({ group: activeGroup, row });
+              else setPos({ group: gi, row: Math.min(activeRow, groups[gi].length - 1) });
+            };
+            return (
+              <div
+                className={"vault-coverflow__item" + (foreground ? " vault-coverflow__item--active" : "")}
+                style={style}
+                key={v.vault_id}
+                aria-hidden={hidden}
+              >
+                <VaultTile vault={v} active={foreground} onSelect={onClick} />
+              </div>
+            );
+          })}
         </div>
+
+        {/* Vertical (cadence) navigation, overlaid top/bottom-center of the
+            stage; only shown when the active asset has multiple cadences. */}
+        {column.length > 1 && (
+          <>
+            <button
+              className="vault-carousel__arrow vault-carousel__arrow--up"
+              onClick={() => goV(-1)}
+              disabled={activeRow === 0}
+              aria-label="Shorter cadence"
+            >
+              ↑
+            </button>
+            <button
+              className="vault-carousel__arrow vault-carousel__arrow--down"
+              onClick={() => goV(1)}
+              disabled={activeRow === column.length - 1}
+              aria-label="Longer cadence"
+            >
+              ↓
+            </button>
+          </>
+        )}
       </div>
 
-      {/* Always rendered (even with one vault) so the row's height is reserved
+      {/* Always rendered (even with one asset) so the row's height is reserved
           and the search bar below keeps a consistent position. */}
       <div className="vault-carousel__nav">
-        {multiple && (
+        {multipleAssets && (
           <>
             <button
               className="vault-carousel__arrow vault-carousel__arrow--prev"
-              onClick={() => go(-1)}
-              disabled={active === 0}
-              aria-label="Previous vault"
+              onClick={() => goH(-1)}
+              disabled={activeGroup === 0}
+              aria-label="Previous asset"
             >
               ‹
             </button>
             <button
               className="vault-carousel__arrow vault-carousel__arrow--next"
-              onClick={() => go(1)}
-              disabled={active === vaults.length - 1}
-              aria-label="Next vault"
+              onClick={() => goH(1)}
+              disabled={activeGroup === groups.length - 1}
+              aria-label="Next asset"
             >
               ›
             </button>
@@ -479,7 +560,9 @@ function VaultTile({
         <AssetGlyph asset={vault.underlying_symbol} />
         <div className="vault-tile__title">
           <div className="vault-tile__sym">{vault.underlying_symbol}</div>
-          <div className="vault-tile__sub">covered call</div>
+          <div className="vault-tile__sub">
+            covered call{vault.round_ms ? ` · ${fmtCadence(vault.round_ms)}` : ""}
+          </div>
         </div>
         {vault.tvl != null && (
           <div className="vault-tile__tvl">
