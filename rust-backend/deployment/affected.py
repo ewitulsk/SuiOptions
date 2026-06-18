@@ -34,7 +34,7 @@ from typing import Iterable
 
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor", "keeper", "derived-metric-worker"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor", "keeper"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -155,6 +155,11 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/api-service-client/**",
         "rust-backend/crates/token-info-client/**",
+        # Vault-APY sampler deps (folded in from derived-metric-worker).
+        "rust-backend/crates/indexer-graphql/**",
+        "rust-backend/crates/pyth-client/**",
+        "rust-backend/crates/pricing/**",
+        "rust-backend/crates/protocol-types/**",
     ],
     "gas-station": [
         "rust-backend/services/gas-station/**",
@@ -180,18 +185,6 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/runtime-config/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/sui-tx/**",
-        "rust-backend/crates/pyth-client/**",
-        "rust-backend/crates/pricing/**",
-        "rust-backend/crates/token-info-client/**",
-        "rust-backend/crates/indexer-graphql/**",
-    ],
-    "derived-metric-worker": [
-        "rust-backend/services/derived-metric-worker/**",
-        "rust-backend/Dockerfile.derived-metric-worker",
-        "rust-backend/crates/observability/**",
-        "rust-backend/crates/protocol-types/**",
-        "rust-backend/crates/runtime-config/**",
-        "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/pyth-client/**",
         "rust-backend/crates/pricing/**",
         "rust-backend/crates/token-info-client/**",

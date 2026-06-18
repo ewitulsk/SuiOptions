@@ -50,7 +50,7 @@ COMPOSE_FILE="docker-compose.${ENV}.yml"
 # Canonical service set + their .env tag-variable names + the compose
 # service name (mostly identical to the cargo crate name, except
 # quoting-service is referenced as `quoting` in compose).
-ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station price-charting balance-monitor keeper derived-metric-worker)
+ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station price-charting balance-monitor keeper)
 
 tag_var_for() {
   case "$1" in
@@ -65,7 +65,6 @@ tag_var_for() {
     price-charting)   echo PRICE_CHARTING_TAG ;;
     balance-monitor)  echo BALANCE_MONITOR_TAG ;;
     keeper)           echo KEEPER_TAG ;;
-    derived-metric-worker) echo DERIVED_METRIC_WORKER_TAG ;;
     *) return 1 ;;
   esac
 }
@@ -82,7 +81,6 @@ compose_name_for() {
     price-charting)   echo price-charting ;;
     balance-monitor)  echo balance-monitor ;;
     keeper)           echo keeper ;;
-    derived-metric-worker) echo derived-metric-worker ;;
     *) return 1 ;;
   esac
 }

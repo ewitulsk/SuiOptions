@@ -10,6 +10,11 @@ observability = { workspace = true, features = ["axum"] }
 cli-spec = { workspace = true }
 api-service-client = { workspace = true }
 token-info-client = { workspace = true }
+# Vault-APY sampler (folded in from derived-metric-worker): vault/round/RFQ
+# queries + the realized series, Pyth spot/vol, and Black–Scholes pricing.
+indexer-graphql = { workspace = true }
+pyth-client = { workspace = true }
+pricing = { workspace = true }
 
 sui-sdk = { workspace = true }
 sui-types = { workspace = true }
@@ -20,10 +25,12 @@ tokio = { workspace = true }
 futures = { workspace = true }
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
 tower-http = { workspace = true }
+reqwest = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 metrics = { workspace = true }

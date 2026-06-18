@@ -46,9 +46,9 @@ export function useVaultRounds(vaultId: string | null) {
 }
 
 /**
- * The vault's APY-over-time curve: realized (indexer) + predicted (worker).
- * Predicted is empty when derived-metric-worker isn't deployed, so the chart
- * shows realized-only until then.
+ * The vault's APY-over-time curve: realized (indexer) + predicted
+ * (price-charting apy sampler). Predicted is empty when that isn't deployed,
+ * so the chart shows realized-only until then.
  */
 export function useVaultApyHistory(vaultId: string | null) {
   return useQuery<VaultApySeries, Error>({

@@ -2600,34 +2600,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derived-metric-worker"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum 0.7.9",
- "chrono",
- "clap",
- "cli-spec",
- "diesel",
- "diesel_migrations",
- "indexer-graphql",
- "metrics",
- "observability",
- "pricing",
- "protocol-types",
- "pyth-client",
- "r2d2",
- "reqwest",
- "runtime-config",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "token-info-client",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "diesel"
 version = "2.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7398,15 +7370,20 @@ dependencies = [
  "diesel",
  "diesel_migrations",
  "futures",
+ "indexer-graphql",
  "metrics",
  "observability",
  "parking_lot 0.12.5",
+ "pricing",
+ "pyth-client",
+ "reqwest",
  "runtime-config",
  "serde",
  "serde_json",
  "sui-sdk",
  "sui-tx",
  "sui-types",
+ "thiserror 1.0.69",
  "token-info-client",
  "tokio",
  "tower-http 0.6.10",

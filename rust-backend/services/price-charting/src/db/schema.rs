@@ -36,4 +36,29 @@ diesel::table! {
     }
 }
 
+// Predicted-APY time-series (one row per (vault, kind, horizon) per sampler
+// tick). The `time` column anchors the hypertable; the natural snapshot key is
+// (vault_id, kind, horizon) read at the latest `time`.
+diesel::table! {
+    vault_predicted_apy (vault_id, kind, horizon, time) {
+        time       -> Timestamptz,
+        vault_id   -> Text,
+        kind       -> Text,
+        horizon    -> Int4,
+        t_ms       -> Int8,
+        apy        -> Float8,
+        confidence -> Float8,
+    }
+}
+
+// Realized-APY time-series (one row per finalized round, idempotent).
+diesel::table! {
+    vault_realized_apy (vault_id, round, time) {
+        time     -> Timestamptz,
+        vault_id -> Text,
+        round    -> Int8,
+        apy      -> Float8,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(pool_trades, pool_mids, watch_cursor);

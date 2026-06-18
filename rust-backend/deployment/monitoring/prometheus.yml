@@ -33,8 +33,6 @@ scrape_configs:
         labels: { env: staging, service: mm-bot }
       - targets: ["balance-monitor:9012"]
         labels: { env: staging, service: balance-monitor }
-      - targets: ["derived-metric-worker:9013"]
-        labels: { env: staging, service: derived-metric-worker }
 
   # The monitoring stack watches itself.
   - job_name: monitoring
