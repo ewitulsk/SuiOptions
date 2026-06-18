@@ -420,6 +420,72 @@ function VaultCarousel({
   );
 }
 
+/** Compact projected-APY sparkline for a vault card: the forecast line with a
+ *  confidence band, drawn as inline SVG (no per-card chart instances). */
+function VaultSparkline({ predicted }: { predicted: VaultApyPoint[] }) {
+  const W = 100;
+  const H = 40;
+
+  const pSorted = [...predicted].sort((a, b) => a.t_ms - b.t_ms);
+  if (pSorted.length < 2) {
+    return (
+      <div className="vault-tile__spark vault-tile__spark--empty">
+        Projected APY fills in as rounds settle
+      </div>
+    );
+  }
+
+  // Band around the forecast: [apy_low, apy_high] per point, pinched to the line
+  // where the model gives no range.
+  const pBand = pSorted.map((p) => ({
+    t: p.t_ms,
+    blo: p.apy_low ?? p.apy,
+    bhi: p.apy_high ?? p.apy,
+  }));
+  const hasBand = pBand.some((b) => b.bhi - b.blo > 1e-4);
+
+  const ts = pSorted.map((p) => p.t_ms);
+  // Include the band extremes in the y-range so a wide band doesn't clip.
+  const vs = [
+    ...pSorted.map((p) => p.apy),
+    ...(hasBand ? pBand.flatMap((b) => [b.blo, b.bhi]) : []),
+  ];
+  const tMin = Math.min(...ts);
+  const tMax = Math.max(...ts);
+  const vMin = Math.min(...vs);
+  const vMax = Math.max(...vs);
+  const pad = (vMax - vMin) * 0.18 || Math.abs(vMax) * 0.18 || 0.01;
+  const lo = vMin - pad;
+  const hi = vMax + pad;
+
+  const x = (t: number) => (tMax === tMin ? 0 : ((t - tMin) / (tMax - tMin)) * W);
+  const y = (v: number) => H - ((v - lo) / (hi - lo)) * H;
+
+  const pPts = pSorted.map((p) => `${x(p.t_ms).toFixed(2)},${y(p.apy).toFixed(2)}`);
+  const pPath = pPts.length ? "M" + pPts.join(" L") : "";
+  // Top edge (highs L→R) then bottom edge (lows R→L), closed into a ribbon.
+  const bandHi = pBand.map((b) => `${x(b.t).toFixed(2)},${y(b.bhi).toFixed(2)}`);
+  const bandLo = pBand.map((b) => `${x(b.t).toFixed(2)},${y(b.blo).toFixed(2)}`);
+  const bandPath =
+    hasBand && bandHi.length >= 2
+      ? `M${bandHi.join(" L")} L${bandLo.reverse().join(" L")} Z`
+      : "";
+
+  return (
+    <svg
+      className="vault-tile__spark"
+      viewBox={`0 0 ${W} ${H}`}
+      preserveAspectRatio="none"
+      aria-hidden
+    >
+      {bandPath && <path className="vault-tile__spark-band" d={bandPath} />}
+      {pPath && (
+        <path className="vault-tile__spark-line vault-tile__spark-line--predicted" d={pPath} vectorEffect="non-scaling-stroke" />
+      )}
+    </svg>
+  );
+}
+
 function VaultTile({
   vault,
   onSelect,
@@ -458,6 +524,8 @@ function VaultTile({
           </div>
         )}
       </div>
+
+      <VaultSparkline predicted={predictedSeries} />
 
       <div className="vault-tile__apys">
         <div className="vault-tile__apy">
