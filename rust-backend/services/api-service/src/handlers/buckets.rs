@@ -59,11 +59,11 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 use chrono::{TimeZone, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use protocol_types::ids::ObjectId;
 
@@ -137,8 +137,19 @@ pub struct BucketsResponse {
     pub series: Vec<SeriesDto>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct ListBucketsParams {
+    /// Drop series whose expiry is already in the past. Opt-in (defaults to
+    /// `false`) so the admin/monitoring and dashboard views — which still need
+    /// expired series — keep their full catalog; the trade picker passes
+    /// `?exclude_expired=true`.
+    #[serde(default)]
+    pub exclude_expired: bool,
+}
+
 pub async fn list_buckets(
     State(state): State<Arc<AppState>>,
+    Query(params): Query<ListBucketsParams>,
 ) -> Result<Json<BucketsResponse>, StatusCode> {
     let active = state
         .indexer
@@ -150,9 +161,11 @@ pub async fn list_buckets(
         })?;
     let active = active.into_iter().map(into_local_bucket).collect();
     let now_ms = Utc::now().timestamp_millis();
-    Ok(Json(BucketsResponse {
-        series: group_into_series(active, &state.catalog, now_ms),
-    }))
+    let mut series = group_into_series(active, &state.catalog, now_ms);
+    if params.exclude_expired {
+        series.retain(|s| s.expiry_ms > now_ms);
+    }
+    Ok(Json(BucketsResponse { series }))
 }
 
 /// `GET /buckets/:bucket_id` — one bucket's cursor/queue state.

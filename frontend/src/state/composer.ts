@@ -189,7 +189,9 @@ export function useComposerState({
 
   // Live strikes: user picks (asset, expiry); we look up the matching series
   // from the api-service response.
-  const bucketsQuery = useBuckets();
+  // Expired series can't be invested in, so the picker asks the backend to drop
+  // them (`?exclude_expired=true`).
+  const bucketsQuery = useBuckets({ excludeExpired: true });
   // SO-69: the writer screen hides invalidated buckets — admin froze them
   // and new writes would revert. Series with no remaining buckets after
   // filtering disappear from the picker too. The trader screen still
@@ -197,7 +199,10 @@ export function useComposerState({
   // anyway, and the quoting-service rejects RFQs against invalidated
   // buckets with an explicit error.
   const seriesList: Series[] = useMemo(() => {
-    const raw = bucketsQuery.data ?? [];
+    // Defensive re-filter of expired series in case the backend served any
+    // (clock skew, an older api-service) — the picker must never offer one.
+    const now = Date.now();
+    const raw = (bucketsQuery.data ?? []).filter((s) => s.expiry_ms > now);
     if (view !== "writer") return raw;
     return raw
       .map((s) => ({ ...s, buckets: s.buckets.filter((b) => !b.invalidated) }))
