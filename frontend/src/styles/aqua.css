@@ -484,11 +484,10 @@
 [data-theme="aqua"] .buy-grid__buckets,
 [data-theme="aqua"] .buy-grid__ticket { position: sticky; top: 88px; }
 
-/* Deepbook buy layout (SO-225): two columns — strikes + detail card on the
-   left, chart + horizontal trade ticket on the right. The chart fills the
-   wide right column where the narrow ticket rail used to sit. */
+/* Deepbook buy layout (SO-225): two columns — chart + horizontal trade ticket
+   on the left in the wide column, strikes + detail card on the right. */
 [data-theme="aqua"] .buy-grid--deepbook {
-  grid-template-columns: minmax(384px, 420px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(384px, 420px);
 }
 /* Left column now stacks the chain over the detail card, so it scrolls with
    the page rather than pinning. */

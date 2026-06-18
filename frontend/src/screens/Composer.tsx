@@ -176,19 +176,6 @@ export function Composer({ initialView }: Props) {
 
         {buyMode === "deepbook" ? (
           <div className="buy-grid buy-grid--deepbook">
-            <aside className="buy-grid__buckets">
-              {chainInner}
-              {live && (
-                <BuyDetailTabs
-                  key={`detail-${s.apiBucket!.bucket_id}`}
-                  bucket={s.apiBucket!}
-                  series={s.series!}
-                  spot={s.spot}
-                  mid={mid}
-                  wallet={s.address}
-                />
-              )}
-            </aside>
             <main className="buy-grid__center">
               {live ? (
                 <>
@@ -203,6 +190,19 @@ export function Composer({ initialView }: Props) {
                 chart
               )}
             </main>
+            <aside className="buy-grid__buckets">
+              {chainInner}
+              {live && (
+                <BuyDetailTabs
+                  key={`detail-${s.apiBucket!.bucket_id}`}
+                  bucket={s.apiBucket!}
+                  series={s.series!}
+                  spot={s.spot}
+                  mid={mid}
+                  wallet={s.address}
+                />
+              )}
+            </aside>
           </div>
         ) : (
           <div className="buy-grid">
