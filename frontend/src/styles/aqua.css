@@ -2173,13 +2173,6 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
   display: flex; justify-content: center; align-items: center; gap: 16px;
   min-height: 40px; margin: -32px 0 16px;
 }
-/* Vertical (cadence) arrows overlay the top/bottom center of the stage. */
-[data-theme="aqua"] .vault-carousel__arrow--up {
-  position: absolute; left: 50%; top: 8px; transform: translateX(-50%);
-}
-[data-theme="aqua"] .vault-carousel__arrow--down {
-  position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%);
-}
 [data-theme="aqua"] .vault-coverflow__item {
   position: absolute; left: 50%; top: 50%; width: 380px;
   transition: transform .4s cubic-bezier(.2, .8, .2, 1), opacity .4s ease;

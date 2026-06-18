@@ -390,29 +390,6 @@ function VaultCarousel({
             );
           })}
         </div>
-
-        {/* Vertical (cadence) navigation, overlaid top/bottom-center of the
-            stage; only shown when the active asset has multiple cadences. */}
-        {column.length > 1 && (
-          <>
-            <button
-              className="vault-carousel__arrow vault-carousel__arrow--up"
-              onClick={() => goV(-1)}
-              disabled={activeRow === 0}
-              aria-label="Shorter cadence"
-            >
-              ↑
-            </button>
-            <button
-              className="vault-carousel__arrow vault-carousel__arrow--down"
-              onClick={() => goV(1)}
-              disabled={activeRow === column.length - 1}
-              aria-label="Longer cadence"
-            >
-              ↓
-            </button>
-          </>
-        )}
       </div>
 
       {/* Always rendered (even with one asset) so the row's height is reserved
