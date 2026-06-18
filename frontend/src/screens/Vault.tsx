@@ -88,10 +88,15 @@ function shortHex(s: string): string {
   return s.length > 12 ? `${s.slice(0, 6)}…${s.slice(-4)}` : s;
 }
 
+/** The most recent point in a series (by timestamp), or null when empty. */
+function latestApyPoint(pts: VaultApyPoint[]): VaultApyPoint | null {
+  if (pts.length === 0) return null;
+  return pts.reduce((a, b) => (b.t_ms > a.t_ms ? b : a));
+}
+
 /** APY of the most recent point in a series (by timestamp), or null when empty. */
 function latestApy(pts: VaultApyPoint[]): number | null {
-  if (pts.length === 0) return null;
-  return pts.reduce((a, b) => (b.t_ms > a.t_ms ? b : a)).apy;
+  return latestApyPoint(pts)?.apy ?? null;
 }
 
 /** Underlying asset logo, falling back to a glyph when token-info has none. */
@@ -439,7 +444,13 @@ function VaultTile({
   const realizedSeries = apyQ.data?.realized ?? [];
   const predictedSeries = apyQ.data?.predicted ?? [];
   const realized = latestApy(realizedSeries) ?? vault.apy;
-  const projected = latestApy(predictedSeries);
+  const projectedPt = latestApyPoint(predictedSeries);
+  const projected = projectedPt?.apy ?? null;
+  const lo = projectedPt?.apy_low;
+  const hi = projectedPt?.apy_high;
+  // Show a range when the band is present and non-degenerate; the projection is
+  // a model estimate, so the range — not a single number — is the honest read.
+  const hasBand = lo != null && hi != null && hi - lo > 1e-4;
 
   return (
     <button className="vault-tile" onClick={onSelect} tabIndex={active ? 0 : -1}>
@@ -466,7 +477,10 @@ function VaultTile({
         </div>
         <div className="vault-tile__apy">
           <div className="vault-tile__apy-label">Projected APY</div>
-          <div className="vault-tile__apy-val">{fmtPct(projected)}</div>
+          <div className={`vault-tile__apy-val${hasBand ? " vault-tile__apy-val--band" : ""}`}>
+            {hasBand ? `${fmtPct(lo)} – ${fmtPct(hi)}` : fmtPct(projected)}
+          </div>
+          {hasBand && <div className="vault-tile__apy-band">mid {fmtPct(projected)}</div>}
         </div>
       </div>
 

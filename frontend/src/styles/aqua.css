@@ -2236,6 +2236,13 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
   font-variant-numeric: tabular-nums;
 }
 [data-theme="aqua"] .vault-tile__apy-val.is-pos { color: var(--aqua-up, #1fbf75); }
+/* A predicted range ("12% – 34%") needs to fit the tile column, so it runs
+   smaller than a single APY figure; the mid sits beneath it, muted. */
+[data-theme="aqua"] .vault-tile__apy-val--band { font-size: 18px; }
+[data-theme="aqua"] .vault-tile__apy-band {
+  font-size: 11px; color: var(--aqua-ink-3); margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
 [data-theme="aqua"] .vault-tile__cta {
   font-size: 13px; font-weight: 600; color: var(--aqua-sui, #4DA2FF);
   transition: gap .15s ease;
