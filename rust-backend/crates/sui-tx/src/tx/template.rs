@@ -339,6 +339,26 @@ pub fn protocol_templates(
                 arities: vec![(target, 3)],
             });
         }
+
+        // DeepBook session twins: single custody-funded calls — the wrapper
+        // does the BalanceManager deposit / order / settle internally, so the
+        // PTB is one Move call (unlike the wallet DeepBook shapes below, which
+        // build the deposit/proof/order steps as separate commands). Enable
+        // takes no type args; the market order carries the pool's (Base, Quote).
+        let enable = t("session_deepbook", "enable_trading_with_session");
+        templates.push(PtbTemplate {
+            name: "session_deepbook:enable_trading".to_owned(),
+            required: vec![enable.clone()],
+            allowed: vec![enable.clone()],
+            arities: vec![(enable, 0)],
+        });
+        let market = t("session_deepbook", "place_market_order_with_session");
+        templates.push(PtbTemplate {
+            name: "session_deepbook:place_market_order".to_owned(),
+            required: vec![market.clone()],
+            allowed: vec![market.clone()],
+            arities: vec![(market, 2)],
+        });
     }
 
     // DeepBook PTB shapes (SO-154 venue creation + SO-157 trading). Coin
@@ -861,6 +881,23 @@ mod tests {
             let bad = build(&[(target("vault", f), 2)], false);
             assert_eq!(match_any(&templates(), &bad), None);
         }
+
+        // DeepBook session twins: enable (no type args) + market order
+        // (2 type args, the pool's Base/Quote).
+        let enable = build(&[(target("session_deepbook", "enable_trading_with_session"), 0)], false);
+        assert_eq!(
+            match_any(&templates(), &enable),
+            Some("session_deepbook:enable_trading"),
+        );
+        let market =
+            build(&[(target("session_deepbook", "place_market_order_with_session"), 2)], false);
+        assert_eq!(
+            match_any(&templates(), &market),
+            Some("session_deepbook:place_market_order"),
+        );
+        // wrong arity refused
+        let bad = build(&[(target("session_deepbook", "place_market_order_with_session"), 3)], false);
+        assert_eq!(match_any(&templates(), &bad), None);
     }
 
     #[test]

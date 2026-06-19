@@ -3,10 +3,10 @@
 // BalanceManager / open-order reads and the cancel / withdraw PTBs.
 
 import { useState } from "react";
-import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useQueryClient } from "@tanstack/react-query";
 
 import type { Bucket, Series } from "../api/client";
+import { useUserIdentity } from "../session/identity";
 import { posthog } from "../lib/posthog";
 import {
   useBalanceManager,
@@ -35,7 +35,11 @@ const ctrlBtn = {
 } as const;
 
 export function OpenOrdersSection({ bucket, series }: Props) {
-  const account = useCurrentAccount();
+  const identity = useUserIdentity();
+  // Session market orders never rest and always sweep the BM empty, so a
+  // session has no open orders / BM balance here; cancel + withdraw stay
+  // wallet-only.
+  const session = identity?.kind === "session" ? identity.session : null;
   const submitTx = useSubmitTransaction();
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState(false);
@@ -53,7 +57,7 @@ export function OpenOrdersSection({ bucket, series }: Props) {
       }
     : null;
 
-  const addr = account?.address ?? null;
+  const addr = session ? session.sessionKey : (identity?.address ?? null);
   const bm = useBalanceManager(addr);
   const openOrders = useOpenOrders(pool, bm.data ?? null, addr);
   const orderDetails = useOpenOrderDetails(pool, openOrders.data, addr);
@@ -121,13 +125,13 @@ export function OpenOrdersSection({ bucket, series }: Props) {
               cancel all
             </button>
           )}
-          {(bmBase > 0n || bmQuote > 0n) && account && (
+          {(bmBase > 0n || bmQuote > 0n) && !session && addr && (
             <button
               disabled={busy}
               onClick={() =>
                 void run(
                   "withdraw",
-                  () => buildWithdrawAllTx({ ...poolRef, recipient: account.address }),
+                  () => buildWithdrawAllTx({ ...poolRef, recipient: addr }),
                   { name: "deepbook_funds_withdrawn", props: { pool_id: pool.poolId } },
                 )
               }

@@ -31,6 +31,11 @@ export const SESSION_ALLOWED: string[] = [
   "options_protocol::session_vault::initiate_withdraw_with_session",
   "options_protocol::session_vault::complete_withdraw_with_session",
   "options_protocol::session_vault::instant_withdraw_pending_with_session",
+  // DeepBook secondary-market trading twins (market orders only). Enable
+  // creates the per-session BalanceManager; the market order is custody-funded
+  // and sweeps proceeds back to custody (see `session_deepbook.move`).
+  "options_protocol::session_deepbook::enable_trading_with_session",
+  "options_protocol::session_deepbook::place_market_order_with_session",
 ];
 
 /**
