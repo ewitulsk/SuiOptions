@@ -18,4 +18,4 @@ db_pool_size            = 8
 # overwrites this with the publish checkpoint when prod is (re)deployed.
 
 # Auto-set by redeploy-contract workflow.
-start_checkpoint = 345862884
+start_checkpoint = 350202416
