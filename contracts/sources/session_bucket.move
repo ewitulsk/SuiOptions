@@ -48,7 +48,7 @@ public fun execute_write_with_session<Underlying, Settlement, Call>(
     signer_account: &mut Account,
     user_account: &mut Account,
     cap: &SessionCap,
-    session_account: &mut SessionAccount,
+    session_account: &SessionAccount,
     flow: FlowKind,
     signed_quote: SignedQuote,
     clock: &Clock,
@@ -69,7 +69,7 @@ public fun execute_write_with_session_for_testing<Underlying, Settlement, Call>(
     signer_account: &mut Account,
     user_account: &mut Account,
     cap: &SessionCap,
-    session_account: &mut SessionAccount,
+    session_account: &SessionAccount,
     flow: FlowKind,
     signed_quote: SignedQuote,
     clock: &Clock,
@@ -89,7 +89,7 @@ fun execute_write_with_quote_session<Underlying, Settlement, Call>(
     signer_account: &mut Account,
     user_account: &mut Account,
     cap: &SessionCap,
-    session_account: &mut SessionAccount,
+    session_account: &SessionAccount,
     flow: FlowKind,
     q: Quote,
     clock: &Clock,
@@ -111,14 +111,14 @@ fun execute_write_with_quote_session<Underlying, Settlement, Call>(
 
     let (underlying, fee, position_recipient, call_token_recipient) =
         if (bucket::is_writer(&flow)) {
-            // User WRITES: their underlying collateralizes the bucket (the
-            // value leaving custody — charged against the cap); the signer
-            // MM buys, paying premium from their Account; net premium and
-            // the Position settle into the user's custody; the MM receives
-            // the call coins.
-            session::authorize_spend<Underlying>(
-                cap, session_account, clock, write_amount, SEL_EXECUTE_WRITE, ctx.sender(),
-            );
+            // User WRITES: their underlying collateralizes the bucket; the
+            // signer MM buys, paying premium from their Account; net premium
+            // and the Position settle into the user's custody; the MM
+            // receives the call coins. The collateral stays the user's claim
+            // (Position redeemable back into this custody) and never reaches
+            // an arbitrary recipient, so this is cap-free (`authorize`) — only
+            // root-signed `withdraw_with_root_sig` can exit custody.
+            session::authorize(cap, session_account, clock, SEL_EXECUTE_WRITE, ctx.sender());
             let underlying_in = account::withdraw_internal<Underlying>(
                 user_account, write_amount, ctx,
             );
@@ -137,13 +137,13 @@ fun execute_write_with_quote_session<Underlying, Settlement, Call>(
 
             (underlying_in.into_balance(), fee, user_owner, signer_recipient)
         } else {
-            // User BUYS: their premium is the value leaving custody —
-            // charged against the cap; the signer MM writes, providing
-            // underlying from their Account and receiving net premium + the
-            // Position; the call coins settle into the user's custody.
-            session::authorize_spend<Settlement>(
-                cap, session_account, clock, gross_premium, SEL_EXECUTE_WRITE, ctx.sender(),
-            );
+            // User BUYS: premium leaves custody into the trade; the signer MM
+            // writes, providing underlying from their Account and receiving
+            // net premium + the Position; the call coins settle into the
+            // user's custody. The premium buys the user a custodied call
+            // position — no value reaches an arbitrary recipient — so this is
+            // cap-free (`authorize`).
+            session::authorize(cap, session_account, clock, SEL_EXECUTE_WRITE, ctx.sender());
             let premium_in = account::withdraw_internal<Settlement>(
                 user_account, gross_premium, ctx,
             );
@@ -202,7 +202,7 @@ public fun exercise_with_session<Underlying, Settlement, Call>(
     bucket: &mut Bucket<Underlying, Settlement, Call>,
     user_account: &mut Account,
     cap: &SessionCap,
-    session_account: &mut SessionAccount,
+    session_account: &SessionAccount,
     amount: u64,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -210,9 +210,10 @@ public fun exercise_with_session<Underlying, Settlement, Call>(
     session_account::assert_session_linked(user_account, cap);
 
     let required_settlement = bucket::required_settlement(bucket, amount);
-    session::authorize_spend<Settlement>(
-        cap, session_account, clock, required_settlement, SEL_EXERCISE, ctx.sender(),
-    );
+    // Exercise pays the strike from custody and pulls the underlying back into
+    // the same custody — no value reaches an arbitrary recipient, so this is
+    // cap-free (`authorize`).
+    session::authorize(cap, session_account, clock, SEL_EXERCISE, ctx.sender());
 
     let call = account::withdraw_internal<Call>(user_account, amount, ctx);
     events::emit_account_withdraw(

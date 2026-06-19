@@ -7,6 +7,8 @@ export {
   SessionHandle,
   SessionExpiredError,
   type CreateSessionEthOptions,
+  type WithdrawAuth,
+  type SignWithdrawParams,
 } from "./session.js";
 
 export {
@@ -14,18 +16,22 @@ export {
   encodeLimits,
   serializeSessionMessage,
   serializeRevokeMessage,
+  serializeWithdrawMessage,
   type SpendLimit,
   type SessionMessageFields,
   type RevokeMessageFields,
+  type WithdrawMessageFields,
 } from "./message.js";
 
 export {
   buildSiweSessionMessage,
   buildSiweRevokeMessage,
+  buildSiweWithdrawMessage,
   ethAddressToBytes,
   ethSignatureToSui,
   type SiweSessionFields,
   type SiweRevokeFields,
+  type SiweWithdrawFields,
 } from "./siwe.js";
 
 export {

@@ -9,13 +9,14 @@
 import { keccak_256 } from "@noble/hashes/sha3.js";
 import { normalizeSuiAddress } from "@mysten/sui/utils";
 
-import { encodeLimits, type SpendLimit } from "./message.js";
+import { canonicalCoinType, encodeLimits, type SpendLimit } from "./message.js";
 
 // dApp display fields — MUST match siwe.move.
 const DOMAIN = "siws-session.demo";
 const URI = "https://siws-session.demo";
 const SIGNIN_STATEMENT = "Authorize a Sui session key.";
 const REVOKE_STATEMENT = "Revoke all Sui session keys.";
+const WITHDRAW_STATEMENT = "Authorize a Sui withdrawal.";
 
 const HEXCHARS = "0123456789abcdef";
 
@@ -115,6 +116,47 @@ export function buildSiweSessionMessage(f: SiweSessionFields): string {
       f.chainId,
       f.issuedAt,
     ) + `\n- siws-session://limits/${encodeLimits(f.limits)}`
+  );
+}
+
+export interface SiweWithdrawFields {
+  registryDomain: string;
+  ethAddress: Uint8Array;
+  /** The options custody Account object id funds leave. */
+  accountId: string;
+  /** Coin type withdrawn (any 0x form; canonicalized internally). */
+  coinType: string;
+  amount: bigint | number;
+  /** Recipient Sui address (bound by the signature). */
+  recipient: string;
+  nonce: Uint8Array;
+  expiresAtMs: bigint | number;
+  chainId: number;
+  issuedAt: string;
+}
+
+/**
+ * Canonical EIP-4361 message the host wallet signs to authorize a SINGLE
+ * external withdrawal. MUST stay byte-for-byte identical to
+ * `siwe::build_withdraw_message` in `siwe.move`.
+ */
+export function buildSiweWithdrawMessage(f: SiweWithdrawFields): string {
+  return (
+    `${DOMAIN} wants you to sign in with your Ethereum account:\n` +
+    `0x${eip55(f.ethAddress)}\n\n` +
+    `${WITHDRAW_STATEMENT}\n\n` +
+    `URI: ${URI}\n` +
+    `Version: 1\n` +
+    `Chain ID: ${f.chainId}\n` +
+    `Nonce: ${bytesToHex(f.nonce)}\n` +
+    `Issued At: ${f.issuedAt}\n` +
+    `Resources:\n` +
+    `- siws-session://sui-registry/${normalizeSuiAddress(f.registryDomain)}\n` +
+    `- siws-session://account/${normalizeSuiAddress(f.accountId)}\n` +
+    `- siws-session://coin-type/${canonicalCoinType(f.coinType)}\n` +
+    `- siws-session://amount/${BigInt(f.amount).toString()}\n` +
+    `- siws-session://recipient/${normalizeSuiAddress(f.recipient)}\n` +
+    `- siws-session://expires/${BigInt(f.expiresAtMs).toString()}`
   );
 }
 

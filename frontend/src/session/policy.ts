@@ -1,13 +1,11 @@
-// Session policy: what a freshly minted SessionCap may do and spend.
+// Session policy: what a freshly minted SessionCap may do.
 //
-// The selector allowlist names every `_with_session` entrypoint (the full
-// selector constants declared in the Move modules), and the per-type spend
-// limits — covered by the root signature the user reviews in their wallet —
-// bound how much of each asset can leave custody per tx / per session.
+// The selector allowlist names every cap-gated `_with_session` entrypoint (the
+// full selector constants declared in the Move modules). Caps carry no spend
+// limits — in-protocol flows are budget-free and external withdrawal is gated
+// by a separate host-wallet signature (see `defaultLimits`).
 
 import type { SpendLimit } from "@yourorg/sui-siws-session";
-
-import { SUPPORTED_TOKENS } from "../config";
 
 /** Cap lifetime. Conservative: one trading session. */
 export const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h
@@ -18,7 +16,9 @@ export const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h
  */
 export const SESSION_ALLOWED: string[] = [
   "options_protocol::session_account::create_and_share_account_with_session",
-  "options_protocol::session_account::withdraw_with_session",
+  // NOTE: external withdrawal is intentionally NOT here. `withdraw_with_root_sig`
+  // is gated by a fresh host-wallet signature (verified on-chain), not by the
+  // session cap, so it needs no cap-allowlist entry.
   "options_protocol::session_account::set_quote_signing_key_with_session",
   "options_protocol::session_bucket::execute_write_with_session",
   "options_protocol::session_bucket::exercise_with_session",
@@ -34,22 +34,14 @@ export const SESSION_ALLOWED: string[] = [
 ];
 
 /**
- * Per-whole-token spend limits. Value can only leave custody in the catalog
- * assets (settlement payments, premium, collateral, withdrawals) — call
- * coins move only inside exercise/burn flows whose proceeds return to
- * custody, so they need no limit entry.
+ * No per-type spend limits. In-protocol flows (write/exercise/vault) move
+ * value only within the user's own custody (collateral, premium, receipts,
+ * positions — all redeemable back to the same account) and never to an
+ * arbitrary recipient, so they're `authorize`-gated with no budget. The one
+ * value-exit, `withdraw_with_root_sig`, requires a fresh host-wallet signature
+ * instead of a cap budget. A session key thus has full trading authority but
+ * zero withdrawal authority.
  */
-const PER_TX_WHOLE_TOKENS = 1_000n;
-const TOTAL_WHOLE_TOKENS = 10_000n;
-
-/** One limit entry per supported token, scaled by its decimals. */
 export function defaultLimits(): SpendLimit[] {
-  return SUPPORTED_TOKENS.filter((t) => t.enabled).map((t) => {
-    const unit = 10n ** BigInt(t.decimals);
-    return {
-      coinType: t.coinType,
-      perTx: PER_TX_WHOLE_TOKENS * unit,
-      total: TOTAL_WHOLE_TOKENS * unit,
-    };
-  });
+  return [];
 }

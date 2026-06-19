@@ -22,11 +22,11 @@ module options_protocol::session_account;
 
 use std::type_name;
 use sui::clock::Clock;
-use sui::coin::Coin;
 use sui::dynamic_field as df;
 use sui::dynamic_object_field as dof;
 
 use siws_session::account::Account as SessionAccount;
+use siws_session::registry::Registry;
 use siws_session::session::{Self, SessionCap};
 
 use options_protocol::account::{Self, Account};
@@ -59,12 +59,10 @@ public struct ObjectIndexKey has copy, drop, store {}
 
 const SEL_CREATE_ACCOUNT: vector<u8> =
     b"options_protocol::session_account::create_and_share_account_with_session";
-const SEL_WITHDRAW: vector<u8> = b"options_protocol::session_account::withdraw_with_session";
 const SEL_SET_QUOTE_SIGNING_KEY: vector<u8> =
     b"options_protocol::session_account::set_quote_signing_key_with_session";
 
 public fun create_account_selector(): vector<u8> { SEL_CREATE_ACCOUNT }
-public fun withdraw_selector(): vector<u8> { SEL_WITHDRAW }
 public fun set_quote_signing_key_selector(): vector<u8> { SEL_SET_QUOTE_SIGNING_KEY }
 
 /// The session account id rendered as an address — the session-rooted
@@ -105,6 +103,17 @@ public(package) fun assert_session_linked(acc: &Account, cap: &SessionCap) {
     assert!(*linked == session::account_id(cap), errors::session_mismatch());
 }
 
+/// Abort unless `acc` is session-rooted and linked to exactly this
+/// `session_account`. Used by the root-signature withdrawal path, which
+/// carries no cap — the link is what binds `acc` to the root identity
+/// (`session_account.owner_pk`) that authorizes the withdrawal.
+public(package) fun assert_session_account_linked(acc: &Account, session_account: &SessionAccount) {
+    let key = SessionOwnerKey {};
+    assert!(df::exists_(account::uid(acc), key), errors::session_mismatch());
+    let linked: &ID = df::borrow(account::uid(acc), key);
+    assert!(*linked == object::id(session_account), errors::session_mismatch());
+}
+
 /// Linked session account id, if this is a session-rooted account.
 public fun session_owner(acc: &Account): Option<ID> {
     let key = SessionOwnerKey {};
@@ -115,21 +124,84 @@ public fun session_owner(acc: &Account): Option<ID> {
     }
 }
 
-/// Cap-gated withdraw — the session twin of `account::withdraw`. Spends
-/// against the cap's per-type limit for `T`.
-public fun withdraw_with_session<T>(
+/// Root-signature-gated external withdrawal — the ONLY path that moves value
+/// out of a session-rooted account's custody to an arbitrary recipient.
+///
+/// Carries no `SessionCap`: the host wallet (Solana root) signs a message
+/// binding this exact `(account, coin type, amount, recipient, nonce,
+/// expiry)`, the contract rebuilds and verifies it on-chain against the
+/// account's root identity, then pays the SIGNED recipient directly. The coin
+/// is never returned to the PTB, so a compromised session key or sponsor can
+/// neither redirect, resize, nor replay a withdrawal. In-protocol flows
+/// (write/exercise/vault) move no value to arbitrary recipients and so stay
+/// cap-free; this is the single re-sign chokepoint.
+public entry fun withdraw_with_root_sig<T>(
     acc: &mut Account,
-    cap: &SessionCap,
-    session_account: &mut SessionAccount,
+    session_account: &SessionAccount,
+    registry: &mut Registry,
     clock: &Clock,
     amount: u64,
+    recipient: address,
+    signature: vector<u8>,
+    nonce: vector<u8>,
+    expires_at_ms: u64,
     ctx: &mut TxContext,
-): Coin<T> {
-    assert_session_linked(acc, cap);
-    session::authorize_spend<T>(cap, session_account, clock, amount, SEL_WITHDRAW, ctx.sender());
+) {
+    assert_session_account_linked(acc, session_account);
+    session::verify_withdraw_auth<T>(
+        registry, session_account, clock, object::id(acc),
+        amount, recipient, signature, nonce, expires_at_ms,
+    );
     let coin = account::withdraw_internal<T>(acc, amount, ctx);
+    transfer::public_transfer(coin, recipient);
     events::emit_account_withdraw(object::id(acc), type_name::with_defining_ids<T>(), amount);
-    coin
+}
+
+/// EIP-4361 / Ethereum-root variant of `withdraw_with_root_sig`.
+public entry fun withdraw_with_root_sig_eth<T>(
+    acc: &mut Account,
+    session_account: &SessionAccount,
+    registry: &mut Registry,
+    clock: &Clock,
+    amount: u64,
+    recipient: address,
+    signature: vector<u8>,
+    nonce: vector<u8>,
+    expires_at_ms: u64,
+    chain_id: u64,
+    issued_at: vector<u8>,
+    ctx: &mut TxContext,
+) {
+    assert_session_account_linked(acc, session_account);
+    session::verify_withdraw_auth_eth<T>(
+        registry, session_account, clock, object::id(acc),
+        amount, recipient, signature, nonce, expires_at_ms, chain_id, issued_at,
+    );
+    let coin = account::withdraw_internal<T>(acc, amount, ctx);
+    transfer::public_transfer(coin, recipient);
+    events::emit_account_withdraw(object::id(acc), type_name::with_defining_ids<T>(), amount);
+}
+
+/// Test-only twin of `withdraw_with_root_sig` that skips the real signature
+/// (the crypto path is pinned separately via reference vectors). Drives the
+/// account linkage, nonce/replay guard, and payout-to-recipient end to end.
+#[test_only]
+public fun withdraw_with_root_sig_for_testing<T>(
+    acc: &mut Account,
+    session_account: &SessionAccount,
+    registry: &mut Registry,
+    clock: &Clock,
+    amount: u64,
+    recipient: address,
+    nonce: vector<u8>,
+    expires_at_ms: u64,
+    ctx: &mut TxContext,
+) {
+    assert_session_account_linked(acc, session_account);
+    session::verify_withdraw_skip_sig(registry, clock, expires_at_ms, nonce);
+    let coin = account::withdraw_internal<T>(acc, amount, ctx);
+    transfer::public_transfer(coin, recipient);
+    events::emit_account_withdraw(object::id(acc), type_name::with_defining_ids<T>(), amount);
 }
 
 /// Cap-gated signing-key rotation — the session twin of

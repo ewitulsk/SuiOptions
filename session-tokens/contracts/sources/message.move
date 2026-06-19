@@ -31,6 +31,7 @@ use siws_session::errors;
 
 const SESSION_PREFIX: vector<u8> = b"siws-session-v2";
 const REVOKE_PREFIX: vector<u8> = b"siws-session-revoke-v1";
+const WITHDRAW_PREFIX: vector<u8> = b"siws-session-withdraw-v1";
 
 public fun build_session_message(
     domain: address,
@@ -98,6 +99,36 @@ public fun build_revoke_message(
     push_field(&mut m, b"chain: ", chain_value(network));
     push_field(&mut m, b"account: ", hex0x(solana_pk));
     push_field(&mut m, b"account_id: ", hex0x(account_id.to_bytes()));
+    push_field(&mut m, b"nonce: ", hex0x(nonce));
+    push_field(&mut m, b"expires_at_ms: ", u64_to_ascii(expires_at_ms));
+    m
+}
+
+/// Withdrawal-authorization message (host wallet / Solana root). Domain-
+/// separated from the session/revoke prefixes so a signature for one can never
+/// be replayed as another. Binds the exact `account_id` (the options custody
+/// account), `coin_type`, `amount`, and `recipient` so a sponsor/session key
+/// cannot redirect or resize the withdrawal. `coin_type` is the canonical
+/// `0x…::module::Name` form (`account::canonical_type_bytes`), appended raw.
+public fun build_withdraw_message(
+    domain: address,
+    network: vector<u8>,
+    owner_pk: vector<u8>,
+    account_id: ID,
+    coin_type: vector<u8>,
+    amount: u64,
+    recipient: address,
+    nonce: vector<u8>,
+    expires_at_ms: u64,
+): vector<u8> {
+    let mut m = WITHDRAW_PREFIX;
+    push_field(&mut m, b"domain: ", hex0x(address::to_bytes(domain)));
+    push_field(&mut m, b"chain: ", chain_value(network));
+    push_field(&mut m, b"account: ", hex0x(owner_pk));
+    push_field(&mut m, b"account_id: ", hex0x(account_id.to_bytes()));
+    push_field(&mut m, b"coin_type: ", coin_type);
+    push_field(&mut m, b"amount: ", u64_to_ascii(amount));
+    push_field(&mut m, b"recipient: ", hex0x(address::to_bytes(recipient)));
     push_field(&mut m, b"nonce: ", hex0x(nonce));
     push_field(&mut m, b"expires_at_ms: ", u64_to_ascii(expires_at_ms));
     m

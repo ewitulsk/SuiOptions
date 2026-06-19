@@ -10,8 +10,10 @@ import { keccak_256 } from "@noble/hashes/sha3.js";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   buildSiweSessionMessage,
+  buildSiweWithdrawMessage,
   serializeSessionMessage,
   serializeRevokeMessage,
+  serializeWithdrawMessage,
 } from "./dist/index.js";
 
 const fill = (n, v) => new Uint8Array(n).fill(v);
@@ -102,3 +104,57 @@ const sigObj = secp256k1.Signature.fromBytes(sig65.slice(0, 64), "compact")
 const recPub = sigObj.recoverPublicKey(digest).toBytes(false);
 const recAddr = keccak_256(recPub.slice(1)).slice(12);
 console.log("recover self-check:", hex(recAddr) === hex(ethAddress) ? "OK" : "MISMATCH");
+
+// --- withdrawal-authorization messages (SIWS + SIWE w/ real signature) ---
+
+const SUI_TYPE =
+  "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI";
+
+const withdraw = serializeWithdrawMessage({
+  domain: "0x1",
+  network: "testnet",
+  solanaPk: fill(32, 0x11),
+  accountId: "0x3",
+  coinType: SUI_TYPE,
+  amount: 250000n,
+  recipient: "0x4",
+  nonce: fill(32, 0x22),
+  expiresAtMs: 1700000000000,
+});
+console.log("\n=== SIWS withdraw message ===");
+console.log(new TextDecoder().decode(withdraw));
+
+const siweWithdraw = buildSiweWithdrawMessage({
+  registryDomain: "0x1",
+  ethAddress,
+  accountId: "0x3",
+  coinType: SUI_TYPE,
+  amount: 250000n,
+  recipient: "0x4",
+  nonce: fill(32, 0x22),
+  expiresAtMs: 1700000000000,
+  chainId: 1,
+  issuedAt: "2026-06-09T00:00:00.000Z",
+});
+console.log("\n=== SIWE withdraw message ===");
+console.log(siweWithdraw);
+
+const wBytes = new TextEncoder().encode(siweWithdraw);
+const wPrefixed = new Uint8Array([
+  0x19,
+  ...new TextEncoder().encode(`Ethereum Signed Message:\n${wBytes.length}`),
+  ...wBytes,
+]);
+const wDigest = keccak_256(wPrefixed);
+const wRecovered = secp256k1.sign(wDigest, priv, { format: "recovered", prehash: false });
+const wSig65 = new Uint8Array(65);
+wSig65.set(wRecovered.slice(1), 0);
+wSig65[64] = wRecovered[0];
+console.log("\n=== SIWE withdraw signature (r||s||v) ===");
+console.log(hex(wSig65));
+
+const wSigObj = secp256k1.Signature.fromBytes(wSig65.slice(0, 64), "compact").addRecoveryBit(
+  wSig65[64],
+);
+const wRecAddr = keccak_256(wSigObj.recoverPublicKey(wDigest).toBytes(false).slice(1)).slice(12);
+console.log("withdraw recover self-check:", hex(wRecAddr) === hex(ethAddress) ? "OK" : "MISMATCH");

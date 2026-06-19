@@ -276,6 +276,87 @@ fun limit_by_type(cap: &SessionCap, coin_type: &vector<u8>): (u64, u64) {
     (0, 0)
 }
 
+/// Verify a host-wallet (SIWS / Solana) signature authorizing a SINGLE
+/// external withdrawal of `amount` of `T` from `account_id` to `recipient`,
+/// and consume its nonce. Carries NO `SessionCap`: the root signature is
+/// strictly stronger than any delegate, so this is the one value-exit that
+/// session keys cannot drive on their own. The message is rebuilt from these
+/// checked args (never a caller blob) and verified against the account's root
+/// identity. Aborts on any violation; on success the caller is cleared to
+/// release the coin to `recipient`.
+public fun verify_withdraw_auth<T>(
+    registry: &mut Registry,
+    account: &Account,
+    clock: &Clock,
+    account_id: ID,
+    amount: u64,
+    recipient: address,
+    signature: vector<u8>,
+    nonce: vector<u8>,
+    expires_at_ms: u64,
+) {
+    let owner_pk = *account.owner_pk();
+    assert!(owner_pk.length() == ED25519_PUBKEY_LEN, errors::invalid_pubkey_length());
+    assert!(signature.length() == ED25519_SIG_LEN, errors::invalid_signature_length());
+    assert!(clock.timestamp_ms() < expires_at_ms, errors::expired());
+    assert!(!registry.nonce_used(nonce), errors::nonce_used());
+
+    let msg = message::build_withdraw_message(
+        registry.domain(),
+        registry.network(),
+        owner_pk,
+        account_id,
+        account::canonical_type_bytes<T>(),
+        amount,
+        recipient,
+        nonce,
+        expires_at_ms,
+    );
+    assert!(ed25519::ed25519_verify(&signature, &owner_pk, &msg), errors::bad_sig());
+
+    registry.consume_nonce(nonce);
+}
+
+/// EIP-4361 / Ethereum variant of `verify_withdraw_auth`. The root identity is
+/// the 20-byte Ethereum address recovered from a secp256k1 personal_sign over
+/// the canonical SIWE withdrawal message.
+public fun verify_withdraw_auth_eth<T>(
+    registry: &mut Registry,
+    account: &Account,
+    clock: &Clock,
+    account_id: ID,
+    amount: u64,
+    recipient: address,
+    signature: vector<u8>,
+    nonce: vector<u8>,
+    expires_at_ms: u64,
+    chain_id: u64,
+    issued_at: vector<u8>,
+) {
+    let owner_pk = *account.owner_pk();
+    assert!(owner_pk.length() == siwe::eth_address_len(), errors::invalid_pubkey_length());
+    assert!(signature.length() == siwe::eth_sig_len(), errors::invalid_signature_length());
+    assert!(clock.timestamp_ms() < expires_at_ms, errors::expired());
+    assert!(!registry.nonce_used(nonce), errors::nonce_used());
+
+    let msg = siwe::build_withdraw_message(
+        registry.domain(),
+        owner_pk,
+        address::from_bytes(account_id.to_bytes()),
+        account::canonical_type_bytes<T>(),
+        amount,
+        recipient,
+        nonce,
+        expires_at_ms,
+        chain_id,
+        issued_at,
+    );
+    let recovered = siwe::recover_eth_address(signature, msg);
+    assert!(recovered == owner_pk, errors::bad_sig());
+
+    registry.consume_nonce(nonce);
+}
+
 /// Bump the account generation, instantly killing every outstanding cap.
 /// Requires a fresh root (Solana) signature over a domain-separated
 /// "revoke-v1" message (spec §1.7).
@@ -346,6 +427,24 @@ fun is_allowed(allowed: &vector<vector<u8>>, selector: &vector<u8>): bool {
         i = i + 1;
     };
     false
+}
+
+/// Test-only: drive the non-crypto guards of the root-sig withdrawal path
+/// (freshness + nonce/replay, consuming the nonce) without a real signature.
+/// Options-side integration tests use this to exercise account linkage and
+/// payout without pinning a signature to a non-deterministic test registry
+/// domain; the real crypto path is covered by the reference-vector /
+/// real-signature tests (`message`/`siwe` suites).
+#[test_only]
+public fun verify_withdraw_skip_sig(
+    registry: &mut Registry,
+    clock: &Clock,
+    expires_at_ms: u64,
+    nonce: vector<u8>,
+) {
+    assert!(clock.timestamp_ms() < expires_at_ms, errors::expired());
+    assert!(!registry.nonce_used(nonce), errors::nonce_used());
+    registry.consume_nonce(nonce);
 }
 
 #[test_only]
