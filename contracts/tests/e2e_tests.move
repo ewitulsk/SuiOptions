@@ -129,7 +129,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
         ts::return_shared(mm);
     };
 
-    // Writer #1 receives net premium + position NFT.
+    // Writer #1 receives net premium + position Object.
     ts::next_tx(&mut scenario, th::writer_addr());
     {
         let net = ts::take_from_sender<Coin<USDC>>(&scenario);
@@ -361,7 +361,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
         let q = quote::new_quote(
             *admin::protocol_id(&config),
             object::id(&mm),
-            th::writer_mm_addr(),  // signer (MM) gets the position NFT
+            th::writer_mm_addr(),  // signer (MM) gets the position Object
             bucket_id,
             buy1_amount,
             buy1_premium,

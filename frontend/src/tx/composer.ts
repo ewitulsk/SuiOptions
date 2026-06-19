@@ -13,7 +13,7 @@
 // Writer-flow invariants enforced by `execute_write_with_quote`
 // (FlowKind::Writer): signer_recipient == call_token_recipient;
 // premium_in.value() == 0; underlying_in.value() == write_amount. The writer
-// (ctx.sender()) receives the net premium and the Position NFT; the MM/buyer
+// (ctx.sender()) receives the net premium and the Position Object; the MM/buyer
 // (signer_token_recipient) receives the CallOption.
 
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
@@ -44,7 +44,7 @@ export type WriteParams = {
   settlementCoinType: string;
   /** The bucket's per-bucket option coin type (`Call` type arg). */
   callCoinType: string;
-  /** Connected wallet; receives the Position NFT and net premium. */
+  /** Connected wallet; receives the Position Object and net premium. */
   writer: string;
 };
 
@@ -144,7 +144,7 @@ export type BuyParams = {
  * enforced by `execute_write_with_quote` (FlowKind::Trader):
  * signer_recipient == position_recipient; underlying_in.value() == 0;
  * premium_in.value() == gross_premium. The Writer MM (signer) supplies the
- * underlying from their Account and receives the Position NFT; the trader
+ * underlying from their Account and receives the Position Object; the trader
  * (ctx.sender()) pays the premium from their wallet and receives the
  * CallOption coin.
  */

@@ -21,7 +21,7 @@ This roadmap takes the frontend from "design demo" to "production tideline.fi on
 
 - Connect a Sui wallet → see your real Account balances, real bucket state, real positions, real on-chain history.
 - RFQ a write or a buy → quotes stream from real MMs over WS → sign one → wallet submits a PTB → indexer confirms → UI updates.
-- Exercise a held call, close-early via NFT transfer, redeem after expiry.
+- Exercise a held call, close-early via Object transfer, redeem after expiry.
 - Mobile-usable, monitored, deployed behind a CDN, with rollback.
 
 ---
@@ -64,7 +64,7 @@ Goal: a user connects a wallet on testnet and sees their **real** account balanc
 - [ ] **F1.5** Account fetch: `suiClient.getObject({ id: <Account ID> })` → balances map. Replace hardcoded `btcBalance = 0.4321`, `usdcBalance = 5000`.
 - [ ] **F1.6** Bucket state fetch: read `Bucket<U,S>` shared object → `total_written`, `exercise_cursor`, `expiry_ms`, `strike`, `underlying_balance`. Feed `BucketBar` and `Tideline`.
 - [ ] **F1.7** Held call tokens: `getOwnedObjects` filter by `CallOption<U,S>` type → group by bucket → owned positions in Dashboard.
-- [ ] **F1.8** Owned Position NFTs: same pattern → written positions in Dashboard.
+- [ ] **F1.8** Owned Position Objects: same pattern → written positions in Dashboard.
 
 ### Indexer WS
 
@@ -213,7 +213,7 @@ Frontend integration is blocked on these. Each cites where the gap surfaces.
 
 ### Quoting service (`rust-backend/crates/quoting-service/`)
 
-- **DEP-B1** Buyback RFQ side for close-early (F2.15). Today RFQ is for opens only. Need symmetric "I want to sell this Position NFT" flow.
+- **DEP-B1** Buyback RFQ side for close-early (F2.15). Today RFQ is for opens only. Need symmetric "I want to sell this Position Object" flow.
 - **DEP-B2** Push retail-side account-state deltas. Today only MMs get `AccountStateUpdate`; retail polls RPC. Push would make balance updates instant.
 - **DEP-B3** Documented WS error code catalog (we'll map in F2.12).
 

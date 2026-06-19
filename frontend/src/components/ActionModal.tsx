@@ -178,7 +178,7 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
                 </div>
               </div>
               <div className="modal__note">
-                Claiming burns your Position NFT and credits both legs to your Account.
+                Claiming burns your Position Object and credits both legs to your Account.
                 Your premium is unaffected — it landed on day one and is already yours.
               </div>
               <div className="modal__actions">
@@ -198,7 +198,7 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
                 {isSigning ? "Signing claim…" : "Confirming on Sui…"}
               </div>
               <div className="modal__sub">
-                {isSigning ? "waiting for wallet" : "burning position NFT"}
+                {isSigning ? "waiting for wallet" : "burning position Object"}
               </div>
             </>
           )}

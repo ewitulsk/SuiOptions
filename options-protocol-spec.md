@@ -56,9 +56,9 @@ The protocol's defining characteristic is its **pooled-bucket model with FIFO ex
 
 - **Call option**: The (asset, expiry) tuple identifying a class of options.
 - **Bucket**: The (asset, expiry, strike, settlement_asset) tuple. A bucket is a single shared object on Sui that pools all writes for that exact contract specification.
-- **Write**: The act of depositing underlying into a bucket in exchange for a Position NFT (and routing premium to the counterparty's Account).
+- **Write**: The act of depositing underlying into a bucket in exchange for a Position Object (and routing premium to the counterparty's Account).
 - **Exercise**: The act of a `CallOption` holder burning their object to receive underlying from the bucket, paying `amount × strike` settlement asset in.
-- **Redeem**: The post-expiry act of a Position NFT holder claiming their proportional share of the bucket's underlying and settlement asset balances.
+- **Redeem**: The post-expiry act of a Position Object holder claiming their proportional share of the bucket's underlying and settlement asset balances.
 
 ### 2.2 The cursor model
 
@@ -966,7 +966,7 @@ Recommended schema:
    - Wraps the `SignedQuote` from the chosen quote
    - Calls `execute_write(bucket, config, treasury, mm_account, underlying_coin, zero_settlement_coin, writer_addr, mm_token_recipient, signed_quote, clock)`
 10. User signs and submits PTB.
-11. On confirmation, frontend shows: net premium received, Position NFT received.
+11. On confirmation, frontend shows: net premium received, Position Object received.
 
 ### 7.2 Retail Trader Frontend
 
@@ -1012,7 +1012,7 @@ RetailWriter   Frontend     QuotingService   TraderMM      Chain
      │            │──────────────────────────────────────────►│
      │            │              │               │  verify   │
      │            │              │               │  skim fee │
-     │            │              │               │  mint NFT │
+     │            │              │               │  mint Object │
      │            │              │               │  mint Tok │
      │            │              │               │  emit ev  │
      │            │ ◄────────────────────────────────────────│
@@ -1064,7 +1064,7 @@ Writer        Frontend       Chain
   │              │              │ check expired
   │              │              │ compute exercised/unexercised
   │              │              │ split out underlying + settlement
-  │              │              │ burn NFT
+  │              │              │ burn Object
   │              │              │ emit Redeemed
   │              │ ◄────────────│
   │ ◄─Done───────│              │
