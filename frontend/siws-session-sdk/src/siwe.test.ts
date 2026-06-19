@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildSiweSessionMessage, ethSignatureToSui } from "./siwe.js";
+import {
+  buildSiweSessionMessage,
+  buildSiweWithdrawMessage,
+  ethSignatureToSui,
+} from "./siwe.js";
 
 // Byte-for-byte identical to the literal asserted in
 // `contracts/tests/siwe_tests.move` (and the message the reference secp256k1
@@ -38,6 +42,23 @@ const SIWE_REF =
   "- siws-session://limits/0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI=200/500," +
   "0x00000000000000000000000000000000000000000000000000000000000000aa::tusdc::TUSDC=1000000/5000000";
 
+const SIWE_WITHDRAW_REF =
+  "siws-session.demo wants you to sign in with your Ethereum account:\n" +
+  "0x1a642f0E3c3aF545E7AcBD38b07251B3990914F1\n\n" +
+  "Authorize a Sui withdrawal.\n\n" +
+  "URI: https://siws-session.demo\n" +
+  "Version: 1\n" +
+  "Chain ID: 1\n" +
+  "Nonce: 2222222222222222222222222222222222222222222222222222222222222222\n" +
+  "Issued At: 2026-06-09T00:00:00.000Z\n" +
+  "Resources:\n" +
+  "- siws-session://sui-registry/0x0000000000000000000000000000000000000000000000000000000000000001\n" +
+  "- siws-session://account/0x0000000000000000000000000000000000000000000000000000000000000003\n" +
+  "- siws-session://coin-type/0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI\n" +
+  "- siws-session://amount/250000\n" +
+  "- siws-session://recipient/0x0000000000000000000000000000000000000000000000000000000000000004\n" +
+  "- siws-session://expires/1700000000000";
+
 describe("SIWE serializer", () => {
   it("matches the on-chain EIP-4361 message byte-for-byte (incl. EIP-55)", () => {
     const msg = buildSiweSessionMessage({
@@ -52,6 +73,22 @@ describe("SIWE serializer", () => {
       limits: LIMITS,
     });
     expect(msg).toBe(SIWE_REF);
+  });
+
+  it("matches the on-chain EIP-4361 withdraw message byte-for-byte", () => {
+    const msg = buildSiweWithdrawMessage({
+      registryDomain: "0x1",
+      ethAddress: ETH,
+      accountId: "0x3",
+      coinType: "0x2::sui::SUI",
+      amount: 250000n,
+      recipient: "0x4",
+      nonce,
+      expiresAtMs: 1700000000000,
+      chainId: 1,
+      issuedAt: "2026-06-09T00:00:00.000Z",
+    });
+    expect(msg).toBe(SIWE_WITHDRAW_REF);
   });
 
   it("normalizes MetaMask v=27/28 to Sui's 0/1", () => {

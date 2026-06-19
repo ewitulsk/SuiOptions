@@ -382,7 +382,14 @@ export async function fundFromFaucet(token: TestToken, amountRaw: bigint): Promi
   }
 }
 
-/** Cap-gated withdrawal from custody to an external Sui address. */
+/**
+ * Withdrawal from custody to an external Sui address. Unlike every other
+ * session action, this is NOT authorized by the session key: it requires a
+ * fresh signature from the user's HOST wallet (Solana/Ethereum), verified
+ * on-chain, binding this exact (account, coin type, amount, recipient). The
+ * tx is still session-signed + sponsored, but the session key alone can't
+ * move funds out — it triggers a wallet prompt here.
+ */
 export async function withdrawFromCustody(
   coinType: string,
   amountRaw: bigint,
@@ -391,21 +398,49 @@ export async function withdrawFromCustody(
   const { handle, optionsAccountId } = snap;
   if (!handle) throw new Error("no active session");
   if (!optionsAccountId) throw new Error("no options account");
-  set({ busy: "withdrawing" });
+  if (!SESSION_REGISTRY_ID) throw new Error("no session registry configured");
+  if (!handle.canRevoke) {
+    throw new Error("reconnect your wallet to authorize a withdrawal");
+  }
+  set({ busy: "awaiting wallet signature" });
   try {
+    // Prompt the host wallet to root-sign this specific withdrawal.
+    const auth = await handle.signWithdraw({
+      accountId: optionsAccountId,
+      coinType,
+      amount: amountRaw,
+      recipient,
+    });
+    set({ busy: "withdrawing" });
     await handle.execute((tx, ctx) => {
-      const coin = tx.moveCall({
-        target: `${PACKAGE_ID}::session_account::withdraw_with_session`,
-        typeArguments: [coinType],
-        arguments: [
-          tx.object(optionsAccountId),
-          tx.object(ctx.capId),
-          tx.object(ctx.accountId),
-          tx.object(SUI_CLOCK_OBJECT_ID),
-          tx.pure.u64(amountRaw),
-        ],
-      });
-      tx.transferObjects([coin], recipient);
+      const args = [
+        tx.object(optionsAccountId),
+        tx.object(ctx.accountId), // the session (siws) account holds the root identity
+        tx.object(SESSION_REGISTRY_ID!),
+        tx.object(SUI_CLOCK_OBJECT_ID),
+        tx.pure.u64(amountRaw),
+        tx.pure.address(recipient),
+        tx.pure.vector("u8", Array.from(auth.signature)),
+        tx.pure.vector("u8", Array.from(auth.nonce)),
+        tx.pure.u64(BigInt(auth.expiresAtMs)),
+      ];
+      if (auth.scheme === "ethereum") {
+        tx.moveCall({
+          target: `${PACKAGE_ID}::session_account::withdraw_with_root_sig_eth`,
+          typeArguments: [coinType],
+          arguments: [
+            ...args,
+            tx.pure.u64(BigInt(auth.chainId)),
+            tx.pure.vector("u8", Array.from(new TextEncoder().encode(auth.issuedAt))),
+          ],
+        });
+      } else {
+        tx.moveCall({
+          target: `${PACKAGE_ID}::session_account::withdraw_with_root_sig`,
+          typeArguments: [coinType],
+          arguments: args,
+        });
+      }
     });
     set({ busy: null });
     posthog.capture("custody_withdrawn", {

@@ -64,9 +64,12 @@ Full design: [`sui-siws-session-key-spec.md`](./sui-siws-session-key-spec.md).
 | [`demo-frontend/`](./demo-frontend) | Vite + React + dapp-kit demo (same stack as `../frontend`). Connect Phantom **or** MetaMask, open a session, fund the account, auto-signed withdraws, sweep stray coins, revoke, with Suiscan tx toasts. |
 
 **The real integration** lives in the main app: `contracts/` defines
-`_with_session` twins (account create/withdraw/key-rotate, write, buy,
-exercise, redeem, burn-expired) that source funds from — and settle outputs
-into — the user's options `Account` custody under the cap's per-type limits;
+`_with_session` twins (account create/key-rotate, write, buy, exercise,
+redeem, burn-expired) that source funds from — and settle outputs into — the
+user's options `Account` custody. In-protocol flows carry **no spend cap**
+(value never leaves custody to an arbitrary recipient); the sole external
+exit, `withdraw_with_root_sig`, is gated by a fresh **host-wallet signature**
+verified on-chain (`session::verify_withdraw_auth[_eth]`), not by the cap;
 `rust-backend` gains `session_*` gas-station templates and
 `deployment-manager --deploy-session`; `frontend/src/session/` + the nav-bar
 account dropdown own sign-in/restore/fund/withdraw/revoke.

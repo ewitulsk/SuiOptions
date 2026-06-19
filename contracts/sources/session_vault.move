@@ -40,22 +40,22 @@ public fun initiate_withdraw_selector(): vector<u8> { SEL_INITIATE_WITHDRAW }
 public fun complete_withdraw_selector(): vector<u8> { SEL_COMPLETE_WITHDRAW }
 public fun instant_withdraw_selector(): vector<u8> { SEL_INSTANT_WITHDRAW }
 
-/// Session twin of `vault::deposit`: underlying out of custody (charged
-/// against the cap's limit for `U`), the `DepositReceipt` custodied on the
-/// account.
+/// Session twin of `vault::deposit`: underlying out of custody into the
+/// vault, the `DepositReceipt` custodied on the account. The deposited value
+/// stays the user's claim (the receipt redeems only back into this same
+/// custody) and never reaches an arbitrary recipient, so this is cap-free
+/// (`authorize`) — only root-signed `withdraw_with_root_sig` exits custody.
 public fun deposit_with_session<U, S, V>(
     vault: &mut Vault<U, S, V>,
     user_account: &mut Account,
     cap: &SessionCap,
-    session_account: &mut SessionAccount,
+    session_account: &SessionAccount,
     amount: u64,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
     session_account::assert_session_linked(user_account, cap);
-    session::authorize_spend<U>(
-        cap, session_account, clock, amount, SEL_DEPOSIT, ctx.sender(),
-    );
+    session::authorize(cap, session_account, clock, SEL_DEPOSIT, ctx.sender());
     let coin = account::withdraw_internal<U>(user_account, amount, ctx);
     events::emit_account_withdraw(
         object::id(user_account),

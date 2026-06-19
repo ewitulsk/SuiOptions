@@ -284,15 +284,19 @@ pub fn protocol_templates(
             arities: vec![(burn, 3)],
         });
 
-        // Withdraw from custody to an external address (TransferObjects of
-        // the returned coin is a benign command).
-        let withdraw = t("session_account", "withdraw_with_session");
-        templates.push(PtbTemplate {
-            name: "session_withdraw".to_owned(),
-            required: vec![withdraw.clone()],
-            allowed: vec![withdraw.clone()],
-            arities: vec![(withdraw, 1)],
-        });
+        // Withdraw from custody to an external address. Authorization is a
+        // fresh host-wallet signature passed as args (verified on-chain); the
+        // entry pays the signed recipient directly, so there is no returned
+        // coin / TransferObjects. We still sponsor gas for the PTB shape.
+        for function in ["withdraw_with_root_sig", "withdraw_with_root_sig_eth"] {
+            let withdraw = t("session_account", function);
+            templates.push(PtbTemplate {
+                name: format!("session_{function}"),
+                required: vec![withdraw.clone()],
+                allowed: vec![withdraw.clone()],
+                arities: vec![(withdraw, 1)],
+            });
+        }
 
         // Deposit into an options account (permissionless on-chain; only
         // moves the sender's own coins in).
@@ -804,9 +808,15 @@ mod tests {
         );
         assert_eq!(match_any(&templates(), &burn), Some("session_burn_expired"));
 
-        // withdraw (+ benign TransferObjects of the returned coin) / deposit.
-        let wd = build(&[(target("session_account", "withdraw_with_session"), 1)], false);
-        assert_eq!(match_any(&templates(), &wd), Some("session_withdraw"));
+        // root-signed external withdrawal (Solana + Ethereum variants) / deposit.
+        let wd = build(&[(target("session_account", "withdraw_with_root_sig"), 1)], false);
+        assert_eq!(match_any(&templates(), &wd), Some("session_withdraw_with_root_sig"));
+        let wd_eth =
+            build(&[(target("session_account", "withdraw_with_root_sig_eth"), 1)], false);
+        assert_eq!(
+            match_any(&templates(), &wd_eth),
+            Some("session_withdraw_with_root_sig_eth"),
+        );
         let dep = build(&[(target("account", "deposit"), 1)], true);
         assert_eq!(match_any(&templates(), &dep), Some("session_deposit"));
 
@@ -862,7 +872,7 @@ mod tests {
                 (target("quote", "new_signed_quote"), 0),
                 (target("bucket", "trader_flow"), 0),
                 (target("session_bucket", "execute_write_with_session"), 3),
-                (target("session_account", "withdraw_with_session"), 1),
+                (target("session_account", "withdraw_with_root_sig"), 1),
             ],
             false,
         );

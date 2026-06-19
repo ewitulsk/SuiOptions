@@ -59,6 +59,21 @@ export interface RevokeMessageFields {
   expiresAtMs: bigint | number;
 }
 
+export interface WithdrawMessageFields {
+  domain: string;
+  network: string;
+  solanaPk: Uint8Array;
+  /** The options custody Account object id funds leave. */
+  accountId: string;
+  /** Coin type withdrawn (any 0x form; canonicalized internally). */
+  coinType: string;
+  amount: bigint | number;
+  /** Recipient Sui address (bound by the signature — not PTB-routable). */
+  recipient: string;
+  nonce: Uint8Array;
+  expiresAtMs: bigint | number;
+}
+
 const HEX = "0123456789abcdef";
 
 /** Lowercase hex with a `0x` prefix — mirrors Move's `hex0x`. */
@@ -122,6 +137,27 @@ export function serializeRevokeMessage(f: RevokeMessageFields): Uint8Array {
     field("chain: ", `sui:${f.network}`) +
     field("account: ", hex0x(f.solanaPk)) +
     field("account_id: ", addrHex(f.accountId)) +
+    field("nonce: ", hex0x(f.nonce)) +
+    field("expires_at_ms: ", BigInt(f.expiresAtMs).toString(10));
+  return new TextEncoder().encode(msg);
+}
+
+/**
+ * Canonical bytes the host wallet signs to authorize a SINGLE external
+ * withdrawal. MUST stay byte-for-byte identical to
+ * `message::build_withdraw_message` in `message.move`. `coin_type` is appended
+ * raw (already the canonical `0x…::module::Name` form).
+ */
+export function serializeWithdrawMessage(f: WithdrawMessageFields): Uint8Array {
+  const msg =
+    "siws-session-withdraw-v1" +
+    field("domain: ", addrHex(f.domain)) +
+    field("chain: ", `sui:${f.network}`) +
+    field("account: ", hex0x(f.solanaPk)) +
+    field("account_id: ", addrHex(f.accountId)) +
+    field("coin_type: ", canonicalCoinType(f.coinType)) +
+    field("amount: ", BigInt(f.amount).toString(10)) +
+    field("recipient: ", addrHex(f.recipient)) +
     field("nonce: ", hex0x(f.nonce)) +
     field("expires_at_ms: ", BigInt(f.expiresAtMs).toString(10));
   return new TextEncoder().encode(msg);

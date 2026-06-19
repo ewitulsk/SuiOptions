@@ -14,12 +14,14 @@ import {
   canonicalCoinType,
   serializeRevokeMessage,
   serializeSessionMessage,
+  serializeWithdrawMessage,
   type SpendLimit,
 } from "./message.js";
 import { fetchGeneration, readGeneration, readSpent, resolveAccountId } from "./reads.js";
 import {
   buildSiweRevokeMessage,
   buildSiweSessionMessage,
+  buildSiweWithdrawMessage,
   ethAddressToBytes,
   ethSignatureToSui,
 } from "./siwe.js";
@@ -58,6 +60,46 @@ type RootState =
 
 function randomNonce(): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(32));
+}
+
+/**
+ * A host-wallet-signed authorization for one external withdrawal. The app
+ * passes these fields to its `withdraw_with_root_sig[_eth]` entrypoint; the tx
+ * is still session-signed + sponsored, but the *authority* is this root
+ * signature, so a compromised session key cannot withdraw on its own.
+ */
+export type WithdrawAuth =
+  | {
+      scheme: "solana";
+      coinType: string;
+      amount: bigint;
+      recipient: string;
+      signature: Uint8Array;
+      nonce: Uint8Array;
+      expiresAtMs: number;
+    }
+  | {
+      scheme: "ethereum";
+      coinType: string;
+      amount: bigint;
+      recipient: string;
+      signature: Uint8Array;
+      nonce: Uint8Array;
+      expiresAtMs: number;
+      chainId: number;
+      issuedAt: string;
+    };
+
+export interface SignWithdrawParams {
+  /** The options custody Account object id funds leave. */
+  accountId: string;
+  /** Coin type to withdraw (any 0x form; canonicalized internally). */
+  coinType: string;
+  amount: bigint | number;
+  /** Recipient Sui address (bound by the signature). */
+  recipient: string;
+  /** Signature validity window; default 60s. */
+  ttlMs?: number;
 }
 
 const enc = new TextEncoder();
@@ -201,6 +243,68 @@ export class SessionHandle {
       generation: this.#p.generation,
       accountGeneration,
       active,
+    };
+  }
+
+  /**
+   * Root-sign an external withdrawal of `amount` of `coinType` from the given
+   * custody account to `recipient`. Prompts the HOST wallet (Solana/Ethereum)
+   * — this is the one action a session key cannot self-authorize. Returns the
+   * signature + nonce + expiry; the caller passes them to the app's
+   * `withdraw_with_root_sig[_eth]` entrypoint and submits via `execute()`
+   * (still session-signed + sponsored). The recipient and amount are bound by
+   * the signature, so the sponsor/session key cannot redirect or resize it.
+   */
+  async signWithdraw(params: SignWithdrawParams): Promise<WithdrawAuth> {
+    const { root, registryId } = this.#p;
+    if (!root.wallet) {
+      throw new Error("withdrawal requires the root wallet (not available after restore)");
+    }
+    const nonce = randomNonce();
+    const expiresAtMs = Date.now() + (params.ttlMs ?? 60_000);
+    const coinType = canonicalCoinType(params.coinType);
+    const amount = BigInt(params.amount);
+
+    if (root.scheme === "solana") {
+      const message = serializeWithdrawMessage({
+        domain: registryId,
+        network: this.#p.network,
+        solanaPk: root.identity,
+        accountId: params.accountId,
+        coinType,
+        amount,
+        recipient: params.recipient,
+        nonce,
+        expiresAtMs,
+      });
+      const { signature } = await root.wallet.signMessage(message);
+      return { scheme: "solana", coinType, amount, recipient: params.recipient, signature, nonce, expiresAtMs };
+    }
+
+    const issuedAt = new Date().toISOString();
+    const message = buildSiweWithdrawMessage({
+      registryDomain: registryId,
+      ethAddress: root.identity,
+      accountId: params.accountId,
+      coinType,
+      amount,
+      recipient: params.recipient,
+      nonce,
+      expiresAtMs,
+      chainId: root.chainId,
+      issuedAt,
+    });
+    const signature = ethSignatureToSui(await root.wallet.personalSign(message));
+    return {
+      scheme: "ethereum",
+      coinType,
+      amount,
+      recipient: params.recipient,
+      signature,
+      nonce,
+      expiresAtMs,
+      chainId: root.chainId,
+      issuedAt,
     };
   }
 

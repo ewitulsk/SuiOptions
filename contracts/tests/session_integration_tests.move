@@ -7,6 +7,7 @@ use sui::test_scenario::{Self as ts, Scenario};
 use sui::test_utils;
 
 use siws_session::account::{Self as siws_account, Account as SessionAccount};
+use siws_session::registry;
 use siws_session::session::{Self, SessionCap, SpendLimit};
 
 use options_protocol::account::{Self, Account};
@@ -25,6 +26,8 @@ const EXPIRY_MS: u64 = 1_000_000;
 
 /// The ephemeral Sui address the cap is bound to.
 const HOLDER: address = @0x5E55;
+/// External recipient for root-signed withdrawals.
+const RECIPIENT: address = @0xBEEF;
 
 fun fill(n: u64, v: u8): vector<u8> {
     let mut out = vector::empty<u8>();
@@ -36,7 +39,6 @@ fun fill(n: u64, v: u8): vector<u8> {
 fun allowlist(): vector<vector<u8>> {
     vector[
         session_account::create_account_selector(),
-        session_account::withdraw_selector(),
         session_account::set_quote_signing_key_selector(),
         session_bucket::execute_write_selector(),
         session_bucket::exercise_selector(),
@@ -50,16 +52,11 @@ fun allowlist(): vector<vector<u8>> {
     ]
 }
 
-/// Generous limits for BTC + USDC (the assets session flows spend).
+/// Caps carry no spend limits: in-protocol flows are `authorize`-gated (no
+/// per-type budget), and the only value-exit (`withdraw_with_root_sig`) is
+/// root-signature-gated, not cap-gated.
 fun default_limits(): vector<SpendLimit> {
-    vector[
-        session::new_limit_for_testing(
-            siws_account::canonical_type_bytes<BTC>(), 1_000, 10_000,
-        ),
-        session::new_limit_for_testing(
-            siws_account::canonical_type_bytes<USDC>(), 100_000_000, 100_000_000,
-        ),
-    ]
+    vector<SpendLimit>[]
 }
 
 /// Session account + live cap bound to HOLDER, and a session-rooted shared
@@ -89,32 +86,38 @@ fun fund_session_user<T>(scenario: &mut Scenario, account_id: ID, amount: u64) {
     ts::return_shared(acc);
 }
 
-// --- account create / withdraw ---
+// --- account create / root-signed external withdrawal ---
 
 #[test]
-fun test_create_account_and_withdraw_with_session() {
+fun test_create_account_and_withdraw_with_root_sig() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
-    let (mut sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
+    let (sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
     fund_session_user<USDC>(&mut scenario, account_id, 1_000_000);
 
     ts::next_tx(&mut scenario, HOLDER);
+    let mut reg = registry::new_for_testing(b"testnet", scenario.ctx());
     let mut acc = th::take_account_by_id(&scenario, account_id);
     // owner is the session account id rendered as an address, and the link
     // points at the session account.
     assert!(account::owner(&acc) == session_account::session_owner_address(&sess), 0);
     assert!(session_account::session_owner(&acc).destroy_some() == object::id(&sess), 0);
 
-    let out = session_account::withdraw_with_session<USDC>(
-        &mut acc, &cap, &mut sess, &clock, 250_000, scenario.ctx(),
+    // The external withdrawal pays the SIGNED recipient directly — the coin is
+    // never returned to the PTB, so it can't be redirected.
+    session_account::withdraw_with_root_sig_for_testing<USDC>(
+        &mut acc, &sess, &mut reg, &clock, 250_000, RECIPIENT, fill(32, 0x01), 9_999_999,
+        scenario.ctx(),
     );
-    assert!(out.value() == 250_000, 0);
     assert!(account::balance_of<USDC>(&acc) == 750_000, 0);
-    // The spend was charged against the cap's USDC budget.
-    assert!(siws_account::spent_of<USDC>(&sess, object::id(&cap)) == 250_000, 0);
-    coin::burn_for_testing(out);
 
     ts::return_shared(acc);
+    ts::next_tx(&mut scenario, RECIPIENT);
+    let out = scenario.take_from_address<Coin<USDC>>(RECIPIENT);
+    assert!(out.value() == 250_000, 0);
+    coin::burn_for_testing(out);
+
+    test_utils::destroy(reg);
     test_utils::destroy(sess);
     test_utils::destroy(cap);
     clock.destroy_for_testing();
@@ -122,56 +125,43 @@ fun test_create_account_and_withdraw_with_session() {
 }
 
 #[test]
-#[expected_failure(abort_code = 7, location = siws_session::session)] // over_per_tx
-fun test_withdraw_with_session_over_per_tx_aborts() {
+#[expected_failure(abort_code = 2, location = siws_session::session)] // nonce_used
+fun test_withdraw_root_sig_replay_aborts() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
-    // BTC per-tx limit is 1_000.
-    let (mut sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
-    fund_session_user<BTC>(&mut scenario, account_id, 10_000);
-
-    ts::next_tx(&mut scenario, HOLDER);
-    let mut acc = th::take_account_by_id(&scenario, account_id);
-    let out = session_account::withdraw_with_session<BTC>(
-        &mut acc, &cap, &mut sess, &clock, 1_001, scenario.ctx(),
-    );
-    coin::burn_for_testing(out);
-    abort 0
-}
-
-#[test]
-#[expected_failure(abort_code = 4, location = siws_session::session)] // wrong_holder
-fun test_withdraw_with_session_wrong_sender_aborts() {
-    let mut scenario = ts::begin(th::admin_addr());
-    let clock = th::init_protocol(&mut scenario);
-    let (mut sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
+    let (sess, _cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
     fund_session_user<USDC>(&mut scenario, account_id, 1_000_000);
 
-    // A different sender than the cap's holder.
-    ts::next_tx(&mut scenario, th::stranger_addr());
+    ts::next_tx(&mut scenario, HOLDER);
+    let mut reg = registry::new_for_testing(b"testnet", scenario.ctx());
     let mut acc = th::take_account_by_id(&scenario, account_id);
-    let out = session_account::withdraw_with_session<USDC>(
-        &mut acc, &cap, &mut sess, &clock, 1, scenario.ctx(),
+    let nonce = fill(32, 0x07);
+    session_account::withdraw_with_root_sig_for_testing<USDC>(
+        &mut acc, &sess, &mut reg, &clock, 100_000, RECIPIENT, nonce, 9_999_999, scenario.ctx(),
     );
-    coin::burn_for_testing(out);
+    // Replaying the SAME nonce aborts — the registry's replay guard.
+    session_account::withdraw_with_root_sig_for_testing<USDC>(
+        &mut acc, &sess, &mut reg, &clock, 100_000, RECIPIENT, nonce, 9_999_999, scenario.ctx(),
+    );
     abort 0
 }
 
 #[test]
 #[expected_failure(abort_code = 56, location = options_protocol::session_account)] // session_mismatch
-fun test_with_session_on_unlinked_account_aborts() {
+fun test_root_sig_withdraw_on_unlinked_account_aborts() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
-    let (mut sess, cap, _) = setup_session_user(&mut scenario, &clock, default_limits());
+    let (sess, _cap, _) = setup_session_user(&mut scenario, &clock, default_limits());
 
     // A PLAIN wallet-owned account (no session link).
     th::create_account(&mut scenario, th::writer_addr(), th::pubkey_a());
     ts::next_tx(&mut scenario, HOLDER);
+    let mut reg = registry::new_for_testing(b"testnet", scenario.ctx());
     let mut plain = th::take_account(&scenario);
-    let out = session_account::withdraw_with_session<USDC>(
-        &mut plain, &cap, &mut sess, &clock, 1, scenario.ctx(),
+    session_account::withdraw_with_root_sig_for_testing<USDC>(
+        &mut plain, &sess, &mut reg, &clock, 1, RECIPIENT, fill(32, 0x01), 9_999_999,
+        scenario.ctx(),
     );
-    coin::burn_for_testing(out);
     abort 0
 }
 
@@ -188,7 +178,7 @@ fun test_writer_flow_with_session() {
     let mut mm_acc = th::take_account(&scenario);
     account::deposit(&mut mm_acc, coin::mint_for_testing<USDC>(10_000_000, scenario.ctx()));
 
-    let (mut sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
+    let (sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
     fund_session_user<BTC>(&mut scenario, account_id, 500);
 
     ts::next_tx(&mut scenario, HOLDER);
@@ -212,7 +202,7 @@ fun test_writer_flow_with_session() {
     let sq = quote::new_signed_quote(q, vector[]);
 
     session_bucket::execute_write_with_session_for_testing<BTC, USDC, CALL>(
-        &mut b, &config, &mut treasury, &mut mm_acc, &mut user_acc, &cap, &mut sess,
+        &mut b, &config, &mut treasury, &mut mm_acc, &mut user_acc, &cap, &sess,
         bucket::writer_flow(), sq, &clock, scenario.ctx(),
     );
 
@@ -221,8 +211,6 @@ fun test_writer_flow_with_session() {
     assert!(account::balance_of<BTC>(&user_acc) == 500 - write_amount, 0);
     assert!(account::balance_of<USDC>(&user_acc) == premium, 0);
     assert!(account::balance_of<USDC>(&mm_acc) == 10_000_000 - premium, 0);
-    // The underlying spend was charged against the cap's BTC budget.
-    assert!(siws_account::spent_of<BTC>(&sess, object::id(&cap)) == write_amount, 0);
 
     ts::return_shared(b);
     ts::return_shared(config);
@@ -261,7 +249,7 @@ fun test_trader_flow_then_exercise_with_session() {
     let mut mm_acc = th::take_account(&scenario);
     account::deposit(&mut mm_acc, coin::mint_for_testing<BTC>(1_000, scenario.ctx()));
 
-    let (mut sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
+    let (sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
     fund_session_user<USDC>(&mut scenario, account_id, 20_000_000);
 
     ts::next_tx(&mut scenario, HOLDER);
@@ -285,7 +273,7 @@ fun test_trader_flow_then_exercise_with_session() {
     let sq = quote::new_signed_quote(q, vector[]);
 
     session_bucket::execute_write_with_session_for_testing<BTC, USDC, CALL>(
-        &mut b, &config, &mut treasury, &mut mm_acc, &mut user_acc, &cap, &mut sess,
+        &mut b, &config, &mut treasury, &mut mm_acc, &mut user_acc, &cap, &sess,
         bucket::trader_flow(), sq, &clock, scenario.ctx(),
     );
 
@@ -293,23 +281,17 @@ fun test_trader_flow_then_exercise_with_session() {
     assert!(account::balance_of<USDC>(&user_acc) == 20_000_000 - premium, 0);
     assert!(account::balance_of<CALL>(&user_acc) == write_amount, 0);
     assert!(account::balance_of<BTC>(&mm_acc) == 1_000 - write_amount, 0);
-    assert!(siws_account::spent_of<USDC>(&sess, object::id(&cap)) == premium, 0);
 
     // Exercise 10 from custody: strike 50_000 × 10 = 500_000 settlement.
     let exercise_amount: u64 = 10;
     let strike_cost: u64 = 500_000;
     session_bucket::exercise_with_session<BTC, USDC, CALL>(
-        &mut b, &mut user_acc, &cap, &mut sess, exercise_amount, &clock, scenario.ctx(),
+        &mut b, &mut user_acc, &cap, &sess, exercise_amount, &clock, scenario.ctx(),
     );
     assert!(account::balance_of<CALL>(&user_acc) == write_amount - exercise_amount, 0);
     assert!(account::balance_of<BTC>(&user_acc) == exercise_amount, 0);
     assert!(
         account::balance_of<USDC>(&user_acc) == 20_000_000 - premium - strike_cost,
-        0,
-    );
-    // Settlement spend accumulated on the cap's USDC budget.
-    assert!(
-        siws_account::spent_of<USDC>(&sess, object::id(&cap)) == premium + strike_cost,
         0,
     );
 
@@ -336,7 +318,7 @@ fun test_redeem_with_session_after_expiry() {
     let mut mm_acc = th::take_account(&scenario);
     account::deposit(&mut mm_acc, coin::mint_for_testing<USDC>(10_000_000, scenario.ctx()));
 
-    let (mut sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
+    let (sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
     fund_session_user<BTC>(&mut scenario, account_id, 500);
 
     ts::next_tx(&mut scenario, HOLDER);
@@ -359,7 +341,7 @@ fun test_redeem_with_session_after_expiry() {
     );
     let sq = quote::new_signed_quote(q, vector[]);
     session_bucket::execute_write_with_session_for_testing<BTC, USDC, CALL>(
-        &mut b, &config, &mut treasury, &mut mm_acc, &mut user_acc, &cap, &mut sess,
+        &mut b, &config, &mut treasury, &mut mm_acc, &mut user_acc, &cap, &sess,
         bucket::writer_flow(), sq, &clock, scenario.ctx(),
     );
     ts::return_shared(config);
@@ -433,7 +415,7 @@ fun test_vault_deposit_and_instant_cancel_with_session() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
     setup_vault(&mut scenario);
-    let (mut sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
+    let (sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
     fund_session_user<BTC>(&mut scenario, account_id, 1_000);
 
     ts::next_tx(&mut scenario, HOLDER);
@@ -441,12 +423,11 @@ fun test_vault_deposit_and_instant_cancel_with_session() {
     let mut acc = th::take_account_by_id(&scenario, account_id);
 
     session_vault::deposit_with_session(
-        &mut v, &mut acc, &cap, &mut sess, 700, &clock, scenario.ctx(),
+        &mut v, &mut acc, &cap, &sess, 700, &clock, scenario.ctx(),
     );
-    // Underlying left custody (charged against the cap); the receipt is
-    // custodied + indexed on the account.
+    // Underlying left custody into the vault; the receipt is custodied +
+    // indexed on the account.
     assert!(account::balance_of<BTC>(&acc) == 300, 0);
-    assert!(siws_account::spent_of<BTC>(&sess, object::id(&cap)) == 700, 0);
     let objects = session_account::object_ids(&acc);
     assert!(objects.length() == 1, 0);
     let receipt_id = objects[0];
@@ -472,7 +453,7 @@ fun test_vault_full_cycle_with_session() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
     setup_vault(&mut scenario);
-    let (mut sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
+    let (sess, cap, account_id) = setup_session_user(&mut scenario, &clock, default_limits());
     fund_session_user<BTC>(&mut scenario, account_id, 1_000);
 
     // Genesis deposit from custody (receipt round 1).
@@ -480,7 +461,7 @@ fun test_vault_full_cycle_with_session() {
     let mut v = ts::take_shared<vault::Vault<BTC, USDC, VSH>>(&scenario);
     let mut acc = th::take_account_by_id(&scenario, account_id);
     session_vault::deposit_with_session(
-        &mut v, &mut acc, &cap, &mut sess, 700, &clock, scenario.ctx(),
+        &mut v, &mut acc, &cap, &sess, 700, &clock, scenario.ctx(),
     );
     let receipt_id = session_account::object_ids(&acc)[0];
     ts::return_shared(v);

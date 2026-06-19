@@ -22,6 +22,7 @@ const DOMAIN: vector<u8> = b"siws-session.demo";
 const URI: vector<u8> = b"https://siws-session.demo";
 const SIGNIN_STATEMENT: vector<u8> = b"Authorize a Sui session key.";
 const REVOKE_STATEMENT: vector<u8> = b"Revoke all Sui session keys.";
+const WITHDRAW_STATEMENT: vector<u8> = b"Authorize a Sui withdrawal.";
 
 /// ecrecover hash flag: 0 = KECCAK256.
 const KECCAK256: u8 = 0;
@@ -87,6 +88,54 @@ public fun build_revoke_message(
         chain_id,
         issued_at,
     )
+}
+
+/// Withdrawal-authorization message (host wallet / Ethereum root). Mirrors
+/// `message::build_withdraw_message` for the SIWS path and `siwe.ts`. The
+/// withdrawal is pinned by the `account`, `coin-type`, `amount`, and
+/// `recipient` resources so a sponsor/session key cannot redirect or resize
+/// it. `coin_type` is the canonical `0x…::module::Name` form, appended raw.
+public fun build_withdraw_message(
+    registry_domain: address,
+    eth_address: vector<u8>,
+    account_id: address,
+    coin_type: vector<u8>,
+    amount: u64,
+    recipient: address,
+    nonce: vector<u8>,
+    expires_at_ms: u64,
+    chain_id: u64,
+    issued_at: vector<u8>,
+): vector<u8> {
+    let mut m = vector::empty<u8>();
+    m.append(DOMAIN);
+    m.append(b" wants you to sign in with your Ethereum account:\n");
+    m.append(b"0x");
+    m.append(eip55(eth_address));
+    m.append(b"\n\n");
+    m.append(WITHDRAW_STATEMENT);
+    m.append(b"\n\n");
+    m.append(b"URI: ");
+    m.append(URI);
+    m.append(b"\nVersion: 1\nChain ID: ");
+    m.append(u64_to_ascii(chain_id));
+    m.append(b"\nNonce: ");
+    m.append(hex::encode(nonce));
+    m.append(b"\nIssued At: ");
+    m.append(issued_at);
+    m.append(b"\nResources:\n- siws-session://sui-registry/0x");
+    m.append(hex::encode(address::to_bytes(registry_domain)));
+    m.append(b"\n- siws-session://account/0x");
+    m.append(hex::encode(address::to_bytes(account_id)));
+    m.append(b"\n- siws-session://coin-type/");
+    m.append(coin_type);
+    m.append(b"\n- siws-session://amount/");
+    m.append(u64_to_ascii(amount));
+    m.append(b"\n- siws-session://recipient/0x");
+    m.append(hex::encode(address::to_bytes(recipient)));
+    m.append(b"\n- siws-session://expires/");
+    m.append(u64_to_ascii(expires_at_ms));
+    m
 }
 
 fun build(
