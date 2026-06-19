@@ -157,6 +157,13 @@ resource "aws_secretsmanager_secret_version" "price_charting_placeholder" {
 # shape; put the real key by hand after apply:
 #   aws secretsmanager put-secret-value --secret-id options/<env>/oracle-service \
 #     --secret-string '{"pyth_api_key":"..."}'
+#
+# NOTE: these secrets were created out-of-band (via the AWS CLI) during SO-254,
+# so on the first `apply` after this lands terraform will report they already
+# exist. Import them before applying (the version's ignore_changes then keeps
+# the hand-set value):
+#   terraform import 'aws_secretsmanager_secret.oracle_service["staging"]' options/staging/oracle-service
+#   terraform import 'aws_secretsmanager_secret.oracle_service["prod"]'    options/prod/oracle-service
 resource "aws_secretsmanager_secret" "oracle_service" {
   for_each                = toset(local.envs)
   name                    = "options/${each.key}/oracle-service"

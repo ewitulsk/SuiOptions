@@ -33,6 +33,8 @@ scrape_configs:
         labels: { env: staging, service: mm-bot }
       - targets: ["balance-monitor:9012"]
         labels: { env: staging, service: balance-monitor }
+      - targets: ["oracle-service:9013"] # internal Pyth gateway; /metrics on the service port
+        labels: { env: staging, service: oracle-service }
 
   # The monitoring stack watches itself.
   - job_name: monitoring

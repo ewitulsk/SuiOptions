@@ -25,8 +25,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg_path = cli.config.to_string_lossy().into_owned();
     let cfg = Config::load(&cfg_path).with_context(|| format!("loading config from {cfg_path}"))?;
-    let secrets = runtime_config::Secrets::load(&cli.secrets)
-        .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
+    // The Pyth API key is optional (anonymous = rate-limited but functional), so
+    // a missing secrets file must NOT block boot — render-secrets.sh only writes
+    // oracle-service.toml when the AWS secret exists. Absent file → no key.
+    let secrets = if cli.secrets.exists() {
+        runtime_config::Secrets::load(&cli.secrets)
+            .with_context(|| format!("loading secrets {}", cli.secrets.display()))?
+    } else {
+        tracing::warn!(
+            path = %cli.secrets.display(),
+            "no secrets file; running Pyth on the anonymous (rate-limited) tier"
+        );
+        runtime_config::Secrets::default()
+    };
 
     // Discover the feeds to subscribe to from the token-info catalog: every
     // token that carries a Pyth feed id (deduped — multiple tokens can't, but
