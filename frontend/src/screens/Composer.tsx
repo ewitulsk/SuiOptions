@@ -19,10 +19,6 @@ import { formatPrice } from "../format";
 import type { View } from "../types";
 import type { ComposerState } from "../state/composer";
 
-function assetLabel(s: ComposerState): string {
-  return s.series?.asset_symbol ?? "—";
-}
-
 function expiryLabel(s: ComposerState): string {
   if (!s.series) return "—";
   const d = new Date(s.series.expiry_iso);
@@ -46,7 +42,6 @@ export function Composer({ initialView }: Props) {
   );
   const book = useOrderBook(poolRef, account?.address ?? null);
   const mid = midFromBook(book.data);
-  const [feedOpen, setFeedOpen] = useState(false);
   // SO-170: on /buy, switch the whole lower area between buying on DeepBook
   // (chart + order book + trade form) and minting from the market makers (RFQ).
   const [buyMode, setBuyMode] = useState<BuyMode>("deepbook");
@@ -96,10 +91,9 @@ export function Composer({ initialView }: Props) {
         <div className="question">
           {s.view === "writer" ? (
             <>
-              What strike are you happy to <b>sell</b> {assetLabel(s)} at on {expiryLabel(s)}?
-              <span className="qsub">
-                Pick a strike. You earn the premium upfront either way.
-              </span>
+              <span className="question__eyebrow">Options Writing</span>
+              Write Options, instantly earn premiums.
+              <span className="qsub">Pick an asset, expiry, and strike price</span>
             </>
           ) : (
             <>
@@ -114,17 +108,6 @@ export function Composer({ initialView }: Props) {
           ? renderTrader()
           : renderWriter()}
       </div>
-
-      {/* Writer keeps the floating quote-feed overlay; the trader feed is docked
-          into the RFQ section below (SO-170). */}
-      {s.view === "writer" &&
-        (feedOpen ? (
-          <QuoteFeed quotes={s.quotes} view={s.view} onClose={() => setFeedOpen(false)} />
-        ) : (
-          <button className="feed-toggle" onClick={() => setFeedOpen(true)}>
-            {s.quotes.length} MM quote{s.quotes.length === 1 ? "" : "s"} live
-          </button>
-        ))}
 
       {s.confirmStage && (
         <ConfirmModal

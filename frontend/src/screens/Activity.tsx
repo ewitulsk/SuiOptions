@@ -8,6 +8,7 @@ import {
   type ActivityFilter,
 } from "../state/activity";
 import { formatPrice } from "../format";
+import { useSegmentPill } from "../lib/useSegmentPill";
 import type { ActivityEvent, ActivityTotals } from "../types";
 
 function shortAddress(addr: string): string {
@@ -59,11 +60,25 @@ function ActivityFilters({
   filter: ActivityFilter;
   setFilter: (f: ActivityFilter) => void;
 }) {
+  const { ref, geom: pill, animated } = useSegmentPill(filter);
   return (
-    <div className="act-filters">
+    <div className="act-filters" role="tablist" ref={ref}>
+      <span
+        className="act-filter__pill"
+        aria-hidden
+        style={{
+          transform: `translate(${pill.left}px, ${pill.top}px)`,
+          width: pill.width,
+          height: pill.height,
+          opacity: pill.ready ? 1 : 0,
+          transition: animated ? undefined : "none",
+        }}
+      />
       {ACTIVITY_FILTERS.map((f) => (
         <button
           key={f.key}
+          role="tab"
+          aria-selected={filter === f.key}
           className={"act-filter" + (filter === f.key ? " is-active" : "")}
           onClick={() => setFilter(f.key)}
         >

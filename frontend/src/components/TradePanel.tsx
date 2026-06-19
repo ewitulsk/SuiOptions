@@ -20,6 +20,7 @@ import {
   type PoolRef,
 } from "../api/deepbook";
 import { useCoinBalance } from "../api/useCoinBalance";
+import { useSegmentPill } from "../lib/useSegmentPill";
 import { TokenLogo } from "./TokenLogo";
 import { formatPrice } from "../format";
 import {
@@ -48,6 +49,7 @@ export function TradePanel({ bucket, series }: Props) {
 
   const [tab, setTab] = useState<Tab>("market");
   const [side, setSide] = useState<Side>("buy");
+  const { ref: sideRef, geom: sidePill, animated: sideAnimated } = useSegmentPill(side);
   const [qtyStr, setQtyStr] = useState("0.01");
   const [priceStr, setPriceStr] = useState("");
   const [slippagePct, setSlippagePct] = useState(1);
@@ -283,12 +285,29 @@ export function TradePanel({ bucket, series }: Props) {
       <div className="tradepanel__body">
       <div className="tradepanel__form">
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ display: "flex", gap: 6 }}>
+          <div ref={sideRef} style={{ position: "relative", display: "flex", gap: 6 }}>
+            <span
+              className="tradepanel__side-pill"
+              aria-hidden
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                height: "100%",
+                width: sidePill.width,
+                transform: `translateX(${sidePill.left}px)`,
+                opacity: sidePill.ready ? 1 : 0,
+                transition: sideAnimated ? undefined : "none",
+              }}
+            />
             {(["buy", "sell"] as Side[]).map((s) => (
               <button
                 key={s}
+                className={side === s ? "is-active" : undefined}
                 onClick={() => setSide(s)}
                 style={{
+                  position: "relative",
+                  zIndex: 1,
                   flex: 1,
                   padding: "6px 0",
                   borderRadius: 8,
@@ -296,9 +315,10 @@ export function TradePanel({ bucket, series }: Props) {
                     ? "1px solid transparent"
                     : "1px solid var(--aqua-line, rgba(92,107,122,0.25))",
                   cursor: "pointer",
-                  background: side === s ? "var(--aqua-sui, #4DA2FF)" : "transparent",
+                  background: "transparent",
                   color: side === s ? "#fff" : "inherit",
                   fontWeight: 600,
+                  transition: "color 160ms ease",
                 }}
               >
                 {s}
