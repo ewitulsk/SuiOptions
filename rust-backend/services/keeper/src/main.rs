@@ -81,6 +81,7 @@ async fn main() -> Result<()> {
     };
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .default_headers(pyth_client::auth_headers(secrets.pyth_api_key()))
         .build()
         .context("building reqwest client")?;
     let indexer = IndexerClient::new(cfg.indexer_graphql_url.clone());

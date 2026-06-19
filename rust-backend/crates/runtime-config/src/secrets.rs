@@ -23,6 +23,13 @@
 //! # MM bot's configured `signing_scheme`: Ed25519 seed, Secp256k1 scalar,
 //! # or Secp256r1 scalar.
 //! quote_key = "0xabcdef..."
+//!
+//! [pyth]
+//! # API key sent as `Authorization: Bearer …` on every Hermes and
+//! # Benchmarks request (the keeper, mm-bot and scheduler all attach it to
+//! # their Pyth HTTP client). Lifts the 10-req/10s per-IP rate limit and is
+//! # mandatory for Pyth Core access from 2026-07-31.
+//! api_key = "..."
 //! ```
 
 use std::path::Path;
@@ -39,6 +46,8 @@ pub struct Secrets {
     pub mm_bot: MmBotSecrets,
     #[serde(default)]
     pub auth: AuthSecrets,
+    #[serde(default)]
+    pub pyth: PythSecrets,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -65,6 +74,14 @@ pub struct AuthSecrets {
     pub jwt_secret: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct PythSecrets {
+    /// Pyth API key, sent as `Authorization: Bearer …` on Hermes and
+    /// Benchmarks requests. Optional: when absent the client falls back to
+    /// the (rate-limited) anonymous tier.
+    pub api_key: Option<String>,
+}
+
 impl Secrets {
     /// Load and parse the secrets file at `path`. Errors if the file is
     /// missing — there's no env fallback by design.
@@ -84,6 +101,7 @@ impl Secrets {
             has_default = result.sui.default.is_some(),
             has_quote_key = result.mm_bot.quote_key.is_some(),
             has_jwt_secret = result.auth.jwt_secret.is_some(),
+            has_pyth_api_key = result.pyth.api_key.is_some(),
             "secrets loaded"
         );
         Ok(result)
@@ -124,6 +142,13 @@ impl Secrets {
             .as_deref()
             .ok_or_else(|| anyhow!("secrets.toml is missing auth.jwt_secret"))
     }
+
+    /// Pyth API key if present. Unlike the signing keys this is optional —
+    /// callers attach it as a Bearer header when set and otherwise fall back
+    /// to the anonymous (rate-limited) tier.
+    pub fn pyth_api_key(&self) -> Option<&str> {
+        self.pyth.api_key.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -148,6 +173,9 @@ default = "suiprivkey1default"
 
 [mm_bot]
 quote_key = "0xdeadbeef"
+
+[pyth]
+api_key = "pyth-test-key"
 "#,
         );
         let s = Secrets::load(&p).unwrap();
@@ -156,6 +184,7 @@ quote_key = "0xdeadbeef"
         // No devnet entry; falls back to default.
         assert_eq!(s.sui_private_key("devnet").unwrap(), "suiprivkey1default");
         assert_eq!(s.mm_quote_key().unwrap(), "0xdeadbeef");
+        assert_eq!(s.pyth_api_key(), Some("pyth-test-key"));
         std::fs::remove_file(&p).ok();
     }
 

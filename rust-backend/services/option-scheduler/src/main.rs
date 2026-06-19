@@ -129,9 +129,11 @@ async fn main() -> Result<()> {
 
     // HTTP client shared by every Pyth lookup. Pyth's public Hermes
     // endpoint applies a 10-req-per-10-second cap per source IP, so a
-    // single shared client is the right move regardless of pair count.
+    // single shared client is the right move regardless of pair count; the
+    // API key (when set) lifts that cap and is mandatory from 2026-07-31.
     let http_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .default_headers(pyth_client::auth_headers(secrets.pyth_api_key()))
         .build()
         .context("building reqwest client")?;
 

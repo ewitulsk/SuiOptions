@@ -76,7 +76,16 @@ async fn main() -> Result<()> {
     // Vault-APY sampler (folded in from derived-metric-worker). Reuses the
     // token catalog snapshot already fetched above; reads vaults/rounds/RFQs
     // and the realized series from the indexer, Pyth for spot + vol.
-    let http = reqwest::Client::new();
+    //
+    // price-charting carries no secrets file (its only secret, the chart DB
+    // URL, arrives via env), so the Pyth API key likewise comes from the
+    // PYTH_API_KEY env var rendered into .env at deploy time. Attaching it as
+    // a default header authenticates every Hermes + Benchmarks call below.
+    let pyth_api_key = std::env::var("PYTH_API_KEY").ok();
+    let http = reqwest::Client::builder()
+        .default_headers(pyth_client::auth_headers(pyth_api_key.as_deref()))
+        .build()
+        .context("building reqwest client")?;
     apy_sampler::spawn(apy_sampler::ApySamplerParams {
         state: Arc::clone(&state),
         indexer: IndexerClient::new(cfg.indexer_graphql_url.clone()),
