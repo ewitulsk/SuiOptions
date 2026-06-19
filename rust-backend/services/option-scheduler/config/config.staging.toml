@@ -64,32 +64,6 @@ interval_pct        = 10.0
   max_publish_lag_ms = 30_000   # decline a roll on prices > 30s stale
   max_conf_bps       = 100      # decline a roll if conf/price > 1%
 
-[[pairs]]
-# Hourly TSUI — coexists with the weekly TSUI pair above. The data model is
-# cadence-scoped (rolls by `expiry_interval_ms`, vaults by `round_ms`), so the
-# two families and their vaults stay distinct end to end. ~24 rolls/day, each
-# publishing a coin package + one DeepBook pool per strike (500 DEEP/pool).
-underlying          = "TSUI"
-settlement          = "TUSDC"
-expiry_interval_ms  = 3_600_000    # 1h
-strikes_below       = 2
-strikes_above       = 2
-interval_pct        = 10.0
-roll_threshold_ms   = 1_800_000    # roll the next bucket ~30m before expiry
-
-  [pairs.spot]
-  source             = "pyth"
-  max_publish_lag_ms = 30_000
-  max_conf_bps       = 100
-
-  # Hourly vault policy (Path A — no contract change). Omitted fields fall back
-  # to the global [vault_template] below (fees, strike band, swap guards).
-  [pairs.vault_template]
-  round_ms           = 3_600_000   # 1h rounds — the discriminator vs the weekly vault
-  selling_window_ms  = 1_800_000   # 30m RFQ selling window
-  min_expiry_lead_ms = 3_000_000   # bucket expiry ≥ now + 50m
-  max_expiry_lead_ms = 4_500_000   # bucket expiry ≤ now + 75m
-
 # ── Vault auto-provisioning ─────────────────────────────────────────────
 # Presence of this table switches on the hourly vault-ensure pass: the
 # scheduler creates exactly one covered-call vault per configured pair with a
