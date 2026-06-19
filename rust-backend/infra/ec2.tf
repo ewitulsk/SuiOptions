@@ -77,8 +77,8 @@ resource "aws_instance" "host" {
 }
 
 # ---- Dedicated prod host ----------------------------------------------------
-# prod runs on its own instance (var.ec2_instance_type, t3.small), isolated
-# from staging which runs a larger type (var.staging_ec2_instance_type). It
+# prod runs on its own instance (var.ec2_instance_type, t3a.medium), sized to
+# match the shared staging host (var.staging_ec2_instance_type). It
 # runs ONLY the prod compose stack plus a Promtail shipper that forwards
 # container logs to the central Loki on the shared host over the private
 # VPC IP. No Loki/Grafana/Gatus server and no Tailscale router live here —

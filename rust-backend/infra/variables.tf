@@ -50,9 +50,9 @@ variable "host_ami" {
 }
 
 variable "ec2_instance_type" {
-  description = "EC2 instance type. x86 (t3.*) so GH-runner builds stay native — no QEMU emulation. Switching to t4g.* (Graviton/ARM) needs a matching change in bake.hcl + the AMI filter in ec2.tf + setup-qemu-action in _deploy.yml."
+  description = "EC2 instance type for the dedicated prod host. Matched to the staging host (t3a.medium, 4 GiB) — t3.small (2 GiB, no swap) was too small. Still x86/amd64, so the pinned AMI and native GH-runner builds are unaffected. Switching to t4g.* (Graviton/ARM) needs a matching change in bake.hcl + the AMI filter in ec2.tf + setup-qemu-action in _deploy.yml."
   type        = string
-  default     = "t3.small"
+  default     = "t3a.medium"
 }
 
 variable "staging_ec2_instance_type" {
