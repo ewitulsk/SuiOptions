@@ -129,6 +129,9 @@
 [data-theme="aqua"] .header__nav button.is-active {
   color: var(--aqua-ink-1);
 }
+[data-theme="aqua"] .header__nav button.header__github {
+  display: inline-flex; align-items: center; gap: 6px;
+}
 @media (prefers-reduced-motion: reduce) {
   [data-theme="aqua"] .header__nav-pill { transition: opacity 160ms ease; }
 }
