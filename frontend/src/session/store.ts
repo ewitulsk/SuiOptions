@@ -26,6 +26,7 @@ import {
 } from "@yourorg/sui-siws-session";
 
 import {
+  DEEPBOOK_REGISTRY_ID,
   ENV,
   GAS_STATION_URL,
   PACKAGE_ID,
@@ -33,6 +34,7 @@ import {
   SESSION_REGISTRY_ID,
   type TestToken,
 } from "../config";
+import { cacheBalanceManager } from "../api/deepbook";
 import {
   cacheOptionsAccountId,
   readCustodyPositionIds,
@@ -52,6 +54,12 @@ export type SessionSnapshot = {
   optionsAccountId: string | null;
   /** Owner address queries/events attribute by (session account id as address). */
   ownerAddress: string | null;
+  /**
+   * The ephemeral session key's Sui address. DeepBook BalanceManagers are
+   * owned by this (the key that signs the trade PTB), so it's the address the
+   * DeepBook read hooks discover the BM by — distinct from `ownerAddress`.
+   */
+  sessionKey: string | null;
   /** Custody balances keyed by canonical coin type. */
   balances: Record<string, bigint>;
   /** Ids of custodied Positions. */
@@ -67,6 +75,7 @@ let snap: SessionSnapshot = {
   status: null,
   optionsAccountId: null,
   ownerAddress: null,
+  sessionKey: null,
   balances: {},
   positionIds: [],
   busy: null,
@@ -246,7 +255,7 @@ async function activate(handle: SessionHandle): Promise<void> {
     auth: "session",
     scheme: handle.scheme,
   });
-  set({ phase: "active", handle, ownerAddress, error: null });
+  set({ phase: "active", handle, ownerAddress, sessionKey: handle.sessionKey, error: null });
   const optionsAccountId = await resolveOptionsAccountId(
     client,
     handle.accountId,
@@ -272,6 +281,7 @@ export async function signOutSession(): Promise<void> {
     status: null,
     optionsAccountId: null,
     ownerAddress: null,
+    sessionKey: null,
     balances: {},
     positionIds: [],
     busy: null,
@@ -475,6 +485,104 @@ export async function executeWithSession(
     set({ busy: null });
     await refreshSession();
   } catch (err) {
+    set({ busy: null, error: message(err) });
+    throw err;
+  }
+}
+
+// --- DeepBook (secondary-market trading) ---
+
+/**
+ * One-time per session: create the session's DeepBook BalanceManager (owned by
+ * the ephemeral key, so the owner-path trade entrypoints work). Returns the
+ * new BM id and caches it so the read hooks (`useBalanceManager`) pick it up.
+ */
+export async function enableDeepbookTrading(): Promise<string> {
+  const { handle } = snap;
+  if (!handle) throw new Error("no active session");
+  if (!DEEPBOOK_REGISTRY_ID) throw new Error("no DeepBook deployment configured");
+  set({ busy: "enabling trading" });
+  try {
+    const result = await handle.execute((tx, ctx) => {
+      tx.moveCall({
+        target: `${PACKAGE_ID}::session_deepbook::enable_trading_with_session`,
+        arguments: [
+          tx.object(DEEPBOOK_REGISTRY_ID!),
+          tx.object(ctx.capId),
+          tx.object(ctx.accountId),
+          tx.object(SUI_CLOCK_OBJECT_ID),
+        ],
+      });
+    });
+    const created = (result.objectChanges ?? []).find(
+      (c) => c.type === "created" && c.objectType?.endsWith("::balance_manager::BalanceManager"),
+    );
+    if (!created || created.type !== "created") {
+      throw new Error("enable trading did not produce a BalanceManager");
+    }
+    cacheBalanceManager(handle.sessionKey, created.objectId);
+    set({ busy: null });
+    posthog.capture("deepbook_trading_enabled", { auth: "session", bm_id: created.objectId });
+    return created.objectId;
+  } catch (err) {
+    posthog.captureException(err, { action: "session_deepbook_enable" });
+    set({ busy: null, error: message(err) });
+    throw err;
+  }
+}
+
+export type SessionMarketOrderParams = {
+  poolId: string;
+  bmId: string;
+  baseCoinType: string;
+  quoteCoinType: string;
+  isBid: boolean;
+  /** Base atomic units, lot-aligned. */
+  qtyRaw: bigint;
+  /** Quote atomic budget pulled from custody for a buy (ignored for a sell). */
+  maxQuoteIn: bigint;
+  clientOrderId: bigint;
+};
+
+/**
+ * Session twin of a DeepBook market order: custody-funded, fills, and sweeps
+ * proceeds straight back into custody (see `session_deepbook.move`). Refreshes
+ * custody balances afterwards.
+ */
+export async function placeMarketOrderWithSession(p: SessionMarketOrderParams): Promise<void> {
+  const { handle } = snap;
+  if (!handle) throw new Error("no active session");
+  const optionsAccountId = await ensureOptionsAccount();
+  set({ busy: `market ${p.isBid ? "buy" : "sell"}` });
+  try {
+    await handle.execute((tx, ctx) => {
+      tx.moveCall({
+        target: `${PACKAGE_ID}::session_deepbook::place_market_order_with_session`,
+        typeArguments: [p.baseCoinType, p.quoteCoinType],
+        arguments: [
+          tx.object(p.poolId),
+          tx.object(p.bmId),
+          tx.object(optionsAccountId),
+          tx.object(ctx.capId),
+          tx.object(ctx.accountId),
+          tx.pure.u64(p.clientOrderId),
+          tx.pure.bool(p.isBid),
+          tx.pure.u64(p.qtyRaw),
+          tx.pure.u64(p.maxQuoteIn),
+          tx.object(SUI_CLOCK_OBJECT_ID),
+        ],
+      });
+    });
+    set({ busy: null });
+    posthog.capture("deepbook_order_placed", {
+      auth: "session",
+      order_type: "market",
+      side: p.isBid ? "buy" : "sell",
+      pool_id: p.poolId,
+    });
+    await refreshSession();
+  } catch (err) {
+    posthog.captureException(err, { action: "session_deepbook_market_order", pool_id: p.poolId });
     set({ busy: null, error: message(err) });
     throw err;
   }

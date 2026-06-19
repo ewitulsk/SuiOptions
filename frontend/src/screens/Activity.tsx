@@ -1,4 +1,4 @@
-import { useCurrentAccount } from "@mysten/dapp-kit";
+import { useUserIdentity } from "../session/identity";
 import {
   ACTIVITY_FILTERS,
   EVENT_TYPE_META,
@@ -149,8 +149,8 @@ function EventRow({ e, now }: { e: ActivityEvent; now: number }) {
 }
 
 export function Activity() {
-  const account = useCurrentAccount();
-  const wallet = account?.address ?? null;
+  const identity = useUserIdentity();
+  const wallet = identity?.address ?? null;
   const a = useActivityState(wallet);
   const earliest = a.events[a.events.length - 1];
 
