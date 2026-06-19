@@ -67,6 +67,7 @@ export function ChartPanel({ poolId, strike, settlementSymbol }: Props) {
         background: { type: ColorType.Solid, color: "transparent" },
         textColor: ink,
         fontFamily: "inherit",
+        attributionLogo: false,
       },
       grid: {
         vertLines: { color: grid },

@@ -75,6 +75,7 @@ export function VaultApyChart({ realized, predicted, loading }: Props) {
         background: { type: ColorType.Solid, color: "transparent" },
         textColor: ink,
         fontFamily: "inherit",
+        attributionLogo: false,
       },
       grid: { vertLines: { color: grid }, horzLines: { color: grid } },
       rightPriceScale: { borderVisible: false },
