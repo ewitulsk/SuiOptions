@@ -28,7 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use indexer_graphql::IndexerClient;
 use protocol_types::asset::AssetType;
@@ -295,7 +295,11 @@ async fn tick_vault(
         stagger_ms,
         max_slices: ids.defaults.slicing.slices,
     });
-    debug!(vault = %meta.vault_id, round = view.round, ?action, "planned");
+    // Skip the steady-state Idle plan to avoid a per-vault log flood every tick;
+    // only surface a plan when there's actually an action to take.
+    if !matches!(action, Action::Idle) {
+        debug!(vault = %meta.vault_id, round = view.round, ?action, "planned");
+    }
 
     let ctx = SubmitCtx {
         wrap,
@@ -392,7 +396,7 @@ async fn select_bucket_or_finalize(
         None => {
             let flows_waiting = view.pending_deposits > 0 || view.queued_withdraw_shares > 0;
             if !flows_waiting {
-                debug!(vault = %ctx.vault_id, "no selectable bucket and no queued flows; idling");
+                trace!(vault = %ctx.vault_id, "no selectable bucket and no queued flows; idling");
                 return Ok(());
             }
             warn!(
