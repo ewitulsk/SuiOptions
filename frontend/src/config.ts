@@ -193,7 +193,11 @@ export async function initConfig(): Promise<void> {
         faucetId: t.faucetId,
         decimals: t.decimals,
         module: t.coinType.split("::")[1] ?? symbol.toLowerCase(),
-        packageId: tt.packageId,
+        // Derive the package from the token's own coinType, not the shared
+        // testTokens.packageId — a token (e.g. prod TSUI) can live in a
+        // different package than the rest, and the faucet must target the
+        // package that actually contains its module.
+        packageId: t.coinType.split("::")[0] ?? tt.packageId,
       }))
     : [];
 
