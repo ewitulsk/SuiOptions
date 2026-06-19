@@ -8,7 +8,7 @@
 //! 4. Submit a trader-flow `execute_write` PTB. The PTB itself mints the
 //!    settlement premium via the configured test-token faucet (no pre-mint
 //!    step), so a single tx covers the whole flow. The Writer MM provides the
-//!    underlying from their Account and receives the Position NFT; this trader
+//!    underlying from their Account and receives the Position Object; this trader
 //!    receives the CallOption coin.
 //!
 //! Every on-chain id (package, ProtocolConfig, Treasury, test-tokens
@@ -164,7 +164,7 @@ async fn main() -> Result<()> {
         nonce: best.quote.nonce,
         signature: best.signature.clone(),
         // Trader flow requires position_recipient == signer_token_recipient (the
-        // MM gets the Position NFT); the trader receives the CallOption.
+        // MM gets the Position Object); the trader receives the CallOption.
         position_recipient: signer_token_recipient,
         call_token_recipient: trader_addr,
         gas_budget: cli.gas_budget,

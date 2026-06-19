@@ -87,7 +87,7 @@ function titleAndBody(e: EventDto): { title: string; body: string } {
   switch (e.type) {
     case "position_opened":
       return e.side === "writer"
-        ? { title: `Wrote ${amt} ${asset} call · ${strike}`, body: "Premium credited; position NFT minted." }
+        ? { title: `Wrote ${amt} ${asset} call · ${strike}`, body: "Premium credited; position Object minted." }
         : { title: `Bought ${amt} ${asset} call · ${strike}`, body: "Premium debited; call option tokens minted." };
     case "exercise":
       return { title: `Exercised ${amt} ${asset} call · ${strike}`, body: "Strike paid; underlying received." };

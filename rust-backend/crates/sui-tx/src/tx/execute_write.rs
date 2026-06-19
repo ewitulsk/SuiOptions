@@ -256,7 +256,7 @@ pub async fn execute_writer_flow(
 /// the PTB) and the underlying side is an empty coin (the Writer MM provides
 /// the underlying from their Account). Per the `FlowKind::Trader` branch in
 /// `bucket::execute_write_with_quote`, the signer (MM) receives the Position
-/// NFT, so `position_recipient` must equal the quote's `signer_token_recipient`;
+/// Object, so `position_recipient` must equal the quote's `signer_token_recipient`;
 /// the trader receives the `CallOption` coin via `call_token_recipient`.
 pub async fn execute_trader_flow(
     client: &SuiClient,

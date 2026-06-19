@@ -214,7 +214,7 @@ fun test_writer_flow_happy_path() {
     ts::return_shared(treasury);
     ts::return_shared(mm_acc);
 
-    // Writer receives net premium and position NFT.
+    // Writer receives net premium and position Object.
     ts::next_tx(&mut scenario, th::writer_addr());
     let net = ts::take_from_sender<Coin<USDC>>(&scenario);
     assert!(net.value() == premium, 0);
@@ -332,7 +332,7 @@ fun test_trader_flow_happy_path() {
     let q = quote::new_quote(
         *admin::protocol_id(&config),
         object::id(&mm_acc),
-        th::writer_mm_addr(),    // signer (writer MM) gets the position NFT
+        th::writer_mm_addr(),    // signer (writer MM) gets the position Object
         object::id(&b),
         write_amount,
         premium,
@@ -349,7 +349,7 @@ fun test_trader_flow_happy_path() {
         coin::zero<BTC>(scenario.ctx()),
         coin::mint_for_testing<USDC>(premium, scenario.ctx()),
         bucket::trader_flow(),
-        th::writer_mm_addr(),    // position NFT recipient = MM
+        th::writer_mm_addr(),    // position Object recipient = MM
         th::trader_addr(),       // call token recipient = retail trader
         sq,
         &clock,
@@ -373,7 +373,7 @@ fun test_trader_flow_happy_path() {
     assert!(call.value() == write_amount, 0);
     ts::return_to_sender(&scenario, call);
 
-    // Writer MM gets the position NFT.
+    // Writer MM gets the position Object.
     ts::next_tx(&mut scenario, th::writer_mm_addr());
     let pos = ts::take_from_sender<Position>(&scenario);
     assert!(position::range_start(&pos) == 0, 0);
@@ -825,7 +825,7 @@ fun test_fifo_assignment_two_writers_partial_exercise() {
 
     write_via_helper(&mut scenario, &clock, 100, 1_000, 1);
 
-    // Capture the first position NFT before second write so it stays with writer_addr.
+    // Capture the first position Object before second write so it stays with writer_addr.
     // Both writes deliver to writer_addr() in the helper; we'll track the position by range_end.
     write_via_helper(&mut scenario, &clock, 50, 1_000, 2);
 

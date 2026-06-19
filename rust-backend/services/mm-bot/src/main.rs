@@ -138,7 +138,7 @@ struct BotConfig {
     #[serde(default)]
     bulk_view_enabled: bool,
 
-    /// Where minted call tokens / position NFTs should land. Defaults to
+    /// Where minted call tokens / position Objects should land. Defaults to
     /// the bot's Sui address.
     #[serde(default)]
     token_recipient: Option<String>,

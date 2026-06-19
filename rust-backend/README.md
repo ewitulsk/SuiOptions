@@ -376,8 +376,8 @@ Walks the full §8.1 writer flow:
 3. Picks the top quote (the service has already sorted by best premium).
 4. Submits one PTB that mints the underlying via the test-token faucet,
    constructs the `Quote` + `SignedQuote` inline, and calls
-   `bucket::execute_write<U, S>`. The position NFT lands in the writer's
-   wallet; the MM gets the call-option NFT.
+   `bucket::execute_write<U, S>`. The position Object lands in the writer's
+   wallet; the MM gets the call-option Object.
 
 ```
 cargo run --release -p writer -- \
@@ -400,7 +400,7 @@ cargo run --release -p writer -- \
 | `-d, --deployments <path>` | `deployments.json` | Deployments file. |
 
 Output ends with `✓ execute_write digest: 0x…`. The writer keeps the
-Position NFT (redeemable post-expiry) and receives the net premium as a
+Position Object (redeemable post-expiry) and receives the net premium as a
 fresh coin in their wallet.
 
 ---
@@ -674,6 +674,6 @@ cargo run --release -p writer -- \
   --write-amount 100000
 ```
 
-The writer prints `✓ execute_write digest: …`. The position NFT is now
-in the writer's wallet; the MM bot has a `CallOption` NFT and its
+The writer prints `✓ execute_write digest: …`. The position Object is now
+in the writer's wallet; the MM bot has a `CallOption` Object and its
 Account's TUSDC balance has been debited by the premium it quoted.
