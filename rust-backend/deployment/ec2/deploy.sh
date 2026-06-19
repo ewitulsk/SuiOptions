@@ -50,7 +50,7 @@ COMPOSE_FILE="docker-compose.${ENV}.yml"
 # Canonical service set + their .env tag-variable names + the compose
 # service name (mostly identical to the cargo crate name, except
 # quoting-service is referenced as `quoting` in compose).
-ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station price-charting balance-monitor keeper)
+ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station price-charting balance-monitor keeper oracle-service)
 
 tag_var_for() {
   case "$1" in
@@ -65,6 +65,7 @@ tag_var_for() {
     price-charting)   echo PRICE_CHARTING_TAG ;;
     balance-monitor)  echo BALANCE_MONITOR_TAG ;;
     keeper)           echo KEEPER_TAG ;;
+    oracle-service)   echo ORACLE_SERVICE_TAG ;;
     *) return 1 ;;
   esac
 }
@@ -81,6 +82,7 @@ compose_name_for() {
     price-charting)   echo price-charting ;;
     balance-monitor)  echo balance-monitor ;;
     keeper)           echo keeper ;;
+    oracle-service)   echo oracle-service ;;
     *) return 1 ;;
   esac
 }
@@ -132,12 +134,6 @@ CHART_DATABASE_URL=""
 if [ -f "secrets/.chart_database_url" ]; then
   CHART_DATABASE_URL=$(cat "secrets/.chart_database_url")
 fi
-# Pyth API key for price-charting (the other Pyth services read it from their
-# /run/secrets TOML instead). Absent in envs without the price-charting secret.
-PYTH_API_KEY=""
-if [ -f "secrets/.pyth_api_key" ]; then
-  PYTH_API_KEY=$(cat "secrets/.pyth_api_key")
-fi
 
 # OTLP trace endpoint (SO-180). On the shared host the services reach the
 # co-located Tempo by docker DNS; the dedicated prod host gets the central
@@ -172,9 +168,6 @@ trap 'rm -f "$NEW_ENV"' EXIT
   echo "DB_HOST=$DB_HOST"
   if [ -n "$CHART_DATABASE_URL" ]; then
     echo "CHART_DATABASE_URL=$CHART_DATABASE_URL"
-  fi
-  if [ -n "$PYTH_API_KEY" ]; then
-    echo "PYTH_API_KEY=$PYTH_API_KEY"
   fi
   echo "OTEL_ENDPOINT=$OTEL_ENDPOINT"
   for svc in "${ALL_SERVICES[@]}"; do

@@ -41,10 +41,8 @@ pub struct ApySamplerParams {
     pub indexer: IndexerClient,
     /// Token catalog (decimals + Pyth feed ids), fetched once at boot.
     pub snapshot: Snapshot,
-    pub http: reqwest::Client,
-    /// Shared, cached, paced realized-vol client (one per process so its
-    /// (feed, day) cache and pacer span every vault and tick).
-    pub benchmark_vol: pyth_client::BenchmarkVol,
+    /// The single Pyth gateway: spot prices + cached/paced realized vol.
+    pub oracle: oracle_client::OracleClient,
     pub tick_interval: Duration,
     pub pyth: PythConfig,
     pub model: ModelConfig,
@@ -124,12 +122,12 @@ async fn tick_once(p: &ApySamplerParams) -> Result<(usize, usize)> {
     let active: Vec<&Vault> = vaults.iter().filter(|v| !v.deposits_paused).collect();
 
     // Resolve realized vol once for the whole tick: collect the distinct
-    // benchmark feeds across every active vault, then compute their sigmas in
-    // one shared bulk pass (cached + paced).
-    let mut feeds: Vec<pyth_client::PriceFeedId> = Vec::new();
+    // (beta) feed ids across every active vault, then ask oracle-service for
+    // their sigmas in one shared bulk pass (it maps beta→stable, caches, paces).
+    let mut feeds: Vec<oracle_client::PriceFeedId> = Vec::new();
     for vault in &active {
         if let Some(u_tok) = p.snapshot.token_by_coin_type(vault.underlying_type.as_str()) {
-            if let Ok(feed) = spot::benchmark_feed(u_tok) {
+            if let Ok(feed) = u_tok.pyth_feed() {
                 if !feeds.contains(&feed) {
                     feeds.push(feed);
                 }
@@ -137,9 +135,13 @@ async fn tick_once(p: &ApySamplerParams) -> Result<(usize, usize)> {
         }
     }
     let sigmas = p
-        .benchmark_vol
-        .realized_sigma_bulk(&feeds, p.pyth.vol_window_days, now_secs())
-        .await;
+        .oracle
+        .realized_vol_bulk(&feeds, p.pyth.vol_window_days)
+        .await
+        .unwrap_or_else(|e| {
+            warn!(error = %format!("{e:#}"), "oracle realized-vol bulk failed; Tier 2 skipped this tick");
+            HashMap::new()
+        });
 
     let now = Utc::now();
     let mut predicted_rows: Vec<PredictedApyRow> = Vec::new();
@@ -203,15 +205,14 @@ async fn tick_once(p: &ApySamplerParams) -> Result<(usize, usize)> {
 async fn compute_vault(
     p: &ApySamplerParams,
     vault: &Vault,
-    sigmas: &HashMap<pyth_client::PriceFeedId, Result<f64>>,
+    sigmas: &HashMap<oracle_client::PriceFeedId, Result<f64>>,
 ) -> Result<Vec<PredictionPoint>> {
     let u_tok = token_for(&p.snapshot, vault.underlying_type.as_str(), "underlying")?;
     let s_tok = token_for(&p.snapshot, vault.settlement_type.as_str(), "settlement")?;
 
     // Spot is required for both tiers (premium → underlying conversion).
     let spot = spot::resolve_cross(
-        &p.http,
-        &p.pyth.hermes_url,
+        &p.oracle,
         u_tok,
         s_tok,
         p.pyth.max_publish_lag_ms,
@@ -223,7 +224,7 @@ async fn compute_vault(
 
     // Vol only gates Tier 2; a vol failure still yields the Tier-1 point. Sigma
     // was resolved for the whole tick (bulk + cached); look this vault's feed up.
-    let sigma = match spot::benchmark_feed(u_tok).ok().and_then(|f| sigmas.get(&f)) {
+    let sigma = match u_tok.pyth_feed().ok().and_then(|f| sigmas.get(&f)) {
         Some(Ok(s)) => *s,
         other => {
             missing("vol");

@@ -115,6 +115,14 @@ target "balance-monitor" {
   cache-to   = [{ type = "gha", mode = "max", scope = "balance-monitor" }]
 }
 
+target "oracle-service" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.oracle-service"
+  tags       = ["${ECR}/options/oracle-service:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "oracle-service" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "oracle-service" }]
+}
+
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper", "balance-monitor"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper", "balance-monitor", "oracle-service"]
 }

@@ -1,11 +1,12 @@
 # Per-env app secrets, one per service:
 #   options/<env>/indexer     -> {"db_password": "..."}
 #   options/<env>/token-info  -> {"db_password": "..."}
-#   options/<env>/mm-bot      -> {"sui_key": "...", "quote_key": "...", "pyth_api_key": "..."}
+#   options/<env>/mm-bot        -> {"sui_key": "...", "quote_key": "..."}
+#   options/<env>/oracle-service -> {"pyth_api_key": "..."}
 #
-# The Pyth-using services (mm-bot, keeper, option-scheduler, price-charting)
-# also carry an optional "pyth_api_key" sent as a Bearer header on Hermes +
-# Benchmarks requests (keeper/scheduler are created by hand, not here).
+# The Pyth API key lives only in oracle-service (the single Pyth gateway) and
+# the keeper (created by hand — it keeps a direct Hermes path for the on-chain
+# VAA). Every other service reads prices/vol from oracle-service (SO-254).
 #
 # Terraform creates empty placeholders. The actual values are filled in
 # via the AWS console (or `aws secretsmanager put-secret-value`) after
@@ -89,7 +90,7 @@ resource "aws_secretsmanager_secret_version" "auth_service" {
 resource "aws_secretsmanager_secret" "mm_bot" {
   for_each                = toset(["staging"])
   name                    = "options/${each.key}/mm-bot"
-  description             = "mm-bot signing keys (JSON: sui_key, quote_key, pyth_api_key)."
+  description             = "mm-bot signing keys (JSON: sui_key, quote_key)."
   recovery_window_in_days = 7
 }
 
@@ -97,9 +98,8 @@ resource "aws_secretsmanager_secret_version" "mm_bot_placeholder" {
   for_each  = aws_secretsmanager_secret.mm_bot
   secret_id = each.value.id
   secret_string = jsonencode({
-    sui_key      = "REPLACE_ME"
-    quote_key    = "REPLACE_ME"
-    pyth_api_key = "REPLACE_ME"
+    sui_key   = "REPLACE_ME"
+    quote_key = "REPLACE_ME"
   })
   lifecycle {
     # Operator updates this by hand after apply; don't drift back.
@@ -136,7 +136,7 @@ resource "aws_secretsmanager_secret_version" "gas_station_placeholder" {
 resource "aws_secretsmanager_secret" "price_charting" {
   for_each                = toset(["staging", "prod"])
   name                    = "options/${each.key}/price-charting"
-  description             = "price-charting TimescaleDB URL + Pyth key (JSON: database_url, pyth_api_key)."
+  description             = "price-charting TimescaleDB URL (JSON: database_url)."
   recovery_window_in_days = 7
 }
 
@@ -145,6 +145,36 @@ resource "aws_secretsmanager_secret_version" "price_charting_placeholder" {
   secret_id = each.value.id
   secret_string = jsonencode({
     database_url = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}
+
+# oracle-service secret — the Pyth API key, sent as a Bearer header on the
+# single Hermes SSE subscription + Benchmarks requests (SO-254). Placeholder
+# shape; put the real key by hand after apply:
+#   aws secretsmanager put-secret-value --secret-id options/<env>/oracle-service \
+#     --secret-string '{"pyth_api_key":"..."}'
+#
+# NOTE: these secrets were created out-of-band (via the AWS CLI) during SO-254,
+# so on the first `apply` after this lands terraform will report they already
+# exist. Import them before applying (the version's ignore_changes then keeps
+# the hand-set value):
+#   terraform import 'aws_secretsmanager_secret.oracle_service["staging"]' options/staging/oracle-service
+#   terraform import 'aws_secretsmanager_secret.oracle_service["prod"]'    options/prod/oracle-service
+resource "aws_secretsmanager_secret" "oracle_service" {
+  for_each                = toset(local.envs)
+  name                    = "options/${each.key}/oracle-service"
+  description             = "oracle-service Pyth API key (JSON: pyth_api_key)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "oracle_service_placeholder" {
+  for_each  = aws_secretsmanager_secret.oracle_service
+  secret_id = each.value.id
+  secret_string = jsonencode({
     pyth_api_key = "REPLACE_ME"
   })
   lifecycle {

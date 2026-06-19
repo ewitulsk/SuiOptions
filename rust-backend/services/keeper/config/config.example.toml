@@ -14,7 +14,6 @@ health_addr = "0.0.0.0:8086"
 # Use the hermes endpoint matching the network's feed set: Sui testnet
 # PriceInfoObjects are keyed by BETA ids → hermes-beta; mainnet → stable.
 hermes_url     = "https://hermes-beta.pyth.network"
-benchmarks_url = "https://benchmarks.pyth.network"
 # Per-network ids: https://docs.pyth.network/price-feeds/contract-addresses/sui
 pyth_package_id     = "0x0000000000000000000000000000000000000000000000000000000000000000"
 wormhole_package_id = "0x0000000000000000000000000000000000000000000000000000000000000000"

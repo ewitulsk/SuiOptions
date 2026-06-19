@@ -44,9 +44,6 @@ fn default_tick_secs() -> u64 {
 fn default_hermes_url() -> String {
     "https://hermes.pyth.network".into()
 }
-fn default_benchmarks_url() -> String {
-    "https://benchmarks.pyth.network".into()
-}
 fn default_update_fee_mist() -> u64 {
     1
 }
@@ -90,17 +87,10 @@ pub struct KeeperConfig {
 pub struct PythKeeperConfig {
     /// Hermes endpoint serving the SAME feed set the network's
     /// PriceInfoObjects are keyed by: `hermes-beta.pyth.network` for Sui
-    /// testnet (beta feed ids), `hermes.pyth.network` for mainnet.
+    /// testnet (beta feed ids), `hermes.pyth.network` for mainnet. Used only
+    /// for the on-chain VAA (submit.rs); spot/σ come from oracle-service.
     #[serde(default = "default_hermes_url")]
     pub hermes_url: String,
-
-    /// Historical daily closes for the realized-vol estimate (README §9).
-    /// Benchmarks serves the *stable* feed set only; discovered beta feed ids
-    /// are mapped to their stable equivalent (`pyth_client::benchmark_feed_id`)
-    /// before the lookup. `vault_defaults.sigma_fallback` still backstops
-    /// unmapped feeds and benchmark outages.
-    #[serde(default = "default_benchmarks_url")]
-    pub benchmarks_url: String,
 
     /// Latest (post-upgrade) Pyth package — the address the
     /// `pyth::pyth` entry calls target.

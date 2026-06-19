@@ -59,6 +59,22 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # Single internal Pyth gateway (SO-254): one Hermes SSE subscription + all
+  # Pyth caching, fanned out over REST + WS on 9013 (never proxied). Reads the
+  # Pyth API key from /run/secrets/oracle-service.toml; discovers feeds from
+  # token-info. Every other service reads prices/vol from here.
+  oracle-service:
+    image: ${ECR}/options/oracle-service:${ORACLE_SERVICE_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      RUST_LOG: info,oracle_service=info
+    volumes:
+      - /opt/options/prod/secrets:/run/secrets:ro
+    depends_on: [token-info]
+    restart: unless-stopped
+    networks: [net]
+
   quoting:
     image: ${ECR}/options/quoting-service:${QUOTING_TAG}
     environment:
@@ -85,11 +101,12 @@ services:
       APP_ENV: prod
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       TOKEN_INFO_URL: http://token-info:9005
+      ORACLE_URL: http://oracle-service:9013
       API_URL: http://api-service:9003
       RUST_LOG: info,mm_bot=info
     volumes:
       - /opt/options/prod/secrets:/run/secrets:ro
-    depends_on: [quoting, token-info, api-service]
+    depends_on: [quoting, token-info, api-service, oracle-service]
     restart: unless-stopped
     networks: [net]
 
@@ -103,10 +120,11 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       DB_HOST: ${DB_HOST}
       TOKEN_INFO_URL: http://token-info:9005
+      ORACLE_URL: http://oracle-service:9013
       RUST_LOG: info,option_scheduler=info
     volumes:
       - /opt/options/prod/secrets:/run/secrets:ro
-    depends_on: [indexer, token-info]
+    depends_on: [indexer, token-info, oracle-service]
     restart: unless-stopped
     networks: [net]
 
@@ -129,9 +147,9 @@ services:
       APP_ENV: prod
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       CHART_DATABASE_URL: ${CHART_DATABASE_URL}
-      PYTH_API_KEY: ${PYTH_API_KEY:-}
+      ORACLE_URL: http://oracle-service:9013
       RUST_LOG: info,price_charting=debug
-    depends_on: [token-info, api-service, indexer]
+    depends_on: [token-info, api-service, indexer, oracle-service]
     restart: unless-stopped
     networks: [net]
 
@@ -172,11 +190,12 @@ services:
     environment:
       APP_ENV: prod
       TOKEN_INFO_URL: http://token-info:9005
+      ORACLE_URL: http://oracle-service:9013
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       RUST_LOG: info,keeper=info
     volumes:
       - /opt/options/prod/secrets:/run/secrets:ro
-    depends_on: [indexer, token-info]
+    depends_on: [indexer, token-info, oracle-service]
     restart: unless-stopped
     networks: [net]
 

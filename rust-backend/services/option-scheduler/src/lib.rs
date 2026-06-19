@@ -16,7 +16,6 @@ pub mod db;
 pub mod families;
 pub mod roller;
 pub mod schedule;
-pub mod sigma;
 pub mod spot;
 pub mod strike_grid;
 pub mod vault_roller;
@@ -37,6 +36,11 @@ pub struct Cli {
     /// crashes if token-info is unreachable.
     #[arg(long, env = "TOKEN_INFO_URL", default_value = "http://127.0.0.1:9005")]
     pub token_info_url: String,
+
+    /// Base URL of the oracle-service: spot prices + realized vol (the single
+    /// Pyth gateway). Replaces the scheduler's direct Hermes/Benchmarks reads.
+    #[arg(long, env = "ORACLE_URL", default_value = "http://127.0.0.1:9013")]
+    pub oracle_url: String,
 
     /// Per-binary secrets TOML. Holds the Sui signing key. No env-var
     /// fallback. Must hold the deployer key — AdminCap is non-transferable.

@@ -43,7 +43,7 @@ use protocol_types::quote::Quote;
 use protocol_types::sides::MmRole;
 use protocol_types::SigningScheme;
 
-use pyth_client::{self as pyth, PriceCache, PriceFeedId, RollingVolBuffer};
+use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
 use api_service_client::ApiServiceClient;
 use token_info_client::{Snapshot, TokenInfoClient};
 use sui_tx::quote_signer::QuoteSigner;
@@ -188,15 +188,14 @@ struct BotConfig {
     onchain_swap: mm_bot::onchain_swap::OnchainSwapConfig,
 }
 
+/// Vol + staleness knobs for the live price cache fed from oracle-service.
+/// Prices/vol now come from oracle-service; these tune the consumer-side
+/// guards and the rolling-vol sampler.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 struct PythConfig {
-    /// Hermes base URL. Mainnet default; override for a private mirror.
-    hermes_url: String,
-    /// Benchmarks base URL. Used for the realized-vol cold-start sample.
-    benchmarks_url: String,
     /// Reject an RFQ if our last *observation* of either price is older
-    /// than this. Catches a wedged or disconnected stream.
+    /// than this. Catches a wedged or disconnected stream (oracle WS).
     max_price_age_ms: u64,
     /// Reject an RFQ if Pyth's publisher timestamp is older than this.
     /// Catches the case where the stream is alive but Pyth itself isn't
@@ -204,14 +203,9 @@ struct PythConfig {
     max_publish_lag_ms: u64,
     /// Rolling window (in hours) used to compute realized vol.
     vol_window_hours: u64,
-    /// How often the live SSE feed is sampled into the vol buffer. The
-    /// vol estimate annualizes from this cadence.
+    /// How often the live cache is sampled into the vol buffer. The vol
+    /// estimate annualizes from this cadence.
     vol_sample_interval_ms: u64,
-    /// Number of historical points to fetch from Benchmarks at startup
-    /// to seed the vol buffer.
-    bootstrap_samples: u32,
-    /// Seconds between adjacent bootstrap samples.
-    bootstrap_interval_secs: u64,
     /// Volatility used until the buffer has enough samples. Once it does,
     /// the live estimate takes over.
     fallback_vol: f64,
@@ -220,14 +214,10 @@ struct PythConfig {
 impl Default for PythConfig {
     fn default() -> Self {
         Self {
-            hermes_url: "https://hermes.pyth.network".into(),
-            benchmarks_url: "https://benchmarks.pyth.network".into(),
             max_price_age_ms: 5_000,
             max_publish_lag_ms: 10_000,
             vol_window_hours: 24,
             vol_sample_interval_ms: 60_000,
-            bootstrap_samples: 24,
-            bootstrap_interval_secs: 3_600,
             fallback_vol: 0.6,
         }
     }
@@ -280,9 +270,6 @@ struct Market {
     /// matched against to pick this market.
     coin_type: String,
     feed: PriceFeedId,
-    /// Stable-feed equivalent of `feed` for the Benchmarks vol bootstrap
-    /// (Benchmarks serves stable ids only). Falls back to `feed` if unmapped.
-    benchmark_feed: PriceFeedId,
     decimals: u8,
     /// Realized-vol buffer fed from this underlying's USD price.
     vol_buf: Arc<RwLock<RollingVolBuffer>>,
@@ -445,7 +432,6 @@ async fn main() -> Result<()> {
             symbol: sym.clone(),
             coin_type: protocol_types::asset::canonicalize_move_type(&spec.coin_type),
             feed,
-            benchmark_feed: pyth::benchmark_feed_id(feed),
             decimals: spec.decimals,
             vol_buf: Arc::new(RwLock::new(RollingVolBuffer::new(
                 vol_window_ms,
@@ -514,43 +500,28 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Pyth client + live price cache + rolling-vol buffer. The SSE task
-    // owns a tokio task that pushes into the cache; the bootstrap +
-    // sampler task seeds and maintains the vol buffer.
-    let http_client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .default_headers(pyth::auth_headers(secrets_loaded.pyth_api_key()))
-        .build()
-        .context("building reqwest client")?;
-    let price_cache = PriceCache::new();
-    // Subscribe to every underlying's feed plus the shared settlement feed.
+    // Live prices come from oracle-service (the single Pyth gateway) over its
+    // WS fanout. `subscribe()` returns a PriceCache a background task keeps
+    // current; the hot RFQ path reads it with the same `get_fresh` staleness
+    // check as when mm-bot owned the SSE connection itself.
+    let oracle = oracle_client::OracleClient::new(&cli.oracle_url);
     let mut all_feeds: Vec<PriceFeedId> = markets.iter().map(|m| m.feed).collect();
     all_feeds.push(settlement_feed);
-    let stream_rx = pyth::spawn_subscriber(
-        http_client.clone(),
-        cfg.pyth.hermes_url.clone(),
-        all_feeds.clone(),
-    );
-    price_cache.spawn_updater(stream_rx);
+    let (price_cache, _ws_task) = oracle.subscribe();
 
-    // Vol is keyed off each underlying's own USD price (annualization factor
-    // follows the sample cadence). A single shared task bootstraps every
-    // market's buffer from Benchmarks with one multi-id request per timestamp,
-    // then fans out a live sampler per underlying.
-    spawn_vol_tasks(
-        http_client.clone(),
-        cfg.pyth.clone(),
-        markets
-            .iter()
-            .map(|m| VolMarket {
-                symbol: m.symbol.clone(),
-                feed: m.feed,
-                benchmark_feed: m.benchmark_feed,
-                buf: Arc::clone(&m.vol_buf),
-            })
-            .collect(),
-        price_cache.clone(),
-    );
+    // Maintain each market's rolling-vol buffer from the live cache on the
+    // configured cadence. No Benchmarks bootstrap: the buffer warms from the
+    // stream within a few samples and `fallback_vol` covers the brief
+    // cold-start window.
+    for m in &markets {
+        spawn_vol_sampler(
+            cfg.pyth.clone(),
+            m.symbol.clone(),
+            m.feed,
+            price_cache.clone(),
+            Arc::clone(&m.vol_buf),
+        );
+    }
 
     // Derive mode: watch token-info for newly-listed underlyings and restart to
     // pick them up. No-op when underlyings were pinned explicitly.
@@ -1440,96 +1411,9 @@ fn spawn_replenish_task(p: ReplenishParams) {
     });
 }
 
-/// Per-market inputs for the vol tasks: the live (beta) `feed` drives the
-/// cache sampler, its stable `benchmark_feed` drives the Benchmarks
-/// bootstrap, and `buf` is the shared rolling buffer both feed into.
-struct VolMarket {
-    symbol: String,
-    feed: PriceFeedId,
-    benchmark_feed: PriceFeedId,
-    buf: Arc<RwLock<RollingVolBuffer>>,
-}
-
-/// Bootstrap every market's vol buffer from Pyth Benchmarks in one shared,
-/// ordered pass, then fan out the per-market live samplers.
-///
-/// The bootstrap walks back `bootstrap_samples` points spaced by
-/// `bootstrap_interval_secs`, fetching *all* markets' benchmark feeds in a
-/// single multi-id request per timestamp and pacing at ~1 request/1.1s — so
-/// the whole bot stays under the 10-req/10s Benchmarks cap no matter how many
-/// markets it makes. (Previously each market ran its own bootstrap loop
-/// concurrently, so N markets meant ~N requests/second and a 429 storm at
-/// startup.)
-///
-/// Live samplers start only after the bootstrap finishes: a live `now` sample
-/// pushed ahead of an older bootstrap sample would sit out of order in the
-/// buffer and corrupt the realized-vol series.
-fn spawn_vol_tasks(
-    client: reqwest::Client,
-    cfg: PythConfig,
-    markets: Vec<VolMarket>,
-    cache: PriceCache,
-) {
-    tokio::spawn(async move {
-        // Distinct benchmark feed ids — one multi-id request covers them all.
-        let mut ids: Vec<PriceFeedId> = Vec::new();
-        for m in &markets {
-            if !ids.contains(&m.benchmark_feed) {
-                ids.push(m.benchmark_feed);
-            }
-        }
-
-        // --- shared bootstrap from Benchmarks -------------------------------
-        // Walk back N points spaced by `bootstrap_interval_secs`. Pace at one
-        // request per ~1.1s so we stay under the 10-req/10s ceiling.
-        let now_secs = (now_ms() / 1000) as i64;
-        for i in (0..cfg.bootstrap_samples).rev() {
-            let ts = now_secs - (i as i64) * cfg.bootstrap_interval_secs as i64;
-            match pyth::benchmarks_at(&client, &cfg.benchmarks_url, &ids, ts).await {
-                Ok(updates) => {
-                    let ts_ms = (ts as u64).saturating_mul(1000);
-                    for upd in &updates {
-                        let Ok(feed) = upd.feed_id() else { continue };
-                        let price = match upd.price.price_f64() {
-                            Ok(p) => p,
-                            Err(e) => {
-                                tracing::debug!(error = %e, "vol bootstrap parse failed");
-                                continue;
-                            }
-                        };
-                        // A stable feed may back more than one market; fill
-                        // every buffer keyed to it.
-                        for m in &markets {
-                            if m.benchmark_feed == feed {
-                                m.buf.write().push(ts_ms, price);
-                            }
-                        }
-                    }
-                    tracing::debug!(ts, feeds = updates.len(), "vol bootstrap sample");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %format!("{e:#}"), ts, "vol bootstrap fetch failed");
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(1_100)).await;
-        }
-        for m in &markets {
-            if let Some(sigma) = m.buf.read().current_annualized() {
-                tracing::info!(symbol = %m.symbol, sigma, "vol buffer bootstrapped");
-            } else {
-                tracing::warn!(symbol = %m.symbol, "vol bootstrap produced too few samples; using fallback until live data fills the window");
-            }
-        }
-
-        // --- fan out the live samplers --------------------------------------
-        for m in markets {
-            spawn_vol_sampler(cfg.clone(), m.symbol, m.feed, cache.clone(), m.buf);
-        }
-    });
-}
-
 /// Maintain one market's vol buffer from the live price cache on the
-/// configured cadence. Assumes the buffer has already been bootstrapped.
+/// configured cadence. The buffer warms from the live stream (no Benchmarks
+/// bootstrap); `fallback_vol` covers the cold-start window.
 fn spawn_vol_sampler(
     cfg: PythConfig,
     symbol: String,

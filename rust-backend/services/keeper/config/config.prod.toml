@@ -19,7 +19,6 @@ health_addr = "0.0.0.0:8086"
 # data must come from hermes-beta (see config.staging.toml for the
 # verification notes). Benchmarks is stable-only → sigma_fallback.
 hermes_url     = "https://hermes-beta.pyth.network"
-benchmarks_url = "https://benchmarks.pyth.network"
 # Sui TESTNET Pyth + Wormhole deployment (prod runs testnet today), per
 # https://docs.pyth.network/price-feeds/contract-addresses/sui
 # (verified against the live fullnode). Replace with the mainnet ids

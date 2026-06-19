@@ -25,7 +25,6 @@ health_addr = "0.0.0.0:8086"
 hermes_url     = "https://hermes-beta.pyth.network"
 # Benchmarks serves the STABLE feed set only, so realized-vol lookups
 # for beta feed ids fail and vault_defaults.sigma_fallback takes over.
-benchmarks_url = "https://benchmarks.pyth.network"
 # Sui TESTNET Pyth + Wormhole deployment, per
 # https://docs.pyth.network/price-feeds/contract-addresses/sui
 # (verified against the live fullnode: both packages exist and both

@@ -34,7 +34,7 @@ from typing import Iterable
 
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor", "keeper"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor", "keeper", "oracle-service"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -103,6 +103,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/sui-tx/**",
         "rust-backend/crates/pyth-client/**",
+        "rust-backend/crates/oracle-client/**",
         "rust-backend/crates/pricing/**",
         "rust-backend/crates/deployments/**",
         "rust-backend/crates/api-service-client/**",
@@ -115,7 +116,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/observability/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/sui-tx/**",
-        "rust-backend/crates/pyth-client/**",
+        "rust-backend/crates/oracle-client/**",
         "rust-backend/crates/deployments/**",
         "rust-backend/crates/indexer-graphql/**",
     ],
@@ -157,7 +158,7 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/token-info-client/**",
         # Vault-APY sampler deps (folded in from derived-metric-worker).
         "rust-backend/crates/indexer-graphql/**",
-        "rust-backend/crates/pyth-client/**",
+        "rust-backend/crates/oracle-client/**",
         "rust-backend/crates/pricing/**",
         "rust-backend/crates/protocol-types/**",
     ],
@@ -185,10 +186,24 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/runtime-config/**",
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/sui-tx/**",
+        # keeper keeps a direct Hermes path for the on-chain VAA (pyth-client),
+        # and reads spot/σ from oracle-service (oracle-client).
         "rust-backend/crates/pyth-client/**",
+        "rust-backend/crates/oracle-client/**",
         "rust-backend/crates/pricing/**",
         "rust-backend/crates/token-info-client/**",
         "rust-backend/crates/indexer-graphql/**",
+    ],
+    "oracle-service": [
+        "rust-backend/services/oracle-service/**",
+        "rust-backend/Dockerfile.oracle-service",
+        "rust-backend/crates/protocol-types/**",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/pyth-client/**",
+        "rust-backend/crates/oracle-client/**",
+        "rust-backend/crates/token-info-client/**",
     ],
 }
 

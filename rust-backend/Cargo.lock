@@ -4770,6 +4770,7 @@ dependencies = [
  "metrics",
  "move-core-types",
  "observability",
+ "oracle-client",
  "pricing",
  "protocol-types",
  "pyth-client",
@@ -5385,6 +5386,7 @@ dependencies = [
  "metrics",
  "move-core-types",
  "observability",
+ "oracle-client",
  "parking_lot 0.12.5",
  "pricing",
  "protocol-types",
@@ -6771,9 +6773,9 @@ dependencies = [
  "metrics",
  "move-core-types",
  "observability",
+ "oracle-client",
  "pricing",
  "protocol-types",
- "pyth-client",
  "r2d2",
  "reqwest",
  "runtime-config",
@@ -6790,6 +6792,44 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "oracle-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "observability",
+ "protocol-types",
+ "pyth-client",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "oracle-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "clap",
+ "cli-spec",
+ "observability",
+ "oracle-client",
+ "pyth-client",
+ "reqwest",
+ "runtime-config",
+ "serde",
+ "serde_json",
+ "token-info-client",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7373,9 +7413,9 @@ dependencies = [
  "indexer-graphql",
  "metrics",
  "observability",
+ "oracle-client",
  "parking_lot 0.12.5",
  "pricing",
- "pyth-client",
  "reqwest",
  "runtime-config",
  "serde",

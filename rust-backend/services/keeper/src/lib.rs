@@ -36,6 +36,12 @@ pub struct Cli {
     #[arg(long, env = "TOKEN_INFO_URL", default_value = "http://127.0.0.1:9005")]
     pub token_info_url: String,
 
+    /// Base URL of the oracle-service: spot prices + realized vol (the single
+    /// Pyth gateway). The keeper still hits Hermes directly for the on-chain
+    /// VAA, but reads spot/σ from here.
+    #[arg(long, env = "ORACLE_URL", default_value = "http://127.0.0.1:9013")]
+    pub oracle_url: String,
+
     /// Per-binary secrets TOML holding the Sui signing key. Any funded
     /// wallet works — the keeper holds no capability objects.
     #[arg(short = 's', long, default_value = "services/keeper/config/secrets.toml")]
