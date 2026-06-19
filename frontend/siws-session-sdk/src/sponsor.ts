@@ -107,11 +107,17 @@ export class GasStationSponsorClient implements SponsorClient {
       fromBase64(reservation.txBytes),
     )).signature;
 
-    return this.client.executeTransactionBlock({
+    const res = await this.client.executeTransactionBlock({
       transactionBlock: reservation.txBytes,
       signature: [userSig, reservation.sponsorSignature],
       options: RESPONSE_OPTIONS,
     });
+    // `executeTransactionBlock` defaults to WaitForEffectsCert: the tx is
+    // finalized but the fullnode we read from may not have applied its effects
+    // yet. Block until it's queryable so the immediate custody re-read
+    // (refreshSession → readAccountBalances) sees the new state.
+    await this.client.waitForTransaction({ digest: res.digest });
+    return res;
   }
 }
 
