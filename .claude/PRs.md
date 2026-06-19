@@ -44,3 +44,4 @@ PRs raised through Claude Code.
 | [#220](https://github.com/ewitulsk/SuiOptions/pull/220) | [SO-223](https://suioptions.atlassian.net/browse/SO-223) | SO-32 Data Layer | Fix Pyth Benchmarks Rate-Limiting via Bulk Fetch, Caching & Paced Requests |
 | [#225](https://github.com/ewitulsk/SuiOptions/pull/225) | [SO-228](https://suioptions.atlassian.net/browse/SO-228) | SO-8 Protocol | Fix Keeper Genesis-Vault select_bucket Loop (Move Enum Phase Mis-Parse) |
 | [#234](https://github.com/ewitulsk/SuiOptions/pull/234) | [SO-237](https://suioptions.atlassian.net/browse/SO-237) | SO-19 Frontend | Group Vault Carousel by Asset with Vertical Cadence Coverflow |
+| [#251](https://github.com/ewitulsk/SuiOptions/pull/251) | [SO-253](https://suioptions.atlassian.net/browse/SO-253) | SO-8 Protocol | Migrate Keeper Realized-Vol to Cached BenchmarkVol (fix Pyth 429 storm) |

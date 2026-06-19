@@ -84,6 +84,13 @@ async fn main() -> Result<()> {
         .default_headers(pyth_client::auth_headers(secrets.pyth_api_key()))
         .build()
         .context("building reqwest client")?;
+    // Cached, paced, bulk realized-vol against Pyth Benchmarks. Shared across
+    // every vault and tick so each daily close is fetched once (immutable
+    // history) and requests stay under the endpoint's rate cap — without it,
+    // each `fetch_sigma` bursts `vol_window_days + 1` unpaced requests per
+    // call and storms the endpoint with 429s. Reuses `http` so it carries the
+    // same Pyth auth header.
+    let bench = pyth_client::BenchmarkVol::new(http.clone(), cfg.pyth.benchmarks_url.clone());
     let indexer = IndexerClient::new(cfg.indexer_graphql_url.clone());
     info!(
         indexer = %cfg.indexer_graphql_url,
@@ -131,7 +138,7 @@ async fn main() -> Result<()> {
                 treasury_id,
                 defaults: &cfg.vault_defaults,
             };
-            match tick_vault(&cli, &cfg, &wrap, &http, &indexer, &pyth_handles, meta, ctx).await {
+            match tick_vault(&cli, &cfg, &wrap, &http, &bench, &indexer, &pyth_handles, meta, ctx).await {
                 Ok(()) => {}
                 Err(e) => match classify(&e) {
                     ErrorClass::Benign => {
@@ -241,6 +248,7 @@ async fn tick_vault(
     cfg: &KeeperConfig,
     wrap: &SuiClientWrapper,
     http: &reqwest::Client,
+    bench: &pyth_client::BenchmarkVol,
     indexer: &IndexerClient,
     pyth_handles: &PythHandles,
     meta: &DiscoveredVault,
@@ -309,8 +317,10 @@ async fn tick_vault(
     match action {
         Action::Idle => Ok(()),
         Action::SelectBucketNeeded => {
-            select_bucket_or_finalize(cli, cfg, http, indexer, &ctx, meta, ids.defaults, &view, now)
-                .await
+            select_bucket_or_finalize(
+                cli, cfg, http, bench, indexer, &ctx, meta, ids.defaults, &view, now,
+            )
+            .await
         }
         other => {
             if cli.dry_run {
@@ -330,6 +340,7 @@ async fn select_bucket_or_finalize(
     cli: &Cli,
     cfg: &KeeperConfig,
     http: &reqwest::Client,
+    bench: &pyth_client::BenchmarkVol,
     indexer: &IndexerClient,
     ctx: &SubmitCtx<'_>,
     meta: &DiscoveredVault,
@@ -339,7 +350,7 @@ async fn select_bucket_or_finalize(
 ) -> Result<()> {
     let candidates = fetch_candidates(indexer, meta).await?;
     let spot = fetch_spot_cross(http, cfg, meta).await?;
-    let sigma = fetch_sigma(http, cfg, meta, defaults, now).await?;
+    let sigma = fetch_sigma(bench, meta, defaults, now).await?;
     let sigma_iv = sigma * defaults.iv_ratio;
 
     let pick = pick_bucket(
@@ -491,22 +502,21 @@ async fn fetch_spot_cross(
 /// static fallback for outages (and for beta feed ids, which Benchmarks
 /// never serves).
 async fn fetch_sigma(
-    http: &reqwest::Client,
-    cfg: &KeeperConfig,
+    bench: &pyth_client::BenchmarkVol,
     meta: &DiscoveredVault,
     defaults: &VaultDefaults,
     now: u64,
 ) -> Result<f64> {
-    match pyth_client::sigma::realized_sigma_from_benchmarks(
-        http,
-        &cfg.pyth.benchmarks_url,
-        // The discovered feed is a beta id; Benchmarks only serves stable, so
-        // map it across. Unmapped ids pass through and fall back as before.
-        pyth_client::benchmark_feed_id(meta.underlying_feed),
-        defaults.vol_window_days,
-        (now / 1000) as i64,
-    )
-    .await
+    match bench
+        .realized_sigma(
+            // The discovered feed is a beta id; Benchmarks only serves stable,
+            // so map it across. Unmapped ids pass through and fall back as
+            // before.
+            pyth_client::benchmark_feed_id(meta.underlying_feed),
+            defaults.vol_window_days,
+            (now / 1000) as i64,
+        )
+        .await
     {
         Ok(s) => Ok(s),
         Err(e) => match defaults.sigma_fallback {
