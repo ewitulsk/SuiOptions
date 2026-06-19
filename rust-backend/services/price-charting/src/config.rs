@@ -28,11 +28,8 @@ fn default_origins() -> Vec<String> {
 fn default_apy_tick_secs() -> u64 {
     120
 }
-fn default_hermes() -> String {
-    "https://hermes.pyth.network".into()
-}
-fn default_benchmarks() -> String {
-    "https://benchmarks.pyth.network".into()
+fn default_oracle_url() -> String {
+    "http://oracle-service:9013".into()
 }
 fn default_vol_window_days() -> u32 {
     30
@@ -81,6 +78,9 @@ pub struct Config {
     /// Indexer GraphQL endpoint — the apy sampler lists vaults / rounds /
     /// RFQs and pulls the realized-APY series from here.
     pub indexer_graphql_url: String,
+    /// oracle-service base URL — the apy sampler's source for spot + realized vol.
+    #[serde(default = "default_oracle_url")]
+    pub oracle_url: String,
     /// Explicit fullnode override; defaults from `network`.
     #[serde(default)]
     pub rpc_url: Option<String>,
@@ -109,15 +109,10 @@ pub struct Config {
     pub model: ModelConfig,
 }
 
-/// Pyth knobs for the apy sampler (folded in from derived-metric-worker).
+/// Realized-vol + spot-guard knobs for the apy sampler. Prices and vol now come
+/// from oracle-service; these only tune the consumer-side guards and window.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PythConfig {
-    /// Pyth Hermes root (latest prices → spot cross).
-    #[serde(default = "default_hermes")]
-    pub hermes_url: String,
-    /// Pyth Benchmarks root (historical closes → realized vol).
-    #[serde(default = "default_benchmarks")]
-    pub benchmarks_url: String,
     /// Trailing window (days) for realized vol.
     #[serde(default = "default_vol_window_days")]
     pub vol_window_days: u32,
@@ -132,8 +127,6 @@ pub struct PythConfig {
 impl Default for PythConfig {
     fn default() -> Self {
         Self {
-            hermes_url: default_hermes(),
-            benchmarks_url: default_benchmarks(),
             vol_window_days: default_vol_window_days(),
             max_publish_lag_ms: default_max_publish_lag_ms(),
             max_conf_bps: default_max_conf_bps(),

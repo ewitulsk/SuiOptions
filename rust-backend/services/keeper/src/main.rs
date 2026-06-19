@@ -84,13 +84,15 @@ async fn main() -> Result<()> {
         .default_headers(pyth_client::auth_headers(secrets.pyth_api_key()))
         .build()
         .context("building reqwest client")?;
-    // Cached, paced, bulk realized-vol against Pyth Benchmarks. Shared across
-    // every vault and tick so each daily close is fetched once (immutable
-    // history) and requests stay under the endpoint's rate cap — without it,
-    // each `fetch_sigma` bursts `vol_window_days + 1` unpaced requests per
-    // call and storms the endpoint with 429s. Reuses `http` so it carries the
-    // same Pyth auth header.
-    let bench = pyth_client::BenchmarkVol::new(http.clone(), cfg.pyth.benchmarks_url.clone());
+    // Spot + realized vol now come from oracle-service (the single Pyth
+    // gateway) instead of the keeper hitting Hermes/Benchmarks itself. The
+    // keeper's own `http` stays for the on-chain VAA path (submit.rs), which a
+    // price cache can't serve. Hard cutover: crash if the oracle never comes up.
+    let oracle = oracle_client::OracleClient::new(&cli.oracle_url);
+    oracle
+        .fetch_blocking_until_ready(30, Duration::from_secs(2))
+        .await
+        .with_context(|| format!("oracle-service at {} unreachable", cli.oracle_url))?;
     let indexer = IndexerClient::new(cfg.indexer_graphql_url.clone());
     info!(
         indexer = %cfg.indexer_graphql_url,
@@ -138,7 +140,7 @@ async fn main() -> Result<()> {
                 treasury_id,
                 defaults: &cfg.vault_defaults,
             };
-            match tick_vault(&cli, &cfg, &wrap, &http, &bench, &indexer, &pyth_handles, meta, ctx).await {
+            match tick_vault(&cli, &cfg, &wrap, &http, &oracle, &indexer, &pyth_handles, meta, ctx).await {
                 Ok(()) => {}
                 Err(e) => match classify(&e) {
                     ErrorClass::Benign => {
@@ -248,7 +250,7 @@ async fn tick_vault(
     cfg: &KeeperConfig,
     wrap: &SuiClientWrapper,
     http: &reqwest::Client,
-    bench: &pyth_client::BenchmarkVol,
+    oracle: &oracle_client::OracleClient,
     indexer: &IndexerClient,
     pyth_handles: &PythHandles,
     meta: &DiscoveredVault,
@@ -317,10 +319,8 @@ async fn tick_vault(
     match action {
         Action::Idle => Ok(()),
         Action::SelectBucketNeeded => {
-            select_bucket_or_finalize(
-                cli, cfg, http, bench, indexer, &ctx, meta, ids.defaults, &view, now,
-            )
-            .await
+            select_bucket_or_finalize(cli, oracle, indexer, &ctx, meta, ids.defaults, &view, now)
+                .await
         }
         other => {
             if cli.dry_run {
@@ -338,9 +338,7 @@ async fn tick_vault(
 #[allow(clippy::too_many_arguments)]
 async fn select_bucket_or_finalize(
     cli: &Cli,
-    cfg: &KeeperConfig,
-    http: &reqwest::Client,
-    bench: &pyth_client::BenchmarkVol,
+    oracle: &oracle_client::OracleClient,
     indexer: &IndexerClient,
     ctx: &SubmitCtx<'_>,
     meta: &DiscoveredVault,
@@ -349,8 +347,8 @@ async fn select_bucket_or_finalize(
     now: u64,
 ) -> Result<()> {
     let candidates = fetch_candidates(indexer, meta).await?;
-    let spot = fetch_spot_cross(http, cfg, meta).await?;
-    let sigma = fetch_sigma(bench, meta, defaults, now).await?;
+    let spot = fetch_spot_cross(oracle, meta).await?;
+    let sigma = fetch_sigma(oracle, meta, defaults).await?;
     let sigma_iv = sigma * defaults.iv_ratio;
 
     let pick = pick_bucket(
@@ -464,58 +462,37 @@ async fn fetch_candidates(
         .collect())
 }
 
-/// USD cross (settlement-per-underlying) from the two Hermes feeds.
+/// USD cross (settlement-per-underlying) from the oracle-service price cache.
 async fn fetch_spot_cross(
-    http: &reqwest::Client,
-    cfg: &KeeperConfig,
+    oracle: &oracle_client::OracleClient,
     meta: &DiscoveredVault,
 ) -> Result<f64> {
-    let updates = pyth_client::latest(
-        http,
-        &cfg.pyth.hermes_url,
-        &[meta.underlying_feed, meta.settlement_feed],
-    )
-    .await
-    .context("fetching hermes spot")?;
-    let mut u = None;
-    let mut s = None;
-    for upd in &updates {
-        let feed = upd.feed_id()?;
-        if feed == meta.underlying_feed {
-            u = Some(upd.price.price_f64()?);
-        }
-        if feed == meta.settlement_feed {
-            s = Some(upd.price.price_f64()?);
-        }
-    }
-    let (u, s) = (
-        u.ok_or_else(|| anyhow::anyhow!("hermes returned no underlying price"))?,
-        s.ok_or_else(|| anyhow::anyhow!("hermes returned no settlement price"))?,
-    );
+    let u = oracle
+        .price(meta.underlying_feed)
+        .await
+        .context("fetching underlying spot from oracle-service")?
+        .price;
+    let s = oracle
+        .price(meta.settlement_feed)
+        .await
+        .context("fetching settlement spot from oracle-service")?
+        .price;
     if !(u > 0.0 && s > 0.0) {
-        return Err(anyhow::anyhow!("non-positive hermes prices: {u} / {s}"));
+        return Err(anyhow::anyhow!("non-positive oracle prices: {u} / {s}"));
     }
     Ok(u / s)
 }
 
-/// Realized σ from Pyth Benchmarks (README §9), with the configured
-/// static fallback for outages (and for beta feed ids, which Benchmarks
-/// never serves).
+/// Realized σ from oracle-service (cached/paced Benchmarks; it maps the beta
+/// feed id to its stable Benchmarks id server-side), with the configured static
+/// fallback for outages.
 async fn fetch_sigma(
-    bench: &pyth_client::BenchmarkVol,
+    oracle: &oracle_client::OracleClient,
     meta: &DiscoveredVault,
     defaults: &VaultDefaults,
-    now: u64,
 ) -> Result<f64> {
-    match bench
-        .realized_sigma(
-            // The discovered feed is a beta id; Benchmarks only serves stable,
-            // so map it across. Unmapped ids pass through and fall back as
-            // before.
-            pyth_client::benchmark_feed_id(meta.underlying_feed),
-            defaults.vol_window_days,
-            (now / 1000) as i64,
-        )
+    match oracle
+        .realized_vol(meta.underlying_feed, defaults.vol_window_days)
         .await
     {
         Ok(s) => Ok(s),

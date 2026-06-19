@@ -86,12 +86,6 @@ pub struct SchedulerConfig {
     #[serde(default = "default_roll_threshold_ms")]
     pub roll_threshold_ms: u64,
 
-    /// Pyth Hermes endpoint settings. Only consulted when at least one
-    /// pair uses `source = "pyth"`, but loaded eagerly so a typo surfaces
-    /// at startup.
-    #[serde(default)]
-    pub pyth: PythGlobalConfig,
-
     /// Configured pairs to roll. Bot is a no-op for any pair not listed.
     pub pairs: Vec<PairConfig>,
 
@@ -125,38 +119,6 @@ pub struct SchedulerConfig {
     /// decimals) come from token-info; everything else comes from here.
     #[serde(default)]
     pub vault_template: Option<VaultTemplate>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PythGlobalConfig {
-    /// Base URL for the Pyth Hermes REST API. The scheduler issues exactly
-    /// one `GET /v2/updates/price/latest?ids[]=…&ids[]=…` per pair per
-    /// roll, so the public endpoint's rate cap is plenty.
-    #[serde(default = "default_hermes_url")]
-    pub hermes_url: String,
-
-    /// Base URL for the Pyth Benchmarks REST API — historical daily
-    /// closes for the z-ladder's realized-vol estimate (one call per day
-    /// of the vol window, per roll).
-    #[serde(default = "default_benchmarks_url")]
-    pub benchmarks_url: String,
-}
-
-impl Default for PythGlobalConfig {
-    fn default() -> Self {
-        Self {
-            hermes_url: default_hermes_url(),
-            benchmarks_url: default_benchmarks_url(),
-        }
-    }
-}
-
-fn default_hermes_url() -> String {
-    "https://hermes.pyth.network".into()
-}
-
-fn default_benchmarks_url() -> String {
-    "https://benchmarks.pyth.network".into()
 }
 
 fn default_tick_secs() -> u64 {
@@ -435,7 +397,6 @@ interval_pct        = 5.0
             "postgresql://postgres:postgres@localhost:5432/scheduler_test"
         );
         assert_eq!(cfg.tick_secs, 60); // default
-        assert_eq!(cfg.pyth.hermes_url, "https://hermes.pyth.network");
         match &cfg.pairs[0].spot {
             SpotConfig::Static { usd } => assert_eq!(*usd, 50_000.0),
             other => panic!("expected static, got {other:?}"),
@@ -449,9 +410,6 @@ interval_pct        = 5.0
 indexer_graphql_url = "http://127.0.0.1:9002/graphql"
 scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler_test"
 
-[pyth]
-hermes_url = "https://hermes.custom/"
-
 [[pairs]]
 underlying          = "TBTC"
 settlement          = "TUSDC"
@@ -464,7 +422,6 @@ interval_pct        = 5.0
   source = "pyth"
 "#,
         );
-        assert_eq!(cfg.pyth.hermes_url, "https://hermes.custom/");
         match &cfg.pairs[0].spot {
             SpotConfig::Pyth {
                 max_publish_lag_ms,
@@ -498,7 +455,6 @@ interval_pct        = 5.0
 "#,
         );
         assert!(cfg.pairs[0].grid.is_none());
-        assert_eq!(cfg.pyth.benchmarks_url, "https://benchmarks.pyth.network");
     }
 
     #[test]
@@ -547,9 +503,6 @@ interval_pct        = 5.0
 indexer_graphql_url = "http://127.0.0.1:9002/graphql"
 scheduler_database_url = "postgresql://postgres:postgres@localhost:5432/scheduler_test"
 
-[pyth]
-benchmarks_url = "https://benchmarks.custom/"
-
 [[pairs]]
 underlying          = "WBTC"
 settlement          = "USDC"
@@ -568,7 +521,6 @@ interval_pct        = 5.0
   sigma_fallback = 0.55
 "#,
         );
-        assert_eq!(cfg.pyth.benchmarks_url, "https://benchmarks.custom/");
         match cfg.pairs[0].grid.as_ref().unwrap() {
             GridConfig::ZLadder { ladder, sigma_fallback, .. } => {
                 assert_eq!(ladder.len(), 7);

@@ -18,6 +18,7 @@ observability  = { workspace = true }
 cli-spec       = { workspace = true }
 sui-tx         = { workspace = true }
 pyth-client    = { workspace = true }
+oracle-client  = { workspace = true }
 pricing        = { workspace = true }
 token-info-client = { workspace = true }
 indexer-graphql = { workspace = true }

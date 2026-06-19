@@ -127,15 +127,9 @@ async fn main() -> Result<()> {
         }
     };
 
-    // HTTP client shared by every Pyth lookup. Pyth's public Hermes
-    // endpoint applies a 10-req-per-10-second cap per source IP, so a
-    // single shared client is the right move regardless of pair count; the
-    // API key (when set) lifts that cap and is mandatory from 2026-07-31.
-    let http_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .default_headers(pyth_client::auth_headers(secrets.pyth_api_key()))
-        .build()
-        .context("building reqwest client")?;
+    // Spot + realized vol come from oracle-service (the single Pyth gateway)
+    // instead of the scheduler hitting Hermes/Benchmarks itself.
+    let oracle = oracle_client::OracleClient::new(&cli.oracle_url);
 
     // Resolve every configured pair against the /tokens catalog (coin type,
     // decimals, Pyth feed). The scheduler never mints, so it touches no
@@ -316,7 +310,7 @@ async fn main() -> Result<()> {
             &cfg,
             &indexer,
             &pair_meta,
-            &http_client,
+            &oracle,
             &wrap,
             package,
             admin_cap,
@@ -477,9 +471,8 @@ struct VaultEntry {
 /// Resolve the per-roll strike set: the legacy percentage grid, or the
 /// vol-aware z-ladder when `[pairs.grid]` is configured (doc 05 §4.2).
 async fn resolve_strikes(
-    pyth_cfg: &option_scheduler::config::PythGlobalConfig,
     meta: &PairMeta,
-    http_client: &reqwest::Client,
+    oracle: &oracle_client::OracleClient,
     spot_usd_cross: f64,
     next_expiry_ms: u64,
 ) -> Result<(Vec<u128>, u8)> {
@@ -503,26 +496,18 @@ async fn resolve_strikes(
     };
 
     let now_ms = now_ms() as i64;
-    // σ: realized vol from Pyth Benchmarks for live pairs; the configured
-    // fallback covers static (test-token) pairs and benchmark outages.
+    // σ: realized vol from oracle-service (cached/paced Benchmarks; it maps the
+    // beta feed id to its stable Benchmarks id server-side) for live pairs; the
+    // configured fallback covers static (test-token) pairs and outages.
     let sigma = match &meta.spot {
         ResolvedSpotSource::Pyth { underlying_feed, .. } => {
-            match option_scheduler::sigma::realized_sigma_from_benchmarks(
-                http_client,
-                &pyth_cfg.benchmarks_url,
-                // Benchmarks serves stable ids only; map beta → stable.
-                pyth_client::benchmark_feed_id(*underlying_feed),
-                *vol_window_days,
-                now_ms / 1000,
-            )
-            .await
-            {
+            match oracle.realized_vol(*underlying_feed, *vol_window_days).await {
                 Ok(s) => s,
                 Err(e) => {
                     let fallback = sigma_fallback.ok_or_else(|| {
                         anyhow!("realized vol fetch failed and no sigma_fallback: {e:#}")
                     })?;
-                    warn!(error = %e, fallback, "realized vol fetch failed; using sigma_fallback");
+                    warn!(error = %format!("{e:#}"), fallback, "realized vol fetch failed; using sigma_fallback");
                     fallback
                 }
             }
@@ -554,7 +539,7 @@ async fn tick_once(
     cfg: &SchedulerConfig,
     indexer: &IndexerClient,
     pairs: &[PairMeta],
-    http_client: &reqwest::Client,
+    oracle: &oracle_client::OracleClient,
     wrap: &SuiClientWrapper,
     package: sui_types::base_types::ObjectID,
     admin_cap: sui_types::base_types::ObjectID,
@@ -659,11 +644,7 @@ async fn tick_once(
             }
         }
 
-        let spot_usd_cross = match meta
-            .spot
-            .resolve_usd_cross(http_client, &cfg.pyth.hermes_url)
-            .await
-        {
+        let spot_usd_cross = match meta.spot.resolve_usd_cross(oracle).await {
             Ok(s) => s,
             Err(e) => {
                 warn!(error = %e, pair = %pair_label, "spot resolve failed; skipping");
@@ -678,9 +659,7 @@ async fn tick_once(
             }
         };
         let (strikes, strike_scale) =
-            match resolve_strikes(&cfg.pyth, meta, http_client, spot_usd_cross, next_expiry)
-                .await
-            {
+            match resolve_strikes(meta, oracle, spot_usd_cross, next_expiry).await {
                 Ok(g) => g,
                 Err(e) => {
                     warn!(error = %e, pair = %pair_label, "strike grid invalid; skipping");

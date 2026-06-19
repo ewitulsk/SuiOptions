@@ -78,6 +78,11 @@ pub struct Cli {
     #[arg(long, env = "TOKEN_INFO_URL", default_value = "http://127.0.0.1:9005")]
     pub token_info_url: String,
 
+    /// Base URL of the oracle-service: live prices over its WS fanout (the
+    /// single Pyth gateway). Replaces the bot's own Hermes subscription.
+    #[arg(long, env = "ORACLE_URL", default_value = "http://127.0.0.1:9013")]
+    pub oracle_url: String,
+
     /// Base URL of the api-service. The bot resolves each RFQ's bucket
     /// (strike, expiry, coin types) from here by address, so it never trusts
     /// pricing inputs delivered on the RFQ broadcast itself.

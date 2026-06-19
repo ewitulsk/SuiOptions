@@ -17,9 +17,7 @@ scheduler_database_url = "postgresql://scheduler_staging:${DB_PASSWORD}@${DB_HOS
 reconciler_safety_margin  = 100
 reconciler_interval_secs  = 30
 
-# BETA hermes — Sui testnet feed ids are the beta set; stable hermes 404s.
-[pyth]
-hermes_url = "https://hermes-beta.pyth.network"
+# Spot + realized vol come from oracle-service (ORACLE_URL, set in compose).
 
 [[pairs]]
 underlying          = "TBTC"

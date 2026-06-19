@@ -5,35 +5,24 @@
 //! - `static` — a hardcoded USD price from `config.toml`. Useful for
 //!   tests, offline dry-runs, and pairs whose price genuinely doesn't
 //!   move (a peg test).
-//! - `pyth` — live USD-cross via Pyth Hermes. Pulls the latest cached
-//!   price for both legs in one HTTP call, validates each one against the
-//!   configured staleness / confidence guards, and returns the cross
-//!   pre-scaled into the bucket's u64 strike unit.
+//! - `pyth` — live USD-cross via oracle-service. Reads the latest cached
+//!   price for both legs, validates each one against the configured
+//!   staleness / confidence guards, and returns the cross.
 //!
-//! Both variants return the same thing: the strike-grid "spot" in chain
-//! units (settlement smallest-units per underlying smallest-unit). The
-//! strike-grid module never sees USD; it operates entirely on the u64
-//! the resolver hands back.
-
-use std::time::{SystemTime, UNIX_EPOCH};
+//! Both variants return the same thing: the strike-grid "spot" as a USD
+//! cross (settlement units per underlying). The strike-grid module never sees
+//! USD-vs-chain-unit scaling — it operates on the f64 the resolver hands back.
 
 use anyhow::{Context, Result};
+use oracle_client::{OracleClient, PriceFeedId, PricePoint};
 use thiserror::Error;
 use tracing::info;
 
-use pyth_client::types::{PriceFeedId, PriceUpdate, PythPrice};
-use pyth_client as pyth;
-
 use crate::config::SpotConfig;
 
-/// Spot source with all chain-relevant inputs already resolved against
-/// `deployments.json`. Built once at boot per pair so a Pyth misconfig
-/// (missing `pythFeedId`, malformed hex) fails before the first tick.
-///
-/// Returns a USD *cross* (settlement-per-underlying in USD terms) and
-/// leaves all chain-unit / strike_scale conversion to `strike_grid` so
-/// the auto-scale picker sees the un-quantized number. For a stablecoin
-/// settlement the cross collapses to the underlying's USD price.
+/// Spot source with all chain-relevant inputs already resolved against the
+/// token catalog. Built once at boot per pair so a Pyth misconfig (missing
+/// `pythFeedId`, malformed hex) fails before the first tick.
 #[derive(Debug, Clone)]
 pub enum ResolvedSpotSource {
     Static {
@@ -85,8 +74,7 @@ pub enum SpotError {
 impl ResolvedSpotSource {
     /// Build a resolved source from the per-pair config + the two token
     /// catalog entries. The Pyth path requires both legs to carry a
-    /// `pythFeedId` in `deployments.json`; missing either one fails at
-    /// boot.
+    /// `pythFeedId`; missing either one fails at boot.
     pub fn from_config(
         cfg: &SpotConfig,
         underlying_spec: &token_info_client::SupportedToken,
@@ -121,13 +109,9 @@ impl ResolvedSpotSource {
         }
     }
 
-    /// Resolve the current USD cross. Static returns immediately; Pyth
-    /// issues one HTTP call to Hermes.
-    pub async fn resolve_usd_cross(
-        &self,
-        client: &reqwest::Client,
-        hermes_url: &str,
-    ) -> Result<f64> {
+    /// Resolve the current USD cross. Static returns immediately; Pyth reads
+    /// both legs from oracle-service.
+    pub async fn resolve_usd_cross(&self, oracle: &OracleClient) -> Result<f64> {
         match *self {
             Self::Static { spot_usd_cross } => Ok(spot_usd_cross),
             Self::Pyth {
@@ -136,33 +120,22 @@ impl ResolvedSpotSource {
                 max_publish_lag_ms,
                 max_conf_bps,
             } => {
-                let updates =
-                    pyth::http::latest(client, hermes_url, &[underlying_feed, settlement_feed])
-                        .await
-                        .context("fetching latest pyth prices")?;
-                let now_ms = current_time_ms();
-                let u = find_price(&updates, underlying_feed).ok_or_else(|| {
+                let u = oracle.price(underlying_feed).await.map_err(|_| {
                     SpotError::MissingFeed {
                         leg: "underlying",
                         feed_id: underlying_feed.to_hex(),
                     }
                 })?;
-                let s = find_price(&updates, settlement_feed).ok_or_else(|| {
+                let s = oracle.price(settlement_feed).await.map_err(|_| {
                     SpotError::MissingFeed {
                         leg: "settlement",
                         feed_id: settlement_feed.to_hex(),
                     }
                 })?;
-                let cross = compute_usd_cross(
-                    &u.price,
-                    &s.price,
-                    max_publish_lag_ms,
-                    max_conf_bps,
-                    now_ms,
-                )?;
+                let cross = compute_usd_cross(&u, &s, max_publish_lag_ms, max_conf_bps)?;
                 info!(
-                    underlying_usd = u.price.price_f64().unwrap_or(f64::NAN),
-                    settlement_usd = s.price.price_f64().unwrap_or(f64::NAN),
+                    underlying_usd = u.price,
+                    settlement_usd = s.price,
                     cross,
                     "pyth spot resolved"
                 );
@@ -172,42 +145,17 @@ impl ResolvedSpotSource {
     }
 }
 
-fn find_price(updates: &[PriceUpdate], feed: PriceFeedId) -> Option<&PriceUpdate> {
-    let target = feed.to_hex();
-    updates.iter().find(|u| u.id.eq_ignore_ascii_case(&target))
-}
-
-fn current_time_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-/// Validate both Pyth legs and return the USD cross
-/// (settlement-per-underlying). All chain-unit conversion happens
-/// downstream in `strike_grid` so the auto-scale picker sees the
-/// un-quantized number.
+/// Validate both legs and return the USD cross (settlement-per-underlying).
+/// All chain-unit conversion happens downstream in `strike_grid`.
 pub fn compute_usd_cross(
-    underlying: &PythPrice,
-    settlement: &PythPrice,
+    underlying: &PricePoint,
+    settlement: &PricePoint,
     max_publish_lag_ms: u64,
     max_conf_bps: u32,
-    now_ms: i64,
 ) -> Result<f64, SpotError> {
-    validate_leg("underlying", underlying, max_publish_lag_ms, max_conf_bps, now_ms)?;
-    validate_leg("settlement", settlement, max_publish_lag_ms, max_conf_bps, now_ms)?;
-
-    // Both prices passed validation so the f64 conversions succeed.
-    let u_price = underlying.price_f64().map_err(|_| SpotError::BadPrice {
-        leg: "underlying",
-        price: f64::NAN,
-    })?;
-    let s_price = settlement.price_f64().map_err(|_| SpotError::BadPrice {
-        leg: "settlement",
-        price: f64::NAN,
-    })?;
-    let cross = u_price / s_price;
+    validate_leg("underlying", underlying, max_publish_lag_ms, max_conf_bps)?;
+    validate_leg("settlement", settlement, max_publish_lag_ms, max_conf_bps)?;
+    let cross = underlying.price / settlement.price;
     if !cross.is_finite() || cross <= 0.0 {
         return Err(SpotError::OutOfRange { scaled: cross });
     }
@@ -216,23 +164,18 @@ pub fn compute_usd_cross(
 
 fn validate_leg(
     leg: &'static str,
-    p: &PythPrice,
+    p: &PricePoint,
     max_publish_lag_ms: u64,
     max_conf_bps: u32,
-    now_ms: i64,
 ) -> Result<(), SpotError> {
-    let price = p.price_f64().map_err(|_| SpotError::BadPrice {
-        leg,
-        price: f64::NAN,
-    })?;
-    if !price.is_finite() || price <= 0.0 {
-        return Err(SpotError::BadPrice { leg, price });
+    if !p.price.is_finite() || p.price <= 0.0 {
+        return Err(SpotError::BadPrice { leg, price: p.price });
     }
-    let conf = p.conf_f64().map_err(|_| SpotError::BadPrice {
-        leg,
-        price: f64::NAN,
-    })?;
-    let conf_bps = if price > 0.0 { conf / price * 10_000.0 } else { f64::INFINITY };
+    let conf_bps = if p.price > 0.0 {
+        p.conf / p.price * 10_000.0
+    } else {
+        f64::INFINITY
+    };
     if conf_bps > max_conf_bps as f64 {
         return Err(SpotError::WideConfidence {
             leg,
@@ -240,11 +183,10 @@ fn validate_leg(
             max_bps: max_conf_bps,
         });
     }
-    let age_ms = now_ms - p.publish_time_ms();
-    if age_ms > max_publish_lag_ms as i64 {
+    if p.age_ms > max_publish_lag_ms as i64 {
         return Err(SpotError::StalePrice {
             leg,
-            age_ms,
+            age_ms: p.age_ms,
             max_ms: max_publish_lag_ms,
         });
     }
@@ -255,46 +197,38 @@ fn validate_leg(
 mod tests {
     use super::*;
 
-    fn now_ms() -> i64 {
-        // Fixed reference time so the `publish_time` deltas are
-        // deterministic.
-        1_750_000_000_000
-    }
-
-    fn price(price: i64, conf: u64, expo: i32, publish_ms: i64) -> PythPrice {
-        PythPrice {
-            price: price.to_string(),
-            conf: conf.to_string(),
-            expo,
-            publish_time: publish_ms / 1000,
+    /// Build a price point with an explicit publisher age (ms).
+    fn point(price: f64, conf: f64, age_ms: i64) -> PricePoint {
+        PricePoint {
+            feed_id: "00".repeat(32),
+            price,
+            conf,
+            publish_time_ms: 0,
+            age_ms,
         }
     }
 
     #[test]
     fn btc_usdc_50k_cross_is_50k() {
-        // Pyth shape: BTC at $50_000 with expo=-8 → integer 50_000 * 10^8.
-        let u = price(50_000 * 100_000_000, 10_000_000, -8, now_ms());
-        // USDC at $1, expo=-8 → 1 * 10^8 = 100_000_000.
-        let s = price(100_000_000, 10_000, -8, now_ms());
-        let cross = compute_usd_cross(&u, &s, 30_000, 100, now_ms()).unwrap();
+        let u = point(50_000.0, 0.1, 0);
+        let s = point(1.0, 0.0001, 0);
+        let cross = compute_usd_cross(&u, &s, 30_000, 100).unwrap();
         assert!((cross - 50_000.0).abs() < 1e-6);
     }
 
     #[test]
     fn deep_cross_is_15_cents() {
-        // DEEP at $0.15, USDC at $1. Cross is just 0.15 — no decimals
-        // involved (strike_grid handles scaling).
-        let u = price(15_000_000, 1_000, -8, now_ms());
-        let s = price(100_000_000, 10_000, -8, now_ms());
-        let cross = compute_usd_cross(&u, &s, 30_000, 100, now_ms()).unwrap();
+        let u = point(0.15, 0.00001, 0);
+        let s = point(1.0, 0.0001, 0);
+        let cross = compute_usd_cross(&u, &s, 30_000, 100).unwrap();
         assert!((cross - 0.15).abs() < 1e-12);
     }
 
     #[test]
     fn stale_underlying_rejected() {
-        let u = price(50_000 * 100_000_000, 10_000_000, -8, now_ms() - 60_000);
-        let s = price(100_000_000, 10_000, -8, now_ms());
-        let err = compute_usd_cross(&u, &s, 30_000, 100, now_ms()).unwrap_err();
+        let u = point(50_000.0, 0.1, 60_000);
+        let s = point(1.0, 0.0001, 0);
+        let err = compute_usd_cross(&u, &s, 30_000, 100).unwrap_err();
         match err {
             SpotError::StalePrice { leg, age_ms, .. } => {
                 assert_eq!(leg, "underlying");
@@ -306,9 +240,9 @@ mod tests {
 
     #[test]
     fn stale_settlement_rejected() {
-        let u = price(50_000 * 100_000_000, 10_000_000, -8, now_ms());
-        let s = price(100_000_000, 10_000, -8, now_ms() - 5 * 60_000);
-        let err = compute_usd_cross(&u, &s, 30_000, 100, now_ms()).unwrap_err();
+        let u = point(50_000.0, 0.1, 0);
+        let s = point(1.0, 0.0001, 5 * 60_000);
+        let err = compute_usd_cross(&u, &s, 30_000, 100).unwrap_err();
         assert!(
             matches!(err, SpotError::StalePrice { leg: "settlement", .. }),
             "got {err:?}"
@@ -318,12 +252,14 @@ mod tests {
     #[test]
     fn wide_confidence_rejected() {
         // 5% confidence on the underlying — way above the 100 bps default.
-        let u = price(50_000 * 100_000_000, 2_500 * 100_000_000, -8, now_ms());
-        let s = price(100_000_000, 10_000, -8, now_ms());
-        let err = compute_usd_cross(&u, &s, 30_000, 100, now_ms()).unwrap_err();
+        let u = point(50_000.0, 2_500.0, 0);
+        let s = point(1.0, 0.0001, 0);
+        let err = compute_usd_cross(&u, &s, 30_000, 100).unwrap_err();
         match err {
             SpotError::WideConfidence {
-                leg, conf_bps, max_bps,
+                leg,
+                conf_bps,
+                max_bps,
             } => {
                 assert_eq!(leg, "underlying");
                 assert_eq!(max_bps, 100);
@@ -335,9 +271,9 @@ mod tests {
 
     #[test]
     fn non_positive_price_rejected() {
-        let u = price(0, 1, -8, now_ms());
-        let s = price(100_000_000, 10_000, -8, now_ms());
-        let err = compute_usd_cross(&u, &s, 30_000, 100, now_ms()).unwrap_err();
+        let u = point(0.0, 1.0, 0);
+        let s = point(1.0, 0.0001, 0);
+        let err = compute_usd_cross(&u, &s, 30_000, 100).unwrap_err();
         assert!(matches!(err, SpotError::BadPrice { leg: "underlying", .. }));
     }
 }

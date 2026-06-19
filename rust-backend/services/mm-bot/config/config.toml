@@ -72,16 +72,13 @@ underlying_replenish_interval_secs = 60
 # unset to derive from the Sui wallet key.
 # token_recipient = "0xabc..."
 
-# Pyth Hermes/Benchmarks settings. All fields are optional — these are
-# the defaults from `PythConfig::default()` written out explicitly so the
-# knobs are discoverable. Sui testnet feed ids are the BETA set, served only
-# by hermes-beta (stable hermes 404s); benchmarks is stable-only so beta-id
-# vol bootstrap falls back to fallback_vol.
+# Live prices come from oracle-service (--oracle-url / ORACLE_URL, default
+# http://127.0.0.1:9013). All fields are optional — these are the defaults
+# from `PythConfig::default()` written out explicitly so the knobs are
+# discoverable.
 [pyth]
-hermes_url             = "https://hermes-beta.pyth.network"
-benchmarks_url         = "https://benchmarks.pyth.network"
 # Reject an RFQ if our last *observation* of either price is older than
-# this. Catches a wedged or disconnected SSE stream.
+# this. Catches a wedged or disconnected oracle WS stream.
 max_price_age_ms       = 5_000
 # Reject if Pyth's publisher timestamp is older than this. Catches the
 # case where the stream is alive but Pyth itself isn't publishing.
@@ -91,10 +88,6 @@ vol_window_hours       = 24
 # Live-cache sample cadence into the vol buffer. Annualization follows
 # this cadence: sigma_year = stddev_log_returns * sqrt(samples_per_year).
 vol_sample_interval_ms = 60_000
-# Historical points pulled from Benchmarks at startup to seed the buffer.
-# Paced at one call per ~1.1s to respect the 10-req/10s rate cap.
-bootstrap_samples      = 24
-bootstrap_interval_secs = 3_600
 # Sigma used until the buffer has enough samples, then live takes over.
 fallback_vol           = 0.6
 

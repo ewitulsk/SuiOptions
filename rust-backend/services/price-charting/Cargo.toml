@@ -13,7 +13,7 @@ token-info-client = { workspace = true }
 # Vault-APY sampler (folded in from derived-metric-worker): vault/round/RFQ
 # queries + the realized series, Pyth spot/vol, and Black–Scholes pricing.
 indexer-graphql = { workspace = true }
-pyth-client = { workspace = true }
+oracle-client = { workspace = true }
 pricing = { workspace = true }
 
 sui-sdk = { workspace = true }

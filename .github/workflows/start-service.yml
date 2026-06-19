@@ -35,6 +35,7 @@ on:
           - gas-station
           - balance-monitor
           - keeper
+          - oracle-service
           - nginx
 
 permissions:

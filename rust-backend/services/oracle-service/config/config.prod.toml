@@ -1,0 +1,11 @@
+# oracle-service config — prod env (prod is a distinct testnet).
+#
+# BETA hermes — prod feed ids are the beta set, served only by hermes-beta
+# (stable hermes 404s). Benchmarks is stable-only; beta→stable mapping is
+# applied service-side per request.
+
+environment    = "prod"
+bind_addr      = "0.0.0.0:9013"
+token_info_url = "http://token-info:9005"
+hermes_url     = "https://hermes-beta.pyth.network"
+benchmarks_url = "https://benchmarks.pyth.network"

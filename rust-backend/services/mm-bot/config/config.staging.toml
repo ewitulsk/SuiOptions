@@ -29,17 +29,13 @@ underlying_replenish_threshold    = 20_000_000_000
 underlying_replenish_amount       = 100_000_000_000
 underlying_replenish_interval_secs = 60
 
-# BETA hermes — testnet feed ids are the beta set; stable hermes 404s.
-# Benchmarks is stable-only, so beta-id vol bootstrap falls back to fallback_vol.
+# Live prices come from oracle-service (ORACLE_URL, set in compose). These
+# only tune the consumer-side staleness guards + the rolling-vol sampler.
 [pyth]
-hermes_url             = "https://hermes-beta.pyth.network"
-benchmarks_url         = "https://benchmarks.pyth.network"
 max_price_age_ms       = 5_000
 max_publish_lag_ms     = 10_000
 vol_window_hours       = 24
 vol_sample_interval_ms = 60_000
-bootstrap_samples      = 24
-bootstrap_interval_secs = 3_600
 fallback_vol           = 0.6
 
 # DeepBook quoting (SO-158): rest two-sided limit orders on every tradeable

@@ -12,6 +12,7 @@ db_pool_size  = 4
 api_service_url = "http://api-service:9003"
 token_info_url  = "http://token-info:9005"
 indexer_graphql_url = "http://indexer:9002/graphql"
+oracle_url      = "http://oracle-service:9013"
 
 discovery_interval_secs = 15
 poll_interval_ms        = 2000
@@ -25,11 +26,9 @@ allowed_origins = ["*"]
 # realized series into Timescale every tick.
 apy_tick_secs = 120
 
-# BETA hermes — testnet feed ids are the beta set; stable hermes 404s.
-# Benchmarks is stable-only, so beta-id vol lookups fall back to the model.
+# Spot + realized vol now come from oracle-service (oracle_url above); these
+# only tune the consumer-side guards + vol window.
 [pyth]
-hermes_url      = "https://hermes-beta.pyth.network"
-benchmarks_url  = "https://benchmarks.pyth.network"
 vol_window_days = 30
 max_publish_lag_ms = 30_000
 max_conf_bps       = 100

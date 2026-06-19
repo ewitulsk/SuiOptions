@@ -24,12 +24,8 @@ tick_secs         = 60
 # the next family. Default = 7 days (the typical bucket cadence).
 roll_threshold_ms = 604_800_000
 
-# Pyth Hermes endpoint. One HTTP `GET /v2/updates/price/latest` is issued
-# per pair per roll — no SSE, no long-lived connection. Override for a
-# private mirror. Sui testnet feed ids are the BETA set, served only by
-# hermes-beta — stable hermes 404s on them (see keeper config for details).
-[pyth]
-hermes_url = "https://hermes-beta.pyth.network"
+# Spot + realized vol come from oracle-service (the single Pyth gateway);
+# point at it with --oracle-url / ORACLE_URL (default http://127.0.0.1:9013).
 
 # Each pair gets its own roll cadence + strike grid + spot source.
 [[pairs]]

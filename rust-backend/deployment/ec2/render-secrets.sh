@@ -87,7 +87,6 @@ $NETWORK = "$SUI_KEY"
 [mm_bot]
 quote_key = "$QUOTE_KEY"
 EOF
-  append_pyth_api_key "$MM_JSON" "$DIR/mm-bot.toml"
 fi
 
 # ---- option-scheduler secret -> rendered TOML ----------------------------
@@ -104,7 +103,6 @@ if SCH_JSON=$(fetch scheduler 2>/dev/null); then
 [sui]
 $NETWORK = "$SUI_KEY"
 EOF
-  append_pyth_api_key "$SCH_JSON" "$DIR/scheduler.toml"
 fi
 
 # ---- auth-service secret -> rendered TOML --------------------------------
@@ -179,15 +177,16 @@ if CHART_JSON=$(fetch price-charting 2>/dev/null); then
   umask 077
   echo "$CHART_DB_URL" > "$DIR/.chart_database_url"
   chmod 600 "$DIR/.chart_database_url"
+fi
 
-  # price-charting has no secrets TOML (it isn't mounted /run/secrets), so its
-  # Pyth API key rides in via env: write it here for deploy.sh to source into
-  # .env as PYTH_API_KEY. Optional — skipped if the secret lacks the field.
-  CHART_PYTH_KEY=$(echo "$CHART_JSON" | jq -r '.pyth_api_key // empty')
-  if [ -n "$CHART_PYTH_KEY" ]; then
-    echo "$CHART_PYTH_KEY" > "$DIR/.pyth_api_key"
-    chmod 600 "$DIR/.pyth_api_key"
-  fi
+# ---- oracle-service secret -> rendered TOML ------------------------------
+# The single Pyth gateway (SO-254). Holds the Pyth API key, attached as a
+# Bearer header on its one Hermes SSE subscription + Benchmarks requests.
+# Absent in envs without the service — silently skipped like mm-bot.
+if ORACLE_JSON=$(fetch oracle-service 2>/dev/null); then
+  umask 077
+  : > "$DIR/oracle-service.toml"
+  append_pyth_api_key "$ORACLE_JSON" "$DIR/oracle-service.toml"
 fi
 
 echo "render-secrets: ok ($ENV)"
