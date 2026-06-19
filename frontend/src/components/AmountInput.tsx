@@ -133,6 +133,8 @@ export function AmountInput({
             step={stableMode ? "0.01" : "0.001"}
             value={text}
             onChange={(e) => update(e.target.value)}
+            // Stop the mouse wheel from scrubbing the number while focused.
+            onWheel={(e) => e.currentTarget.blur()}
           />
           <div className="amount__stepper">
             <button

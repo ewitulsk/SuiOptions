@@ -14,6 +14,7 @@ import { useCallTokenLots } from "../api/useCallTokenLots";
 import { useOptionMetrics } from "../api/optionMetrics";
 import { usePositionEconomics, useDayChange } from "../api/positionEconomics";
 import { formatPrice } from "../format";
+import { useSegmentPill } from "../lib/useSegmentPill";
 import { Orderbook } from "./Orderbook";
 import { OpenOrdersSection } from "./OpenOrdersSection";
 import { WaveLoader } from "./WaveLoader";
@@ -74,9 +75,21 @@ export function BuyDetailTabs({ bucket, series, spot, mid, wallet, tab, onTabCha
   const greek = (v: ReactNode) => (greekLoading ? <WaveLoader /> : m ? v : "—");
   const hasPosition = econ.qty > 0;
 
+  const { ref: barRef, geom: pill, animated } = useSegmentPill(tab);
+
   return (
     <div className="panel dtabs">
-      <div className="dtabs__bar" role="tablist">
+      <div className="dtabs__bar" role="tablist" ref={barRef}>
+        <span
+          className="dtabs__pill"
+          aria-hidden
+          style={{
+            transform: `translateX(${pill.left}px)`,
+            width: pill.width,
+            opacity: pill.ready ? 1 : 0,
+            transition: animated ? undefined : "none",
+          }}
+        />
         {(["greeks", "details", "book", "orders"] as DetailTab[]).map((t) => (
           <button
             key={t}
