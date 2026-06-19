@@ -46,6 +46,13 @@ export function useVaultActions() {
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
 
+  // Auto-dismiss so the toast behaves like a notification popup, matching the
+  // success/error timings in `state/dashboard.ts`.
+  function showToast(next: Toast) {
+    setToast(next);
+    setTimeout(() => setToast(null), next.variant === "error" ? 6000 : 4500);
+  }
+
   function refresh(vaultId: string) {
     qc.invalidateQueries({ queryKey: ["vault", vaultId] });
     qc.invalidateQueries({ queryKey: ["vaults"] });
@@ -64,7 +71,7 @@ export function useVaultActions() {
     sessionAdd: (tx: Parameters<typeof addSessionVaultDeposit>[0], ctx: Parameters<typeof addSessionVaultDeposit>[1]) => void,
   ) {
     if (!address) {
-      setToast({ message: "Connect a wallet or sign in to continue.", variant: "error" });
+      showToast({ message: "Connect a wallet or sign in to continue.", variant: "error" });
       return;
     }
     setBusy(label);
@@ -75,10 +82,10 @@ export function useVaultActions() {
       } else {
         await submitTx(walletTx(address));
       }
-      setToast({ message: okMsg, variant: "success" });
+      showToast({ message: okMsg, variant: "success" });
       refresh(vault.vault_id);
     } catch (err) {
-      setToast({ message: err instanceof Error ? err.message : String(err), variant: "error" });
+      showToast({ message: err instanceof Error ? err.message : String(err), variant: "error" });
     } finally {
       setBusy(null);
     }
