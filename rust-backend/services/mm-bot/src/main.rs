@@ -519,6 +519,7 @@ async fn main() -> Result<()> {
     // sampler task seeds and maintains the vol buffer.
     let http_client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
+        .default_headers(pyth::auth_headers(secrets_loaded.pyth_api_key()))
         .build()
         .context("building reqwest client")?;
     let price_cache = PriceCache::new();

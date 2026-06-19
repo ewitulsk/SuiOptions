@@ -41,6 +41,22 @@ fetch() {
     --query SecretString --output text
 }
 
+# Append a `[pyth]` section with the API key to a rendered secrets TOML, if
+# the service's JSON carries a non-empty `pyth_api_key`. Optional by design:
+# absent key → anonymous (rate-limited) Pyth tier, no [pyth] section emitted.
+#   $1 = service secret JSON   $2 = target .toml path
+append_pyth_api_key() {
+  local key
+  key=$(echo "$1" | jq -r '.pyth_api_key // empty')
+  if [ -n "$key" ]; then
+    cat >> "$2" <<EOF
+
+[pyth]
+api_key = "$key"
+EOF
+  fi
+}
+
 # ---- indexer secret -> exported as DB_PASSWORD for compose -----------------
 INDEXER_JSON=$(fetch indexer)
 DB_PASSWORD=$(echo "$INDEXER_JSON" | jq -r '.db_password')
@@ -71,6 +87,7 @@ $NETWORK = "$SUI_KEY"
 [mm_bot]
 quote_key = "$QUOTE_KEY"
 EOF
+  append_pyth_api_key "$MM_JSON" "$DIR/mm-bot.toml"
 fi
 
 # ---- option-scheduler secret -> rendered TOML ----------------------------
@@ -87,6 +104,7 @@ if SCH_JSON=$(fetch scheduler 2>/dev/null); then
 [sui]
 $NETWORK = "$SUI_KEY"
 EOF
+  append_pyth_api_key "$SCH_JSON" "$DIR/scheduler.toml"
 fi
 
 # ---- auth-service secret -> rendered TOML --------------------------------
@@ -144,6 +162,7 @@ if KEEPER_JSON=$(fetch keeper 2>/dev/null); then
 [sui]
 $NETWORK = "$SUI_KEY"
 EOF
+  append_pyth_api_key "$KEEPER_JSON" "$DIR/keeper.toml"
 else
   echo "WARNING: options/$ENV/keeper secret not found — keeper will fail its health check if deployed" >&2
 fi
@@ -160,6 +179,15 @@ if CHART_JSON=$(fetch price-charting 2>/dev/null); then
   umask 077
   echo "$CHART_DB_URL" > "$DIR/.chart_database_url"
   chmod 600 "$DIR/.chart_database_url"
+
+  # price-charting has no secrets TOML (it isn't mounted /run/secrets), so its
+  # Pyth API key rides in via env: write it here for deploy.sh to source into
+  # .env as PYTH_API_KEY. Optional — skipped if the secret lacks the field.
+  CHART_PYTH_KEY=$(echo "$CHART_JSON" | jq -r '.pyth_api_key // empty')
+  if [ -n "$CHART_PYTH_KEY" ]; then
+    echo "$CHART_PYTH_KEY" > "$DIR/.pyth_api_key"
+    chmod 600 "$DIR/.pyth_api_key"
+  fi
 fi
 
 echo "render-secrets: ok ($ENV)"

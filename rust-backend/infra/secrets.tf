@@ -1,7 +1,11 @@
 # Per-env app secrets, one per service:
 #   options/<env>/indexer     -> {"db_password": "..."}
 #   options/<env>/token-info  -> {"db_password": "..."}
-#   options/<env>/mm-bot      -> {"sui_key": "...", "quote_key": "..."}
+#   options/<env>/mm-bot      -> {"sui_key": "...", "quote_key": "...", "pyth_api_key": "..."}
+#
+# The Pyth-using services (mm-bot, keeper, option-scheduler, price-charting)
+# also carry an optional "pyth_api_key" sent as a Bearer header on Hermes +
+# Benchmarks requests (keeper/scheduler are created by hand, not here).
 #
 # Terraform creates empty placeholders. The actual values are filled in
 # via the AWS console (or `aws secretsmanager put-secret-value`) after
@@ -85,7 +89,7 @@ resource "aws_secretsmanager_secret_version" "auth_service" {
 resource "aws_secretsmanager_secret" "mm_bot" {
   for_each                = toset(["staging"])
   name                    = "options/${each.key}/mm-bot"
-  description             = "mm-bot signing keys (JSON: sui_key, quote_key)."
+  description             = "mm-bot signing keys (JSON: sui_key, quote_key, pyth_api_key)."
   recovery_window_in_days = 7
 }
 
@@ -93,8 +97,9 @@ resource "aws_secretsmanager_secret_version" "mm_bot_placeholder" {
   for_each  = aws_secretsmanager_secret.mm_bot
   secret_id = each.value.id
   secret_string = jsonencode({
-    sui_key   = "REPLACE_ME"
-    quote_key = "REPLACE_ME"
+    sui_key      = "REPLACE_ME"
+    quote_key    = "REPLACE_ME"
+    pyth_api_key = "REPLACE_ME"
   })
   lifecycle {
     # Operator updates this by hand after apply; don't drift back.
@@ -131,7 +136,7 @@ resource "aws_secretsmanager_secret_version" "gas_station_placeholder" {
 resource "aws_secretsmanager_secret" "price_charting" {
   for_each                = toset(["staging", "prod"])
   name                    = "options/${each.key}/price-charting"
-  description             = "price-charting TimescaleDB URL (JSON: database_url)."
+  description             = "price-charting TimescaleDB URL + Pyth key (JSON: database_url, pyth_api_key)."
   recovery_window_in_days = 7
 }
 
@@ -140,6 +145,7 @@ resource "aws_secretsmanager_secret_version" "price_charting_placeholder" {
   secret_id = each.value.id
   secret_string = jsonencode({
     database_url = "REPLACE_ME"
+    pyth_api_key = "REPLACE_ME"
   })
   lifecycle {
     # Operator updates this by hand after apply; don't drift back.

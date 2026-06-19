@@ -124,6 +124,7 @@ services:
       APP_ENV: staging
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       CHART_DATABASE_URL: ${CHART_DATABASE_URL}
+      PYTH_API_KEY: ${PYTH_API_KEY:-}
       RUST_LOG: info,price_charting=debug
     depends_on: [token-info, api-service, indexer]
     restart: unless-stopped
