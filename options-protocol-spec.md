@@ -57,7 +57,7 @@ The protocol's defining characteristic is its **pooled-bucket model with FIFO ex
 - **Call option**: The (asset, expiry) tuple identifying a class of options.
 - **Bucket**: The (asset, expiry, strike, settlement_asset) tuple. A bucket is a single shared object on Sui that pools all writes for that exact contract specification.
 - **Write**: The act of depositing underlying into a bucket in exchange for a Position Object (and routing premium to the counterparty's Account).
-- **Exercise**: The act of a `CallOption` holder burning their object to receive underlying from the bucket, paying `amount × strike` settlement asset in.
+- **Exercise**: The act of a call-option holder burning their `Coin<Call>` tokens to receive underlying from the bucket, paying `amount × strike` settlement asset in.
 - **Redeem**: The post-expiry act of a Position Object holder claiming their proportional share of the bucket's underlying and settlement asset balances.
 
 ### 2.2 The cursor model
@@ -94,7 +94,9 @@ options_protocol/
 │   ├── admin.move          // AdminCap, protocol_config
 │   ├── account.move        // Account shared object, deposits, withdrawals, signing key
 │   ├── bucket.move         // Bucket shared object, cursor logic, write/exercise/redeem
-│   ├── call_option.move    // CallOption owned-object type, mint/burn/split/join
+│   │                       // (no call_option.move) — the option is a fungible
+│   │                       // Coin<Call> whose currency is generated per roll by
+│   │                       // the scheduler; the bucket holds its TreasuryCap. See §3.4.
 │   ├── position.move       // Position type, mint/burn, redemption math
 │   ├── quote.move          // Quote struct, signature verification, nonce tracking
 │   ├── treasury.move       // Fee treasury shared object, asset-agnostic Bag
@@ -141,23 +143,27 @@ public struct Account has key {
 
 Storing balances and consumed nonces as dynamic fields keeps `Account` generic across asset types without parameterization.
 
-#### 3.2.4 `Bucket<Underlying, Settlement>` (shared)
+#### 3.2.4 `Bucket<Underlying, Settlement, Call>` (shared)
 
 ```move
-public struct Bucket<phantom Underlying, phantom Settlement> has key {
+public struct Bucket<phantom Underlying, phantom Settlement, phantom Call> has key {
     id: UID,
     asset_type: TypeName,
     settlement_type: TypeName,
+    call_type: TypeName,
     expiry_ms: u64,                  // Sui clock timestamp in milliseconds
     strike: u64,                     // strike in raw settlement-asset smallest-units
     total_written: u128,
     exercise_cursor: u128,
     underlying_balance: Balance<Underlying>,
     settlement_balance: Balance<Settlement>,
+    // Sole mint/burn authority for this bucket's option coin. Held for the
+    // bucket's whole life; never exposed by reference outside the module.
+    call_treasury: TreasuryCap<Call>,
 }
 ```
 
-`Underlying` and `Settlement` are phantom type parameters that distinguish buckets by their asset pair. The `Bucket` does not hold a `TreasuryCap` — `CallOption` (§3.2.6) is a plain Move object minted/burned by the protocol's `bucket` module directly. Bucket isolation for `CallOption` is enforced by the `bucket_id: ID` field stored on each `CallOption` and checked at exercise time. See §3.4 for the rationale and the planned Currency-standard migration.
+`Underlying`, `Settlement`, and `Call` are phantom type parameters. `Underlying`/`Settlement` distinguish buckets by their asset pair; `Call` is the bucket's option-coin type — a One-Time-Witness currency generated per roll (§3.4). The `Bucket` **owns the sole `TreasuryCap<Call>`** for its option coin and is the only minter and burner. This makes the coin's outstanding supply exactly equal the outstanding (unexercised, unburned) option amount, and makes bucket isolation a **type-system** guarantee rather than a runtime `bucket_id` check: a `Coin<Call>` can only be burned by the one bucket that owns its `TreasuryCap<Call>`.
 
 #### 3.2.5 `Position` (owned)
 
@@ -172,19 +178,11 @@ public struct Position has key, store {
 
 `Position` is an owned Sui Move object — `key + store` — held in the writer's wallet. It is freely transferable via `sui::transfer::public_transfer` and can be wrapped inside other objects (kiosks, custodial vaults, DEX listings) by any holder. Burned at redemption (§3.3.6).
 
-#### 3.2.6 `CallOption` (owned)
+#### 3.2.6 Option coin: `Coin<Call>` (fungible)
 
-```move
-public struct CallOption has key, store {
-    id: UID,
-    bucket_id: ID,
-    amount: u64,
-}
-```
+The call option is a **fungible `Coin<Call>`**, not a bespoke object. `Call` is a One-Time-Witness currency type unique to each bucket; the option-scheduler generates and publishes these per roll (§3.4). The bucket holds the sole `TreasuryCap<Call>`, so the option is minted at write (§3.3.4) and burned at exercise / expiry (§3.3.5, §3.3.7) through the bucket's own treasury.
 
-`CallOption` is an owned Sui Move object — `key + store` — held in the option buyer's wallet. Like `Position`, it is freely transferable via `sui::transfer::public_transfer` and wrappable inside other objects. It exposes `split(amount)` and `join(other)` so a holder can divide or recombine their position; the protocol enforces `bucket_id` equality on `join`. Burned at exercise (§3.3.5).
-
-> **MVP note: `CallOption` is non-fungible at the object level.** Two `CallOption` objects with the same `bucket_id` represent equivalent rights but are distinct objects — they aren't interchangeable in a `Coin<T>` sense. The spec originally proposed `Coin<CallOptionToken<U, S>>`; that approach was dropped because Sui's Coin type requires a One-Time Witness per fungible currency, which doesn't compose with runtime bucket creation. See §3.4.
+Because it is an ordinary `Coin<Call>`, the option inherits native coin semantics for free: wallets display it as a balance, and holders use `coin::split` / `coin::join` to subdivide or recombine. No `bucket_id` field is needed — two `Coin<Call>` of the same type are fully fungible, and a coin can only ever be burned by the bucket whose `TreasuryCap<Call>` minted it, so bucket isolation is enforced by the type system.
 
 #### 3.2.7 `SignedQuote`
 
@@ -225,23 +223,23 @@ All functions live in their respective modules and emit events on success (see �
 #### 3.3.1 Admin
 
 ```move
-public fun new_call_option<Underlying, Settlement>(
+public fun create_bucket<Underlying, Settlement, Call>(
     _: &AdminCap,
+    call_treasury: TreasuryCap<Call>,   // fresh (zero-supply) cap for this bucket's option coin
     expiry_ms: u64,
-    start_strike: u64,
-    strike_interval: u64,
-    count: u64,
-    coin_witness: ... ,   // see §3.4 for coin-creation pattern
+    strike: u64,
     ctx: &mut TxContext,
 )
 ```
 
-Creates `count` buckets at strikes `start_strike`, `start_strike + strike_interval`, …, `start_strike + (count-1) * strike_interval`. For each bucket: mints the bucket as a shared object and emits `BucketCreated`. `CallOption` objects are minted on demand at `execute_write` time — no per-bucket coin currency is created.
+Creates one bucket for the `(Underlying, Settlement, Call)` triple, taking ownership of the option coin's `TreasuryCap<Call>` (asserted fresh — zero supply — so the supply == outstanding-options invariant holds from genesis). Mints the bucket as a shared object and emits `BucketCreated`.
+
+One bucket per call (rather than a `count` loop) because each bucket needs a **distinct** `Call` coin type, and a generic function is monomorphic in its type arguments per invocation. The option-scheduler fans a strike grid out off-chain: it publishes one package containing N One-Time-Witness coin modules, harvests the N `TreasuryCap`s their `init`s mint, then issues N `create_bucket` calls in a single PTB — one per cap. See §3.4 for the per-roll coin-generation pattern.
 
 ```move
 public fun set_fee_bps(_: &AdminCap, config: &mut ProtocolConfig, new_bps: u64)
 public fun withdraw_treasury<T>(_: &AdminCap, treasury: &mut Treasury, amount: u64, recipient: address, ctx: &mut TxContext)
-public fun cleanup_bucket<U, S>(_: &AdminCap, bucket: Bucket<U, S>, ctx: &mut TxContext)
+public fun cleanup_bucket<U, S, Call>(_: &AdminCap, bucket: Bucket<U, S, Call>, ctx: &mut TxContext)
 ```
 
 `cleanup_bucket` requires: `clock.timestamp_ms() ≥ expiry_ms` AND `underlying_balance == 0` AND `settlement_balance == 0`. Destroys the bucket object.
@@ -284,8 +282,8 @@ On success, records the nonce with its `valid_until_ms` in Account dynamic field
 #### 3.3.4 Write execution (the unified entry point)
 
 ```move
-public fun execute_write<Underlying, Settlement>(
-    bucket: &mut Bucket<Underlying, Settlement>,
+public fun execute_write<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
     config: &ProtocolConfig,
     treasury: &mut Treasury,
     signer_account: &mut Account,
@@ -320,7 +318,7 @@ Logic (in order):
    - `range_end = range_start + quote.write_amount as u128`
    - `bucket.total_written = range_end`
 9. **Mint `Position`** with `(bucket_id, range_start, range_end)` → transfer to `position_recipient`.
-10. **Mint `CallOption`** with `(bucket_id, amount = quote.write_amount)` → transfer to `call_token_recipient`.
+10. **Mint option coin**: `coin::mint(&mut bucket.call_treasury, quote.write_amount, ctx)` → `Coin<Call>`, transferred to `call_token_recipient`. The minted amount equals the underlying written, keeping coin supply == outstanding options.
 11. **Emit `WriteExecuted` event**.
 
 The function takes both `Coin<Underlying>` and `Coin<Settlement>` parameters even though only one is non-empty per flow, to keep the function signature uniform. Empty Coins are destroyed via `coin::destroy_zero`.
@@ -328,9 +326,9 @@ The function takes both `Coin<Underlying>` and `Coin<Settlement>` parameters eve
 #### 3.3.5 Exercise
 
 ```move
-public fun exercise<Underlying, Settlement>(
-    bucket: &mut Bucket<Underlying, Settlement>,
-    call: CallOption,
+public fun exercise<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    call: Coin<Call>,
     settlement_payment: Coin<Settlement>,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -339,23 +337,22 @@ public fun exercise<Underlying, Settlement>(
 
 Logic:
 1. Assert `clock.timestamp_ms() < bucket.expiry_ms`.
-2. Assert `call_option::bucket_id(&call) == object::id(bucket)`.
-3. `amount = call_option::amount(&call)`.
-4. Assert `coin::value(&settlement_payment) == amount * bucket.strike` (in raw units).
-5. Assert `bucket.exercise_cursor + (amount as u128) ≤ bucket.total_written`.
-6. Burn `call` via `call_option::burn`.
-7. Move `settlement_payment` into `bucket.settlement_balance`.
-8. `bucket.exercise_cursor += amount as u128`.
-9. Split and return `amount` of underlying from `bucket.underlying_balance`.
-10. Emit `Exercised` event.
+2. `amount = coin::value(&call)`; assert `amount > 0`. (No `bucket_id` check needed — the `Coin<Call>` type already pins the option to this bucket.)
+3. Assert `coin::value(&settlement_payment) == amount * bucket.strike` (in raw units).
+4. Assert `bucket.exercise_cursor + (amount as u128) ≤ bucket.total_written`.
+5. Burn `call` via `coin::burn(&mut bucket.call_treasury, call)` — burning through the bucket's own treasury is what enforces, by type, that the coin belongs to this bucket.
+6. Move `settlement_payment` into `bucket.settlement_balance`.
+7. `bucket.exercise_cursor += amount as u128`.
+8. Split and return `amount` of underlying from `bucket.underlying_balance`.
+9. Emit `Exercised` event.
 
-To exercise a partial amount, the holder calls `call_option::split(&mut call, amount, ctx)` first to carve off the slice they want to exercise, then passes the carved object to `exercise`.
+To exercise a partial amount, the holder uses `coin::split(&mut call, amount, ctx)` first to carve off the slice they want to exercise, then passes the carved `Coin<Call>` to `exercise`.
 
 #### 3.3.6 Redeem
 
 ```move
-public fun redeem_position<Underlying, Settlement>(
-    bucket: &mut Bucket<Underlying, Settlement>,
+public fun redeem_position<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
     position: Position,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -375,12 +372,12 @@ Logic:
 7. Emit `Redeemed` event.
 8. Return both coins.
 
-#### 3.3.7 Burn expired `CallOption`
+#### 3.3.7 Burn expired option coin
 
 ```move
-public fun burn_expired_option<Underlying, Settlement>(
-    bucket: &mut Bucket<Underlying, Settlement>,
-    call: CallOption,
+public fun burn_expired_option<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    call: Coin<Call>,
     clock: &Clock,
     ctx: &mut TxContext,
 )
@@ -388,19 +385,23 @@ public fun burn_expired_option<Underlying, Settlement>(
 
 Logic:
 1. Assert `clock.timestamp_ms() ≥ bucket.expiry_ms`.
-2. Assert `call_option::bucket_id(&call) == object::id(bucket)`.
-3. Burn `call` via `call_option::burn`.
-4. Emit `ExpiredOptionBurned` event.
+2. Burn `call` via `coin::burn(&mut bucket.call_treasury, call)` (the coin type pins it to this bucket).
+3. Emit `ExpiredOptionBurned` event.
 
 ### 3.4 Per-bucket token representation
 
-**MVP design**: `CallOption` (§3.2.6) is a single non-fungible Move object type defined once in the protocol package. Every bucket mints the same struct; bucket isolation is enforced by the `bucket_id: ID` field stored on each `CallOption` and checked at `exercise` and `join`. Holders can `split` a `CallOption` to subdivide their position; the resulting child object inherits the parent's `bucket_id`. This sidesteps Sui's One-Time-Witness requirement (which would otherwise force a per-bucket package publish) at the cost of giving up native `Coin<T>` semantics — wallets see each `CallOption` as a discrete object rather than a fungible balance.
+**Design: per-roll One-Time-Witness coin packages.** Each bucket's option is a real fungible `Coin<Call>` whose `Call` type is unique to that bucket. The option-scheduler produces these per roll:
 
-The original spec's `Coin<CallOptionToken<U, S>>` design is therefore **rejected for MVP**. Earlier drafts considered three alternatives (per-bucket published witness modules; per-(Underlying, Settlement) generic Coin types; per-bucket phantom-witness with `coin::create_currency`) and all hit the same fundamental problem: Sui's Coin standard requires module-init OTW, which cannot be invoked at runtime from a shared-object operation.
+1. **Codegen** — for a strike grid of N strikes, generate one OTW coin module per strike (`call_0 … call_{N-1}`). Each module's `init` calls `coin::create_currency`, freezes the metadata, and transfers the resulting `TreasuryCap` to the publisher (the scheduler).
+2. **Compile & publish** — compile the package in-process and publish it; harvest the N `TreasuryCap<Call_i>` objects the inits minted from the publish transaction's object changes.
+3. **Create buckets** — pair each cap to its strike and call `bucket::create_bucket<Underlying, Settlement, Call_i>` once per cap, all in a single PTB. Each bucket takes ownership of its `TreasuryCap<Call>` and holds it for life.
 
-**End goal — Sui Currency standard**: Sui's [Currency standard](https://docs.sui.io/onchain-finance/fungible-tokens/currency) ships thousands of pre-deployed marker structs (`Marker0001`, `Marker0002`, …) that the protocol can register a fungible token against at runtime, without a per-token package publish. The target design is to wrap each bucket's `CallOption` rights using one of these pre-deployed markers, giving holders a true fungible `Coin`-like balance per bucket. When the supply of markers is exhausted, the protocol contract is upgraded to deploy additional markers — a routine upgrade, not a redesign.
+Because the bucket owns the sole `TreasuryCap<Call>`, it is the only entity that can mint (at write) or burn (at exercise / expiry) the option coin. Two consequences fall out for free:
 
-This migration is out of MVP scope but the on-chain types are deliberately shaped so that the move is additive: `CallOption` becomes the privileged wrapper that mints/burns its corresponding Currency-marker `Coin`, leaving `bucket.move` and the cursor model untouched.
+- **Outstanding supply == outstanding options.** The cap starts fresh (zero supply, asserted at `create_bucket`), is minted 1:1 with underlying written, and burned on exercise/expiry — so `coin::total_supply(call_treasury)` always equals the unexercised, unburned option amount.
+- **Bucket isolation is a type guarantee.** A `Coin<Call_i>` can only be burned by the bucket holding `TreasuryCap<Call_i>`. There is no `bucket_id` field on the option and no runtime cross-bucket check to get wrong; the type system does it.
+
+This sidesteps the classic obstacle — Sui's Coin standard requires a module-`init` OTW per currency, which cannot be invoked at runtime from a shared-object operation — by moving currency creation off the hot path and into the scheduler's per-roll package publish. Holders get native `Coin` semantics (wallet balances, `split`/`join`) with no per-operation package publishing.
 
 ### 3.5 Events
 
@@ -1092,7 +1093,7 @@ Writer        Frontend       Chain
 
 **Scenario 4: Frontrunning RFQ**. Quoting Service operator leaks RFQs to favored MMs. **Mitigation**: out of scope for MVP. Could be addressed by signed RFQs, decentralized RFQ relay, or batching.
 
-**Scenario 5: Bucket cursor manipulation**. None possible — cursor only advances via legitimate exercises, which require burning a `CallOption` and paying full settlement.
+**Scenario 5: Bucket cursor manipulation**. None possible — cursor only advances via legitimate exercises, which require burning a `Coin<Call>` and paying full settlement.
 
 **Scenario 6: Reentrancy**. Move's resource model precludes reentrancy attacks within a single PTB; objects are linearly typed.
 
@@ -1107,7 +1108,7 @@ The following are critical and warrant audit attention:
 1. Cursor math in `execute_write` and `redeem_position`.
 2. Signature verification and nonce tracking in `verify_and_consume_quote`.
 3. Fee skim arithmetic and rounding behavior.
-4. `CallOption` bucket-isolation: the `bucket_id` field on each `CallOption` is the only thing preventing a holder from exercising one bucket's `CallOption` against another bucket. Verify the `exercise` and `call_option::join` `bucket_id` checks are airtight.
+4. Option-coin bucket isolation: isolation rests on each bucket owning a distinct `TreasuryCap<Call>` and being the sole minter/burner of its `Coin<Call>`. Verify each bucket's `TreasuryCap` is fresh (zero supply) at `create_bucket`, is never exposed by reference outside the `bucket` module, and that every mint/burn goes through the bucket's own treasury.
 5. Sui-specific concerns: shared object access patterns, dynamic field key collisions, clock object usage.
 
 ---
@@ -1116,7 +1117,7 @@ The following are critical and warrant audit attention:
 
 - Multi-key Accounts (cold key + hot key separation).
 - Multi-MM aggregated quotes (writer requests size, service splits across MMs, single PTB executes multiple `execute_write` calls).
-- Exchange integration / order book listing of `CallOption` objects (likely gated on the Currency-standard migration described in §3.4).
+- Exchange integration / order-book listing of the option `Coin<Call>` (already fungible per §3.4; this is integration work, not a protocol change).
 - Reversed-flow frontend (retail trader buying calls) — protocol supports it, frontend is future work.
 - Decentralization of the Quoting Service.
 - Cross-chain bridging for underlying assets.
@@ -1129,7 +1130,7 @@ The following are critical and warrant audit attention:
 ## 11. Implementation Roadmap (Suggested)
 
 **Phase 1 — Core protocol**
-- Bucket, Account, Position, CallOption types
+- Bucket, Account, Position types; per-bucket option `Coin<Call>`
 - `execute_write`, `exercise`, `redeem_position`, `burn_expired_option`
 - Quote signature verification, nonce tracking
 - Event emission
