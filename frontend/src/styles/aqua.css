@@ -1168,7 +1168,7 @@
 }
 
 [data-theme="aqua"] .toast {
-  position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%);
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
   display: flex; align-items: center; gap: 10px;
   padding: 12px 18px;
   background: var(--aqua-glass-3); backdrop-filter: blur(16px);
