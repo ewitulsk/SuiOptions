@@ -198,7 +198,12 @@ function WithdrawForm({ balances }: { balances: Record<string, bigint> }) {
     <div className="wallet-menu__withdraw">
       <div className="wallet-menu__section-label">Withdraw to Sui address</div>
       <div style={{ display: "flex", gap: 4, padding: "0 8px 6px" }}>
-        <select value={ticker || held[0].ticker} onChange={(e) => setTicker(e.target.value)}>
+        <select
+          className="admin-field__input"
+          style={{ flex: 1 }}
+          value={ticker || held[0].ticker}
+          onChange={(e) => setTicker(e.target.value)}
+        >
           {held.map((t) => (
             <option key={t.ticker} value={t.ticker}>
               {t.ticker}
@@ -206,7 +211,8 @@ function WithdrawForm({ balances }: { balances: Record<string, bigint> }) {
           ))}
         </select>
         <input
-          style={{ width: 70 }}
+          className="admin-field__input"
+          style={{ width: 90 }}
           placeholder="amount"
           value={amount}
           onChange={(e) => setAmount(e.target.value)}
@@ -214,12 +220,13 @@ function WithdrawForm({ balances }: { balances: Record<string, bigint> }) {
       </div>
       <div style={{ display: "flex", gap: 4, padding: "0 8px 6px" }}>
         <input
+          className="admin-field__input"
           style={{ flex: 1 }}
           placeholder="0x recipient"
           value={recipient}
           onChange={(e) => setRecipient(e.target.value)}
         />
-        <button disabled={busy || !amount || !recipient} onClick={submit}>
+        <button className="admin-btn" disabled={busy || !amount || !recipient} onClick={submit}>
           {busy ? "…" : "Send"}
         </button>
       </div>
