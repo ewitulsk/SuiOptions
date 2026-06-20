@@ -45,3 +45,4 @@ PRs raised through Claude Code.
 | [#225](https://github.com/ewitulsk/SuiOptions/pull/225) | [SO-228](https://suioptions.atlassian.net/browse/SO-228) | SO-8 Protocol | Fix Keeper Genesis-Vault select_bucket Loop (Move Enum Phase Mis-Parse) |
 | [#234](https://github.com/ewitulsk/SuiOptions/pull/234) | [SO-237](https://suioptions.atlassian.net/browse/SO-237) | SO-19 Frontend | Group Vault Carousel by Asset with Vertical Cadence Coverflow |
 | [#251](https://github.com/ewitulsk/SuiOptions/pull/251) | [SO-253](https://suioptions.atlassian.net/browse/SO-253) | SO-8 Protocol | Migrate Keeper Realized-Vol to Cached BenchmarkVol (fix Pyth 429 storm) |
+| [#265](https://github.com/ewitulsk/SuiOptions/pull/265) | [SO-266](https://suioptions.atlassian.net/browse/SO-266) | SO-19 Frontend | Gate Exercise on Expired Options + Fix Off-Screen Popup Positioning |
