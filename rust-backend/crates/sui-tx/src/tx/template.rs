@@ -115,6 +115,33 @@ pub fn match_any<'a>(templates: &'a [PtbTemplate], pt: &ProgrammableTransaction)
         .map(|t| t.name.as_str())
 }
 
+/// Compact, log-safe summary of a PTB's command sequence: each Move call as
+/// `package::module::function<type_arg_count>`, each other command by kind,
+/// joined by `; `. The matcher is otherwise opaque on refusal — this turns a
+/// bare "matches no template" into something we can diff against the frontend
+/// builders.
+pub fn describe_ptb(pt: &ProgrammableTransaction) -> String {
+    pt.commands
+        .iter()
+        .map(|cmd| match cmd {
+            Command::MoveCall(c) => format!(
+                "{}::{}::{}<{}>",
+                c.package,
+                c.module,
+                c.function,
+                c.type_arguments.len()
+            ),
+            Command::SplitCoins(..) => "SplitCoins".to_owned(),
+            Command::MergeCoins(..) => "MergeCoins".to_owned(),
+            Command::TransferObjects(..) => "TransferObjects".to_owned(),
+            Command::MakeMoveVec(..) => "MakeMoveVec".to_owned(),
+            Command::Publish(..) => "Publish".to_owned(),
+            Command::Upgrade(..) => "Upgrade".to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// The Sui framework package (`0x2`), home of `coin::zero`.
 fn framework() -> ObjectID {
     ObjectID::from_hex_literal("0x2").expect("0x2 is a valid ObjectID")
@@ -403,7 +430,7 @@ pub fn protocol_templates(
             name: "deepbook_place_market".to_owned(),
             required: vec![proof.clone(), place_market.clone()],
             allowed: vec![deposit.clone(), proof.clone(), place_market.clone()],
-            arities: vec![(place_market, 2), (deposit, 1)],
+            arities: vec![(place_market.clone(), 2), (deposit.clone(), 1)],
         });
 
         // Cancels.
@@ -433,6 +460,39 @@ pub fn protocol_templates(
             required: vec![proof.clone(), settle.clone()],
             allowed: vec![proof.clone(), settle.clone(), withdraw_all.clone()],
             arities: vec![(settle.clone(), 2), (withdraw_all.clone(), 1)],
+        });
+
+        // Market buy/sell that delivers proceeds to the wallet in one PTB
+        // (frontend `buildPlaceMarketOrderTx` with a `recipient`): fills settle
+        // into the BM, so the same tx mints a fresh proof, settles, and drains
+        // both assets back out (proof → place_market → proof → settle →
+        // withdraw_all ×1-2). The session twin folds this into a single
+        // `_with_session` call, which is why session market orders were
+        // sponsored and wallet ones were not. Every asset moved is the user's
+        // own — same posture as `deepbook_withdraw` — so the sponsor only risks
+        // gas. Kept separate from `deepbook_place_market` so a plain order still
+        // can't smuggle a withdraw.
+        templates.push(PtbTemplate {
+            name: "deepbook_place_market_withdraw".to_owned(),
+            required: vec![
+                proof.clone(),
+                place_market.clone(),
+                settle.clone(),
+                withdraw_all.clone(),
+            ],
+            allowed: vec![
+                deposit.clone(),
+                proof.clone(),
+                place_market.clone(),
+                settle.clone(),
+                withdraw_all.clone(),
+            ],
+            arities: vec![
+                (place_market.clone(), 2),
+                (deposit.clone(), 1),
+                (settle.clone(), 2),
+                (withdraw_all.clone(), 1),
+            ],
         });
 
         // Exercise an option whose coin the user parked in their DeepBook
@@ -614,6 +674,46 @@ mod tests {
             false,
         );
         assert_eq!(match_any(&templates(), &market), Some("deepbook_place_market"));
+
+        // Market buy/sell that settles + drains fills back to the wallet in one
+        // PTB (buildPlaceMarketOrderTx with a recipient): optional deposit →
+        // proof → place_market → fresh proof → settle → withdraw_all ×2
+        // (+ benign TransferObjects). This is the wallet "buy/sell on DeepBook"
+        // shape the gas station was refusing.
+        let market_withdraw = build(
+            &[
+                (d("balance_manager", "deposit"), 1),
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "place_market_order"), 2),
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "withdraw_settled_amounts"), 2),
+                (d("balance_manager", "withdraw_all"), 1),
+                (d("balance_manager", "withdraw_all"), 1),
+            ],
+            false,
+        );
+        assert_eq!(
+            match_any(&templates(), &market_withdraw),
+            Some("deepbook_place_market_withdraw"),
+        );
+
+        // Same without the optional deposit prelude (e.g. a market sell funded
+        // entirely from the BM) still matches.
+        let market_withdraw_no_deposit = build(
+            &[
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "place_market_order"), 2),
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "withdraw_settled_amounts"), 2),
+                (d("balance_manager", "withdraw_all"), 1),
+                (d("balance_manager", "withdraw_all"), 1),
+            ],
+            false,
+        );
+        assert_eq!(
+            match_any(&templates(), &market_withdraw_no_deposit),
+            Some("deepbook_place_market_withdraw"),
+        );
 
         // Cancels.
         let cancel = build(
