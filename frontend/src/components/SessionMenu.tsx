@@ -11,15 +11,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { SUPPORTED_TOKENS, findToken } from "../config";
 import {
-  ENV,
-  SUPPORTED_TOKENS,
-  TEST_TOKENS,
-  findToken,
-  type TestToken,
-} from "../config";
-import {
-  fundFromFaucet,
   revokeSession,
   sessionLoginAvailable,
   signInWithLastEth,
@@ -167,31 +160,6 @@ export function ConnectMenu({ onSuiWallet }: { onSuiWallet: () => void }) {
   );
 }
 
-const FUND_WHOLE_TOKENS = 10n;
-
-function FundRow({ token }: { token: TestToken }) {
-  const [busy, setBusy] = useState(false);
-  const amount = FUND_WHOLE_TOKENS * 10n ** BigInt(token.decimals);
-  return (
-    <button
-      className="wallet-menu__item"
-      disabled={busy}
-      onClick={async () => {
-        setBusy(true);
-        try {
-          await fundFromFaucet(token, amount);
-        } catch {
-          /* surfaced via session.error */
-        } finally {
-          setBusy(false);
-        }
-      }}
-    >
-      {busy ? `Minting ${token.symbol}…` : `+${FUND_WHOLE_TOKENS} ${token.symbol}`}
-    </button>
-  );
-}
-
 function WithdrawForm({ balances }: { balances: Record<string, bigint> }) {
   const held = useMemo(
     () =>
@@ -230,7 +198,12 @@ function WithdrawForm({ balances }: { balances: Record<string, bigint> }) {
     <div className="wallet-menu__withdraw">
       <div className="wallet-menu__section-label">Withdraw to Sui address</div>
       <div style={{ display: "flex", gap: 4, padding: "0 8px 6px" }}>
-        <select value={ticker || held[0].ticker} onChange={(e) => setTicker(e.target.value)}>
+        <select
+          className="admin-field__input"
+          style={{ flex: 1 }}
+          value={ticker || held[0].ticker}
+          onChange={(e) => setTicker(e.target.value)}
+        >
           {held.map((t) => (
             <option key={t.ticker} value={t.ticker}>
               {t.ticker}
@@ -238,7 +211,8 @@ function WithdrawForm({ balances }: { balances: Record<string, bigint> }) {
           ))}
         </select>
         <input
-          style={{ width: 70 }}
+          className="admin-field__input"
+          style={{ width: 90 }}
           placeholder="amount"
           value={amount}
           onChange={(e) => setAmount(e.target.value)}
@@ -246,16 +220,43 @@ function WithdrawForm({ balances }: { balances: Record<string, bigint> }) {
       </div>
       <div style={{ display: "flex", gap: 4, padding: "0 8px 6px" }}>
         <input
+          className="admin-field__input"
           style={{ flex: 1 }}
           placeholder="0x recipient"
           value={recipient}
           onChange={(e) => setRecipient(e.target.value)}
         />
-        <button disabled={busy || !amount || !recipient} onClick={submit}>
+        <button className="admin-btn" disabled={busy || !amount || !recipient} onClick={submit}>
           {busy ? "…" : "Send"}
         </button>
       </div>
     </div>
+  );
+}
+
+/** Shows the Sui session account address with a one-click copy. */
+function CopyAddressRow({ address }: { address: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="wallet-menu__item"
+      role="menuitem"
+      title={`Copy session account ${address}`}
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(address);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          /* clipboard unavailable */
+        }
+      }}
+    >
+      <span className="wallet-menu__addr">{shortHex(address)}</span>
+      <span className="wallet-menu__label" style={{ marginLeft: "auto" }}>
+        {copied ? "Copied!" : "Copy address"}
+      </span>
+    </button>
   );
 }
 
@@ -300,6 +301,9 @@ export function SessionMenu() {
           <div className="wallet-menu__header">
             <span className="wallet-menu__wallet-name">{rootLabel}</span>
           </div>
+
+          <div className="wallet-menu__section-label">Session account</div>
+          <CopyAddressRow address={handle.accountId} />
 
           <div className="wallet-menu__section-label">
             {expired
@@ -361,15 +365,6 @@ export function SessionMenu() {
               </span>
             </div>
           ))}
-
-          {ENV === "testnet" && TEST_TOKENS.length > 0 && !expired && !revoked && (
-            <>
-              <div className="wallet-menu__section-label">Fund (testnet faucet)</div>
-              {TEST_TOKENS.map((t) => (
-                <FundRow key={t.symbol} token={t} />
-              ))}
-            </>
-          )}
 
           {!expired && !revoked && <WithdrawForm balances={session.balances} />}
 
