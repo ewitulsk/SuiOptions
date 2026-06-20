@@ -186,7 +186,12 @@ function buildOwnedRow(
   const amount = scaleU64(obj.amount_raw, series.asset_decimals);
   const strike = series.buckets.find((b) => b.bucket_id === obj.bucket_id)?.strike ?? 0;
   const dte = daysUntil(series.expiry_ms, now);
-  const expired = dte < 0;
+  // Gate on the real timestamp, not the rounded `dte`: an option that expired
+  // up to ~12h ago rounds to dte=0 and would otherwise read as not-expired,
+  // leaving a live Exercise button. On-chain `exercise` asserts
+  // `timestamp_ms() < expiry_ms` (bucket.move), so anything at/after expiry is
+  // unexercisable and must be gated here.
+  const expired = now >= series.expiry_ms;
   const itm = spot > 0 && spot > strike;
   const moneyness = strike > 0 ? ((spot - strike) / strike) * 100 : 0;
   const intrinsicNow = Math.max(0, (spot - strike) * amount);
