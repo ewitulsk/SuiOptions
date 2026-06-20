@@ -188,11 +188,8 @@ export function OwnedCard({
           </button>
         )}
         {p.status === "expired_itm" && (
-          <button
-            className="pos-card__cta pos-card__cta--primary"
-            onClick={() => onExercise(p)}
-          >
-            Auto-settle → +{formatPrice(p.pnl)} USDC
+          <button className="pos-card__cta pos-card__cta--ghost" disabled>
+            Expired · exercise window closed
           </button>
         )}
         {p.status === "active_otm" && (

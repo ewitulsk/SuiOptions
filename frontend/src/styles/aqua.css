@@ -1119,7 +1119,7 @@
 
 /* ---------- Modal / toast ---------- */
 [data-theme="aqua"] .scrim {
-  position: absolute; inset: 0;
+  position: fixed; inset: 0;
   background: rgba(var(--aqua-shadow-rgb),0.35);
   backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
   display: flex; align-items: center; justify-content: center;
