@@ -802,6 +802,7 @@ async fn run_reconciler(
     safety_margin: u64,
 ) -> Result<()> {
     confirm_landed_rolls(pool, indexer, pair_keys).await?;
+    supersede_invalidated_families(pool, indexer, pair_keys).await?;
 
     let rows = db::needs_reconciliation_rows(pool)?;
     if rows.is_empty() {
@@ -871,6 +872,51 @@ async fn confirm_landed_rolls(
                     &b.bucket_id.to_hex(),
                 )?;
             }
+        }
+    }
+    Ok(())
+}
+
+/// Treat a fully-invalidated bucket family as if it never existed: mark its
+/// confirmed roll `superseded` so the active slot frees and the cadence picker
+/// re-rolls a fresh family at the same expiry. Only confirmed, unexpired rolls
+/// are checked; a re-rolled family adds live buckets at the same expiry, so the
+/// "all invalidated" test goes false and the row stops being superseded.
+async fn supersede_invalidated_families(
+    pool: &db::DbPool,
+    indexer: &IndexerClient,
+    pair_keys: &[PairKey],
+) -> Result<()> {
+    let rows = db::confirmed_unexpired_rolls(pool, now_ms())?;
+    for row in rows {
+        let expiry = row.expiry_ms as u64;
+        // Live (non-cleaned) buckets at this expiry belonging to this row's pair.
+        let family: Vec<_> = indexer
+            .buckets(true, None, None, Some(expiry))
+            .await?
+            .into_iter()
+            .filter(|b| {
+                pair_keys
+                    .iter()
+                    .find(|p| p.matches_assets(&b.asset_type, &b.settlement_type))
+                    .is_some_and(|pk| {
+                        pk.underlying_symbol == row.underlying_symbol
+                            && pk.settlement_symbol == row.settlement_symbol
+                    })
+            })
+            .collect();
+        // Non-empty guard: an empty result means the indexer hasn't ingested
+        // the family yet (or it's been cleaned) — don't supersede on that.
+        if !family.is_empty() && family.iter().all(|b| b.invalidated) {
+            info!(
+                id = row.id,
+                pair = %format!("{}/{}", row.underlying_symbol, row.settlement_symbol),
+                expiry_ms = expiry,
+                buckets = family.len(),
+                "reconciler: bucket family fully invalidated — superseding so the cadence picker re-rolls"
+            );
+            metrics::counter!("scheduler_rolls_superseded_total").increment(1);
+            db::mark_superseded(pool, row.id)?;
         }
     }
     Ok(())
