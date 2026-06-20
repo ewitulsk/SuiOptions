@@ -145,6 +145,12 @@ pub struct ListBucketsParams {
     /// `?exclude_expired=true`.
     #[serde(default)]
     pub exclude_expired: bool,
+    /// Drop admin-invalidated buckets (and series left empty). Opt-in
+    /// (defaults to `false`) so admin/monitoring views still see invalidated
+    /// buckets; the trade picker passes `?exclude_invalidated=true` to hide
+    /// frozen strikes server-side rather than filtering client-side.
+    #[serde(default)]
+    pub exclude_invalidated: bool,
 }
 
 pub async fn list_buckets(
@@ -165,7 +171,19 @@ pub async fn list_buckets(
     if params.exclude_expired {
         series.retain(|s| s.expiry_ms > now_ms);
     }
+    if params.exclude_invalidated {
+        retain_non_invalidated(&mut series);
+    }
     Ok(Json(BucketsResponse { series }))
+}
+
+/// Drop admin-invalidated buckets from every series and remove series left
+/// with no buckets. Used by `?exclude_invalidated=true`.
+fn retain_non_invalidated(series: &mut Vec<SeriesDto>) {
+    for s in series.iter_mut() {
+        s.buckets.retain(|b| !b.invalidated);
+    }
+    series.retain(|s| !s.buckets.is_empty());
 }
 
 /// `GET /buckets/:bucket_id` — one bucket's cursor/queue state.
@@ -624,6 +642,34 @@ mod tests {
         )];
         let s = group_into_series(buckets, &cat, NOW_MS);
         assert_eq!(s[0].buckets[0].fill_pct, Some(0.0));
+    }
+
+    #[test]
+    fn exclude_invalidated_drops_buckets_and_empty_series() {
+        let cat = fixture_catalog();
+        // One series: two valid strikes + one invalidated.
+        let mut inv = mk_bucket(860, 0, 0, 0);
+        inv.invalidated = true;
+        let mut series = group_into_series(
+            vec![
+                (ObjectId::new([0x01; 32]), mk_bucket(850, 0, 0, 0)),
+                (ObjectId::new([0x02; 32]), inv),
+                (ObjectId::new([0x03; 32]), mk_bucket(870, 0, 0, 0)),
+            ],
+            &cat,
+            NOW_MS,
+        );
+        assert_eq!(series[0].buckets.len(), 3);
+        retain_non_invalidated(&mut series);
+        assert_eq!(series[0].buckets.len(), 2);
+        assert!(series[0].buckets.iter().all(|b| !b.invalidated));
+
+        // A series whose every bucket is invalidated is removed entirely.
+        let mut only_inv = mk_bucket(900, 0, 0, 0);
+        only_inv.invalidated = true;
+        let mut s2 = group_into_series(vec![(ObjectId::new([0x04; 32]), only_inv)], &cat, NOW_MS);
+        retain_non_invalidated(&mut s2);
+        assert!(s2.is_empty());
     }
 
     fn mk_idx_bucket(id: ObjectId, written: u128, cursor: u128) -> IndexerBucket {

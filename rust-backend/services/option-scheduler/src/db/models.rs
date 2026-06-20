@@ -12,6 +12,11 @@ pub enum RollState {
     Submitted,
     Confirmed,
     NeedsReconciliation,
+    /// Confirmed family whose buckets were all invalidated on-chain. Terminal
+    /// and NOT active, so it drops out of `latest_active_expiry` and frees the
+    /// `scheduler_rolls_active_slot` partial-unique slot — letting the cadence
+    /// picker re-roll a fresh family at the same expiry.
+    Superseded,
 }
 
 impl RollState {
@@ -21,6 +26,7 @@ impl RollState {
             Self::Submitted => "submitted",
             Self::Confirmed => "confirmed",
             Self::NeedsReconciliation => "needs_reconciliation",
+            Self::Superseded => "superseded",
         }
     }
 
@@ -30,6 +36,7 @@ impl RollState {
             "submitted" => Some(Self::Submitted),
             "confirmed" => Some(Self::Confirmed),
             "needs_reconciliation" => Some(Self::NeedsReconciliation),
+            "superseded" => Some(Self::Superseded),
             _ => None,
         }
     }

@@ -242,6 +242,30 @@ pub fn delete_reconciled(pool: &DbPool, row_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Confirmed rolls whose expiry is still in the future — the families a vault
+/// could still select. The reconciler checks these for on-chain invalidation;
+/// past-expiry families age out on their own.
+pub fn confirmed_unexpired_rolls(pool: &DbPool, now_ms: u64) -> Result<Vec<SchedulerRollRow>> {
+    let mut conn = pool.get().context("confirmed_unexpired_rolls: pool")?;
+    scheduler_rolls::table
+        .filter(scheduler_rolls::state.eq(RollState::Confirmed.as_str()))
+        .filter(scheduler_rolls::expiry_ms.gt(now_ms as i64))
+        .load(&mut conn)
+        .context("confirmed_unexpired_rolls: query")
+}
+
+/// Mark a confirmed roll `superseded` (its on-chain family was fully
+/// invalidated). The state is non-active, so it leaves the active slot free
+/// for the cadence picker to re-roll a fresh family at the same expiry.
+pub fn mark_superseded(pool: &DbPool, row_id: i64) -> Result<()> {
+    let mut conn = pool.get().context("mark_superseded: pool")?;
+    diesel::update(scheduler_rolls::table.find(row_id))
+        .set(scheduler_rolls::state.eq(RollState::Superseded.as_str()))
+        .execute(&mut conn)
+        .context("mark_superseded")?;
+    Ok(())
+}
+
 /// Get all active rows (for boot logging).
 pub fn all_active_rows(pool: &DbPool) -> Result<Vec<SchedulerRollRow>> {
     let mut conn = pool.get().context("all_active_rows: pool")?;
@@ -546,6 +570,12 @@ mod tests {
             assert_eq!(RollState::parse(state.as_str()), Some(*state));
             assert!(state.is_active());
         }
+        // Superseded round-trips but is NOT active — that's what frees the slot.
+        assert_eq!(
+            RollState::parse(RollState::Superseded.as_str()),
+            Some(RollState::Superseded)
+        );
+        assert!(!RollState::Superseded.is_active());
         assert_eq!(RollState::parse("bogus"), None);
     }
 
@@ -569,6 +599,29 @@ mod tests {
         delete_pending(&pool, "TBTC", "TUSDC", 2_000).unwrap();
         // Row is gone; re-claim succeeds.
         assert!(claim_slot(&pool, "TBTC", "TUSDC", 2_000, WEEK, 0).unwrap());
+    }
+
+    #[test]
+    #[ignore]
+    fn superseded_frees_slot_for_reroll() {
+        let pool = test_pool();
+        let now = 1_000_000u64;
+        // Confirmed family at a future expiry.
+        assert!(claim_slot(&pool, "TSUI", "TUSDC", now + HOUR, HOUR, 0).unwrap());
+        mark_submitted(&pool, "TSUI", "TUSDC", now + HOUR, "0xabc", &["id1".into()]).unwrap();
+        confirm_from_indexer(&pool, "TSUI", "TUSDC", now + HOUR, "id1").unwrap();
+
+        // It's a re-roll candidate, and still blocks a duplicate claim.
+        let cands = confirmed_unexpired_rolls(&pool, now).unwrap();
+        assert_eq!(cands.len(), 1);
+        assert!(!claim_slot(&pool, "TSUI", "TUSDC", now + HOUR, HOUR, 0).unwrap());
+
+        // Supersede (family fully invalidated) → slot frees, latest drops it,
+        // and the same expiry can be re-rolled.
+        mark_superseded(&pool, cands[0].id).unwrap();
+        assert_eq!(latest_active_expiry(&pool, "TSUI", "TUSDC", HOUR).unwrap(), None);
+        assert!(confirmed_unexpired_rolls(&pool, now).unwrap().is_empty());
+        assert!(claim_slot(&pool, "TSUI", "TUSDC", now + HOUR, HOUR, 0).unwrap());
     }
 
     #[test]
