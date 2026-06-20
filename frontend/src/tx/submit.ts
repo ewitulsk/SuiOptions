@@ -3,9 +3,10 @@
 // One entry point for every on-chain write. When the sponsor toggle is on and
 // the user is connected, it runs Sui's sponsored-transaction flow: build the
 // gasless TransactionKind, get the gas station to attach gas + sign, have the
-// wallet co-sign the same bytes, then execute with both signatures. Otherwise
-// (toggle off, or sponsorship fails) it falls back to the normal wallet-paid
-// `signAndExecuteTransaction`, so the user's action always completes.
+// wallet co-sign the same bytes, then execute with both signatures. When the
+// toggle is off it goes straight to wallet-paid `signAndExecuteTransaction`.
+// Sponsorship failures are NOT silently retried wallet-paid — they surface so
+// the user can choose to turn off the Gas toggle and pay their own gas.
 
 import {
   useCurrentAccount,
@@ -53,12 +54,14 @@ export function useSubmitTransaction() {
         signature: [userSignature, sponsorSignature],
       });
     } catch (err) {
-      // Graceful fallback to wallet-paid: gas station down, balance too low, or
-      // the tx targets a non-allow-listed package (e.g. faucet/admin). The
-      // fallback hides gas-station degradation from users, so report it.
-      posthog.captureException(err, { source: "sponsorship_fallback" });
-      console.warn("sponsorship failed, falling back to wallet-paid:", err);
-      await signAndExecute({ transaction: tx });
+      // No silent wallet-paid fallback: a sponsorship failure (gas station
+      // down, balance too low, or the tx targets a non-allow-listed package)
+      // surfaces so the user can turn off the Gas toggle and pay their own gas.
+      posthog.captureException(err, { source: "sponsorship_failed" });
+      console.warn("sponsorship failed:", err);
+      throw new Error(
+        "Gas sponsorship failed for this transaction. Turn off the Gas toggle in the header to pay your own gas, then retry.",
+      );
     }
   };
 }

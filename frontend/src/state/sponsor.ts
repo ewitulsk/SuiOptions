@@ -55,8 +55,8 @@ export async function initSponsorHealth(): Promise<void> {
     health = await fetchGasStationBalance();
   } catch {
     // Gas station unreachable: leave health null. With no explicit user pref
-    // the toggle stays ON, but a sponsorship attempt will fail and fall back
-    // to wallet-paid (see useSubmitTransaction).
+    // the toggle stays ON, but a sponsorship attempt will fail and surface an
+    // error prompting the user to turn off the toggle (see useSubmitTransaction).
     health = null;
   }
   emit();
