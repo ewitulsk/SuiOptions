@@ -71,3 +71,11 @@ gas_budget          = 200_000_000
 # defaults (poll 10s, ReservePlus, 300bps shade, 5,000-TUSDC escrow cap).
 [onchain_rfq]
 enabled = true
+
+# On-chain proceeds-swap bidder (C2): the buy side of the vault's
+# settlement→underlying swap auctions. Posts underlying, wins settlement,
+# pricing the escrow at the Pyth cross less bid_margin_bps. Reuses the RFQ
+# bidder knobs (poll 10s, escrow cap, rebid) under [onchain_swap.bidder];
+# bid_margin_bps/lookback_secs use struct defaults (20bps, 24h).
+[onchain_swap.bidder]
+enabled = true
