@@ -259,6 +259,32 @@ function WithdrawForm({ balances }: { balances: Record<string, bigint> }) {
   );
 }
 
+/** Shows the Sui session account address with a one-click copy. */
+function CopyAddressRow({ address }: { address: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="wallet-menu__item"
+      role="menuitem"
+      title={`Copy session account ${address}`}
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(address);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          /* clipboard unavailable */
+        }
+      }}
+    >
+      <span className="wallet-menu__addr">{shortHex(address)}</span>
+      <span className="wallet-menu__label" style={{ marginLeft: "auto" }}>
+        {copied ? "Copied!" : "Copy address"}
+      </span>
+    </button>
+  );
+}
+
 /** The account dropdown while a session is active. */
 export function SessionMenu() {
   const session = useSession();
@@ -300,6 +326,9 @@ export function SessionMenu() {
           <div className="wallet-menu__header">
             <span className="wallet-menu__wallet-name">{rootLabel}</span>
           </div>
+
+          <div className="wallet-menu__section-label">Session account</div>
+          <CopyAddressRow address={handle.accountId} />
 
           <div className="wallet-menu__section-label">
             {expired
