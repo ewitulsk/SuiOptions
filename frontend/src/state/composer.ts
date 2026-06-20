@@ -63,11 +63,11 @@ function formatPremium(v: number): string {
   return Math.round(v).toString();
 }
 
-// Default trade size scaled to the asset's price: aim for ~$100 of notional,
+// Default trade size scaled to the asset's price: aim for ~$1k of notional,
 // then snap the resulting quantity to a tidy 1/2/5 round number so the field
-// pre-fills with e.g. 0.001 BTC, 0.05 ETH, or 50 of a $2 token rather than a
+// pre-fills with e.g. 0.01 BTC, 0.5 ETH, or 500 of a $2 token rather than a
 // flat 0.05 that's $5k on one asset and pennies on another.
-const DEFAULT_NOTIONAL_USD = 100;
+const DEFAULT_NOTIONAL_USD = 1000;
 
 function niceDefaultAmount(spot: number): number {
   if (!Number.isFinite(spot) || spot <= 0) return 0.05;
