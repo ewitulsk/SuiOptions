@@ -18,7 +18,7 @@ use sui_types::transaction::{Command, GasData, Transaction, TransactionData, Tra
 use tracing::info;
 
 use crate::sui_client::Signer;
-use crate::tx::template::{match_any, PtbTemplate};
+use crate::tx::template::{describe_ptb, match_any, PtbTemplate};
 
 /// Budget-sizing knobs (from gas-station config).
 pub struct BudgetPolicy {
@@ -67,7 +67,10 @@ fn validate_kind(kind: &TransactionKind, templates: &[PtbTemplate]) -> Result<()
             info!(template = name, "PTB matched sponsored template");
             Ok(())
         }
-        None => bail!("PTB matches no sponsored template"),
+        // Include the decoded command sequence so a refusal can be diffed
+        // against the frontend builders without a redeploy (the matcher is
+        // otherwise opaque).
+        None => bail!("PTB matches no sponsored template: [{}]", describe_ptb(pt)),
     }
 }
 
