@@ -8,7 +8,7 @@ use tracing::info;
 use gas_station::{router, AppState, Cli, Config};
 use sui_tx::tx::sponsor::BudgetPolicy;
 use sui_tx::tx::template::protocol_templates;
-use sui_tx::SuiClientWrapper;
+use sui_tx::{Network, SuiClientWrapper};
 use sui_types::base_types::ObjectID;
 use token_info_client::TokenInfoClient;
 
@@ -42,8 +42,9 @@ async fn main() -> Result<()> {
         .package()
         .context("protocol package id from token-info")?;
 
-    // Faucet `mint_to_sender` is testnet-only; never sponsor it in prod.
-    let allow_faucet = cfg.environment != "prod";
+    // Faucet `mint_to_sender` is testnet-only; sponsor it on any non-mainnet
+    // network (prod is itself a testnet deployment that ships test tokens).
+    let allow_faucet = cfg.network != Network::Mainnet;
     let mut test_tokens: Vec<(ObjectID, String)> = Vec::new();
     if allow_faucet {
         if let Some(tt) = snapshot.maybe_test_tokens() {
