@@ -278,12 +278,17 @@ async fn tick_vault(
         None => None,
     };
 
-    // Cap the configured stagger to this vault's selling window so an hourly
-    // round's short window still opens multiple slices (weekly unchanged).
+    // Cap both the slice count and the stagger to this vault's selling window:
+    // an hourly round's 30-min window runs a single slice, while a weekly
+    // round's 12h window keeps the configured count (self-scaling, one config).
+    let slices = keeper::slicing::effective_slices(
+        ids.defaults.slicing.slices,
+        view.config.selling_window_ms,
+    );
     let stagger_ms = keeper::slicing::effective_stagger_ms(
         ids.defaults.slicing.stagger_minutes * 60_000,
         view.config.selling_window_ms,
-        ids.defaults.slicing.slices,
+        slices,
     );
 
     let action = plan(&PlanInput {
@@ -293,7 +298,7 @@ async fn tick_vault(
         swap_auctions: &swap_auctions,
         bucket_meta: bucket_meta.as_ref(),
         stagger_ms,
-        max_slices: ids.defaults.slicing.slices,
+        max_slices: slices,
     });
     // Skip the steady-state Idle plan to avoid a per-vault log flood every tick;
     // only surface a plan when there's actually an action to take.

@@ -24,6 +24,21 @@ pub fn effective_stagger_ms(
     configured_stagger_ms.min(window_fit)
 }
 
+/// Minimum selling-window time one slice is worth opening for. Caps the slice
+/// count on short rounds so an hourly vault's 30-min window runs a single
+/// auction over the whole deployable, while a weekly vault's 12h window keeps
+/// the full configured count. Mirrors `effective_stagger_ms` — self-scaling,
+/// so one keeper config drives both cadences. One mm-bot doesn't need an
+/// hourly round chopped into four open→settle re-offers.
+const MIN_MS_PER_SLICE: u64 = 30 * 60_000; // 30 min
+
+/// Cap the configured slice count to `selling_window_ms / MIN_MS_PER_SLICE`,
+/// floored at 1. Hourly (30-min window) → 1; weekly (12h window) → configured.
+pub fn effective_slices(configured_slices: u64, selling_window_ms: u64) -> u64 {
+    let window_fit = (selling_window_ms / MIN_MS_PER_SLICE).max(1);
+    configured_slices.min(window_fit).max(1)
+}
+
 /// Size of the slice to open now, or `None` when nothing should open
 /// (window closed, nothing deployable, or an auction already running —
 /// the caller checks `open_rfqs`).
@@ -125,5 +140,29 @@ mod tests {
     fn effective_stagger_floors_at_one() {
         assert_eq!(effective_stagger_ms(90 * 60_000, 0, 4), 1);
         assert_eq!(effective_stagger_ms(90 * 60_000, 1_000_000, 0), 1_000_000);
+    }
+
+    #[test]
+    fn effective_slices_caps_hourly_to_one() {
+        // Hourly vault: 30-min selling window → a single slice over the round.
+        assert_eq!(effective_slices(4, 30 * 60_000), 1);
+        // With one slice, the opener offers the whole deployable at once.
+        let stagger = effective_stagger_ms(90 * 60_000, 30 * 60_000, 1);
+        assert_eq!(
+            next_slice_amount(1_000_000, 0, 30 * 60_000, stagger, 1, u64::MAX),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn effective_slices_leaves_weekly_untouched() {
+        // Weekly vault: 12h selling window keeps the full configured count.
+        assert_eq!(effective_slices(4, 12 * HOUR), 4);
+    }
+
+    #[test]
+    fn effective_slices_floors_at_one() {
+        assert_eq!(effective_slices(0, 12 * HOUR), 1);
+        assert_eq!(effective_slices(4, 0), 1);
     }
 }
