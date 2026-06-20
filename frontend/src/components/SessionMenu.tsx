@@ -11,15 +11,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { SUPPORTED_TOKENS, findToken } from "../config";
 import {
-  ENV,
-  SUPPORTED_TOKENS,
-  TEST_TOKENS,
-  findToken,
-  type TestToken,
-} from "../config";
-import {
-  fundFromFaucet,
   revokeSession,
   sessionLoginAvailable,
   signInWithLastEth,
@@ -164,31 +157,6 @@ export function ConnectMenu({ onSuiWallet }: { onSuiWallet: () => void }) {
         </div>
       )}
     </div>
-  );
-}
-
-const FUND_WHOLE_TOKENS = 10n;
-
-function FundRow({ token }: { token: TestToken }) {
-  const [busy, setBusy] = useState(false);
-  const amount = FUND_WHOLE_TOKENS * 10n ** BigInt(token.decimals);
-  return (
-    <button
-      className="wallet-menu__item"
-      disabled={busy}
-      onClick={async () => {
-        setBusy(true);
-        try {
-          await fundFromFaucet(token, amount);
-        } catch {
-          /* surfaced via session.error */
-        } finally {
-          setBusy(false);
-        }
-      }}
-    >
-      {busy ? `Minting ${token.symbol}…` : `+${FUND_WHOLE_TOKENS} ${token.symbol}`}
-    </button>
   );
 }
 
@@ -390,15 +358,6 @@ export function SessionMenu() {
               </span>
             </div>
           ))}
-
-          {ENV === "testnet" && TEST_TOKENS.length > 0 && !expired && !revoked && (
-            <>
-              <div className="wallet-menu__section-label">Fund (testnet faucet)</div>
-              {TEST_TOKENS.map((t) => (
-                <FundRow key={t.symbol} token={t} />
-              ))}
-            </>
-          )}
 
           {!expired && !revoked && <WithdrawForm balances={session.balances} />}
 
