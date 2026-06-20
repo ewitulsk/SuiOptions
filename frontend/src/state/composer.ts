@@ -4,7 +4,7 @@
 // spot from Pyth, wallet balances from on-chain `getBalance`, and the bucket
 // cursor/queue from the `/buckets` response. The hook keeps a single return
 // shape so UI components don't change.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { normalizeStructTag } from "@mysten/sui/utils";
 import { useSubmitTransaction } from "../tx/submit";
@@ -12,6 +12,7 @@ import { posthog } from "../lib/posthog";
 import { useBuckets } from "../api/useBuckets";
 import { useCoinBalance } from "../api/useCoinBalance";
 import { usePythPrice } from "../api/usePythPrice";
+import { resolveFeedId } from "../api/pyth";
 import { useRfq } from "../api/useRfq";
 import { useBulkView } from "../api/useBulkView";
 import { buildBuyTx, buildWriteTx } from "../tx/composer";
@@ -61,6 +62,22 @@ function formatPremium(v: number): string {
   if (!Number.isFinite(v)) return "—";
   if (v <= 0) return "0";
   return Math.round(v).toString();
+}
+
+// Default trade size scaled to the asset's price: aim for ~$1k of notional,
+// then snap the resulting quantity to a tidy 1/2/5 round number so the field
+// pre-fills with e.g. 0.01 BTC, 0.5 ETH, or 500 of a $2 token rather than a
+// flat 0.05 that's $5k on one asset and pennies on another.
+const DEFAULT_NOTIONAL_USD = 1000;
+
+function niceDefaultAmount(spot: number): number {
+  if (!Number.isFinite(spot) || spot <= 0) return 0.05;
+  const raw = DEFAULT_NOTIONAL_USD / spot;
+  const exp = Math.floor(Math.log10(raw));
+  const base = 10 ** exp;
+  const frac = raw / base; // in [1, 10)
+  const mult = frac < 1.5 ? 1 : frac < 3.5 ? 2 : frac < 7.5 ? 5 : 10;
+  return mult * base;
 }
 
 /**
@@ -266,6 +283,24 @@ export function useComposerState({
   const live = usePythPrice(selectedAsset);
   const spot = live?.price ?? 0;
   const spotUnavailable = selectedAsset !== null && live === null;
+
+  // Scale the pre-filled amount to the asset's price (~$1k of notional, snapped
+  // to a round number) once spot lands for the selected asset, and again each
+  // time the user switches assets. Guarded so it fires once per asset rather
+  // than on every live price tick — edits made while staying on an asset stick.
+  //
+  // `live` lags one render behind a switch (its price updates in an effect), so
+  // gate on the feed id actually matching the selected asset — otherwise the
+  // first post-switch render would default off the *previous* asset's price and
+  // then mark the new asset done, leaving the amount stuck.
+  const defaultedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!selectedAsset || !live || spot <= 0) return;
+    if (live.feedId !== resolveFeedId(selectedAsset)) return;
+    if (defaultedFor.current === selectedAsset) return;
+    defaultedFor.current = selectedAsset;
+    setAmount(niceDefaultAmount(spot));
+  }, [selectedAsset, live, spot]);
 
   // Wallet balances from on-chain `getBalance`, scaled by each side's
   // decimals. Resolve coin types from the selected series.
