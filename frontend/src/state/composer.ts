@@ -4,7 +4,7 @@
 // spot from Pyth, wallet balances from on-chain `getBalance`, and the bucket
 // cursor/queue from the `/buckets` response. The hook keeps a single return
 // shape so UI components don't change.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { normalizeStructTag } from "@mysten/sui/utils";
 import { useSubmitTransaction } from "../tx/submit";
@@ -61,6 +61,22 @@ function formatPremium(v: number): string {
   if (!Number.isFinite(v)) return "—";
   if (v <= 0) return "0";
   return Math.round(v).toString();
+}
+
+// Default trade size scaled to the asset's price: aim for ~$100 of notional,
+// then snap the resulting quantity to a tidy 1/2/5 round number so the field
+// pre-fills with e.g. 0.001 BTC, 0.05 ETH, or 50 of a $2 token rather than a
+// flat 0.05 that's $5k on one asset and pennies on another.
+const DEFAULT_NOTIONAL_USD = 100;
+
+function niceDefaultAmount(spot: number): number {
+  if (!Number.isFinite(spot) || spot <= 0) return 0.05;
+  const raw = DEFAULT_NOTIONAL_USD / spot;
+  const exp = Math.floor(Math.log10(raw));
+  const base = 10 ** exp;
+  const frac = raw / base; // in [1, 10)
+  const mult = frac < 1.5 ? 1 : frac < 3.5 ? 2 : frac < 7.5 ? 5 : 10;
+  return mult * base;
 }
 
 /**
@@ -266,6 +282,17 @@ export function useComposerState({
   const live = usePythPrice(selectedAsset);
   const spot = live?.price ?? 0;
   const spotUnavailable = selectedAsset !== null && live === null;
+
+  // Scale the pre-filled amount to the asset's price the first time spot lands
+  // (~$100 of notional, snapped to a round number). Fires once and only while
+  // the field still holds the untouched default, so it never clobbers a user
+  // edit made before the price arrived.
+  const defaultedAmount = useRef(false);
+  useEffect(() => {
+    if (defaultedAmount.current || spot <= 0) return;
+    defaultedAmount.current = true;
+    setAmount((cur) => (cur === initialAmount ? niceDefaultAmount(spot) : cur));
+  }, [spot, initialAmount]);
 
   // Wallet balances from on-chain `getBalance`, scaled by each side's
   // decimals. Resolve coin types from the selected series.
