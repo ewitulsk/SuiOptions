@@ -12,6 +12,7 @@ import { posthog } from "../lib/posthog";
 import { useBuckets } from "../api/useBuckets";
 import { useCoinBalance } from "../api/useCoinBalance";
 import { usePythPrice } from "../api/usePythPrice";
+import { resolveFeedId } from "../api/pyth";
 import { useRfq } from "../api/useRfq";
 import { useBulkView } from "../api/useBulkView";
 import { buildBuyTx, buildWriteTx } from "../tx/composer";
@@ -287,13 +288,19 @@ export function useComposerState({
   // to a round number) once spot lands for the selected asset, and again each
   // time the user switches assets. Guarded so it fires once per asset rather
   // than on every live price tick — edits made while staying on an asset stick.
+  //
+  // `live` lags one render behind a switch (its price updates in an effect), so
+  // gate on the feed id actually matching the selected asset — otherwise the
+  // first post-switch render would default off the *previous* asset's price and
+  // then mark the new asset done, leaving the amount stuck.
   const defaultedFor = useRef<string | null>(null);
   useEffect(() => {
-    if (!selectedAsset || spot <= 0) return;
+    if (!selectedAsset || !live || spot <= 0) return;
+    if (live.feedId !== resolveFeedId(selectedAsset)) return;
     if (defaultedFor.current === selectedAsset) return;
     defaultedFor.current = selectedAsset;
     setAmount(niceDefaultAmount(spot));
-  }, [selectedAsset, spot]);
+  }, [selectedAsset, live, spot]);
 
   // Wallet balances from on-chain `getBalance`, scaled by each side's
   // decimals. Resolve coin types from the selected series.
