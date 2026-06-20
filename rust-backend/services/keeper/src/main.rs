@@ -368,7 +368,7 @@ async fn select_bucket_or_finalize(
         &view.config,
         meta.underlying_decimals,
         meta.settlement_decimals,
-        defaults.target_delta,
+        defaults.target_delta_for(view.config.round_ms),
     );
 
     // Skip rounds whose snapped strike can't clear the reserve the on-chain

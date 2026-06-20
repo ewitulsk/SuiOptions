@@ -119,6 +119,13 @@ pub struct VaultDefaults {
     /// the reserve floor.
     pub target_delta: f64,
 
+    /// Per-cadence override of `target_delta` for short-round (hourly)
+    /// vaults — those with `round_ms <= SHORT_ROUND_THRESHOLD_MS`. At an
+    /// hourly tenor a 0.20-delta call's premium falls below the reserve, so
+    /// these vaults target closer to ATM (higher delta) to stay sellable.
+    /// Absent ⇒ `target_delta` applies to every cadence.
+    pub short_round_target_delta: Option<f64>,
+
     /// σ when the Benchmarks fetch fails (always, on testnet — beta
     /// feed ids aren't served there). No fallback ⇒ the vault skips
     /// strike selection that tick.
@@ -134,9 +141,26 @@ impl Default for VaultDefaults {
         Self {
             iv_ratio: default_iv_ratio(),
             target_delta: default_target_delta(),
+            short_round_target_delta: None,
             sigma_fallback: None,
             vol_window_days: default_vol_window_days(),
             slicing: SlicingConfig::default(),
+        }
+    }
+}
+
+/// Round duration at/below which a vault is "short cadence" (hourly): its tiny
+/// option tenor needs a closer-to-ATM strike to clear the reserve, so
+/// `short_round_target_delta` (when set) overrides `target_delta`.
+pub const SHORT_ROUND_THRESHOLD_MS: u64 = 6 * 3_600_000; // 6h
+
+impl VaultDefaults {
+    /// The strike-selection delta target for a vault of this cadence.
+    pub fn target_delta_for(&self, round_ms: u64) -> f64 {
+        if round_ms <= SHORT_ROUND_THRESHOLD_MS {
+            self.short_round_target_delta.unwrap_or(self.target_delta)
+        } else {
+            self.target_delta
         }
     }
 }
@@ -197,6 +221,14 @@ mod tests {
             assert_eq!(cfg.pyth.update_fee_mist, 1, "{env}");
             // Launch-memo strategy defaults (guide doc 08).
             assert_eq!(cfg.vault_defaults.target_delta, 0.20, "{env}");
+            // Hourly (short-round) vaults target closer to ATM to clear the reserve.
+            assert_eq!(
+                cfg.vault_defaults.short_round_target_delta,
+                Some(0.25),
+                "{env}"
+            );
+            assert_eq!(cfg.vault_defaults.target_delta_for(3_600_000), 0.25, "{env}: hourly");
+            assert_eq!(cfg.vault_defaults.target_delta_for(604_800_000), 0.20, "{env}: weekly");
             assert_eq!(cfg.vault_defaults.iv_ratio, 1.15, "{env}");
             assert_eq!(
                 cfg.vault_defaults.sigma_fallback,
@@ -206,6 +238,22 @@ mod tests {
             assert_eq!(cfg.vault_defaults.slicing.slices, 4, "{env}");
             assert_eq!(cfg.vault_defaults.slicing.stagger_minutes, 90, "{env}");
         }
+    }
+
+    #[test]
+    fn target_delta_for_overrides_only_short_rounds() {
+        let d = VaultDefaults {
+            target_delta: 0.20,
+            short_round_target_delta: Some(0.25),
+            ..VaultDefaults::default()
+        };
+        // Hourly (≤ 6h) takes the override; weekly keeps the global target.
+        assert_eq!(d.target_delta_for(3_600_000), 0.25); // 1h
+        assert_eq!(d.target_delta_for(SHORT_ROUND_THRESHOLD_MS), 0.25); // boundary
+        assert_eq!(d.target_delta_for(604_800_000), 0.20); // weekly
+        // No override ⇒ global target at every cadence.
+        let d = VaultDefaults { short_round_target_delta: None, ..d };
+        assert_eq!(d.target_delta_for(3_600_000), 0.20);
     }
 
     /// The example config (local dev) must also parse.
