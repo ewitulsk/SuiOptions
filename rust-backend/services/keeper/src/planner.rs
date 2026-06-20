@@ -192,6 +192,7 @@ mod tests {
         VaultConfigView {
             min_strike_bps_over_spot: 300,
             max_strike_bps_over_spot: 6000,
+            min_reserve_premium_bps: 10,
             min_expiry_lead_ms: 3 * 24 * HOUR,
             max_expiry_lead_ms: 9 * 24 * HOUR,
             max_slice_amount: u64::MAX,

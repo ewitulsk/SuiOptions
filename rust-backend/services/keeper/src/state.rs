@@ -43,6 +43,10 @@ pub struct VaultView {
 pub struct VaultConfigView {
     pub min_strike_bps_over_spot: u64,
     pub max_strike_bps_over_spot: u64,
+    /// Floor the on-chain `open_rfq` sets the reserve premium at: bps of the
+    /// slice notional. The keeper uses it to skip rounds whose snapped strike
+    /// can't clear the reserve (see `select_bucket_or_finalize`).
+    pub min_reserve_premium_bps: u64,
     pub min_expiry_lead_ms: u64,
     pub max_expiry_lead_ms: u64,
     pub max_slice_amount: u64,
@@ -208,6 +212,7 @@ pub fn parse_vault_view(fields: &Value) -> Result<VaultView> {
         config: VaultConfigView {
             min_strike_bps_over_spot: u64_field(config, "min_strike_bps_over_spot")?,
             max_strike_bps_over_spot: u64_field(config, "max_strike_bps_over_spot")?,
+            min_reserve_premium_bps: u64_field(config, "min_reserve_premium_bps")?,
             min_expiry_lead_ms: u64_field(config, "min_expiry_lead_ms")?,
             max_expiry_lead_ms: u64_field(config, "max_expiry_lead_ms")?,
             max_slice_amount: u64_field(config, "max_slice_amount")?,
@@ -407,6 +412,7 @@ mod tests {
             "config": {
                 "min_strike_bps_over_spot": "300",
                 "max_strike_bps_over_spot": "6000",
+                "min_reserve_premium_bps": "10",
                 "min_expiry_lead_ms": "259200000",
                 "max_expiry_lead_ms": "777600000",
                 "max_slice_amount": "2000000000",

@@ -18,6 +18,7 @@ fn cfg() -> VaultConfigView {
     VaultConfigView {
         min_strike_bps_over_spot: 0, // band wide open: test the snap rule alone
         max_strike_bps_over_spot: 1_000_000,
+        min_reserve_premium_bps: 10,
         min_expiry_lead_ms: 3 * 86_400_000,
         max_expiry_lead_ms: 9 * 86_400_000,
         max_slice_amount: u64::MAX,

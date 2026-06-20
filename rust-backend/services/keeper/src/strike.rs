@@ -9,7 +9,7 @@
 //! transferable); the golden test in `tests/strike_goldens.rs` runs
 //! both on shared vectors.
 
-use pricing::{call_delta, strike_for_delta, CallInputs};
+use pricing::{call_delta, call_price_per_unit, strike_for_delta, CallInputs};
 use sui_types::base_types::ObjectID;
 
 use crate::state::VaultConfigView;
@@ -36,6 +36,18 @@ impl BucketCandidate {
     }
 }
 
+impl StrikePick {
+    /// Whether the snapped strike's fair value can clear the reserve the
+    /// on-chain `open_rfq` will set (`min_reserve_premium_bps` of notional,
+    /// i.e. `spot × bps/1e4` per unit). The model premium is the ceiling on
+    /// any plausible bid, so `false` means the auction can only expire unsold
+    /// — the keeper skips the round instead of churning it.
+    pub fn clears_reserve(&self, spot_usd_cross: f64, min_reserve_premium_bps: u64) -> bool {
+        let reserve_per_unit = spot_usd_cross * min_reserve_premium_bps as f64 / 10_000.0;
+        self.model_premium_usd > reserve_per_unit
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StrikePick {
     pub bucket_id: ObjectID,
@@ -46,6 +58,11 @@ pub struct StrikePick {
     pub k_star_usd: f64,
     /// Black-Scholes delta of the snapped strike at the IV estimate.
     pub model_delta: f64,
+    /// Black-Scholes per-underlying-unit call price of the snapped strike at
+    /// the IV estimate, in settlement-per-underlying (USD cross) units — the
+    /// ceiling on any plausible bid. Compared against the reserve to skip
+    /// structurally-unsellable rounds.
+    pub model_premium_usd: f64,
     /// True when no candidate ≥ K* existed (doc 04 §3 GridCoverageMiss).
     pub grid_coverage_miss: bool,
 }
@@ -108,6 +125,13 @@ pub fn pick_bucket(
             r: 0.0,
             sigma: sigma_iv,
         }),
+        model_premium_usd: call_price_per_unit(CallInputs {
+            spot: spot_usd_cross,
+            strike: strike_usd,
+            t_years: tau_years,
+            r: 0.0,
+            sigma: sigma_iv,
+        }),
         grid_coverage_miss: miss,
     })
 }
@@ -121,6 +145,7 @@ mod tests {
         VaultConfigView {
             min_strike_bps_over_spot: 300,
             max_strike_bps_over_spot: 6000,
+            min_reserve_premium_bps: 10,
             min_expiry_lead_ms: 3 * 86_400_000,
             max_expiry_lead_ms: 9 * 86_400_000,
             max_slice_amount: u64::MAX,
@@ -215,5 +240,59 @@ mod tests {
         let all: Vec<_> = near.iter().cloned().chain(far.iter().cloned()).collect();
         let pick = pick_bucket(&all, 3.47, 0.85, now, &cfg(), 9, 6, 0.10).unwrap();
         assert_eq!(pick.expiry_ms, now + 5 * 86_400_000);
+    }
+
+    /// Hourly tenor: the +3% floor forces a far-OTM strike whose fair value is
+    /// ~0, far under the 10-bps reserve — `clears_reserve` must reject it so
+    /// the keeper idles the round instead of churning unsellable auctions.
+    #[test]
+    fn clears_reserve_rejects_worthless_short_dated_strike() {
+        let now = 1_700_000_000_000u64;
+        let hourly = VaultConfigView {
+            min_expiry_lead_ms: 50 * 60_000,
+            max_expiry_lead_ms: 90 * 60_000,
+            ..cfg()
+        };
+        let expiry = now + 73 * 60_000;
+        // spot 0.708; strikes 0.709 (below +3% band), 0.780, 0.850 (scale 8).
+        let family: Vec<_> = [70_900u128, 78_000, 85_000]
+            .iter()
+            .enumerate()
+            .map(|(i, k)| BucketCandidate {
+                bucket_id: id(i as u8 + 1),
+                call_type: format!("0xc::call_{i}::CALL_{i}"),
+                strike_raw: *k,
+                strike_scale: 8,
+                expiry_ms: expiry,
+            })
+            .collect();
+        let pick = pick_bucket(&family, 0.708, 0.83, now, &hourly, 9, 6, 0.20).unwrap();
+        assert!((pick.strike_usd - 0.780).abs() < 1e-9, "{pick:?}");
+        assert!(pick.model_premium_usd < 1e-6, "fair value ~0: {pick:?}");
+        assert!(!pick.clears_reserve(0.708, 10), "{pick:?}");
+    }
+
+    /// A normal weekly ~0.10Δ strike is worth far more than the 10-bps
+    /// reserve, so the round proceeds.
+    #[test]
+    fn clears_reserve_passes_normal_weekly_strike() {
+        let now = 1_700_000_000_000u64;
+        let family = sui_family(now + 7 * 86_400_000);
+        let pick = pick_bucket(&family, 3.47, 0.85, now, &cfg(), 9, 6, 0.10).unwrap();
+        assert!(pick.model_premium_usd > 0.0, "{pick:?}");
+        assert!(pick.clears_reserve(3.47, 10), "{pick:?}");
+    }
+
+    /// `clears_reserve` compares fair value strictly against `bps × spot`.
+    #[test]
+    fn clears_reserve_threshold_is_bps_of_spot() {
+        let now = 1_700_000_000_000u64;
+        let family = sui_family(now + 7 * 86_400_000);
+        let mut pick = pick_bucket(&family, 3.47, 0.85, now, &cfg(), 9, 6, 0.10).unwrap();
+        // reserve at spot 3.47, 10 bps = 0.00347.
+        pick.model_premium_usd = 0.004;
+        assert!(pick.clears_reserve(3.47, 10));
+        pick.model_premium_usd = 0.003;
+        assert!(!pick.clears_reserve(3.47, 10));
     }
 }
