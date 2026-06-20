@@ -283,16 +283,17 @@ export function useComposerState({
   const spot = live?.price ?? 0;
   const spotUnavailable = selectedAsset !== null && live === null;
 
-  // Scale the pre-filled amount to the asset's price the first time spot lands
-  // (~$100 of notional, snapped to a round number). Fires once and only while
-  // the field still holds the untouched default, so it never clobbers a user
-  // edit made before the price arrived.
-  const defaultedAmount = useRef(false);
+  // Scale the pre-filled amount to the asset's price (~$1k of notional, snapped
+  // to a round number) once spot lands for the selected asset, and again each
+  // time the user switches assets. Guarded so it fires once per asset rather
+  // than on every live price tick — edits made while staying on an asset stick.
+  const defaultedFor = useRef<string | null>(null);
   useEffect(() => {
-    if (defaultedAmount.current || spot <= 0) return;
-    defaultedAmount.current = true;
-    setAmount((cur) => (cur === initialAmount ? niceDefaultAmount(spot) : cur));
-  }, [spot, initialAmount]);
+    if (!selectedAsset || spot <= 0) return;
+    if (defaultedFor.current === selectedAsset) return;
+    defaultedFor.current = selectedAsset;
+    setAmount(niceDefaultAmount(spot));
+  }, [selectedAsset, spot]);
 
   // Wallet balances from on-chain `getBalance`, scaled by each side's
   // decimals. Resolve coin types from the selected series.
