@@ -71,7 +71,7 @@ interval_pct        = 10.0
 underlying          = "TSUI"
 settlement          = "TUSDC"
 expiry_interval_ms  = 3_600_000    # 1h
-strikes_below       = 2
+strikes_below       = 2            # superseded by [pairs.grid] below (z-ladder)
 strikes_above       = 2
 interval_pct        = 10.0
 roll_threshold_ms   = 1_800_000    # roll the next bucket ~30m before expiry
@@ -81,6 +81,19 @@ roll_threshold_ms   = 1_800_000    # roll the next bucket ~30m before expiry
   max_publish_lag_ms = 30_000
   max_conf_bps       = 100
 
+  # Tenor-aware strike grid (vol-scaled z-ladder), replacing the legacy ±10%
+  # fixed grid — an order of magnitude too wide for the ~1h tenor, where the
+  # whole sellable band sits within ~±2% of spot. The finer ladder (vs the
+  # default SUI 5-point one) keeps adjacent strikes inside the sellable delta
+  # band so the keeper's snap-up lands on a strike that clears the reserve.
+  # vol_floor 0.5: in calmer markets a 1h call is genuinely too thin to clear,
+  # and the keeper idles the round (sub-reserve guard) rather than churn.
+  [pairs.grid]
+  mode           = "z_ladder"
+  ladder         = [0.0, 0.4, 0.8, 1.2, 1.6, 2.0]
+  vol_floor      = 0.5
+  sigma_fallback = 0.85
+
   # Hourly vault policy (Path A — no contract change). Omitted fields fall back
   # to the global [vault_template] below (fees, strike band, swap guards).
   [pairs.vault_template]
@@ -88,6 +101,12 @@ roll_threshold_ms   = 1_800_000    # roll the next bucket ~30m before expiry
   selling_window_ms  = 1_800_000   # 30m RFQ selling window
   min_expiry_lead_ms = 3_000_000   # bucket expiry ≥ now + 50m
   max_expiry_lead_ms = 4_500_000   # bucket expiry ≤ now + 75m
+  # Hourly strike economics (vs the weekly global): at ~1h tenor the sellable
+  # strikes sit just above spot, so drop the +3% floor; and 1h premiums are
+  # thin, so drop the reserve from 10→5 bps. Pairs with the closer-to-ATM
+  # keeper target_delta (short_round_target_delta) to stay above the reserve.
+  min_strike_bps_over_spot = 30    # +0.3% (weekly is +3%)
+  min_reserve_premium_bps  = 5     # 5 bps (weekly is 10)
 
 # ── Vault auto-provisioning ─────────────────────────────────────────────
 # Presence of this table switches on the hourly vault-ensure pass: the

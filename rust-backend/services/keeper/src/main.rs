@@ -368,11 +368,15 @@ async fn select_bucket_or_finalize(
         &view.config,
         meta.underlying_decimals,
         meta.settlement_decimals,
-        defaults.target_delta,
+        defaults.target_delta_for(view.config.round_ms),
     );
 
+    // Skip rounds whose snapped strike can't clear the reserve the on-chain
+    // open_rfq will set: the option's fair value caps any plausible bid, so a
+    // sub-reserve strike can only churn open/settle gas on auctions that
+    // always expire unsold. Treat it like no candidate — idle the round.
     match pick {
-        Some(p) => {
+        Some(p) if p.clears_reserve(spot, view.config.min_reserve_premium_bps) => {
             // The calibration trail / forward-shadow dataset (doc 06 §9.4):
             // every selection logs (σ, K*, snapped strike, model delta).
             info!(
@@ -398,24 +402,46 @@ async fn select_bucket_or_finalize(
             }
             execute_select_bucket(ctx, p.bucket_id, &p.call_type).await
         }
-        None => {
-            let flows_waiting = view.pending_deposits > 0 || view.queued_withdraw_shares > 0;
-            if !flows_waiting {
-                trace!(vault = %ctx.vault_id, "no selectable bucket and no queued flows; idling");
-                return Ok(());
-            }
-            warn!(
+        Some(p) => {
+            // A strike exists but its fair value can't clear the reserve —
+            // skip the round rather than churn unsellable auctions. The
+            // scheduler grid likely has no strike near K* at this tenor.
+            info!(
                 vault = %ctx.vault_id,
                 round = view.round,
-                "no selectable bucket but flows are queued — finalizing the idle round"
+                spot,
+                sigma_iv,
+                strike = p.strike_usd,
+                model_delta = p.model_delta,
+                model_premium_usd = p.model_premium_usd,
+                reserve_per_unit = spot * view.config.min_reserve_premium_bps as f64 / 10_000.0,
+                "strike unsellable: fair value below reserve — idling round"
             );
-            if cli.dry_run {
-                info!(vault = %ctx.vault_id, "dry-run: would finalize_round (idle)");
-                return Ok(());
-            }
-            execute(ctx, &Action::FinalizeRound).await
+            idle_or_finalize_round(cli, ctx, view).await
         }
+        None => idle_or_finalize_round(cli, ctx, view).await,
     }
+}
+
+/// No viable strike this round — no in-band candidate, or none whose fair
+/// value clears the reserve. Finalize if deposits/withdrawals are queued and
+/// waiting on the round to roll, otherwise idle.
+async fn idle_or_finalize_round(cli: &Cli, ctx: &SubmitCtx<'_>, view: &VaultView) -> Result<()> {
+    let flows_waiting = view.pending_deposits > 0 || view.queued_withdraw_shares > 0;
+    if !flows_waiting {
+        trace!(vault = %ctx.vault_id, "no viable strike and no queued flows; idling");
+        return Ok(());
+    }
+    warn!(
+        vault = %ctx.vault_id,
+        round = view.round,
+        "no viable strike but flows are queued — finalizing the idle round"
+    );
+    if cli.dry_run {
+        info!(vault = %ctx.vault_id, "dry-run: would finalize_round (idle)");
+        return Ok(());
+    }
+    execute(ctx, &Action::FinalizeRound).await
 }
 
 async fn fetch_bucket_meta(

@@ -457,6 +457,28 @@ interval_pct        = 5.0
         assert!(cfg.pairs[0].grid.is_none());
     }
 
+    /// The shipped prod config must parse, and the hourly TSUI pair must carry
+    /// the vol-aware z-ladder grid plus the lowered strike/reserve overrides
+    /// that keep its ~1h options sellable.
+    #[test]
+    fn shipped_prod_config_parses_with_hourly_overrides() {
+        let cfg = parse(include_str!("../config/config.prod.toml"));
+        let hourly = cfg
+            .pairs
+            .iter()
+            .find(|p| p.underlying == "TSUI" && p.expiry_interval_ms == 3_600_000)
+            .expect("hourly TSUI pair");
+        match hourly.grid.as_ref().expect("hourly grid configured") {
+            GridConfig::ZLadder { ladder, vol_floor, .. } => {
+                assert_eq!(ladder.len(), 6, "finer ladder than the default 5-point");
+                assert_eq!(*vol_floor, 0.5);
+            }
+        }
+        let t = hourly.vault_template.as_ref().expect("hourly vault_template");
+        assert_eq!(t.min_strike_bps_over_spot, 30);
+        assert_eq!(t.min_reserve_premium_bps, 5);
+    }
+
     #[test]
     fn parses_z_ladder_grid_with_defaults() {
         let cfg = parse(
