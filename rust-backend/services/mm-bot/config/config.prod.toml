@@ -67,3 +67,11 @@ quote_full_inventory = true
 # BM settlement top-up chunk, atomic (1,000 TUSDC).
 tusdc_deposit_chunk = 1_000_000_000
 gas_budget          = 200_000_000
+
+# On-chain RFQ bidder (C2): the mm-bot is the intended counterparty for the
+# vaults' on-chain RFQ auctions. Poll open auctions, price them with the same
+# Black-Scholes brain, and bid from the wallet under the escrow cap. Without
+# this the keeper's slices expire unsold every round. Tuning uses the struct
+# defaults (poll 10s, ReservePlus, 300bps shade, 5,000-TUSDC escrow cap).
+[onchain_rfq]
+enabled = true
