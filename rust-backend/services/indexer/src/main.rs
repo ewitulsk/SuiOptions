@@ -32,6 +32,17 @@ async fn main() -> Result<()> {
     let cfg = Config::load(&cfg_path)
         .with_context(|| format!("loading config from {cfg_path}"))?;
 
+    // Resolve the JSON-RPC endpoint: prefer the shared `[sui] rpc_url`
+    // override from the optional secrets file (rendered by render-secrets.sh)
+    // over the config / public default. Optional by design — a missing or
+    // unreadable secrets file degrades to cfg.resolve_rpc_url() so the indexer
+    // never crash-loops when the secret isn't rendered.
+    let rpc_url = match load_rpc_override(cli.secrets.as_deref()) {
+        Some(u) => u,
+        None => cfg.resolve_rpc_url()?,
+    };
+    info!(rpc = %redact_rpc(&rpc_url), "resolved Sui JSON-RPC endpoint");
+
     // Resolve the deployed package id from the token-info service so a
     // redeploy doesn't need an indexer config edit. Hard cutover: if
     // token-info is unreachable after the retry window we crash (no
@@ -119,12 +130,11 @@ async fn main() -> Result<()> {
                 s
             }
             None => {
-                let rpc = cfg.resolve_rpc_url()?;
-                info!(rpc = %rpc, "no start_checkpoint pinned; querying tip");
+                info!("no start_checkpoint pinned; querying tip");
                 let client = SuiClientBuilder::default()
-                    .build(&rpc)
+                    .build(&rpc_url)
                     .await
-                    .with_context(|| format!("connecting to {rpc}"))?;
+                    .with_context(|| format!("connecting to {}", redact_rpc(&rpc_url)))?;
                 let latest = client
                     .read_api()
                     .get_latest_checkpoint_sequence_number()
@@ -147,29 +157,27 @@ async fn main() -> Result<()> {
     // Background tip-poller: refresh the chain head every 10s so the bar has a
     // live 100% target. Best-effort — if no RPC resolves, /progress just omits
     // the tip (frontend shows current/rate without a percentage).
-    match cfg.resolve_rpc_url() {
-        Ok(tip_rpc) => {
-            let tip_state = Arc::clone(&progress_state);
-            tokio::spawn(async move {
-                let mut client = None;
-                let mut ticker = tokio::time::interval(Duration::from_secs(10));
-                loop {
-                    ticker.tick().await;
-                    if client.is_none() {
-                        client = SuiClientBuilder::default().build(&tip_rpc).await.ok();
-                    }
-                    let Some(c) = client.as_ref() else { continue };
-                    match c.read_api().get_latest_checkpoint_sequence_number().await {
-                        Ok(tip) => tip_state.set_tip(tip),
-                        Err(e) => {
-                            warn!(error = %e, "tip poll failed; will reconnect");
-                            client = None;
-                        }
+    {
+        let tip_rpc = rpc_url.clone();
+        let tip_state = Arc::clone(&progress_state);
+        tokio::spawn(async move {
+            let mut client = None;
+            let mut ticker = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                ticker.tick().await;
+                if client.is_none() {
+                    client = SuiClientBuilder::default().build(&tip_rpc).await.ok();
+                }
+                let Some(c) = client.as_ref() else { continue };
+                match c.read_api().get_latest_checkpoint_sequence_number().await {
+                    Ok(tip) => tip_state.set_tip(tip),
+                    Err(e) => {
+                        warn!(error = %e, "tip poll failed; will reconnect");
+                        client = None;
                     }
                 }
-            });
-        }
-        Err(e) => warn!(error = %e, "no RPC for tip polling; /progress will omit the tip"),
+            }
+        });
     }
 
     // Sui checkpoint ingestion. `setup_single_workflow` returns
@@ -238,4 +246,26 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Read `[sui] rpc_url` from the optional secrets file. Returns `None` (with a
+/// warning) when the path is unset or the file is missing/unparseable, so the
+/// caller falls back to the config / public RPC rather than crash-looping.
+fn load_rpc_override(path: Option<&std::path::Path>) -> Option<String> {
+    let path = path?;
+    match runtime_config::Secrets::load(path) {
+        Ok(s) => s.sui.rpc_url,
+        Err(e) => {
+            warn!(error = %e, path = %path.display(), "secrets file unreadable; using config/public RPC");
+            None
+        }
+    }
+}
+
+/// Strip any token-bearing path from an RPC URL for logging, keeping the host.
+fn redact_rpc(url: &str) -> &str {
+    url.split("://")
+        .nth(1)
+        .and_then(|s| s.split('/').next())
+        .unwrap_or(url)
 }

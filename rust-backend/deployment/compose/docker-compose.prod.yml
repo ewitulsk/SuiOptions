@@ -55,6 +55,10 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       DB_HOST: ${DB_HOST}
       RUST_LOG: info,indexer=info
+    # Reads only [sui] rpc_url from /run/secrets/indexer.toml (shared Sui RPC
+    # override, rendered by render-secrets.sh). Optional — absent file → public RPC.
+    volumes:
+      - /opt/options/prod/secrets:/run/secrets:ro
     depends_on: [token-info]
     restart: unless-stopped
     networks: [net]
@@ -149,6 +153,11 @@ services:
       CHART_DATABASE_URL: ${CHART_DATABASE_URL}
       ORACLE_URL: http://oracle-service:9013
       RUST_LOG: info,price_charting=debug
+    # Reads only [sui] rpc_url from /run/secrets/price-charting.toml (shared Sui
+    # RPC override). The watcher's poll loop is a heavy RPC consumer, so this is
+    # the main reason price-charting mounts secrets. Optional — absent → public RPC.
+    volumes:
+      - /opt/options/prod/secrets:/run/secrets:ro
     depends_on: [token-info, api-service, indexer, oracle-service]
     restart: unless-stopped
     networks: [net]

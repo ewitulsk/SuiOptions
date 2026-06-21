@@ -74,11 +74,20 @@ pub struct SuiClientWrapper {
 impl SuiClientWrapper {
     pub async fn connect(secrets: &runtime_config::Secrets, network: Network) -> Result<Self> {
         let signer = Signer::from_secrets(secrets, network).context("loading signer")?;
+        // Prefer the operator's shared RPC override (rendered into the [sui]
+        // block of the service's secrets toml) over the public default.
+        let rpc_url = secrets.resolve_rpc_url(network.rpc_url());
         let client = SuiClientBuilder::default()
-            .build(network.rpc_url())
+            .build(&rpc_url)
             .await
-            .with_context(|| format!("building SuiClient for {network}"))?;
-        tracing::info!(%network, address = %signer.address, "sui client ready");
+            .with_context(|| format!("building SuiClient for {network} at {rpc_url}"))?;
+        // Log the host only, never the full URL — the override carries a token.
+        let rpc_host = rpc_url
+            .split("://")
+            .nth(1)
+            .and_then(|s| s.split('/').next())
+            .unwrap_or(rpc_url.as_str());
+        tracing::info!(%network, rpc_host, address = %signer.address, "sui client ready");
         Ok(Self {
             client,
             signer,

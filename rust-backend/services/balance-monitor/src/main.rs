@@ -32,8 +32,23 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Prefer the shared `[sui] rpc_url` override from the optional secrets file
+    // (rendered by render-secrets.sh) over the public network default. The
+    // per-watch secrets files (resolved below) are a separate concern.
+    // Optional: a missing/unreadable file degrades to the public endpoint.
+    let rpc_url = match cli.secrets.as_deref() {
+        Some(path) => match runtime_config::Secrets::load(path) {
+            Ok(s) => s.resolve_rpc_url(cfg.network.rpc_url()),
+            Err(e) => {
+                warn!(error = %e, path = %path.display(), "secrets file unreadable; using public RPC");
+                cfg.network.rpc_url().to_string()
+            }
+        },
+        None => cfg.network.rpc_url().to_string(),
+    };
+    info!(rpc = %redact_rpc(&rpc_url), "resolved Sui JSON-RPC endpoint");
     let sui = SuiClientBuilder::default()
-        .build(cfg.network.rpc_url())
+        .build(&rpc_url)
         .await
         .context("connecting Sui client")?;
 
@@ -71,6 +86,14 @@ async fn main() -> Result<()> {
             poll_wallet(&sui, watch, *addr).await;
         }
     }
+}
+
+/// Strip any token-bearing path from an RPC URL for logging, keeping the host.
+fn redact_rpc(url: &str) -> &str {
+    url.split("://")
+        .nth(1)
+        .and_then(|s| s.split('/').next())
+        .unwrap_or(url)
 }
 
 fn resolve_address(w: &Watch, cfg: &Config) -> Result<SuiAddress> {

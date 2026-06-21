@@ -25,5 +25,12 @@ COPY --from=builder /src/target/release/balance-monitor /usr/local/bin/balance-m
 COPY services/balance-monitor/config/ /app/config/
 
 ENV APP_ENV=staging
+# --secrets carries the shared Sui RPC override ([sui] rpc_url), rendered to
+# /run/secrets/balance-monitor.toml by render-secrets.sh (separate from the
+# per-watch secrets files this service reads to resolve wallet addresses).
+# Optional at runtime: a missing/un-rendered file degrades to the public RPC.
+# (Baked here, not as a compose `command:` — the `sh -c` form swallows extra
+# command args.)
 ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/balance-monitor \
-  --config /app/config/config.${APP_ENV}.toml"]
+  --config /app/config/config.${APP_ENV}.toml \
+  --secrets /run/secrets/balance-monitor.toml"]
