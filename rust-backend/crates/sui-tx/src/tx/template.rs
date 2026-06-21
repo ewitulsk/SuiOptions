@@ -10,9 +10,10 @@
 //! What we pin: the ordered subsequence of Move-call targets
 //! (`package::module::function`), a closed set of targets that may appear at
 //! all, and the type-argument arity of the anchor calls. What we let vary: the
-//! `coinWithBalance` coin-selection prelude (a non-deterministic run of
-//! `SplitCoins`/`MergeCoins`/`MergeCoins`), since its shape depends on the
-//! user's coins. Argument wiring is left to the on-chain dry run plus the Move
+//! `coinWithBalance` coin-selection plumbing (a non-deterministic run of
+//! `SplitCoins`/`MergeCoins` plus the value-neutral `0x2::coin::{zero,
+//! destroy_zero}` cleanup calls the SDK injects around it), since its shape
+//! depends on the user's coins. Argument wiring is left to the on-chain dry run plus the Move
 //! contract's own invariants — the station's job is only to refuse paying for
 //! calls into functions it does not endorse.
 
@@ -69,9 +70,14 @@ impl PtbTemplate {
         // Collect Move calls in order; every non-Move-call command must be one
         // of the benign value-plumbing kinds the frontend emits (Publish /
         // Upgrade are rejected here and, redundantly, by the sponsor guard).
+        // The value-neutral `0x2::coin::{zero,destroy_zero}` calls the
+        // `coinWithBalance` resolver injects are skipped here too — like the
+        // plumbing commands, they can appear in any template without being
+        // listed in its `allowed` set.
         let mut calls: Vec<&ProgrammableMoveCall> = Vec::new();
         for cmd in &pt.commands {
             match cmd {
+                Command::MoveCall(call) if is_benign_coin_primitive(call.as_ref()) => {}
                 Command::MoveCall(call) => calls.push(call.as_ref()),
                 Command::SplitCoins(..)
                 | Command::MergeCoins(..)
@@ -147,6 +153,20 @@ fn framework() -> ObjectID {
     ObjectID::from_hex_literal("0x2").expect("0x2 is a valid ObjectID")
 }
 
+/// The value-neutral `0x2::coin` primitives the `coinWithBalance` intent
+/// resolver injects around its split/merge prelude: `zero<T>()` mints an empty
+/// coin, `destroy_zero<T>(c)` aborts unless `c` is empty. Neither can move
+/// value, so — exactly like the `SplitCoins`/`MergeCoins` plumbing — they may
+/// appear in any template without being listed in its `allowed` set. The
+/// single-type-arg check keeps a forged call (wrong generics) from sneaking
+/// through this skip; it would then fail the closed-target-set check instead.
+fn is_benign_coin_primitive(call: &ProgrammableMoveCall) -> bool {
+    call.package == framework()
+        && call.module.as_str() == "coin"
+        && matches!(call.function.as_str(), "zero" | "destroy_zero")
+        && call.type_arguments.len() == 1
+}
+
 /// Build the sponsored-PTB templates for the protocol frontend.
 ///
 /// Mirrors the builders in `frontend/src/tx/{composer,dashboard,faucet,deepbook,session}.ts`.
@@ -165,15 +185,15 @@ pub fn protocol_templates(
     session: Option<ObjectID>,
 ) -> Vec<PtbTemplate> {
     let t = |module: &str, function: &str| MoveTarget::new(protocol, module, function);
-    let coin_zero = MoveTarget::new(framework(), "coin", "zero");
 
-    // write / buy differ only by writer_flow vs trader_flow.
+    // write / buy differ only by writer_flow vs trader_flow. The executor's
+    // `coin::zero` is skipped as a benign coin primitive (see
+    // `is_benign_coin_primitive`), so it need not be pinned here.
     let execute_write_flow = |name: &str, flow: &str| {
         let targets = vec![
             t("quote", "new_quote"),
             t("quote", "new_signed_quote"),
             t("bucket", flow),
-            coin_zero.clone(),
             t("bucket", "execute_write"),
         ];
         PtbTemplate {
@@ -1075,6 +1095,84 @@ mod tests {
     fn wrong_type_arg_arity_rejected() {
         let pt = build(&[(target("bucket", "exercise"), 2)], false);
         assert_eq!(match_any(&templates(), &pt), None);
+    }
+
+    #[test]
+    fn exercise_with_coin_with_balance_cleanup_matches() {
+        // The exact shape prod refused: the `coinWithBalance` resolver wraps
+        // `bucket::exercise` in a split/merge prelude and a trailing
+        // `0x2::coin::destroy_zero<1>` cleanup.
+        // [SplitCoins; MergeCoins; SplitCoins; bucket::exercise<3>;
+        //  TransferObjects; 0x2::coin::destroy_zero<1>]
+        use sui_types::transaction::Argument;
+        let mut b = ProgrammableTransactionBuilder::new();
+        let amt = b.pure(1u64).unwrap();
+        b.command(Command::SplitCoins(Argument::GasCoin, vec![amt]));
+        b.command(Command::MergeCoins(Argument::GasCoin, vec![Argument::GasCoin]));
+        let amt2 = b.pure(1u64).unwrap();
+        b.command(Command::SplitCoins(Argument::GasCoin, vec![amt2]));
+        b.programmable_move_call(
+            pkg(),
+            Identifier::new("bucket").unwrap(),
+            Identifier::new("exercise").unwrap(),
+            vec![TypeTag::U64, TypeTag::U64, TypeTag::U64],
+            vec![],
+        );
+        b.command(Command::TransferObjects(
+            vec![Argument::GasCoin],
+            Argument::GasCoin,
+        ));
+        b.programmable_move_call(
+            framework(),
+            Identifier::new("coin").unwrap(),
+            Identifier::new("destroy_zero").unwrap(),
+            vec![TypeTag::U64],
+            vec![],
+        );
+        let pt = b.finish();
+        assert_eq!(match_any(&templates(), &pt), Some("exercise"));
+    }
+
+    #[test]
+    fn benign_coin_primitives_skipped_across_templates() {
+        let coin = |function: &str| MoveTarget::new(framework(), "coin", function);
+        let d = |module: &str, function: &str| MoveTarget::new(deepbook_pkg(), module, function);
+
+        // `destroy_zero<1>` trailing a DeepBook withdraw — a different template
+        // than `exercise`, proving the skip is universal, not exercise-only.
+        let withdraw = build(
+            &[
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "withdraw_settled_amounts"), 2),
+                (d("balance_manager", "withdraw_all"), 1),
+                (coin("destroy_zero"), 1),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &withdraw), Some("deepbook_withdraw"));
+
+        // `coin::zero<1>` is now skipped everywhere, not just in write/buy: a
+        // vault deposit carrying it still matches.
+        let vault_deposit = build(&[(target("vault", "deposit"), 3), (coin("zero"), 1)], false);
+        assert_eq!(match_any(&templates(), &vault_deposit), Some("vault:deposit"));
+    }
+
+    #[test]
+    fn forged_coin_primitive_not_skipped() {
+        let coin = |function: &str| MoveTarget::new(framework(), "coin", function);
+        // Wrong generics (arity != 1) are NOT treated as the benign primitive;
+        // they fall through to the closed-target-set check and are refused.
+        let bad_arity = build(
+            &[(target("bucket", "exercise"), 3), (coin("destroy_zero"), 2)],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &bad_arity), None);
+        // A non-cleanup `0x2::coin` function is not skipped either.
+        let other_coin_fn = build(
+            &[(target("bucket", "exercise"), 3), (coin("into_balance"), 1)],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &other_coin_fn), None);
     }
 
     #[test]
