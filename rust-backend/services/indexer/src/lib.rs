@@ -40,6 +40,13 @@ pub struct Cli {
     /// Path to the TOML config. Overrides the `CONFIG_PATH` env var.
     #[arg(short, long, default_value = "services/indexer/config/config.toml")]
     pub config: PathBuf,
+
+    /// Optional secrets TOML. Only `[sui] rpc_url` is read — the shared Sui
+    /// RPC override rendered by render-secrets.sh. Optional: a missing or
+    /// unreadable file falls back to the config / public RPC, so the indexer
+    /// never crash-loops when the secret isn't rendered.
+    #[arg(long)]
+    pub secrets: Option<PathBuf>,
 }
 
 cli_spec::define_program! {

@@ -17,6 +17,11 @@
 //! devnet  = "suiprivkey1..."
 //! # Optional shared fallback used when the per-network slot is unset.
 //! default = "suiprivkey1..."
+//! # Optional JSON-RPC endpoint override. When set, every binary that builds
+//! # a SuiClient through `resolve_rpc_url` uses this instead of the public
+//! # network default — lets us point the fleet at a rate-limit-lifted RPC
+//! # provider. Absent → public endpoint.
+//! rpc_url = "https://1rpc.io/<token>/sui"
 //!
 //! [mm_bot]
 //! # 32-byte secret used to sign Quotes. Interpretation depends on the
@@ -57,6 +62,10 @@ pub struct SuiSecrets {
     pub devnet: Option<String>,
     /// Used when the per-network slot is unset.
     pub default: Option<String>,
+    /// Optional JSON-RPC endpoint override shared by every binary. When set,
+    /// `Secrets::resolve_rpc_url` returns this instead of the public network
+    /// default. Absent → public endpoint.
+    pub rpc_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -102,6 +111,7 @@ impl Secrets {
             has_quote_key = result.mm_bot.quote_key.is_some(),
             has_jwt_secret = result.auth.jwt_secret.is_some(),
             has_pyth_api_key = result.pyth.api_key.is_some(),
+            has_rpc_url = result.sui.rpc_url.is_some(),
             "secrets loaded"
         );
         Ok(result)
@@ -148,6 +158,18 @@ impl Secrets {
     /// to the anonymous (rate-limited) tier.
     pub fn pyth_api_key(&self) -> Option<&str> {
         self.pyth.api_key.as_deref()
+    }
+
+    /// JSON-RPC endpoint to build a SuiClient against: the operator-provided
+    /// `sui.rpc_url` override if set, else `fallback` (the caller's public
+    /// default for its network, e.g. `Network::rpc_url()`). Never errors — a
+    /// missing override degrades to the public endpoint so a mis-rendered or
+    /// absent secret can't crash-loop a service.
+    pub fn resolve_rpc_url(&self, fallback: &str) -> String {
+        self.sui
+            .rpc_url
+            .clone()
+            .unwrap_or_else(|| fallback.to_string())
     }
 }
 
@@ -218,6 +240,28 @@ testnet = "suiprivkey1testnet"
         assert_eq!(s.sui_private_key("TESTNET").unwrap(), "k");
         assert_eq!(s.sui_private_key("TestNet").unwrap(), "k");
         std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn resolve_rpc_url_prefers_override_else_fallback() {
+        let with = write_tmp(
+            "rpc_set",
+            "[sui]\ntestnet = \"k\"\nrpc_url = \"https://private.example/sui\"\n",
+        );
+        let s = Secrets::load(&with).unwrap();
+        assert_eq!(
+            s.resolve_rpc_url("https://fallback.example"),
+            "https://private.example/sui"
+        );
+        std::fs::remove_file(&with).ok();
+
+        let without = write_tmp("rpc_unset", "[sui]\ntestnet = \"k\"\n");
+        let s = Secrets::load(&without).unwrap();
+        assert_eq!(
+            s.resolve_rpc_url("https://fallback.example"),
+            "https://fallback.example"
+        );
+        std::fs::remove_file(&without).ok();
     }
 
     #[test]

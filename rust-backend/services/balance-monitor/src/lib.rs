@@ -36,6 +36,13 @@ pub struct Cli {
         default_value = "services/balance-monitor/config/config.toml"
     )]
     pub config: PathBuf,
+
+    /// Optional secrets TOML. Only `[sui] rpc_url` is read — the shared Sui
+    /// RPC override rendered by render-secrets.sh. Separate from the per-watch
+    /// secrets files used to resolve wallet addresses. Optional: a missing or
+    /// unreadable file falls back to the public RPC for the configured network.
+    #[arg(long)]
+    pub secrets: Option<PathBuf>,
 }
 
 cli_spec::define_program! {

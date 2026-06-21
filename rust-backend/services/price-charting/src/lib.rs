@@ -24,6 +24,12 @@ pub mod watcher;
 pub struct Cli {
     #[arg(short, long, default_value = "services/price-charting/config/config.toml")]
     pub config: PathBuf,
+
+    /// Optional secrets TOML. Only `[sui] rpc_url` is read — the shared Sui
+    /// RPC override rendered by render-secrets.sh. Optional: a missing or
+    /// unreadable file falls back to the config / public RPC.
+    #[arg(long)]
+    pub secrets: Option<PathBuf>,
 }
 
 cli_spec::define_program! {

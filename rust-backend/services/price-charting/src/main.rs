@@ -50,11 +50,20 @@ async fn main() -> Result<()> {
     let repo = Repo::new(Arc::clone(&pool));
     info!(pool_size = cfg.db_pool_size, "charts DB ready (migrations applied)");
 
-    let rpc = cfg.resolve_rpc_url()?;
+    // Prefer the shared `[sui] rpc_url` override from the optional secrets file
+    // (rendered by render-secrets.sh) over the config / public default. The
+    // watcher's poll loop is a heavy RPC consumer, so this is the main reason
+    // price-charting carries a secrets mount. Optional: a missing/unreadable
+    // file degrades to cfg.resolve_rpc_url().
+    let rpc = match load_rpc_override(cli.secrets.as_deref()) {
+        Some(u) => u,
+        None => cfg.resolve_rpc_url()?,
+    };
+    info!(rpc = %redact_rpc(&rpc), "resolved Sui JSON-RPC endpoint");
     let sui = SuiClientBuilder::default()
         .build(&rpc)
         .await
-        .with_context(|| format!("connecting to {rpc}"))?;
+        .with_context(|| format!("connecting to {}", redact_rpc(&rpc)))?;
 
     let state = Arc::new(AppState::new(repo));
     watcher::spawn(watcher::WatcherParams {
@@ -90,11 +99,33 @@ async fn main() -> Result<()> {
     info!(
         environment = %cfg.environment,
         api_service = %cfg.api_service_url,
-        rpc = %rpc,
+        rpc = %redact_rpc(&rpc),
         ttl_hours = cfg.ttl_hours,
         mid_sample_interval_secs = cfg.mid_sample_interval_secs,
         "watcher + mid sampler running"
     );
 
     router::serve(cfg.bind_addr, state, &cfg.allowed_origins).await
+}
+
+/// Read `[sui] rpc_url` from the optional secrets file. Returns `None` (with a
+/// warning) when the path is unset or the file is missing/unparseable, so the
+/// caller falls back to the config / public RPC rather than crash-looping.
+fn load_rpc_override(path: Option<&std::path::Path>) -> Option<String> {
+    let path = path?;
+    match runtime_config::Secrets::load(path) {
+        Ok(s) => s.sui.rpc_url,
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "secrets file unreadable; using config/public RPC");
+            None
+        }
+    }
+}
+
+/// Strip any token-bearing path from an RPC URL for logging, keeping the host.
+fn redact_rpc(url: &str) -> &str {
+    url.split("://")
+        .nth(1)
+        .and_then(|s| s.split('/').next())
+        .unwrap_or(url)
 }

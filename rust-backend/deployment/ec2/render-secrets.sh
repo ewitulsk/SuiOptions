@@ -57,6 +57,32 @@ EOF
   fi
 }
 
+# ---- shared Sui JSON-RPC endpoint (SO-270) -------------------------------
+# One secret per env (options/<env>/sui-rpc -> {"rpc_url": "..."}). Injected
+# into the [sui] block of the keyed service tomls below and rendered as a
+# standalone toml for the keyless services (indexer / price-charting /
+# balance-monitor). Absent or REPLACE_ME → RPC_URL stays empty and every
+# service falls back to the public Sui endpoint (resolve_rpc_url degrades
+# gracefully — never a hard fail).
+RPC_URL=""
+if RPC_JSON=$(fetch sui-rpc 2>/dev/null); then
+  RPC_URL=$(echo "$RPC_JSON" | jq -r '.rpc_url // empty')
+  if [ "$RPC_URL" = "REPLACE_ME" ]; then
+    RPC_URL=""
+  fi
+fi
+# Pre-build the TOML line so it can be dropped verbatim into the [sui] block of
+# each heredoc. Built with escaped quotes here rather than via `${RPC_URL:+…}`
+# inline — inside a heredoc that form strips the inner quotes and yields
+# invalid TOML. Empty when unset → an inert blank line in the rendered file.
+RPC_LINE=""
+if [ -n "$RPC_URL" ]; then
+  RPC_LINE="rpc_url = \"$RPC_URL\""
+  echo "render-secrets: sui-rpc override present"
+else
+  echo "render-secrets: no sui-rpc override — services use public RPC"
+fi
+
 # ---- indexer secret -> exported as DB_PASSWORD for compose -----------------
 INDEXER_JSON=$(fetch indexer)
 DB_PASSWORD=$(echo "$INDEXER_JSON" | jq -r '.db_password')
@@ -83,6 +109,7 @@ if MM_JSON=$(fetch mm-bot 2>/dev/null); then
   cat > "$DIR/mm-bot.toml" <<EOF
 [sui]
 $NETWORK = "$SUI_KEY"
+$RPC_LINE
 
 [mm_bot]
 quote_key = "$QUOTE_KEY"
@@ -102,6 +129,7 @@ if SCH_JSON=$(fetch scheduler 2>/dev/null); then
   cat > "$DIR/scheduler.toml" <<EOF
 [sui]
 $NETWORK = "$SUI_KEY"
+$RPC_LINE
 EOF
 fi
 
@@ -134,6 +162,7 @@ if GAS_JSON=$(fetch gas-station 2>/dev/null); then
   cat > "$DIR/gas-station.toml" <<EOF
 [sui]
 $NETWORK = "$SUI_KEY"
+$RPC_LINE
 EOF
 fi
 
@@ -159,6 +188,7 @@ if KEEPER_JSON=$(fetch keeper 2>/dev/null); then
   cat > "$DIR/keeper.toml" <<EOF
 [sui]
 $NETWORK = "$SUI_KEY"
+$RPC_LINE
 EOF
   append_pyth_api_key "$KEEPER_JSON" "$DIR/keeper.toml"
 else
@@ -187,6 +217,21 @@ if ORACLE_JSON=$(fetch oracle-service 2>/dev/null); then
   umask 077
   : > "$DIR/oracle-service.toml"
   append_pyth_api_key "$ORACLE_JSON" "$DIR/oracle-service.toml"
+fi
+
+# ---- keyless services -> standalone [sui] rpc_url toml --------------------
+# indexer / price-charting / balance-monitor hold no signing key but still
+# build a SuiClient. They read only `[sui] rpc_url` from these files (mounted
+# at /run/secrets/<svc>.toml). Rendered only when the override is present —
+# absent file → those services fall back to their config / public RPC.
+if [ -n "$RPC_URL" ]; then
+  umask 077
+  for svc in indexer price-charting balance-monitor; do
+    cat > "$DIR/$svc.toml" <<EOF
+[sui]
+rpc_url = "$RPC_URL"
+EOF
+  done
 fi
 
 echo "render-secrets: ok ($ENV)"

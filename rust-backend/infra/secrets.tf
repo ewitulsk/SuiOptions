@@ -182,3 +182,31 @@ resource "aws_secretsmanager_secret_version" "oracle_service_placeholder" {
     ignore_changes = [secret_string]
   }
 }
+
+# Shared Sui JSON-RPC endpoint (SO-270). One secret per env — every service
+# that talks to a Sui fullnode reads this single URL so we point the whole
+# fleet at our rate-limit-lifted RPC provider without duplicating the token
+# across each service's secret. render-secrets.sh injects it into the [sui]
+# block of the keyed service tomls and renders standalone tomls for the
+# keyless services. Placeholder shape; put the real URL by hand after apply:
+#   aws secretsmanager put-secret-value --secret-id options/<env>/sui-rpc \
+#     --secret-string '{"rpc_url":"https://1rpc.io/<token>/sui"}'
+# Absent / REPLACE_ME → services fall back to the public Sui endpoint.
+resource "aws_secretsmanager_secret" "sui_rpc" {
+  for_each                = toset(local.envs)
+  name                    = "options/${each.key}/sui-rpc"
+  description             = "Shared Sui JSON-RPC endpoint (JSON: rpc_url)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "sui_rpc_placeholder" {
+  for_each  = aws_secretsmanager_secret.sui_rpc
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    rpc_url = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}
