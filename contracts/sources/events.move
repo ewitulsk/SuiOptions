@@ -314,6 +314,146 @@ public struct VaultDepositsPaused has copy, drop {
     paused: bool,
 }
 
+// ---- cash-secured puts (put_bucket.move / rfq_put.move) ----
+//
+// Deliberately distinct from the covered-call events above: a put is a
+// separate product (collateral is settlement, exercise delivers
+// underlying), so the indexer keys it on its own event types and existing
+// call consumers are untouched — mirroring how `CollateralizedWrite` was
+// kept distinct from `WriteExecuted`.
+
+public struct PutBucketCreated has copy, drop {
+    bucket_id: ID,
+    asset_type: TypeName,
+    settlement_type: TypeName,
+    /// Fully-qualified type of the per-bucket put coin (`Coin<put_type>`).
+    put_type: TypeName,
+    expiry_ms: u64,
+    strike: u128,
+    strike_scale: u8,
+}
+
+public struct PutWriteExecuted has copy, drop {
+    bucket_id: ID,
+    signer_account_id: ID,
+    signer_token_recipient: address,
+    executor: address,
+    position_id: ID,
+    position_recipient: address,
+    put_token_recipient: address,
+    write_amount: u64,
+    /// Cash collateral escrowed = ceil(write_amount × strike).
+    collateral: u64,
+    gross_premium: u64,
+    fee: u64,
+    net_premium: u64,
+    range_start: u128,
+    range_end: u128,
+    nonce: u64,
+}
+
+public struct PutCollateralizedWrite has copy, drop {
+    bucket_id: ID,
+    writer: address,
+    write_amount: u64,
+    collateral: u64,
+    range_start: u128,
+    range_end: u128,
+}
+
+public struct PutExercised has copy, drop {
+    bucket_id: ID,
+    exerciser: address,
+    /// Underlying delivered into the bucket (== put coins burned).
+    amount: u64,
+    /// Settlement (cash) paid out to the exerciser = floor(amount × strike).
+    settlement_paid: u64,
+    cursor_after: u128,
+}
+
+public struct PutRedeemed has copy, drop {
+    bucket_id: ID,
+    position_id: ID,
+    redeemer: address,
+    range_start: u128,
+    range_end: u128,
+    /// Assigned (exercised) underlying handed to the writer.
+    underlying_returned: u64,
+    /// Unassigned cash collateral returned = floor(unexercised × strike).
+    settlement_returned: u64,
+}
+
+public struct PutExpiredOptionBurned has copy, drop {
+    bucket_id: ID,
+    burner: address,
+    amount: u64,
+}
+
+public struct PutBucketCleaned has copy, drop {
+    bucket_id: ID,
+    /// Rounding-remainder cash swept to the admin at cleanup.
+    dust_swept: u64,
+}
+
+public struct PutBucketInvalidated has copy, drop {
+    bucket_id: ID,
+    at_ms: u64,
+    admin: address,
+    reason: vector<u8>,
+}
+
+public struct PutBucketRevalidated has copy, drop {
+    bucket_id: ID,
+    at_ms: u64,
+    admin: address,
+    reason: vector<u8>,
+}
+
+public struct PutRfqCreated has copy, drop {
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    amount: u64,
+    collateral: u64,
+    reserve_premium: u64,
+    deadline_ms: u64,
+    max_deadline_ms: u64,
+    min_increment_bps: u64,
+}
+
+public struct PutRfqBid has copy, drop {
+    rfq_id: ID,
+    bidder: address,
+    put_recipient: address,
+    premium: u64,
+    previous_premium: u64,
+    new_deadline_ms: u64,
+}
+
+public struct PutRfqSettled has copy, drop {
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    winner: address,
+    put_recipient: address,
+    position_id: ID,
+    position_recipient: address,
+    amount: u64,
+    gross_premium: u64,
+    fee: u64,
+    net_premium: u64,
+    range_start: u128,
+    range_end: u128,
+}
+
+public struct PutRfqExpiredUnsold has copy, drop {
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    amount: u64,
+    reserve_premium: u64,
+}
+
 public struct AccountCreated has copy, drop {
     account_id: ID,
     owner: address,
@@ -883,6 +1023,226 @@ public(package) fun emit_treasury_withdrawn(
     recipient: address,
 ) {
     event::emit(TreasuryWithdrawn { asset_type, amount, recipient });
+}
+
+// ---- cash-secured put emitters ----
+
+public(package) fun emit_put_bucket_created(
+    bucket_id: ID,
+    asset_type: TypeName,
+    settlement_type: TypeName,
+    put_type: TypeName,
+    expiry_ms: u64,
+    strike: u128,
+    strike_scale: u8,
+) {
+    event::emit(PutBucketCreated {
+        bucket_id,
+        asset_type,
+        settlement_type,
+        put_type,
+        expiry_ms,
+        strike,
+        strike_scale,
+    });
+}
+
+public(package) fun emit_put_write_executed(
+    bucket_id: ID,
+    signer_account_id: ID,
+    signer_token_recipient: address,
+    executor: address,
+    position_id: ID,
+    position_recipient: address,
+    put_token_recipient: address,
+    write_amount: u64,
+    collateral: u64,
+    gross_premium: u64,
+    fee: u64,
+    net_premium: u64,
+    range_start: u128,
+    range_end: u128,
+    nonce: u64,
+) {
+    event::emit(PutWriteExecuted {
+        bucket_id,
+        signer_account_id,
+        signer_token_recipient,
+        executor,
+        position_id,
+        position_recipient,
+        put_token_recipient,
+        write_amount,
+        collateral,
+        gross_premium,
+        fee,
+        net_premium,
+        range_start,
+        range_end,
+        nonce,
+    });
+}
+
+public(package) fun emit_put_collateralized_write(
+    bucket_id: ID,
+    writer: address,
+    write_amount: u64,
+    collateral: u64,
+    range_start: u128,
+    range_end: u128,
+) {
+    event::emit(PutCollateralizedWrite {
+        bucket_id,
+        writer,
+        write_amount,
+        collateral,
+        range_start,
+        range_end,
+    });
+}
+
+public(package) fun emit_put_exercised(
+    bucket_id: ID,
+    exerciser: address,
+    amount: u64,
+    settlement_paid: u64,
+    cursor_after: u128,
+) {
+    event::emit(PutExercised { bucket_id, exerciser, amount, settlement_paid, cursor_after });
+}
+
+public(package) fun emit_put_redeemed(
+    bucket_id: ID,
+    position_id: ID,
+    redeemer: address,
+    range_start: u128,
+    range_end: u128,
+    underlying_returned: u64,
+    settlement_returned: u64,
+) {
+    event::emit(PutRedeemed {
+        bucket_id,
+        position_id,
+        redeemer,
+        range_start,
+        range_end,
+        underlying_returned,
+        settlement_returned,
+    });
+}
+
+public(package) fun emit_put_expired_option_burned(
+    bucket_id: ID,
+    burner: address,
+    amount: u64,
+) {
+    event::emit(PutExpiredOptionBurned { bucket_id, burner, amount });
+}
+
+public(package) fun emit_put_bucket_cleaned(bucket_id: ID, dust_swept: u64) {
+    event::emit(PutBucketCleaned { bucket_id, dust_swept });
+}
+
+public(package) fun emit_put_bucket_invalidated(
+    bucket_id: ID,
+    at_ms: u64,
+    admin: address,
+    reason: vector<u8>,
+) {
+    event::emit(PutBucketInvalidated { bucket_id, at_ms, admin, reason });
+}
+
+public(package) fun emit_put_bucket_revalidated(
+    bucket_id: ID,
+    at_ms: u64,
+    admin: address,
+    reason: vector<u8>,
+) {
+    event::emit(PutBucketRevalidated { bucket_id, at_ms, admin, reason });
+}
+
+public(package) fun emit_put_rfq_created(
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    amount: u64,
+    collateral: u64,
+    reserve_premium: u64,
+    deadline_ms: u64,
+    max_deadline_ms: u64,
+    min_increment_bps: u64,
+) {
+    event::emit(PutRfqCreated {
+        rfq_id,
+        bucket_id,
+        origin,
+        amount,
+        collateral,
+        reserve_premium,
+        deadline_ms,
+        max_deadline_ms,
+        min_increment_bps,
+    });
+}
+
+public(package) fun emit_put_rfq_bid(
+    rfq_id: ID,
+    bidder: address,
+    put_recipient: address,
+    premium: u64,
+    previous_premium: u64,
+    new_deadline_ms: u64,
+) {
+    event::emit(PutRfqBid {
+        rfq_id,
+        bidder,
+        put_recipient,
+        premium,
+        previous_premium,
+        new_deadline_ms,
+    });
+}
+
+public(package) fun emit_put_rfq_settled(
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    winner: address,
+    put_recipient: address,
+    position_id: ID,
+    position_recipient: address,
+    amount: u64,
+    gross_premium: u64,
+    fee: u64,
+    net_premium: u64,
+    range_start: u128,
+    range_end: u128,
+) {
+    event::emit(PutRfqSettled {
+        rfq_id,
+        bucket_id,
+        origin,
+        winner,
+        put_recipient,
+        position_id,
+        position_recipient,
+        amount,
+        gross_premium,
+        fee,
+        net_premium,
+        range_start,
+        range_end,
+    });
+}
+
+public(package) fun emit_put_rfq_expired_unsold(
+    rfq_id: ID,
+    bucket_id: ID,
+    origin: ID,
+    amount: u64,
+    reserve_premium: u64,
+) {
+    event::emit(PutRfqExpiredUnsold { rfq_id, bucket_id, origin, amount, reserve_premium });
 }
 
 /// Test-only constructors so tests can assert emitted event *contents*

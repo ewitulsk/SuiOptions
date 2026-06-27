@@ -54,7 +54,11 @@ const MAX_STRIKE_SCALE: u8 = 38;
 
 /// 10^exp for exp ∈ [0, MAX_STRIKE_SCALE]. Aborts if exp exceeds the cap
 /// — keeps `pow10` cheap and guarantees the result fits in u128.
-fun pow10(exp: u8): u128 {
+///
+/// `public(package)` so the cash-secured-put module reuses the exact same
+/// power-of-ten table (and its overflow guard) rather than carrying a copy
+/// that could drift.
+public(package) fun pow10(exp: u8): u128 {
     assert!(exp <= MAX_STRIKE_SCALE, errors::strike_scale_too_large());
     let mut result: u128 = 1;
     let mut i: u8 = 0;
