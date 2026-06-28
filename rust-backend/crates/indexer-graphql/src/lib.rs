@@ -248,10 +248,9 @@ impl IndexerClient {
         asset_type: Option<&AssetType>,
         settlement_type: Option<&AssetType>,
         expiry_ms: Option<u64>,
-        option_kind: Option<&str>,
     ) -> Result<Vec<Bucket>> {
-        const Q: &str = "query($a:Boolean,$u:String,$s:String,$e:String,$k:String){\
-            buckets(activeOnly:$a,assetType:$u,settlementType:$s,expiryMs:$e,optionKind:$k){\
+        const Q: &str = "query($a:Boolean,$u:String,$s:String,$e:String){\
+            buckets(activeOnly:$a,assetType:$u,settlementType:$s,expiryMs:$e){\
             bucketId assetType settlementType callType strikeRaw strikeScale expiryMs \
             totalWrittenRaw exerciseCursorRaw cleaned invalidated optionKind deepbookPoolId}}";
         let vars = json!({
@@ -259,7 +258,6 @@ impl IndexerClient {
             "u": asset_type.map(|a| a.as_str()),
             "s": settlement_type.map(|a| a.as_str()),
             "e": expiry_ms.map(|e| e.to_string()),
-            "k": option_kind,
         });
         let data: BucketsWrap = self.gql(Q, vars).await?;
         data.buckets.into_iter().map(Bucket::try_from).collect()
@@ -279,8 +277,8 @@ impl IndexerClient {
     pub async fn positions_by_recipient(&self, recipient: SuiAddress) -> Result<Vec<Position>> {
         const Q: &str = "query($r:String!){positionsByRecipient(recipient:$r){objectId bucketId \
             recipient rangeStartRaw rangeEndRaw assetType settlementType strikeRaw strikeScale \
-            expiryMs totalWrittenRaw exerciseCursorRaw premiumReceivedRaw mmAccountId txDigest \
-            mintedAtMs}}";
+            expiryMs totalWrittenRaw exerciseCursorRaw optionKind premiumReceivedRaw mmAccountId \
+            txDigest mintedAtMs}}";
         let data: PositionsByRecipientWrap =
             self.gql(Q, json!({ "r": recipient.to_hex() })).await?;
         data.positions_by_recipient
@@ -297,8 +295,8 @@ impl IndexerClient {
         }
         const Q: &str = "query($ids:[String!]!){positions(objectIds:$ids){objectId bucketId \
             recipient rangeStartRaw rangeEndRaw assetType settlementType strikeRaw strikeScale \
-            expiryMs totalWrittenRaw exerciseCursorRaw premiumReceivedRaw mmAccountId txDigest \
-            mintedAtMs}}";
+            expiryMs totalWrittenRaw exerciseCursorRaw optionKind premiumReceivedRaw mmAccountId \
+            txDigest mintedAtMs}}";
         let data: PositionsWrap = self.gql(Q, json!({ "ids": object_ids })).await?;
         data.positions.into_iter().map(Position::try_from).collect()
     }
@@ -314,7 +312,7 @@ impl IndexerClient {
     ) -> Result<Vec<Rfq>> {
         const Q: &str = "query($s:String,$o:String){rfqs(status:$s,origin:$o){rfqId bucketId \
             origin amountRaw reservePremiumRaw deadlineMs bestPremiumRaw bestBidder status \
-            winner netPremiumRaw positionId grossPremiumRaw feeRaw}}";
+            winner netPremiumRaw positionId grossPremiumRaw feeRaw optionKind}}";
         let vars = json!({ "s": status, "o": origin.map(|o| o.to_hex()) });
         let data: RfqsWrap = self.gql(Q, vars).await?;
         data.rfqs.into_iter().map(Rfq::try_from).collect()
@@ -436,6 +434,42 @@ impl IndexerClient {
         let filter = json!({
             "eventType": ["WriteExecuted"],
             "payloadContains": { "payload": { "call_token_recipient": wallet.to_hex() } },
+        });
+        self.scan_events(filter, 0).await
+    }
+
+    /// All `PutWriteExecuted` events for `account` with `sequence > after`, in
+    /// ascending order. The put-side mirror of
+    /// [`write_executed_for_account_since`]. Returns `(sequence, nonce)` pairs.
+    pub async fn put_write_executed_for_account_since(
+        &self,
+        account: ObjectId,
+        after: u64,
+    ) -> Result<Vec<(u64, u64)>> {
+        let filter = json!({
+            "eventType": ["PutWriteExecuted"],
+            "payloadContains": { "payload": { "signer_account_id": account.to_hex() } },
+        });
+        let events = self.scan_events(filter, after).await?;
+        let mut out = Vec::with_capacity(events.len());
+        for ev in events {
+            if let ChainEvent::PutWriteExecuted(w) = ev.event {
+                out.push((ev.sequence, w.nonce));
+            }
+        }
+        Ok(out)
+    }
+
+    /// All `PutWriteExecuted` events whose `put_token_recipient` is `wallet`, in
+    /// ascending order. The put-side mirror of
+    /// [`write_executed_for_recipient`].
+    pub async fn put_write_executed_for_recipient(
+        &self,
+        wallet: SuiAddress,
+    ) -> Result<Vec<IndexedEvent>> {
+        let filter = json!({
+            "eventType": ["PutWriteExecuted"],
+            "payloadContains": { "payload": { "put_token_recipient": wallet.to_hex() } },
         });
         self.scan_events(filter, 0).await
     }
@@ -643,8 +677,16 @@ struct BucketJson {
     exercise_cursor_raw: String,
     cleaned: bool,
     invalidated: bool,
+    #[serde(default = "default_option_kind")]
+    option_kind: String,
     #[serde(default)]
     deepbook_pool_id: Option<String>,
+}
+
+/// Serde default for `option_kind` — calls are the historical default, so a
+/// server that omits the field is treated as a call.
+fn default_option_kind() -> String {
+    "call".to_string()
 }
 
 #[derive(Deserialize)]
@@ -679,6 +721,8 @@ struct PositionJson {
     expiry_ms: String,
     total_written_raw: String,
     exercise_cursor_raw: String,
+    #[serde(default = "default_option_kind")]
+    option_kind: String,
     premium_received_raw: String,
     mm_account_id: String,
     tx_digest: String,
@@ -704,6 +748,8 @@ struct RfqJson {
     gross_premium_raw: Option<String>,
     #[serde(default)]
     fee_raw: Option<String>,
+    #[serde(default = "default_option_kind")]
+    option_kind: String,
 }
 
 #[derive(Deserialize)]
@@ -824,6 +870,7 @@ impl TryFrom<BucketJson> for Bucket {
             exercise_cursor: parse_u128(&b.exercise_cursor_raw)?,
             cleaned: b.cleaned,
             invalidated: b.invalidated,
+            option_kind: b.option_kind,
             deepbook_pool_id: b
                 .deepbook_pool_id
                 .as_deref()
@@ -871,6 +918,7 @@ impl TryFrom<PositionJson> for Position {
             expiry_ms: parse_u64(&p.expiry_ms)?,
             total_written: parse_u128(&p.total_written_raw)?,
             exercise_cursor: parse_u128(&p.exercise_cursor_raw)?,
+            option_kind: p.option_kind,
             premium_received: parse_u64(&p.premium_received_raw)?,
             mm_account_id: parse_object_id(&p.mm_account_id)?,
             tx_digest: p.tx_digest,
@@ -897,6 +945,7 @@ impl TryFrom<RfqJson> for Rfq {
             position_id: r.position_id.as_deref().map(parse_object_id).transpose()?,
             gross_premium: r.gross_premium_raw.as_deref().map(parse_u64).transpose()?,
             fee: r.fee_raw.as_deref().map(parse_u64).transpose()?,
+            option_kind: r.option_kind,
         })
     }
 }

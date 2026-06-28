@@ -91,7 +91,10 @@ pub fn reservation_for(side: Side, bucket: &Bucket, quote: &Quote) -> (AssetType
 /// downcast to u64 (saturating — an overflow here means the bucket params are
 /// unrealistic and the reservation check would reject anyway).
 fn put_collateral(bucket: &Bucket, write_amount: u64) -> u64 {
-    let scale = 10u128.pow(bucket.strike_scale as u32);
+    // `checked_pow` guards a pathological strike_scale (>38) from panicking;
+    // such a scale can't represent a real price, so fall back to a divisor
+    // of 1 — the reservation check downstream rejects the absurd amount.
+    let scale = 10u128.checked_pow(bucket.strike_scale as u32).unwrap_or(1);
     let numerator = (write_amount as u128).saturating_mul(bucket.strike);
     let collateral = numerator.div_ceil(scale);
     u64::try_from(collateral).unwrap_or(u64::MAX)
