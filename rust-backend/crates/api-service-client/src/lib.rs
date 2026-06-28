@@ -41,11 +41,26 @@ pub struct BucketPricing {
     pub settlement_coin_type: String,
     /// The bucket's fungible option-coin type — the `Call` type argument
     /// for bid/write PTBs. Empty when talking to an api-service that
-    /// predates the field.
+    /// predates the field. For put buckets this carries the `Put` coin type
+    /// (api-service serves the per-bucket option coin under both
+    /// `call_coin_type` and `option_coin_type`).
     pub call_coin_type: String,
+    /// True when this bucket is a cash-secured put (`option_kind == "put"`).
+    /// Defaults to false (call) against an api-service that predates puts.
+    pub is_put: bool,
     pub strike: u128,
     pub strike_scale: u8,
     pub expiry_ms: u64,
+}
+
+impl BucketPricing {
+    /// Cash collateral a put writer must post for `amount` underlying units:
+    /// `ceil(amount × strike / 10^strike_scale)`. Meaningless for calls.
+    pub fn put_collateral(&self, amount: u64) -> u128 {
+        let divisor = 10u128.pow(self.strike_scale as u32);
+        let numerator = amount as u128 * self.strike;
+        numerator.div_ceil(divisor)
+    }
 }
 
 /// The subset of `GET /buckets/:bucket_id`'s response we price from. serde
@@ -56,6 +71,13 @@ struct BucketDetailWire {
     settlement_coin_type: String,
     #[serde(default)]
     call_coin_type: String,
+    /// Generic per-bucket option coin type (put buckets populate this; for
+    /// calls it equals `call_coin_type`). Falls back to `call_coin_type`.
+    #[serde(default)]
+    option_coin_type: String,
+    /// "call" | "put"; absent ⇒ "call".
+    #[serde(default)]
+    option_kind: String,
     strike_raw: String,
     strike_scale: u8,
     expiry_ms: i64,
@@ -110,14 +132,22 @@ impl ApiServiceClient {
             .await
             .with_context(|| format!("decoding bucket detail from {url}"))?;
 
+        // Prefer the generic option_coin_type (put-aware); fall back to the
+        // legacy call_coin_type field.
+        let option_coin = if !wire.option_coin_type.is_empty() {
+            wire.option_coin_type.clone()
+        } else {
+            wire.call_coin_type.clone()
+        };
         let pricing = BucketPricing {
             asset_coin_type: canonicalize_move_type(&wire.asset_coin_type),
             settlement_coin_type: canonicalize_move_type(&wire.settlement_coin_type),
-            call_coin_type: if wire.call_coin_type.is_empty() {
+            call_coin_type: if option_coin.is_empty() {
                 String::new()
             } else {
-                canonicalize_move_type(&wire.call_coin_type)
+                canonicalize_move_type(&option_coin)
             },
+            is_put: wire.option_kind == "put",
             strike: wire
                 .strike_raw
                 .parse::<u128>()
@@ -133,7 +163,18 @@ impl ApiServiceClient {
     /// bidder's discovery poll (vault-implementation-guide doc 05 §3.1).
     /// Never cached: deadlines and best bids move with every block.
     pub async fn open_rfqs(&self) -> Result<Vec<OpenRfq>> {
-        let url = format!("{}/rfqs?status=open", self.base_url);
+        self.open_rfqs_kind("call").await
+    }
+
+    /// Open cash-secured-put auctions from `GET /rfqs?status=open&kind=put` —
+    /// the put on-chain bidder's discovery poll. `amount` is the put notional
+    /// (underlying units); the bidder still escrows premium, not collateral.
+    pub async fn open_put_rfqs(&self) -> Result<Vec<OpenRfq>> {
+        self.open_rfqs_kind("put").await
+    }
+
+    async fn open_rfqs_kind(&self, kind: &str) -> Result<Vec<OpenRfq>> {
+        let url = format!("{}/rfqs?status=open&kind={kind}", self.base_url);
         let wire: RfqsWire = self
             .http
             .get(&url)
@@ -352,11 +393,15 @@ mod tests {
             asset_coin_type: canonicalize_move_type(&wire.asset_coin_type),
             settlement_coin_type: canonicalize_move_type(&wire.settlement_coin_type),
             call_coin_type: wire.call_coin_type.clone(), // absent pre-C2 → empty
+            is_put: wire.option_kind == "put",
             strike: wire.strike_raw.parse().unwrap(),
             strike_scale: wire.strike_scale,
             expiry_ms: wire.expiry_ms.max(0) as u64,
         };
         assert!(p.call_coin_type.is_empty());
+        assert!(!p.is_put);
+        // ceil collateral: 100 units × 31473 / 1e9 = 0.0031473 → 1.
+        assert_eq!(p.put_collateral(100), 1);
         assert_eq!(
             p.asset_coin_type,
             "0x0000000000000000000000000000000000000000000000000000000000009b72::twal::TWAL"
