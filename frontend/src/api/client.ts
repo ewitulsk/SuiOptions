@@ -30,6 +30,12 @@ export type Bucket = {
    * and to match the wallet's owned option coins back to their bucket.
    */
   call_coin_type: string;
+  /**
+   * Per-bucket option coin type, carried for both calls and puts (cash-secured
+   * PUT support). Backend-optional: falls back to `call_coin_type` when the
+   * api-service hasn't started emitting it yet. Use `optionCoinType()` to read.
+   */
+  option_coin_type?: string;
   /** On-chain `strike_scale`. Real ratio = `strike_raw / 10^strike_scale`. */
   strike_scale: number;
   total_written: number | null;
@@ -61,6 +67,11 @@ export type Bucket = {
  * Strikes within a series are the user-facing selection axis.
  */
 export type Series = {
+  /**
+   * Whether this series writes covered CALLs or cash-secured PUTs. Backend-
+   * optional during rollout: treat a missing value as `"call"`.
+   */
+  option_type?: "call" | "put";
   /** Friendly symbol (e.g. `"TBTC"`) or raw Move type if unknown. */
   asset_symbol: string;
   asset_decimals: number | null;
@@ -80,6 +91,21 @@ export type Series = {
 export type BucketsResponse = {
   series: Series[];
 };
+
+/**
+ * The per-bucket option coin type to use as the option (`Call`/`Put`) type arg.
+ * Prefers the call/put-agnostic `option_coin_type`; falls back to the legacy
+ * `call_coin_type` so the app keeps working before the backend emits the new
+ * field. Both forms describe the same `Coin<…>` for a covered-call bucket.
+ */
+export function optionCoinType(b: Bucket): string {
+  return b.option_coin_type ?? b.call_coin_type;
+}
+
+/** A series' option type, defaulting to `"call"` when the backend omits it. */
+export function seriesOptionType(s: Series): "call" | "put" {
+  return s.option_type ?? "call";
+}
 
 export async function fetchBuckets(opts?: { excludeExpired?: boolean }): Promise<Series[]> {
   const qs = opts?.excludeExpired ? "?exclude_expired=true" : "";

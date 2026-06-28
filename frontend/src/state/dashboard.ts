@@ -16,7 +16,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { normalizeStructTag } from "@mysten/sui/utils";
-import { addSessionExercise, addSessionRedeem } from "../tx/session";
+import {
+  addSessionExercise,
+  addSessionRedeem,
+  addSessionPutExercise,
+  addSessionPutRedeem,
+} from "../tx/session";
 import { useUserIdentity } from "../session/identity";
 import { executeWithSession } from "../session/store";
 import { useSubmitTransaction } from "../tx/submit";
@@ -25,20 +30,23 @@ import { posthog } from "../lib/posthog";
 import type { ToastState } from "../components/Toast";
 import { useBuckets } from "../api/useBuckets";
 import { useOwnedCallOptions } from "../api/useOwnedCallOptions";
+import { useOwnedPutOptions } from "../api/useOwnedPutOptions";
 import { useCallTokenLots } from "../api/useCallTokenLots";
 import { useDashboardPnl } from "../api/useDashboardPnl";
 import { useOwnedPositions, type OwnedPositionObj } from "../api/useOwnedPositions";
 import { usePythPrices } from "../api/usePythPrice";
 import { useBalanceManager, useBmCoinBalances } from "../api/deepbook";
-import { fetchEnrichedPositions } from "../api/client";
+import { fetchEnrichedPositions, optionCoinType, seriesOptionType } from "../api/client";
 import type { BucketPnl, CallTokenLot, EnrichedPosition, Position, Series } from "../api/client";
 import type { OwnedCallOption } from "../api/useOwnedCallOptions";
 import { buildExerciseTx, buildRedeemTx } from "../tx/dashboard";
+import { buildExercisePutTx, buildRedeemPutTx } from "../tx/dashboard_put";
 import { buildWithdrawBaseTx } from "../tx/deepbook";
 import type {
   DashboardModal,
   DashboardSpots,
   DashboardTotals,
+  OptionType,
   OwnedLot,
   OwnedPosition,
   WrittenPosition,
@@ -172,6 +180,7 @@ function buildOwnedRow(
   now: number,
   /** Portion of `obj.amount_raw` held in the DeepBook trading account (BM). */
   bmAmountRaw: bigint,
+  optionType: OptionType,
 ): OwnedPosition | null {
   const bucketInfo = bucketIdx.get(obj.bucket_id);
   if (!bucketInfo) return null;
@@ -192,9 +201,17 @@ function buildOwnedRow(
   // `timestamp_ms() < expiry_ms` (bucket.move), so anything at/after expiry is
   // unexercisable and must be gated here.
   const expired = now >= series.expiry_ms;
-  const itm = spot > 0 && spot > strike;
-  const moneyness = strike > 0 ? ((spot - strike) / strike) * 100 : 0;
-  const intrinsicNow = Math.max(0, (spot - strike) * amount);
+  // PUT is ITM when spot < strike (mirror of the CALL spot > strike); payoff is
+  // inverted (strike − spot). Moneyness keeps the same convention (positive =
+  // ITM) by flipping its sign for puts.
+  const isPut = optionType === "put";
+  const itm = spot > 0 && (isPut ? spot < strike : spot > strike);
+  const moneyness =
+    strike > 0 ? ((isPut ? strike - spot : spot - strike) / strike) * 100 : 0;
+  const intrinsicNow = Math.max(
+    0,
+    (isPut ? strike - spot : spot - strike) * amount,
+  );
 
   // True cost basis (SO-209): start from the backend's FIFO remaining lots
   // (RFQ + DeepBook acquisitions net of tracked sells/exercises/burns), then
@@ -242,6 +259,7 @@ function buildOwnedRow(
   return {
     id: obj.coin_type,
     side: "owned",
+    optionType,
     asset: displayAsset(series.asset_symbol),
     strike,
     expiry: isoDate(series.expiry_ms),
@@ -272,6 +290,7 @@ function buildWrittenRow(
   liveCursor: { totalWrittenRaw: string; cursorRaw: string } | null,
   spot: number,
   now: number,
+  optionType: OptionType,
 ): WrittenPosition {
   const amount = scaleU128(
     (BigInt(p.range_end_raw) - BigInt(p.range_start_raw)).toString(),
@@ -308,6 +327,7 @@ function buildWrittenRow(
   return {
     id: p.position_object_id,
     side: "written",
+    optionType,
     asset: displayAsset(p.asset_symbol),
     strike,
     expiry: isoDate(p.expiry_ms),
@@ -378,6 +398,12 @@ export function useDashboardState(): DashboardState {
     buckets.data,
     sessionState ? sessionState.balances : null,
   );
+  // Cash-secured PUT holdings (`Coin<Put>`), mapped to their put buckets.
+  const ownedPuts = useOwnedPutOptions(
+    wallet,
+    buckets.data,
+    sessionState ? sessionState.balances : null,
+  );
   // Per-purchase provenance for owned calls (boughtFrom / premiumPaid / boughtAt).
   const lots = useCallTokenLots(wallet);
 
@@ -391,7 +417,11 @@ export function useDashboardState(): DashboardState {
     const set = new Set<string>();
     for (const s of buckets.data ?? []) {
       if (s.settlement_coin_type) set.add(s.settlement_coin_type);
-      for (const b of s.buckets) if (b.call_coin_type) set.add(b.call_coin_type);
+      // Cover both call and put option coin types (option_coin_type ?? call_coin_type).
+      for (const b of s.buckets) {
+        const ct = optionCoinType(b);
+        if (ct) set.add(ct);
+      }
     }
     return Array.from(set);
   }, [buckets.data]);
@@ -451,19 +481,23 @@ export function useDashboardState(): DashboardState {
     const pnlByBucket = new Map<string, BucketPnl>();
     for (const b of pnl.data ?? []) pnlByBucket.set(b.bucket_id, b);
 
-    // Normalized option-coin type → bucket id.
-    const callTypeToBucket = new Map<string, string>();
+    // Normalized option-coin type → { bucket id, option type }. Covers both
+    // covered-call and cash-secured-put buckets (puts read option_coin_type).
+    const optionTypeMeta = new Map<string, { bucketId: string; optionType: OptionType }>();
     for (const s of buckets.data ?? []) {
+      const ot = seriesOptionType(s);
       for (const b of s.buckets) {
-        if (b.call_coin_type) callTypeToBucket.set(normalizeStructTag(b.call_coin_type), b.bucket_id);
+        const ct = optionCoinType(b);
+        if (ct) optionTypeMeta.set(normalizeStructTag(ct), { bucketId: b.bucket_id, optionType: ot });
       }
     }
 
     // A holding is wallet balance + trading-account (BM) balance. Union the two
     // so a position that lives *only* in the BM (e.g. a market buy that never
-    // got withdrawn) still shows up.
+    // got withdrawn) still shows up. Calls and puts both contribute here; the
+    // option-type map disambiguates which builder semantics each coin gets.
     const walletByType = new Map<string, bigint>();
-    for (const o of owned.data ?? []) {
+    for (const o of [...(owned.data ?? []), ...(ownedPuts.data ?? [])]) {
       walletByType.set(normalizeStructTag(o.coin_type), BigInt(o.amount_raw));
     }
     const bmByType = bmBalances.data ?? {};
@@ -471,8 +505,9 @@ export function useDashboardState(): DashboardState {
 
     const rows: OwnedPosition[] = [];
     for (const type of allTypes) {
-      const bucket_id = callTypeToBucket.get(type);
-      if (!bucket_id) continue; // settlement type, or unknown — not a position
+      const meta = optionTypeMeta.get(type);
+      if (!meta) continue; // settlement type, or unknown — not a position
+      const { bucketId: bucket_id, optionType } = meta;
       const walletRaw = walletByType.get(type) ?? 0n;
       const bmRaw = bmByType[type] ?? 0n;
       const total = walletRaw + bmRaw;
@@ -488,11 +523,12 @@ export function useDashboardState(): DashboardState {
         spot,
         now,
         bmRaw,
+        optionType,
       );
       if (row) rows.push(row);
     }
     return rows;
-  }, [owned.data, bmBalances.data, buckets.data, lots.data, pnl.data, spots, now]);
+  }, [owned.data, ownedPuts.data, bmBalances.data, buckets.data, lots.data, pnl.data, spots, now]);
 
   // Settlement balances sitting in the trading account (BM), for the dashboard
   // "in DeepBook" section — one entry per distinct settlement token held.
@@ -531,7 +567,9 @@ export function useDashboardState(): DashboardState {
       const liveCursor = lookupBucketCursor(buckets.data, pos.bucket_id);
       const symbol = displayAsset(pos.asset_symbol);
       const spot = spots[symbol] ?? 0;
-      return buildWrittenRow(pos, liveCursor, spot, now);
+      const series = bucketIdx.get(o.bucket_id)?.series;
+      const optionType: OptionType = series ? seriesOptionType(series) : "call";
+      return buildWrittenRow(pos, liveCursor, spot, now, optionType);
     });
   }, [ownedPositions.data, enriched.data, buckets.data, spots, now]);
 
@@ -593,25 +631,28 @@ export function useDashboardState(): DashboardState {
     try {
       if (captured.kind === "exercise") {
         const { position: p, qty } = captured;
+        const isPut = p.optionType === "put";
         // Resolve the bucket by the position's coin type — a BM-only holding
-        // has no `owned.data` (wallet) entry, so we can't key off that.
+        // has no `owned.data` (wallet) entry, so we can't key off that. Match on
+        // the call/put-agnostic option coin type so puts resolve too.
         const norm = normalizeStructTag(p.id);
         const bucketInfo = (buckets.data ?? [])
           .flatMap((s) => s.buckets.map((b) => ({ series: s, b })))
-          .find((x) => normalizeStructTag(x.b.call_coin_type) === norm);
+          .find((x) => normalizeStructTag(optionCoinType(x.b)) === norm);
         if (!bucketInfo) {
           throw new Error("missing on-chain reference for exercise");
         }
         const { series, b: bucket } = bucketInfo;
-        const callCoinType = bucket.call_coin_type;
+        const optCoinType = optionCoinType(bucket);
         const assetDec = series.asset_decimals ?? 0;
         const exerciseAmountRaw = BigInt(
           Math.round(qty * 10 ** assetDec).toString(),
         );
-        // settlement_raw = exerciseAmount_raw * strike_raw / 10^strike_scale
+        // CALL: settlement_raw = exerciseAmount_raw * strike_raw / 10^strike_scale
         // (strike_raw / 10^strike_scale is settlement-smallest per
         // underlying-smallest; multiplying by the raw amount gives raw
-        // settlement.)
+        // settlement.) PUT: the holder delivers `exerciseAmountRaw` underlying
+        // and receives settlement, so no settlement payment is computed here.
         const strikeRaw = BigInt(bucket.strike_raw);
         const scale = BigInt(10) ** BigInt(bucket.strike_scale);
         const settlementAmountRaw = (exerciseAmountRaw * strikeRaw) / scale;
@@ -619,40 +660,62 @@ export function useDashboardState(): DashboardState {
         setModal({ ...captured, stage: "broadcast" } as DashboardModal);
         if (sessionState) {
           await executeWithSession("exercising", (tx, ctx) =>
-            addSessionExercise(tx, ctx, {
-              bucketId: bucket.bucket_id,
-              callCoinType,
-              underlyingCoinType: series.asset_coin_type,
-              settlementCoinType: series.settlement_coin_type,
-              exerciseAmountRaw,
-            }),
+            isPut
+              ? addSessionPutExercise(tx, ctx, {
+                  bucketId: bucket.bucket_id,
+                  putCoinType: optCoinType,
+                  underlyingCoinType: series.asset_coin_type,
+                  settlementCoinType: series.settlement_coin_type,
+                  exerciseAmountRaw,
+                })
+              : addSessionExercise(tx, ctx, {
+                  bucketId: bucket.bucket_id,
+                  callCoinType: optCoinType,
+                  underlyingCoinType: series.asset_coin_type,
+                  settlementCoinType: series.settlement_coin_type,
+                  exerciseAmountRaw,
+                }),
           );
         } else {
           // If part/all of the option coin is in the DeepBook trading account,
           // withdraw it inline (atomic) so the exercise can consume it.
           const walletRaw = BigInt(
-            (owned.data ?? []).find((o) => normalizeStructTag(o.coin_type) === norm)?.amount_raw ?? "0",
+            ([...(owned.data ?? []), ...(ownedPuts.data ?? [])].find(
+              (o) => normalizeStructTag(o.coin_type) === norm,
+            )?.amount_raw) ?? "0",
           );
           const bmRaw = (bmBalances.data ?? {})[norm] ?? 0n;
           const bmWithdraw =
             bmRaw > 0n && bmId.data && bucket.deepbook_pool_id
               ? { poolId: bucket.deepbook_pool_id, bmId: bmId.data, walletAmountRaw: walletRaw }
               : undefined;
-          const tx = buildExerciseTx({
-            bucketId: bucket.bucket_id,
-            callCoinType,
-            exerciseAmountRaw,
-            settlementAmountRaw,
-            underlyingCoinType: series.asset_coin_type,
-            settlementCoinType: series.settlement_coin_type,
-            recipient: wallet,
-            bmWithdraw,
-          });
+          const tx = isPut
+            ? buildExercisePutTx({
+                bucketId: bucket.bucket_id,
+                putCoinType: optCoinType,
+                exerciseAmountRaw,
+                underlyingDeliveryRaw: exerciseAmountRaw,
+                underlyingCoinType: series.asset_coin_type,
+                settlementCoinType: series.settlement_coin_type,
+                recipient: wallet,
+                bmWithdraw,
+              })
+            : buildExerciseTx({
+                bucketId: bucket.bucket_id,
+                callCoinType: optCoinType,
+                exerciseAmountRaw,
+                settlementAmountRaw,
+                underlyingCoinType: series.asset_coin_type,
+                settlementCoinType: series.settlement_coin_type,
+                recipient: wallet,
+                bmWithdraw,
+              });
           await submitTx(tx);
         }
         setModal({ ...captured, stage: "confirmed" } as DashboardModal);
         posthog.capture("option_exercised", {
           asset: captured.position.asset,
+          option_type: captured.position.optionType,
           strike: captured.position.strike,
           expiry: captured.position.expiry,
           qty,
@@ -662,6 +725,7 @@ export function useDashboardState(): DashboardState {
         });
       } else if (captured.kind === "claim") {
         const { position: p } = captured;
+        const isPut = p.optionType === "put";
         // Resolve the on-chain object from the wallet (authoritative) and the
         // coin types from /buckets — no dependency on the /positions endpoint.
         const matchPos = (ownedPositions.data ?? []).find((pp) => pp.object_id === p.id);
@@ -671,31 +735,50 @@ export function useDashboardState(): DashboardState {
         if (!matchPos || !bucketInfo) {
           throw new Error("missing on-chain reference for claim");
         }
+        const optCoinType = optionCoinType(bucketInfo.b);
         setModal({ ...captured, stage: "broadcast" } as DashboardModal);
         if (sessionState) {
           await executeWithSession("redeeming", (tx, ctx) =>
-            addSessionRedeem(tx, ctx, {
-              bucketId: matchPos.bucket_id,
-              positionObjectId: matchPos.object_id,
-              callCoinType: bucketInfo.b.call_coin_type,
-              underlyingCoinType: bucketInfo.series.asset_coin_type,
-              settlementCoinType: bucketInfo.series.settlement_coin_type,
-            }),
+            isPut
+              ? addSessionPutRedeem(tx, ctx, {
+                  bucketId: matchPos.bucket_id,
+                  positionObjectId: matchPos.object_id,
+                  putCoinType: optCoinType,
+                  underlyingCoinType: bucketInfo.series.asset_coin_type,
+                  settlementCoinType: bucketInfo.series.settlement_coin_type,
+                })
+              : addSessionRedeem(tx, ctx, {
+                  bucketId: matchPos.bucket_id,
+                  positionObjectId: matchPos.object_id,
+                  callCoinType: optCoinType,
+                  underlyingCoinType: bucketInfo.series.asset_coin_type,
+                  settlementCoinType: bucketInfo.series.settlement_coin_type,
+                }),
           );
         } else {
-          const tx = buildRedeemTx({
-            bucketId: matchPos.bucket_id,
-            positionObjectId: matchPos.object_id,
-            callCoinType: bucketInfo.b.call_coin_type,
-            underlyingCoinType: bucketInfo.series.asset_coin_type,
-            settlementCoinType: bucketInfo.series.settlement_coin_type,
-            recipient: wallet,
-          });
+          const tx = isPut
+            ? buildRedeemPutTx({
+                bucketId: matchPos.bucket_id,
+                positionObjectId: matchPos.object_id,
+                putCoinType: optCoinType,
+                underlyingCoinType: bucketInfo.series.asset_coin_type,
+                settlementCoinType: bucketInfo.series.settlement_coin_type,
+                recipient: wallet,
+              })
+            : buildRedeemTx({
+                bucketId: matchPos.bucket_id,
+                positionObjectId: matchPos.object_id,
+                callCoinType: optCoinType,
+                underlyingCoinType: bucketInfo.series.asset_coin_type,
+                settlementCoinType: bucketInfo.series.settlement_coin_type,
+                recipient: wallet,
+              });
           await submitTx(tx);
         }
         setModal({ ...captured, stage: "confirmed" } as DashboardModal);
         posthog.capture("position_claimed", {
           asset: captured.position.asset,
+          option_type: captured.position.optionType,
           strike: captured.position.strike,
           expiry: captured.position.expiry,
           premium_received: captured.position.premiumReceived,
@@ -725,7 +808,7 @@ export function useDashboardState(): DashboardState {
     const norm = normalizeStructTag(p.id);
     const info = (buckets.data ?? [])
       .flatMap((s) => s.buckets.map((b) => ({ series: s, b })))
-      .find((x) => normalizeStructTag(x.b.call_coin_type) === norm);
+      .find((x) => normalizeStructTag(optionCoinType(x.b)) === norm);
     if (!info || !info.b.deepbook_pool_id) {
       setToast({ message: "failed · no DeepBook pool for this position", variant: "error" });
       setTimeout(() => setToast(null), 6000);
@@ -735,7 +818,7 @@ export function useDashboardState(): DashboardState {
       const tx = buildWithdrawBaseTx({
         poolId: info.b.deepbook_pool_id,
         bmId: bmId.data,
-        baseCoinType: info.b.call_coin_type,
+        baseCoinType: optionCoinType(info.b),
         quoteCoinType: info.series.settlement_coin_type,
         recipient: wallet,
       });
@@ -752,6 +835,7 @@ export function useDashboardState(): DashboardState {
         wallet_address: wallet,
       });
       owned.refetch();
+      ownedPuts.refetch();
       bmBalances.refetch();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -765,8 +849,14 @@ export function useDashboardState(): DashboardState {
     if (modal && (modal as { stage?: string }).stage === "confirmed") {
       const k = modal.kind;
       if (k === "exercise") {
+        const p = modal.position;
         setToast({
-          message: `exercised · received ${modal.qty.toFixed(modal.position.asset === "BTC" ? 4 : 0)} ${modal.position.asset}`,
+          // PUT exercise delivers the underlying and pays out settlement; CALL
+          // exercise pays settlement and receives the underlying.
+          message:
+            p.optionType === "put"
+              ? `exercised · delivered ${modal.qty.toFixed(p.asset === "BTC" ? 4 : 0)} ${p.asset} for ${p.strike} USDC each`
+              : `exercised · received ${modal.qty.toFixed(p.asset === "BTC" ? 4 : 0)} ${p.asset}`,
           variant: "success",
         });
       } else if (k === "claim") {
@@ -779,6 +869,7 @@ export function useDashboardState(): DashboardState {
     ownedPositions.refetch();
     enriched.refetch();
     owned.refetch();
+    ownedPuts.refetch();
     bmBalances.refetch();
   };
 

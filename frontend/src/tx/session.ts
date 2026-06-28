@@ -169,6 +169,148 @@ export function addSessionRedeem(
   });
 }
 
+// ─────────────────────────── cash-secured puts ────────────────────────────
+//
+// Session twins of `put_bucket::*`, targeting `session_put_bucket` (mirror of
+// `session_bucket`). The custody Account funds the executor side and receives
+// the outputs, gated by the SessionCap — so no coins ride in the PTB, exactly
+// like the call session path. The flow markers reuse the CALL module's
+// `bucket::writer_flow` / `bucket::trader_flow`, as on the wallet put path.
+
+export type SessionPutTradeParams = {
+  entry: RfqQuoteEntry;
+  underlyingCoinType: string;
+  settlementCoinType: string;
+  putCoinType: string;
+  /** "writer" = Earn (FlowKind::Writer), "trader" = Buy (FlowKind::Trader). */
+  flow: "writer" | "trader";
+};
+
+/**
+ * Append a writer/trader-flow `execute_write_with_session` to `tx`, targeting
+ * `session_put_bucket`. The quote prelude is identical to the call path.
+ */
+export function addSessionPutTrade(
+  tx: Transaction,
+  ctx: SessionCtx,
+  p: SessionPutTradeParams,
+): void {
+  const pkg = requirePackage();
+  if (!PROTOCOL_CONFIG_ID || !TREASURY_ID) {
+    throw new Error(
+      `Missing protocolConfigId/treasuryId for VITE_ENVIRONMENT="${ENV}" — cannot build execute_write_with_session`,
+    );
+  }
+  const q = p.entry.quote;
+
+  const quoteArg = tx.moveCall({
+    target: `${pkg}::quote::new_quote`,
+    arguments: [
+      tx.pure.vector("u8", Array.from(fromHex(strip0x(q.protocol_id)))),
+      tx.pure.id(q.signer_account_id),
+      tx.pure.address(q.signer_token_recipient),
+      tx.pure.id(q.bucket_id),
+      tx.pure.u64(BigInt(q.write_amount)),
+      tx.pure.u64(BigInt(q.premium)),
+      tx.pure.u64(BigInt(q.valid_until_ms)),
+      tx.pure.u64(BigInt(q.nonce)),
+    ],
+  });
+  const signedQuote = tx.moveCall({
+    target: `${pkg}::quote::new_signed_quote`,
+    arguments: [
+      quoteArg,
+      tx.pure.vector("u8", Array.from(fromHex(strip0x(p.entry.signature)))),
+    ],
+  });
+  const flow = tx.moveCall({
+    target: `${pkg}::bucket::${p.flow === "writer" ? "writer_flow" : "trader_flow"}`,
+  });
+
+  tx.moveCall({
+    target: `${pkg}::session_put_bucket::execute_write_with_session`,
+    typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.putCoinType],
+    arguments: [
+      tx.object(q.bucket_id),
+      tx.object(PROTOCOL_CONFIG_ID),
+      tx.object(TREASURY_ID),
+      tx.object(q.signer_account_id), // MM Account (shared, mutable)
+      tx.object(ctx.optionsAccountId),
+      tx.object(ctx.capId),
+      tx.object(ctx.accountId),
+      flow,
+      signedQuote,
+      tx.object(SUI_CLOCK_OBJECT_ID),
+    ],
+  });
+}
+
+export type SessionPutExerciseParams = {
+  bucketId: string;
+  putCoinType: string;
+  underlyingCoinType: string;
+  settlementCoinType: string;
+  /** Amount to exercise, in underlying smallest units (== option coin units). */
+  exerciseAmountRaw: bigint;
+};
+
+/**
+ * Append `exercise_with_session` to `tx`, targeting `session_put_bucket`:
+ * burns custodied put coins, delivers the underlying from custody, credits the
+ * settlement back into custody.
+ */
+export function addSessionPutExercise(
+  tx: Transaction,
+  ctx: SessionCtx,
+  p: SessionPutExerciseParams,
+): void {
+  const pkg = requirePackage();
+  tx.moveCall({
+    target: `${pkg}::session_put_bucket::exercise_with_session`,
+    typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.putCoinType],
+    arguments: [
+      tx.object(p.bucketId),
+      tx.object(ctx.optionsAccountId),
+      tx.object(ctx.capId),
+      tx.object(ctx.accountId),
+      tx.pure.u64(p.exerciseAmountRaw),
+      tx.object(SUI_CLOCK_OBJECT_ID),
+    ],
+  });
+}
+
+export type SessionPutRedeemParams = {
+  bucketId: string;
+  positionObjectId: string;
+  putCoinType: string;
+  underlyingCoinType: string;
+  settlementCoinType: string;
+};
+
+/**
+ * Append `redeem_position_with_session` to `tx`, targeting `session_put_bucket`:
+ * redeems a custodied Position after expiry; both legs settle back into custody.
+ */
+export function addSessionPutRedeem(
+  tx: Transaction,
+  ctx: SessionCtx,
+  p: SessionPutRedeemParams,
+): void {
+  const pkg = requirePackage();
+  tx.moveCall({
+    target: `${pkg}::session_put_bucket::redeem_position_with_session`,
+    typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.putCoinType],
+    arguments: [
+      tx.object(p.bucketId),
+      tx.object(ctx.optionsAccountId),
+      tx.object(ctx.capId),
+      tx.object(ctx.accountId),
+      tx.pure.id(p.positionObjectId),
+      tx.object(SUI_CLOCK_OBJECT_ID),
+    ],
+  });
+}
+
 // ─────────────────────────── covered-call vault ───────────────────────────
 //
 // Session twins of `vault::*` (`contracts/sources/session_vault.move`). The

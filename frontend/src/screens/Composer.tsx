@@ -4,6 +4,7 @@ import { useComposerState } from "../state/composer";
 import { midFromBook, poolRefFor, useOrderBook } from "../api/deepbook";
 import { BuyDetailTabs, type DetailTab } from "../components/BuyDetailTabs";
 import { BuyModeToggle, type BuyMode } from "../components/BuyModeToggle";
+import { OptionTypeToggle } from "../components/OptionTypeToggle";
 import { BucketBar } from "../components/BucketBar";
 import { StrikeTiles } from "../components/StrikeTiles";
 import { ChainTable } from "../components/ChainTable";
@@ -63,7 +64,7 @@ export function Composer({ initialView }: Props) {
       ? `Insufficient USDC · need ${formatPrice(s.bestPremium)}`
       : s.quotes.length === 0
         ? "Waiting on MMs…"
-        : `Buy call · pay ${formatPrice(s.bestPremium)} USDC →`;
+        : `Buy ${s.optionType} · pay ${formatPrice(s.bestPremium)} USDC →`;
 
   const ctaDisabled =
     !s.connected ||
@@ -87,6 +88,8 @@ export function Composer({ initialView }: Props) {
           onSelectExpiry={s.selectExpiry}
           settlementSymbol={s.series?.settlement_symbol ?? "USDC"}
         />
+
+        <OptionTypeToggle optionType={s.optionType} onChange={s.setOptionType} />
 
         <div className="question">
           {s.view === "writer" ? (
@@ -114,6 +117,7 @@ export function Composer({ initialView }: Props) {
           stage={s.confirmStage}
           summary={s.confirmSummary}
           view={s.view}
+          optionType={s.optionType}
           onClose={s.closeConfirm}
         />
       )}

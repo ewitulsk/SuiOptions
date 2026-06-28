@@ -3,6 +3,8 @@
 
 export type Side = "writer" | "trader" | "account";
 export type View = "writer" | "trader";
+/** Cash-secured PUT vs covered CALL. Orthogonal to writer/trader `View`. */
+export type OptionType = "call" | "put";
 
 export type Strike = {
   strike: number;
@@ -33,6 +35,7 @@ export type ConfirmStage = "signing" | "broadcast" | "confirmed" | null;
 
 export type ConfirmSummary = {
   view: View;
+  optionType: OptionType;
   premium: number;
   bucket: string;
   rangeStart: number;
@@ -57,6 +60,8 @@ export type OwnedLot = {
 export type OwnedPosition = {
   id: string;
   side: "owned";
+  /** "call" (covered call) or "put" (cash-secured put). Defaults to "call". */
+  optionType: OptionType;
   asset: "BTC" | "SUI" | string;
   strike: number;
   expiry: string;
@@ -96,6 +101,8 @@ export type OwnedPosition = {
 export type WrittenPosition = {
   id: string;
   side: "written";
+  /** "call" (covered call) or "put" (cash-secured put). Defaults to "call". */
+  optionType: OptionType;
   asset: "BTC" | "SUI" | string;
   strike: number;
   expiry: string;
