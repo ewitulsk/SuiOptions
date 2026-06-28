@@ -42,7 +42,7 @@ use indexer_graphql::IndexerClient;
 use option_scheduler::config::{GridConfig, PairConfig, SchedulerConfig, VaultTemplate};
 use option_scheduler::db;
 use option_scheduler::families::{CanonicalType, PairKey};
-use option_scheduler::roller::{self, ErrorClass, RollPlan};
+use option_scheduler::roller::{self, ErrorClass, ProductType, RollPlan};
 use option_scheduler::schedule::{decide_tick, SkipReason, TickDecision};
 use option_scheduler::spot::ResolvedSpotSource;
 use option_scheduler::strike_grid::{build_strike_grid_for_pair, build_z_ladder_for_pair};
@@ -556,11 +556,13 @@ async fn tick_once(
         // produced duplicate families. A transient DB read error skips the
         // pair this tick (retried next tick) rather than risking a roll on
         // missing state.
+        let product_type = meta.cfg.product_type.as_str();
         let latest_expiry = match db::latest_active_expiry(
             db_pool,
             &meta.cfg.underlying,
             &meta.cfg.settlement,
             meta.cfg.expiry_interval_ms,
+            product_type,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -625,6 +627,7 @@ async fn tick_once(
             &meta.cfg.settlement,
             next_expiry,
             meta.cfg.expiry_interval_ms,
+            product_type,
             anchor_seq,
         ) {
             Ok(true) => {
@@ -654,6 +657,7 @@ async fn tick_once(
                     &meta.cfg.underlying,
                     &meta.cfg.settlement,
                     next_expiry,
+                    product_type,
                 );
                 continue;
             }
@@ -668,6 +672,7 @@ async fn tick_once(
                         &meta.cfg.underlying,
                         &meta.cfg.settlement,
                         next_expiry,
+                        product_type,
                     );
                     continue;
                 }
@@ -683,6 +688,7 @@ async fn tick_once(
             expiry_ms: next_expiry,
             strikes,
             strike_scale,
+            product_type: meta.cfg.product_type,
         };
         plan.log_intent(cli.dry_run);
 
@@ -693,6 +699,7 @@ async fn tick_once(
                 &meta.cfg.underlying,
                 &meta.cfg.settlement,
                 next_expiry,
+                product_type,
             );
             continue;
         }
@@ -743,6 +750,7 @@ async fn tick_once(
                     &meta.cfg.underlying,
                     &meta.cfg.settlement,
                     next_expiry,
+                    product_type,
                     &out.digest,
                     &ids,
                 ) {
@@ -767,6 +775,7 @@ async fn tick_once(
                             &meta.cfg.underlying,
                             &meta.cfg.settlement,
                             next_expiry,
+                            product_type,
                         );
                     }
                     ErrorClass::Ambiguous => {
@@ -775,6 +784,7 @@ async fn tick_once(
                             &meta.cfg.underlying,
                             &meta.cfg.settlement,
                             next_expiry,
+                            product_type,
                             &format!("{e:#}"),
                         );
                     }
@@ -863,12 +873,17 @@ async fn confirm_landed_rolls(
             };
             if pk.underlying_symbol == row.underlying_symbol
                 && pk.settlement_symbol == row.settlement_symbol
+                // A call and a put family can share an expiry slot; confirm only
+                // the row whose product matches this bucket. The bucket's coin
+                // type module is `put_<i>` for puts, `call_<i>` for calls.
+                && product_of_bucket(b.call_type.as_str()) == row.product_type
             {
                 db::confirm_from_indexer(
                     pool,
                     &pk.underlying_symbol,
                     &pk.settlement_symbol,
                     expiry,
+                    &row.product_type,
                     &b.bucket_id.to_hex(),
                 )?;
             }
@@ -920,6 +935,22 @@ async fn supersede_invalidated_families(
         }
     }
     Ok(())
+}
+
+/// Classify an on-chain bucket's option-coin type into the scheduler's product
+/// tag. Put coins live in `…::put_<i>::PUT_<I>` modules; everything else is a
+/// call. Used to confirm the right roll row when a call and a put family share
+/// an expiry slot.
+fn product_of_bucket(coin_type: &str) -> &'static str {
+    let is_put = coin_type
+        .split("::")
+        .nth(1)
+        .is_some_and(|m| m.starts_with("put_"));
+    if is_put {
+        ProductType::Put.as_str()
+    } else {
+        ProductType::Call.as_str()
+    }
 }
 
 fn now_ms() -> u64 {

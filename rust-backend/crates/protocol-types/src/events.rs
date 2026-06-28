@@ -568,6 +568,208 @@ pub struct VaultDepositsPaused {
     pub paused: bool,
 }
 
+// ─── cash-secured put events (mirror of the call/RFQ events above) ───
+//
+// Field order matches the Move structs in `events.move` exactly. Puts carry
+// two extra economic fields vs calls: `collateral` (the cash escrowed =
+// ceil(amount × strike)) on the write events, and `dust_swept` on cleanup.
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutBucketCreated {
+    pub bucket_id: ObjectId,
+    pub asset_type: AssetType,
+    pub settlement_type: AssetType,
+    /// Fully-qualified type of the per-bucket fungible put coin (`Coin<put_type>`).
+    pub put_type: AssetType,
+    #[serde(with = "u64_string")]
+    pub expiry_ms: u64,
+    #[serde(with = "u128_string")]
+    pub strike: u128,
+    pub strike_scale: u8,
+}
+
+impl PutBucketCreated {
+    pub fn strike_as_f64(&self) -> f64 {
+        self.strike as f64 / 10f64.powi(self.strike_scale as i32)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutWriteExecuted {
+    pub bucket_id: ObjectId,
+    pub signer_account_id: ObjectId,
+    pub signer_token_recipient: SuiAddress,
+    pub executor: SuiAddress,
+    pub position_id: ObjectId,
+    pub position_recipient: SuiAddress,
+    pub put_token_recipient: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub write_amount: u64,
+    /// Cash collateral escrowed = ceil(write_amount × strike).
+    #[serde(with = "u64_string")]
+    pub collateral: u64,
+    #[serde(with = "u64_string")]
+    pub gross_premium: u64,
+    #[serde(with = "u64_string")]
+    pub fee: u64,
+    #[serde(with = "u64_string")]
+    pub net_premium: u64,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
+    #[serde(with = "u64_string")]
+    pub nonce: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutCollateralizedWrite {
+    pub bucket_id: ObjectId,
+    pub writer: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub write_amount: u64,
+    #[serde(with = "u64_string")]
+    pub collateral: u64,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutExercised {
+    pub bucket_id: ObjectId,
+    pub exerciser: SuiAddress,
+    /// Underlying delivered in (== put coins burned).
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    /// Settlement (cash) paid out = floor(amount × strike).
+    #[serde(with = "u64_string")]
+    pub settlement_paid: u64,
+    #[serde(with = "u128_string")]
+    pub cursor_after: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutRedeemed {
+    pub bucket_id: ObjectId,
+    pub position_id: ObjectId,
+    pub redeemer: SuiAddress,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
+    /// Assigned (exercised) underlying handed to the writer.
+    #[serde(with = "u64_string")]
+    pub underlying_returned: u64,
+    /// Unassigned cash collateral returned = floor(unexercised × strike).
+    #[serde(with = "u64_string")]
+    pub settlement_returned: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutExpiredOptionBurned {
+    pub bucket_id: ObjectId,
+    pub burner: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutBucketCleaned {
+    pub bucket_id: ObjectId,
+    /// Rounding-remainder cash swept to the admin at cleanup.
+    #[serde(with = "u64_string")]
+    pub dust_swept: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutBucketInvalidated {
+    pub bucket_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub at_ms: u64,
+    pub admin: SuiAddress,
+    #[serde(with = "crate::coding::bytes_hex")]
+    pub reason: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutBucketRevalidated {
+    pub bucket_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub at_ms: u64,
+    pub admin: SuiAddress,
+    #[serde(with = "crate::coding::bytes_hex")]
+    pub reason: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutRfqCreated {
+    pub rfq_id: ObjectId,
+    pub bucket_id: ObjectId,
+    pub origin: ObjectId,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    /// Cash collateral escrowed for the slice.
+    #[serde(with = "u64_string")]
+    pub collateral: u64,
+    #[serde(with = "u64_string")]
+    pub reserve_premium: u64,
+    #[serde(with = "u64_string")]
+    pub deadline_ms: u64,
+    #[serde(with = "u64_string")]
+    pub max_deadline_ms: u64,
+    #[serde(with = "u64_string")]
+    pub min_increment_bps: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutRfqBid {
+    pub rfq_id: ObjectId,
+    pub bidder: SuiAddress,
+    pub put_recipient: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub premium: u64,
+    #[serde(with = "u64_string")]
+    pub previous_premium: u64,
+    #[serde(with = "u64_string")]
+    pub new_deadline_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutRfqSettled {
+    pub rfq_id: ObjectId,
+    pub bucket_id: ObjectId,
+    pub origin: ObjectId,
+    pub winner: SuiAddress,
+    pub put_recipient: SuiAddress,
+    pub position_id: ObjectId,
+    pub position_recipient: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub gross_premium: u64,
+    #[serde(with = "u64_string")]
+    pub fee: u64,
+    #[serde(with = "u64_string")]
+    pub net_premium: u64,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutRfqExpiredUnsold {
+    pub rfq_id: ObjectId,
+    pub bucket_id: ObjectId,
+    pub origin: ObjectId,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub reserve_premium: u64,
+}
+
 /// Tagged union over every event the indexer may publish.
 ///
 /// The variant name is what shows up as `"type"` over the wire; the payload
@@ -614,6 +816,20 @@ pub enum ChainEvent {
     VaultConfigUpdated(VaultConfigUpdated),
     VaultConfigApplied(VaultConfigApplied),
     VaultDepositsPaused(VaultDepositsPaused),
+    // cash-secured puts
+    PutBucketCreated(PutBucketCreated),
+    PutWriteExecuted(PutWriteExecuted),
+    PutCollateralizedWrite(PutCollateralizedWrite),
+    PutExercised(PutExercised),
+    PutRedeemed(PutRedeemed),
+    PutExpiredOptionBurned(PutExpiredOptionBurned),
+    PutBucketCleaned(PutBucketCleaned),
+    PutBucketInvalidated(PutBucketInvalidated),
+    PutBucketRevalidated(PutBucketRevalidated),
+    PutRfqCreated(PutRfqCreated),
+    PutRfqBid(PutRfqBid),
+    PutRfqSettled(PutRfqSettled),
+    PutRfqExpiredUnsold(PutRfqExpiredUnsold),
 }
 
 /// An envelope wrapping a `ChainEvent` with the ordering metadata the indexer

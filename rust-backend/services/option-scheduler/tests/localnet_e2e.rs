@@ -30,7 +30,7 @@ use sui_types::crypto::{get_key_pair, AccountKeyPair, SuiKeyPair};
 use sui_types::transaction::Transaction;
 use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
 
-use option_scheduler::roller::{self, RollPlan};
+use option_scheduler::roller::{self, ProductType, RollPlan};
 use option_scheduler::strike_grid::StrikeGrid;
 use sui_tx::sui_client::{Network, Signer, SuiClientWrapper};
 
@@ -182,6 +182,7 @@ async fn localnet_roll_creates_per_bucket_coins() -> Result<()> {
         }
         .strikes(),
         strike_scale: 0,
+        product_type: ProductType::Call,
     };
 
     let wrap = SuiClientWrapper {

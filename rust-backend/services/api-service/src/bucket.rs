@@ -14,6 +14,9 @@ pub struct Bucket {
     pub exercise_cursor: u128,
     pub cleaned: bool,
     pub invalidated: bool,
+    /// `"call"` | `"put"` — the option kind this bucket writes. Populated from
+    /// the indexer's `optionKind`; defaults to `"call"` for back-compat.
+    pub option_kind: String,
     /// DeepBook pool trading this bucket's call coin (SO-153), hex object
     /// id. `None` until a venue is created.
     pub deepbook_pool_id: Option<String>,

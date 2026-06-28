@@ -31,6 +31,14 @@ struct RfqObservation {
     bucket_id: String,
     write_amount: u64,
     side: String,
+    /// Option product (`call` / `put`). Optional on the wire: streams from
+    /// pre-puts services omit it, so default to `call`.
+    #[serde(default = "default_option_kind")]
+    option_kind: String,
+}
+
+fn default_option_kind() -> String {
+    "call".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,8 +119,9 @@ async fn main() -> Result<()> {
 fn print(o: &RfqObservation) {
     let ts = format_ts(o.timestamp_ms);
     println!(
-        "{ts}  {side:6}  bucket={bucket}  write={amount}  req={req}",
+        "{ts}  {side:6}  {kind:4}  bucket={bucket}  write={amount}  req={req}",
         side = o.side,
+        kind = o.option_kind,
         bucket = short(&o.bucket_id),
         amount = o.write_amount,
         req = o.request_id,

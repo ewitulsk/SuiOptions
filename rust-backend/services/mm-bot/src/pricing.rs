@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use pricing::{call_price_per_unit, premium_for_write, CallInputs};
+use pricing::{call_price_per_unit, premium_for_write, put_price_per_unit, CallInputs};
 use protocol_types::asset::canonicalize_move_type;
 use protocol_types::sides::Side;
 use pyth_client::{PriceCache, PriceFeedId};
@@ -46,6 +46,10 @@ pub struct RfqPricingInputs {
     pub strike_scale: u8,
     /// Bucket expiry as a Sui clock millisecond timestamp.
     pub expiry_ms: u64,
+    /// `true` when the bucket is a cash-secured put: the Black-Scholes mid
+    /// comes from [`pricing::put_price_per_unit`] instead of the call pricer.
+    /// The spread / premium-scaling logic is identical to the call path.
+    pub is_put: bool,
 }
 
 /// Whether the bucket's pair (as resolved from api-service) is the one this bot
@@ -224,14 +228,19 @@ pub fn price_rfq(
 ) -> PriceDecision {
     let t_years = time_to_expiry_years(inputs.expiry_ms, now_ms);
     let strike_scaled = rebase_strike_to_scale_zero(inputs.strike, inputs.strike_scale);
-    let call_inputs = CallInputs {
+    // PutInputs == CallInputs; the only difference is which BS leg we evaluate.
+    let bs_inputs = CallInputs {
         spot: spot_scaled,
         strike: strike_scaled,
         t_years,
         r: cfg.rate,
         sigma,
     };
-    let per_unit_mid = call_price_per_unit(call_inputs);
+    let per_unit_mid = if inputs.is_put {
+        put_price_per_unit(bs_inputs)
+    } else {
+        call_price_per_unit(bs_inputs)
+    };
     let per_unit = apply_spread(per_unit_mid, inputs.side, cfg);
     let premium = premium_for_write(per_unit, inputs.write_amount);
     if premium == 0 {
@@ -280,6 +289,24 @@ mod tests {
             strike,
             strike_scale,
             expiry_ms,
+            is_put: false,
+        }
+    }
+
+    fn put_rfq(
+        side: Side,
+        expiry_ms: u64,
+        strike: u128,
+        strike_scale: u8,
+        write_amount: u64,
+    ) -> RfqPricingInputs {
+        RfqPricingInputs {
+            write_amount,
+            side,
+            strike,
+            strike_scale,
+            expiry_ms,
+            is_put: true,
         }
     }
 
@@ -696,6 +723,89 @@ mod tests {
             PriceDecision::Quote { premium, .. } => assert_eq!(premium, 10),
             _ => panic!("expected Quote"),
         }
+    }
+
+    // -- price_rfq put path ---------------------------------------------
+
+    #[test]
+    fn price_rfq_put_quotes_atm_textbook_value() {
+        // S=K=100, T=1y, r=5%, σ=20% → BS put ≈ 5.5735, write=1 → floor = 5.
+        let year_ms = 1000 * 86_400 * 365u64;
+        let p = put_rfq(Side::Trader, year_ms, 100, 0, 1);
+        let d = price_rfq(&pricing_cfg(), &p, 100.0, 0.20, 0);
+        match d {
+            PriceDecision::Quote { premium, per_unit, .. } => {
+                assert_eq!(premium, 5);
+                close(per_unit, 5.5735, 0.01);
+            }
+            other => panic!("expected Quote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn price_rfq_put_differs_from_call_otm() {
+        // Spot well above strike: the call is deep ITM, the put deep OTM, so
+        // the same inputs must price very differently across the two legs.
+        let year_ms = 1000 * 86_400 * 365u64;
+        let call = price_rfq(&pricing_cfg(), &rfq(year_ms, 100, 0, 1_000_000), 150.0, 0.20, 0);
+        let put = price_rfq(
+            &pricing_cfg(),
+            &put_rfq(Side::Trader, year_ms, 100, 0, 1_000_000),
+            150.0,
+            0.20,
+            0,
+        );
+        assert!(premium_of(&call) > premium_of(&put), "{call:?} vs {put:?}");
+    }
+
+    #[test]
+    fn price_rfq_put_expired_prices_to_intrinsic() {
+        // Expired put, spot below strike → intrinsic = K - S per unit.
+        let p = put_rfq(Side::Trader, 0, 100, 0, 1);
+        let d = price_rfq(&pricing_cfg(), &p, 60.0, 0.2, 1_000);
+        match d {
+            PriceDecision::Quote { premium, t_years, .. } => {
+                assert_eq!(premium, 40); // 100 - 60
+                close(t_years, 0.0, 1e-12);
+            }
+            other => panic!("expected Quote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn price_rfq_put_spread_marks_ask_up_and_bid_down() {
+        // Same ATM put priced trader-side (ask) and writer-side (bid) with a
+        // 100/200 bps spread: ask above the put mid, bid below.
+        let year_ms = 1000 * 86_400 * 365u64;
+        let cfg = PricingConfig {
+            rate: 0.05,
+            quote_ttl_ms: 30_000,
+            ask_markup_bps: 100,
+            bid_markdown_bps: 200,
+        };
+        let mid = premium_of(&price_rfq(
+            &pricing_cfg(),
+            &put_rfq(Side::Trader, year_ms, 100, 0, 1_000_000),
+            100.0,
+            0.20,
+            0,
+        ));
+        let ask = premium_of(&price_rfq(
+            &cfg,
+            &put_rfq(Side::Trader, year_ms, 100, 0, 1_000_000),
+            100.0,
+            0.20,
+            0,
+        ));
+        let bid = premium_of(&price_rfq(
+            &cfg,
+            &put_rfq(Side::Writer, year_ms, 100, 0, 1_000_000),
+            100.0,
+            0.20,
+            0,
+        ));
+        assert!(ask > mid, "ask {ask} should exceed mid {mid}");
+        assert!(bid < mid, "bid {bid} should be below mid {mid}");
     }
 
     // -- serves_pair (pair gate) ----------------------------------------

@@ -6,10 +6,18 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use sui_types::base_types::ObjectID;
 
 use sui_tx::sui_client::Network;
+
+/// Option product the trader flow targets. `call` is the default so existing
+/// invocations are unchanged.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Product {
+    Call,
+    Put,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "trader", about = "Retail-trader test client for the options protocol")]
@@ -44,6 +52,10 @@ pub struct Cli {
     /// Symbol for the settlement token (the premium is paid in this).
     #[arg(long, default_value = "TUSDC")]
     pub settlement: String,
+
+    /// `call` (covered call) or `put` (cash-secured put). Defaults to `call`.
+    #[arg(long, value_enum, default_value_t = Product::Call)]
+    pub product: Product,
 
     #[arg(long, default_value_t = 200_000_000)]
     pub gas_budget: u64,

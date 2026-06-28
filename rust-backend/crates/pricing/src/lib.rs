@@ -29,6 +29,11 @@ pub struct CallInputs {
     pub sigma: f64,
 }
 
+/// Black-Scholes inputs for a put. Identical shape to [`CallInputs`] (spot,
+/// strike, time, rate, vol are option-type-agnostic); aliased for call-site
+/// clarity in the put functions below.
+pub type PutInputs = CallInputs;
+
 /// Per-unit-of-underlying call price in the same units as `strike`/`spot`.
 pub fn call_price_per_unit(i: CallInputs) -> f64 {
     trace!(spot = i.spot, strike = i.strike, t_years = i.t_years, r = i.r, sigma = i.sigma, "computing call price");
@@ -225,6 +230,106 @@ pub fn implied_vol(market: f64, spot: f64, strike: f64, t_years: f64, r: f64) ->
 /// position (the latter is what produces the screenshot's 537.15 = 500 + 37.15).
 pub fn break_even(strike: f64, premium_per_unit: f64) -> f64 {
     strike + premium_per_unit
+}
+
+// ---- cash-secured puts (mirror of the call functions above) ----
+//
+// Every put function shares the call edge conventions: at expiry the value is
+// the raw intrinsic `max(K − S, 0)`; at zero vol it is the discounted forward
+// intrinsic; otherwise Black-Scholes. The relationships to the call side are
+// exact (put–call parity `C − P = S − K·e^(−rτ)`), which the tests pin.
+
+/// Per-unit-of-underlying European put price, in the same units as
+/// `strike`/`spot`: `K·e^(−rτ)·N(−d2) − S·N(−d1)`.
+pub fn put_price_per_unit(i: PutInputs) -> f64 {
+    trace!(spot = i.spot, strike = i.strike, t_years = i.t_years, r = i.r, sigma = i.sigma, "computing put price");
+    if i.t_years <= 0.0 {
+        return (i.strike - i.spot).max(0.0);
+    }
+    if i.sigma <= 0.0 {
+        let fwd = i.spot * (i.r * i.t_years).exp();
+        let intrinsic = (i.strike - fwd).max(0.0);
+        return intrinsic * (-i.r * i.t_years).exp();
+    }
+    let sqrt_t = i.t_years.sqrt();
+    let d1 = ((i.spot / i.strike).ln() + (i.r + 0.5 * i.sigma * i.sigma) * i.t_years)
+        / (i.sigma * sqrt_t);
+    let d2 = d1 - i.sigma * sqrt_t;
+    let price = i.strike * (-i.r * i.t_years).exp() * norm_cdf(-d2) - i.spot * norm_cdf(-d1);
+    trace!(price, d1, d2, "put price computed");
+    price
+}
+
+/// Analytic put delta `−N(−d1)` (equivalently `N(d1) − 1`), in `[−1, 0]`. At
+/// expiry / zero vol the option is deterministic, so delta is the negative
+/// indicator of the (forward) intrinsic being positive.
+pub fn put_delta(i: PutInputs) -> f64 {
+    if i.t_years <= 0.0 {
+        return if i.spot < i.strike { -1.0 } else { 0.0 };
+    }
+    if i.sigma <= 0.0 {
+        let fwd = i.spot * (i.r * i.t_years).exp();
+        return if fwd < i.strike { -1.0 } else { 0.0 };
+    }
+    let sqrt_t = i.t_years.sqrt();
+    let d1 = ((i.spot / i.strike).ln() + (i.r + 0.5 * i.sigma * i.sigma) * i.t_years)
+        / (i.sigma * sqrt_t);
+    -norm_cdf(-d1)
+}
+
+/// Risk-neutral probability the put finishes in-the-money (S < K) — i.e. the
+/// cash-secured writer gets assigned — which is `N(−d2)`. The put analog of
+/// `assignment_prob`. Edge conventions match `put_delta`.
+pub fn put_assignment_prob(i: PutInputs) -> f64 {
+    if i.t_years <= 0.0 {
+        return if i.spot < i.strike { 1.0 } else { 0.0 };
+    }
+    if i.sigma <= 0.0 {
+        let fwd = i.spot * (i.r * i.t_years).exp();
+        return if fwd < i.strike { 1.0 } else { 0.0 };
+    }
+    let sqrt_t = i.t_years.sqrt();
+    let d1 = ((i.spot / i.strike).ln() + (i.r + 0.5 * i.sigma * i.sigma) * i.t_years)
+        / (i.sigma * sqrt_t);
+    let d2 = d1 - i.sigma * sqrt_t;
+    norm_cdf(-d2)
+}
+
+/// Analytic Black-Scholes put greeks. `gamma`/`vega` are identical to the
+/// call's; `delta` = `N(d1) − 1`; `theta`/`rho` carry the put signs. Same edge
+/// conventions as `put_price_per_unit`.
+pub fn put_greeks(i: PutInputs) -> Greeks {
+    if i.t_years <= 0.0 || i.sigma <= 0.0 {
+        return Greeks {
+            delta: put_delta(i),
+            gamma: 0.0,
+            vega: 0.0,
+            theta: 0.0,
+            rho: 0.0,
+        };
+    }
+    let sqrt_t = i.t_years.sqrt();
+    let d1 = ((i.spot / i.strike).ln() + (i.r + 0.5 * i.sigma * i.sigma) * i.t_years)
+        / (i.sigma * sqrt_t);
+    let d2 = d1 - i.sigma * sqrt_t;
+    let pdf_d1 = norm_pdf(d1);
+    let disc = (-i.r * i.t_years).exp();
+
+    let delta = norm_cdf(d1) - 1.0;
+    let gamma = pdf_d1 / (i.spot * i.sigma * sqrt_t);
+    let vega = i.spot * pdf_d1 * sqrt_t;
+    // Annualized put theta, then per-day below.
+    let theta_annual =
+        -(i.spot * pdf_d1 * i.sigma) / (2.0 * sqrt_t) + i.r * i.strike * disc * norm_cdf(-d2);
+    let rho = -i.strike * i.t_years * disc * norm_cdf(-d2);
+
+    Greeks { delta, gamma, vega, theta: theta_annual / 365.0, rho }
+}
+
+/// Break-even underlying price for a long put held to expiry:
+/// `strike − premium_per_unit`.
+pub fn put_break_even(strike: f64, premium_per_unit: f64) -> f64 {
+    strike - premium_per_unit
 }
 
 /// Inverse standard normal CDF via Acklam's rational approximation
@@ -660,5 +765,154 @@ mod tests {
     #[test]
     fn break_even_basic() {
         close(break_even(500.0, 37.15), 537.15, 1e-12);
+    }
+
+    // ---- put tests ----
+
+    #[test]
+    fn put_call_parity_holds() {
+        // C − P = S − K·e^(−rτ) across regimes (the exact relationship).
+        let cases = [
+            (100.0, 100.0, 1.0, 0.05, 0.20),
+            (100.0, 80.0, 0.5, 0.03, 0.35),
+            (100.0, 130.0, 0.25, 0.0, 0.60),
+            (3.5, 4.2, 14.0 / 365.0, 0.03, 0.90),
+            (77_000.0, 90_000.0, 30.0 / 365.0, 0.04, 0.45),
+        ];
+        for (spot, strike, t_years, r, sigma) in cases {
+            let i = CallInputs { spot, strike, t_years, r, sigma };
+            let c = call_price_per_unit(i);
+            let p = put_price_per_unit(i);
+            close(c - p, spot - strike * (-r * t_years).exp(), 1e-6);
+        }
+    }
+
+    #[test]
+    fn put_atm_textbook_value() {
+        // S=K=100, T=1, r=0.05, σ=0.20: call≈10.4506, parity ⇒ put≈5.5735.
+        let p = put_price_per_unit(PutInputs {
+            spot: 100.0,
+            strike: 100.0,
+            t_years: 1.0,
+            r: 0.05,
+            sigma: 0.20,
+        });
+        close(p, 5.5735, 0.01);
+    }
+
+    #[test]
+    fn put_zero_time_is_intrinsic() {
+        // K=100, S=95 → max(K−S,0)=5.
+        let p = put_price_per_unit(PutInputs {
+            spot: 95.0,
+            strike: 100.0,
+            t_years: 0.0,
+            r: 0.05,
+            sigma: 0.6,
+        });
+        close(p, 5.0, 1e-9);
+    }
+
+    #[test]
+    fn put_zero_vol_collapses_to_discounted_intrinsic() {
+        // σ=0, S=90, K=100, r=0 → max(100−90,0)=10.
+        let p = put_price_per_unit(PutInputs {
+            spot: 90.0,
+            strike: 100.0,
+            t_years: 1.0,
+            r: 0.0,
+            sigma: 0.0,
+        });
+        close(p, 10.0, 1e-9);
+    }
+
+    #[test]
+    fn put_delta_matches_bump_and_reprice() {
+        let cases = [
+            (100.0, 100.0, 1.0, 0.05, 0.20),
+            (100.0, 70.0, 7.0 / 365.0, 0.0, 0.60),
+            (3.5, 3.0, 14.0 / 365.0, 0.03, 0.90),
+            (77_000.0, 60_000.0, 30.0 / 365.0, 0.04, 0.45),
+        ];
+        for (spot, strike, t_years, r, sigma) in cases {
+            let i = PutInputs { spot, strike, t_years, r, sigma };
+            let h = spot * 1e-5;
+            let up = put_price_per_unit(PutInputs { spot: spot + h, ..i });
+            let dn = put_price_per_unit(PutInputs { spot: spot - h, ..i });
+            let numeric = (up - dn) / (2.0 * h);
+            close(put_delta(i), numeric, 2e-5);
+            // delta ∈ [−1, 0] and equals N(d1) − 1 = call_delta − 1.
+            assert!(put_delta(i) <= 0.0 && put_delta(i) >= -1.0);
+            close(put_delta(i), call_delta(i) - 1.0, 2e-5);
+        }
+    }
+
+    #[test]
+    fn put_delta_edges() {
+        // Expired ITM put (S<K) → −1; OTM → 0.
+        let base = PutInputs { spot: 95.0, strike: 100.0, t_years: 0.0, r: 0.0, sigma: 0.5 };
+        close(put_delta(base), -1.0, 1e-12);
+        close(put_delta(PutInputs { spot: 105.0, ..base }), 0.0, 1e-12);
+    }
+
+    #[test]
+    fn put_assignment_prob_matches_complement() {
+        // N(−d2) = 1 − N(d2) = 1 − call assignment_prob (same inputs, smooth regime).
+        let i = PutInputs { spot: 100.0, strike: 100.0, t_years: 0.5, r: 0.0, sigma: 0.4 };
+        close(put_assignment_prob(i), 1.0 - assignment_prob(i), 1e-9);
+        // Expired ITM → 1, OTM → 0.
+        let exp = PutInputs { spot: 95.0, strike: 100.0, t_years: 0.0, r: 0.0, sigma: 0.5 };
+        close(put_assignment_prob(exp), 1.0, 1e-12);
+        close(put_assignment_prob(PutInputs { spot: 105.0, ..exp }), 0.0, 1e-12);
+    }
+
+    #[test]
+    fn put_greeks_match_bump_and_reprice() {
+        let cases = [
+            (100.0, 100.0, 1.0, 0.05, 0.20),
+            (100.0, 70.0, 7.0 / 365.0, 0.0, 0.60),
+            (3.5, 3.0, 14.0 / 365.0, 0.03, 0.90),
+        ];
+        for (spot, strike, t_years, r, sigma) in cases {
+            let i = PutInputs { spot, strike, t_years, r, sigma };
+            let g = put_greeks(i);
+
+            let hs = spot * 1e-4;
+            let p_up = put_price_per_unit(PutInputs { spot: spot + hs, ..i });
+            let p_mid = put_price_per_unit(i);
+            let p_dn = put_price_per_unit(PutInputs { spot: spot - hs, ..i });
+            close_greek(g.gamma, (p_up - 2.0 * p_mid + p_dn) / (hs * hs));
+
+            let hv = sigma * 1e-4;
+            let v_up = put_price_per_unit(PutInputs { sigma: sigma + hv, ..i });
+            let v_dn = put_price_per_unit(PutInputs { sigma: sigma - hv, ..i });
+            close_greek(g.vega, (v_up - v_dn) / (2.0 * hv));
+
+            let ht = t_years * 1e-4;
+            let t_up = put_price_per_unit(PutInputs { t_years: t_years + ht, ..i });
+            let t_dn = put_price_per_unit(PutInputs { t_years: t_years - ht, ..i });
+            close_greek(g.theta * 365.0, -(t_up - t_dn) / (2.0 * ht));
+
+            let hr = 1e-5;
+            let r_up = put_price_per_unit(PutInputs { r: r + hr, ..i });
+            let r_dn = put_price_per_unit(PutInputs { r: r - hr, ..i });
+            close_greek(g.rho, (r_up - r_dn) / (2.0 * hr));
+        }
+    }
+
+    #[test]
+    fn put_greeks_share_gamma_vega_with_call() {
+        // gamma/vega are option-type-independent.
+        let i = CallInputs { spot: 100.0, strike: 110.0, t_years: 0.5, r: 0.02, sigma: 0.5 };
+        let c = call_greeks(i);
+        let p = put_greeks(i);
+        close(p.gamma, c.gamma, 1e-12);
+        close(p.vega, c.vega, 1e-12);
+        close(p.delta, c.delta - 1.0, 1e-12);
+    }
+
+    #[test]
+    fn put_break_even_basic() {
+        close(put_break_even(500.0, 37.15), 462.85, 1e-12);
     }
 }

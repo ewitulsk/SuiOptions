@@ -63,6 +63,8 @@ use anyhow::Result;
 use runtime_config::config_load;
 use serde::Deserialize;
 
+use crate::roller::ProductType;
+
 fn default_health_addr() -> std::net::SocketAddr {
     "0.0.0.0:8083".parse().unwrap()
 }
@@ -147,6 +149,13 @@ pub struct PairConfig {
 
     /// Spacing between adjacent strikes, in percent of spot.
     pub interval_pct: f64,
+
+    /// Covered call (default) vs cash-secured put. Selects the option-coin
+    /// codegen and the on-chain `create_bucket` vs `create_put_bucket` entry
+    /// for this pair's rolls. Absent ⇒ `call` (back-compat with pre-puts
+    /// configs).
+    #[serde(default)]
+    pub product_type: ProductType,
 
     pub spot: SpotConfig,
 

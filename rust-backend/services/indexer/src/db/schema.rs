@@ -55,6 +55,7 @@ diesel::table! {
         cleaned         -> Bool,
         invalidated     -> Bool,
         updated_at_seq  -> Int8,
+        option_kind     -> Text,
     }
 }
 
@@ -70,6 +71,7 @@ diesel::table! {
         mm_account_id    -> Text,
         tx_digest        -> Text,
         minted_at_ms     -> Int8,
+        option_kind      -> Text,
     }
 }
 
@@ -107,6 +109,7 @@ diesel::table! {
         gross_premium   -> Nullable<Numeric>,
         fee             -> Nullable<Numeric>,
         updated_at_seq  -> Int8,
+        option_kind     -> Text,
     }
 }
 
@@ -117,6 +120,7 @@ diesel::table! {
         bidder         -> Text,
         call_recipient -> Text,
         premium        -> Numeric,
+        option_kind    -> Text,
     }
 }
 

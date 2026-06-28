@@ -52,6 +52,7 @@ export function OwnedCard({
   onWithdraw: (p: OwnedPosition) => void;
 }) {
   const isItm = p.itm;
+  const isPut = p.optionType === "put";
   const inDeepbook = p.tradingAccountAmount > 0;
   return (
     <div className={"pos-card pos-card--owned " + (isItm ? "is-itm" : "is-otm")}>
@@ -60,7 +61,7 @@ export function OwnedCard({
           <AssetGlyph asset={p.asset} />
           <div className="pos-card__bucket-label">
             <div className="pos-card__bucket-main">
-              {p.asset} <span className="dim">·</span> call <span className="dim">·</span>{" "}
+              {p.asset} <span className="dim">·</span> {isPut ? "put" : "call"} <span className="dim">·</span>{" "}
               {fmtStrike(p.asset, p.strike)}
             </div>
             <div className="pos-card__bucket-sub">
@@ -83,7 +84,7 @@ export function OwnedCard({
           <div className="pos-card__metric-label">You own</div>
           <div className="pos-card__metric-val">
             {fmtAmt(p.asset, p.amount)}
-            <span className="pos-card__metric-unit"> {p.asset} call</span>
+            <span className="pos-card__metric-unit"> {p.asset} {isPut ? "put" : "call"}</span>
           </div>
           <div className="pos-card__metric-sub">
             cost basis {formatPrice(p.premiumPaid)} USDC
@@ -97,7 +98,9 @@ export function OwnedCard({
             </div>
           ))}
           <div className="pos-card__metric-sub">
-            exercise cost {formatPrice(p.amount * p.strike, { grouping: true })} USDC
+            {isPut
+              ? `deliver ${fmtAmt(p.asset, p.amount)} ${p.asset} · receive ${formatPrice(p.amount * p.strike, { grouping: true })} USDC`
+              : `exercise cost ${formatPrice(p.amount * p.strike, { grouping: true })} USDC`}
           </div>
           {inDeepbook && (
             <div className="pos-card__metric-sub is-info">
@@ -184,7 +187,9 @@ export function OwnedCard({
             className="pos-card__cta pos-card__cta--primary"
             onClick={() => onExercise(p)}
           >
-            Exercise → receive {fmtAmt(p.asset, p.amount)} {p.asset}
+            {isPut
+              ? `Exercise → deliver ${fmtAmt(p.asset, p.amount)} ${p.asset}`
+              : `Exercise → receive ${fmtAmt(p.asset, p.amount)} ${p.asset}`}
           </button>
         )}
         {p.status === "expired_itm" && (
@@ -195,13 +200,15 @@ export function OwnedCard({
         {p.status === "active_otm" && (
           <>
             <button className="pos-card__cta pos-card__cta--ghost" disabled>
-              Hold · wait for {p.asset} ≥ {fmtStrike(p.asset, p.strike)}
+              Hold · wait for {p.asset} {isPut ? "≤" : "≥"} {fmtStrike(p.asset, p.strike)}
             </button>
             <button
               className="pos-card__cta pos-card__cta--secondary"
               onClick={() => onExercise(p)}
             >
-              Exercise anyway → receive {fmtAmt(p.asset, p.amount)} {p.asset}
+              {isPut
+                ? `Exercise anyway → deliver ${fmtAmt(p.asset, p.amount)} ${p.asset}`
+                : `Exercise anyway → receive ${fmtAmt(p.asset, p.amount)} ${p.asset}`}
             </button>
           </>
         )}
@@ -223,6 +230,7 @@ export function WrittenCard({
   onClaim: (p: WrittenPosition) => void;
 }) {
   const exercisedPct = p.exercisedPct;
+  const isPut = p.optionType === "put";
   return (
     <div className="pos-card pos-card--written">
       <div className="pos-card__head">
@@ -230,7 +238,7 @@ export function WrittenCard({
           <AssetGlyph asset={p.asset} />
           <div className="pos-card__bucket-label">
             <div className="pos-card__bucket-main">
-              {p.asset} <span className="dim">·</span> call <span className="dim">·</span>{" "}
+              {p.asset} <span className="dim">·</span> {isPut ? "put" : "call"} <span className="dim">·</span>{" "}
               {fmtStrike(p.asset, p.strike)}
             </div>
             <div className="pos-card__bucket-sub">

@@ -526,6 +526,7 @@ async fn cycle(
                 strike: b.strike_raw,
                 strike_scale: b.strike_scale,
                 expiry_ms: b.expiry_ms,
+                is_put: false, // deepbook quoting is call-only
             };
             match price_rfq(&p.pricing, &inputs, *spot_scaled, *sigma, now) {
                 PriceDecision::Quote { per_unit, .. } => Some(per_unit),

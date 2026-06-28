@@ -7,6 +7,7 @@ diesel::table! {
         settlement_symbol     -> Text,
         expiry_ms             -> Int8,
         expiry_interval_ms    -> Int8,
+        product_type          -> Text,
         state                 -> Text,
         tx_digest             -> Nullable<Text>,
         bucket_ids            -> Nullable<Jsonb>,

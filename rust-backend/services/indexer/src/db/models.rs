@@ -119,6 +119,19 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::VaultConfigUpdated(_) => "VaultConfigUpdated",
         ChainEvent::VaultConfigApplied(_) => "VaultConfigApplied",
         ChainEvent::VaultDepositsPaused(_) => "VaultDepositsPaused",
+        ChainEvent::PutBucketCreated(_) => "PutBucketCreated",
+        ChainEvent::PutWriteExecuted(_) => "PutWriteExecuted",
+        ChainEvent::PutCollateralizedWrite(_) => "PutCollateralizedWrite",
+        ChainEvent::PutExercised(_) => "PutExercised",
+        ChainEvent::PutRedeemed(_) => "PutRedeemed",
+        ChainEvent::PutExpiredOptionBurned(_) => "PutExpiredOptionBurned",
+        ChainEvent::PutBucketCleaned(_) => "PutBucketCleaned",
+        ChainEvent::PutBucketInvalidated(_) => "PutBucketInvalidated",
+        ChainEvent::PutBucketRevalidated(_) => "PutBucketRevalidated",
+        ChainEvent::PutRfqCreated(_) => "PutRfqCreated",
+        ChainEvent::PutRfqBid(_) => "PutRfqBid",
+        ChainEvent::PutRfqSettled(_) => "PutRfqSettled",
+        ChainEvent::PutRfqExpiredUnsold(_) => "PutRfqExpiredUnsold",
     }
 }
 
@@ -166,6 +179,8 @@ pub struct BucketRow {
     pub cleaned: bool,
     pub invalidated: bool,
     pub updated_at_seq: i64,
+    /// "call" or "put" — shared-table discriminator (defaults to "call").
+    pub option_kind: String,
 }
 
 // ---------- bucket_deepbook_pools ----------
@@ -231,6 +246,8 @@ pub struct PositionRow {
     pub mm_account_id: String,
     pub tx_digest: String,
     pub minted_at_ms: i64,
+    /// "call" or "put" — shared-table discriminator (defaults to "call").
+    pub option_kind: String,
 }
 
 // ---------- conversions to/from in-memory state ----------
@@ -254,6 +271,7 @@ impl BucketRow {
                 exercise_cursor: bigdecimal_to_u128(&self.exercise_cursor)?,
                 cleaned: self.cleaned,
                 invalidated: self.invalidated,
+                option_kind: self.option_kind,
             },
         ))
     }
@@ -277,6 +295,7 @@ impl PositionRow {
                 recipient,
                 range_start: start,
                 range_end: end,
+                option_kind: self.option_kind,
             },
         ))
     }
@@ -334,6 +353,8 @@ pub struct RfqRow {
     pub gross_premium: Option<BigDecimal>,
     pub fee: Option<BigDecimal>,
     pub updated_at_seq: i64,
+    /// "call" or "put" — shared-table discriminator (defaults to "call").
+    pub option_kind: String,
 }
 
 impl RfqRow {
@@ -369,6 +390,7 @@ impl RfqRow {
                     .map_err(|e| anyhow::anyhow!("rfq position_id: {e}"))?,
                 gross_premium: self.gross_premium.as_ref().map(bigdecimal_to_u64).transpose()?,
                 fee: self.fee.as_ref().map(bigdecimal_to_u64).transpose()?,
+                option_kind: self.option_kind,
             },
         ))
     }
@@ -382,6 +404,8 @@ pub struct RfqBidRow {
     pub bidder: String,
     pub call_recipient: String,
     pub premium: BigDecimal,
+    /// "call" or "put" — shared-table discriminator (defaults to "call").
+    pub option_kind: String,
 }
 
 // ---------- vaults / vault_rounds / vault_user_receipts (D2) ----------

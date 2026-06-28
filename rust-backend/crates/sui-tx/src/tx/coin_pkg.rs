@@ -182,6 +182,44 @@ pub async fn create_buckets_and_pools(
     pools: Option<&PoolCreation>,
     gas_budget: u64,
 ) -> Result<SuiTransactionBlockResponse> {
+    create_buckets_impl(
+        client, signer, package, admin_cap, specs, pools, gas_budget, "bucket", "create_bucket",
+    )
+    .await
+}
+
+/// Cash-secured-put twin of [`create_buckets_and_pools`]: calls
+/// `put_bucket::create_put_bucket<U, S, Put>` per spec (the `call_type` field
+/// of [`CreateBucketSpec`] holds the put coin type). Pools, if requested, are
+/// `Pool<Put, Settlement>` — identical grid logic.
+pub async fn create_put_buckets_and_pools(
+    client: &SuiClient,
+    signer: &Signer,
+    package: ObjectID,
+    admin_cap: ObjectID,
+    specs: &[CreateBucketSpec],
+    pools: Option<&PoolCreation>,
+    gas_budget: u64,
+) -> Result<SuiTransactionBlockResponse> {
+    create_buckets_impl(
+        client, signer, package, admin_cap, specs, pools, gas_budget, "put_bucket",
+        "create_put_bucket",
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_buckets_impl(
+    client: &SuiClient,
+    signer: &Signer,
+    package: ObjectID,
+    admin_cap: ObjectID,
+    specs: &[CreateBucketSpec],
+    pools: Option<&PoolCreation>,
+    gas_budget: u64,
+    bucket_module_name: &str,
+    create_fn_name: &str,
+) -> Result<SuiTransactionBlockResponse> {
     if specs.is_empty() {
         return Err(anyhow!("create_buckets called with no specs"));
     }
@@ -213,8 +251,10 @@ pub async fn create_buckets_and_pools(
         None => None,
     };
 
-    let bucket_module = Identifier::new("bucket").unwrap();
-    let create_fn = Identifier::new("create_bucket").unwrap();
+    let bucket_module = Identifier::new(bucket_module_name)
+        .map_err(|e| anyhow!("bucket module {bucket_module_name}: {e}"))?;
+    let create_fn = Identifier::new(create_fn_name)
+        .map_err(|e| anyhow!("create fn {create_fn_name}: {e}"))?;
     let pool_module = Identifier::new("pool").unwrap();
     let create_pool_fn = Identifier::new("create_permissionless_pool").unwrap();
 

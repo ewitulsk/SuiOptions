@@ -1,14 +1,16 @@
 import { formatPrice } from "../format";
-import type { ConfirmStage, ConfirmSummary, View } from "../types";
+import type { ConfirmStage, ConfirmSummary, OptionType, View } from "../types";
 
 type Props = {
   stage: ConfirmStage;
   summary: ConfirmSummary | null;
   view: View;
+  optionType: OptionType;
   onClose: () => void;
 };
 
-export function ConfirmModal({ stage, summary, view, onClose }: Props) {
+export function ConfirmModal({ stage, summary, view, optionType, onClose }: Props) {
+  const isPut = optionType === "put";
   return (
     <div className="scrim">
       <div className="modal">
@@ -30,7 +32,11 @@ export function ConfirmModal({ stage, summary, view, onClose }: Props) {
           <>
             <div className="modal__check">✓</div>
             <div className="modal__title">
-              {view === "writer" ? "Position opened." : "Call purchased."}
+              {view === "writer"
+                ? "Position opened."
+                : isPut
+                  ? "Put purchased."
+                  : "Call purchased."}
             </div>
             <div className="modal__sub">{summary.bucket}</div>
             <div className="modal__list">
@@ -47,14 +53,18 @@ export function ConfirmModal({ stage, summary, view, onClose }: Props) {
                     </b>
                   </div>
                   <div className="modal__list-row">
-                    <span>collateral locked</span>
-                    <b>{summary.amount.toFixed(4)} {summary.asset}</b>
+                    <span>{isPut ? "cash collateral locked" : "collateral locked"}</span>
+                    <b>
+                      {isPut
+                        ? `${formatPrice(summary.amount * summary.strike, { grouping: true })} USDC`
+                        : `${summary.amount.toFixed(4)} ${summary.asset}`}
+                    </b>
                   </div>
                 </>
               ) : (
                 <>
                   <div className="modal__list-row">
-                    <span>call options minted</span>
+                    <span>{isPut ? "put options minted" : "call options minted"}</span>
                     <b>
                       {summary.amount.toFixed(4)} {summary.asset} @ ${formatPrice(summary.strike, { grouping: true })}
                     </b>

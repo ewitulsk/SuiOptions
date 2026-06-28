@@ -8,6 +8,7 @@ use sui::test_scenario::{Self as ts, Scenario};
 use options_protocol::admin::{Self, AdminCap, ProtocolConfig};
 use options_protocol::account::{Self, Account};
 use options_protocol::bucket;
+use options_protocol::put_bucket;
 use options_protocol::treasury::{Self, Treasury};
 
 public struct USDC has drop {}
@@ -20,6 +21,11 @@ public struct BTC has drop {}
 public struct CALL has drop {}
 public struct CALL2 has drop {}
 public struct CALL3 has drop {}
+
+/// Per-bucket put-coin marker types — the put analog of CALL/CALL2/CALL3.
+public struct PUT has drop {}
+public struct PUT2 has drop {}
+public struct PUT3 has drop {}
 
 /// Create and share a bucket for `(U, S, C)` with a fresh test option-coin
 /// treasury cap. Runs as the admin. Mirrors what the scheduler does on chain
@@ -35,6 +41,23 @@ public fun new_bucket<U, S, C>(
     let cap = take_admin_cap(scenario);
     let tcap = coin::create_treasury_cap_for_testing<C>(scenario.ctx());
     bucket::create_bucket<U, S, C>(&cap, tcap, expiry_ms, strike, strike_scale, scenario.ctx());
+    return_admin_cap(scenario, cap);
+}
+
+/// Create and share a cash-secured-put bucket for `(U, S, P)` with a fresh
+/// test put-coin treasury cap. The put analog of `new_bucket`.
+public fun new_put_bucket<U, S, P>(
+    scenario: &mut Scenario,
+    expiry_ms: u64,
+    strike: u128,
+    strike_scale: u8,
+) {
+    ts::next_tx(scenario, admin_addr());
+    let cap = take_admin_cap(scenario);
+    let tcap = coin::create_treasury_cap_for_testing<P>(scenario.ctx());
+    put_bucket::create_put_bucket<U, S, P>(
+        &cap, tcap, expiry_ms, strike, strike_scale, scenario.ctx(),
+    );
     return_admin_cap(scenario, cap);
 }
 

@@ -18,10 +18,13 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
 
   if (modal.kind === "exercise") {
     const { position: p, qty } = modal;
+    const isPut = p.optionType === "put";
     const spot = spots[p.asset] ?? 0;
+    // CALL: pay strike*qty USDC, receive qty underlying. PUT: deliver qty
+    // underlying, receive strike*qty USDC. Intrinsic is the inverted payoff.
     const usdcOut = p.strike * qty;
     const usdcValueAtSpot = spot * qty;
-    const intrinsic = Math.max(0, (spot - p.strike) * qty);
+    const intrinsic = Math.max(0, (isPut ? p.strike - spot : spot - p.strike) * qty);
     return (
       <div className="scrim">
         <div className="modal modal--wide">
@@ -32,28 +35,45 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
                 <button className="modal__x" onClick={onClose}>×</button>
               </div>
               <div className="modal__title">
-                Exercise {qty.toFixed(p.asset === "BTC" ? 4 : 0)} {p.asset} call at $
-                {formatPrice(p.strike, { grouping: true })}
+                Exercise {qty.toFixed(p.asset === "BTC" ? 4 : 0)} {p.asset}{" "}
+                {isPut ? "put" : "call"} at ${formatPrice(p.strike, { grouping: true })}
               </div>
               <div className="modal__sub">
                 tideline · bucket {p.asset.toLowerCase()}_{p.strike}_
                 {p.expiry.replaceAll("-", "")}
               </div>
               <div className="modal__list">
-                <div className="modal__list-row">
-                  <span>strike (you pay)</span>
-                  <b>−{formatPrice(usdcOut, { grouping: true })} USDC</b>
-                </div>
-                <div className="modal__list-row">
-                  <span>{p.asset} received</span>
-                  <b>+{qty.toFixed(p.asset === "BTC" ? 4 : 0)} {p.asset}</b>
-                </div>
-                <div className="modal__list-row">
-                  <span>{p.asset} value at spot</span>
-                  <b>
-                    {formatPrice(usdcValueAtSpot, { grouping: true })} USDC
-                  </b>
-                </div>
+                {isPut ? (
+                  <>
+                    <div className="modal__list-row">
+                      <span>{p.asset} delivered</span>
+                      <b>−{qty.toFixed(p.asset === "BTC" ? 4 : 0)} {p.asset}</b>
+                    </div>
+                    <div className="modal__list-row">
+                      <span>strike (you receive)</span>
+                      <b>+{formatPrice(usdcOut, { grouping: true })} USDC</b>
+                    </div>
+                    <div className="modal__list-row">
+                      <span>{p.asset} value at spot</span>
+                      <b>{formatPrice(usdcValueAtSpot, { grouping: true })} USDC</b>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="modal__list-row">
+                      <span>strike (you pay)</span>
+                      <b>−{formatPrice(usdcOut, { grouping: true })} USDC</b>
+                    </div>
+                    <div className="modal__list-row">
+                      <span>{p.asset} received</span>
+                      <b>+{qty.toFixed(p.asset === "BTC" ? 4 : 0)} {p.asset}</b>
+                    </div>
+                    <div className="modal__list-row">
+                      <span>{p.asset} value at spot</span>
+                      <b>{formatPrice(usdcValueAtSpot, { grouping: true })} USDC</b>
+                    </div>
+                  </>
+                )}
                 <div className="modal__list-row">
                   <span>intrinsic captured</span>
                   <b className="modal__list-val--pos">+{formatPrice(intrinsic)} USDC</b>
@@ -72,8 +92,9 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
               </div>
               <div className="modal__note">
                 Exercise advances the bucket cursor by {qty.toFixed(p.asset === "BTC" ? 4 : 0)}{" "}
-                {p.asset}. Your call tokens are burned. The bucket's FIFO assignment picks
-                which writer's range gets exercised — you don't pick.
+                {p.asset}. Your {isPut ? "put" : "call"} tokens are burned
+                {isPut ? " and you deliver the underlying" : ""}. The bucket's FIFO
+                assignment picks which writer's range gets exercised — you don't pick.
               </div>
               <div className="modal__actions">
                 <button className="modal__cta modal__cta--ghost" onClick={onClose}>
@@ -104,17 +125,34 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
               <div className="modal__check">✓</div>
               <div className="modal__title">Exercised.</div>
               <div className="modal__sub">
-                {qty.toFixed(p.asset === "BTC" ? 4 : 0)} {p.asset} received
+                {isPut
+                  ? `${formatPrice(usdcOut, { grouping: true })} USDC received`
+                  : `${qty.toFixed(p.asset === "BTC" ? 4 : 0)} ${p.asset} received`}
               </div>
               <div className="modal__list">
-                <div className="modal__list-row">
-                  <span>paid</span>
-                  <b>−{formatPrice(usdcOut, { grouping: true })} USDC</b>
-                </div>
-                <div className="modal__list-row">
-                  <span>received</span>
-                  <b>+{qty.toFixed(p.asset === "BTC" ? 4 : 0)} {p.asset}</b>
-                </div>
+                {isPut ? (
+                  <>
+                    <div className="modal__list-row">
+                      <span>delivered</span>
+                      <b>−{qty.toFixed(p.asset === "BTC" ? 4 : 0)} {p.asset}</b>
+                    </div>
+                    <div className="modal__list-row">
+                      <span>received</span>
+                      <b>+{formatPrice(usdcOut, { grouping: true })} USDC</b>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="modal__list-row">
+                      <span>paid</span>
+                      <b>−{formatPrice(usdcOut, { grouping: true })} USDC</b>
+                    </div>
+                    <div className="modal__list-row">
+                      <span>received</span>
+                      <b>+{qty.toFixed(p.asset === "BTC" ? 4 : 0)} {p.asset}</b>
+                    </div>
+                  </>
+                )}
                 <div className="modal__list-row">
                   <span>net P/L</span>
                   <b className={p.pnl >= 0 ? "modal__list-val--pos" : "modal__list-val--neg"}>

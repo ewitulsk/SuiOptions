@@ -182,6 +182,11 @@ struct BotConfig {
     #[serde(default)]
     onchain_rfq: mm_bot::onchain_rfq::OnchainRfqConfig,
 
+    /// On-chain cash-secured-PUT RFQ bidder — the put mirror of
+    /// `[onchain_rfq]` (same config shape). Off by default.
+    #[serde(default)]
+    onchain_put_rfq: mm_bot::onchain_rfq::OnchainRfqConfig,
+
     /// On-chain proceeds-swap bidder (doc 05 §3.1) — the buy side of the
     /// vault's settlement→underlying swap auctions. Off by default.
     #[serde(default)]
@@ -644,6 +649,38 @@ async fn main() -> Result<()> {
         tracing::info!("onchain rfq bidder enabled");
     }
 
+    // On-chain cash-secured-PUT RFQ bidder: poll open put auctions, price them
+    // with the put leg of the same brain, bid the premium from the wallet under
+    // the escrow cap (same accounting as the call bidder).
+    if cfg.onchain_put_rfq.enabled {
+        let bidder_markets = markets
+            .iter()
+            .map(|m| mm_bot::onchain_put_rfq::BidderMarket {
+                symbol: m.symbol.clone(),
+                coin_type: m.coin_type.clone(),
+                feed: m.feed,
+                decimals: m.decimals,
+                vol_buf: Arc::clone(&m.vol_buf),
+            })
+            .collect();
+        mm_bot::onchain_put_rfq::spawn_bidder(mm_bot::onchain_put_rfq::BidderParams {
+            cfg: cfg.onchain_put_rfq.clone(),
+            secrets: secrets_loaded.clone(),
+            network: cfg.network,
+            package: snapshot.package()?,
+            api_url: cli.api_url.clone(),
+            price_cache: price_cache.clone(),
+            markets: bidder_markets,
+            settlement_feed,
+            settlement_coin_type: settlement_coin_type.clone(),
+            settlement_decimals,
+            pricing: pricing_cfg,
+            staleness,
+            fallback_vol: cfg.pyth.fallback_vol,
+        });
+        tracing::info!("onchain put rfq bidder enabled");
+    }
+
     // On-chain swap bidder: the buy side of the vault's proceeds-swap
     // auctions (settlement → underlying), discovered straight from
     // SwapRfqCreated events.
@@ -900,6 +937,7 @@ async fn main() -> Result<()> {
                         strike: bucket.strike,
                         strike_scale: bucket.strike_scale,
                         expiry_ms: bucket.expiry_ms,
+                        is_put: bucket.is_put,
                     };
                     match price_rfq(&pricing_cfg, &inputs, spot_scaled, sigma, now) {
                         PriceDecision::Quote {
@@ -1049,6 +1087,7 @@ async fn main() -> Result<()> {
                             strike: bucket.strike,
                             strike_scale: bucket.strike_scale,
                             expiry_ms: bucket.expiry_ms,
+                            is_put: bucket.is_put,
                         };
                         if let PriceDecision::Quote { premium, .. } =
                             price_rfq(&pricing_cfg, &inputs, spot_scaled, sigma, now)

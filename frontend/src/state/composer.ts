@@ -16,8 +16,10 @@ import { resolveFeedId } from "../api/pyth";
 import { useRfq } from "../api/useRfq";
 import { useBulkView } from "../api/useBulkView";
 import { buildBuyTx, buildWriteTx } from "../tx/composer";
+import { buildBuyPutTx, buildWritePutTx } from "../tx/composer_put";
 import { formatPrice } from "../format";
-import { addSessionTrade } from "../tx/session";
+import { addSessionPutTrade, addSessionTrade } from "../tx/session";
+import { optionCoinType, seriesOptionType } from "../api/client";
 import { useUserIdentity } from "../session/identity";
 import { executeWithSession } from "../session/store";
 import type { ToastState } from "../components/Toast";
@@ -27,6 +29,7 @@ import type {
   Bucket,
   ConfirmStage,
   ConfirmSummary,
+  OptionType,
   Quote,
   Strike,
   View,
@@ -117,6 +120,7 @@ function rfqEntriesToUi(
 
 export type ComposerStateOpts = {
   initialView?: View;
+  initialOptionType?: OptionType;
   initialAmount?: number;
   initialIdx?: number;
 };
@@ -134,6 +138,9 @@ export type ExpiryOption = {
 export type ComposerState = {
   view: View;
   setView: (v: View) => void;
+  /** Covered CALL vs cash-secured PUT — orthogonal to `view`. */
+  optionType: OptionType;
+  setOptionType: (t: OptionType) => void;
   connected: boolean;
   address: string | null;
   spot: number;
@@ -188,10 +195,12 @@ export type ComposerState = {
 
 export function useComposerState({
   initialView = "writer",
+  initialOptionType = "call",
   initialAmount = 0.05,
   initialIdx = 2,
 }: ComposerStateOpts = {}): ComposerState {
   const [view, setView] = useState<View>(initialView);
+  const [optionType, setOptionType] = useState<OptionType>(initialOptionType);
   // Wallet user or session login — both can trade. For sessions, balances
   // live in the options Account custody rather than at an address.
   const identity = useUserIdentity();
@@ -219,12 +228,16 @@ export function useComposerState({
     // Defensive re-filter of expired series in case the backend served any
     // (clock skew, an older api-service) — the picker must never offer one.
     const now = Date.now();
-    const raw = (bucketsQuery.data ?? []).filter((s) => s.expiry_ms > now);
+    const raw = (bucketsQuery.data ?? [])
+      .filter((s) => s.expiry_ms > now)
+      // Show only the series matching the selected option type (call vs put).
+      // Series without an `option_type` are treated as calls.
+      .filter((s) => seriesOptionType(s) === optionType);
     if (view !== "writer") return raw;
     return raw
       .map((s) => ({ ...s, buckets: s.buckets.filter((b) => !b.invalidated) }))
       .filter((s) => s.buckets.length > 0);
-  }, [bucketsQuery.data, view]);
+  }, [bucketsQuery.data, view, optionType]);
 
   const assets: AssetOption[] = useMemo(() => {
     const seen = new Map<string, AssetOption>();
@@ -444,9 +457,15 @@ export function useComposerState({
   const bucketsLoading = bucketsQuery.isLoading;
   const bucketsEmpty = !bucketsLoading && strikes.length === 0;
 
-  // Insufficiency uses real balances. Writer supplies the underlying
-  // (`amount`); trader pays the live premium.
-  const insufficientBtc = amount > btcBalance;
+  // Insufficiency uses real balances. A CALL writer supplies the underlying
+  // (`amount`); a PUT writer supplies settlement cash collateral
+  // (≈ amount * strike). Every buyer (call or put) pays the live premium.
+  const putCollateral =
+    optionType === "put" && selected.strike > 0 ? amount * selected.strike : 0;
+  const insufficientBtc =
+    optionType === "put"
+      ? putCollateral > usdcBalance // put writer posts settlement collateral
+      : amount > btcBalance;
   const insufficientUsdc = bestPremium > usdcBalance;
   const insufficient = view === "writer" ? insufficientBtc : insufficientUsdc;
 
@@ -509,45 +528,77 @@ export function useComposerState({
 
     setConfirmStage("signing");
     try {
-      const callCoinType = series.buckets.find(
+      const quoteBucket = series.buckets.find(
         (b) => b.bucket_id === entry.quote.bucket_id,
-      )?.call_coin_type;
-      if (!callCoinType) {
+      );
+      const coinType = quoteBucket ? optionCoinType(quoteBucket) : undefined;
+      if (!quoteBucket || !coinType) {
         setConfirmStage(null);
         setToast({ message: "bucket metadata not loaded · try again", variant: "info" });
         setTimeout(() => setToast(null), 4000);
         return;
       }
       setConfirmStage("broadcast");
+      const isPut = optionType === "put";
       if (sessionState) {
         // Session login: custody-funded `_with_session` flow, sponsored and
         // signed by the ephemeral key.
         await executeWithSession(view === "trader" ? "buying" : "writing", (tx, ctx) =>
-          addSessionTrade(tx, ctx, {
-            entry,
-            underlyingCoinType: series.asset_coin_type,
-            settlementCoinType: series.settlement_coin_type,
-            callCoinType,
-            flow: view === "trader" ? "trader" : "writer",
-          }),
+          isPut
+            ? addSessionPutTrade(tx, ctx, {
+                entry,
+                underlyingCoinType: series.asset_coin_type,
+                settlementCoinType: series.settlement_coin_type,
+                putCoinType: coinType,
+                flow: view === "trader" ? "trader" : "writer",
+              })
+            : addSessionTrade(tx, ctx, {
+                entry,
+                underlyingCoinType: series.asset_coin_type,
+                settlementCoinType: series.settlement_coin_type,
+                callCoinType: coinType,
+                flow: view === "trader" ? "trader" : "writer",
+              }),
         );
       } else {
-        const tx =
-          view === "trader"
-            ? buildBuyTx({
-                entry,
-                underlyingCoinType: series.asset_coin_type,
-                settlementCoinType: series.settlement_coin_type,
-                callCoinType,
-                trader: wallet,
-              })
-            : buildWriteTx({
-                entry,
-                underlyingCoinType: series.asset_coin_type,
-                settlementCoinType: series.settlement_coin_type,
-                callCoinType,
-                writer: wallet,
-              });
+        let tx;
+        if (isPut) {
+          tx =
+            view === "trader"
+              ? buildBuyPutTx({
+                  entry,
+                  underlyingCoinType: series.asset_coin_type,
+                  settlementCoinType: series.settlement_coin_type,
+                  putCoinType: coinType,
+                  trader: wallet,
+                })
+              : buildWritePutTx({
+                  entry,
+                  underlyingCoinType: series.asset_coin_type,
+                  settlementCoinType: series.settlement_coin_type,
+                  putCoinType: coinType,
+                  strikeRaw: quoteBucket.strike_raw,
+                  strikeScale: quoteBucket.strike_scale,
+                  writer: wallet,
+                });
+        } else {
+          tx =
+            view === "trader"
+              ? buildBuyTx({
+                  entry,
+                  underlyingCoinType: series.asset_coin_type,
+                  settlementCoinType: series.settlement_coin_type,
+                  callCoinType: coinType,
+                  trader: wallet,
+                })
+              : buildWriteTx({
+                  entry,
+                  underlyingCoinType: series.asset_coin_type,
+                  settlementCoinType: series.settlement_coin_type,
+                  callCoinType: coinType,
+                  writer: wallet,
+                });
+        }
         await submitTx(tx);
       }
 
@@ -556,6 +607,7 @@ export function useComposerState({
       const expiry = formatExpiry(series.expiry_iso);
       setConfirmSummary({
         view,
+        optionType,
         premium: bestPremium,
         bucket: `${asset}·${expiry}·${(selected.strike / 1000).toFixed(1)}k`,
         rangeStart,
@@ -568,6 +620,7 @@ export function useComposerState({
       setConfirmStage("confirmed");
       posthog.capture(view === "writer" ? "option_written" : "option_purchased", {
         asset: series.asset_symbol,
+        option_type: optionType,
         strike: selected.strike,
         expiry: series.expiry_iso,
         amount,
@@ -600,7 +653,7 @@ export function useComposerState({
         message:
           view === "writer"
             ? `position opened · +${formatPrice(s.premium)} ${settlementSymbol} received`
-            : `call purchased · ${s.amount.toFixed(4)} ${s.asset} strike $${formatPrice(s.strike, { grouping: true })}`,
+            : `${s.optionType === "put" ? "put" : "call"} purchased · ${s.amount.toFixed(4)} ${s.asset} strike $${formatPrice(s.strike, { grouping: true })}`,
         variant: "success",
       });
       setTimeout(() => setToast(null), 4500);
@@ -610,6 +663,8 @@ export function useComposerState({
   return {
     view,
     setView,
+    optionType,
+    setOptionType,
     connected,
     address: wallet,
     spot,

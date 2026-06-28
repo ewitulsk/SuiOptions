@@ -58,6 +58,7 @@ pub struct SchedulerRollRow {
     pub settlement_symbol: String,
     pub expiry_ms: i64,
     pub expiry_interval_ms: i64,
+    pub product_type: String,
     pub state: String,
     pub tx_digest: Option<String>,
     pub bucket_ids: Option<serde_json::Value>,
@@ -82,6 +83,7 @@ pub struct NewSchedulerRoll<'a> {
     pub settlement_symbol: &'a str,
     pub expiry_ms: i64,
     pub expiry_interval_ms: i64,
+    pub product_type: &'a str,
     pub state: &'a str,
     pub submit_anchor_seq: Option<i64>,
 }

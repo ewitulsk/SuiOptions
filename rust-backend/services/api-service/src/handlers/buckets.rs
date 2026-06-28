@@ -35,6 +35,7 @@
 //!       "asset_decimals": 8,
 //!       "settlement_symbol": "TUSDC",
 //!       "settlement_decimals": 6,
+//!       "option_type": "call",
 //!       "expiry_ms": 1782345600000,
 //!       "expiry_iso": "2026-06-26T08:00:00Z",
 //!       "buckets": [
@@ -42,6 +43,8 @@
 //!           "bucket_id": "0x9c2b…42a1",
 //!           "strike": 85000.0,
 //!           "strike_raw": "85000000000",
+//!           "call_coin_type": "0x…::call_0::CALL_0",
+//!           "option_coin_type": "0x…::call_0::CALL_0",
 //!           "total_written": 4.2,
 //!           "total_written_raw": "420000000",
 //!           "exercise_cursor": 1.0,
@@ -84,7 +87,13 @@ pub struct BucketDto {
     /// Fully-qualified type of this bucket's fungible option coin
     /// (`Coin<call_coin_type>`). The frontend uses it as the `Call` type arg
     /// when exercising, and to match the user's owned option coins to buckets.
+    /// Kept populated for both calls and puts (back-compat); put consumers
+    /// should prefer `option_coin_type`.
     pub call_coin_type: String,
+    /// Generic per-bucket option coin type. Equals `call_coin_type` for calls
+    /// and the per-bucket put coin for puts. Emitted alongside `call_coin_type`
+    /// so kind-aware consumers don't have to special-case the field name.
+    pub option_coin_type: String,
     /// On-chain `strike_scale` (0..=9). Exposed so frontends can recompute
     /// the USD strike independently if they want.
     pub strike_scale: u8,
@@ -124,6 +133,9 @@ pub struct SeriesDto {
     pub settlement_symbol: String,
     pub settlement_decimals: Option<u8>,
     pub settlement_coin_type: String,
+    /// `"call"` | `"put"`. Series are grouped by `(asset, settlement, expiry,
+    /// option_type)`, so every bucket within a series shares this kind.
+    pub option_type: String,
     /// Unix millis. Sent as a number — Date.now()-style. Safe in JS as
     /// long as expiries stay before year 2255.
     pub expiry_ms: i64,
@@ -157,6 +169,9 @@ pub async fn list_buckets(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListBucketsParams>,
 ) -> Result<Json<BucketsResponse>, StatusCode> {
+    // One fetch returns calls *and* puts (the indexer's `buckets` query has no
+    // kind filter); `group_into_series` then splits them into separate series by
+    // `option_type`, so both kinds surface from this single unified endpoint.
     let active = state
         .indexer
         .buckets(true, None, None, None)
@@ -225,8 +240,15 @@ pub struct BucketDetailDto {
     /// written; `null` when underlying decimals are unknown.
     pub fill_pct: Option<f64>,
     /// Fully-qualified type of the bucket's fungible option coin — the
-    /// `Call` type argument for write/bid/exercise PTBs.
+    /// `Call` type argument for write/bid/exercise PTBs. Populated for both
+    /// calls and puts (back-compat).
     pub call_coin_type: String,
+    /// Generic per-bucket option coin type (equals `call_coin_type` for calls,
+    /// the put coin for puts). The api-service-client's `BucketDetailWire`
+    /// prefers this field.
+    pub option_coin_type: String,
+    /// `"call"` | `"put"`. The api-service-client reads this to set `is_put`.
+    pub option_kind: String,
     /// DeepBook pool for this bucket (SO-153); `null` if none.
     pub deepbook_pool_id: Option<String>,
     /// Pool exists, bucket not cleaned, not expired (see `/buckets`).
@@ -297,6 +319,8 @@ fn detail_dto_from(b: &IndexerBucket, catalog: &TokenCatalog, now_ms: i64) -> Bu
         queued_ahead_raw: queued_ahead_raw.to_string(),
         fill_pct,
         call_coin_type: b.call_type.to_canonical(),
+        option_coin_type: b.call_type.to_canonical(),
+        option_kind: b.option_kind.clone(),
         deepbook_pool_id: b.deepbook_pool_id.as_ref().map(|p| p.to_hex()),
         tradeable: is_tradeable(b.deepbook_pool_id.is_some(), b.cleaned, b.expiry_ms, now_ms),
     }
@@ -324,12 +348,16 @@ fn into_local_bucket(b: indexer_graphql::Bucket) -> (protocol_types::ids::Object
             exercise_cursor: b.exercise_cursor,
             cleaned: b.cleaned,
             invalidated: b.invalidated,
+            option_kind: b.option_kind,
             deepbook_pool_id: b.deepbook_pool_id.map(|p| p.to_hex()),
         },
     )
 }
 
-type SeriesKey = (String, String, u64);
+/// `(asset_type, settlement_type, expiry_ms, option_kind)`. Adding the option
+/// kind to the key keeps call and put strikes in separate series even when they
+/// share an asset/settlement/expiry.
+type SeriesKey = (String, String, u64, String);
 
 /// Pure helper — split out so it's unit-testable without spinning up axum.
 fn group_into_series(
@@ -343,13 +371,14 @@ fn group_into_series(
             b.asset_type.as_str().to_string(),
             b.settlement_type.as_str().to_string(),
             b.expiry_ms,
+            b.option_kind.clone(),
         );
         grouped.entry(key).or_default().push((id.to_hex(), b));
     }
 
     grouped
         .into_iter()
-        .map(|((asset_ct, settle_ct, expiry_ms), members)| {
+        .map(|((asset_ct, settle_ct, expiry_ms, option_kind), members)| {
             let asset_meta = catalog.lookup(&asset_ct);
             let settle_meta = catalog.lookup(&settle_ct);
             let asset_decimals = asset_meta.map(|m| m.decimals);
@@ -379,6 +408,7 @@ fn group_into_series(
                     .unwrap_or_else(|| settle_ct.clone()),
                 settlement_decimals: settle_decimals,
                 settlement_coin_type: protocol_types::asset::canonicalize_move_type(&settle_ct),
+                option_type: option_kind,
                 expiry_ms: expiry_ms as i64,
                 expiry_iso: iso_millis(expiry_ms as i64),
                 buckets: bucket_dtos,
@@ -413,6 +443,7 @@ fn dto_from(
         strike,
         strike_raw: b.strike.to_string(),
         call_coin_type: protocol_types::asset::canonicalize_move_type(b.call_type.as_str()),
+        option_coin_type: protocol_types::asset::canonicalize_move_type(b.call_type.as_str()),
         strike_scale: b.strike_scale,
         total_written,
         total_written_raw: b.total_written.to_string(),
@@ -485,6 +516,7 @@ mod tests {
             exercise_cursor: cursor,
             cleaned: false,
             invalidated: false,
+            option_kind: "call".to_string(),
             deepbook_pool_id: None,
         }
     }
@@ -520,6 +552,30 @@ mod tests {
         assert_eq!(b.total_written, Some(4.2));
         assert_eq!(b.exercise_cursor, Some(1.0));
         assert!((b.fill_pct.unwrap() - 100.0 * 1.0 / 4.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn call_and_put_buckets_split_into_separate_series() {
+        // Same asset/settlement/expiry but different option_kind must land in
+        // two distinct series, each tagged with its option_type.
+        let cat = fixture_catalog();
+        let mut put = mk_bucket(900, 0, 0, 0);
+        put.option_kind = "put".to_string();
+        let series = group_into_series(
+            vec![
+                (ObjectId::new([0x0a; 32]), mk_bucket(850, 0, 0, 0)),
+                (ObjectId::new([0x0b; 32]), put),
+            ],
+            &cat,
+            NOW_MS,
+        );
+        assert_eq!(series.len(), 2);
+        let call = series.iter().find(|s| s.option_type == "call").unwrap();
+        let put = series.iter().find(|s| s.option_type == "put").unwrap();
+        assert_eq!(call.buckets.len(), 1);
+        assert_eq!(put.buckets.len(), 1);
+        // option_coin_type is emitted alongside the legacy call_coin_type.
+        assert_eq!(call.buckets[0].option_coin_type, call.buckets[0].call_coin_type);
     }
 
     #[test]
@@ -560,6 +616,7 @@ mod tests {
             exercise_cursor: 0,
             cleaned: false,
             invalidated: false,
+            option_kind: "call".to_string(),
             deepbook_pool_id: None,
         };
         let s = group_into_series(vec![(ObjectId::new([0xff; 32]), b)], &cat, NOW_MS);
@@ -588,6 +645,7 @@ mod tests {
             exercise_cursor: 0,
             cleaned: false,
             invalidated: false,
+            option_kind: "call".to_string(),
             deepbook_pool_id: None,
         };
         let s = group_into_series(vec![(ObjectId::new([0xfe; 32]), b)], &cat, NOW_MS);
@@ -626,6 +684,7 @@ mod tests {
             exercise_cursor: 0,
             cleaned: false,
             invalidated: false,
+            option_kind: "call".to_string(),
             deepbook_pool_id: None,
         };
         let s = group_into_series(vec![(ObjectId::new([0x11; 32]), b)], &cat, NOW_MS);
@@ -685,6 +744,7 @@ mod tests {
             exercise_cursor: cursor,
             cleaned: false,
             invalidated: false,
+            option_kind: "call".to_string(),
             deepbook_pool_id: None,
         }
     }

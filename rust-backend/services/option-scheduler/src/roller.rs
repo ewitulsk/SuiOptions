@@ -23,6 +23,33 @@ use sui_tx::tx::coin_pkg::{self, CreateBucketSpec};
 
 use crate::codegen;
 
+/// Which option product a roll creates. Calls publish `call_<i>` coin modules
+/// and `bucket::create_bucket`; puts publish `put_<i>` modules and
+/// `put_bucket::create_put_bucket`. Defaults to `Call` so existing configs and
+/// rows (pre-puts) keep their behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProductType {
+    Call,
+    Put,
+}
+
+impl Default for ProductType {
+    fn default() -> Self {
+        Self::Call
+    }
+}
+
+impl ProductType {
+    /// Lowercase wire/DB tag (`"call"` / `"put"`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Call => "call",
+            Self::Put => "put",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RollPlan {
     pub underlying_symbol: String,
@@ -42,6 +69,10 @@ pub struct RollPlan {
     /// non-uniform by design.
     pub strikes: Vec<u128>,
     pub strike_scale: u8,
+    /// Call vs cash-secured put. Selects the codegen coin modules, the
+    /// on-chain `create_bucket` vs `create_put_bucket` entry, and the
+    /// cap→strike index parser.
+    pub product_type: ProductType,
 }
 
 impl RollPlan {
@@ -91,6 +122,7 @@ pub fn classify_error(err: &anyhow::Error) -> ErrorClass {
         "object not found",
         "invalid object",
         "building bucket::new_call_option tx",
+        "building put_bucket::create_put_bucket tx",
     ];
     for pat in &definitely_not_sent {
         if msg.contains(pat) {
@@ -125,8 +157,15 @@ pub async fn submit(
         "{}-{}@{}",
         plan.underlying_symbol, plan.settlement_symbol, plan.expiry_ms
     );
-    let pkg = codegen::generate(plan.strikes.len() as u64, plan.underlying_decimals, &label)
-        .context("generating coin package")?;
+    let pkg = match plan.product_type {
+        ProductType::Call => {
+            codegen::generate(plan.strikes.len() as u64, plan.underlying_decimals, &label)
+        }
+        ProductType::Put => {
+            codegen::generate_puts(plan.strikes.len() as u64, plan.underlying_decimals, &label)
+        }
+    }
+    .context("generating coin package")?;
     let compiled = BuildConfig::new_for_testing()
         .build(&pkg.dir)
         .with_context(|| {
@@ -159,16 +198,32 @@ pub async fn submit(
     // 4. pair each cap to its strike, then create the buckets and (when a
     //    DeepBook deployment is configured) their pools in one atomic PTB.
     let specs = pair_caps_to_strikes(plan, &published.caps)?;
-    let resp = coin_pkg::create_buckets_and_pools(
-        &wrap.client,
-        &wrap.signer,
-        package,
-        admin_cap,
-        &specs,
-        pools,
-        gas_budget,
-    )
-    .await
+    let resp = match plan.product_type {
+        ProductType::Call => {
+            coin_pkg::create_buckets_and_pools(
+                &wrap.client,
+                &wrap.signer,
+                package,
+                admin_cap,
+                &specs,
+                pools,
+                gas_budget,
+            )
+            .await
+        }
+        ProductType::Put => {
+            coin_pkg::create_put_buckets_and_pools(
+                &wrap.client,
+                &wrap.signer,
+                package,
+                admin_cap,
+                &specs,
+                pools,
+                gas_budget,
+            )
+            .await
+        }
+    }
     .context("creating buckets")?;
 
     let digest = resp.digest.to_string();
@@ -198,9 +253,15 @@ fn pair_caps_to_strikes(
             plan.strikes.len()
         );
     }
+    // Calls encode the strike index as `…::call_<i>::CALL_<I>`; puts as
+    // `…::put_<i>::PUT_<I>`. Pick the matching parser for the plan's product.
+    let index_of: fn(&str) -> Result<u64> = match plan.product_type {
+        ProductType::Call => codegen::call_index,
+        ProductType::Put => codegen::put_index,
+    };
     let mut specs = Vec::with_capacity(caps.len());
     for cap in caps {
-        let i = codegen::call_index(&cap.call_type)
+        let i = index_of(&cap.call_type)
             .with_context(|| format!("indexing cap {}", cap.call_type))?;
         if i as usize >= plan.strikes.len() {
             anyhow::bail!(

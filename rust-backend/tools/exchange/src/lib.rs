@@ -6,10 +6,19 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use sui_types::base_types::{ObjectID, SuiAddress};
 
 use sui_tx::sui_client::Network;
+
+/// Option product selector for bucket creation. Mirrors the scheduler's
+/// `roller::ProductType`; `call` is the default so existing behaviour is
+/// unchanged.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Product {
+    Call,
+    Put,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "exchange", about = "Admin CLI for the covered-call options protocol")]
@@ -46,6 +55,10 @@ pub enum Command {
         underlying: String,
         #[arg(long, default_value = "TUSDC")]
         settlement: String,
+        /// `call` (covered call) or `put` (cash-secured put). Defaults to
+        /// `call` so existing invocations are unchanged.
+        #[arg(long, value_enum, default_value_t = Product::Call)]
+        product: Product,
         #[arg(long)]
         expiry_ms: u64,
         #[arg(long)]

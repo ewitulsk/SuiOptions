@@ -33,9 +33,10 @@ use protocol_types::sides::{RetailRole, Side};
 use token_info_client::TokenInfoClient;
 use sui_tx::sui_client::SuiClientWrapper;
 use sui_tx::tx::execute_write::{execute_writer_flow, ExecuteWriteParams};
+use sui_tx::tx::execute_write_put::{execute_put_writer_flow, ExecutePutWriterParams};
 use sui_tx::ws_client;
 
-use writer::Cli;
+use writer::{Cli, Product};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -138,39 +139,94 @@ async fn main() -> Result<()> {
         sui_address_from_pt(best.quote.signer_token_recipient)?;
 
     // The option coin type is the bucket's third type parameter; read it off
-    // the on-chain Bucket<U, S, Call> object.
-    let call_type = bucket_call_type(&wrap.client, cli.bucket).await?;
+    // the on-chain Bucket<U, S, Call|Put> object (index 2 holds either).
+    let option_type = bucket_call_type(&wrap.client, cli.bucket).await?;
 
-    let params = ExecuteWriteParams {
-        package,
-        underlying_type: &underlying_spec.coin_type,
-        settlement_type: &settlement_spec.coin_type,
-        call_type: &call_type,
-        tokens_package: tokens_pkg,
-        underlying_module: &underlying_module,
-        underlying_faucet_id: underlying_faucet.faucet()?,
-        bucket_id: cli.bucket,
-        protocol_config_id: protocol_config,
-        treasury_id: treasury,
-        mm_account_id,
-        protocol_id: best.quote.protocol_id.clone(),
-        signer_account_id_bytes,
-        signer_token_recipient,
-        bucket_id_bytes,
-        write_amount: best.quote.write_amount,
-        premium: best.quote.premium,
-        valid_until_ms: best.quote.valid_until_ms,
-        nonce: best.quote.nonce,
-        signature: best.signature.clone(),
-        position_recipient: writer_addr,
-        // Writer flow requires signer_token_recipient == call_token_recipient.
-        call_token_recipient: signer_token_recipient,
-        gas_budget: cli.gas_budget,
+    let resp = match cli.product {
+        Product::Call => {
+            let params = ExecuteWriteParams {
+                package,
+                underlying_type: &underlying_spec.coin_type,
+                settlement_type: &settlement_spec.coin_type,
+                call_type: &option_type,
+                tokens_package: tokens_pkg,
+                underlying_module: &underlying_module,
+                underlying_faucet_id: underlying_faucet.faucet()?,
+                bucket_id: cli.bucket,
+                protocol_config_id: protocol_config,
+                treasury_id: treasury,
+                mm_account_id,
+                protocol_id: best.quote.protocol_id.clone(),
+                signer_account_id_bytes,
+                signer_token_recipient,
+                bucket_id_bytes,
+                write_amount: best.quote.write_amount,
+                premium: best.quote.premium,
+                valid_until_ms: best.quote.valid_until_ms,
+                nonce: best.quote.nonce,
+                signature: best.signature.clone(),
+                position_recipient: writer_addr,
+                // Writer flow requires signer_token_recipient == call_token_recipient.
+                call_token_recipient: signer_token_recipient,
+                gas_budget: cli.gas_budget,
+            };
+            execute_writer_flow(&wrap.client, &wrap.signer, &params).await?
+        }
+        Product::Put => {
+            // Puts settle in cash: the writer mints SETTLEMENT collateral
+            // (not underlying), so resolve the settlement faucet/module here.
+            let settlement_faucet = snapshot.faucet_token(&cli.settlement)?;
+            let (settlement_tokens_pkg, settlement_module) = settlement_faucet.module_path()?;
+            let strike = cli
+                .strike
+                .ok_or_else(|| anyhow!("--strike is required for --product put"))?;
+            let collateral = put_collateral(best.quote.write_amount, strike, cli.strike_scale)?;
+            let params = ExecutePutWriterParams {
+                package,
+                underlying_type: &underlying_spec.coin_type,
+                settlement_type: &settlement_spec.coin_type,
+                put_type: &option_type,
+                tokens_package: settlement_tokens_pkg,
+                settlement_module: &settlement_module,
+                settlement_faucet_id: settlement_faucet.faucet()?,
+                bucket_id: cli.bucket,
+                protocol_config_id: protocol_config,
+                treasury_id: treasury,
+                mm_account_id,
+                protocol_id: best.quote.protocol_id.clone(),
+                signer_account_id_bytes,
+                signer_token_recipient,
+                bucket_id_bytes,
+                write_amount: best.quote.write_amount,
+                premium: best.quote.premium,
+                valid_until_ms: best.quote.valid_until_ms,
+                nonce: best.quote.nonce,
+                signature: best.signature.clone(),
+                collateral,
+                position_recipient: writer_addr,
+                // Writer flow requires signer_token_recipient == put_token_recipient.
+                put_token_recipient: signer_token_recipient,
+                gas_budget: cli.gas_budget,
+            };
+            execute_put_writer_flow(&wrap.client, &wrap.signer, &params).await?
+        }
     };
-
-    let resp = execute_writer_flow(&wrap.client, &wrap.signer, &params).await?;
     println!("✓ execute_write digest: {}", resp.digest);
     Ok(())
+}
+
+/// Cash collateral for a written put = ceil(write_amount × strike / 10^scale),
+/// in settlement smallest-units. Saturates rather than panicking on overflow.
+fn put_collateral(write_amount: u64, strike: u128, strike_scale: u8) -> Result<u64> {
+    let scale = 10u128
+        .checked_pow(strike_scale as u32)
+        .ok_or_else(|| anyhow!("strike_scale {strike_scale} too large"))?;
+    let numerator = (write_amount as u128)
+        .checked_mul(strike)
+        .ok_or_else(|| anyhow!("write_amount × strike overflows u128"))?;
+    let collateral = numerator.div_ceil(scale);
+    u64::try_from(collateral)
+        .map_err(|_| anyhow!("collateral {collateral} exceeds u64 range"))
 }
 
 /// Read the bucket's option-coin type (the `Call` in `Bucket<U, S, Call>`)

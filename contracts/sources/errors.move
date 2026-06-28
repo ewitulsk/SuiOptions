@@ -58,3 +58,4 @@ public fun vault_wrong_pool(): u64 { 55 }
 public fun session_mismatch(): u64 { 56 }
 public fun position_not_found(): u64 { 57 }
 public fun object_not_found(): u64 { 58 }
+public fun put_collateral_mismatch(): u64 { 59 }
