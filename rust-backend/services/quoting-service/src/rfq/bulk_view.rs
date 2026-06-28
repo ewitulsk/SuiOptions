@@ -274,6 +274,8 @@ mod tests {
             exercise_cursor: 0,
             cleaned: false,
             invalidated: false,
+            deepbook_pool_id: None,
+            option_kind: "call".into(),
         }
     }
 
