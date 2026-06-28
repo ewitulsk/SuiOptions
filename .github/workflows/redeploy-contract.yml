@@ -256,10 +256,14 @@ jobs:
           RPC_URL: ${{ inputs.rpc_url }}
         run: |
           ARGS=(
-            --env     "$ENV"
-            --network "$NETWORK"
-            --output  deployments.json
-            --secrets /tmp/deploy-secrets/secrets.toml
+            --env        "$ENV"
+            --network    "$NETWORK"
+            --output     deployments.json
+            --secrets    /tmp/deploy-secrets/secrets.toml
+            # The main package (19 modules + Pyth/Wormhole deps) costs more
+            # than the deployment-manager's 0.5 SUI default to publish — that
+            # ceiling caused InsufficientGas on the publish tx. Bump to 2 SUI.
+            --gas-budget 2000000000
           )
           if [ "${{ inputs.deploy_tokens }}" = "true" ]; then
             ARGS+=(--deploy-tokens)
