@@ -57,4 +57,4 @@ pub use cache::{CachedPrice, PriceCache};
 pub use http::{benchmark_at, benchmarks_at, latest, latest_with_update_data};
 pub use stream::{spawn_subscriber, StreamEvent};
 pub use types::{HermesEnvelope, PriceFeedId, PriceUpdate, PythPrice};
-pub use vol::{log_returns, realized_vol, RollingVolBuffer};
+pub use vol::{log_returns, realized_vol, realized_vol_with, RollingVolBuffer, VolEstimator};

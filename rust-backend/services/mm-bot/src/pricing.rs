@@ -8,7 +8,10 @@
 
 use std::time::Duration;
 
-use pricing::{call_price_per_unit, premium_for_write, put_price_per_unit, CallInputs};
+use pricing::{
+    american_call_price, american_put_price, call_price_carry, fair_iv, premium_for_write,
+    put_price_carry, CallInputs, IvParams,
+};
 use protocol_types::asset::canonicalize_move_type;
 use protocol_types::sides::Side;
 use pyth_client::{PriceCache, PriceFeedId};
@@ -28,6 +31,31 @@ pub struct PricingConfig {
     /// MM (retail is writing — `Side::Writer`): the premium we pay is marked
     /// *down* off the mid.
     pub bid_markdown_bps: u64,
+    /// Realized-σ → pricing-IV transform (variance-risk premium + OTM skew).
+    /// Defaults to the identity (`IvParams::default()`), so until calibrated the
+    /// quoter prices on raw realized vol exactly as before.
+    pub iv: IvParams,
+    /// Continuous carry/dividend yield `q` of the underlying (staking, funding).
+    /// `0.0` ⇒ no carry. Feeds the forward drift and the American pricer.
+    pub carry_yield: f64,
+    /// Price the option's American early-exercise right (CRR binomial) instead
+    /// of the European closed form. `false` ⇒ European (today's behavior).
+    /// Matters chiefly for puts on a positive rate.
+    pub american: bool,
+}
+
+impl Default for PricingConfig {
+    fn default() -> Self {
+        Self {
+            rate: 0.0,
+            quote_ttl_ms: 30_000,
+            ask_markup_bps: 0,
+            bid_markdown_bps: 0,
+            iv: IvParams::default(),
+            carry_yield: 0.0,
+            american: false,
+        }
+    }
 }
 
 /// The bucket-resolved + request inputs for pricing one RFQ. The bucket fields
@@ -87,6 +115,10 @@ pub struct Staleness {
     pub max_price_age: Duration,
     /// Maximum lag between Pyth's publisher timestamp and `now`.
     pub max_publish_lag: Duration,
+    /// Reject a price whose Pyth confidence interval is wider than this fraction
+    /// of the price (`conf/price`). `0.0` disables the check — quoting a razor
+    /// mid off a low-confidence spot is the risk this guards against.
+    pub max_conf_ratio: f64,
 }
 
 /// Reasons `compute_spot*` can fail. Stable strings so callers can
@@ -97,6 +129,7 @@ pub enum SpotError {
     SettlementStale,
     NonPositivePrice,
     OutOfRange,
+    ConfTooWide,
 }
 
 impl SpotError {
@@ -106,6 +139,7 @@ impl SpotError {
             SpotError::SettlementStale => "settlement price stale or unseen",
             SpotError::NonPositivePrice => "non-positive or non-finite price",
             SpotError::OutOfRange => "scaled spot out of range",
+            SpotError::ConfTooWide => "price confidence interval too wide",
         }
     }
 }
@@ -181,7 +215,21 @@ pub fn compute_spot_from_cache(
     let s = cache
         .get_fresh(settlement_feed, staleness.max_price_age, staleness.max_publish_lag)
         .ok_or(SpotError::SettlementStale)?;
+    // Reject quotes off a low-confidence Pyth observation (either leg). Disabled
+    // when `max_conf_ratio == 0`.
+    if staleness.max_conf_ratio > 0.0 && !conf_within(&u, staleness.max_conf_ratio) {
+        return Err(SpotError::ConfTooWide);
+    }
+    if staleness.max_conf_ratio > 0.0 && !conf_within(&s, staleness.max_conf_ratio) {
+        return Err(SpotError::ConfTooWide);
+    }
     compute_spot_from_prices(u.price, s.price, underlying_decimals, settlement_decimals)
+}
+
+/// Whether a cached price's confidence interval is within `max_ratio` of the
+/// price (`conf/price ≤ max_ratio`). A non-positive price fails the gate.
+fn conf_within(p: &pyth_client::CachedPrice, max_ratio: f64) -> bool {
+    p.price > 0.0 && p.conf >= 0.0 && (p.conf / p.price) <= max_ratio
 }
 
 /// Time to expiry in years, saturating at zero so an already-expired
@@ -228,18 +276,25 @@ pub fn price_rfq(
 ) -> PriceDecision {
     let t_years = time_to_expiry_years(inputs.expiry_ms, now_ms);
     let strike_scaled = rebase_strike_to_scale_zero(inputs.strike, inputs.strike_scale);
-    // PutInputs == CallInputs; the only difference is which BS leg we evaluate.
+    // Lift the raw realized σ into the pricing IV (variance-risk premium + OTM
+    // skew). With the default `IvParams` this is the identity, so behavior is
+    // unchanged until the knobs are calibrated and set.
+    let pricing_sigma = fair_iv(sigma, spot_scaled, strike_scaled, inputs.is_put, cfg.iv);
+    // PutInputs == CallInputs; the leg + European/American choice select the
+    // pricer. `carry_yield = 0` + `american = false` reproduces the prior
+    // European call/put closed form exactly.
     let bs_inputs = CallInputs {
         spot: spot_scaled,
         strike: strike_scaled,
         t_years,
         r: cfg.rate,
-        sigma,
+        sigma: pricing_sigma,
     };
-    let per_unit_mid = if inputs.is_put {
-        put_price_per_unit(bs_inputs)
-    } else {
-        call_price_per_unit(bs_inputs)
+    let per_unit_mid = match (inputs.is_put, cfg.american) {
+        (false, false) => call_price_carry(bs_inputs, cfg.carry_yield),
+        (true, false) => put_price_carry(bs_inputs, cfg.carry_yield),
+        (false, true) => american_call_price(bs_inputs, cfg.carry_yield),
+        (true, true) => american_put_price(bs_inputs, cfg.carry_yield),
     };
     let per_unit = apply_spread(per_unit_mid, inputs.side, cfg);
     let premium = premium_for_write(per_unit, inputs.write_amount);
@@ -254,7 +309,7 @@ pub fn price_rfq(
         spot_scaled,
         strike_scaled,
         t_years,
-        sigma,
+        sigma: pricing_sigma,
         per_unit,
     }
 }
@@ -416,6 +471,7 @@ mod tests {
         Staleness {
             max_price_age: Duration::from_secs(60),
             max_publish_lag: Duration::from_secs(60),
+            max_conf_ratio: 0.0,
         }
     }
 
@@ -471,6 +527,7 @@ mod tests {
         let staleness = Staleness {
             max_price_age: Duration::from_secs(60),
             max_publish_lag: Duration::from_secs(600),
+            max_conf_ratio: 0.0,
         };
         let e = compute_spot_from_cache(&cache, u, s, 8, 8, staleness).unwrap_err();
         assert_eq!(e, SpotError::UnderlyingStale);
@@ -499,6 +556,7 @@ mod tests {
         let staleness = Staleness {
             max_price_age: Duration::from_secs(600),
             max_publish_lag: Duration::from_secs(60),
+            max_conf_ratio: 0.0,
         };
         let e = compute_spot_from_cache(&cache, u, s, 8, 8, staleness).unwrap_err();
         assert_eq!(e, SpotError::UnderlyingStale);
@@ -515,6 +573,35 @@ mod tests {
         cache.insert(s, cached(1.0));
         let e = compute_spot_from_cache(&cache, u, s, 8, 8, loose_staleness()).unwrap_err();
         assert_eq!(e, SpotError::NonPositivePrice);
+    }
+
+    #[test]
+    fn cache_spot_rejects_wide_confidence() {
+        let cache = PriceCache::new();
+        let u = feed_id(0x01);
+        let s = feed_id(0x02);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        // Underlying with a 5%-of-price confidence band.
+        cache.insert(
+            u,
+            CachedPrice { price: 100.0, conf: 5.0, publish_time_ms: now_ms, observed_at: Instant::now() },
+        );
+        cache.insert(s, cached(1.0));
+        // 2% tolerance ⇒ the 5% band is rejected.
+        let staleness = Staleness {
+            max_price_age: Duration::from_secs(60),
+            max_publish_lag: Duration::from_secs(60),
+            max_conf_ratio: 0.02,
+        };
+        assert_eq!(
+            compute_spot_from_cache(&cache, u, s, 8, 8, staleness).unwrap_err(),
+            SpotError::ConfTooWide
+        );
+        // Disabled (0.0) ⇒ the same wide band is accepted.
+        assert!(compute_spot_from_cache(&cache, u, s, 8, 8, loose_staleness()).is_ok());
     }
 
     // -- time_to_expiry_years -------------------------------------------
@@ -579,6 +666,7 @@ mod tests {
             quote_ttl_ms: 30_000,
             ask_markup_bps: 0,
             bid_markdown_bps: 0,
+            ..Default::default()
         }
     }
 
@@ -717,6 +805,7 @@ mod tests {
             quote_ttl_ms: 30_000,
             ask_markup_bps: 0,
             bid_markdown_bps: 0,
+            ..Default::default()
         };
         let d = price_rfq(&cfg, &p, 110.0, 0.0, 0);
         match d {
@@ -782,6 +871,7 @@ mod tests {
             quote_ttl_ms: 30_000,
             ask_markup_bps: 100,
             bid_markdown_bps: 200,
+            ..Default::default()
         };
         let mid = premium_of(&price_rfq(
             &pricing_cfg(),
@@ -806,6 +896,64 @@ mod tests {
         ));
         assert!(ask > mid, "ask {ask} should exceed mid {mid}");
         assert!(bid < mid, "bid {bid} should be below mid {mid}");
+    }
+
+    // -- IV pipeline + carry/American wiring (gated knobs) ---------------
+
+    #[test]
+    fn price_rfq_default_iv_is_unchanged() {
+        // Default IvParams/carry/european must reproduce the bare BS premium.
+        let year_ms = 1000 * 86_400 * 365u64;
+        let p = rfq(year_ms, 100, 0, 1_000_000);
+        let d = price_rfq(&pricing_cfg(), &p, 100.0, 0.20, 0);
+        // ~10.4506 * 1e6, same as the pre-pipeline path.
+        assert!((10_000_000..=11_000_000).contains(&premium_of(&d)));
+    }
+
+    #[test]
+    fn price_rfq_vrp_raises_premium() {
+        // A >1 variance-risk premium lifts the priced vol, so the premium for
+        // the same RFQ rises versus the identity default.
+        let year_ms = 1000 * 86_400 * 365u64;
+        let p = rfq(year_ms, 100, 0, 1_000_000);
+        let base = premium_of(&price_rfq(&pricing_cfg(), &p, 100.0, 0.20, 0));
+        let cfg = PricingConfig {
+            iv: IvParams { vrp_ratio: 1.15, ..Default::default() },
+            ..pricing_cfg()
+        };
+        let lifted = premium_of(&price_rfq(&cfg, &p, 100.0, 0.20, 0));
+        assert!(lifted > base, "vrp premium {lifted} should exceed base {base}");
+    }
+
+    #[test]
+    fn price_rfq_put_skew_lifts_otm_put_only() {
+        // Downside skew lifts an OTM put (K<S) but leaves the OTM call alone.
+        let year_ms = 1000 * 86_400 * 365u64;
+        let cfg = PricingConfig {
+            iv: IvParams { put_skew_bps: 4000.0, ..Default::default() },
+            ..pricing_cfg()
+        };
+        let otm_put = put_rfq(Side::Trader, year_ms, 80, 0, 1_000_000); // K=80 < S=100
+        let base_put = premium_of(&price_rfq(&pricing_cfg(), &otm_put, 100.0, 0.50, 0));
+        let skew_put = premium_of(&price_rfq(&cfg, &otm_put, 100.0, 0.50, 0));
+        assert!(skew_put > base_put, "skew put {skew_put} should exceed base {base_put}");
+
+        let otm_call = rfq(year_ms, 120, 0, 1_000_000); // K=120 > S=100
+        let base_call = premium_of(&price_rfq(&pricing_cfg(), &otm_call, 100.0, 0.50, 0));
+        let skew_call = premium_of(&price_rfq(&cfg, &otm_call, 100.0, 0.50, 0));
+        assert_eq!(skew_call, base_call, "put-skew knob must not touch calls");
+    }
+
+    #[test]
+    fn price_rfq_american_put_exceeds_european_on_positive_rate() {
+        // Deep-ITM put, positive rate: the American flag adds the early-exercise
+        // premium the European path omits.
+        let year_ms = 1000 * 86_400 * 365u64;
+        let p = put_rfq(Side::Trader, year_ms, 100, 0, 1_000_000); // K=100, S=60 ⇒ deep ITM
+        let euro = premium_of(&price_rfq(&pricing_cfg(), &p, 60.0, 0.25, 0));
+        let cfg = PricingConfig { american: true, ..pricing_cfg() };
+        let amer = premium_of(&price_rfq(&cfg, &p, 60.0, 0.25, 0));
+        assert!(amer > euro, "american put {amer} should exceed european {euro}");
     }
 
     // -- serves_pair (pair gate) ----------------------------------------
@@ -848,6 +996,7 @@ mod tests {
             quote_ttl_ms: 30_000,
             ask_markup_bps: 100,
             bid_markdown_bps: 200,
+            ..Default::default()
         };
         let mid = premium_of(&price_rfq(&pricing_cfg(), &rfq(year_ms, 100, 0, 1_000_000), 100.0, 0.20, 0));
         let ask = premium_of(&price_rfq(

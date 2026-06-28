@@ -42,6 +42,23 @@ quote_ttl_ms       = 30_000
 ask_markup_bps     = 100
 bid_markdown_bps   = 100
 
+# --- Pricing model knobs (default to today's behavior; set after calibration) ---
+# Variance-risk-premium multiplier (IV/RV) applied to the realized-vol estimate
+# before pricing. 1.0 = price on raw realized vol (legacy). The vault keeper uses
+# ~1.15; align the bot here once the backtester calibrates the live regime.
+vrp_ratio          = 1.0
+# OTM-wing skew slopes, in bps per unit of log-moneyness. 0 = flat smile.
+#   call_skew_bps lifts OTM calls (K>S); put_skew_bps lifts OTM puts (K<S).
+# Crypto typically carries a steeper downside (put) skew — calibrate separately.
+call_skew_bps      = 0.0
+put_skew_bps       = 0.0
+# Continuous carry/dividend yield q of the underlying (staking, perp funding).
+# 0 = none. Feeds the forward drift and the American pricer.
+carry_yield        = 0.0
+# Price the American early-exercise right (CRR binomial) instead of European.
+# false = European (legacy). Mainly affects ITM puts on a positive rate.
+american           = false
+
 # Both roles by default; a single Account can serve writer + trader.
 roles = ["trader_mm", "writer_mm"]
 
@@ -90,6 +107,15 @@ vol_window_hours       = 24
 vol_sample_interval_ms = 60_000
 # Sigma used until the buffer has enough samples, then live takes over.
 fallback_vol           = 0.6
+# Realized-vol estimator: "sample_stddev" (legacy; subtracts the sample mean,
+# biases σ down on short trending windows), "zero_mean" (no drift subtraction —
+# preferred for option vol), or "ewma" (exponentially-weighted, tracks regimes).
+vol_estimator          = "sample_stddev"
+# EWMA decay λ when vol_estimator = "ewma". 0.94 = RiskMetrics daily.
+ewma_lambda            = 0.94
+# Decline a quote when Pyth's confidence band exceeds this fraction of price
+# (conf/price). 0 disables the guard. e.g. 0.02 = decline above a 2% band.
+max_conf_ratio         = 0.0
 
 # DeepBook quoting (SO-158). Off by default for local runs — flip on once
 # the local stack serves deepbook ids from token-info.

@@ -332,6 +332,184 @@ pub fn put_break_even(strike: f64, premium_per_unit: f64) -> f64 {
     strike - premium_per_unit
 }
 
+// ---- carry yield (cost-of-carry generalization) ----
+//
+// The protocol's options are American (exercise any time before expiry), and
+// the underlyings can carry a yield `q` (staking, perp funding). Both matter:
+//
+//   * For a CALL on a non-yielding underlying (`q = 0`, `r ≥ 0`) early exercise
+//     is never optimal, so American == European and `call_price_per_unit` is
+//     exact. A positive `q` re-introduces early-exercise value.
+//   * For a PUT, early exercise can be optimal whenever the option is deep ITM
+//     and `r > 0`, *even at `q = 0`* — so the European `put_price_per_unit`
+//     structurally under-prices the American put on a positive rate.
+//
+// `call_price_carry` / `put_price_carry` are the European prices generalized to
+// a continuous carry yield (forward `F = S·e^((r−q)τ)`); the `american_*`
+// functions price the early-exercise right via a CRR binomial. All reduce to
+// the existing `*_per_unit` functions at `q = 0` (calls) / European (puts).
+
+/// European call price with a continuous carry/dividend yield `q`:
+/// `S·e^(−qτ)·N(d1) − K·e^(−rτ)·N(d2)`, `d1 = (ln(S/K)+(r−q+σ²/2)τ)/(σ√τ)`.
+/// `q = 0` reproduces [`call_price_per_unit`] exactly.
+pub fn call_price_carry(i: CallInputs, q: f64) -> f64 {
+    if i.t_years <= 0.0 {
+        return (i.spot - i.strike).max(0.0);
+    }
+    if i.sigma <= 0.0 {
+        let fwd = i.spot * ((i.r - q) * i.t_years).exp();
+        return (fwd - i.strike).max(0.0) * (-i.r * i.t_years).exp();
+    }
+    let sqrt_t = i.t_years.sqrt();
+    let d1 = ((i.spot / i.strike).ln() + (i.r - q + 0.5 * i.sigma * i.sigma) * i.t_years)
+        / (i.sigma * sqrt_t);
+    let d2 = d1 - i.sigma * sqrt_t;
+    i.spot * (-q * i.t_years).exp() * norm_cdf(d1) - i.strike * (-i.r * i.t_years).exp() * norm_cdf(d2)
+}
+
+/// European put price with a continuous carry/dividend yield `q`:
+/// `K·e^(−rτ)·N(−d2) − S·e^(−qτ)·N(−d1)`. `q = 0` reproduces
+/// [`put_price_per_unit`] exactly.
+pub fn put_price_carry(i: PutInputs, q: f64) -> f64 {
+    if i.t_years <= 0.0 {
+        return (i.strike - i.spot).max(0.0);
+    }
+    if i.sigma <= 0.0 {
+        let fwd = i.spot * ((i.r - q) * i.t_years).exp();
+        return (i.strike - fwd).max(0.0) * (-i.r * i.t_years).exp();
+    }
+    let sqrt_t = i.t_years.sqrt();
+    let d1 = ((i.spot / i.strike).ln() + (i.r - q + 0.5 * i.sigma * i.sigma) * i.t_years)
+        / (i.sigma * sqrt_t);
+    let d2 = d1 - i.sigma * sqrt_t;
+    i.strike * (-i.r * i.t_years).exp() * norm_cdf(-d2) - i.spot * (-q * i.t_years).exp() * norm_cdf(-d1)
+}
+
+/// Default CRR binomial step count. 256 steps prices a weekly-to-monthly option
+/// to well under a basis point of the analytic European value — ample for
+/// quoting, where the model error dwarfs the tree-discretization error.
+pub const AMERICAN_BINOMIAL_STEPS: usize = 256;
+
+/// American option price via a Cox-Ross-Rubinstein binomial tree with carry
+/// yield `q`, taking the max of continuation and immediate-exercise value at
+/// every node. `is_put = false` prices a call, `true` a put. Degenerates to the
+/// raw intrinsic at/after expiry and to the European carry price at zero vol.
+///
+/// This is the early-exercise-aware pricer: an American call equals its
+/// European value when `q = 0` (no early exercise), while an American put on a
+/// positive rate is strictly worth more than the European put.
+fn american_price(i: CallInputs, q: f64, steps: usize, is_put: bool) -> f64 {
+    let intrinsic = |s: f64| {
+        if is_put {
+            (i.strike - s).max(0.0)
+        } else {
+            (s - i.strike).max(0.0)
+        }
+    };
+    if i.t_years <= 0.0 {
+        return intrinsic(i.spot);
+    }
+    if i.sigma <= 0.0 || steps == 0 {
+        // No volatility ⇒ no exercise optionality beyond the forward; fall back
+        // to the closed-form European carry price.
+        return if is_put {
+            put_price_carry(i, q)
+        } else {
+            call_price_carry(i, q)
+        };
+    }
+    let n = steps;
+    let dt = i.t_years / n as f64;
+    let up = (i.sigma * dt.sqrt()).exp();
+    let down = 1.0 / up;
+    let disc = (-i.r * dt).exp();
+    // Risk-neutral up-probability under carry `q`. Guard the rare degenerate
+    // regime (huge `r−q` vs tiny σ√dt) by clamping into [0, 1].
+    let p = ((((i.r - q) * dt).exp() - down) / (up - down)).clamp(0.0, 1.0);
+
+    // Terminal layer, then fold back, overlaying early exercise at each node.
+    let mut values: Vec<f64> = (0..=n)
+        .map(|j| intrinsic(i.spot * up.powi(j as i32) * down.powi((n - j) as i32)))
+        .collect();
+    for step in (0..n).rev() {
+        for j in 0..=step {
+            let cont = disc * (p * values[j + 1] + (1.0 - p) * values[j]);
+            let s = i.spot * up.powi(j as i32) * down.powi((step - j) as i32);
+            values[j] = cont.max(intrinsic(s));
+        }
+    }
+    values[0]
+}
+
+/// American call price (CRR binomial, [`AMERICAN_BINOMIAL_STEPS`]) with carry
+/// yield `q`. Equals [`call_price_per_unit`] when `q = 0`.
+pub fn american_call_price(i: CallInputs, q: f64) -> f64 {
+    american_price(i, q, AMERICAN_BINOMIAL_STEPS, false)
+}
+
+/// American put price (CRR binomial, [`AMERICAN_BINOMIAL_STEPS`]) with carry
+/// yield `q`. Captures the early-exercise premium the European
+/// [`put_price_per_unit`] omits whenever `r > 0`.
+pub fn american_put_price(i: PutInputs, q: f64) -> f64 {
+    american_price(i, q, AMERICAN_BINOMIAL_STEPS, true)
+}
+
+// ---- implied-vol pipeline (realized σ → pricing IV) ----
+
+/// How a realized-vol estimate is turned into the implied vol used for pricing.
+/// The product has no listed IV history, so IV is always a *model*: realized
+/// vol lifted by a variance-risk premium and an OTM-wing skew.
+///
+/// Defaults are the identity transform (`vrp_ratio = 1.0`, both skews `0`), so
+/// wiring [`fair_iv`] into a quoter is behaviour-preserving until the knobs are
+/// calibrated and set.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IvParams {
+    /// Variance-risk-premium multiplier (IV/RV). `1.0` = no premium. The vault
+    /// keeper already uses ~1.15; this lets every quoter share one number.
+    pub vrp_ratio: f64,
+    /// Upside-skew slope in bps per unit of log-moneyness, applied to **OTM
+    /// calls** (`K > S`): uplift `= call_skew_bps/1e4 · ln(K/S)`. `0` = flat.
+    pub call_skew_bps: f64,
+    /// Downside-skew slope in bps per unit of log-moneyness, applied to **OTM
+    /// puts** (`K < S`): uplift `= put_skew_bps/1e4 · ln(S/K)`. `0` = flat.
+    pub put_skew_bps: f64,
+}
+
+impl Default for IvParams {
+    fn default() -> Self {
+        Self { vrp_ratio: 1.0, call_skew_bps: 0.0, put_skew_bps: 0.0 }
+    }
+}
+
+/// Convert a realized-vol estimate into the implied vol to price with:
+/// `IV = RV · vrp_ratio · (1 + skew_uplift)`. Skew lifts only the traded OTM
+/// wing (OTM calls for `is_put = false`, OTM puts for `is_put = true`); ITM/ATM
+/// and the non-traded wing get no uplift. The result is floored at a small
+/// positive value so a degenerate input never yields a zero/negative vol.
+pub fn fair_iv(realized_sigma: f64, spot: f64, strike: f64, is_put: bool, p: IvParams) -> f64 {
+    let mut iv = realized_sigma * p.vrp_ratio;
+    if spot > 0.0 && strike > 0.0 {
+        let uplift = if is_put {
+            // OTM put: K < S.
+            if strike < spot {
+                (p.put_skew_bps / 10_000.0) * (spot / strike).ln()
+            } else {
+                0.0
+            }
+        } else {
+            // OTM call: K > S.
+            if strike > spot {
+                (p.call_skew_bps / 10_000.0) * (strike / spot).ln()
+            } else {
+                0.0
+            }
+        };
+        iv *= 1.0 + uplift.max(0.0);
+    }
+    iv.max(1e-6)
+}
+
 /// Inverse standard normal CDF via Acklam's rational approximation
 /// (relative error < 1.15e-9 over the open unit interval). Returns ±∞ at
 /// p = 0 / 1 and NaN outside [0, 1].
@@ -401,22 +579,48 @@ fn norm_pdf(x: f64) -> f64 {
     (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt()
 }
 
-/// Standard normal CDF via Abramowitz-Stegun 26.2.17.
+/// Standard normal CDF via Graeme West's `cumnorm` (2004) — a Hart-style
+/// rational approximation accurate to ~1e-15 absolute, versus the ~7e-8 of the
+/// previous Abramowitz-Stegun 26.2.17 form. The tighter accuracy restores the
+/// `S·φ(d1) = K·e^(−rτ)·φ(d2)` identity to ~1e-12, so analytic greeks agree
+/// with bump-and-reprice to machine-ish precision rather than ~1e-5.
 fn norm_cdf(x: f64) -> f64 {
-    // erf approximation; works on the [-∞, ∞] range with reflection.
-    let a1 = 0.254829592;
-    let a2 = -0.284496736;
-    let a3 = 1.421413741;
-    let a4 = -1.453152027;
-    let a5 = 1.061405429;
-    let p = 0.3275911;
-
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x_abs = x.abs() / std::f64::consts::SQRT_2;
-    let t = 1.0 / (1.0 + p * x_abs);
-    let y = 1.0
-        - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x_abs * x_abs).exp();
-    0.5 * (1.0 + sign * y)
+    let x_abs = x.abs();
+    // Beyond ~37σ the tail is 0 to full f64 precision.
+    if x_abs > 37.0 {
+        return if x > 0.0 { 1.0 } else { 0.0 };
+    }
+    let exponential = (-x_abs * x_abs / 2.0).exp();
+    let cumnorm = if x_abs < 7.071_067_811_865_475 {
+        let build = 3.526_249_659_989_109e-2 * x_abs + 0.700_383_064_443_688;
+        let build = build * x_abs + 6.373_962_203_531_650;
+        let build = build * x_abs + 33.912_866_078_383_02;
+        let build = build * x_abs + 112.079_291_497_871_0;
+        let build = build * x_abs + 221.213_596_169_931_1;
+        let build = build * x_abs + 220.206_867_912_376_1;
+        let numer = exponential * build;
+        let denom = 8.838_834_764_831_844e-2 * x_abs + 1.755_667_163_182_642;
+        let denom = denom * x_abs + 16.064_177_579_206_95;
+        let denom = denom * x_abs + 86.780_732_202_946_10;
+        let denom = denom * x_abs + 296.564_248_779_674_0;
+        let denom = denom * x_abs + 637.333_633_378_831_1;
+        let denom = denom * x_abs + 793.826_512_519_948_1;
+        let denom = denom * x_abs + 440.413_735_824_752_2;
+        numer / denom
+    } else {
+        // Continued-fraction tail for |x| ≥ ~7.07.
+        let build = x_abs + 0.65;
+        let build = x_abs + 4.0 / build;
+        let build = x_abs + 3.0 / build;
+        let build = x_abs + 2.0 / build;
+        let build = x_abs + 1.0 / build;
+        exponential / build / 2.506_628_274_631_000
+    };
+    if x > 0.0 {
+        1.0 - cumnorm
+    } else {
+        cumnorm
+    }
 }
 
 #[cfg(test)]
@@ -914,5 +1118,153 @@ mod tests {
     #[test]
     fn put_break_even_basic() {
         close(put_break_even(500.0, 37.15), 462.85, 1e-12);
+    }
+
+    // ---- higher-accuracy norm_cdf (West) ----
+
+    #[test]
+    fn norm_cdf_is_high_accuracy() {
+        // West's algorithm is ~1e-15; pin reference values much tighter than
+        // the old A-S 26.2.17 (~7e-8) form allowed.
+        close(norm_cdf(0.0), 0.5, 1e-15);
+        close(norm_cdf(1.0), 0.841_344_746_068_543, 1e-12);
+        close(norm_cdf(-1.0), 0.158_655_253_931_457, 1e-12);
+        close(norm_cdf(1.96), 0.975_002_104_851_780, 1e-12);
+        close(norm_cdf(-3.0), 0.001_349_898_031_630, 1e-12);
+        // Symmetry and tail saturation.
+        close(norm_cdf(5.0) + norm_cdf(-5.0), 1.0, 1e-15);
+        assert_eq!(norm_cdf(40.0), 1.0);
+        assert_eq!(norm_cdf(-40.0), 0.0);
+    }
+
+    #[test]
+    fn norm_cdf_restores_phi_identity() {
+        // The accuracy gain restores S·φ(d1) = K·e^(−rτ)·φ(d2), so analytic
+        // call delta now matches central differences to ~1e-9 (was ~1e-5).
+        let i = CallInputs { spot: 100.0, strike: 130.0, t_years: 7.0 / 365.0, r: 0.0, sigma: 0.60 };
+        let h = i.spot * 1e-6;
+        let up = call_price_per_unit(CallInputs { spot: i.spot + h, ..i });
+        let dn = call_price_per_unit(CallInputs { spot: i.spot - h, ..i });
+        close(call_delta(i), (up - dn) / (2.0 * h), 1e-7);
+    }
+
+    // ---- carry-aware European prices ----
+
+    #[test]
+    fn carry_reduces_to_european_at_zero_q() {
+        for (spot, strike, t_years, r, sigma) in [
+            (100.0, 100.0, 1.0, 0.05, 0.20),
+            (100.0, 130.0, 0.25, 0.0, 0.60),
+            (3.5, 4.2, 14.0 / 365.0, 0.03, 0.90),
+        ] {
+            let i = CallInputs { spot, strike, t_years, r, sigma };
+            close(call_price_carry(i, 0.0), call_price_per_unit(i), 1e-12);
+            close(put_price_carry(i, 0.0), put_price_per_unit(i), 1e-12);
+        }
+    }
+
+    #[test]
+    fn carry_yield_lowers_call_raises_put() {
+        // A positive carry yield drops the forward, so the call is worth less
+        // and the put more than their q=0 values.
+        let i = CallInputs { spot: 100.0, strike: 100.0, t_years: 1.0, r: 0.02, sigma: 0.40 };
+        assert!(call_price_carry(i, 0.05) < call_price_per_unit(i));
+        assert!(put_price_carry(i, 0.05) > put_price_per_unit(i));
+    }
+
+    #[test]
+    fn carry_put_call_parity_with_yield() {
+        // C − P = S·e^(−qτ) − K·e^(−rτ).
+        let i = CallInputs { spot: 100.0, strike: 110.0, t_years: 0.5, r: 0.03, sigma: 0.35 };
+        let q = 0.04;
+        let lhs = call_price_carry(i, q) - put_price_carry(i, q);
+        let rhs = i.spot * (-q * i.t_years).exp() - i.strike * (-i.r * i.t_years).exp();
+        close(lhs, rhs, 1e-9);
+    }
+
+    // ---- American binomial pricer ----
+
+    #[test]
+    fn american_call_equals_european_when_no_carry() {
+        // No dividend ⇒ early exercise never optimal ⇒ American == European.
+        for (spot, strike, t_years, r, sigma) in [
+            (100.0, 100.0, 1.0, 0.05, 0.20),
+            (100.0, 130.0, 30.0 / 365.0, 0.04, 0.55),
+            (3.5, 4.0, 7.0 / 365.0, 0.03, 0.90),
+        ] {
+            let i = CallInputs { spot, strike, t_years, r, sigma };
+            // Tree vs analytic European: a few bps of spot at 256 steps.
+            close(american_call_price(i, 0.0), call_price_per_unit(i), 0.02 * spot.max(1.0) / 100.0 + 1e-3);
+        }
+    }
+
+    #[test]
+    fn american_put_exceeds_european_on_positive_rate() {
+        // The headline put fix: with r > 0 the American put carries a strictly
+        // positive early-exercise premium the European model omits. Use a deep
+        // ITM put where early exercise is clearly valuable.
+        let i = PutInputs { spot: 60.0, strike: 100.0, t_years: 1.0, r: 0.10, sigma: 0.25 };
+        let euro = put_price_per_unit(i);
+        let amer = american_put_price(i, 0.0);
+        assert!(amer > euro + 0.5, "amer {amer} should beat euro {euro} by the exercise premium");
+        // It can never be worth less than immediate exercise.
+        assert!(amer >= i.strike - i.spot - 1e-6);
+    }
+
+    #[test]
+    fn american_put_matches_european_at_zero_rate_zero_carry() {
+        // With r = q = 0 there is no early-exercise incentive for a put either.
+        let i = PutInputs { spot: 95.0, strike: 100.0, t_years: 0.5, r: 0.0, sigma: 0.40 };
+        close(american_put_price(i, 0.0), put_price_per_unit(i), 0.02);
+    }
+
+    #[test]
+    fn american_degenerate_inputs() {
+        // Expired ⇒ raw intrinsic; zero vol ⇒ European carry price.
+        let exp = CallInputs { spot: 110.0, strike: 100.0, t_years: 0.0, r: 0.05, sigma: 0.4 };
+        close(american_call_price(exp, 0.0), 10.0, 1e-12);
+        close(american_put_price(CallInputs { spot: 90.0, ..exp }, 0.0), 10.0, 1e-12);
+        let zero_vol = CallInputs { spot: 100.0, strike: 100.0, t_years: 1.0, r: 0.05, sigma: 0.0 };
+        close(american_call_price(zero_vol, 0.0), call_price_carry(zero_vol, 0.0), 1e-12);
+    }
+
+    // ---- fair_iv pipeline ----
+
+    #[test]
+    fn fair_iv_default_is_identity() {
+        // Defaults must not move pricing: IV == RV regardless of moneyness/type.
+        let p = IvParams::default();
+        close(fair_iv(0.55, 100.0, 120.0, false, p), 0.55, 1e-12);
+        close(fair_iv(0.55, 100.0, 80.0, true, p), 0.55, 1e-12);
+    }
+
+    #[test]
+    fn fair_iv_applies_vrp() {
+        let p = IvParams { vrp_ratio: 1.15, ..Default::default() };
+        close(fair_iv(0.50, 100.0, 100.0, false, p), 0.575, 1e-12);
+    }
+
+    #[test]
+    fn fair_iv_skew_lifts_only_traded_otm_wing() {
+        // OTM call (K>S) gets the call-skew uplift; an ITM call does not, and
+        // the put-skew knob leaves calls untouched.
+        let call_p = IvParams { vrp_ratio: 1.0, call_skew_bps: 5000.0, put_skew_bps: 9999.0 };
+        let otm_call = fair_iv(0.50, 100.0, 130.0, false, call_p);
+        let itm_call = fair_iv(0.50, 100.0, 80.0, false, call_p);
+        assert!(otm_call > 0.50, "otm call iv {otm_call} should be lifted");
+        close(itm_call, 0.50, 1e-12);
+
+        // OTM put (K<S) gets the put-skew uplift; ITM put does not.
+        let put_p = IvParams { vrp_ratio: 1.0, call_skew_bps: 9999.0, put_skew_bps: 5000.0 };
+        let otm_put = fair_iv(0.50, 100.0, 70.0, true, put_p);
+        let itm_put = fair_iv(0.50, 100.0, 130.0, true, put_p);
+        assert!(otm_put > 0.50, "otm put iv {otm_put} should be lifted");
+        close(itm_put, 0.50, 1e-12);
+    }
+
+    #[test]
+    fn fair_iv_floors_positive() {
+        // A degenerate zero RV still yields a usable positive vol.
+        assert!(fair_iv(0.0, 100.0, 100.0, false, IvParams::default()) > 0.0);
     }
 }

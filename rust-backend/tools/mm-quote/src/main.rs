@@ -155,6 +155,7 @@ fn main() -> Result<()> {
         // Simulator prints the Black-Scholes mid — no spread.
         ask_markup_bps: 0,
         bid_markdown_bps: 0,
+        ..Default::default()
     };
     let decision = price_rfq(&cfg, &inputs, spot_scaled, args.sigma, now);
 

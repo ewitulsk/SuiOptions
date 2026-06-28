@@ -43,7 +43,8 @@ use protocol_types::quote::Quote;
 use protocol_types::sides::MmRole;
 use protocol_types::SigningScheme;
 
-use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
+use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer, VolEstimator};
+use pricing::IvParams;
 use api_service_client::ApiServiceClient;
 use token_info_client::{Snapshot, TokenInfoClient};
 use sui_tx::quote_signer::QuoteSigner;
@@ -117,6 +118,26 @@ struct BotConfig {
     rate: f64,
     #[serde(default = "default_quote_ttl_ms")]
     quote_ttl_ms: u64,
+
+    /// Variance-risk-premium multiplier (IV/RV) applied to the realized-vol
+    /// estimate before pricing. Defaults to 1.0 (no premium — today's behavior);
+    /// the vault keeper uses ~1.15. Set after a backtester calibration.
+    #[serde(default = "default_vrp_ratio")]
+    vrp_ratio: f64,
+    /// Upside-skew slope (bps per unit log-moneyness) for OTM calls. Default 0.
+    #[serde(default)]
+    call_skew_bps: f64,
+    /// Downside-skew slope (bps per unit log-moneyness) for OTM puts. Default 0.
+    #[serde(default)]
+    put_skew_bps: f64,
+    /// Continuous carry/dividend yield `q` of the underlying (staking, funding).
+    /// Default 0.0. Feeds the forward drift and the American pricer.
+    #[serde(default)]
+    carry_yield: f64,
+    /// Price the American early-exercise right (CRR binomial) instead of the
+    /// European closed form. Default false. Matters for puts on a positive rate.
+    #[serde(default)]
+    american: bool,
 
     /// Ask-side markup in basis points, applied when quoting as the Writer MM
     /// (retail buying — trader flow): premium is marked *up* off the
@@ -214,6 +235,17 @@ struct PythConfig {
     /// Volatility used until the buffer has enough samples. Once it does,
     /// the live estimate takes over.
     fallback_vol: f64,
+    /// Realized-vol estimator: `"sample_stddev"` (default, legacy — subtracts
+    /// the sample mean), `"zero_mean"` (no drift subtraction; preferred for
+    /// option vol), or `"ewma"` (exponentially-weighted, tracks regime shifts).
+    vol_estimator: String,
+    /// EWMA decay λ used when `vol_estimator = "ewma"`. Default 0.94
+    /// (RiskMetrics daily).
+    ewma_lambda: f64,
+    /// Reject (or, upstream, widen) a quote when Pyth's confidence interval is
+    /// wider than this fraction of the price (`conf/price`). 0 disables the
+    /// guard (default). e.g. 0.02 = decline when conf exceeds 2% of price.
+    max_conf_ratio: f64,
 }
 
 impl Default for PythConfig {
@@ -224,8 +256,35 @@ impl Default for PythConfig {
             vol_window_hours: 24,
             vol_sample_interval_ms: 60_000,
             fallback_vol: 0.6,
+            vol_estimator: default_vol_estimator(),
+            ewma_lambda: default_ewma_lambda(),
+            max_conf_ratio: 0.0,
         }
     }
+}
+
+/// Map the `vol_estimator` config string to a [`VolEstimator`]. Unknown values
+/// fall back to the legacy sample-stddev with a warning.
+fn parse_vol_estimator(s: &str, lambda: f64) -> VolEstimator {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "zero_mean" | "zeromean" => VolEstimator::ZeroMean,
+        "ewma" => VolEstimator::Ewma { lambda },
+        "sample_stddev" | "samplestddev" | "" => VolEstimator::SampleStdDev,
+        other => {
+            tracing::warn!(estimator = %other, "unknown vol_estimator; using sample_stddev");
+            VolEstimator::SampleStdDev
+        }
+    }
+}
+
+fn default_vrp_ratio() -> f64 {
+    1.0
+}
+fn default_vol_estimator() -> String {
+    "sample_stddev".into()
+}
+fn default_ewma_lambda() -> f64 {
+    0.94
 }
 
 fn default_scheme() -> SigningScheme {
@@ -424,6 +483,8 @@ async fn main() -> Result<()> {
     let samples_per_year =
         (365.0 * 24.0 * 60.0 * 60.0 * 1000.0) / cfg.pyth.vol_sample_interval_ms as f64;
     let vol_window_ms = cfg.pyth.vol_window_hours.saturating_mul(3_600_000);
+    let vol_estimator = parse_vol_estimator(&cfg.pyth.vol_estimator, cfg.pyth.ewma_lambda);
+    tracing::info!(?vol_estimator, "realized-vol estimator selected");
     let mut markets: Vec<Market> = Vec::with_capacity(underlyings.len());
     for sym in &underlyings {
         let spec = snapshot
@@ -438,9 +499,10 @@ async fn main() -> Result<()> {
             coin_type: protocol_types::asset::canonicalize_move_type(&spec.coin_type),
             feed,
             decimals: spec.decimals,
-            vol_buf: Arc::new(RwLock::new(RollingVolBuffer::new(
+            vol_buf: Arc::new(RwLock::new(RollingVolBuffer::with_estimator(
                 vol_window_ms,
                 samples_per_year,
+                vol_estimator,
             ))),
         });
     }
@@ -557,7 +619,22 @@ async fn main() -> Result<()> {
         quote_ttl_ms: cfg.quote_ttl_ms,
         ask_markup_bps: cfg.ask_markup_bps,
         bid_markdown_bps: cfg.bid_markdown_bps,
+        iv: IvParams {
+            vrp_ratio: cfg.vrp_ratio,
+            call_skew_bps: cfg.call_skew_bps,
+            put_skew_bps: cfg.put_skew_bps,
+        },
+        carry_yield: cfg.carry_yield,
+        american: cfg.american,
     };
+    tracing::info!(
+        vrp_ratio = cfg.vrp_ratio,
+        call_skew_bps = cfg.call_skew_bps,
+        put_skew_bps = cfg.put_skew_bps,
+        carry_yield = cfg.carry_yield,
+        american = cfg.american,
+        "pricing model knobs"
+    );
     // api-service client: the bot looks each RFQ's bucket up by address to get
     // its true (strike, expiry, coin types) rather than trusting the broadcast.
     let api = ApiServiceClient::new(&cli.api_url);
@@ -570,6 +647,7 @@ async fn main() -> Result<()> {
     let staleness = Staleness {
         max_price_age: Duration::from_millis(cfg.pyth.max_price_age_ms),
         max_publish_lag: Duration::from_millis(cfg.pyth.max_publish_lag_ms),
+        max_conf_ratio: cfg.pyth.max_conf_ratio,
     };
 
     // DeepBook quoting loop (SO-158): rest two-sided limit orders on every
