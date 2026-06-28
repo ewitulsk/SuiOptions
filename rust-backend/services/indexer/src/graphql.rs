@@ -51,6 +51,8 @@ pub struct PositionGql {
     pub expiry_ms: String,
     pub total_written_raw: String,
     pub exercise_cursor_raw: String,
+    /// "call" or "put".
+    pub option_kind: String,
     // provenance (denormalized from the minting WriteExecuted)
     pub premium_received_raw: String,
     pub mm_account_id: String,
@@ -73,6 +75,7 @@ impl From<(PositionRow, BucketRow)> for PositionGql {
             expiry_ms: b.expiry_ms.to_string(),
             total_written_raw: b.total_written.to_string(),
             exercise_cursor_raw: b.exercise_cursor.to_string(),
+            option_kind: p.option_kind,
             premium_received_raw: p.premium_received.to_string(),
             mm_account_id: p.mm_account_id,
             tx_digest: p.tx_digest,
@@ -125,6 +128,8 @@ pub struct BucketGql {
     pub exercise_cursor_raw: String,
     pub cleaned: bool,
     pub invalidated: bool,
+    /// "call" or "put".
+    pub option_kind: String,
     /// DeepBook pool trading this bucket's call coin (SO-152); null until a
     /// venue is created.
     pub deepbook_pool_id: Option<String>,
@@ -144,6 +149,7 @@ impl BucketGql {
             exercise_cursor_raw: b.exercise_cursor.to_string(),
             cleaned: b.cleaned,
             invalidated: b.invalidated,
+            option_kind: b.option_kind,
             deepbook_pool_id,
         }
     }
@@ -221,6 +227,8 @@ pub struct RfqGql {
     pub gross_premium_raw: Option<String>,
     /// Protocol RFQ fee taken at settle (settled auctions only).
     pub fee_raw: Option<String>,
+    /// "call" or "put".
+    pub option_kind: String,
 }
 
 impl From<RfqRow> for RfqGql {
@@ -240,6 +248,7 @@ impl From<RfqRow> for RfqGql {
             position_id: r.position_id,
             gross_premium_raw: r.gross_premium.map(|v| v.to_string()),
             fee_raw: r.fee.map(|v| v.to_string()),
+            option_kind: r.option_kind,
         }
     }
 }
@@ -560,6 +569,7 @@ impl QueryRoot {
         asset_type: Option<String>,
         settlement_type: Option<String>,
         expiry_ms: Option<String>,
+        option_kind: Option<String>,
     ) -> async_graphql::Result<Vec<BucketGql>> {
         let expiry_ms = match expiry_ms.as_deref() {
             Some(s) => Some(
@@ -574,6 +584,7 @@ impl QueryRoot {
             asset_type,
             settlement_type,
             expiry_ms,
+            option_kind,
         };
         let repo = ctx.data_unchecked::<Repo>().clone();
         let rows = db_query("buckets_query", move || -> anyhow::Result<_> {

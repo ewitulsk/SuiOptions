@@ -27,6 +27,11 @@ use crate::db::models::{
 };
 use crate::db::{CheckpointBatch, EventBuild, HydratedViews};
 
+/// Discriminator stored in the `option_kind` column on shared bucket /
+/// position / rfq tables. Calls are the historical default.
+pub const OPTION_KIND_CALL: &str = "call";
+pub const OPTION_KIND_PUT: &str = "put";
+
 /// What we keep per Account: balances per asset type, plus the registered
 /// signing pubkey (so the quoting service can verify quotes locally as
 /// defense-in-depth even while it lazy-loads its own copy).
@@ -47,6 +52,8 @@ pub struct AccountState {
 pub struct BucketState {
     pub asset_type: AssetType,
     pub settlement_type: AssetType,
+    /// For calls: the per-bucket call coin type. For puts: the per-bucket put
+    /// coin type. Named `call_type` for back-compat with the shared schema.
     pub call_type: AssetType,
     pub strike: u128,
     pub strike_scale: u8,
@@ -55,6 +62,8 @@ pub struct BucketState {
     pub exercise_cursor: u128,
     pub cleaned: bool,
     pub invalidated: bool,
+    /// "call" or "put" — discriminates which product the bucket belongs to.
+    pub option_kind: String,
 }
 
 /// A bucket's DeepBook trading venue (SO-152). Written once per bucket —
@@ -85,6 +94,8 @@ pub struct PositionState {
     pub recipient: SuiAddress,
     pub range_start: u128,
     pub range_end: u128,
+    /// "call" or "put".
+    pub option_kind: String,
 }
 
 /// Lifecycle of an on-chain RFQ auction (C3).
@@ -134,6 +145,8 @@ pub struct RfqState {
     pub gross_premium: Option<u64>,
     /// Protocol RFQ fee taken at settle (`gross_premium − net_premium`).
     pub fee: Option<u64>,
+    /// "call" or "put".
+    pub option_kind: String,
 }
 
 /// One covered-call vault's headline state, assembled from its event
@@ -533,6 +546,31 @@ fn collect_participants(
             push(f.taker_balance_manager_id.to_hex(), "deepbook_taker_bm");
             push(f.maker_balance_manager_id.to_hex(), "deepbook_maker_bm");
         }
+        // ── cash-secured puts (mirror of the call arms above) ────────
+        ChainEvent::PutWriteExecuted(w) => {
+            push(w.position_recipient.to_hex(), "position_recipient");
+            push(w.put_token_recipient.to_hex(), "put_token_recipient");
+            push(w.signer_token_recipient.to_hex(), "signer_token_recipient");
+            push(w.executor.to_hex(), "executor");
+            if let Some(o) = account_owner_hex(inner, &w.signer_account_id) {
+                push(o, "signer_account_owner");
+            }
+        }
+        ChainEvent::PutExercised(e) => push(e.exerciser.to_hex(), "exerciser"),
+        ChainEvent::PutRedeemed(r) => push(r.redeemer.to_hex(), "redeemer"),
+        ChainEvent::PutExpiredOptionBurned(b) => push(b.burner.to_hex(), "burner"),
+        ChainEvent::PutBucketInvalidated(i) => push(i.admin.to_hex(), "admin"),
+        ChainEvent::PutBucketRevalidated(r) => push(r.admin.to_hex(), "admin"),
+        ChainEvent::PutCollateralizedWrite(w) => push(w.writer.to_hex(), "writer"),
+        ChainEvent::PutRfqBid(b) => {
+            push(b.bidder.to_hex(), "bidder");
+            push(b.put_recipient.to_hex(), "put_recipient");
+        }
+        ChainEvent::PutRfqSettled(s) => {
+            push(s.winner.to_hex(), "winner");
+            push(s.put_recipient.to_hex(), "put_recipient");
+            push(s.position_recipient.to_hex(), "position_recipient");
+        }
         // DeepBookPoolCreated carries no addresses (the creator isn't in the
         // event payload).
         ChainEvent::BucketCreated(_)
@@ -550,7 +588,11 @@ fn collect_participants(
         | ChainEvent::VaultRoundFinalized(_)
         | ChainEvent::VaultConfigUpdated(_)
         | ChainEvent::VaultConfigApplied(_)
-        | ChainEvent::VaultDepositsPaused(_) => {}
+        | ChainEvent::VaultDepositsPaused(_)
+        | ChainEvent::PutBucketCreated(_)
+        | ChainEvent::PutBucketCleaned(_)
+        | ChainEvent::PutRfqCreated(_)
+        | ChainEvent::PutRfqExpiredUnsold(_) => {}
     }
 }
 
@@ -688,6 +730,7 @@ fn stage_event_into_batch(
                 bidder: b.bidder.to_hex(),
                 call_recipient: b.call_recipient.to_hex(),
                 premium: u64_to_bigdecimal(b.premium),
+                option_kind: OPTION_KIND_CALL.to_string(),
             });
         }
         ChainEvent::RfqSettled(s) => {
@@ -740,7 +783,85 @@ fn stage_event_into_batch(
         ChainEvent::VaultConfigApplied(c) => {
             stage_vault(inner, c.vault_id, sequence, batch);
         }
+        // ── cash-secured puts (mirror of the call arms above) ────────
+        ChainEvent::PutBucketCreated(b) => {
+            if let Some(state) = inner.buckets.get(&b.bucket_id) {
+                batch.buckets.push(bucket_row(b.bucket_id, state, sequence));
+            }
+        }
+        ChainEvent::PutWriteExecuted(w) => {
+            if let Some(state) = inner.buckets.get(&w.bucket_id) {
+                batch.buckets.push(bucket_row(w.bucket_id, state, sequence));
+            }
+            batch
+                .position_upserts
+                .push(put_write_position_row(w, sequence, tx_digest, timestamp_ms));
+        }
+        ChainEvent::PutExercised(e) => {
+            if let Some(state) = inner.buckets.get(&e.bucket_id) {
+                batch.buckets.push(bucket_row(e.bucket_id, state, sequence));
+            }
+        }
+        ChainEvent::PutRedeemed(r) => {
+            batch
+                .position_deletes
+                .push((r.bucket_id.to_hex(), u128_to_bigdecimal(r.range_start)));
+        }
+        ChainEvent::PutBucketCleaned(c) => {
+            if let Some(state) = inner.buckets.get(&c.bucket_id) {
+                batch.buckets.push(bucket_row(c.bucket_id, state, sequence));
+            }
+        }
+        ChainEvent::PutBucketInvalidated(i) => {
+            if let Some(state) = inner.buckets.get(&i.bucket_id) {
+                batch.buckets.push(bucket_row(i.bucket_id, state, sequence));
+            }
+        }
+        ChainEvent::PutBucketRevalidated(r) => {
+            if let Some(state) = inner.buckets.get(&r.bucket_id) {
+                batch.buckets.push(bucket_row(r.bucket_id, state, sequence));
+            }
+        }
+        ChainEvent::PutCollateralizedWrite(w) => {
+            if let Some(state) = inner.buckets.get(&w.bucket_id) {
+                batch.buckets.push(bucket_row(w.bucket_id, state, sequence));
+            }
+        }
+        ChainEvent::PutRfqCreated(r) => {
+            if let Some(state) = inner.rfqs.get(&r.rfq_id) {
+                batch.rfqs.push(rfq_row(r.rfq_id, state, sequence));
+            }
+        }
+        ChainEvent::PutRfqBid(b) => {
+            if let Some(state) = inner.rfqs.get(&b.rfq_id) {
+                batch.rfqs.push(rfq_row(b.rfq_id, state, sequence));
+            }
+            batch.rfq_bids.push(RfqBidRow {
+                rfq_id: b.rfq_id.to_hex(),
+                sequence,
+                bidder: b.bidder.to_hex(),
+                // The put coin recipient lives in the shared `call_recipient`
+                // column.
+                call_recipient: b.put_recipient.to_hex(),
+                premium: u64_to_bigdecimal(b.premium),
+                option_kind: OPTION_KIND_PUT.to_string(),
+            });
+        }
+        ChainEvent::PutRfqSettled(s) => {
+            if let Some(state) = inner.rfqs.get(&s.rfq_id) {
+                batch.rfqs.push(rfq_row(s.rfq_id, state, sequence));
+            }
+            batch
+                .position_upserts
+                .push(put_settled_position_row(s, sequence, tx_digest, timestamp_ms));
+        }
+        ChainEvent::PutRfqExpiredUnsold(e) => {
+            if let Some(state) = inner.rfqs.get(&e.rfq_id) {
+                batch.rfqs.push(rfq_row(e.rfq_id, state, sequence));
+            }
+        }
         ChainEvent::ExpiredOptionBurned(_)
+        | ChainEvent::PutExpiredOptionBurned(_)
         | ChainEvent::FeeUpdated(_)
         | ChainEvent::TreasuryWithdrawn(_)
         | ChainEvent::VaultPositionRedeemed(_)
@@ -798,6 +919,7 @@ fn bucket_row(id: ObjectId, state: &BucketState, sequence: i64) -> BucketRow {
         cleaned: state.cleaned,
         invalidated: state.invalidated,
         updated_at_seq: sequence,
+        option_kind: state.option_kind.clone(),
     }
 }
 
@@ -820,6 +942,54 @@ fn write_position_row(
         mm_account_id: w.signer_account_id.to_hex(),
         tx_digest: tx_digest.to_string(),
         minted_at_ms,
+        option_kind: OPTION_KIND_CALL.to_string(),
+    }
+}
+
+/// Position row for a `PutWriteExecuted`. Mirrors [`write_position_row`] but
+/// puts have no `signer_account_id` field, so MM-account provenance is unset.
+fn put_write_position_row(
+    w: &protocol_types::events::PutWriteExecuted,
+    sequence: i64,
+    tx_digest: &str,
+    minted_at_ms: i64,
+) -> PositionRow {
+    PositionRow {
+        bucket_id: w.bucket_id.to_hex(),
+        range_start: u128_to_bigdecimal(w.range_start),
+        range_end: u128_to_bigdecimal(w.range_end),
+        object_id: w.position_id.to_hex(),
+        recipient: w.position_recipient.to_hex(),
+        updated_at_seq: sequence,
+        premium_received: u64_to_bigdecimal(w.gross_premium),
+        mm_account_id: w.signer_account_id.to_hex(),
+        tx_digest: tx_digest.to_string(),
+        minted_at_ms,
+        option_kind: OPTION_KIND_PUT.to_string(),
+    }
+}
+
+/// Position row minted at a `PutRfqSettled`. The settle event carries the
+/// position id/recipient/range directly.
+fn put_settled_position_row(
+    s: &protocol_types::events::PutRfqSettled,
+    sequence: i64,
+    tx_digest: &str,
+    minted_at_ms: i64,
+) -> PositionRow {
+    PositionRow {
+        bucket_id: s.bucket_id.to_hex(),
+        range_start: u128_to_bigdecimal(s.range_start),
+        range_end: u128_to_bigdecimal(s.range_end),
+        object_id: s.position_id.to_hex(),
+        recipient: s.position_recipient.to_hex(),
+        updated_at_seq: sequence,
+        premium_received: u64_to_bigdecimal(s.gross_premium),
+        // RFQ settles aren't tied to an MM off-chain account.
+        mm_account_id: ObjectId::ZERO.to_hex(),
+        tx_digest: tx_digest.to_string(),
+        minted_at_ms,
+        option_kind: OPTION_KIND_PUT.to_string(),
     }
 }
 
@@ -862,6 +1032,7 @@ fn rfq_row(id: ObjectId, state: &RfqState, sequence: i64) -> RfqRow {
         gross_premium: state.gross_premium.map(u64_to_bigdecimal),
         fee: state.fee.map(u64_to_bigdecimal),
         updated_at_seq: sequence,
+        option_kind: state.option_kind.clone(),
     }
 }
 
@@ -1041,6 +1212,7 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                     position_id: None,
                     gross_premium: None,
                     fee: None,
+                    option_kind: OPTION_KIND_CALL.to_string(),
                 },
             );
         }
@@ -1181,6 +1353,94 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                 v.deposits_paused = p.paused;
             }
         }
+        // ── cash-secured puts (mirror of the call arms above) ────────
+        ChainEvent::PutBucketCreated(b) => apply_put_bucket_created(inner, b),
+        ChainEvent::PutWriteExecuted(w) => apply_put_write_executed(inner, w),
+        ChainEvent::PutExercised(e) => {
+            if let Some(b) = inner.buckets.get_mut(&e.bucket_id) {
+                b.exercise_cursor = e.cursor_after;
+            }
+        }
+        ChainEvent::PutRedeemed(r) => {
+            inner.positions.remove(&(r.bucket_id, r.range_start));
+        }
+        ChainEvent::PutExpiredOptionBurned(_) => {} // no state change
+        ChainEvent::PutBucketCleaned(c) => {
+            if let Some(b) = inner.buckets.get_mut(&c.bucket_id) {
+                b.cleaned = true;
+            }
+        }
+        ChainEvent::PutBucketInvalidated(i) => {
+            if let Some(b) = inner.buckets.get_mut(&i.bucket_id) {
+                b.invalidated = true;
+            }
+        }
+        ChainEvent::PutBucketRevalidated(r) => {
+            if let Some(b) = inner.buckets.get_mut(&r.bucket_id) {
+                b.invalidated = false;
+            }
+        }
+        ChainEvent::PutCollateralizedWrite(w) => {
+            if let Some(b) = inner.buckets.get_mut(&w.bucket_id) {
+                b.total_written = w.range_end;
+            }
+        }
+        ChainEvent::PutRfqCreated(r) => {
+            inner.rfqs.insert(
+                r.rfq_id,
+                RfqState {
+                    bucket_id: r.bucket_id,
+                    origin: r.origin,
+                    amount: r.amount,
+                    reserve_premium: r.reserve_premium,
+                    deadline_ms: r.deadline_ms,
+                    best_premium: None,
+                    best_bidder: None,
+                    status: RfqStatus::Open,
+                    winner: None,
+                    net_premium: None,
+                    position_id: None,
+                    gross_premium: None,
+                    fee: None,
+                    option_kind: OPTION_KIND_PUT.to_string(),
+                },
+            );
+        }
+        ChainEvent::PutRfqBid(b) => {
+            if let Some(rfq) = inner.rfqs.get_mut(&b.rfq_id) {
+                rfq.best_premium = Some(b.premium);
+                rfq.best_bidder = Some(b.bidder);
+                rfq.deadline_ms = b.new_deadline_ms;
+            }
+        }
+        ChainEvent::PutRfqSettled(s) => {
+            if let Some(rfq) = inner.rfqs.get_mut(&s.rfq_id) {
+                rfq.status = RfqStatus::Settled;
+                rfq.winner = Some(s.winner);
+                rfq.net_premium = Some(s.net_premium);
+                rfq.position_id = Some(s.position_id);
+                rfq.gross_premium = Some(s.gross_premium);
+                rfq.fee = Some(s.fee);
+            }
+            // The settle mints a Position to the writer (mirrors the
+            // WriteExecuted path for direct writes).
+            inner.positions.insert(
+                (s.bucket_id, s.range_start),
+                PositionState {
+                    bucket_id: s.bucket_id,
+                    object_id: s.position_id,
+                    recipient: s.position_recipient,
+                    range_start: s.range_start,
+                    range_end: s.range_end,
+                    option_kind: OPTION_KIND_PUT.to_string(),
+                },
+            );
+        }
+        ChainEvent::PutRfqExpiredUnsold(e) => {
+            if let Some(rfq) = inner.rfqs.get_mut(&e.rfq_id) {
+                rfq.status = RfqStatus::ExpiredUnsold;
+            }
+        }
         ChainEvent::FeeUpdated(_)
         | ChainEvent::TreasuryWithdrawn(_)
         | ChainEvent::VaultPositionRedeemed(_)
@@ -1206,6 +1466,7 @@ fn apply_bucket_created(inner: &mut Inner, b: &BucketCreated) {
             exercise_cursor: 0,
             cleaned: false,
             invalidated: false,
+            option_kind: OPTION_KIND_CALL.to_string(),
         },
     );
 }
@@ -1238,6 +1499,7 @@ fn apply_write_executed(inner: &mut Inner, w: &WriteExecuted) {
             recipient: w.position_recipient,
             range_start: w.range_start,
             range_end: w.range_end,
+            option_kind: OPTION_KIND_CALL.to_string(),
         },
     );
 }
@@ -1250,6 +1512,43 @@ fn apply_exercised(inner: &mut Inner, e: &Exercised) {
 
 fn apply_redeemed(inner: &mut Inner, r: &Redeemed) {
     inner.positions.remove(&(r.bucket_id, r.range_start));
+}
+
+fn apply_put_bucket_created(inner: &mut Inner, b: &protocol_types::events::PutBucketCreated) {
+    inner.buckets.insert(
+        b.bucket_id,
+        BucketState {
+            asset_type: b.asset_type.clone(),
+            settlement_type: b.settlement_type.clone(),
+            // The put coin type lives in the shared `call_type` column.
+            call_type: b.put_type.clone(),
+            strike: b.strike,
+            strike_scale: b.strike_scale,
+            expiry_ms: b.expiry_ms,
+            total_written: 0,
+            exercise_cursor: 0,
+            cleaned: false,
+            invalidated: false,
+            option_kind: OPTION_KIND_PUT.to_string(),
+        },
+    );
+}
+
+fn apply_put_write_executed(inner: &mut Inner, w: &protocol_types::events::PutWriteExecuted) {
+    if let Some(b) = inner.buckets.get_mut(&w.bucket_id) {
+        b.total_written = w.range_end;
+    }
+    inner.positions.insert(
+        (w.bucket_id, w.range_start),
+        PositionState {
+            bucket_id: w.bucket_id,
+            object_id: w.position_id,
+            recipient: w.position_recipient,
+            range_start: w.range_start,
+            range_end: w.range_end,
+            option_kind: OPTION_KIND_PUT.to_string(),
+        },
+    );
 }
 
 fn apply_account_delta<E: AccountDelta>(inner: &mut Inner, e: &E, is_deposit: bool) {

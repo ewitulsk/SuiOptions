@@ -50,6 +50,7 @@ pub fn latest_active_expiry(
     underlying: &str,
     settlement: &str,
     expiry_interval_ms: u64,
+    product_type: &str,
 ) -> Result<Option<u64>> {
     use diesel::dsl::max;
     let mut conn = pool.get().context("latest_active_expiry: pool")?;
@@ -57,6 +58,7 @@ pub fn latest_active_expiry(
         .filter(scheduler_rolls::underlying_symbol.eq(underlying))
         .filter(scheduler_rolls::settlement_symbol.eq(settlement))
         .filter(scheduler_rolls::expiry_interval_ms.eq(expiry_interval_ms as i64))
+        .filter(scheduler_rolls::product_type.eq(product_type))
         .filter(
             scheduler_rolls::state.eq_any(&[
                 RollState::Pending.as_str(),
@@ -80,6 +82,7 @@ pub fn claim_slot(
     settlement: &str,
     expiry_ms: u64,
     expiry_interval_ms: u64,
+    product_type: &str,
     anchor_seq: u64,
 ) -> Result<bool> {
     let mut conn = pool.get().context("claim_slot: pool")?;
@@ -88,6 +91,7 @@ pub fn claim_slot(
         settlement_symbol: settlement,
         expiry_ms: expiry_ms as i64,
         expiry_interval_ms: expiry_interval_ms as i64,
+        product_type,
         state: RollState::Pending.as_str(),
         submit_anchor_seq: Some(anchor_seq as i64),
     };
@@ -115,6 +119,7 @@ pub fn mark_submitted(
     underlying: &str,
     settlement: &str,
     expiry_ms: u64,
+    product_type: &str,
     tx_digest: &str,
     bucket_ids: &[String],
 ) -> Result<()> {
@@ -124,6 +129,7 @@ pub fn mark_submitted(
         .filter(scheduler_rolls::underlying_symbol.eq(underlying))
         .filter(scheduler_rolls::settlement_symbol.eq(settlement))
         .filter(scheduler_rolls::expiry_ms.eq(expiry_ms as i64))
+        .filter(scheduler_rolls::product_type.eq(product_type))
         .filter(scheduler_rolls::state.eq(RollState::Pending.as_str()))
         .set((
             scheduler_rolls::state.eq(RollState::Submitted.as_str()),
@@ -142,6 +148,7 @@ pub fn mark_needs_reconciliation(
     underlying: &str,
     settlement: &str,
     expiry_ms: u64,
+    product_type: &str,
     error_msg: &str,
 ) -> Result<()> {
     let mut conn = pool.get().context("mark_needs_reconciliation: pool")?;
@@ -149,6 +156,7 @@ pub fn mark_needs_reconciliation(
         .filter(scheduler_rolls::underlying_symbol.eq(underlying))
         .filter(scheduler_rolls::settlement_symbol.eq(settlement))
         .filter(scheduler_rolls::expiry_ms.eq(expiry_ms as i64))
+        .filter(scheduler_rolls::product_type.eq(product_type))
         .filter(scheduler_rolls::state.eq(RollState::Pending.as_str()))
         .set((
             scheduler_rolls::state.eq(RollState::NeedsReconciliation.as_str()),
@@ -166,12 +174,14 @@ pub fn delete_pending(
     underlying: &str,
     settlement: &str,
     expiry_ms: u64,
+    product_type: &str,
 ) -> Result<()> {
     let mut conn = pool.get().context("delete_pending: pool")?;
     diesel::delete(scheduler_rolls::table)
         .filter(scheduler_rolls::underlying_symbol.eq(underlying))
         .filter(scheduler_rolls::settlement_symbol.eq(settlement))
         .filter(scheduler_rolls::expiry_ms.eq(expiry_ms as i64))
+        .filter(scheduler_rolls::product_type.eq(product_type))
         .filter(scheduler_rolls::state.eq(RollState::Pending.as_str()))
         .execute(&mut conn)
         .context("delete_pending")?;
@@ -184,6 +194,7 @@ pub fn confirm_from_indexer(
     underlying: &str,
     settlement: &str,
     expiry_ms: u64,
+    product_type: &str,
     bucket_id: &str,
 ) -> Result<()> {
     let mut conn = pool.get().context("confirm_from_indexer: pool")?;
@@ -193,6 +204,7 @@ pub fn confirm_from_indexer(
         .filter(scheduler_rolls::underlying_symbol.eq(underlying))
         .filter(scheduler_rolls::settlement_symbol.eq(settlement))
         .filter(scheduler_rolls::expiry_ms.eq(expiry_ms as i64))
+        .filter(scheduler_rolls::product_type.eq(product_type))
         .filter(
             scheduler_rolls::state
                 .eq(RollState::Submitted.as_str())
@@ -586,19 +598,21 @@ mod tests {
     #[ignore] // requires SCHEDULER_TEST_DATABASE_URL
     fn claim_and_duplicate_blocked() {
         let pool = test_pool();
-        assert!(claim_slot(&pool, "TBTC", "TUSDC", 1_000, WEEK, 0).unwrap());
+        assert!(claim_slot(&pool, "TBTC", "TUSDC", 1_000, WEEK, "call", 0).unwrap());
         // Same slot: partial UNIQUE index blocks duplicates.
-        assert!(!claim_slot(&pool, "TBTC", "TUSDC", 1_000, WEEK, 0).unwrap());
+        assert!(!claim_slot(&pool, "TBTC", "TUSDC", 1_000, WEEK, "call", 0).unwrap());
+        // ...but a put at the same slot is a distinct product — allowed.
+        assert!(claim_slot(&pool, "TBTC", "TUSDC", 1_000, WEEK, "put", 0).unwrap());
     }
 
     #[test]
     #[ignore]
     fn claim_allowed_after_delete() {
         let pool = test_pool();
-        assert!(claim_slot(&pool, "TBTC", "TUSDC", 2_000, WEEK, 0).unwrap());
-        delete_pending(&pool, "TBTC", "TUSDC", 2_000).unwrap();
+        assert!(claim_slot(&pool, "TBTC", "TUSDC", 2_000, WEEK, "call", 0).unwrap());
+        delete_pending(&pool, "TBTC", "TUSDC", 2_000, "call").unwrap();
         // Row is gone; re-claim succeeds.
-        assert!(claim_slot(&pool, "TBTC", "TUSDC", 2_000, WEEK, 0).unwrap());
+        assert!(claim_slot(&pool, "TBTC", "TUSDC", 2_000, WEEK, "call", 0).unwrap());
     }
 
     #[test]
@@ -607,30 +621,30 @@ mod tests {
         let pool = test_pool();
         let now = 1_000_000u64;
         // Confirmed family at a future expiry.
-        assert!(claim_slot(&pool, "TSUI", "TUSDC", now + HOUR, HOUR, 0).unwrap());
-        mark_submitted(&pool, "TSUI", "TUSDC", now + HOUR, "0xabc", &["id1".into()]).unwrap();
-        confirm_from_indexer(&pool, "TSUI", "TUSDC", now + HOUR, "id1").unwrap();
+        assert!(claim_slot(&pool, "TSUI", "TUSDC", now + HOUR, HOUR, "call", 0).unwrap());
+        mark_submitted(&pool, "TSUI", "TUSDC", now + HOUR, "call", "0xabc", &["id1".into()]).unwrap();
+        confirm_from_indexer(&pool, "TSUI", "TUSDC", now + HOUR, "call", "id1").unwrap();
 
         // It's a re-roll candidate, and still blocks a duplicate claim.
         let cands = confirmed_unexpired_rolls(&pool, now).unwrap();
         assert_eq!(cands.len(), 1);
-        assert!(!claim_slot(&pool, "TSUI", "TUSDC", now + HOUR, HOUR, 0).unwrap());
+        assert!(!claim_slot(&pool, "TSUI", "TUSDC", now + HOUR, HOUR, "call", 0).unwrap());
 
         // Supersede (family fully invalidated) → slot frees, latest drops it,
         // and the same expiry can be re-rolled.
         mark_superseded(&pool, cands[0].id).unwrap();
-        assert_eq!(latest_active_expiry(&pool, "TSUI", "TUSDC", HOUR).unwrap(), None);
+        assert_eq!(latest_active_expiry(&pool, "TSUI", "TUSDC", HOUR, "call").unwrap(), None);
         assert!(confirmed_unexpired_rolls(&pool, now).unwrap().is_empty());
-        assert!(claim_slot(&pool, "TSUI", "TUSDC", now + HOUR, HOUR, 0).unwrap());
+        assert!(claim_slot(&pool, "TSUI", "TUSDC", now + HOUR, HOUR, "call", 0).unwrap());
     }
 
     #[test]
     #[ignore]
     fn submit_and_confirm_workflow() {
         let pool = test_pool();
-        assert!(claim_slot(&pool, "TBTC", "TUSDC", 3_000, WEEK, 42).unwrap());
-        mark_submitted(&pool, "TBTC", "TUSDC", 3_000, "0xabc", &["id1".into()]).unwrap();
-        confirm_from_indexer(&pool, "TBTC", "TUSDC", 3_000, "id1").unwrap();
+        assert!(claim_slot(&pool, "TBTC", "TUSDC", 3_000, WEEK, "call", 42).unwrap());
+        mark_submitted(&pool, "TBTC", "TUSDC", 3_000, "call", "0xabc", &["id1".into()]).unwrap();
+        confirm_from_indexer(&pool, "TBTC", "TUSDC", 3_000, "call", "id1").unwrap();
         let rows = all_active_rows(&pool).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].state, "confirmed");
@@ -640,8 +654,8 @@ mod tests {
     #[ignore]
     fn reconciliation_workflow() {
         let pool = test_pool();
-        assert!(claim_slot(&pool, "TBTC", "TUSDC", 4_000, WEEK, 10).unwrap());
-        mark_needs_reconciliation(&pool, "TBTC", "TUSDC", 4_000, "timeout").unwrap();
+        assert!(claim_slot(&pool, "TBTC", "TUSDC", 4_000, WEEK, "call", 10).unwrap());
+        mark_needs_reconciliation(&pool, "TBTC", "TUSDC", 4_000, "call", "timeout").unwrap();
         let rows = needs_reconciliation_rows(&pool).unwrap();
         assert_eq!(rows.len(), 1);
         delete_reconciled(&pool, rows[0].id).unwrap();
@@ -652,10 +666,10 @@ mod tests {
     #[ignore]
     fn latest_active_expiry_picks_highest() {
         let pool = test_pool();
-        claim_slot(&pool, "TBTC", "TUSDC", 1_000, WEEK, 0).unwrap();
-        claim_slot(&pool, "TBTC", "TUSDC", 2_000, WEEK, 0).unwrap();
+        claim_slot(&pool, "TBTC", "TUSDC", 1_000, WEEK, "call", 0).unwrap();
+        claim_slot(&pool, "TBTC", "TUSDC", 2_000, WEEK, "call", 0).unwrap();
         assert_eq!(
-            latest_active_expiry(&pool, "TBTC", "TUSDC", WEEK).unwrap(),
+            latest_active_expiry(&pool, "TBTC", "TUSDC", WEEK, "call").unwrap(),
             Some(2_000)
         );
     }
@@ -666,14 +680,14 @@ mod tests {
         // A weekly family with a far expiry must NOT suppress the hourly
         // family's much nearer latest expiry for the same pair.
         let pool = test_pool();
-        claim_slot(&pool, "TSUI", "TUSDC", 10 * WEEK, WEEK, 0).unwrap();
-        claim_slot(&pool, "TSUI", "TUSDC", 5 * HOUR, HOUR, 0).unwrap();
+        claim_slot(&pool, "TSUI", "TUSDC", 10 * WEEK, WEEK, "call", 0).unwrap();
+        claim_slot(&pool, "TSUI", "TUSDC", 5 * HOUR, HOUR, "call", 0).unwrap();
         assert_eq!(
-            latest_active_expiry(&pool, "TSUI", "TUSDC", WEEK).unwrap(),
+            latest_active_expiry(&pool, "TSUI", "TUSDC", WEEK, "call").unwrap(),
             Some(10 * WEEK)
         );
         assert_eq!(
-            latest_active_expiry(&pool, "TSUI", "TUSDC", HOUR).unwrap(),
+            latest_active_expiry(&pool, "TSUI", "TUSDC", HOUR, "call").unwrap(),
             Some(5 * HOUR)
         );
     }

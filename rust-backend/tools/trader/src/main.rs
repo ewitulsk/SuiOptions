@@ -35,9 +35,10 @@ use protocol_types::sides::{RetailRole, Side};
 use token_info_client::TokenInfoClient;
 use sui_tx::sui_client::SuiClientWrapper;
 use sui_tx::tx::execute_write::{execute_trader_flow, ExecuteTraderParams};
+use sui_tx::tx::execute_write_put::{execute_put_trader_flow, ExecutePutTraderParams};
 use sui_tx::ws_client;
 
-use trader::Cli;
+use trader::{Cli, Product};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -139,38 +140,74 @@ async fn main() -> Result<()> {
     let signer_token_recipient = sui_address_from_pt(best.quote.signer_token_recipient)?;
 
     // The option coin type is the bucket's third type parameter; read it off
-    // the on-chain Bucket<U, S, Call> object.
-    let call_type = bucket_call_type(&wrap.client, cli.bucket).await?;
+    // the on-chain Bucket<U, S, Call|Put> object (index 2 holds either).
+    let option_type = bucket_call_type(&wrap.client, cli.bucket).await?;
 
-    let params = ExecuteTraderParams {
-        package,
-        underlying_type: &underlying_spec.coin_type,
-        settlement_type: &settlement_spec.coin_type,
-        call_type: &call_type,
-        tokens_package: tokens_pkg,
-        settlement_module: &settlement_module,
-        settlement_faucet_id: settlement_faucet.faucet()?,
-        bucket_id: cli.bucket,
-        protocol_config_id: protocol_config,
-        treasury_id: treasury,
-        mm_account_id,
-        protocol_id: best.quote.protocol_id.clone(),
-        signer_account_id_bytes,
-        signer_token_recipient,
-        bucket_id_bytes,
-        write_amount: best.quote.write_amount,
-        premium: best.quote.premium,
-        valid_until_ms: best.quote.valid_until_ms,
-        nonce: best.quote.nonce,
-        signature: best.signature.clone(),
-        // Trader flow requires position_recipient == signer_token_recipient (the
-        // MM gets the Position Object); the trader receives the CallOption.
-        position_recipient: signer_token_recipient,
-        call_token_recipient: trader_addr,
-        gas_budget: cli.gas_budget,
+    let resp = match cli.product {
+        Product::Call => {
+            let params = ExecuteTraderParams {
+                package,
+                underlying_type: &underlying_spec.coin_type,
+                settlement_type: &settlement_spec.coin_type,
+                call_type: &option_type,
+                tokens_package: tokens_pkg,
+                settlement_module: &settlement_module,
+                settlement_faucet_id: settlement_faucet.faucet()?,
+                bucket_id: cli.bucket,
+                protocol_config_id: protocol_config,
+                treasury_id: treasury,
+                mm_account_id,
+                protocol_id: best.quote.protocol_id.clone(),
+                signer_account_id_bytes,
+                signer_token_recipient,
+                bucket_id_bytes,
+                write_amount: best.quote.write_amount,
+                premium: best.quote.premium,
+                valid_until_ms: best.quote.valid_until_ms,
+                nonce: best.quote.nonce,
+                signature: best.signature.clone(),
+                // Trader flow requires position_recipient == signer_token_recipient (the
+                // MM gets the Position Object); the trader receives the CallOption.
+                position_recipient: signer_token_recipient,
+                call_token_recipient: trader_addr,
+                gas_budget: cli.gas_budget,
+            };
+            execute_trader_flow(&wrap.client, &wrap.signer, &params).await?
+        }
+        Product::Put => {
+            // Put trader flow: both legs are settlement. The trader still mints
+            // the premium from the settlement faucet (already resolved above);
+            // the MM posts the cash collateral from their Account.
+            let params = ExecutePutTraderParams {
+                package,
+                underlying_type: &underlying_spec.coin_type,
+                settlement_type: &settlement_spec.coin_type,
+                put_type: &option_type,
+                tokens_package: tokens_pkg,
+                settlement_module: &settlement_module,
+                settlement_faucet_id: settlement_faucet.faucet()?,
+                bucket_id: cli.bucket,
+                protocol_config_id: protocol_config,
+                treasury_id: treasury,
+                mm_account_id,
+                protocol_id: best.quote.protocol_id.clone(),
+                signer_account_id_bytes,
+                signer_token_recipient,
+                bucket_id_bytes,
+                write_amount: best.quote.write_amount,
+                premium: best.quote.premium,
+                valid_until_ms: best.quote.valid_until_ms,
+                nonce: best.quote.nonce,
+                signature: best.signature.clone(),
+                // Trader flow requires position_recipient == signer_token_recipient
+                // (the MM writes the put / gets the Position); trader gets the puts.
+                position_recipient: signer_token_recipient,
+                put_token_recipient: trader_addr,
+                gas_budget: cli.gas_budget,
+            };
+            execute_put_trader_flow(&wrap.client, &wrap.signer, &params).await?
+        }
     };
-
-    let resp = execute_trader_flow(&wrap.client, &wrap.signer, &params).await?;
     println!("✓ execute_write (trader) digest: {}", resp.digest);
     Ok(())
 }

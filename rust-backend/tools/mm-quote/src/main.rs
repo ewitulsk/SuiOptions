@@ -21,12 +21,20 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use mm_bot::pricing::{
     compute_spot_from_prices, price_rfq, PriceDecision, PricingConfig, RfqPricingInputs, SpotError,
 };
 use protocol_types::sides::Side;
+
+/// Option product to price. `call` is the default so existing invocations are
+/// unchanged; `put` switches the Black-Scholes mid to the put pricer.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum Product {
+    Call,
+    Put,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "mm-quote", about = "Simulate the mm-bot's premium for an RFQ given asset prices.")]
@@ -75,6 +83,10 @@ struct Args {
     /// Annualized risk-free rate, continuous compounding (0.05 = 5%).
     #[arg(long, default_value_t = 0.0)]
     rate: f64,
+
+    /// `call` or `put`. Selects the Black-Scholes pricer. Defaults to `call`.
+    #[arg(long, value_enum, default_value_t = Product::Call)]
+    product: Product,
 
     /// Quote TTL in ms — sets `valid_until_ms = now + ttl`.
     #[arg(long, default_value_t = 30_000)]
@@ -126,12 +138,15 @@ fn main() -> Result<()> {
     // the user passed on the CLI straight into the pricer.
     let inputs = RfqPricingInputs {
         write_amount: args.write_amount,
-        // Simulator always pretends retail is trading (buying calls) — only
-        // the pricing primitives are exercised; `side` is informational.
+        // Simulator always pretends retail is trading (buying) — only the
+        // pricing primitives are exercised; `side` is informational.
         side: Side::Trader,
         strike: args.strike,
         strike_scale: args.strike_scale,
         expiry_ms,
+        // Put pricing routes through pricing::put_price_per_unit / put_greeks
+        // inside price_rfq.
+        is_put: matches!(args.product, Product::Put),
     };
 
     let cfg = PricingConfig {

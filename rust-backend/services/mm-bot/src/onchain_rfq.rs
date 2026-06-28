@@ -230,7 +230,7 @@ pub fn parse_auction_view(fields: &Value) -> Result<AuctionView> {
     })
 }
 
-async fn fetch_auction_view(
+pub(crate) async fn fetch_auction_view(
     client: &sui_sdk::SuiClient,
     rfq_id: ObjectID,
 ) -> Result<Option<AuctionView>> {
@@ -390,6 +390,7 @@ async fn tick(
             strike: bucket.strike,
             strike_scale: bucket.strike_scale,
             expiry_ms: bucket.expiry_ms,
+            is_put: false, // the call auction bidder; puts go through onchain_put_rfq
         };
         let max_bid = match price_rfq(&p.pricing, &inputs, spot_scaled, sigma, now) {
             PriceDecision::Quote { premium, .. } => premium,
@@ -458,7 +459,7 @@ async fn tick(
 }
 
 /// The wallet's largest settlement coin with at least `premium` on it.
-async fn settlement_funding_coin(
+pub(crate) async fn settlement_funding_coin(
     wrap: &SuiClientWrapper,
     settlement_coin_type: &str,
     premium: u64,
@@ -482,11 +483,11 @@ async fn settlement_funding_coin(
         .map(|c| c.coin_object_id))
 }
 
-fn sui_object_id(id: protocol_types::ids::ObjectId) -> Result<ObjectID> {
+pub(crate) fn sui_object_id(id: protocol_types::ids::ObjectId) -> Result<ObjectID> {
     Ok(ObjectID::new(*id.as_bytes()))
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

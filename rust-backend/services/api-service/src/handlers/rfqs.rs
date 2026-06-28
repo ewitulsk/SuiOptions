@@ -19,6 +19,10 @@ pub struct RfqsQuery {
     pub status: Option<String>,
     /// Origin filter — a vault id for coupled auctions.
     pub origin: Option<String>,
+    /// Option kind: `call` | `put`. Defaults to `call`, so existing callers
+    /// (and the call mm-bot) keep seeing call auctions unchanged. The put
+    /// bidder passes `?kind=put`.
+    pub kind: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -39,6 +43,8 @@ pub struct RfqDto {
     pub gross_premium_raw: Option<String>,
     /// Protocol RFQ fee taken at settle (settled auctions only).
     pub fee_raw: Option<String>,
+    /// `"call"` | `"put"` — the option kind this auction is for.
+    pub option_kind: String,
 }
 
 #[derive(Serialize)]
@@ -55,6 +61,11 @@ pub async fn list_rfqs(
             return Err(StatusCode::BAD_REQUEST);
         }
     }
+    // Default to "call" so pre-puts callers are unaffected.
+    let kind = q.kind.as_deref().unwrap_or("call");
+    if !matches!(kind, "call" | "put") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let origin = match q.origin.as_deref() {
         Some(o) => Some(ObjectId::from_hex(o).map_err(|_| StatusCode::BAD_REQUEST)?),
         None => None,
@@ -69,7 +80,14 @@ pub async fn list_rfqs(
         })?;
     let rfqs = rows
         .into_iter()
-        .map(|r| RfqDto {
+        // TODO(cash-secured-puts): source the per-row kind from the indexer's
+        // `optionKind` once `indexer_graphql::Rfq` carries it. Until then every
+        // auction is a call, so `?kind=put` correctly yields no rows and
+        // `?kind=call` (the default) returns everything — back-compat-safe.
+        .map(|r| (rfq_kind_of(&r), r))
+        .filter(|(rfq_kind, _)| *rfq_kind == kind)
+        .map(|(rfq_kind, r)| RfqDto {
+            option_kind: rfq_kind.to_string(),
             rfq_id: r.rfq_id.to_hex(),
             bucket_id: r.bucket_id.to_hex(),
             origin: r.origin.to_hex(),
@@ -87,6 +105,14 @@ pub async fn list_rfqs(
         })
         .collect();
     Ok(Json(RfqsResponse { rfqs }))
+}
+
+/// The option kind of one auction. Defaults to `"call"`; once
+/// `indexer_graphql::Rfq` exposes `option_kind` this should read it.
+fn rfq_kind_of(_r: &indexer_graphql::Rfq) -> &'static str {
+    // TODO(cash-secured-puts): return `r.option_kind` (mapped to a static str)
+    // once the indexer-graphql `Rfq` carries the field.
+    "call"
 }
 
 /// One bid in an auction's history, ascending by sequence.

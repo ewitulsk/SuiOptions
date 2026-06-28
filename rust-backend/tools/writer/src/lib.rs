@@ -6,10 +6,18 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use sui_types::base_types::ObjectID;
 
 use sui_tx::sui_client::Network;
+
+/// Option product the writer flow targets. `call` is the default so existing
+/// invocations are unchanged.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Product {
+    Call,
+    Put,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "writer", about = "Retail-writer test client for the options protocol")]
@@ -44,6 +52,19 @@ pub struct Cli {
     /// Symbol for the settlement token.
     #[arg(long, default_value = "TUSDC")]
     pub settlement: String,
+
+    /// `call` (covered call) or `put` (cash-secured put). Defaults to `call`.
+    #[arg(long, value_enum, default_value_t = Product::Call)]
+    pub product: Product,
+
+    /// Bucket strike (raw, at `--strike-scale`). Required for `--product put`
+    /// to size the cash collateral = ceil(write_amount × strike / 10^scale).
+    #[arg(long)]
+    pub strike: Option<u128>,
+
+    /// Strike scale (0..=9) matching `--strike`. Only used for `--product put`.
+    #[arg(long, default_value_t = 0)]
+    pub strike_scale: u8,
 
     #[arg(long, default_value_t = 200_000_000)]
     pub gas_budget: u64,

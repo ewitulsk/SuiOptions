@@ -26,10 +26,10 @@ use sui_tx::sui_client::SuiClientWrapper;
 use sui_tx::tx::admin::{set_fee_bps, withdraw_treasury};
 use sui_tx::tx::test_tokens::{mint_and_deposit_into_account, mint_to_sender};
 
-use option_scheduler::roller::{self, RollPlan};
+use option_scheduler::roller::{self, ProductType, RollPlan};
 use option_scheduler::strike_grid::StrikeGrid;
 
-use exchange::{Cli, Command};
+use exchange::{Cli, Command, Product};
 
 /// Resolves either a ticker (looked up via the `/tokens` catalog) or a
 /// fully-qualified Move type string. Lets every command that needs a type
@@ -85,6 +85,7 @@ async fn main() -> Result<()> {
             strike_interval,
             count,
             strike_scale,
+            product,
         } => {
             let u_spec = snapshot
                 .token_spec(&underlying)
@@ -105,6 +106,11 @@ async fn main() -> Result<()> {
                 count,
                 strike_scale,
             };
+            // Route to the call/put codegen + create path inside the roller.
+            let product_type = match product {
+                Product::Call => ProductType::Call,
+                Product::Put => ProductType::Put,
+            };
             let plan = RollPlan {
                 underlying_symbol: underlying.clone(),
                 settlement_symbol: settlement.clone(),
@@ -115,6 +121,7 @@ async fn main() -> Result<()> {
                 expiry_ms,
                 strikes: grid.strikes(),
                 strike_scale,
+                product_type,
             };
             // The manual tool rolls buckets only; pool creation stays with
             // the scheduler (pass None).

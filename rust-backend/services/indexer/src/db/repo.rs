@@ -746,6 +746,9 @@ impl Repo {
         if let Some(e) = f.expiry_ms {
             q = q.filter(buckets::expiry_ms.eq(e));
         }
+        if let Some(k) = &f.option_kind {
+            q = q.filter(buckets::option_kind.eq(k.clone()));
+        }
         q.order(buckets::expiry_ms.asc())
             .load::<BucketRow>(&mut conn)
             .context("loading buckets")
@@ -848,6 +851,8 @@ pub struct BucketQuery {
     pub asset_type: Option<String>,
     pub settlement_type: Option<String>,
     pub expiry_ms: Option<i64>,
+    /// "call" or "put"; `None` returns both.
+    pub option_kind: Option<String>,
 }
 
 const MAX_FILTER_DEPTH: u8 = 12;

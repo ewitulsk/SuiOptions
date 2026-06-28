@@ -20,11 +20,14 @@ use protocol_types::asset::AssetType;
 use protocol_types::events::{
     AccountCreated, AccountDeposit, AccountWithdraw, BucketCleaned, BucketCreated,
     BucketInvalidated, BucketRevalidated, ChainEvent, CollateralizedWrite, Exercised,
-    ExpiredOptionBurned, FeeUpdated, InstantWithdraw, Redeemed, RfqBid, RfqCreated,
-    RfqExpiredUnsold, RfqSettled, SharesClaimed, SigningKeyRotated, SwapRfqBid, SwapRfqCreated,
-    SwapRfqSettled, SwapRfqUnfilled, TreasuryWithdrawn, VaultBucketSelected, VaultConfigUpdated,
-    VaultCreated, VaultDeposit, VaultDepositsPaused, VaultFeesCharged, VaultPositionRedeemed,
-    VaultRoundFinalized, WithdrawCompleted, WithdrawInitiated, WriteExecuted,
+    ExpiredOptionBurned, FeeUpdated, InstantWithdraw, PutBucketCleaned, PutBucketCreated,
+    PutBucketInvalidated, PutBucketRevalidated, PutCollateralizedWrite, PutExercised,
+    PutExpiredOptionBurned, PutRedeemed, PutRfqBid, PutRfqCreated, PutRfqExpiredUnsold,
+    PutRfqSettled, PutWriteExecuted, Redeemed, RfqBid, RfqCreated, RfqExpiredUnsold, RfqSettled,
+    SharesClaimed, SigningKeyRotated, SwapRfqBid, SwapRfqCreated, SwapRfqSettled, SwapRfqUnfilled,
+    TreasuryWithdrawn, VaultBucketSelected, VaultConfigUpdated, VaultCreated, VaultDeposit,
+    VaultDepositsPaused, VaultFeesCharged, VaultPositionRedeemed, VaultRoundFinalized,
+    WithdrawCompleted, WithdrawInitiated, WriteExecuted,
 };
 use protocol_types::ids::{ObjectId, SuiAddress};
 
@@ -73,6 +76,20 @@ pub struct EventTypes {
     pub vault_round_finalized: String,
     pub vault_config_updated: String,
     pub vault_deposits_paused: String,
+    // Cash-secured put events (mirror of the call/RFQ events above).
+    pub put_bucket_created: String,
+    pub put_write_executed: String,
+    pub put_collateralized_write: String,
+    pub put_exercised: String,
+    pub put_redeemed: String,
+    pub put_expired_option_burned: String,
+    pub put_bucket_cleaned: String,
+    pub put_bucket_invalidated: String,
+    pub put_bucket_revalidated: String,
+    pub put_rfq_created: String,
+    pub put_rfq_bid: String,
+    pub put_rfq_settled: String,
+    pub put_rfq_expired_unsold: String,
     /// Prefix of DeepBook's generic `pool::PoolCreated<Base, Quote>` event
     /// (SO-152). Built from DeepBook's ORIGINAL package id — Sui resolves
     /// event/struct types to the first publish, not the upgraded package
@@ -123,6 +140,19 @@ impl EventTypes {
             vault_round_finalized: mk("VaultRoundFinalized"),
             vault_config_updated: mk("VaultConfigUpdated"),
             vault_deposits_paused: mk("VaultDepositsPaused"),
+            put_bucket_created: mk("PutBucketCreated"),
+            put_write_executed: mk("PutWriteExecuted"),
+            put_collateralized_write: mk("PutCollateralizedWrite"),
+            put_exercised: mk("PutExercised"),
+            put_redeemed: mk("PutRedeemed"),
+            put_expired_option_burned: mk("PutExpiredOptionBurned"),
+            put_bucket_cleaned: mk("PutBucketCleaned"),
+            put_bucket_invalidated: mk("PutBucketInvalidated"),
+            put_bucket_revalidated: mk("PutBucketRevalidated"),
+            put_rfq_created: mk("PutRfqCreated"),
+            put_rfq_bid: mk("PutRfqBid"),
+            put_rfq_settled: mk("PutRfqSettled"),
+            put_rfq_expired_unsold: mk("PutRfqExpiredUnsold"),
             deepbook_pool_created_prefix: deepbook_original_package_id
                 .map(|pkg| format!("{pkg}::pool::PoolCreated<")),
             deepbook_order_filled: deepbook_original_package_id
@@ -130,7 +160,7 @@ impl EventTypes {
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 35] {
+    pub fn all_strings(&self) -> [&str; 48] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -167,6 +197,19 @@ impl EventTypes {
             &self.vault_round_finalized,
             &self.vault_config_updated,
             &self.vault_deposits_paused,
+            &self.put_bucket_created,
+            &self.put_write_executed,
+            &self.put_collateralized_write,
+            &self.put_exercised,
+            &self.put_redeemed,
+            &self.put_expired_option_burned,
+            &self.put_bucket_cleaned,
+            &self.put_bucket_invalidated,
+            &self.put_bucket_revalidated,
+            &self.put_rfq_created,
+            &self.put_rfq_bid,
+            &self.put_rfq_settled,
+            &self.put_rfq_expired_unsold,
         ]
     }
 }
@@ -255,6 +298,32 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(VaultConfigUpdated, VaultConfigUpdated)
     } else if type_str == types.vault_deposits_paused {
         decode!(VaultDepositsPaused, VaultDepositsPaused)
+    } else if type_str == types.put_bucket_created {
+        decode!(PutBucketCreated, PutBucketCreated)
+    } else if type_str == types.put_write_executed {
+        decode!(PutWriteExecuted, PutWriteExecuted)
+    } else if type_str == types.put_collateralized_write {
+        decode!(PutCollateralizedWrite, PutCollateralizedWrite)
+    } else if type_str == types.put_exercised {
+        decode!(PutExercised, PutExercised)
+    } else if type_str == types.put_redeemed {
+        decode!(PutRedeemed, PutRedeemed)
+    } else if type_str == types.put_expired_option_burned {
+        decode!(PutExpiredOptionBurned, PutExpiredOptionBurned)
+    } else if type_str == types.put_bucket_cleaned {
+        decode!(PutBucketCleaned, PutBucketCleaned)
+    } else if type_str == types.put_bucket_invalidated {
+        decode!(PutBucketInvalidated, PutBucketInvalidated)
+    } else if type_str == types.put_bucket_revalidated {
+        decode!(PutBucketRevalidated, PutBucketRevalidated)
+    } else if type_str == types.put_rfq_created {
+        decode!(PutRfqCreated, PutRfqCreated)
+    } else if type_str == types.put_rfq_bid {
+        decode!(PutRfqBid, PutRfqBid)
+    } else if type_str == types.put_rfq_settled {
+        decode!(PutRfqSettled, PutRfqSettled)
+    } else if type_str == types.put_rfq_expired_unsold {
+        decode!(PutRfqExpiredUnsold, PutRfqExpiredUnsold)
     } else {
         Ok(None)
     }

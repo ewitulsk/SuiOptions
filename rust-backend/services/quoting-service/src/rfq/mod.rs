@@ -70,14 +70,31 @@ impl From<ProtocolError> for QuoteRejection {
 /// retail-side direction. See §3.3.4:
 ///
 /// - Writer flow (retail writes): signer is Trader MM, signer provides the
-///   premium in the bucket's Settlement asset.
-/// - Trader flow (retail trades): signer is Writer MM, signer provides
-///   `write_amount` of the bucket's Underlying asset.
+///   premium in the bucket's Settlement asset. Same for calls and puts.
+/// - Trader flow (retail trades): signer is Writer MM (the put writer for a
+///   put bucket). For a **call** bucket they escrow `write_amount` of the
+///   Underlying asset; for a **cash-secured put** they instead post CASH
+///   collateral in the Settlement asset, `ceil(write_amount × strike /
+///   10^strike_scale)`.
 pub fn reservation_for(side: Side, bucket: &Bucket, quote: &Quote) -> (AssetType, u64) {
     match side {
         Side::Writer => (bucket.settlement_type.clone(), quote.premium),
+        Side::Trader if bucket.option_kind == "put" => {
+            (bucket.settlement_type.clone(), put_collateral(bucket, quote.write_amount))
+        }
         Side::Trader => (bucket.asset_type.clone(), quote.write_amount),
     }
+}
+
+/// Cash collateral a put writer must post for `write_amount` of underlying:
+/// `ceil(write_amount × strike / 10^strike_scale)`, computed in u128 and
+/// downcast to u64 (saturating — an overflow here means the bucket params are
+/// unrealistic and the reservation check would reject anyway).
+fn put_collateral(bucket: &Bucket, write_amount: u64) -> u64 {
+    let scale = 10u128.pow(bucket.strike_scale as u32);
+    let numerator = (write_amount as u128).saturating_mul(bucket.strike);
+    let collateral = numerator.div_ceil(scale);
+    u64::try_from(collateral).unwrap_or(u64::MAX)
 }
 
 /// Run a single quote through every check. On success, places a reservation
@@ -378,6 +395,7 @@ mod tests {
             exercise_cursor: 0,
             cleaned: false,
             invalidated: false,
+            option_kind: "call".into(),
         }
     }
 
@@ -519,6 +537,58 @@ mod tests {
             QuoteRejection::BucketInvalidated,
         );
         assert_eq!(state.reservations.len(), 0);
+    }
+
+    #[test]
+    fn put_trader_reserves_ceil_cash_collateral() {
+        // write_amount=100, strike=50, scale=0 → 100*50 = 5000 settlement.
+        let mut bucket = mk_bucket();
+        bucket.option_kind = "put".into();
+        let q = Quote {
+            protocol_id: vec![],
+            signer_account_id: ObjectId::ZERO,
+            signer_token_recipient: SuiAddress::ZERO,
+            bucket_id: bucket.bucket_id,
+            write_amount: 100,
+            premium: 7,
+            valid_until_ms: 0,
+            nonce: 0,
+        };
+        let (asset, amount) = reservation_for(Side::Trader, &bucket, &q);
+        assert_eq!(asset, bucket.settlement_type);
+        assert_eq!(amount, 5000);
+
+        // ceil: strike=3, scale=1 (0.3), write_amount=10 → 30/10 = 3 exactly;
+        // write_amount=11 → 33/10 → ceil 4.
+        bucket.strike = 3;
+        bucket.strike_scale = 1;
+        let mut q2 = q.clone();
+        q2.write_amount = 11;
+        let (_, amt) = reservation_for(Side::Trader, &bucket, &q2);
+        assert_eq!(amt, 4);
+
+        // The Writer branch (premium in settlement) is unchanged for puts.
+        let (wasset, wamt) = reservation_for(Side::Writer, &bucket, &q);
+        assert_eq!(wasset, bucket.settlement_type);
+        assert_eq!(wamt, 7);
+    }
+
+    #[test]
+    fn call_trader_still_reserves_underlying() {
+        let bucket = mk_bucket(); // option_kind == "call"
+        let q = Quote {
+            protocol_id: vec![],
+            signer_account_id: ObjectId::ZERO,
+            signer_token_recipient: SuiAddress::ZERO,
+            bucket_id: bucket.bucket_id,
+            write_amount: 100,
+            premium: 7,
+            valid_until_ms: 0,
+            nonce: 0,
+        };
+        let (asset, amount) = reservation_for(Side::Trader, &bucket, &q);
+        assert_eq!(asset, bucket.asset_type);
+        assert_eq!(amount, 100);
     }
 
     #[test]

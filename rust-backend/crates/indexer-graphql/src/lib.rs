@@ -50,6 +50,8 @@ pub struct Bucket {
     pub exercise_cursor: u128,
     pub cleaned: bool,
     pub invalidated: bool,
+    /// "call" or "put". Defaults to "call" if the server omits it.
+    pub option_kind: String,
     /// DeepBook pool trading this bucket's call coin (SO-152); `None` until
     /// a venue is created.
     pub deepbook_pool_id: Option<ObjectId>,
@@ -90,6 +92,8 @@ pub struct Position {
     pub expiry_ms: u64,
     pub total_written: u128,
     pub exercise_cursor: u128,
+    /// "call" or "put". Defaults to "call" if the server omits it.
+    pub option_kind: String,
     pub premium_received: u64,
     pub mm_account_id: ObjectId,
     pub tx_digest: String,
@@ -117,6 +121,8 @@ pub struct Rfq {
     pub gross_premium: Option<u64>,
     /// Protocol RFQ fee taken at settle (settled auctions only).
     pub fee: Option<u64>,
+    /// "call" or "put". Defaults to "call" if the server omits it.
+    pub option_kind: String,
 }
 
 /// One bid in an auction's history (C3).
@@ -228,7 +234,7 @@ impl IndexerClient {
     pub async fn bucket(&self, bucket_id: ObjectId) -> Result<Option<Bucket>> {
         const Q: &str = "query($id:String!){bucket(id:$id){bucketId assetType settlementType \
             callType strikeRaw strikeScale expiryMs totalWrittenRaw exerciseCursorRaw cleaned \
-            invalidated deepbookPoolId}}";
+            invalidated optionKind deepbookPoolId}}";
         let data: BucketWrap = self
             .gql(Q, json!({ "id": bucket_id.to_hex() }))
             .await?;
@@ -242,16 +248,18 @@ impl IndexerClient {
         asset_type: Option<&AssetType>,
         settlement_type: Option<&AssetType>,
         expiry_ms: Option<u64>,
+        option_kind: Option<&str>,
     ) -> Result<Vec<Bucket>> {
-        const Q: &str = "query($a:Boolean,$u:String,$s:String,$e:String){\
-            buckets(activeOnly:$a,assetType:$u,settlementType:$s,expiryMs:$e){\
+        const Q: &str = "query($a:Boolean,$u:String,$s:String,$e:String,$k:String){\
+            buckets(activeOnly:$a,assetType:$u,settlementType:$s,expiryMs:$e,optionKind:$k){\
             bucketId assetType settlementType callType strikeRaw strikeScale expiryMs \
-            totalWrittenRaw exerciseCursorRaw cleaned invalidated deepbookPoolId}}";
+            totalWrittenRaw exerciseCursorRaw cleaned invalidated optionKind deepbookPoolId}}";
         let vars = json!({
             "a": active_only,
             "u": asset_type.map(|a| a.as_str()),
             "s": settlement_type.map(|a| a.as_str()),
             "e": expiry_ms.map(|e| e.to_string()),
+            "k": option_kind,
         });
         let data: BucketsWrap = self.gql(Q, vars).await?;
         data.buckets.into_iter().map(Bucket::try_from).collect()
@@ -821,6 +829,7 @@ impl TryFrom<BucketJson> for Bucket {
                 .as_deref()
                 .map(parse_object_id)
                 .transpose()?,
+            option_kind: "call".to_string(),
         })
     }
 }

@@ -69,6 +69,36 @@ pub fn generate(count: u64, decimals: u8, label: &str) -> Result<GeneratedPackag
     Ok(GeneratedPackage { dir })
 }
 
+/// Cash-secured-put twin of [`generate`]: emits `put_<i>/PUT_<i>` OTW coin
+/// modules (symbol `oPUT<i>`) instead of the `call_<i>` grid. Same on-disk
+/// shape and `decimals`/`label` semantics; paired back to strikes via
+/// [`put_index`].
+pub fn generate_puts(count: u64, decimals: u8, label: &str) -> Result<GeneratedPackage> {
+    assert!(count > 0, "coin package codegen requires count > 0");
+    let unique = format!(
+        "opt-putpkg-{}-{}",
+        std::process::id(),
+        DIR_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let dir = std::env::temp_dir().join(unique);
+    let sources = dir.join("sources");
+    fs::create_dir_all(&sources)
+        .with_context(|| format!("creating put-package dir {}", sources.display()))?;
+
+    fs::write(dir.join("Move.toml"), move_toml())
+        .with_context(|| format!("writing Move.toml in {}", dir.display()))?;
+
+    let safe_label = sanitize_label(label);
+    for i in 0..count {
+        let src = put_module_source(i, decimals, &safe_label);
+        let path = sources.join(format!("put_{i}.move"));
+        fs::write(&path, src)
+            .with_context(|| format!("writing module {}", path.display()))?;
+    }
+
+    Ok(GeneratedPackage { dir })
+}
+
 /// Generate a single-module share-coin package for a vault's `VShare` type.
 ///
 /// Mirrors [`generate`] but emits one `vshare::VSHARE` One-Time-Witness coin
@@ -172,6 +202,34 @@ fun init(witness: CALL_{i}, ctx: &mut TxContext) {{
     )
 }
 
+/// One OTW put-coin module, mirroring [`module_source`] with `put_<i>/PUT_<i>`
+/// and the `oPUT` symbol.
+fn put_module_source(i: u64, decimals: u8, label: &str) -> String {
+    let symbol = format!("oPUT{i}");
+    let name = format!("Option Put {i} {label}");
+    format!(
+        r#"#[allow(deprecated_usage, lint(self_transfer))]
+module gen_coin::put_{i};
+
+public struct PUT_{i} has drop {{}}
+
+fun init(witness: PUT_{i}, ctx: &mut TxContext) {{
+    let (treasury, metadata) = sui::coin::create_currency(
+        witness,
+        {decimals},
+        b"{symbol}",
+        b"{name}",
+        b"Tokenized cash-secured put option (auto-generated per roll)",
+        std::option::none(),
+        ctx,
+    );
+    sui::transfer::public_freeze_object(metadata);
+    sui::transfer::public_transfer(treasury, ctx.sender());
+}}
+"#
+    )
+}
+
 /// Keep only characters safe inside a Move `b"..."` byte-string literal:
 /// ASCII alphanumerics plus a few separators. Everything else becomes `-`.
 fn sanitize_label(label: &str) -> String {
@@ -202,6 +260,20 @@ pub fn call_index(call_type: &str) -> Result<u64> {
         .with_context(|| format!("call type module not `call_<i>`: {call_type}"))?;
     idx.parse::<u64>()
         .with_context(|| format!("call type index not a number: {call_type}"))
+}
+
+/// Put twin of [`call_index`]: parse the strike index out of a generated put
+/// type string, i.e. the `3` from `0x…::put_3::PUT_3`.
+pub fn put_index(put_type: &str) -> Result<u64> {
+    let module = put_type
+        .split("::")
+        .nth(1)
+        .with_context(|| format!("put type missing module segment: {put_type}"))?;
+    let idx = module
+        .strip_prefix("put_")
+        .with_context(|| format!("put type module not `put_<i>`: {put_type}"))?;
+    idx.parse::<u64>()
+        .with_context(|| format!("put type index not a number: {put_type}"))
 }
 
 #[cfg(test)]
