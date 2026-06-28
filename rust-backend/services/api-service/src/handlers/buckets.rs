@@ -320,9 +320,7 @@ fn detail_dto_from(b: &IndexerBucket, catalog: &TokenCatalog, now_ms: i64) -> Bu
         fill_pct,
         call_coin_type: b.call_type.to_canonical(),
         option_coin_type: b.call_type.to_canonical(),
-        // TODO(cash-secured-puts): source this from the indexer's `optionKind`
-        // once `indexer_graphql::Bucket` carries it; defaults to "call".
-        option_kind: "call".to_string(),
+        option_kind: b.option_kind.clone(),
         deepbook_pool_id: b.deepbook_pool_id.as_ref().map(|p| p.to_hex()),
         tradeable: is_tradeable(b.deepbook_pool_id.is_some(), b.cleaned, b.expiry_ms, now_ms),
     }
@@ -350,12 +348,7 @@ fn into_local_bucket(b: indexer_graphql::Bucket) -> (protocol_types::ids::Object
             exercise_cursor: b.exercise_cursor,
             cleaned: b.cleaned,
             invalidated: b.invalidated,
-            // TODO(cash-secured-puts): once indexer-graphql's `Bucket` carries
-            // `option_kind` (the indexer is being updated in parallel to expose
-            // `optionKind`), read it here as `b.option_kind`. Until that field
-            // lands the api-service defaults every bucket to "call", which is
-            // back-compat-safe — calls keep working unchanged.
-            option_kind: "call".to_string(),
+            option_kind: b.option_kind,
             deepbook_pool_id: b.deepbook_pool_id.map(|p| p.to_hex()),
         },
     )
@@ -562,6 +555,30 @@ mod tests {
     }
 
     #[test]
+    fn call_and_put_buckets_split_into_separate_series() {
+        // Same asset/settlement/expiry but different option_kind must land in
+        // two distinct series, each tagged with its option_type.
+        let cat = fixture_catalog();
+        let mut put = mk_bucket(900, 0, 0, 0);
+        put.option_kind = "put".to_string();
+        let series = group_into_series(
+            vec![
+                (ObjectId::new([0x0a; 32]), mk_bucket(850, 0, 0, 0)),
+                (ObjectId::new([0x0b; 32]), put),
+            ],
+            &cat,
+            NOW_MS,
+        );
+        assert_eq!(series.len(), 2);
+        let call = series.iter().find(|s| s.option_type == "call").unwrap();
+        let put = series.iter().find(|s| s.option_type == "put").unwrap();
+        assert_eq!(call.buckets.len(), 1);
+        assert_eq!(put.buckets.len(), 1);
+        // option_coin_type is emitted alongside the legacy call_coin_type.
+        assert_eq!(call.buckets[0].option_coin_type, call.buckets[0].call_coin_type);
+    }
+
+    #[test]
     fn strike_uses_both_decimals_so_btc_strike_lands_in_realistic_usd() {
         // Regression for SO-49: api-service was dividing the on-chain
         // strike by 10^settlement_decimals only, dropping a factor of
@@ -727,6 +744,7 @@ mod tests {
             exercise_cursor: cursor,
             cleaned: false,
             invalidated: false,
+            option_kind: "call".to_string(),
             deepbook_pool_id: None,
         }
     }

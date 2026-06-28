@@ -876,7 +876,6 @@ impl TryFrom<BucketJson> for Bucket {
                 .as_deref()
                 .map(parse_object_id)
                 .transpose()?,
-            option_kind: "call".to_string(),
         })
     }
 }
