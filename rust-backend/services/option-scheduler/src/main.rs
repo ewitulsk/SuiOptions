@@ -162,11 +162,15 @@ async fn main() -> Result<()> {
             settlement: CanonicalType::parse(&s_spec.coin_type)?,
         };
         // Effective vault template: per-pair override wins, else the global
-        // template. Absent on both ⇒ no vault for this pair.
+        // template. Absent on both ⇒ no vault for this pair. Vault
+        // auto-provisioning creates covered-CALL vaults only; a put pair rolls
+        // buckets but never provisions a vault (it would otherwise race the
+        // call twin's same-cadence vault).
         if let Some(template) = pair
             .vault_template
             .clone()
             .or_else(|| cfg.vault_template.clone())
+            .filter(|_| pair.product_type == ProductType::Call)
         {
             match (u_spec.pyth_feed(), s_spec.pyth_feed()) {
                 (Ok(u_feed), Ok(s_feed)) => vault_entries.push(VaultEntry {
