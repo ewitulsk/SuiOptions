@@ -62,6 +62,40 @@ interval_pct        = 10.0
   max_publish_lag_ms = 30_000   # decline a roll on prices > 30s stale
   max_conf_bps       = 100      # decline a roll if conf/price > 1%
 
+# ── Cash-secured put pairs ──────────────────────────────────────────────
+# Mirror the TSUI/TBTC call pairs above; `product_type = "put"` selects the
+# put coin codegen + `create_put_bucket` path. A put family shares the expiry
+# slot with its call twin — the scheduler disambiguates by coin module
+# (`put_<i>` vs `call_<i>`). Vault auto-provisioning is call-only, so these
+# roll put buckets but create no vault.
+[[pairs]]
+underlying          = "TSUI"
+settlement          = "TUSDC"
+product_type        = "put"
+expiry_interval_ms  = 604_800_000
+strikes_below       = 2
+strikes_above       = 2
+interval_pct        = 10.0
+
+  [pairs.spot]
+  source             = "pyth"
+  max_publish_lag_ms = 30_000
+  max_conf_bps       = 100
+
+[[pairs]]
+underlying          = "TBTC"
+settlement          = "TUSDC"
+product_type        = "put"
+expiry_interval_ms  = 604_800_000
+strikes_below       = 2
+strikes_above       = 2
+interval_pct        = 5.0
+
+  [pairs.spot]
+  source             = "pyth"
+  max_publish_lag_ms = 30_000
+  max_conf_bps       = 100
+
 # ── Vault auto-provisioning ─────────────────────────────────────────────
 # Presence of this table switches on the hourly vault-ensure pass: the
 # scheduler creates exactly one covered-call vault per configured pair with a
