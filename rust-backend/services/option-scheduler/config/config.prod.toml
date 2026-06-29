@@ -23,6 +23,7 @@ reconciler_interval_secs  = 30
 [[pairs]]
 underlying          = "TBTC"
 settlement          = "TUSDC"
+product_type        = "call"
 expiry_interval_ms  = 604_800_000
 strikes_below       = 2
 strikes_above       = 2
@@ -36,6 +37,7 @@ interval_pct        = 5.0
 [[pairs]]
 underlying          = "TWAL"
 settlement          = "TUSDC"
+product_type        = "call"
 expiry_interval_ms  = 604_800_000
 strikes_below       = 2
 strikes_above       = 2
@@ -51,6 +53,7 @@ interval_pct        = 10.0
 [[pairs]]
 underlying          = "TSUI"
 settlement          = "TUSDC"
+product_type        = "call"
 expiry_interval_ms  = 604_800_000
 strikes_below       = 2
 strikes_above       = 2
@@ -70,6 +73,7 @@ interval_pct        = 10.0
 # publishing a coin package + one DeepBook pool per strike (500 DEEP/pool).
 underlying          = "TSUI"
 settlement          = "TUSDC"
+product_type        = "call"
 expiry_interval_ms  = 3_600_000    # 1h
 strikes_below       = 2            # superseded by [pairs.grid] below (z-ladder)
 strikes_above       = 2
