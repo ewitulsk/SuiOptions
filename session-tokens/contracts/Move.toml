@@ -5,10 +5,10 @@ edition = "2024.beta"
 # `published-at` = latest on-chain package id (bumped on each upgrade);
 # `[addresses] siws_session` = ORIGINAL id (anchors type identity). Both needed
 # for the next upgrade.
-published-at = "0xc309f25410966dc16f9a372d013becba553625aad1fff4364c0e9284183625d5"
+published-at = "0x883a8a7440f5f963cc64577dd0bb8c8bb435171552f22c91abc669a9659e0cea"
 
 [dependencies]
 Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/mainnet" }
 
 [addresses]
-siws_session = "0xc309f25410966dc16f9a372d013becba553625aad1fff4364c0e9284183625d5"
+siws_session = "0x883a8a7440f5f963cc64577dd0bb8c8bb435171552f22c91abc669a9659e0cea"

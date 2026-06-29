@@ -89,15 +89,15 @@
   },
   "staging": {
     "package_info": {
-      "packageId": "0xdff46adf8582dcdeb2c0aeeec10a76cb98e994b6fbf11920456746c7106a0de4",
-      "adminCapId": "0x16f27e1879ae8d11607f50d41369be169639ff73efb14d6d18b6d28a03e32991",
-      "protocolConfigId": "0x9279b51c2316c093be1b4dcab201a45c22ffd2484a77b1374d20901bfe5841ce",
-      "upgradeCapId": "0xe4079a1314a2235428ad52008e075de8db9faa9e91379c4d30f5972d8e5f356e",
-      "treasuryId": "0x224d3046272d9fd5843822533a3b862135e75f0d01afd3d831f14909e7263c2c",
-      "publishDigest": "jZCyb7v3iuCVpjZ3snjr2otDBxTwrDJqvYTmTcxVQPH",
-      "initDigest": "GqdBujKhQNsPskAr97stCBXRpKTTD4TGFQe1KT8A4adv",
+      "packageId": "0xf8d2dd3e8cb9d58f2fe2178fd50d4f40f7a25fd34a9eedc856163edc612fa12e",
+      "adminCapId": "0x12f1f0d13d4f3c9fc90f9807c52726590f90061991e9143cdc53a49d2cf4208c",
+      "protocolConfigId": "0xf416dc93cdab43c802d6fc24cee7c2be13dd72c138651a744e434e6dfd75544e",
+      "upgradeCapId": "0x3c14128ab251fef1101582945116df2a7c90188309c80628ebc249fb9295ba88",
+      "treasuryId": "0xe95ceb3cca92ff5e631480a34cef9d40949530545720a766ad9e1a3966b3dc13",
+      "publishDigest": "4qn5hBFDeKsBnStHBxMYN2UzWTChrbuSZLJBBf2RuCP1",
+      "initDigest": "ADDhTMbRMhTyHPMBmLWH5JotgwYnknEPNx6uSMwMG9js",
       "deployer": "0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865",
-      "deployedAt": "2026-06-19T05:33:53.217945360+00:00",
+      "deployedAt": "2026-06-29T15:57:45.156783189+00:00",
       "network": "testnet",
       "testTokens": {
         "packageId": "0xc7b13fac3b94b3c6171ff0247b282dc4caeda51b64d2e421f62bfd17004d4e1b",
@@ -140,11 +140,11 @@
         "poolCreationFee": "500000000"
       },
       "sessionTokens": {
-        "packageId": "0xfc8ffb8b8079276a466064b40ab045e90a1dd6f877694e8a27704025baf4f291",
-        "registryId": "0x36b1a3a01fb0c2abcec27e3e85952c557e91e78f3a4d56e462cff97fe10e9f68",
-        "upgradeCapId": "0x6a1629c2d108a34f19e728543acab11d6847653c98c089c392b0d35c23a8696c",
-        "publishDigest": "GJuGzyMusDDC91xSoD4XhCwFpyUFqEiAsfQHMqPjE86u",
-        "deployedAt": "2026-06-19T05:33:36.394988605+00:00"
+        "packageId": "0x883a8a7440f5f963cc64577dd0bb8c8bb435171552f22c91abc669a9659e0cea",
+        "registryId": "0xb68ab5e63f4a55805f86ad65d9b6ade1d024f77bc0a1b37b6fcd9d2b1945d7bf",
+        "upgradeCapId": "0x2782ee6d728663f3872d101de9ce838365a980ce96cc46b77239193f41ed1707",
+        "publishDigest": "HkVMSWaYCNrj79bhJviWVpDecFRfzcQ4cQpDkDyNruTf",
+        "deployedAt": "2026-06-29T15:57:25.248468726+00:00"
       }
     },
     "token_info": {
