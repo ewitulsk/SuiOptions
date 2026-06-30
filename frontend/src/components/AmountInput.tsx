@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { View } from "../types";
+import type { OptionType, View } from "../types";
 import { findToken } from "../config";
 import { TokenLogo } from "./TokenLogo";
 
@@ -7,6 +7,8 @@ type Props = {
   amount: number;
   setAmount: (n: number) => void;
   view: View;
+  /** Covered CALL vs cash-secured PUT — flips a writer's collateral asset. */
+  optionType: OptionType;
   /** Underlying-asset symbol (on-chain ticker, e.g. `TBTC`); null while loading. */
   assetSymbol: string | null;
   btcBalance: number;
@@ -15,6 +17,9 @@ type Props = {
   /** Live spot price (settlement per 1 underlying). Powers the USDC-denominated
    *  input on the Buy page; 0/absent disables the toggle. */
   spot: number;
+  /** Selected strike (settlement per 1 underlying). A put writer's USDC
+   *  collateral is `amount × strike`, so the writer toggle converts via this. */
+  strike: number;
   /** Settlement-asset symbol (e.g. `USDC`) for the alternate denomination. */
   settlementSymbol: string;
 };
@@ -29,24 +34,32 @@ export function AmountInput({
   amount,
   setAmount,
   view,
+  optionType,
   assetSymbol,
   btcBalance,
   usdcBalance,
   error,
   spot,
+  strike,
   settlementSymbol,
 }: Props) {
-  // USDC-denominated entry is a Buy-page convenience: type the underlying
-  // quantity as its spot-notional value instead. `amount` (underlying display
-  // units) stays the source of truth for everything downstream.
+  // A put writer funds the position with USDC cash collateral, not the
+  // underlying — so the Earn page gets the same denomination toggle the Buy
+  // page has, letting them type either the underlying notional or the USDC
+  // collateral. `amount` (underlying display units) stays the source of truth.
+  const isPutWriter = view === "writer" && optionType === "put";
+  // Underlying → stable conversion rate. The trader values their notional at
+  // live spot; a put writer's collateral is fixed at `amount × strike`.
+  const rate = isPutWriter ? strike : spot;
+
   const [denom, setDenom] = useState<Denom>("underlying");
-  const canDenominate = view === "trader" && spot > 0;
+  const canDenominate = (view === "trader" || isPutWriter) && rate > 0;
   const stableMode = canDenominate && denom === "stable";
 
   // Display ⇄ underlying conversion. In stable mode the field shows a USDC
-  // figure (underlying × spot); typing divides back out by spot.
-  const toDisplay = (u: number) => (stableMode ? u * spot : u);
-  const fromDisplay = (d: number) => (stableMode ? d / spot : d);
+  // figure (underlying × rate); typing divides back out by rate.
+  const toDisplay = (u: number) => (stableMode ? u * rate : u);
+  const fromDisplay = (d: number) => (stableMode ? d / rate : d);
 
   const unitSymbol = stableMode ? settlementSymbol : assetSymbol;
   const unitName = findToken(unitSymbol)?.name ?? unitSymbol ?? "—";
@@ -87,15 +100,18 @@ export function AmountInput({
     }
   };
 
-  // Balance shown is the side's spending balance: USDC for the trader (in either
-  // denomination), the underlying for the writer.
-  const balLine =
-    view === "writer" ? btcBalance.toFixed(4) : `${usdcBalance.toFixed(2)} USDC`;
+  // Balance shown is the side's spending balance: USDC for the trader (premium)
+  // and the put writer (cash collateral); the underlying for a call writer.
+  const spendsStable = view === "trader" || isPutWriter;
+  const balLine = spendsStable
+    ? `${usdcBalance.toFixed(2)} USDC`
+    : btcBalance.toFixed(4);
   // The equivalent value in the other unit, so both numbers are always visible.
+  // For a put writer the USDC figure is the collateral they post.
   const equivLine = stableMode
     ? `≈ ${amount.toFixed(4)} ${assetSymbol ?? ""}`.trim()
     : canDenominate
-      ? `≈ ${(amount * spot).toFixed(2)} ${settlementSymbol}`
+      ? `≈ ${(amount * rate).toFixed(2)} ${settlementSymbol}${isPutWriter ? " collateral" : ""}`
       : null;
 
   const meta = (
@@ -160,7 +176,17 @@ export function AmountInput({
           </div>
           <button
             className="amount__max"
-            onClick={() => setAmount(view === "writer" ? btcBalance : 0.1)}
+            onClick={() =>
+              setAmount(
+                isPutWriter
+                  ? rate > 0
+                    ? usdcBalance / rate // max underlying notional the USDC collateral covers
+                    : 0
+                  : view === "writer"
+                    ? btcBalance
+                    : 0.1,
+              )
+            }
           >
             Max
           </button>
