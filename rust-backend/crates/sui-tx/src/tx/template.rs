@@ -188,37 +188,48 @@ pub fn protocol_templates(
 
     // write / buy differ only by writer_flow vs trader_flow. The executor's
     // `coin::zero` is skipped as a benign coin primitive (see
-    // `is_benign_coin_primitive`), so it need not be pinned here.
-    let execute_write_flow = |name: &str, flow: &str| {
+    // `is_benign_coin_primitive`), so it need not be pinned here. `module` is
+    // `bucket` for covered calls / `put_bucket` for cash-secured puts — both
+    // reuse the `bucket::{writer,trader}_flow` markers and an `execute_write`
+    // with the same 3-type-arg shape.
+    let execute_write_flow = |name: &str, flow: &str, module: &str| {
         let targets = vec![
             t("quote", "new_quote"),
             t("quote", "new_signed_quote"),
             t("bucket", flow),
-            t("bucket", "execute_write"),
+            t(module, "execute_write"),
         ];
         PtbTemplate {
             name: name.to_owned(),
             required: targets.clone(),
             allowed: targets,
-            arities: vec![(t("bucket", "execute_write"), 3)],
+            arities: vec![(t(module, "execute_write"), 3)],
+        }
+    };
+
+    // Single-anchor wallet flow (exercise / redeem) for either option module.
+    let single_call = |name: &str, module: &str, function: &str| {
+        let target = t(module, function);
+        PtbTemplate {
+            name: name.to_owned(),
+            required: vec![target.clone()],
+            allowed: vec![target.clone()],
+            arities: vec![(target, 3)],
         }
     };
 
     let mut templates = vec![
-        execute_write_flow("write", "writer_flow"),
-        execute_write_flow("buy", "trader_flow"),
-        PtbTemplate {
-            name: "exercise".to_owned(),
-            required: vec![t("bucket", "exercise")],
-            allowed: vec![t("bucket", "exercise")],
-            arities: vec![(t("bucket", "exercise"), 3)],
-        },
-        PtbTemplate {
-            name: "redeem".to_owned(),
-            required: vec![t("bucket", "redeem_position")],
-            allowed: vec![t("bucket", "redeem_position")],
-            arities: vec![(t("bucket", "redeem_position"), 3)],
-        },
+        execute_write_flow("write", "writer_flow", "bucket"),
+        execute_write_flow("buy", "trader_flow", "bucket"),
+        single_call("exercise", "bucket", "exercise"),
+        single_call("redeem", "bucket", "redeem_position"),
+        // Cash-secured put wallet flows (put_bucket.move). Same PTB shapes as
+        // their call twins above; mirrors frontend tx/composer_put.ts and
+        // tx/dashboard_put.ts.
+        execute_write_flow("put_write", "writer_flow", "put_bucket"),
+        execute_write_flow("put_buy", "trader_flow", "put_bucket"),
+        single_call("put_exercise", "put_bucket", "exercise"),
+        single_call("put_redeem", "put_bucket", "redeem_position"),
     ];
 
     // Wallet-facing covered-call vault flows (doc 03). Each is a single call
@@ -291,23 +302,34 @@ pub fn protocol_templates(
         });
 
         // write / buy twins: same quote prelude, no executor coins (the
-        // account custody funds the trade), so no `coin::zero`.
-        let session_write_flow = |name: &str, flow: &str| {
+        // account custody funds the trade), so no `coin::zero`. `module` is
+        // `session_bucket` (calls) or `session_put_bucket` (puts).
+        let session_write_flow = |name: &str, flow: &str, module: &str| {
             let targets = vec![
                 t("quote", "new_quote"),
                 t("quote", "new_signed_quote"),
                 t("bucket", flow),
-                t("session_bucket", "execute_write_with_session"),
+                t(module, "execute_write_with_session"),
             ];
             PtbTemplate {
                 name: name.to_owned(),
                 required: targets.clone(),
                 allowed: targets,
-                arities: vec![(t("session_bucket", "execute_write_with_session"), 3)],
+                arities: vec![(t(module, "execute_write_with_session"), 3)],
             }
         };
-        templates.push(session_write_flow("session_write", "writer_flow"));
-        templates.push(session_write_flow("session_buy", "trader_flow"));
+        templates.push(session_write_flow("session_write", "writer_flow", "session_bucket"));
+        templates.push(session_write_flow("session_buy", "trader_flow", "session_bucket"));
+        templates.push(session_write_flow(
+            "session_put_write",
+            "writer_flow",
+            "session_put_bucket",
+        ));
+        templates.push(session_write_flow(
+            "session_put_buy",
+            "trader_flow",
+            "session_put_bucket",
+        ));
 
         let exercise = t("session_bucket", "exercise_with_session");
         templates.push(PtbTemplate {
@@ -329,6 +351,23 @@ pub fn protocol_templates(
             required: vec![burn.clone()],
             allowed: vec![burn.clone()],
             arities: vec![(burn, 3)],
+        });
+
+        // Put session twins (session_put_bucket.move). The frontend builds only
+        // exercise / redeem custody flows for puts (tx/session.ts); no burn.
+        let put_exercise = t("session_put_bucket", "exercise_with_session");
+        templates.push(PtbTemplate {
+            name: "session_put_exercise".to_owned(),
+            required: vec![put_exercise.clone()],
+            allowed: vec![put_exercise.clone()],
+            arities: vec![(put_exercise, 3)],
+        });
+        let put_redeem = t("session_put_bucket", "redeem_position_with_session");
+        templates.push(PtbTemplate {
+            name: "session_put_redeem".to_owned(),
+            required: vec![put_redeem.clone()],
+            allowed: vec![put_redeem.clone()],
+            arities: vec![(put_redeem, 3)],
         });
 
         // Withdraw from custody to an external address. Authorization is a
@@ -526,8 +565,24 @@ pub fn protocol_templates(
         templates.push(PtbTemplate {
             name: "exercise_with_bm_withdraw".to_owned(),
             required: vec![proof.clone(), settle.clone(), withdraw_all.clone(), exercise.clone()],
-            allowed: vec![proof, settle.clone(), withdraw_all.clone(), exercise.clone()],
-            arities: vec![(settle, 2), (withdraw_all, 1), (exercise, 3)],
+            allowed: vec![proof.clone(), settle.clone(), withdraw_all.clone(), exercise.clone()],
+            arities: vec![(settle.clone(), 2), (withdraw_all.clone(), 1), (exercise, 3)],
+        });
+
+        // Same shape for a cash-secured put parked in the BM (buildExercisePutTx
+        // with bmWithdraw): settle + withdraw the put coin out, then
+        // put_bucket::exercise.
+        let put_exercise = t("put_bucket", "exercise");
+        templates.push(PtbTemplate {
+            name: "put_exercise_with_bm_withdraw".to_owned(),
+            required: vec![
+                proof.clone(),
+                settle.clone(),
+                withdraw_all.clone(),
+                put_exercise.clone(),
+            ],
+            allowed: vec![proof, settle.clone(), withdraw_all.clone(), put_exercise.clone()],
+            arities: vec![(settle, 2), (withdraw_all, 1), (put_exercise, 3)],
         });
     }
 
@@ -630,6 +685,40 @@ mod tests {
         assert_eq!(match_any(&templates(), &ex), Some("exercise"));
         let rd = build(&[(target("bucket", "redeem_position"), 3)], false);
         assert_eq!(match_any(&templates(), &rd), Some("redeem"));
+    }
+
+    #[test]
+    fn put_wallet_flows_match() {
+        // write / buy: same quote prelude + benign coin::zero, but the anchor
+        // is put_bucket::execute_write, and the flow marker still lives in the
+        // call `bucket` module.
+        let write = build(
+            &[
+                (target("quote", "new_quote"), 0),
+                (target("quote", "new_signed_quote"), 0),
+                (target("bucket", "writer_flow"), 0),
+                (MoveTarget::new(framework(), "coin", "zero"), 1),
+                (target("put_bucket", "execute_write"), 3),
+            ],
+            true,
+        );
+        assert_eq!(match_any(&templates(), &write), Some("put_write"));
+        let buy = build(
+            &[
+                (target("quote", "new_quote"), 0),
+                (target("quote", "new_signed_quote"), 0),
+                (target("bucket", "trader_flow"), 0),
+                (MoveTarget::new(framework(), "coin", "zero"), 1),
+                (target("put_bucket", "execute_write"), 3),
+            ],
+            true,
+        );
+        assert_eq!(match_any(&templates(), &buy), Some("put_buy"));
+
+        let ex = build(&[(target("put_bucket", "exercise"), 3)], true);
+        assert_eq!(match_any(&templates(), &ex), Some("put_exercise"));
+        let rd = build(&[(target("put_bucket", "redeem_position"), 3)], false);
+        assert_eq!(match_any(&templates(), &rd), Some("put_redeem"));
     }
 
     #[test]
@@ -800,6 +889,18 @@ mod tests {
         let plain = build(&[(target("bucket", "exercise"), 3)], true);
         assert_eq!(match_any(&templates(), &plain), Some("exercise"));
 
+        // Same shape for a cash-secured put parked in the BM.
+        let put = build(
+            &[
+                (d("balance_manager", "generate_proof_as_owner"), 0),
+                (d("pool", "withdraw_settled_amounts"), 2),
+                (d("balance_manager", "withdraw_all"), 1),
+                (target("put_bucket", "exercise"), 3),
+            ],
+            true,
+        );
+        assert_eq!(match_any(&templates(), &put), Some("put_exercise_with_bm_withdraw"));
+
         // Withdraw without the exercise must NOT match the combined template
         // (it requires `exercise`); it falls through to `deepbook_withdraw`.
         let no_exercise = build(
@@ -947,6 +1048,35 @@ mod tests {
             false,
         );
         assert_eq!(match_any(&templates(), &burn), Some("session_burn_expired"));
+
+        // put session twins: write / buy / exercise / redeem (no burn).
+        let put_write = build(
+            &[
+                (target("quote", "new_quote"), 0),
+                (target("quote", "new_signed_quote"), 0),
+                (target("bucket", "writer_flow"), 0),
+                (target("session_put_bucket", "execute_write_with_session"), 3),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &put_write), Some("session_put_write"));
+        let put_buy = build(
+            &[
+                (target("quote", "new_quote"), 0),
+                (target("quote", "new_signed_quote"), 0),
+                (target("bucket", "trader_flow"), 0),
+                (target("session_put_bucket", "execute_write_with_session"), 3),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &put_buy), Some("session_put_buy"));
+        let put_ex = build(&[(target("session_put_bucket", "exercise_with_session"), 3)], false);
+        assert_eq!(match_any(&templates(), &put_ex), Some("session_put_exercise"));
+        let put_rd = build(
+            &[(target("session_put_bucket", "redeem_position_with_session"), 3)],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &put_rd), Some("session_put_redeem"));
 
         // root-signed external withdrawal (Solana + Ethereum variants) / deposit.
         let wd = build(&[(target("session_account", "withdraw_with_root_sig"), 1)], false);

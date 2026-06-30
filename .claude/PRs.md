@@ -46,3 +46,5 @@ PRs raised through Claude Code.
 | [#234](https://github.com/ewitulsk/SuiOptions/pull/234) | [SO-237](https://suioptions.atlassian.net/browse/SO-237) | SO-19 Frontend | Group Vault Carousel by Asset with Vertical Cadence Coverflow |
 | [#251](https://github.com/ewitulsk/SuiOptions/pull/251) | [SO-253](https://suioptions.atlassian.net/browse/SO-253) | SO-8 Protocol | Migrate Keeper Realized-Vol to Cached BenchmarkVol (fix Pyth 429 storm) |
 | [#265](https://github.com/ewitulsk/SuiOptions/pull/265) | [SO-266](https://suioptions.atlassian.net/browse/SO-266) | SO-19 Frontend | Gate Exercise on Expired Options + Fix Off-Screen Popup Positioning |
+| [#274](https://github.com/ewitulsk/SuiOptions/pull/274) | [SO-272](https://suioptions.atlassian.net/browse/SO-272) | SO-19 Frontend | Fix Put Earn-Page Writer UI (USDC Collateral, Mirrored Outcomes, Dual-Denom Input) |
+| [#275](https://github.com/ewitulsk/SuiOptions/pull/275) | [SO-273](https://suioptions.atlassian.net/browse/SO-273) | — Gas Station | Sponsor Cash-Secured Put PTBs in Gas-Station Templates |
