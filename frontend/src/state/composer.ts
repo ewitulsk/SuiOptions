@@ -159,6 +159,9 @@ export type ComposerState = {
   insufficient: boolean;
   insufficientBtc: boolean;
   insufficientUsdc: boolean;
+  /** USDC cash collateral a put writer must post for the current amount/strike
+   *  (`amount × strike`); 0 for calls. Drives the put-side insufficiency copy. */
+  putCollateral: number;
   btcBalance: number;
   usdcBalance: number;
   bucket: Bucket;
@@ -681,6 +684,7 @@ export function useComposerState({
     insufficient,
     insufficientBtc,
     insufficientUsdc,
+    putCollateral,
     btcBalance,
     usdcBalance,
     bucket,

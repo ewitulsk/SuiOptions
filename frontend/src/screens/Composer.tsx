@@ -93,11 +93,21 @@ export function Composer({ initialView }: Props) {
 
         <div className="question">
           {s.view === "writer" ? (
-            <>
-              <span className="question__eyebrow">Options Writing</span>
-              Write Options, instantly earn premiums.
-              <span className="qsub">Pick an asset, expiry, and strike price</span>
-            </>
+            s.optionType === "put" ? (
+              <>
+                <span className="question__eyebrow">Cash-Secured Puts</span>
+                Get paid to buy {s.selectedAsset ?? "crypto"} at your price.
+                <span className="qsub">
+                  Post USDC collateral, earn premium upfront — buy only if it dips to strike
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="question__eyebrow">Covered Calls</span>
+                Write Options, instantly earn premiums.
+                <span className="qsub">Pick an asset, expiry, and strike price</span>
+              </>
+            )
           ) : (
             <>
               <span className="question__eyebrow">Options Trading</span>
@@ -208,10 +218,12 @@ export function Composer({ initialView }: Props) {
                   amount={s.amount}
                   setAmount={s.setAmount}
                   view={s.view}
+                  optionType={s.optionType}
                   assetSymbol={s.selectedAsset}
                   btcBalance={s.btcBalance}
                   usdcBalance={s.usdcBalance}
                   spot={s.spot}
+                  strike={s.selected.strike}
                   settlementSymbol={s.series?.settlement_symbol ?? "USDC"}
                   error={
                     s.insufficientUsdc
@@ -273,15 +285,19 @@ export function Composer({ initialView }: Props) {
           amount={s.amount}
           setAmount={s.setAmount}
           view={s.view}
+          optionType={s.optionType}
           assetSymbol={s.selectedAsset}
           btcBalance={s.btcBalance}
           usdcBalance={s.usdcBalance}
           spot={s.spot}
+          strike={s.selected.strike}
           settlementSymbol={s.series?.settlement_symbol ?? "USDC"}
           error={
-            s.insufficientBtc
-              ? `INSUFFICIENT ${s.selectedAsset ?? ""} BALANCE`.replace(/\s+/g, " ").trim()
-              : ""
+            !s.insufficientBtc
+              ? ""
+              : s.optionType === "put"
+                ? `INSUFFICIENT USDC · NEED ${formatPrice(s.putCollateral)} COLLATERAL`
+                : `INSUFFICIENT ${s.selectedAsset ?? ""} BALANCE`.replace(/\s+/g, " ").trim()
           }
         />
 
@@ -292,6 +308,7 @@ export function Composer({ initialView }: Props) {
           premiumLoading={s.premiumLoading}
           amount={s.amount}
           strike={s.selected.strike}
+          optionType={s.optionType}
           assetSymbol={s.selectedAsset}
           expiryLabel={expiryLabel(s)}
         />

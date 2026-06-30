@@ -1,4 +1,5 @@
 import { formatPremiumFull, formatPrice } from "../format";
+import type { OptionType } from "../types";
 import { WaveLoader } from "./WaveLoader";
 
 // Token quantities keep up to 4 decimals; USD prices go through formatPrice.
@@ -8,17 +9,24 @@ const usd = (n: number) => formatPrice(n, { grouping: true });
 // Premiums show the exact amount paid/earned, never rounded to the cent.
 const premiumFull = (n: number) => formatPremiumFull(n, { grouping: true });
 
+const unit = (text: string) => (
+  <span style={{ fontSize: 11, color: "var(--aqua-ink-3)", marginLeft: 4 }}>{text}</span>
+);
+
 type WriterProps = {
   premium: number;
   premiumLoading: boolean;
   amount: number;
   strike: number;
+  optionType: OptionType;
   assetSymbol: string | null;
   expiryLabel: string;
 };
 
-export function WriterPanels({ premium, premiumLoading, amount, strike, assetSymbol, expiryLabel }: WriterProps) {
+export function WriterPanels({ premium, premiumLoading, amount, strike, optionType, assetSymbol, expiryLabel }: WriterProps) {
   const asset = assetSymbol ?? "—";
+  const isPut = optionType === "put";
+  const collateral = amount * strike;
   return (
     <div className="panels">
       <div className="panel">
@@ -30,7 +38,9 @@ export function WriterPanels({ premium, premiumLoading, amount, strike, assetSym
           <span className="unit">USDC</span>
         </div>
         <div className="panel__sub">
-          Paid upfront. Yours to keep regardless of exercise.
+          {isPut
+            ? `Paid upfront for taking on the obligation to buy ${asset} at strike. Yours to keep regardless of exercise.`
+            : "Paid upfront. Yours to keep regardless of exercise."}
         </div>
       </div>
       <div className="panel">
@@ -41,24 +51,51 @@ export function WriterPanels({ premium, premiumLoading, amount, strike, assetSym
           className="panel__split"
           style={{ margin: 0, padding: 0, background: "transparent", border: "none" }}
         >
-          <div className="panel__split-cell">
-            <div className="panel__split-label">if {asset} ≥ ${usd(strike)}</div>
-            <div className="panel__split-val">
-              {usd(amount * strike)}
-              <span style={{ fontSize: 11, color: "var(--aqua-ink-3)", marginLeft: 4 }}>USDC</span>
-            </div>
-            <div className="panel__split-sub">
-              your {fmt(amount)} {asset} is sold at strike
-            </div>
-          </div>
-          <div className="panel__split-cell">
-            <div className="panel__split-label">if {asset} &lt; ${usd(strike)}</div>
-            <div className="panel__split-val">
-              {fmt(amount)}
-              <span style={{ fontSize: 11, color: "var(--aqua-ink-3)", marginLeft: 4 }}>{asset}</span>
-            </div>
-            <div className="panel__split-sub">your collateral returns to you</div>
-          </div>
+          {isPut ? (
+            <>
+              {/* Put writer: assigned when spot is BELOW strike. */}
+              <div className="panel__split-cell">
+                <div className="panel__split-label">if {asset} &lt; ${usd(strike)}</div>
+                <div className="panel__split-val">
+                  {fmt(amount)}
+                  {unit(asset)}
+                </div>
+                <div className="panel__split-sub">
+                  your {usd(collateral)} USDC collateral buys {asset} at strike
+                </div>
+              </div>
+              <div className="panel__split-cell">
+                <div className="panel__split-label">if {asset} ≥ ${usd(strike)}</div>
+                <div className="panel__split-val">
+                  {usd(collateral)}
+                  {unit("USDC")}
+                </div>
+                <div className="panel__split-sub">your cash collateral returns to you</div>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* Call writer: assigned when spot is ABOVE strike. */}
+              <div className="panel__split-cell">
+                <div className="panel__split-label">if {asset} ≥ ${usd(strike)}</div>
+                <div className="panel__split-val">
+                  {usd(collateral)}
+                  {unit("USDC")}
+                </div>
+                <div className="panel__split-sub">
+                  your {fmt(amount)} {asset} is sold at strike
+                </div>
+              </div>
+              <div className="panel__split-cell">
+                <div className="panel__split-label">if {asset} &lt; ${usd(strike)}</div>
+                <div className="panel__split-val">
+                  {fmt(amount)}
+                  {unit(asset)}
+                </div>
+                <div className="panel__split-sub">your collateral returns to you</div>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>
