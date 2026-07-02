@@ -1,31 +1,46 @@
 # 09 — Real threshold crypto: FROST + ECDSA-MPC, DKG, N≥3
 
-**Spec:** bridge-spec.md §6 (M3)
-**Why:** M1's `ThresholdSigner` is one keypair per curve. The trust model's headline guarantee — no single compromised node can forge a message — only exists at k-of-n with shares from a DKG. Nothing on-chain changes: the envelope shape and group-key registry were built for this.
+**Spec:** bridge-spec.md §6 (M3 exit) · **Status:** not started (needs 07+08)
+**Why:** `bridge-signer`'s `ThresholdSigner` today is literally one keypair per curve — the "threshold" is a name. The trust model's headline guarantee (no single compromised node forges a message) only exists once the group key is produced by a DKG and signing is k-of-n with shares that never combine into a full key. **Nothing on-chain changes:** the `SignatureEnvelope` (`scheme_tag`, `group_pubkey_id`, `signature`), the `GroupKeyRegistry`/`registerGroupKey` rotation seam, and the async session API (ticket 06) were all built for exactly this swap.
 
-## Scope
+**The on-chain verify paths are already proven** to accept a real aggregated signature: an Ed25519 signature verifies on the live Sui Inbox and an ECDSA one on the live HyperEVM Inbox (the round trip in DEPLOYMENTS.md). FROST/GG20 must simply produce byte-identical-shaped signatures.
 
-### 1. Library selection (spec §6.1 open item — resolve first, in writing)
-- Ed25519: a maintained `frost-ed25519` (ZF FROST family) — verify the aggregated signature is RFC 8032-compatible with Sui's `ed25519_verify`.
-- ECDSA/secp256k1: GG20/CGGMP implementation. Selection criteria: current maintenance, **identifiable aborts**, **safe concurrent signing sessions**, audit history. Produce a short written comparison before committing; schedule the external review (ticket 10).
+---
 
-### 2. DKG ceremony (×2 — one per curve)
-Tooling for the multi-round DKG with mixed participants (TEE nodes + any human bootstrap parties — resolve spec §9.3: bootstrap-only vs permanent, before the ceremony). Each TEE party's share is immediately Seal-encrypted to its per-node identity (ticket 08 mechanism). Group pubkeys registered on both chains via `registerGroupKey` under a new `group_pubkey_id`; `setSignerThreshold(k, n)` updated.
+## Detailed implementation plan
 
-### 3. MPC transport
-libp2p mesh between signer nodes over **mutually-attested channels**: peers exchange + verify Nautilus attestations and on-chain `Enclave` registrations before accepting round messages. Untrusted coordinator/relay for liveness only (can stall, cannot forge — every round message is signed by an enclave key).
+### Phase 1 — Library selection (resolve §6.1 in writing FIRST)
+Do NOT roll your own threshold crypto. Produce a short written comparison + pick, then schedule the external review (ticket 10).
+- **Ed25519 (FROST, 2-round):** default to the ZF `frost-ed25519` family (`frost-core` + `frost-ed25519`), which is audited and maintained. **Must verify:** the aggregated signature is RFC-8032-compatible so Sui's `ed25519_verify` accepts it unchanged (write a test: FROST-aggregate → `ed25519_verify` in a Move test using a known group key).
+- **ECDSA/secp256k1 (GG20 / CGGMP, multi-round):** the harder choice — the MPC-ECDSA crate landscape is uneven. Selection criteria: current maintenance, prior audit, **identifiable aborts** (a misbehaving party is pinpointed and ejected, not just a stalled round), and **safe concurrent signing sessions** (multiple `message_hash` sessions in flight — GG20 has known concurrency footguns). Must verify: aggregated sig recovers to the registered group address via `ecrecover` (test against the EVM Inbox path).
+- Output: `CRYPTO_CHOICE.md` with the two crates, versions, audit links, and the concurrency/abort posture.
 
-### 4. Signing sessions behind the async API
-The ticket-06 session store becomes real: `POST /sign_requests` on any node opens/joins a session keyed by `message_hash`; k nodes run FROST (2-round) or GG20 rounds; the aggregated signature lands in the session for polling. Each node independently runs the ticket-02 §5.4 verification before participating — k honest verifications per message.
+### Phase 2 — DKG ceremony tooling (×2, one per curve)
+1. Run a Pedersen/GJKR-style DKG (or FROST's own trusted-dealer-free DKG) across the party set. Parties = the N Nautilus enclaves (+ any human bootstrap parties — **resolve §9.3 first: are humans bootstrap-only or permanent share-holders?** it changes their custody story).
+2. Each party finishes holding a **verified share**; the group public key falls out; **no full private key ever exists anywhere**. Each enclave party's share is immediately Seal-encrypted to its per-node identity via the ticket-08 mechanism.
+3. Register the two group pubkeys on **both** chains via `registerGroupKey` under a **new `group_pubkey_id`**, and `setSignerThreshold(k, n)`. Keep the old 1-of-1 id registered until cutover.
+4. Ceremony must be reproducible/auditable (transcript logged); this procedure is in the ticket-10 audit scope.
 
-### 5. Rollout
-N=3, k=2 on testnet: three enclaves (ideally ≥2 operators to make the threshold non-fictional even on testnet). Rotate the Inboxes to the new group keys; retire the 1-of-1 keys.
+### Phase 3 — MPC transport (libp2p mesh)
+1. A libp2p P2P mesh between the signer enclaves over **mutually-attested, authenticated channels**: before accepting any round message, each node verifies the peer's Nautilus attestation + its on-chain `Enclave` registration (reuse ticket-07's on-chain registry as the peer allow-list).
+2. An **untrusted coordinator/relay for liveness only** — it queues/forwards round messages but cannot forge them (every round message is signed by a share-holder's enclave key). It can stall, never corrupt.
+3. At N=1 there is no mesh; the transport turns on as N grows — no contract change.
 
-## Verify (exit criteria — spec M3 exit)
-- Group keys generated by DKG; **no full private key ever exists** (code-reviewed invariant: no aggregation path).
-- k-of-n signing live on testnet, both directions, through the unchanged on-chain verify paths.
-- One-node-down tolerated (kill a node mid-traffic; signing continues at k=2).
-- A node refuses rounds with an unattested/unregistered peer (negative test).
-- Concurrent sessions: parallel messages sign correctly (the GG20 concurrency criterion in practice).
+### Phase 4 — Wire threshold signing behind the async API
+The ticket-06 session store becomes real: `POST /sign_requests` on any node opens/joins a session keyed by `message_hash`; the coordinator gathers a signing set of k nodes; they run the FROST (2-round) or GG20 (multi-round) protocol; the aggregated signature lands in the session for `GET /sign_requests/:hash` polling. **Each participating node independently runs its own ticket-02 §5.4 verification before contributing a share** — so a forged source view has to fool k independent enclaves, not one. This is where the "verify-before-admit" and idempotent-session design pays off.
 
-**Depends on:** 06 (async API), 07 (enclaves + attestation), 08 (share provisioning). **Blocks:** 10.
+### Phase 5 — Rollout to N=3, k=2 on testnet
+1. Stand up three enclaves — ideally under **≥2 distinct operators**, because a threshold where one entity holds all operator caps is organizational fiction (spec §1). 
+2. Rotate both Inboxes to the new DKG group keys (`registerGroupKey` new id, point the relayer/signer at it), then retire the 1-of-1 keys.
+
+## Exit criteria (spec M3 exit)
+- Group keys generated by DKG with a **code-reviewed no-reconstruction invariant** — grep the signing path: no code ever assembles the full private key.
+- k-of-n signing live on testnet **both directions**, verifying through the unchanged on-chain paths (re-run the round trip with the threshold signer).
+- **One-node-down tolerated:** kill a node mid-traffic, signing continues at k=2.
+- A node **refuses rounds from an unattested/unregistered peer** (negative test).
+- **Concurrent sessions:** parallel messages sign correctly without cross-session interference (the GG20 concurrency criterion, demonstrated).
+
+## Effort & sequencing
+The other large M3 ticket. Phase 1 (selection + compatibility tests) is doable now on a laptop and de-risks everything — **do it first, even before 07/08 finish**, since a bad ECDSA-MPC crate choice is expensive to unwind. Phases 2–5 need the enclaves (07) and Seal provisioning (08).
+
+**Depends on:** 06 (async surface), 07 (enclaves + attested peer identity), 08 (share provisioning). **Blocks:** 10.
