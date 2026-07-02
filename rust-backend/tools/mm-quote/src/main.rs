@@ -161,6 +161,9 @@ fn main() -> Result<()> {
         ttl_charge_mult: 0.0,
         fallback_vol_penalty: 1.0,
         smile: Smile::default(),
+        max_quote_notional: 0,
+        size_widening_vol: 0.0,
+        size_ref_notional: 0,
     };
     let sigma = SigmaEstimate { sigma: args.sigma, is_fallback: false };
     let decision = price_rfq(&cfg, &inputs, spot_scaled, sigma, now);

@@ -55,6 +55,18 @@ pub struct PricingConfig {
     /// Default (flat) preserves single-sigma pricing across the whole grid;
     /// per-symbol overrides come from the bot's `[smiles]` config table.
     pub smile: Smile,
+    /// Decline any RFQ whose notional (spot × write_amount, in settlement
+    /// smallest-units) exceeds this — an unbounded quote is an unbounded
+    /// vega/delta position from one signature. 0 disables.
+    pub max_quote_notional: u64,
+    /// Size-dependent widening: extra proportional vol widening per
+    /// `size_ref_notional` of quote notional (ask sigma ×, bid sigma ÷).
+    /// Premium impact is ≈ vega-proportional, so big clips pay for the
+    /// inventory they move. 0.0 disables.
+    pub size_widening_vol: f64,
+    /// Reference notional (settlement smallest-units) at which
+    /// `size_widening_vol` applies in full.
+    pub size_ref_notional: u64,
 }
 
 /// The bucket-resolved + request inputs for pricing one RFQ. The bucket fields
@@ -310,15 +322,30 @@ pub fn price_rfq(
     let t_years = time_to_expiry_years(inputs.expiry_ms, now_ms);
     let strike_scaled = rebase_strike_to_scale_zero(inputs.strike, inputs.strike_scale);
     let SigmaEstimate { sigma, is_fallback } = sigma_est;
+    // Size gate: one signature must not move unbounded notional.
+    let notional = spot_scaled * inputs.write_amount as f64;
+    if cfg.max_quote_notional > 0 && notional > cfg.max_quote_notional as f64 {
+        return PriceDecision::Decline {
+            reason: "size exceeds max quote notional".into(),
+        };
+    }
     // Strike-dependent vol: evaluate the configured smile at this strike.
     // Flat (default) leaves sigma untouched.
     let sigma = cfg.smile.sigma_at(sigma, spot_scaled, strike_scaled, t_years);
     // Vol-space spread: the ask leg prices at marked-up sigma, the bid leg at
-    // marked-down sigma; quoting on the fallback sigma widens further.
+    // marked-down sigma. Quoting on the fallback sigma widens further, and
+    // size widening scales with the clip's notional (≈ vega-proportional
+    // premium impact).
     let penalty = if is_fallback { cfg.fallback_vol_penalty.max(1.0) } else { 1.0 };
+    let size_mult = if cfg.size_ref_notional > 0 && cfg.size_widening_vol > 0.0 {
+        1.0 + cfg.size_widening_vol * (notional / cfg.size_ref_notional as f64)
+    } else {
+        1.0
+    };
+    let widen = penalty * size_mult;
     let sigma_side = match inputs.side {
-        Side::Trader => sigma * cfg.ask_vol_markup.max(1.0) * penalty,
-        Side::Writer => sigma * cfg.bid_vol_markdown.clamp(0.0, 1.0) / penalty,
+        Side::Trader => sigma * cfg.ask_vol_markup.max(1.0) * widen,
+        Side::Writer => sigma * cfg.bid_vol_markdown.clamp(0.0, 1.0) / widen,
     };
     // PutInputs == CallInputs; the only difference is which BS leg we evaluate.
     let bs_mid = CallInputs {
@@ -767,6 +794,9 @@ mod tests {
             ttl_charge_mult: 0.0,
             fallback_vol_penalty: 1.0,
             smile: Smile::default(),
+            max_quote_notional: 0,
+            size_widening_vol: 0.0,
+            size_ref_notional: 0,
         }
     }
 
@@ -912,6 +942,9 @@ mod tests {
             ttl_charge_mult: 0.0,
             fallback_vol_penalty: 1.0,
             smile: Smile::default(),
+            max_quote_notional: 0,
+            size_widening_vol: 0.0,
+            size_ref_notional: 0,
         };
         let d = price_rfq(&cfg, &p, 110.0, live(0.0), 0);
         match d {
@@ -1009,6 +1042,9 @@ mod tests {
             ttl_charge_mult: 0.0,
             fallback_vol_penalty: 1.0,
             smile: Smile::default(),
+            max_quote_notional: 0,
+            size_widening_vol: 0.0,
+            size_ref_notional: 0,
         };
         let mid = premium_of(&price_rfq(
             &pricing_cfg(),
@@ -1080,6 +1116,9 @@ mod tests {
             ttl_charge_mult: 0.0,
             fallback_vol_penalty: 1.0,
             smile: Smile::default(),
+            max_quote_notional: 0,
+            size_widening_vol: 0.0,
+            size_ref_notional: 0,
         };
         let mid = premium_of(&price_rfq(&pricing_cfg(), &rfq(year_ms, 100, 0, 1_000_000), 100.0, live(0.20), 0));
         let ask = premium_of(&price_rfq(
@@ -1284,5 +1323,60 @@ mod tests {
             premium_of(&price_rfq(&pricing_cfg(), &atm, 100.0, live(0.60), 0)),
             premium_of(&price_rfq(&smiled, &atm, 100.0, live(0.60), 0))
         );
+    }
+
+    // -- size cap + size widening ------------------------------------------
+
+    #[test]
+    fn oversize_rfq_declines() {
+        let (ask_rfq, _, spot) = weekly_atm();
+        // Notional = 100 × 1M = 100M; cap it below that.
+        let capped = PricingConfig { max_quote_notional: 50_000_000, ..pricing_cfg() };
+        match price_rfq(&capped, &ask_rfq, spot, live(0.60), 0) {
+            PriceDecision::Decline { reason } => {
+                assert_eq!(reason, "size exceeds max quote notional")
+            }
+            other => panic!("expected Decline, got {other:?}"),
+        }
+        // At or under the cap quotes fine; 0 disables entirely.
+        let roomy = PricingConfig { max_quote_notional: 200_000_000, ..pricing_cfg() };
+        assert!(matches!(
+            price_rfq(&roomy, &ask_rfq, spot, live(0.60), 0),
+            PriceDecision::Quote { .. }
+        ));
+        assert!(matches!(
+            price_rfq(&pricing_cfg(), &ask_rfq, spot, live(0.60), 0),
+            PriceDecision::Quote { .. }
+        ));
+    }
+
+    #[test]
+    fn size_widening_makes_big_clips_pay_more_per_unit() {
+        let week_ms = 1000 * 86_400 * 7u64;
+        let cfg = PricingConfig {
+            // 10% extra vol per 100M notional.
+            size_widening_vol: 0.10,
+            size_ref_notional: 100_000_000,
+            ..pricing_cfg()
+        };
+        let small = rfq_side(Side::Trader, week_ms, 100, 0, 1_000_000); // 100M notional
+        let big = rfq_side(Side::Trader, week_ms, 100, 0, 10_000_000); // 1B notional
+        let per_unit_of = |d: &PriceDecision| match d {
+            PriceDecision::Quote { per_unit, .. } => *per_unit,
+            other => panic!("expected Quote, got {other:?}"),
+        };
+        let small_unit = per_unit_of(&price_rfq(&cfg, &small, 100.0, live(0.60), 0));
+        let big_unit = per_unit_of(&price_rfq(&cfg, &big, 100.0, live(0.60), 0));
+        assert!(big_unit > small_unit, "{big_unit} !> {small_unit}");
+        // Bid side: the big clip is paid less per unit.
+        let small_bid = rfq_side(Side::Writer, week_ms, 100, 0, 1_000_000);
+        let big_bid = rfq_side(Side::Writer, week_ms, 100, 0, 10_000_000);
+        let small_bid_unit = per_unit_of(&price_rfq(&cfg, &small_bid, 100.0, live(0.60), 0));
+        let big_bid_unit = per_unit_of(&price_rfq(&cfg, &big_bid, 100.0, live(0.60), 0));
+        assert!(big_bid_unit < small_bid_unit, "{big_bid_unit} !< {small_bid_unit}");
+        // Neutral knobs: per-unit price is size-independent.
+        let flat_small = per_unit_of(&price_rfq(&pricing_cfg(), &small, 100.0, live(0.60), 0));
+        let flat_big = per_unit_of(&price_rfq(&pricing_cfg(), &big, 100.0, live(0.60), 0));
+        assert!((flat_small - flat_big).abs() < 1e-12);
     }
 }

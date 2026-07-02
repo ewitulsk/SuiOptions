@@ -157,6 +157,17 @@ struct BotConfig {
     /// Per-symbol smile overrides, e.g. `[smiles.TBTC] skew = 0.05`.
     #[serde(default)]
     smiles: HashMap<String, SmileConfig>,
+    /// Decline any RFQ whose notional (spot × write_amount, settlement
+    /// smallest-units) exceeds this. Defaults to 0 (no cap).
+    #[serde(default)]
+    max_quote_notional: u64,
+    /// Size widening: extra proportional vol widening per
+    /// `size_ref_notional` of quote notional. Defaults to 0.0 (disabled).
+    #[serde(default)]
+    size_widening_vol: f64,
+    /// Reference notional (settlement smallest-units) for `size_widening_vol`.
+    #[serde(default)]
+    size_ref_notional: u64,
 
     /// Roles advertised to the quoting service.
     roles: Vec<MmRole>,
@@ -637,6 +648,9 @@ async fn main() -> Result<()> {
         ttl_charge_mult: cfg.ttl_charge_mult,
         fallback_vol_penalty: cfg.fallback_vol_penalty,
         smile: cfg.smile.into(),
+        max_quote_notional: cfg.max_quote_notional,
+        size_widening_vol: cfg.size_widening_vol,
+        size_ref_notional: cfg.size_ref_notional,
     };
     // api-service client: the bot looks each RFQ's bucket up by address to get
     // its true (strike, expiry, coin types) rather than trusting the broadcast.

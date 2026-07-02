@@ -28,6 +28,15 @@ ttl_charge_mult    = 1.0
 # Extra vol widening while the vol buffer is cold (fallback sigma in use).
 fallback_vol_penalty = 1.25
 
+# Size awareness. max_quote_notional caps any single RFQ's notional
+# (spot x write_amount, settlement smallest-units); 0 = no cap. Size
+# widening adds size_widening_vol of proportional vol spread per
+# size_ref_notional of notional, so big clips pay for the inventory they
+# move. 100_000_000_000 = 100k TUSDC at 6 decimals.
+max_quote_notional = 0
+size_widening_vol  = 0.10
+size_ref_notional  = 100_000_000_000
+
 
 roles = ["trader_mm", "writer_mm"]
 bulk_view_enabled = true
