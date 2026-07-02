@@ -1,0 +1,22 @@
+[package]
+name = "bridge-signer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Off-chain signing for the Layer 1 transport. At the M1 "1-of-1" launch this is
+# a single-party signer; the same API becomes the threshold share-signing path
+# at M3 (bridge-spec.md §1, §6). Produces signatures the on-chain Inboxes accept
+# directly: Ed25519 over the digest for Sui, recoverable ECDSA for EVM.
+
+[dependencies]
+bridge-types = { workspace = true }
+thiserror = { workspace = true }
+ed25519-dalek = { workspace = true }
+k256 = { version = "0.13", features = ["ecdsa"] }
+
+[dev-dependencies]
+hex = { workspace = true }

@@ -1,0 +1,14 @@
+[package]
+name = "sui_bridge"
+version = "0.0.1"
+edition = "2024.beta"
+
+# Layer 1 — Generic cross-chain messaging (Sui side).
+# Outbox / Inbox / chain registry / canonical CrossChainMessage + keccak256
+# digest + Ed25519 group-signature verification. See ../bridge-spec.md §2.
+#
+# The Sui framework (Sui, MoveStdlib) is injected implicitly by the toolchain;
+# the package name `sui_bridge` is the implicit named address (published at the
+# package's own ID).
+
+[dependencies]

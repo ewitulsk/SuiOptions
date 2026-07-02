@@ -1,0 +1,22 @@
+[package]
+name = "bridge-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Layer 1 canonical message types shared by the signer node and the relayer.
+# This is the THIRD implementation of the wire format (after the Move
+# `sui_bridge::message` and the Solidity `Message.sol`); all three must produce
+# a byte-identical keccak256 digest. The `known_digest_vector` test pins it.
+
+[dependencies]
+serde = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+tiny-keccak = { version = "2", features = ["keccak"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

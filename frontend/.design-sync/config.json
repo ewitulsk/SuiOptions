@@ -1,0 +1,68 @@
+{
+  "projectId": "019e2eaa-b787-7142-9424-594bf76b8d24",
+  "shape": "package",
+  "pkg": "tideline-frontend",
+  "globalName": "Tideline",
+  "entry": "__nodist__.js",
+  "srcDir": "src/components",
+  "tsconfig": ".design-sync/tsconfig.dssync.json",
+  "cssEntry": "src/styles/aqua.css",
+  "extraFonts": ".design-sync/fonts/fonts.css",
+  "extraEntries": [
+    "./.design-sync/ds-provider.tsx"
+  ],
+  "provider": {
+    "component": "DSProvider"
+  },
+  "overrides": {
+    "StrikeTiles": {
+      "cardMode": "column"
+    },
+    "Header": {
+      "cardMode": "single"
+    },
+    "ActionModal": {
+      "cardMode": "single",
+      "viewport": "720x920"
+    },
+    "ConfirmModal": {
+      "cardMode": "single",
+      "viewport": "560x760"
+    },
+    "Toast": {
+      "cardMode": "single",
+      "primaryStory": "Success"
+    }
+  },
+  "dtsPropsFor": {
+    "Toast": "message: string;\n  variant?: \"success\" | \"error\" | \"info\";",
+    "StrikeTiles": "strikes: Array<{ strike: number; perUnit: number; premium: number; premiumDisplay: string }>;\n  selectedIdx: number;\n  onSelect: (i: number) => void;\n  view: \"writer\" | \"trader\";",
+    "AmountInput": "amount: number;\n  setAmount: (n: number) => void;\n  view: \"writer\" | \"trader\";\n  /** Underlying-asset symbol (on-chain ticker, e.g. `TBTC`); null while loading. */\n  assetSymbol: string | null;\n  btcBalance: number;\n  usdcBalance: number;\n  error: string;\n  /** Live spot price (settlement per 1 underlying); 0/absent disables the USDC toggle. */\n  spot: number;\n  /** Settlement-asset symbol (e.g. `USDC`) for the alternate denomination. */\n  settlementSymbol: string;",
+    "BucketBar": "symbol: string | null | undefined;\n  assets: Array<{ symbol: string; decimals: number | null }>;\n  selectedAsset: string | null;\n  onSelectAsset: (symbol: string) => void;\n  expiries: Array<{ ms: number; iso: string }>;\n  selectedExpiryMs: number | null;\n  onSelectExpiry: (ms: number) => void;\n  settlementSymbol: string;",
+    "ChainTable": "buckets: Array<{ bucket_id: string; strike: number | null; strike_raw: string; call_coin_type: string; strike_scale: number; total_written: number | null; total_written_raw: string; exercise_cursor: number | null; exercise_cursor_raw: string; fill_pct: number | null; invalidated: boolean; deepbook_pool_id: string | null; tradeable: boolean }>;\n  strikes: Array<{ strike: number; perUnit: number; premium: number; premiumDisplay: string }>;\n  series: { asset_symbol: string; asset_decimals: number | null; asset_coin_type: string; settlement_symbol: string; settlement_decimals: number | null; settlement_coin_type: string; expiry_ms: number; expiry_iso: string; buckets: Array<{ bucket_id: string; strike: number | null; strike_raw: string; call_coin_type: string; strike_scale: number; total_written: number | null; total_written_raw: string; exercise_cursor: number | null; exercise_cursor_raw: string; fill_pct: number | null; invalidated: boolean; deepbook_pool_id: string | null; tradeable: boolean }> };\n  spot: number;\n  selectedIdx: number;\n  onSelect: (i: number) => void;",
+    "BuyDetailTabs": "bucket: { bucket_id: string; strike: number | null; strike_raw: string; call_coin_type: string; strike_scale: number; total_written: number | null; total_written_raw: string; exercise_cursor: number | null; exercise_cursor_raw: string; fill_pct: number | null; invalidated: boolean; deepbook_pool_id: string | null; tradeable: boolean };\n  series: { asset_symbol: string; asset_decimals: number | null; asset_coin_type: string; settlement_symbol: string; settlement_decimals: number | null; settlement_coin_type: string; expiry_ms: number; expiry_iso: string; buckets: Array<{ bucket_id: string; strike: number | null; strike_raw: string; call_coin_type: string; strike_scale: number; total_written: number | null; total_written_raw: string; exercise_cursor: number | null; exercise_cursor_raw: string; fill_pct: number | null; invalidated: boolean; deepbook_pool_id: string | null; tradeable: boolean }> };\n  spot: number;\n  mid: number | null;\n  wallet: string | null;\n  tab: \"greeks\" | \"details\" | \"book\" | \"orders\";\n  onTabChange: (tab: \"greeks\" | \"details\" | \"book\" | \"orders\") => void;",
+    "BuyModeToggle": "mode: \"deepbook\" | \"mm\";\n  onChange: (m: \"deepbook\" | \"mm\") => void;",
+    "QuoteFeed": "quotes: Array<{ id: string; name: string; addr: string; fill: number; revertRate: number; latency: number; premium: number; ttl: number; arrivedAt: number }>;\n  view: \"writer\" | \"trader\";\n  onClose?: () => void;\n  docked?: boolean;",
+    "Tideline": "bucket: { cursor: number; queued: number; cap: number };\n  amount: number;\n  assetSymbol: string | null;",
+    "TraderPanels": "premium: number;\n  premiumLoading: boolean;\n  amount: number;\n  strike: number;\n  spot: number;\n  assetSymbol: string | null;\n  expiryLabel: string;",
+    "WriterPanels": "premium: number;\n  premiumLoading: boolean;\n  amount: number;\n  strike: number;\n  assetSymbol: string | null;\n  expiryLabel: string;",
+    "ChartPanel": "poolId: string;\n  /** Bucket strike in quote units, for the reference line. null hides it. */\n  strike: number | null;\n  settlementSymbol: string;",
+    "PayoffChart": "strike: number;\n  qty: number;\n  totalCost: number;\n  breakEven: number;\n  spot: number;",
+    "VaultApyChart": "realized: Array<{ t_ms: number; apy: number; apy_low?: number; apy_high?: number; assignment_prob?: number; downside_round_yield?: number; kind?: string; confidence?: number }>;\n  predicted: Array<{ t_ms: number; apy: number; apy_low?: number; apy_high?: number; assignment_prob?: number; downside_round_yield?: number; kind?: string; confidence?: number }>;\n  loading: boolean;",
+    "WaveLoader": "className?: string;",
+    "IndexerProgressBar": "",
+    "LiveBuckets": "",
+    "Header": "",
+    "SessionMenu": "",
+    "OwnedCard": "p: {\n    id: string; side: \"owned\"; asset: \"BTC\" | \"SUI\" | string; strike: number; expiry: string; amount: number;\n    premiumPaid: number; boughtFrom: string; boughtAt: string; rangeId: string; tradingAccountAmount: number;\n    lots: Array<{ amount: number; cost: number; source: \"rfq\" | \"deepbook\" | \"transfer\"; acquiredAtMs: number }>;\n    spot: number; dte: number; itm: boolean; moneyness: number; intrinsicNow: number; pnl: number;\n    realizedPnl: number; totalPnl: number; unpricedExerciseAmount: number;\n    status: \"exercisable\" | \"active_otm\" | \"expired_itm\" | \"expired_otm\";\n  };\n  onExercise: (p: OwnedCardProps[\"p\"]) => void;\n  onWithdraw: (p: OwnedCardProps[\"p\"]) => void;",
+    "WrittenCard": "p: {\n    id: string; side: \"written\"; asset: \"BTC\" | \"SUI\" | string; strike: number; expiry: string; amount: number;\n    premiumReceived: number; soldTo: string; soldAt: string; rangeStart: number; rangeEnd: number;\n    cursorAtSale?: number; cursorAtExpiry?: number; spot: number; dte: number; exercisedQty: number;\n    totalQty: number; exercisedPct: number; cursor: number;\n    status: \"claimable\" | \"active\" | \"partially_exercised\" | \"fully_exercised\";\n  };\n  onClaim: (p: WrittenCardProps[\"p\"]) => void;",
+    "ActionModal": "modal:\n    | { kind: \"exercise\"; stage: \"signing\" | \"broadcast\" | \"confirmed\" | \"review\" | null; position: {\n    id: string; side: \"owned\"; asset: \"BTC\" | \"SUI\" | string; strike: number; expiry: string; amount: number;\n    premiumPaid: number; boughtFrom: string; boughtAt: string; rangeId: string; tradingAccountAmount: number;\n    lots: Array<{ amount: number; cost: number; source: \"rfq\" | \"deepbook\" | \"transfer\"; acquiredAtMs: number }>;\n    spot: number; dte: number; itm: boolean; moneyness: number; intrinsicNow: number; pnl: number;\n    realizedPnl: number; totalPnl: number; unpricedExerciseAmount: number;\n    status: \"exercisable\" | \"active_otm\" | \"expired_itm\" | \"expired_otm\";\n  }; qty: number }\n    | { kind: \"claim\"; stage: \"signing\" | \"broadcast\" | \"confirmed\" | \"review\" | null; position: {\n    id: string; side: \"written\"; asset: \"BTC\" | \"SUI\" | string; strike: number; expiry: string; amount: number;\n    premiumReceived: number; soldTo: string; soldAt: string; rangeStart: number; rangeEnd: number;\n    cursorAtSale?: number; cursorAtExpiry?: number; spot: number; dte: number; exercisedQty: number;\n    totalQty: number; exercisedPct: number; cursor: number;\n    status: \"claimable\" | \"active\" | \"partially_exercised\" | \"fully_exercised\";\n  } }\n    | null;\n  spots: Record<string, number | null>;\n  onSubmit: () => void;\n  onClose: () => void;",
+    "ConfirmModal": "stage: \"signing\" | \"broadcast\" | \"confirmed\" | null;\n  summary: {\n    view: \"writer\" | \"trader\"; premium: number; bucket: string; rangeStart: number; rangeEnd: number;\n    amount: number; strike: number; asset: string; expiry: string;\n  } | null;\n  view: \"writer\" | \"trader\";\n  onClose: () => void;",
+    "TokenLogo": "symbol: string | null | undefined;\n  className: string;\n  fallback: React.ReactNode;",
+    "ConnectMenu": "onSuiWallet: () => void;",
+    "TradePanel": "bucket: { bucket_id: string; strike: number | null; strike_raw: string; call_coin_type: string; strike_scale: number; total_written: number | null; total_written_raw: string; exercise_cursor: number | null; exercise_cursor_raw: string; fill_pct: number | null; invalidated: boolean; deepbook_pool_id: string | null; tradeable: boolean };\n  series: { asset_symbol: string; asset_decimals: number | null; asset_coin_type: string; settlement_symbol: string; settlement_decimals: number | null; settlement_coin_type: string; expiry_ms: number; expiry_iso: string; buckets: Array<{ bucket_id: string; strike: number | null; strike_raw: string; call_coin_type: string; strike_scale: number; total_written: number | null; total_written_raw: string; exercise_cursor: number | null; exercise_cursor_raw: string; fill_pct: number | null; invalidated: boolean; deepbook_pool_id: string | null; tradeable: boolean }> };",
+    "Orderbook": "bucket: { bucket_id: string; strike: number | null; strike_raw: string; call_coin_type: string; strike_scale: number; total_written: number | null; total_written_raw: string; exercise_cursor: number | null; exercise_cursor_raw: string; fill_pct: number | null; invalidated: boolean; deepbook_pool_id: string | null; tradeable: boolean };\n  series: { asset_symbol: string; asset_decimals: number | null; asset_coin_type: string; settlement_symbol: string; settlement_decimals: number | null; settlement_coin_type: string; expiry_ms: number; expiry_iso: string; buckets: Array<{ bucket_id: string; strike: number | null; strike_raw: string; call_coin_type: string; strike_scale: number; total_written: number | null; total_written_raw: string; exercise_cursor: number | null; exercise_cursor_raw: string; fill_pct: number | null; invalidated: boolean; deepbook_pool_id: string | null; tradeable: boolean }> };",
+    "OpenOrdersSection": "bucket: { bucket_id: string; strike: number | null; strike_raw: string; call_coin_type: string; strike_scale: number; total_written: number | null; total_written_raw: string; exercise_cursor: number | null; exercise_cursor_raw: string; fill_pct: number | null; invalidated: boolean; deepbook_pool_id: string | null; tradeable: boolean };\n  series: { asset_symbol: string; asset_decimals: number | null; asset_coin_type: string; settlement_symbol: string; settlement_decimals: number | null; settlement_coin_type: string; expiry_ms: number; expiry_iso: string; buckets: Array<{ bucket_id: string; strike: number | null; strike_raw: string; call_coin_type: string; strike_scale: number; total_written: number | null; total_written_raw: string; exercise_cursor: number | null; exercise_cursor_raw: string; fill_pct: number | null; invalidated: boolean; deepbook_pool_id: string | null; tradeable: boolean }> };"
+  },
+  "readmeHeader": ".design-sync/conventions.md"
+}

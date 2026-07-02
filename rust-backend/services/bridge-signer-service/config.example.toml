@@ -1,0 +1,21 @@
+# bridge-signer-service (M1, single-party). Copy and fill in.
+
+public_bind_addr = "0.0.0.0:3000"
+admin_bind_addr  = "127.0.0.1:3001"
+
+# M1-ONLY single-party key seeds (32-byte hex). Prefer ${ENV} expansion so the
+# raw seeds never sit in the file. At M3 these are Seal-provisioned in-enclave
+# and this section disappears.
+ed25519_seed_hex   = "${BRIDGE_ED25519_SEED}"
+secp256k1_seed_hex = "${BRIDGE_SECP256K1_SEED}"
+
+# Registered group-key ids the envelope references (must match what was passed
+# to registerGroupKey on each Inbox).
+# Per-chain registries are independent namespaces; the live deployment uses id 1
+# on both the Sui Inbox (Ed25519) and the EVM Inbox (ECDSA).
+ed25519_group_pubkey_id = 1   # Sui group key
+ecdsa_group_pubkey_id   = 1   # EVM group key
+
+# DEV ONLY: skips the §5.4 source-commitment check. Switch to "rpc" once the
+# Outbox-commitment + finality verifier lands.
+source_verifier = "trust_all"

@@ -1,0 +1,10 @@
+{
+  "comment": "design-sync-only tsconfig. The converter's tsconfigPathsPlugin reads paths/baseUrl from THIS file literally (it does not follow `extends`), so the alias below is the whole point: redirect the heavy WalletConnect dynamic import to a local stub to stay under the 5 MB bundle cap. The app's real build still uses ../tsconfig.json.",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "jsx": "react-jsx",
+    "paths": {
+      "@walletconnect/ethereum-provider": ["./wc-stub.ts"]
+    }
+  }
+}

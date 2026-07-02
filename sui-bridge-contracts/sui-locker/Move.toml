@@ -1,0 +1,10 @@
+[package]
+name = "locker"
+version = "0.0.1"
+edition = "2024.beta"
+
+# Layer 2 — Lock-and-Mint Bridge (Sui side), built on top of the L1 messaging
+# package (../sui). See ../../bridge-spec.md §3 and ../relayer-dispatch-design.md.
+
+[dependencies]
+sui_bridge = { local = "../sui" }

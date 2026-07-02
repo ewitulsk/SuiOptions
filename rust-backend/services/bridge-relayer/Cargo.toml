@@ -1,0 +1,46 @@
+[package]
+name = "bridge-relayer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "bridge-relayer"
+path = "src/main.rs"
+
+# Untrusted relayer (bridge-spec.md §2, Layer 3). Watches a source Outbox for
+# committed messages, reconstructs the canonical message, asks the signer node
+# for an aggregated signature, and submits the self-verifying message to the
+# destination Inbox. The relayer is trustless: every check is on-chain.
+#
+# M1 scope: the Sui *source* watcher is real (sui-sdk); the signer hop is real
+# (HTTP). Destination submission is a dry-run stub — EVM submission needs an EVM
+# client (none vendored yet) and Sui Inbox submission needs the Layer-2 Locker.
+
+[dependencies]
+bridge-types   = { workspace = true }
+runtime-config = { workspace = true }
+observability  = { workspace = true }
+
+config = { version = "0.14", features = ["toml"] }
+clap = { workspace = true }
+
+tokio = { workspace = true }
+reqwest = { workspace = true }
+async-trait = "0.1"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# EVM destination submitter (Inbox.receiveMessage on HyperEVM).
+alloy = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+bridge-signer = { workspace = true }

@@ -1,0 +1,43 @@
+[package]
+name = "bridge-signer-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "bridge-signer-service"
+path = "src/main.rs"
+
+# The signer node (bridge-spec.md §5). At M1 it is a single-party signer behind
+# an HTTP surface; the §5.4 security boundary ("the Outbox committed this exact
+# message at source finality") is enforced via the `SourceVerifier` trait before
+# any signature is produced. Seal share-load, DKG, and Nautilus attestation
+# (the admin endpoints) are M3/M4 and currently stubbed.
+
+[dependencies]
+bridge-types   = { workspace = true }
+bridge-signer  = { workspace = true }
+runtime-config = { workspace = true }
+observability  = { workspace = true, features = ["axum"] }
+
+config = { version = "0.14", features = ["toml"] }
+clap = { workspace = true }
+
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+async-trait = "0.1"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

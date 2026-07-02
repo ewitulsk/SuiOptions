@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/protocol-types",
+    "crates/bridge-types",
+    "crates/bridge-signer",
     "crates/runtime-config",
     "crates/cli-spec",
     "crates/pyth-client",
@@ -27,6 +29,8 @@ members = [
     "services/price-charting",
     "services/balance-monitor",
     "services/oracle-service",
+    "services/bridge-signer-service",
+    "services/bridge-relayer",
     "tools/deployment-manager",
     "tools/exchange",
     "tools/writer",
@@ -46,6 +50,8 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 protocol-types = { path = "crates/protocol-types" }
+bridge-types   = { path = "crates/bridge-types" }
+bridge-signer  = { path = "crates/bridge-signer" }
 runtime-config = { path = "crates/runtime-config" }
 cli-spec       = { path = "crates/cli-spec" }
 pyth-client    = { path = "crates/pyth-client" }

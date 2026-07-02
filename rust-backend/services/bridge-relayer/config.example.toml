@@ -1,0 +1,20 @@
+# bridge-relayer (M1). Copy and fill in.
+
+# Sui JSON-RPC of the source chain to watch for committed messages.
+source_rpc_url = "https://fullnode.testnet.sui.io:443"
+
+# Deployed bridge package id (the package that holds the `events` module + the
+# Outbox you want to relay from).
+bridge_package_id = "0x..."
+
+# Signer node base URL (bridge-signer-service public port).
+signer_url = "http://127.0.0.1:3000"
+
+# Seconds between source polls.
+poll_interval_secs = 5
+
+# EVM destination (HyperEVM). Set all three to submit to the EVM Inbox for real;
+# omit any to dry-run the destination instead.
+evm_rpc_url = "https://rpc.hyperliquid-testnet.xyz/evm"
+evm_inbox_addr = "0xA2b0dA5F12628f1FDC1E517DF33F5C3fF528bF74"
+evm_relayer_key = "${BRIDGE_EVM_RELAYER_KEY}"
