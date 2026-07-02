@@ -24,7 +24,8 @@ use anyhow::{bail, Result};
 use clap::{Parser, ValueEnum};
 
 use mm_bot::pricing::{
-    compute_spot_from_prices, price_rfq, PriceDecision, PricingConfig, RfqPricingInputs, SpotError,
+    compute_spot_from_prices, price_rfq, PriceDecision, PricingConfig, RfqPricingInputs,
+    SigmaEstimate, Smile, SpotError,
 };
 use protocol_types::sides::Side;
 
@@ -155,8 +156,17 @@ fn main() -> Result<()> {
         // Simulator prints the Black-Scholes mid — no spread.
         ask_markup_bps: 0,
         bid_markdown_bps: 0,
+        ask_vol_markup: 1.0,
+        bid_vol_markdown: 1.0,
+        ttl_charge_mult: 0.0,
+        fallback_vol_penalty: 1.0,
+        smile: Smile::default(),
+        max_quote_notional: 0,
+        size_widening_vol: 0.0,
+        size_ref_notional: 0,
     };
-    let decision = price_rfq(&cfg, &inputs, spot_scaled, args.sigma, now);
+    let sigma = SigmaEstimate { sigma: args.sigma, is_fallback: false };
+    let decision = price_rfq(&cfg, &inputs, spot_scaled, sigma, now);
 
     if args.json {
         print_json(&decision, spot_scaled, &inputs, now);

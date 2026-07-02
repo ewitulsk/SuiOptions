@@ -28,19 +28,45 @@ signing_scheme     = "ed25519"
 underlying_symbols = ["TBTC", "TWAL"]
 settlement_symbol  = "TUSDC"
 
-# Annualized risk-free rate. Pyth doesn't model the curve; this stays a
-# config knob.
-rate               = 0.05
+# Annualized risk-free rate. Protocol convention is r = 0 (settlement is a
+# stablecoin with no funded rate leg), which keeps fair value identical
+# across the keeper, api-service, vault-sim, and this bot. Note r > 0 also
+# reintroduces the American-put early-exercise premium that European
+# Black-Scholes doesn't model (see crates/pricing).
+rate               = 0.0
 
 # How long the bot's signed quotes stay valid.
 quote_ttl_ms       = 30_000
 
-# Two-sided spread off the Black-Scholes mid, in basis points. We serve both
-# sides from one Account, so the spread is what makes the book two-sided:
-#   ask_markup_bps   — marked UP when we write to a retail trader (Side::Trader)
-#   bid_markdown_bps — marked DOWN when we buy from a retail writer (Side::Writer)
+# Two-sided spread. The primary spread is in VOL space — the ask leg prices
+# at sigma × ask_vol_markup, the bid leg at sigma × bid_vol_markdown — so the
+# spread scales with the vega being warehoused. The bps knobs are the
+# *minimum* premium-space spread, all that separates the sides deep ITM where
+# vega ≈ 0.
 ask_markup_bps     = 100
 bid_markdown_bps   = 100
+ask_vol_markup     = 1.10
+bid_vol_markdown   = 0.90
+
+# Last-look charge: a signed quote is a free 30s option for the taker (they
+# execute only when the market moved their way during the TTL). Charge the
+# expected favorable move — mult × |delta|·spot·sigma·√(ttl_years) — on the
+# ask, and shade it off the bid. 0.0 disables.
+ttl_charge_mult    = 1.0
+
+# Extra vol widening while quoting on the fallback sigma (vol buffer still
+# cold): ask sigma ×= this, bid sigma ÷= this. 1.0 disables.
+fallback_vol_penalty = 1.25
+
+# Size awareness. max_quote_notional caps any single RFQ's notional
+# (spot x write_amount, settlement smallest-units); 0 = no cap. Size
+# widening adds size_widening_vol of proportional vol spread per
+# size_ref_notional of notional, so big clips pay for the inventory they
+# move. 100_000_000_000 = 100k TUSDC at 6 decimals.
+max_quote_notional = 0
+size_widening_vol  = 0.10
+size_ref_notional  = 100_000_000_000
+
 
 # Both roles by default; a single Account can serve writer + trader.
 roles = ["trader_mm", "writer_mm"]
@@ -67,10 +93,20 @@ bootstrap_underlying_amount = 100_000_000_000
 underlying_replenish_threshold    = 20_000_000_000
 underlying_replenish_amount       = 100_000_000_000
 underlying_replenish_interval_secs = 60
-
 # Optional: where minted call tokens / position NFTs should land. Leave
 # unset to derive from the Sui wallet key.
 # token_recipient = "0xabc..."
+
+# Strike-dependent vol (see crates/pricing smile.rs): sigma(K) = sigma_atm x
+# (1 + skew*z + convexity*z^2), z = ln(K/S)/(sigma_atm*sqrt(tau)). Flat (0/0)
+# until calibrated from observed quotes; positive skew richens the upside
+# wing, positive convexity richens both wings. Per-symbol overrides:
+#   [smiles.TBTC]
+#   skew = 0.05
+[smile]
+skew      = 0.0
+convexity = 0.0
+
 
 # Live prices come from oracle-service (--oracle-url / ORACLE_URL, default
 # http://127.0.0.1:9013). All fields are optional — these are the defaults
@@ -83,13 +119,24 @@ max_price_age_ms       = 5_000
 # Reject if Pyth's publisher timestamp is older than this. Catches the
 # case where the stream is alive but Pyth itself isn't publishing.
 max_publish_lag_ms     = 10_000
-# Rolling window for realized vol.
+# Reject if either feed's Pyth confidence interval exceeds this many bps of
+# its price — fresh-but-unsure feeds are when quotes get picked off. 0 = off;
+# observe conf/price on our feeds before enabling.
+max_conf_bps           = 0
+# Short rolling window for realized vol; the quoted sigma is
+# max(short, long) so one calm day can't undercut the trailing week.
 vol_window_hours       = 24
-# Live-cache sample cadence into the vol buffer. Annualization follows
-# this cadence: sigma_year = stddev_log_returns * sqrt(samples_per_year).
-vol_sample_interval_ms = 60_000
+vol_long_window_hours  = 168
+# Live-cache sample cadence into the vol buffers. Annualization uses the
+# samples' actual timestamps, so skipped ticks don't bias sigma. 5-minute
+# sampling: 1-minute bars mostly measure oracle jitter, not diffusion.
+vol_sample_interval_ms = 300_000
 # Sigma used until the buffer has enough samples, then live takes over.
+# Per-symbol overrides below; this is the default for anything unlisted.
 fallback_vol           = 0.6
+[pyth.fallback_vols]
+TBTC = 0.45
+TWAL = 1.0
 
 # DeepBook quoting (SO-158). Off by default for local runs — flip on once
 # the local stack serves deepbook ids from token-info.

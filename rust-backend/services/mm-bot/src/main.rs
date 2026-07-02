@@ -23,7 +23,7 @@
 //! call token). `roles` in the TOML controls advertised roles to the
 //! quoting service.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -43,6 +43,7 @@ use protocol_types::quote::Quote;
 use protocol_types::sides::MmRole;
 use protocol_types::SigningScheme;
 
+use pricing::smile::Smile;
 use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
 use api_service_client::ApiServiceClient;
 use token_info_client::{Snapshot, TokenInfoClient};
@@ -55,7 +56,7 @@ use sui_tx::ws_client;
 use mm_bot::liquidity::{FaucetLiquiditySource, LiquiditySource};
 use mm_bot::pricing::{
     compute_spot_from_cache, price_rfq, resolve_sigma, serves_pair, PriceDecision, PricingConfig,
-    RfqPricingInputs, Staleness,
+    RfqPricingInputs, SigmaEstimate, Staleness,
 };
 use mm_bot::Cli;
 
@@ -111,23 +112,62 @@ struct BotConfig {
     #[serde(default = "default_settlement")]
     settlement_symbol: String,
 
-    /// Annualized risk-free rate. Pyth doesn't price the curve; this
-    /// stays a config knob.
+    /// Annualized risk-free rate. Protocol convention is r = 0 (the serde
+    /// default): settlement is a stablecoin with no funded rate leg, and
+    /// r = 0 keeps fair value identical across keeper / api-service /
+    /// vault-sim / this bot. It also makes European put pricing exact for
+    /// the American-exercisable on-chain puts.
     #[serde(default)]
     rate: f64,
     #[serde(default = "default_quote_ttl_ms")]
     quote_ttl_ms: u64,
 
-    /// Ask-side markup in basis points, applied when quoting as the Writer MM
-    /// (retail buying — trader flow): premium is marked *up* off the
-    /// Black-Scholes mid. Defaults to 100 (1%).
+    /// Ask-side *minimum* markup in basis points of premium, applied when
+    /// quoting as the Writer MM (retail buying — trader flow). The vol-space
+    /// spread (`ask_vol_markup`) usually dominates; this is the floor left
+    /// deep ITM where vega ≈ 0. Defaults to 100 (1%).
     #[serde(default = "default_spread_bps")]
     ask_markup_bps: u64,
-    /// Bid-side markdown in basis points, applied when quoting as the Trader
-    /// MM (retail writing — writer flow): premium is marked *down* off the
-    /// mid. Defaults to 100 (1%).
+    /// Bid-side *minimum* markdown in basis points of premium, applied when
+    /// quoting as the Trader MM (retail writing — writer flow). Defaults to
+    /// 100 (1%).
     #[serde(default = "default_spread_bps")]
     bid_markdown_bps: u64,
+    /// Vol-space ask spread: sigma multiplier (≥ 1) when we sell options.
+    /// Defaults to 1.0 (disabled) so unconfigured deployments keep the
+    /// bps-only behavior.
+    #[serde(default = "default_vol_spread_neutral")]
+    ask_vol_markup: f64,
+    /// Vol-space bid spread: sigma multiplier (≤ 1) when we buy options.
+    /// Defaults to 1.0 (disabled).
+    #[serde(default = "default_vol_spread_neutral")]
+    bid_vol_markdown: f64,
+    /// Last-look charge multiplier on `|delta|·spot·sigma·√(ttl_years)`,
+    /// added to the ask / shaded off the bid. Defaults to 0.0 (disabled).
+    #[serde(default)]
+    ttl_charge_mult: f64,
+    /// Extra vol widening (≥ 1) while quoting on the fallback sigma (cold
+    /// vol buffer). Defaults to 1.0 (disabled).
+    #[serde(default = "default_vol_spread_neutral")]
+    fallback_vol_penalty: f64,
+    /// Default vol smile (skew/convexity in standardized log-moneyness z —
+    /// see `pricing::smile`). Flat by default; calibrate before enabling.
+    #[serde(default)]
+    smile: SmileConfig,
+    /// Per-symbol smile overrides, e.g. `[smiles.TBTC] skew = 0.05`.
+    #[serde(default)]
+    smiles: HashMap<String, SmileConfig>,
+    /// Decline any RFQ whose notional (spot × write_amount, settlement
+    /// smallest-units) exceeds this. Defaults to 0 (no cap).
+    #[serde(default)]
+    max_quote_notional: u64,
+    /// Size widening: extra proportional vol widening per
+    /// `size_ref_notional` of quote notional. Defaults to 0.0 (disabled).
+    #[serde(default)]
+    size_widening_vol: f64,
+    /// Reference notional (settlement smallest-units) for `size_widening_vol`.
+    #[serde(default)]
+    size_ref_notional: u64,
 
     /// Roles advertised to the quoting service.
     roles: Vec<MmRole>,
@@ -206,14 +246,27 @@ struct PythConfig {
     /// Catches the case where the stream is alive but Pyth itself isn't
     /// publishing.
     max_publish_lag_ms: u64,
-    /// Rolling window (in hours) used to compute realized vol.
+    /// Reject an RFQ if either feed's Pyth confidence interval exceeds this
+    /// many basis points of its price — a fresh feed that is unsure of
+    /// itself is exactly when quotes get picked off. 0 disables.
+    max_conf_bps: u64,
+    /// Rolling window (in hours) used to compute realized vol — the short,
+    /// regime-tracking window.
     vol_window_hours: u64,
+    /// Long realized-vol window (in hours). The quoted sigma is the max of
+    /// the two windows, so one calm day can't undercut what the trailing
+    /// week actually realized. Default 168 (7d).
+    vol_long_window_hours: u64,
     /// How often the live cache is sampled into the vol buffer. The vol
-    /// estimate annualizes from this cadence.
+    /// estimate annualizes from the samples' actual timestamps, so skipped
+    /// ticks (stale stream) don't bias it.
     vol_sample_interval_ms: u64,
     /// Volatility used until the buffer has enough samples. Once it does,
-    /// the live estimate takes over.
+    /// the live estimate takes over. Overridable per symbol below.
     fallback_vol: f64,
+    /// Per-symbol overrides for `fallback_vol` (e.g. `TBTC = 0.45`): one
+    /// flat number is wrong in both directions for a majors/small-cap mix.
+    fallback_vols: HashMap<String, f64>,
 }
 
 impl Default for PythConfig {
@@ -221,10 +274,28 @@ impl Default for PythConfig {
         Self {
             max_price_age_ms: 5_000,
             max_publish_lag_ms: 10_000,
+            max_conf_bps: 0,
             vol_window_hours: 24,
-            vol_sample_interval_ms: 60_000,
+            vol_long_window_hours: 168,
+            vol_sample_interval_ms: 300_000,
             fallback_vol: 0.6,
+            fallback_vols: HashMap::new(),
         }
+    }
+}
+
+/// Serde mirror of [`pricing::smile::Smile`] (the pricing crate stays
+/// serde-free). Defaults to flat.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default)]
+struct SmileConfig {
+    skew: f64,
+    convexity: f64,
+}
+
+impl From<SmileConfig> for Smile {
+    fn from(c: SmileConfig) -> Self {
+        Smile { skew: c.skew, convexity: c.convexity }
     }
 }
 
@@ -250,7 +321,10 @@ fn default_bootstrap_amount() -> u64 {
 } // 1e12 raw — plenty of settlement to quote with
 fn default_spread_bps() -> u64 {
     100
-} // 1% markup/markdown off the BS mid
+} // 1% minimum markup/markdown off the BS mid
+fn default_vol_spread_neutral() -> f64 {
+    1.0
+} // sigma multiplier of 1.0 = vol-space spread disabled
 fn default_bootstrap_underlying_amount() -> u64 {
     100_000_000_000
 } // 1e11 raw underlying — inventory to write against
@@ -276,8 +350,16 @@ struct Market {
     coin_type: String,
     feed: PriceFeedId,
     decimals: u8,
-    /// Realized-vol buffer fed from this underlying's USD price.
+    /// Short-window realized-vol buffer fed from this underlying's USD price.
     vol_buf: Arc<RwLock<RollingVolBuffer>>,
+    /// Long-window buffer (same samples); quoted sigma is max(short, long).
+    vol_buf_long: Arc<RwLock<RollingVolBuffer>>,
+    /// Sigma used while `vol_buf` is cold: the per-symbol override from
+    /// `[pyth].fallback_vols`, else the global `fallback_vol`.
+    fallback_vol: f64,
+    /// Vol smile for this underlying: the per-symbol override from
+    /// `[smiles]`, else the global `[smile]`.
+    smile: Smile,
 }
 
 /// Derive the underlying set from token-info: every enabled token that has a
@@ -421,9 +503,8 @@ async fn main() -> Result<()> {
 
     // Build one Market per underlying. Vol buffers are created here; their
     // sampler tasks are spawned once the Pyth subscriber is up (below).
-    let samples_per_year =
-        (365.0 * 24.0 * 60.0 * 60.0 * 1000.0) / cfg.pyth.vol_sample_interval_ms as f64;
     let vol_window_ms = cfg.pyth.vol_window_hours.saturating_mul(3_600_000);
+    let vol_long_window_ms = cfg.pyth.vol_long_window_hours.saturating_mul(3_600_000);
     let mut markets: Vec<Market> = Vec::with_capacity(underlyings.len());
     for sym in &underlyings {
         let spec = snapshot
@@ -438,10 +519,15 @@ async fn main() -> Result<()> {
             coin_type: protocol_types::asset::canonicalize_move_type(&spec.coin_type),
             feed,
             decimals: spec.decimals,
-            vol_buf: Arc::new(RwLock::new(RollingVolBuffer::new(
-                vol_window_ms,
-                samples_per_year,
-            ))),
+            vol_buf: Arc::new(RwLock::new(RollingVolBuffer::new(vol_window_ms))),
+            vol_buf_long: Arc::new(RwLock::new(RollingVolBuffer::new(vol_long_window_ms))),
+            fallback_vol: cfg
+                .pyth
+                .fallback_vols
+                .get(sym)
+                .copied()
+                .unwrap_or(cfg.pyth.fallback_vol),
+            smile: cfg.smiles.get(sym).copied().unwrap_or(cfg.smile).into(),
         });
     }
     tracing::info!(
@@ -524,7 +610,7 @@ async fn main() -> Result<()> {
             m.symbol.clone(),
             m.feed,
             price_cache.clone(),
-            Arc::clone(&m.vol_buf),
+            vec![Arc::clone(&m.vol_buf), Arc::clone(&m.vol_buf_long)],
         );
     }
 
@@ -557,6 +643,14 @@ async fn main() -> Result<()> {
         quote_ttl_ms: cfg.quote_ttl_ms,
         ask_markup_bps: cfg.ask_markup_bps,
         bid_markdown_bps: cfg.bid_markdown_bps,
+        ask_vol_markup: cfg.ask_vol_markup,
+        bid_vol_markdown: cfg.bid_vol_markdown,
+        ttl_charge_mult: cfg.ttl_charge_mult,
+        fallback_vol_penalty: cfg.fallback_vol_penalty,
+        smile: cfg.smile.into(),
+        max_quote_notional: cfg.max_quote_notional,
+        size_widening_vol: cfg.size_widening_vol,
+        size_ref_notional: cfg.size_ref_notional,
     };
     // api-service client: the bot looks each RFQ's bucket up by address to get
     // its true (strike, expiry, coin types) rather than trusting the broadcast.
@@ -570,6 +664,7 @@ async fn main() -> Result<()> {
     let staleness = Staleness {
         max_price_age: Duration::from_millis(cfg.pyth.max_price_age_ms),
         max_publish_lag: Duration::from_millis(cfg.pyth.max_publish_lag_ms),
+        max_conf_bps: cfg.pyth.max_conf_bps,
     };
 
     // DeepBook quoting loop (SO-158): rest two-sided limit orders on every
@@ -592,6 +687,9 @@ async fn main() -> Result<()> {
                         feed: m.feed,
                         decimals: m.decimals,
                         vol_buf: Arc::clone(&m.vol_buf),
+                        vol_buf_long: Arc::clone(&m.vol_buf_long),
+                        fallback_vol: m.fallback_vol,
+                        smile: m.smile,
                     })
                     .collect();
                 mm_bot::deepbook::spawn_quoter(mm_bot::deepbook::QuoterParams {
@@ -607,7 +705,6 @@ async fn main() -> Result<()> {
                     settlement_decimals,
                     pricing: pricing_cfg,
                     staleness,
-                    fallback_vol: cfg.pyth.fallback_vol,
                     liquidity: Arc::clone(&liquidity),
                 });
                 tracing::info!(markets = cfg.underlying_symbols.len(), "deepbook quoting enabled");
@@ -629,6 +726,9 @@ async fn main() -> Result<()> {
                 feed: m.feed,
                 decimals: m.decimals,
                 vol_buf: Arc::clone(&m.vol_buf),
+                vol_buf_long: Arc::clone(&m.vol_buf_long),
+                fallback_vol: m.fallback_vol,
+                smile: m.smile,
             })
             .collect();
         mm_bot::onchain_rfq::spawn_bidder(mm_bot::onchain_rfq::BidderParams {
@@ -644,7 +744,6 @@ async fn main() -> Result<()> {
             settlement_decimals,
             pricing: pricing_cfg,
             staleness,
-            fallback_vol: cfg.pyth.fallback_vol,
         });
         tracing::info!("onchain rfq bidder enabled");
     }
@@ -661,6 +760,9 @@ async fn main() -> Result<()> {
                 feed: m.feed,
                 decimals: m.decimals,
                 vol_buf: Arc::clone(&m.vol_buf),
+                vol_buf_long: Arc::clone(&m.vol_buf_long),
+                fallback_vol: m.fallback_vol,
+                smile: m.smile,
             })
             .collect();
         mm_bot::onchain_put_rfq::spawn_bidder(mm_bot::onchain_put_rfq::BidderParams {
@@ -676,7 +778,6 @@ async fn main() -> Result<()> {
             settlement_decimals,
             pricing: pricing_cfg,
             staleness,
-            fallback_vol: cfg.pyth.fallback_vol,
         });
         tracing::info!("onchain put rfq bidder enabled");
     }
@@ -693,6 +794,9 @@ async fn main() -> Result<()> {
                 feed: m.feed,
                 decimals: m.decimals,
                 vol_buf: Arc::clone(&m.vol_buf),
+                vol_buf_long: Arc::clone(&m.vol_buf_long),
+                fallback_vol: m.fallback_vol,
+                smile: m.smile,
             })
             .collect();
         mm_bot::onchain_swap::spawn_bidder(mm_bot::onchain_swap::SwapBidderParams {
@@ -928,7 +1032,8 @@ async fn main() -> Result<()> {
                     };
                     let sigma = resolve_sigma(
                         market.vol_buf.read().current_annualized(),
-                        cfg.pyth.fallback_vol,
+                        market.vol_buf_long.read().current_annualized(),
+                        market.fallback_vol,
                     );
 
                     let inputs = RfqPricingInputs {
@@ -939,7 +1044,8 @@ async fn main() -> Result<()> {
                         expiry_ms: bucket.expiry_ms,
                         is_put: bucket.is_put,
                     };
-                    match price_rfq(&pricing_cfg, &inputs, spot_scaled, sigma, now) {
+                    let market_cfg = PricingConfig { smile: market.smile, ..pricing_cfg };
+                    match price_rfq(&market_cfg, &inputs, spot_scaled, sigma, now) {
                         PriceDecision::Quote {
                             premium,
                             valid_until_ms,
@@ -1027,7 +1133,7 @@ async fn main() -> Result<()> {
                     let now = now_ms();
                     // One spot/vol read per market for the whole batch; `None`
                     // where that market's feed is currently stale.
-                    let spots: Vec<Option<(f64, f64)>> = markets
+                    let spots: Vec<Option<(f64, SigmaEstimate, Smile)>> = markets
                         .iter()
                         .map(|m| {
                             match compute_spot_from_cache(
@@ -1042,8 +1148,10 @@ async fn main() -> Result<()> {
                                     spot,
                                     resolve_sigma(
                                         m.vol_buf.read().current_annualized(),
-                                        cfg.pyth.fallback_vol,
+                                        m.vol_buf_long.read().current_annualized(),
+                                        m.fallback_vol,
                                     ),
+                                    m.smile,
                                 )),
                                 Err(_) => None,
                             }
@@ -1065,7 +1173,7 @@ async fn main() -> Result<()> {
                         };
                         // Match the bucket to one of our markets and grab that
                         // market's spot/sigma; skip if unserved or stale.
-                        let Some((spot_scaled, sigma)) = markets
+                        let Some((spot_scaled, sigma, smile)) = markets
                             .iter()
                             .position(|m| {
                                 serves_pair(
@@ -1089,8 +1197,9 @@ async fn main() -> Result<()> {
                             expiry_ms: bucket.expiry_ms,
                             is_put: bucket.is_put,
                         };
+                        let market_cfg = PricingConfig { smile, ..pricing_cfg };
                         if let PriceDecision::Quote { premium, .. } =
-                            price_rfq(&pricing_cfg, &inputs, spot_scaled, sigma, now)
+                            price_rfq(&market_cfg, &inputs, spot_scaled, sigma, now)
                         {
                             premiums.push(BulkViewMmPremium {
                                 bucket_id: *bucket_id,
@@ -1458,7 +1567,7 @@ fn spawn_vol_sampler(
     symbol: String,
     feed: PriceFeedId,
     cache: PriceCache,
-    buf: Arc<RwLock<RollingVolBuffer>>,
+    bufs: Vec<Arc<RwLock<RollingVolBuffer>>>,
 ) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_millis(cfg.vol_sample_interval_ms));
@@ -1478,11 +1587,15 @@ fn spawn_vol_sampler(
             if cp.observed_at.elapsed() > Duration::from_millis(cfg.max_price_age_ms) {
                 continue;
             }
-            buf.write().push(now_ms(), cp.price);
-            if let Some(sigma) = buf.read().current_annualized() {
+            let now = now_ms();
+            for buf in &bufs {
+                buf.write().push(now, cp.price);
+            }
+            if let Some(sigma) = bufs.first().and_then(|b| b.read().current_annualized()) {
                 vol_log_counter += 1;
                 if vol_log_counter % 60 == 1 {
-                    tracing::debug!(sigma, samples = buf.read().len(), "vol updated");
+                    let samples = bufs.first().map(|b| b.read().len()).unwrap_or(0);
+                    tracing::debug!(sigma, samples, "vol updated");
                 }
             }
         }

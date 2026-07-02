@@ -17,11 +17,30 @@ signing_scheme     = "ed25519"
 # `underlying_exclude = [...]` to skip specific tickers.
 settlement_symbol  = "TUSDC"
 
-rate               = 0.05
+rate               = 0.0
 quote_ttl_ms       = 30_000
 
+# Minimum premium-space spread (deep-ITM floor); the primary spread is the
+# vol-space markup/markdown below.
 ask_markup_bps     = 100
 bid_markdown_bps   = 100
+# Vol-space spread: ask at sigma×1.10, bid at sigma×0.90.
+ask_vol_markup     = 1.10
+bid_vol_markdown   = 0.90
+# Last-look charge: |delta|·spot·sigma·√(ttl_years) on the ask / off the bid.
+ttl_charge_mult    = 1.0
+# Extra vol widening while the vol buffer is cold (fallback sigma in use).
+fallback_vol_penalty = 1.25
+
+# Size awareness. max_quote_notional caps any single RFQ's notional
+# (spot x write_amount, settlement smallest-units); 0 = no cap. Size
+# widening adds size_widening_vol of proportional vol spread per
+# size_ref_notional of notional, so big clips pay for the inventory they
+# move. 100_000_000_000 = 100k TUSDC at 6 decimals.
+max_quote_notional = 0
+size_widening_vol  = 0.10
+size_ref_notional  = 100_000_000_000
+
 
 roles = ["trader_mm", "writer_mm"]
 bulk_view_enabled = true
@@ -32,15 +51,33 @@ bootstrap_underlying_amount = 100_000_000_000
 underlying_replenish_threshold    = 20_000_000_000
 underlying_replenish_amount       = 100_000_000_000
 underlying_replenish_interval_secs = 60
+# Strike-dependent vol (see crates/pricing smile.rs): sigma(K) = sigma_atm x
+# (1 + skew*z + convexity*z^2), z = ln(K/S)/(sigma_atm*sqrt(tau)). Flat (0/0)
+# until calibrated from observed quotes; positive skew richens the upside
+# wing, positive convexity richens both wings. Per-symbol overrides:
+#   [smiles.TBTC]
+#   skew = 0.05
+[smile]
+skew      = 0.0
+convexity = 0.0
+
 
 # Live prices come from oracle-service (ORACLE_URL, set in compose). These
 # only tune the consumer-side staleness guards + the rolling-vol sampler.
 [pyth]
 max_price_age_ms       = 5_000
 max_publish_lag_ms     = 10_000
+# Pyth confidence gate, bps of price; 0 = off (observe feeds before enabling).
+max_conf_bps           = 0
+# Short + long realized-vol windows; quoted sigma is max(short, long).
 vol_window_hours       = 24
-vol_sample_interval_ms = 60_000
+vol_long_window_hours  = 168
+# 5-minute sampling (1-minute bars mostly measure oracle jitter).
+vol_sample_interval_ms = 300_000
 fallback_vol           = 0.6
+[pyth.fallback_vols]
+TBTC = 0.45
+TWAL = 1.0
 
 # DeepBook quoting (SO-158): rest two-sided limit orders on every tradeable
 # bucket pool of the configured pair. The bot finds (or creates+registers)

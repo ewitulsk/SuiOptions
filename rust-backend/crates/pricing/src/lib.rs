@@ -13,10 +13,18 @@
 //!                    multiply the per-unit BS price by this to get the
 //!                    quoted premium for the whole RFQ.
 //!
-//! We use Abramowitz-Stegun 26.2.17 for the standard normal CDF — accurate to
-//! ~7e-8, plenty for a test bot.
+//! The standard normal CDF is computed from `libm::erfc`, accurate to ~1 ulp.
+//!
+//! Rate convention: the protocol prices with `r = 0` everywhere (keeper,
+//! api-service, vault-sim, mm-bot). Settlement is a stablecoin with no funded
+//! rate leg, so a nonzero r has nothing to hedge against; r = 0 also makes
+//! these European formulas exact for the protocol's American-exercisable
+//! options (early exercise of a call on a non-yielding asset, or of a put at
+//! r = 0, is never optimal). The `r` parameter stays for tests and for any
+//! future funded-rate use.
 
 pub mod grid;
+pub mod smile;
 
 use tracing::trace;
 
@@ -56,13 +64,25 @@ pub fn call_price_per_unit(i: CallInputs) -> f64 {
 }
 
 /// Scale the per-unit price by the RFQ's `write_amount`, rounded down to a
-/// u64. The MM bot uses this as the premium it quotes back.
+/// u64. The MM bot uses this for the premium it *pays* (bid side); rounding
+/// down never overpays.
 pub fn premium_for_write(per_unit: f64, write_amount: u64) -> u64 {
     let total = per_unit * write_amount as f64;
     if total.is_nan() || total < 0.0 {
         return 0;
     }
     total.floor() as u64
+}
+
+/// Like [`premium_for_write`] but rounded up — for the premium the MM
+/// *charges* (ask side), where rounding down would systematically undercharge
+/// by up to one settlement raw-unit per quote.
+pub fn premium_for_write_ceil(per_unit: f64, write_amount: u64) -> u64 {
+    let total = per_unit * write_amount as f64;
+    if total.is_nan() || total <= 0.0 {
+        return 0;
+    }
+    total.ceil() as u64
 }
 
 /// Analytic call delta N(d1). Edge conventions match `call_price_per_unit`:
@@ -401,22 +421,9 @@ fn norm_pdf(x: f64) -> f64 {
     (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt()
 }
 
-/// Standard normal CDF via Abramowitz-Stegun 26.2.17.
+/// Standard normal CDF: Φ(x) = erfc(−x/√2)/2, ~1 ulp via libm.
 fn norm_cdf(x: f64) -> f64 {
-    // erf approximation; works on the [-∞, ∞] range with reflection.
-    let a1 = 0.254829592;
-    let a2 = -0.284496736;
-    let a3 = 1.421413741;
-    let a4 = -1.453152027;
-    let a5 = 1.061405429;
-    let p = 0.3275911;
-
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x_abs = x.abs() / std::f64::consts::SQRT_2;
-    let t = 1.0 / (1.0 + p * x_abs);
-    let y = 1.0
-        - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x_abs * x_abs).exp();
-    0.5 * (1.0 + sign * y)
+    0.5 * libm::erfc(-x / std::f64::consts::SQRT_2)
 }
 
 #[cfg(test)]
@@ -507,15 +514,15 @@ mod tests {
 
     #[test]
     fn norm_cdf_inv_round_trips_norm_cdf() {
-        // norm_cdf is A-S 26.2.17 (~7e-8 abs error), so the round trip is
-        // bounded by its accuracy, not Acklam's.
+        // norm_cdf is exact to ~1 ulp (libm erfc), so the round trip is
+        // bounded by Acklam's ~1.15e-9 relative error in x.
         let mut x = -6.0;
         while x <= 6.0 {
             let p = norm_cdf(x);
             if p > 0.0 && p < 1.0 {
                 let x_dx_dp = (-x * x / 2.0).exp() / (2.0 * std::f64::consts::PI).sqrt();
                 // Compare in probability space to avoid tail blow-up of dp→dx.
-                close(norm_cdf(norm_cdf_inv(p)), p, 1e-7 + 1e-9 / x_dx_dp.max(1e-12));
+                close(norm_cdf(norm_cdf_inv(p)), p, 1e-12 + 1e-9 / x_dx_dp.max(1e-12));
             }
             x += 0.01;
         }
@@ -532,11 +539,9 @@ mod tests {
 
     #[test]
     fn call_delta_matches_bump_and_reprice() {
-        // Analytic delta vs central finite difference. The agreement floor
-        // is set by the A-S 26.2.17 norm_cdf (~1.5e-7 abs error): its error
-        // term's derivative breaks the exact S·φ(d1) = K·e^{−rτ}·φ(d2)
-        // cancellation by up to ~1e-5, so we test to 2e-5 rather than the
-        // 1e-6 an exact CDF would allow.
+        // Analytic delta vs central finite difference. With the exact
+        // (erfc-based) norm_cdf the agreement floor is the FD truncation
+        // error itself, so 1e-6 holds.
         let cases = [
             (100.0, 100.0, 1.0, 0.05, 0.20),
             (100.0, 130.0, 7.0 / 365.0, 0.0, 0.60),
@@ -549,7 +554,7 @@ mod tests {
             let up = call_price_per_unit(CallInputs { spot: spot + h, ..i });
             let dn = call_price_per_unit(CallInputs { spot: spot - h, ..i });
             let numeric = (up - dn) / (2.0 * h);
-            close(call_delta(i), numeric, 2e-5);
+            close(call_delta(i), numeric, 1e-6);
         }
     }
 
@@ -640,22 +645,41 @@ mod tests {
         assert!((1040..=1050).contains(&hundred));
     }
 
-    /// Finite-difference check with a relative floor: the A-S `norm_cdf`'s
-    /// ~7e-8 absolute error scales with price (and thus with spot), so a
-    /// large-spot vega/rho carries proportionally larger FD noise than the
-    /// flat 2e-4 a small fixture allows. `2e-4 + 2e-4·|expected|` keeps the
-    /// tight floor on near-zero greeks (gamma) while admitting it on big ones.
+    #[test]
+    fn premium_ceil_rounds_up_and_handles_edge_inputs() {
+        let p = call_price_per_unit(CallInputs {
+            spot: 100.0,
+            strike: 100.0,
+            t_years: 1.0,
+            r: 0.05,
+            sigma: 0.20,
+        });
+        // ~10.4506 per unit: floor pays 10, ceil charges 11.
+        assert_eq!(premium_for_write(p, 1), 10);
+        assert_eq!(premium_for_write_ceil(p, 1), 11);
+        // Exact integers don't get bumped.
+        assert_eq!(premium_for_write_ceil(50.0, 2), 100);
+        // Degenerate inputs collapse to zero like the floor variant.
+        assert_eq!(premium_for_write_ceil(0.0, 100), 0);
+        assert_eq!(premium_for_write_ceil(-1.0, 100), 0);
+        assert_eq!(premium_for_write_ceil(f64::NAN, 100), 0);
+    }
+
+    /// Finite-difference check with a relative floor: FD truncation and f64
+    /// cancellation noise scale with the greek's magnitude (and with spot),
+    /// so `1e-5 + 1e-5·|expected|` keeps a tight floor on near-zero greeks
+    /// (gamma) while admitting proportional noise on big ones (vega/rho at
+    /// large spot).
     fn close_greek(a: f64, b: f64) {
-        let eps = 2e-4 + 2e-4 * b.abs();
+        let eps = 1e-5 + 1e-5 * b.abs();
         assert!((a - b).abs() < eps, "{a} vs {b}, eps {eps}");
     }
 
     #[test]
     fn call_greeks_match_bump_and_reprice() {
         // Analytic greeks vs central finite differences on call_price_per_unit.
-        // Tolerance is looser than delta's (2e-5) because gamma is a second
-        // derivative and the A-S norm_cdf error compounds across the higher-
-        // order bumps.
+        // Tolerance is looser than delta's because gamma is a second
+        // derivative and FD noise compounds across the higher-order bumps.
         let cases = [
             (100.0, 100.0, 1.0, 0.05, 0.20),
             (100.0, 130.0, 7.0 / 365.0, 0.0, 0.60),

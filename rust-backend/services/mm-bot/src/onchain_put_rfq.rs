@@ -35,6 +35,8 @@ use crate::onchain_rfq::{
     decide_bid, fetch_auction_view, now_ms, settlement_funding_coin, sui_object_id, AuctionView,
     OnchainRfqConfig,
 };
+use pricing::smile::Smile;
+
 use crate::pricing::{
     compute_spot_from_cache, price_rfq, resolve_sigma, serves_pair, PriceDecision, PricingConfig,
     RfqPricingInputs, Staleness,
@@ -48,6 +50,12 @@ pub struct BidderMarket {
     pub feed: PriceFeedId,
     pub decimals: u8,
     pub vol_buf: Arc<RwLock<RollingVolBuffer>>,
+    /// Long-window buffer; quoted sigma is max(short, long).
+    pub vol_buf_long: Arc<RwLock<RollingVolBuffer>>,
+    /// Sigma used while `vol_buf` is cold (per-symbol config override).
+    pub fallback_vol: f64,
+    /// Vol smile for this underlying (per-symbol config override).
+    pub smile: Smile,
 }
 
 pub struct BidderParams {
@@ -65,7 +73,6 @@ pub struct BidderParams {
     pub settlement_decimals: u8,
     pub pricing: PricingConfig,
     pub staleness: Staleness,
-    pub fallback_vol: f64,
 }
 
 pub fn spawn_bidder(p: BidderParams) {
@@ -178,7 +185,11 @@ async fn tick(
                 continue;
             }
         };
-        let sigma = resolve_sigma(market.vol_buf.read().current_annualized(), p.fallback_vol);
+        let sigma = resolve_sigma(
+            market.vol_buf.read().current_annualized(),
+            market.vol_buf_long.read().current_annualized(),
+            market.fallback_vol,
+        );
         let inputs = RfqPricingInputs {
             write_amount: view.amount,
             side: Side::Writer, // retail/vault is the writer; we buy the put
@@ -187,7 +198,8 @@ async fn tick(
             expiry_ms: bucket.expiry_ms,
             is_put: true,
         };
-        let max_bid = match price_rfq(&p.pricing, &inputs, spot_scaled, sigma, now) {
+        let cfg_m = PricingConfig { smile: market.smile, ..p.pricing };
+        let max_bid = match price_rfq(&cfg_m, &inputs, spot_scaled, sigma, now) {
             PriceDecision::Quote { premium, .. } => premium,
             PriceDecision::Decline { reason } => {
                 tracing::debug!(rfq = %rfq.rfq_id.to_hex(), reason, "declined to price put");

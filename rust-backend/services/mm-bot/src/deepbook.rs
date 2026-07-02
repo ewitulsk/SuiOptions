@@ -47,9 +47,11 @@ use sui_tx::tx::deepbook::{
 };
 
 use crate::liquidity::LiquiditySource;
+use pricing::smile::Smile;
+
 use crate::pricing::{
     compute_spot_from_cache, price_rfq, resolve_sigma, PriceDecision, PricingConfig,
-    RfqPricingInputs, Staleness,
+    RfqPricingInputs, SigmaEstimate, Staleness,
 };
 
 // -- Config ----------------------------------------------------------------
@@ -172,6 +174,12 @@ pub struct QuoterMarket {
     pub feed: PriceFeedId,
     pub decimals: u8,
     pub vol_buf: Arc<RwLock<RollingVolBuffer>>,
+    /// Long-window buffer; quoted sigma is max(short, long).
+    pub vol_buf_long: Arc<RwLock<RollingVolBuffer>>,
+    /// Sigma used while `vol_buf` is cold (per-symbol config override).
+    pub fallback_vol: f64,
+    /// Vol smile for this underlying (per-symbol config override).
+    pub smile: Smile,
 }
 
 /// Everything the quoter task needs, captured at boot.
@@ -189,7 +197,6 @@ pub struct QuoterParams {
     pub settlement_decimals: u8,
     pub pricing: PricingConfig,
     pub staleness: Staleness,
-    pub fallback_vol: f64,
     /// Pulls settlement (and, via the same trait, any coin the bot needs)
     /// before quoting. Defaults to the test-token faucet; a real market maker
     /// swaps in their own funding source.
@@ -444,7 +451,7 @@ async fn cycle(
     // One spot/sigma read per market with buckets this cycle; `None` where
     // that market's feed is currently stale (its pools keep their previous
     // quotes — they self-expire on-chain).
-    let mut spots: HashMap<usize, Option<(f64, f64)>> = HashMap::new();
+    let mut spots: HashMap<usize, Option<(f64, SigmaEstimate)>> = HashMap::new();
     for (_, mi) in &ours {
         spots.entry(*mi).or_insert_with(|| {
             let m = &p.markets[*mi];
@@ -458,7 +465,11 @@ async fn cycle(
             ) {
                 Ok(spot) => Some((
                     spot,
-                    resolve_sigma(m.vol_buf.read().current_annualized(), p.fallback_vol),
+                    resolve_sigma(
+                        m.vol_buf.read().current_annualized(),
+                        m.vol_buf_long.read().current_annualized(),
+                        m.fallback_vol,
+                    ),
                 )),
                 Err(e) => {
                     tracing::warn!(
@@ -528,7 +539,8 @@ async fn cycle(
                 expiry_ms: b.expiry_ms,
                 is_put: false, // deepbook quoting is call-only
             };
-            match price_rfq(&p.pricing, &inputs, *spot_scaled, *sigma, now) {
+            let cfg_m = PricingConfig { smile: p.markets[*mi].smile, ..p.pricing };
+            match price_rfq(&cfg_m, &inputs, *spot_scaled, *sigma, now) {
                 PriceDecision::Quote { per_unit, .. } => Some(per_unit),
                 PriceDecision::Decline { .. } => None,
             }
