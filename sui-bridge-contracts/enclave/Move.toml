@@ -1,0 +1,11 @@
+[package]
+name = "bridge_enclave"
+version = "0.0.1"
+edition = "2024.beta"
+
+# On-chain Nitro-enclave registry for the bridge signer (bridge-spec.md §5,
+# bridge_tickets/07 Phase 3). Adapted from MystenLabs/nautilus
+# move/enclave/sources/enclave.move (Apache-2.0); the attestation verification
+# itself is native in the Sui framework (`sui::nitro_attestation`).
+
+[dependencies]

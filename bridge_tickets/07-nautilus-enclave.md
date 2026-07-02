@@ -1,6 +1,7 @@
 # 07 — Nautilus enclave: run the signer inside AWS Nitro
 
-**Spec:** bridge-spec.md §5.1–§5.4 · **Milestone:** M3 entry · **Status:** not started (needs hardware)
+**Spec:** bridge-spec.md §5.1–§5.4 · **Milestone:** M3 entry · **Status:** IN PROGRESS
+**Landed:** Phase 2 (arm64 CI build/deploy workflow + PCR0 drift gate) and Phase 3 (on-chain enclave registry — `sui-bridge-contracts/enclave/`, 7 Move tests). **Remaining (needs Nitro hardware):** Phase 1 (nautilus port + in-enclave TLS egress), Phase 4 (in-enclave chain view), Phases 5–6 (terraform + lifecycle).
 **Why:** today `bridge-signer-service` is a plain process with curve seeds in config. The spec's trust model requires it to run inside an attested AWS Nitro enclave so that (a) only approved code, registered on-chain, can produce signatures, and (b) the enclave's *chain view* — the §5.4 "was this committed at finality" check — can't be forged by the untrusted host. This ticket is the enclave migration only; Seal-based key provisioning is ticket 08 (this one can boot with a config-injected seed for staging so the two are independently testable).
 
 **Hard prerequisite:** a Nitro-Enclave-capable EC2 instance with `nitro-cli`. The vCPU floor is processor-dependent — **Intel/AMD need ≥4 vCPU** (whole hyperthread pairs are dedicated to the enclave and ≥2 vCPU must remain for the parent → smallest is `*.xlarge`), but **Graviton needs only ≥2 vCPU** (no SMT → 1 parent + 1 enclave → smallest is `*.large`). Bare-metal, T-family burstable (t3/t4g), and single-core instances are excluded regardless. Our signer workload is light (axum + rustls + the §5.4 verifier), so **default to a `c7g.large` (2 vCPU / 4 GB Graviton)** — ample and cheaper than an Intel xlarge. Caveats: the EIF must be built for **aarch64** and **PCRs are arch-specific** (don't mix arches across the signer set); revisit sizing only if in-enclave crypto (ticket 09) turns CPU-heavy. None of this is doable in the dev sandbox.
@@ -50,11 +51,13 @@ Ship the **image pinned by digest** (host `build-enclave`s the same digest → s
 
 **Note on the existing arm backend workflows:** the other services already target arm (cross-compiled or on arm runners), but the enclave EIF is stricter — it needs a *native* arm64 build for reproducibility, so it can't ride an x86-runner + cross-compile path even if the plain services do.
 
-### Phase 3 — On-chain enclave registry (`enclave.move`)
-1. Vendor/port nautilus `enclave.move` into our Sui deployment. It: verifies the attestation's COSE signature chain to the AWS Nitro root cert (stored in the Sui framework), checks PCR0/1/2 against an `EnclaveConfig`, and extracts the `public_key` field.
-2. `EnclaveConfig` (shared, governance-updatable PCRs) + `register_enclave(config, attestation) -> Enclave` creating a per-instance `Enclave` object holding the attested ephemeral pubkey.
-3. **Per-node operator cap:** registration/update of node *i*'s `Enclave` object requires operator *i*'s cap. This cap is the per-node credential the ticket-08 Seal policy binds to (spec §6.5). Custody decision → ticket 10.
-4. `update_enclave` for re-registration after a restart (new ephemeral key) — governance/operator gated, emits an event (alertable, ticket 10).
+### Phase 3 — On-chain enclave registry (`enclave.move`) ✅ LANDED
+Implemented in `sui-bridge-contracts/enclave/` (package `bridge_enclave`), adapted from nautilus `enclave.move` (Apache-2.0); attestation verification is native in the Sui framework (`sui::nitro_attestation`, confirmed present in the 1.71 toolchain).
+1. `enclave::enclave` — `EnclaveConfig<T>` (shared, governance-`Cap`-gated PCRs + version), `register_enclave(config, NitroAttestationDocument)` → per-node `Enclave<T>` object holding the attested ephemeral pubkey; `verify_signature` for enclave-signed intents. ✅
+2. `enclave::signer` — the `BRIDGE_SIGNER` witness + `init` minting the governance `Cap`. ✅
+3. **Bridge additions over upstream:** `update_enclave_pk` re-registers a fresh ephemeral key into the SAME `Enclave` object (stable object id, so the ticket-08 Seal binding survives a restart — §6.4); owner-gated; register/update **events** for ticket-10 alerting; `destroy_old_enclave` version-gated retirement. ✅
+4. **Per-node operator credential:** `Enclave.owner` (the registrant) gates `update_enclave_pk`/`destroy_enclave_by_owner`; custody decision → ticket 10.
+5. **Tested (7 Move tests):** PCR/version + cap gating, owner gating, stale-version retirement, bad-signature rejection, witness-cap minting. **NOT unit-testable here:** the `register_enclave`/`update_enclave_pk` attestation path needs a real `NitroAttestationDocument` (framework-native, real enclave + hardware) — integration-test in Phase 1/6. Test-only `deploy_for_testing` exercises the registry logic without a doc.
 
 ### Phase 4 — Chain view inside the boundary (§5.4)
 1. The ticket-02 `RpcVerifier` runs *in-enclave* with the ≥2-provider quorum, over the in-enclave-TLS transport from Phase 1. Carry forward the two live-run fixes: **bounded `eth_getLogs` lookback** (public RPCs cap the range) and tolerance for public-RPC 500s (retry/failover across the quorum providers).
