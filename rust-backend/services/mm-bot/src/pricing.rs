@@ -9,7 +9,8 @@
 use std::time::Duration;
 
 use pricing::{
-    call_price_per_unit, premium_for_write, premium_for_write_ceil, put_price_per_unit, CallInputs,
+    call_delta, call_price_per_unit, premium_for_write, premium_for_write_ceil, put_delta,
+    put_price_per_unit, CallInputs,
 };
 use protocol_types::asset::canonicalize_move_type;
 use protocol_types::sides::Side;
@@ -22,14 +23,32 @@ pub struct PricingConfig {
     pub rate: f64,
     /// How long the quote we emit stays valid, in milliseconds.
     pub quote_ttl_ms: u64,
-    /// Ask-side markup, in basis points, applied when we quote as the Writer
-    /// MM (retail is buying — `Side::Trader`): the premium we charge is marked
-    /// *up* off the Black-Scholes mid.
+    /// Ask-side *minimum* markup, in basis points of premium, applied when we
+    /// quote as the Writer MM (retail is buying — `Side::Trader`). The
+    /// vol-space spread below usually dominates; this floor is what's left
+    /// deep ITM, where vega ≈ 0 and the vol spread collapses onto the mid.
     pub ask_markup_bps: u64,
-    /// Bid-side markdown, in basis points, applied when we quote as the Trader
-    /// MM (retail is writing — `Side::Writer`): the premium we pay is marked
-    /// *down* off the mid.
+    /// Bid-side *minimum* markdown, in basis points of premium, applied when
+    /// we quote as the Trader MM (retail is writing — `Side::Writer`).
     pub bid_markdown_bps: u64,
+    /// Multiplier (≥ 1) on sigma for the ask leg: we sell options at
+    /// marked-up vol. Spreading in vol space scales the spread with the vega
+    /// actually being warehoused — a flat premium-bps spread is dust far OTM
+    /// and pure intrinsic markup deep ITM. 1.0 disables.
+    pub ask_vol_markup: f64,
+    /// Multiplier (≤ 1) on sigma for the bid leg: we buy options at
+    /// marked-down vol. 1.0 disables.
+    pub bid_vol_markdown: f64,
+    /// Last-look charge: a signed quote is a free option on the market
+    /// moving over its TTL — the counterparty executes only when the move
+    /// favors them. We charge `mult · |delta| · spot · sigma · √(ttl_years)`
+    /// (the expected favorable move, delta-scaled) on the ask and shade it
+    /// off the bid. 0.0 disables.
+    pub ttl_charge_mult: f64,
+    /// Extra vol widening (≥ 1) applied while sigma is the config fallback
+    /// (cold vol buffer): the ask leg's sigma is multiplied and the bid
+    /// leg's divided by this, so quoting blind is quoted wide. 1.0 disables.
+    pub fallback_vol_penalty: f64,
 }
 
 /// The bucket-resolved + request inputs for pricing one RFQ. The bucket fields
@@ -82,13 +101,17 @@ fn apply_spread(per_unit_mid: f64, side: Side, cfg: &PricingConfig) -> f64 {
     per_unit_mid * (1.0 + bps / 10_000.0)
 }
 
-/// Staleness bounds applied when reading Pyth's cache.
+/// Freshness/quality bounds applied when reading Pyth's cache.
 #[derive(Clone, Copy, Debug)]
 pub struct Staleness {
     /// Maximum age of our local observation of a price.
     pub max_price_age: Duration,
     /// Maximum lag between Pyth's publisher timestamp and `now`.
     pub max_publish_lag: Duration,
+    /// Maximum Pyth confidence interval, as basis points of the price:
+    /// decline instead of quoting off a feed that is fresh but unsure of
+    /// itself. 0 disables the check.
+    pub max_conf_bps: u64,
 }
 
 /// Reasons `compute_spot*` can fail. Stable strings so callers can
@@ -99,6 +122,7 @@ pub enum SpotError {
     SettlementStale,
     NonPositivePrice,
     OutOfRange,
+    ConfidenceTooWide,
 }
 
 impl SpotError {
@@ -108,6 +132,7 @@ impl SpotError {
             SpotError::SettlementStale => "settlement price stale or unseen",
             SpotError::NonPositivePrice => "non-positive or non-finite price",
             SpotError::OutOfRange => "scaled spot out of range",
+            SpotError::ConfidenceTooWide => "price confidence too wide",
         }
     }
 }
@@ -168,7 +193,7 @@ pub fn compute_spot_from_prices(
 }
 
 /// Same as [`compute_spot_from_prices`] but reads both feeds out of a
-/// [`PriceCache`], applying staleness bounds.
+/// [`PriceCache`], applying staleness and confidence bounds.
 pub fn compute_spot_from_cache(
     cache: &PriceCache,
     underlying_feed: PriceFeedId,
@@ -183,6 +208,17 @@ pub fn compute_spot_from_cache(
     let s = cache
         .get_fresh(settlement_feed, staleness.max_price_age, staleness.max_publish_lag)
         .ok_or(SpotError::SettlementStale)?;
+    if staleness.max_conf_bps > 0 {
+        // Pyth's conf is the 1-sigma uncertainty of the aggregate price —
+        // exactly the moments (thin books, publisher disagreement) a quote
+        // is most likely to be picked off.
+        let limit = staleness.max_conf_bps as f64 / 10_000.0;
+        for cp in [&u, &s] {
+            if cp.price > 0.0 && cp.conf.is_finite() && cp.conf > cp.price * limit {
+                return Err(SpotError::ConfidenceTooWide);
+            }
+        }
+    }
     compute_spot_from_prices(u.price, s.price, underlying_decimals, settlement_decimals)
 }
 
@@ -212,9 +248,36 @@ pub fn rebase_strike_to_scale_zero(strike: u128, strike_scale: u8) -> f64 {
     strike as f64 / 10f64.powi(strike_scale as i32)
 }
 
-/// Returned sigma is the live realized vol when available, else `fallback`.
-pub fn resolve_sigma(live_sigma: Option<f64>, fallback: f64) -> f64 {
-    live_sigma.unwrap_or(fallback)
+/// A resolved sigma, flagged with whether it is the config fallback (cold
+/// vol buffer) rather than the live estimate — pricing widens the spread
+/// while quoting blind (`PricingConfig::fallback_vol_penalty`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SigmaEstimate {
+    pub sigma: f64,
+    pub is_fallback: bool,
+}
+
+/// Live realized vol when available, else `fallback` (flagged as such).
+pub fn resolve_sigma(live_sigma: Option<f64>, fallback: f64) -> SigmaEstimate {
+    match live_sigma {
+        Some(sigma) => SigmaEstimate { sigma, is_fallback: false },
+        None => SigmaEstimate { sigma: fallback, is_fallback: true },
+    }
+}
+
+const MS_PER_YEAR: f64 = 365.0 * 86_400_000.0;
+
+/// Black-Scholes per-unit value at the given inputs; puts floor at intrinsic
+/// because the on-chain puts are American (put_bucket allows exercise any
+/// time pre-expiry): the European value dips under K − S when r > 0, and an
+/// ask below intrinsic is bought + exercised immediately for a riskless
+/// profit.
+fn per_unit_at(bs: CallInputs, is_put: bool) -> f64 {
+    if is_put {
+        put_price_per_unit(bs).max((bs.strike - bs.spot).max(0.0))
+    } else {
+        call_price_per_unit(bs)
+    }
 }
 
 /// The full per-RFQ decision: compose the arithmetic, then either emit a
@@ -225,29 +288,47 @@ pub fn price_rfq(
     cfg: &PricingConfig,
     inputs: &RfqPricingInputs,
     spot_scaled: f64,
-    sigma: f64,
+    sigma_est: SigmaEstimate,
     now_ms: u64,
 ) -> PriceDecision {
     let t_years = time_to_expiry_years(inputs.expiry_ms, now_ms);
     let strike_scaled = rebase_strike_to_scale_zero(inputs.strike, inputs.strike_scale);
+    let SigmaEstimate { sigma, is_fallback } = sigma_est;
+    // Vol-space spread: the ask leg prices at marked-up sigma, the bid leg at
+    // marked-down sigma; quoting on the fallback sigma widens further.
+    let penalty = if is_fallback { cfg.fallback_vol_penalty.max(1.0) } else { 1.0 };
+    let sigma_side = match inputs.side {
+        Side::Trader => sigma * cfg.ask_vol_markup.max(1.0) * penalty,
+        Side::Writer => sigma * cfg.bid_vol_markdown.clamp(0.0, 1.0) / penalty,
+    };
     // PutInputs == CallInputs; the only difference is which BS leg we evaluate.
-    let bs_inputs = CallInputs {
+    let bs_mid = CallInputs {
         spot: spot_scaled,
         strike: strike_scaled,
         t_years,
         r: cfg.rate,
         sigma,
     };
-    let per_unit_mid = if inputs.is_put {
-        // The on-chain puts are American (put_bucket allows exercise any time
-        // pre-expiry), so the quote can never sit below intrinsic: the
-        // European value dips under K − S when r > 0, and an ask below
-        // intrinsic is bought + exercised immediately for a riskless profit.
-        put_price_per_unit(bs_inputs).max((strike_scaled - spot_scaled).max(0.0))
-    } else {
-        call_price_per_unit(bs_inputs)
+    let per_unit_mid = per_unit_at(bs_mid, inputs.is_put);
+    let per_unit_vol = per_unit_at(CallInputs { sigma: sigma_side, ..bs_mid }, inputs.is_put);
+    // The premium-bps spread is the minimum: it is all that separates the
+    // sides deep ITM, where vega ≈ 0 and the vol spread collapses onto the
+    // mid. Ask takes the larger of the two, bid the smaller.
+    let per_unit_bps = apply_spread(per_unit_mid, inputs.side, cfg);
+    let base = match inputs.side {
+        Side::Trader => per_unit_vol.max(per_unit_bps),
+        Side::Writer => per_unit_vol.min(per_unit_bps),
     };
-    let per_unit = apply_spread(per_unit_mid, inputs.side, cfg);
+    // Last-look charge (see `PricingConfig::ttl_charge_mult`): expected
+    // favorable move over the quote's TTL, delta-scaled.
+    let ttl_years = cfg.quote_ttl_ms as f64 / MS_PER_YEAR;
+    let delta = if inputs.is_put { put_delta(bs_mid) } else { call_delta(bs_mid) };
+    let ttl_charge =
+        cfg.ttl_charge_mult.max(0.0) * delta.abs() * spot_scaled * sigma * ttl_years.sqrt();
+    let per_unit = match inputs.side {
+        Side::Trader => base + ttl_charge,
+        Side::Writer => (base - ttl_charge).max(0.0),
+    };
     // Ask rounds up, bid rounds down: flooring the ask would undercharge by
     // up to one settlement raw-unit per quote.
     let premium = match inputs.side {
@@ -323,6 +404,11 @@ mod tests {
 
     fn close(a: f64, b: f64, eps: f64) {
         assert!((a - b).abs() < eps, "{a} vs {b}, eps {eps}");
+    }
+
+    /// A live (non-fallback) sigma, the default for pricing tests.
+    fn live(sigma: f64) -> SigmaEstimate {
+        SigmaEstimate { sigma, is_fallback: false }
     }
 
     // -- compute_spot_from_prices ---------------------------------------
@@ -401,6 +487,7 @@ mod tests {
         assert_eq!(SpotError::SettlementStale.as_str(), "settlement price stale or unseen");
         assert_eq!(SpotError::NonPositivePrice.as_str(), "non-positive or non-finite price");
         assert_eq!(SpotError::OutOfRange.as_str(), "scaled spot out of range");
+        assert_eq!(SpotError::ConfidenceTooWide.as_str(), "price confidence too wide");
     }
 
     // -- compute_spot_from_cache ----------------------------------------
@@ -427,6 +514,7 @@ mod tests {
         Staleness {
             max_price_age: Duration::from_secs(60),
             max_publish_lag: Duration::from_secs(60),
+            max_conf_bps: 0,
         }
     }
 
@@ -482,6 +570,7 @@ mod tests {
         let staleness = Staleness {
             max_price_age: Duration::from_secs(60),
             max_publish_lag: Duration::from_secs(600),
+            max_conf_bps: 0,
         };
         let e = compute_spot_from_cache(&cache, u, s, 8, 8, staleness).unwrap_err();
         assert_eq!(e, SpotError::UnderlyingStale);
@@ -510,6 +599,7 @@ mod tests {
         let staleness = Staleness {
             max_price_age: Duration::from_secs(600),
             max_publish_lag: Duration::from_secs(60),
+            max_conf_bps: 0,
         };
         let e = compute_spot_from_cache(&cache, u, s, 8, 8, staleness).unwrap_err();
         assert_eq!(e, SpotError::UnderlyingStale);
@@ -526,6 +616,44 @@ mod tests {
         cache.insert(s, cached(1.0));
         let e = compute_spot_from_cache(&cache, u, s, 8, 8, loose_staleness()).unwrap_err();
         assert_eq!(e, SpotError::NonPositivePrice);
+    }
+
+    fn cached_with_conf(price: f64, conf: f64) -> CachedPrice {
+        CachedPrice { conf, ..cached(price) }
+    }
+
+    #[test]
+    fn cache_spot_rejects_wide_confidence() {
+        // Underlying conf = 5% of price; a 100 bps cap must decline it.
+        let cache = PriceCache::new();
+        let u = feed_id(0x01);
+        let s = feed_id(0x02);
+        cache.insert(u, cached_with_conf(60_000.0, 3_000.0));
+        cache.insert(s, cached(1.0));
+        let guarded = Staleness { max_conf_bps: 100, ..loose_staleness() };
+        let e = compute_spot_from_cache(&cache, u, s, 8, 8, guarded).unwrap_err();
+        assert_eq!(e, SpotError::ConfidenceTooWide);
+        // The settlement leg is guarded too.
+        let cache = PriceCache::new();
+        cache.insert(u, cached(60_000.0));
+        cache.insert(s, cached_with_conf(1.0, 0.05));
+        let e = compute_spot_from_cache(&cache, u, s, 8, 8, guarded).unwrap_err();
+        assert_eq!(e, SpotError::ConfidenceTooWide);
+    }
+
+    #[test]
+    fn cache_spot_conf_gate_disabled_and_within_bounds_pass() {
+        let cache = PriceCache::new();
+        let u = feed_id(0x01);
+        let s = feed_id(0x02);
+        cache.insert(u, cached_with_conf(60_000.0, 3_000.0));
+        cache.insert(s, cached(1.0));
+        // max_conf_bps = 0 disables the check entirely.
+        assert!(compute_spot_from_cache(&cache, u, s, 8, 8, loose_staleness()).is_ok());
+        // Conf inside the cap passes: 30 (5 bps) under a 100 bps cap.
+        cache.insert(u, cached_with_conf(60_000.0, 30.0));
+        let guarded = Staleness { max_conf_bps: 100, ..loose_staleness() };
+        assert!(compute_spot_from_cache(&cache, u, s, 8, 8, guarded).is_ok());
     }
 
     // -- time_to_expiry_years -------------------------------------------
@@ -574,12 +702,18 @@ mod tests {
 
     #[test]
     fn sigma_prefers_live() {
-        assert_eq!(resolve_sigma(Some(0.42), 0.6), 0.42);
+        assert_eq!(
+            resolve_sigma(Some(0.42), 0.6),
+            SigmaEstimate { sigma: 0.42, is_fallback: false }
+        );
     }
 
     #[test]
     fn sigma_falls_back() {
-        assert_eq!(resolve_sigma(None, 0.6), 0.6);
+        assert_eq!(
+            resolve_sigma(None, 0.6),
+            SigmaEstimate { sigma: 0.6, is_fallback: true }
+        );
     }
 
     // -- price_rfq ------------------------------------------------------
@@ -590,6 +724,10 @@ mod tests {
             quote_ttl_ms: 30_000,
             ask_markup_bps: 0,
             bid_markdown_bps: 0,
+            ask_vol_markup: 1.0,
+            bid_vol_markdown: 1.0,
+            ttl_charge_mult: 0.0,
+            fallback_vol_penalty: 1.0,
         }
     }
 
@@ -599,7 +737,7 @@ mod tests {
         // `rfq` is trader-side (our ask), which rounds UP → 11.
         let year_ms = 1000 * 86_400 * 365u64;
         let p = rfq(year_ms, 100, 0, 1);
-        let d = price_rfq(&pricing_cfg(), &p, 100.0, 0.20, 0);
+        let d = price_rfq(&pricing_cfg(), &p, 100.0, live(0.20), 0);
         match d {
             PriceDecision::Quote { premium, valid_until_ms, spot_scaled, strike_scaled, t_years, sigma, per_unit } => {
                 assert_eq!(premium, 11);
@@ -618,7 +756,7 @@ mod tests {
     fn price_rfq_declines_when_priced_to_zero() {
         // Spot far below strike, no time → intrinsic = 0 → premium = 0.
         let p = rfq(0, 200, 0, 1_000_000);
-        let d = price_rfq(&pricing_cfg(), &p, 100.0, 0.2, 0);
+        let d = price_rfq(&pricing_cfg(), &p, 100.0, live(0.2), 0);
         match d {
             PriceDecision::Decline { reason } => assert_eq!(reason, "priced to zero"),
             other => panic!("expected Decline, got {other:?}"),
@@ -630,7 +768,7 @@ mod tests {
         // expiry_ms in the past, spot > strike — should price to intrinsic
         // and *not* decline.
         let p = rfq(0, 100, 0, 1);
-        let d = price_rfq(&pricing_cfg(), &p, 150.0, 0.2, 1_000);
+        let d = price_rfq(&pricing_cfg(), &p, 150.0, live(0.2), 1_000);
         match d {
             PriceDecision::Quote { premium, t_years, .. } => {
                 assert_eq!(premium, 50); // intrinsic = 150 - 100, times write=1
@@ -653,8 +791,8 @@ mod tests {
         let p_high = rfq(year_ms, 100_000_000_000_000_000_000u128, 18, 1_000_000);
         let cfg = pricing_cfg();
 
-        let d_low = price_rfq(&cfg, &p_low, 100.0, 0.20, 0);
-        let d_high = price_rfq(&cfg, &p_high, 100.0, 0.20, 0);
+        let d_low = price_rfq(&cfg, &p_low, 100.0, live(0.20), 0);
+        let d_high = price_rfq(&cfg, &p_high, 100.0, live(0.20), 0);
 
         let (low, high) = match (&d_low, &d_high) {
             (
@@ -680,7 +818,7 @@ mod tests {
         // strike=100_000_000, scale=6 → effective strike = 100. With spot 110
         // and zero time, intrinsic = 10 per unit, write 7 → premium 70.
         let p = rfq(0, 100_000_000, 6, 7);
-        let d = price_rfq(&pricing_cfg(), &p, 110.0, 0.2, 0);
+        let d = price_rfq(&pricing_cfg(), &p, 110.0, live(0.2), 0);
         match d {
             PriceDecision::Quote { premium, strike_scaled, .. } => {
                 close(strike_scaled, 100.0, 1e-12);
@@ -696,8 +834,8 @@ mod tests {
         let year_ms = 1000 * 86_400 * 365u64;
         let p1 = rfq(year_ms, 100, 0, 100);
         let p2 = rfq(year_ms, 100, 0, 200);
-        let d1 = price_rfq(&pricing_cfg(), &p1, 100.0, 0.20, 0);
-        let d2 = price_rfq(&pricing_cfg(), &p2, 100.0, 0.20, 0);
+        let d1 = price_rfq(&pricing_cfg(), &p1, 100.0, live(0.20), 0);
+        let d2 = price_rfq(&pricing_cfg(), &p2, 100.0, live(0.20), 0);
         let (a, b) = match (&d1, &d2) {
             (PriceDecision::Quote { premium: a, .. }, PriceDecision::Quote { premium: b, .. }) => (*a, *b),
             _ => panic!("expected two Quotes"),
@@ -710,7 +848,7 @@ mod tests {
     #[test]
     fn price_rfq_valid_until_uses_ttl() {
         let p = rfq(0, 100, 0, 1);
-        let d = price_rfq(&pricing_cfg(), &p, 150.0, 0.2, 10_000);
+        let d = price_rfq(&pricing_cfg(), &p, 150.0, live(0.2), 10_000);
         match d {
             PriceDecision::Quote { valid_until_ms, .. } => {
                 assert_eq!(valid_until_ms, 40_000); // 10_000 + ttl 30_000
@@ -730,8 +868,12 @@ mod tests {
             quote_ttl_ms: 30_000,
             ask_markup_bps: 0,
             bid_markdown_bps: 0,
+            ask_vol_markup: 1.0,
+            bid_vol_markdown: 1.0,
+            ttl_charge_mult: 0.0,
+            fallback_vol_penalty: 1.0,
         };
-        let d = price_rfq(&cfg, &p, 110.0, 0.0, 0);
+        let d = price_rfq(&cfg, &p, 110.0, live(0.0), 0);
         match d {
             PriceDecision::Quote { premium, .. } => assert_eq!(premium, 10),
             _ => panic!("expected Quote"),
@@ -746,7 +888,7 @@ mod tests {
         // rounds UP → 6.
         let year_ms = 1000 * 86_400 * 365u64;
         let p = put_rfq(Side::Trader, year_ms, 100, 0, 1);
-        let d = price_rfq(&pricing_cfg(), &p, 100.0, 0.20, 0);
+        let d = price_rfq(&pricing_cfg(), &p, 100.0, live(0.20), 0);
         match d {
             PriceDecision::Quote { premium, per_unit, .. } => {
                 assert_eq!(premium, 6);
@@ -767,14 +909,14 @@ mod tests {
             &pricing_cfg(),
             &put_rfq(Side::Trader, year_ms, 100, 0, 1_000_000),
             60.0,
-            0.20,
+            live(0.20),
             0,
         ));
         let bid = premium_of(&price_rfq(
             &pricing_cfg(),
             &put_rfq(Side::Writer, year_ms, 100, 0, 1_000_000),
             60.0,
-            0.20,
+            live(0.20),
             0,
         ));
         let intrinsic_total = 40 * 1_000_000u64;
@@ -787,12 +929,12 @@ mod tests {
         // Spot well above strike: the call is deep ITM, the put deep OTM, so
         // the same inputs must price very differently across the two legs.
         let year_ms = 1000 * 86_400 * 365u64;
-        let call = price_rfq(&pricing_cfg(), &rfq(year_ms, 100, 0, 1_000_000), 150.0, 0.20, 0);
+        let call = price_rfq(&pricing_cfg(), &rfq(year_ms, 100, 0, 1_000_000), 150.0, live(0.20), 0);
         let put = price_rfq(
             &pricing_cfg(),
             &put_rfq(Side::Trader, year_ms, 100, 0, 1_000_000),
             150.0,
-            0.20,
+            live(0.20),
             0,
         );
         assert!(premium_of(&call) > premium_of(&put), "{call:?} vs {put:?}");
@@ -802,7 +944,7 @@ mod tests {
     fn price_rfq_put_expired_prices_to_intrinsic() {
         // Expired put, spot below strike → intrinsic = K - S per unit.
         let p = put_rfq(Side::Trader, 0, 100, 0, 1);
-        let d = price_rfq(&pricing_cfg(), &p, 60.0, 0.2, 1_000);
+        let d = price_rfq(&pricing_cfg(), &p, 60.0, live(0.2), 1_000);
         match d {
             PriceDecision::Quote { premium, t_years, .. } => {
                 assert_eq!(premium, 40); // 100 - 60
@@ -822,26 +964,30 @@ mod tests {
             quote_ttl_ms: 30_000,
             ask_markup_bps: 100,
             bid_markdown_bps: 200,
+            ask_vol_markup: 1.0,
+            bid_vol_markdown: 1.0,
+            ttl_charge_mult: 0.0,
+            fallback_vol_penalty: 1.0,
         };
         let mid = premium_of(&price_rfq(
             &pricing_cfg(),
             &put_rfq(Side::Trader, year_ms, 100, 0, 1_000_000),
             100.0,
-            0.20,
+            live(0.20),
             0,
         ));
         let ask = premium_of(&price_rfq(
             &cfg,
             &put_rfq(Side::Trader, year_ms, 100, 0, 1_000_000),
             100.0,
-            0.20,
+            live(0.20),
             0,
         ));
         let bid = premium_of(&price_rfq(
             &cfg,
             &put_rfq(Side::Writer, year_ms, 100, 0, 1_000_000),
             100.0,
-            0.20,
+            live(0.20),
             0,
         ));
         assert!(ask > mid, "ask {ask} should exceed mid {mid}");
@@ -888,20 +1034,24 @@ mod tests {
             quote_ttl_ms: 30_000,
             ask_markup_bps: 100,
             bid_markdown_bps: 200,
+            ask_vol_markup: 1.0,
+            bid_vol_markdown: 1.0,
+            ttl_charge_mult: 0.0,
+            fallback_vol_penalty: 1.0,
         };
-        let mid = premium_of(&price_rfq(&pricing_cfg(), &rfq(year_ms, 100, 0, 1_000_000), 100.0, 0.20, 0));
+        let mid = premium_of(&price_rfq(&pricing_cfg(), &rfq(year_ms, 100, 0, 1_000_000), 100.0, live(0.20), 0));
         let ask = premium_of(&price_rfq(
             &cfg,
             &rfq_side(Side::Trader, year_ms, 100, 0, 1_000_000),
             100.0,
-            0.20,
+            live(0.20),
             0,
         ));
         let bid = premium_of(&price_rfq(
             &cfg,
             &rfq_side(Side::Writer, year_ms, 100, 0, 1_000_000),
             100.0,
-            0.20,
+            live(0.20),
             0,
         ));
         assert!(ask > mid, "ask {ask} should exceed mid {mid}");
@@ -921,16 +1071,156 @@ mod tests {
             &pricing_cfg(),
             &rfq_side(Side::Trader, year_ms, 100, 0, 1_000_000),
             100.0,
-            0.20,
+            live(0.20),
             0,
         ));
         let bid = premium_of(&price_rfq(
             &pricing_cfg(),
             &rfq_side(Side::Writer, year_ms, 100, 0, 1_000_000),
             100.0,
-            0.20,
+            live(0.20),
             0,
         ));
         assert!(ask >= bid && ask - bid <= 1, "ask {ask}, bid {bid}");
+    }
+
+    // -- vol-space spread, TTL charge, fallback penalty -------------------
+
+    /// ATM weekly option sized so vega is meaningful; used by the spread tests.
+    fn weekly_atm() -> (RfqPricingInputs, RfqPricingInputs, f64) {
+        let week_ms = 1000 * 86_400 * 7u64;
+        (
+            rfq_side(Side::Trader, week_ms, 100, 0, 1_000_000),
+            rfq_side(Side::Writer, week_ms, 100, 0, 1_000_000),
+            100.0,
+        )
+    }
+
+    #[test]
+    fn vol_markup_widens_ask_and_markdown_widens_bid() {
+        let (ask_rfq, bid_rfq, spot) = weekly_atm();
+        let flat = pricing_cfg();
+        let vol_spread = PricingConfig {
+            ask_vol_markup: 1.10,
+            bid_vol_markdown: 0.90,
+            ..pricing_cfg()
+        };
+        let ask_flat = premium_of(&price_rfq(&flat, &ask_rfq, spot, live(0.60), 0));
+        let bid_flat = premium_of(&price_rfq(&flat, &bid_rfq, spot, live(0.60), 0));
+        let ask_vol = premium_of(&price_rfq(&vol_spread, &ask_rfq, spot, live(0.60), 0));
+        let bid_vol = premium_of(&price_rfq(&vol_spread, &bid_rfq, spot, live(0.60), 0));
+        assert!(ask_vol > ask_flat, "ask {ask_vol} !> {ask_flat}");
+        assert!(bid_vol < bid_flat, "bid {bid_vol} !< {bid_flat}");
+        // ATM the premium is ≈ linear in sigma, so a 10% vol markup moves the
+        // ask by ≈ 10% — far more than a 100bps premium floor would.
+        assert!(ask_vol as f64 > ask_flat as f64 * 1.05, "{ask_vol} vs {ask_flat}");
+    }
+
+    #[test]
+    fn bps_floor_survives_deep_itm_where_vol_spread_collapses() {
+        // Deep ITM call: premium ≈ intrinsic, vega ≈ 0, so the vol spread
+        // alone would quote both sides at ≈ mid. The bps floor must keep the
+        // book two-sided.
+        let year_ms = 1000 * 86_400 * 365u64;
+        let cfg = PricingConfig {
+            ask_markup_bps: 100,
+            bid_markdown_bps: 100,
+            ask_vol_markup: 1.10,
+            bid_vol_markdown: 0.90,
+            ..pricing_cfg()
+        };
+        let ask = premium_of(&price_rfq(
+            &cfg,
+            &rfq_side(Side::Trader, year_ms, 10, 0, 1_000_000),
+            100.0,
+            live(0.05),
+            0,
+        ));
+        let bid = premium_of(&price_rfq(
+            &cfg,
+            &rfq_side(Side::Writer, year_ms, 10, 0, 1_000_000),
+            100.0,
+            live(0.05),
+            0,
+        ));
+        let mid = premium_of(&price_rfq(
+            &pricing_cfg(),
+            &rfq_side(Side::Trader, year_ms, 10, 0, 1_000_000),
+            100.0,
+            live(0.05),
+            0,
+        ));
+        // Ask at least the 100bps floor above mid; bid at least 100bps below.
+        assert!(ask as f64 >= mid as f64 * 1.0099, "ask {ask} vs mid {mid}");
+        assert!(bid as f64 <= mid as f64 * 0.9901, "bid {bid} vs mid {mid}");
+    }
+
+    #[test]
+    fn ttl_charge_widens_both_sides_monotonically() {
+        let (ask_rfq, bid_rfq, spot) = weekly_atm();
+        let no_charge = pricing_cfg();
+        let charged = PricingConfig { ttl_charge_mult: 1.0, ..pricing_cfg() };
+        let more_charged = PricingConfig { ttl_charge_mult: 2.0, ..pricing_cfg() };
+        let ask0 = premium_of(&price_rfq(&no_charge, &ask_rfq, spot, live(0.60), 0));
+        let ask1 = premium_of(&price_rfq(&charged, &ask_rfq, spot, live(0.60), 0));
+        let ask2 = premium_of(&price_rfq(&more_charged, &ask_rfq, spot, live(0.60), 0));
+        assert!(ask0 < ask1 && ask1 < ask2, "{ask0} {ask1} {ask2}");
+        let bid0 = premium_of(&price_rfq(&no_charge, &bid_rfq, spot, live(0.60), 0));
+        let bid1 = premium_of(&price_rfq(&charged, &bid_rfq, spot, live(0.60), 0));
+        assert!(bid1 < bid0, "{bid1} !< {bid0}");
+        // Sanity on magnitude: |delta|·S·σ·√ttl at 30s TTL, σ=0.6, ATM
+        // delta ≈ 0.5 → ≈ 100·0.5·0.6·√(30/31.5M) ≈ 0.029 per unit ≈ 29k
+        // on 1M written. The charge must be in that ballpark, not 100x off.
+        let widened = ask1 - ask0;
+        assert!((10_000..=60_000).contains(&widened), "ttl charge {widened}");
+    }
+
+    #[test]
+    fn fallback_sigma_quotes_wider_than_live() {
+        let (ask_rfq, bid_rfq, spot) = weekly_atm();
+        let cfg = PricingConfig { fallback_vol_penalty: 1.5, ..pricing_cfg() };
+        let fallback = SigmaEstimate { sigma: 0.60, is_fallback: true };
+        let ask_live = premium_of(&price_rfq(&cfg, &ask_rfq, spot, live(0.60), 0));
+        let ask_blind = premium_of(&price_rfq(&cfg, &ask_rfq, spot, fallback, 0));
+        let bid_live = premium_of(&price_rfq(&cfg, &bid_rfq, spot, live(0.60), 0));
+        let bid_blind = premium_of(&price_rfq(&cfg, &bid_rfq, spot, fallback, 0));
+        assert!(ask_blind > ask_live, "{ask_blind} !> {ask_live}");
+        assert!(bid_blind < bid_live, "{bid_blind} !< {bid_live}");
+        // Penalty below 1 must not tighten the quote (clamped to neutral).
+        let tightening = PricingConfig { fallback_vol_penalty: 0.5, ..pricing_cfg() };
+        let ask_clamped = premium_of(&price_rfq(&tightening, &ask_rfq, spot, fallback, 0));
+        let ask_neutral = premium_of(&price_rfq(&pricing_cfg(), &ask_rfq, spot, live(0.60), 0));
+        assert_eq!(ask_clamped, ask_neutral);
+    }
+
+    #[test]
+    fn neutral_knobs_reproduce_bps_only_pricing() {
+        // Regression guard: with the new knobs at their neutral values the
+        // premium must be exactly what the pre-overhaul bps-only model
+        // produced (mid ± bps, ask ceiled / bid floored).
+        let (ask_rfq, bid_rfq, spot) = weekly_atm();
+        let cfg = PricingConfig {
+            ask_markup_bps: 100,
+            bid_markdown_bps: 200,
+            ..pricing_cfg()
+        };
+        let sigma = 0.60;
+        let mid = pricing::call_price_per_unit(CallInputs {
+            spot,
+            strike: 100.0,
+            t_years: time_to_expiry_years(ask_rfq.expiry_ms, 0),
+            r: cfg.rate,
+            sigma,
+        });
+        let expected_ask = premium_for_write_ceil(mid * 1.01, 1_000_000);
+        let expected_bid = premium_for_write(mid * 0.98, 1_000_000);
+        assert_eq!(
+            premium_of(&price_rfq(&cfg, &ask_rfq, spot, live(sigma), 0)),
+            expected_ask
+        );
+        assert_eq!(
+            premium_of(&price_rfq(&cfg, &bid_rfq, spot, live(sigma), 0)),
+            expected_bid
+        );
     }
 }

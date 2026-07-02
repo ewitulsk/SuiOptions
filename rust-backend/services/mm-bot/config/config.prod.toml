@@ -20,8 +20,17 @@ settlement_symbol  = "TUSDC"
 rate               = 0.0
 quote_ttl_ms       = 30_000
 
+# Minimum premium-space spread (deep-ITM floor); the primary spread is the
+# vol-space markup/markdown below.
 ask_markup_bps     = 100
 bid_markdown_bps   = 100
+# Vol-space spread: ask at sigma×1.10, bid at sigma×0.90.
+ask_vol_markup     = 1.10
+bid_vol_markdown   = 0.90
+# Last-look charge: |delta|·spot·sigma·√(ttl_years) on the ask / off the bid.
+ttl_charge_mult    = 1.0
+# Extra vol widening while the vol buffer is cold (fallback sigma in use).
+fallback_vol_penalty = 1.25
 
 roles = ["trader_mm", "writer_mm"]
 bulk_view_enabled = true
@@ -38,9 +47,14 @@ underlying_replenish_interval_secs = 60
 [pyth]
 max_price_age_ms       = 5_000
 max_publish_lag_ms     = 10_000
+# Pyth confidence gate, bps of price; 0 = off (observe feeds before enabling).
+max_conf_bps           = 0
 vol_window_hours       = 24
 vol_sample_interval_ms = 60_000
 fallback_vol           = 0.6
+[pyth.fallback_vols]
+TBTC = 0.45
+TWAL = 1.0
 
 # DeepBook quoting (SO-158): rest two-sided limit orders on every tradeable
 # bucket pool of the configured pair. The bot finds (or creates+registers)

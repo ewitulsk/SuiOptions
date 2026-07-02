@@ -38,12 +38,25 @@ rate               = 0.0
 # How long the bot's signed quotes stay valid.
 quote_ttl_ms       = 30_000
 
-# Two-sided spread off the Black-Scholes mid, in basis points. We serve both
-# sides from one Account, so the spread is what makes the book two-sided:
-#   ask_markup_bps   — marked UP when we write to a retail trader (Side::Trader)
-#   bid_markdown_bps — marked DOWN when we buy from a retail writer (Side::Writer)
+# Two-sided spread. The primary spread is in VOL space — the ask leg prices
+# at sigma × ask_vol_markup, the bid leg at sigma × bid_vol_markdown — so the
+# spread scales with the vega being warehoused. The bps knobs are the
+# *minimum* premium-space spread, all that separates the sides deep ITM where
+# vega ≈ 0.
 ask_markup_bps     = 100
 bid_markdown_bps   = 100
+ask_vol_markup     = 1.10
+bid_vol_markdown   = 0.90
+
+# Last-look charge: a signed quote is a free 30s option for the taker (they
+# execute only when the market moved their way during the TTL). Charge the
+# expected favorable move — mult × |delta|·spot·sigma·√(ttl_years) — on the
+# ask, and shade it off the bid. 0.0 disables.
+ttl_charge_mult    = 1.0
+
+# Extra vol widening while quoting on the fallback sigma (vol buffer still
+# cold): ask sigma ×= this, bid sigma ÷= this. 1.0 disables.
+fallback_vol_penalty = 1.25
 
 # Both roles by default; a single Account can serve writer + trader.
 roles = ["trader_mm", "writer_mm"]
@@ -86,13 +99,21 @@ max_price_age_ms       = 5_000
 # Reject if Pyth's publisher timestamp is older than this. Catches the
 # case where the stream is alive but Pyth itself isn't publishing.
 max_publish_lag_ms     = 10_000
+# Reject if either feed's Pyth confidence interval exceeds this many bps of
+# its price — fresh-but-unsure feeds are when quotes get picked off. 0 = off;
+# observe conf/price on our feeds before enabling.
+max_conf_bps           = 0
 # Rolling window for realized vol.
 vol_window_hours       = 24
 # Live-cache sample cadence into the vol buffer. Annualization uses the
 # samples' actual timestamps, so skipped ticks don't bias sigma.
 vol_sample_interval_ms = 60_000
 # Sigma used until the buffer has enough samples, then live takes over.
+# Per-symbol overrides below; this is the default for anything unlisted.
 fallback_vol           = 0.6
+[pyth.fallback_vols]
+TBTC = 0.45
+TWAL = 1.0
 
 # DeepBook quoting (SO-158). Off by default for local runs — flip on once
 # the local stack serves deepbook ids from token-info.

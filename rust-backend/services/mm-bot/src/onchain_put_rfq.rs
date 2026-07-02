@@ -48,6 +48,8 @@ pub struct BidderMarket {
     pub feed: PriceFeedId,
     pub decimals: u8,
     pub vol_buf: Arc<RwLock<RollingVolBuffer>>,
+    /// Sigma used while `vol_buf` is cold (per-symbol config override).
+    pub fallback_vol: f64,
 }
 
 pub struct BidderParams {
@@ -65,7 +67,6 @@ pub struct BidderParams {
     pub settlement_decimals: u8,
     pub pricing: PricingConfig,
     pub staleness: Staleness,
-    pub fallback_vol: f64,
 }
 
 pub fn spawn_bidder(p: BidderParams) {
@@ -178,7 +179,7 @@ async fn tick(
                 continue;
             }
         };
-        let sigma = resolve_sigma(market.vol_buf.read().current_annualized(), p.fallback_vol);
+        let sigma = resolve_sigma(market.vol_buf.read().current_annualized(), market.fallback_vol);
         let inputs = RfqPricingInputs {
             write_amount: view.amount,
             side: Side::Writer, // retail/vault is the writer; we buy the put
