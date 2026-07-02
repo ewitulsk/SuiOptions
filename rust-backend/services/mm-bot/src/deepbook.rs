@@ -172,6 +172,8 @@ pub struct QuoterMarket {
     pub feed: PriceFeedId,
     pub decimals: u8,
     pub vol_buf: Arc<RwLock<RollingVolBuffer>>,
+    /// Long-window buffer; quoted sigma is max(short, long).
+    pub vol_buf_long: Arc<RwLock<RollingVolBuffer>>,
     /// Sigma used while `vol_buf` is cold (per-symbol config override).
     pub fallback_vol: f64,
 }
@@ -459,7 +461,11 @@ async fn cycle(
             ) {
                 Ok(spot) => Some((
                     spot,
-                    resolve_sigma(m.vol_buf.read().current_annualized(), m.fallback_vol),
+                    resolve_sigma(
+                        m.vol_buf.read().current_annualized(),
+                        m.vol_buf_long.read().current_annualized(),
+                        m.fallback_vol,
+                    ),
                 )),
                 Err(e) => {
                     tracing::warn!(

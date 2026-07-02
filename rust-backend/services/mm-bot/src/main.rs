@@ -231,8 +231,13 @@ struct PythConfig {
     /// many basis points of its price — a fresh feed that is unsure of
     /// itself is exactly when quotes get picked off. 0 disables.
     max_conf_bps: u64,
-    /// Rolling window (in hours) used to compute realized vol.
+    /// Rolling window (in hours) used to compute realized vol — the short,
+    /// regime-tracking window.
     vol_window_hours: u64,
+    /// Long realized-vol window (in hours). The quoted sigma is the max of
+    /// the two windows, so one calm day can't undercut what the trailing
+    /// week actually realized. Default 168 (7d).
+    vol_long_window_hours: u64,
     /// How often the live cache is sampled into the vol buffer. The vol
     /// estimate annualizes from the samples' actual timestamps, so skipped
     /// ticks (stale stream) don't bias it.
@@ -252,7 +257,8 @@ impl Default for PythConfig {
             max_publish_lag_ms: 10_000,
             max_conf_bps: 0,
             vol_window_hours: 24,
-            vol_sample_interval_ms: 60_000,
+            vol_long_window_hours: 168,
+            vol_sample_interval_ms: 300_000,
             fallback_vol: 0.6,
             fallback_vols: HashMap::new(),
         }
@@ -310,8 +316,10 @@ struct Market {
     coin_type: String,
     feed: PriceFeedId,
     decimals: u8,
-    /// Realized-vol buffer fed from this underlying's USD price.
+    /// Short-window realized-vol buffer fed from this underlying's USD price.
     vol_buf: Arc<RwLock<RollingVolBuffer>>,
+    /// Long-window buffer (same samples); quoted sigma is max(short, long).
+    vol_buf_long: Arc<RwLock<RollingVolBuffer>>,
     /// Sigma used while `vol_buf` is cold: the per-symbol override from
     /// `[pyth].fallback_vols`, else the global `fallback_vol`.
     fallback_vol: f64,
@@ -459,6 +467,7 @@ async fn main() -> Result<()> {
     // Build one Market per underlying. Vol buffers are created here; their
     // sampler tasks are spawned once the Pyth subscriber is up (below).
     let vol_window_ms = cfg.pyth.vol_window_hours.saturating_mul(3_600_000);
+    let vol_long_window_ms = cfg.pyth.vol_long_window_hours.saturating_mul(3_600_000);
     let mut markets: Vec<Market> = Vec::with_capacity(underlyings.len());
     for sym in &underlyings {
         let spec = snapshot
@@ -474,6 +483,7 @@ async fn main() -> Result<()> {
             feed,
             decimals: spec.decimals,
             vol_buf: Arc::new(RwLock::new(RollingVolBuffer::new(vol_window_ms))),
+            vol_buf_long: Arc::new(RwLock::new(RollingVolBuffer::new(vol_long_window_ms))),
             fallback_vol: cfg
                 .pyth
                 .fallback_vols
@@ -562,7 +572,7 @@ async fn main() -> Result<()> {
             m.symbol.clone(),
             m.feed,
             price_cache.clone(),
-            Arc::clone(&m.vol_buf),
+            vec![Arc::clone(&m.vol_buf), Arc::clone(&m.vol_buf_long)],
         );
     }
 
@@ -635,6 +645,7 @@ async fn main() -> Result<()> {
                         feed: m.feed,
                         decimals: m.decimals,
                         vol_buf: Arc::clone(&m.vol_buf),
+                        vol_buf_long: Arc::clone(&m.vol_buf_long),
                         fallback_vol: m.fallback_vol,
                     })
                     .collect();
@@ -672,6 +683,7 @@ async fn main() -> Result<()> {
                 feed: m.feed,
                 decimals: m.decimals,
                 vol_buf: Arc::clone(&m.vol_buf),
+                vol_buf_long: Arc::clone(&m.vol_buf_long),
                 fallback_vol: m.fallback_vol,
             })
             .collect();
@@ -704,6 +716,7 @@ async fn main() -> Result<()> {
                 feed: m.feed,
                 decimals: m.decimals,
                 vol_buf: Arc::clone(&m.vol_buf),
+                vol_buf_long: Arc::clone(&m.vol_buf_long),
                 fallback_vol: m.fallback_vol,
             })
             .collect();
@@ -736,6 +749,7 @@ async fn main() -> Result<()> {
                 feed: m.feed,
                 decimals: m.decimals,
                 vol_buf: Arc::clone(&m.vol_buf),
+                vol_buf_long: Arc::clone(&m.vol_buf_long),
                 fallback_vol: m.fallback_vol,
             })
             .collect();
@@ -972,6 +986,7 @@ async fn main() -> Result<()> {
                     };
                     let sigma = resolve_sigma(
                         market.vol_buf.read().current_annualized(),
+                        market.vol_buf_long.read().current_annualized(),
                         market.fallback_vol,
                     );
 
@@ -1086,6 +1101,7 @@ async fn main() -> Result<()> {
                                     spot,
                                     resolve_sigma(
                                         m.vol_buf.read().current_annualized(),
+                                        m.vol_buf_long.read().current_annualized(),
                                         m.fallback_vol,
                                     ),
                                 )),
@@ -1502,7 +1518,7 @@ fn spawn_vol_sampler(
     symbol: String,
     feed: PriceFeedId,
     cache: PriceCache,
-    buf: Arc<RwLock<RollingVolBuffer>>,
+    bufs: Vec<Arc<RwLock<RollingVolBuffer>>>,
 ) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_millis(cfg.vol_sample_interval_ms));
@@ -1522,11 +1538,15 @@ fn spawn_vol_sampler(
             if cp.observed_at.elapsed() > Duration::from_millis(cfg.max_price_age_ms) {
                 continue;
             }
-            buf.write().push(now_ms(), cp.price);
-            if let Some(sigma) = buf.read().current_annualized() {
+            let now = now_ms();
+            for buf in &bufs {
+                buf.write().push(now, cp.price);
+            }
+            if let Some(sigma) = bufs.first().and_then(|b| b.read().current_annualized()) {
                 vol_log_counter += 1;
                 if vol_log_counter % 60 == 1 {
-                    tracing::debug!(sigma, samples = buf.read().len(), "vol updated");
+                    let samples = bufs.first().map(|b| b.read().len()).unwrap_or(0);
+                    tracing::debug!(sigma, samples, "vol updated");
                 }
             }
         }

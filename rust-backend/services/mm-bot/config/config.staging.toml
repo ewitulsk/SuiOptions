@@ -45,8 +45,11 @@ max_price_age_ms       = 5_000
 max_publish_lag_ms     = 10_000
 # Pyth confidence gate, bps of price; 0 = off (observe feeds before enabling).
 max_conf_bps           = 0
+# Short + long realized-vol windows; quoted sigma is max(short, long).
 vol_window_hours       = 24
-vol_sample_interval_ms = 60_000
+vol_long_window_hours  = 168
+# 5-minute sampling (1-minute bars mostly measure oracle jitter).
+vol_sample_interval_ms = 300_000
 fallback_vol           = 0.6
 [pyth.fallback_vols]
 TBTC = 0.45

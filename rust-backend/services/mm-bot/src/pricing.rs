@@ -258,10 +258,20 @@ pub struct SigmaEstimate {
 }
 
 /// Live realized vol when available, else `fallback` (flagged as such).
-pub fn resolve_sigma(live_sigma: Option<f64>, fallback: f64) -> SigmaEstimate {
-    match live_sigma {
-        Some(sigma) => SigmaEstimate { sigma, is_fallback: false },
-        None => SigmaEstimate { sigma: fallback, is_fallback: true },
+/// Two live windows feed in — a short one that tracks the current regime and
+/// a long one that remembers it — and the max wins: one calm day must not
+/// sell options below what the trailing week actually realized.
+pub fn resolve_sigma(
+    live_short: Option<f64>,
+    live_long: Option<f64>,
+    fallback: f64,
+) -> SigmaEstimate {
+    match (live_short, live_long) {
+        (None, None) => SigmaEstimate { sigma: fallback, is_fallback: true },
+        (short, long) => SigmaEstimate {
+            sigma: short.unwrap_or(0.0).max(long.unwrap_or(0.0)),
+            is_fallback: false,
+        },
     }
 }
 
@@ -703,7 +713,7 @@ mod tests {
     #[test]
     fn sigma_prefers_live() {
         assert_eq!(
-            resolve_sigma(Some(0.42), 0.6),
+            resolve_sigma(Some(0.42), None, 0.6),
             SigmaEstimate { sigma: 0.42, is_fallback: false }
         );
     }
@@ -711,8 +721,27 @@ mod tests {
     #[test]
     fn sigma_falls_back() {
         assert_eq!(
-            resolve_sigma(None, 0.6),
+            resolve_sigma(None, None, 0.6),
             SigmaEstimate { sigma: 0.6, is_fallback: true }
+        );
+    }
+
+    #[test]
+    fn sigma_blends_windows_by_max() {
+        // Calm day (short 0.3) after a wild week (long 0.9): quote the week.
+        assert_eq!(
+            resolve_sigma(Some(0.3), Some(0.9), 0.6),
+            SigmaEstimate { sigma: 0.9, is_fallback: false }
+        );
+        // Wild day after a calm week: quote the day.
+        assert_eq!(
+            resolve_sigma(Some(0.9), Some(0.3), 0.6),
+            SigmaEstimate { sigma: 0.9, is_fallback: false }
+        );
+        // One live window is enough to count as live.
+        assert_eq!(
+            resolve_sigma(None, Some(0.5), 0.6),
+            SigmaEstimate { sigma: 0.5, is_fallback: false }
         );
     }
 

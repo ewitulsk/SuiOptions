@@ -103,11 +103,14 @@ max_publish_lag_ms     = 10_000
 # its price — fresh-but-unsure feeds are when quotes get picked off. 0 = off;
 # observe conf/price on our feeds before enabling.
 max_conf_bps           = 0
-# Rolling window for realized vol.
+# Short rolling window for realized vol; the quoted sigma is
+# max(short, long) so one calm day can't undercut the trailing week.
 vol_window_hours       = 24
-# Live-cache sample cadence into the vol buffer. Annualization uses the
-# samples' actual timestamps, so skipped ticks don't bias sigma.
-vol_sample_interval_ms = 60_000
+vol_long_window_hours  = 168
+# Live-cache sample cadence into the vol buffers. Annualization uses the
+# samples' actual timestamps, so skipped ticks don't bias sigma. 5-minute
+# sampling: 1-minute bars mostly measure oracle jitter, not diffusion.
+vol_sample_interval_ms = 300_000
 # Sigma used until the buffer has enough samples, then live takes over.
 # Per-symbol overrides below; this is the default for anything unlisted.
 fallback_vol           = 0.6
