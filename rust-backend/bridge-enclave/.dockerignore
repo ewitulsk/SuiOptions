@@ -1,0 +1,5 @@
+# Keep the build context lean + deterministic (reproducible PCRs).
+**/target
+**/*.log
+**/.DS_Store
+bridge-enclave/

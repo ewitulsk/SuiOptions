@@ -3,7 +3,7 @@
 **Spec:** bridge-spec.md §5.1–§5.4 · **Milestone:** M3 entry · **Status:** not started (needs hardware)
 **Why:** today `bridge-signer-service` is a plain process with curve seeds in config. The spec's trust model requires it to run inside an attested AWS Nitro enclave so that (a) only approved code, registered on-chain, can produce signatures, and (b) the enclave's *chain view* — the §5.4 "was this committed at finality" check — can't be forged by the untrusted host. This ticket is the enclave migration only; Seal-based key provisioning is ticket 08 (this one can boot with a config-injected seed for staging so the two are independently testable).
 
-**Hard prerequisite:** a Nitro-Enclave-capable EC2 instance (`m5.xlarge`/`c5.xlarge` or larger, enclave option enabled) with `nitro-cli`. None of this is doable in the dev sandbox.
+**Hard prerequisite:** a Nitro-Enclave-capable EC2 instance with `nitro-cli`. The vCPU floor is processor-dependent — **Intel/AMD need ≥4 vCPU** (whole hyperthread pairs are dedicated to the enclave and ≥2 vCPU must remain for the parent → smallest is `*.xlarge`), but **Graviton needs only ≥2 vCPU** (no SMT → 1 parent + 1 enclave → smallest is `*.large`). Bare-metal, T-family burstable (t3/t4g), and single-core instances are excluded regardless. Our signer workload is light (axum + rustls + the §5.4 verifier), so **default to a `c7g.large` (2 vCPU / 4 GB Graviton)** — ample and cheaper than an Intel xlarge. Caveats: the EIF must be built for **aarch64** and **PCRs are arch-specific** (don't mix arches across the signer set); revisit sizing only if in-enclave crypto (ticket 09) turns CPU-heavy. None of this is doable in the dev sandbox.
 
 ---
 
@@ -21,10 +21,34 @@
 3. **Egress rework (the real work):** the signer's `EvmProbe`/`SuiProbe` (ticket 02) currently make direct `reqwest` calls. Inside the enclave there is no direct socket — route all outbound HTTPS through the vsock proxy, with **rustls terminating inside the enclave** so the parent forwards ciphertext only. Concretely: a custom `reqwest` connector (or `hyper` client) whose transport is vsock→parent-forwarder→TCP, wrapping the stream in an in-enclave rustls `ClientConnection` pinned to the configured provider certs. `SuiClientBuilder` (SuiDestSubmitter) needs the same treatment or gets replaced by raw JSON-RPC over the vsock transport.
 4. `allowed_endpoints.yaml` = the RPC hostnames (Sui fullnode(s), HyperEVM RPC(s), later Seal key servers). The parent's forwarder only dials these.
 
-### Phase 2 — Reproducible build & PCR measurement
-1. Build the EIF via the nautilus reproducible Dockerfile: pinned Rust toolchain, pinned base image digest, `--frozen` cargo, no build timestamps. Goal: **bit-identical EIF → identical PCR0** across machines.
-2. `nitro-cli build-enclave` → capture PCR0/1/2. Commit the expected PCRs.
-3. **CI job:** rebuild the EIF on a clean runner and assert PCR0 matches the committed value. A drift here means the on-chain `EnclaveConfig` would reject the real enclave — catch it in CI, not at deploy.
+### Phase 2 — Reproducible build & PCR measurement (GitHub Actions, arm64)
+1. Build the EIF via the nautilus reproducible Dockerfile: pinned Rust toolchain, base image pinned **by digest**, `cargo build --locked --release`, `SOURCE_DATE_EPOCH` set, no build timestamps. Goal: **bit-identical EIF → identical PCR0** across machines/runs.
+2. `nitro-cli build-enclave --docker-uri <img> --output-file signer.eif` → emits PCR0/1/2. Commit the expected PCR0 to the repo.
+3. **CI drift gate:** rebuild on a clean runner and assert PCR0 == committed. Drift ⇒ the on-chain `EnclaveConfig` would reject the real enclave — catch it here, not at deploy.
+
+**Runner architecture — build the EIF NATIVELY on arm64, never x86+QEMU** (emulation is slow and breaks PCR determinism). GitHub *does* have arm64 hosted runners (the earlier "x86 only" belief is outdated), but for this **private** repo they require Team/Enterprise ("larger runners"). Two supported paths:
+- **Team/Enterprise plan:** `runs-on: ubuntu-24.04-arm` (or a labeled arm64 larger runner). Native, clean.
+- **Otherwise (default assumption):** a **self-hosted arm64 runner on a small Graviton box** (e.g. a `t4g`/`c7g` build instance — burstable is fine for *building*, it's only excluded for *running* enclaves). This box also reliably runs `nitro-cli build-enclave`.
+
+**Verify at build time:** whether `nitro-cli build-enclave` runs on a *hosted* runner without the `nitro_enclaves` kernel module. The build/measurement step generally does not need Nitro hardware, but if a hosted runner can't run it, that forces the self-hosted-Graviton path — so plan for the self-hosted runner as the safe default.
+
+**Pipeline outline** (`.github/workflows/bridge-enclave.yml`):
+```
+jobs:
+  build-eif:
+    runs-on: [self-hosted, linux, arm64]     # or ubuntu-24.04-arm on Team/Enterprise
+    steps:
+      - checkout
+      - build reproducible docker image (pinned digest, --locked, SOURCE_DATE_EPOCH)
+      - nitro-cli build-enclave --docker-uri $IMG --output-file signer.eif
+      - PCR0=$(jq -r .Measurements.PCR0 build-output.json)
+      - test "$PCR0" = "$(cat expected_pcr0.txt)"   # drift gate — fail on mismatch
+      - on tag: docker push $IMG to ECR (pinned by digest)   # host rebuilds the SAME EIF
+      - upload signer.eif + measurements as artifacts / into the EnclaveConfig manifest
+```
+Ship the **image pinned by digest** (host `build-enclave`s the same digest → same EIF → same PCRs), or ship the EIF artifact directly. The measurements feed the governance step that sets `EnclaveConfig` PCRs on-chain (Phase 3).
+
+**Note on the existing arm backend workflows:** the other services already target arm (cross-compiled or on arm runners), but the enclave EIF is stricter — it needs a *native* arm64 build for reproducibility, so it can't ride an x86-runner + cross-compile path even if the plain services do.
 
 ### Phase 3 — On-chain enclave registry (`enclave.move`)
 1. Vendor/port nautilus `enclave.move` into our Sui deployment. It: verifies the attestation's COSE signature chain to the AWS Nitro root cert (stored in the Sui framework), checks PCR0/1/2 against an `EnclaveConfig`, and extracts the `public_key` field.
@@ -37,10 +61,30 @@
 2. Provider certs pinned in the enclave image (part of PCR measurement) so a swapped provider changes the PCRs.
 3. Document the TCB honestly: at N=1 the enclave + its (pinned, in-enclave-verified) chain view is the trust root; the k-of-n guarantee arrives at ticket 09.
 
-### Phase 5 — Infra & lifecycle
-1. Terraform: Nitro-enabled EC2 (`options-*` host conventions), enclave allocator (CPU/mem carve-out), **a new ECR repo in `ecr.tf`** for the server image (per the repo's redeploy gotchas — missing repo → 403 push).
-2. Lifecycle scripts: `build` (EIF + PCRs), `run` (`nitro-cli run-enclave`), the parent-side vsock forwarder + admin proxy, `attach-console` for debug builds only.
-3. Boot flow: enclave starts → generates ephemeral Ed25519 key in-memory → `GET /get_attestation` returns the doc with that pubkey → operator calls `register_enclave` on-chain with their cap → signer flips to "ready".
+### Phase 5 — Infra: Terraform (a new, isolated root)
+
+**Use a new Terraform root — do NOT extend `rust-backend/infra/`.** That root is flat, amd64/Ubuntu, local-state, and carries a known destructive-drift landmine (its `ecr.tf` `aws_ecr_repository.svc` for_each has `terraform state rm` warnings; a blanket `apply` there destroys the derived-metric-worker ECR repo + edits IAM — see the repo's terraform-drift notes). Isolating the enclave infra in its own root with its own state means we never have to `-target` around that, and the arch/OS differ anyway (arm64 + Nitro vs amd64).
+
+**New root: `rust-backend/infra-bridge/`** (own `versions.tf` with a **separate state backend key**, not shared with `infra/`). Read the existing network via data sources (or a `terraform_remote_state` data source against the main root's outputs) — reuse the VPC/subnet, don't recreate.
+
+Resources:
+1. **`aws_ecr_repository "bridge_signer_enclave"`** — a standalone repo *in this root* (not the shared `svc` for_each map), which sidesteps the drift landmine entirely. (Missing repo → 403 on push, per the redeploy gotchas.)
+2. **`aws_instance "bridge_signer"`**:
+   - `instance_type = "c7g.large"`, **`enclave_options { enabled = true }`**.
+   - `ami` = a **pinned Amazon Linux 2023 (or Ubuntu) arm64** AMI. Pin it, don't `most_recent` (matches the existing convention so a new release doesn't force-replace the host) — and it must be **arm64**, not the amd64 AMI the main root uses.
+   - `iam_instance_profile`, `vpc_security_group_ids`, `subnet_id` (data), `root_block_device` gp3 30+ GB.
+   - `user_data` (cloud-init, mirror the `infra/templates/` pattern): install `aws-nitro-enclaves-cli` + `-devel` + docker, add the user to the `ne`+`docker` groups, template **`/etc/nitro_enclaves/allocator.yaml`** (`cpu_count: 1`, `memory_mib: 1536`), `systemctl enable --now nitro-enclaves-allocator docker`, pull the image from ECR, `nitro-cli run-enclave`, and start the parent-side vsock forwarder + admin proxy.
+3. **`aws_iam_role` + instance profile** (least-priv): ECR pull, `AmazonSSMManagedInstanceCore` (managed via SSM — **no SSH**, per repo ops conventions), CloudWatch Logs, and KMS decrypt only if the Seal/secrets path needs it.
+4. **`aws_security_group`**: egress 443 to the RPC providers, Seal servers, ECR, SSM, and CloudWatch endpoints; ingress **tcp/3000 (signer public API) from the relayer's SG/CIDR only**. Admin **3001 stays host-local** (no SG ingress). No inbound 22.
+
+**Allocator math on c7g.large** (2 vCPU / 4 GB): 1 vCPU + ~1.5 GB to the enclave, leaving 1 vCPU + ~2.5 GB for the parent + vsock proxy. Comfortable for the signer workload.
+
+**N=1 now; module-ize for N≥3 later.** Write it as a small module (`bridge_signer_node`) even though we instantiate it once, so ticket 09's N=3 is `for_each` over three operator/subnet inputs.
+`outputs.tf`: instance id, private IP, ECR repo URL, the SG id (for the relayer's egress rule).
+
+### Phase 6 — Lifecycle & boot
+1. Lifecycle scripts: `build` (EIF + PCRs, in CI per Phase 2), `run` (`nitro-cli run-enclave`), the parent-side vsock forwarder + admin proxy, `attach-console` for debug builds only.
+2. Boot flow: enclave starts → generates ephemeral Ed25519 key in-memory → `GET /get_attestation` returns the doc with that pubkey → operator calls `register_enclave` on-chain with their cap → signer flips to "ready".
 
 ## Exit criteria
 - Enclave runs on a Nitro EC2; `/get_attestation` returns a doc whose PCRs match the reproducible build and whose signature chain **verifies on-chain** via `register_enclave`.
@@ -49,6 +93,6 @@
 - End-to-end: a live testnet message is signed from inside the enclave and delivered both directions (re-run the ticket-04/round-trip flow with the enclave as signer).
 
 ## Effort & sequencing
-Largest single ticket in the M3 track. Rough phases: P1 (port + egress rework) ~1–2 wk — the in-enclave TLS transport is the crux; P2 (reproducible build) ~few days incl. CI; P3 (enclave.move) ~1 wk; P4 ~few days; P5 (infra) ~1 wk. Do P1–P2 before touching Move; P3 can proceed in parallel.
+Largest single ticket in the M3 track. Rough phases: P1 (port + egress rework) ~1–2 wk — the in-enclave TLS transport is the crux; P2 (reproducible build + arm64 CI) ~few days; P3 (enclave.move) ~1 wk; P4 ~few days; P5 (terraform, isolated root) ~1 wk; P6 (lifecycle/boot) ~few days. Do P1–P2 before touching Move; P3 and P5 can proceed in parallel.
 
 **Depends on:** 02 (verifier runs in-enclave), 06 (async API is the enclave surface). **Blocks:** 08, 09.

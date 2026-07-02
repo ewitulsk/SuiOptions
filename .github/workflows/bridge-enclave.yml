@@ -1,0 +1,148 @@
+name: Bridge Enclave (Nautilus)
+
+# Build + measure the AWS Nitro Enclave image (EIF) for bridge-signer-service,
+# and (on manual dispatch) deploy it to ECR. bridge_tickets/07.
+#
+# Runs on a FREE public-repo arm64 hosted runner (ubuntu-24.04-arm) — the EIF
+# must be built natively on arm64 for the c7g.large (Graviton) host; x86+QEMU is
+# avoided because emulation jeopardizes PCR reproducibility.
+#
+# CLEAN SEPARATION from the rest of CI:
+#   - dedicated file + name; its own concurrency group
+#   - path-filtered so it ONLY runs on enclave/signer changes (no overlap with
+#     move-ci.yml `contracts/**` or the deploy-*.yml stack)
+#   - does NOT call the shared _deploy.yml; its own ECR repo + (later) IAM role
+#     from the isolated `infra-bridge` terraform root, not the main infra.
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Push the image to ECR + publish the EIF after building'
+        type: boolean
+        default: false
+      environment:
+        description: 'Target environment for deploy'
+        type: choice
+        options: [staging, prod]
+        default: staging
+  push:
+    branches: [main, ewitulsk/sui-bridge]
+    paths: &enclave_paths
+      - 'rust-backend/bridge-enclave/**'
+      - 'rust-backend/services/bridge-signer-service/**'
+      - 'rust-backend/crates/bridge-types/**'
+      - 'rust-backend/crates/bridge-signer/**'
+      - '.github/workflows/bridge-enclave.yml'
+  pull_request:
+    paths: *enclave_paths
+
+# Serialize per-ref; cancel superseded CI runs (but never a deploy).
+concurrency:
+  group: bridge-enclave-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+permissions:
+  contents: read
+  id-token: write        # OIDC → AWS, only used on deploy
+
+env:
+  # PCR0 depends on the nitro-cli / bundled-kernel version, NOT just the app
+  # image — pin it exactly and bump deliberately (a bump changes PCR0).
+  NITRO_CLI_VERSION: v1.3.1
+  # ECR repo is created by the infra-bridge terraform root (ticket 07 Phase 5).
+  ECR_REPO: ${{ vars.BRIDGE_ENCLAVE_ECR_REPO }}
+
+jobs:
+  build-enclave:
+    runs-on: ubuntu-24.04-arm    # free native arm64 on public repos (GA Aug 2025)
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- build the reproducible app image (context = rust-backend workspace) ---
+      - name: Build enclave app image
+        working-directory: rust-backend
+        run: |
+          docker build \
+            -f bridge-enclave/Dockerfile \
+            -t bridge-signer-enclave:${{ github.sha }} \
+            .
+
+      # --- install nitro-cli (SMOKE-TEST POINT, ticket 07 Phase 2) ---
+      # build-enclave is a build/measure step and should not need Nitro hardware
+      # or the nitro_enclaves driver — but this is the thing to confirm first on
+      # a hosted runner. If it fails here, move the build-enclave step to a
+      # self-hosted Graviton runner (restricted to non-fork triggers) per README.
+      - name: Install nitro-cli (${{ env.NITRO_CLI_VERSION }})
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential llvm-dev libclang-dev
+          git clone --depth 1 --branch "${NITRO_CLI_VERSION}" \
+            https://github.com/aws/aws-nitro-enclaves-cli.git /tmp/nitro-cli
+          # Builds the nitro-cli binary + ships the arch-specific kernel/init blobs
+          # that build-enclave bundles into the EIF (blobs affect PCR0).
+          make -C /tmp/nitro-cli nitro-cli
+          sudo make -C /tmp/nitro-cli install
+          nitro-cli --version
+
+      # --- build the EIF + capture measurements ---
+      - name: Build EIF
+        run: |
+          nitro-cli build-enclave \
+            --docker-uri bridge-signer-enclave:${{ github.sha }} \
+            --output-file signer.eif \
+            > measurements.json
+          cat measurements.json
+
+      # --- reproducibility gate: PCR0 must match the approved value ---
+      - name: Verify PCR0
+        run: |
+          set -euo pipefail
+          PCR0=$(jq -r '.Measurements.PCR0' measurements.json)
+          EXPECTED=$(tr -d '[:space:]' < rust-backend/bridge-enclave/expected_pcr0.txt)
+          echo "built  PCR0 = $PCR0"
+          echo "expect PCR0 = $EXPECTED"
+          if [ "$EXPECTED" = "PENDING" ]; then
+            echo "::notice::expected_pcr0.txt is PENDING — first-run capture. Commit this PCR0 to enable the drift gate:"
+            echo "::notice::$PCR0"
+          elif [ "$PCR0" != "$EXPECTED" ]; then
+            echo "::error::PCR0 drift — built EIF does not match the approved measurement. The on-chain EnclaveConfig would reject this build."
+            exit 1
+          else
+            echo "PCR0 matches the approved value."
+          fi
+
+      - name: Upload EIF + measurements
+        uses: actions/upload-artifact@v4
+        with:
+          name: signer-eif-${{ github.sha }}
+          path: |
+            signer.eif
+            measurements.json
+          retention-days: 14
+
+      # --- deploy (manual dispatch only) ---
+      - name: Configure AWS credentials
+        if: github.event_name == 'workflow_dispatch' && inputs.deploy
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to ECR
+        if: github.event_name == 'workflow_dispatch' && inputs.deploy
+        uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      - name: Push image to ECR
+        if: github.event_name == 'workflow_dispatch' && inputs.deploy
+        run: |
+          set -euo pipefail
+          REG="${{ steps.ecr.outputs.registry }}"
+          docker tag bridge-signer-enclave:${{ github.sha }} "$REG/$ECR_REPO:${{ github.sha }}"
+          docker push "$REG/$ECR_REPO:${{ github.sha }}"
+          echo "pushed $REG/$ECR_REPO:${{ github.sha }}"
+          # NOTE: the enclave HOST runs the measured EIF directly (Model B, ship
+          # the EIF) rather than rebuilding — publish signer.eif to S3 for the
+          # host here once the infra-bridge bucket exists (ticket 07 Phase 5).
