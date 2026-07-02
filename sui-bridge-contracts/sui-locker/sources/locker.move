@@ -4,6 +4,10 @@
 /// - Home chain: `Vault::Escrow` holds a `Balance<T>` of the native asset.
 /// - Foreign chain: `Vault::Mint` holds the wrapped coin's `TreasuryCap<T>`.
 ///
+/// Inbound transfers over the per-window rate-limit cap are queued (never
+/// reverted) and released by a permissionless `claim` after the window (§3.5) —
+/// matching the EVM Locker's behavior.
+///
 /// Inbound delivery uses the standard `bridge_receive` convention
 /// (../relayer-dispatch-design.md): the relayer reads the Locker object's type
 /// to learn `(package, module, T)` and calls `bridge_receive`, which drives
@@ -16,9 +20,9 @@ use sui::coin::{Self, Coin, TreasuryCap};
 use sui::event;
 use sui::table::{Self, Table};
 
-use sui_bridge::envelope::SignatureEnvelope;
+use sui_bridge::envelope;
 use sui_bridge::inbox::{Self, Inbox};
-use sui_bridge::message::CrossChainMessage;
+use sui_bridge::message;
 use sui_bridge::outbox::{Self, Outbox};
 use sui_bridge::registry::GroupKeyRegistry;
 
@@ -32,10 +36,12 @@ const EPaused: u64 = 3;
 const EUnknownPeer: u64 = 4;
 const EPeerMismatch: u64 = 5;
 const EAssetMismatch: u64 = 6;
-const ERateLimitExceeded: u64 = 7;
+// 7 was ERateLimitExceeded — over-limit transfers now queue instead of abort.
 const EAmountHasDust: u64 = 8;
 const EAdminCapMismatch: u64 = 9;
 const EZeroAmount: u64 = 10;
+const EStillLocked: u64 = 11;
+const EUnknownQueueEntry: u64 = 12;
 
 /// Where the asset lives on this chain.
 public enum Vault<phantom T> has store {
@@ -61,6 +67,17 @@ public struct Locker<phantom T> has key {
     rate_limit_cap: u64,
     window_start_ms: u64,
     window_used: u64,
+    // Over-limit inbound transfers queue here instead of reverting (§3.5); a
+    // permissionless `claim` releases them once the window passes.
+    queued: Table<u64, QueuedTransfer>,
+    next_queue_id: u64,
+}
+
+/// A rate-limited inbound transfer awaiting its unlock time.
+public struct QueuedTransfer has store, drop {
+    recipient: address,
+    wire_amount: u64,
+    unlock_at_ms: u64,
 }
 
 public struct LockerAdminCap has key, store {
@@ -88,6 +105,21 @@ public struct BridgedIn has copy, drop {
     src_chain_id: u32,
     wire_amount: u64,
     recipient: address,
+}
+
+public struct TransferQueued has copy, drop {
+    locker_id: ID,
+    id: u64,
+    recipient: address,
+    wire_amount: u64,
+    unlock_at_ms: u64,
+}
+
+public struct TransferClaimed has copy, drop {
+    locker_id: ID,
+    id: u64,
+    recipient: address,
+    wire_amount: u64,
 }
 
 // --- creation ---
@@ -130,6 +162,8 @@ fun create<T>(
         rate_limit_cap: 0,
         window_start_ms: 0,
         window_used: 0,
+        queued: table::new(ctx),
+        next_queue_id: 0,
     };
     let locker_id = object::id(&locker);
     event::emit(LockerCreated { locker_id, asset_id: locker.asset_id, mode });
@@ -217,18 +251,23 @@ public fun bridge_out<T>(
 
 // --- inbound: the standard delivery convention ---
 
-/// Standard relayer entry (bridge-spec.md §3.4, dispatch-design §3.1). Verifies
-/// + consumes the message via L1, then releases (home) or mints (foreign).
+/// Standard relayer entry (bridge-spec.md §3.4, dispatch-design §3.1). The
+/// `message` and `envelope` are passed as BCS bytes so a generic relayer can
+/// supply plain `vector<u8>` args (decoded here via `from_bcs`) rather than
+/// constructing the structs through chained MoveCalls. Verifies + consumes the
+/// message via L1, then releases (home) or mints (foreign).
 public fun bridge_receive<T>(
     inbox: &mut Inbox,
     keys: &GroupKeyRegistry,
     self: &mut Locker<T>,
-    message: CrossChainMessage,
-    envelope: SignatureEnvelope,
+    message: vector<u8>,
+    envelope: vector<u8>,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
-    let delivered = inbox::receive(inbox, keys, message, envelope);
+    let m = message::from_bcs(message);
+    let env = envelope::from_bcs(envelope);
+    let delivered = inbox::receive(inbox, keys, m, env);
     let (src_chain_id, src_app, payload) = inbox::consume(inbox, delivered, &self.id);
     apply_inbound(self, src_chain_id, src_app, payload, clock, ctx);
 }
@@ -252,11 +291,53 @@ fun apply_inbound<T>(
 
     let wire_amount = transfer_payload::amount(&tp);
     assert!(wire_amount > 0, EZeroAmount);
-    enforce_rate_limit(self, wire_amount, clock);
-
-    let local_amount = from_wire(wire_amount, self.local_decimals);
     let recipient = sui::address::from_bytes(transfer_payload::recipient(&tp));
 
+    if (within_rate_limit(self, wire_amount, clock)) {
+        deliver(self, recipient, wire_amount, ctx);
+        event::emit(BridgedIn {
+            locker_id: object::id(self),
+            src_chain_id,
+            wire_amount,
+            recipient,
+        });
+    } else {
+        // Over the window cap: queue instead of reverting (§3.5). The message is
+        // still consumed at the Inbox; only the payout is delayed until `claim`.
+        let unlock_at_ms = self.window_start_ms + self.rate_limit_window_ms;
+        let id = self.next_queue_id;
+        self.next_queue_id = id + 1;
+        self.queued.add(id, QueuedTransfer { recipient, wire_amount, unlock_at_ms });
+        event::emit(TransferQueued {
+            locker_id: object::id(self),
+            id,
+            recipient,
+            wire_amount,
+            unlock_at_ms,
+        });
+    }
+}
+
+/// Permissionless release of a queued transfer once its window has passed. The
+/// delay was the rate-limit control, so a claim does not consume budget.
+public fun claim<T>(self: &mut Locker<T>, queue_id: u64, clock: &Clock, ctx: &mut TxContext) {
+    assert!(!self.paused, EPaused);
+    assert!(self.queued.contains(queue_id), EUnknownQueueEntry);
+    assert!(clock.timestamp_ms() >= self.queued.borrow(queue_id).unlock_at_ms, EStillLocked);
+
+    let QueuedTransfer { recipient, wire_amount, unlock_at_ms: _ } = self.queued.remove(queue_id);
+    deliver(self, recipient, wire_amount, ctx);
+    event::emit(TransferClaimed {
+        locker_id: object::id(self),
+        id: queue_id,
+        recipient,
+        wire_amount,
+    });
+}
+
+/// Release/mint `wire_amount` (scaled to local decimals) to `recipient`.
+fun deliver<T>(self: &mut Locker<T>, recipient: address, wire_amount: u64, ctx: &mut TxContext) {
+    let local_amount = from_wire(wire_amount, self.local_decimals);
     match (&mut self.vault) {
         Vault::Escrow(bal) => {
             transfer::public_transfer(coin::take(bal, local_amount, ctx), recipient);
@@ -265,24 +346,23 @@ fun apply_inbound<T>(
             transfer::public_transfer(coin::mint(cap, local_amount, ctx), recipient);
         },
     };
-
-    event::emit(BridgedIn {
-        locker_id: object::id(self),
-        src_chain_id,
-        wire_amount,
-        recipient,
-    });
 }
 
-fun enforce_rate_limit<T>(self: &mut Locker<T>, amount: u64, clock: &Clock) {
-    if (self.rate_limit_cap == 0) return;
+/// True (and reserves budget) if `amount` fits the current window cap; false if
+/// over — the caller queues. cap == 0 disables the limit (always true).
+fun within_rate_limit<T>(self: &mut Locker<T>, amount: u64, clock: &Clock): bool {
+    if (self.rate_limit_cap == 0) return true;
     let now = clock.timestamp_ms();
     if (now >= self.window_start_ms + self.rate_limit_window_ms) {
         self.window_start_ms = now;
         self.window_used = 0;
     };
-    assert!(self.window_used + amount <= self.rate_limit_cap, ERateLimitExceeded);
-    self.window_used = self.window_used + amount;
+    if (self.window_used + amount <= self.rate_limit_cap) {
+        self.window_used = self.window_used + amount;
+        true
+    } else {
+        false
+    }
 }
 
 // --- decimals scaling (NTT trimmed-amount) ---
@@ -323,6 +403,17 @@ fun pow10(n: u8): u128 {
 public fun asset_id<T>(locker: &Locker<T>): vector<u8> { locker.asset_id }
 public fun is_paused<T>(locker: &Locker<T>): bool { locker.paused }
 public fun local_decimals<T>(locker: &Locker<T>): u8 { locker.local_decimals }
+
+/// Whether a queue entry exists (not yet claimed).
+public fun is_queued<T>(locker: &Locker<T>, id: u64): bool { locker.queued.contains(id) }
+
+/// `(recipient, wire_amount, unlock_at_ms)` for a queued transfer. Aborts if the
+/// id is unknown (already claimed or never queued).
+public fun queued_transfer<T>(locker: &Locker<T>, id: u64): (address, u64, u64) {
+    assert!(locker.queued.contains(id), EUnknownQueueEntry);
+    let q = locker.queued.borrow(id);
+    (q.recipient, q.wire_amount, q.unlock_at_ms)
+}
 
 /// Escrowed balance (home chain). Aborts if this is a Mint locker.
 public fun escrowed<T>(locker: &Locker<T>): u64 {

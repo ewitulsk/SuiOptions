@@ -13,13 +13,15 @@ import {IMessageRecipient} from "./interfaces/IMessageRecipient.sol";
 ///         §2.5). Unlike Move, the EVM has dynamic dispatch, so delivery is a
 ///         direct `onReceive` call rather than a hot potato.
 ///
-///         Ordering is windowed/out-of-order (§2.6): the `consumed` hash-set is
-///         the exactly-once guard, marked before the external call
+///         No cross-message ordering is enforced (§2.6): the `consumed` hash-set
+///         is the sole exactly-once guard, marked before the external call
 ///         (checks-effects-interactions) so a reentrant replay reverts.
 contract Inbox {
     Registry public immutable registry;
     /// Internal id of THIS chain; every accepted message must target it.
     uint32 public immutable dstChainId;
+    /// Digest domain separator (spec §2.2), derived from the deployment salt.
+    bytes32 public immutable domainSep;
 
     mapping(bytes32 => bool) public consumed;
     mapping(uint32 => uint64) public highestNonce; // observability only
@@ -41,9 +43,10 @@ contract Inbox {
         _;
     }
 
-    constructor(Registry registry_, uint32 dstChainId_) {
+    constructor(Registry registry_, uint32 dstChainId_, bytes32 deploymentSalt) {
         registry = registry_;
         dstChainId = dstChainId_;
+        domainSep = Message.deriveDomainSep(deploymentSalt);
     }
 
     /// @notice Verify and deliver a message. Named `receiveMessage` because
@@ -56,7 +59,7 @@ contract Inbox {
         if (paused) revert InboxPaused();
         if (message.dstChainId != dstChainId) revert WrongDstChain(dstChainId, message.dstChainId);
 
-        bytes32 messageHash = Message.hash(message);
+        bytes32 messageHash = Message.hash(message, domainSep);
         if (consumed[messageHash]) revert AlreadyConsumed(messageHash);
 
         (uint8 registeredScheme, bytes memory key) = registry.groupKey(envelope.groupPubkeyId);

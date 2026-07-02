@@ -15,7 +15,7 @@ cargo run -p bridge-relayer -- --config config.toml
 ```
 Sui Outbox  ──poll MessageCommitted──▶ reconstruct CrossChainMessage (+ verify hash)
      │                                              │
-     │                                  POST /sign_message ──▶ signer node
+     │                                  POST /sign_requests ─▶ signer node (submit+poll)
      │                                              │
      └────────────────────────── submit(message, envelope) ──▶ destination Inbox
 ```
@@ -25,7 +25,7 @@ Sui Outbox  ──poll MessageCommitted──▶ reconstruct CrossChainMessage (
 | Stage | Status |
 |-------|--------|
 | Sui source watcher (`sui_source.rs`) | ✅ real — pages `MessageCommitted` via sui-sdk, reconstructs + hash-checks each message |
-| Signer hop (`signer_client.rs`) | ✅ real — HTTP `POST /sign_message` |
+| Signer hop (`signer_client.rs`) | ✅ real — `POST /sign_requests` submit + poll `GET /sign_requests/{hash}` |
 | Relay orchestration (`relay.rs`) | ✅ real + tested — sign, submit, dedup against already-delivered |
 | **EVM destination submit** (`evm_submit.rs`) | ✅ real — `Inbox.receiveMessage` via alloy; validated end-to-end on anvil |
 | Sui destination submit | ⛔ blocked on the Layer-2 Locker (see below) |
@@ -61,11 +61,12 @@ Two bugs the live run caught and fixed:
    against proxied fullnodes; replaced with a raw-JSON-RPC `reqwest` watcher
    (IPv4-pinned).
 
-> Environment caveat: in this sandbox, `reqwest`'s outbound HTTPS to public
-> fullnodes hangs after connect (while `curl` succeeds), so the relayer binary's
-> live fetch could not complete here. The watch → decode → sign path was
-> validated with the real on-chain event via the working tools; the relayer code
-> itself is unit-tested and unchanged by that caveat.
+> Correction (2026-07-01): an earlier note here claimed `reqwest`'s outbound HTTPS
+> to public fullnodes hangs after connect in this sandbox. Re-tested and it does
+> NOT reproduce — curl, reqwest (all client configs), and sui-sdk all reach
+> `fullnode.testnet.sui.io` in ~0.2–0.3s. The relayer binary is not egress-blocked
+> against Sui; only its destination *write* path hasn't been exercised end-to-end
+> yet (the round trip in DEPLOYMENTS.md was CLI/cast-driven).
 
 ## Tests
 

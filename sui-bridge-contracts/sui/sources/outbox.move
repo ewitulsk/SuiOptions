@@ -19,16 +19,25 @@ public struct Outbox has key {
     id: UID,
     /// Internal registry id of THIS chain (the source for everything it emits).
     src_chain_id: u32,
+    /// Digest domain separator (spec §2.2), derived from the deployment salt.
+    domain_sep: vector<u8>,
     /// `next_nonce[dst_chain_id]` — monotonic per (src, dst) lane (§2.6).
     next_nonce: Table<u32, u64>,
     paused: bool,
 }
 
-/// Create + share an Outbox for this chain. Governance-gated.
-public fun create(_: &GovernanceCap, src_chain_id: u32, ctx: &mut TxContext): ID {
+/// Create + share an Outbox for this chain. Governance-gated. `deployment_salt`
+/// is the 32-byte per-deployment salt; the digest separator is derived + stored.
+public fun create(
+    _: &GovernanceCap,
+    src_chain_id: u32,
+    deployment_salt: vector<u8>,
+    ctx: &mut TxContext,
+): ID {
     let outbox = Outbox {
         id: object::new(ctx),
         src_chain_id,
+        domain_sep: message::derive_domain_sep(deployment_salt),
         next_nonce: table::new(ctx),
         paused: false,
     };
@@ -59,7 +68,7 @@ public fun send(
         dst_app,
         payload,
     );
-    let message_hash = message::hash(&m);
+    let message_hash = message::hash(&m, outbox.domain_sep);
 
     *outbox.next_nonce.borrow_mut(dst_chain_id) = nonce + 1;
 

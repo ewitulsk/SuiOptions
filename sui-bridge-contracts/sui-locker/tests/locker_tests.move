@@ -133,18 +133,92 @@ fun inbound_rejects_wrong_asset() {
 }
 
 #[test]
-#[expected_failure(abort_code = 7, location = locker)]
-fun inbound_enforces_rate_limit() {
+fun inbound_over_limit_queues_then_claims() {
+    let mut s = ts::begin(ADMIN);
+    setup_mint(&mut s, 8); // 1:1
+    let admin = s.take_from_sender<LockerAdminCap>();
+    let mut lk = s.take_shared<Locker<TEST_COIN>>();
+    locker::set_rate_limit(&admin, &mut lk, 1000, 1500); // cap 1500 / 1000ms window
+    let mut clk = clock::create_for_testing(s.ctx());
+    clk.set_for_testing(10_000); // past the initial (t=0) window so it re-anchors
+
+    // First 1000 is within cap → delivered immediately (window re-anchors to 10_000).
+    locker::apply_inbound_for_testing(&mut lk, SRC_CHAIN, peer(), payload(asset(), 1000, @0xCAFE), &clk, s.ctx());
+    // Second 1000 exceeds the 1500 cap → queued (does NOT abort), nothing minted.
+    locker::apply_inbound_for_testing(&mut lk, SRC_CHAIN, peer(), payload(asset(), 1000, @0xBEEF), &clk, s.ctx());
+
+    assert!(locker::is_queued(&lk, 0), 0);
+    let (recipient, amount, unlock_at) = locker::queued_transfer(&lk, 0);
+    assert!(recipient == @0xBEEF, 1);
+    assert!(amount == 1000, 2);
+    assert!(unlock_at == 11_000, 3); // window end at enqueue time (10_000 + 1000)
+
+    // Only the first delivery minted so far.
+    s.next_tx(ADMIN);
+    let c0 = s.take_from_address<Coin<TEST_COIN>>(@0xCAFE);
+    assert!(c0.value() == 1000, 4);
+    coin::burn_for_testing(c0);
+
+    // Claim after the window releases the queued amount.
+    clk.set_for_testing(11_000);
+    locker::claim(&mut lk, 0, &clk, s.ctx());
+    assert!(!locker::is_queued(&lk, 0), 5);
+
+    s.next_tx(ADMIN);
+    let c1 = s.take_from_address<Coin<TEST_COIN>>(@0xBEEF);
+    assert!(c1.value() == 1000, 6);
+    coin::burn_for_testing(c1);
+
+    clk.destroy_for_testing();
+    s.return_to_sender(admin);
+    ts::return_shared(lk);
+    s.end();
+}
+
+#[test]
+#[expected_failure(abort_code = 11, location = locker)]
+fun claim_before_unlock_aborts() {
     let mut s = ts::begin(ADMIN);
     setup_mint(&mut s, 8);
     let admin = s.take_from_sender<LockerAdminCap>();
     let mut lk = s.take_shared<Locker<TEST_COIN>>();
-    locker::set_rate_limit(&admin, &mut lk, 1_000_000, 1500); // cap 1500/window
-    let clk = clock::create_for_testing(s.ctx());
+    locker::set_rate_limit(&admin, &mut lk, 1_000_000, 500);
+    let mut clk = clock::create_for_testing(s.ctx());
+    clk.set_for_testing(10_000);
 
-    // First 1000 ok, second 1000 exceeds the 1500 cap.
-    locker::apply_inbound_for_testing(&mut lk, SRC_CHAIN, peer(), payload(asset(), 1000, @0xCAFE), &clk, s.ctx());
-    locker::apply_inbound_for_testing(&mut lk, SRC_CHAIN, peer(), payload(asset(), 1000, @0xCAFE), &clk, s.ctx());
+    // 1000 > cap 500 → queued at id 0.
+    locker::apply_inbound_for_testing(&mut lk, SRC_CHAIN, peer(), payload(asset(), 1000, @0xBEEF), &clk, s.ctx());
+    // Still inside the window → StillLocked.
+    locker::claim(&mut lk, 0, &clk, s.ctx());
+    abort 99
+}
+
+#[test]
+#[expected_failure(abort_code = 12, location = locker)]
+fun claim_unknown_entry_aborts() {
+    let mut s = ts::begin(ADMIN);
+    setup_mint(&mut s, 8);
+    let mut lk = s.take_shared<Locker<TEST_COIN>>();
+    let clk = clock::create_for_testing(s.ctx());
+    locker::claim(&mut lk, 99, &clk, s.ctx());
+    abort 99
+}
+
+#[test]
+#[expected_failure(abort_code = 3, location = locker)]
+fun claim_blocked_when_paused() {
+    let mut s = ts::begin(ADMIN);
+    setup_mint(&mut s, 8);
+    let admin = s.take_from_sender<LockerAdminCap>();
+    let mut lk = s.take_shared<Locker<TEST_COIN>>();
+    locker::set_rate_limit(&admin, &mut lk, 1_000_000, 500);
+    let mut clk = clock::create_for_testing(s.ctx());
+    clk.set_for_testing(10_000);
+    locker::apply_inbound_for_testing(&mut lk, SRC_CHAIN, peer(), payload(asset(), 1000, @0xBEEF), &clk, s.ctx());
+
+    locker::set_paused(&admin, &mut lk, true);
+    clk.set_for_testing(10_000 + 1_000_000);
+    locker::claim(&mut lk, 0, &clk, s.ctx()); // paused → abort
     abort 99
 }
 

@@ -25,6 +25,8 @@ contract Deploy is Script {
         address governance = vm.envOr("GOVERNANCE", deployer);
         address guardian = vm.envOr("GUARDIAN", deployer);
         address groupAddress = vm.envAddress("GROUP_ADDRESS"); // ECDSA group address
+        // 32-byte per-deployment salt; MUST match the Sui contracts + services.
+        bytes32 deploymentSalt = vm.envBytes32("DEPLOYMENT_SALT");
 
         uint32 hyperLocal = uint32(vm.envOr("HYPER_LOCAL_CHAIN_ID", uint256(998)));
         uint32 suiLocal = uint32(vm.envOr("SUI_LOCAL_ID", uint256(0)));
@@ -37,8 +39,8 @@ contract Deploy is Script {
 
         // Deployer holds governance during wiring so it can register entries.
         Registry registry = new Registry(deployer, guardian);
-        Inbox inbox = new Inbox(registry, hyperId);
-        Outbox outbox = new Outbox(registry, hyperId);
+        Inbox inbox = new Inbox(registry, hyperId, deploymentSalt);
+        Outbox outbox = new Outbox(registry, hyperId, deploymentSalt);
 
         // This chain (HyperEVM): finalityKind 0 = confirmation depth.
         registry.registerChain(
@@ -73,5 +75,7 @@ contract Deploy is Script {
         console.log("governance ", governance);
         console.log("guardian   ", guardian);
         console.log("groupAddr  ", groupAddress);
+        console.logBytes32(deploymentSalt);
+        console.logBytes32(inbox.domainSep());
     }
 }

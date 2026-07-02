@@ -1,5 +1,27 @@
 # 05 — Sui Locker: rate-limit overflow queue (retrofit)
 
+**Status (2026-07-01): DONE — code complete, all tests green.**
+- `enforce_rate_limit` (which aborted with code 7) replaced by `within_rate_limit`
+  returning a bool; `apply_inbound` now delivers when within cap, else enqueues a
+  `QueuedTransfer { recipient, wire_amount, unlock_at_ms }` in a `Table<u64, _>` and
+  emits `TransferQueued` — **never reverts**; the message is still consumed at the Inbox.
+- `claim(locker, id, clock, ctx)` — permissionless after `unlock_at_ms`, releases/mints
+  the exact amount, emits `TransferClaimed`; pause-gated; claims don't consume budget.
+  `unlock_at_ms` = `window_start_ms + rate_limit_window_ms` (window end at enqueue).
+- Shared `deliver` helper (escrow take / mint) used by both the immediate and claim paths.
+- Views `is_queued` / `queued_transfer`; error 7 retired, added `EStillLocked=11`,
+  `EUnknownQueueEntry=12`. Behavior now matches the EVM Locker's queue semantics.
+- **Tests — 13/13 Sui locker:** queue-then-claim happy path (verifies unlock time, that
+  only the in-cap transfer delivered, and the claim releases the queued one),
+  claim-before-unlock (11), unknown-entry (12), paused-claim (3), plus the prior 9.
+- Note (as flagged): adding struct fields is upgrade-incompatible → the live Sui Locker
+  needs a **fresh publish** of this package. **Done 2026-07-01** — this queue-enabled locker
+  package (`0x3ef9…`) is the live Locker instance used in ticket 04's round trip (see
+  `DEPLOYMENTS.md`).
+
+---
+
+
 **Spec:** bridge-spec.md §3.5 — "Rate-limit overflow queues; it never reverts."
 **Why:** `locker.move` `enforce_rate_limit` aborts with `ERateLimitExceeded` (locker.move:284). An over-limit inbound transfer therefore strands the user's funds at source until the window resets, and relayers burn gas on retries. The EVM Locker (ticket 03) ships the queue from day one; this retrofits the Sui side to match.
 

@@ -17,25 +17,32 @@ cargo run -p bridge-signer-service -- --config config.toml
 **Public (port 3000):**
 | Route | Purpose |
 |-------|---------|
-| `POST /sign_message` | `{message: CrossChainMessage}` → verify §5.4 boundary, then sign with the destination family's scheme (Ed25519 for Sui, ECDSA for EVM). Returns `{message_hash, envelope}`. |
+| `POST /sign_requests` | `{message}` → verify §5.4 boundary, then sign (Ed25519 for Sui, ECDSA for EVM). **Idempotent per message hash**; returns `202 {message_hash, status, envelope?}`. At M1 the 202 already carries `status:"signed"`; the async surface is for M3 MPC. |
+| `GET /sign_requests/:hash` | Poll a session → `{message_hash, status: pending\|signed, envelope?}`, or `404` if unknown. |
 | `GET /group_keys` | The Ed25519 pubkey + ECDSA address + ids to register on-chain via `registerGroupKey`. |
 | `GET /get_attestation` | **M1 stub** — real Nautilus attestation is M3/M4. |
 | `GET /health`, `GET /metrics` | liveness + Prometheus. |
+
+DoS guardrails (§5.3): the §5.4 verify runs **before** a session is admitted (an
+uncommitted message is `422` at the door, never queued); duplicate in-flight
+requests coalesce by hash; the session map is bounded + TTL-evicted; and
+`POST /sign_requests` is per-IP rate limited.
 
 **Admin (port 3001, localhost-only in prod):** Seal key-load, share
 provisioning, and DKG (`/admin/*`) — all return `501` until M3.
 
 ## The security boundary (§5.4)
 
-`/sign_message` will only sign a message that the source Outbox committed at
-finality. That check is the [`SourceVerifier`](src/verifier.rs) trait:
-- `trust_all` — **DEV ONLY**, skips the check (logs a warning).
-- `rpc` — verify against a source-chain RPC view. **Not built at M1** — this is
-  the signer's remaining M1 work, and the reason the service isn't production
-  safe yet on its own.
+The signer only signs a message the source Outbox committed at finality. That
+check is the [`SourceVerifier`](src/verifier.rs) trait:
+- `trust_all` — **DEV ONLY** (rejected unless `environment = "dev"`), skips the check.
+- `rpc` — verify against ≥2 independent source-chain RPC providers (the
+  [`RpcVerifier`](src/verifier.rs), spec §5.4): the registered Outbox must have
+  committed the exact message at the configured confirmation depth.
 
 ## Tests
 
-`tests/sign.rs` drives the real router and asserts `/sign_message` returns the
-exact signature the on-chain `known_digest_vector` tests expect — end-to-end
-proof the service interoperates with the Sui Inbox.
+`tests/sign.rs` drives the real router: a `POST /sign_requests` returns the exact
+signature the on-chain `known_digest_vector` tests expect (end-to-end proof the
+service interoperates with the Sui Inbox), a duplicate POST coalesces onto one
+session, and an uncommitted message is `422` at the door with no cached session.

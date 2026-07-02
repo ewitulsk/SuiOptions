@@ -1,6 +1,6 @@
 //! Two axum routers on two ports (spec §5.3):
 //! - [`serve_public`] (3000): `/health`, `/get_attestation`, `/group_keys`,
-//!   `POST /sign_message`.
+//!   `POST /sign_requests`, `GET /sign_requests/{hash}`.
 //! - [`serve_admin`] (3001, localhost-only in prod): Seal key-load + share
 //!   provisioning + DKG — all stubbed at M1.
 
@@ -20,7 +20,8 @@ pub fn public_router(state: Arc<AppState>) -> Router {
         .route("/health", get(handlers::health))
         .route("/get_attestation", get(handlers::get_attestation))
         .route("/group_keys", get(handlers::group_keys))
-        .route("/sign_message", post(handlers::sign_message))
+        .route("/sign_requests", post(handlers::create_sign_request))
+        .route("/sign_requests/:message_hash", get(handlers::get_sign_request))
         .with_state(state)
         .merge(observability::middleware::metrics_route())
         .layer(axum::middleware::from_fn(observability::middleware::http_obs))
@@ -40,7 +41,9 @@ pub fn admin_router() -> Router {
 pub async fn serve_public(addr: SocketAddr, state: Arc<AppState>) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, "bridge-signer public API listening");
-    axum::serve(listener, public_router(state)).await?;
+    // ConnectInfo makes the peer address available for the per-IP rate limiter.
+    axum::serve(listener, public_router(state).into_make_service_with_connect_info::<SocketAddr>())
+        .await?;
     Ok(())
 }
 

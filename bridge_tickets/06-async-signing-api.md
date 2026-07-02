@@ -1,5 +1,25 @@
 # 06 — Async signing API (submit → poll by message_hash)
 
+**Status (2026-07-01): DONE — code complete, tested (unit + live HTTP).**
+- `POST /sign_requests` → `202 {message_hash, status, envelope?}`, idempotent per hash
+  (duplicate coalesces onto the existing session via a Pending marker);
+  `GET /sign_requests/:hash` → `{status: pending|signed, envelope?}` or 404. `/sign_message`
+  removed. (Route uses axum-0.7 `:param` syntax.)
+- Session store (`sessions.rs`): keyed by hash, TTL-evicts terminal sessions, bounded map
+  (sheds load → 503), verify-failure abandons (not cached → retryable). Unit-tested.
+- DoS guardrails (§5.3): **verify-before-admit** (uncommitted → 422 at the door, never
+  queued), in-flight dedup, bounded map, per-IP fixed-window rate limit (`ratelimit.rs`,
+  wired via `ConnectInfo`). Config knobs added (ttl/cap/rate).
+- Relayer `signer_client.rs`: submit-then-poll behind the unchanged `RemoteSigner::sign`,
+  so `relay.rs` is untouched and the M3 MPC turn-on needs no client edit.
+- **Tests:** signer-service 22 lib (5 session + 2 ratelimit + verifier/probe) + 5 integration
+  (completes+pollable, duplicate-coalesces, uncommitted-422-at-door, unsupported-family-400,
+  unknown-hash-404); relayer 9. **Live HTTP smoke:** ran the service, POST→202 signed with
+  the exact known-vector signature, GET→200 same, unknown→404.
+
+---
+
+
 **Spec:** bridge-spec.md §5.3
 **Why:** the signer exposes a synchronous `POST /sign_message` (router.rs:23). FROST/GG20 at k > 1 are multi-round protocols across nodes — a synchronous request/response API cannot survive M3 (ticket 09). The spec resolved to design the poll model now so the interface doesn't break when MPC turns on. Also hardens the public DoS surface.
 

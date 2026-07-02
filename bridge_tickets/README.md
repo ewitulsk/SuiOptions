@@ -16,12 +16,12 @@ Work remaining to complete the cross-chain messaging layer + lock-and-mint bridg
 
 | # | Ticket | Spec milestone | One-liner |
 |---|--------|----------------|-----------|
-| 01 | [domain-separator](01-domain-separator.md) | M1 gap | `DOMAIN_SEP` in the digest, all 3 impls + redeploy — blocks everything else |
-| 02 | [rpc-source-verifier](02-rpc-source-verifier.md) | M1 gap | Replace `TrustAllVerifier`: sign only Outbox-committed-at-finality messages (biggest live security hole) |
-| 03 | [evm-locker](03-evm-locker.md) | M2 | `Locker.sol` escrow/wrapped + queue-on-rate-limit, peer-wired to the Sui Locker |
-| 04 | [relayer-evm-to-sui](04-relayer-evm-to-sui.md) | M1/M2 | EVM source watcher + type-derived generic Sui submitter → full round trip |
-| 05 | [sui-rate-limit-queue](05-sui-rate-limit-queue.md) | M2 | Retrofit Sui Locker: over-limit transfers queue + permissionless claim, never revert |
-| 06 | [async-signing-api](06-async-signing-api.md) | pre-M3 | `POST /sign_requests` + poll-by-hash, idempotent sessions, verify-before-admit |
+| 01 | [domain-separator](01-domain-separator.md) | M1 gap | ✅ **DONE** — `DOMAIN_SEP` in the digest, all 3 impls, both chains redeployed live, parity verified |
+| 02 | [rpc-source-verifier](02-rpc-source-verifier.md) | M1 gap | ✅ **DONE** — `RpcVerifier` (all-provider quorum, EVM+Sui probes), anvil-verified; `trust_all` dev-gated |
+| 03 | [evm-locker](03-evm-locker.md) | M2 | ✅ **DONE** — `Locker.sol` escrow/mint + `WrappedToken`, queue-on-rate-limit, 16 tests + anvil deploy |
+| 04 | [relayer-evm-to-sui](04-relayer-evm-to-sui.md) | M1/M2 | ✅ **DONE** — EVM watcher + type-derived Sui submitter + BCS layer + router; **live HyperEVM→Sui→HyperEVM round trip on testnet** (M2 exit) |
+| 05 | [sui-rate-limit-queue](05-sui-rate-limit-queue.md) | M2 | ✅ **DONE** — Sui Locker queues over-limit transfers + permissionless claim, matches EVM; 13 tests |
+| 06 | [async-signing-api](06-async-signing-api.md) | pre-M3 | ✅ **DONE** — `POST /sign_requests` + poll-by-hash, idempotent sessions, verify-before-admit, per-IP limit; live-smoked |
 | 07 | [nautilus-enclave](07-nautilus-enclave.md) | M3 | Signer inside AWS Nitro: attestation on-chain, TLS-in-enclave chain view |
 | 08 | [seal-share-provisioning](08-seal-share-provisioning.md) | M3 | Per-node Seal policy (§6.5) + 2-step key load; restart/replacement recovery |
 | 09 | [threshold-signing-dkg](09-threshold-signing-dkg.md) | M3 | FROST + ECDSA-MPC libs, dual DKG, attested libp2p mesh, N=3 k=2 |

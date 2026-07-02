@@ -41,9 +41,8 @@ cd sui-bridge-contracts/sui && sui move test && sui move build
   `consume`, atomically with delivery, so an untrusted relayer cannot
   consume-without-delivering.
 
-- **Ordering is windowed/out-of-order** (spec §2.6): the `consumed` hash-set is
-  the absolute exactly-once guard; per-source nonce is tracked for
-  observability, not enforced.
+- **No cross-message ordering** (spec §2.6): the `consumed` hash-set is the sole
+  exactly-once guard; per-source nonce is tracked for observability, not enforced.
 
 ## Out of scope here (per the spec's milestones)
 

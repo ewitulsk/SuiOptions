@@ -19,9 +19,8 @@
 /// relayer thus cannot consume a message without actually delivering it (the
 /// whole PTB aborts and nothing is marked), closing the consume-and-drop grief.
 ///
-/// Ordering is windowed/out-of-order (§2.6, recommended for permissionless
-/// relay): the `consumed` hash-set is the absolute exactly-once guard;
-/// per-source nonce is tracked for observability, not enforced.
+/// No cross-message ordering is enforced (§2.6): the `consumed` hash-set is the
+/// sole exactly-once guard; per-source nonce is tracked for observability only.
 module sui_bridge::inbox;
 
 use sui::table::{Self, Table};
@@ -35,6 +34,8 @@ public struct Inbox has key {
     id: UID,
     /// Internal registry id of THIS chain; every accepted message must target it.
     dst_chain_id: u32,
+    /// Digest domain separator (spec §2.2), derived from the deployment salt.
+    domain_sep: vector<u8>,
     /// Exactly-once guard, keyed by the 32-byte canonical message hash.
     consumed: Table<vector<u8>, bool>,
     /// Highest nonce observed per source chain (observability only).
@@ -54,10 +55,18 @@ public struct DeliveredMessage {
 }
 
 /// Create + share an Inbox bound to this chain's internal id. Governance-gated.
-public fun create(_: &GovernanceCap, dst_chain_id: u32, ctx: &mut TxContext): ID {
+/// `deployment_salt` is the 32-byte per-deployment salt; the digest separator is
+/// derived + stored so it is auditable on-chain.
+public fun create(
+    _: &GovernanceCap,
+    dst_chain_id: u32,
+    deployment_salt: vector<u8>,
+    ctx: &mut TxContext,
+): ID {
     let inbox = Inbox {
         id: object::new(ctx),
         dst_chain_id,
+        domain_sep: message::derive_domain_sep(deployment_salt),
         consumed: table::new(ctx),
         highest_nonce: table::new(ctx),
         paused: false,
@@ -80,7 +89,7 @@ public fun receive(
     assert!(!inbox.paused, errors::inbox_paused());
     assert!(message::dst_chain_id(&message) == inbox.dst_chain_id, errors::wrong_dst_chain());
 
-    let message_hash = message::hash(&message);
+    let message_hash = message::hash(&message, inbox.domain_sep);
     assert!(!inbox.consumed.contains(message_hash), errors::message_already_consumed());
 
     envelope::verify(keys, &envelope, &message_hash);
@@ -148,14 +157,17 @@ public fun set_paused(_: &GuardianCap, inbox: &mut Inbox, paused: bool) {
 /// verification. Lets `consume` (which needs `dst_app` to equal a runtime
 /// object id) be exercised without an offline signature over that id.
 #[test_only]
-public fun deliver_for_testing(message: &CrossChainMessage): DeliveredMessage {
+public fun deliver_for_testing(
+    message: &CrossChainMessage,
+    domain_sep: vector<u8>,
+): DeliveredMessage {
     DeliveredMessage {
         src_chain_id: message::src_chain_id(message),
         src_app: message::src_app(message),
         dst_app: message::dst_app(message),
         nonce: message::nonce(message),
         payload: message::payload(message),
-        message_hash: message::hash(message),
+        message_hash: message::hash(message, domain_sep),
     }
 }
 

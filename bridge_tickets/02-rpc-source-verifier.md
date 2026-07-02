@@ -1,5 +1,34 @@
 # 02 — RPC source verifier (§5.4 security boundary)
 
+**Status (2026-07-01): DONE — code complete, all tests green.**
+- `RpcVerifier` behind the existing `SourceVerifier` trait, over a mockable
+  `CommitmentProbe` abstraction; quorum = **every configured provider must
+  independently confirm** (fail closed on any Pending/NotFound/error/disagreement).
+- `EvmProbe` (eth_getLogs on the Outbox `MessageCommitted` indexed topic +
+  eth_blockNumber finality) and `SuiProbe` (suix_queryEvents match on
+  `message_hash`; queryable ⇒ final). Pure parsers factored out and unit-tested.
+- Config: `[[source_chains]]` mirror (family / rpc_urls / outbox_addr|package_id /
+  confirmations / allow_single_provider) + `environment`; `trust_all` now a hard
+  error outside `environment = "dev"`; unknown route ⇒ 422.
+- `update_chain` governance fn added to `registry.move` (+ 2 Move tests) to backfill
+  peer addresses — the ticket-01 follow-up. NOTE: using it on the *current* live Sui
+  registry needs a redeploy (new package types); the live verifier reads the Outbox
+  addr from its own config, so this isn't blocking.
+- **Tests:** signer-service 15 unit (6 verifier quorum via mock probe, 6 probe
+  parsers, 1 topic0 guard, 2 build-gating) + 2 sign integration; Move 16/16.
+  **Anvil integration** (`examples/verify_evm_smoke.rs`): real Outbox + real
+  `MessageCommitted` drove the EvmProbe through NotFound → Final(0-conf) →
+  Pending(100-conf) → Final(after mining 100) — the §5.4 "refuse before finality,
+  sign after" path proven on a live node.
+- Digest-parity transitivity: `verify_committed` recomputes `digest(msg, domain_sep)`
+  which ticket 01 already locked byte-identical to the on-chain emitted hash, so the
+  probe finds the right log by construction.
+- Deferred: live Sui suix_queryEvents run (sandbox reqwest→fullnode caveat); parsing
+  is unit-tested against sample payloads.
+
+---
+
+
 **Spec:** bridge-spec.md §5.4, §4 (finality)
 **Why:** the only verifier today is `TrustAllVerifier` (`bridge-signer-service/src/verifier.rs`) — the signer signs any well-formed message, so anyone who can reach it can mint arbitrarily on the deployed contracts. This is the single largest gap between the deployed system and the spec's security claims. `verifier.rs` already defines the `SourceVerifier` trait and bails on `mode = "rpc"`; this ticket implements it.
 

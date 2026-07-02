@@ -95,8 +95,39 @@ public fun register_chain(
     events::emit_chain_registered(internal_id, fam);
 }
 
+/// Update the mutable fields of an already-registered chain: the peer Outbox/
+/// Inbox addresses and the finality rule. The internal id, family, and
+/// native_identifier are the chain's immutable identity and are left untouched.
+/// Governance-gated. Use this to backfill a peer chain's contract addresses once
+/// that chain has been deployed (spec §7).
+public fun update_chain(
+    _: &GovernanceCap,
+    registry: &mut ChainRegistry,
+    internal_id: u32,
+    outbox_addr: vector<u8>,
+    inbox_addr: vector<u8>,
+    finality_kind: u8,
+    finality_value: u64,
+) {
+    assert!(registry.chains.contains(internal_id), errors::chain_not_registered());
+    let e = registry.chains.borrow_mut(internal_id);
+    e.outbox_addr = outbox_addr;
+    e.inbox_addr = inbox_addr;
+    e.finality_kind = finality_kind;
+    e.finality_value = finality_value;
+    events::emit_chain_registered(internal_id, chain_id::family(internal_id));
+}
+
 public fun is_registered(registry: &ChainRegistry, internal_id: u32): bool {
     registry.chains.contains(internal_id)
+}
+
+/// The registered peer `(outbox_addr, inbox_addr)` for a chain. Aborts if the
+/// chain is not registered.
+public fun chain_endpoints(registry: &ChainRegistry, internal_id: u32): (vector<u8>, vector<u8>) {
+    assert!(registry.chains.contains(internal_id), errors::chain_not_registered());
+    let e = registry.chains.borrow(internal_id);
+    (e.outbox_addr, e.inbox_addr)
 }
 
 public fun family(registry: &ChainRegistry, internal_id: u32): u8 {

@@ -53,6 +53,18 @@ impl SignatureEnvelope {
     pub fn new(scheme: Scheme, group_pubkey_id: u32, signature: Vec<u8>) -> Self {
         Self { scheme_tag: scheme.tag(), group_pubkey_id, signature }
     }
+
+    /// Standard **BCS** serialization matching `sui_bridge::envelope::from_bcs`
+    /// (scheme_tag, group_pubkey_id, signature) — the plain `vector<u8>` arg a
+    /// relayer passes to the Sui `bridge_receive`.
+    pub fn to_move_bcs(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(self.scheme_tag);
+        out.extend_from_slice(&self.group_pubkey_id.to_le_bytes());
+        crate::message::push_uleb128(&mut out, self.signature.len() as u64);
+        out.extend_from_slice(&self.signature);
+        out
+    }
 }
 
 #[cfg(test)]
@@ -67,5 +79,13 @@ mod tests {
         assert_eq!(Scheme::from_tag(9), None);
         assert_eq!(Scheme::for_family(chain_id::FAMILY_EVM), Some(Scheme::EcdsaSecp256k1));
         assert_eq!(Scheme::for_family(chain_id::FAMILY_SUI), Some(Scheme::Ed25519));
+    }
+
+    /// BCS layout: scheme_tag (u8), group_pubkey_id (u32 LE), signature
+    /// (ULEB128 len + bytes) — what `sui_bridge::envelope::from_bcs` decodes.
+    #[test]
+    fn to_move_bcs_layout() {
+        let e = SignatureEnvelope { scheme_tag: 0, group_pubkey_id: 1, signature: vec![0xaa, 0xbb] };
+        assert_eq!(hex::encode(e.to_move_bcs()), "000100000002aabb");
     }
 }

@@ -17,6 +17,9 @@ const ADMIN: address = @0xA;
 const SUI_ID: u32 = 134217728;
 const HYPER_ID: u32 = 268436454;
 
+/// Shared per-deployment test salt (matches bridge-types TEST_SALT = 0x01*32).
+fun test_salt(): vector<u8> { filled(0x01, 32) }
+
 /// A stand-in for a Layer 2 app (e.g. a Locker). Its object id is the 32-byte
 /// `dst_app` / `src_app` identity used by `consume` / `send`.
 public struct TestApp has key { id: UID }
@@ -28,14 +31,15 @@ fun filled(b: u8, n: u64): vector<u8> {
     v
 }
 
-// Ed25519 group key + a valid signature over the canonical digest of the
-// message {src=2, dst=1, nonce=7, src_app=0xab*32, dst_app=0xcd*32,
-// payload="hello-bridge"} — produced offline (see scratchpad/gen_vector.mjs).
+// Ed25519 group key + a valid signature over the DOMAIN-SEPARATED digest (salt
+// = 0x01*32) of the message {src=2, dst=1, nonce=7, src_app=0xab*32,
+// dst_app=0xcd*32, payload="hello-bridge"} — regenerate via
+// `cargo run -p bridge-signer --example group_keys`.
 fun group_pubkey(): vector<u8> {
     x"2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
 }
 fun valid_signature(): vector<u8> {
-    x"3830227d4552e5a5864e7c16dbc69f0326a45a068cb98443fc4098824ce7afd0e0ccbe45043b269ae0b50c5bc54854451418d1803af9277c2262b9c0ad493b03"
+    x"12bc85a949906a86bdea305aa6bc32ef704e77de62ea5fb65a3df3a39902e53398ca95da28a3c34aa8187edcf8f6936330c94016e1e1c4d3f2f7b80027190001"
 }
 
 /// Tx 1: publish/init. Tx 2: register both chains + the Ed25519 group key, and
@@ -60,8 +64,8 @@ fun setup(s: &mut Scenario) {
         );
         registry::register_group_key(&gov, &mut keys, 1, envelope::scheme_ed25519(), group_pubkey());
 
-        inbox::create(&gov, SUI_ID, s.ctx());
-        outbox::create(&gov, SUI_ID, s.ctx());
+        inbox::create(&gov, SUI_ID, test_salt(), s.ctx());
+        outbox::create(&gov, SUI_ID, test_salt(), s.ctx());
 
         ts::return_shared(chains);
         ts::return_shared(keys);
@@ -154,10 +158,11 @@ fun consume_delivers_and_marks_replay() {
 
     let app = TestApp { id: object::new(s.ctx()) };
     let dst_app = object::uid_to_bytes(&app.id);
+    let ds = message::derive_domain_sep(test_salt());
     let m = message::new(HYPER_ID, SUI_ID, 9, filled(0xab, 32), dst_app, b"payload-bytes");
-    let hash = message::hash(&m);
+    let hash = message::hash(&m, ds);
 
-    let delivered = inbox::deliver_for_testing(&m);
+    let delivered = inbox::deliver_for_testing(&m, ds);
     let (src_chain, src_app, payload) = inbox::consume(&mut inbox, delivered, &app.id);
 
     assert!(src_chain == HYPER_ID, 0);
@@ -181,10 +186,11 @@ fun consume_rejects_replay() {
     let app = TestApp { id: object::new(s.ctx()) };
     let dst_app = object::uid_to_bytes(&app.id);
     let m = message::new(HYPER_ID, SUI_ID, 9, filled(0xab, 32), dst_app, b"p");
+    let ds = message::derive_domain_sep(test_salt());
 
-    inbox::consume(&mut inbox, inbox::deliver_for_testing(&m), &app.id);
+    inbox::consume(&mut inbox, inbox::deliver_for_testing(&m, ds), &app.id);
     // Same message hash a second time → message_already_consumed.
-    inbox::consume(&mut inbox, inbox::deliver_for_testing(&m), &app.id);
+    inbox::consume(&mut inbox, inbox::deliver_for_testing(&m, ds), &app.id);
 
     let TestApp { id } = app;
     id.delete();
@@ -202,7 +208,8 @@ fun consume_rejects_wrong_app_identity() {
     let app = TestApp { id: object::new(s.ctx()) };
     // dst_app deliberately not the app's id.
     let m = message::new(HYPER_ID, SUI_ID, 9, filled(0xab, 32), filled(0xee, 32), b"p");
-    inbox::consume(&mut inbox, inbox::deliver_for_testing(&m), &app.id);
+    let ds = message::derive_domain_sep(test_salt());
+    inbox::consume(&mut inbox, inbox::deliver_for_testing(&m, ds), &app.id);
 
     let TestApp { id } = app;
     id.delete();
@@ -223,9 +230,11 @@ fun outbox_send_assigns_monotonic_nonce_and_matching_hash() {
     let (n1, _h1) = outbox::send(&mut outbox, &app.id, HYPER_ID, dst_app, b"second");
     assert!(n0 == 0 && n1 == 1, 0);
 
-    // The emitted hash equals an independent recompute of the same message.
+    // The emitted hash equals an independent recompute of the same message
+    // under the outbox's deployment salt.
+    let ds = message::derive_domain_sep(test_salt());
     let expected = message::new(SUI_ID, HYPER_ID, 0, object::uid_to_bytes(&app.id), dst_app, b"first");
-    assert!(h0 == message::hash(&expected), 1);
+    assert!(h0 == message::hash(&expected, ds), 1);
 
     assert!(outbox::next_nonce(&mut outbox, HYPER_ID) == 2, 2);
 
@@ -251,6 +260,72 @@ fun outbox_send_blocked_when_paused() {
     id.delete();
     s.return_to_sender(guardian);
     ts::return_shared(outbox);
+    s.end();
+}
+
+/// End-to-end BCS parity: the exact `vector<u8>` args a generic relayer passes
+/// (Rust `to_move_bcs`) decode via `from_bcs` and verify through the real
+/// `inbox::receive` — the same domain-separated Ed25519 signature the relayer
+/// obtains from the signer. This is the byte-level contract the Sui submitter
+/// relies on (relayer-dispatch-design §3.1).
+#[test]
+fun receive_accepts_bcs_decoded_relayer_args() {
+    let mut s = ts::begin(ADMIN);
+    setup(&mut s);
+    let inbox = s.take_shared<Inbox>();
+    let keys = s.take_shared<GroupKeyRegistry>();
+
+    let m = message::from_bcs(
+        x"01e603001000000008070000000000000020abababababababababababababababababababababababababababababababab20cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd0c68656c6c6f2d627269646765",
+    );
+    let env = envelope::from_bcs(
+        x"00010000004012bc85a949906a86bdea305aa6bc32ef704e77de62ea5fb65a3df3a39902e53398ca95da28a3c34aa8187edcf8f6936330c94016e1e1c4d3f2f7b80027190001",
+    );
+    let delivered = inbox::receive(&inbox, &keys, m, env);
+    assert!(inbox::delivered_payload(&delivered) == b"hello-bridge", 0);
+    inbox::destroy_delivered_for_testing(delivered);
+
+    ts::return_shared(inbox);
+    ts::return_shared(keys);
+    s.end();
+}
+
+#[test]
+fun update_chain_backfills_peer_addresses() {
+    let mut s = ts::begin(ADMIN);
+    setup(&mut s);
+    let gov = s.take_from_sender<GovernanceCap>();
+    let mut chains = s.take_shared<ChainRegistry>();
+
+    // HYPER_ID was registered in setup with placeholder endpoints; backfill real ones.
+    let real_outbox = filled(0xaa, 32);
+    let real_inbox = filled(0xbb, 32);
+    registry::update_chain(&gov, &mut chains, HYPER_ID, real_outbox, real_inbox, 0, 20);
+
+    let (o, i) = registry::chain_endpoints(&chains, HYPER_ID);
+    assert!(o == real_outbox, 0);
+    assert!(i == real_inbox, 1);
+    let (fk, fv) = registry::finality(&chains, HYPER_ID);
+    assert!(fk == 0 && fv == 20, 2);
+
+    s.return_to_sender(gov);
+    ts::return_shared(chains);
+    s.end();
+}
+
+#[test]
+#[expected_failure]
+fun update_chain_unregistered_aborts() {
+    let mut s = ts::begin(ADMIN);
+    setup(&mut s);
+    let gov = s.take_from_sender<GovernanceCap>();
+    let mut chains = s.take_shared<ChainRegistry>();
+
+    // internal id 999... never registered.
+    registry::update_chain(&gov, &mut chains, 201326592, filled(0xaa, 32), filled(0xbb, 32), 0, 1);
+
+    s.return_to_sender(gov);
+    ts::return_shared(chains);
     s.end();
 }
 

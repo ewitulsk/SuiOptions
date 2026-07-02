@@ -8,10 +8,12 @@ use clap::Parser;
 
 pub mod config;
 pub mod event;
+pub mod evm_source;
 pub mod evm_submit;
 pub mod relay;
 pub mod signer_client;
 pub mod submit;
+pub mod sui_dest;
 pub mod sui_source;
 
 pub use config::Config;

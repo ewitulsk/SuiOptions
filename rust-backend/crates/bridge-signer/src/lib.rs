@@ -57,15 +57,18 @@ impl ThresholdSigner {
     }
 
     /// Sign `message` for its destination chain, returning a ready envelope.
+    /// `domain_sep` is [`bridge_types::message::derive_domain_sep`] of the
+    /// deployment salt — the digest is domain-separated (spec §2.2).
     pub fn sign(
         &self,
         message: &CrossChainMessage,
+        domain_sep: &Bytes32,
         group_pubkey_id: u32,
     ) -> Result<SignatureEnvelope, SignerError> {
         let family = chain_id::family(message.dst_chain_id);
         let scheme =
             Scheme::for_family(family).ok_or(SignerError::UnsupportedDstFamily(family))?;
-        let digest = message.digest();
+        let digest = message.digest(domain_sep);
         let signature = match scheme {
             Scheme::Ed25519 => self.sign_ed25519(&digest).to_vec(),
             Scheme::EcdsaSecp256k1 => self.sign_ecdsa_recoverable(&digest)?.to_vec(),
@@ -92,6 +95,10 @@ impl ThresholdSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bridge_types::message::derive_domain_sep;
+
+    /// Fixed dummy salt shared with the Move + Solidity parity tests.
+    const TEST_SALT: Bytes32 = [0x01; 32];
 
     fn vector_message_to_sui() -> CrossChainMessage {
         CrossChainMessage::new(
@@ -115,12 +122,13 @@ mod tests {
             hex::encode(signer.ed25519_group_pubkey()),
             "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
         );
-        let env = signer.sign(&vector_message_to_sui(), 1).unwrap();
+        let ds = derive_domain_sep(&TEST_SALT);
+        let env = signer.sign(&vector_message_to_sui(), &ds, 1).unwrap();
         assert_eq!(env.scheme_tag, bridge_types::envelope::SCHEME_ED25519);
         assert_eq!(
             hex::encode(&env.signature),
-            "3830227d4552e5a5864e7c16dbc69f0326a45a068cb98443fc4098824ce7afd0\
-             e0ccbe45043b269ae0b50c5bc54854451418d1803af9277c2262b9c0ad493b03"
+            "12bc85a949906a86bdea305aa6bc32ef704e77de62ea5fb65a3df3a39902e533\
+             98ca95da28a3c34aa8187edcf8f6936330c94016e1e1c4d3f2f7b80027190001"
         );
     }
 
@@ -138,8 +146,9 @@ mod tests {
             [0x22; 32],
             b"p".to_vec(),
         );
-        let digest = message.digest();
-        let env = signer.sign(&message, 1).unwrap();
+        let ds = derive_domain_sep(&TEST_SALT);
+        let digest = message.digest(&ds);
+        let env = signer.sign(&message, &ds, 1).unwrap();
         assert_eq!(env.scheme_tag, bridge_types::envelope::SCHEME_ECDSA_SECP256K1);
         assert_eq!(env.signature.len(), 65);
         let v = env.signature[64];
@@ -166,8 +175,9 @@ mod tests {
             [0u8; 32],
             vec![],
         );
+        let ds = derive_domain_sep(&TEST_SALT);
         assert!(matches!(
-            signer.sign(&message, 1),
+            signer.sign(&message, &ds, 1),
             Err(SignerError::UnsupportedDstFamily(chain_id::FAMILY_SOLANA))
         ));
     }

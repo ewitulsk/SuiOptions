@@ -1,15 +1,18 @@
 //! Real Sui source watcher over raw JSON-RPC (`suix_queryEvents`) via reqwest.
 //!
-//! We talk JSON-RPC directly rather than through `sui-sdk` because the SDK's
-//! jsonrpsee HTTP client stalls on the `rpc.discover` handshake against
-//! proxied public fullnodes; a plain reqwest POST is lighter and reliable.
+//! We talk JSON-RPC directly rather than through `sui-sdk` for a lighter
+//! dependency on the read path. (An earlier comment here claimed the SDK's
+//! jsonrpsee client stalls on `rpc.discover` and that reqwest hangs against
+//! public fullnodes — re-tested 2026-07-01, neither reproduces: curl, reqwest,
+//! and sui-sdk all reach `fullnode.testnet.sui.io` in ~0.2–0.3s. Raw reqwest is
+//! kept for simplicity, not because sui-sdk is broken.)
 //!
 //! Sui has fast deterministic finality — events returned by a fullnode are from
 //! finalized checkpoints — so no extra confirmation gate is needed (§4).
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use bridge_types::CrossChainMessage;
+use bridge_types::{Bytes32, CrossChainMessage};
 use serde_json::{json, Value};
 use tracing::warn;
 
@@ -23,6 +26,8 @@ pub struct SuiSourceWatcher {
     http: reqwest::Client,
     rpc_url: String,
     package: String,
+    /// Digest domain separator (spec §2.2) used to verify each event's hash.
+    domain_sep: Bytes32,
     /// JSON-RPC `EventID` cursor ({txDigest, eventSeq}) or null for the start.
     cursor: Value,
     page_limit: u64,
@@ -30,7 +35,7 @@ pub struct SuiSourceWatcher {
 
 impl SuiSourceWatcher {
     /// Build the watcher and sanity-check the RPC (fails fast on a bad URL).
-    pub async fn connect(rpc_url: &str, package: &str) -> Result<Self> {
+    pub async fn connect(rpc_url: &str, package: &str, domain_sep: Bytes32) -> Result<Self> {
         // Bind egress to IPv4: some hosts' IPv6 path to proxied fullnodes
         // black-holes the response (connects, then never replies).
         let http = reqwest::Client::builder()
@@ -42,6 +47,7 @@ impl SuiSourceWatcher {
             http,
             rpc_url: rpc_url.to_string(),
             package: package.to_string(),
+            domain_sep,
             cursor: Value::Null,
             page_limit: 50,
         };
@@ -93,7 +99,7 @@ impl SourceWatcher for SuiSourceWatcher {
             for ev in result["data"].as_array().cloned().unwrap_or_default() {
                 let ty = ev["type"].as_str().unwrap_or_default();
                 if ty.ends_with(COMMITTED_SUFFIX) {
-                    match decode_message_committed(&ev["parsedJson"]) {
+                    match decode_message_committed(&ev["parsedJson"], &self.domain_sep) {
                         Ok(m) => out.push(m),
                         Err(e) => {
                             warn!(error = %e, "skipping undecodable MessageCommitted event")

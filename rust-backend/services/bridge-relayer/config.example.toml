@@ -10,11 +10,34 @@ bridge_package_id = "0x..."
 # Signer node base URL (bridge-signer-service public port).
 signer_url = "http://127.0.0.1:3000"
 
+# 32-byte hex per-deployment salt. The digest domain separator is
+# keccak256("XCHAIN_MSG_V1" || salt) (spec §2.2). MUST match the deployed
+# contracts and the signer node.
+deployment_salt_hex = "${BRIDGE_DEPLOYMENT_SALT}"
+
 # Seconds between source polls.
 poll_interval_secs = 5
 
-# EVM destination (HyperEVM). Set all three to submit to the EVM Inbox for real;
-# omit any to dry-run the destination instead.
-evm_rpc_url = "https://rpc.hyperliquid-testnet.xyz/evm"
-evm_inbox_addr = "0xA2b0dA5F12628f1FDC1E517DF33F5C3fF528bF74"
+# --- Sui source (Sui → EVM). Always on: watches the Sui Outbox above. ---
+
+# --- EVM destination (Sui → EVM): submit to the HyperEVM Inbox. ---
+# Set all three to submit for real; omit any and EVM-bound messages are skipped.
+evm_rpc_url = "https://rpcs.chain.link/hyperevm/testnet"
+evm_inbox_addr = "0xD4524ce4b234c24B156631Ca612EC387de39968C"
 evm_relayer_key = "${BRIDGE_EVM_RELAYER_KEY}"
+
+# --- EVM source (HyperEVM → Sui): watch the HyperEVM Outbox for commitments. ---
+evm_source_rpc_url = "https://rpcs.chain.link/hyperevm/testnet"
+evm_source_outbox_addr = "0x1797FAa1eAF0cc1fC7C092Db0035A3c46A357ff6"
+evm_source_confirmations = 12
+evm_source_start_block = 0
+
+# --- Sui destination (HyperEVM → Sui): deliver via the app's bridge_receive. ---
+# The relayer signs + pays gas with sui_relayer_key; inbox/keys are the L1
+# shared objects (see sui-bridge-contracts/DEPLOYMENTS.md). dst_app is read from
+# each message, so no per-app config.
+sui_dest_rpc_url = "https://fullnode.testnet.sui.io"
+sui_relayer_key = "${BRIDGE_SUI_RELAYER_KEY}"
+sui_inbox_id = "0x32c3cfe0571167002fc386d7bae00a6d761ada54f70dcf4e8e18ee615c230250"
+sui_group_key_registry_id = "0x16ffe9d907a9bd1bd274cc8b48bc3092ae3546f9e9d2c57e7841984468856144"
+sui_gas_budget = 100000000

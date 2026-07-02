@@ -1,5 +1,40 @@
 # 04 — Relayer: EVM→Sui direction (EVM watcher + generic Sui submitter)
 
+**Status (2026-07-01): code complete + tested; live round trip deferred.**
+- **L1 BCS layer:** `message::from_bcs` / `envelope::from_bcs` (Move) + `to_move_bcs`
+  (Rust) so the relayer passes plain `vector<u8>` args. `bridge_receive` now takes
+  BCS bytes and decodes internally (dispatch-design §3.1). **Parity proven E2E in
+  Move:** `receive_accepts_bcs_decoded_relayer_args` runs Rust-produced bytes through
+  `from_bcs` → real `inbox::receive` with the domain-separated Ed25519 sig verifying.
+- **`EvmSourceWatcher`** (alloy): eth_getLogs on the Outbox `MessageCommitted` topic,
+  reconstruct + hash-check, confirmation-depth gate. **Anvil integration passed:**
+  2 real events reconstructed at 0-conf, 0 at 100-conf, 2 after mining 100.
+- **`SuiDestSubmitter`** (sui-tx): reads `dst_app`'s on-chain type → `parse_dispatch`
+  derives `(package, module, type_args)` → single `bridge_receive` MoveCall with the
+  L1 shared objects + BCS byte args → `submit_ptb`. Type-derivation is unit-tested
+  (generic/nested/non-generic/malformed); the PTB path compiles against the real Sui
+  SDK. `is_delivered` returns false (on-chain `consumed` set is the real guard; a
+  devInspect pre-skip is a noted follow-up).
+- **Family `Router`** routes each message by `chain_id::family(dst)` → EVM/Sui submitter
+  (unit-tested); `main.rs` runs both source watchers concurrently over one router.
+- **Ops:** relay-submission failures log `alert_id = "tx-failed-bridge-relay"`
+  (.claude/tx-alerting.md); benign already-delivered races surface as AlreadyDelivered.
+- **Tests:** relayer 9 unit + EvmSourceWatcher anvil integration; bridge-types BCS
+  parity; Move 18 (incl. 2 BCS parity); locker 10; all suites green.
+- **✅ Live HyperEVM→Sui→HyperEVM round trip DONE (M2 exit, 2026-07-01):** deployed the
+  Sui Locker`<WBTC>` (Mint) + EVM Locker (Escrow) + test token, wired peers both ways, and
+  ran the full round trip on testnet — lock 1 tBTC → mint 1 WBTC → burn → release 1 tBTC,
+  supply invariant holding, both signatures verified on the real Inboxes, both reconstructed
+  digests matching the on-chain `messageHash`. Addresses in `DEPLOYMENTS.md`. The submitting
+  relay was CLI/cast-driven this round; the relayer *binary* is anvil/unit-verified. NOTE:
+  the Sui fullnode egress is NOT blocked (re-tested — curl/reqwest/sui-sdk all reach it in
+  ~0.2–0.3s); the earlier "reqwest hangs" note in `sui_source.rs` doesn't reproduce, so the
+  binary can drive this autonomously — only its write path hasn't been exercised yet.
+- Out of scope (unchanged): descriptor registry + custom adapter (§3.3/§3.5).
+
+---
+
+
 **Spec:** bridge-spec.md §2.5 (Sui delivery), sui-bridge-contracts/relayer-dispatch-design.md §3
 **Why:** only Sui→EVM relays today. There is no EVM source watcher and no Sui destination submitter — the Sui side is blocked by design on the `bridge_receive` convention (see the dispatch-design doc), which the Sui Locker now implements. This ticket completes the M2 round trip.
 

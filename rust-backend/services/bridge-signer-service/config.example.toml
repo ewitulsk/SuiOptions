@@ -3,6 +3,12 @@
 public_bind_addr = "0.0.0.0:3000"
 admin_bind_addr  = "127.0.0.1:3001"
 
+# Async signing surface (§5.3) — all optional, defaults shown:
+# session_ttl_secs = 300        # evict completed sessions after this
+# max_sessions = 10000          # bound the in-memory session map (DoS)
+# sign_rate_window_secs = 60    # per-IP POST /sign_requests budget window
+# sign_rate_max = 120           # ...max requests per window
+
 # M1-ONLY single-party key seeds (32-byte hex). Prefer ${ENV} expansion so the
 # raw seeds never sit in the file. At M3 these are Seal-provisioned in-enclave
 # and this section disappears.
@@ -16,6 +22,37 @@ secp256k1_seed_hex = "${BRIDGE_SECP256K1_SEED}"
 ed25519_group_pubkey_id = 1   # Sui group key
 ecdsa_group_pubkey_id   = 1   # EVM group key
 
-# DEV ONLY: skips the §5.4 source-commitment check. Switch to "rpc" once the
-# Outbox-commitment + finality verifier lands.
+# 32-byte hex per-deployment salt. The digest domain separator is
+# keccak256("XCHAIN_MSG_V1" || salt) (spec §2.2). MUST be byte-identical to the
+# value baked into the deployed Sui + EVM contracts and the relayer, or every
+# signature will fail to verify on-chain.
+deployment_salt_hex = "${BRIDGE_DEPLOYMENT_SALT}"
+
+# Deployment environment. `trust_all` verification is ONLY allowed when this is
+# "dev"; anywhere else the node refuses to start with it.
+environment = "dev"
+
+# Source-commitment verification (§5.4):
+#   "trust_all" — DEV ONLY, skips the check (signs anything).
+#   "rpc"       — verify the registered Outbox committed the message at finality,
+#                 across every configured provider below.
 source_verifier = "trust_all"
+
+# For source_verifier = "rpc": one entry per chain that can be a message SOURCE.
+# §5.4 wants >=2 independent RPC providers per chain (set allow_single_provider
+# to override for dev or deterministic-finality Sui). Values below match the
+# 2026-07-01 redeploy (see sui-bridge-contracts/DEPLOYMENTS.md).
+#
+# [[source_chains]]
+# internal_chain_id = 268436454              # HyperEVM
+# family = "evm"
+# rpc_urls = ["https://rpcs.chain.link/hyperevm/testnet", "https://<second-provider>"]
+# outbox_addr = "0x1797FAa1eAF0cc1fC7C092Db0035A3c46A357ff6"
+# confirmations = 12
+#
+# [[source_chains]]
+# internal_chain_id = 134217728              # Sui
+# family = "sui"
+# rpc_urls = ["https://fullnode.testnet.sui.io"]
+# package_id = "0x6435311f4d8891f7392cadcc3cc503e71757ba3d24f043f5c04733da7ae6b000"
+# allow_single_provider = true               # Sui has deterministic checkpoint finality

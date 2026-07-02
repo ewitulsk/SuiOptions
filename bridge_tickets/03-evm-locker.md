@@ -1,5 +1,29 @@
 # 03 — EVM Locker (lock-and-mint app, HyperEVM side)
 
+**Status (2026-07-01): DONE — code complete, all tests green, deploy validated on anvil.**
+- `Locker.sol` (escrow/mint modes) + `WrappedToken.sol` (minimal owner-mint/burn ERC-20).
+- Outbound `lock`/`burn` (mode-checked) → NTT decimals scaling with dust rejection →
+  `TransferPayload.encode` (shared 72-byte wire format) → `Outbox.send`.
+- Inbound `onReceive` (only-Inbox, peer + asset checks) → scale from wire → release/mint.
+- **Rate-limit overflow queue built in from day one** (§3.5): over-cap inbound transfers
+  enqueue `{recipient, wireAmount, unlockAt}` and NEVER revert; permissionless `claim`
+  after the window; double-claim guarded. (The Sui side still reverts — ticket 05.)
+- `transferAdmin` for governance handoff; `DeployLocker.s.sol` (both modes, wraps +
+  ownership transfer + peer wiring), refactored to dodge script stack-too-deep.
+- **Tests — 16 forge Locker tests, all green:** escrow-in/scale, dust reject, wrong-mode,
+  unknown-peer, burn-scale (6-dec), release-escrow (18-dec), mint-foreign, only-Inbox,
+  peer/asset mismatch, rate-limit queue+claim (+StillLocked +double-claim), pause in/out,
+  admin-gating, transferAdmin handoff, **supply-invariant round trip**, and
+  **end-to-end through the real Inbox** (ECDSA verify → dispatch → mint). Full suite 41/41;
+  Sui-locker 10/10 unaffected.
+- **Anvil deploy validated:** `DeployLocker` (Mint) deployed WrappedToken + Locker, handed
+  ownership to the Locker, wired the peer — verified via `cast`.
+- Deferred to ticket 04: live testnet Locker deploy + the HyperEVM↔Sui round trip (needs a
+  live Sui Locker instance + the EVM→Sui relayer; that's where the round-trip exit lives).
+
+---
+
+
 **Spec:** bridge-spec.md §3
 **Why:** the Sui Locker exists (`sui-bridge-contracts/sui-locker/`); the EVM side has only the `TransferPayload` library. Without it there is no home-chain escrow and no M2 round trip.
 

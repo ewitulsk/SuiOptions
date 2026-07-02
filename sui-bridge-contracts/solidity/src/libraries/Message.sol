@@ -12,11 +12,16 @@ pragma solidity ^0.8.20;
 ///         version (u8) | srcChainId (u32) | dstChainId (u32) | nonce (u64)
 ///           | srcApp (bytes32) | dstApp (bytes32) | payloadLen (u32) | payload
 ///
-///         message_hash = keccak256(encode(message)). Signers sign over this
-///         32-byte digest directly (no EIP-191 prefix), matching the Ed25519
-///         path on Sui.
+///         message_hash = keccak256(DOMAIN_SEP || encode(message)), where
+///         DOMAIN_SEP = keccak256("XCHAIN_MSG_V1" || deploymentSalt) binds every
+///         signed message to one logical deployment (spec §2.2). Signers sign
+///         over this 32-byte digest directly (no EIP-191 prefix), matching the
+///         Ed25519 path on Sui.
 library Message {
     uint8 internal constant VERSION = 1;
+
+    /// @notice Domain-separation tag hashed with the per-deployment salt.
+    bytes13 internal constant DOMAIN_TAG = "XCHAIN_MSG_V1";
 
     error BadVersion(uint8 version);
 
@@ -44,8 +49,16 @@ library Message {
         );
     }
 
-    function hash(CrossChainMessage memory m) internal pure returns (bytes32) {
-        return keccak256(encode(m));
+    /// @notice DOMAIN_SEP = keccak256("XCHAIN_MSG_V1" || deploymentSalt).
+    ///         Derived once at contract construction so the stored separator is
+    ///         auditable on-chain.
+    function deriveDomainSep(bytes32 deploymentSalt) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(DOMAIN_TAG, deploymentSalt));
+    }
+
+    /// @notice keccak256(domainSep || encode(message)) — the digest signers sign.
+    function hash(CrossChainMessage memory m, bytes32 domainSep) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(domainSep, encode(m)));
     }
 
     /// @notice Left-pad an EVM address into a bytes32 app identity (spec §2.2).

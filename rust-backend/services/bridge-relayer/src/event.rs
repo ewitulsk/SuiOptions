@@ -23,7 +23,10 @@ pub enum EventDecodeError {
     HashMismatch,
 }
 
-pub fn decode_message_committed(parsed: &Value) -> Result<CrossChainMessage, EventDecodeError> {
+pub fn decode_message_committed(
+    parsed: &Value,
+    domain_sep: &Bytes32,
+) -> Result<CrossChainMessage, EventDecodeError> {
     let src_chain_id = u32_field(parsed, "src_chain_id")?;
     let dst_chain_id = u32_field(parsed, "dst_chain_id")?;
     let nonce = u64_field(parsed, "nonce")?;
@@ -36,8 +39,8 @@ pub fn decode_message_committed(parsed: &Value) -> Result<CrossChainMessage, Eve
         CrossChainMessage::new(src_chain_id, dst_chain_id, nonce, src_app, dst_app, payload);
 
     // The event is untrusted plumbing — verify its hash matches the canonical
-    // digest of the fields we just reconstructed.
-    if message.digest() != claimed_hash {
+    // (domain-separated) digest of the fields we just reconstructed.
+    if message.digest(domain_sep) != claimed_hash {
         return Err(EventDecodeError::HashMismatch);
     }
     Ok(message)
@@ -97,10 +100,19 @@ fn bytes32_field(v: &Value, name: &'static str) -> Result<Bytes32, EventDecodeEr
 mod tests {
     use super::*;
     use bridge_types::chain_id;
+    use bridge_types::message::derive_domain_sep;
     use serde_json::json;
 
+    const TEST_SALT: Bytes32 = [0x01; 32];
+
+    fn test_domain_sep() -> Bytes32 {
+        derive_domain_sep(&TEST_SALT)
+    }
+
+    /// Domain-separated digest of the known vector under TEST_SALT (matches the
+    /// bridge-types and cross-language parity vectors).
     fn known_hash_hex() -> &'static str {
-        "7b767c416104fbef99880be0416fa07353493afb6547ad67d700029ce09572af"
+        "535392536947463d04988702a5480f431f34efed3cf557dc12aa434c2decd707"
     }
 
     /// Array-of-numbers form (how Sui actually renders `vector<u8>`), with the
@@ -118,12 +130,12 @@ mod tests {
             "dst_app": vec![0xcdu8; 32],
             "payload": b"hello-bridge".to_vec(),
         });
-        let m = decode_message_committed(&parsed).unwrap();
+        let m = decode_message_committed(&parsed, &test_domain_sep()).unwrap();
         assert_eq!(m.src_chain_id, chain_id::encode(chain_id::FAMILY_EVM, 998).unwrap());
         assert_eq!(m.dst_chain_id, chain_id::encode(chain_id::FAMILY_SUI, 0).unwrap());
         assert_eq!(m.nonce, 7);
         assert_eq!(m.payload, b"hello-bridge");
-        assert_eq!(hex::encode(m.digest()), known_hash_hex());
+        assert_eq!(hex::encode(m.digest(&test_domain_sep())), known_hash_hex());
     }
 
     /// `0x`-hex form for byte fields is also accepted.
@@ -138,8 +150,8 @@ mod tests {
             "dst_app": format!("0x{}", "cd".repeat(32)),
             "payload": "0x68656c6c6f2d627269646765",
         });
-        let m = decode_message_committed(&parsed).unwrap();
-        assert_eq!(hex::encode(m.digest()), known_hash_hex());
+        let m = decode_message_committed(&parsed, &test_domain_sep()).unwrap();
+        assert_eq!(hex::encode(m.digest(&test_domain_sep())), known_hash_hex());
     }
 
     /// A message_hash that doesn't match the reconstructed fields is rejected.
@@ -154,6 +166,9 @@ mod tests {
             "dst_app": vec![0xcdu8; 32],
             "payload": b"hello-bridge".to_vec(),
         });
-        assert_eq!(decode_message_committed(&parsed), Err(EventDecodeError::HashMismatch));
+        assert_eq!(
+            decode_message_committed(&parsed, &test_domain_sep()),
+            Err(EventDecodeError::HashMismatch)
+        );
     }
 }

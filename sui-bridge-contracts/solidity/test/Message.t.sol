@@ -8,6 +8,9 @@ import {Message} from "../src/libraries/Message.sol";
 contract MessageTest is Test {
     bytes32 constant SRC_APP = 0xabababababababababababababababababababababababababababababababab;
     bytes32 constant DST_APP = 0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd;
+    /// Shared cross-language test salt (0x01*32); DOMAIN_SEP mirrors it.
+    bytes32 constant TEST_SALT = 0x0101010101010101010101010101010101010101010101010101010101010101;
+    bytes32 immutable DOMAIN_SEP = Message.deriveDomainSep(TEST_SALT);
 
     function _vectorMessage() internal pure returns (Message.CrossChainMessage memory) {
         return Message.CrossChainMessage({
@@ -21,12 +24,14 @@ contract MessageTest is Test {
         });
     }
 
-    /// Digest parity with the Move side: this exact message hashes to the same
-    /// value in `sui_bridge::message_tests::known_digest_vector`. If either
-    /// encoding drifts, a signature made for one chain fails on the other.
-    function test_known_digest_matches_sui() public pure {
-        bytes32 expected = 0x7b767c416104fbef99880be0416fa07353493afb6547ad67d700029ce09572af;
-        assertEq(Message.hash(_vectorMessage()), expected);
+    /// Digest parity with the Move side under the shared TEST_SALT: this exact
+    /// message hashes to the same value in
+    /// `sui_bridge::message_tests::known_digest_vector` and the bridge-types
+    /// `known_digest_vector`. If any encoding drifts, a signature made for one
+    /// chain fails on the other.
+    function test_known_digest_matches_sui() public view {
+        bytes32 expected = 0x535392536947463d04988702a5480f431f34efed3cf557dc12aa434c2decd707;
+        assertEq(Message.hash(_vectorMessage(), DOMAIN_SEP), expected);
     }
 
     function test_encode_length_is_fixed_header_plus_payload() public pure {
@@ -36,11 +41,17 @@ contract MessageTest is Test {
         assertEq(enc.length, 1 + 4 + 4 + 8 + 32 + 32 + 4 + m.payload.length);
     }
 
-    function test_hash_is_field_sensitive() public pure {
+    function test_hash_is_field_sensitive() public view {
         Message.CrossChainMessage memory a = _vectorMessage();
         Message.CrossChainMessage memory b = _vectorMessage();
         b.nonce = 8;
-        assertTrue(Message.hash(a) != Message.hash(b));
+        assertTrue(Message.hash(a, DOMAIN_SEP) != Message.hash(b, DOMAIN_SEP));
+    }
+
+    function test_hash_is_domain_separated() public pure {
+        bytes32 sepA = Message.deriveDomainSep(bytes32(uint256(1)));
+        bytes32 sepB = Message.deriveDomainSep(bytes32(uint256(2)));
+        assertTrue(Message.hash(_vectorMessage(), sepA) != Message.hash(_vectorMessage(), sepB));
     }
 
     function test_encode_rejects_bad_version() public {

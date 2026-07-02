@@ -1,6 +1,7 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -9,6 +10,7 @@ use serde_json::json;
 
 use bridge_types::{chain_id, CrossChainMessage, Scheme, SignatureEnvelope};
 
+use crate::sessions::{Admit, SignStatus};
 use crate::state::AppState;
 use crate::verifier::VerifyError;
 
@@ -17,41 +19,100 @@ pub struct SignRequest {
     pub message: CrossChainMessage,
 }
 
+/// Async session status returned by POST (202) and GET.
 #[derive(Debug, Serialize)]
-pub struct SignResponse {
-    /// `0x`-prefixed keccak256 digest the signature is over.
+pub struct SignRequestResponse {
+    /// `0x`-prefixed keccak256 digest the signature is (or will be) over.
     pub message_hash: String,
-    pub envelope: SignatureEnvelope,
+    /// `"pending"` | `"signed"`.
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<SignatureEnvelope>,
 }
 
-/// POST /sign_message (spec §5.3). Enforces the §5.4 boundary, then signs with
-/// the scheme the destination family verifies.
-pub async fn sign_message(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<SignRequest>,
-) -> Result<Json<SignResponse>, ApiError> {
-    let message = req.message;
+fn to_response(message_hash: String, status: &SignStatus) -> SignRequestResponse {
+    match status {
+        SignStatus::Pending => SignRequestResponse { message_hash, status: "pending", envelope: None },
+        SignStatus::Signed(env) => SignRequestResponse {
+            message_hash,
+            status: "signed",
+            envelope: Some((**env).clone()),
+        },
+    }
+}
 
-    // (1) well-formed: destination must be a family we can sign for.
+/// POST /sign_requests (spec §5.3). Idempotent per message hash: a duplicate
+/// coalesces onto the existing session. A newly-admitted request is verified
+/// against the §5.4 source boundary *before* any signing work — an uncommitted
+/// message is rejected at the door (422) and never queued. At M1 signing runs
+/// inline, so the 202 usually already carries `status: "signed"`.
+pub async fn create_sign_request(
+    State(state): State<Arc<AppState>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    Json(req): Json<SignRequest>,
+) -> Result<(StatusCode, Json<SignRequestResponse>), ApiError> {
+    // Per-IP rate limit (skipped when the peer addr is absent, e.g. in tests).
+    if let Some(ConnectInfo(addr)) = peer {
+        if !state.rate_limiter.check(addr.ip()) {
+            return Err(ApiError::RateLimited);
+        }
+    }
+
+    let message = req.message;
     let family = chain_id::family(message.dst_chain_id);
     let scheme = Scheme::for_family(family).ok_or(ApiError::UnsupportedFamily(family))?;
+    let hash = format!("0x{}", hex::encode(message.digest(&state.domain_sep)));
 
-    // (2) §5.4: only sign messages the source Outbox committed at finality.
-    state.verifier.verify_committed(&message).await?;
+    // Claim the session (or coalesce). In-flight dedup: a concurrent duplicate
+    // sees the Pending marker and returns without re-verifying/re-signing.
+    match state.sessions.admit(&hash) {
+        Admit::Existing(status) => return Ok((StatusCode::ACCEPTED, Json(to_response(hash, &status)))),
+        Admit::Full => return Err(ApiError::Busy),
+        Admit::New => {}
+    }
 
-    // (3) reference the registered group key for this destination's scheme.
+    // §5.4 boundary. On failure, abandon the session (don't cache a rejection —
+    // the message may reach finality later) and 422 at the door.
+    if let Err(e) = state.verifier.verify_committed(&message).await {
+        state.sessions.abandon(&hash);
+        return Err(ApiError::from(e));
+    }
+
     let group_pubkey_id = match scheme {
         Scheme::Ed25519 => state.ed25519_group_pubkey_id,
         Scheme::EcdsaSecp256k1 => state.ecdsa_group_pubkey_id,
     };
+    match state.signer.sign(&message, &state.domain_sep, group_pubkey_id) {
+        Ok(envelope) => {
+            state.sessions.finalize(&hash, envelope.clone());
+            Ok((StatusCode::ACCEPTED, Json(to_response(hash, &SignStatus::Signed(Box::new(envelope))))))
+        }
+        Err(e) => {
+            state.sessions.abandon(&hash);
+            Err(ApiError::Sign(e.to_string()))
+        }
+    }
+}
 
-    let message_hash = format!("0x{}", hex::encode(message.digest()));
-    let envelope = state
-        .signer
-        .sign(&message, group_pubkey_id)
-        .map_err(|e| ApiError::Sign(e.to_string()))?;
+/// GET /sign_requests/{message_hash} — poll a session by its `0x`-hash.
+pub async fn get_sign_request(
+    State(state): State<Arc<AppState>>,
+    Path(message_hash): Path<String>,
+) -> Result<Json<SignRequestResponse>, ApiError> {
+    let hash = normalize_hash(&message_hash);
+    match state.sessions.get(&hash) {
+        Some(status) => Ok(Json(to_response(hash, &status))),
+        None => Err(ApiError::NotFound),
+    }
+}
 
-    Ok(Json(SignResponse { message_hash, envelope }))
+fn normalize_hash(h: &str) -> String {
+    let h = h.trim().to_lowercase();
+    if h.starts_with("0x") {
+        h
+    } else {
+        format!("0x{h}")
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +169,9 @@ pub enum ApiError {
     UnsupportedFamily(u8),
     Verify(VerifyError),
     Sign(String),
+    RateLimited,
+    Busy,
+    NotFound,
 }
 
 impl From<VerifyError> for ApiError {
@@ -126,10 +190,20 @@ impl IntoResponse for ApiError {
             ApiError::Verify(e @ VerifyError::NotCommitted { .. }) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
             }
+            ApiError::Verify(e @ VerifyError::UnknownRoute(_)) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
+            }
             ApiError::Verify(e @ VerifyError::Unavailable(_)) => {
                 (StatusCode::SERVICE_UNAVAILABLE, e.to_string())
             }
             ApiError::Sign(m) => (StatusCode::INTERNAL_SERVER_ERROR, format!("signing failed: {m}")),
+            ApiError::RateLimited => {
+                (StatusCode::TOO_MANY_REQUESTS, "per-IP sign-request rate limit exceeded".into())
+            }
+            ApiError::Busy => {
+                (StatusCode::SERVICE_UNAVAILABLE, "signer session capacity reached".into())
+            }
+            ApiError::NotFound => (StatusCode::NOT_FOUND, "no signing session for that hash".into()),
         };
         (status, Json(json!({ "error": message }))).into_response()
     }

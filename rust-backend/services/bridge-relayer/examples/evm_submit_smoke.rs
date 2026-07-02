@@ -1,6 +1,6 @@
 //! End-to-end check of the EVM destination submitter against a local node.
 //!
-//! Args: <rpc_url> <inbox_addr> <recipient_addr(20-byte hex)> <relayer_key> <group_secp_seed_hex>
+//! Args: <rpc_url> <inbox_addr> <recipient_addr(20-byte hex)> <relayer_key> <group_secp_seed_hex> <deployment_salt_hex>
 //!
 //! Signs a Sui→EVM message with the group key, submits it via the real
 //! `EvmDestSubmitter`, and asserts the Inbox marked it consumed (which only
@@ -10,7 +10,8 @@
 use bridge_relayer::evm_submit::EvmDestSubmitter;
 use bridge_relayer::relay::DestSubmitter;
 use bridge_signer::ThresholdSigner;
-use bridge_types::{chain_id, message::left_pad_address, CrossChainMessage};
+use bridge_types::message::{derive_domain_sep, left_pad_address};
+use bridge_types::{chain_id, CrossChainMessage};
 
 fn parse32(s: &str) -> [u8; 32] {
     hex::decode(s.trim_start_matches("0x")).unwrap().try_into().unwrap()
@@ -19,8 +20,9 @@ fn parse32(s: &str) -> [u8; 32] {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let a: Vec<String> = std::env::args().collect();
-    let (rpc, inbox, recipient, relayer_key, group_seed) =
-        (&a[1], &a[2], &a[3], &a[4], &a[5]);
+    let (rpc, inbox, recipient, relayer_key, group_seed, salt_hex) =
+        (&a[1], &a[2], &a[3], &a[4], &a[5], &a[6]);
+    let domain_sep = derive_domain_sep(&parse32(salt_hex));
 
     let recipient_addr: [u8; 20] =
         hex::decode(recipient.trim_start_matches("0x")).unwrap().try_into().unwrap();
@@ -36,8 +38,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let signer = ThresholdSigner::from_seeds([0x42; 32], parse32(group_seed))?;
-    let envelope = signer.sign(&message, 1)?;
-    let digest = message.digest();
+    let envelope = signer.sign(&message, &domain_sep, 1)?;
+    let digest = message.digest(&domain_sep);
 
     let submitter = EvmDestSubmitter::new(rpc, inbox, relayer_key)?;
     assert!(!submitter.is_delivered(&digest).await?, "should not be delivered yet");

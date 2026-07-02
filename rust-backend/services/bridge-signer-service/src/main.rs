@@ -23,13 +23,22 @@ async fn main() -> Result<()> {
         "signer keys loaded (M1 single-party)"
     );
 
-    let verifier = verifier::build(&cfg.source_verifier).context("building source verifier")?;
+    let domain_sep = cfg.domain_sep().context("deriving domain separator")?;
+    let verifier =
+        verifier::build(&cfg.source_verifier, &cfg.environment, domain_sep, &cfg.source_chains)
+            .context("building source verifier")?;
 
     let state = Arc::new(AppState {
         signer,
         verifier,
+        domain_sep,
         ed25519_group_pubkey_id: cfg.ed25519_group_pubkey_id,
         ecdsa_group_pubkey_id: cfg.ecdsa_group_pubkey_id,
+        sessions: bridge_signer_service::sessions::SessionStore::new(cfg.session_ttl_secs, cfg.max_sessions),
+        rate_limiter: bridge_signer_service::ratelimit::RateLimiter::new(
+            cfg.sign_rate_window_secs,
+            cfg.sign_rate_max,
+        ),
     });
 
     let public_addr = cfg.public_bind_addr;

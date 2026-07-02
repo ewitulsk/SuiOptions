@@ -17,17 +17,24 @@
 /// payload       bytes        payload_len bytes
 /// ```
 ///
-/// `message_hash = keccak256(encode(message))`. Signers sign over this 32-byte
-/// digest (Ed25519 verify is performed over the digest bytes on Sui; ecrecover
-/// over the same digest on EVM), keeping "the signed digest is identical
-/// everywhere" literally true.
+/// `message_hash = keccak256(DOMAIN_SEP || encode(message))`, where
+/// `DOMAIN_SEP = keccak256("XCHAIN_MSG_V1" || deployment_salt)` binds every
+/// signed message to one logical deployment (bridge-spec.md §2.2) so a redeploy
+/// that reuses registry ids cannot replay previously signed messages. Signers
+/// sign over this 32-byte digest (Ed25519 verify over the digest bytes on Sui;
+/// ecrecover over the same digest on EVM), keeping "the signed digest is
+/// identical everywhere" literally true.
 module sui_bridge::message;
 
+use sui::bcs;
 use sui::hash;
 use sui_bridge::errors;
 
 /// Current canonical format version. Start at 1 (bridge-spec.md §2.2).
 const VERSION: u8 = 1;
+
+/// Domain-separation tag hashed with the per-deployment salt to form DOMAIN_SEP.
+const DOMAIN_TAG: vector<u8> = b"XCHAIN_MSG_V1";
 
 const BYTES32_LEN: u64 = 32;
 
@@ -97,9 +104,42 @@ public fun encode(m: &CrossChainMessage): vector<u8> {
     out
 }
 
-/// `keccak256(encode(message))` — the 32-byte digest signers sign over.
-public fun hash(m: &CrossChainMessage): vector<u8> {
-    hash::keccak256(&encode(m))
+/// `DOMAIN_SEP = keccak256("XCHAIN_MSG_V1" || deployment_salt)`. Derived once
+/// per deployment and stored on the Outbox/Inbox so the separator is auditable
+/// on-chain. `deployment_salt` must be 32 bytes.
+public fun derive_domain_sep(deployment_salt: vector<u8>): vector<u8> {
+    assert!(deployment_salt.length() == BYTES32_LEN, errors::bad_bytes32_length());
+    let mut preimage = DOMAIN_TAG;
+    preimage.append(deployment_salt);
+    hash::keccak256(&preimage)
+}
+
+/// `keccak256(domain_sep || encode(message))` — the 32-byte digest signers sign
+/// over. `domain_sep` is [`derive_domain_sep`] of the deployment salt.
+public fun hash(m: &CrossChainMessage, domain_sep: vector<u8>): vector<u8> {
+    let mut preimage = domain_sep;
+    preimage.append(encode(m));
+    hash::keccak256(&preimage)
+}
+
+/// Decode the standard BCS serialization of a `CrossChainMessage` (field order:
+/// version, src_chain_id, dst_chain_id, nonce, src_app, dst_app, payload). This
+/// is what an untrusted relayer passes as a plain `vector<u8>` arg so it doesn't
+/// have to construct the struct via chained MoveCalls (relayer-dispatch-design
+/// §3.1). Produced off-chain by `bridge_types::CrossChainMessage::to_move_bcs`.
+public fun from_bcs(bytes: vector<u8>): CrossChainMessage {
+    let mut b = bcs::new(bytes);
+    let version = b.peel_u8();
+    let src_chain_id = b.peel_u32();
+    let dst_chain_id = b.peel_u32();
+    let nonce = b.peel_u64();
+    let src_app = b.peel_vec_u8();
+    let dst_app = b.peel_vec_u8();
+    let payload = b.peel_vec_u8();
+    assert!(version == VERSION, errors::unsupported_version());
+    assert!(src_app.length() == BYTES32_LEN, errors::bad_bytes32_length());
+    assert!(dst_app.length() == BYTES32_LEN, errors::bad_bytes32_length());
+    CrossChainMessage { version, src_chain_id, dst_chain_id, nonce, src_app, dst_app, payload }
 }
 
 // --- big-endian integer encoders ---

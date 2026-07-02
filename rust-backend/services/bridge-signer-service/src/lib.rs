@@ -8,7 +8,10 @@ use clap::Parser;
 
 pub mod config;
 pub mod handlers;
+pub mod probe;
+pub mod ratelimit;
 pub mod router;
+pub mod sessions;
 pub mod state;
 pub mod verifier;
 

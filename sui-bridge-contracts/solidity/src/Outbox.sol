@@ -13,6 +13,8 @@ contract Outbox {
     Registry public immutable registry;
     /// Internal id of THIS chain (the source for everything it emits).
     uint32 public immutable srcChainId;
+    /// Digest domain separator (spec §2.2), derived from the deployment salt.
+    bytes32 public immutable domainSep;
 
     /// nextNonce[dstChainId] — monotonic per (src, dst) lane (§2.6).
     mapping(uint32 => uint64) public nextNonce;
@@ -37,9 +39,10 @@ contract Outbox {
         _;
     }
 
-    constructor(Registry registry_, uint32 srcChainId_) {
+    constructor(Registry registry_, uint32 srcChainId_, bytes32 deploymentSalt) {
         registry = registry_;
         srcChainId = srcChainId_;
+        domainSep = Message.deriveDomainSep(deploymentSalt);
     }
 
     /// @notice Emit a message to `dstApp` on `dstChainId`. Returns the assigned
@@ -61,7 +64,7 @@ contract Outbox {
             dstApp: dstApp,
             payload: payload
         });
-        messageHash = Message.hash(m);
+        messageHash = Message.hash(m, domainSep);
 
         nextNonce[dstChainId] = nonce + 1;
 

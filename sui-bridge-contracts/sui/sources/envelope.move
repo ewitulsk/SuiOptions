@@ -12,6 +12,7 @@
 /// ecrecover path.
 module sui_bridge::envelope;
 
+use sui::bcs;
 use sui::ed25519;
 use sui_bridge::errors;
 use sui_bridge::registry::{Self, GroupKeyRegistry};
@@ -29,6 +30,17 @@ public struct SignatureEnvelope has copy, drop, store {
 }
 
 public fun new(scheme_tag: u8, group_pubkey_id: u32, signature: vector<u8>): SignatureEnvelope {
+    SignatureEnvelope { scheme_tag, group_pubkey_id, signature }
+}
+
+/// Decode the standard BCS serialization (scheme_tag, group_pubkey_id,
+/// signature) a relayer passes as a plain `vector<u8>` arg. Produced off-chain
+/// by `bridge_types::SignatureEnvelope::to_move_bcs`.
+public fun from_bcs(bytes: vector<u8>): SignatureEnvelope {
+    let mut b = bcs::new(bytes);
+    let scheme_tag = b.peel_u8();
+    let group_pubkey_id = b.peel_u32();
+    let signature = b.peel_vec_u8();
     SignatureEnvelope { scheme_tag, group_pubkey_id, signature }
 }
 

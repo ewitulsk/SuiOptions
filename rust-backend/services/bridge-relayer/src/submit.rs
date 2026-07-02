@@ -13,7 +13,9 @@ use tracing::info;
 
 use crate::relay::DestSubmitter;
 
-pub struct DryRunSubmitter;
+pub struct DryRunSubmitter {
+    pub domain_sep: Bytes32,
+}
 
 #[async_trait]
 impl DestSubmitter for DryRunSubmitter {
@@ -31,7 +33,7 @@ impl DestSubmitter for DryRunSubmitter {
             nonce = message.nonce,
             scheme_tag = envelope.scheme_tag,
             group_pubkey_id = envelope.group_pubkey_id,
-            message_hash = %format!("0x{}", hex::encode(message.digest())),
+            message_hash = %format!("0x{}", hex::encode(message.digest(&self.domain_sep))),
             signature = %format!("0x{}", hex::encode(&envelope.signature)),
             "DRY RUN — would submit to destination Inbox (real adapter pending)"
         );

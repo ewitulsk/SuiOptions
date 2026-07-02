@@ -1,5 +1,25 @@
 # 01 — DOMAIN_SEP in the message digest (+ redeploy)
 
+**Status (2026-07-01): DONE — both chains redeployed live, parity verified.**
+- Steps 1–4, 7: code complete, all tests green (Rust 16 + 3, Move 14, Solidity 25).
+- Three-way digest parity locked: Rust `known_digest_vector`, Move
+  `message_tests::known_digest_vector`, Solidity `test_known_digest_matches_sui`
+  all assert `0x535392…d707` (test salt `0x01*32`).
+- Signature parity: the Rust-generated domain-separated Ed25519 signature verifies
+  on-chain in Move `receive_accepts_valid_threshold_signature`.
+- Step 5 (Sui): fresh package `0x6435311f…`, Inbox/Outbox created with salt,
+  chains + Ed25519 group key wired.
+- Step 5 (EVM): redeployed to HyperEVM testnet via the Chainlink RPC (canonical
+  host blocked by an upstream SNI egress filter). Registry/Inbox/Outbox live.
+- Step 6 (smoke): **cross-chain parity confirmed live** — `domainSep()` on both
+  EVM contracts and `domain_sep` on both Sui objects all read `0x734dcc…d1dc`.
+- All addresses in `DEPLOYMENTS.md`.
+- Open follow-up → ticket 02: Sui ChainRegistry's HyperEVM entry has zero EVM
+  addrs (registered before EVM deploy); needs an `update_chain` govt fn in
+  registry.move to backfill the real EVM Outbox/Inbox.
+- Regenerate vectors after any digest change: `cargo run -p bridge-signer --example group_keys`.
+
+
 **Spec:** bridge-spec.md §2.2 (mandatory domain separation)
 **Why now:** the deployed digest is a bare `keccak256(encode(message))` on all three implementations. Every testnet redeploy (fresh `consumed` set, same registry IDs) lets previously signed messages replay. Changing the digest later invalidates all accumulated signatures and touches every layer — do it before more traffic and before the other tickets land on the wrong format.
 

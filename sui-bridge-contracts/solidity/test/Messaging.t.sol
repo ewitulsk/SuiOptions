@@ -42,12 +42,15 @@ contract MessagingTest is Test {
     uint32 immutable HYPER_ID = ChainId.encode(ChainId.FAMILY_EVM, 998);
 
     bytes32 constant SUI_PEER = 0x1111111111111111111111111111111111111111111111111111111111111111;
+    bytes32 constant TEST_SALT = 0x0101010101010101010101010101010101010101010101010101010101010101;
+    bytes32 domainSep;
 
     function setUp() public {
         registry = new Registry(governance, guardian);
         // This Inbox/Outbox live on HyperEVM.
-        inbox = new Inbox(registry, HYPER_ID);
-        outbox = new Outbox(registry, HYPER_ID);
+        inbox = new Inbox(registry, HYPER_ID, TEST_SALT);
+        outbox = new Outbox(registry, HYPER_ID, TEST_SALT);
+        domainSep = Message.deriveDomainSep(TEST_SALT);
         recipient = new MockRecipient();
 
         registry.registerChain(SUI_ID, bytes("sui-testnet"), bytes32(0), bytes32(0), 1, 0);
@@ -82,13 +85,13 @@ contract MessagingTest is Test {
 
     function _envelope(uint256 pk, Message.CrossChainMessage memory m)
         internal
-        pure
+        view
         returns (Envelope.SignatureEnvelope memory)
     {
         return Envelope.SignatureEnvelope({
             schemeTag: Envelope.SCHEME_ECDSA_SECP256K1,
             groupPubkeyId: GROUP_KEY_ID,
-            signature: _sign(pk, Message.hash(m))
+            signature: _sign(pk, Message.hash(m, domainSep))
         });
     }
 
@@ -96,7 +99,7 @@ contract MessagingTest is Test {
 
     function test_receive_delivers_valid_signature() public {
         Message.CrossChainMessage memory m = _message(0, bytes("payload-bytes"));
-        bytes32 h = Message.hash(m);
+        bytes32 h = Message.hash(m, domainSep);
 
         vm.expectEmit(true, false, false, true, address(inbox));
         emit Inbox.MessageDelivered(h, SUI_ID, 0);
@@ -116,7 +119,7 @@ contract MessagingTest is Test {
         inbox.receiveMessage(m, env);
 
         vm.expectRevert(
-            abi.encodeWithSelector(Inbox.AlreadyConsumed.selector, Message.hash(m))
+            abi.encodeWithSelector(Inbox.AlreadyConsumed.selector, Message.hash(m, domainSep))
         );
         inbox.receiveMessage(m, env);
     }
@@ -182,7 +185,7 @@ contract MessagingTest is Test {
             dstApp: dstApp,
             payload: bytes("first")
         });
-        assertEq(h0, Message.hash(expected));
+        assertEq(h0, Message.hash(expected, domainSep));
     }
 
     function test_outbox_send_blocked_when_paused() public {
