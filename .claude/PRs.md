@@ -47,3 +47,4 @@ PRs raised through Claude Code.
 | [#251](https://github.com/ewitulsk/SuiOptions/pull/251) | [SO-253](https://suioptions.atlassian.net/browse/SO-253) | SO-8 Protocol | Migrate Keeper Realized-Vol to Cached BenchmarkVol (fix Pyth 429 storm) |
 | [#265](https://github.com/ewitulsk/SuiOptions/pull/265) | [SO-266](https://suioptions.atlassian.net/browse/SO-266) | SO-19 Frontend | Gate Exercise on Expired Options + Fix Off-Screen Popup Positioning |
 | [#268](https://github.com/ewitulsk/SuiOptions/pull/268) | [SO-269](https://suioptions.atlassian.net/browse/SO-269) | — | Sponsor coinWithBalance coin Cleanup in All Gas-Station Templates |
+| [#276](https://github.com/ewitulsk/SuiOptions/pull/276) | [SO-275](https://suioptions.atlassian.net/browse/SO-275) | SO-274 Cross-Chain Bridge | Bridge M0+M1 Foundation: Messaging Contracts, Locker, Signer & Relayer |
