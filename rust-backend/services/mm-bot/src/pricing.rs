@@ -8,6 +8,7 @@
 
 use std::time::Duration;
 
+pub use pricing::smile::Smile;
 use pricing::{
     call_delta, call_price_per_unit, premium_for_write, premium_for_write_ceil, put_delta,
     put_price_per_unit, CallInputs,
@@ -49,6 +50,11 @@ pub struct PricingConfig {
     /// (cold vol buffer): the ask leg's sigma is multiplied and the bid
     /// leg's divided by this, so quoting blind is quoted wide. 1.0 disables.
     pub fallback_vol_penalty: f64,
+    /// Strike-dependent vol ([`pricing::smile::Smile`]): the base sigma is
+    /// evaluated through the smile at the bucket's strike before spreads.
+    /// Default (flat) preserves single-sigma pricing across the whole grid;
+    /// per-symbol overrides come from the bot's `[smiles]` config table.
+    pub smile: Smile,
 }
 
 /// The bucket-resolved + request inputs for pricing one RFQ. The bucket fields
@@ -304,6 +310,9 @@ pub fn price_rfq(
     let t_years = time_to_expiry_years(inputs.expiry_ms, now_ms);
     let strike_scaled = rebase_strike_to_scale_zero(inputs.strike, inputs.strike_scale);
     let SigmaEstimate { sigma, is_fallback } = sigma_est;
+    // Strike-dependent vol: evaluate the configured smile at this strike.
+    // Flat (default) leaves sigma untouched.
+    let sigma = cfg.smile.sigma_at(sigma, spot_scaled, strike_scaled, t_years);
     // Vol-space spread: the ask leg prices at marked-up sigma, the bid leg at
     // marked-down sigma; quoting on the fallback sigma widens further.
     let penalty = if is_fallback { cfg.fallback_vol_penalty.max(1.0) } else { 1.0 };
@@ -757,6 +766,7 @@ mod tests {
             bid_vol_markdown: 1.0,
             ttl_charge_mult: 0.0,
             fallback_vol_penalty: 1.0,
+            smile: Smile::default(),
         }
     }
 
@@ -901,6 +911,7 @@ mod tests {
             bid_vol_markdown: 1.0,
             ttl_charge_mult: 0.0,
             fallback_vol_penalty: 1.0,
+            smile: Smile::default(),
         };
         let d = price_rfq(&cfg, &p, 110.0, live(0.0), 0);
         match d {
@@ -997,6 +1008,7 @@ mod tests {
             bid_vol_markdown: 1.0,
             ttl_charge_mult: 0.0,
             fallback_vol_penalty: 1.0,
+            smile: Smile::default(),
         };
         let mid = premium_of(&price_rfq(
             &pricing_cfg(),
@@ -1067,6 +1079,7 @@ mod tests {
             bid_vol_markdown: 1.0,
             ttl_charge_mult: 0.0,
             fallback_vol_penalty: 1.0,
+            smile: Smile::default(),
         };
         let mid = premium_of(&price_rfq(&pricing_cfg(), &rfq(year_ms, 100, 0, 1_000_000), 100.0, live(0.20), 0));
         let ask = premium_of(&price_rfq(
@@ -1250,6 +1263,26 @@ mod tests {
         assert_eq!(
             premium_of(&price_rfq(&cfg, &bid_rfq, spot, live(sigma), 0)),
             expected_bid
+        );
+    }
+
+    #[test]
+    fn smile_raises_otm_call_ask_and_leaves_atm_alone() {
+        let week_ms = 1000 * 86_400 * 7u64;
+        let smiled = PricingConfig {
+            smile: Smile { skew: 0.1, convexity: 0.0 },
+            ..pricing_cfg()
+        };
+        // Far-OTM call (strike 130 vs spot 100): positive skew richens the wing.
+        let otm = rfq_side(Side::Trader, week_ms, 130, 0, 1_000_000);
+        let flat_px = premium_of(&price_rfq(&pricing_cfg(), &otm, 100.0, live(0.60), 0));
+        let smiled_px = premium_of(&price_rfq(&smiled, &otm, 100.0, live(0.60), 0));
+        assert!(smiled_px > flat_px, "{smiled_px} !> {flat_px}");
+        // ATM (z = 0): identical premium.
+        let atm = rfq_side(Side::Trader, week_ms, 100, 0, 1_000_000);
+        assert_eq!(
+            premium_of(&price_rfq(&pricing_cfg(), &atm, 100.0, live(0.60), 0)),
+            premium_of(&price_rfq(&smiled, &atm, 100.0, live(0.60), 0))
         );
     }
 }

@@ -47,6 +47,8 @@ use sui_tx::tx::deepbook::{
 };
 
 use crate::liquidity::LiquiditySource;
+use pricing::smile::Smile;
+
 use crate::pricing::{
     compute_spot_from_cache, price_rfq, resolve_sigma, PriceDecision, PricingConfig,
     RfqPricingInputs, SigmaEstimate, Staleness,
@@ -176,6 +178,8 @@ pub struct QuoterMarket {
     pub vol_buf_long: Arc<RwLock<RollingVolBuffer>>,
     /// Sigma used while `vol_buf` is cold (per-symbol config override).
     pub fallback_vol: f64,
+    /// Vol smile for this underlying (per-symbol config override).
+    pub smile: Smile,
 }
 
 /// Everything the quoter task needs, captured at boot.
@@ -535,7 +539,8 @@ async fn cycle(
                 expiry_ms: b.expiry_ms,
                 is_put: false, // deepbook quoting is call-only
             };
-            match price_rfq(&p.pricing, &inputs, *spot_scaled, *sigma, now) {
+            let cfg_m = PricingConfig { smile: p.markets[*mi].smile, ..p.pricing };
+            match price_rfq(&cfg_m, &inputs, *spot_scaled, *sigma, now) {
                 PriceDecision::Quote { per_unit, .. } => Some(per_unit),
                 PriceDecision::Decline { .. } => None,
             }

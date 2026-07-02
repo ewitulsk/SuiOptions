@@ -58,6 +58,7 @@ ttl_charge_mult    = 1.0
 # cold): ask sigma ×= this, bid sigma ÷= this. 1.0 disables.
 fallback_vol_penalty = 1.25
 
+
 # Both roles by default; a single Account can serve writer + trader.
 roles = ["trader_mm", "writer_mm"]
 
@@ -83,10 +84,20 @@ bootstrap_underlying_amount = 100_000_000_000
 underlying_replenish_threshold    = 20_000_000_000
 underlying_replenish_amount       = 100_000_000_000
 underlying_replenish_interval_secs = 60
-
 # Optional: where minted call tokens / position NFTs should land. Leave
 # unset to derive from the Sui wallet key.
 # token_recipient = "0xabc..."
+
+# Strike-dependent vol (see crates/pricing smile.rs): sigma(K) = sigma_atm x
+# (1 + skew*z + convexity*z^2), z = ln(K/S)/(sigma_atm*sqrt(tau)). Flat (0/0)
+# until calibrated from observed quotes; positive skew richens the upside
+# wing, positive convexity richens both wings. Per-symbol overrides:
+#   [smiles.TBTC]
+#   skew = 0.05
+[smile]
+skew      = 0.0
+convexity = 0.0
+
 
 # Live prices come from oracle-service (--oracle-url / ORACLE_URL, default
 # http://127.0.0.1:9013). All fields are optional — these are the defaults

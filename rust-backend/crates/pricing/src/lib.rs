@@ -24,6 +24,7 @@
 //! future funded-rate use.
 
 pub mod grid;
+pub mod smile;
 
 use tracing::trace;
 

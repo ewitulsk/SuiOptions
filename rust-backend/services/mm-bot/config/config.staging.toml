@@ -28,6 +28,7 @@ ttl_charge_mult    = 1.0
 # Extra vol widening while the vol buffer is cold (fallback sigma in use).
 fallback_vol_penalty = 1.25
 
+
 roles = ["trader_mm", "writer_mm"]
 bulk_view_enabled = true
 
@@ -37,6 +38,16 @@ bootstrap_underlying_amount = 100_000_000_000
 underlying_replenish_threshold    = 20_000_000_000
 underlying_replenish_amount       = 100_000_000_000
 underlying_replenish_interval_secs = 60
+# Strike-dependent vol (see crates/pricing smile.rs): sigma(K) = sigma_atm x
+# (1 + skew*z + convexity*z^2), z = ln(K/S)/(sigma_atm*sqrt(tau)). Flat (0/0)
+# until calibrated from observed quotes; positive skew richens the upside
+# wing, positive convexity richens both wings. Per-symbol overrides:
+#   [smiles.TBTC]
+#   skew = 0.05
+[smile]
+skew      = 0.0
+convexity = 0.0
+
 
 # Live prices come from oracle-service (ORACLE_URL, set in compose). These
 # only tune the consumer-side staleness guards + the rolling-vol sampler.

@@ -25,7 +25,7 @@ use clap::{Parser, ValueEnum};
 
 use mm_bot::pricing::{
     compute_spot_from_prices, price_rfq, PriceDecision, PricingConfig, RfqPricingInputs,
-    SigmaEstimate, SpotError,
+    SigmaEstimate, Smile, SpotError,
 };
 use protocol_types::sides::Side;
 
@@ -160,6 +160,7 @@ fn main() -> Result<()> {
         bid_vol_markdown: 1.0,
         ttl_charge_mult: 0.0,
         fallback_vol_penalty: 1.0,
+        smile: Smile::default(),
     };
     let sigma = SigmaEstimate { sigma: args.sigma, is_fallback: false };
     let decision = price_rfq(&cfg, &inputs, spot_scaled, sigma, now);

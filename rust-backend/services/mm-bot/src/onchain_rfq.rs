@@ -42,6 +42,8 @@ use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
 use sui_tx::sui_client::{Network, SuiClientWrapper};
 use sui_tx::tx::rfq::{bid, RfqBidParams, RfqTypes};
 
+use pricing::smile::Smile;
+
 use crate::pricing::{
     compute_spot_from_cache, price_rfq, resolve_sigma, serves_pair, PriceDecision, PricingConfig,
     RfqPricingInputs, Staleness,
@@ -264,6 +266,8 @@ pub struct BidderMarket {
     pub vol_buf_long: Arc<RwLock<RollingVolBuffer>>,
     /// Sigma used while `vol_buf` is cold (per-symbol config override).
     pub fallback_vol: f64,
+    /// Vol smile for this underlying (per-symbol config override).
+    pub smile: Smile,
 }
 
 pub struct BidderParams {
@@ -399,7 +403,8 @@ async fn tick(
             expiry_ms: bucket.expiry_ms,
             is_put: false, // the call auction bidder; puts go through onchain_put_rfq
         };
-        let max_bid = match price_rfq(&p.pricing, &inputs, spot_scaled, sigma, now) {
+        let cfg_m = PricingConfig { smile: market.smile, ..p.pricing };
+        let max_bid = match price_rfq(&cfg_m, &inputs, spot_scaled, sigma, now) {
             PriceDecision::Quote { premium, .. } => premium,
             PriceDecision::Decline { reason } => {
                 tracing::debug!(rfq = %rfq.rfq_id.to_hex(), reason, "declined to price");

@@ -43,6 +43,7 @@ use protocol_types::quote::Quote;
 use protocol_types::sides::MmRole;
 use protocol_types::SigningScheme;
 
+use pricing::smile::Smile;
 use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
 use api_service_client::ApiServiceClient;
 use token_info_client::{Snapshot, TokenInfoClient};
@@ -149,6 +150,13 @@ struct BotConfig {
     /// vol buffer). Defaults to 1.0 (disabled).
     #[serde(default = "default_vol_spread_neutral")]
     fallback_vol_penalty: f64,
+    /// Default vol smile (skew/convexity in standardized log-moneyness z —
+    /// see `pricing::smile`). Flat by default; calibrate before enabling.
+    #[serde(default)]
+    smile: SmileConfig,
+    /// Per-symbol smile overrides, e.g. `[smiles.TBTC] skew = 0.05`.
+    #[serde(default)]
+    smiles: HashMap<String, SmileConfig>,
 
     /// Roles advertised to the quoting service.
     roles: Vec<MmRole>,
@@ -265,6 +273,21 @@ impl Default for PythConfig {
     }
 }
 
+/// Serde mirror of [`pricing::smile::Smile`] (the pricing crate stays
+/// serde-free). Defaults to flat.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default)]
+struct SmileConfig {
+    skew: f64,
+    convexity: f64,
+}
+
+impl From<SmileConfig> for Smile {
+    fn from(c: SmileConfig) -> Self {
+        Smile { skew: c.skew, convexity: c.convexity }
+    }
+}
+
 fn default_scheme() -> SigningScheme {
     SigningScheme::Ed25519
 }
@@ -323,6 +346,9 @@ struct Market {
     /// Sigma used while `vol_buf` is cold: the per-symbol override from
     /// `[pyth].fallback_vols`, else the global `fallback_vol`.
     fallback_vol: f64,
+    /// Vol smile for this underlying: the per-symbol override from
+    /// `[smiles]`, else the global `[smile]`.
+    smile: Smile,
 }
 
 /// Derive the underlying set from token-info: every enabled token that has a
@@ -490,6 +516,7 @@ async fn main() -> Result<()> {
                 .get(sym)
                 .copied()
                 .unwrap_or(cfg.pyth.fallback_vol),
+            smile: cfg.smiles.get(sym).copied().unwrap_or(cfg.smile).into(),
         });
     }
     tracing::info!(
@@ -609,6 +636,7 @@ async fn main() -> Result<()> {
         bid_vol_markdown: cfg.bid_vol_markdown,
         ttl_charge_mult: cfg.ttl_charge_mult,
         fallback_vol_penalty: cfg.fallback_vol_penalty,
+        smile: cfg.smile.into(),
     };
     // api-service client: the bot looks each RFQ's bucket up by address to get
     // its true (strike, expiry, coin types) rather than trusting the broadcast.
@@ -647,6 +675,7 @@ async fn main() -> Result<()> {
                         vol_buf: Arc::clone(&m.vol_buf),
                         vol_buf_long: Arc::clone(&m.vol_buf_long),
                         fallback_vol: m.fallback_vol,
+                        smile: m.smile,
                     })
                     .collect();
                 mm_bot::deepbook::spawn_quoter(mm_bot::deepbook::QuoterParams {
@@ -685,6 +714,7 @@ async fn main() -> Result<()> {
                 vol_buf: Arc::clone(&m.vol_buf),
                 vol_buf_long: Arc::clone(&m.vol_buf_long),
                 fallback_vol: m.fallback_vol,
+                smile: m.smile,
             })
             .collect();
         mm_bot::onchain_rfq::spawn_bidder(mm_bot::onchain_rfq::BidderParams {
@@ -718,6 +748,7 @@ async fn main() -> Result<()> {
                 vol_buf: Arc::clone(&m.vol_buf),
                 vol_buf_long: Arc::clone(&m.vol_buf_long),
                 fallback_vol: m.fallback_vol,
+                smile: m.smile,
             })
             .collect();
         mm_bot::onchain_put_rfq::spawn_bidder(mm_bot::onchain_put_rfq::BidderParams {
@@ -751,6 +782,7 @@ async fn main() -> Result<()> {
                 vol_buf: Arc::clone(&m.vol_buf),
                 vol_buf_long: Arc::clone(&m.vol_buf_long),
                 fallback_vol: m.fallback_vol,
+                smile: m.smile,
             })
             .collect();
         mm_bot::onchain_swap::spawn_bidder(mm_bot::onchain_swap::SwapBidderParams {
@@ -998,7 +1030,8 @@ async fn main() -> Result<()> {
                         expiry_ms: bucket.expiry_ms,
                         is_put: bucket.is_put,
                     };
-                    match price_rfq(&pricing_cfg, &inputs, spot_scaled, sigma, now) {
+                    let market_cfg = PricingConfig { smile: market.smile, ..pricing_cfg };
+                    match price_rfq(&market_cfg, &inputs, spot_scaled, sigma, now) {
                         PriceDecision::Quote {
                             premium,
                             valid_until_ms,
@@ -1086,7 +1119,7 @@ async fn main() -> Result<()> {
                     let now = now_ms();
                     // One spot/vol read per market for the whole batch; `None`
                     // where that market's feed is currently stale.
-                    let spots: Vec<Option<(f64, SigmaEstimate)>> = markets
+                    let spots: Vec<Option<(f64, SigmaEstimate, Smile)>> = markets
                         .iter()
                         .map(|m| {
                             match compute_spot_from_cache(
@@ -1104,6 +1137,7 @@ async fn main() -> Result<()> {
                                         m.vol_buf_long.read().current_annualized(),
                                         m.fallback_vol,
                                     ),
+                                    m.smile,
                                 )),
                                 Err(_) => None,
                             }
@@ -1125,7 +1159,7 @@ async fn main() -> Result<()> {
                         };
                         // Match the bucket to one of our markets and grab that
                         // market's spot/sigma; skip if unserved or stale.
-                        let Some((spot_scaled, sigma)) = markets
+                        let Some((spot_scaled, sigma, smile)) = markets
                             .iter()
                             .position(|m| {
                                 serves_pair(
@@ -1149,8 +1183,9 @@ async fn main() -> Result<()> {
                             expiry_ms: bucket.expiry_ms,
                             is_put: bucket.is_put,
                         };
+                        let market_cfg = PricingConfig { smile, ..pricing_cfg };
                         if let PriceDecision::Quote { premium, .. } =
-                            price_rfq(&pricing_cfg, &inputs, spot_scaled, sigma, now)
+                            price_rfq(&market_cfg, &inputs, spot_scaled, sigma, now)
                         {
                             premiums.push(BulkViewMmPremium {
                                 bucket_id: *bucket_id,
