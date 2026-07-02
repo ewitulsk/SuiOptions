@@ -28,9 +28,12 @@ signing_scheme     = "ed25519"
 underlying_symbols = ["TBTC", "TWAL"]
 settlement_symbol  = "TUSDC"
 
-# Annualized risk-free rate. Pyth doesn't model the curve; this stays a
-# config knob.
-rate               = 0.05
+# Annualized risk-free rate. Protocol convention is r = 0 (settlement is a
+# stablecoin with no funded rate leg), which keeps fair value identical
+# across the keeper, api-service, vault-sim, and this bot. Note r > 0 also
+# reintroduces the American-put early-exercise premium that European
+# Black-Scholes doesn't model (see crates/pricing).
+rate               = 0.0
 
 # How long the bot's signed quotes stay valid.
 quote_ttl_ms       = 30_000

@@ -14,6 +14,14 @@
 //!                    quoted premium for the whole RFQ.
 //!
 //! The standard normal CDF is computed from `libm::erfc`, accurate to ~1 ulp.
+//!
+//! Rate convention: the protocol prices with `r = 0` everywhere (keeper,
+//! api-service, vault-sim, mm-bot). Settlement is a stablecoin with no funded
+//! rate leg, so a nonzero r has nothing to hedge against; r = 0 also makes
+//! these European formulas exact for the protocol's American-exercisable
+//! options (early exercise of a call on a non-yielding asset, or of a put at
+//! r = 0, is never optimal). The `r` parameter stays for tests and for any
+//! future funded-rate use.
 
 pub mod grid;
 

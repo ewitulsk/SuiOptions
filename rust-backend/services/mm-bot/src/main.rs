@@ -111,8 +111,11 @@ struct BotConfig {
     #[serde(default = "default_settlement")]
     settlement_symbol: String,
 
-    /// Annualized risk-free rate. Pyth doesn't price the curve; this
-    /// stays a config knob.
+    /// Annualized risk-free rate. Protocol convention is r = 0 (the serde
+    /// default): settlement is a stablecoin with no funded rate leg, and
+    /// r = 0 keeps fair value identical across keeper / api-service /
+    /// vault-sim / this bot. It also makes European put pricing exact for
+    /// the American-exercisable on-chain puts.
     #[serde(default)]
     rate: f64,
     #[serde(default = "default_quote_ttl_ms")]

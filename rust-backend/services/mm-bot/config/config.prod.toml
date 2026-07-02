@@ -17,7 +17,7 @@ signing_scheme     = "ed25519"
 # `underlying_exclude = [...]` to skip specific tickers.
 settlement_symbol  = "TUSDC"
 
-rate               = 0.05
+rate               = 0.0
 quote_ttl_ms       = 30_000
 
 ask_markup_bps     = 100
