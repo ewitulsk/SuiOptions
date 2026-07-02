@@ -8,7 +8,9 @@
 
 use std::time::Duration;
 
-use pricing::{call_price_per_unit, premium_for_write, put_price_per_unit, CallInputs};
+use pricing::{
+    call_price_per_unit, premium_for_write, premium_for_write_ceil, put_price_per_unit, CallInputs,
+};
 use protocol_types::asset::canonicalize_move_type;
 use protocol_types::sides::Side;
 use pyth_client::{PriceCache, PriceFeedId};
@@ -237,12 +239,21 @@ pub fn price_rfq(
         sigma,
     };
     let per_unit_mid = if inputs.is_put {
-        put_price_per_unit(bs_inputs)
+        // The on-chain puts are American (put_bucket allows exercise any time
+        // pre-expiry), so the quote can never sit below intrinsic: the
+        // European value dips under K − S when r > 0, and an ask below
+        // intrinsic is bought + exercised immediately for a riskless profit.
+        put_price_per_unit(bs_inputs).max((strike_scaled - spot_scaled).max(0.0))
     } else {
         call_price_per_unit(bs_inputs)
     };
     let per_unit = apply_spread(per_unit_mid, inputs.side, cfg);
-    let premium = premium_for_write(per_unit, inputs.write_amount);
+    // Ask rounds up, bid rounds down: flooring the ask would undercharge by
+    // up to one settlement raw-unit per quote.
+    let premium = match inputs.side {
+        Side::Trader => premium_for_write_ceil(per_unit, inputs.write_amount),
+        Side::Writer => premium_for_write(per_unit, inputs.write_amount),
+    };
     if premium == 0 {
         return PriceDecision::Decline {
             reason: "priced to zero".into(),
@@ -584,13 +595,14 @@ mod tests {
 
     #[test]
     fn price_rfq_quotes_atm_textbook_value() {
-        // S=K=100, T=1y, r=5%, σ=20%, write=1 → premium ≈ floor(10.4506) = 10.
+        // S=K=100, T=1y, r=5%, σ=20%, write=1 → BS ≈ 10.4506; the default
+        // `rfq` is trader-side (our ask), which rounds UP → 11.
         let year_ms = 1000 * 86_400 * 365u64;
         let p = rfq(year_ms, 100, 0, 1);
         let d = price_rfq(&pricing_cfg(), &p, 100.0, 0.20, 0);
         match d {
             PriceDecision::Quote { premium, valid_until_ms, spot_scaled, strike_scaled, t_years, sigma, per_unit } => {
-                assert_eq!(premium, 10);
+                assert_eq!(premium, 11);
                 assert_eq!(valid_until_ms, 30_000);
                 close(spot_scaled, 100.0, 1e-12);
                 close(strike_scaled, 100.0, 1e-12);
@@ -654,7 +666,8 @@ mod tests {
         // Effective strike and per-unit price must be identical.
         close(*low.1, *high.1, 1e-9);
         close(*low.2, *high.2, 1e-12);
-        // Premium is floor(per_unit * write), so equal per_unit ⇒ equal premium.
+        // Premium rounds per_unit * write the same way, so equal per_unit
+        // ⇒ equal premium.
         assert_eq!(low.0, high.0);
 
         // Sanity-check the magnitude against a textbook ATM (S=K=100,
@@ -729,17 +742,44 @@ mod tests {
 
     #[test]
     fn price_rfq_put_quotes_atm_textbook_value() {
-        // S=K=100, T=1y, r=5%, σ=20% → BS put ≈ 5.5735, write=1 → floor = 5.
+        // S=K=100, T=1y, r=5%, σ=20% → BS put ≈ 5.5735; trader-side ask
+        // rounds UP → 6.
         let year_ms = 1000 * 86_400 * 365u64;
         let p = put_rfq(Side::Trader, year_ms, 100, 0, 1);
         let d = price_rfq(&pricing_cfg(), &p, 100.0, 0.20, 0);
         match d {
             PriceDecision::Quote { premium, per_unit, .. } => {
-                assert_eq!(premium, 5);
+                assert_eq!(premium, 6);
                 close(per_unit, 5.5735, 0.01);
             }
             other => panic!("expected Quote, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn price_rfq_put_never_quotes_below_intrinsic() {
+        // Deep-ITM put with r > 0: the European value K·e^(−rτ)·N(−d2) −
+        // S·N(−d1) ≈ 35.2 sits BELOW the 40.0 intrinsic. The puts are
+        // American-exercisable, so the quote must floor at intrinsic on both
+        // sides — an ask below it is free money for the counterparty.
+        let year_ms = 1000 * 86_400 * 365u64;
+        let ask = premium_of(&price_rfq(
+            &pricing_cfg(),
+            &put_rfq(Side::Trader, year_ms, 100, 0, 1_000_000),
+            60.0,
+            0.20,
+            0,
+        ));
+        let bid = premium_of(&price_rfq(
+            &pricing_cfg(),
+            &put_rfq(Side::Writer, year_ms, 100, 0, 1_000_000),
+            60.0,
+            0.20,
+            0,
+        ));
+        let intrinsic_total = 40 * 1_000_000u64;
+        assert!(ask >= intrinsic_total, "ask {ask} below intrinsic {intrinsic_total}");
+        assert!(bid >= intrinsic_total, "bid {bid} below intrinsic {intrinsic_total}");
     }
 
     #[test]
@@ -873,8 +913,9 @@ mod tests {
 
     #[test]
     fn zero_spread_is_side_independent_and_matches_mid() {
-        // With both bps at zero, trader and writer sides price identically to
-        // the bare Black-Scholes mid (regression guard for the pre-spread path).
+        // With both bps at zero, trader and writer sides price the same bare
+        // Black-Scholes mid; the only residual difference is the rounding
+        // direction (ask ceils, bid floors), at most one raw unit.
         let year_ms = 1000 * 86_400 * 365u64;
         let ask = premium_of(&price_rfq(
             &pricing_cfg(),
@@ -890,6 +931,6 @@ mod tests {
             0.20,
             0,
         ));
-        assert_eq!(ask, bid);
+        assert!(ask >= bid && ask - bid <= 1, "ask {ask}, bid {bid}");
     }
 }

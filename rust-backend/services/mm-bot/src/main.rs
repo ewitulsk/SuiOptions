@@ -209,7 +209,8 @@ struct PythConfig {
     /// Rolling window (in hours) used to compute realized vol.
     vol_window_hours: u64,
     /// How often the live cache is sampled into the vol buffer. The vol
-    /// estimate annualizes from this cadence.
+    /// estimate annualizes from the samples' actual timestamps, so skipped
+    /// ticks (stale stream) don't bias it.
     vol_sample_interval_ms: u64,
     /// Volatility used until the buffer has enough samples. Once it does,
     /// the live estimate takes over.
@@ -421,8 +422,6 @@ async fn main() -> Result<()> {
 
     // Build one Market per underlying. Vol buffers are created here; their
     // sampler tasks are spawned once the Pyth subscriber is up (below).
-    let samples_per_year =
-        (365.0 * 24.0 * 60.0 * 60.0 * 1000.0) / cfg.pyth.vol_sample_interval_ms as f64;
     let vol_window_ms = cfg.pyth.vol_window_hours.saturating_mul(3_600_000);
     let mut markets: Vec<Market> = Vec::with_capacity(underlyings.len());
     for sym in &underlyings {
@@ -438,10 +437,7 @@ async fn main() -> Result<()> {
             coin_type: protocol_types::asset::canonicalize_move_type(&spec.coin_type),
             feed,
             decimals: spec.decimals,
-            vol_buf: Arc::new(RwLock::new(RollingVolBuffer::new(
-                vol_window_ms,
-                samples_per_year,
-            ))),
+            vol_buf: Arc::new(RwLock::new(RollingVolBuffer::new(vol_window_ms))),
         });
     }
     tracing::info!(

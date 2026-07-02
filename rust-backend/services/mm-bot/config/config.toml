@@ -85,8 +85,8 @@ max_price_age_ms       = 5_000
 max_publish_lag_ms     = 10_000
 # Rolling window for realized vol.
 vol_window_hours       = 24
-# Live-cache sample cadence into the vol buffer. Annualization follows
-# this cadence: sigma_year = stddev_log_returns * sqrt(samples_per_year).
+# Live-cache sample cadence into the vol buffer. Annualization uses the
+# samples' actual timestamps, so skipped ticks don't bias sigma.
 vol_sample_interval_ms = 60_000
 # Sigma used until the buffer has enough samples, then live takes over.
 fallback_vol           = 0.6

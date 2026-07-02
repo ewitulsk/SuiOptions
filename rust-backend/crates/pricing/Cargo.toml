@@ -9,3 +9,6 @@ path = "src/lib.rs"
 
 [dependencies]
 tracing = { workspace = true }
+
+# Exact-to-~1ulp erfc for the standard normal CDF.
+libm = "0.2"
