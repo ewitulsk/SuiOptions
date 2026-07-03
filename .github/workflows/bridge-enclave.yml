@@ -86,12 +86,17 @@ jobs:
           # `make install` (install-tools) installs BOTH binaries; vsock-proxy
           # must be built too or install dies on the missing binary.
           make -C /tmp/nitro-cli vsock-proxy
+          # `make install` installs to the LOCAL prefix ./build/install (not
+          # /usr/bin); its env.sh sets PATH + NITRO_CLI_BLOBS. Source it in
+          # every step that runs nitro-cli.
           sudo make -C /tmp/nitro-cli install
+          source /tmp/nitro-cli/build/install/etc/profile.d/nitro-cli-env.sh
           nitro-cli --version
 
       # --- build the EIF + capture measurements ---
       - name: Build EIF
         run: |
+          source /tmp/nitro-cli/build/install/etc/profile.d/nitro-cli-env.sh
           nitro-cli build-enclave \
             --docker-uri bridge-signer-enclave:${{ github.sha }} \
             --output-file signer.eif \
