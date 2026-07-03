@@ -139,7 +139,9 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.deploy
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}
+          # Dedicated bridge deploy role (infra-bridge root) — the main
+          # DEPLOY_ROLE_ARN's OIDC trust only covers staging/main refs.
+          role-to-assume: ${{ vars.BRIDGE_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Login to ECR
