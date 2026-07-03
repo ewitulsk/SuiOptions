@@ -90,6 +90,10 @@ jobs:
           # /usr/bin); its env.sh sets PATH + NITRO_CLI_BLOBS. Source it in
           # every step that runs nitro-cli.
           sudo make -C /tmp/nitro-cli install
+          # The rpm/deb packages create this log dir; the from-source local
+          # install doesn't, and nitro-cli dies (E19) if it can't open it.
+          sudo mkdir -p /var/log/nitro_enclaves
+          sudo chown "$(id -u):$(id -g)" /var/log/nitro_enclaves
           source /tmp/nitro-cli/build/install/etc/profile.d/nitro-cli-env.sh
           nitro-cli --version
 
