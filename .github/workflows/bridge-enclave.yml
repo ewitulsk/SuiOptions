@@ -83,6 +83,9 @@ jobs:
           # Builds the nitro-cli binary + ships the arch-specific kernel/init blobs
           # that build-enclave bundles into the EIF (blobs affect PCR0).
           make -C /tmp/nitro-cli nitro-cli
+          # `make install` (install-tools) installs BOTH binaries; vsock-proxy
+          # must be built too or install dies on the missing binary.
+          make -C /tmp/nitro-cli vsock-proxy
           sudo make -C /tmp/nitro-cli install
           nitro-cli --version
 
