@@ -16,11 +16,22 @@
 
 ## Detailed implementation plan
 
-### Phase 1 — Fork & port the signer into the nautilus app (no attestation yet)
-1. Fork `MystenLabs/nautilus`; pin the commit. Track our delta in a `FORK_DELTA.md` for the ticket-10 audit (upstream is explicitly unaudited).
-2. Move `bridge-signer-service` into `src/nautilus-server/src/apps/bridge-signer/`. The axum public router (ticket 06: `/sign_requests`, `GET /sign_requests/:hash`, `/get_attestation`, `/health`) becomes the enclave's public surface; admin routes (Seal load, ticket 08) bind to the vsock-local admin port only.
-3. **Egress rework (the real work):** the signer's `EvmProbe`/`SuiProbe` (ticket 02) currently make direct `reqwest` calls. Inside the enclave there is no direct socket — route all outbound HTTPS through the vsock proxy, with **rustls terminating inside the enclave** so the parent forwards ciphertext only. Concretely: a custom `reqwest` connector (or `hyper` client) whose transport is vsock→parent-forwarder→TCP, wrapping the stream in an in-enclave rustls `ClientConnection` pinned to the configured provider certs. `SuiClientBuilder` (SuiDestSubmitter) needs the same treatment or gets replaced by raw JSON-RPC over the vsock transport.
-4. `allowed_endpoints.yaml` = the RPC hostnames (Sui fullnode(s), HyperEVM RPC(s), later Seal key servers). The parent's forwarder only dials these.
+### Phase 1 — Vendor nautilus (pinned) + embed the signer as a lib (no attestation yet)
+
+**Structure decision — vendor into THIS monorepo, NOT a separate fork repo.** The signer is already a workspace crate and all bridge work lives on one PR/audit surface; a separate `ewitulsk/nautilus` fork would split the signer from its enclave wrapper and force an awkward cross-repo build. So vendor the needed nautilus subtree (`src/nautilus-server` + the EIF build tooling + the vsock traffic-forwarder + `allowed_endpoints.yaml`) into `rust-backend/bridge-enclave/`, **pinned to a specific upstream commit**, recorded in a `FORK_DELTA.md` (upstream is Apache-2.0 and explicitly unaudited). This mirrors what we already did for the Move side (`sui-bridge-contracts/enclave/` vendored `enclave.move`).
+
+**Bring-up sequence (once the c7g.large is up):**
+1. `git clone` upstream nautilus and run the **stock example** on the box first — validate the full pipeline (reproducible build → `build-enclave` → attestation doc → `register_enclave` against the `bridge_enclave` registry from Phase 3) *before* touching our code. Fast confidence that the hardware + framework path works end-to-end.
+2. Only then vendor the pinned subtree in and swap the example app for our signer.
+> Clone to bring up + validate; vendor-pinned to ship. The loose clone is never the committed artifact — PCRs require the exact build inputs to be version-controlled + auditable.
+
+**Embed the signer as a library — do NOT rewrite it into the app slot.** Library-fy `bridge-signer-service` (expose its router + `AppState` from a `lib` crate) and have the vendored nautilus-server app depend on it **by path**, rather than moving/duplicating the logic. The signer's HTTP surface (ticket 06: `/sign_requests`, `GET /sign_requests/:hash`, `/get_attestation`, `/health`) becomes the enclave's public surface; admin routes (Seal load, ticket 08) bind to the vsock-local admin port only.
+
+**Reproducibility — keep the enclave build a SEPARATE Cargo project.** nautilus-server pins its own dependency versions for deterministic PCRs, which can clash with the main workspace's versions. So `rust-backend/bridge-enclave/` carries its **own `Cargo.lock`** and pulls the signer lib as a path dep — it is **not** a member of the main workspace. (This is why the CI Dockerfile builds from the enclave dir with its own lock, and why the signer must be lib-shaped, not folded into the workspace binary.)
+
+**Egress rework (the real work):** the signer's `EvmProbe`/`SuiProbe` (ticket 02) currently make direct `reqwest` calls. Inside the enclave there is no direct socket — route all outbound HTTPS through the vsock proxy, with **rustls terminating inside the enclave** so the parent forwards ciphertext only. Concretely: a custom `reqwest` connector (or `hyper` client) whose transport is vsock→parent-forwarder→TCP, wrapping the stream in an in-enclave rustls `ClientConnection` pinned to the configured provider certs. `SuiClientBuilder` (SuiDestSubmitter) needs the same treatment or gets replaced by raw JSON-RPC over the vsock transport.
+
+**allowed_endpoints.yaml** = the RPC hostnames (Sui fullnode(s), HyperEVM RPC(s), later Seal key servers). The parent's forwarder only dials these.
 
 ### Phase 2 — Reproducible build & PCR measurement (GitHub Actions, arm64)
 1. Build the EIF via the nautilus reproducible Dockerfile: pinned Rust toolchain, base image pinned **by digest**, `cargo build --locked --release`, `SOURCE_DATE_EPOCH` set, no build timestamps. Goal: **bit-identical EIF → identical PCR0** across machines/runs.
