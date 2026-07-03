@@ -1,0 +1,30 @@
+#!/bin/bash
+# Provision the Graviton host to be Nitro-Enclave-ready (bridge_tickets/07 Phase 5/6).
+# It does NOT run an enclave yet — there's no EIF until Phase 1. Once the EIF is
+# built (CI), run it over SSM: `nitro-cli run-enclave --eif-path signer.eif ...`.
+set -euxo pipefail
+
+dnf -y update
+
+# Nitro Enclaves CLI (+ devel for build-enclave) and docker (image runs / build).
+# NOTE(ticket-07): verify these package names on the pinned AL2023 release; the
+# Nitro CLI version affects PCR0, so pin it deliberately for reproducibility.
+dnf -y install aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel docker
+
+# Allow ec2-user (and root/SSM) to drive the enclave + docker.
+usermod -aG ne ec2-user || true
+usermod -aG docker ec2-user || true
+
+# Dedicate ${enclave_cpu_count} vCPU + ${enclave_memory_mib} MiB to enclaves.
+mkdir -p /etc/nitro_enclaves
+cat > /etc/nitro_enclaves/allocator.yaml <<EOF
+---
+memory_mib: ${enclave_memory_mib}
+cpu_count: ${enclave_cpu_count}
+EOF
+
+systemctl enable --now docker
+systemctl enable --now nitro-enclaves-allocator
+
+nitro-cli --version || true
+echo "bridge-enclave host provisioned; Nitro-ready. Awaiting EIF (ticket 07 Phase 1)."

@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars and adjust. Most defaults are fine for the N=1 launch.
+aws_region    = "us-east-1"
+instance_type = "c7g.large"
+
+# Enclave carve-out on c7g.large (2 vCPU / 4 GB): 1 vCPU + 1.5 GB to the enclave.
+enclave_cpu_count  = 1
+enclave_memory_mib = 1536
+
+# Leave empty until the relayer needs to reach the signer API; then add its CIDR.
+# signer_api_ingress_cidrs = ["10.40.0.0/16"]
