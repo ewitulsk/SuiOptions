@@ -256,6 +256,133 @@ mod tests {
         assert_eq!(settlement_to_underlying(100, 0, 0), None);
     }
 
+    // ── property tests (Phase 4 hardening) ──
+
+    /// Deterministic xorshift64* so the property runs are reproducible
+    /// without a rand dependency (the crate is no_std).
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545F4914F6CDD1D)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n.max(1)
+        }
+    }
+
+    /// The put-bucket solvency proof from `put_bucket.move`, exercised
+    /// under random write/exercise/redeem sequences: collateral in rounds
+    /// UP (ceil), every cash payout rounds DOWN (floor) — so the cash
+    /// balance can never go negative and ends as non-negative dust, while
+    /// the underlying leg drains to exactly zero.
+    #[test]
+    fn put_bucket_solvency_under_random_sequences() {
+        for seed in 1..=50u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15));
+            // Random fractional strike: ratio strike/10^scale in (0, 10).
+            let scale = (rng.below(6) + 1) as u8;
+            let strike = rng.below(10 * 10u64.pow(scale as u32) - 1) as u128 + 1;
+
+            let mut cash: i128 = 0; // settlement balance
+            let mut delivered: i128 = 0; // underlying balance
+            let mut total_written: u128 = 0;
+            let mut cursor: u128 = 0;
+            let mut positions = [(0u128, 0u128); 16];
+            let mut n_pos = 0;
+
+            // Writes.
+            while n_pos < 16 {
+                let amount = rng.below(1_000) + 1;
+                let collateral = apply_strike_ceil(amount as u128, strike, scale).unwrap();
+                cash += collateral as i128;
+                positions[n_pos] = (total_written, total_written + amount as u128);
+                total_written += amount as u128;
+                n_pos += 1;
+            }
+
+            // Random exercises up to total_written.
+            while cursor < total_written {
+                let remaining = (total_written - cursor) as u64;
+                let amount = rng.below(remaining * 2) + 1; // sometimes stop early
+                if amount > remaining {
+                    break;
+                }
+                let payout = apply_strike_floor(amount as u128, strike, scale).unwrap();
+                cash -= payout as i128;
+                delivered += amount as i128;
+                cursor += amount as u128;
+                assert!(cash >= 0, "cash went negative mid-exercise (seed {seed})");
+            }
+
+            // Redeem every position.
+            for &(rs, re) in &positions[..n_pos] {
+                let exercised = exercised_in_range(cursor, rs, re);
+                let unexercised = (re - rs) - exercised;
+                delivered -= exercised as i128;
+                let refund = apply_strike_floor(unexercised, strike, scale).unwrap();
+                cash -= refund as i128;
+                assert!(cash >= 0, "cash went negative at redeem (seed {seed})");
+            }
+
+            // The underlying leg is exact; the cash leg leaves only
+            // non-negative dust.
+            assert_eq!(delivered, 0, "underlying leg must drain exactly (seed {seed})");
+            assert!(cash >= 0, "dust must be non-negative (seed {seed})");
+        }
+    }
+
+    /// The call-side settlement leg documents a KNOWN inherited edge from
+    /// `bucket.move`: exercises pay round_half_up(n × strike) in, redeems
+    /// pay round_half_up(exercised_range × strike) out — sums of half-up
+    /// roundings over different partitions can differ, so a bucket can be
+    /// short by strictly less than one settlement smallest-unit per
+    /// position (the last redeemer would fail for dust). See
+    /// SECURITY.md §known-issues. This test pins that bound so any
+    /// regression that widens it is caught.
+    #[test]
+    fn call_bucket_settlement_deficit_bounded_by_rounding() {
+        for seed in 1..=50u64 {
+            let mut rng = Rng(seed.wrapping_mul(0xDEADBEEFCAFE));
+            let scale = (rng.below(4) + 1) as u8;
+            let strike = rng.below(10 * 10u64.pow(scale as u32) - 1) as u128 + 1;
+
+            let mut settlement: i128 = 0;
+            let mut total_written: u128 = 0;
+            let mut cursor: u128 = 0;
+            let mut positions = [(0u128, 0u128); 16];
+            let mut n_pos = 0;
+            while n_pos < 16 {
+                let amount = rng.below(1_000) + 1;
+                positions[n_pos] = (total_written, total_written + amount as u128);
+                total_written += amount as u128;
+                n_pos += 1;
+            }
+            while cursor < total_written {
+                let remaining = (total_written - cursor) as u64;
+                let amount = rng.below(remaining * 2) + 1;
+                if amount > remaining {
+                    break;
+                }
+                settlement += apply_strike(amount as u128, strike, scale).unwrap() as i128;
+                cursor += amount as u128;
+            }
+            for &(rs, re) in &positions[..n_pos] {
+                let exercised = exercised_in_range(cursor, rs, re);
+                settlement -= apply_strike(exercised, strike, scale).unwrap() as i128;
+            }
+            // Deficit strictly bounded below one unit per position.
+            assert!(
+                settlement > -(n_pos as i128),
+                "deficit exceeded rounding bound (seed {seed}): {settlement}"
+            );
+        }
+    }
+
     // ── FIFO cursor assignment ──
 
     #[test]

@@ -605,6 +605,54 @@ fn vault_full_round_lifecycle() {
     let position = Keypair::new();
     let call_dest = ctx.fund(&mm.pubkey(), &call_mint, 0);
     let treasury_settlement = ctx.fund(&ctx.core_treasury.clone(), &ctx.settlement.clone(), 0);
+
+    // ── Phase 4 threat check: coupled-auction bypass ──
+    // Settling the vault's auction directly on the venue (no vault PDA
+    // signature) must fail — this is what keeps the vault's open_rfqs /
+    // positions counters from drifting out from under it.
+    let bypass_pos = Keypair::new();
+    let ix = Instruction::new_with_bytes(
+        venue_id(),
+        &auction_venue::instruction::SettleCall {}.data(),
+        auction_venue::accounts::SettleCall {
+            cranker: mm.pubkey(),
+            creator_wallet: ctx.vault,
+            auction,
+            escrow_vault,
+            bid_vault,
+            authority: None,
+            proceeds_token: v.proceeds,
+            refund_token: v.deployable,
+            bucket,
+            position: bypass_pos.pubkey(),
+            underlying_vault: ata(&bucket, &ctx.underlying),
+            call_mint,
+            call_dest,
+            core_config: ctx.core_config,
+            core_treasury_token: treasury_settlement,
+            core_event_authority_acc: ea(&core_id()),
+            core_program: core_id(),
+            token_program: anchor_spl::token::ID,
+            system_program: anchor_lang::system_program::ID,
+            event_authority: ea(&venue_id()),
+            program: venue_id(),
+        }
+        .to_account_metas(None),
+    );
+    let result = ctx.send(&mm, &[ix], &[&bypass_pos]);
+    // VenueError::WrongSettleAuthority
+    {
+        use solana_instruction::error::InstructionError;
+        use solana_transaction_error::TransactionError;
+        let err = result.expect_err("bypass must fail");
+        let expected = 6000 + auction_venue::error::VenueError::WrongSettleAuthority as u32;
+        match err.err {
+            TransactionError::InstructionError(_, InstructionError::Custom(code)) => {
+                assert_eq!(code, expected, "logs: {:?}", err.meta.logs)
+            }
+            other => panic!("expected {expected}, got {other:?}"),
+        }
+    }
     let vault_pos_0 = pda(
         &[b"vault_pos", ctx.vault.as_ref(), &0u64.to_le_bytes()],
         &vault_prog(),

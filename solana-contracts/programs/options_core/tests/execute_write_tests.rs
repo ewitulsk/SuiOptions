@@ -382,6 +382,101 @@ fn writer_flow_call_recipient_must_match_quote() {
 }
 
 #[test]
+fn sig_index_pointing_at_non_precompile_fails() {
+    let mut ctx = TestCtx::setup();
+    let s = setup_writer_flow(&mut ctx);
+    let writer = ctx.writer.insecure_clone();
+    let quote = writer_quote(&ctx, &s, 1);
+
+    // A VALID precompile ix rides along at index 0, but the program is
+    // told to introspect index 1 — which is execute_write itself. The
+    // introspection must reject rather than trust the wrong instruction.
+    // (sig_ix_index is fixed to 0 in the helper, so build manually: put a
+    // junk transfer at index 0 and the valid sig at index 1, then point
+    // at index 0.)
+    let junk = anchor_lang::solana_program::system_instruction::transfer(
+        &writer.pubkey(),
+        &writer.pubkey(),
+        1,
+    );
+    let sig_ix = ed25519_verify_ix(&quote, &s.sk);
+    // helper builds [given_ix, execute] with sig_ix_index = 0; pass junk
+    // as the "signature" instruction and append the real one after — the
+    // program reads index 0 (junk) and must fail.
+    let result = ctx
+        .execute_write_with_sig_ix(
+            &writer,
+            &s.keys,
+            &s.mm_account,
+            &quote,
+            FlowKind::Writer,
+            writer.pubkey(),
+            &ctx.trader_mm.pubkey().clone(),
+            Some(junk),
+        )
+        .map(|_| ());
+    assert_core_err(result, CoreError::MissingSigVerification);
+    drop(sig_ix);
+}
+
+#[test]
+fn multi_signature_precompile_header_rejected() {
+    use ed25519_dalek::Signer as _;
+    let mut ctx = TestCtx::setup();
+    let s = setup_writer_flow(&mut ctx);
+    let writer = ctx.writer.insecure_clone();
+    let quote = writer_quote(&ctx, &s, 1);
+
+    // Hand-craft a VALID two-signature Ed25519 instruction (same key
+    // signing the quote bytes twice). The precompile passes; the
+    // program's "exactly one signature" pin must reject — otherwise an
+    // attacker could hide a second offsets record pointing elsewhere.
+    let msg = quote_bytes(&quote);
+    let sig = s.sk.sign(&msg).to_bytes();
+    let pk = s.sk.verifying_key().to_bytes();
+    let mut data = Vec::new();
+    data.extend_from_slice(&[2u8, 0]); // num_signatures = 2
+    let pk1 = 30u16;
+    let sig1 = pk1 + 32;
+    let pk2 = sig1 + 64;
+    let sig2 = pk2 + 32;
+    let msg_off = sig2 + 64;
+    for (pko, sigo) in [(pk1, sig1), (pk2, sig2)] {
+        data.extend_from_slice(&sigo.to_le_bytes());
+        data.extend_from_slice(&u16::MAX.to_le_bytes());
+        data.extend_from_slice(&pko.to_le_bytes());
+        data.extend_from_slice(&u16::MAX.to_le_bytes());
+        data.extend_from_slice(&msg_off.to_le_bytes());
+        data.extend_from_slice(&(msg.len() as u16).to_le_bytes());
+        data.extend_from_slice(&u16::MAX.to_le_bytes());
+    }
+    data.extend_from_slice(&pk);
+    data.extend_from_slice(&sig);
+    data.extend_from_slice(&pk);
+    data.extend_from_slice(&sig);
+    data.extend_from_slice(&msg);
+    let two_sig_ix = anchor_lang::solana_program::instruction::Instruction {
+        program_id: options_core::quote::ED25519_PROGRAM_ID,
+        accounts: vec![],
+        data,
+    };
+
+    let result = ctx
+        .execute_write_with_sig_ix(
+            &writer,
+            &s.keys,
+            &s.mm_account,
+            &quote,
+            FlowKind::Writer,
+            writer.pubkey(),
+            &ctx.trader_mm.pubkey().clone(),
+            Some(two_sig_ix),
+        )
+        .map(|_| ());
+    assert_core_err(result, CoreError::MissingSigVerification);
+}
+
+#[test]
 fn prune_nonce_after_expiry_only() {
     let mut ctx = TestCtx::setup();
     let s = setup_writer_flow(&mut ctx);

@@ -60,7 +60,7 @@ pub fn handle_open_rfq(ctx: Context<OpenRfq>, slice_amount: u64) -> Result<()> {
     require!(vault.phase == Phase::Active, VaultError::WrongPhase);
     require!(now < vault.selling_ends_ms, VaultError::SellingClosed);
     require!(
-        vault.open_rfqs + vault.open_swap_rfqs < vault.config.max_open_rfqs,
+        vault.open_rfqs < vault.config.max_open_rfqs,
         VaultError::TooManyRfqs
     );
     require!(slice_amount > 0, VaultError::ZeroAmount);

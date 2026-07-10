@@ -85,7 +85,9 @@ pub fn handle_select_bucket(ctx: Context<SelectBucket>) -> Result<()> {
     let auction_room = vault.config.rfq_duration_ms
         + vault.config.rfq_max_extension_ms
         + SETTLE_BUFFER_MS;
-    let hard_cap = expiry - auction_room;
+    let hard_cap = expiry
+        .checked_sub(auction_room)
+        .ok_or(VaultError::ExpiryOutOfBand)?;
     vault.selling_ends_ms = (now + vault.config.selling_window_ms).min(hard_cap);
 
     emit_cpi!(VaultBucketSelected {

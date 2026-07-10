@@ -62,7 +62,7 @@ pub fn handle_open_swap_rfq(ctx: Context<OpenSwapRfq>, amount_s: u64) -> Result<
     let clock = Clock::get()?;
     let vault = &ctx.accounts.vault;
     require!(
-        vault.open_rfqs + vault.open_swap_rfqs < vault.config.max_open_rfqs,
+        vault.open_swap_rfqs < vault.config.max_open_rfqs,
         VaultError::TooManyRfqs
     );
     let s_in = amount_s.min(ctx.accounts.proceeds.amount);
