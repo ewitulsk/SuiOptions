@@ -15,8 +15,6 @@
 
 #![no_std]
 
-use primitive_types::U256;
-
 /// Maximum supported strike_scale: 10^38 is the largest power of ten that
 /// fits in u128 (mirrors `bucket::MAX_STRIKE_SCALE`).
 pub const MAX_STRIKE_SCALE: u8 = 38;
@@ -102,13 +100,15 @@ pub fn amount_for_shares(shares: u64, pps: u128) -> Option<u64> {
 }
 
 /// amount × spot / 10^spot_scale, round-half-up — `apply_strike`-style
-/// settlement notional of an underlying amount, in u256 so a u64 amount ×
-/// u128 spot cannot overflow (mirrors `vault::settlement_notional`).
+/// settlement notional of an underlying amount (mirrors
+/// `vault::settlement_notional`). Move used u256 here; checked u128 is
+/// equivalent for every realistic magnitude (u64 amount × scale-12 spot
+/// stays ≲10^34 ≪ u128::MAX) and overflow degrades to `None` → a clean
+/// program error instead of UB.
 pub fn settlement_notional(amount: u64, spot: u128, spot_scale: u8) -> Option<u64> {
-    let divisor = U256::from(10u8).checked_pow(U256::from(spot_scale))?;
-    let numerator = U256::from(amount) * U256::from(spot);
-    let out = (numerator + divisor / 2) / divisor;
-    u64::try_from(out).ok()
+    let divisor = pow10(spot_scale)?;
+    let numerator = (amount as u128).checked_mul(spot)?;
+    u64::try_from(numerator.checked_add(divisor / 2)? / divisor).ok()
 }
 
 /// amount_s × 10^spot_scale / spot, floor — settlement valued in underlying
@@ -121,8 +121,8 @@ pub fn settlement_to_underlying(amount_s: u64, spot: u128, spot_scale: u8) -> Op
     if spot == 0 {
         return None;
     }
-    let mult = U256::from(10u8).checked_pow(U256::from(spot_scale))?;
-    let out = U256::from(amount_s) * mult / U256::from(spot);
+    let mult = pow10(spot_scale)?;
+    let out = (amount_s as u128).checked_mul(mult)? / spot;
     u64::try_from(out).ok()
 }
 

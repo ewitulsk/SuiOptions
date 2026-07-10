@@ -4,6 +4,3 @@ version = "0.1.0"
 description = "Shared pure math for the options protocol programs — audited once, compiled into each program"
 edition.workspace = true
 rust-version.workspace = true
-
-[dependencies]
-primitive-types = { version = "0.13", default-features = false }

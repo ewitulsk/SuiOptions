@@ -17,16 +17,22 @@ use crate::util::now_ms;
 ///
 /// The `position` account is a fresh client-generated keypair (mirrors Sui
 /// object ids) — no PDA derivation race when two writes land in one slot.
+///
+/// `payer` (rent) is separate from `writer` (collateral authority) so a
+/// program PDA can be the writer under CPI — PDAs owned by another program
+/// cannot fund system-program account creation. Direct users pass the same
+/// wallet for both.
 #[event_cpi]
 #[derive(Accounts)]
 pub struct WriteCollateralized<'info> {
     #[account(mut)]
+    pub payer: Signer<'info>,
     pub writer: Signer<'info>,
     #[account(mut)]
     pub bucket: Account<'info, Bucket>,
     #[account(
         init,
-        payer = writer,
+        payer = payer,
         space = 8 + Position::INIT_SPACE,
         signer
     )]

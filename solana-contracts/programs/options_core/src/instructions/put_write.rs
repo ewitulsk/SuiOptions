@@ -20,16 +20,20 @@ pub fn required_collateral(bucket: &PutBucket, amount: u64) -> Result<u64> {
 /// Core cash-secured write (mirrors `put_bucket::write_collateralized`):
 /// escrow the cash collateral, advance the cursor by `write_amount`
 /// (underlying units — NOT the collateral value), mint Position + puts.
+/// `payer` (rent) is separate from `writer` (collateral authority) so a
+/// program PDA can be the writer under CPI; direct users pass the same
+/// wallet for both.
 #[event_cpi]
 #[derive(Accounts)]
 pub struct WritePutCollateralized<'info> {
     #[account(mut)]
+    pub payer: Signer<'info>,
     pub writer: Signer<'info>,
     #[account(mut)]
     pub bucket: Box<Account<'info, PutBucket>>,
     #[account(
         init,
-        payer = writer,
+        payer = payer,
         space = 8 + Position::INIT_SPACE,
         signer
     )]

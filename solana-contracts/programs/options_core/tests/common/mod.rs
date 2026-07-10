@@ -304,6 +304,7 @@ impl TestCtx {
             }
             .data(),
             options_core::accounts::WriteCollateralized {
+                payer: writer.pubkey(),
                 writer: writer.pubkey(),
                 bucket: keys.bucket,
                 position: position.pubkey(),
@@ -819,6 +820,7 @@ impl TestCtx {
             }
             .data(),
             options_core::accounts::WritePutCollateralized {
+                payer: writer.pubkey(),
                 writer: writer.pubkey(),
                 bucket: keys.bucket,
                 position: position.pubkey(),
