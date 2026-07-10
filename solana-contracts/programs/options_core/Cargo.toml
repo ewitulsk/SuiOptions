@@ -1,0 +1,42 @@
+[package]
+name = "options_core"
+version = "0.1.0"
+description = "Options protocol core: covered-call + cash-secured-put buckets (audit package 1)"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "options_core"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang.workspace = true
+anchor-spl.workspace = true
+options_math.workspace = true
+solana-instructions-sysvar = "3.0"
+solana-sdk-ids = "3.1"
+
+[dev-dependencies]
+litesvm = { version = "0.10.0", features = ["precompiles"] }
+litesvm-token = "0.10.0"
+solana-message = "3.0.1"
+solana-transaction = "3.0.2"
+solana-signer = "3.0.0"
+solana-keypair = "3.0.1"
+solana-ed25519-program = "3.0.0"
+solana-instruction = "3.0.0"
+solana-transaction-error = "3.3.1"
+ed25519-dalek = "2"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
