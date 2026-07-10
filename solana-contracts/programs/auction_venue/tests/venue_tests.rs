@@ -325,6 +325,7 @@ impl Ctx {
             }
             .data(),
             auction_venue::accounts::CreateAuction {
+                payer: seller.pubkey(),
                 creator: seller.pubkey(),
                 escrow_mint: self.underlying,
                 bid_mint: self.settlement,
@@ -683,6 +684,7 @@ fn put_auction_escrows_ceil_collateral_and_settles() {
         }
         .data(),
         auction_venue::accounts::CreateAuction {
+            payer: seller.pubkey(),
             creator: seller.pubkey(),
             escrow_mint: ctx.settlement,
             bid_mint: ctx.settlement,
@@ -776,6 +778,7 @@ fn swap_auction_standalone_and_force_refund_gating() {
         }
         .data(),
         auction_venue::accounts::CreateAuction {
+            payer: seller.pubkey(),
             creator: seller.pubkey(),
             escrow_mint: ctx.settlement,
             bid_mint: ctx.underlying,

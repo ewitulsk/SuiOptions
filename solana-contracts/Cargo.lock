@@ -2071,6 +2071,19 @@ name = "options_vault"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
+ "anchor-spl",
+ "auction_venue",
+ "litesvm",
+ "litesvm-token",
+ "options_core",
+ "options_math",
+ "solana-account",
+ "solana-instruction",
+ "solana-keypair",
+ "solana-message",
+ "solana-signer",
+ "solana-transaction",
+ "solana-transaction-error",
 ]
 
 [[package]]

@@ -21,17 +21,22 @@ pub struct AuctionParams {
     pub settle_authority: Option<Pubkey>,
 }
 
+/// `payer` (rent) is separate from `creator` (escrow authority + PDA
+/// seed) so a program PDA can be the creator under CPI — PDAs owned by
+/// another program cannot fund account creation. Direct users pass the
+/// same wallet for both.
 #[event_cpi]
 #[derive(Accounts)]
 #[instruction(salt: u64)]
 pub struct CreateAuction<'info> {
     #[account(mut)]
+    pub payer: Signer<'info>,
     pub creator: Signer<'info>,
     pub escrow_mint: Box<Account<'info, Mint>>,
     pub bid_mint: Box<Account<'info, Mint>>,
     #[account(
         init,
-        payer = creator,
+        payer = payer,
         space = 8 + Auction::INIT_SPACE,
         seeds = [AUCTION_SEED, creator.key().as_ref(), &salt.to_le_bytes()],
         bump
@@ -39,7 +44,7 @@ pub struct CreateAuction<'info> {
     pub auction: Box<Account<'info, Auction>>,
     #[account(
         init,
-        payer = creator,
+        payer = payer,
         seeds = [ESCROW_SEED, auction.key().as_ref()],
         bump,
         token::mint = escrow_mint,
@@ -48,7 +53,7 @@ pub struct CreateAuction<'info> {
     pub escrow_vault: Box<Account<'info, TokenAccount>>,
     #[account(
         init,
-        payer = creator,
+        payer = payer,
         seeds = [BIDS_SEED, auction.key().as_ref()],
         bump,
         token::mint = bid_mint,
