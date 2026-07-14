@@ -51,6 +51,12 @@ export let PACKAGE_ID: string | undefined;
 export let PROTOCOL_CONFIG_ID: string | undefined;
 export let TREASURY_ID: string | undefined;
 
+// The options_vault package of the four-package contracts tree.
+// `PACKAGE_ID` above is options_core (buckets/accounts/quotes); vault PTBs
+// and vault object types resolve against this one. `undefined` on records
+// predating the split.
+export let VAULT_PACKAGE_ID: string | undefined;
+
 // DeepBook v3 deployment ids (SO-151), served by token-info alongside the
 // protocol ids. All `undefined` on networks without a DeepBook deployment
 // (devnet) — DeepBook features simply don't render there.
@@ -128,6 +134,7 @@ type PackageInfoDto = {
     deepCoinType: string;
     poolCreationFee: string;
   } | null;
+  vault?: { packageId: string } | null;
 };
 
 type SupportedTokenDto = {
@@ -160,6 +167,7 @@ export async function initConfig(): Promise<void> {
   PACKAGE_ID = info.packageId;
   PROTOCOL_CONFIG_ID = info.protocolConfigId;
   TREASURY_ID = info.treasuryId ?? undefined;
+  VAULT_PACKAGE_ID = info.vault?.packageId;
 
   const db = info.deepbook;
   DEEPBOOK_PACKAGE_ID = db?.packageId;

@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSuiClient } from "@mysten/dapp-kit";
 
-import { PACKAGE_ID } from "../config";
+import { VAULT_PACKAGE_ID } from "../config";
 import {
   fetchRfqBids,
   fetchVault,
@@ -130,14 +130,14 @@ export function useOwnedVaultReceipts(
 ) {
   const client = useSuiClient();
   return useQuery<OwnedVaultReceipts, Error>({
-    queryKey: ["vault-receipts-owned", wallet, vaultId, PACKAGE_ID],
-    enabled: wallet !== null && vaultId !== null && !!PACKAGE_ID,
+    queryKey: ["vault-receipts-owned", wallet, vaultId, VAULT_PACKAGE_ID],
+    enabled: wallet !== null && vaultId !== null && !!VAULT_PACKAGE_ID,
     refetchInterval: 10_000,
     queryFn: async () => {
       const empty: OwnedVaultReceipts = { deposits: [], withdraws: [] };
-      if (!wallet || !vaultId || !PACKAGE_ID) return empty;
-      const depType = `${PACKAGE_ID}::vault::DepositReceipt`;
-      const wdType = `${PACKAGE_ID}::vault::WithdrawReceipt`;
+      if (!wallet || !vaultId || !VAULT_PACKAGE_ID) return empty;
+      const depType = `${VAULT_PACKAGE_ID}::vault::DepositReceipt`;
+      const wdType = `${VAULT_PACKAGE_ID}::vault::WithdrawReceipt`;
 
       const collect = async (structType: string, wantShares: boolean) => {
         const out: OwnedReceipt[] = [];

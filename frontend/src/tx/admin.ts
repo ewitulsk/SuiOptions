@@ -22,7 +22,7 @@
 import { Transaction } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
 
-import { ENV, PACKAGE_ID } from "../config";
+import { ENV, PACKAGE_ID, VAULT_PACKAGE_ID } from "../config";
 
 function requirePackage(): string {
   if (!PACKAGE_ID) {
@@ -31,6 +31,15 @@ function requirePackage(): string {
     );
   }
   return PACKAGE_ID;
+}
+
+function requireVaultPackage(): string {
+  if (!VAULT_PACKAGE_ID) {
+    throw new Error(
+      `No vault deployment for VITE_ENVIRONMENT="${ENV}" (token-info returned no vault packageId) — the admin page cannot build vault PTBs`,
+    );
+  }
+  return VAULT_PACKAGE_ID;
 }
 
 /** `reason: vector<u8>` arg — UTF-8 bytes of the admin's note. */
@@ -175,7 +184,7 @@ function buildVaultPauseToggleTx(
   fn: "pause_deposits" | "unpause_deposits",
   p: VaultPauseParams,
 ): Transaction {
-  const pkg = requirePackage();
+  const pkg = requireVaultPackage();
   const tx = new Transaction();
   tx.moveCall({
     target: `${pkg}::vault::${fn}`,

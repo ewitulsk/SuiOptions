@@ -1,23 +1,23 @@
 // Programmable Transaction Block builders for the covered-call vault's
 // wallet-facing user flows.
 //
-// Shapes mirror the Move signatures in `contracts/sources/vault.move` and must
-// stay in lockstep with the gas station's `vault_*` templates
+// Shapes mirror the Move signatures in `contracts/vault/sources/vault.move`
+// and must stay in lockstep with the gas station's `vault_*` templates
 // (`rust-backend/crates/sui-tx/src/tx/template.rs`). Each is a single call with
 // the vault's three type args `<U, S, V>` (underlying, settlement, share);
 // none take the clock. Returned objects/coins are transferred to the wallet.
 
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
 
-import { ENV, PACKAGE_ID } from "../config";
+import { ENV, VAULT_PACKAGE_ID } from "../config";
 
 function requirePackage(): string {
-  if (!PACKAGE_ID) {
+  if (!VAULT_PACKAGE_ID) {
     throw new Error(
-      `No deployment for VITE_ENVIRONMENT="${ENV}" (token-info returned no packageId) — cannot build vault PTBs`,
+      `No vault deployment for VITE_ENVIRONMENT="${ENV}" (token-info returned no vault packageId) — cannot build vault PTBs`,
     );
   }
-  return PACKAGE_ID;
+  return VAULT_PACKAGE_ID;
 }
 
 /** The three vault type args, sourced from the `Vault` DTO. */
