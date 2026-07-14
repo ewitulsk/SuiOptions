@@ -1,0 +1,13 @@
+# Move build artifacts
+build/
+
+# Move coverage / trace output
+*.mvcov
+.coverage_map.mvcov
+.trace
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

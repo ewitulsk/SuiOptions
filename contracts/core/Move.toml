@@ -1,0 +1,10 @@
+[package]
+name = "options_core"
+version = "0.0.1"
+edition = "2024.beta"
+
+# Deliberately dependency-free (Sui framework only): the core protocol —
+# buckets, cursor math, accounts, quotes, treasury — is the deepest audit
+# scope and carries no third-party code. Oracle (pyth) lives in
+# options_vault; auction mechanics live in the auction package.
+[dependencies]
