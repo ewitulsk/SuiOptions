@@ -39,12 +39,18 @@ impl ProtocolEventWorker {
     pub fn new(
         store: Arc<Store>,
         repo: Repo,
-        package_id: &str,
+        packages: event_types::PackageIds<'_>,
         deepbook_original_package_id: Option<&str>,
         progress: Arc<ProgressState>,
     ) -> Self {
-        let types = EventTypes::for_package(package_id, deepbook_original_package_id);
-        info!(package_id, "indexer worker listening for events");
+        let types = EventTypes::for_packages(packages, deepbook_original_package_id);
+        info!(
+            core = packages.core,
+            auction = packages.auction,
+            rfq = packages.rfq,
+            vault = packages.vault,
+            "indexer worker listening for events"
+        );
         for t in types.all_strings() {
             debug!(event_type = t, "subscribed");
         }
@@ -329,8 +335,10 @@ mod tests {
     /// dispatch + Store::ingest fast path directly.
     #[test]
     fn dispatch_round_trips_a_bucket_created_event_into_store() {
-        let pkg = "0xabc";
-        let types = EventTypes::for_package(pkg, None);
+        let types = EventTypes::for_packages(
+            event_types::PackageIds { core: "0xabc", auction: "0xa1", rfq: "0xf1", vault: "0xe1" },
+            None,
+        );
         let store = Store::new();
 
         let evt = BucketCreated {

@@ -98,12 +98,15 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::DeepBookPoolCreated(_) => "DeepBookPoolCreated",
         ChainEvent::DeepBookOrderFilled(_) => "DeepBookOrderFilled",
         ChainEvent::CollateralizedWrite(_) => "CollateralizedWrite",
+        ChainEvent::AuctionCreated(_) => "AuctionCreated",
+        ChainEvent::AuctionBid(_) => "AuctionBid",
+        ChainEvent::AuctionSettled(_) => "AuctionSettled",
+        ChainEvent::AuctionUnfilled(_) => "AuctionUnfilled",
         ChainEvent::RfqCreated(_) => "RfqCreated",
-        ChainEvent::RfqBid(_) => "RfqBid",
         ChainEvent::RfqSettled(_) => "RfqSettled",
         ChainEvent::RfqExpiredUnsold(_) => "RfqExpiredUnsold",
-        ChainEvent::SwapRfqCreated(_) => "SwapRfqCreated",
-        ChainEvent::SwapRfqBid(_) => "SwapRfqBid",
+        ChainEvent::VaultRfqSettled(_) => "VaultRfqSettled",
+        ChainEvent::VaultRfqUnsold(_) => "VaultRfqUnsold",
         ChainEvent::SwapRfqSettled(_) => "SwapRfqSettled",
         ChainEvent::SwapRfqUnfilled(_) => "SwapRfqUnfilled",
         ChainEvent::VaultCreated(_) => "VaultCreated",
@@ -129,7 +132,6 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::PutBucketInvalidated(_) => "PutBucketInvalidated",
         ChainEvent::PutBucketRevalidated(_) => "PutBucketRevalidated",
         ChainEvent::PutRfqCreated(_) => "PutRfqCreated",
-        ChainEvent::PutRfqBid(_) => "PutRfqBid",
         ChainEvent::PutRfqSettled(_) => "PutRfqSettled",
         ChainEvent::PutRfqExpiredUnsold(_) => "PutRfqExpiredUnsold",
     }
@@ -338,8 +340,10 @@ pub fn account_row_into_state(row: AccountRow) -> anyhow::Result<(ObjectId, Acco
 #[diesel(table_name = rfqs)]
 #[diesel(primary_key(rfq_id))]
 pub struct RfqRow {
+    /// The generic auction object id (rows are keyed by auction now).
     pub rfq_id: String,
-    pub bucket_id: String,
+    /// Null for swaps and for coupled option auctions not yet enriched.
+    pub bucket_id: Option<String>,
     pub origin: String,
     pub amount: BigDecimal,
     pub reserve_premium: BigDecimal,
@@ -353,8 +357,11 @@ pub struct RfqRow {
     pub gross_premium: Option<BigDecimal>,
     pub fee: Option<BigDecimal>,
     pub updated_at_seq: i64,
-    /// "call" or "put" — shared-table discriminator (defaults to "call").
-    pub option_kind: String,
+    /// "call" | "put" | "swap" | "unknown" — what the auction is for.
+    pub auction_kind: String,
+    /// The options_rfq adapter's Rfq metadata object id; null for
+    /// vault-coupled and swap auctions.
+    pub meta_id: Option<String>,
 }
 
 impl RfqRow {
@@ -367,11 +374,17 @@ impl RfqRow {
                 .transpose()
                 .map_err(|e| anyhow::anyhow!("rfq {} address: {e}", self.rfq_id))
         };
+        let opt_id = |s: &Option<String>, field: &str| -> anyhow::Result<Option<ObjectId>> {
+            s.as_deref()
+                .map(ObjectId::from_hex)
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("rfq {field}: {e}"))
+        };
         Ok((
             id,
             RfqState {
-                bucket_id: ObjectId::from_hex(&self.bucket_id)
-                    .map_err(|e| anyhow::anyhow!("rfq bucket_id {}: {e}", self.bucket_id))?,
+                meta_id: opt_id(&self.meta_id, "meta_id")?,
+                bucket_id: opt_id(&self.bucket_id, "bucket_id")?,
                 origin: ObjectId::from_hex(&self.origin)
                     .map_err(|e| anyhow::anyhow!("rfq origin {}: {e}", self.origin))?,
                 amount: bigdecimal_to_u64(&self.amount)?,
@@ -382,15 +395,10 @@ impl RfqRow {
                 status: RfqStatus::from_str_tag(&self.status)?,
                 winner: opt_addr(&self.winner)?,
                 net_premium: self.net_premium.as_ref().map(bigdecimal_to_u64).transpose()?,
-                position_id: self
-                    .position_id
-                    .as_deref()
-                    .map(ObjectId::from_hex)
-                    .transpose()
-                    .map_err(|e| anyhow::anyhow!("rfq position_id: {e}"))?,
+                position_id: opt_id(&self.position_id, "position_id")?,
                 gross_premium: self.gross_premium.as_ref().map(bigdecimal_to_u64).transpose()?,
                 fee: self.fee.as_ref().map(bigdecimal_to_u64).transpose()?,
-                option_kind: self.option_kind,
+                auction_kind: self.auction_kind,
             },
         ))
     }
@@ -399,13 +407,16 @@ impl RfqRow {
 #[derive(Queryable, Insertable, Debug, Clone)]
 #[diesel(table_name = rfq_bids)]
 pub struct RfqBidRow {
+    /// The generic auction object id (matches `rfqs.rfq_id`).
     pub rfq_id: String,
     pub sequence: i64,
     pub bidder: String,
+    /// `AuctionBid.token_recipient` — the option-coin recipient for option
+    /// auctions (shared column name kept for schema stability).
     pub call_recipient: String,
     pub premium: BigDecimal,
-    /// "call" or "put" — shared-table discriminator (defaults to "call").
-    pub option_kind: String,
+    /// "call" | "put" | "swap" | "unknown", copied from the parent auction.
+    pub auction_kind: String,
 }
 
 // ---------- vaults / vault_rounds / vault_user_receipts (D2) ----------

@@ -42,6 +42,14 @@ async fn main() -> Result<()> {
         .package()
         .context("protocol package id from token-info")?;
 
+    // Vault flows live in the options_vault package (four-package split);
+    // a deployment without it can't sponsor vault PTBs, so fail at boot.
+    let vault_pkg = snapshot
+        .vault()
+        .context("options_vault package missing from token-info package_info")?
+        .package()
+        .context("vault package id from token-info")?;
+
     // Faucet `mint_to_sender` is testnet-only; sponsor it on any non-mainnet
     // network (prod is itself a testnet deployment that ships test tokens).
     let allow_faucet = cfg.network != Network::Mainnet;
@@ -68,7 +76,7 @@ async fn main() -> Result<()> {
         .transpose()
         .context("deepbook package id from token-info")?;
 
-    let templates = protocol_templates(protocol, &test_tokens, allow_faucet, deepbook);
+    let templates = protocol_templates(protocol, vault_pkg, &test_tokens, allow_faucet, deepbook);
 
     info!(
         environment = %cfg.environment,

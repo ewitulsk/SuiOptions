@@ -15,15 +15,13 @@
 
 pub mod account;
 pub mod admin;
+pub mod auction;
 pub mod coin_pkg;
 pub mod deepbook;
 pub mod execute_write;
 pub mod execute_write_put;
 pub mod pyth_update;
-pub mod rfq;
-pub mod rfq_put;
 pub mod sponsor;
-pub mod swap_auction;
 pub mod template;
 pub mod test_tokens;
 pub mod vault;
@@ -39,9 +37,10 @@ use sui_types::base_types::ObjectID;
 use sui_types::object::Owner;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{
-    ObjectArg, SharedObjectMutability, Transaction, TransactionData,
+    Argument, ObjectArg, SharedObjectMutability, Transaction, TransactionData,
 };
 use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
+use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION};
 use tracing::{debug, trace};
 
 use sui_sdk::SuiClient;
@@ -82,6 +81,15 @@ pub async fn shared_object_arg(
         }),
         other => Err(anyhow!("object {id} is not shared: {:?}", other)),
     }
+}
+
+/// Immutable Clock argument, shared by every deadline-aware builder.
+pub(crate) fn clock_arg(pt: &mut ProgrammableTransactionBuilder) -> Result<Argument> {
+    Ok(pt.obj(ObjectArg::SharedObject {
+        id: SUI_CLOCK_OBJECT_ID,
+        initial_shared_version: SUI_CLOCK_OBJECT_SHARED_VERSION,
+        mutability: SharedObjectMutability::Immutable,
+    })?)
 }
 
 /// Gas-select, sign, submit, and assert success for a finished PTB. Shared

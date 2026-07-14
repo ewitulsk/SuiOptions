@@ -94,8 +94,10 @@ diesel::table! {
 
 diesel::table! {
     rfqs (rfq_id) {
+        // The generic auction object id (four-package layout); the adapter's
+        // Rfq metadata object id rides in `meta_id`.
         rfq_id          -> Text,
-        bucket_id       -> Text,
+        bucket_id       -> Nullable<Text>,
         origin          -> Text,
         amount          -> Numeric,
         reserve_premium -> Numeric,
@@ -109,7 +111,8 @@ diesel::table! {
         gross_premium   -> Nullable<Numeric>,
         fee             -> Nullable<Numeric>,
         updated_at_seq  -> Int8,
-        option_kind     -> Text,
+        auction_kind    -> Text,
+        meta_id         -> Nullable<Text>,
     }
 }
 
@@ -120,7 +123,7 @@ diesel::table! {
         bidder         -> Text,
         call_recipient -> Text,
         premium        -> Numeric,
-        option_kind    -> Text,
+        auction_kind   -> Text,
     }
 }
 

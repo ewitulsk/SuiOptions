@@ -14,7 +14,7 @@
 //!      ([`keeper::discovery`]) — a vault created on chain is picked up
 //!      on the next tick, no config change needed.
 //!   2. Per vault: read the chain ([`state::fetch_vault_view`] +
-//!      RfqCreated discovery), plan the single next action
+//!      AuctionCreated discovery), plan the single next action
 //!      ([`planner::plan`]), resolve a strike pick when asked, and
 //!      submit with a Pyth price update prepended in-PTB ([`submit`]).
 //!
@@ -42,12 +42,12 @@ use keeper::discovery::{
     resolve_price_info_table, resolve_vault, DiscoveredVault, PriceInfoTable,
 };
 use keeper::planner::{plan, Action, BucketMeta, PlanInput};
-use keeper::state::{discover_open_rfqs, discover_open_swap_rfqs, fetch_vault_view, VaultView};
+use keeper::state::{discover_open_auctions, fetch_vault_view, VaultView};
 use keeper::strike::{pick_bucket, BucketCandidate};
 use keeper::submit::{classify, execute, execute_select_bucket, ErrorClass, SubmitCtx};
 use keeper::Cli;
 
-/// How far back to scan RfqCreated events for live auctions: auctions
+/// How far back to scan AuctionCreated events for live auctions: auctions
 /// can't outlive a round, so two round lengths is generous.
 const RFQ_LOOKBACK_ROUNDS: u64 = 2;
 
@@ -66,7 +66,17 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("fetching catalog from token-info at {}", cli.token_info_url))?;
 
-    let package = snapshot.package()?;
+    // Four-package split: cranks target options_vault; auction discovery
+    // filters the generic auction package's events. Both are required —
+    // fail at boot on a deployment without them.
+    let vault_package = snapshot
+        .vault()
+        .context("options_vault package missing from token-info package_info")?
+        .package()?;
+    let auction_package = snapshot
+        .auction()
+        .context("auction package missing from token-info package_info")?
+        .package()?;
     let protocol_config_id = snapshot.protocol_config()?;
     let treasury_id = snapshot.treasury()?;
     let wrap = SuiClientWrapper::connect(&secrets, cli.network).await?;
@@ -135,7 +145,8 @@ async fn main() -> Result<()> {
                 continue;
             }
             let ctx = TickCtx {
-                package,
+                vault_package,
+                auction_package,
                 protocol_config_id,
                 treasury_id,
                 defaults: &cfg.vault_defaults,
@@ -238,7 +249,10 @@ async fn discover_new_vaults(
 /// Per-tick context shared by every vault (resolved once at boot).
 #[derive(Clone, Copy)]
 struct TickCtx<'a> {
-    package: ObjectID,
+    /// options_vault package (crank targets).
+    vault_package: ObjectID,
+    /// Generic auction package (AuctionCreated discovery).
+    auction_package: ObjectID,
     protocol_config_id: ObjectID,
     treasury_id: ObjectID,
     defaults: &'a VaultDefaults,
@@ -261,15 +275,20 @@ async fn tick_vault(
 
     let lookback = view.config.round_ms.saturating_mul(RFQ_LOOKBACK_ROUNDS);
     let cutoff = now.saturating_sub(lookback);
-    let auctions = if view.open_rfqs > 0 {
-        discover_open_rfqs(&wrap.client, ids.package, meta.vault_id, cutoff).await?
+    // One AuctionCreated walk covers both kinds; the escrow leg tells an
+    // RFQ slice (Auction<U, S>) from a proceeds swap (Auction<S, U>).
+    let (auctions, swap_auctions) = if view.open_rfqs > 0 || view.open_swap_rfqs > 0 {
+        discover_open_auctions(
+            &wrap.client,
+            ids.auction_package,
+            meta.vault_id,
+            &meta.underlying_type,
+            &meta.settlement_type,
+            cutoff,
+        )
+        .await?
     } else {
-        Vec::new()
-    };
-    let swap_auctions = if view.open_swap_rfqs > 0 {
-        discover_open_swap_rfqs(&wrap.client, ids.package, meta.vault_id, cutoff).await?
-    } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     // The current bucket's call type (and liveness) from the indexer.
@@ -311,7 +330,7 @@ async fn tick_vault(
         http,
         hermes_url: &cfg.pyth.hermes_url,
         pyth: pyth_handles,
-        package: ids.package,
+        package: ids.vault_package,
         protocol_config_id: ids.protocol_config_id,
         treasury_id: ids.treasury_id,
         vault_id: meta.vault_id,

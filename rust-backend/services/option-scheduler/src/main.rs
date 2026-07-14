@@ -70,6 +70,12 @@ async fn main() -> Result<()> {
         })?;
 
     let package = snapshot.package()?;
+    // Vault creation targets the options_vault package (four-package
+    // split); bucket rolls stay on core. Fail at boot if it's missing.
+    let vault_package = snapshot
+        .vault()
+        .context("options_vault package missing from token-info package_info")?
+        .package()?;
     let admin_cap = snapshot.admin_cap()?;
     let wrap = SuiClientWrapper::connect(&secrets, cli.network).await?;
 
@@ -343,7 +349,7 @@ async fn main() -> Result<()> {
                 &indexer,
                 &vault_entries,
                 &wrap,
-                package,
+                vault_package,
                 admin_cap,
                 &db_pool,
             )
@@ -368,7 +374,7 @@ async fn vault_pass(
     indexer: &IndexerClient,
     entries: &[VaultEntry],
     wrap: &SuiClientWrapper,
-    package: sui_types::base_types::ObjectID,
+    vault_package: sui_types::base_types::ObjectID,
     admin_cap: sui_types::base_types::ObjectID,
     db_pool: &db::DbPool,
 ) -> Result<()> {
@@ -420,7 +426,7 @@ async fn vault_pass(
             .map(|v| v.vault_id.to_hex());
         if let Err(e) = vault_roller::ensure_vault(
             wrap,
-            package,
+            vault_package,
             admin_cap,
             db_pool,
             &entry.spec,

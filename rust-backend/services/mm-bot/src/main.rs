@@ -715,6 +715,23 @@ async fn main() -> Result<()> {
         }
     }
 
+    // The on-chain bidders bid through the generic `auction` package
+    // (four-package split); resolve it once, failing boot if any bidder
+    // is enabled on a deployment without it.
+    let auction_package = if cfg.onchain_rfq.enabled
+        || cfg.onchain_put_rfq.enabled
+        || cfg.onchain_swap.bidder.enabled
+    {
+        Some(
+            snapshot
+                .auction()
+                .context("auction package missing from token-info (required by the on-chain bidders)")?
+                .package()?,
+        )
+    } else {
+        None
+    };
+
     // On-chain RFQ bidder (C2): poll open auctions, price them with the
     // same brain, bid from the wallet under the escrow cap.
     if cfg.onchain_rfq.enabled {
@@ -735,7 +752,7 @@ async fn main() -> Result<()> {
             cfg: cfg.onchain_rfq.clone(),
             secrets: secrets_loaded.clone(),
             network: cfg.network,
-            package: snapshot.package()?,
+            package: auction_package.expect("resolved above"),
             api_url: cli.api_url.clone(),
             price_cache: price_cache.clone(),
             markets: bidder_markets,
@@ -769,7 +786,7 @@ async fn main() -> Result<()> {
             cfg: cfg.onchain_put_rfq.clone(),
             secrets: secrets_loaded.clone(),
             network: cfg.network,
-            package: snapshot.package()?,
+            package: auction_package.expect("resolved above"),
             api_url: cli.api_url.clone(),
             price_cache: price_cache.clone(),
             markets: bidder_markets,
@@ -784,7 +801,7 @@ async fn main() -> Result<()> {
 
     // On-chain swap bidder: the buy side of the vault's proceeds-swap
     // auctions (settlement → underlying), discovered straight from
-    // SwapRfqCreated events.
+    // AuctionCreated events.
     if cfg.onchain_swap.bidder.enabled {
         let swap_markets = markets
             .iter()
@@ -803,7 +820,7 @@ async fn main() -> Result<()> {
             cfg: cfg.onchain_swap.clone(),
             secrets: secrets_loaded.clone(),
             network: cfg.network,
-            package: snapshot.package()?,
+            package: auction_package.expect("resolved above"),
             api_url: cli.api_url.clone(),
             price_cache: price_cache.clone(),
             markets: swap_markets,

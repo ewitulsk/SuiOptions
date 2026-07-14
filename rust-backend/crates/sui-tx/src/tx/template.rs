@@ -170,6 +170,8 @@ fn is_benign_coin_primitive(call: &ProgrammableMoveCall) -> bool {
 /// Build the sponsored-PTB templates for the protocol frontend.
 ///
 /// Mirrors the builders in `frontend/src/tx/{composer,dashboard,faucet,deepbook}.ts`.
+/// `protocol` is the `options_core` package id; `vault_pkg` is the
+/// `options_vault` package id the vault flows target (four-package split).
 /// `test_tokens` is the `(package, module)` of each faucet token (e.g.
 /// `(0xpkg, "tbtc")`), only used when `allow_faucet` is set (dev/staging).
 /// `deepbook` is DeepBook's UPGRADED package id (the one Move calls target,
@@ -177,6 +179,7 @@ fn is_benign_coin_primitive(call: &ProgrammableMoveCall) -> bool {
 /// no DeepBook PTBs are sponsored there.
 pub fn protocol_templates(
     protocol: ObjectID,
+    vault_pkg: ObjectID,
     test_tokens: &[(ObjectID, String)],
     allow_faucet: bool,
     deepbook: Option<ObjectID>,
@@ -241,7 +244,7 @@ pub fn protocol_templates(
         "complete_withdraw",
         "instant_withdraw_pending",
     ] {
-        let target = t("vault", function);
+        let target = MoveTarget::new(vault_pkg, "vault", function);
         templates.push(PtbTemplate {
             name: format!("vault:{function}"),
             required: vec![target.clone()],
@@ -414,6 +417,10 @@ mod tests {
         ObjectID::from_hex_literal("0xabc").unwrap()
     }
 
+    fn vault_pkg() -> ObjectID {
+        ObjectID::from_hex_literal("0xdef").unwrap()
+    }
+
     /// Build a PTB from a list of `(target, type-arg count)` Move calls, with an
     /// optional benign coin-prep prelude inserted before the last call (mimics
     /// `coinWithBalance`).
@@ -447,6 +454,7 @@ mod tests {
     fn templates() -> Vec<PtbTemplate> {
         protocol_templates(
             pkg(),
+            vault_pkg(),
             &[(pkg(), "tbtc".to_owned())],
             true,
             Some(deepbook_pkg()),
@@ -538,7 +546,7 @@ mod tests {
     #[test]
     fn faucet_rejected_when_disabled() {
         let no_faucet =
-            protocol_templates(pkg(), &[(pkg(), "tbtc".to_owned())], false, None);
+            protocol_templates(pkg(), vault_pkg(), &[(pkg(), "tbtc".to_owned())], false, None);
         let pt = build(&[(target("tbtc", "mint_to_sender"), 0)], false);
         assert_eq!(match_any(&no_faucet, &pt), None);
     }
@@ -785,7 +793,7 @@ mod tests {
         assert_eq!(match_any(&templates(), &bad_arity), None);
 
         // No deepbook configured (devnet) → never sponsored.
-        let no_db = protocol_templates(pkg(), &[], false, None);
+        let no_db = protocol_templates(pkg(), vault_pkg(), &[], false, None);
         let pt = build(
             &[(
                 MoveTarget::new(deepbook_pkg(), "pool", "create_permissionless_pool"),
@@ -890,9 +898,19 @@ mod tests {
         assert_eq!(match_any(&templates(), &withdraw), Some("deepbook_withdraw"));
 
         // `coin::zero<1>` is now skipped everywhere, not just in write/buy: a
-        // vault deposit carrying it still matches.
-        let vault_deposit = build(&[(target("vault", "deposit"), 3), (coin("zero"), 1)], false);
+        // vault deposit carrying it still matches. Vault flows target the
+        // options_vault package, not core.
+        let vault_deposit = build(
+            &[
+                (MoveTarget::new(vault_pkg(), "vault", "deposit"), 3),
+                (coin("zero"), 1),
+            ],
+            false,
+        );
         assert_eq!(match_any(&templates(), &vault_deposit), Some("vault:deposit"));
+        // The same call against the core package no longer matches.
+        let wrong_pkg = build(&[(target("vault", "deposit"), 3)], false);
+        assert_eq!(match_any(&templates(), &wrong_pkg), None);
     }
 
     #[test]

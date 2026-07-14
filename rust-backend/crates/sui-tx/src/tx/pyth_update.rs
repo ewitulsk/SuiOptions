@@ -29,8 +29,7 @@ use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{Argument, Command};
 
-use crate::tx::rfq::clock_arg;
-use crate::tx::shared_object_arg;
+use crate::tx::{clock_arg, shared_object_arg};
 
 /// On-chain handles for the Pyth + Wormhole deployments on the target
 /// network. Package ids are the *latest* (upgraded) packages the entry

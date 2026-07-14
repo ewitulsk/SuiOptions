@@ -347,7 +347,7 @@ async fn current_round_premium(
     let mut premium_raw: u64 = 0;
     let mut total_notional: u64 = 0;
     let mut settled_notional: u64 = 0;
-    for r in rfqs.iter().filter(|r| r.bucket_id == bucket) {
+    for r in rfqs.iter().filter(|r| r.bucket_id == Some(bucket)) {
         total_notional = total_notional.saturating_add(r.amount);
         match r.status.as_str() {
             "settled" => {

@@ -206,11 +206,17 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-/// One on-chain RFQ auction (C3). Numeric fields are decimal strings.
+/// One on-chain auction (C3, four-package layout). Numeric fields are
+/// decimal strings.
 #[derive(SimpleObject)]
 pub struct RfqGql {
+    /// The generic auction object id (rows are keyed by auction now).
     pub rfq_id: String,
-    pub bucket_id: String,
+    /// The options_rfq adapter's Rfq metadata object id; null for
+    /// vault-coupled and swap auctions.
+    pub meta_id: Option<String>,
+    /// Null for swaps / not-yet-enriched coupled auctions.
+    pub bucket_id: Option<String>,
     /// Vault id (coupled auctions) or seller-address-as-id.
     pub origin: String,
     pub amount_raw: String,
@@ -227,14 +233,15 @@ pub struct RfqGql {
     pub gross_premium_raw: Option<String>,
     /// Protocol RFQ fee taken at settle (settled auctions only).
     pub fee_raw: Option<String>,
-    /// "call" or "put".
-    pub option_kind: String,
+    /// call | put | swap | unknown.
+    pub auction_kind: String,
 }
 
 impl From<RfqRow> for RfqGql {
     fn from(r: RfqRow) -> Self {
         RfqGql {
             rfq_id: r.rfq_id,
+            meta_id: r.meta_id,
             bucket_id: r.bucket_id,
             origin: r.origin,
             amount_raw: r.amount.to_string(),
@@ -248,7 +255,7 @@ impl From<RfqRow> for RfqGql {
             position_id: r.position_id,
             gross_premium_raw: r.gross_premium.map(|v| v.to_string()),
             fee_raw: r.fee.map(|v| v.to_string()),
-            option_kind: r.option_kind,
+            auction_kind: r.auction_kind,
         }
     }
 }

@@ -316,11 +316,20 @@ impl Repo {
             }
 
             for rfq in &batch.rfqs {
+                // Rows are born at AuctionCreated and *enriched* by later
+                // adapter/vault events (bucket, meta id, kind, settle
+                // economics), so the conflict-update mirrors the full
+                // snapshot rather than just the bid/settle fields.
                 diesel::insert_into(rfqs::table)
                     .values(rfq)
                     .on_conflict(rfqs::rfq_id)
                     .do_update()
                     .set((
+                        rfqs::bucket_id.eq(&rfq.bucket_id),
+                        rfqs::meta_id.eq(&rfq.meta_id),
+                        rfqs::origin.eq(&rfq.origin),
+                        rfqs::amount.eq(&rfq.amount),
+                        rfqs::reserve_premium.eq(&rfq.reserve_premium),
                         rfqs::deadline_ms.eq(rfq.deadline_ms),
                         rfqs::best_premium.eq(&rfq.best_premium),
                         rfqs::best_bidder.eq(&rfq.best_bidder),
@@ -328,6 +337,9 @@ impl Repo {
                         rfqs::winner.eq(&rfq.winner),
                         rfqs::net_premium.eq(&rfq.net_premium),
                         rfqs::position_id.eq(&rfq.position_id),
+                        rfqs::gross_premium.eq(&rfq.gross_premium),
+                        rfqs::fee.eq(&rfq.fee),
+                        rfqs::auction_kind.eq(&rfq.auction_kind),
                         rfqs::updated_at_seq.eq(rfq.updated_at_seq),
                     ))
                     .execute(conn)

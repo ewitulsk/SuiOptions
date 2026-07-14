@@ -100,11 +100,17 @@ pub struct Position {
     pub minted_at_ms: u64,
 }
 
-/// One on-chain RFQ auction from the indexer's materialized view (C3).
+/// One on-chain auction from the indexer's materialized view (C3, four-
+/// package layout). Rows are keyed by the generic auction id.
 #[derive(Clone, Debug)]
 pub struct Rfq {
+    /// The generic auction object id.
     pub rfq_id: ObjectId,
-    pub bucket_id: ObjectId,
+    /// The options_rfq adapter's Rfq metadata object id; `None` for
+    /// vault-coupled and swap auctions.
+    pub meta_id: Option<ObjectId>,
+    /// `None` for swaps / not-yet-enriched coupled auctions.
+    pub bucket_id: Option<ObjectId>,
     /// Vault id (coupled auctions) or seller-address-as-id.
     pub origin: ObjectId,
     pub amount: u64,
@@ -121,8 +127,9 @@ pub struct Rfq {
     pub gross_premium: Option<u64>,
     /// Protocol RFQ fee taken at settle (settled auctions only).
     pub fee: Option<u64>,
-    /// "call" or "put". Defaults to "call" if the server omits it.
-    pub option_kind: String,
+    /// "call" | "put" | "swap" | "unknown". Defaults to "call" if the
+    /// server omits it.
+    pub auction_kind: String,
 }
 
 /// One bid in an auction's history (C3).
@@ -310,9 +317,9 @@ impl IndexerClient {
         status: Option<&str>,
         origin: Option<ObjectId>,
     ) -> Result<Vec<Rfq>> {
-        const Q: &str = "query($s:String,$o:String){rfqs(status:$s,origin:$o){rfqId bucketId \
-            origin amountRaw reservePremiumRaw deadlineMs bestPremiumRaw bestBidder status \
-            winner netPremiumRaw positionId grossPremiumRaw feeRaw optionKind}}";
+        const Q: &str = "query($s:String,$o:String){rfqs(status:$s,origin:$o){rfqId metaId \
+            bucketId origin amountRaw reservePremiumRaw deadlineMs bestPremiumRaw bestBidder \
+            status winner netPremiumRaw positionId grossPremiumRaw feeRaw auctionKind}}";
         let vars = json!({ "s": status, "o": origin.map(|o| o.to_hex()) });
         let data: RfqsWrap = self.gql(Q, vars).await?;
         data.rfqs.into_iter().map(Rfq::try_from).collect()
@@ -733,7 +740,10 @@ struct PositionJson {
 #[serde(rename_all = "camelCase")]
 struct RfqJson {
     rfq_id: String,
-    bucket_id: String,
+    #[serde(default)]
+    meta_id: Option<String>,
+    #[serde(default)]
+    bucket_id: Option<String>,
     origin: String,
     amount_raw: String,
     reserve_premium_raw: String,
@@ -749,7 +759,7 @@ struct RfqJson {
     #[serde(default)]
     fee_raw: Option<String>,
     #[serde(default = "default_option_kind")]
-    option_kind: String,
+    auction_kind: String,
 }
 
 #[derive(Deserialize)]
@@ -931,7 +941,8 @@ impl TryFrom<RfqJson> for Rfq {
     fn try_from(r: RfqJson) -> Result<Self> {
         Ok(Rfq {
             rfq_id: parse_object_id(&r.rfq_id)?,
-            bucket_id: parse_object_id(&r.bucket_id)?,
+            meta_id: r.meta_id.as_deref().map(parse_object_id).transpose()?,
+            bucket_id: r.bucket_id.as_deref().map(parse_object_id).transpose()?,
             origin: parse_object_id(&r.origin)?,
             amount: parse_u64(&r.amount_raw)?,
             reserve_premium: parse_u64(&r.reserve_premium_raw)?,
@@ -944,7 +955,7 @@ impl TryFrom<RfqJson> for Rfq {
             position_id: r.position_id.as_deref().map(parse_object_id).transpose()?,
             gross_premium: r.gross_premium_raw.as_deref().map(parse_u64).transpose()?,
             fee: r.fee_raw.as_deref().map(parse_u64).transpose()?,
-            option_kind: r.option_kind,
+            auction_kind: r.auction_kind,
         })
     }
 }

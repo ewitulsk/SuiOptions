@@ -24,6 +24,7 @@ pub struct SubmitCtx<'a> {
     pub http: &'a reqwest::Client,
     pub hermes_url: &'a str,
     pub pyth: &'a PythHandles,
+    /// The `options_vault` package id (every crank targets `vault::*`).
     pub package: ObjectID,
     pub protocol_config_id: ObjectID,
     pub treasury_id: ObjectID,
@@ -185,11 +186,14 @@ pub enum ErrorClass {
 }
 
 /// Move abort codes that mean "the state changed between read and
-/// submit" (`contracts/sources/errors.move`).
+/// submit". Vault + oracle codes keep their historical values in
+/// `contracts/vault/sources/errors.move`; core codes live in
+/// `contracts/core/sources/errors.move`; 3/4 come from the generic
+/// auction venue (`contracts/auction/sources/errors.move`).
 const BENIGN_ABORTS: &[u64] = &[
+    3,  // auction_closed
+    4,  // auction_not_closed (deadline got sniped out)
     21, // zero_amount: proceeds swapped by a racer
-    29, // rfq_closed
-    30, // rfq_not_closed (deadline got sniped out)
     35, // vault_wrong_phase
     36, // vault_bucket_not_selected
     37, // vault_bucket_already_selected
@@ -211,9 +215,10 @@ const RETRY_ABORTS: &[u64] = &[
     53, // vault_proceeds_unswapped: thin book, partial later
 ];
 
-/// Config/deployment bugs: retrying cannot help.
+/// Config/deployment bugs: retrying cannot help. (The old code 32
+/// `rfq_bucket_mismatch` moved to the options_rfq adapter package, which
+/// the keeper's vault cranks never call.)
 const FATAL_ABORTS: &[u64] = &[
-    32, // rfq_bucket_mismatch
     42, // vault_receipt_round_mismatch
     48, // vault_wrong_origin
     49, // oracle_feed_mismatch
