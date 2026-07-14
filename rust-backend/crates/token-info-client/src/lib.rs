@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use sui_types::base_types::{ObjectID, SuiAddress};
 use tracing::{info, warn};
 
-pub use deployments::{DeepBookInfo, PackageInfo, SessionTokensInfo, TestTokens, TokenInfo};
+pub use deployments::{DeepBookInfo, PackageInfo, SubPackageInfo, TestTokens, TokenInfo};
 
 /// One supported-token catalog entry as served by `GET /tokens`.
 ///
@@ -121,11 +121,20 @@ impl Snapshot {
         self.package_info.deepbook.as_ref()
     }
 
-    /// siws_session package + registry for wallet-rooted session login.
-    /// `None` where session login isn't deployed — session features must
-    /// degrade gracefully rather than crash.
-    pub fn session_tokens(&self) -> Option<&SessionTokensInfo> {
-        self.package_info.session_tokens.as_ref()
+    /// Generic auction package. `None` on deployments predating the
+    /// four-package split.
+    pub fn auction(&self) -> Option<&SubPackageInfo> {
+        self.package_info.auction.as_ref()
+    }
+
+    /// options_rfq adapter package.
+    pub fn rfq(&self) -> Option<&SubPackageInfo> {
+        self.package_info.rfq.as_ref()
+    }
+
+    /// options_vault package.
+    pub fn vault(&self) -> Option<&SubPackageInfo> {
+        self.package_info.vault.as_ref()
     }
 
     // --- faucet accessors (testTokens passthrough) -------------------------
@@ -334,7 +343,9 @@ mod tests {
                 network: "testnet".into(),
                 test_tokens: None,
                 deepbook: None,
-                session_tokens: None,
+                auction: None,
+                rfq: None,
+                vault: None,
             },
             tokens: vec![
                 tok(

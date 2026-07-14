@@ -1,22 +1,26 @@
-//! Deploys the options-protocol Move package to one or all Sui networks and
-//! records every important on-chain address into a single `deployments.json`.
+//! Deploys the options-protocol contracts tree (four Move packages) to a
+//! Sui network and records every important on-chain address into a single
+//! `deployments.json`.
 //!
-//! Pipeline per network:
-//!   1. Build the Move package (`sui-move-build`)
-//!   2. Publish via the SDK transaction builder (auto-selects gas)
-//!   3. Parse object_changes for: package_id, AdminCap, ProtocolConfig, UpgradeCap
-//!   4. Call `treasury::create_and_share(&AdminCap)` and capture the Treasury ID
-//!   5. Merge into `deployments.json`, replacing only the targeted network's entry
+//! Pipeline per network, in dependency order (each publish stamps the
+//! package's `Published.toml` so the next build links the fresh id):
+//!   1. Publish `auction` (generic venue, no deps)
+//!   2. Publish `core` (options_core) and parse object_changes for:
+//!      package_id, AdminCap, ProtocolConfig, UpgradeCap
+//!   3. Publish `rfq` (options_rfq: deps core + auction)
+//!   4. Publish `vault` (options_vault: deps core + auction + pyth)
+//!   5. Call `treasury::create_and_share(&AdminCap)` and capture the Treasury ID
+//!   6. Merge into `deployments.json`, replacing only the targeted env's entry
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use sui_sdk::SuiClientBuilder;
 
 use deployment_manager::deploy::{
-    create_and_share_treasury, publish_package, publish_session_package, publish_test_tokens,
+    create_and_share_treasury, publish_dep_package, publish_package, publish_test_tokens,
 };
 use deployment_manager::json_store::{
-    Deployments, NetworkDeployment, PackageInfo, SessionTokensRecord, TestTokenRecord,
+    Deployments, NetworkDeployment, PackageInfo, PackageRecord, TestTokenRecord,
     TestTokensRecord, TokenSpec,
 };
 use deployment_manager::network::Network;
@@ -44,16 +48,6 @@ async fn main() -> Result<()> {
                 format!("resolving test-tokens path {}", cli.test_tokens.display())
             })?,
         )
-    } else {
-        None
-    };
-    let session_path = if cli.deploy_session {
-        Some(cli.session_contracts.canonicalize().with_context(|| {
-            format!(
-                "resolving session-contracts path {}",
-                cli.session_contracts.display()
-            )
-        })?)
     } else {
         None
     };
@@ -87,10 +81,6 @@ async fn main() -> Result<()> {
         .envs
         .get(&env_key)
         .and_then(|d| d.package_info.deepbook.clone());
-    let previous_session = store
-        .envs
-        .get(&env_key)
-        .and_then(|d| d.package_info.session_tokens.clone());
 
     let record = deploy_one(
         network,
@@ -98,11 +88,9 @@ async fn main() -> Result<()> {
         &secrets,
         &contracts_path,
         test_tokens_path.as_deref(),
-        session_path.as_deref(),
         previous_tokens,
         previous_token_info,
         previous_deepbook,
-        previous_session,
         cli.gas_budget,
         cli.skip_init,
     )
@@ -121,13 +109,11 @@ async fn deploy_one(
     network: Network,
     rpc_url: &str,
     secrets: &runtime_config::Secrets,
-    contracts_path: &std::path::Path,
+    contracts_root: &std::path::Path,
     test_tokens_path: Option<&std::path::Path>,
-    session_path: Option<&std::path::Path>,
     previous_tokens: Option<TestTokensRecord>,
     previous_token_info: BTreeMap<String, TokenSpec>,
     previous_deepbook: Option<serde_json::Value>,
-    previous_session: Option<SessionTokensRecord>,
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
@@ -141,49 +127,47 @@ async fn deploy_one(
         .await
         .with_context(|| format!("building Sui client for {network}"))?;
 
-    // The protocol package links against siws_session, so the session
-    // package publishes FIRST (rewriting its Move.toml to the fresh id).
-    let session_tokens = if let Some(path) = session_path {
-        let outcome =
-            publish_session_package(&client, &signer, path, network.as_str(), gas_budget)
-                .await
-                .with_context(|| format!("publishing siws_session to {network}"))?;
-        tracing::info!(
-            package = %outcome.package_id,
-            registry = %outcome.registry_id,
-            "siws_session published"
-        );
-        Some(SessionTokensRecord {
-            package_id: outcome.package_id.to_string(),
-            registry_id: outcome.registry_id.to_string(),
-            upgrade_cap_id: outcome.upgrade_cap_id.to_string(),
-            publish_digest: outcome.digest,
-            deployed_at: chrono::Utc::now().to_rfc3339(),
-        })
-    } else if let Some(prev) = previous_session {
-        tracing::info!(
-            package = %prev.package_id,
-            "preserving existing sessionTokens record (use --deploy-session to refresh)"
-        );
-        Some(prev)
-    } else {
-        tracing::warn!(
-            "no sessionTokens record and --deploy-session not set; the protocol publish \
-             links against whatever the session package's Move.toml currently points at"
-        );
-        None
+    let env = network.as_str();
+    let record = |o: &deployment_manager::deploy::DepPublishOutcome| PackageRecord {
+        package_id: o.package_id.to_string(),
+        upgrade_cap_id: o.upgrade_cap_id.to_string(),
+        publish_digest: o.digest.clone(),
+        deployed_at: chrono::Utc::now().to_rfc3339(),
     };
 
-    let publish = publish_package(&client, &signer, contracts_path, gas_budget)
+    // Publish the tree in dependency order; each publish stamps its
+    // Published.toml so the next build resolves the fresh id.
+    let auction_out =
+        publish_dep_package(&client, &signer, &contracts_root.join("auction"), "auction", env, gas_budget)
+            .await
+            .with_context(|| format!("publishing auction to {network}"))?;
+    tracing::info!(package = %auction_out.package_id, "auction published");
+
+    let publish = publish_package(&client, &signer, &contracts_root.join("core"), env, gas_budget)
         .await
-        .with_context(|| format!("publishing to {network}"))?;
+        .with_context(|| format!("publishing options_core to {network}"))?;
     tracing::info!(
         package = %publish.package_id,
         admin_cap = %publish.admin_cap_id,
         protocol_config = %publish.protocol_config_id,
         digest = %publish.digest,
-        "package published"
+        "options_core published"
     );
+
+    let rfq_out =
+        publish_dep_package(&client, &signer, &contracts_root.join("rfq"), "options_rfq", env, gas_budget)
+            .await
+            .with_context(|| format!("publishing options_rfq to {network}"))?;
+    tracing::info!(package = %rfq_out.package_id, "options_rfq published");
+
+    let vault_out =
+        publish_dep_package(&client, &signer, &contracts_root.join("vault"), "options_vault", env, gas_budget)
+            .await
+            .with_context(|| format!("publishing options_vault to {network}"))?;
+    tracing::info!(package = %vault_out.package_id, "options_vault published");
+
+    let (auction, rfq, vault) =
+        (Some(record(&auction_out)), Some(record(&rfq_out)), Some(record(&vault_out)));
 
     let (treasury_id, init_digest) = if skip_init {
         (None, None)
@@ -278,7 +262,9 @@ async fn deploy_one(
             network: network.as_str().to_owned(),
             test_tokens,
             deepbook: previous_deepbook,
-            session_tokens,
+            auction,
+            rfq,
+            vault,
         },
         token_info,
     })
