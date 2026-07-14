@@ -1,10 +1,23 @@
 # Covered Call Options Protocol — Design Specification
 
-**Version**: 0.1 (MVP)
+**Version**: 0.2
 **Target chain**: Sui
 **Contract language**: Sui Move
 **Off-chain services**: Rust
 **Transport**: WebSocket (JSON messages over WSS)
+
+> **v0.2 (audit restructure).** The contracts now ship as four Move
+> packages with one-way boundaries — `options_core` (everything this
+> spec's §3 describes, minus the venues), `auction` (a generic escrowed
+> ascending auction), `options_rfq` (option-RFQ adapters over it), and
+> `options_vault` (the covered-call vault + Pyth oracle). Cash-secured
+> puts (`put_bucket`) mirror §3's covered-call design with cash
+> collateral. The additions beyond this document are specified in
+> `docs/audit-restructure/03-package-specs.md` (package trust model,
+> auction semantics, adapters, put math, the reviewed public surface)
+> and `docs/vault-implementation-guide/` (vault economics). §3.1 below
+> reflects the v0.2 package layout; the type and function specifications
+> in the rest of §3 are unchanged and normative for `options_core`.
 
 ---
 
@@ -88,21 +101,32 @@ Because writes are assigned in FIFO order, early writers face exercises earlier 
 
 ### 3.1 Module structure
 
+Four packages with one-way dependencies (v0.2; see
+`docs/audit-restructure/03-package-specs.md` for the packages beyond
+core):
+
 ```
-options_protocol/
-├── sources/
-│   ├── admin.move          // AdminCap, protocol_config
-│   ├── account.move        // Account shared object, deposits, withdrawals, signing key
-│   ├── bucket.move         // Bucket shared object, cursor logic, write/exercise/redeem
-│   │                       // (no call_option.move) — the option is a fungible
-│   │                       // Coin<Call> whose currency is generated per roll by
-│   │                       // the scheduler; the bucket holds its TreasuryCap. See §3.4.
-│   ├── position.move       // Position type, mint/burn, redemption math
-│   ├── quote.move          // Quote struct, signature verification, nonce tracking
-│   ├── treasury.move       // Fee treasury shared object, asset-agnostic Bag
-│   ├── events.move         // All event types
-│   └── errors.move         // Error code constants
-└── Move.toml
+contracts/
+├── core/          # options_core — zero third-party deps
+│   └── sources/
+│       ├── admin.move          // AdminCap, ProtocolConfig
+│       ├── account.move        // Account shared object, deposits, withdrawals, signing key
+│       ├── bucket.move         // Bucket shared object, cursor logic, write/exercise/redeem
+│       │                       // (no call_option.move) — the option is a fungible
+│       │                       // Coin<Call> whose currency is generated per roll by
+│       │                       // the scheduler; the bucket holds its TreasuryCap. See §3.4.
+│       ├── put_bucket.move     // Cash-secured-put twin of bucket.move
+│       ├── position.move       // Position type, mint/burn, redemption math
+│       ├── quote.move          // Quote struct, signature verification, nonce tracking
+│       ├── treasury.move       // Fee treasury shared object
+│       ├── events.move         // Core event types
+│       └── errors.move         // Core error codes
+├── auction/       # generic escrowed ascending auction — zero deps
+│   └── sources/{auction,events,errors}.move
+├── rfq/           # options_rfq — call/put RFQ adapters (deps: core, auction)
+│   └── sources/{rfq,events,errors}.move
+└── vault/         # options_vault — covered-call vault + Pyth oracle
+    └── sources/{vault,oracle,events,errors}.move   # (deps: core, auction, pyth)
 ```
 
 ### 3.2 Key types
