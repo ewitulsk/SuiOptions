@@ -1,0 +1,20 @@
+# solana-indexer config — prod env. Like the Sui stack, prod currently
+# runs against the test cluster (devnet); flip cluster + endpoint +
+# program ids together when mainnet contracts exist.
+
+cluster              = "devnet"
+laserstream_endpoint = "https://laserstream-devnet-ewr.helius-rpc.com"
+
+graphql_addr = "0.0.0.0:9002"
+health_addr  = "0.0.0.0:8081"
+
+allowed_origins   = ["*"]
+expose_playground = false
+
+database_url = "postgresql://solana_indexer_prod:${DB_PASSWORD}@${DB_HOST}:5432/solana_indexer_prod"
+db_pool_size = 8
+
+[programs]
+options_core  = "6KeiQVrkr7uxW1LKhZGpjg7yaYVrz4AKyGaD7Dgnef1t"
+auction_venue = "8cvpWnJaQ4kTEPypwrZvBPzEM4R7FbivgybXBm2ahvKk"
+options_vault = "ELxbfwPUPJ4U1SnvWZJpLxdCRbgMiBpgQmdRizNWYcXe"

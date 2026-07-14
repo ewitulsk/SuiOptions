@@ -1,0 +1,99 @@
+# solana-option-scheduler config — local dev.
+#
+# Chain-side ids (program ids, admin pubkey, test-token mints, pyth feed
+# ids) come from solana-token-info (--token-info-url). This file controls
+# which pairs the bot rolls buckets for and how aggressively.
+
+# GraphQL endpoint of the local solana-indexer. Consumed only to confirm
+# submitted rolls and drive the reconciler — never to make a roll decision
+# (that is sourced solely from the DB below).
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
+
+# Scheduler rolls DB (mandatory). Single source of truth for which
+# (pair, expiry) slots have been rolled; its partial UNIQUE index is the
+# hard guard against duplicate bucket creation. The scheduler fails fast
+# at boot if this is unreachable. Point a local Postgres here for
+# `cargo run`. Supports env-var expansion for deployed envs.
+scheduler_database_url = "postgresql://postgres:postgres@localhost:7653/solana_scheduler"
+
+# How often the tick loop wakes up. Cheap — reads the DB + maybe submits
+# a handful of txs.
+tick_secs         = 60
+
+# When the latest family for a pair is closer than this to expiry, roll
+# the next family. Default = 7 days (the typical bucket cadence).
+roll_threshold_ms = 604_800_000
+
+reconciler_safety_margin = 100
+reconciler_interval_secs = 30
+
+# Spot + realized vol come from solana-oracle-service (the single Pyth
+# gateway); point at it with --oracle-url / ORACLE_URL (default
+# http://127.0.0.1:9013).
+
+[[pairs]]
+underlying          = "TBTC"
+settlement          = "TUSDC"
+product_type        = "call"
+expiry_interval_ms  = 604_800_000      # 1 week
+strikes_below       = 2
+strikes_above       = 2
+interval_pct        = 5.0
+
+  # Pyth pulls the cross of TBTC and TUSDC USD prices at roll time. Both
+  # legs go through Pyth uniformly; the feed id for each ticker lives in
+  # the solana-token-info catalog.
+  [pairs.spot]
+  source             = "pyth"
+  max_publish_lag_ms = 30_000   # decline a roll on prices > 30s stale
+  max_conf_bps       = 100      # decline a roll if conf/price > 1%
+
+[[pairs]]
+underlying          = "TSOL"
+settlement          = "TUSDC"
+product_type        = "call"
+expiry_interval_ms  = 604_800_000
+strikes_below       = 2
+strikes_above       = 2
+interval_pct        = 10.0
+
+  [pairs.spot]
+  source             = "pyth"
+  max_publish_lag_ms = 30_000
+  max_conf_bps       = 100
+
+# Grid v2: add a `[pairs.grid]` table to place strikes at
+# standard-deviation multiples instead of fixed percentages, so the
+# covered-call vault's 0.1-delta strike (z = 1.30) is on-grid by
+# construction. `strikes_below`/`strikes_above`/`interval_pct` are ignored
+# for such pairs. σ = realized vol from solana-oracle-service, clamped to
+# [vol_floor, vol_ceiling]; `sigma_fallback` covers static-spot pairs and
+# benchmark outages.
+#
+#   [pairs.grid]
+#   mode            = "z_ladder"
+#   ladder          = [0.0, 0.65, 1.3, 1.95, 2.6]
+#   vol_window_days = 30
+#   vol_floor       = 0.2
+#   vol_ceiling     = 3.0
+#   sigma_fallback  = 0.85
+
+# ── Vault auto-provisioning ─────────────────────────────────────────────
+# Presence of this table switches on the hourly vault-ensure pass: the
+# scheduler creates one covered-call vault per configured call pair with a
+# Pyth feed on both legs (the share mint is a PDA — single-tx create).
+# All fields fall back to the contract's reference config; an empty
+# `[vault_template]` is enough to enable creation. Comment this table out
+# to disable vault creation.
+[vault_template]
+mgmt_fee_bps_annual      = 200
+perf_fee_bps             = 1_000
+round_ms                 = 604_800_000
+selling_window_ms        = 43_200_000
+min_strike_bps_over_spot = 300
+max_strike_bps_over_spot = 6_000
+min_expiry_lead_ms       = 259_200_000
+max_expiry_lead_ms       = 777_600_000
+max_swap_slippage_bps    = 50
+max_price_age_secs       = 60
+max_conf_bps             = 100

@@ -1,0 +1,40 @@
+# Standalone workspace, deliberately NOT a member of the rust-backend
+# workspace: the Sui crates there are pinned to the framework/mainnet git
+# branch, while this service needs the Solana SDK version tree (keypair
+# decode to derive watch addresses from rendered secrets files). Same
+# pattern as services/solana-indexer and crates/solana-tx. The shared
+# runtime-config / observability crates are pulled in by path — their
+# `workspace = true` deps resolve against rust-backend/Cargo.toml.
+[workspace]
+
+[package]
+name = "solana-balance-monitor"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "solana-balance-monitor"
+path = "src/main.rs"
+
+[dependencies]
+runtime-config = { path = "../../crates/runtime-config" }
+observability  = { path = "../../crates/observability" }
+solana-tx      = { path = "../../crates/solana-tx" }
+
+# Pinned to match crates/solana-tx (anchor-lang 1.1.2 → solana v3 crates).
+solana-sdk    = { version = "3.0", features = ["full"] }
+solana-client = "3.1"
+
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+metrics = "0.24"
+
+[dev-dependencies]
+bs58 = "0.5"

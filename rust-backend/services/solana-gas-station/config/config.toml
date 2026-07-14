@@ -1,0 +1,37 @@
+# solana-gas-station config (local dev).
+#
+# Sponsors user transactions by co-signing the fee-payer slot. The station
+# key is read from the secrets TOML (`--secrets`, default
+# services/solana-gas-station/config/secrets.toml) under the `[solana]`
+# slot for `network` below; copy secrets.example.toml to secrets.toml and
+# fill it in.
+
+environment = "dev"
+
+bind_addr   = "127.0.0.1:9009"
+network     = "devnet"
+
+allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+# 1 SOL. Below this /balance reports unhealthy and /sponsor 503s.
+min_balance_threshold_lamports = 1000000000
+
+# 0.005 SOL cap on the station's simulated lamport delta per sponsored tx
+# (fee + rent debits, e.g. ATA creation ~0.002 SOL).
+max_sponsor_lamports_per_tx = 5000000
+
+# solana-token-info supplies the deployed program ids that seed the
+# sponsored-transaction templates at boot, plus the testTokens block the
+# faucet mints from.
+token_info_url = "http://127.0.0.1:9005"
+
+# Test-token faucet (force-disabled on mainnet-beta regardless).
+faucet_enabled = true
+
+# Per-request mint amounts in RAW units:
+# TBTC 8 decimals → 1 TBTC; TUSDC 6 decimals → 100,000 TUSDC;
+# TSOL 9 decimals → 100 TSOL.
+[faucet_amounts]
+TBTC  = 100000000
+TUSDC = 100000000000
+TSOL  = 100000000000

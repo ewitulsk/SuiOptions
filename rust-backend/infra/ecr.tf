@@ -8,7 +8,7 @@ locals {
   # retired. Removing it here destroys the repo on apply — if it still holds
   # images, run `terraform state rm 'aws_ecr_repository.svc["derived-metric-worker"]'`
   # and delete the repo by hand (or set force_delete) to avoid a destroy error.
-  service_repos = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor", "keeper", "oracle-service"]
+  service_repos = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor", "keeper", "oracle-service", "solana-indexer", "solana-token-info", "solana-auth-service", "solana-api-service", "solana-quoting-service", "solana-oracle-service", "solana-price-charting", "solana-gas-station", "solana-keeper", "solana-option-scheduler", "solana-mm-bot", "solana-balance-monitor"]
 }
 
 resource "aws_ecr_repository" "svc" {

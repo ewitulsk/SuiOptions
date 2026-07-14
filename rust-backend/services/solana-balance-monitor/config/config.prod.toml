@@ -1,0 +1,29 @@
+# solana-balance-monitor config — prod env (devnet, same as staging for now).
+
+environment = "prod"
+network     = "devnet"
+ops_addr    = "0.0.0.0:9012"
+
+poll_interval_secs = 60
+
+[[watch]]
+name = "solana-gas-station"
+secrets_file = "/run/secrets/solana-gas-station.toml"
+low_balance_sol = 5.0
+
+[[watch]]
+name = "solana-scheduler"
+secrets_file = "/run/secrets/solana-scheduler.toml"
+low_balance_sol = 2.0
+
+[[watch]]
+name = "solana-keeper"
+secrets_file = "/run/secrets/solana-keeper.toml"
+low_balance_sol = 2.0
+
+# mm-bot is optional in prod (render-secrets.sh skips absent secrets); the
+# watch is skipped with a warning when the file isn't rendered.
+[[watch]]
+name = "solana-mm-bot"
+secrets_file = "/run/secrets/solana-mm-bot.toml"
+low_balance_sol = 2.0

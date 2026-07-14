@@ -1,0 +1,71 @@
+# Standalone workspace, deliberately NOT a member of the rust-backend
+# workspace: the Sui crates there are pinned to the framework/mainnet git
+# branch, while this bot needs the Solana SDK version tree (same pattern as
+# services/solana-indexer and crates/solana-tx). The shared main-workspace
+# crates are pulled in by path — their `workspace = true` deps resolve
+# against rust-backend/Cargo.toml; the program crates' resolve against
+# solana-contracts/Cargo.toml (anchor-lang 1.1.2, event-cpi).
+[workspace]
+
+[package]
+name = "solana-mm-bot"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "solana-mm-bot"
+path = "src/main.rs"
+
+[dependencies]
+# Shared main-workspace crates (path; version-resolved against
+# rust-backend/Cargo.toml).
+runtime-config = { path = "../../crates/runtime-config" }
+observability  = { path = "../../crates/observability", features = ["axum"] }
+cli-spec       = { path = "../../crates/cli-spec" }
+protocol-types = { path = "../../crates/protocol-types" }
+pricing        = { path = "../../crates/pricing" }
+pyth-client    = { path = "../../crates/pyth-client" }
+oracle-client  = { path = "../../crates/oracle-client" }
+solana-token-info-client = { path = "../../crates/solana-token-info-client" }
+solana-indexer-graphql   = { path = "../../crates/solana-indexer-graphql" }
+
+# Solana chain plumbing (standalone crate; pulls the program crates).
+solana-tx = { path = "../../crates/solana-tx" }
+
+# The deployed programs themselves — account layouts (Auction, MmAccount,
+# Bucket) and error enums, zero drift with what's on chain.
+options_core  = { path = "../../../solana-contracts/programs/options_core", features = ["no-entrypoint"] }
+auction_venue = { path = "../../../solana-contracts/programs/auction_venue", features = ["no-entrypoint"] }
+# The real on-chain auction math (min_next_bid) — no re-derivation.
+options_math  = { path = "../../../solana-contracts/crates/options_math" }
+
+# Pinned to the solana-contracts tree (anchor-lang 1.1.2 → solana v3 crates),
+# matching crates/solana-tx.
+anchor-lang = "1.1.2"
+anchor-spl  = "1.1.2"
+solana-sdk    = { version = "3.0", features = ["full"] }
+solana-client = "3.1"
+
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+config = { version = "0.14", features = ["toml"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+ed25519-dalek = "2"
+bs58 = "0.5"
+hex = "0.4"
+
+anyhow = "1"
+tracing = "0.1"
+metrics = "0.24"
+parking_lot = "0.12"

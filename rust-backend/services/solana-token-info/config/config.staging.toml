@@ -1,0 +1,28 @@
+# solana-token-info config — staging env (devnet).
+
+environment        = "staging"
+network            = "devnet"
+deployments_path   = "/app/deployments/solana-deployments.json"
+
+database_url       = "postgresql://solana_token_info_staging:${DB_PASSWORD}@${DB_HOST}:5432/solana_token_info_staging"
+db_pool_size       = 8
+
+public_bind_addr   = "0.0.0.0:9005"
+internal_bind_addr = "0.0.0.0:9006"
+
+allowed_origins    = ["*"]
+
+# solana-auth-service internal verify route (compose-internal) — gates the
+# public mutate endpoints.
+auth_service_url   = "http://solana-auth-service:9008"
+
+# Display metadata for the staging test-token overlay. Keyed by ticker.
+[seed_meta.TBTC]
+name     = "Test Bitcoin"
+logo_uri = "https://assets.coingecko.com/coins/images/1/small/bitcoin.png"
+[seed_meta.TUSDC]
+name     = "Test USDC"
+logo_uri = "https://assets.coingecko.com/coins/images/6319/small/usdc.png"
+[seed_meta.TSOL]
+name     = "Test Solana"
+logo_uri = "https://assets.coingecko.com/coins/images/4128/small/solana.png"

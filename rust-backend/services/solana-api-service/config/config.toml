@@ -1,0 +1,19 @@
+# solana-api-service config (local dev).
+#
+# Reads protocol state from solana-indexer's GraphQL API and serves HTTP
+# to the frontend.
+
+bind_addr           = "127.0.0.1:9003"
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
+
+# Frontend dev origins. Use ["*"] for permissive dev only.
+allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+# solana-token-info public API. Catalog (mint -> {symbol, decimals}) is
+# fetched from here at boot. Hard cutover: unreachable => crash.
+token_info_url = "http://127.0.0.1:9005"
+
+# Solana JSON-RPC for the live-vault read in GET /vaults/:id. Public
+# devnet endpoint; swap in a keyed Helius URL if the public one rate-limits
+# (planned: operator override via the options/<env>/solana-rpc secret).
+solana_rpc_url = "https://api.devnet.solana.com"

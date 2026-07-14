@@ -1,0 +1,21 @@
+# solana-indexer config — staging env (Solana devnet).
+
+cluster              = "devnet"
+laserstream_endpoint = "https://laserstream-devnet-ewr.helius-rpc.com"
+
+graphql_addr = "0.0.0.0:9002"
+health_addr  = "0.0.0.0:8081"
+
+# GraphQL is publicly routed via nginx (/staging/solana-indexer/graphql).
+allowed_origins   = ["*"]
+expose_playground = true
+
+database_url = "postgresql://solana_indexer_staging:${DB_PASSWORD}@${DB_HOST}:5432/solana_indexer_staging"
+db_pool_size = 8
+
+# Devnet program ids (deploy-stable on Solana; update on a NEW deploy of
+# the programs, not on upgrades).
+[programs]
+options_core  = "6KeiQVrkr7uxW1LKhZGpjg7yaYVrz4AKyGaD7Dgnef1t"
+auction_venue = "8cvpWnJaQ4kTEPypwrZvBPzEM4R7FbivgybXBm2ahvKk"
+options_vault = "ELxbfwPUPJ4U1SnvWZJpLxdCRbgMiBpgQmdRizNWYcXe"

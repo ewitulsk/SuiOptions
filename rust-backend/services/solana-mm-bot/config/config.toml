@@ -1,0 +1,140 @@
+# solana-mm-bot config — local dev.
+#
+# Everything chain-side (program ids, config PDA, mints, decimals, Pyth
+# feeds) is resolved from solana-token-info at boot. This file controls the
+# bot's *behaviour*: what pairs to quote, its pricing inputs, and what it
+# advertises to the quoting service.
+#
+# Secrets live in `secrets.toml` ([solana] wallet keypair for gas + bids,
+# [mm_bot].quote_key for the ed25519 Quote signing seed).
+
+# Ops (health/metrics) bind address.
+health_addr        = "0.0.0.0:9010"
+
+# Solana cluster: selects the [solana].<network> secret slot and the
+# default RPC URL. One of: devnet / testnet / mainnet-beta.
+network            = "devnet"
+
+quoting_url        = "ws://127.0.0.1:9002/"
+
+# solana-indexer GraphQL — auction discovery for the on-chain bidders.
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
+
+# solana-gas-station base URL: the non-mainnet test-token faucet the bot
+# tops its wallet up from. Comment out to disable minting entirely (the
+# bot then only moves what the wallet already holds).
+faucet_url         = "http://127.0.0.1:9009"
+
+# MmAccount PDA salt under the wallet (multiple accounts per owner).
+mm_account_salt    = 0
+
+# Pairs to make markets on. Symbols are looked up in the solana-token-info
+# catalog (mint, decimals, pythFeedId). Empty/unset = derive mode: every
+# enabled Pyth-fed token that isn't the settlement asset.
+underlying_symbols = ["TBTC", "TWAL"]
+settlement_symbol  = "TUSDC"
+
+# Annualized risk-free rate. Protocol convention is r = 0 (settlement is a
+# stablecoin with no funded rate leg), which keeps fair value identical
+# across the stack; r > 0 also reintroduces the American-put
+# early-exercise premium European Black-Scholes doesn't model.
+rate               = 0.0
+
+# How long the bot's signed quotes stay valid.
+quote_ttl_ms       = 30_000
+
+# Two-sided spread. The primary spread is in VOL space — the ask leg prices
+# at sigma × ask_vol_markup, the bid leg at sigma × bid_vol_markdown — so the
+# spread scales with the vega being warehoused. The bps knobs are the
+# *minimum* premium-space spread, all that separates the sides deep ITM where
+# vega ≈ 0.
+ask_markup_bps     = 100
+bid_markdown_bps   = 100
+ask_vol_markup     = 1.10
+bid_vol_markdown   = 0.90
+
+# Last-look charge: a signed quote is a free 30s option for the taker.
+# Charge mult × |delta|·spot·sigma·√(ttl_years) on the ask, shade it off
+# the bid. 0.0 disables.
+ttl_charge_mult    = 1.0
+
+# Extra vol widening while quoting on the fallback sigma (vol buffer still
+# cold): ask sigma ×= this, bid sigma ÷= this. 1.0 disables.
+fallback_vol_penalty = 1.25
+
+# Size awareness. max_quote_notional caps any single RFQ's notional
+# (spot x write_amount, settlement smallest-units); 0 = no cap. Size
+# widening adds size_widening_vol of proportional vol spread per
+# size_ref_notional of notional. 100_000_000_000 = 100k TUSDC at 6 decimals.
+max_quote_notional = 0
+size_widening_vol  = 0.10
+size_ref_notional  = 100_000_000_000
+
+# Both roles by default; a single MmAccount can serve writer + trader.
+roles = ["trader_mm", "writer_mm"]
+
+# Answer unsigned bulk-view RFQs (indicative premiums for the frontend's
+# tiles). Priced with the same model but never signed — no nonce consumed.
+bulk_view_enabled = true
+
+# MmAccount inventory floors (deposited from the wallet, faucet-topped on
+# non-mainnet). Settlement pays premiums (Trader-MM / bid side); underlying
+# collateralizes writes (Writer-MM / ask side). Smallest-units.
+bootstrap_settlement_amount = 1_000_000_000_000
+bootstrap_underlying_amount = 100_000_000_000
+
+# Background underlying top-up: when an underlying's MmAccount balance
+# falls below the threshold, deposit the replenish amount. 0 disables.
+underlying_replenish_threshold    = 20_000_000_000
+underlying_replenish_amount       = 100_000_000_000
+underlying_replenish_interval_secs = 60
+
+# Optional: wallet that receives minted option tokens on quote execution
+# (Quote.signer_token_recipient, base58). Unset = the bot's wallet.
+# token_recipient = "..."
+
+# Strike-dependent vol (see crates/pricing smile.rs): sigma(K) = sigma_atm x
+# (1 + skew*z + convexity*z^2), z = ln(K/S)/(sigma_atm*sqrt(tau)). Flat (0/0)
+# until calibrated from observed quotes. Per-symbol overrides:
+#   [smiles.TBTC]
+#   skew = 0.05
+[smile]
+skew      = 0.0
+convexity = 0.0
+
+# Live prices come from solana-oracle-service (--oracle-url / ORACLE_URL,
+# default http://127.0.0.1:9013). These tune the consumer-side staleness
+# guards + the rolling-vol sampler (same knob names as the Sui twin).
+[pyth]
+max_price_age_ms       = 5_000
+max_publish_lag_ms     = 10_000
+# Pyth confidence gate, bps of price; 0 = off.
+max_conf_bps           = 0
+# Short + long realized-vol windows; quoted sigma is max(short, long).
+vol_window_hours       = 24
+vol_long_window_hours  = 168
+# 5-minute sampling (1-minute bars mostly measure oracle jitter).
+vol_sample_interval_ms = 300_000
+fallback_vol           = 0.6
+[pyth.fallback_vols]
+TBTC = 0.45
+TWAL = 1.0
+
+# Unified on-chain auction bidder — the venue replaces Sui's per-kind
+# auctions with one program, so one section with per-mode enables. Off by
+# default for local runs.
+[onchain_auction]
+covered_call     = false
+cash_secured_put = false
+swap             = false
+# Shared decide_bid knobs (same semantics as the Sui [onchain_rfq] section):
+poll_secs             = 10
+initial_bid           = "reserve_plus"   # reserve_plus | shaded | max
+shade_bps             = 300
+rebid                 = true
+# Settlement locked across live call/put best bids (smallest-units).
+max_concurrent_escrow = 5_000_000_000
+min_deadline_lead_ms  = 30_000
+# Swap mode: pay at most fair × (1 − margin); escrow cap in UNDERLYING units.
+swap_bid_margin_bps        = 20
+swap_max_concurrent_escrow = 5_000_000_000

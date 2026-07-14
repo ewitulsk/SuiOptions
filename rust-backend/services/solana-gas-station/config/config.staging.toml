@@ -1,0 +1,23 @@
+# solana-gas-station config — staging env (Solana devnet).
+
+environment = "staging"
+
+bind_addr   = "0.0.0.0:9009"
+network     = "devnet"
+
+allowed_origins = ["*"]
+
+min_balance_threshold_lamports = 1000000000
+max_sponsor_lamports_per_tx = 5000000
+
+# solana-token-info supplies the deployed program ids (and the testTokens
+# block) that seed the sponsored-transaction templates at boot.
+token_info_url = "http://solana-token-info:9005"
+
+faucet_enabled = true
+
+# Per-request mint amounts in RAW units (TBTC 8dp, TUSDC 6dp, TSOL 9dp).
+[faucet_amounts]
+TBTC  = 100000000
+TUSDC = 100000000000
+TSOL  = 100000000000

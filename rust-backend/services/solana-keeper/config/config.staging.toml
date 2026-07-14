@@ -1,0 +1,36 @@
+# solana-keeper config — staging env (Solana devnet).
+#
+# Vaults are DISCOVERED from the solana-indexer's `vaults` view, not
+# configured: each discovered vault's pinned Pyth feeds, mints and pair
+# decimals resolve from its on-chain Vault account (src/discovery.rs).
+# This file carries only endpoints, the Pyth handles, and the strategy
+# defaults applied to every discovered vault.
+
+indexer_graphql_url = "http://solana-indexer:9002/graphql"
+tick_secs   = 15
+health_addr = "0.0.0.0:8086"
+
+[pyth]
+# Devnet vaults are pinned to the BETA feed set — update data must come
+# from hermes-BETA (stable hermes updates carry different feed ids).
+hermes_url = "https://hermes-beta.pyth.network"
+# The Pyth receiver + its Wormhole verification bridge are compile-time
+# constants (same address on mainnet + devnet); uncomment to override if
+# the receiver's config is ever migrated.
+# wormhole_program_id = "HDwcJBJXjL9FpJ7UBsYBtaDjsBUhuLCUYoz3zr8SWWaQ"
+
+# Strategy defaults for every discovered vault — launch-memo values
+# (guide doc 08): Δ target 0.20, 4 slices / 90 min stagger.
+[vault_defaults]
+iv_ratio = 1.15        # calibrated: BTC 1.19, ETH 1.08 (backtester, Jun 2026)
+target_delta = 0.20    # doc 08: 0.10 leaves too little premium above the
+                       # reserve after snap-up + haircut
+# Hourly (≤6h round) vaults target closer to ATM: at that tenor a
+# 0.20-delta call's premium falls below the reserve, so it would never sell.
+short_round_target_delta = 0.25
+sigma_fallback = 0.85  # load-bearing while Benchmarks lacks the beta feeds
+vol_window_days = 30
+
+[vault_defaults.slicing]
+slices = 4
+stagger_minutes = 90

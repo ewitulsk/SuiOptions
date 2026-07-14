@@ -1,0 +1,62 @@
+# Standalone workspace, deliberately NOT a member of the rust-backend
+# workspace: the Sui crates there are pinned to the framework/mainnet git
+# branch, while this crate needs the Solana SDK version tree. Same pattern
+# as services/solana-indexer. The shared runtime-config / observability
+# crates are pulled in by path — their `workspace = true` deps resolve
+# against rust-backend/Cargo.toml; the program crates' resolve against
+# solana-contracts/Cargo.toml (anchor-lang 1.1.2, event-cpi).
+[workspace]
+
+[package]
+name = "solana-tx"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+runtime-config = { path = "../runtime-config" }
+observability  = { path = "../observability" }
+
+# The deployed programs themselves: account layouts, instruction args,
+# generated `instruction` / `accounts` client modules, error enums, seed
+# constants — zero drift with what's on chain.
+options_core  = { path = "../../../solana-contracts/programs/options_core", features = ["no-entrypoint"] }
+auction_venue = { path = "../../../solana-contracts/programs/auction_venue", features = ["no-entrypoint"] }
+options_vault = { path = "../../../solana-contracts/programs/options_vault", features = ["no-entrypoint"] }
+
+# Pinned to the solana-contracts tree (anchor-lang 1.1.2 → solana v3 crates).
+anchor-lang = "1.1.2"
+anchor-spl  = "1.1.2"
+
+solana-sdk    = { version = "3.0", features = ["full"] }
+solana-client = "3.1"
+solana-ed25519-program = "3.0"
+solana-sdk-ids = "3.1"
+solana-commitment-config = "3"
+
+# Pyth pull-oracle receiver. The SDK (types, seeds, params) is anchor-1.x
+# compatible; the receiver *program* crate is not on crates.io, so the two
+# instructions we need are hand-encoded in src/pyth.rs from these types.
+pyth-solana-receiver-sdk = "2.0"
+pythnet-sdk = "3.0"
+
+borsh = "1"
+bs58 = "0.5"
+sha2 = "0.10"
+ed25519-dalek = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+# Same litesvm the program repo tests with (precompiles for Ed25519SigVerify).
+litesvm = { version = "0.10.0", features = ["precompiles"] }
+litesvm-token = "0.10.0"

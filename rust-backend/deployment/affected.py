@@ -34,7 +34,7 @@ from typing import Iterable
 
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor", "keeper", "oracle-service"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor", "keeper", "oracle-service", "solana-indexer", "solana-token-info", "solana-auth-service", "solana-api-service", "solana-quoting-service", "solana-oracle-service", "solana-price-charting", "solana-gas-station", "solana-keeper", "solana-option-scheduler", "solana-mm-bot", "solana-balance-monitor"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -74,6 +74,26 @@ REBUILD_ALL_GLOBS = [
 #   keeper           : protocol-types, runtime-config, cli-spec, sui-tx,
 #                      pyth-client, pricing, token-info-client,
 #                      indexer-graphql, observability
+#   solana-indexer   : runtime-config, observability (standalone workspace;
+#                      own Cargo.lock inside its service dir)
+#   solana-token-info      : runtime-config, cli-spec, solana-deployments,
+#                            solana-token-info-client, auth-client
+#   solana-auth-service    : runtime-config, cli-spec
+#   solana-api-service     : runtime-config, cli-spec, solana-indexer-graphql,
+#                            solana-token-info-client, pricing
+#   solana-quoting-service : protocol-types, runtime-config, cli-spec,
+#                            solana-indexer-graphql, solana-token-info-client
+#   solana-oracle-service  : wraps services/oracle-service (path dep!) +
+#                            solana-token-info-client — inherits the Sui
+#                            oracle-service's crate deps
+#   solana-price-charting  : runtime-config, cli-spec, solana-token-info-client,
+#                            solana-indexer-graphql, oracle-client, pricing
+#   The standalone Solana workspaces (solana-gas-station / solana-keeper /
+#   solana-option-scheduler / solana-mm-bot / solana-balance-monitor) each
+#   carry their own Cargo.lock in their service dir and path-import
+#   crates/solana-tx, which deps the program crates in
+#   solana-contracts/programs (and options_math in solana-contracts/crates)
+#   — so program changes rebuild them.
 #   (every service also depends on observability)
 SERVICE_GLOBS: dict[str, list[str]] = {
     "indexer": [
@@ -194,6 +214,12 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/token-info-client/**",
         "rust-backend/crates/indexer-graphql/**",
     ],
+    "solana-indexer": [
+        "rust-backend/services/solana-indexer/**",
+        "rust-backend/Dockerfile.solana-indexer",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+    ],
     "oracle-service": [
         "rust-backend/services/oracle-service/**",
         "rust-backend/Dockerfile.oracle-service",
@@ -204,6 +230,134 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/pyth-client/**",
         "rust-backend/crates/oracle-client/**",
         "rust-backend/crates/token-info-client/**",
+    ],
+    "solana-token-info": [
+        "rust-backend/services/solana-token-info/**",
+        "rust-backend/Dockerfile.solana-token-info",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/solana-deployments/**",
+        "rust-backend/crates/solana-token-info-client/**",
+        "rust-backend/crates/auth-client/**",
+    ],
+    "solana-auth-service": [
+        "rust-backend/services/solana-auth-service/**",
+        "rust-backend/Dockerfile.solana-auth-service",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
+    ],
+    "solana-api-service": [
+        "rust-backend/services/solana-api-service/**",
+        "rust-backend/Dockerfile.solana-api-service",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/solana-indexer-graphql/**",
+        "rust-backend/crates/solana-token-info-client/**",
+        "rust-backend/crates/pricing/**",
+    ],
+    "solana-quoting-service": [
+        "rust-backend/services/solana-quoting-service/**",
+        "rust-backend/Dockerfile.solana-quoting-service",
+        "rust-backend/crates/protocol-types/**",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/solana-indexer-graphql/**",
+        "rust-backend/crates/solana-token-info-client/**",
+    ],
+    # Wraps the Sui oracle-service crate (path dep), so it rebuilds on that
+    # service's source and crate deps too.
+    "solana-oracle-service": [
+        "rust-backend/services/solana-oracle-service/**",
+        "rust-backend/Dockerfile.solana-oracle-service",
+        "rust-backend/services/oracle-service/**",
+        "rust-backend/crates/protocol-types/**",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/pyth-client/**",
+        "rust-backend/crates/oracle-client/**",
+        "rust-backend/crates/token-info-client/**",
+        "rust-backend/crates/solana-token-info-client/**",
+    ],
+    "solana-price-charting": [
+        "rust-backend/services/solana-price-charting/**",
+        "rust-backend/Dockerfile.solana-price-charting",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/solana-token-info-client/**",
+        "rust-backend/crates/solana-indexer-graphql/**",
+        "rust-backend/crates/oracle-client/**",
+        "rust-backend/crates/pricing/**",
+    ],
+    # Standalone Solana workspaces: own dir (incl. their Cargo.lock) +
+    # path-imported shared crates + solana-tx and the on-chain program
+    # crates it pins (solana-contracts/** paths are repo-relative, like
+    # everything else here).
+    "solana-gas-station": [
+        "rust-backend/services/solana-gas-station/**",
+        "rust-backend/Dockerfile.solana-gas-station",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/solana-tx/**",
+        "rust-backend/crates/solana-token-info-client/**",
+        "solana-contracts/programs/**",
+    ],
+    "solana-keeper": [
+        "rust-backend/services/solana-keeper/**",
+        "rust-backend/Dockerfile.solana-keeper",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/oracle-client/**",
+        "rust-backend/crates/pyth-client/**",
+        "rust-backend/crates/pricing/**",
+        "rust-backend/crates/solana-indexer-graphql/**",
+        "rust-backend/crates/solana-token-info-client/**",
+        "rust-backend/crates/solana-tx/**",
+        "solana-contracts/programs/**",
+        "solana-contracts/crates/**",
+    ],
+    "solana-option-scheduler": [
+        "rust-backend/services/solana-option-scheduler/**",
+        "rust-backend/Dockerfile.solana-option-scheduler",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/oracle-client/**",
+        "rust-backend/crates/pricing/**",
+        "rust-backend/crates/solana-token-info-client/**",
+        "rust-backend/crates/solana-indexer-graphql/**",
+        "rust-backend/crates/solana-tx/**",
+        "solana-contracts/programs/**",
+        "solana-contracts/crates/**",
+    ],
+    "solana-mm-bot": [
+        "rust-backend/services/solana-mm-bot/**",
+        "rust-backend/Dockerfile.solana-mm-bot",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/protocol-types/**",
+        "rust-backend/crates/pricing/**",
+        "rust-backend/crates/pyth-client/**",
+        "rust-backend/crates/oracle-client/**",
+        "rust-backend/crates/solana-token-info-client/**",
+        "rust-backend/crates/solana-indexer-graphql/**",
+        "rust-backend/crates/solana-tx/**",
+        "solana-contracts/programs/**",
+        "solana-contracts/crates/**",
+    ],
+    "solana-balance-monitor": [
+        "rust-backend/services/solana-balance-monitor/**",
+        "rust-backend/Dockerfile.solana-balance-monitor",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/solana-tx/**",
+        "solana-contracts/programs/**",
     ],
 }
 

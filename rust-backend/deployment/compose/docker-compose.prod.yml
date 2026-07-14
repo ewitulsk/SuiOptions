@@ -63,6 +63,23 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # Solana-port indexer: ingests the three Solana programs' emit_cpi events
+  # from Helius LaserStream and serves the GraphQL query API on 9002 / ops
+  # on 8081 (proxied by nginx under /prod/solana-indexer). Requires
+  # /run/secrets/solana-indexer.toml ([helius] api_key).
+  solana-indexer:
+    image: ${ECR}/options/solana-indexer:${SOLANA_INDEXER_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      RUST_LOG: info,solana_indexer=info
+    volumes:
+      - /opt/options/prod/secrets:/run/secrets:ro
+    restart: unless-stopped
+    networks: [net]
+
   # Single internal Pyth gateway (SO-254): one Hermes SSE subscription + all
   # Pyth caching, fanned out over REST + WS on 9013 (never proxied). Reads the
   # Pyth API key from /run/secrets/oracle-service.toml; discovers feeds from
@@ -208,6 +225,185 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # ── Solana stack (docs/solana/backend/00-architecture.md) ─────────────
+  # Runs alongside the Sui services on the same host. Ports duplicate the
+  # Sui twins' numbers deliberately — containers are distinct on `net` and
+  # nginx routes by service name, so there is no collision.
+
+  # Solana token catalog — the sole reader of solana-deployments.json.
+  # Public read port 9005 (proxied under /prod/solana-token-info) +
+  # internal mutate port 9006 (never proxied).
+  solana-token-info:
+    image: ${ECR}/options/solana-token-info:${SOLANA_TOKEN_INFO_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      RUST_LOG: info,solana_token_info=info
+    # solana-deployments.json rides in the same deploy-bundle directory
+    # mount as the Sui token-info's deployments.json (see that block's
+    # inode-trap note). config.prod.toml points deployments_path at
+    # /app/deployments/solana-deployments.json.
+    volumes:
+      - /opt/options/prod/deployments/:/app/deployments/:ro
+    depends_on: [solana-auth-service]
+    restart: unless-stopped
+    networks: [net]
+
+  # Solana admin auth (JWTs for solana-token-info's mutate endpoints).
+  # Public port 9007 (proxied under /prod/solana-auth) + internal verify
+  # port 9008 (never proxied). Reads its JWT secret from /run/secrets.
+  solana-auth-service:
+    image: ${ECR}/options/solana-auth-service:${SOLANA_AUTH_SERVICE_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      RUST_LOG: info,solana_auth_service=info
+    volumes:
+      - /opt/options/prod/secrets:/run/secrets:ro
+    restart: unless-stopped
+    networks: [net]
+
+  # Single internal Pyth gateway for the Solana stack (mirrors
+  # oracle-service): one Hermes SSE subscription, REST + WS on 9013 (never
+  # proxied). Reads the Pyth API key from
+  # /run/secrets/solana-oracle-service.toml; discovers feeds from
+  # solana-token-info.
+  solana-oracle-service:
+    image: ${ECR}/options/solana-oracle-service:${SOLANA_ORACLE_SERVICE_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      RUST_LOG: info,solana_oracle_service=info
+    volumes:
+      - /opt/options/prod/secrets:/run/secrets:ro
+    depends_on: [solana-token-info]
+    restart: unless-stopped
+    networks: [net]
+
+  # Solana RFQ hub (WS + HTTP on 9002, proxied under /prod/solana-quoting).
+  solana-quoting-service:
+    image: ${ECR}/options/solana-quoting-service:${SOLANA_QUOTING_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      RUST_LOG: info,solana_quoting_service=info
+    depends_on: [solana-indexer, solana-token-info]
+    restart: unless-stopped
+    networks: [net]
+
+  solana-api-service:
+    image: ${ECR}/options/solana-api-service:${SOLANA_API_SERVICE_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      RUST_LOG: info,solana_api_service=info
+    depends_on: [solana-indexer, solana-token-info]
+    restart: unless-stopped
+    networks: [net]
+
+  # Solana OHLC/APY store (Tiger Data TimescaleDB via
+  # SOLANA_CHART_DATABASE_URL, rendered by render-secrets.sh); REST + WS on
+  # 9011 (proxied under /prod/solana-charts). No secrets mount — no chain
+  # reads (no ingestion tasks until a Solana DEX integration lands).
+  solana-price-charting:
+    image: ${ECR}/options/solana-price-charting:${SOLANA_PRICE_CHARTING_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      SOLANA_CHART_DATABASE_URL: ${SOLANA_CHART_DATABASE_URL}
+      RUST_LOG: info,solana_price_charting=info
+    depends_on: [solana-token-info, solana-indexer, solana-oracle-service]
+    restart: unless-stopped
+    networks: [net]
+
+  # Solana gas station: co-signs the fee-payer slot with the station wallet
+  # and serves the non-mainnet test-token faucet. Public port 9009 (proxied
+  # under /prod/solana-gas-station). Reads the station key from
+  # /run/secrets.
+  solana-gas-station:
+    image: ${ECR}/options/solana-gas-station:${SOLANA_GAS_STATION_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      RUST_LOG: info,solana_gas_station=info
+    volumes:
+      - /opt/options/prod/secrets:/run/secrets:ro
+    depends_on: [solana-token-info]
+    restart: unless-stopped
+    networks: [net]
+
+  # Solana covered-call vault crank (guide doc 09). Holds only a gas wallet
+  # (/run/secrets/solana-keeper.toml); vaults are auto-discovered from the
+  # solana-indexer's vaults view. Ops-only /health + /metrics on 8086.
+  solana-keeper:
+    image: ${ECR}/options/solana-keeper:${SOLANA_KEEPER_TAG}
+    environment:
+      APP_ENV: prod
+      TOKEN_INFO_URL: http://solana-token-info:9005
+      ORACLE_URL: http://solana-oracle-service:9013
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      RUST_LOG: info,solana_keeper=info
+    volumes:
+      - /opt/options/prod/secrets:/run/secrets:ro
+    depends_on: [solana-indexer, solana-token-info, solana-oracle-service]
+    restart: unless-stopped
+    networks: [net]
+
+  # Solana bucket/vault roller (guide doc 10). Signs with the admin keypair
+  # (/run/secrets/solana-scheduler.toml). Ops-only /health + /metrics on
+  # 8087.
+  solana-option-scheduler:
+    image: ${ECR}/options/solana-option-scheduler:${SOLANA_SCHEDULER_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      # Mandatory: the scheduler refuses to start without its rolls DB
+      # (solana_scheduler_prod). Expanded in config.prod.toml.
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      TOKEN_INFO_URL: http://solana-token-info:9005
+      ORACLE_URL: http://solana-oracle-service:9013
+      RUST_LOG: info,solana_option_scheduler=info
+    volumes:
+      - /opt/options/prod/secrets:/run/secrets:ro
+    depends_on: [solana-indexer, solana-token-info, solana-oracle-service]
+    restart: unless-stopped
+    networks: [net]
+
+  # Solana market maker (guide doc 11). Signs quotes with
+  # /run/secrets/solana-mm-bot.toml. Ops-only /health + /metrics on 9010.
+  solana-mm-bot:
+    image: ${ECR}/options/solana-mm-bot:${SOLANA_MM_BOT_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      TOKEN_INFO_URL: http://solana-token-info:9005
+      ORACLE_URL: http://solana-oracle-service:9013
+      API_URL: http://solana-api-service:9003
+      RUST_LOG: info,solana_mm_bot=info
+    volumes:
+      - /opt/options/prod/secrets:/run/secrets:ro
+    depends_on: [solana-quoting-service, solana-token-info, solana-api-service, solana-oracle-service]
+    restart: unless-stopped
+    networks: [net]
+
+  # SOL balance gauges + low-balance alerts for the Solana operational
+  # wallets. Derives addresses from the same rendered secrets the services
+  # mount (whole secrets dir, like the Sui balance-monitor); scraped by the
+  # Prometheus agent on 9012. Not proxied by nginx.
+  solana-balance-monitor:
+    image: ${ECR}/options/solana-balance-monitor:${SOLANA_BALANCE_MONITOR_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      RUST_LOG: info,solana_balance_monitor=info
+    volumes:
+      - /opt/options/prod/secrets:/run/secrets:ro
+    restart: unless-stopped
+    networks: [net]
+
   # Single public entrypoint per env. Strips the /prod/{quoting,api,indexer,scheduler,mm-bot}
   # prefix before forwarding. depends_on is start-order only; nginx
   # tolerates backends being briefly unreachable on first boot.
@@ -220,7 +416,7 @@ services:
     volumes:
       - /opt/options/prod/nginx/:/etc/nginx/options/:ro
     command: ["nginx", "-c", "/etc/nginx/options/nginx.conf", "-g", "daemon off;"]
-    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, keeper]
+    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, keeper, solana-indexer, solana-token-info, solana-auth-service, solana-api-service, solana-quoting-service, solana-price-charting, solana-gas-station]
     restart: unless-stopped
     networks: [net]
 

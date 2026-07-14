@@ -15,6 +15,9 @@ members = [
     "crates/auth-client",
     "crates/vault-sim",
     "crates/observability",
+    "crates/solana-deployments",
+    "crates/solana-token-info-client",
+    "crates/solana-indexer-graphql",
     "services/indexer",
     "services/keeper",
     "services/quoting-service",
@@ -27,6 +30,12 @@ members = [
     "services/price-charting",
     "services/balance-monitor",
     "services/oracle-service",
+    "services/solana-token-info",
+    "services/solana-auth-service",
+    "services/solana-api-service",
+    "services/solana-quoting-service",
+    "services/solana-oracle-service",
+    "services/solana-price-charting",
     "tools/deployment-manager",
     "tools/exchange",
     "tools/writer",
@@ -59,6 +68,9 @@ indexer-graphql = { path = "crates/indexer-graphql" }
 auth-client    = { path = "crates/auth-client" }
 vault-sim      = { path = "crates/vault-sim" }
 observability  = { path = "crates/observability" }
+solana-deployments = { path = "crates/solana-deployments" }
+solana-token-info-client = { path = "crates/solana-token-info-client" }
+solana-indexer-graphql = { path = "crates/solana-indexer-graphql" }
 
 # Pinned to match sui-keys's exact requirement on the framework/mainnet branch.
 tokio = { version = "=1.49.0", features = ["full"] }

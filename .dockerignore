@@ -1,0 +1,20 @@
+# Applies only to docker builds whose context is the REPO ROOT — the
+# standalone Solana service images (bake.hcl `_solana-standalone` targets:
+# solana-gas-station / solana-keeper / solana-option-scheduler /
+# solana-mm-bot / solana-balance-monitor), whose cargo workspaces
+# path-depend on ../solana-contracts/programs and so can't build from the
+# rust-backend-only context the other images use.
+#
+# Only rust-backend/ and solana-contracts/ enter the context; build
+# artifacts and local secrets are re-excluded below (later rules win).
+# rust-backend/.dockerignore does NOT apply here — mirror its exclusions.
+*
+!rust-backend
+!solana-contracts
+rust-backend/target
+rust-backend/**/target
+solana-contracts/target
+solana-contracts/**/target
+rust-backend/deployment
+rust-backend/**/secrets.toml
+rust-backend/services/mm-bot/config/mm-bot.account.json

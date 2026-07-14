@@ -1,0 +1,47 @@
+# Multi-stage build for solana-keeper (the Solana vault crank).
+#
+# Build context is the REPO ROOT, not rust-backend/ (bake.hcl's
+# `_solana-standalone` target sets context ".."): the service is a
+# standalone cargo workspace, like solana-indexer, but it additionally
+# path-depends on the program crates in ../solana-contracts/programs — a
+# rust-backend-only context can't see them. The repo-root .dockerignore
+# keeps the context to rust-backend/ + solana-contracts/.
+#
+# The builder runs under the target platform set by bake.hcl. Do NOT
+# add `--platform=$BUILDPLATFORM` here — that would pin the builder to
+# the GH runner's native arch and produce a binary that doesn't match
+# the image manifest's arch.
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev clang cmake protobuf-compiler git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Both trees, laid out exactly as in the repo so the workspace's
+# ../../../solana-contracts path deps resolve.
+COPY rust-backend/ rust-backend/
+COPY solana-contracts/ solana-contracts/
+RUN cargo build --release --manifest-path rust-backend/services/solana-keeper/Cargo.toml
+
+FROM debian:bookworm-slim
+# No libpq5 (no Postgres — chain + indexer GraphQL + token-info only), no
+# git. curl stays for ad-hoc health probes.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /src/rust-backend/services/solana-keeper/target/release/solana-keeper /usr/local/bin/solana-keeper
+COPY rust-backend/services/solana-keeper/config/ /app/config/
+
+ENV APP_ENV=staging
+# The keeper holds a plain gas wallet (no privileged accounts); the key is
+# rendered to /run/secrets/solana-keeper.toml at deploy time by
+# render-secrets.sh from `options/<env>/solana-keeper` in Secrets Manager.
+#
+# --network: BOTH envs map to devnet today — prod is a distinct devnet
+# deployment (see render-secrets.sh SOLANA_NETWORK, the per-env configs).
+# The secrets TOML's `[solana]` slot is keyed by the same mapping in
+# render-secrets.sh; flip the two together when prod moves to mainnet-beta.
+# token-info / oracle resolve via the TOKEN_INFO_URL / ORACLE_URL env vars
+# (set in compose, like the Sui keeper) rather than baked-in flags.
+ENTRYPOINT ["/bin/sh", "-c", "case \"$APP_ENV\" in staging|prod) NET=devnet ;; *) echo \"unknown APP_ENV: $APP_ENV\" >&2; exit 1 ;; esac; exec /usr/local/bin/solana-keeper --config /app/config/config.${APP_ENV}.toml --secrets /run/secrets/solana-keeper.toml --network $NET"]

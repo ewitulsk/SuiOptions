@@ -219,6 +219,24 @@ if ORACLE_JSON=$(fetch oracle-service 2>/dev/null); then
   append_pyth_api_key "$ORACLE_JSON" "$DIR/oracle-service.toml"
 fi
 
+# ---- solana-indexer secret -> rendered TOML --------------------------------
+# Helius API key for the LaserStream subscription. Required by the service
+# (no public fallback); an absent or unfilled secret is skipped so it never
+# blocks other services' deploys — solana-indexer itself then crash-loops
+# until options/$ENV/solana-indexer (key helius_api_key) is filled.
+if SOLANA_INDEXER_JSON=$(fetch solana-indexer 2>/dev/null); then
+  HELIUS_API_KEY=$(echo "$SOLANA_INDEXER_JSON" | jq -r '.helius_api_key')
+  if [ -n "$HELIUS_API_KEY" ] && [ "$HELIUS_API_KEY" != "null" ] && [ "$HELIUS_API_KEY" != "REPLACE_ME" ]; then
+    umask 077
+    cat > "$DIR/solana-indexer.toml" <<EOF
+[helius]
+api_key = "$HELIUS_API_KEY"
+EOF
+  else
+    echo "render-secrets: options/$ENV/solana-indexer unfilled (helius_api_key) — skipped" >&2
+  fi
+fi
+
 # ---- keyless services -> standalone [sui] rpc_url toml --------------------
 # indexer / price-charting / balance-monitor hold no signing key but still
 # build a SuiClient. They read only `[sui] rpc_url` from these files (mounted
@@ -233,5 +251,187 @@ rpc_url = "$RPC_URL"
 EOF
   done
 fi
+
+# ═══ Solana stack (docs/solana/backend/13-infra-and-deployment.md §7) ═══════
+
+# ---- shared Solana JSON-RPC endpoint ---------------------------------------
+# Mirrors the sui-rpc pattern above: one secret per env
+# (options/<env>/solana-rpc -> {"rpc_url": "..."}), injected into the
+# [solana] block of the keyed Solana service tomls below and rendered as a
+# standalone toml for solana-balance-monitor. Absent or REPLACE_ME →
+# SOLANA_RPC_URL stays empty and the services fall back to the public
+# cluster endpoint.
+SOLANA_RPC_URL=""
+if SOLANA_RPC_JSON=$(fetch solana-rpc 2>/dev/null); then
+  SOLANA_RPC_URL=$(echo "$SOLANA_RPC_JSON" | jq -r '.rpc_url // empty')
+  if [ "$SOLANA_RPC_URL" = "REPLACE_ME" ]; then
+    SOLANA_RPC_URL=""
+  fi
+fi
+# Pre-built TOML line, same reason as RPC_LINE above (heredoc quoting).
+SOLANA_RPC_LINE=""
+if [ -n "$SOLANA_RPC_URL" ]; then
+  SOLANA_RPC_LINE="rpc_url = \"$SOLANA_RPC_URL\""
+  echo "render-secrets: solana-rpc override present"
+else
+  echo "render-secrets: no solana-rpc override — Solana services use public RPC"
+fi
+
+# Network slot the keyed Solana service tomls use. BOTH envs run devnet
+# today (prod is a distinct devnet deployment); flip to mainnet-beta
+# together with the service configs + Dockerfile --network mappings.
+SOLANA_NETWORK=devnet
+
+# ---- solana-auth-service secret -> rendered TOML ---------------------------
+# JWT signing secret (terraform auto-generated, never REPLACE_ME).
+# solana-auth-service is the sole holder — deliberately distinct from the
+# Sui auth-service secret so tokens aren't cross-valid between domains.
+if SOLANA_AUTH_JSON=$(fetch solana-auth-service 2>/dev/null); then
+  JWT_SECRET=$(echo "$SOLANA_AUTH_JSON" | jq -r '.jwt_secret')
+  if [ -z "$JWT_SECRET" ] || [ "$JWT_SECRET" = "null" ]; then
+    echo "missing jwt_secret in options/$ENV/solana-auth-service" >&2
+    exit 1
+  fi
+  umask 077
+  cat > "$DIR/solana-auth-service.toml" <<EOF
+[auth]
+jwt_secret = "$JWT_SECRET"
+EOF
+fi
+
+# ---- solana-gas-station secret -> rendered TOML ----------------------------
+# Station (fee payer + faucet mint authority) keypair, in the network slot
+# the service's config expects. Unfilled (REPLACE_ME) secrets are skipped
+# like solana-indexer's so they never block other services' deploys — the
+# service then crash-loops until options/$ENV/solana-gas-station (key:
+# keypair) is filled.
+if SOLANA_GAS_JSON=$(fetch solana-gas-station 2>/dev/null); then
+  KEYPAIR=$(echo "$SOLANA_GAS_JSON" | jq -r '.keypair // empty')
+  if [ -n "$KEYPAIR" ] && [ "$KEYPAIR" != "REPLACE_ME" ]; then
+    umask 077
+    cat > "$DIR/solana-gas-station.toml" <<EOF
+[solana]
+$SOLANA_NETWORK = "$KEYPAIR"
+$SOLANA_RPC_LINE
+EOF
+  else
+    echo "render-secrets: options/$ENV/solana-gas-station unfilled (keypair) — skipped" >&2
+  fi
+fi
+
+# ---- solana-scheduler secret -> rendered TOML ------------------------------
+# The scheduler signs with the admin keypair (config.admin — the parallel
+# of the Sui deployer key). Same skip-if-unfilled posture as above.
+if SOLANA_SCH_JSON=$(fetch solana-scheduler 2>/dev/null); then
+  KEYPAIR=$(echo "$SOLANA_SCH_JSON" | jq -r '.keypair // empty')
+  if [ -n "$KEYPAIR" ] && [ "$KEYPAIR" != "REPLACE_ME" ]; then
+    umask 077
+    cat > "$DIR/solana-scheduler.toml" <<EOF
+[solana]
+$SOLANA_NETWORK = "$KEYPAIR"
+$SOLANA_RPC_LINE
+EOF
+  else
+    echo "render-secrets: options/$ENV/solana-scheduler unfilled (keypair) — skipped" >&2
+  fi
+fi
+
+# ---- solana-keeper secret -> rendered TOML ---------------------------------
+# Plain gas wallet (no privileged accounts — every crank is validated
+# on-chain) + an optional Pyth API key for the keeper's direct Hermes path.
+if SOLANA_KEEPER_JSON=$(fetch solana-keeper 2>/dev/null); then
+  KEYPAIR=$(echo "$SOLANA_KEEPER_JSON" | jq -r '.keypair // empty')
+  if [ -n "$KEYPAIR" ] && [ "$KEYPAIR" != "REPLACE_ME" ]; then
+    umask 077
+    cat > "$DIR/solana-keeper.toml" <<EOF
+[solana]
+$SOLANA_NETWORK = "$KEYPAIR"
+$SOLANA_RPC_LINE
+EOF
+    # Optional [pyth] api_key — the placeholder REPLACE_ME counts as absent
+    # (absent → anonymous rate-limited Hermes tier).
+    SOLANA_KEEPER_PYTH=$(echo "$SOLANA_KEEPER_JSON" | jq -r '.pyth_api_key // empty')
+    if [ -n "$SOLANA_KEEPER_PYTH" ] && [ "$SOLANA_KEEPER_PYTH" != "REPLACE_ME" ]; then
+      cat >> "$DIR/solana-keeper.toml" <<EOF
+
+[pyth]
+api_key = "$SOLANA_KEEPER_PYTH"
+EOF
+    fi
+  else
+    echo "render-secrets: options/$ENV/solana-keeper unfilled (keypair) — skipped" >&2
+  fi
+fi
+
+# ---- solana-mm-bot secret -> rendered TOML ---------------------------------
+# Wallet keypair + the ed25519 quote signing seed registered on the
+# MmAccount. Same skip-if-unfilled posture as above.
+if SOLANA_MM_JSON=$(fetch solana-mm-bot 2>/dev/null); then
+  KEYPAIR=$(echo "$SOLANA_MM_JSON" | jq -r '.keypair // empty')
+  QUOTE_KEY=$(echo "$SOLANA_MM_JSON" | jq -r '.quote_key // empty')
+  if [ -n "$KEYPAIR" ] && [ "$KEYPAIR" != "REPLACE_ME" ] \
+    && [ -n "$QUOTE_KEY" ] && [ "$QUOTE_KEY" != "REPLACE_ME" ]; then
+    umask 077
+    cat > "$DIR/solana-mm-bot.toml" <<EOF
+[solana]
+$SOLANA_NETWORK = "$KEYPAIR"
+$SOLANA_RPC_LINE
+
+[mm_bot]
+quote_key = "$QUOTE_KEY"
+EOF
+  else
+    echo "render-secrets: options/$ENV/solana-mm-bot unfilled (keypair/quote_key) — skipped" >&2
+  fi
+fi
+
+# ---- solana-oracle-service secret -> rendered TOML -------------------------
+# The Solana stack's single Pyth gateway (mirror of oracle-service above).
+# The API key is optional: an unfilled (REPLACE_ME) key renders an empty
+# toml → anonymous rate-limited tier, no [pyth] section.
+if SOLANA_ORACLE_JSON=$(fetch solana-oracle-service 2>/dev/null); then
+  umask 077
+  : > "$DIR/solana-oracle-service.toml"
+  SOLANA_ORACLE_PYTH=$(echo "$SOLANA_ORACLE_JSON" | jq -r '.pyth_api_key // empty')
+  if [ -n "$SOLANA_ORACLE_PYTH" ] && [ "$SOLANA_ORACLE_PYTH" != "REPLACE_ME" ]; then
+    cat >> "$DIR/solana-oracle-service.toml" <<EOF
+[pyth]
+api_key = "$SOLANA_ORACLE_PYTH"
+EOF
+  fi
+fi
+
+# ---- solana-price-charting secret -> sourced into .env by deploy.sh --------
+# Tiger Data TimescaleDB connection URL for the Solana OHLC/APY store
+# (compose injects it as SOLANA_CHART_DATABASE_URL). Mirrors the Sui
+# price-charting flow above, including the fail-noisy posture on an
+# unfilled secret.
+if SOLANA_CHART_JSON=$(fetch solana-price-charting 2>/dev/null); then
+  SOLANA_CHART_DB_URL=$(echo "$SOLANA_CHART_JSON" | jq -r '.database_url')
+  if [ -z "$SOLANA_CHART_DB_URL" ] || [ "$SOLANA_CHART_DB_URL" = "null" ] || [ "$SOLANA_CHART_DB_URL" = "REPLACE_ME" ]; then
+    echo "missing database_url in options/$ENV/solana-price-charting" >&2
+    exit 1
+  fi
+  umask 077
+  echo "$SOLANA_CHART_DB_URL" > "$DIR/.solana_chart_database_url"
+  chmod 600 "$DIR/.solana_chart_database_url"
+fi
+
+# ---- keyless Solana services -> standalone [solana] rpc_url toml -----------
+# solana-balance-monitor holds no signing key of its own (it reads the
+# sibling services' rendered files for watch addresses) but still builds an
+# RPC client; its --secrets file carries only the shared override. Rendered
+# only when the override is present — absent file → public cluster RPC.
+if [ -n "$SOLANA_RPC_URL" ]; then
+  umask 077
+  cat > "$DIR/solana-balance-monitor.toml" <<EOF
+[solana]
+rpc_url = "$SOLANA_RPC_URL"
+EOF
+fi
+
+# NOTE: solana-token-info renders nothing here — like the Sui token-info it
+# authenticates to Postgres with the shared per-env role password
+# (.db_password above), injected by deploy.sh as DB_PASSWORD.
 
 echo "render-secrets: ok ($ENV)"

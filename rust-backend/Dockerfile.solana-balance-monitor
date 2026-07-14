@@ -1,0 +1,43 @@
+# Multi-stage build for solana-balance-monitor.
+#
+# Build context is the REPO ROOT, not rust-backend/ (bake.hcl's
+# `_solana-standalone` target sets context ".."): the service is a
+# standalone cargo workspace, like solana-indexer, but via solana-tx it
+# path-depends on the program crates in ../solana-contracts/programs — a
+# rust-backend-only context can't see them. The repo-root .dockerignore
+# keeps the context to rust-backend/ + solana-contracts/.
+#
+# The builder runs under the target platform set by bake.hcl. Do NOT
+# add `--platform=$BUILDPLATFORM` here — that would pin the builder to
+# the GH runner's native arch and produce a binary that doesn't match
+# the image manifest's arch.
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev clang cmake protobuf-compiler git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Both trees, laid out exactly as in the repo so the workspace's
+# ../../../solana-contracts path deps resolve.
+COPY rust-backend/ rust-backend/
+COPY solana-contracts/ solana-contracts/
+RUN cargo build --release --manifest-path rust-backend/services/solana-balance-monitor/Cargo.toml
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /src/rust-backend/services/solana-balance-monitor/target/release/solana-balance-monitor /usr/local/bin/solana-balance-monitor
+COPY rust-backend/services/solana-balance-monitor/config/ /app/config/
+
+ENV APP_ENV=staging
+# --secrets carries the shared Solana RPC override ([solana] rpc_url),
+# rendered to /run/secrets/solana-balance-monitor.toml by render-secrets.sh
+# (separate from the per-watch secrets files this service reads to resolve
+# wallet addresses). Optional at runtime: a missing/un-rendered file
+# degrades to the public cluster RPC. (Baked here, not as a compose
+# `command:` — the `sh -c` form swallows extra command args.)
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/solana-balance-monitor \
+  --config /app/config/config.${APP_ENV}.toml \
+  --secrets /run/secrets/solana-balance-monitor.toml"]

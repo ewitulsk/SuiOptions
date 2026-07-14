@@ -1,0 +1,47 @@
+[package]
+name = "solana-api-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "solana-api-service"
+path = "src/main.rs"
+
+[dependencies]
+runtime-config = { workspace = true }
+observability  = { workspace = true, features = ["axum"] }
+cli-spec       = { workspace = true }
+solana-indexer-graphql   = { workspace = true }
+solana-token-info-client = { workspace = true }
+pricing        = { workspace = true }
+
+clap = { workspace = true }
+chrono = { workspace = true }
+
+tokio = { workspace = true }
+
+axum = { workspace = true }
+tower-http = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+
+anyhow = { workspace = true }
+
+tracing = { workspace = true }
+
+# Vault live read (`solana_rpc.rs`): base58 pubkey validation + borsh
+# mirror decode of the on-chain Vault account. Plain borsh mirrors — no
+# solana-sdk in the main workspace (see docs/solana/backend/00-architecture.md).
+bs58 = "0.5"
+borsh = { version = "1", features = ["derive"] }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

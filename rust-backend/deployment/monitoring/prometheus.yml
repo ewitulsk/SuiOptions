@@ -35,6 +35,31 @@ scrape_configs:
         labels: { env: staging, service: balance-monitor }
       - targets: ["oracle-service:9013"] # internal Pyth gateway; /metrics on the service port
         labels: { env: staging, service: oracle-service }
+      - targets: ["solana-indexer:8081"]
+        labels: { env: staging, service: solana-indexer }
+      # ── Solana stack (docs/solana/backend/13-infra-and-deployment.md) ──
+      - targets: ["solana-token-info:9006"] # internal port; /metrics is never public
+        labels: { env: staging, service: solana-token-info }
+      - targets: ["solana-auth-service:9008"] # internal port
+        labels: { env: staging, service: solana-auth-service }
+      - targets: ["solana-api-service:9003"]
+        labels: { env: staging, service: solana-api-service }
+      - targets: ["solana-quoting-service:9002"]
+        labels: { env: staging, service: solana-quoting-service }
+      - targets: ["solana-oracle-service:9013"] # internal Pyth gateway; /metrics on the service port
+        labels: { env: staging, service: solana-oracle-service }
+      - targets: ["solana-price-charting:9011"]
+        labels: { env: staging, service: solana-price-charting }
+      - targets: ["solana-gas-station:9009"]
+        labels: { env: staging, service: solana-gas-station }
+      - targets: ["solana-keeper:8086"]
+        labels: { env: staging, service: solana-keeper }
+      - targets: ["solana-option-scheduler:8087"]
+        labels: { env: staging, service: solana-option-scheduler }
+      - targets: ["solana-mm-bot:9010"]
+        labels: { env: staging, service: solana-mm-bot }
+      - targets: ["solana-balance-monitor:9012"]
+        labels: { env: staging, service: solana-balance-monitor }
 
   # The monitoring stack watches itself.
   - job_name: monitoring

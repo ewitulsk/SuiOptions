@@ -1,0 +1,70 @@
+# Standalone workspace, deliberately NOT a member of the rust-backend
+# workspace: the Sui crates there are pinned to the framework/mainnet git
+# branch, while this service needs the Solana SDK version tree (same rule
+# as services/solana-indexer and crates/solana-tx). Shared main-workspace
+# crates are pulled in by path — their `workspace = true` deps resolve
+# against rust-backend/Cargo.toml; the program crates' resolve against
+# solana-contracts/Cargo.toml.
+[workspace]
+
+[package]
+name = "solana-keeper"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "solana-keeper"
+path = "src/main.rs"
+
+[dependencies]
+# Shared main-workspace crates (path-imported, Solana-SDK-free).
+runtime-config = { path = "../../crates/runtime-config" }
+observability  = { path = "../../crates/observability" }
+oracle-client  = { path = "../../crates/oracle-client" }
+pyth-client    = { path = "../../crates/pyth-client" }
+pricing        = { path = "../../crates/pricing" }
+solana-indexer-graphql   = { path = "../../crates/solana-indexer-graphql" }
+solana-token-info-client = { path = "../../crates/solana-token-info-client" }
+
+# Chain plumbing: RPC wrapper, signer, PDAs, instruction builders over the
+# real program crates, Pyth receiver posting, error classification.
+solana-tx = { path = "../../crates/solana-tx" }
+
+# The deployed programs' own crates: exact account layouts + error enums.
+options_core  = { path = "../../../solana-contracts/programs/options_core", features = ["no-entrypoint"] }
+auction_venue = { path = "../../../solana-contracts/programs/auction_venue", features = ["no-entrypoint"] }
+options_vault = { path = "../../../solana-contracts/programs/options_vault", features = ["no-entrypoint"] }
+options_math  = { path = "../../../solana-contracts/crates/options_math" }
+
+# Pinned to the solana-contracts tree (anchor-lang 1.1.2 → solana v3 crates),
+# matching crates/solana-tx.
+anchor-lang = "1.1.2"
+anchor-spl  = "1.1.2"
+solana-sdk    = { version = "3.0", features = ["full"] }
+solana-client = "3.1"
+
+# Hermes accumulator-update parsing (feed-id extraction per Merkle leg).
+pythnet-sdk = "3.0"
+byteorder = "1"
+
+# Tx-size measurement for the post×2+crank single-tx packing decision.
+bincode = "1"
+
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+tracing = "0.1"
+metrics = "0.24"
+
+[dev-dependencies]
+# Same litesvm the program repo tests with.
+litesvm = { version = "0.10.0", features = ["precompiles"] }
+litesvm-token = "0.10.0"
+toml = "0.8"

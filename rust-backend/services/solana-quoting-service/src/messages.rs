@@ -1,0 +1,480 @@
+//! WebSocket protocol — the Solana port of `protocol_types::messages`.
+//!
+//! Every wire frame is JSON of the form
+//!
+//! ```json
+//! { "type": "<variant>", "request_id"?: "...", "payload": { ... } }
+//! ```
+//!
+//! Deltas vs the Sui twin (the frame catalog itself is unchanged, so the
+//! frontend WS layer ports mechanically):
+//!
+//! - Ids (accounts, buckets, mints) are **base58 pubkey strings**, compared
+//!   byte-exact — no `0x` normalization.
+//! - Signatures / challenges / raw pubkeys stay `0x`-hex ([`crate::coding::bytes_hex`]).
+//! - Integers stay decimal strings.
+//! - `signing_scheme` is the on-chain u8 tag (0 = Ed25519, the only scheme
+//!   in program v1) instead of the Sui enum.
+//! - [`RfqQuoteEntry`] gains `quote_bytes_b64`: the canonical Borsh quote
+//!   bytes, base64 — clients feed these straight into the Ed25519SigVerify
+//!   precompile instruction without re-implementing Borsh.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use protocol_types::sides::{MmRole, RetailRole, Side};
+
+use crate::coding::{bytes_hex, u128_string, u64_string};
+use crate::quote::QuoteWire;
+
+// ---------------------------------------------------------------------------
+// retail ↔ service
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum RetailToService {
+    Hello {
+        payload: RetailHelloPayload,
+    },
+    SubscribeBuckets {
+        payload: SubscribeBucketsPayload,
+    },
+    RFQRequest {
+        request_id: String,
+        payload: RfqRequestPayload,
+    },
+    /// Unsigned, non-executable request for indicative premiums across many
+    /// buckets at once. Powers the tile display without spamming MMs with
+    /// signable RFQs.
+    BulkViewRFQRequest {
+        request_id: String,
+        payload: BulkViewRfqRequestPayload,
+    },
+    Pong,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetailHelloPayload {
+    pub role: RetailRole,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscribeBucketsPayload {
+    pub bucket_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RfqRequestPayload {
+    pub bucket_id: String,
+    #[serde(with = "u64_string")]
+    pub write_amount: u64,
+    pub side: Side,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ServiceToRetail {
+    HelloAck {
+        payload: HelloAckPayload,
+    },
+    BucketUpdate {
+        payload: BucketUpdatePayload,
+    },
+    RFQResponse {
+        request_id: String,
+        payload: RfqResponsePayload,
+    },
+    /// Averaged indicative premiums for a
+    /// [`BulkViewRFQRequest`](RetailToService::BulkViewRFQRequest).
+    BulkViewRFQResponse {
+        request_id: String,
+        payload: BulkViewRfqResponsePayload,
+    },
+    Error {
+        request_id: Option<String>,
+        payload: ErrorPayload,
+    },
+    Ping,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HelloAckPayload {
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketUpdatePayload {
+    pub bucket_id: String,
+    #[serde(with = "u128_string")]
+    pub total_written: u128,
+    #[serde(with = "u128_string")]
+    pub exercise_cursor: u128,
+    #[serde(with = "u64_string")]
+    pub expiry_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RfqResponsePayload {
+    pub bucket_id: String,
+    #[serde(with = "u64_string")]
+    pub write_amount: u64,
+    /// Already sorted best-price-first for the retail user (highest premium
+    /// for writer-side, lowest premium for trader-side).
+    pub quotes: Vec<RfqQuoteEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RfqQuoteEntry {
+    pub quote: QuoteWire,
+    /// Detached 64-byte ed25519 signature over `quote_bytes`.
+    #[serde(with = "bytes_hex")]
+    pub signature: Vec<u8>,
+    /// Canonical Borsh bytes of the quote, base64 — the exact message the
+    /// Ed25519SigVerify precompile instruction must carry. Provided so
+    /// clients don't re-implement Borsh serialization.
+    pub quote_bytes_b64: String,
+    pub mm_id: String,
+    pub mm_reputation: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorPayload {
+    pub code: String,
+    pub message: String,
+}
+
+// ---------------------------------------------------------------------------
+// MM ↔ service
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum MmToService {
+    Hello {
+        payload: MmHelloPayload,
+    },
+    AuthResponse {
+        payload: AuthResponsePayload,
+    },
+    Quote {
+        request_id: String,
+        payload: MmQuotePayload,
+    },
+    /// Unsigned indicative premiums in response to a
+    /// [`BulkViewRFQBroadcast`](ServiceToMm::BulkViewRFQBroadcast). No nonce
+    /// is consumed and nothing is signed — these never reach the chain.
+    BulkViewQuote {
+        request_id: String,
+        payload: BulkViewQuotePayload,
+    },
+    Decline {
+        request_id: String,
+        payload: DeclinePayload,
+    },
+    Pong,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MmHelloPayload {
+    pub roles: Vec<MmRole>,
+    /// The MM's MmAccount address (base58).
+    pub account_id: String,
+    /// On-chain scheme tag for `signing_pubkey`. Program v1 registers only
+    /// Ed25519 (0); anything else is rejected at auth as
+    /// `auth_scheme_unknown`. Defaults to 0 when omitted.
+    #[serde(default)]
+    pub signing_scheme: u8,
+    #[serde(with = "bytes_hex")]
+    pub signing_pubkey: Vec<u8>,
+    /// Opt-in to receiving unsigned
+    /// [`BulkViewRFQBroadcast`](ServiceToMm::BulkViewRFQBroadcast) requests.
+    /// Defaults to false so an MM that doesn't set it is simply never sent
+    /// bulk-view RFQs.
+    #[serde(default)]
+    pub bulk_view: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthResponsePayload {
+    #[serde(with = "bytes_hex")]
+    pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MmQuotePayload {
+    pub quote: QuoteWire,
+    #[serde(with = "bytes_hex")]
+    pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclinePayload {
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ServiceToMm {
+    AuthChallenge {
+        payload: AuthChallengePayload,
+    },
+    AuthAck {
+        payload: AuthAckPayload,
+    },
+    RFQBroadcast {
+        request_id: String,
+        payload: RfqBroadcastPayload,
+    },
+    /// Price these buckets for tile display. Unsigned — the MM responds with
+    /// [`BulkViewQuote`](MmToService::BulkViewQuote). Sent only to MMs that
+    /// advertised `bulk_view = true`.
+    BulkViewRFQBroadcast {
+        request_id: String,
+        payload: BulkViewRfqBroadcastPayload,
+    },
+    AccountStateUpdate {
+        payload: AccountStateUpdatePayload,
+    },
+    ReservationConfirmed {
+        request_id: String,
+        payload: ReservationPayload,
+    },
+    ReservationReleased {
+        request_id: String,
+        payload: ReservationPayload,
+    },
+    Error {
+        request_id: Option<String>,
+        payload: ErrorPayload,
+    },
+    Ping,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthChallengePayload {
+    #[serde(with = "bytes_hex")]
+    pub challenge: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthAckPayload {
+    pub session_id: String,
+}
+
+/// Service → MM: a quote is wanted on `bucket_id` for `write_amount` on the
+/// given `side`. The payload carries **only the bucket address** — never its
+/// strike, expiry, or mints. The MM resolves those itself from the
+/// solana-api-service (its own trust boundary) so a malicious or buggy
+/// upstream can't hand it spoofed pricing inputs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RfqBroadcastPayload {
+    pub bucket_id: String,
+    #[serde(with = "u64_string")]
+    pub write_amount: u64,
+    pub side: Side,
+    #[serde(with = "u64_string")]
+    pub deadline_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountStateUpdatePayload {
+    pub account_id: String,
+    /// `mint (base58) → balance` (raw smallest-units, decimal-string in JSON).
+    pub balances: BTreeMap<String, U64Str>,
+    pub active_reservations: BTreeMap<String, U64Str>,
+    pub available: BTreeMap<String, U64Str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReservationPayload {
+    pub account_id: String,
+    #[serde(with = "u64_string")]
+    pub nonce: u64,
+    /// SPL mint (base58) the reservation is denominated in — the Solana
+    /// rename of the Sui twin's `asset_type`.
+    pub mint: String,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+}
+
+/// `u64` map-value newtype — serde's `#[serde(with)]` only lives on fields,
+/// so map values wrap in a newtype using the same decimal-string encoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct U64Str(pub u64);
+
+impl From<u64> for U64Str {
+    fn from(v: u64) -> Self {
+        Self(v)
+    }
+}
+
+impl From<U64Str> for u64 {
+    fn from(v: U64Str) -> Self {
+        v.0
+    }
+}
+
+impl Serialize for U64Str {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&self.0.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for U64Str {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(de)?;
+        s.parse::<u64>().map(U64Str).map_err(serde::de::Error::custom)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// bulk-view RFQ (unsigned indicative premiums for tile display)
+// ---------------------------------------------------------------------------
+
+/// Retail → service: request indicative premiums for many buckets at one
+/// write amount. Unlike `RFQRequest`, the result is unsigned and not
+/// executable — it only drives the tile display, so it never reserves MM
+/// balance or consumes a nonce.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BulkViewRfqRequestPayload {
+    pub bucket_ids: Vec<String>,
+    #[serde(with = "u64_string")]
+    pub write_amount: u64,
+    pub side: Side,
+}
+
+/// Service → retail: averaged indicative premiums, one entry per bucket the
+/// service had (or could fetch) a value for. Buckets no MM priced are omitted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BulkViewRfqResponsePayload {
+    #[serde(with = "u64_string")]
+    pub write_amount: u64,
+    pub premiums: Vec<BulkViewPremium>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BulkViewPremium {
+    pub bucket_id: String,
+    /// Mean of the responding MMs' premiums, settlement smallest-units.
+    #[serde(with = "u64_string")]
+    pub premium: u64,
+    /// How many MMs contributed to the average.
+    pub mm_count: u32,
+    /// True if this value came from a cache entry past its TTL (a refresh was
+    /// kicked off in the background; the next request carries the fresh value).
+    pub stale: bool,
+    /// Age of the cached value in ms (≈0 for a value just fetched).
+    #[serde(with = "u64_string")]
+    pub cache_age_ms: u64,
+}
+
+/// Service → MM: price these buckets at `write_amount`, no signing. Sent only
+/// to MMs that advertised `bulk_view = true` in their Hello. Like
+/// [`RfqBroadcastPayload`], it carries only bucket **addresses**.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BulkViewRfqBroadcastPayload {
+    #[serde(with = "u64_string")]
+    pub write_amount: u64,
+    pub side: Side,
+    #[serde(with = "u64_string")]
+    pub deadline_ms: u64,
+    pub bucket_ids: Vec<String>,
+}
+
+/// MM → service: indicative premiums for the requested buckets. Unsigned; no
+/// nonce consumed. Buckets the MM declines to price are omitted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BulkViewQuotePayload {
+    pub premiums: Vec<BulkViewMmPremium>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BulkViewMmPremium {
+    pub bucket_id: String,
+    #[serde(with = "u64_string")]
+    pub premium: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rfq_request_round_trips() {
+        let msg = RetailToService::RFQRequest {
+            request_id: "req-abc".into(),
+            payload: RfqRequestPayload {
+                bucket_id: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin".into(),
+                write_amount: 10_000_000,
+                side: Side::Writer,
+            },
+        };
+        let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["type"], "RFQRequest");
+        assert_eq!(v["request_id"], "req-abc");
+        assert_eq!(v["payload"]["side"], "writer");
+        assert_eq!(v["payload"]["write_amount"], "10000000");
+        assert_eq!(
+            v["payload"]["bucket_id"],
+            "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+        );
+
+        let back: RetailToService = serde_json::from_value(v).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn mm_hello_round_trips_with_scheme_default() {
+        let msg = MmToService::Hello {
+            payload: MmHelloPayload {
+                roles: vec![MmRole::TraderMm, MmRole::WriterMm],
+                account_id: "acc111".into(),
+                signing_scheme: 0,
+                signing_pubkey: vec![0xaa; 32],
+                bulk_view: true,
+            },
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        assert!(s.contains("\"type\":\"Hello\""));
+        assert!(s.contains("\"trader_mm\""));
+        assert!(s.contains("\"signing_scheme\":0"));
+        let back: MmToService = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, msg);
+
+        // Omitting signing_scheme / bulk_view defaults to 0 / false.
+        let minimal: MmHelloPayload = serde_json::from_str(
+            r#"{"roles":["trader_mm"],"account_id":"acc111","signing_pubkey":"0xaa"}"#,
+        )
+        .unwrap();
+        assert_eq!(minimal.signing_scheme, 0);
+        assert!(!minimal.bulk_view);
+    }
+
+    #[test]
+    fn rfq_quote_entry_carries_quote_bytes_b64() {
+        let entry = RfqQuoteEntry {
+            quote: crate::quote::QuoteWire {
+                protocol_id: "p".into(),
+                signer_account: "s".into(),
+                signer_token_recipient: "r".into(),
+                bucket: "b".into(),
+                write_amount: 1,
+                premium: 2,
+                valid_until_ms: 3,
+                nonce: 4,
+            },
+            signature: vec![0xff; 64],
+            quote_bytes_b64: "AAEC".into(),
+            mm_id: "acc111".into(),
+            mm_reputation: 1.0,
+        };
+        let v: serde_json::Value = serde_json::to_value(&entry).unwrap();
+        assert_eq!(v["quote_bytes_b64"], "AAEC");
+        assert!(v["signature"].as_str().unwrap().starts_with("0x"));
+        let back: RfqQuoteEntry = serde_json::from_value(v).unwrap();
+        assert_eq!(back, entry);
+    }
+}

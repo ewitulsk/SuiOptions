@@ -1,0 +1,11 @@
+# solana-oracle-service config — staging env (devnet).
+#
+# BETA hermes — the solana-token-info catalog carries the beta feed id set,
+# served only by hermes-beta (stable hermes 404s). Benchmarks is stable-only;
+# beta→stable mapping is applied service-side per request.
+
+environment    = "staging"
+bind_addr      = "0.0.0.0:9013"
+token_info_url = "http://solana-token-info:9005"
+hermes_url     = "https://hermes-beta.pyth.network"
+benchmarks_url = "https://benchmarks.pyth.network"

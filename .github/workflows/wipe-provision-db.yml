@@ -27,6 +27,9 @@ on:
           - indexer
           - scheduler
           - token-info
+          - solana-indexer
+          - solana-token-info
+          - solana-option-scheduler
       environment:
         description: 'Target environment'
         required: true
@@ -78,6 +81,9 @@ jobs:
             indexer)         echo "compose_svc=indexer"               >> "$GITHUB_OUTPUT" ;;
             scheduler)       echo "compose_svc=option-scheduler"      >> "$GITHUB_OUTPUT" ;;
             token-info)      echo "compose_svc=token-info"            >> "$GITHUB_OUTPUT" ;;
+            solana-indexer)  echo "compose_svc=solana-indexer"        >> "$GITHUB_OUTPUT" ;;
+            solana-token-info)       echo "compose_svc=solana-token-info"       >> "$GITHUB_OUTPUT" ;;
+            solana-option-scheduler) echo "compose_svc=solana-option-scheduler" >> "$GITHUB_OUTPUT" ;;
             *)
               echo "::error::Invalid service '$SERVICE'"
               exit 1

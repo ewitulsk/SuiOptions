@@ -1,0 +1,23 @@
+# solana-auth-service config (local dev).
+#
+# Issues admin JWTs after a Solana ed25519 signature challenge-response and
+# exposes an internal verify route. The JWT secret comes from the secrets TOML
+# (`--secrets`, default services/solana-auth-service/config/secrets.toml); copy
+# secrets.example.toml to secrets.toml and fill in `auth.jwt_secret`.
+
+environment        = "dev"
+
+public_bind_addr   = "127.0.0.1:9007"
+internal_bind_addr = "127.0.0.1:9008"
+
+allowed_origins    = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+# Wallets allowed to obtain an admin JWT. Base58 ed25519 pubkeys, exact match
+# (case-sensitive, no normalization). The seed entry is the system program id —
+# NOT a real wallet, a placeholder that can never log in. Replace with the
+# real admin wallet address(es).
+admin_addresses    = ["11111111111111111111111111111111"]
+
+token_ttl_secs     = 3600
+refresh_max_secs   = 86400
+challenge_ttl_secs = 300

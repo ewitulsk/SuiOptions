@@ -1,0 +1,47 @@
+# Multi-stage build for solana-option-scheduler.
+#
+# Build context is the REPO ROOT, not rust-backend/ (bake.hcl's
+# `_solana-standalone` target sets context ".."): the service is a
+# standalone cargo workspace, like solana-indexer, but it additionally
+# path-depends on the program crates in ../solana-contracts/programs — a
+# rust-backend-only context can't see them. The repo-root .dockerignore
+# keeps the context to rust-backend/ + solana-contracts/.
+#
+# The builder runs under the target platform set by bake.hcl. Do NOT
+# add `--platform=$BUILDPLATFORM` here — that would pin the builder to
+# the GH runner's native arch and produce a binary that doesn't match
+# the image manifest's arch.
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev clang cmake protobuf-compiler git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Both trees, laid out exactly as in the repo so the workspace's
+# ../../../solana-contracts path deps resolve.
+COPY rust-backend/ rust-backend/
+COPY solana-contracts/ solana-contracts/
+RUN cargo build --release --manifest-path rust-backend/services/solana-option-scheduler/Cargo.toml
+
+FROM debian:bookworm-slim
+# libpq5 is the runtime shared lib the scheduler binary links against for
+# Postgres connections (diesel — the rolls DB). Unlike the Sui scheduler,
+# no runtime git: rolls build no Move coin packages on Solana.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 libpq5 curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /src/rust-backend/services/solana-option-scheduler/target/release/solana-option-scheduler /usr/local/bin/solana-option-scheduler
+COPY rust-backend/services/solana-option-scheduler/config/ /app/config/
+
+ENV APP_ENV=staging
+# Scheduler signs with the admin keypair (config.admin — the parallel of the
+# Sui deployer key). /run/secrets/solana-scheduler.toml is rendered at deploy
+# time by render-secrets.sh from `options/<env>/solana-scheduler`.
+#
+# --network is derived from APP_ENV: BOTH envs map to devnet today — prod is
+# a distinct devnet deployment (see Dockerfile.solana-keeper,
+# render-secrets.sh SOLANA_NETWORK); flip them together when prod moves to
+# mainnet-beta. TOKEN_INFO_URL / ORACLE_URL arrive via the env (set in
+# compose, like solana-keeper) rather than baked-in flags.
+ENTRYPOINT ["/bin/sh", "-c", "case \"$APP_ENV\" in staging|prod) NET=devnet ;; *) echo \"unknown APP_ENV: $APP_ENV\" >&2; exit 1 ;; esac; exec /usr/local/bin/solana-option-scheduler --config /app/config/config.${APP_ENV}.toml --secrets /run/secrets/solana-scheduler.toml --network $NET"]

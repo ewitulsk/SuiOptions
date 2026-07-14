@@ -1,0 +1,36 @@
+# Multi-stage build for the solana-indexer.
+#
+# The builder runs under the target platform set by bake.hcl. Do NOT
+# add `--platform=$BUILDPLATFORM` here — that would pin the builder to
+# the GH runner's native arch and produce a binary that doesn't match
+# the image manifest's arch (Graviton kernels reject mismatched arm64
+# images with `Exec format error`).
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev clang cmake protobuf-compiler git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the whole workspace: solana-indexer is a standalone cargo workspace
+# under services/ (isolated from the pinned Sui dependency tree) but path-
+# depends on crates/runtime-config and crates/observability.
+COPY . .
+RUN cargo build --release --manifest-path services/solana-indexer/Cargo.toml
+
+FROM debian:bookworm-slim
+# libpq5 is the runtime shared lib for Postgres; curl backs the compose
+# healthcheck.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 libpq5 curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /src/services/solana-indexer/target/release/solana-indexer /usr/local/bin/solana-indexer
+COPY services/solana-indexer/config/ /app/config/
+
+# Like the rest of the stack, both staging and prod currently run against
+# the test cluster (Solana devnet); the per-env config carries the ids.
+ENV APP_ENV=staging
+# --secrets carries the Helius API key ([helius] api_key), rendered to
+# /run/secrets/solana-indexer.toml by render-secrets.sh and bind-mounted
+# by compose. REQUIRED — there is no public fallback for LaserStream.
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/solana-indexer --config /app/config/config.${APP_ENV}.toml --secrets /run/secrets/solana-indexer.toml"]

@@ -44,6 +44,14 @@ endpoints:
       - "[STATUS] == 200"
       - "[BODY] == ok"
 
+  - name: Solana Indexer
+    group: staging
+    url: http://options-staging-solana-indexer-1:8081/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
   - name: Token Info
     group: staging
     url: http://options-staging-token-info-1:9005/health
@@ -82,4 +90,94 @@ endpoints:
     interval: 30s
     conditions:
       - "[STATUS] == 200"
+
+  # ── Solana stack (staging; container DNS, ops ports for the internal
+  # services — docs/solana/backend/13-infra-and-deployment.md) ─────────
+  - name: Solana Token Info
+    group: staging
+    url: http://options-staging-solana-token-info-1:9005/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Solana Auth Service
+    group: staging
+    url: http://options-staging-solana-auth-service-1:9007/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Solana API Service
+    group: staging
+    url: http://options-staging-solana-api-service-1:9003/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Solana Quoting Service
+    group: staging
+    url: http://options-staging-solana-quoting-service-1:9002/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Solana Oracle Service
+    group: staging
+    url: http://options-staging-solana-oracle-service-1:9013/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Solana Price Charting
+    group: staging
+    url: http://options-staging-solana-price-charting-1:9011/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Solana Gas Station
+    group: staging
+    url: http://options-staging-solana-gas-station-1:9009/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Solana Keeper
+    group: staging
+    url: http://options-staging-solana-keeper-1:8086/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Solana Option Scheduler
+    group: staging
+    url: http://options-staging-solana-option-scheduler-1:8087/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Solana MM Bot
+    group: staging
+    url: http://options-staging-solana-mm-bot-1:9010/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Solana Balance Monitor
+    group: staging
+    url: http://options-staging-solana-balance-monitor-1:9012/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
 

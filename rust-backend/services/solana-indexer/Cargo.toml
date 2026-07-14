@@ -1,0 +1,64 @@
+# Standalone workspace, deliberately NOT a member of the rust-backend
+# workspace: the Sui crates there are pinned to the framework/mainnet git
+# branch (exact tokio pin, no-tonic OTLP), while this service needs the
+# tonic/prost stack for Yellowstone gRPC (Helius LaserStream). Keeping it
+# resolution-isolated mirrors how solana-contracts/ is its own workspace.
+# The shared runtime-config / observability crates are pulled in by path —
+# their `workspace = true` deps resolve against rust-backend/Cargo.toml.
+[workspace]
+
+[package]
+name = "solana-indexer"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "solana-indexer"
+path = "src/main.rs"
+
+[dependencies]
+runtime-config = { path = "../../crates/runtime-config" }
+observability  = { path = "../../crates/observability", features = ["axum"] }
+metrics        = "0.24"
+
+# Helius LaserStream (Yellowstone-gRPC-compatible) client: auto-reconnect
+# with internal slot tracking (replay=true → from_slot on reconnects).
+# default-features off drops the cuckoo-filter machinery (needs
+# solana-pubkey; we filter on three program ids, not millions).
+helius-laserstream = { version = "0.5", default-features = false }
+
+# Anchor event payloads are Borsh; mirror structs in src/events.rs carry
+# both Borsh (decode) and serde (JSONB payload) derives.
+borsh = { version = "1", features = ["derive"] }
+bs58 = "0.5"
+sha2 = "0.10"
+
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+thiserror = "1"
+anyhow = "1"
+
+tracing = "0.1"
+
+# GraphQL query API (same surface conventions as services/indexer).
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+async-graphql = { version = "7" }
+async-graphql-axum = { version = "7" }
+
+# Postgres persistence.
+diesel = { version = "2.2", features = ["postgres", "r2d2", "chrono", "numeric", "serde_json"] }
+diesel_migrations = { version = "2", features = ["postgres"] }
+r2d2 = "0.8"
+bigdecimal = { version = "0.4", features = ["serde"] }

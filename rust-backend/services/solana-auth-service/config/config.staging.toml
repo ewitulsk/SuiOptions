@@ -1,0 +1,18 @@
+# solana-auth-service config — staging env (devnet).
+
+environment        = "staging"
+
+public_bind_addr   = "0.0.0.0:9007"
+internal_bind_addr = "0.0.0.0:9008"
+
+allowed_origins    = ["*"]
+
+# Wallets allowed to obtain an admin JWT. Base58 ed25519 pubkeys, exact match
+# (case-sensitive, no normalization). The seed entry is the system program id —
+# NOT a real wallet, a placeholder that can never log in. Replace with the
+# real admin wallet address(es).
+admin_addresses    = ["11111111111111111111111111111111"]
+
+token_ttl_secs     = 3600
+refresh_max_secs   = 86400
+challenge_ttl_secs = 300

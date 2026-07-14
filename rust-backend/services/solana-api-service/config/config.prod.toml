@@ -1,0 +1,28 @@
+# solana-api-service config — prod env.
+#
+# Bind on all interfaces so the docker port mapping works.
+
+bind_addr = "0.0.0.0:9003"
+
+# solana-indexer GraphQL query API over the compose-internal network.
+indexer_graphql_url = "http://solana-indexer:9002/graphql"
+
+# Frontend prod origin. REPLACE with the real frontend URL before going live.
+allowed_origins = ["*"]
+
+# solana-token-info public API over the compose-internal network.
+token_info_url = "http://solana-token-info:9005"
+
+# Predicted-APY read API (solana-price-charting's /vault-apy/:id),
+# composed into /vaults/:id/apy. Omit to serve realized-only.
+derived_metrics_url = "http://solana-price-charting:9011"
+
+# Solana JSON-RPC for the live-vault read in GET /vaults/:id. prod targets
+# devnet until the mainnet-beta cutover; point at mainnet only once the
+# deployment does. Public endpoint for now; a keyed Helius URL will replace
+# it via the options/<env>/solana-rpc secret when public rate limits bite.
+# A read failure degrades to omitting live state, never a 5xx.
+solana_rpc_url = "https://api.devnet.solana.com"
+
+# price_charting_url intentionally unset: no Solana DEX ingestion yet, so
+# the PnL exercise mark always falls back to the bucket strike.

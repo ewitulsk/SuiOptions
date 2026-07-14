@@ -156,7 +156,7 @@ jobs:
             # Keep this in sync with ALL_SERVICES in deployment/ec2/deploy.sh
             # and affected.py — a service missing here is never tag-seeded on
             # force_all, so deploy.sh rejects the deploy on a fresh box.
-            services='["indexer","quoting-service","mm-bot","option-scheduler","api-service","token-info","auth-service","gas-station","price-charting","balance-monitor","keeper","oracle-service"]'
+            services='["indexer","quoting-service","mm-bot","option-scheduler","api-service","token-info","auth-service","gas-station","price-charting","balance-monitor","keeper","oracle-service","solana-indexer","solana-token-info","solana-auth-service","solana-api-service","solana-quoting-service","solana-oracle-service","solana-price-charting","solana-gas-station","solana-keeper","solana-option-scheduler","solana-mm-bot","solana-balance-monitor"]'
             echo "force_all or image_tag override → rolling all services"
           else
             services=$(printf '%s\n' "$CHANGED_FILES" \
@@ -288,6 +288,9 @@ jobs:
           # every deploy (the redeploy-contract workflow checks out its new
           # commit via `ref`, so its fresh deployments.json rides along here).
           cp deployments.json /tmp/bundle/deployments/deployments.json
+          # solana-deployments.json rides along the same way for
+          # solana-token-info (its sole reader).
+          cp solana-deployments.json /tmp/bundle/deployments/solana-deployments.json
           # nginx sidecar config — shipped inside a `nginx/` directory so
           # compose can bind-mount the directory (and nginx -c picks the
           # file out of it). Mounting the directory instead of the file

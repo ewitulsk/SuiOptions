@@ -1,0 +1,57 @@
+# Standalone workspace, deliberately NOT a member of the rust-backend
+# workspace: the Sui crates there are pinned to the framework/mainnet git
+# branch, while this tool needs the Solana SDK version tree. Same pattern
+# as crates/solana-tx and services/solana-indexer. The shared
+# runtime-config / solana-deployments crates are pulled in by path — their
+# `workspace = true` deps resolve against rust-backend/Cargo.toml; the
+# program crate's resolve against solana-contracts/Cargo.toml.
+[workspace]
+
+[package]
+name = "solana-deployment-manager"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "solana-deploy"
+path = "src/main.rs"
+
+[dependencies]
+runtime-config = { path = "../../crates/runtime-config" }
+# Network / Signer / RPC wrapper / PDA helpers / instruction builders.
+solana-tx = { path = "../../crates/solana-tx" }
+# The reader's types — reused directly so writer and reader can't drift.
+solana-deployments = { path = "../../crates/solana-deployments" }
+
+# Config account layout + declared program id (idempotent-init check).
+options_core = { path = "../../../solana-contracts/programs/options_core", features = ["no-entrypoint"] }
+
+# Pinned to the solana-contracts tree (anchor-lang 1.1.2 → solana v3 crates).
+anchor-lang = "1.1.2"
+anchor-spl = "1.1.2"
+
+solana-sdk = { version = "3.0", features = ["full"] }
+solana-client = "3.1"
+solana-commitment-config = "3"
+# `bincode` gates the instruction constructors (create_account).
+solana-system-interface = { version = "3", features = ["bincode"] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bs58 = "0.5"
+
+[dev-dependencies]
+# Same litesvm the program repo tests with.
+litesvm = { version = "0.10.0", features = ["precompiles"] }
+litesvm-token = "0.10.0"

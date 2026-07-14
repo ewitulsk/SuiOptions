@@ -1,0 +1,71 @@
+# Standalone workspace, deliberately NOT a member of the rust-backend
+# workspace: the Sui crates there are pinned to the framework/mainnet git
+# branch, while this service needs the Solana SDK version tree (same rule
+# as services/solana-indexer and crates/solana-tx). Shared crates
+# (runtime-config, observability, oracle-client, solana-token-info-client,
+# solana-indexer-graphql, pricing, cli-spec) are pulled in by path — their
+# `workspace = true` deps resolve against rust-backend/Cargo.toml; the
+# program crates' resolve against solana-contracts/Cargo.toml.
+[workspace]
+
+[package]
+name = "solana-option-scheduler"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "solana-option-scheduler"
+path = "src/main.rs"
+
+[dependencies]
+runtime-config = { path = "../../crates/runtime-config" }
+observability  = { path = "../../crates/observability" }
+cli-spec       = { path = "../../crates/cli-spec" }
+oracle-client  = { path = "../../crates/oracle-client" }
+pricing        = { path = "../../crates/pricing" }
+solana-token-info-client = { path = "../../crates/solana-token-info-client" }
+solana-indexer-graphql   = { path = "../../crates/solana-indexer-graphql" }
+solana-tx      = { path = "../../crates/solana-tx" }
+
+# The deployed program crates: seed constants, VaultConfig layout, account
+# structs — zero drift with what's on chain (same pins as solana-tx).
+options_core  = { path = "../../../solana-contracts/programs/options_core", features = ["no-entrypoint"] }
+options_vault = { path = "../../../solana-contracts/programs/options_vault", features = ["no-entrypoint"] }
+# Economic math shared with the programs (pow10 / apply_strike) — used by
+# the strike-scale integrality rule and its tests.
+options_math  = { path = "../../../solana-contracts/crates/options_math" }
+
+# Pinned to the solana-contracts tree (anchor-lang 1.1.2 → solana v3 crates),
+# matching crates/solana-tx.
+solana-sdk    = { version = "3.0", features = ["full"] }
+solana-client = "3.1"
+
+sha2 = "0.10"
+
+tokio = { version = "1", features = ["full"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+clap = { version = "4", features = ["derive", "env"] }
+config = { version = "0.14", features = ["toml"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+metrics = "0.24"
+
+# Postgres persistence for the local rolls/vaults tables.
+diesel = { version = "2.2", features = ["postgres", "r2d2", "chrono", "serde_json"] }
+diesel_migrations = { version = "2", features = ["postgres"] }
+r2d2 = "0.8"
+
+[dev-dependencies]
+# Same litesvm the program repo tests with.
+litesvm = { version = "0.10.0", features = ["precompiles"] }
+litesvm-token = "0.10.0"
+anchor-lang = "1.1.2"

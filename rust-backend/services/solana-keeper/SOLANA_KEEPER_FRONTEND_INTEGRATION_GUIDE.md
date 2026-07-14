@@ -1,0 +1,3 @@
+# solana-keeper — Frontend Integration Guide
+
+Nothing to integrate: solana-keeper has **no frontend-facing API** (no public routes, no DB). It is the permissionless background crank for the covered-call vaults — every tick it discovers vaults via solana-indexer, plans the one action each round needs (select bucket / open + settle RFQ slices / swap proceeds / redeem / finalize), posts fresh Pyth `PriceUpdateV2`s ahead of oracle-gated cranks, and submits with a plain gas wallet. The frontend observes its effects through solana-indexer (`vaults`, `vaultRounds`, `auctions`) and solana-api-service, never the keeper itself. Ops surface: `/health` + `/metrics` on `0.0.0.0:8086` (docker service `solana-keeper`); alerts fire as `alert_id = "tx-failed-solana-keeper"`.

@@ -1,0 +1,4 @@
+# Diesel CLI config. The schema is hand-maintained in src/db/schema.rs;
+# migrations are embedded in the binary (see src/db/mod.rs).
+[migrations_directory]
+dir = "src/db/migrations"

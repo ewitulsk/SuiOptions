@@ -1,0 +1,22 @@
+# solana-indexer config — local development (Solana devnet).
+#
+# NOTE: a resume older than LaserStream's replay window (~24h / 216k
+# slots) cannot be served by the stream; wipe the DB (or pin start_slot)
+# and re-sync. A cold-backfill path via getSignaturesForAddress is future
+# work — the worker alerts loudly rather than silently skipping.
+
+cluster              = "devnet"
+laserstream_endpoint = "https://laserstream-devnet-ewr.helius-rpc.com"
+
+graphql_addr      = "127.0.0.1:9002"
+allowed_origins   = ["*"]
+expose_playground = true
+health_addr       = "127.0.0.1:8081"
+
+database_url = "postgresql://postgres:postgres@localhost:7654/solana_indexer"
+db_pool_size = 8
+
+[programs]
+options_core  = "6KeiQVrkr7uxW1LKhZGpjg7yaYVrz4AKyGaD7Dgnef1t"
+auction_venue = "8cvpWnJaQ4kTEPypwrZvBPzEM4R7FbivgybXBm2ahvKk"
+options_vault = "ELxbfwPUPJ4U1SnvWZJpLxdCRbgMiBpgQmdRizNWYcXe"

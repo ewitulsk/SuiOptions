@@ -57,8 +57,11 @@ case "$SERVICE" in
   indexer)         DB_PREFIX=indexer ;;
   scheduler)       DB_PREFIX=scheduler ;;
   token-info)      DB_PREFIX=token_info ;;
+  solana-indexer)  DB_PREFIX=solana_indexer ;;
+  solana-token-info)       DB_PREFIX=solana_token_info ;;
+  solana-option-scheduler) DB_PREFIX=solana_scheduler ;;
   *)
-    echo "FATAL: unknown service '$SERVICE' (expected indexer|scheduler|token-info)"
+    echo "FATAL: unknown service '$SERVICE' (expected indexer|scheduler|token-info|solana-indexer|solana-token-info|solana-option-scheduler)"
     exit 1
     ;;
 esac

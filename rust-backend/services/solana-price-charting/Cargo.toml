@@ -1,0 +1,34 @@
+[package]
+name = "solana-price-charting"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+runtime-config = { workspace = true }
+observability = { workspace = true, features = ["axum"] }
+cli-spec = { workspace = true }
+solana-token-info-client = { workspace = true }
+# Vault-APY sampler: vault/round/auction queries + the realized series,
+# Pyth spot/vol via solana-oracle-service, and Black–Scholes pricing.
+solana-indexer-graphql = { workspace = true }
+oracle-client = { workspace = true }
+pricing = { workspace = true }
+
+clap = { workspace = true }
+tokio = { workspace = true }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
+tower-http = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+metrics = { workspace = true }
+parking_lot = { workspace = true }
+chrono = { workspace = true }
+
+diesel = { workspace = true }
+diesel_migrations = { workspace = true }
+bigdecimal = { workspace = true }

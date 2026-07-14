@@ -1,0 +1,12 @@
+DROP TABLE vault_receipts;
+DROP TABLE vault_rounds;
+DROP TABLE vaults;
+DROP TABLE auction_bids;
+DROP TABLE auctions;
+DROP TABLE positions;
+DROP TABLE buckets;
+DROP TABLE account_balances;
+DROP TABLE accounts;
+DROP TABLE event_participants;
+DROP TABLE indexed_events;
+DROP TABLE indexer_progress;

@@ -1,0 +1,36 @@
+# solana-price-charting — local dev against the staging-style stack. Point
+# SOLANA_CHART_DATABASE_URL at any Postgres with the timescaledb extension
+# (e.g. `docker run -p 5432:5432 timescale/timescaledb:latest-pg16`).
+
+environment   = "dev"
+bind_addr     = "0.0.0.0:9011"
+
+database_url  = "${SOLANA_CHART_DATABASE_URL}"
+db_pool_size  = 4
+
+token_info_url      = "http://127.0.0.1:9005"
+indexer_graphql_url = "http://127.0.0.1:9002/graphql"
+oracle_url          = "http://127.0.0.1:9013"
+
+# Kept for the future ingestion task's eviction pass; unused until then.
+ttl_hours = 168
+
+allowed_origins = ["*"]
+
+# Vault-APY sampler (the live part of this service).
+apy_tick_secs = 120
+
+# Spot + realized vol come from solana-oracle-service (oracle_url above).
+[pyth]
+vol_window_days = 30
+max_publish_lag_ms = 30_000
+max_conf_bps       = 100
+
+[model]
+forecast_horizon = 4
+delta_target     = 0.10
+# Predicted APY is net of expected assignment, simply annualized and capped.
+apy_cap          = 5.0   # ±500% ceiling
+assumed_vrp      = 0.04  # implied = realized + 4 vol points
+vrp_band         = 0.02  # Tier-2 range: +2…+6 vol points
+vol_band         = 0.25  # Tier-1 range: realized vol ±25%

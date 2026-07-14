@@ -1,0 +1,6378 @@
+{
+  "address": "6KeiQVrkr7uxW1LKhZGpjg7yaYVrz4AKyGaD7Dgnef1t",
+  "metadata": {
+    "name": "options_core",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Options protocol core: covered-call + cash-secured-put buckets (audit package 1)"
+  },
+  "instructions": [
+    {
+      "name": "account_deposit",
+      "discriminator": [
+        110,
+        65,
+        94,
+        191,
+        69,
+        13,
+        136,
+        230
+      ],
+      "accounts": [
+        {
+          "name": "depositor",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "mm_account"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "from_token",
+          "writable": true
+        },
+        {
+          "name": "account_token",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "mm_account"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "account_withdraw",
+      "discriminator": [
+        14,
+        200,
+        240,
+        43,
+        173,
+        115,
+        147,
+        226
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true
+        },
+        {
+          "name": "mm_account",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  109,
+                  95,
+                  97,
+                  99,
+                  99,
+                  111,
+                  117,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mm_account.owner",
+                "account": "MmAccount"
+              },
+              {
+                "kind": "account",
+                "path": "mm_account.salt",
+                "account": "MmAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "account_token",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "mm_account"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "to_token",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "burn_expired_option",
+      "discriminator": [
+        205,
+        189,
+        141,
+        35,
+        172,
+        105,
+        24,
+        223
+      ],
+      "accounts": [
+        {
+          "name": "burner",
+          "signer": true
+        },
+        {
+          "name": "bucket"
+        },
+        {
+          "name": "call_mint",
+          "writable": true
+        },
+        {
+          "name": "burner_call",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "burn_expired_put",
+      "discriminator": [
+        195,
+        114,
+        52,
+        38,
+        80,
+        15,
+        100,
+        155
+      ],
+      "accounts": [
+        {
+          "name": "burner",
+          "signer": true
+        },
+        {
+          "name": "bucket"
+        },
+        {
+          "name": "put_mint",
+          "writable": true
+        },
+        {
+          "name": "burner_put",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "cleanup_bucket",
+      "discriminator": [
+        120,
+        184,
+        244,
+        45,
+        180,
+        132,
+        169,
+        109
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "call_mint",
+          "writable": true
+        },
+        {
+          "name": "underlying_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.underlying_mint",
+                "account": "Bucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "settlement_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.settlement_mint",
+                "account": "Bucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "cleanup_put_bucket",
+      "discriminator": [
+        166,
+        235,
+        187,
+        217,
+        24,
+        18,
+        186,
+        61
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "put_mint",
+          "writable": true
+        },
+        {
+          "name": "underlying_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.underlying_mint",
+                "account": "PutBucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "settlement_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.settlement_mint",
+                "account": "PutBucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "admin_settlement",
+          "docs": [
+            "Receives the rounding-dust sweep."
+          ],
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "create_account",
+      "discriminator": [
+        99,
+        20,
+        130,
+        119,
+        196,
+        235,
+        131,
+        149
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "mm_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  109,
+                  95,
+                  97,
+                  99,
+                  99,
+                  111,
+                  117,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "arg",
+                "path": "salt"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "salt",
+          "type": "u64"
+        },
+        {
+          "name": "signing_scheme",
+          "type": "u8"
+        },
+        {
+          "name": "signing_pubkey",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "create_bucket",
+      "discriminator": [
+        26,
+        158,
+        9,
+        222,
+        245,
+        138,
+        207,
+        185
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "underlying_mint"
+        },
+        {
+          "name": "settlement_mint"
+        },
+        {
+          "name": "bucket",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  99,
+                  107,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "underlying_mint"
+              },
+              {
+                "kind": "account",
+                "path": "settlement_mint"
+              },
+              {
+                "kind": "arg",
+                "path": "salt"
+              }
+            ]
+          }
+        },
+        {
+          "name": "call_mint",
+          "docs": [
+            "The per-bucket option coin. Sui's per-roll OTW package publish +",
+            "`TreasuryCap` handoff collapses into creating a fresh mint here with",
+            "the bucket PDA as sole authority — zero supply by construction, so",
+            "the supply == outstanding-options invariant holds from genesis."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  97,
+                  108,
+                  108,
+                  95,
+                  109,
+                  105,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket"
+              }
+            ]
+          }
+        },
+        {
+          "name": "underlying_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "underlying_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "settlement_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "settlement_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "salt",
+          "type": "u64"
+        },
+        {
+          "name": "expiry_ms",
+          "type": "u64"
+        },
+        {
+          "name": "strike",
+          "type": "u128"
+        },
+        {
+          "name": "strike_scale",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "create_put_bucket",
+      "discriminator": [
+        162,
+        72,
+        142,
+        31,
+        79,
+        10,
+        97,
+        232
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "underlying_mint"
+        },
+        {
+          "name": "settlement_mint"
+        },
+        {
+          "name": "bucket",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  117,
+                  116,
+                  95,
+                  98,
+                  117,
+                  99,
+                  107,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "underlying_mint"
+              },
+              {
+                "kind": "account",
+                "path": "settlement_mint"
+              },
+              {
+                "kind": "arg",
+                "path": "salt"
+              }
+            ]
+          }
+        },
+        {
+          "name": "put_mint",
+          "docs": [
+            "The per-bucket put coin: put units are denominated in UNDERLYING",
+            "smallest-units (the option's notional), so decimals mirror the",
+            "underlying, exactly like the call mint."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  117,
+                  116,
+                  95,
+                  109,
+                  105,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket"
+              }
+            ]
+          }
+        },
+        {
+          "name": "underlying_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "underlying_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "settlement_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "settlement_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "salt",
+          "type": "u64"
+        },
+        {
+          "name": "expiry_ms",
+          "type": "u64"
+        },
+        {
+          "name": "strike",
+          "type": "u128"
+        },
+        {
+          "name": "strike_scale",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "deposit_protocol_fee",
+      "discriminator": [
+        11,
+        201,
+        29,
+        241,
+        255,
+        105,
+        1,
+        23
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "treasury",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "from_token",
+          "writable": true
+        },
+        {
+          "name": "treasury_token",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "execute_put_write",
+      "discriminator": [
+        185,
+        210,
+        101,
+        28,
+        222,
+        116,
+        60,
+        67
+      ],
+      "accounts": [
+        {
+          "name": "executor",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "treasury",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "settlement_mint"
+        },
+        {
+          "name": "settlement_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.settlement_mint",
+                "account": "PutBucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "put_mint",
+          "writable": true
+        },
+        {
+          "name": "put_dest",
+          "docs": [
+            "Writer flow: must be owned by `quote.signer_token_recipient` (the",
+            "buying MM); trader flow: the executor's choice."
+          ],
+          "writable": true
+        },
+        {
+          "name": "mm_account"
+        },
+        {
+          "name": "mm_settlement",
+          "docs": [
+            "Premium source (writer flow) / net-premium + collateral source",
+            "(trader flow) — the MM account's settlement ATA covers both legs."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "mm_account"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.settlement_mint",
+                "account": "PutBucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "executor_settlement",
+          "docs": [
+            "Writer flow: pays the cash collateral. Trader flow: pays the gross",
+            "premium."
+          ],
+          "writable": true
+        },
+        {
+          "name": "treasury_settlement",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "settlement_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "nonce_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  110,
+                  111,
+                  110,
+                  99,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mm_account"
+              },
+              {
+                "kind": "arg",
+                "path": "quote.nonce"
+              }
+            ]
+          }
+        },
+        {
+          "name": "instructions_sysvar",
+          "address": "Sysvar1nstructions1111111111111111111111111"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "quote",
+          "type": {
+            "defined": {
+              "name": "Quote"
+            }
+          }
+        },
+        {
+          "name": "flow",
+          "type": {
+            "defined": {
+              "name": "FlowKind"
+            }
+          }
+        },
+        {
+          "name": "position_recipient",
+          "type": "pubkey"
+        },
+        {
+          "name": "sig_ix_index",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "execute_write",
+      "discriminator": [
+        23,
+        147,
+        50,
+        201,
+        105,
+        35,
+        101,
+        106
+      ],
+      "accounts": [
+        {
+          "name": "executor",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "treasury",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "settlement_mint"
+        },
+        {
+          "name": "underlying_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.underlying_mint",
+                "account": "Bucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "call_mint",
+          "writable": true
+        },
+        {
+          "name": "call_dest",
+          "docs": [
+            "Destination of the minted option coins. Writer flow: must be owned",
+            "by `quote.signer_token_recipient` (the buying MM); trader flow: the",
+            "executor's choice."
+          ],
+          "writable": true
+        },
+        {
+          "name": "mm_account",
+          "docs": [
+            "The signing MM's account; bound to the quote by",
+            "`quote.signer_account == mm_account.key()`."
+          ]
+        },
+        {
+          "name": "mm_settlement",
+          "docs": [
+            "The MM account's settlement ATA: premium source (writer flow) or",
+            "net-premium destination (trader flow)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "mm_account"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.settlement_mint",
+                "account": "Bucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "mm_underlying",
+          "docs": [
+            "Trader flow only: the MM account's underlying ATA (collateral",
+            "source)."
+          ],
+          "writable": true,
+          "optional": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "mm_account"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.underlying_mint",
+                "account": "Bucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "executor_underlying",
+          "docs": [
+            "Writer flow only: the executor's underlying source."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "executor_settlement",
+          "docs": [
+            "Writer flow: receives the net premium. Trader flow: pays the gross",
+            "premium."
+          ],
+          "writable": true
+        },
+        {
+          "name": "treasury_settlement",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "settlement_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "nonce_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  110,
+                  111,
+                  110,
+                  99,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mm_account"
+              },
+              {
+                "kind": "arg",
+                "path": "quote.nonce"
+              }
+            ]
+          }
+        },
+        {
+          "name": "instructions_sysvar",
+          "docs": [
+            "`load_instruction_at_checked` for precompile introspection."
+          ],
+          "address": "Sysvar1nstructions1111111111111111111111111"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "quote",
+          "type": {
+            "defined": {
+              "name": "Quote"
+            }
+          }
+        },
+        {
+          "name": "flow",
+          "type": {
+            "defined": {
+              "name": "FlowKind"
+            }
+          }
+        },
+        {
+          "name": "position_recipient",
+          "type": "pubkey"
+        },
+        {
+          "name": "sig_ix_index",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "exercise",
+      "discriminator": [
+        144,
+        79,
+        103,
+        64,
+        241,
+        78,
+        80,
+        174
+      ],
+      "accounts": [
+        {
+          "name": "exerciser",
+          "signer": true
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "call_mint",
+          "writable": true
+        },
+        {
+          "name": "exerciser_call",
+          "writable": true
+        },
+        {
+          "name": "exerciser_settlement",
+          "writable": true
+        },
+        {
+          "name": "exerciser_underlying",
+          "writable": true
+        },
+        {
+          "name": "underlying_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.underlying_mint",
+                "account": "Bucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "settlement_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.settlement_mint",
+                "account": "Bucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "exercise_put",
+      "discriminator": [
+        120,
+        99,
+        205,
+        72,
+        244,
+        215,
+        21,
+        242
+      ],
+      "accounts": [
+        {
+          "name": "exerciser",
+          "signer": true
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "put_mint",
+          "writable": true
+        },
+        {
+          "name": "exerciser_put",
+          "writable": true
+        },
+        {
+          "name": "exerciser_underlying",
+          "writable": true
+        },
+        {
+          "name": "exerciser_settlement",
+          "writable": true
+        },
+        {
+          "name": "underlying_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.underlying_mint",
+                "account": "PutBucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "settlement_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.settlement_mint",
+                "account": "PutBucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "initialize",
+      "discriminator": [
+        175,
+        175,
+        109,
+        31,
+        13,
+        152,
+        155,
+        237
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "treasury",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "invalidate_bucket",
+      "discriminator": [
+        182,
+        254,
+        158,
+        117,
+        217,
+        202,
+        130,
+        237
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "reason",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "invalidate_put_bucket",
+      "discriminator": [
+        235,
+        65,
+        128,
+        193,
+        166,
+        52,
+        46,
+        105
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "reason",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "prune_nonce",
+      "discriminator": [
+        190,
+        226,
+        133,
+        110,
+        206,
+        68,
+        95,
+        14
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "nonce_record",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "redeem_position",
+      "discriminator": [
+        51,
+        138,
+        49,
+        229,
+        33,
+        216,
+        19,
+        97
+      ],
+      "accounts": [
+        {
+          "name": "redeemer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "position",
+          "writable": true
+        },
+        {
+          "name": "redeemer_underlying",
+          "writable": true
+        },
+        {
+          "name": "redeemer_settlement",
+          "writable": true
+        },
+        {
+          "name": "underlying_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.underlying_mint",
+                "account": "Bucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "settlement_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.settlement_mint",
+                "account": "Bucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "redeem_put_position",
+      "discriminator": [
+        95,
+        67,
+        29,
+        58,
+        81,
+        88,
+        63,
+        168
+      ],
+      "accounts": [
+        {
+          "name": "redeemer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "position",
+          "writable": true
+        },
+        {
+          "name": "redeemer_underlying",
+          "writable": true
+        },
+        {
+          "name": "redeemer_settlement",
+          "writable": true
+        },
+        {
+          "name": "underlying_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.underlying_mint",
+                "account": "PutBucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "settlement_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.settlement_mint",
+                "account": "PutBucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "revalidate_bucket",
+      "discriminator": [
+        165,
+        240,
+        72,
+        154,
+        111,
+        37,
+        225,
+        24
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "reason",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "revalidate_put_bucket",
+      "discriminator": [
+        105,
+        72,
+        217,
+        172,
+        226,
+        145,
+        96,
+        98
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "reason",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "rotate_signing_key",
+      "discriminator": [
+        229,
+        103,
+        107,
+        44,
+        84,
+        162,
+        133,
+        170
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true
+        },
+        {
+          "name": "mm_account",
+          "writable": true
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_scheme",
+          "type": "u8"
+        },
+        {
+          "name": "new_pubkey",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "set_admin",
+      "discriminator": [
+        251,
+        163,
+        0,
+        52,
+        91,
+        194,
+        187,
+        92
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_admin",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "set_fee_bps",
+      "discriminator": [
+        2,
+        161,
+        245,
+        141,
+        111,
+        32,
+        39,
+        198
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_bps",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "transfer_position",
+      "discriminator": [
+        139,
+        130,
+        102,
+        147,
+        135,
+        77,
+        113,
+        222
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true
+        },
+        {
+          "name": "position",
+          "writable": true
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_owner",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "withdraw_treasury",
+      "discriminator": [
+        40,
+        63,
+        122,
+        158,
+        144,
+        216,
+        83,
+        96
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "treasury",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "treasury_token",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "recipient_token",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "write_collateralized",
+      "discriminator": [
+        183,
+        206,
+        32,
+        229,
+        204,
+        170,
+        214,
+        244
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "writer",
+          "signer": true
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "writer_underlying",
+          "writable": true
+        },
+        {
+          "name": "underlying_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.underlying_mint",
+                "account": "Bucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "call_mint",
+          "writable": true
+        },
+        {
+          "name": "call_dest",
+          "docs": [
+            "Where the freshly minted option coins land; any token account of",
+            "the bucket's call mint (typically the writer's ATA)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "position_owner",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "write_put_collateralized",
+      "discriminator": [
+        170,
+        208,
+        113,
+        180,
+        97,
+        108,
+        243,
+        193
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "writer",
+          "signer": true
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "writer_settlement",
+          "writable": true
+        },
+        {
+          "name": "settlement_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "bucket"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bucket.settlement_mint",
+                "account": "PutBucket"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "put_mint",
+          "writable": true
+        },
+        {
+          "name": "put_dest",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "write_amount",
+          "type": "u64"
+        },
+        {
+          "name": "position_owner",
+          "type": "pubkey"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Bucket",
+      "discriminator": [
+        27,
+        203,
+        100,
+        76,
+        218,
+        12,
+        58,
+        168
+      ]
+    },
+    {
+      "name": "Config",
+      "discriminator": [
+        155,
+        12,
+        170,
+        224,
+        30,
+        250,
+        204,
+        130
+      ]
+    },
+    {
+      "name": "MmAccount",
+      "discriminator": [
+        77,
+        40,
+        250,
+        221,
+        248,
+        70,
+        92,
+        135
+      ]
+    },
+    {
+      "name": "NonceRecord",
+      "discriminator": [
+        108,
+        73,
+        223,
+        163,
+        215,
+        18,
+        237,
+        161
+      ]
+    },
+    {
+      "name": "Position",
+      "discriminator": [
+        170,
+        188,
+        143,
+        228,
+        122,
+        64,
+        247,
+        208
+      ]
+    },
+    {
+      "name": "PutBucket",
+      "discriminator": [
+        58,
+        106,
+        29,
+        108,
+        17,
+        226,
+        240,
+        161
+      ]
+    },
+    {
+      "name": "Treasury",
+      "discriminator": [
+        238,
+        239,
+        123,
+        238,
+        89,
+        1,
+        168,
+        253
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "AccountCreated",
+      "discriminator": [
+        70,
+        39,
+        6,
+        173,
+        118,
+        198,
+        190,
+        91
+      ]
+    },
+    {
+      "name": "AccountDeposit",
+      "discriminator": [
+        188,
+        191,
+        72,
+        125,
+        33,
+        113,
+        134,
+        126
+      ]
+    },
+    {
+      "name": "AccountWithdraw",
+      "discriminator": [
+        195,
+        85,
+        211,
+        81,
+        71,
+        159,
+        143,
+        29
+      ]
+    },
+    {
+      "name": "AdminChanged",
+      "discriminator": [
+        232,
+        34,
+        31,
+        226,
+        62,
+        18,
+        19,
+        114
+      ]
+    },
+    {
+      "name": "BucketCleaned",
+      "discriminator": [
+        3,
+        57,
+        183,
+        175,
+        12,
+        172,
+        72,
+        153
+      ]
+    },
+    {
+      "name": "BucketCreated",
+      "discriminator": [
+        86,
+        118,
+        23,
+        62,
+        30,
+        216,
+        33,
+        92
+      ]
+    },
+    {
+      "name": "BucketInvalidated",
+      "discriminator": [
+        151,
+        23,
+        18,
+        173,
+        139,
+        92,
+        61,
+        68
+      ]
+    },
+    {
+      "name": "BucketRevalidated",
+      "discriminator": [
+        157,
+        25,
+        223,
+        102,
+        161,
+        212,
+        168,
+        252
+      ]
+    },
+    {
+      "name": "CollateralizedWrite",
+      "discriminator": [
+        45,
+        101,
+        75,
+        135,
+        171,
+        136,
+        100,
+        152
+      ]
+    },
+    {
+      "name": "Exercised",
+      "discriminator": [
+        199,
+        234,
+        66,
+        198,
+        152,
+        62,
+        234,
+        154
+      ]
+    },
+    {
+      "name": "ExpiredOptionBurned",
+      "discriminator": [
+        64,
+        212,
+        151,
+        214,
+        52,
+        152,
+        78,
+        20
+      ]
+    },
+    {
+      "name": "FeeUpdated",
+      "discriminator": [
+        228,
+        75,
+        43,
+        103,
+        9,
+        196,
+        182,
+        4
+      ]
+    },
+    {
+      "name": "PositionTransferred",
+      "discriminator": [
+        20,
+        4,
+        69,
+        199,
+        156,
+        57,
+        177,
+        14
+      ]
+    },
+    {
+      "name": "ProtocolFeeDeposited",
+      "discriminator": [
+        220,
+        27,
+        137,
+        68,
+        140,
+        231,
+        207,
+        205
+      ]
+    },
+    {
+      "name": "PutBucketCleaned",
+      "discriminator": [
+        245,
+        83,
+        66,
+        166,
+        68,
+        176,
+        51,
+        36
+      ]
+    },
+    {
+      "name": "PutBucketCreated",
+      "discriminator": [
+        245,
+        222,
+        122,
+        27,
+        94,
+        175,
+        204,
+        169
+      ]
+    },
+    {
+      "name": "PutBucketInvalidated",
+      "discriminator": [
+        62,
+        27,
+        209,
+        88,
+        64,
+        152,
+        219,
+        60
+      ]
+    },
+    {
+      "name": "PutBucketRevalidated",
+      "discriminator": [
+        56,
+        218,
+        86,
+        220,
+        198,
+        122,
+        153,
+        118
+      ]
+    },
+    {
+      "name": "PutCollateralizedWrite",
+      "discriminator": [
+        191,
+        125,
+        229,
+        15,
+        113,
+        106,
+        159,
+        57
+      ]
+    },
+    {
+      "name": "PutExercised",
+      "discriminator": [
+        82,
+        155,
+        74,
+        148,
+        103,
+        214,
+        234,
+        249
+      ]
+    },
+    {
+      "name": "PutExpiredOptionBurned",
+      "discriminator": [
+        145,
+        30,
+        242,
+        135,
+        136,
+        45,
+        36,
+        208
+      ]
+    },
+    {
+      "name": "PutRedeemed",
+      "discriminator": [
+        225,
+        253,
+        201,
+        173,
+        71,
+        28,
+        240,
+        235
+      ]
+    },
+    {
+      "name": "PutWriteExecuted",
+      "discriminator": [
+        84,
+        22,
+        28,
+        203,
+        223,
+        132,
+        90,
+        150
+      ]
+    },
+    {
+      "name": "Redeemed",
+      "discriminator": [
+        14,
+        29,
+        183,
+        71,
+        31,
+        165,
+        107,
+        38
+      ]
+    },
+    {
+      "name": "SigningKeyRotated",
+      "discriminator": [
+        72,
+        178,
+        61,
+        219,
+        217,
+        128,
+        135,
+        13
+      ]
+    },
+    {
+      "name": "TreasuryWithdrawn",
+      "discriminator": [
+        143,
+        181,
+        157,
+        169,
+        87,
+        155,
+        170,
+        46
+      ]
+    },
+    {
+      "name": "WriteExecuted",
+      "discriminator": [
+        116,
+        94,
+        146,
+        62,
+        3,
+        218,
+        17,
+        231
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "QuoteExpired",
+      "msg": "Quote valid_until_ms has passed"
+    },
+    {
+      "code": 6001,
+      "name": "QuoteNonceUsed",
+      "msg": "Nonce already consumed for this account"
+    },
+    {
+      "code": 6002,
+      "name": "QuoteSignatureInvalid",
+      "msg": "Quote signature verification failed"
+    },
+    {
+      "code": 6003,
+      "name": "QuoteProtocolMismatch",
+      "msg": "Quote protocol_id does not match config"
+    },
+    {
+      "code": 6004,
+      "name": "QuoteBucketMismatch",
+      "msg": "Quote bucket_id does not match provided bucket"
+    },
+    {
+      "code": 6005,
+      "name": "QuoteAccountMismatch",
+      "msg": "Quote signer_account_id does not match provided account"
+    },
+    {
+      "code": 6006,
+      "name": "QuoteRecipientMismatch",
+      "msg": "Quote signer_token_recipient does not match flow recipient"
+    },
+    {
+      "code": 6007,
+      "name": "BucketExpired",
+      "msg": "Operation requires now < expiry but bucket is expired"
+    },
+    {
+      "code": 6008,
+      "name": "BucketNotExpired",
+      "msg": "Operation requires now >= expiry but bucket is not expired"
+    },
+    {
+      "code": 6009,
+      "name": "BucketNotDrained",
+      "msg": "Bucket still holds balances or unredeemed positions"
+    },
+    {
+      "code": 6010,
+      "name": "InsufficientAccountBalance",
+      "msg": "Account lacks balance for quote"
+    },
+    {
+      "code": 6011,
+      "name": "AmountMismatch",
+      "msg": "Provided amount does not match quote write_amount or premium"
+    },
+    {
+      "code": 6012,
+      "name": "SettlementAmountMismatch",
+      "msg": "Exercise payment does not equal amount x strike"
+    },
+    {
+      "code": 6013,
+      "name": "CursorOverflow",
+      "msg": "Exercise would advance cursor past total_written"
+    },
+    {
+      "code": 6014,
+      "name": "NotOwner",
+      "msg": "Caller is not the owner"
+    },
+    {
+      "code": 6015,
+      "name": "PositionBucketMismatch",
+      "msg": "Position bucket does not match provided bucket"
+    },
+    {
+      "code": 6016,
+      "name": "FeeTooHigh",
+      "msg": "Fee exceeds MAX_FEE_BPS"
+    },
+    {
+      "code": 6017,
+      "name": "NonceStillValid",
+      "msg": "Nonce is still valid; cannot prune"
+    },
+    {
+      "code": 6018,
+      "name": "InsufficientTreasuryBalance",
+      "msg": "Treasury lacks balance"
+    },
+    {
+      "code": 6019,
+      "name": "ZeroAmount",
+      "msg": "Amount must be positive"
+    },
+    {
+      "code": 6020,
+      "name": "InvalidSigningScheme",
+      "msg": "Unsupported signing scheme"
+    },
+    {
+      "code": 6021,
+      "name": "InvalidPubkeyLength",
+      "msg": "Signing pubkey has wrong length for scheme"
+    },
+    {
+      "code": 6022,
+      "name": "StrikeScaleTooLarge",
+      "msg": "strike_scale exceeds the supported maximum (38)"
+    },
+    {
+      "code": 6023,
+      "name": "BucketInvalidated",
+      "msg": "Bucket is invalidated; new writes are frozen"
+    },
+    {
+      "code": 6024,
+      "name": "BucketNotInvalidated",
+      "msg": "Bucket is not invalidated"
+    },
+    {
+      "code": 6025,
+      "name": "PutCollateralMismatch",
+      "msg": "Put collateral does not equal ceil(write_amount x strike)"
+    },
+    {
+      "code": 6026,
+      "name": "MathOverflow",
+      "msg": "Arithmetic overflow in strike/fee math"
+    },
+    {
+      "code": 6027,
+      "name": "MissingSigVerification",
+      "msg": "Expected Ed25519 signature-verification instruction not found or malformed"
+    },
+    {
+      "code": 6028,
+      "name": "RecipientMismatch",
+      "msg": "Token account owner does not match expected recipient"
+    }
+  ],
+  "types": [
+    {
+      "name": "AccountCreated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "account",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "signing_scheme",
+            "type": "u8"
+          },
+          {
+            "name": "signing_pubkey",
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AccountDeposit",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "account",
+            "type": "pubkey"
+          },
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AccountWithdraw",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "account",
+            "type": "pubkey"
+          },
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AdminChanged",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "old_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_admin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Bucket",
+      "docs": [
+        "Covered-call bucket (Sui `Bucket<U, S, C>`). The generics become stored",
+        "mint pubkeys; the `TreasuryCap<Call>` becomes `call_mint` with this PDA",
+        "as sole mint/burn authority, so outstanding supply == outstanding",
+        "options exactly as on Sui. Bucket isolation is the runtime constraint",
+        "`token_account.mint == bucket.call_mint` (checked on every mint/burn",
+        "path) instead of a type-system guarantee — an explicit audit item."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "underlying_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "settlement_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "call_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "expiry_ms",
+            "type": "u64"
+          },
+          {
+            "name": "strike",
+            "docs": [
+              "Real ratio (settlement smallest-units per underlying smallest-unit)",
+              "= `strike / 10^strike_scale`."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "strike_scale",
+            "type": "u8"
+          },
+          {
+            "name": "total_written",
+            "type": "u128"
+          },
+          {
+            "name": "exercise_cursor",
+            "type": "u128"
+          },
+          {
+            "name": "invalidated",
+            "docs": [
+              "Admin-controlled freeze on new writes; exercises and redeems are",
+              "unaffected."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "salt",
+            "docs": [
+              "PDA-seed salt so an identical (pair, expiry, strike) bucket can be",
+              "re-created if one is invalidated (Sui allowed duplicates freely)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BucketCleaned",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BucketCreated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "underlying_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "settlement_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "call_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "expiry_ms",
+            "type": "u64"
+          },
+          {
+            "name": "strike",
+            "type": "u128"
+          },
+          {
+            "name": "strike_scale",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BucketInvalidated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "timestamp_ms",
+            "type": "u64"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "reason",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BucketRevalidated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "timestamp_ms",
+            "type": "u64"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "reason",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CollateralizedWrite",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "writer",
+            "type": "pubkey"
+          },
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "range_start",
+            "type": "u128"
+          },
+          {
+            "name": "range_end",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Config",
+      "docs": [
+        "Protocol config — the Sui `ProtocolConfig` + `AdminCap` fused: the",
+        "capability becomes an `admin` pubkey (rotatable via `set_admin`, the",
+        "analog of transferring the cap). The config PDA's own address is the",
+        "quote domain separator (Sui derived `protocol_id` from the AdminCap id)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "fee_bps",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Exercised",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "exerciser",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "settlement_paid",
+            "type": "u64"
+          },
+          {
+            "name": "cursor_after",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ExpiredOptionBurned",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "burner",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "FeeUpdated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "old_bps",
+            "type": "u64"
+          },
+          {
+            "name": "new_bps",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "FlowKind",
+      "docs": [
+        "Which side the quote's signer is on — the port of `bucket::FlowKind`."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Writer"
+          },
+          {
+            "name": "Trader"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MmAccount",
+      "docs": [
+        "Market-maker account (Sui shared `Account`). Balances live in ATAs",
+        "owned by this PDA; consumed nonces live in `NonceRecord` PDAs."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "salt",
+            "docs": [
+              "Distinguishes multiple accounts per owner (the future MM-sharding",
+              "pattern from the spec)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "signing_scheme",
+            "type": "u8"
+          },
+          {
+            "name": "signing_pubkey",
+            "type": "bytes"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "NonceRecord",
+      "docs": [
+        "A consumed quote nonce (Sui dynamic field `NonceKey → valid_until_ms`).",
+        "`init` failing on an existing PDA IS the replay check. `prune_nonce`",
+        "closes it after expiry, rent to the caller — the incentive analog of",
+        "Sui's storage rebate."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mm_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          },
+          {
+            "name": "valid_until_ms",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Position",
+      "docs": [
+        "Writer position over `[range_start, range_end)` (Sui owned `Position`",
+        "object). A plain owned record with a `transfer_position` instruction —",
+        "not an NFT (port plan decision #2). Created with a fresh keypair, like",
+        "Sui object ids; closed at redeem with rent to the redeemer. Both call",
+        "and put buckets mint this type; `bucket` disambiguates."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "range_start",
+            "type": "u128"
+          },
+          {
+            "name": "range_end",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PositionTransferred",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "old_owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_owner",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProtocolFeeDeposited",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "payer",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PutBucket",
+      "docs": [
+        "Cash-secured-put bucket (Sui `PutBucket<U, S, P>`). Same cursor design",
+        "with the asset legs flipped: collateral is settlement cash, exercisers",
+        "deliver underlying. `total_written` / cursor / ranges are denominated in",
+        "UNDERLYING units, exactly as for calls."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "underlying_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "settlement_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "put_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "expiry_ms",
+            "type": "u64"
+          },
+          {
+            "name": "strike",
+            "type": "u128"
+          },
+          {
+            "name": "strike_scale",
+            "type": "u8"
+          },
+          {
+            "name": "total_written",
+            "type": "u128"
+          },
+          {
+            "name": "exercise_cursor",
+            "type": "u128"
+          },
+          {
+            "name": "total_redeemed",
+            "docs": [
+              "Sum of redeemed position ranges; cleanup requires it to equal",
+              "`total_written` (the cash leg leaves rounding dust, so a",
+              "zero-balance gate would be unreachable for fractional strikes)."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "invalidated",
+            "type": "bool"
+          },
+          {
+            "name": "salt",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PutBucketCleaned",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "dust_swept",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PutBucketCreated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "underlying_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "settlement_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "put_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "expiry_ms",
+            "type": "u64"
+          },
+          {
+            "name": "strike",
+            "type": "u128"
+          },
+          {
+            "name": "strike_scale",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PutBucketInvalidated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "timestamp_ms",
+            "type": "u64"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "reason",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PutBucketRevalidated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "timestamp_ms",
+            "type": "u64"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "reason",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PutCollateralizedWrite",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "writer",
+            "type": "pubkey"
+          },
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "write_amount",
+            "type": "u64"
+          },
+          {
+            "name": "collateral",
+            "type": "u64"
+          },
+          {
+            "name": "range_start",
+            "type": "u128"
+          },
+          {
+            "name": "range_end",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PutExercised",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "exerciser",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "settlement_paid",
+            "type": "u64"
+          },
+          {
+            "name": "cursor_after",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PutExpiredOptionBurned",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "burner",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PutRedeemed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "redeemer",
+            "type": "pubkey"
+          },
+          {
+            "name": "range_start",
+            "type": "u128"
+          },
+          {
+            "name": "range_end",
+            "type": "u128"
+          },
+          {
+            "name": "underlying_returned",
+            "type": "u64"
+          },
+          {
+            "name": "settlement_returned",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PutWriteExecuted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "signer_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "signer_token_recipient",
+            "type": "pubkey"
+          },
+          {
+            "name": "executor",
+            "type": "pubkey"
+          },
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "position_recipient",
+            "type": "pubkey"
+          },
+          {
+            "name": "put_token_recipient",
+            "type": "pubkey"
+          },
+          {
+            "name": "write_amount",
+            "type": "u64"
+          },
+          {
+            "name": "collateral",
+            "type": "u64"
+          },
+          {
+            "name": "gross_premium",
+            "type": "u64"
+          },
+          {
+            "name": "fee",
+            "type": "u64"
+          },
+          {
+            "name": "net_premium",
+            "type": "u64"
+          },
+          {
+            "name": "range_start",
+            "type": "u128"
+          },
+          {
+            "name": "range_end",
+            "type": "u128"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Quote",
+      "docs": [
+        "The structured payload signed by the MM's hot key — the port of",
+        "`quote::Quote`. Canonical bytes are the Borsh (AnchorSerialize)",
+        "encoding, replacing Sui's BCS; field order is frozen and mirrors the",
+        "Move struct (IDs/addresses become 32-byte pubkeys, so the layout is",
+        "nearly identical). The off-chain signer must produce exactly these",
+        "bytes — lock with golden vectors against the quoting service."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "protocol_id",
+            "docs": [
+              "Domain separator: the protocol's `Config` PDA address (Sui derived",
+              "its `protocol_id` from the AdminCap object id)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "signer_account",
+            "docs": [
+              "The signing MM's `MmAccount` address."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "signer_token_recipient",
+            "docs": [
+              "Wallet that receives the signer's minted tokens: the call/put coins",
+              "in writer flow, the `Position` in trader flow."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "write_amount",
+            "type": "u64"
+          },
+          {
+            "name": "premium",
+            "docs": [
+              "Gross premium in settlement smallest-units."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "valid_until_ms",
+            "type": "u64"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Redeemed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "redeemer",
+            "type": "pubkey"
+          },
+          {
+            "name": "range_start",
+            "type": "u128"
+          },
+          {
+            "name": "range_end",
+            "type": "u128"
+          },
+          {
+            "name": "underlying_returned",
+            "type": "u64"
+          },
+          {
+            "name": "settlement_returned",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SigningKeyRotated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "account",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_scheme",
+            "type": "u8"
+          },
+          {
+            "name": "new_pubkey",
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Treasury",
+      "docs": [
+        "Fee treasury marker. Balances live in associated token accounts owned",
+        "by this PDA — the analog of Sui's dynamic-field `Balance<T>` bag."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TreasuryWithdrawn",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "recipient",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "WriteExecuted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "signer_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "signer_token_recipient",
+            "type": "pubkey"
+          },
+          {
+            "name": "executor",
+            "type": "pubkey"
+          },
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "position_recipient",
+            "type": "pubkey"
+          },
+          {
+            "name": "call_token_recipient",
+            "type": "pubkey"
+          },
+          {
+            "name": "write_amount",
+            "type": "u64"
+          },
+          {
+            "name": "gross_premium",
+            "type": "u64"
+          },
+          {
+            "name": "fee",
+            "type": "u64"
+          },
+          {
+            "name": "net_premium",
+            "type": "u64"
+          },
+          {
+            "name": "range_start",
+            "type": "u128"
+          },
+          {
+            "name": "range_end",
+            "type": "u128"
+          },
+          {
+            "name": "nonce",
+            "type": "u64"
+          }
+        ]
+      }
+    }
+  ]
+}

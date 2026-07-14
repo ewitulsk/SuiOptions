@@ -36,6 +36,18 @@ on:
           - balance-monitor
           - keeper
           - oracle-service
+          - solana-indexer
+          - solana-token-info
+          - solana-auth-service
+          - solana-api-service
+          - solana-quoting-service
+          - solana-oracle-service
+          - solana-price-charting
+          - solana-gas-station
+          - solana-keeper
+          - solana-option-scheduler
+          - solana-mm-bot
+          - solana-balance-monitor
           - nginx
 
 permissions:

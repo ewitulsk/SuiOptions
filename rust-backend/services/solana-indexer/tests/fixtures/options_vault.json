@@ -1,0 +1,3508 @@
+{
+  "address": "ELxbfwPUPJ4U1SnvWZJpLxdCRbgMiBpgQmdRizNWYcXe",
+  "metadata": {
+    "name": "options_vault",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Covered-call vault built on options_core + auction_venue (audit package 3)"
+  },
+  "instructions": [
+    {
+      "name": "claim_shares",
+      "discriminator": [
+        130,
+        131,
+        29,
+        237,
+        134,
+        20,
+        110,
+        245
+      ],
+      "accounts": [
+        {
+          "name": "claimer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault"
+        },
+        {
+          "name": "receipt",
+          "writable": true
+        },
+        {
+          "name": "round_state"
+        },
+        {
+          "name": "claimable_shares",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  108,
+                  97,
+                  105,
+                  109,
+                  97,
+                  98,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "claimer_shares",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "complete_withdraw",
+      "discriminator": [
+        172,
+        129,
+        141,
+        17,
+        95,
+        253,
+        251,
+        98
+      ],
+      "accounts": [
+        {
+          "name": "withdrawer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault"
+        },
+        {
+          "name": "receipt",
+          "writable": true
+        },
+        {
+          "name": "round_state",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  117,
+                  110,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              },
+              {
+                "kind": "account",
+                "path": "receipt.round",
+                "account": "WithdrawReceipt"
+              }
+            ]
+          }
+        },
+        {
+          "name": "withdrawal_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  119,
+                  105,
+                  116,
+                  104,
+                  100,
+                  114,
+                  97,
+                  119,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "withdrawer_token",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "crank_redeem",
+      "discriminator": [
+        140,
+        55,
+        201,
+        8,
+        210,
+        41,
+        220,
+        213
+      ],
+      "accounts": [
+        {
+          "name": "cranker",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "vault_position",
+          "docs": [
+            "The FIFO head entry; closed after redemption, rent to the cranker."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116,
+                  95,
+                  112,
+                  111,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              },
+              {
+                "kind": "account",
+                "path": "vault.positions_head",
+                "account": "Vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "position",
+          "writable": true
+        },
+        {
+          "name": "deployable",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  108,
+                  111,
+                  121,
+                  97,
+                  98,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proceeds",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  99,
+                  101,
+                  101,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bucket_underlying_vault",
+          "writable": true
+        },
+        {
+          "name": "bucket_settlement_vault",
+          "writable": true
+        },
+        {
+          "name": "core_event_authority"
+        },
+        {
+          "name": "core_program",
+          "address": "6KeiQVrkr7uxW1LKhZGpjg7yaYVrz4AKyGaD7Dgnef1t"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "create_vault",
+      "discriminator": [
+        29,
+        237,
+        247,
+        208,
+        193,
+        82,
+        54,
+        135
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "underlying_mint"
+        },
+        {
+          "name": "settlement_mint"
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "underlying_mint"
+              },
+              {
+                "kind": "account",
+                "path": "settlement_mint"
+              },
+              {
+                "kind": "arg",
+                "path": "salt"
+              }
+            ]
+          }
+        },
+        {
+          "name": "share_mint",
+          "docs": [
+            "The share coin: Sui's fresh `TreasuryCap<VShare>` becomes a mint",
+            "created here with the vault PDA as sole authority — zero supply by",
+            "construction."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  104,
+                  97,
+                  114,
+                  101,
+                  95,
+                  109,
+                  105,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "deployable",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  108,
+                  111,
+                  121,
+                  97,
+                  98,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pending",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  110,
+                  100,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proceeds",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  99,
+                  101,
+                  101,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "withdrawal_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  119,
+                  105,
+                  116,
+                  104,
+                  100,
+                  114,
+                  97,
+                  119,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "claimable_shares",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  108,
+                  97,
+                  105,
+                  109,
+                  97,
+                  98,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "queued_shares",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  113,
+                  117,
+                  101,
+                  117,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "salt",
+          "type": "u64"
+        },
+        {
+          "name": "config",
+          "type": {
+            "defined": {
+              "name": "VaultConfig"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "deposit",
+      "discriminator": [
+        242,
+        35,
+        198,
+        137,
+        82,
+        225,
+        242,
+        182
+      ],
+      "accounts": [
+        {
+          "name": "depositor",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "pending",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  110,
+                  100,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "depositor_token",
+          "writable": true
+        },
+        {
+          "name": "receipt",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "finalize_round",
+      "discriminator": [
+        239,
+        160,
+        254,
+        11,
+        254,
+        144,
+        53,
+        148
+      ],
+      "accounts": [
+        {
+          "name": "cranker",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "share_mint",
+          "writable": true
+        },
+        {
+          "name": "deployable",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  108,
+                  111,
+                  121,
+                  97,
+                  98,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pending",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  110,
+                  100,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proceeds",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  99,
+                  101,
+                  101,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "withdrawal_pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  119,
+                  105,
+                  116,
+                  104,
+                  100,
+                  114,
+                  97,
+                  119,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "claimable_shares",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  108,
+                  97,
+                  105,
+                  109,
+                  97,
+                  98,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "queued_shares",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  113,
+                  117,
+                  101,
+                  117,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "round_state",
+          "docs": [
+            "pps[round], set exactly once here."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  117,
+                  110,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              },
+              {
+                "kind": "account",
+                "path": "vault.round",
+                "account": "Vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "prev_round_state",
+          "docs": [
+            "pps[round − 1]; required for every round after genesis. Identity",
+            "pinned in the handler (vault + round fields) — an optional account",
+            "can't carry a sibling-referencing seeds constraint through the IDL",
+            "build."
+          ],
+          "optional": true
+        },
+        {
+          "name": "core_treasury_token",
+          "docs": [
+            "Fee destination: core treasury's underlying token account",
+            "(ownership verified in the handler)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "underlying_price"
+        },
+        {
+          "name": "settlement_price"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "initiate_withdraw",
+      "discriminator": [
+        156,
+        172,
+        140,
+        245,
+        182,
+        250,
+        239,
+        160
+      ],
+      "accounts": [
+        {
+          "name": "withdrawer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault"
+        },
+        {
+          "name": "queued_shares",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  113,
+                  117,
+                  101,
+                  117,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "withdrawer_shares",
+          "writable": true
+        },
+        {
+          "name": "receipt",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "shares",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "instant_withdraw_pending",
+      "discriminator": [
+        98,
+        152,
+        239,
+        20,
+        98,
+        154,
+        58,
+        205
+      ],
+      "accounts": [
+        {
+          "name": "withdrawer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault"
+        },
+        {
+          "name": "receipt",
+          "writable": true
+        },
+        {
+          "name": "pending",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  110,
+                  100,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "withdrawer_token",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "open_rfq",
+      "discriminator": [
+        15,
+        64,
+        102,
+        65,
+        193,
+        240,
+        126,
+        45
+      ],
+      "accounts": [
+        {
+          "name": "cranker",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "bucket"
+        },
+        {
+          "name": "underlying_mint"
+        },
+        {
+          "name": "settlement_mint"
+        },
+        {
+          "name": "deployable",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  108,
+                  111,
+                  121,
+                  97,
+                  98,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proceeds",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  99,
+                  101,
+                  101,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "underlying_price"
+        },
+        {
+          "name": "settlement_price"
+        },
+        {
+          "name": "auction",
+          "writable": true
+        },
+        {
+          "name": "escrow_vault",
+          "writable": true
+        },
+        {
+          "name": "bid_vault",
+          "writable": true
+        },
+        {
+          "name": "venue_event_authority"
+        },
+        {
+          "name": "venue_program",
+          "address": "8cvpWnJaQ4kTEPypwrZvBPzEM4R7FbivgybXBm2ahvKk"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "slice_amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "open_swap_rfq",
+      "discriminator": [
+        183,
+        9,
+        219,
+        97,
+        176,
+        31,
+        136,
+        172
+      ],
+      "accounts": [
+        {
+          "name": "cranker",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "underlying_mint"
+        },
+        {
+          "name": "settlement_mint"
+        },
+        {
+          "name": "deployable",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  108,
+                  111,
+                  121,
+                  97,
+                  98,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proceeds",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  99,
+                  101,
+                  101,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "underlying_price"
+        },
+        {
+          "name": "settlement_price"
+        },
+        {
+          "name": "auction",
+          "writable": true
+        },
+        {
+          "name": "escrow_vault",
+          "writable": true
+        },
+        {
+          "name": "bid_vault",
+          "writable": true
+        },
+        {
+          "name": "venue_event_authority"
+        },
+        {
+          "name": "venue_program",
+          "address": "8cvpWnJaQ4kTEPypwrZvBPzEM4R7FbivgybXBm2ahvKk"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount_s",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "select_bucket",
+      "discriminator": [
+        44,
+        41,
+        129,
+        84,
+        24,
+        210,
+        28,
+        165
+      ],
+      "accounts": [
+        {
+          "name": "cranker",
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "bucket"
+        },
+        {
+          "name": "underlying_price"
+        },
+        {
+          "name": "settlement_price"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "set_paused",
+      "discriminator": [
+        91,
+        60,
+        125,
+        192,
+        176,
+        225,
+        166,
+        218
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "paused",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "settle_rfq",
+      "discriminator": [
+        125,
+        70,
+        220,
+        201,
+        43,
+        183,
+        4,
+        9
+      ],
+      "accounts": [
+        {
+          "name": "cranker",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "auction",
+          "writable": true
+        },
+        {
+          "name": "escrow_vault",
+          "writable": true
+        },
+        {
+          "name": "bid_vault",
+          "writable": true
+        },
+        {
+          "name": "deployable",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  108,
+                  111,
+                  121,
+                  97,
+                  98,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proceeds",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  99,
+                  101,
+                  101,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault_position",
+          "docs": [
+            "The FIFO tail entry, created only when a winner exists."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116,
+                  95,
+                  112,
+                  111,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              },
+              {
+                "kind": "account",
+                "path": "vault.positions_tail",
+                "account": "Vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "bucket_underlying_vault",
+          "writable": true
+        },
+        {
+          "name": "call_mint",
+          "writable": true
+        },
+        {
+          "name": "call_dest",
+          "writable": true
+        },
+        {
+          "name": "core_config"
+        },
+        {
+          "name": "core_treasury_token",
+          "writable": true
+        },
+        {
+          "name": "core_event_authority"
+        },
+        {
+          "name": "core_program",
+          "address": "6KeiQVrkr7uxW1LKhZGpjg7yaYVrz4AKyGaD7Dgnef1t"
+        },
+        {
+          "name": "venue_event_authority"
+        },
+        {
+          "name": "venue_program",
+          "address": "8cvpWnJaQ4kTEPypwrZvBPzEM4R7FbivgybXBm2ahvKk"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "settle_rfq_expired",
+      "discriminator": [
+        49,
+        231,
+        59,
+        188,
+        211,
+        113,
+        224,
+        71
+      ],
+      "accounts": [
+        {
+          "name": "cranker",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "auction",
+          "writable": true
+        },
+        {
+          "name": "escrow_vault",
+          "writable": true
+        },
+        {
+          "name": "bid_vault",
+          "writable": true
+        },
+        {
+          "name": "bucket"
+        },
+        {
+          "name": "bidder_refund",
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "deployable",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  108,
+                  111,
+                  121,
+                  97,
+                  98,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "venue_event_authority"
+        },
+        {
+          "name": "venue_program",
+          "address": "8cvpWnJaQ4kTEPypwrZvBPzEM4R7FbivgybXBm2ahvKk"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "settle_swap_rfq",
+      "discriminator": [
+        238,
+        157,
+        158,
+        32,
+        94,
+        196,
+        68,
+        16
+      ],
+      "accounts": [
+        {
+          "name": "cranker",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "auction",
+          "writable": true
+        },
+        {
+          "name": "escrow_vault",
+          "writable": true
+        },
+        {
+          "name": "bid_vault",
+          "writable": true
+        },
+        {
+          "name": "deployable",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  108,
+                  111,
+                  121,
+                  97,
+                  98,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proceeds",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  99,
+                  101,
+                  101,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "underlying_price"
+        },
+        {
+          "name": "settlement_price"
+        },
+        {
+          "name": "winner_dest",
+          "docs": [
+            "ownership."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "bidder_refund",
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "venue_event_authority"
+        },
+        {
+          "name": "venue_program",
+          "address": "8cvpWnJaQ4kTEPypwrZvBPzEM4R7FbivgybXBm2ahvKk"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "update_config",
+      "discriminator": [
+        29,
+        158,
+        252,
+        191,
+        10,
+        83,
+        219,
+        99
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_config",
+          "type": {
+            "defined": {
+              "name": "VaultConfig"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "update_oracle_feeds",
+      "discriminator": [
+        169,
+        49,
+        202,
+        109,
+        166,
+        9,
+        111,
+        251
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "underlying_feed_id",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "settlement_feed_id",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "DepositReceipt",
+      "discriminator": [
+        64,
+        175,
+        24,
+        183,
+        138,
+        109,
+        70,
+        78
+      ]
+    },
+    {
+      "name": "RoundState",
+      "discriminator": [
+        153,
+        242,
+        39,
+        64,
+        102,
+        34,
+        239,
+        11
+      ]
+    },
+    {
+      "name": "Vault",
+      "discriminator": [
+        211,
+        8,
+        232,
+        43,
+        2,
+        152,
+        117,
+        119
+      ]
+    },
+    {
+      "name": "VaultPosition",
+      "discriminator": [
+        122,
+        109,
+        193,
+        63,
+        69,
+        148,
+        90,
+        237
+      ]
+    },
+    {
+      "name": "WithdrawReceipt",
+      "discriminator": [
+        132,
+        238,
+        44,
+        182,
+        207,
+        9,
+        124,
+        140
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "InstantWithdraw",
+      "discriminator": [
+        129,
+        241,
+        175,
+        60,
+        179,
+        105,
+        100,
+        62
+      ]
+    },
+    {
+      "name": "SharesClaimed",
+      "discriminator": [
+        135,
+        17,
+        55,
+        130,
+        218,
+        208,
+        153,
+        101
+      ]
+    },
+    {
+      "name": "VaultBucketSelected",
+      "discriminator": [
+        162,
+        170,
+        164,
+        28,
+        170,
+        244,
+        16,
+        78
+      ]
+    },
+    {
+      "name": "VaultConfigApplied",
+      "discriminator": [
+        214,
+        31,
+        117,
+        209,
+        140,
+        203,
+        60,
+        66
+      ]
+    },
+    {
+      "name": "VaultConfigUpdated",
+      "discriminator": [
+        72,
+        22,
+        37,
+        111,
+        58,
+        30,
+        160,
+        212
+      ]
+    },
+    {
+      "name": "VaultCreated",
+      "discriminator": [
+        117,
+        25,
+        120,
+        254,
+        75,
+        236,
+        78,
+        115
+      ]
+    },
+    {
+      "name": "VaultDeposit",
+      "discriminator": [
+        4,
+        248,
+        234,
+        163,
+        99,
+        238,
+        140,
+        45
+      ]
+    },
+    {
+      "name": "VaultDepositsPaused",
+      "discriminator": [
+        139,
+        17,
+        32,
+        130,
+        150,
+        0,
+        130,
+        146
+      ]
+    },
+    {
+      "name": "VaultFeesCharged",
+      "discriminator": [
+        167,
+        0,
+        177,
+        157,
+        225,
+        78,
+        210,
+        201
+      ]
+    },
+    {
+      "name": "VaultPositionRedeemed",
+      "discriminator": [
+        29,
+        9,
+        177,
+        84,
+        215,
+        128,
+        18,
+        158
+      ]
+    },
+    {
+      "name": "VaultRfqOpened",
+      "discriminator": [
+        127,
+        180,
+        210,
+        17,
+        219,
+        63,
+        173,
+        98
+      ]
+    },
+    {
+      "name": "VaultRfqSettled",
+      "discriminator": [
+        225,
+        150,
+        203,
+        97,
+        37,
+        202,
+        83,
+        172
+      ]
+    },
+    {
+      "name": "VaultRfqUnsold",
+      "discriminator": [
+        50,
+        111,
+        120,
+        60,
+        179,
+        94,
+        58,
+        31
+      ]
+    },
+    {
+      "name": "VaultRoundFinalized",
+      "discriminator": [
+        170,
+        136,
+        122,
+        18,
+        88,
+        229,
+        240,
+        235
+      ]
+    },
+    {
+      "name": "VaultSwapOpened",
+      "discriminator": [
+        90,
+        20,
+        149,
+        48,
+        108,
+        56,
+        225,
+        100
+      ]
+    },
+    {
+      "name": "VaultSwapSettled",
+      "discriminator": [
+        69,
+        162,
+        86,
+        182,
+        246,
+        158,
+        41,
+        208
+      ]
+    },
+    {
+      "name": "VaultSwapUnfilled",
+      "discriminator": [
+        149,
+        198,
+        214,
+        102,
+        136,
+        55,
+        39,
+        127
+      ]
+    },
+    {
+      "name": "WithdrawCompleted",
+      "discriminator": [
+        180,
+        77,
+        152,
+        99,
+        248,
+        179,
+        163,
+        44
+      ]
+    },
+    {
+      "name": "WithdrawInitiated",
+      "discriminator": [
+        134,
+        166,
+        82,
+        139,
+        128,
+        252,
+        131,
+        175
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "WrongPhase",
+      "msg": "Operation not legal in the current phase"
+    },
+    {
+      "code": 6001,
+      "name": "BucketNotSelected",
+      "msg": "Bucket is not the vault's selected bucket"
+    },
+    {
+      "code": 6002,
+      "name": "BucketAlreadySelected",
+      "msg": "A bucket is already selected this round"
+    },
+    {
+      "code": 6003,
+      "name": "SellingClosed",
+      "msg": "Selling window has closed"
+    },
+    {
+      "code": 6004,
+      "name": "PositionsPending",
+      "msg": "Positions remain to be redeemed"
+    },
+    {
+      "code": 6005,
+      "name": "RfqsOpen",
+      "msg": "Open RFQs must settle before finalize"
+    },
+    {
+      "code": 6006,
+      "name": "RoundNotFinalized",
+      "msg": "Round has not been finalized"
+    },
+    {
+      "code": 6007,
+      "name": "ReceiptMismatch",
+      "msg": "Receipt does not belong to this vault/round"
+    },
+    {
+      "code": 6008,
+      "name": "StrikeOutOfBand",
+      "msg": "Bucket strike outside the configured band over spot"
+    },
+    {
+      "code": 6009,
+      "name": "ExpiryOutOfBand",
+      "msg": "Bucket expiry outside the configured lead window"
+    },
+    {
+      "code": 6010,
+      "name": "SliceTooLarge",
+      "msg": "Slice exceeds cap or deployable balance"
+    },
+    {
+      "code": 6011,
+      "name": "TooManyRfqs",
+      "msg": "Too many open RFQs"
+    },
+    {
+      "code": 6012,
+      "name": "DepositsPaused",
+      "msg": "Deposits are paused"
+    },
+    {
+      "code": 6013,
+      "name": "WrongOrigin",
+      "msg": "Auction does not originate from this vault"
+    },
+    {
+      "code": 6014,
+      "name": "OracleFeedMismatch",
+      "msg": "Oracle account is not the pinned feed"
+    },
+    {
+      "code": 6015,
+      "name": "OraclePriceStale",
+      "msg": "Oracle price is stale"
+    },
+    {
+      "code": 6016,
+      "name": "OracleConfidence",
+      "msg": "Oracle confidence interval too wide"
+    },
+    {
+      "code": 6017,
+      "name": "OraclePriceInvalid",
+      "msg": "Oracle price invalid"
+    },
+    {
+      "code": 6018,
+      "name": "ProceedsUnswapped",
+      "msg": "Settlement proceeds must be swapped before finalize"
+    },
+    {
+      "code": 6019,
+      "name": "ConfigInvalid",
+      "msg": "Vault config out of bounds"
+    },
+    {
+      "code": 6020,
+      "name": "BucketInvalidated",
+      "msg": "Bucket is invalidated"
+    },
+    {
+      "code": 6021,
+      "name": "ZeroAmount",
+      "msg": "Amount must be positive"
+    },
+    {
+      "code": 6022,
+      "name": "NotAdmin",
+      "msg": "Caller is not the vault admin"
+    },
+    {
+      "code": 6023,
+      "name": "WrongIndex",
+      "msg": "Wrong FIFO index for crank"
+    },
+    {
+      "code": 6024,
+      "name": "MathOverflow",
+      "msg": "Arithmetic overflow"
+    },
+    {
+      "code": 6025,
+      "name": "AccountMismatch",
+      "msg": "Account mismatch"
+    }
+  ],
+  "types": [
+    {
+      "name": "Auction",
+      "docs": [
+        "One escrowed ascending auction — the unification of `rfq.move`,",
+        "`rfq_put.move` and `swap_auction.move` (same machinery, different",
+        "legs). Escrowed bids are what make the best bid always settleable,",
+        "which is what makes the settle crank permissionless."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "creator",
+            "type": "pubkey"
+          },
+          {
+            "name": "salt",
+            "type": "u64"
+          },
+          {
+            "name": "mode",
+            "type": {
+              "defined": {
+                "name": "AuctionMode"
+              }
+            }
+          },
+          {
+            "name": "bucket",
+            "docs": [
+              "The options_core bucket for adapter modes; `Pubkey::default()` for",
+              "pure swaps."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "escrow_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "bid_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "docs": [
+              "Escrowed amount (underlying for calls, cash collateral for puts,",
+              "sell-side tokens for swaps)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "notional",
+            "docs": [
+              "Option notional in underlying units (== amount for calls; the put",
+              "notional for puts; 0 for swaps)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "reserve_bid",
+            "docs": [
+              "Bids below this are rejected — the only price-safety floor a quiet",
+              "auction has."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "deadline_ms",
+            "type": "u64"
+          },
+          {
+            "name": "snipe_window_ms",
+            "docs": [
+              "Anti-snipe: a best bid inside `snipe_window_ms` of the deadline",
+              "pushes it out by `snipe_extension_ms`, capped at `max_deadline_ms`."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "snipe_extension_ms",
+            "type": "u64"
+          },
+          {
+            "name": "max_deadline_ms",
+            "type": "u64"
+          },
+          {
+            "name": "min_increment_bps",
+            "docs": [
+              "Minimum improvement over the current best, in bps of the best."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "best_bidder",
+            "docs": [
+              "The bid escrow token account's balance IS the best bid."
+            ],
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "best_token_recipient",
+            "docs": [
+              "Where the winner wants the option coins (call/put recipient wallet)",
+              "or the swapped escrow (swap mode)."
+            ],
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "position_recipient",
+            "docs": [
+              "Owner of the minted Position (adapter modes)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "proceeds_token",
+            "docs": [
+              "Exact token account receiving the winning bid (net premium for",
+              "adapters, the bid tokens for swaps). Fixed at creation so a",
+              "coupled venue (the vault) can absorb into its own vaults."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "refund_token",
+            "docs": [
+              "Exact token account receiving the escrow back on the no-winner /",
+              "refund / expired paths."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "settle_authority",
+            "docs": [
+              "When set, only this authority (a coupled venue's PDA, signing via",
+              "CPI) may settle — the analog of `rfq.move`'s `coupled` flag."
+            ],
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuctionMode",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Swap"
+          },
+          {
+            "name": "CoveredCall"
+          },
+          {
+            "name": "CashSecuredPut"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Bucket",
+      "docs": [
+        "Covered-call bucket (Sui `Bucket<U, S, C>`). The generics become stored",
+        "mint pubkeys; the `TreasuryCap<Call>` becomes `call_mint` with this PDA",
+        "as sole mint/burn authority, so outstanding supply == outstanding",
+        "options exactly as on Sui. Bucket isolation is the runtime constraint",
+        "`token_account.mint == bucket.call_mint` (checked on every mint/burn",
+        "path) instead of a type-system guarantee — an explicit audit item."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "underlying_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "settlement_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "call_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "expiry_ms",
+            "type": "u64"
+          },
+          {
+            "name": "strike",
+            "docs": [
+              "Real ratio (settlement smallest-units per underlying smallest-unit)",
+              "= `strike / 10^strike_scale`."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "strike_scale",
+            "type": "u8"
+          },
+          {
+            "name": "total_written",
+            "type": "u128"
+          },
+          {
+            "name": "exercise_cursor",
+            "type": "u128"
+          },
+          {
+            "name": "invalidated",
+            "docs": [
+              "Admin-controlled freeze on new writes; exercises and redeems are",
+              "unaffected."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "salt",
+            "docs": [
+              "PDA-seed salt so an identical (pair, expiry, strike) bucket can be",
+              "re-created if one is invalidated (Sui allowed duplicates freely)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DepositReceipt",
+      "docs": [
+        "Claim ticket for a queued deposit: claimable at `pps[round − 1]` once",
+        "that price exists."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "InstantWithdraw",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "withdrawer",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Phase",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Settling"
+          },
+          {
+            "name": "Active"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RoundState",
+      "docs": [
+        "pps[r], set exactly once when round r finalizes (the Move `Table`",
+        "entry). `claim_shares` / `complete_withdraw` pass the round they need."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "pps",
+            "type": "u128"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SharesClaimed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "claimer",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "shares",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Vault",
+      "docs": [
+        "Port of `vault::Vault<U, S, VShare>`. Balances live in PDA-seeded token",
+        "accounts (an ATA can't hold three underlying sub-balances); the share",
+        "`TreasuryCap` becomes `share_mint` with this PDA as authority; the pps",
+        "`Table` becomes per-round `RoundState` PDAs; the positions",
+        "`ObjectTable` becomes `VaultPosition` index PDAs + head/tail."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "docs": [
+              "The Move AdminCap holder, for config/pause (rotule via creator)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "underlying_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "settlement_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "share_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "config",
+            "type": {
+              "defined": {
+                "name": "VaultConfig"
+              }
+            }
+          },
+          {
+            "name": "pending_config",
+            "docs": [
+              "Stashed by `update_config`, applied at the next finalize so the",
+              "admin cannot change rules mid-round."
+            ],
+            "type": {
+              "option": {
+                "defined": {
+                  "name": "VaultConfig"
+                }
+              }
+            }
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "phase",
+            "type": {
+              "defined": {
+                "name": "Phase"
+              }
+            }
+          },
+          {
+            "name": "current_bucket",
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "current_expiry_ms",
+            "docs": [
+              "Expiry of `current_bucket`; 0 when none."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "selling_ends_ms",
+            "docs": [
+              "`open_rfq` forbidden after this."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "open_rfqs",
+            "type": "u64"
+          },
+          {
+            "name": "open_swap_rfqs",
+            "type": "u64"
+          },
+          {
+            "name": "positions_head",
+            "type": "u64"
+          },
+          {
+            "name": "positions_tail",
+            "type": "u64"
+          },
+          {
+            "name": "round_premium_collected",
+            "docs": [
+              "Net-of-protocol-fee premium collected this round, settlement units."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "round_swap_settlement_out",
+            "docs": [
+              "Cumulative swap legs this round, for the premium→underlying",
+              "conversion at the round's realized rate."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "round_swap_underlying_in",
+            "type": "u64"
+          },
+          {
+            "name": "paused_deposits",
+            "type": "bool"
+          },
+          {
+            "name": "auction_nonce",
+            "docs": [
+              "Monotonic per-vault auction salt for CPI-created auctions."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "salt",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultBucketSelected",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "strike",
+            "type": "u128"
+          },
+          {
+            "name": "strike_scale",
+            "type": "u8"
+          },
+          {
+            "name": "expiry_ms",
+            "type": "u64"
+          },
+          {
+            "name": "selling_ends_ms",
+            "type": "u64"
+          },
+          {
+            "name": "spot",
+            "type": "u128"
+          },
+          {
+            "name": "spot_scale",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultConfig",
+      "docs": [
+        "Port of `vault::VaultConfig` — field-for-field."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mgmt_fee_bps_annual",
+            "type": "u64"
+          },
+          {
+            "name": "perf_fee_bps",
+            "type": "u64"
+          },
+          {
+            "name": "round_ms",
+            "type": "u64"
+          },
+          {
+            "name": "selling_window_ms",
+            "type": "u64"
+          },
+          {
+            "name": "min_strike_bps_over_spot",
+            "type": "u64"
+          },
+          {
+            "name": "max_strike_bps_over_spot",
+            "type": "u64"
+          },
+          {
+            "name": "min_expiry_lead_ms",
+            "type": "u64"
+          },
+          {
+            "name": "max_expiry_lead_ms",
+            "type": "u64"
+          },
+          {
+            "name": "min_reserve_premium_bps",
+            "type": "u64"
+          },
+          {
+            "name": "max_slice_amount",
+            "type": "u64"
+          },
+          {
+            "name": "max_open_rfqs",
+            "type": "u64"
+          },
+          {
+            "name": "rfq_duration_ms",
+            "type": "u64"
+          },
+          {
+            "name": "rfq_snipe_window_ms",
+            "type": "u64"
+          },
+          {
+            "name": "rfq_snipe_extension_ms",
+            "type": "u64"
+          },
+          {
+            "name": "rfq_max_extension_ms",
+            "type": "u64"
+          },
+          {
+            "name": "rfq_min_increment_bps",
+            "type": "u64"
+          },
+          {
+            "name": "hold_premium_in_settlement",
+            "type": "bool"
+          },
+          {
+            "name": "max_swap_slippage_bps",
+            "type": "u64"
+          },
+          {
+            "name": "underlying_feed_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "settlement_feed_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "max_price_age_secs",
+            "type": "u64"
+          },
+          {
+            "name": "max_conf_bps",
+            "type": "u64"
+          },
+          {
+            "name": "underlying_decimals",
+            "type": "u8"
+          },
+          {
+            "name": "settlement_decimals",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultConfigApplied",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "mgmt_fee_bps_annual",
+            "type": "u64"
+          },
+          {
+            "name": "perf_fee_bps",
+            "type": "u64"
+          },
+          {
+            "name": "round_ms",
+            "type": "u64"
+          },
+          {
+            "name": "selling_window_ms",
+            "type": "u64"
+          },
+          {
+            "name": "min_strike_bps_over_spot",
+            "type": "u64"
+          },
+          {
+            "name": "max_strike_bps_over_spot",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultConfigUpdated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultCreated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "underlying_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "settlement_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "share_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "mgmt_fee_bps_annual",
+            "type": "u64"
+          },
+          {
+            "name": "perf_fee_bps",
+            "type": "u64"
+          },
+          {
+            "name": "round_ms",
+            "type": "u64"
+          },
+          {
+            "name": "selling_window_ms",
+            "type": "u64"
+          },
+          {
+            "name": "min_strike_bps_over_spot",
+            "type": "u64"
+          },
+          {
+            "name": "max_strike_bps_over_spot",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultDeposit",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "depositor",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultDepositsPaused",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "paused",
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultFeesCharged",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "mgmt_fee",
+            "type": "u64"
+          },
+          {
+            "name": "perf_fee",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultPosition",
+      "docs": [
+        "FIFO index entry for a Position held by the vault (the Move",
+        "`ObjectTable<u64, Position>` row). Created at settle_rfq, closed at",
+        "crank_redeem."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "index",
+            "type": "u64"
+          },
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultPositionRedeemed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "underlying",
+            "type": "u64"
+          },
+          {
+            "name": "settlement",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultRfqOpened",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "auction",
+            "type": "pubkey"
+          },
+          {
+            "name": "slice_amount",
+            "type": "u64"
+          },
+          {
+            "name": "reserve_premium",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultRfqSettled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "auction",
+            "type": "pubkey"
+          },
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "net_premium",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultRfqUnsold",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "auction",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultRoundFinalized",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "pps",
+            "type": "u128"
+          },
+          {
+            "name": "aum",
+            "type": "u64"
+          },
+          {
+            "name": "shares",
+            "type": "u64"
+          },
+          {
+            "name": "premium_s",
+            "type": "u64"
+          },
+          {
+            "name": "premium_u",
+            "type": "u64"
+          },
+          {
+            "name": "withdrawals_owed",
+            "type": "u64"
+          },
+          {
+            "name": "shares_burned",
+            "type": "u64"
+          },
+          {
+            "name": "deposits_processed",
+            "type": "u64"
+          },
+          {
+            "name": "shares_minted",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultSwapOpened",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "auction",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount_s",
+            "type": "u64"
+          },
+          {
+            "name": "reserve_underlying",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultSwapSettled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "auction",
+            "type": "pubkey"
+          },
+          {
+            "name": "bidder",
+            "type": "pubkey"
+          },
+          {
+            "name": "settlement_out",
+            "type": "u64"
+          },
+          {
+            "name": "underlying_in",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultSwapUnfilled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "auction",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount_s",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "WithdrawCompleted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "withdrawer",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "shares",
+            "type": "u64"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "WithdrawInitiated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "withdrawer",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "shares",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "WithdrawReceipt",
+      "docs": [
+        "Two-step withdrawal ticket: pays `shares × pps[round] / PPS_SCALE`",
+        "once round `round` finalizes."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u64"
+          },
+          {
+            "name": "shares",
+            "type": "u64"
+          }
+        ]
+      }
+    }
+  ]
+}

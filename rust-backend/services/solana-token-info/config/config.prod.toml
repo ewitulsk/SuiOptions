@@ -1,0 +1,33 @@
+# solana-token-info config — prod env (devnet for now).
+#
+# prod is a distinct devnet deployment (its own program initialization,
+# separate from staging). program_info comes from the `prod` slot in
+# solana-deployments.json; because the network is not mainnet-beta, the
+# test-token overlay is folded into `/tokens` just like staging.
+
+environment        = "prod"
+network            = "devnet"
+deployments_path   = "/app/deployments/solana-deployments.json"
+
+database_url       = "postgresql://solana_token_info_prod:${DB_PASSWORD}@${DB_HOST}:5432/solana_token_info_prod"
+db_pool_size       = 8
+
+public_bind_addr   = "0.0.0.0:9005"
+internal_bind_addr = "0.0.0.0:9006"
+
+allowed_origins    = ["*"]
+
+# solana-auth-service internal verify route (compose-internal) — gates the
+# public mutate endpoints.
+auth_service_url   = "http://solana-auth-service:9008"
+
+# Display metadata for the prod test-token overlay. Keyed by ticker.
+[seed_meta.TBTC]
+name     = "Test Bitcoin"
+logo_uri = "https://assets.coingecko.com/coins/images/1/small/bitcoin.png"
+[seed_meta.TUSDC]
+name     = "Test USDC"
+logo_uri = "https://assets.coingecko.com/coins/images/6319/small/usdc.png"
+[seed_meta.TSOL]
+name     = "Test Solana"
+logo_uri = "https://assets.coingecko.com/coins/images/4128/small/solana.png"

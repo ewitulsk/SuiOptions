@@ -1,0 +1,82 @@
+# solana-mm-bot config — staging env (devnet deployment).
+
+health_addr        = "0.0.0.0:9010"
+
+network            = "devnet"
+
+quoting_url        = "ws://solana-quoting-service:9002/"
+
+indexer_graphql_url = "http://solana-indexer:9002/graphql"
+
+# Non-mainnet: top the wallet up from the gas-station faucet.
+faucet_url         = "http://solana-gas-station:9009"
+
+mm_account_salt    = 0
+
+# Derive mode: `underlying_symbols` left unset, so the bot makes markets in
+# every enabled token-info token with a Pyth feed, and a watcher restarts
+# the bot to pick up newly-listed underlyings. Pin an explicit
+# `underlying_symbols = [...]` list to opt out, or add
+# `underlying_exclude = [...]` to skip specific tickers.
+settlement_symbol  = "TUSDC"
+
+rate               = 0.0
+quote_ttl_ms       = 30_000
+
+# Minimum premium-space spread (deep-ITM floor); the primary spread is the
+# vol-space markup/markdown below.
+ask_markup_bps     = 100
+bid_markdown_bps   = 100
+ask_vol_markup     = 1.10
+bid_vol_markdown   = 0.90
+# Last-look charge: |delta|·spot·sigma·√(ttl_years) on the ask / off the bid.
+ttl_charge_mult    = 1.0
+# Extra vol widening while the vol buffer is cold (fallback sigma in use).
+fallback_vol_penalty = 1.25
+
+max_quote_notional = 0
+size_widening_vol  = 0.10
+size_ref_notional  = 100_000_000_000
+
+roles = ["trader_mm", "writer_mm"]
+bulk_view_enabled = true
+
+bootstrap_settlement_amount = 1_000_000_000_000
+bootstrap_underlying_amount = 100_000_000_000
+
+underlying_replenish_threshold    = 20_000_000_000
+underlying_replenish_amount       = 100_000_000_000
+underlying_replenish_interval_secs = 60
+
+[smile]
+skew      = 0.0
+convexity = 0.0
+
+# Live prices come from solana-oracle-service (ORACLE_URL, set in compose).
+[pyth]
+max_price_age_ms       = 5_000
+max_publish_lag_ms     = 10_000
+max_conf_bps           = 0
+vol_window_hours       = 24
+vol_long_window_hours  = 168
+vol_sample_interval_ms = 300_000
+fallback_vol           = 0.6
+[pyth.fallback_vols]
+TBTC = 0.45
+TWAL = 1.0
+
+# Unified on-chain auction bidder: the mm-bot is the intended counterparty
+# for the vaults' venue auctions — without it the keeper's slices expire
+# unsold every round. All three modes on; tuning uses the struct defaults.
+[onchain_auction]
+covered_call     = true
+cash_secured_put = true
+swap             = true
+poll_secs             = 10
+initial_bid           = "reserve_plus"
+shade_bps             = 300
+rebid                 = true
+max_concurrent_escrow = 5_000_000_000
+min_deadline_lead_ms  = 30_000
+swap_bid_margin_bps        = 20
+swap_max_concurrent_escrow = 5_000_000_000

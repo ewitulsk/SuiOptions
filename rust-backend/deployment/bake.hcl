@@ -123,6 +123,115 @@ target "oracle-service" {
   cache-to   = [{ type = "gha", mode = "max", scope = "oracle-service" }]
 }
 
+target "solana-indexer" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.solana-indexer"
+  tags       = ["${ECR}/options/solana-indexer:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "solana-indexer" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "solana-indexer" }]
+}
+
+# Standalone Solana workspaces (gas-station / keeper / option-scheduler /
+# mm-bot / balance-monitor) path-depend on ../solana-contracts/programs, so
+# their build context is the REPO ROOT, not rust-backend/. Paths here
+# resolve from the `docker buildx bake` working directory (rust-backend/ —
+# see _deploy.yml), hence context ".." and dockerfile paths prefixed with
+# rust-backend/ (dockerfile resolves relative to the context). The
+# repo-root .dockerignore keeps the context to rust-backend/ +
+# solana-contracts/.
+target "_solana-standalone" {
+  context   = ".."
+  platforms = ["linux/amd64"]
+}
+
+target "solana-token-info" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.solana-token-info"
+  tags       = ["${ECR}/options/solana-token-info:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "solana-token-info" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "solana-token-info" }]
+}
+
+target "solana-auth-service" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.solana-auth-service"
+  tags       = ["${ECR}/options/solana-auth-service:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "solana-auth-service" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "solana-auth-service" }]
+}
+
+target "solana-api-service" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.solana-api-service"
+  tags       = ["${ECR}/options/solana-api-service:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "solana-api-service" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "solana-api-service" }]
+}
+
+target "solana-quoting-service" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.solana-quoting-service"
+  tags       = ["${ECR}/options/solana-quoting-service:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "solana-quoting-service" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "solana-quoting-service" }]
+}
+
+target "solana-oracle-service" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.solana-oracle-service"
+  tags       = ["${ECR}/options/solana-oracle-service:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "solana-oracle-service" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "solana-oracle-service" }]
+}
+
+target "solana-price-charting" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.solana-price-charting"
+  tags       = ["${ECR}/options/solana-price-charting:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "solana-price-charting" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "solana-price-charting" }]
+}
+
+target "solana-gas-station" {
+  inherits   = ["_solana-standalone"]
+  dockerfile = "rust-backend/Dockerfile.solana-gas-station"
+  tags       = ["${ECR}/options/solana-gas-station:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "solana-gas-station" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "solana-gas-station" }]
+}
+
+target "solana-keeper" {
+  inherits   = ["_solana-standalone"]
+  dockerfile = "rust-backend/Dockerfile.solana-keeper"
+  tags       = ["${ECR}/options/solana-keeper:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "solana-keeper" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "solana-keeper" }]
+}
+
+target "solana-option-scheduler" {
+  inherits   = ["_solana-standalone"]
+  dockerfile = "rust-backend/Dockerfile.solana-option-scheduler"
+  tags       = ["${ECR}/options/solana-option-scheduler:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "solana-option-scheduler" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "solana-option-scheduler" }]
+}
+
+target "solana-mm-bot" {
+  inherits   = ["_solana-standalone"]
+  dockerfile = "rust-backend/Dockerfile.solana-mm-bot"
+  tags       = ["${ECR}/options/solana-mm-bot:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "solana-mm-bot" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "solana-mm-bot" }]
+}
+
+target "solana-balance-monitor" {
+  inherits   = ["_solana-standalone"]
+  dockerfile = "rust-backend/Dockerfile.solana-balance-monitor"
+  tags       = ["${ECR}/options/solana-balance-monitor:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "solana-balance-monitor" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "solana-balance-monitor" }]
+}
+
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper", "balance-monitor", "oracle-service"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper", "balance-monitor", "oracle-service", "solana-indexer", "solana-token-info", "solana-auth-service", "solana-api-service", "solana-quoting-service", "solana-oracle-service", "solana-price-charting", "solana-gas-station", "solana-keeper", "solana-option-scheduler", "solana-mm-bot", "solana-balance-monitor"]
 }

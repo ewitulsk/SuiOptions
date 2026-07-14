@@ -210,3 +210,235 @@ resource "aws_secretsmanager_secret_version" "sui_rpc_placeholder" {
     ignore_changes = [secret_string]
   }
 }
+
+# solana-indexer secret per env — the Helius API key backing the
+# LaserStream (Yellowstone gRPC) subscription. Placeholder shape; put the
+# real key by hand after apply:
+#   aws secretsmanager put-secret-value --secret-id options/<env>/solana-indexer \
+#     --secret-string '{"helius_api_key":"<key>"}'
+# render-secrets.sh skips an unfilled secret (other services deploy fine);
+# solana-indexer itself crash-loops until the key is real.
+resource "aws_secretsmanager_secret" "solana_indexer" {
+  for_each                = toset(local.envs)
+  name                    = "options/${each.key}/solana-indexer"
+  description             = "solana-indexer Helius API key (JSON: helius_api_key)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "solana_indexer_placeholder" {
+  for_each  = aws_secretsmanager_secret.solana_indexer
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    helius_api_key = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}
+
+# ─── Solana service secrets (docs/solana/backend/13-infra-and-deployment.md) ──
+# Auto-generated: solana-token-info (db_password), solana-auth-service
+# (jwt_secret) — mirror their Sui twins above. Everything else is a
+# hand-filled REPLACE_ME placeholder (keypairs generated with
+# `solana-keygen new`, stored base58; see the migration run-book).
+
+# solana-token-info secret per env.
+resource "aws_secretsmanager_secret" "solana_token_info" {
+  for_each                = toset(local.envs)
+  name                    = "options/${each.key}/solana-token-info"
+  description             = "solana-token-info DB password (JSON: db_password)."
+  recovery_window_in_days = 7
+}
+
+resource "random_password" "solana_token_info_db" {
+  for_each = toset(local.envs)
+  length   = 32
+  special  = false
+}
+
+resource "aws_secretsmanager_secret_version" "solana_token_info" {
+  for_each  = aws_secretsmanager_secret.solana_token_info
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    db_password = random_password.solana_token_info_db[each.key].result
+  })
+}
+
+# solana-auth-service secret per env — JWT signing key, auto-generated.
+# Deliberately distinct from the Sui auth-service secret so tokens are not
+# cross-valid between the two JWT domains.
+resource "aws_secretsmanager_secret" "solana_auth_service" {
+  for_each                = toset(local.envs)
+  name                    = "options/${each.key}/solana-auth-service"
+  description             = "solana-auth-service JWT signing secret (JSON: jwt_secret)."
+  recovery_window_in_days = 7
+}
+
+resource "random_password" "solana_auth_jwt" {
+  for_each = toset(local.envs)
+  length   = 48
+  special  = false
+}
+
+resource "aws_secretsmanager_secret_version" "solana_auth_service" {
+  for_each  = aws_secretsmanager_secret.solana_auth_service
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    jwt_secret = random_password.solana_auth_jwt[each.key].result
+  })
+}
+
+# solana-gas-station secret per env — the station (fee payer + faucet mint
+# authority) keypair. Placeholder shape, fill by hand after apply.
+resource "aws_secretsmanager_secret" "solana_gas_station" {
+  for_each                = toset(local.envs)
+  name                    = "options/${each.key}/solana-gas-station"
+  description             = "solana-gas-station station keypair (JSON: keypair)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "solana_gas_station_placeholder" {
+  for_each  = aws_secretsmanager_secret.solana_gas_station
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    keypair = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}
+
+# solana-scheduler secret per env — the admin keypair (config.admin;
+# parallels the Sui scheduler's deployer key). Placeholder shape.
+resource "aws_secretsmanager_secret" "solana_scheduler" {
+  for_each                = toset(local.envs)
+  name                    = "options/${each.key}/solana-scheduler"
+  description             = "solana-option-scheduler admin keypair (JSON: keypair)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "solana_scheduler_placeholder" {
+  for_each  = aws_secretsmanager_secret.solana_scheduler
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    keypair = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}
+
+# solana-keeper secret per env — a plain gas wallet (no privileged
+# accounts) + an optional Pyth API key for its direct Hermes path.
+resource "aws_secretsmanager_secret" "solana_keeper" {
+  for_each                = toset(local.envs)
+  name                    = "options/${each.key}/solana-keeper"
+  description             = "solana-keeper gas keypair + optional Pyth key (JSON: keypair, pyth_api_key)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "solana_keeper_placeholder" {
+  for_each  = aws_secretsmanager_secret.solana_keeper
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    keypair      = "REPLACE_ME"
+    pyth_api_key = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}
+
+# solana-mm-bot secret per env — wallet keypair + the ed25519 quote signing
+# seed registered on the MmAccount. Placeholder shape.
+resource "aws_secretsmanager_secret" "solana_mm_bot" {
+  for_each                = toset(local.envs)
+  name                    = "options/${each.key}/solana-mm-bot"
+  description             = "solana-mm-bot signing keys (JSON: keypair, quote_key)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "solana_mm_bot_placeholder" {
+  for_each  = aws_secretsmanager_secret.solana_mm_bot
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    keypair   = "REPLACE_ME"
+    quote_key = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}
+
+# solana-oracle-service secret per env — optional Pyth API key (Bearer on
+# the Hermes SSE subscription + Benchmarks requests). Placeholder shape.
+resource "aws_secretsmanager_secret" "solana_oracle_service" {
+  for_each                = toset(local.envs)
+  name                    = "options/${each.key}/solana-oracle-service"
+  description             = "solana-oracle-service Pyth API key (JSON: pyth_api_key)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "solana_oracle_service_placeholder" {
+  for_each  = aws_secretsmanager_secret.solana_oracle_service
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    pyth_api_key = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}
+
+# solana-price-charting secret per env — the Tiger Data TimescaleDB URL for
+# the Solana OHLC/APY store (a separate `solana` DB on the shared
+# instance). Placeholder shape; put the real URL by hand after apply.
+resource "aws_secretsmanager_secret" "solana_price_charting" {
+  for_each                = toset(local.envs)
+  name                    = "options/${each.key}/solana-price-charting"
+  description             = "solana-price-charting TimescaleDB URL (JSON: database_url)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "solana_price_charting_placeholder" {
+  for_each  = aws_secretsmanager_secret.solana_price_charting
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    database_url = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}
+
+# Shared Solana JSON-RPC endpoint — mirrors sui-rpc above. One secret per
+# env; render-secrets.sh injects it into the [solana] block of every keyed
+# Solana service toml (and a standalone toml for solana-balance-monitor).
+# Absent / REPLACE_ME → services fall back to the public cluster endpoint.
+#   aws secretsmanager put-secret-value --secret-id options/<env>/solana-rpc \
+#     --secret-string '{"rpc_url":"https://devnet.helius-rpc.com/?api-key=..."}'
+resource "aws_secretsmanager_secret" "solana_rpc" {
+  for_each                = toset(local.envs)
+  name                    = "options/${each.key}/solana-rpc"
+  description             = "Shared Solana JSON-RPC endpoint (JSON: rpc_url)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "solana_rpc_placeholder" {
+  for_each  = aws_secretsmanager_secret.solana_rpc
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    rpc_url = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}

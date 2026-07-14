@@ -48,6 +48,8 @@ pub struct Secrets {
     #[serde(default)]
     pub sui: SuiSecrets,
     #[serde(default)]
+    pub solana: SolanaSecrets,
+    #[serde(default)]
     pub mm_bot: MmBotSecrets,
     #[serde(default)]
     pub auth: AuthSecrets,
@@ -65,6 +67,18 @@ pub struct SuiSecrets {
     /// Optional JSON-RPC endpoint override shared by every binary. When set,
     /// `Secrets::resolve_rpc_url` returns this instead of the public network
     /// default. Absent → public endpoint.
+    pub rpc_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SolanaSecrets {
+    pub testnet: Option<String>,
+    pub mainnet: Option<String>,
+    pub devnet: Option<String>,
+    /// Used when the per-network slot is unset.
+    pub default: Option<String>,
+    /// Optional JSON-RPC endpoint override (e.g. a keyed Helius URL) shared
+    /// by every Solana binary. Absent → public cluster endpoint.
     pub rpc_url: Option<String>,
 }
 
@@ -137,6 +151,40 @@ impl Secrets {
                      fallback"
                 )
             })
+    }
+
+    /// Solana keypair for `network` (case-insensitive: `mainnet` /
+    /// `mainnet-beta` / `testnet` / `devnet`). The value is either a base58
+    /// 64-byte keypair or a Solana-CLI JSON byte array; decoding is the
+    /// caller's job (this crate stays SDK-free). Falls back to
+    /// `solana.default`. Never reads env.
+    pub fn solana_keypair(&self, network: &str) -> Result<&str> {
+        debug!(network, "resolving solana keypair");
+        let per_net = match network.to_ascii_lowercase().as_str() {
+            "mainnet" | "mainnet-beta" => &self.solana.mainnet,
+            "testnet" => &self.solana.testnet,
+            "devnet" => &self.solana.devnet,
+            other => return Err(anyhow!("unknown network slot: {other}")),
+        };
+        per_net
+            .as_deref()
+            .or(self.solana.default.as_deref())
+            .ok_or_else(|| {
+                anyhow!(
+                    "secrets.toml has no solana.{network} key and no \
+                     solana.default fallback"
+                )
+            })
+    }
+
+    /// Solana JSON-RPC endpoint: the operator-provided `solana.rpc_url`
+    /// override if set, else `fallback` (the caller's public cluster URL).
+    /// Never errors — a missing override degrades to the public endpoint.
+    pub fn resolve_solana_rpc_url(&self, fallback: &str) -> String {
+        self.solana
+            .rpc_url
+            .clone()
+            .unwrap_or_else(|| fallback.to_string())
     }
 
     pub fn mm_quote_key(&self) -> Result<&str> {
@@ -262,6 +310,41 @@ testnet = "suiprivkey1testnet"
             "https://fallback.example"
         );
         std::fs::remove_file(&without).ok();
+    }
+
+    #[test]
+    fn solana_slots_and_rpc_override() {
+        let p = write_tmp(
+            "solana",
+            r#"
+[solana]
+devnet = "base58keypairdev"
+default = "base58keypairdefault"
+rpc_url = "https://devnet.helius-rpc.com/?api-key=x"
+"#,
+        );
+        let s = Secrets::load(&p).unwrap();
+        assert_eq!(s.solana_keypair("devnet").unwrap(), "base58keypairdev");
+        // mainnet-beta aliases the mainnet slot; falls back to default here.
+        assert_eq!(
+            s.solana_keypair("mainnet-beta").unwrap(),
+            "base58keypairdefault"
+        );
+        assert!(s.solana_keypair("localnet").is_err());
+        assert_eq!(
+            s.resolve_solana_rpc_url("https://api.devnet.solana.com"),
+            "https://devnet.helius-rpc.com/?api-key=x"
+        );
+        std::fs::remove_file(&p).ok();
+
+        let empty = write_tmp("solana_empty", "[sui]\ntestnet = \"k\"\n");
+        let s = Secrets::load(&empty).unwrap();
+        assert!(s.solana_keypair("devnet").is_err());
+        assert_eq!(
+            s.resolve_solana_rpc_url("https://api.devnet.solana.com"),
+            "https://api.devnet.solana.com"
+        );
+        std::fs::remove_file(&empty).ok();
     }
 
     #[test]

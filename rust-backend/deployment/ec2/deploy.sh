@@ -50,7 +50,7 @@ COMPOSE_FILE="docker-compose.${ENV}.yml"
 # Canonical service set + their .env tag-variable names + the compose
 # service name (mostly identical to the cargo crate name, except
 # quoting-service is referenced as `quoting` in compose).
-ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station price-charting balance-monitor keeper oracle-service)
+ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station price-charting balance-monitor keeper oracle-service solana-indexer solana-token-info solana-auth-service solana-api-service solana-quoting-service solana-oracle-service solana-price-charting solana-gas-station solana-keeper solana-option-scheduler solana-mm-bot solana-balance-monitor)
 
 tag_var_for() {
   case "$1" in
@@ -66,6 +66,18 @@ tag_var_for() {
     balance-monitor)  echo BALANCE_MONITOR_TAG ;;
     keeper)           echo KEEPER_TAG ;;
     oracle-service)   echo ORACLE_SERVICE_TAG ;;
+    solana-indexer)   echo SOLANA_INDEXER_TAG ;;
+    solana-token-info)       echo SOLANA_TOKEN_INFO_TAG ;;
+    solana-auth-service)     echo SOLANA_AUTH_SERVICE_TAG ;;
+    solana-api-service)      echo SOLANA_API_SERVICE_TAG ;;
+    solana-quoting-service)  echo SOLANA_QUOTING_TAG ;;
+    solana-oracle-service)   echo SOLANA_ORACLE_SERVICE_TAG ;;
+    solana-price-charting)   echo SOLANA_PRICE_CHARTING_TAG ;;
+    solana-gas-station)      echo SOLANA_GAS_STATION_TAG ;;
+    solana-keeper)           echo SOLANA_KEEPER_TAG ;;
+    solana-option-scheduler) echo SOLANA_SCHEDULER_TAG ;;
+    solana-mm-bot)           echo SOLANA_MM_BOT_TAG ;;
+    solana-balance-monitor)  echo SOLANA_BALANCE_MONITOR_TAG ;;
     *) return 1 ;;
   esac
 }
@@ -83,6 +95,20 @@ compose_name_for() {
     balance-monitor)  echo balance-monitor ;;
     keeper)           echo keeper ;;
     oracle-service)   echo oracle-service ;;
+    solana-indexer)   echo solana-indexer ;;
+    # The Solana services keep their full names in compose (no quoting →
+    # quoting-service style shortening).
+    solana-token-info)       echo solana-token-info ;;
+    solana-auth-service)     echo solana-auth-service ;;
+    solana-api-service)      echo solana-api-service ;;
+    solana-quoting-service)  echo solana-quoting-service ;;
+    solana-oracle-service)   echo solana-oracle-service ;;
+    solana-price-charting)   echo solana-price-charting ;;
+    solana-gas-station)      echo solana-gas-station ;;
+    solana-keeper)           echo solana-keeper ;;
+    solana-option-scheduler) echo solana-option-scheduler ;;
+    solana-mm-bot)           echo solana-mm-bot ;;
+    solana-balance-monitor)  echo solana-balance-monitor ;;
     *) return 1 ;;
   esac
 }
@@ -134,6 +160,11 @@ CHART_DATABASE_URL=""
 if [ -f "secrets/.chart_database_url" ]; then
   CHART_DATABASE_URL=$(cat "secrets/.chart_database_url")
 fi
+# Same, for solana-price-charting's Timescale store.
+SOLANA_CHART_DATABASE_URL=""
+if [ -f "secrets/.solana_chart_database_url" ]; then
+  SOLANA_CHART_DATABASE_URL=$(cat "secrets/.solana_chart_database_url")
+fi
 
 # OTLP trace endpoint (SO-180). On the shared host the services reach the
 # co-located Tempo by docker DNS; the dedicated prod host gets the central
@@ -168,6 +199,9 @@ trap 'rm -f "$NEW_ENV"' EXIT
   echo "DB_HOST=$DB_HOST"
   if [ -n "$CHART_DATABASE_URL" ]; then
     echo "CHART_DATABASE_URL=$CHART_DATABASE_URL"
+  fi
+  if [ -n "$SOLANA_CHART_DATABASE_URL" ]; then
+    echo "SOLANA_CHART_DATABASE_URL=$SOLANA_CHART_DATABASE_URL"
   fi
   echo "OTEL_ENDPOINT=$OTEL_ENDPOINT"
   for svc in "${ALL_SERVICES[@]}"; do
@@ -234,6 +268,18 @@ health_path_for() {
     auth-service)     echo "/$ENV/auth/health" ;;
     price-charting)   echo "/$ENV/charts/health" ;;
     keeper)           echo "/$ENV/keeper/health" ;;
+    solana-indexer)   echo "/$ENV/solana-indexer/health" ;;
+    # Publicly-routed Solana services only. The internal-only ones
+    # (solana-keeper / solana-option-scheduler / solana-mm-bot /
+    # solana-balance-monitor / solana-oracle-service) are deliberately
+    # absent — no nginx route, so the gate is skipped (Gatus covers their
+    # container-DNS ops ports instead).
+    solana-token-info)       echo "/$ENV/solana-token-info/health" ;;
+    solana-auth-service)     echo "/$ENV/solana-auth/health" ;;
+    solana-api-service)      echo "/$ENV/solana-api/health" ;;
+    solana-quoting-service)  echo "/$ENV/solana-quoting/health" ;;
+    solana-price-charting)   echo "/$ENV/solana-charts/health" ;;
+    solana-gas-station)      echo "/$ENV/solana-gas-station/health" ;;
     *) return 1 ;;
   esac
 }

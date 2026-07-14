@@ -1,0 +1,25 @@
+# Solana quoting service config — local dev.
+#
+# The service holds no funds and signs no transactions — it routes RFQs
+# between retail clients and market makers, and tracks reservations against
+# the solana-indexer's on-chain balance view.
+
+bind_addr            = "127.0.0.1:9002"
+indexer_graphql_url  = "http://127.0.0.1:9002/graphql"
+
+# Window during which the service collects MM quotes for one retail RFQ
+# before responding. Spec default is 2s; tighten in latency-sensitive setups.
+rfq_window_ms        = 2000
+
+# How long a cached bulk-view (tile) premium stays fresh. A hit older than
+# this is still served immediately (stale-while-revalidate) while a refresh
+# re-broadcasts to MMs in the background. Spec default 30s.
+bulk_view_cache_ttl_ms = 30000
+
+# WS keep-alive cadence.
+ping_interval_secs   = 15
+
+# solana-token-info public API. The protocol_id domain separator (the
+# options_core Config PDA, base58) is fetched from here at boot, exactly as
+# the program derives it, so a redeploy doesn't require editing this file.
+token_info_url       = "http://127.0.0.1:9005"

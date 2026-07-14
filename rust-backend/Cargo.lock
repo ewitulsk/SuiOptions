@@ -1406,6 +1406,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "119771309b95163ec7aaf79810da82f7cd0599c19722d48b9c03894dca833966"
 
 [[package]]
+name = "borsh"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3f6da4992df95bbcd9af42a6c7dcb994498fc9048230405f3b36ff7cd3f145"
+dependencies = [
+ "borsh-derive",
+ "bytes",
+ "cfg_aliases 0.2.1",
+]
+
+[[package]]
+name = "borsh-derive"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ae8fb4fb5740e4b2c4884ff95f5f32f5e8479db1e8fd8eb49ddbe09eb09bb7c"
+dependencies = [
+ "once_cell",
+ "proc-macro-crate 3.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "brotli"
 version = "8.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9321,6 +9345,199 @@ dependencies = [
  "log",
  "rand 0.8.6",
  "sha1",
+]
+
+[[package]]
+name = "solana-api-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "borsh",
+ "bs58 0.5.1",
+ "chrono",
+ "clap",
+ "cli-spec",
+ "observability",
+ "pricing",
+ "reqwest",
+ "runtime-config",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "solana-indexer-graphql",
+ "solana-token-info-client",
+ "tokio",
+ "tower-http 0.6.10",
+ "tracing",
+]
+
+[[package]]
+name = "solana-auth-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "bs58 0.5.1",
+ "clap",
+ "cli-spec",
+ "config",
+ "dashmap 6.1.0",
+ "ed25519-dalek",
+ "hex",
+ "hmac",
+ "metrics",
+ "observability",
+ "rand 0.8.6",
+ "runtime-config",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower-http 0.6.10",
+ "tracing",
+]
+
+[[package]]
+name = "solana-deployments"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bs58 0.5.1",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "solana-indexer-graphql"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "observability",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "solana-oracle-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "clap",
+ "observability",
+ "oracle-service",
+ "reqwest",
+ "serde_json",
+ "solana-token-info-client",
+ "tokio",
+]
+
+[[package]]
+name = "solana-price-charting"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "bigdecimal",
+ "chrono",
+ "clap",
+ "cli-spec",
+ "diesel",
+ "diesel_migrations",
+ "metrics",
+ "observability",
+ "oracle-client",
+ "parking_lot 0.12.5",
+ "pricing",
+ "runtime-config",
+ "serde",
+ "serde_json",
+ "solana-indexer-graphql",
+ "solana-token-info-client",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower-http 0.6.10",
+ "tracing",
+]
+
+[[package]]
+name = "solana-quoting-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "borsh",
+ "bs58 0.5.1",
+ "clap",
+ "cli-spec",
+ "dashmap 6.1.0",
+ "ed25519-dalek",
+ "futures-util",
+ "hex",
+ "metrics",
+ "observability",
+ "parking_lot 0.12.5",
+ "protocol-types",
+ "rand 0.8.6",
+ "runtime-config",
+ "serde",
+ "serde_json",
+ "solana-indexer-graphql",
+ "solana-token-info-client",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "solana-token-info"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "auth-client",
+ "axum 0.7.9",
+ "chrono",
+ "clap",
+ "cli-spec",
+ "config",
+ "diesel",
+ "diesel_migrations",
+ "metrics",
+ "observability",
+ "r2d2",
+ "runtime-config",
+ "serde",
+ "serde_json",
+ "solana-deployments",
+ "solana-token-info-client",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower-http 0.6.10",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "solana-token-info-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "observability",
+ "protocol-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "solana-deployments",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

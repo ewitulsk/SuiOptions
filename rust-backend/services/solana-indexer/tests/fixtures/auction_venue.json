@@ -1,0 +1,1671 @@
+{
+  "address": "8cvpWnJaQ4kTEPypwrZvBPzEM4R7FbivgybXBm2ahvKk",
+  "metadata": {
+    "name": "auction_venue",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Generic escrowed ascending-auction venue (audit package 2)"
+  },
+  "instructions": [
+    {
+      "name": "bid",
+      "discriminator": [
+        199,
+        56,
+        85,
+        38,
+        146,
+        243,
+        37,
+        158
+      ],
+      "accounts": [
+        {
+          "name": "bidder",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "auction",
+          "writable": true
+        },
+        {
+          "name": "bid_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  105,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bidder_source",
+          "writable": true
+        },
+        {
+          "name": "previous_bidder_refund",
+          "docs": [
+            "The outbid bidder's ATA for the bid mint; required when a best bid",
+            "stands."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "token_recipient",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "create_call_auction",
+      "discriminator": [
+        236,
+        212,
+        29,
+        89,
+        238,
+        122,
+        209,
+        106
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "creator",
+          "signer": true
+        },
+        {
+          "name": "escrow_mint"
+        },
+        {
+          "name": "bid_mint"
+        },
+        {
+          "name": "auction",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  117,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "creator"
+              },
+              {
+                "kind": "arg",
+                "path": "salt"
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bid_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  105,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow_source",
+          "docs": [
+            "The creator's source of the escrowed tokens."
+          ],
+          "writable": true
+        },
+        {
+          "name": "proceeds_token",
+          "docs": [
+            "Receives the winning bid at settle (net premium for adapters).",
+            "Fixed here so coupled venues absorb into their own vaults."
+          ]
+        },
+        {
+          "name": "refund_token",
+          "docs": [
+            "Receives the escrow back on no-winner / refund / expired paths."
+          ]
+        },
+        {
+          "name": "bucket",
+          "docs": [
+            "Adapter modes: the options_core bucket this auction writes into.",
+            "for pure swaps (pass the auction itself as a placeholder)."
+          ]
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "salt",
+          "type": "u64"
+        },
+        {
+          "name": "escrow_amount",
+          "type": "u64"
+        },
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "AuctionParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "create_put_auction",
+      "discriminator": [
+        103,
+        33,
+        191,
+        65,
+        229,
+        144,
+        32,
+        235
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "creator",
+          "signer": true
+        },
+        {
+          "name": "escrow_mint"
+        },
+        {
+          "name": "bid_mint"
+        },
+        {
+          "name": "auction",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  117,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "creator"
+              },
+              {
+                "kind": "arg",
+                "path": "salt"
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bid_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  105,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow_source",
+          "docs": [
+            "The creator's source of the escrowed tokens."
+          ],
+          "writable": true
+        },
+        {
+          "name": "proceeds_token",
+          "docs": [
+            "Receives the winning bid at settle (net premium for adapters).",
+            "Fixed here so coupled venues absorb into their own vaults."
+          ]
+        },
+        {
+          "name": "refund_token",
+          "docs": [
+            "Receives the escrow back on no-winner / refund / expired paths."
+          ]
+        },
+        {
+          "name": "bucket",
+          "docs": [
+            "Adapter modes: the options_core bucket this auction writes into.",
+            "for pure swaps (pass the auction itself as a placeholder)."
+          ]
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "salt",
+          "type": "u64"
+        },
+        {
+          "name": "notional",
+          "type": "u64"
+        },
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "AuctionParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "create_swap_auction",
+      "discriminator": [
+        28,
+        69,
+        120,
+        134,
+        153,
+        72,
+        41,
+        213
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "creator",
+          "signer": true
+        },
+        {
+          "name": "escrow_mint"
+        },
+        {
+          "name": "bid_mint"
+        },
+        {
+          "name": "auction",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  117,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "creator"
+              },
+              {
+                "kind": "arg",
+                "path": "salt"
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bid_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  105,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow_source",
+          "docs": [
+            "The creator's source of the escrowed tokens."
+          ],
+          "writable": true
+        },
+        {
+          "name": "proceeds_token",
+          "docs": [
+            "Receives the winning bid at settle (net premium for adapters).",
+            "Fixed here so coupled venues absorb into their own vaults."
+          ]
+        },
+        {
+          "name": "refund_token",
+          "docs": [
+            "Receives the escrow back on no-winner / refund / expired paths."
+          ]
+        },
+        {
+          "name": "bucket",
+          "docs": [
+            "Adapter modes: the options_core bucket this auction writes into.",
+            "for pure swaps (pass the auction itself as a placeholder)."
+          ]
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "salt",
+          "type": "u64"
+        },
+        {
+          "name": "escrow_amount",
+          "type": "u64"
+        },
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "AuctionParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "settle_call",
+      "discriminator": [
+        58,
+        230,
+        6,
+        58,
+        104,
+        245,
+        154,
+        227
+      ],
+      "accounts": [
+        {
+          "name": "cranker",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "creator_wallet",
+          "writable": true
+        },
+        {
+          "name": "auction",
+          "writable": true
+        },
+        {
+          "name": "escrow_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bid_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  105,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "signer": true,
+          "optional": true
+        },
+        {
+          "name": "proceeds_token",
+          "writable": true
+        },
+        {
+          "name": "refund_token",
+          "writable": true
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "underlying_vault",
+          "writable": true
+        },
+        {
+          "name": "call_mint",
+          "writable": true
+        },
+        {
+          "name": "call_dest",
+          "docs": [
+            "Winner's call-coin destination; owner pinned to the winning bid's",
+            "token_recipient in the handler, mint enforced by core."
+          ],
+          "writable": true
+        },
+        {
+          "name": "core_config"
+        },
+        {
+          "name": "core_treasury_token",
+          "docs": [
+            "Core treasury's ATA for the bid mint (fee destination)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "core_event_authority_acc"
+        },
+        {
+          "name": "core_program",
+          "address": "6KeiQVrkr7uxW1LKhZGpjg7yaYVrz4AKyGaD7Dgnef1t"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "settle_expired",
+      "discriminator": [
+        187,
+        68,
+        57,
+        40,
+        121,
+        72,
+        73,
+        161
+      ],
+      "accounts": [
+        {
+          "name": "cranker",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "creator_wallet",
+          "writable": true
+        },
+        {
+          "name": "auction",
+          "writable": true
+        },
+        {
+          "name": "escrow_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bid_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  105,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "signer": true,
+          "optional": true
+        },
+        {
+          "name": "bucket"
+        },
+        {
+          "name": "bidder_refund",
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "refund_token",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "settle_put",
+      "discriminator": [
+        194,
+        118,
+        96,
+        247,
+        46,
+        99,
+        233,
+        184
+      ],
+      "accounts": [
+        {
+          "name": "cranker",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "creator_wallet",
+          "writable": true
+        },
+        {
+          "name": "auction",
+          "writable": true
+        },
+        {
+          "name": "escrow_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bid_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  105,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "signer": true,
+          "optional": true
+        },
+        {
+          "name": "proceeds_token",
+          "writable": true
+        },
+        {
+          "name": "refund_token",
+          "writable": true
+        },
+        {
+          "name": "bucket",
+          "writable": true
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "settlement_vault",
+          "writable": true
+        },
+        {
+          "name": "put_mint",
+          "writable": true
+        },
+        {
+          "name": "put_dest",
+          "docs": [
+            "Winner's put-coin destination."
+          ],
+          "writable": true
+        },
+        {
+          "name": "core_config"
+        },
+        {
+          "name": "core_treasury_token",
+          "writable": true
+        },
+        {
+          "name": "core_event_authority_acc"
+        },
+        {
+          "name": "core_program",
+          "address": "6KeiQVrkr7uxW1LKhZGpjg7yaYVrz4AKyGaD7Dgnef1t"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "settle_swap",
+      "discriminator": [
+        3,
+        130,
+        133,
+        180,
+        251,
+        87,
+        242,
+        250
+      ],
+      "accounts": [
+        {
+          "name": "cranker",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "creator_wallet",
+          "writable": true
+        },
+        {
+          "name": "auction",
+          "writable": true
+        },
+        {
+          "name": "escrow_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bid_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  105,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "auction"
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "signer": true,
+          "optional": true
+        },
+        {
+          "name": "winner_dest",
+          "docs": [
+            "Winner's escrow destination (fill path)."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "bidder_refund",
+          "docs": [
+            "Standing bidder's refund ATA (force_refund path)."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "proceeds_token",
+          "writable": true
+        },
+        {
+          "name": "refund_token",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "force_refund",
+          "type": "bool"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Auction",
+      "discriminator": [
+        218,
+        94,
+        247,
+        242,
+        126,
+        233,
+        131,
+        81
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "AuctionBid",
+      "discriminator": [
+        113,
+        186,
+        124,
+        132,
+        210,
+        152,
+        98,
+        191
+      ]
+    },
+    {
+      "name": "AuctionCreated",
+      "discriminator": [
+        133,
+        190,
+        194,
+        65,
+        172,
+        0,
+        70,
+        178
+      ]
+    },
+    {
+      "name": "AuctionSettled",
+      "discriminator": [
+        61,
+        151,
+        131,
+        170,
+        95,
+        203,
+        219,
+        147
+      ]
+    },
+    {
+      "name": "AuctionUnsold",
+      "discriminator": [
+        133,
+        240,
+        153,
+        110,
+        220,
+        240,
+        114,
+        248
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "AuctionClosed",
+      "msg": "Auction deadline has passed; no more bids"
+    },
+    {
+      "code": 6001,
+      "name": "AuctionNotClosed",
+      "msg": "Auction deadline has not passed yet"
+    },
+    {
+      "code": 6002,
+      "name": "BidTooLow",
+      "msg": "Bid below reserve or minimum increment"
+    },
+    {
+      "code": 6003,
+      "name": "DurationTooShort",
+      "msg": "Auction duration below the minimum"
+    },
+    {
+      "code": 6004,
+      "name": "TooCloseToExpiry",
+      "msg": "Auction would end too close to bucket expiry"
+    },
+    {
+      "code": 6005,
+      "name": "BucketExpiredOrInvalid",
+      "msg": "Bucket is expired or invalidated"
+    },
+    {
+      "code": 6006,
+      "name": "BucketStillLive",
+      "msg": "Bucket is still live; expired-recovery path unavailable"
+    },
+    {
+      "code": 6007,
+      "name": "WrongSettleAuthority",
+      "msg": "Missing or wrong settle authority for coupled auction"
+    },
+    {
+      "code": 6008,
+      "name": "WrongMode",
+      "msg": "Instruction does not match the auction mode"
+    },
+    {
+      "code": 6009,
+      "name": "ZeroAmount",
+      "msg": "Amount must be positive"
+    },
+    {
+      "code": 6010,
+      "name": "RecipientMismatch",
+      "msg": "Account does not match the recipient fixed at creation"
+    },
+    {
+      "code": 6011,
+      "name": "CollateralMismatch",
+      "msg": "Escrow does not equal the put's required collateral"
+    },
+    {
+      "code": 6012,
+      "name": "MathOverflow",
+      "msg": "Arithmetic overflow"
+    },
+    {
+      "code": 6013,
+      "name": "RefundAccountMismatch",
+      "msg": "Refund account is not the outbid bidder's ATA"
+    },
+    {
+      "code": 6014,
+      "name": "BucketMismatch",
+      "msg": "Account does not match the auction's bucket"
+    },
+    {
+      "code": 6015,
+      "name": "ForceRefundUnauthorized",
+      "msg": "force_refund requires the settle authority"
+    }
+  ],
+  "types": [
+    {
+      "name": "Auction",
+      "docs": [
+        "One escrowed ascending auction — the unification of `rfq.move`,",
+        "`rfq_put.move` and `swap_auction.move` (same machinery, different",
+        "legs). Escrowed bids are what make the best bid always settleable,",
+        "which is what makes the settle crank permissionless."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "creator",
+            "type": "pubkey"
+          },
+          {
+            "name": "salt",
+            "type": "u64"
+          },
+          {
+            "name": "mode",
+            "type": {
+              "defined": {
+                "name": "AuctionMode"
+              }
+            }
+          },
+          {
+            "name": "bucket",
+            "docs": [
+              "The options_core bucket for adapter modes; `Pubkey::default()` for",
+              "pure swaps."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "escrow_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "bid_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "docs": [
+              "Escrowed amount (underlying for calls, cash collateral for puts,",
+              "sell-side tokens for swaps)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "notional",
+            "docs": [
+              "Option notional in underlying units (== amount for calls; the put",
+              "notional for puts; 0 for swaps)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "reserve_bid",
+            "docs": [
+              "Bids below this are rejected — the only price-safety floor a quiet",
+              "auction has."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "deadline_ms",
+            "type": "u64"
+          },
+          {
+            "name": "snipe_window_ms",
+            "docs": [
+              "Anti-snipe: a best bid inside `snipe_window_ms` of the deadline",
+              "pushes it out by `snipe_extension_ms`, capped at `max_deadline_ms`."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "snipe_extension_ms",
+            "type": "u64"
+          },
+          {
+            "name": "max_deadline_ms",
+            "type": "u64"
+          },
+          {
+            "name": "min_increment_bps",
+            "docs": [
+              "Minimum improvement over the current best, in bps of the best."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "best_bidder",
+            "docs": [
+              "The bid escrow token account's balance IS the best bid."
+            ],
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "best_token_recipient",
+            "docs": [
+              "Where the winner wants the option coins (call/put recipient wallet)",
+              "or the swapped escrow (swap mode)."
+            ],
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "position_recipient",
+            "docs": [
+              "Owner of the minted Position (adapter modes)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "proceeds_token",
+            "docs": [
+              "Exact token account receiving the winning bid (net premium for",
+              "adapters, the bid tokens for swaps). Fixed at creation so a",
+              "coupled venue (the vault) can absorb into its own vaults."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "refund_token",
+            "docs": [
+              "Exact token account receiving the escrow back on the no-winner /",
+              "refund / expired paths."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "settle_authority",
+            "docs": [
+              "When set, only this authority (a coupled venue's PDA, signing via",
+              "CPI) may settle — the analog of `rfq.move`'s `coupled` flag."
+            ],
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuctionBid",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "auction",
+            "type": "pubkey"
+          },
+          {
+            "name": "bidder",
+            "type": "pubkey"
+          },
+          {
+            "name": "token_recipient",
+            "type": "pubkey"
+          },
+          {
+            "name": "bid",
+            "type": "u64"
+          },
+          {
+            "name": "previous_bid",
+            "type": "u64"
+          },
+          {
+            "name": "deadline_ms",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuctionCreated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "auction",
+            "type": "pubkey"
+          },
+          {
+            "name": "mode",
+            "type": {
+              "defined": {
+                "name": "AuctionMode"
+              }
+            }
+          },
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "creator",
+            "type": "pubkey"
+          },
+          {
+            "name": "escrow_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "bid_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "notional",
+            "type": "u64"
+          },
+          {
+            "name": "reserve_bid",
+            "type": "u64"
+          },
+          {
+            "name": "deadline_ms",
+            "type": "u64"
+          },
+          {
+            "name": "max_deadline_ms",
+            "type": "u64"
+          },
+          {
+            "name": "min_increment_bps",
+            "type": "u64"
+          },
+          {
+            "name": "settle_authority",
+            "type": {
+              "option": "pubkey"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuctionMode",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Swap"
+          },
+          {
+            "name": "CoveredCall"
+          },
+          {
+            "name": "CashSecuredPut"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuctionParams",
+      "docs": [
+        "Common creation parameters (the long Move arg lists, grouped)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "reserve_bid",
+            "type": "u64"
+          },
+          {
+            "name": "duration_ms",
+            "type": "u64"
+          },
+          {
+            "name": "snipe_window_ms",
+            "type": "u64"
+          },
+          {
+            "name": "snipe_extension_ms",
+            "type": "u64"
+          },
+          {
+            "name": "max_extension_ms",
+            "type": "u64"
+          },
+          {
+            "name": "min_increment_bps",
+            "type": "u64"
+          },
+          {
+            "name": "position_recipient",
+            "docs": [
+              "Owner of the minted Position (adapter modes; ignored for swaps)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "settle_authority",
+            "docs": [
+              "Coupled-venue settle gate (None ⇒ permissionless settle)."
+            ],
+            "type": {
+              "option": "pubkey"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuctionSettled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "auction",
+            "type": "pubkey"
+          },
+          {
+            "name": "mode",
+            "type": {
+              "defined": {
+                "name": "AuctionMode"
+              }
+            }
+          },
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "winner",
+            "type": "pubkey"
+          },
+          {
+            "name": "token_recipient",
+            "type": "pubkey"
+          },
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "position_recipient",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "notional",
+            "type": "u64"
+          },
+          {
+            "name": "gross_bid",
+            "type": "u64"
+          },
+          {
+            "name": "fee",
+            "type": "u64"
+          },
+          {
+            "name": "net_proceeds",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuctionUnsold",
+      "docs": [
+        "No winner, refund path, or expired-bucket recovery."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "auction",
+            "type": "pubkey"
+          },
+          {
+            "name": "mode",
+            "type": {
+              "defined": {
+                "name": "AuctionMode"
+              }
+            }
+          },
+          {
+            "name": "bucket",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "reserve_bid",
+            "type": "u64"
+          },
+          {
+            "name": "bid_refunded",
+            "docs": [
+              "True when a standing bid was refunded (out-of-band swap or dead",
+              "bucket), false for a plain no-bid expiry."
+            ],
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Config",
+      "docs": [
+        "Protocol config — the Sui `ProtocolConfig` + `AdminCap` fused: the",
+        "capability becomes an `admin` pubkey (rotatable via `set_admin`, the",
+        "analog of transferring the cap). The config PDA's own address is the",
+        "quote domain separator (Sui derived `protocol_id` from the AdminCap id)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "fee_bps",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ]
+}

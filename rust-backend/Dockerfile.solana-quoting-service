@@ -1,0 +1,26 @@
+# Builder runs under bake.hcl's target platform. Do NOT add
+# `--platform=$BUILDPLATFORM` — it would pin the builder to the GH
+# runner's arch and produce a binary that doesn't match the image
+# manifest's arch.
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev clang cmake protobuf-compiler git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+RUN cargo build --release -p solana-quoting-service
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /src/target/release/solana-quoting-service /usr/local/bin/solana-quoting-service
+COPY services/solana-quoting-service/config/ /app/config/
+# No deployments file: unlike the Sui quoting-service, the protocol_id
+# domain separator (options_core Config PDA) is fetched from
+# solana-token-info at boot.
+
+ENV APP_ENV=staging
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/solana-quoting-service --config /app/config/config.${APP_ENV}.toml"]

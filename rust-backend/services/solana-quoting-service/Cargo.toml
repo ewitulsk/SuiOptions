@@ -1,0 +1,55 @@
+[package]
+name = "solana-quoting-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "solana-quoting-service"
+path = "src/main.rs"
+
+[dependencies]
+# Sides (writer/trader/MM roles) are chain-agnostic; reusing them keeps the
+# WS wire serde byte-identical to the Sui twin.
+protocol-types = { workspace = true }
+runtime-config = { workspace = true }
+observability = { workspace = true }
+cli-spec       = { workspace = true }
+solana-indexer-graphql = { workspace = true }
+solana-token-info-client = { workspace = true }
+
+clap = { workspace = true }
+
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Canonical quote bytes (the Ed25519SigVerify message) are Borsh — the
+# Solana replacement for the Sui twin's BCS. bs58 decodes wire pubkeys,
+# base64 encodes the quote bytes shipped in RFQResponse.
+borsh = { version = "1", features = ["derive"] }
+bs58 = "0.5"
+base64 = { workspace = true }
+
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+tracing = { workspace = true }
+metrics = { workspace = true }
+
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
