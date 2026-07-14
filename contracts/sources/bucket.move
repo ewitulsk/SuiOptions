@@ -330,10 +330,13 @@ public fun write_collateralized<Underlying, Settlement, Call>(
     write_collateralized_balance(bucket, underlying_in.into_balance(), clock, ctx)
 }
 
-/// `Balance`-accepting sibling of `write_collateralized`, for venues in
-/// this package (e.g. the on-chain RFQ) whose escrow lives as a `Balance`.
-/// Same checks, same event.
-public(package) fun write_collateralized_balance<Underlying, Settlement, Call>(
+/// `Balance`-accepting sibling of `write_collateralized`, for venues (e.g.
+/// the on-chain RFQ) whose escrow lives as a `Balance`. Same checks, same
+/// event. Public and permissionless-safe by construction: full collateral
+/// in, `Position` + option coin out 1:1 — no premium leg, no quote bypass;
+/// supply == collateral is preserved. (`write_collateralized` already
+/// exposes the identical capability for `Coin` callers.)
+public fun write_collateralized_balance<Underlying, Settlement, Call>(
     bucket: &mut Bucket<Underlying, Settlement, Call>,
     underlying: Balance<Underlying>,
     clock: &Clock,
@@ -379,7 +382,8 @@ public(package) fun do_write<Underlying, Settlement, Call>(
 /// Splits the protocol fee out of `premium` into the treasury; returns the
 /// net premium balance and the fee taken. Fee = floor(premium × fee_bps /
 /// 10_000), computed in u128 — matches the historical inline math exactly.
-public(package) fun skim_fee<Settlement>(
+/// Public: an outside caller can only donate fees to the treasury.
+public fun skim_fee<Settlement>(
     config: &ProtocolConfig,
     treasury: &mut Treasury,
     mut premium: Balance<Settlement>,
@@ -562,7 +566,7 @@ public fun revalidate_bucket<Underlying, Settlement, Call>(
 
 /// Strike cost for exercising `amount` option units, with the bucket's
 /// round-half-up scaling (see `apply_strike`).
-public(package) fun required_settlement<U, S, C>(bucket: &Bucket<U, S, C>, amount: u64): u64 {
+public fun required_settlement<U, S, C>(bucket: &Bucket<U, S, C>, amount: u64): u64 {
     apply_strike(amount as u128, bucket.strike, bucket.strike_scale)
 }
 

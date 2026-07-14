@@ -113,7 +113,7 @@ fun apply_strike_floor(amount: u128, strike: u128, strike_scale: u8): u64 {
 }
 
 /// Cash collateral required to write `amount` underlying-units of this put.
-public(package) fun required_collateral<U, S, P>(bucket: &PutBucket<U, S, P>, amount: u64): u64 {
+public fun required_collateral<U, S, P>(bucket: &PutBucket<U, S, P>, amount: u64): u64 {
     apply_strike_ceil(amount as u128, bucket.strike, bucket.strike_scale)
 }
 
@@ -338,9 +338,10 @@ public fun write_collateralized<Underlying, Settlement, Put>(
     write_collateralized_balance(bucket, collateral_in.into_balance(), write_amount, clock, ctx)
 }
 
-/// `Balance`-accepting sibling for in-package venues (the put RFQ) whose
-/// escrow lives as a `Balance`.
-public(package) fun write_collateralized_balance<Underlying, Settlement, Put>(
+/// `Balance`-accepting sibling for venues (the put RFQ) whose escrow lives
+/// as a `Balance`. Public and permissionless-safe: the exact cash
+/// collateral is required in, `Position` + put coin out — no premium leg.
+public fun write_collateralized_balance<Underlying, Settlement, Put>(
     bucket: &mut PutBucket<Underlying, Settlement, Put>,
     collateral: Balance<Settlement>,
     write_amount: u64,
