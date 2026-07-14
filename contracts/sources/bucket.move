@@ -91,8 +91,8 @@ public fun writer_flow(): FlowKind { FlowKind::Writer }
 
 public fun trader_flow(): FlowKind { FlowKind::Trader }
 
-/// Enum variants can only be matched in their defining module; out-of-module
-/// venues (see `session_bucket`) branch through this instead.
+/// Enum variants can only be matched in their defining module; other modules
+/// (see `put_bucket`) branch through this instead.
 public fun is_writer(flow: &FlowKind): bool {
     match (flow) {
         FlowKind::Writer => true,
