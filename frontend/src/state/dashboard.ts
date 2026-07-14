@@ -15,15 +15,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 import { normalizeStructTag } from "@mysten/sui/utils";
-import {
-  addSessionExercise,
-  addSessionRedeem,
-  addSessionPutExercise,
-  addSessionPutRedeem,
-} from "../tx/session";
-import { useUserIdentity } from "../session/identity";
-import { executeWithSession } from "../session/store";
 import { useSubmitTransaction } from "../tx/submit";
 import { posthog } from "../lib/posthog";
 
@@ -379,38 +372,25 @@ export type DashboardState = {
 };
 
 export function useDashboardState(): DashboardState {
-  const identity = useUserIdentity();
-  const sessionState = identity?.kind === "session" ? identity.session : null;
-  const wallet = identity?.address ?? null;
+  const account = useCurrentAccount();
+  const wallet = account?.address ?? null;
   const connected = wallet !== null;
 
   // Written positions: the wallet is the authoritative list (transfer-correct,
   // no projection snapshot bound), enriched by object id via api-service.
-  const ownedPositions = useOwnedPositions(
-    wallet,
-    sessionState ? sessionState.positionIds : null,
-  );
+  const ownedPositions = useOwnedPositions(wallet);
   const buckets = useBuckets();
   // Option coins live in per-roll packages; the bucket list supplies the
   // coin-type→bucket mapping the owned-call query needs.
-  const owned = useOwnedCallOptions(
-    wallet,
-    buckets.data,
-    sessionState ? sessionState.balances : null,
-  );
+  const owned = useOwnedCallOptions(wallet, buckets.data);
   // Cash-secured PUT holdings (`Coin<Put>`), mapped to their put buckets.
-  const ownedPuts = useOwnedPutOptions(
-    wallet,
-    buckets.data,
-    sessionState ? sessionState.balances : null,
-  );
+  const ownedPuts = useOwnedPutOptions(wallet, buckets.data);
   // Per-purchase provenance for owned calls (boughtFrom / premiumPaid / boughtAt).
   const lots = useCallTokenLots(wallet);
 
   // DeepBook trading account (BM): position tokens and settlement the user left
-  // sitting in their balance manager rather than the wallet. Wallet-login only
-  // — session users trade out of custody, not a personal BM.
-  const bmId = useBalanceManager(sessionState ? null : wallet);
+  // sitting in their balance manager rather than the wallet.
+  const bmId = useBalanceManager(wallet);
   // True cost-basis PnL (FIFO lots + realized), attributed to the wallet's BM.
   const pnl = useDashboardPnl(wallet, bmId.data ?? null);
   const bmQueryTypes = useMemo<string[]>(() => {
@@ -658,60 +638,40 @@ export function useDashboardState(): DashboardState {
         const settlementAmountRaw = (exerciseAmountRaw * strikeRaw) / scale;
 
         setModal({ ...captured, stage: "broadcast" } as DashboardModal);
-        if (sessionState) {
-          await executeWithSession("exercising", (tx, ctx) =>
-            isPut
-              ? addSessionPutExercise(tx, ctx, {
-                  bucketId: bucket.bucket_id,
-                  putCoinType: optCoinType,
-                  underlyingCoinType: series.asset_coin_type,
-                  settlementCoinType: series.settlement_coin_type,
-                  exerciseAmountRaw,
-                })
-              : addSessionExercise(tx, ctx, {
-                  bucketId: bucket.bucket_id,
-                  callCoinType: optCoinType,
-                  underlyingCoinType: series.asset_coin_type,
-                  settlementCoinType: series.settlement_coin_type,
-                  exerciseAmountRaw,
-                }),
-          );
-        } else {
-          // If part/all of the option coin is in the DeepBook trading account,
-          // withdraw it inline (atomic) so the exercise can consume it.
-          const walletRaw = BigInt(
-            ([...(owned.data ?? []), ...(ownedPuts.data ?? [])].find(
-              (o) => normalizeStructTag(o.coin_type) === norm,
-            )?.amount_raw) ?? "0",
-          );
-          const bmRaw = (bmBalances.data ?? {})[norm] ?? 0n;
-          const bmWithdraw =
-            bmRaw > 0n && bmId.data && bucket.deepbook_pool_id
-              ? { poolId: bucket.deepbook_pool_id, bmId: bmId.data, walletAmountRaw: walletRaw }
-              : undefined;
-          const tx = isPut
-            ? buildExercisePutTx({
-                bucketId: bucket.bucket_id,
-                putCoinType: optCoinType,
-                exerciseAmountRaw,
-                underlyingDeliveryRaw: exerciseAmountRaw,
-                underlyingCoinType: series.asset_coin_type,
-                settlementCoinType: series.settlement_coin_type,
-                recipient: wallet,
-                bmWithdraw,
-              })
-            : buildExerciseTx({
-                bucketId: bucket.bucket_id,
-                callCoinType: optCoinType,
-                exerciseAmountRaw,
-                settlementAmountRaw,
-                underlyingCoinType: series.asset_coin_type,
-                settlementCoinType: series.settlement_coin_type,
-                recipient: wallet,
-                bmWithdraw,
-              });
-          await submitTx(tx);
-        }
+        // If part/all of the option coin is in the DeepBook trading account,
+        // withdraw it inline (atomic) so the exercise can consume it.
+        const walletRaw = BigInt(
+          ([...(owned.data ?? []), ...(ownedPuts.data ?? [])].find(
+            (o) => normalizeStructTag(o.coin_type) === norm,
+          )?.amount_raw) ?? "0",
+        );
+        const bmRaw = (bmBalances.data ?? {})[norm] ?? 0n;
+        const bmWithdraw =
+          bmRaw > 0n && bmId.data && bucket.deepbook_pool_id
+            ? { poolId: bucket.deepbook_pool_id, bmId: bmId.data, walletAmountRaw: walletRaw }
+            : undefined;
+        const tx = isPut
+          ? buildExercisePutTx({
+              bucketId: bucket.bucket_id,
+              putCoinType: optCoinType,
+              exerciseAmountRaw,
+              underlyingDeliveryRaw: exerciseAmountRaw,
+              underlyingCoinType: series.asset_coin_type,
+              settlementCoinType: series.settlement_coin_type,
+              recipient: wallet,
+              bmWithdraw,
+            })
+          : buildExerciseTx({
+              bucketId: bucket.bucket_id,
+              callCoinType: optCoinType,
+              exerciseAmountRaw,
+              settlementAmountRaw,
+              underlyingCoinType: series.asset_coin_type,
+              settlementCoinType: series.settlement_coin_type,
+              recipient: wallet,
+              bmWithdraw,
+            });
+        await submitTx(tx);
         setModal({ ...captured, stage: "confirmed" } as DashboardModal);
         posthog.capture("option_exercised", {
           asset: captured.position.asset,
@@ -721,7 +681,7 @@ export function useDashboardState(): DashboardState {
           qty,
           pnl: captured.position.pnl,
           wallet_address: wallet,
-          auth: sessionState ? "session" : "wallet",
+          auth: "wallet",
         });
       } else if (captured.kind === "claim") {
         const { position: p } = captured;
@@ -737,44 +697,24 @@ export function useDashboardState(): DashboardState {
         }
         const optCoinType = optionCoinType(bucketInfo.b);
         setModal({ ...captured, stage: "broadcast" } as DashboardModal);
-        if (sessionState) {
-          await executeWithSession("redeeming", (tx, ctx) =>
-            isPut
-              ? addSessionPutRedeem(tx, ctx, {
-                  bucketId: matchPos.bucket_id,
-                  positionObjectId: matchPos.object_id,
-                  putCoinType: optCoinType,
-                  underlyingCoinType: bucketInfo.series.asset_coin_type,
-                  settlementCoinType: bucketInfo.series.settlement_coin_type,
-                })
-              : addSessionRedeem(tx, ctx, {
-                  bucketId: matchPos.bucket_id,
-                  positionObjectId: matchPos.object_id,
-                  callCoinType: optCoinType,
-                  underlyingCoinType: bucketInfo.series.asset_coin_type,
-                  settlementCoinType: bucketInfo.series.settlement_coin_type,
-                }),
-          );
-        } else {
-          const tx = isPut
-            ? buildRedeemPutTx({
-                bucketId: matchPos.bucket_id,
-                positionObjectId: matchPos.object_id,
-                putCoinType: optCoinType,
-                underlyingCoinType: bucketInfo.series.asset_coin_type,
-                settlementCoinType: bucketInfo.series.settlement_coin_type,
-                recipient: wallet,
-              })
-            : buildRedeemTx({
-                bucketId: matchPos.bucket_id,
-                positionObjectId: matchPos.object_id,
-                callCoinType: optCoinType,
-                underlyingCoinType: bucketInfo.series.asset_coin_type,
-                settlementCoinType: bucketInfo.series.settlement_coin_type,
-                recipient: wallet,
-              });
-          await submitTx(tx);
-        }
+        const tx = isPut
+          ? buildRedeemPutTx({
+              bucketId: matchPos.bucket_id,
+              positionObjectId: matchPos.object_id,
+              putCoinType: optCoinType,
+              underlyingCoinType: bucketInfo.series.asset_coin_type,
+              settlementCoinType: bucketInfo.series.settlement_coin_type,
+              recipient: wallet,
+            })
+          : buildRedeemTx({
+              bucketId: matchPos.bucket_id,
+              positionObjectId: matchPos.object_id,
+              callCoinType: optCoinType,
+              underlyingCoinType: bucketInfo.series.asset_coin_type,
+              settlementCoinType: bucketInfo.series.settlement_coin_type,
+              recipient: wallet,
+            });
+        await submitTx(tx);
         setModal({ ...captured, stage: "confirmed" } as DashboardModal);
         posthog.capture("position_claimed", {
           asset: captured.position.asset,
@@ -784,7 +724,7 @@ export function useDashboardState(): DashboardState {
           premium_received: captured.position.premiumReceived,
           exercised_pct: captured.position.exercisedPct,
           wallet_address: wallet,
-          auth: sessionState ? "session" : "wallet",
+          auth: "wallet",
         });
       }
     } catch (err) {
@@ -792,7 +732,7 @@ export function useDashboardState(): DashboardState {
       posthog.captureException(err, {
         action: captured?.kind,
         wallet_address: wallet,
-        auth: sessionState ? "session" : "wallet",
+        auth: "wallet",
       });
       setToast({ message: `failed · ${message}`, variant: "error" });
       setTimeout(() => setToast(null), 6000);
@@ -804,7 +744,7 @@ export function useDashboardState(): DashboardState {
   // and drains only the option coin back to the wallet (leaves settlement in
   // the BM for other trades).
   const withdrawFromTradingAccount = async (p: OwnedPosition) => {
-    if (!wallet || sessionState || !bmId.data) return;
+    if (!wallet || !bmId.data) return;
     const norm = normalizeStructTag(p.id);
     const info = (buckets.data ?? [])
       .flatMap((s) => s.buckets.map((b) => ({ series: s, b })))

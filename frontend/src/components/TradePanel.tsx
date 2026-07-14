@@ -9,11 +9,9 @@
 
 import { useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { normalizeStructTag } from "@mysten/sui/utils";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 
 import type { Bucket, Series } from "../api/client";
-import { useUserIdentity } from "../session/identity";
-import { enableDeepbookTrading, placeMarketOrderWithSession } from "../session/store";
 import { posthog } from "../lib/posthog";
 import {
   useBalanceManager,
@@ -45,15 +43,8 @@ type Tab = "market" | "limit";
 type Side = "buy" | "sell";
 
 export function TradePanel({ bucket, series }: Props) {
-  const identity = useUserIdentity();
-  // Wallet user or session login — both trade DeepBook. A session's
-  // BalanceManager is owned by its ephemeral key, so reads (BM, book,
-  // balances) key off `sessionKey`; writes route through the sponsored
-  // session entrypoints. Session users get market orders only — a resting
-  // limit order would strand funds behind the ephemeral key if the session
-  // lapsed before it filled.
-  const session = identity?.kind === "session" ? identity.session : null;
-  const connected = !!identity;
+  const account = useCurrentAccount();
+  const connected = !!account;
   const submitTx = useSubmitTransaction();
   const queryClient = useQueryClient();
 
@@ -79,18 +70,14 @@ export function TradePanel({ bucket, series }: Props) {
     : null;
   const venue = deriveVenueParams(baseDec, quoteDec);
 
-  // DeepBook BalanceManager owner: a session's ephemeral key, else the wallet.
-  const addr = session ? session.sessionKey : (identity?.address ?? null);
+  const addr = account?.address ?? null;
   const bm = useBalanceManager(addr);
   const book = useOrderBook(pool, addr);
   const bmBalances = useBmBalances(pool, bm.data ?? null, addr);
-  // Session funds live in custody, not at an address; show custody balances.
-  const walletQuote = useCoinBalance(session ? null : addr, series.settlement_coin_type);
-  const walletBase = useCoinBalance(session ? null : addr, bucket.call_coin_type);
-  const custodyRaw = (coinType: string) =>
-    (session?.balances[normalizeStructTag(coinType)] ?? 0n).toString();
-  const ownQuote = session ? custodyRaw(series.settlement_coin_type) : (walletQuote.data ?? "0");
-  const ownBase = session ? custodyRaw(bucket.call_coin_type) : (walletBase.data ?? "0");
+  const walletQuote = useCoinBalance(addr, series.settlement_coin_type);
+  const walletBase = useCoinBalance(addr, bucket.call_coin_type);
+  const ownQuote = walletQuote.data ?? "0";
+  const ownBase = walletBase.data ?? "0";
 
   const refreshAll = () => {
     for (const key of ["deepbook-book", "deepbook-open-orders", "deepbook-open-order-details", "deepbook-bm-balances", "coin-balance"]) {
@@ -163,9 +150,7 @@ export function TradePanel({ bucket, series }: Props) {
           onClick={() => {
             run(
               "enable trading",
-              session
-                ? () => enableDeepbookTrading()
-                : () => submitTx(buildEnableTradingTx()),
+              () => submitTx(buildEnableTradingTx()),
               { name: "deepbook_trading_enabled" },
             ).then(() =>
               queryClient.invalidateQueries({ queryKey: ["deepbook-bm"] }),
@@ -197,31 +182,6 @@ export function TradePanel({ bucket, series }: Props) {
         pool_id: pool.poolId,
       },
     };
-    // Session: custody-funded, swept back to custody. A buy budgets quote
-    // (cost + slippage); a sell delivers base. The BM is always empty between
-    // trades, so there's no BM-balance offset to net against.
-    if (session) {
-      const maxQuoteIn =
-        side === "buy"
-          ? BigInt(Math.ceil(marketEstimate.cost * (1 + slippagePct / 100) * 10 ** quoteDec))
-          : 0n;
-      void run(
-        `market ${side}`,
-        () =>
-          placeMarketOrderWithSession({
-            poolId: pool.poolId,
-            bmId,
-            baseCoinType: pool.baseCoinType,
-            quoteCoinType: pool.quoteCoinType,
-            isBid: side === "buy",
-            qtyRaw,
-            maxQuoteIn,
-            clientOrderId: BigInt(Date.now()),
-          }),
-        event,
-      );
-      return;
-    }
     const deposit =
       side === "buy"
         ? (() => {
@@ -252,9 +212,6 @@ export function TradePanel({ bucket, series }: Props) {
   };
 
   const placeLimit = () => {
-    // Limit orders are wallet-only: a resting order would strand custody funds
-    // behind the ephemeral key if the session lapsed before it filled.
-    if (session) return;
     if (qtyRaw <= 0n || limitPrice <= 0) return;
     const priceRaw = toRawPrice(limitPrice, baseDec, quoteDec, venue.tickSize, side === "buy" ? "bid" : "ask");
     if (priceRaw <= 0n) return;
@@ -313,9 +270,7 @@ export function TradePanel({ bucket, series }: Props) {
           )}
         </span>
         <span style={{ display: "flex", gap: 4 }}>
-          {/* Session logins: market only (a resting limit order would strand
-              custody funds behind the ephemeral key past session expiry). */}
-          {(session ? (["market"] as Tab[]) : (["market", "limit"] as Tab[])).map((t) => (
+          {(["market", "limit"] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -439,7 +394,7 @@ export function TradePanel({ bucket, series }: Props) {
           </button>
           {note && <div className="panel__sub">{note}</div>}
           <div className="panel__sub" style={{ fontSize: 10 }}>
-            {session ? "custody" : "wallet"}: {fmtQuote(BigInt(ownQuote))} {settle} ·{" "}
+            wallet: {fmtQuote(BigInt(ownQuote))} {settle} ·{" "}
             {fmtBase(BigInt(ownBase))} options
           </div>
         </div>

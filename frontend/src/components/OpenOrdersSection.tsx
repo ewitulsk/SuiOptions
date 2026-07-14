@@ -4,9 +4,9 @@
 
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 
 import type { Bucket, Series } from "../api/client";
-import { useUserIdentity } from "../session/identity";
 import { posthog } from "../lib/posthog";
 import {
   useBalanceManager,
@@ -35,11 +35,7 @@ const ctrlBtn = {
 } as const;
 
 export function OpenOrdersSection({ bucket, series }: Props) {
-  const identity = useUserIdentity();
-  // Session market orders never rest and always sweep the BM empty, so a
-  // session has no open orders / BM balance here; cancel + withdraw stay
-  // wallet-only.
-  const session = identity?.kind === "session" ? identity.session : null;
+  const account = useCurrentAccount();
   const submitTx = useSubmitTransaction();
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState(false);
@@ -57,7 +53,7 @@ export function OpenOrdersSection({ bucket, series }: Props) {
       }
     : null;
 
-  const addr = session ? session.sessionKey : (identity?.address ?? null);
+  const addr = account?.address ?? null;
   const bm = useBalanceManager(addr);
   const openOrders = useOpenOrders(pool, bm.data ?? null, addr);
   const orderDetails = useOpenOrderDetails(pool, openOrders.data, addr);
@@ -125,7 +121,7 @@ export function OpenOrdersSection({ bucket, series }: Props) {
               cancel all
             </button>
           )}
-          {(bmBase > 0n || bmQuote > 0n) && !session && addr && (
+          {(bmBase > 0n || bmQuote > 0n) && addr && (
             <button
               disabled={busy}
               onClick={() =>

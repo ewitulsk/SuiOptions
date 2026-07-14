@@ -6,8 +6,6 @@
 // (`rust-backend/crates/sui-tx/src/tx/template.rs`). Each is a single call with
 // the vault's three type args `<U, S, V>` (underlying, settlement, share);
 // none take the clock. Returned objects/coins are transferred to the wallet.
-//
-// Session logins use the custody-funded twins in `tx/session.ts` instead.
 
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
 

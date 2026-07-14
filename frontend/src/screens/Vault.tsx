@@ -3,7 +3,7 @@
 // Reads the api-service vault endpoints (`/vaults`, `/vaults/:id/rounds`) and
 // the user's on-chain receipts/share balance, and drives every invest action
 // (deposit / claim / initiate+complete withdraw / cancel) through
-// `useVaultActions`, which routes to the wallet or session-login custody path.
+// `useVaultActions`.
 //
 // All decision-support fields (fees, strike band, round cadence, live phase)
 // are served from the vault's on-chain VaultConfig via api-service — no mocks.
@@ -11,14 +11,11 @@
 
 import { useState, useEffect, useMemo, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { useQuery } from "@tanstack/react-query";
-import { useSuiClient } from "@mysten/dapp-kit";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 
 import type { Vault, VaultRound, VaultApyPoint, VaultRfq } from "../api/vaults";
 import { useVault, useVaultRounds, useVaultApyHistory, useOwnedVaultReceipts, useShareBalance, useVaults, useVaultRfqs, useRfqBids } from "../api/useVaults";
 import { useVaultActions } from "../state/vault";
-import { useUserIdentity } from "../session/identity";
-import { readCustodyObjectIds } from "../session/accounts";
 import { VaultApyChart } from "../components/VaultApyChart";
 import { TokenLogo } from "../components/TokenLogo";
 import { findToken } from "../config";
@@ -972,46 +969,22 @@ function ParamsCard({ vault }: { vault: Vault }) {
 // Position value (held shares × pps), in display underlying units. Shares are
 // denominated in the underlying's decimals (1 share == 1 underlying at pps 1.0).
 function useMyPositionValue(vault: Vault): number | null {
-  const identity = useUserIdentity();
-  const session = identity?.kind === "session" ? identity.session : null;
-  const balQ = useShareBalance(
-    identity?.address ?? null,
-    vault.share_type,
-    session ? session.balances : undefined,
-  );
+  const account = useCurrentAccount();
+  const balQ = useShareBalance(account?.address ?? null, vault.share_type);
   if (balQ.data == null || vault.underlying_decimals == null || vault.pps == null) return null;
   const shares = Number(balQ.data) / 10 ** vault.underlying_decimals;
   return shares * vault.pps;
 }
 
 function InvestPanel({ vault }: { vault: Vault }) {
-  const identity = useUserIdentity();
-  const session = identity?.kind === "session" ? identity.session : null;
-  const address = identity?.address ?? null;
-  const client = useSuiClient();
+  const account = useCurrentAccount();
+  const address = account?.address ?? null;
   const actions = useVaultActions();
   const [tab, setTab] = useState<"deposit" | "withdraw">("deposit");
   const [amount, setAmount] = useState("");
 
-  // Session receipts/share coins live in custody; read the on-account object
-  // index so claim/withdraw can find their receipt object ids.
-  const custodyQ = useQuery({
-    queryKey: ["custody-objs", session?.optionsAccountId],
-    enabled: !!session?.optionsAccountId,
-    refetchInterval: 10_000,
-    queryFn: () => readCustodyObjectIds(client, session!.optionsAccountId as string),
-  });
-
-  const receiptsQ = useOwnedVaultReceipts(
-    address,
-    vault.vault_id,
-    session ? (custodyQ.data ?? []) : undefined,
-  );
-  const shareBalQ = useShareBalance(
-    address,
-    vault.share_type,
-    session ? session.balances : undefined,
-  );
+  const receiptsQ = useOwnedVaultReceipts(address, vault.vault_id);
+  const shareBalQ = useShareBalance(address, vault.share_type);
 
   const uDec = vault.underlying_decimals;
   const amountNum = Number(amount) || 0;
@@ -1022,7 +995,7 @@ function InvestPanel({ vault }: { vault: Vault }) {
       <div className="vault-card vault-invest">
         <div className="vault-card__head">Invest</div>
         <div className="vault-card__body vault-prose__muted">
-          Connect a wallet or sign in to deposit into this vault.
+          Connect a wallet to deposit into this vault.
         </div>
       </div>
     );

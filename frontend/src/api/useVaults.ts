@@ -1,6 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSuiClient } from "@mysten/dapp-kit";
-import { normalizeStructTag } from "@mysten/sui/utils";
 
 import { PACKAGE_ID } from "../config";
 import {
@@ -123,21 +122,15 @@ function parseReceipt(
  *
  * The api-service `/receipts` endpoint aggregates by round and carries no
  * object id, so the actions read from the chain instead (mirrors
- * `useOwnedPositions`):
- *   - **wallet** → `getOwnedObjects` filtered to the receipt struct types.
- *   - **session** → the receipts are custodied on the options Account; pass
- *     `custodyObjectIds` (the on-account `ObjectIndexKey` list) and we read
- *     those by id.
+ * `useOwnedPositions`): `getOwnedObjects` filtered to the receipt struct types.
  */
 export function useOwnedVaultReceipts(
   wallet: string | null,
   vaultId: string | null,
-  custodyObjectIds?: string[] | null,
 ) {
   const client = useSuiClient();
-  const custodyKey = custodyObjectIds ? custodyObjectIds.slice().sort().join(",") : null;
   return useQuery<OwnedVaultReceipts, Error>({
-    queryKey: ["vault-receipts-owned", wallet, vaultId, PACKAGE_ID, custodyKey],
+    queryKey: ["vault-receipts-owned", wallet, vaultId, PACKAGE_ID],
     enabled: wallet !== null && vaultId !== null && !!PACKAGE_ID,
     refetchInterval: 10_000,
     queryFn: async () => {
@@ -146,28 +139,6 @@ export function useOwnedVaultReceipts(
       const depType = `${PACKAGE_ID}::vault::DepositReceipt`;
       const wdType = `${PACKAGE_ID}::vault::WithdrawReceipt`;
 
-      // Session custody: read the indexed object ids directly.
-      if (custodyObjectIds) {
-        if (custodyObjectIds.length === 0) return empty;
-        const objs = await client.multiGetObjects({
-          ids: custodyObjectIds,
-          options: { showContent: true, showType: true },
-        });
-        const out: OwnedVaultReceipts = { deposits: [], withdraws: [] };
-        for (const item of objs) {
-          const type = item.data?.type ?? "";
-          if (type.startsWith(depType)) {
-            const r = parseReceipt(item.data, false);
-            if (r && r.vault_id === vaultId) out.deposits.push(r);
-          } else if (type.startsWith(wdType)) {
-            const r = parseReceipt(item.data, true);
-            if (r && r.vault_id === vaultId) out.withdraws.push(r);
-          }
-        }
-        return out;
-      }
-
-      // Wallet: query owned objects by struct type.
       const collect = async (structType: string, wantShares: boolean) => {
         const out: OwnedReceipt[] = [];
         let cursor: string | null | undefined = undefined;
@@ -197,26 +168,17 @@ export function useOwnedVaultReceipts(
 }
 
 /**
- * The user's spendable share-coin (`Coin<V>`) balance for a vault, raw units.
- * Wallet users hold it at their address; session users hold it in custody
- * (pass `custodyBalances`, the on-account balance map keyed by canonical type).
+ * The user's spendable share-coin (`Coin<V>`) balance for a vault, raw units,
+ * held at their wallet address.
  */
-export function useShareBalance(
-  wallet: string | null,
-  shareType: string | null,
-  custodyBalances?: Record<string, bigint> | null,
-) {
+export function useShareBalance(wallet: string | null, shareType: string | null) {
   const client = useSuiClient();
   return useQuery<bigint, Error>({
-    queryKey: ["vault-share-balance", wallet, shareType, custodyBalances ? "session" : "wallet"],
+    queryKey: ["vault-share-balance", wallet, shareType],
     enabled: wallet !== null && shareType !== null,
     refetchInterval: 10_000,
     queryFn: async () => {
       if (!wallet || !shareType) return 0n;
-      const canonical = normalizeStructTag(shareType);
-      if (custodyBalances) {
-        return custodyBalances[canonical] ?? 0n;
-      }
       const bal = await client.getBalance({ owner: wallet, coinType: shareType });
       return BigInt(bal.totalBalance);
     },
