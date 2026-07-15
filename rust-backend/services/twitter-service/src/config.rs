@@ -20,7 +20,7 @@ pub struct Config {
 }
 
 fn default_api_base() -> String {
-    "https://api.twitter.com".to_string()
+    "https://api.x.com".to_string()
 }
 
 impl Config {
