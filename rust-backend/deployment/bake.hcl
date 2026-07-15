@@ -147,6 +147,22 @@ target "social-bot" {
   cache-to   = [{ type = "gha", mode = "max", scope = "social-bot" }]
 }
 
+target "engagement-service" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.engagement-service"
+  tags       = ["${ECR}/options/engagement-service:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "engagement-service" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "engagement-service" }]
+}
+
+target "airdrop-bot" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.airdrop-bot"
+  tags       = ["${ECR}/options/airdrop-bot:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "airdrop-bot" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "airdrop-bot" }]
+}
+
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "engagement-service", "airdrop-bot"]
 }

@@ -34,7 +34,7 @@ from typing import Iterable
 
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "engagement-service", "airdrop-bot"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -73,6 +73,8 @@ REBUILD_ALL_GLOBS = [
 #   balance-monitor  : runtime-config, cli-spec, sui-tx, observability
 #   twitter-service  : runtime-config, cli-spec
 #   social-bot       : runtime-config, cli-spec
+#   engagement-service: runtime-config, cli-spec
+#   airdrop-bot      : runtime-config, cli-spec
 #   keeper           : protocol-types, runtime-config, cli-spec, sui-tx,
 #                      pyth-client, pricing, token-info-client,
 #                      indexer-graphql, observability
@@ -215,6 +217,20 @@ SERVICE_GLOBS: dict[str, list[str]] = {
     "social-bot": [
         "rust-backend/services/social-bot/**",
         "rust-backend/Dockerfile.social-bot",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
+    ],
+    "engagement-service": [
+        "rust-backend/services/engagement-service/**",
+        "rust-backend/Dockerfile.engagement-service",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
+    ],
+    "airdrop-bot": [
+        "rust-backend/services/airdrop-bot/**",
+        "rust-backend/Dockerfile.airdrop-bot",
         "rust-backend/crates/runtime-config/**",
         "rust-backend/crates/observability/**",
         "rust-backend/crates/cli-spec/**",

@@ -50,7 +50,7 @@ COMPOSE_FILE="docker-compose.${ENV}.yml"
 # Canonical service set + their .env tag-variable names + the compose
 # service name (mostly identical to the cargo crate name, except
 # quoting-service is referenced as `quoting` in compose).
-ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station price-charting balance-monitor keeper oracle-service cctp-relay twitter-service social-bot)
+ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station price-charting balance-monitor keeper oracle-service cctp-relay twitter-service social-bot engagement-service airdrop-bot)
 
 tag_var_for() {
   case "$1" in
@@ -69,6 +69,8 @@ tag_var_for() {
     cctp-relay)       echo CCTP_RELAY_TAG ;;
     twitter-service)  echo TWITTER_SERVICE_TAG ;;
     social-bot)       echo SOCIAL_BOT_TAG ;;
+    engagement-service) echo ENGAGEMENT_SERVICE_TAG ;;
+    airdrop-bot)      echo AIRDROP_BOT_TAG ;;
     *) return 1 ;;
   esac
 }
@@ -89,6 +91,8 @@ compose_name_for() {
     cctp-relay)       echo cctp-relay ;;
     twitter-service)  echo twitter-service ;;
     social-bot)       echo social-bot ;;
+    engagement-service) echo engagement-service ;;
+    airdrop-bot)      echo airdrop-bot ;;
     *) return 1 ;;
   esac
 }
@@ -242,6 +246,7 @@ health_path_for() {
     cctp-relay)       echo "/$ENV/cctp/health" ;;
     keeper)           echo "/$ENV/keeper/health" ;;
     social-bot)       echo "/$ENV/social-bot/health" ;;
+    airdrop-bot)      echo "/$ENV/airdrop-bot/health" ;;
     *) return 1 ;;
   esac
 }

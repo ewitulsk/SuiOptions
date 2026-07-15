@@ -1,4 +1,5 @@
-//! axum HTTP server (internal-only — never proxied by nginx).
+//! axum HTTP server. Proxied by nginx at /<env>/airdrop-bot/ — Discord
+//! delivers its signed interaction webhooks through it.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -8,16 +9,17 @@ use axum::routing::{get, post};
 use axum::Router;
 use tracing::info;
 
-use crate::handlers;
+use crate::discord;
 use crate::state::AppState;
+
+async fn health() -> &'static str {
+    "ok"
+}
 
 pub async fn serve(addr: SocketAddr, state: Arc<AppState>) -> Result<()> {
     let app = Router::new()
-        .route("/health", get(handlers::health))
-        .route("/accounts", get(handlers::accounts))
-        .route("/tweets", post(handlers::post_tweet))
-        .route("/mentions", get(handlers::mentions))
-        .route("/tweets/metrics", get(handlers::tweets_metrics))
+        .route("/health", get(health))
+        .route("/discord/interactions", post(discord::interactions))
         .with_state(state)
         .merge(observability::middleware::metrics_route())
         .layer(axum::middleware::from_fn(
@@ -25,7 +27,7 @@ pub async fn serve(addr: SocketAddr, state: Arc<AppState>) -> Result<()> {
         ));
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(%addr, "twitter-service http listening");
+    info!(%addr, "airdrop-bot http listening");
     axum::serve(listener, app).await?;
     Ok(())
 }

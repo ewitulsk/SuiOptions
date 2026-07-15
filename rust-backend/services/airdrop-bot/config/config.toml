@@ -1,0 +1,12 @@
+# airdrop-bot config (local dev).
+#
+# Discord slash-command bot for the engagement airdrop (/leaderboard,
+# /points). The Discord application public key comes from the secrets TOML
+# (`--secrets`, default services/airdrop-bot/config/secrets.toml); copy
+# secrets.example.toml to secrets.toml and fill it in.
+
+environment = "dev"
+
+bind_addr   = "127.0.0.1:9018"
+
+engagement_service_url = "http://127.0.0.1:9017"

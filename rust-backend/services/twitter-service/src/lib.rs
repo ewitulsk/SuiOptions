@@ -12,6 +12,10 @@
 //! - `GET /health`
 //! - `GET /accounts` — the configured account names.
 //! - `POST /tweets` — `{account, text}` → post a tweet from that account.
+//! - `GET /mentions?account=…[&since_id=…]` — recent tweets mentioning
+//!   `@account` with engagement counters (consumed by engagement-service).
+//! - `GET /tweets/metrics?account=…&ids=…` — refresh counters for up to
+//!   100 known tweets.
 
 pub mod config;
 pub mod handlers;

@@ -1,0 +1,8 @@
+# airdrop-bot config — staging env.
+
+environment = "staging"
+
+# Proxied by nginx at /staging/airdrop-bot/ — Discord webhooks land here.
+bind_addr   = "0.0.0.0:9018"
+
+engagement_service_url = "http://engagement-service:9017"

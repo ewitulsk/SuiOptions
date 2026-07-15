@@ -1,0 +1,40 @@
+[package]
+name = "engagement-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "engagement-service"
+path = "src/main.rs"
+
+[dependencies]
+runtime-config = { workspace = true }
+observability  = { workspace = true, features = ["axum"] }
+cli-spec       = { workspace = true }
+
+clap = { workspace = true }
+
+tokio = { workspace = true }
+
+axum = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+reqwest = { workspace = true }
+
+chrono = { workspace = true }
+
+# Postgres persistence (same diesel + r2d2 + embedded-migration shape as
+# price-charting).
+diesel = { workspace = true }
+diesel_migrations = { workspace = true }
+r2d2 = { workspace = true }
+
+anyhow = { workspace = true }
+
+tracing = { workspace = true }

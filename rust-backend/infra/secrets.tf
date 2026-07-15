@@ -240,6 +240,31 @@ resource "aws_secretsmanager_secret_version" "social_bot_placeholder" {
   }
 }
 
+# airdrop-bot secret — Discord public key for webhook verification. A
+# SEPARATE Discord application from social-bot's (community-facing bot).
+# Staging-only (like mm-bot). Placeholder shape; put the real value by hand
+# after apply:
+#   aws secretsmanager put-secret-value --secret-id options/staging/airdrop-bot \
+#     --secret-string '{"discord_public_key":"..."}'
+resource "aws_secretsmanager_secret" "airdrop_bot" {
+  for_each                = toset(["staging"])
+  name                    = "options/${each.key}/airdrop-bot"
+  description             = "airdrop-bot webhook verification key (JSON: discord_public_key)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "airdrop_bot_placeholder" {
+  for_each  = aws_secretsmanager_secret.airdrop_bot
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    discord_public_key = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}
+
 # Shared Sui JSON-RPC endpoint (SO-270). One secret per env — every service
 # that talks to a Sui fullnode reads this single URL so we point the whole
 # fleet at our rate-limit-lifted RPC provider without duplicating the token

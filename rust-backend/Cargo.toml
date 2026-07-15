@@ -31,6 +31,8 @@ members = [
     "services/oracle-service",
     "services/twitter-service",
     "services/social-bot",
+    "services/engagement-service",
+    "services/airdrop-bot",
     "tools/deployment-manager",
     "tools/exchange",
     "tools/writer",

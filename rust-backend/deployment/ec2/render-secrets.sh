@@ -296,6 +296,26 @@ discord_public_key   = "$DISCORD_KEY"
 EOF
 fi
 
+# ---- airdrop-bot secret -> rendered TOML -----------------------------------
+# Discord public key for the airdrop bot's OWN application (webhook
+# verification) — a separate Discord app from social-bot's. Staging-only —
+# absent in envs without the service, silently skipped.
+#
+# NOTE: airdrop-bot IS health-gated by deploy.sh (via nginx). The service
+# refuses to boot on missing/placeholder values, so fill this secret before
+# the first deploy that includes it, or the deploy rolls back.
+if AIRDROP_JSON=$(fetch airdrop-bot 2>/dev/null); then
+  AIRDROP_DISCORD_KEY=$(echo "$AIRDROP_JSON" | jq -r '.discord_public_key')
+  if [ -z "$AIRDROP_DISCORD_KEY" ] || [ "$AIRDROP_DISCORD_KEY" = "null" ]; then
+    echo "missing discord_public_key in options/$ENV/airdrop-bot" >&2
+    exit 1
+  fi
+  umask 077
+  cat > "$DIR/airdrop-bot.toml" <<EOF
+discord_public_key = "$AIRDROP_DISCORD_KEY"
+EOF
+fi
+
 # ---- keyless services -> standalone [sui] rpc_url toml --------------------
 # indexer / price-charting / balance-monitor hold no signing key but still
 # build a SuiClient. They read only `[sui] rpc_url` from these files (mounted

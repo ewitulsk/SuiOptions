@@ -1,0 +1,32 @@
+# engagement-service config — staging env.
+
+environment = "staging"
+
+# Internal-only: reachable on the compose `net` network (airdrop-bot),
+# deliberately never proxied by nginx.
+bind_addr   = "0.0.0.0:9017"
+
+database_url = "postgresql://engagement_staging:${DB_PASSWORD}@${DB_HOST}:5432/engagement_staging"
+db_pool_size = 4
+
+twitter_service_url = "http://twitter-service:9014"
+# twitter-service account name (= the @handle whose mentions accrue points).
+twitter_account     = "suioptions"
+
+poll_interval_secs    = 300
+refresh_max_age_hours = 168
+
+[points]
+# engagement_points = likes*1 + replies*2 + retweets*3 + quotes*4
+like_weight    = 1.0
+reply_weight   = 2.0
+retweet_weight = 3.0
+quote_weight   = 4.0
+
+# airdrop_points = engagement_points * rate * (ambassador ? multiplier : 1)
+airdrop_points_per_engagement_point = 10.0
+ambassador_multiplier               = 1.5
+# Ambassador twitter handles (without @, case-insensitive). Config, not
+# secrets — handles aren't sensitive and updating the roster is an ordinary
+# config deploy.
+ambassadors = []
