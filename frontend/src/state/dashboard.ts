@@ -5,7 +5,7 @@
 //
 // Wiring:
 //   - written positions   ← api-service /positions (indexer-backed)
-//   - owned call options  ← suiClient.getOwnedObjects (wallet)
+//   - owned call options  ← gRPC ListBalances (wallet)
 //   - owned-call provenance ← api-service /call-token-lots (indexer)
 //   - bucket cursors      ← api-service /buckets (5s refetch)
 //   - spot                ← Pyth live feeds (BTC + SUI)

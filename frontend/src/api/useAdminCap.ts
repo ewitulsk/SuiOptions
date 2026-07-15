@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { useSuiClient } from "@mysten/dapp-kit";
 
 import { PACKAGE_ID } from "../config";
+import { useSuiGrpcClient } from "../lib/suiGrpc";
 
 /**
  * Detects whether the connected wallet holds an `AdminCap` and, if so,
@@ -20,7 +20,7 @@ export type AdminCapStatus = {
 };
 
 export function useAdminCap(wallet: string | null) {
-  const client = useSuiClient();
+  const client = useSuiGrpcClient();
   return useQuery<AdminCapStatus, Error>({
     queryKey: ["admin-cap", wallet, PACKAGE_ID],
     enabled: wallet !== null && !!PACKAGE_ID,
@@ -29,13 +29,12 @@ export function useAdminCap(wallet: string | null) {
     queryFn: async () => {
       if (!wallet || !PACKAGE_ID) return { isAdmin: false, adminCapId: null };
       const structType = `${PACKAGE_ID}::admin::AdminCap`;
-      const page = await client.getOwnedObjects({
+      const page = await client.core.listOwnedObjects({
         owner: wallet,
-        filter: { StructType: structType },
-        options: { showType: false },
+        type: structType,
+        limit: 1,
       });
-      const first = page.data.find((item) => item.data?.objectId);
-      const adminCapId = first?.data?.objectId ?? null;
+      const adminCapId = page.objects[0]?.objectId ?? null;
       return { isAdmin: adminCapId !== null, adminCapId };
     },
   });

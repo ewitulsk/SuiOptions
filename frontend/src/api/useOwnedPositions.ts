@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { useSuiClient } from "@mysten/dapp-kit";
 
 import { PACKAGE_ID } from "../config";
+import { listAllOwnedObjects, useSuiGrpcClient } from "../lib/suiGrpc";
 
 /**
  * One `Position` object held by the caller's wallet (SO-97). The wallet is
@@ -24,7 +24,7 @@ export type OwnedPositionObj = {
  * is null or no package id is configured. Mirrors `useOwnedCallOptions`.
  */
 export function useOwnedPositions(wallet: string | null) {
-  const client = useSuiClient();
+  const client = useSuiGrpcClient();
   return useQuery<OwnedPositionObj[], Error>({
     queryKey: ["owned-positions", wallet, PACKAGE_ID],
     enabled: wallet !== null && !!PACKAGE_ID,
@@ -33,30 +33,21 @@ export function useOwnedPositions(wallet: string | null) {
       if (!wallet || !PACKAGE_ID) return [];
       const structType = `${PACKAGE_ID}::position::Position`;
       const result: OwnedPositionObj[] = [];
-      let cursor: string | null | undefined = undefined;
-      do {
-        const page = await client.getOwnedObjects({
-          owner: wallet,
-          filter: { StructType: structType },
-          options: { showContent: true, showType: true },
-          cursor,
+      for (const obj of await listAllOwnedObjects(client, wallet, structType)) {
+        const fields = obj.json as {
+          bucket_id?: string;
+          range_start?: string;
+          range_end?: string;
+        } | null;
+        if (!fields?.bucket_id || fields.range_start == null || fields.range_end == null)
+          continue;
+        result.push({
+          object_id: obj.objectId,
+          bucket_id: fields.bucket_id,
+          range_start_raw: fields.range_start,
+          range_end_raw: fields.range_end,
         });
-        for (const item of page.data) {
-          const data = item.data;
-          if (!data || !data.content || data.content.dataType !== "moveObject")
-            continue;
-          const fields = (data.content as unknown as {
-            fields: { bucket_id: string; range_start: string; range_end: string };
-          }).fields;
-          result.push({
-            object_id: data.objectId,
-            bucket_id: fields.bucket_id,
-            range_start_raw: fields.range_start,
-            range_end_raw: fields.range_end,
-          });
-        }
-        cursor = page.hasNextPage ? page.nextCursor : undefined;
-      } while (cursor);
+      }
       return result;
     },
   });

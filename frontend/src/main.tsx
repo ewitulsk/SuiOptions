@@ -14,6 +14,11 @@ import "./theme";
 import "./styles/aqua.css";
 import "./styles/global.css";
 
+// dapp-kit's provider still wants a JSON-RPC client per network, but after the
+// JSON-RPC migration (docs/sui-json-rpc-migration.md) nothing routes reads or
+// writes through it — chain access goes through the gRPC/GraphQL clients in
+// src/lib/suiGrpc.ts. This map now only names the selectable networks and
+// backs dapp-kit's wallet plumbing.
 const { networkConfig } = createNetworkConfig({
   testnet: { network: "testnet", url: getJsonRpcFullnodeUrl("testnet") },
   mainnet: { network: "mainnet", url: getJsonRpcFullnodeUrl("mainnet") },
