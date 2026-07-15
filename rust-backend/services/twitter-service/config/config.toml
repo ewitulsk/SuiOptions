@@ -1,0 +1,10 @@
+# twitter-service config (local dev).
+#
+# Posts outgoing tweets for multiple accounts. Per-account OAuth 1.0a
+# credentials come from the secrets TOML (`--secrets`, default
+# services/twitter-service/config/secrets.toml); copy secrets.example.toml to
+# secrets.toml and fill it in.
+
+environment = "dev"
+
+bind_addr   = "127.0.0.1:9014"

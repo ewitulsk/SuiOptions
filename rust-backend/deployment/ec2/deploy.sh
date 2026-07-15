@@ -50,7 +50,7 @@ COMPOSE_FILE="docker-compose.${ENV}.yml"
 # Canonical service set + their .env tag-variable names + the compose
 # service name (mostly identical to the cargo crate name, except
 # quoting-service is referenced as `quoting` in compose).
-ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station price-charting balance-monitor keeper oracle-service cctp-relay)
+ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station price-charting balance-monitor keeper oracle-service cctp-relay twitter-service social-bot)
 
 tag_var_for() {
   case "$1" in
@@ -67,6 +67,8 @@ tag_var_for() {
     keeper)           echo KEEPER_TAG ;;
     oracle-service)   echo ORACLE_SERVICE_TAG ;;
     cctp-relay)       echo CCTP_RELAY_TAG ;;
+    twitter-service)  echo TWITTER_SERVICE_TAG ;;
+    social-bot)       echo SOCIAL_BOT_TAG ;;
     *) return 1 ;;
   esac
 }
@@ -85,6 +87,8 @@ compose_name_for() {
     keeper)           echo keeper ;;
     oracle-service)   echo oracle-service ;;
     cctp-relay)       echo cctp-relay ;;
+    twitter-service)  echo twitter-service ;;
+    social-bot)       echo social-bot ;;
     *) return 1 ;;
   esac
 }
@@ -237,6 +241,7 @@ health_path_for() {
     price-charting)   echo "/$ENV/charts/health" ;;
     cctp-relay)       echo "/$ENV/cctp/health" ;;
     keeper)           echo "/$ENV/keeper/health" ;;
+    social-bot)       echo "/$ENV/social-bot/health" ;;
     *) return 1 ;;
   esac
 }

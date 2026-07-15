@@ -1,0 +1,13 @@
+# social-bot config — staging env.
+
+environment = "staging"
+
+# Proxied by nginx at /staging/social-bot/ — Slack + Discord webhooks land here.
+bind_addr   = "0.0.0.0:9016"
+
+twitter_service_url = "http://twitter-service:9014"
+
+# Users allowed to run /tweet. Empty = nobody can post — add team member ids
+# here (Slack: profile → Copy member ID; Discord: developer mode → Copy User ID).
+slack_allowed_user_ids   = []
+discord_allowed_user_ids = []

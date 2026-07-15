@@ -29,6 +29,8 @@ members = [
     "services/cctp-relay",
     "services/balance-monitor",
     "services/oracle-service",
+    "services/twitter-service",
+    "services/social-bot",
     "tools/deployment-manager",
     "tools/exchange",
     "tools/writer",

@@ -131,6 +131,22 @@ target "oracle-service" {
   cache-to   = [{ type = "gha", mode = "max", scope = "oracle-service" }]
 }
 
+target "twitter-service" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.twitter-service"
+  tags       = ["${ECR}/options/twitter-service:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "twitter-service" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "twitter-service" }]
+}
+
+target "social-bot" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.social-bot"
+  tags       = ["${ECR}/options/social-bot:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "social-bot" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "social-bot" }]
+}
+
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot"]
 }

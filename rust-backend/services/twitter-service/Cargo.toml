@@ -1,0 +1,39 @@
+[package]
+name = "twitter-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "twitter-service"
+path = "src/main.rs"
+
+[dependencies]
+runtime-config = { workspace = true }
+observability  = { workspace = true, features = ["axum"] }
+cli-spec       = { workspace = true }
+
+clap = { workspace = true }
+
+tokio = { workspace = true }
+
+axum = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+reqwest = { workspace = true }
+
+# OAuth 1.0a request signing (HMAC-SHA1 over the RFC 5849 base string).
+hmac = { workspace = true }
+sha1 = "0.10"
+base64 = { workspace = true }
+percent-encoding = "2"
+uuid = { workspace = true }
+
+anyhow = { workspace = true }
+
+tracing = { workspace = true }
