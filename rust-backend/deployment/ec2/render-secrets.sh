@@ -247,6 +247,55 @@ if ORACLE_JSON=$(fetch oracle-service 2>/dev/null); then
   append_pyth_api_key "$ORACLE_JSON" "$DIR/oracle-service.toml"
 fi
 
+# ---- twitter-service secret -> rendered TOML ------------------------------
+# Per-account OAuth 1.0a credentials for outgoing tweets (one
+# [accounts.<name>] section per account). Staging-only — absent in envs
+# without the service, silently skipped like mm-bot.
+if TW_JSON=$(fetch twitter-service 2>/dev/null); then
+  if ! echo "$TW_JSON" | jq -e '
+      (.accounts | type == "object" and length > 0)
+      and ([.accounts[] | .api_key, .api_key_secret, .access_token, .access_token_secret]
+           | all(type == "string" and length > 0))' >/dev/null; then
+    echo "malformed options/$ENV/twitter-service (need accounts.<name>.{api_key,api_key_secret,access_token,access_token_secret})" >&2
+    exit 1
+  fi
+  umask 077
+  echo "$TW_JSON" | jq -r '
+    .accounts | to_entries[] |
+    "[accounts.\(.key)]\n"
+    + "api_key             = \"\(.value.api_key)\"\n"
+    + "api_key_secret      = \"\(.value.api_key_secret)\"\n"
+    + "access_token        = \"\(.value.access_token)\"\n"
+    + "access_token_secret = \"\(.value.access_token_secret)\"\n"
+  ' > "$DIR/twitter-service.toml"
+fi
+
+# ---- social-bot secret -> rendered TOML ------------------------------------
+# Slack signing secret + Discord public key (webhook verification).
+# Staging-only — absent in envs without the service, silently skipped.
+#
+# NOTE: social-bot IS health-gated by deploy.sh (via nginx). The service
+# refuses to boot on missing/placeholder values, so fill this secret and
+# options/<env>/twitter-service with real values before the first deploy
+# that includes these services, or the deploy rolls back.
+if BOT_JSON=$(fetch social-bot 2>/dev/null); then
+  SLACK_SECRET=$(echo "$BOT_JSON" | jq -r '.slack_signing_secret')
+  DISCORD_KEY=$(echo "$BOT_JSON" | jq -r '.discord_public_key')
+  if [ -z "$SLACK_SECRET" ] || [ "$SLACK_SECRET" = "null" ]; then
+    echo "missing slack_signing_secret in options/$ENV/social-bot" >&2
+    exit 1
+  fi
+  if [ -z "$DISCORD_KEY" ] || [ "$DISCORD_KEY" = "null" ]; then
+    echo "missing discord_public_key in options/$ENV/social-bot" >&2
+    exit 1
+  fi
+  umask 077
+  cat > "$DIR/social-bot.toml" <<EOF
+slack_signing_secret = "$SLACK_SECRET"
+discord_public_key   = "$DISCORD_KEY"
+EOF
+fi
+
 # ---- keyless services -> standalone [sui] rpc_url toml --------------------
 # indexer / price-charting / balance-monitor hold no signing key but still
 # build a SuiClient. They read only `[sui] rpc_url` from these files (mounted

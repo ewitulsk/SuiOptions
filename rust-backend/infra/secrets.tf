@@ -183,6 +183,63 @@ resource "aws_secretsmanager_secret_version" "oracle_service_placeholder" {
   }
 }
 
+# twitter-service secret — per-account OAuth 1.0a credentials for outgoing
+# tweets. Staging-only (like mm-bot): the service isn't declared in prod's
+# compose file, so no prod secret is created. Placeholder shape; put the real
+# credentials by hand after apply:
+#   aws secretsmanager put-secret-value --secret-id options/staging/twitter-service \
+#     --secret-string '{"accounts":{"suioptions":{"api_key":"...","api_key_secret":"...","access_token":"...","access_token_secret":"..."}}}'
+resource "aws_secretsmanager_secret" "twitter_service" {
+  for_each                = toset(["staging"])
+  name                    = "options/${each.key}/twitter-service"
+  description             = "twitter-service per-account OAuth 1.0a credentials (JSON: accounts.<name>.{api_key,api_key_secret,access_token,access_token_secret})."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "twitter_service_placeholder" {
+  for_each  = aws_secretsmanager_secret.twitter_service
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    accounts = {
+      suioptions = {
+        api_key             = "REPLACE_ME"
+        api_key_secret      = "REPLACE_ME"
+        access_token        = "REPLACE_ME"
+        access_token_secret = "REPLACE_ME"
+      }
+    }
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}
+
+# social-bot secret — Slack signing secret + Discord public key for webhook
+# verification. Staging-only (like mm-bot). Placeholder shape; put the real
+# values by hand after apply:
+#   aws secretsmanager put-secret-value --secret-id options/staging/social-bot \
+#     --secret-string '{"slack_signing_secret":"...","discord_public_key":"..."}'
+resource "aws_secretsmanager_secret" "social_bot" {
+  for_each                = toset(["staging"])
+  name                    = "options/${each.key}/social-bot"
+  description             = "social-bot webhook verification keys (JSON: slack_signing_secret, discord_public_key)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "social_bot_placeholder" {
+  for_each  = aws_secretsmanager_secret.social_bot
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    slack_signing_secret = "REPLACE_ME"
+    discord_public_key   = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}
+
 # Shared Sui JSON-RPC endpoint (SO-270). One secret per env — every service
 # that talks to a Sui fullnode reads this single URL so we point the whole
 # fleet at our rate-limit-lifted RPC provider without duplicating the token

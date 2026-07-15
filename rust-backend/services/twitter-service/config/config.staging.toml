@@ -1,0 +1,7 @@
+# twitter-service config — staging env.
+
+environment = "staging"
+
+# Internal-only: reachable on the compose `net` network (social-bot),
+# deliberately never proxied by nginx.
+bind_addr   = "0.0.0.0:9014"

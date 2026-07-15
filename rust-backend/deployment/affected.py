@@ -34,7 +34,7 @@ from typing import Iterable
 
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -71,6 +71,8 @@ REBUILD_ALL_GLOBS = [
 #   auth-service     : runtime-config, cli-spec, protocol-types
 #   gas-station      : runtime-config, cli-spec, sui-tx
 #   balance-monitor  : runtime-config, cli-spec, sui-tx, observability
+#   twitter-service  : runtime-config, cli-spec
+#   social-bot       : runtime-config, cli-spec
 #   keeper           : protocol-types, runtime-config, cli-spec, sui-tx,
 #                      pyth-client, pricing, token-info-client,
 #                      indexer-graphql, observability
@@ -202,6 +204,20 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/pricing/**",
         "rust-backend/crates/token-info-client/**",
         "rust-backend/crates/indexer-graphql/**",
+    ],
+    "twitter-service": [
+        "rust-backend/services/twitter-service/**",
+        "rust-backend/Dockerfile.twitter-service",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
+    ],
+    "social-bot": [
+        "rust-backend/services/social-bot/**",
+        "rust-backend/Dockerfile.social-bot",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
     ],
     "oracle-service": [
         "rust-backend/services/oracle-service/**",

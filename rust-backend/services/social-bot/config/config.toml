@@ -1,0 +1,17 @@
+# social-bot config (local dev).
+#
+# Slack + Discord slash-command bots (one binary). Allow-listed users post
+# tweets from any twitter-service account with `/tweet <account> <text>`.
+# Signing secrets come from the secrets TOML (`--secrets`, default
+# services/social-bot/config/secrets.toml); copy secrets.example.toml to
+# secrets.toml and fill it in.
+
+environment = "dev"
+
+bind_addr   = "127.0.0.1:9016"
+
+twitter_service_url = "http://127.0.0.1:9014"
+
+# Users allowed to run /tweet. Empty = nobody can post.
+slack_allowed_user_ids   = []
+discord_allowed_user_ids = []
