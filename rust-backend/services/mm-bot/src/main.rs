@@ -1,23 +1,29 @@
 //! Market-maker bot.
 //!
+//! Phase 0 (once per deployment): `mm-bot deploy-collateral` publishes this
+//! MM's own copy of the `mm_collateral` package (collateral abstraction,
+//! plan §8) and persists `{package_id, account_id, upgrade_cap}`.
+//!
 //! Phase 1: bootstrap.
 //!   - Reads its TOML config (incl. `signing_scheme`) + `MM_QUOTE_KEY`
 //!     (32-byte hex secret — interpretation depends on the scheme).
-//!   - Resolves the test-token pair (`underlying_symbol` / `settlement_symbol`)
-//!     against `deployments.json`.
-//!   - Resolves its Account from chain state for the *current* deployment:
-//!     looks up the `AccountCreated` event under the current package for this
-//!     bot's Sui address. If none exists (e.g. right after a fresh contract
-//!     deployment), calls `account::create_and_share_account(scheme, pubkey)`
-//!     and funds it with `bootstrap_settlement_amount` of the settlement
-//!     asset via `test_tokens::<sym>::mint` + `account::deposit`. No local
-//!     state is persisted — the deployment is the source of truth.
+//!   - Resolves the collateral routing: `collateral_package` /
+//!     `collateral_account` from the config, else the deploy-collateral
+//!     state file.
+//!   - Resolves its QuoteSigner from chain state for the *current*
+//!     deployment: looks up the `SignerCreated` event under the current
+//!     package for this bot's Sui address. If none exists (e.g. right after
+//!     a fresh contract deployment), calls
+//!     `quote_signer::create_and_share_signer(scheme, pubkey)` and funds the
+//!     MM's own CollateralAccount with `bootstrap_settlement_amount` via
+//!     `test_tokens::<sym>::mint` + `mm_collateral::deposit`.
 //!
 //! Phase 2: serve.
 //!   - Authenticates over WS via the scheme-aware challenge (§5.4.1).
 //!   - Loops on `RFQBroadcast`, prices each option via Black-Scholes using
-//!     the spot/vol/rate config, signs the BCS-encoded Quote with the
-//!     configured scheme, sends. Pongs Pings.
+//!     the spot/vol/rate config, signs the BCS-encoded Quote (which carries
+//!     the collateral routing INSIDE the signed payload) with the configured
+//!     scheme, sends. Pongs Pings.
 //!
 //! The MM serves as a **Trader MM** by default (pays premium, receives the
 //! call token). `roles` in the TOML controls advertised roles to the
@@ -49,16 +55,18 @@ use api_service_client::ApiServiceClient;
 use token_info_client::{Snapshot, TokenInfoClient};
 use sui_tx::quote_signer::QuoteSigner;
 use sui_tx::sui_client::{Network, SuiClientWrapper};
-use sui_tx::tx::account::{account_balance_of, create_and_share_account, find_account};
-use sui_tx::tx::test_tokens::mint_and_deposit_into_account;
+use sui_tx::tx::mm_collateral::balance_of as collateral_balance_of;
+use sui_tx::tx::signer::{create_and_share_signer, find_signer};
+use sui_tx::tx::test_tokens::mint_and_deposit_into_collateral;
 use sui_tx::ws_client;
 
+use mm_bot::collateral;
 use mm_bot::liquidity::{FaucetLiquiditySource, LiquiditySource};
 use mm_bot::pricing::{
     compute_spot_from_cache, price_rfq, resolve_sigma, serves_pair, PriceDecision, PricingConfig,
     RfqPricingInputs, SigmaEstimate, Staleness,
 };
-use mm_bot::Cli;
+use mm_bot::{Cli, Command};
 
 // -- Config --------------------------------------------------------------
 
@@ -83,6 +91,21 @@ struct BotConfig {
     /// One of `ed25519` / `secp256k1` / `secp256r1`.
     #[serde(default = "default_scheme")]
     signing_scheme: SigningScheme,
+
+    /// This MM's published mm_collateral package id (the quote's
+    /// `release_package`). Optional — when absent (the default) the bot
+    /// reads the state file written by `mm-bot deploy-collateral`.
+    #[serde(default)]
+    collateral_package: Option<String>,
+    /// The shared `CollateralAccount` object id (the quote's
+    /// `collateral_source`). Optional, paired with `collateral_package`.
+    #[serde(default)]
+    collateral_account: Option<String>,
+    /// Module holding the standardized `release` function inside
+    /// `collateral_package` (the quote's `release_module`). Defaults to the
+    /// first-party template's module name.
+    #[serde(default = "default_release_module")]
+    release_module: String,
 
     /// Explicit allowlist of underlyings to make markets in. Each symbol is
     /// looked up in the token-info catalog (coin type, decimals, `pythFeedId`)
@@ -303,6 +326,10 @@ fn default_scheme() -> SigningScheme {
     SigningScheme::Ed25519
 }
 
+fn default_release_module() -> String {
+    "mm_collateral".into()
+}
+
 fn default_underlying_symbols() -> Vec<String> {
     // Empty ⇒ derive the underlying set from token-info's enabled catalog.
     Vec::new()
@@ -453,9 +480,49 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let cfg = load_config(&cli.config)?;
-    observability::ops::spawn(cfg.health_addr);
     let secrets_loaded = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
+
+    // Subcommand: publish this MM's own mm_collateral package and exit.
+    if let Some(Command::DeployCollateral { contracts, out }) = &cli.command {
+        let wrap = SuiClientWrapper::connect(&secrets_loaded, cfg.network).await?;
+        let dep = collateral::deploy(
+            &wrap.client,
+            &wrap.signer,
+            contracts,
+            cfg.network.as_str(),
+            cli.gas_budget,
+        )
+        .await?;
+        let out = out
+            .clone()
+            .unwrap_or_else(|| collateral::default_state_path(cfg.network.as_str()));
+        collateral::store(&out, &dep)?;
+        println!("mm_collateral published:");
+        println!("  package_id  = {}", dep.package_id);
+        println!("  account_id  = {}", dep.account_id);
+        println!("  upgrade_cap = {}", dep.upgrade_cap);
+        println!("state persisted to {}", out.display());
+        return Ok(());
+    }
+
+    observability::ops::spawn(cfg.health_addr);
+
+    // Collateral routing (plan §8): explicit config wins, else the state file
+    // written by `mm-bot deploy-collateral`. Required — quotes carry the
+    // routing inside the signed payload.
+    let (collateral_package, collateral_account) = collateral::resolve(
+        cfg.collateral_package.as_deref(),
+        cfg.collateral_account.as_deref(),
+        &collateral::default_state_path(cfg.network.as_str()),
+        cfg.network.as_str(),
+    )?;
+    tracing::info!(
+        %collateral_package,
+        %collateral_account,
+        release_module = %cfg.release_module,
+        "collateral routing resolved"
+    );
     // Resolve the token catalog from token-info. Hard cutover: if token-info
     // is unreachable after the retry window we crash (no deployments.json
     // fallback).
@@ -542,18 +609,29 @@ async fn main() -> Result<()> {
     let pubkey_bytes = signer.public_bytes();
     tracing::info!(scheme = ?signer.scheme(), pubkey_len = pubkey_bytes.len(), "quote signer ready");
 
-    // Account: bootstrap if missing, then fund with settlement.
-    let account_id =
-        resolve_account(&cli, &cfg, &snapshot, &secrets_loaded, &signer, &pubkey_bytes).await?;
-    tracing::info!(account_id = %account_id, "mm account ready");
-    let account_id_pt = pt_object_id_from_sui(account_id);
+    // QuoteSigner: bootstrap if missing; fund the MM's own CollateralAccount.
+    let signer_id = resolve_signer(
+        &cli,
+        &cfg,
+        &snapshot,
+        &secrets_loaded,
+        &signer,
+        &pubkey_bytes,
+        collateral_package,
+        collateral_account,
+    )
+    .await?;
+    tracing::info!(signer_id = %signer_id, "quote signer ready on chain");
+    let signer_id_pt = pt_object_id_from_sui(signer_id);
+    let collateral_account_pt = pt_object_id_from_sui(collateral_account);
+    let release_package_pt = PtSuiAddress::new(*pt_object_id_from_sui(collateral_package).as_bytes());
 
     // Liquidity source: pulls settlement (and, via the same trait, any coin the
     // bot needs) before quoting. Default = the test-token faucet; a real market
     // maker swaps in their own funding source at this one site.
     let liquidity: Arc<dyn LiquiditySource> = Arc::new(FaucetLiquiditySource::new(
         snapshot.maybe_test_tokens(),
-        snapshot.package()?,
+        collateral_package,
         cli.gas_budget,
     ));
 
@@ -561,7 +639,6 @@ async fn main() -> Result<()> {
     // never runs dry mid-test. One task per underlying. Only relevant if we
     // advertise writer_mm and auto-replenish is enabled.
     if cfg.roles.contains(&MmRole::WriterMm) && cfg.underlying_replenish_threshold > 0 {
-        let package = snapshot.package()?;
         for sym in &underlyings {
             // A derived underlying might not be a faucet/test token; skip
             // auto-replenish for it rather than failing boot.
@@ -579,8 +656,8 @@ async fn main() -> Result<()> {
             spawn_replenish_task(ReplenishParams {
                 secrets: secrets_loaded.clone(),
                 network: cfg.network,
-                package,
-                account_id,
+                collateral_package,
+                collateral_account,
                 coin_type: underlying.coin_type.clone(),
                 symbol: sym.clone(),
                 threshold: cfg.underlying_replenish_threshold,
@@ -837,7 +914,7 @@ async fn main() -> Result<()> {
 
     // Connect → authenticate → serve, reconnecting with capped exponential
     // backoff. A transient auth rejection — the indexer hasn't ingested our
-    // AccountCreated yet (`auth_scheme_unknown`) — or a dropped connection is
+    // SignerCreated yet (`auth_scheme_unknown`) — or a dropped connection is
     // expected right after a redeploy, so we keep the process (and its
     // /health endpoint) alive and retry until the indexer catches up. Only a
     // permanent auth error (a key/scheme mismatch the indexer will never
@@ -862,7 +939,7 @@ async fn main() -> Result<()> {
         let hello = MmToService::Hello {
             payload: MmHelloPayload {
                 roles: cfg.roles.clone(),
-                account_id: account_id_pt,
+                account_id: signer_id_pt,
                 signing_scheme: signer.scheme(),
                 signing_pubkey: pubkey_bytes.clone(),
                 bulk_view: cfg.bulk_view_enabled,
@@ -935,9 +1012,6 @@ async fn main() -> Result<()> {
                 ServiceToMm::RFQBroadcast { .. } => "rfq_broadcast",
                 ServiceToMm::BulkViewRFQBroadcast { .. } => "bulk_view_rfq_broadcast",
                 ServiceToMm::Ping => "ping",
-                ServiceToMm::AccountStateUpdate { .. } => "account_state_update",
-                ServiceToMm::ReservationConfirmed { .. } => "reservation_confirmed",
-                ServiceToMm::ReservationReleased { .. } => "reservation_released",
                 _ => "other",
             };
             metrics::counter!("mm_bot_ws_messages_total", "type" => frame_type).increment(1);
@@ -1088,7 +1162,10 @@ async fn main() -> Result<()> {
                             nonce_counter = nonce_counter.wrapping_add(1);
                             let quote = Quote {
                                 protocol_id: protocol_id.clone(),
-                                signer_account_id: account_id_pt,
+                                signer_id: signer_id_pt,
+                                collateral_source: collateral_account_pt,
+                                release_package: release_package_pt,
+                                release_module: cfg.release_module.clone(),
                                 signer_token_recipient: token_recipient,
                                 bucket_id: payload.bucket_id,
                                 write_amount: payload.write_amount,
@@ -1243,15 +1320,6 @@ async fn main() -> Result<()> {
                         break 'serve;
                     }
                 }
-                ServiceToMm::AccountStateUpdate { .. } => {
-                    tracing::trace!("received account state update");
-                }
-                ServiceToMm::ReservationConfirmed { .. } => {
-                    tracing::trace!("received reservation confirmed");
-                }
-                ServiceToMm::ReservationReleased { .. } => {
-                    tracing::trace!("received reservation released");
-                }
                 other => {
                     tracing::debug!(?other, "ignored frame");
                 }
@@ -1293,32 +1361,37 @@ fn load_quote_signer(
     QuoteSigner::from_secret_str(secrets.mm_quote_key()?, scheme)
 }
 
-async fn resolve_account(
+/// Resolve (or bootstrap) the bot's on-chain QuoteSigner and, on a fresh
+/// bootstrap, fund the MM's own CollateralAccount so it can quote on day one.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_signer(
     cli: &Cli,
     cfg: &BotConfig,
     snapshot: &token_info_client::Snapshot,
     secrets: &runtime_config::Secrets,
     signer: &QuoteSigner,
     pubkey_bytes: &[u8],
+    collateral_package: ObjectID,
+    collateral_account: ObjectID,
 ) -> Result<ObjectID> {
     let wrap = SuiClientWrapper::connect(secrets, cfg.network).await?;
     let package = snapshot.package()?;
 
     // The deployment is the source of truth — no local sidecar. If this
-    // bot's Sui address already created an Account under the current package,
-    // adopt it; otherwise bootstrap a fresh one. A fresh contract deployment
-    // (new package) has no such event, so the bot self-heals by creating a
-    // new account against the package the indexer is actually watching.
-    if let Some(account_id) =
-        find_account(&wrap.client, package, wrap.signer.address, signer.scheme(), pubkey_bytes)
+    // bot's Sui address already created a QuoteSigner under the current
+    // package, adopt it; otherwise bootstrap a fresh one. A fresh contract
+    // deployment (new package) has no such event, so the bot self-heals by
+    // creating a new signer against the package the indexer is watching.
+    if let Some(signer_id) =
+        find_signer(&wrap.client, package, wrap.signer.address, signer.scheme(), pubkey_bytes)
             .await?
     {
-        tracing::info!(%account_id, "adopted existing on-chain account for this deployment");
-        return Ok(account_id);
+        tracing::info!(%signer_id, "adopted existing on-chain quote signer for this deployment");
+        return Ok(signer_id);
     }
 
-    tracing::info!("no account for the current deployment — bootstrapping a fresh Account");
-    let created = create_and_share_account(
+    tracing::info!("no quote signer for the current deployment — bootstrapping a fresh one");
+    let created = create_and_share_signer(
         &wrap.client,
         &wrap.signer,
         package,
@@ -1327,23 +1400,23 @@ async fn resolve_account(
         cli.gas_budget,
     )
     .await?;
-    tracing::info!(digest = %created.digest, account_id = %created.account_id, "account created");
+    tracing::info!(digest = %created.digest, signer_id = %created.signer_id, "quote signer created");
 
-    // Fund it with settlement so it can pay premiums on day one (Trader-MM /
-    // bid side). Create and fund are separate txs; a crash between them leaves
-    // the account (adopted on the next boot) unfunded — acceptable for the
-    // test MM bot.
+    // Fund the MM's own CollateralAccount with settlement so it can pay
+    // premiums on day one (Trader-MM / bid side). Create and fund are
+    // separate txs; a crash between them leaves the signer (adopted on the
+    // next boot) unfunded — acceptable for the test MM bot.
     let settlement = snapshot.faucet_token(&cfg.settlement_symbol)?;
     let (tokens_pkg, settlement_module) = settlement.module_path()?;
-    let fund_resp = mint_and_deposit_into_account(
+    let fund_resp = mint_and_deposit_into_collateral(
         &wrap.client,
         &wrap.signer,
         tokens_pkg,
         &settlement_module,
         settlement.faucet()?,
         &settlement.coin_type,
-        created.account_id,
-        package,
+        collateral_account,
+        collateral_package,
         cfg.bootstrap_settlement_amount,
         cli.gas_budget,
     )
@@ -1352,7 +1425,7 @@ async fn resolve_account(
         digest = %fund_resp.digest,
         amount = cfg.bootstrap_settlement_amount,
         symbol = %cfg.settlement_symbol,
-        "account funded (settlement)"
+        "collateral account funded (settlement)"
     );
 
     // Fund it with each underlying so it can write calls to retail traders
@@ -1361,15 +1434,15 @@ async fn resolve_account(
     for sym in &cfg.underlying_symbols {
         let underlying = snapshot.faucet_token(sym)?;
         let (u_tokens_pkg, underlying_module) = underlying.module_path()?;
-        let fund_resp = mint_and_deposit_into_account(
+        let fund_resp = mint_and_deposit_into_collateral(
             &wrap.client,
             &wrap.signer,
             u_tokens_pkg,
             &underlying_module,
             underlying.faucet()?,
             &underlying.coin_type,
-            created.account_id,
-            package,
+            collateral_account,
+            collateral_package,
             cfg.bootstrap_underlying_amount,
             cli.gas_budget,
         )
@@ -1378,11 +1451,11 @@ async fn resolve_account(
             digest = %fund_resp.digest,
             amount = cfg.bootstrap_underlying_amount,
             symbol = %sym,
-            "account funded (underlying)"
+            "collateral account funded (underlying)"
         );
     }
 
-    Ok(created.account_id)
+    Ok(created.signer_id)
 }
 
 async fn expect_auth_challenge(ws: &mut ws_client::WsStream) -> Result<Vec<u8>> {
@@ -1398,7 +1471,7 @@ enum AuthVerdict {
     Ok,
     /// The quoting service rejected auth for a reason that resolves on its
     /// own — chiefly `auth_scheme_unknown` (the indexer hasn't ingested our
-    /// AccountCreated yet). Retry until it catches up.
+    /// SignerCreated yet). Retry until it catches up.
     Retryable { code: String, message: String },
     /// A permanent rejection (`auth_pubkey_mismatch` / `auth_signature_invalid`):
     /// the registered key/scheme will never match what we present. Fatal —
@@ -1503,8 +1576,11 @@ fn find_market<'a>(
 struct ReplenishParams {
     secrets: runtime_config::Secrets,
     network: Network,
-    package: ObjectID,
-    account_id: ObjectID,
+    /// The MM's own mm_collateral package + shared CollateralAccount — the
+    /// bot tracks its own available funds by RPC-reading its own account
+    /// (plan §8: its own concern, not protocol infrastructure).
+    collateral_package: ObjectID,
+    collateral_account: ObjectID,
     coin_type: String,
     symbol: String,
     threshold: u64,
@@ -1515,11 +1591,11 @@ struct ReplenishParams {
     liquidity: Arc<dyn LiquiditySource>,
 }
 
-/// Periodically read the Account's underlying balance (via devInspect, no gas)
-/// and mint+deposit a top-up when it drops below the configured threshold.
-/// Runs in its own tokio task with its own Sui client so it doesn't contend
-/// with the WS serve loop. Transient errors are logged and retried on the next
-/// tick — a wedged faucet shouldn't kill the bot.
+/// Periodically read the CollateralAccount's underlying balance (via
+/// devInspect, no gas) and mint+deposit a top-up when it drops below the
+/// configured threshold. Runs in its own tokio task with its own Sui client
+/// so it doesn't contend with the WS serve loop. Transient errors are logged
+/// and retried on the next tick — a wedged faucet shouldn't kill the bot.
 fn spawn_replenish_task(p: ReplenishParams) {
     tokio::spawn(async move {
         let wrap = match SuiClientWrapper::connect(&p.secrets, p.network).await {
@@ -1533,11 +1609,11 @@ fn spawn_replenish_task(p: ReplenishParams) {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
-            let balance = match account_balance_of(
+            let balance = match collateral_balance_of(
                 &wrap.client,
                 wrap.signer.address,
-                p.package,
-                p.account_id,
+                p.collateral_package,
+                p.collateral_account,
                 &p.coin_type,
             )
             .await
@@ -1564,7 +1640,7 @@ fn spawn_replenish_task(p: ReplenishParams) {
                 .ensure_account_balance(
                     &wrap.client,
                     &wrap.signer,
-                    p.account_id,
+                    p.collateral_account,
                     &p.coin_type,
                     p.top_up,
                 )

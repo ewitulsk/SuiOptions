@@ -96,7 +96,10 @@ mod tests {
         MmQuotePayload {
             quote: Quote {
                 protocol_id: vec![],
-                signer_account_id: ObjectId::ZERO,
+                signer_id: ObjectId::ZERO,
+                collateral_source: ObjectId::ZERO,
+                release_package: SuiAddress::ZERO,
+                release_module: "mm_collateral".into(),
                 signer_token_recipient: SuiAddress::ZERO,
                 bucket_id: ObjectId::ZERO,
                 write_amount: 1,

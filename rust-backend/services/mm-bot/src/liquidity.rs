@@ -19,7 +19,7 @@ use sui_types::base_types::ObjectID;
 
 use protocol_types::asset::canonicalize_move_type;
 use sui_tx::sui_client::Signer;
-use sui_tx::tx::test_tokens::{mint_and_deposit_into_account, mint_to_sender};
+use sui_tx::tx::test_tokens::{mint_and_deposit_into_collateral, mint_to_sender};
 use token_info_client::{TestTokens, TokenInfo};
 
 /// A source the bot pulls trading liquidity from. Implement this to fund the
@@ -43,11 +43,11 @@ pub trait LiquiditySource: Send + Sync {
         target: u64,
     ) -> u64;
 
-    /// Optional: deposit `amount` atomic units of `coin_type` into the
-    /// protocol trading `Account` (the writer-MM funds option writes from
-    /// there). Defaults to a no-op (returns `false`): an external source funds
-    /// the wallet; the bot can move wallet→Account itself. The faucet impl
-    /// overrides this. Returns whether a deposit happened.
+    /// Optional: deposit `amount` atomic units of `coin_type` into the MM's
+    /// own `mm_collateral::CollateralAccount` (the writer-MM's quotes release
+    /// funds from there). Defaults to a no-op (returns `false`): an external
+    /// source funds the wallet; the bot can move wallet→account itself. The
+    /// faucet impl overrides this. Returns whether a deposit happened.
     async fn ensure_account_balance(
         &self,
         _client: &SuiClient,
@@ -67,16 +67,20 @@ pub trait LiquiditySource: Send + Sync {
 pub struct FaucetLiquiditySource {
     /// canonical coin type → its faucet record.
     faucets: HashMap<String, TokenInfo>,
-    /// Options protocol package, for the `account::deposit` half of the
-    /// Account top-up.
-    options_package: ObjectID,
+    /// The MM's own mm_collateral package, for the
+    /// `mm_collateral::deposit` half of the collateral top-up.
+    collateral_package: ObjectID,
     gas_budget: u64,
 }
 
 impl FaucetLiquiditySource {
     /// Build from the token-info snapshot's testTokens block (`None` on
     /// mainnet → a source that no-ops for everything).
-    pub fn new(test_tokens: Option<&TestTokens>, options_package: ObjectID, gas_budget: u64) -> Self {
+    pub fn new(
+        test_tokens: Option<&TestTokens>,
+        collateral_package: ObjectID,
+        gas_budget: u64,
+    ) -> Self {
         let faucets = test_tokens
             .map(|tt| {
                 tt.tokens
@@ -85,7 +89,7 @@ impl FaucetLiquiditySource {
                     .collect()
             })
             .unwrap_or_default();
-        Self { faucets, options_package, gas_budget }
+        Self { faucets, collateral_package, gas_budget }
     }
 
     fn faucet_for(&self, coin_type: &str) -> Option<&TokenInfo> {
@@ -174,7 +178,7 @@ impl LiquiditySource for FaucetLiquiditySource {
                 return false;
             }
         };
-        match mint_and_deposit_into_account(
+        match mint_and_deposit_into_collateral(
             client,
             signer,
             tokens_pkg,
@@ -182,7 +186,7 @@ impl LiquiditySource for FaucetLiquiditySource {
             faucet_id,
             coin_type,
             account_id,
-            self.options_package,
+            self.collateral_package,
             amount,
             self.gas_budget,
         )

@@ -16,8 +16,22 @@
 > `docs/audit-restructure/03-package-specs.md` (package trust model,
 > auction semantics, adapters, put math, the reviewed public surface)
 > and `docs/vault-implementation-guide/` (vault economics). §3.1 below
-> reflects the v0.2 package layout; the type and function specifications
-> in the rest of §3 are unchanged and normative for `options_core`.
+> reflects the v0.2 package layout.
+>
+> **v0.3 (collateral abstraction).** Quote-driven collateral custody
+> left core entirely: the `Account` of §3.2.3 is now a slim
+> `QuoteSigner` (signing key + nonces, no balances), `execute_write`
+> (§3.3.4) is a two-step `request_*_flow` → `release` →
+> `execute_*_flow` protocol built on a `CollateralRequest` hot potato,
+> and the `Quote` (§3.2.7/§4.1) gained THREE signed fields —
+> `collateral_source: ID`, `release_package: address`,
+> `release_module: String` (inserted after `signer_id`, in that order)
+> — that route collateral release to any external package implementing
+> the standardized `release<T>` interface. The first-party
+> implementation is `contracts/mm-collateral` (deployed per market
+> maker). §3.2.3, §3.3.2–3.3.4, §5.1/§5.5 (reservations removed), and
+> §9.2 Scenario 1 (mitigation is reputation-only) are superseded as
+> specified in `docs/audit-restructure/04-collateral-abstraction-plan.md`.
 
 ---
 

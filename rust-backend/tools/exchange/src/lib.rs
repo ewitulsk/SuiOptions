@@ -78,12 +78,18 @@ pub enum Command {
         #[arg(long)]
         amount: u64,
     },
-    /// Mint a test token and deposit it into the given Account in one PTB.
-    /// Use for fast-MM-bootstrap or any "give Account X some settlement
-    /// asset to quote with" workflow.
+    /// Mint a test token and deposit it into an MM's own
+    /// `mm_collateral::CollateralAccount` in one PTB (core holds no MM funds
+    /// under the collateral abstraction). Use for fast-MM-bootstrap or any
+    /// "give this collateral account some settlement asset to quote with"
+    /// workflow.
     FundAccount {
+        /// The shared CollateralAccount object id.
         #[arg(long)]
         account: ObjectID,
+        /// The MM's published mm_collateral package id.
+        #[arg(long)]
+        collateral_package: ObjectID,
         #[arg(long)]
         token: String,
         #[arg(long)]

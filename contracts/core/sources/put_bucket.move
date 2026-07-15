@@ -60,13 +60,14 @@ use sui::balance::{Self, Balance};
 use sui::clock::Clock;
 use sui::coin::{Self, Coin, TreasuryCap};
 
-use options_core::account::{Self, Account};
 use options_core::admin::{AdminCap, ProtocolConfig};
-use options_core::bucket::{Self, FlowKind};
+use options_core::bucket;
+use options_core::collateral::{Self, CollateralRequest};
 use options_core::errors;
 use options_core::events;
 use options_core::position::{Self, Position};
 use options_core::quote::{Self, Quote, SignedQuote};
+use options_core::quote_signer::QuoteSigner;
 use options_core::treasury::Treasury;
 
 /// Mirror of `bucket::MAX_STRIKE_SCALE` (10^38 is the largest power of ten
@@ -164,140 +165,86 @@ public fun create_put_bucket<Underlying, Settlement, Put>(
     transfer::share_object(bucket);
 }
 
-public fun execute_write<Underlying, Settlement, Put>(
-    bucket: &mut PutBucket<Underlying, Settlement, Put>,
+/// Writer flow, step 1 (see `bucket::request_writer_flow` and
+/// `collateral.move`): the signer is the trader MM (the put BUYER).
+/// Demands the MM's PREMIUM as a `CollateralRequest<Settlement>`.
+public fun request_writer_flow<Underlying, Settlement, Put>(
+    bucket: &PutBucket<Underlying, Settlement, Put>,
+    signer: &mut QuoteSigner,
     config: &ProtocolConfig,
-    treasury: &mut Treasury,
-    signer_account: &mut Account,
-    collateral_in: Coin<Settlement>,
-    premium_in: Coin<Settlement>,
-    flow: FlowKind,
-    position_recipient: address,
-    put_token_recipient: address,
     signed_quote: SignedQuote,
     clock: &Clock,
-    ctx: &mut TxContext,
-) {
-    let q = quote::verify_and_consume_quote(signer_account, config, &signed_quote, clock);
-    execute_write_with_quote<Underlying, Settlement, Put>(
-        bucket,
-        config,
-        treasury,
-        signer_account,
-        collateral_in,
-        premium_in,
-        flow,
-        position_recipient,
-        put_token_recipient,
-        q,
-        clock,
-        ctx,
-    );
+): CollateralRequest<Settlement> {
+    let q = quote::verify_and_consume_quote(signer, config, &signed_quote, clock);
+    assert_quote_bucket(bucket, &q, clock);
+    collateral::new_writer_request<Settlement>(q, quote::premium(&q))
 }
 
-#[test_only]
-public fun execute_write_for_testing<Underlying, Settlement, Put>(
-    bucket: &mut PutBucket<Underlying, Settlement, Put>,
+/// Trader flow, step 1: the signer is the writer MM (the put SELLER).
+/// Demands the MM's cash write collateral —
+/// `ceil(write_amount × strike)` — as a `CollateralRequest<Settlement>`.
+/// Both put flows demand the settlement asset; the flow tag on the potato
+/// keeps a premium-sized writer request out of `execute_trader_flow`.
+public fun request_trader_flow<Underlying, Settlement, Put>(
+    bucket: &PutBucket<Underlying, Settlement, Put>,
+    signer: &mut QuoteSigner,
     config: &ProtocolConfig,
-    treasury: &mut Treasury,
-    signer_account: &mut Account,
-    collateral_in: Coin<Settlement>,
-    premium_in: Coin<Settlement>,
-    flow: FlowKind,
-    position_recipient: address,
-    put_token_recipient: address,
     signed_quote: SignedQuote,
     clock: &Clock,
-    ctx: &mut TxContext,
-) {
-    let q = quote::verify_skip_sig(signer_account, config, &signed_quote, clock);
-    execute_write_with_quote<Underlying, Settlement, Put>(
-        bucket,
-        config,
-        treasury,
-        signer_account,
-        collateral_in,
-        premium_in,
-        flow,
-        position_recipient,
-        put_token_recipient,
+): CollateralRequest<Settlement> {
+    let q = quote::verify_and_consume_quote(signer, config, &signed_quote, clock);
+    assert_quote_bucket(bucket, &q, clock);
+    collateral::new_trader_request<Settlement>(
         q,
-        clock,
-        ctx,
-    );
+        required_collateral(bucket, quote::write_amount(&q)),
+    )
 }
 
-#[allow(lint(self_transfer))]
-fun execute_write_with_quote<Underlying, Settlement, Put>(
-    bucket: &mut PutBucket<Underlying, Settlement, Put>,
-    config: &ProtocolConfig,
-    treasury: &mut Treasury,
-    signer_account: &mut Account,
-    collateral_in: Coin<Settlement>,
-    premium_in: Coin<Settlement>,
-    flow: FlowKind,
-    position_recipient: address,
-    put_token_recipient: address,
-    q: Quote,
+fun assert_quote_bucket<Underlying, Settlement, Put>(
+    bucket: &PutBucket<Underlying, Settlement, Put>,
+    q: &Quote,
     clock: &Clock,
-    ctx: &mut TxContext,
 ) {
-    let bucket_id = object::id(bucket);
-    assert!(quote::bucket_id(&q) == bucket_id, errors::quote_bucket_mismatch());
+    assert!(quote::bucket_id(q) == object::id(bucket), errors::quote_bucket_mismatch());
     assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
     assert!(!bucket.invalidated, errors::bucket_invalidated());
+    assert!(quote::write_amount(q) > 0, errors::zero_amount());
+}
+
+/// Writer flow, step 2: the executor (the retail put writer, tx sender)
+/// posts the exact cash collateral and receives the `Position` + net
+/// premium; the MM's `Coin<Put>` goes to the quote's
+/// `signer_token_recipient`.
+#[allow(lint(self_transfer))]
+public fun execute_writer_flow<Underlying, Settlement, Put>(
+    bucket: &mut PutBucket<Underlying, Settlement, Put>,
+    config: &ProtocolConfig,
+    treasury: &mut Treasury,
+    request: CollateralRequest<Settlement>,
+    premium_funds: Balance<Settlement>,
+    collateral_in: Coin<Settlement>,
+    position_recipient: address,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    let (q, amount, is_writer) = collateral::destroy(request);
+    assert!(is_writer, errors::request_flow_mismatch());
+    let bucket_id = object::id(bucket);
+    assert!(quote::bucket_id(&q) == bucket_id, errors::quote_bucket_mismatch());
+    assert!(premium_funds.value() == amount, errors::amount_mismatch());
 
     let write_amount = quote::write_amount(&q);
     let gross_premium = quote::premium(&q);
-    let signer_recipient = quote::signer_token_recipient(&q);
-    assert!(write_amount > 0, errors::zero_amount());
+    let put_token_recipient = quote::signer_token_recipient(&q);
     let collateral_required = required_collateral(bucket, write_amount);
+    assert!(collateral_in.value() == collateral_required, errors::put_collateral_mismatch());
 
-    let (collateral, fee) = if (bucket::is_writer(&flow)) {
-        // Writer flow: signer is the trader MM — the BUYER of the put.
-        // Signer-supplied side: premium (Settlement) debited from their
-        // Account. Executor-supplied side: cash collateral matching
-        // ceil(write_amount × strike). The executor (the writer) keeps the
-        // net premium; the buyer gets the put coins.
-        assert!(signer_recipient == put_token_recipient, errors::quote_recipient_mismatch());
-        assert!(premium_in.value() == 0, errors::amount_mismatch());
-        assert!(collateral_in.value() == collateral_required, errors::put_collateral_mismatch());
-
-        let premium_coin = account::withdraw_internal<Settlement>(
-            signer_account,
-            gross_premium,
-            ctx,
-        );
-        let (net_balance, fee) = bucket::skim_fee(config, treasury, premium_coin.into_balance());
-        let net_coin = coin::from_balance(net_balance, ctx);
-        transfer::public_transfer(net_coin, ctx.sender());
-
-        premium_in.destroy_zero();
-        (collateral_in.into_balance(), fee)
-    } else {
-        // Trader flow: signer is the writer MM — the SELLER/writer of the
-        // put. Signer-supplied side: cash collateral debited from their
-        // Account. Executor-supplied side: premium matching gross_premium.
-        // The signer (writer) keeps the net premium; the executor (the
-        // buyer) gets the put coins.
-        assert!(signer_recipient == position_recipient, errors::quote_recipient_mismatch());
-        assert!(collateral_in.value() == 0, errors::amount_mismatch());
-        assert!(premium_in.value() == gross_premium, errors::amount_mismatch());
-
-        let collateral_coin = account::withdraw_internal<Settlement>(
-            signer_account,
-            collateral_required,
-            ctx,
-        );
-        let (net_balance, fee) = bucket::skim_fee(config, treasury, premium_in.into_balance());
-        account::deposit_balance(signer_account, net_balance);
-
-        collateral_in.destroy_zero();
-        (collateral_coin.into_balance(), fee)
-    };
+    let (net_balance, fee) = bucket::skim_fee(config, treasury, premium_funds);
     let net_premium = gross_premium - fee;
+    transfer::public_transfer(coin::from_balance(net_balance, ctx), ctx.sender());
 
-    let (position, put) = do_write(bucket, collateral, write_amount, ctx);
+    let (position, put) =
+        write_and_check(bucket, collateral_in.into_balance(), write_amount, clock, ctx);
     let range_start = position::range_start(&position);
     let range_end = position::range_end(&position);
     let position_id = object::id(&position);
@@ -306,8 +253,9 @@ fun execute_write_with_quote<Underlying, Settlement, Put>(
 
     events::emit_put_write_executed(
         bucket_id,
-        quote::signer_account_id(&q),
-        signer_recipient,
+        quote::signer_id(&q),
+        quote::collateral_source(&q),
+        put_token_recipient,
         ctx.sender(),
         position_id,
         position_recipient,
@@ -321,6 +269,106 @@ fun execute_write_with_quote<Underlying, Settlement, Put>(
         range_end,
         quote::nonce(&q),
     );
+}
+
+/// Trader flow, step 2: the executor (the retail put buyer, tx sender)
+/// pays the premium and chooses where the `Coin<Put>` goes; the MM
+/// receives the `Position` + net premium at `signer_token_recipient`.
+public fun execute_trader_flow<Underlying, Settlement, Put>(
+    bucket: &mut PutBucket<Underlying, Settlement, Put>,
+    config: &ProtocolConfig,
+    treasury: &mut Treasury,
+    request: CollateralRequest<Settlement>,
+    collateral_funds: Balance<Settlement>,
+    premium_in: Coin<Settlement>,
+    put_token_recipient: address,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    let (q, amount, is_writer) = collateral::destroy(request);
+    assert!(!is_writer, errors::request_flow_mismatch());
+    let bucket_id = object::id(bucket);
+    assert!(quote::bucket_id(&q) == bucket_id, errors::quote_bucket_mismatch());
+    assert!(collateral_funds.value() == amount, errors::amount_mismatch());
+
+    let write_amount = quote::write_amount(&q);
+    let gross_premium = quote::premium(&q);
+    let position_recipient = quote::signer_token_recipient(&q);
+    let collateral_required = required_collateral(bucket, write_amount);
+    assert!(collateral_funds.value() == collateral_required, errors::put_collateral_mismatch());
+    assert!(premium_in.value() == gross_premium, errors::amount_mismatch());
+
+    let (net_balance, fee) = bucket::skim_fee(config, treasury, premium_in.into_balance());
+    let net_premium = gross_premium - fee;
+    transfer::public_transfer(coin::from_balance(net_balance, ctx), position_recipient);
+
+    let (position, put) = write_and_check(bucket, collateral_funds, write_amount, clock, ctx);
+    let range_start = position::range_start(&position);
+    let range_end = position::range_end(&position);
+    let position_id = object::id(&position);
+    transfer::public_transfer(position, position_recipient);
+    transfer::public_transfer(put, put_token_recipient);
+
+    events::emit_put_write_executed(
+        bucket_id,
+        quote::signer_id(&q),
+        quote::collateral_source(&q),
+        position_recipient,
+        ctx.sender(),
+        position_id,
+        position_recipient,
+        put_token_recipient,
+        write_amount,
+        collateral_required,
+        gross_premium,
+        fee,
+        net_premium,
+        range_start,
+        range_end,
+        quote::nonce(&q),
+    );
+}
+
+fun write_and_check<Underlying, Settlement, Put>(
+    bucket: &mut PutBucket<Underlying, Settlement, Put>,
+    collateral: Balance<Settlement>,
+    write_amount: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): (Position, Coin<Put>) {
+    assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
+    assert!(!bucket.invalidated, errors::bucket_invalidated());
+    do_write(bucket, collateral, write_amount, ctx)
+}
+
+/// Test-only request twins that skip signature verification.
+#[test_only]
+public fun request_writer_flow_for_testing<Underlying, Settlement, Put>(
+    bucket: &PutBucket<Underlying, Settlement, Put>,
+    signer: &mut QuoteSigner,
+    config: &ProtocolConfig,
+    signed_quote: SignedQuote,
+    clock: &Clock,
+): CollateralRequest<Settlement> {
+    let q = quote::verify_skip_sig(signer, config, &signed_quote, clock);
+    assert_quote_bucket(bucket, &q, clock);
+    collateral::new_writer_request<Settlement>(q, quote::premium(&q))
+}
+
+#[test_only]
+public fun request_trader_flow_for_testing<Underlying, Settlement, Put>(
+    bucket: &PutBucket<Underlying, Settlement, Put>,
+    signer: &mut QuoteSigner,
+    config: &ProtocolConfig,
+    signed_quote: SignedQuote,
+    clock: &Clock,
+): CollateralRequest<Settlement> {
+    let q = quote::verify_skip_sig(signer, config, &signed_quote, clock);
+    assert_quote_bucket(bucket, &q, clock);
+    collateral::new_trader_request<Settlement>(
+        q,
+        required_collateral(bucket, quote::write_amount(&q)),
+    )
 }
 
 /// Core cash-secured write: escrow `collateral_in` cash in the bucket and

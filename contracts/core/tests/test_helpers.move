@@ -1,14 +1,16 @@
 #[test_only]
 module options_core::test_helpers;
 
+use std::string;
 use sui::clock::{Self, Clock};
 use sui::coin;
 use sui::test_scenario::{Self as ts, Scenario};
 
 use options_core::admin::{Self, AdminCap, ProtocolConfig};
-use options_core::account::{Self, Account};
 use options_core::bucket;
 use options_core::put_bucket;
+use options_core::quote::{Self, Quote};
+use options_core::quote_signer::{Self, QuoteSigner};
 use options_core::treasury::{Self, Treasury};
 
 public struct USDC has drop {}
@@ -95,22 +97,51 @@ public fun scheme_ed25519(): u8 { 0 }
 public fun scheme_secp256k1(): u8 { 1 }
 public fun scheme_secp256r1(): u8 { 2 }
 
-/// Create and share an Account owned by `owner` with an Ed25519 signing key.
-/// Default for existing tests — see `create_account_with_scheme` for the
+/// Create and share a QuoteSigner owned by `owner` with an Ed25519 signing
+/// key. Default for existing tests — see `create_signer_with_scheme` for the
 /// per-scheme variant.
-public fun create_account(scenario: &mut Scenario, owner: address, pubkey: vector<u8>) {
-    create_account_with_scheme(scenario, owner, scheme_ed25519(), pubkey)
+public fun create_signer(scenario: &mut Scenario, owner: address, pubkey: vector<u8>) {
+    create_signer_with_scheme(scenario, owner, scheme_ed25519(), pubkey)
 }
 
-/// Create and share an Account using an explicit signing scheme byte.
-public fun create_account_with_scheme(
+/// Create and share a QuoteSigner using an explicit signing scheme byte.
+public fun create_signer_with_scheme(
     scenario: &mut Scenario,
     owner: address,
     scheme: u8,
     pubkey: vector<u8>,
 ) {
     ts::next_tx(scenario, owner);
-    account::create_and_share_account(scheme, pubkey, scenario.ctx());
+    quote_signer::create_and_share_signer(scheme, pubkey, scenario.ctx());
+}
+
+/// Build a Quote from the pre-collateral-abstraction 8 params, filling the
+/// three new routing fields with test dummies: `collateral_source` = the
+/// signer's own id (the released funds are minted inline in core tests, so
+/// the source is never dereferenced) and a placeholder release package/module.
+public fun new_test_quote(
+    protocol_id: vector<u8>,
+    signer_id: ID,
+    signer_token_recipient: address,
+    bucket_id: ID,
+    write_amount: u64,
+    premium: u64,
+    valid_until_ms: u64,
+    nonce: u64,
+): Quote {
+    quote::new_quote(
+        protocol_id,
+        signer_id,
+        signer_id, // collateral_source dummy
+        @0x0,
+        string::utf8(b"mm_collateral"),
+        signer_token_recipient,
+        bucket_id,
+        write_amount,
+        premium,
+        valid_until_ms,
+        nonce,
+    )
 }
 
 public fun take_admin_cap(scenario: &Scenario): AdminCap {
@@ -130,10 +161,6 @@ public fun take_treasury(scenario: &Scenario): Treasury {
     ts::take_shared<Treasury>(scenario)
 }
 
-public fun take_account(scenario: &Scenario): Account {
-    ts::take_shared<Account>(scenario)
-}
-
-public fun take_account_by_id(scenario: &Scenario, id: ID): Account {
-    ts::take_shared_by_id<Account>(scenario, id)
+public fun take_signer(scenario: &Scenario): QuoteSigner {
+    ts::take_shared<QuoteSigner>(scenario)
 }

@@ -33,15 +33,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    account_balances (account_id, asset_type) {
-        account_id     -> Text,
-        asset_type     -> Text,
-        balance        -> Numeric,
-        updated_at_seq -> Int8,
-    }
-}
-
-diesel::table! {
     buckets (bucket_id) {
         bucket_id       -> Text,
         asset_type      -> Text,
@@ -188,7 +179,6 @@ diesel::table! {
     }
 }
 
-diesel::joinable!(account_balances -> accounts (account_id));
 diesel::joinable!(event_participants -> indexed_events (sequence));
 diesel::joinable!(bucket_deepbook_pools -> buckets (bucket_id));
 diesel::joinable!(rfq_bids -> indexed_events (sequence));
@@ -197,7 +187,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     indexer_progress,
     indexed_events,
     accounts,
-    account_balances,
     buckets,
     positions,
     bucket_deepbook_pools,

@@ -15,13 +15,13 @@ use tracing::{debug, trace};
 
 use protocol_types::asset::AssetType;
 use protocol_types::events::{
-    AccountDeposit, AccountWithdraw, BucketCreated, ChainEvent, DeepBookPoolCreated, Exercised,
-    IndexedEvent, Redeemed, WriteExecuted,
+    BucketCreated, ChainEvent, DeepBookPoolCreated, Exercised, IndexedEvent, Redeemed,
+    WriteExecuted,
 };
 use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::db::models::{
-    u128_to_bigdecimal, u64_to_bigdecimal, AccountBalanceRow, AccountRow, BucketRow,
+    u128_to_bigdecimal, u64_to_bigdecimal, AccountRow, BucketRow,
     DeepBookPoolRow, EventParticipantRow, PositionRow, RfqBidRow, RfqRow, VaultReceiptRow,
     VaultRoundRow, VaultRow,
 };
@@ -40,18 +40,17 @@ pub const AUCTION_KIND_PUT: &str = OPTION_KIND_PUT;
 pub const AUCTION_KIND_SWAP: &str = "swap";
 pub const AUCTION_KIND_UNKNOWN: &str = "unknown";
 
-/// What we keep per Account: balances per asset type, plus the registered
-/// signing pubkey (so the quoting service can verify quotes locally as
-/// defense-in-depth even while it lazy-loads its own copy).
+/// What we keep per QuoteSigner: the registered signing pubkey + owner (so
+/// the quoting service can verify quotes and authenticate MMs). Core holds
+/// no MM funds anymore — there are no balances to materialize.
 #[derive(Clone, Debug, Default)]
 pub struct AccountState {
     pub owner: Option<SuiAddress>,
     pub signing_pubkey: Vec<u8>,
-    /// Registered signing scheme, set from `AccountCreated` /
+    /// Registered signing scheme, set from `SignerCreated` /
     /// `SigningKeyRotated`. `None` only for rows hydrated before the scheme
     /// column was backfilled.
     pub signing_scheme: Option<protocol_types::SigningScheme>,
-    pub balances: BTreeMap<AssetType, u64>,
 }
 
 /// What we keep per Bucket: cursor state + identity. Strike, scale, and
@@ -540,7 +539,7 @@ fn collect_participants(
             push(w.call_token_recipient.to_hex(), "call_token_recipient");
             push(w.signer_token_recipient.to_hex(), "signer_token_recipient");
             push(w.executor.to_hex(), "executor");
-            if let Some(o) = account_owner_hex(inner, &w.signer_account_id) {
+            if let Some(o) = account_owner_hex(inner, &w.signer_id) {
                 push(o, "signer_account_owner");
             }
         }
@@ -549,19 +548,9 @@ fn collect_participants(
         ChainEvent::ExpiredOptionBurned(b) => push(b.burner.to_hex(), "burner"),
         ChainEvent::BucketInvalidated(i) => push(i.admin.to_hex(), "admin"),
         ChainEvent::BucketRevalidated(r) => push(r.admin.to_hex(), "admin"),
-        ChainEvent::AccountCreated(a) => push(a.owner.to_hex(), "account_owner"),
-        ChainEvent::AccountDeposit(d) => {
-            if let Some(o) = account_owner_hex(inner, &d.account_id) {
-                push(o, "account_owner");
-            }
-        }
-        ChainEvent::AccountWithdraw(w) => {
-            if let Some(o) = account_owner_hex(inner, &w.account_id) {
-                push(o, "account_owner");
-            }
-        }
+        ChainEvent::SignerCreated(a) => push(a.owner.to_hex(), "account_owner"),
         ChainEvent::SigningKeyRotated(r) => {
-            if let Some(o) = account_owner_hex(inner, &r.account_id) {
+            if let Some(o) = account_owner_hex(inner, &r.signer_id) {
                 push(o, "account_owner");
             }
         }
@@ -603,7 +592,7 @@ fn collect_participants(
             push(w.put_token_recipient.to_hex(), "put_token_recipient");
             push(w.signer_token_recipient.to_hex(), "signer_token_recipient");
             push(w.executor.to_hex(), "executor");
-            if let Some(o) = account_owner_hex(inner, &w.signer_account_id) {
+            if let Some(o) = account_owner_hex(inner, &w.signer_id) {
                 push(o, "signer_account_owner");
             }
         }
@@ -700,46 +689,16 @@ fn stage_event_into_batch(
                 batch.buckets.push(bucket_row(r.bucket_id, state, sequence));
             }
         }
-        ChainEvent::AccountCreated(a) => {
-            if let Some(state) = inner.accounts.get(&a.account_id) {
-                batch.accounts.push(account_row(a.account_id, state, sequence));
-            }
-        }
-        ChainEvent::AccountDeposit(d) => {
-            if let Some(state) = inner.accounts.get(&d.account_id) {
-                // Deposit may also create the row if the account was never
-                // seen via AccountCreated (defensive — apply_account_delta
-                // calls .entry().or_default()).
-                batch
-                    .accounts
-                    .push(account_row(d.account_id, state, sequence));
-                if let Some(bal) = state.balances.get(&d.asset_type) {
-                    batch.account_balances.push(balance_row(
-                        d.account_id,
-                        &d.asset_type,
-                        *bal,
-                        sequence,
-                    ));
-                }
-            }
-        }
-        ChainEvent::AccountWithdraw(w) => {
-            if let Some(state) = inner.accounts.get(&w.account_id) {
-                if let Some(bal) = state.balances.get(&w.asset_type) {
-                    batch.account_balances.push(balance_row(
-                        w.account_id,
-                        &w.asset_type,
-                        *bal,
-                        sequence,
-                    ));
-                }
+        ChainEvent::SignerCreated(a) => {
+            if let Some(state) = inner.accounts.get(&a.signer_id) {
+                batch.accounts.push(account_row(a.signer_id, state, sequence));
             }
         }
         ChainEvent::SigningKeyRotated(r) => {
-            if let Some(state) = inner.accounts.get(&r.account_id) {
+            if let Some(state) = inner.accounts.get(&r.signer_id) {
                 batch
                     .accounts
-                    .push(account_row(r.account_id, state, sequence));
+                    .push(account_row(r.signer_id, state, sequence));
             }
         }
         ChainEvent::DeepBookPoolCreated(p) => {
@@ -992,17 +951,16 @@ fn write_position_row(
         recipient: w.position_recipient.to_hex(),
         updated_at_seq: sequence,
         // SO-97 provenance: gross premium the writer received, the
-        // counterparty MM account, and the minting tx for explorer links.
+        // counterparty MM's QuoteSigner, and the minting tx for explorer links.
         premium_received: u64_to_bigdecimal(w.gross_premium),
-        mm_account_id: w.signer_account_id.to_hex(),
+        mm_account_id: w.signer_id.to_hex(),
         tx_digest: tx_digest.to_string(),
         minted_at_ms,
         option_kind: OPTION_KIND_CALL.to_string(),
     }
 }
 
-/// Position row for a `PutWriteExecuted`. Mirrors [`write_position_row`] but
-/// puts have no `signer_account_id` field, so MM-account provenance is unset.
+/// Position row for a `PutWriteExecuted`. Mirrors [`write_position_row`].
 fn put_write_position_row(
     w: &protocol_types::events::PutWriteExecuted,
     sequence: i64,
@@ -1017,7 +975,7 @@ fn put_write_position_row(
         recipient: w.position_recipient.to_hex(),
         updated_at_seq: sequence,
         premium_received: u64_to_bigdecimal(w.gross_premium),
-        mm_account_id: w.signer_account_id.to_hex(),
+        mm_account_id: w.signer_id.to_hex(),
         tx_digest: tx_digest.to_string(),
         minted_at_ms,
         option_kind: OPTION_KIND_PUT.to_string(),
@@ -1208,20 +1166,6 @@ fn account_row(id: ObjectId, state: &AccountState, sequence: i64) -> AccountRow 
     }
 }
 
-fn balance_row(
-    account_id: ObjectId,
-    asset_type: &AssetType,
-    balance: u64,
-    sequence: i64,
-) -> AccountBalanceRow {
-    AccountBalanceRow {
-        account_id: account_id.to_hex(),
-        asset_type: asset_type.as_str().to_string(),
-        balance: u64_to_bigdecimal(balance),
-        updated_at_seq: sequence,
-    }
-}
-
 fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
     match event {
         ChainEvent::BucketCreated(b) => apply_bucket_created(inner, b),
@@ -1245,19 +1189,17 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                 b.invalidated = false;
             }
         }
-        ChainEvent::AccountCreated(a) => {
+        ChainEvent::SignerCreated(a) => {
             let acct = inner
                 .accounts
-                .entry(a.account_id)
+                .entry(a.signer_id)
                 .or_insert_with(AccountState::default);
             acct.signing_pubkey = a.signing_pubkey.clone();
             acct.signing_scheme = Some(a.signing_scheme);
             acct.owner = Some(a.owner);
         }
-        ChainEvent::AccountDeposit(d) => apply_account_delta(inner, d, true),
-        ChainEvent::AccountWithdraw(w) => apply_account_delta(inner, w, false),
         ChainEvent::SigningKeyRotated(r) => {
-            if let Some(acct) = inner.accounts.get_mut(&r.account_id) {
+            if let Some(acct) = inner.accounts.get_mut(&r.signer_id) {
                 acct.signing_pubkey = r.new_pubkey.clone();
                 acct.signing_scheme = Some(r.new_scheme);
             }
@@ -1751,51 +1693,11 @@ fn apply_put_write_executed(inner: &mut Inner, w: &protocol_types::events::PutWr
     );
 }
 
-fn apply_account_delta<E: AccountDelta>(inner: &mut Inner, e: &E, is_deposit: bool) {
-    let acct = inner.accounts.entry(e.account_id()).or_default();
-    let bal = acct.balances.entry(e.asset_type().clone()).or_insert(0);
-    if is_deposit {
-        *bal = bal.saturating_add(e.amount());
-    } else {
-        *bal = bal.saturating_sub(e.amount());
-    }
-}
-
-trait AccountDelta {
-    fn account_id(&self) -> ObjectId;
-    fn asset_type(&self) -> &AssetType;
-    fn amount(&self) -> u64;
-}
-
-impl AccountDelta for AccountDeposit {
-    fn account_id(&self) -> ObjectId {
-        self.account_id
-    }
-    fn asset_type(&self) -> &AssetType {
-        &self.asset_type
-    }
-    fn amount(&self) -> u64 {
-        self.amount
-    }
-}
-
-impl AccountDelta for AccountWithdraw {
-    fn account_id(&self) -> ObjectId {
-        self.account_id
-    }
-    fn asset_type(&self) -> &AssetType {
-        &self.asset_type
-    }
-    fn amount(&self) -> u64 {
-        self.amount
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use protocol_types::events::{
-        AccountCreated, AccountDeposit, BucketCreated, BucketInvalidated, BucketRevalidated,
+        BucketCreated, BucketInvalidated, BucketRevalidated, SignerCreated,
     };
 
     fn bucket_evt(id: u8) -> ChainEvent {
@@ -1840,7 +1742,8 @@ mod tests {
         store.ingest(
             ChainEvent::WriteExecuted(WriteExecuted {
                 bucket_id: id,
-                signer_account_id: ObjectId::ZERO,
+                signer_id: ObjectId::ZERO,
+                collateral_source: ObjectId::ZERO,
                 signer_token_recipient: SuiAddress::ZERO,
                 executor: SuiAddress::ZERO,
                 position_id: ObjectId::new([0x88; 32]),
@@ -1878,37 +1781,21 @@ mod tests {
     }
 
     #[test]
-    fn account_balances_apply_deposit_and_withdraw() {
+    fn signer_created_registers_key_and_owner() {
         let store = Store::default();
-        let acct = ObjectId::new([0xab; 32]);
+        let signer = ObjectId::new([0xab; 32]);
         store.ingest(
-            ChainEvent::AccountCreated(AccountCreated {
-                account_id: acct,
+            ChainEvent::SignerCreated(SignerCreated {
+                signer_id: signer,
                 owner: SuiAddress::new([0xcd; 32]),
                 signing_scheme: protocol_types::SigningScheme::Ed25519,
                 signing_pubkey: vec![0x01; 32],
             }),
             1,
         );
-        store.ingest(
-            ChainEvent::AccountDeposit(AccountDeposit {
-                account_id: acct,
-                asset_type: AssetType::new("USDC"),
-                amount: 1_000,
-            }),
-            2,
-        );
-        store.ingest(
-            ChainEvent::AccountWithdraw(AccountWithdraw {
-                account_id: acct,
-                asset_type: AssetType::new("USDC"),
-                amount: 250,
-            }),
-            3,
-        );
-        let s = store.account(&acct).unwrap();
-        assert_eq!(s.balances[&AssetType::new("USDC")], 750);
+        let s = store.account(&signer).unwrap();
         assert_eq!(s.signing_pubkey, vec![0x01; 32]);
+        assert_eq!(s.signing_scheme, Some(protocol_types::SigningScheme::Ed25519));
         assert_eq!(s.owner, Some(SuiAddress::new([0xcd; 32])));
     }
 
@@ -2334,7 +2221,8 @@ mod tests {
         let buyer = SuiAddress::new([0x22; 32]);
         let we = ChainEvent::WriteExecuted(WriteExecuted {
             bucket_id: ObjectId::new([0x11; 32]),
-            signer_account_id: ObjectId::ZERO,
+            signer_id: ObjectId::ZERO,
+            collateral_source: ObjectId::ZERO,
             signer_token_recipient: buyer,
             executor: writer,
             position_id: ObjectId::new([0x88; 32]),
@@ -2359,7 +2247,7 @@ mod tests {
         assert!(has(&writer, "executor"));
         assert!(has(&buyer, "call_token_recipient"));
         assert!(has(&buyer, "signer_token_recipient"));
-        // Account owner unknown (no AccountCreated) → no signer_account_owner row.
+        // Signer owner unknown (no SignerCreated) → no signer_account_owner row.
         assert!(!parts.iter().any(|p| p.role == "signer_account_owner"));
         assert_eq!(staged.db_batch.events.len(), 1);
     }

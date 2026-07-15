@@ -18,7 +18,10 @@ public struct BucketCreated has copy, drop {
 
 public struct WriteExecuted has copy, drop {
     bucket_id: ID,
-    signer_account_id: ID,
+    /// The `QuoteSigner` whose quote authorized this write.
+    signer_id: ID,
+    /// The external collateral object the signer's funds released from.
+    collateral_source: ID,
     signer_token_recipient: address,
     executor: address,
     position_id: ID,
@@ -109,7 +112,10 @@ public struct PutBucketCreated has copy, drop {
 
 public struct PutWriteExecuted has copy, drop {
     bucket_id: ID,
-    signer_account_id: ID,
+    /// The `QuoteSigner` whose quote authorized this write.
+    signer_id: ID,
+    /// The external collateral object the signer's funds released from.
+    collateral_source: ID,
     signer_token_recipient: address,
     executor: address,
     position_id: ID,
@@ -183,27 +189,15 @@ public struct PutBucketRevalidated has copy, drop {
     reason: vector<u8>,
 }
 
-public struct AccountCreated has copy, drop {
-    account_id: ID,
+public struct SignerCreated has copy, drop {
+    signer_id: ID,
     owner: address,
     signing_scheme: u8,
     signing_pubkey: vector<u8>,
 }
 
-public struct AccountDeposit has copy, drop {
-    account_id: ID,
-    asset_type: TypeName,
-    amount: u64,
-}
-
-public struct AccountWithdraw has copy, drop {
-    account_id: ID,
-    asset_type: TypeName,
-    amount: u64,
-}
-
 public struct SigningKeyRotated has copy, drop {
-    account_id: ID,
+    signer_id: ID,
     new_scheme: u8,
     new_pubkey: vector<u8>,
 }
@@ -241,7 +235,8 @@ public(package) fun emit_bucket_created(
 
 public(package) fun emit_write_executed(
     bucket_id: ID,
-    signer_account_id: ID,
+    signer_id: ID,
+    collateral_source: ID,
     signer_token_recipient: address,
     executor: address,
     position_id: ID,
@@ -257,7 +252,8 @@ public(package) fun emit_write_executed(
 ) {
     event::emit(WriteExecuted {
         bucket_id,
-        signer_account_id,
+        signer_id,
+        collateral_source,
         signer_token_recipient,
         executor,
         position_id,
@@ -343,42 +339,26 @@ public(package) fun emit_bucket_revalidated(
     event::emit(BucketRevalidated { bucket_id, at_ms, admin, reason });
 }
 
-public(package) fun emit_account_created(
-    account_id: ID,
+public(package) fun emit_signer_created(
+    signer_id: ID,
     owner: address,
     signing_scheme: u8,
     signing_pubkey: vector<u8>,
 ) {
-    event::emit(AccountCreated {
-        account_id,
+    event::emit(SignerCreated {
+        signer_id,
         owner,
         signing_scheme,
         signing_pubkey,
     });
 }
 
-public(package) fun emit_account_deposit(
-    account_id: ID,
-    asset_type: TypeName,
-    amount: u64,
-) {
-    event::emit(AccountDeposit { account_id, asset_type, amount });
-}
-
-public(package) fun emit_account_withdraw(
-    account_id: ID,
-    asset_type: TypeName,
-    amount: u64,
-) {
-    event::emit(AccountWithdraw { account_id, asset_type, amount });
-}
-
 public(package) fun emit_signing_key_rotated(
-    account_id: ID,
+    signer_id: ID,
     new_scheme: u8,
     new_pubkey: vector<u8>,
 ) {
-    event::emit(SigningKeyRotated { account_id, new_scheme, new_pubkey });
+    event::emit(SigningKeyRotated { signer_id, new_scheme, new_pubkey });
 }
 
 public(package) fun emit_fee_updated(old_bps: u64, new_bps: u64) {
@@ -417,7 +397,8 @@ public(package) fun emit_put_bucket_created(
 
 public(package) fun emit_put_write_executed(
     bucket_id: ID,
-    signer_account_id: ID,
+    signer_id: ID,
+    collateral_source: ID,
     signer_token_recipient: address,
     executor: address,
     position_id: ID,
@@ -434,7 +415,8 @@ public(package) fun emit_put_write_executed(
 ) {
     event::emit(PutWriteExecuted {
         bucket_id,
-        signer_account_id,
+        signer_id,
+        collateral_source,
         signer_token_recipient,
         executor,
         position_id,
@@ -534,7 +516,8 @@ public(package) fun emit_put_bucket_revalidated(
 #[test_only]
 public fun new_write_executed_for_testing(
     bucket_id: ID,
-    signer_account_id: ID,
+    signer_id: ID,
+    collateral_source: ID,
     signer_token_recipient: address,
     executor: address,
     position_id: ID,
@@ -550,7 +533,8 @@ public fun new_write_executed_for_testing(
 ): WriteExecuted {
     WriteExecuted {
         bucket_id,
-        signer_account_id,
+        signer_id,
+        collateral_source,
         signer_token_recipient,
         executor,
         position_id,

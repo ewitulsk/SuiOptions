@@ -5,12 +5,13 @@ use sui::balance::{Self, Balance};
 use sui::clock::Clock;
 use sui::coin::{Self, Coin, TreasuryCap};
 
-use options_core::account::{Self, Account};
 use options_core::admin::{Self, AdminCap, ProtocolConfig};
+use options_core::collateral::{Self, CollateralRequest};
 use options_core::errors;
 use options_core::events;
 use options_core::position::{Self, Position};
 use options_core::quote::{Self, Quote, SignedQuote};
+use options_core::quote_signer::QuoteSigner;
 use options_core::treasury::{Self, Treasury};
 
 /// The call option is a per-bucket fungible coin: `Coin<Call>`. `Call` is a
@@ -82,24 +83,6 @@ fun apply_strike(amount: u128, strike: u128, strike_scale: u8): u64 {
     ((numerator + half) / divisor) as u64
 }
 
-public enum FlowKind has copy, drop, store {
-    Writer,
-    Trader,
-}
-
-public fun writer_flow(): FlowKind { FlowKind::Writer }
-
-public fun trader_flow(): FlowKind { FlowKind::Trader }
-
-/// Enum variants can only be matched in their defining module; other modules
-/// (see `put_bucket`) branch through this instead.
-public fun is_writer(flow: &FlowKind): bool {
-    match (flow) {
-        FlowKind::Writer => true,
-        FlowKind::Trader => false,
-    }
-}
-
 /// Create a single bucket for the (Underlying, Settlement, Call) triple,
 /// taking ownership of the option coin's `TreasuryCap`.
 ///
@@ -156,138 +139,80 @@ public fun create_bucket<Underlying, Settlement, Call>(
     transfer::share_object(bucket);
 }
 
-public fun execute_write<Underlying, Settlement, Call>(
-    bucket: &mut Bucket<Underlying, Settlement, Call>,
+/// Writer flow, step 1 of the collateral protocol (see `collateral.move`):
+/// the signer is the trader MM (the buyer). Verifies the signed quote
+/// (consuming its nonce) against this bucket and demands the MM's PREMIUM
+/// as a `CollateralRequest<Settlement>` for their `release` implementation
+/// to fulfill. Consumed by `execute_writer_flow` in the same transaction.
+public fun request_writer_flow<Underlying, Settlement, Call>(
+    bucket: &Bucket<Underlying, Settlement, Call>,
+    signer: &mut QuoteSigner,
     config: &ProtocolConfig,
-    treasury: &mut Treasury,
-    signer_account: &mut Account,
-    underlying_in: Coin<Underlying>,
-    premium_in: Coin<Settlement>,
-    flow: FlowKind,
-    position_recipient: address,
-    call_token_recipient: address,
     signed_quote: SignedQuote,
     clock: &Clock,
-    ctx: &mut TxContext,
-) {
-    let q = quote::verify_and_consume_quote(signer_account, config, &signed_quote, clock);
-    execute_write_with_quote<Underlying, Settlement, Call>(
-        bucket,
-        config,
-        treasury,
-        signer_account,
-        underlying_in,
-        premium_in,
-        flow,
-        position_recipient,
-        call_token_recipient,
-        q,
-        clock,
-        ctx,
-    );
+): CollateralRequest<Settlement> {
+    let q = quote::verify_and_consume_quote(signer, config, &signed_quote, clock);
+    assert_quote_bucket(bucket, &q, clock);
+    collateral::new_writer_request<Settlement>(q, quote::premium(&q))
 }
 
-#[test_only]
-public fun execute_write_for_testing<Underlying, Settlement, Call>(
-    bucket: &mut Bucket<Underlying, Settlement, Call>,
+/// Trader flow, step 1: the signer is the writer MM (the seller). Demands
+/// the MM's UNDERLYING write collateral as a `CollateralRequest<Underlying>`.
+public fun request_trader_flow<Underlying, Settlement, Call>(
+    bucket: &Bucket<Underlying, Settlement, Call>,
+    signer: &mut QuoteSigner,
     config: &ProtocolConfig,
-    treasury: &mut Treasury,
-    signer_account: &mut Account,
-    underlying_in: Coin<Underlying>,
-    premium_in: Coin<Settlement>,
-    flow: FlowKind,
-    position_recipient: address,
-    call_token_recipient: address,
     signed_quote: SignedQuote,
     clock: &Clock,
-    ctx: &mut TxContext,
-) {
-    let q = quote::verify_skip_sig(signer_account, config, &signed_quote, clock);
-    execute_write_with_quote<Underlying, Settlement, Call>(
-        bucket,
-        config,
-        treasury,
-        signer_account,
-        underlying_in,
-        premium_in,
-        flow,
-        position_recipient,
-        call_token_recipient,
-        q,
-        clock,
-        ctx,
-    );
+): CollateralRequest<Underlying> {
+    let q = quote::verify_and_consume_quote(signer, config, &signed_quote, clock);
+    assert_quote_bucket(bucket, &q, clock);
+    collateral::new_trader_request<Underlying>(q, quote::write_amount(&q))
 }
 
-#[allow(lint(self_transfer))]
-fun execute_write_with_quote<Underlying, Settlement, Call>(
-    bucket: &mut Bucket<Underlying, Settlement, Call>,
-    config: &ProtocolConfig,
-    treasury: &mut Treasury,
-    signer_account: &mut Account,
-    underlying_in: Coin<Underlying>,
-    premium_in: Coin<Settlement>,
-    flow: FlowKind,
-    position_recipient: address,
-    call_token_recipient: address,
-    q: Quote,
+fun assert_quote_bucket<Underlying, Settlement, Call>(
+    bucket: &Bucket<Underlying, Settlement, Call>,
+    q: &Quote,
     clock: &Clock,
-    ctx: &mut TxContext,
 ) {
-    let bucket_id = object::id(bucket);
-    assert!(quote::bucket_id(&q) == bucket_id, errors::quote_bucket_mismatch());
+    assert!(quote::bucket_id(q) == object::id(bucket), errors::quote_bucket_mismatch());
     assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
     assert!(!bucket.invalidated, errors::bucket_invalidated());
+    assert!(quote::write_amount(q) > 0, errors::zero_amount());
+}
+
+/// Writer flow, step 2: consume the potato + the released premium and
+/// execute the covered write. The executor (the retail writer, tx sender)
+/// supplies the underlying and receives the `Position` + net premium; the
+/// MM's `Coin<Call>` goes to the quote's `signer_token_recipient`.
+#[allow(lint(self_transfer))]
+public fun execute_writer_flow<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    config: &ProtocolConfig,
+    treasury: &mut Treasury,
+    request: CollateralRequest<Settlement>,
+    premium_funds: Balance<Settlement>,
+    underlying_in: Coin<Underlying>,
+    position_recipient: address,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    let (q, amount, is_writer) = collateral::destroy(request);
+    assert!(is_writer, errors::request_flow_mismatch());
+    let bucket_id = object::id(bucket);
+    assert!(quote::bucket_id(&q) == bucket_id, errors::quote_bucket_mismatch());
+    assert!(premium_funds.value() == amount, errors::amount_mismatch());
 
     let write_amount = quote::write_amount(&q);
     let gross_premium = quote::premium(&q);
-    let signer_recipient = quote::signer_token_recipient(&q);
-    assert!(write_amount > 0, errors::zero_amount());
+    let call_token_recipient = quote::signer_token_recipient(&q);
+    assert!(underlying_in.value() == write_amount, errors::amount_mismatch());
 
-    let (underlying, fee) = match (flow) {
-        FlowKind::Writer => {
-            // Signer is the trader MM (the buyer of the option).
-            // Signer-supplied side: premium (Settlement) debited from their Account.
-            // Executor-supplied side: underlying matching write_amount.
-            assert!(signer_recipient == call_token_recipient, errors::quote_recipient_mismatch());
-            assert!(premium_in.value() == 0, errors::amount_mismatch());
-            assert!(underlying_in.value() == write_amount, errors::amount_mismatch());
-
-            let premium_coin = account::withdraw_internal<Settlement>(
-                signer_account,
-                gross_premium,
-                ctx,
-            );
-            let (net_balance, fee) = skim_fee(config, treasury, premium_coin.into_balance());
-            let net_coin = coin::from_balance(net_balance, ctx);
-            transfer::public_transfer(net_coin, ctx.sender());
-
-            premium_in.destroy_zero();
-            (underlying_in.into_balance(), fee)
-        },
-        FlowKind::Trader => {
-            // Signer is the writer MM (the seller of the option).
-            // Signer-supplied side: underlying debited from their Account.
-            // Executor-supplied side: premium matching gross_premium.
-            assert!(signer_recipient == position_recipient, errors::quote_recipient_mismatch());
-            assert!(underlying_in.value() == 0, errors::amount_mismatch());
-            assert!(premium_in.value() == gross_premium, errors::amount_mismatch());
-
-            let underlying_coin = account::withdraw_internal<Underlying>(
-                signer_account,
-                write_amount,
-                ctx,
-            );
-            let (net_balance, fee) = skim_fee(config, treasury, premium_in.into_balance());
-            account::deposit_balance(signer_account, net_balance);
-
-            underlying_in.destroy_zero();
-            (underlying_coin.into_balance(), fee)
-        },
-    };
+    let (net_balance, fee) = skim_fee(config, treasury, premium_funds);
     let net_premium = gross_premium - fee;
+    transfer::public_transfer(coin::from_balance(net_balance, ctx), ctx.sender());
 
-    let (position, call) = do_write(bucket, underlying, ctx);
+    let (position, call) = write_and_check(bucket, underlying_in.into_balance(), clock, ctx);
     let range_start = position::range_start(&position);
     let range_end = position::range_end(&position);
     let position_id = object::id(&position);
@@ -296,8 +221,9 @@ fun execute_write_with_quote<Underlying, Settlement, Call>(
 
     events::emit_write_executed(
         bucket_id,
-        quote::signer_account_id(&q),
-        signer_recipient,
+        quote::signer_id(&q),
+        quote::collateral_source(&q),
+        call_token_recipient,
         ctx.sender(),
         position_id,
         position_recipient,
@@ -310,6 +236,106 @@ fun execute_write_with_quote<Underlying, Settlement, Call>(
         range_end,
         quote::nonce(&q),
     );
+}
+
+/// Trader flow, step 2: consume the potato + the released underlying and
+/// execute the covered write. The executor (the retail trader, tx sender)
+/// pays the premium and chooses where the `Coin<Call>` goes; the MM
+/// receives the `Position` + net premium at `signer_token_recipient`.
+public fun execute_trader_flow<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    config: &ProtocolConfig,
+    treasury: &mut Treasury,
+    request: CollateralRequest<Underlying>,
+    underlying_funds: Balance<Underlying>,
+    premium_in: Coin<Settlement>,
+    call_token_recipient: address,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    let (q, amount, is_writer) = collateral::destroy(request);
+    assert!(!is_writer, errors::request_flow_mismatch());
+    let bucket_id = object::id(bucket);
+    assert!(quote::bucket_id(&q) == bucket_id, errors::quote_bucket_mismatch());
+    assert!(underlying_funds.value() == amount, errors::amount_mismatch());
+
+    let write_amount = quote::write_amount(&q);
+    let gross_premium = quote::premium(&q);
+    let position_recipient = quote::signer_token_recipient(&q);
+    assert!(underlying_funds.value() == write_amount, errors::amount_mismatch());
+    assert!(premium_in.value() == gross_premium, errors::amount_mismatch());
+
+    let (net_balance, fee) = skim_fee(config, treasury, premium_in.into_balance());
+    let net_premium = gross_premium - fee;
+    transfer::public_transfer(coin::from_balance(net_balance, ctx), position_recipient);
+
+    let (position, call) = write_and_check(bucket, underlying_funds, clock, ctx);
+    let range_start = position::range_start(&position);
+    let range_end = position::range_end(&position);
+    let position_id = object::id(&position);
+    transfer::public_transfer(position, position_recipient);
+    transfer::public_transfer(call, call_token_recipient);
+
+    events::emit_write_executed(
+        bucket_id,
+        quote::signer_id(&q),
+        quote::collateral_source(&q),
+        position_recipient,
+        ctx.sender(),
+        position_id,
+        position_recipient,
+        call_token_recipient,
+        write_amount,
+        gross_premium,
+        fee,
+        net_premium,
+        range_start,
+        range_end,
+        quote::nonce(&q),
+    );
+}
+
+/// Shared execute-step bucket checks: the request was minted against a
+/// live bucket, but re-assert cheaply in case state changed inside the
+/// same transaction (an earlier PTB command could not have expired it,
+/// but invalidation gating is defense-in-depth).
+fun write_and_check<Underlying, Settlement, Call>(
+    bucket: &mut Bucket<Underlying, Settlement, Call>,
+    underlying: Balance<Underlying>,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): (Position, Coin<Call>) {
+    assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
+    assert!(!bucket.invalidated, errors::bucket_invalidated());
+    do_write(bucket, underlying, ctx)
+}
+
+/// Test-only request twins that skip signature verification (test quotes
+/// carry empty signatures); every other check is identical.
+#[test_only]
+public fun request_writer_flow_for_testing<Underlying, Settlement, Call>(
+    bucket: &Bucket<Underlying, Settlement, Call>,
+    signer: &mut QuoteSigner,
+    config: &ProtocolConfig,
+    signed_quote: SignedQuote,
+    clock: &Clock,
+): CollateralRequest<Settlement> {
+    let q = quote::verify_skip_sig(signer, config, &signed_quote, clock);
+    assert_quote_bucket(bucket, &q, clock);
+    collateral::new_writer_request<Settlement>(q, quote::premium(&q))
+}
+
+#[test_only]
+public fun request_trader_flow_for_testing<Underlying, Settlement, Call>(
+    bucket: &Bucket<Underlying, Settlement, Call>,
+    signer: &mut QuoteSigner,
+    config: &ProtocolConfig,
+    signed_quote: SignedQuote,
+    clock: &Clock,
+): CollateralRequest<Underlying> {
+    let q = quote::verify_skip_sig(signer, config, &signed_quote, clock);
+    assert_quote_bucket(bucket, &q, clock);
+    collateral::new_trader_request<Underlying>(q, quote::write_amount(&q))
 }
 
 /// Core covered-write: escrow `underlying_in` in the bucket and mint the

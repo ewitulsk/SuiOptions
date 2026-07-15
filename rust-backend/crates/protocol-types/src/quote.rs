@@ -1,12 +1,16 @@
 //! The signed quote payload. This is the one type whose BCS encoding **must**
-//! byte-match the Move struct in §3.2.7 — the chain hashes these bytes and
-//! `ed25519_verify`s the signature against the Account's registered pubkey.
+//! byte-match the Move struct in `options_core::quote::Quote` — the chain
+//! hashes these bytes and verifies the signature against the QuoteSigner's
+//! registered pubkey.
 //!
-//! Field order matches the Move declaration:
+//! Field order matches the Move declaration (NORMATIVE):
 //!
 //! ```text
 //! protocol_id:            vector<u8>           // ULEB128 len + bytes
-//! signer_account_id:      ID (32 bytes)
+//! signer_id:              ID (32 bytes)        // the QuoteSigner object
+//! collateral_source:      ID (32 bytes)        // object release() debits
+//! release_package:        address (32 bytes)   // package holding release()
+//! release_module:         String               // ULEB128 len + utf8 bytes
 //! signer_token_recipient: address (32 bytes)
 //! bucket_id:              ID (32 bytes)
 //! write_amount:           u64 (little-endian)
@@ -16,7 +20,7 @@
 //! ```
 //!
 //! JSON encoding (§4.3) is the human-readable variant: hex for byte arrays,
-//! decimal strings for u64.
+//! decimal strings for u64, plain strings for the module name.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +32,14 @@ use super::ids::{ObjectId, SuiAddress};
 pub struct Quote {
     #[serde(with = "bytes_hex")]
     pub protocol_id: Vec<u8>,
-    pub signer_account_id: ObjectId,
+    /// The `QuoteSigner` whose key + nonce table authorize this quote.
+    pub signer_id: ObjectId,
+    /// The collateral object the MM's `release()` implementation debits.
+    pub collateral_source: ObjectId,
+    /// Package + module containing the standardized `release` function. The
+    /// full routing is INSIDE the signature so no intermediary can corrupt it.
+    pub release_package: SuiAddress,
+    pub release_module: String,
     pub signer_token_recipient: SuiAddress,
     pub bucket_id: ObjectId,
     #[serde(with = "u64_string")]
@@ -58,8 +69,8 @@ pub struct SignedQuote {
 impl SignedQuote {
     /// Verify the signature against the given pubkey + scheme, plus the
     /// surface-level invariants that don't need on-chain state (protocol_id
-    /// match, expiry, signer account id). Nonce uniqueness and bucket
-    /// existence are checked elsewhere (Account / state).
+    /// match, expiry, signer id). Nonce uniqueness and bucket existence are
+    /// checked elsewhere (QuoteSigner / state).
     ///
     /// For Ed25519 (`scheme == 0`) we sign/verify the raw BCS payload.
     /// For Secp256k1 / Secp256r1 the verifier hashes the BCS payload with
@@ -70,13 +81,13 @@ impl SignedQuote {
         scheme: crate::SigningScheme,
         signing_pubkey: &[u8],
         expected_protocol_id: &[u8],
-        expected_signer_account_id: ObjectId,
+        expected_signer_id: ObjectId,
         now_ms: u64,
     ) -> Result<(), ProtocolError> {
         if self.quote.protocol_id != expected_protocol_id {
             return Err(ProtocolError::QuoteProtocolMismatch);
         }
-        if self.quote.signer_account_id != expected_signer_account_id {
+        if self.quote.signer_id != expected_signer_id {
             return Err(ProtocolError::QuoteAccountMismatch);
         }
         if now_ms >= self.quote.valid_until_ms {
@@ -98,7 +109,10 @@ mod tests {
     fn sample_quote() -> Quote {
         Quote {
             protocol_id: vec![0xa1, 0xb2, 0xc3],
-            signer_account_id: ObjectId::new([0x11; 32]),
+            signer_id: ObjectId::new([0x11; 32]),
+            collateral_source: ObjectId::new([0x44; 32]),
+            release_package: SuiAddress::new([0x55; 32]),
+            release_module: "mm_collateral".to_string(),
             signer_token_recipient: SuiAddress::new([0x22; 32]),
             bucket_id: ObjectId::new([0x33; 32]),
             write_amount: 10_000_000,
@@ -108,8 +122,10 @@ mod tests {
         }
     }
 
-    /// Hand-built BCS bytes for `sample_quote`, locking in the wire format.
-    /// If this test breaks, signature verification breaks on chain.
+    /// Hand-built golden BCS bytes for `sample_quote`, locking in the wire
+    /// format. If this test breaks, signature verification breaks on chain —
+    /// every off-chain signer (mm-bot, frontend) must produce exactly these
+    /// bytes for this quote.
     #[test]
     fn bcs_layout_is_byte_exact() {
         let bytes = sample_quote().to_bcs_bytes().unwrap();
@@ -117,8 +133,15 @@ mod tests {
         // protocol_id: ULEB128(3) + bytes
         expected.push(0x03);
         expected.extend_from_slice(&[0xa1, 0xb2, 0xc3]);
-        // signer_account_id: 32 bytes
+        // signer_id: 32 bytes
         expected.extend_from_slice(&[0x11; 32]);
+        // collateral_source: 32 bytes
+        expected.extend_from_slice(&[0x44; 32]);
+        // release_package: 32 bytes
+        expected.extend_from_slice(&[0x55; 32]);
+        // release_module: ULEB128 len + utf8 bytes ("mm_collateral" = 13)
+        expected.push(13);
+        expected.extend_from_slice(b"mm_collateral");
         // signer_token_recipient: 32 bytes
         expected.extend_from_slice(&[0x22; 32]);
         // bucket_id: 32 bytes
@@ -134,6 +157,28 @@ mod tests {
         assert_eq!(bytes, expected);
     }
 
+    /// Golden-bytes serialization of a fully-known quote, hex-pinned. Guards
+    /// the cross-language signing contract (Move `bcs::to_bytes(&quote)` must
+    /// hash these exact bytes).
+    #[test]
+    fn bcs_golden_bytes() {
+        let bytes = sample_quote().to_bcs_bytes().unwrap();
+        let expected_hex = concat!(
+            "03a1b2c3",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "4444444444444444444444444444444444444444444444444444444444444444",
+            "5555555555555555555555555555555555555555555555555555555555555555",
+            "0d6d6d5f636f6c6c61746572616c",
+            "2222222222222222222222222222222222222222222222222222222222222222",
+            "3333333333333333333333333333333333333333333333333333333333333333",
+            "8096980000000000",
+            "80f0fa0200000000",
+            "0094c51c97010000",
+            "2a00000000000000",
+        );
+        assert_eq!(hex::encode(&bytes), expected_hex);
+    }
+
     #[test]
     fn json_matches_spec_shape() {
         let q = sample_quote();
@@ -143,10 +188,15 @@ mod tests {
         assert_eq!(v["premium"], "50000000");
         assert_eq!(v["valid_until_ms"], "1748534400000");
         assert_eq!(v["nonce"], "42");
+        assert_eq!(v["release_module"], "mm_collateral");
         // ids are 0x-prefixed hex strings of 64 hex chars.
         let bucket = v["bucket_id"].as_str().unwrap();
         assert_eq!(bucket.len(), 66);
         assert!(bucket.starts_with("0x33"));
+        let source = v["collateral_source"].as_str().unwrap();
+        assert!(source.starts_with("0x44"));
+        let pkg = v["release_package"].as_str().unwrap();
+        assert!(pkg.starts_with("0x55"));
 
         let round: Quote = serde_json::from_value(v).unwrap();
         assert_eq!(round, q);
@@ -222,6 +272,30 @@ mod tests {
     }
 
     #[test]
+    fn verify_rejects_routing_tampering() {
+        // The collateral routing is inside the signature: swapping any of
+        // collateral_source / release_package / release_module invalidates it.
+        let quote = sample_quote();
+        let (scheme, pk, sig) = sign_ed25519(&quote);
+        let base = SignedQuote {
+            quote,
+            signature: sig,
+        };
+        let mut a = base.clone();
+        a.quote.collateral_source = ObjectId::new([0xde; 32]);
+        let mut b = base.clone();
+        b.quote.release_package = SuiAddress::new([0xad; 32]);
+        let mut c = base;
+        c.quote.release_module = "evil".to_string();
+        for tampered in [a, b, c] {
+            assert_eq!(
+                tampered.verify(scheme, &pk, &[0xa1, 0xb2, 0xc3], ObjectId::new([0x11; 32]), 0),
+                Err(ProtocolError::QuoteSignatureInvalid),
+            );
+        }
+    }
+
+    #[test]
     fn verify_rejects_expired() {
         let quote = sample_quote();
         let valid_until = quote.valid_until_ms;
@@ -251,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_rejects_wrong_account() {
+    fn verify_rejects_wrong_signer() {
         let quote = sample_quote();
         let (scheme, pk, sig) = sign_ed25519(&quote);
         let signed = SignedQuote {

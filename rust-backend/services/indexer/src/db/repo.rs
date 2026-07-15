@@ -37,12 +37,12 @@ use crate::store::{
 };
 
 use super::models::{
-    account_row_into_state, bigdecimal_to_u128, event_type_tag, AccountBalanceRow, AccountRow,
+    account_row_into_state, event_type_tag, AccountRow,
     BucketRow, DeepBookPoolRow, EventParticipantRow, IndexedEventRow, NewIndexedEventRow,
     PositionRow, ProgressRow, RfqBidRow, RfqRow, VaultReceiptRow, VaultRoundRow, VaultRow,
 };
 use super::schema::{
-    account_balances, accounts, bucket_deepbook_pools, buckets, event_participants,
+    accounts, bucket_deepbook_pools, buckets, event_participants,
     indexed_events, indexer_progress, positions, rfq_bids, rfqs, vault_rounds,
     vault_user_receipts, vaults,
 };
@@ -60,7 +60,6 @@ pub struct CheckpointBatch {
     pub last_sequence: i64,
     pub events: Vec<NewIndexedEventRow>,
     pub accounts: Vec<AccountRow>,
-    pub account_balances: Vec<AccountBalanceRow>,
     pub buckets: Vec<BucketRow>,
     /// Bucket → DeepBook venue rows (SO-152). Insert-only, first pool wins.
     pub deepbook_pools: Vec<DeepBookPoolRow>,
@@ -88,7 +87,6 @@ impl CheckpointBatch {
             last_sequence,
             events: Vec::new(),
             accounts: Vec::new(),
-            account_balances: Vec::new(),
             buckets: Vec::new(),
             deepbook_pools: Vec::new(),
             position_upserts: Vec::new(),
@@ -105,7 +103,6 @@ impl CheckpointBatch {
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
             && self.accounts.is_empty()
-            && self.account_balances.is_empty()
             && self.buckets.is_empty()
             && self.deepbook_pools.is_empty()
             && self.position_upserts.is_empty()
@@ -229,26 +226,6 @@ impl Repo {
                         ))
                         .execute(conn)
                         .context("upserting accounts")?;
-                }
-            }
-
-            if !batch.account_balances.is_empty() {
-                let _s = tracing::info_span!("db_query", query = "upsert_account_balances")
-                    .entered();
-                for bal in &batch.account_balances {
-                    diesel::insert_into(account_balances::table)
-                        .values(bal)
-                        .on_conflict((
-                            account_balances::account_id,
-                            account_balances::asset_type,
-                        ))
-                        .do_update()
-                        .set((
-                            account_balances::balance.eq(&bal.balance),
-                            account_balances::updated_at_seq.eq(bal.updated_at_seq),
-                        ))
-                        .execute(conn)
-                        .context("upserting account_balances")?;
                 }
             }
 
@@ -484,32 +461,6 @@ impl Repo {
             acct_map.insert(id, state);
         }
 
-        for row in account_balances::table
-            .load::<AccountBalanceRow>(&mut conn)
-            .context("loading account_balances")?
-        {
-            let id = ObjectId::from_hex(&row.account_id)
-                .map_err(|e| anyhow::anyhow!("balance account_id {}: {e}", row.account_id))?;
-            if let Some(acct) = acct_map.get_mut(&id) {
-                let bal = bigdecimal_to_u128(&row.balance)?;
-                // Balances are stored as NUMERIC for headroom but the in-memory
-                // shape uses u64 (mirroring Coin values). Truncate via u128 → u64
-                // — overflow would mean an on-chain balance > u64::MAX which
-                // can't happen.
-                let bal_u64 = bal.try_into().map_err(|_| {
-                    anyhow::anyhow!(
-                        "balance {bal} for account {} asset {} exceeds u64",
-                        row.account_id,
-                        row.asset_type
-                    )
-                })?;
-                acct.balances.insert(
-                    protocol_types::asset::AssetType::new(row.asset_type),
-                    bal_u64,
-                );
-            }
-        }
-
         let mut bucket_map: BTreeMap<ObjectId, BucketState> = BTreeMap::new();
         for row in buckets::table
             .load::<BucketRow>(&mut conn)
@@ -681,27 +632,16 @@ impl Repo {
             .context("loading positions by object_ids")
     }
 
-    /// JIT point-lookup: one account with its per-asset balances. Returns
-    /// `None` when the account isn't known. Backs the GraphQL `account(id)`
-    /// query that replaces the quoting-service's in-memory account mirror.
-    pub fn account_by_id(
-        &self,
-        account_id: &str,
-    ) -> Result<Option<(AccountRow, Vec<AccountBalanceRow>)>> {
+    /// JIT point-lookup: one QuoteSigner registration (signing key + owner).
+    /// Returns `None` when the signer isn't known. Backs the GraphQL
+    /// `account(id)` query the quoting-service authenticates MMs against.
+    pub fn account_by_id(&self, account_id: &str) -> Result<Option<AccountRow>> {
         let mut conn = self.conn()?;
-        let acct = accounts::table
+        accounts::table
             .find(account_id)
             .first::<AccountRow>(&mut conn)
             .optional()
-            .context("loading account")?;
-        let Some(acct) = acct else {
-            return Ok(None);
-        };
-        let bals = account_balances::table
-            .filter(account_balances::account_id.eq(account_id))
-            .load::<AccountBalanceRow>(&mut conn)
-            .context("loading account_balances")?;
-        Ok(Some((acct, bals)))
+            .context("loading account")
     }
 
     /// JIT point-lookup: one bucket by id. Backs the GraphQL `bucket(id)`

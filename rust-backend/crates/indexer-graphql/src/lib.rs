@@ -9,8 +9,6 @@
 //! precision-safe convention); we parse them back into `u64` / `u128` /
 //! `u8` here so callers get typed values.
 
-use std::collections::BTreeMap;
-
 use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -57,24 +55,16 @@ pub struct Bucket {
     pub deepbook_pool_id: Option<ObjectId>,
 }
 
-/// An account's registered signing key + per-asset balances. `signing_scheme`
-/// is `None` only for un-backfilled rows; callers treat that as "unknown
-/// signer" (reject), matching the pre-JIT behaviour.
+/// A QuoteSigner's registered signing key. Core holds no MM funds anymore
+/// (collateral custody lives in per-MM external packages), so there are no
+/// balances here. `signing_scheme` is `None` only for un-backfilled rows;
+/// callers treat that as "unknown signer" (reject).
 #[derive(Clone, Debug)]
 pub struct Account {
     pub account_id: ObjectId,
     pub owner: Option<SuiAddress>,
     pub signing_scheme: Option<SigningScheme>,
     pub signing_pubkey: Vec<u8>,
-    pub balances: BTreeMap<AssetType, u64>,
-}
-
-impl Account {
-    /// On-chain balance for `asset`, 0 if none recorded. Callers subtract
-    /// their own local reservations to get spendable balance.
-    pub fn balance(&self, asset: &AssetType) -> u64 {
-        self.balances.get(asset).copied().unwrap_or(0)
-    }
 }
 
 /// An enriched position (position row joined to its bucket + mint provenance).
@@ -270,10 +260,10 @@ impl IndexerClient {
         data.buckets.into_iter().map(Bucket::try_from).collect()
     }
 
-    /// One account (signing key + balances), or `None` if unknown.
+    /// One QuoteSigner (registered signing key), or `None` if unknown.
     pub async fn account(&self, account_id: ObjectId) -> Result<Option<Account>> {
         const Q: &str = "query($id:String!){account(id:$id){accountId owner signingScheme \
-            signingPubkeyHex balances{assetType balanceRaw}}}";
+            signingPubkeyHex}}";
         let data: AccountWrap = self
             .gql(Q, json!({ "id": account_id.to_hex() }))
             .await?;
@@ -403,10 +393,10 @@ impl IndexerClient {
             .unwrap_or(0))
     }
 
-    /// All `WriteExecuted` events for `account` with `sequence > after`, in
-    /// ascending order. Backs the quoting-service's reservation reconciliation
-    /// (the JIT replacement for observing live `WriteExecuted` frames).
-    /// Returns `(sequence, nonce)` pairs.
+    /// All `WriteExecuted` events for the QuoteSigner `account` with
+    /// `sequence > after`, in ascending order. Backs the quoting-service's
+    /// reputation fill accounting (the JIT replacement for observing live
+    /// `WriteExecuted` frames). Returns `(sequence, nonce)` pairs.
     pub async fn write_executed_for_account_since(
         &self,
         account: ObjectId,
@@ -417,7 +407,7 @@ impl IndexerClient {
         // `payload` for JSONB `@>` to hit.
         let filter = json!({
             "eventType": ["WriteExecuted"],
-            "payloadContains": { "payload": { "signer_account_id": account.to_hex() } },
+            "payloadContains": { "payload": { "signer_id": account.to_hex() } },
         });
         let events = self.scan_events(filter, after).await?;
         let mut out = Vec::with_capacity(events.len());
@@ -455,7 +445,7 @@ impl IndexerClient {
     ) -> Result<Vec<(u64, u64)>> {
         let filter = json!({
             "eventType": ["PutWriteExecuted"],
-            "payloadContains": { "payload": { "signer_account_id": account.to_hex() } },
+            "payloadContains": { "payload": { "signer_id": account.to_hex() } },
         });
         let events = self.scan_events(filter, after).await?;
         let mut out = Vec::with_capacity(events.len());
@@ -703,14 +693,6 @@ struct AccountJson {
     owner: Option<String>,
     signing_scheme: Option<i32>,
     signing_pubkey_hex: String,
-    balances: Vec<BalanceJson>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BalanceJson {
-    asset_type: String,
-    balance_raw: String,
 }
 
 #[derive(Deserialize)]
@@ -897,16 +879,11 @@ impl TryFrom<AccountJson> for Account {
             .signing_scheme
             .map(|v| SigningScheme::from_u8(parse_u8(v)?).map_err(|e| anyhow!("bad scheme: {e:?}")))
             .transpose()?;
-        let mut balances = BTreeMap::new();
-        for b in a.balances {
-            balances.insert(AssetType::new(b.asset_type), parse_u64(&b.balance_raw)?);
-        }
         Ok(Account {
             account_id: parse_object_id(&a.account_id)?,
             owner: a.owner.as_deref().map(parse_address).transpose()?,
             signing_scheme,
             signing_pubkey: decode_hex(&a.signing_pubkey_hex)?,
-            balances,
         })
     }
 }

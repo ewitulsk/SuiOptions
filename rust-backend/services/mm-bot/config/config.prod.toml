@@ -10,6 +10,17 @@ quoting_url        = "ws://quoting:9002/"
 
 signing_scheme     = "ed25519"
 
+# --- Collateral routing (collateral abstraction, plan 04 §8) -----------
+# Core holds no MM funds: each MM publishes its own mm_collateral package
+# (`mm-bot deploy-collateral`) and its quotes carry the routing INSIDE the
+# signed payload. When these are unset, the bot reads the state file the
+# deploy-collateral subcommand writes
+# (services/mm-bot/config/collateral.<network>.toml).
+# collateral_package = "0x..."
+# collateral_account = "0x..."
+# release_module     = "mm_collateral"
+
+
 # Derive mode: `underlying_symbols` left unset, so the bot makes markets in
 # every enabled token-info token with a Pyth feed (currently TBTC, TWAL)
 # and a watcher restarts the bot to pick up newly-listed underlyings. Pin an

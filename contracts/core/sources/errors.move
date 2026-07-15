@@ -10,7 +10,7 @@ public fun quote_recipient_mismatch(): u64 { 7 }
 public fun bucket_expired(): u64 { 8 }
 public fun bucket_not_expired(): u64 { 9 }
 public fun bucket_not_drained(): u64 { 10 }
-public fun insufficient_account_balance(): u64 { 11 }
+// 11 retired (insufficient_account_balance — core holds no MM funds).
 public fun amount_mismatch(): u64 { 12 }
 public fun settlement_amount_mismatch(): u64 { 13 }
 public fun cursor_overflow(): u64 { 14 }
@@ -32,3 +32,4 @@ public fun treasury_cap_not_fresh(): u64 { 28 }
 // 35-55 moved to the options_vault package (vault + oracle codes).
 // 56-58 retired (session custody codes).
 public fun put_collateral_mismatch(): u64 { 59 }
+public fun request_flow_mismatch(): u64 { 60 }

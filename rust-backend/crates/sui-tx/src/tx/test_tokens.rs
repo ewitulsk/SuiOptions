@@ -54,25 +54,25 @@ pub async fn mint_to_sender(
     submit(client, signer, pt, gas_budget).await
 }
 
-/// Mint + deposit into an Account in one PTB. The MM bot calls this on
-/// first run so the freshly-created Account has settlement-asset balance
-/// to pay premiums from.
+/// Mint + deposit into the MM's own `mm_collateral::CollateralAccount` in one
+/// PTB. The MM bot calls this to fund its collateral account (core's
+/// `account::deposit` is gone — custody lives in the per-MM package).
 ///
 /// Returns the [`SuiTransactionBlockResponse`] so the caller can log digest
 /// / object changes.
-pub async fn mint_and_deposit_into_account(
+pub async fn mint_and_deposit_into_collateral(
     client: &SuiClient,
     signer: &Signer,
     tokens_package: ObjectID,
     module: &str,
     faucet_id: ObjectID,
     coin_type: &str,
-    account_id: ObjectID,
-    options_package: ObjectID,
+    collateral_account_id: ObjectID,
+    collateral_package: ObjectID,
     amount: u64,
     gas_budget: u64,
 ) -> Result<SuiTransactionBlockResponse> {
-    info!(%tokens_package, module, %account_id, amount, "minting and depositing into account");
+    info!(%tokens_package, module, %collateral_account_id, amount, "minting and depositing into collateral account");
     use move_core_types::language_storage::TypeTag;
     use std::str::FromStr;
 
@@ -89,13 +89,13 @@ pub async fn mint_and_deposit_into_account(
         vec![faucet, amount_arg],
     );
 
-    // account::deposit<T>(&mut Account, Coin<T>)
-    let account = pt.obj(shared_object_arg(client, account_id, true).await?)?;
+    // mm_collateral::deposit<T>(&mut CollateralAccount, Coin<T>)
+    let account = pt.obj(shared_object_arg(client, collateral_account_id, true).await?)?;
     let coin_tag = TypeTag::from_str(coin_type)
         .with_context(|| format!("parsing coin type {coin_type}"))?;
     pt.programmable_move_call(
-        options_package,
-        Identifier::new("account").unwrap(),
+        collateral_package,
+        Identifier::new("mm_collateral").unwrap(),
         Identifier::new("deposit").unwrap(),
         vec![coin_tag],
         vec![account, coin],

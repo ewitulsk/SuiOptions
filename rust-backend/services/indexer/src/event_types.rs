@@ -21,13 +21,13 @@ use serde::Deserialize;
 
 use protocol_types::asset::AssetType;
 use protocol_types::events::{
-    AccountCreated, AccountDeposit, AccountWithdraw, AuctionBid, AuctionCreated, AuctionSettled,
+    AuctionBid, AuctionCreated, AuctionSettled,
     AuctionUnfilled, BucketCleaned, BucketCreated, BucketInvalidated, BucketRevalidated,
     ChainEvent, CollateralizedWrite, Exercised, ExpiredOptionBurned, FeeUpdated, InstantWithdraw,
     PutBucketCleaned, PutBucketCreated, PutBucketInvalidated, PutBucketRevalidated,
     PutCollateralizedWrite, PutExercised, PutExpiredOptionBurned, PutRedeemed, PutRfqCreated,
     PutRfqExpiredUnsold, PutRfqSettled, PutWriteExecuted, Redeemed, RfqCreated, RfqExpiredUnsold,
-    RfqSettled, SharesClaimed, SigningKeyRotated, SwapRfqSettled, SwapRfqUnfilled,
+    RfqSettled, SharesClaimed, SignerCreated, SigningKeyRotated, SwapRfqSettled, SwapRfqUnfilled,
     TreasuryWithdrawn, VaultBucketSelected, VaultConfigUpdated, VaultCreated, VaultDeposit,
     VaultDepositsPaused, VaultFeesCharged, VaultPositionRedeemed, VaultRfqSettled, VaultRfqUnsold,
     VaultRoundFinalized, WithdrawCompleted, WithdrawInitiated, WriteExecuted,
@@ -62,9 +62,7 @@ pub struct EventTypes {
     pub bucket_cleaned: String,
     pub bucket_invalidated: String,
     pub bucket_revalidated: String,
-    pub account_created: String,
-    pub account_deposit: String,
-    pub account_withdraw: String,
+    pub signer_created: String,
     pub signing_key_rotated: String,
     pub fee_updated: String,
     pub treasury_withdrawn: String,
@@ -138,9 +136,7 @@ impl EventTypes {
             bucket_cleaned: core("BucketCleaned"),
             bucket_invalidated: core("BucketInvalidated"),
             bucket_revalidated: core("BucketRevalidated"),
-            account_created: core("AccountCreated"),
-            account_deposit: core("AccountDeposit"),
-            account_withdraw: core("AccountWithdraw"),
+            signer_created: core("SignerCreated"),
             signing_key_rotated: core("SigningKeyRotated"),
             fee_updated: core("FeeUpdated"),
             treasury_withdrawn: core("TreasuryWithdrawn"),
@@ -188,7 +184,7 @@ impl EventTypes {
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 51] {
+    pub fn all_strings(&self) -> [&str; 49] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -198,9 +194,7 @@ impl EventTypes {
             &self.bucket_cleaned,
             &self.bucket_invalidated,
             &self.bucket_revalidated,
-            &self.account_created,
-            &self.account_deposit,
-            &self.account_withdraw,
+            &self.signer_created,
             &self.signing_key_rotated,
             &self.fee_updated,
             &self.treasury_withdrawn,
@@ -275,12 +269,8 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(BucketInvalidated, BucketInvalidated)
     } else if type_str == types.bucket_revalidated {
         decode!(BucketRevalidated, BucketRevalidated)
-    } else if type_str == types.account_created {
-        decode!(AccountCreated, AccountCreated)
-    } else if type_str == types.account_deposit {
-        decode!(AccountDeposit, AccountDeposit)
-    } else if type_str == types.account_withdraw {
-        decode!(AccountWithdraw, AccountWithdraw)
+    } else if type_str == types.signer_created {
+        decode!(SignerCreated, SignerCreated)
     } else if type_str == types.signing_key_rotated {
         decode!(SigningKeyRotated, SigningKeyRotated)
     } else if type_str == types.fee_updated {
@@ -576,7 +566,7 @@ mod tests {
         let t = types();
         assert_eq!(t.bucket_created, format!("{PKG}::events::BucketCreated"));
         assert_eq!(t.write_executed, format!("{PKG}::events::WriteExecuted"));
-        assert_eq!(t.account_deposit, format!("{PKG}::events::AccountDeposit"));
+        assert_eq!(t.signer_created, format!("{PKG}::events::SignerCreated"));
         assert_eq!(
             t.auction_created,
             format!("{AUCTION_PKG}::events::AuctionCreated")
@@ -619,7 +609,8 @@ mod tests {
         let t = types();
         let evt = WriteExecuted {
             bucket_id: ObjectId::new([0x11; 32]),
-            signer_account_id: ObjectId::new([0x22; 32]),
+            signer_id: ObjectId::new([0x22; 32]),
+            collateral_source: ObjectId::new([0x23; 32]),
             signer_token_recipient: SuiAddress::new([0x33; 32]),
             executor: SuiAddress::new([0x44; 32]),
             position_id: ObjectId::new([0xaa; 32]),

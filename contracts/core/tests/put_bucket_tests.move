@@ -4,9 +4,7 @@ module options_core::put_bucket_tests;
 use sui::coin::{Self, Coin};
 use sui::test_scenario::{Self as ts, Scenario};
 
-use options_core::account;
 use options_core::admin;
-use options_core::bucket;
 use options_core::put_bucket::{Self, PutBucket};
 use options_core::position::{Self, Position};
 use options_core::quote;
@@ -18,14 +16,6 @@ const EXPIRY_MS: u64 = 1_000_000;
 
 fun setup_bucket(scenario: &mut Scenario) {
     th::new_put_bucket<BTC, USDC, PUT>(scenario, EXPIRY_MS, STRIKE, STRIKE_SCALE);
-}
-
-fun fund_account<T>(scenario: &mut Scenario, owner: address, amount: u64) {
-    ts::next_tx(scenario, owner);
-    let mut acc = th::take_account(scenario);
-    let c = coin::mint_for_testing<T>(amount, scenario.ctx());
-    account::deposit(&mut acc, c);
-    ts::return_shared(acc);
 }
 
 /// Writer-flow write: the writer (executor, tx sender = writer_addr) posts
@@ -42,12 +32,12 @@ fun write_put_writer(
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(scenario);
     let config = th::take_config(scenario);
     let mut treasury = th::take_treasury(scenario);
-    let mut mm_acc = th::take_account(scenario);
+    let mut signer = th::take_signer(scenario);
 
     let collateral_amount = put_bucket::required_collateral(&b, write_amount);
-    let q = quote::new_quote(
+    let q = th::new_test_quote(
         *admin::protocol_id(&config),
-        object::id(&mm_acc),
+        object::id(&signer),
         th::trader_mm_addr(), // signer (buyer) recipient == put token recipient
         object::id(&b),
         write_amount,
@@ -56,20 +46,21 @@ fun write_put_writer(
         nonce,
     );
     let sq = quote::new_signed_quote(q, vector[]);
+    let req = put_bucket::request_writer_flow_for_testing<BTC, USDC, PUT>(
+        &b, &mut signer, &config, sq, clock,
+    );
+    // The MM's released premium (Balance stand-in) + the writer's collateral.
+    let premium_funds = coin::mint_for_testing<USDC>(premium, scenario.ctx()).into_balance();
     let collateral = coin::mint_for_testing<USDC>(collateral_amount, scenario.ctx());
-    let zero_premium = coin::zero<USDC>(scenario.ctx());
 
-    put_bucket::execute_write_for_testing<BTC, USDC, PUT>(
+    put_bucket::execute_writer_flow<BTC, USDC, PUT>(
         &mut b,
         &config,
         &mut treasury,
-        &mut mm_acc,
+        req,
+        premium_funds,
         collateral,
-        zero_premium,
-        bucket::writer_flow(),
         th::writer_addr(),
-        th::trader_mm_addr(),
-        sq,
         clock,
         scenario.ctx(),
     );
@@ -77,7 +68,7 @@ fun write_put_writer(
     ts::return_shared(b);
     ts::return_shared(config);
     ts::return_shared(treasury);
-    ts::return_shared(mm_acc);
+    ts::return_shared(signer);
 }
 
 // --- create ---
@@ -149,8 +140,7 @@ fun test_writer_flow_happy_path() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
 
     let write_amount: u64 = 100;
     let premium: u64 = 1_000_000;
@@ -166,12 +156,6 @@ fun test_writer_flow_happy_path() {
     assert!(put_bucket::underlying_balance(&b) == 0, 0);
     assert!(put_bucket::put_supply(&b) == write_amount, 0);
     ts::return_shared(b);
-
-    // MM (signer/buyer) account debited the premium.
-    ts::next_tx(&mut scenario, th::trader_mm_addr());
-    let mm_acc = th::take_account(&scenario);
-    assert!(account::balance_of<USDC>(&mm_acc) == 10_000_000 - premium, 0);
-    ts::return_shared(mm_acc);
 
     // Writer receives net premium + Position.
     ts::next_tx(&mut scenario, th::writer_addr());
@@ -200,40 +184,40 @@ fun test_writer_flow_wrong_collateral_aborts() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
     let config = th::take_config(&scenario);
     let mut treasury = th::take_treasury(&scenario);
-    let mut mm_acc = th::take_account(&scenario);
+    let mut signer = th::take_signer(&scenario);
 
-    let q = quote::new_quote(
+    let premium: u64 = 1_000_000;
+    let q = th::new_test_quote(
         *admin::protocol_id(&config),
-        object::id(&mm_acc),
+        object::id(&signer),
         th::trader_mm_addr(),
         object::id(&b),
         100,
-        1_000_000,
+        premium,
         EXPIRY_MS,
         1,
     );
     let sq = quote::new_signed_quote(q, vector[]);
+    let req = put_bucket::request_writer_flow_for_testing<BTC, USDC, PUT>(
+        &b, &mut signer, &config, sq, &clock,
+    );
     // One short of the required 5_000_000.
     let collateral = coin::mint_for_testing<USDC>(100 * (STRIKE as u64) - 1, scenario.ctx());
 
-    put_bucket::execute_write_for_testing<BTC, USDC, PUT>(
+    put_bucket::execute_writer_flow<BTC, USDC, PUT>(
         &mut b,
         &config,
         &mut treasury,
-        &mut mm_acc,
+        req,
+        coin::mint_for_testing<USDC>(premium, scenario.ctx()).into_balance(),
         collateral,
-        coin::zero<USDC>(scenario.ctx()),
-        bucket::writer_flow(),
         th::writer_addr(),
-        th::trader_mm_addr(),
-        sq,
         &clock,
         scenario.ctx(),
     );
@@ -241,7 +225,7 @@ fun test_writer_flow_wrong_collateral_aborts() {
     ts::return_shared(b);
     ts::return_shared(config);
     ts::return_shared(treasury);
-    ts::return_shared(mm_acc);
+    ts::return_shared(signer);
     clock.destroy_for_testing();
     ts::end(scenario);
 }
@@ -253,9 +237,7 @@ fun test_trader_flow_happy_path() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::writer_mm_addr(), th::pubkey_a());
-    // Writer MM funds its account with cash collateral.
-    fund_account<USDC>(&mut scenario, th::writer_mm_addr(), 10_000_000);
+    th::create_signer(&mut scenario, th::writer_mm_addr(), th::pubkey_a());
 
     let write_amount: u64 = 80;
     let premium: u64 = 2_000_000;
@@ -265,11 +247,11 @@ fun test_trader_flow_happy_path() {
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
     let config = th::take_config(&scenario);
     let mut treasury = th::take_treasury(&scenario);
-    let mut mm_acc = th::take_account(&scenario);
+    let mut signer = th::take_signer(&scenario);
 
-    let q = quote::new_quote(
+    let q = th::new_test_quote(
         *admin::protocol_id(&config),
-        object::id(&mm_acc),
+        object::id(&signer),
         th::writer_mm_addr(), // signer (writer MM) recipient == position recipient
         object::id(&b),
         write_amount,
@@ -278,31 +260,30 @@ fun test_trader_flow_happy_path() {
         1,
     );
     let sq = quote::new_signed_quote(q, vector[]);
+    let req = put_bucket::request_trader_flow_for_testing<BTC, USDC, PUT>(
+        &b, &mut signer, &config, sq, &clock,
+    );
 
-    put_bucket::execute_write_for_testing<BTC, USDC, PUT>(
+    put_bucket::execute_trader_flow<BTC, USDC, PUT>(
         &mut b,
         &config,
         &mut treasury,
-        &mut mm_acc,
-        coin::zero<USDC>(scenario.ctx()),
+        req,
+        // The MM's released cash write collateral (Balance stand-in).
+        coin::mint_for_testing<USDC>(collateral, scenario.ctx()).into_balance(),
         coin::mint_for_testing<USDC>(premium, scenario.ctx()),
-        bucket::trader_flow(),
-        th::writer_mm_addr(), // position recipient = MM
         th::trader_addr(),    // put token recipient = retail trader
-        sq,
         &clock,
         scenario.ctx(),
     );
 
     assert!(put_bucket::settlement_balance(&b) == collateral, 0);
     assert!(put_bucket::put_supply(&b) == write_amount, 0);
-    // MM: collateral withdrawn, net premium deposited.
-    assert!(account::balance_of<USDC>(&mm_acc) == 10_000_000 - collateral + premium, 0);
 
     ts::return_shared(b);
     ts::return_shared(config);
     ts::return_shared(treasury);
-    ts::return_shared(mm_acc);
+    ts::return_shared(signer);
 
     // Trader gets the put coins.
     ts::next_tx(&mut scenario, th::trader_addr());
@@ -310,12 +291,119 @@ fun test_trader_flow_happy_path() {
     assert!(put.value() == write_amount, 0);
     ts::return_to_sender(&scenario, put);
 
-    // Writer MM gets the Position.
+    // Writer MM gets the Position + the net premium coin.
     ts::next_tx(&mut scenario, th::writer_mm_addr());
+    let net = ts::take_from_sender<Coin<USDC>>(&scenario);
+    assert!(net.value() == premium, 0);
+    coin::burn_for_testing(net);
     let pos = ts::take_from_sender<Position>(&scenario);
     assert!(position::range_end(&pos) == (write_amount as u128), 0);
     ts::return_to_sender(&scenario, pos);
 
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+// --- request/execute flow tag (both put requests are CollateralRequest<S>) ---
+
+#[test]
+#[expected_failure(abort_code = 60, location = options_core::put_bucket)] // request_flow_mismatch
+fun test_writer_request_into_trader_execute_aborts() {
+    // A premium-sized writer potato typechecks into the trader execute
+    // (both legs are the settlement asset); the flow tag must reject it.
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_bucket(&mut scenario);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
+
+    ts::next_tx(&mut scenario, th::writer_addr());
+    let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
+    let config = th::take_config(&scenario);
+    let mut treasury = th::take_treasury(&scenario);
+    let mut signer = th::take_signer(&scenario);
+
+    let premium: u64 = 1_000_000;
+    let q = th::new_test_quote(
+        *admin::protocol_id(&config),
+        object::id(&signer),
+        th::trader_mm_addr(),
+        object::id(&b),
+        100,
+        premium,
+        EXPIRY_MS,
+        1,
+    );
+    let sq = quote::new_signed_quote(q, vector[]);
+    let req = put_bucket::request_writer_flow_for_testing<BTC, USDC, PUT>(
+        &b, &mut signer, &config, sq, &clock,
+    );
+    put_bucket::execute_trader_flow<BTC, USDC, PUT>(
+        &mut b,
+        &config,
+        &mut treasury,
+        req,
+        coin::mint_for_testing<USDC>(premium, scenario.ctx()).into_balance(),
+        coin::mint_for_testing<USDC>(premium, scenario.ctx()),
+        th::trader_addr(),
+        &clock,
+        scenario.ctx(),
+    );
+
+    ts::return_shared(b);
+    ts::return_shared(config);
+    ts::return_shared(treasury);
+    ts::return_shared(signer);
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = 60, location = options_core::put_bucket)] // request_flow_mismatch
+fun test_trader_request_into_writer_execute_aborts() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_bucket(&mut scenario);
+    th::create_signer(&mut scenario, th::writer_mm_addr(), th::pubkey_a());
+
+    ts::next_tx(&mut scenario, th::trader_addr());
+    let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
+    let config = th::take_config(&scenario);
+    let mut treasury = th::take_treasury(&scenario);
+    let mut signer = th::take_signer(&scenario);
+
+    let write_amount: u64 = 80;
+    let premium: u64 = 2_000_000;
+    let collateral = put_bucket::required_collateral(&b, write_amount);
+    let q = th::new_test_quote(
+        *admin::protocol_id(&config),
+        object::id(&signer),
+        th::writer_mm_addr(),
+        object::id(&b),
+        write_amount,
+        premium,
+        EXPIRY_MS,
+        1,
+    );
+    let sq = quote::new_signed_quote(q, vector[]);
+    let req = put_bucket::request_trader_flow_for_testing<BTC, USDC, PUT>(
+        &b, &mut signer, &config, sq, &clock,
+    );
+    put_bucket::execute_writer_flow<BTC, USDC, PUT>(
+        &mut b,
+        &config,
+        &mut treasury,
+        req,
+        coin::mint_for_testing<USDC>(premium, scenario.ctx()).into_balance(),
+        coin::mint_for_testing<USDC>(collateral, scenario.ctx()),
+        th::trader_addr(),
+        &clock,
+        scenario.ctx(),
+    );
+
+    ts::return_shared(b);
+    ts::return_shared(config);
+    ts::return_shared(treasury);
+    ts::return_shared(signer);
     clock.destroy_for_testing();
     ts::end(scenario);
 }
@@ -327,8 +415,7 @@ fun test_exercise_happy_path() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
     write_put_writer(&mut scenario, &clock, 100, 1_000_000, 1);
 
     // Buyer (trader MM) holds the put; exercise 40 of it by delivering 40 BTC.
@@ -367,8 +454,7 @@ fun test_exercise_wrong_delivery_aborts() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
     write_put_writer(&mut scenario, &clock, 50, 1_000, 1);
 
     ts::next_tx(&mut scenario, th::trader_mm_addr());
@@ -389,8 +475,7 @@ fun test_exercise_after_expiry_aborts() {
     let mut scenario = ts::begin(th::admin_addr());
     let mut clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
     write_put_writer(&mut scenario, &clock, 50, 1_000, 1);
 
     clock.set_for_testing(EXPIRY_MS);
@@ -415,8 +500,7 @@ fun test_redeem_before_expiry_aborts() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
     write_put_writer(&mut scenario, &clock, 50, 1_000, 1);
 
     ts::next_tx(&mut scenario, th::writer_addr());
@@ -436,8 +520,7 @@ fun test_redeem_fully_unexercised_returns_all_cash() {
     let mut scenario = ts::begin(th::admin_addr());
     let mut clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
     write_put_writer(&mut scenario, &clock, 80, 1_000, 1);
 
     clock.set_for_testing(EXPIRY_MS + 1);
@@ -462,8 +545,7 @@ fun test_redeem_fully_exercised_returns_all_underlying() {
     let mut scenario = ts::begin(th::admin_addr());
     let mut clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
     write_put_writer(&mut scenario, &clock, 60, 1_000, 1);
 
     // Holder exercises the whole lot.
@@ -498,8 +580,7 @@ fun test_fifo_two_writers_partial_exercise() {
     let mut scenario = ts::begin(th::admin_addr());
     let mut clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 100_000_000);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
 
     write_put_writer(&mut scenario, &clock, 100, 1_000, 1);
     write_put_writer(&mut scenario, &clock, 50, 1_000, 2);
@@ -561,20 +642,19 @@ fun test_solvency_fractional_strike_with_dust_sweep() {
     let mut scenario = ts::begin(th::admin_addr());
     let mut clock = th::init_protocol(&mut scenario);
     th::new_put_bucket<BTC, USDC, PUT>(&mut scenario, EXPIRY_MS, 15_000, 5);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
 
     // Writer-flow write of 21 (collateral computed on-chain = 4).
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
     let config = th::take_config(&scenario);
     let mut treasury = th::take_treasury(&scenario);
-    let mut mm_acc = th::take_account(&scenario);
+    let mut signer = th::take_signer(&scenario);
     let collateral_amount = put_bucket::required_collateral(&b, 21);
     assert!(collateral_amount == 4, 0);
-    let q = quote::new_quote(
+    let q = th::new_test_quote(
         *admin::protocol_id(&config),
-        object::id(&mm_acc),
+        object::id(&signer),
         th::trader_mm_addr(),
         object::id(&b),
         21,
@@ -583,19 +663,20 @@ fun test_solvency_fractional_strike_with_dust_sweep() {
         1,
     );
     let sq = quote::new_signed_quote(q, vector[]);
-    put_bucket::execute_write_for_testing<BTC, USDC, PUT>(
-        &mut b, &config, &mut treasury, &mut mm_acc,
+    let req = put_bucket::request_writer_flow_for_testing<BTC, USDC, PUT>(
+        &b, &mut signer, &config, sq, &clock,
+    );
+    put_bucket::execute_writer_flow<BTC, USDC, PUT>(
+        &mut b, &config, &mut treasury, req,
+        coin::mint_for_testing<USDC>(1_000, scenario.ctx()).into_balance(),
         coin::mint_for_testing<USDC>(collateral_amount, scenario.ctx()),
-        coin::zero<USDC>(scenario.ctx()),
-        bucket::writer_flow(),
         th::writer_addr(),
-        th::trader_mm_addr(),
-        sq, &clock, scenario.ctx(),
+        &clock, scenario.ctx(),
     );
     ts::return_shared(b);
     ts::return_shared(config);
     ts::return_shared(treasury);
-    ts::return_shared(mm_acc);
+    ts::return_shared(signer);
 
     // Two exercises of 7 each.
     let mut i = 0;
@@ -656,8 +737,7 @@ fun test_cleanup_before_all_redeemed_aborts() {
     let mut scenario = ts::begin(th::admin_addr());
     let mut clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
     write_put_writer(&mut scenario, &clock, 50, 1_000, 1);
 
     clock.set_for_testing(EXPIRY_MS + 1);
@@ -681,8 +761,7 @@ fun test_invalidated_blocks_write() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
 
     ts::next_tx(&mut scenario, th::admin_addr());
     let cap = th::take_admin_cap(&scenario);
@@ -702,8 +781,7 @@ fun test_exercise_works_when_invalidated() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
     write_put_writer(&mut scenario, &clock, 50, 1_000, 1);
 
     ts::next_tx(&mut scenario, th::admin_addr());
@@ -734,8 +812,7 @@ fun test_burn_expired_option() {
     let mut scenario = ts::begin(th::admin_addr());
     let mut clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-    fund_account<USDC>(&mut scenario, th::trader_mm_addr(), 10_000_000);
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
     write_put_writer(&mut scenario, &clock, 50, 1_000, 1);
 
     clock.set_for_testing(EXPIRY_MS + 1);

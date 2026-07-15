@@ -34,7 +34,7 @@ use protocol_types::sides::{RetailRole, Side};
 
 use token_info_client::TokenInfoClient;
 use sui_tx::sui_client::SuiClientWrapper;
-use sui_tx::tx::execute_write::{execute_trader_flow, ExecuteTraderParams};
+use sui_tx::tx::execute_write::{execute_trader_flow, ExecuteTraderParams, QuoteRouting};
 use sui_tx::tx::execute_write_put::{execute_put_trader_flow, ExecutePutTraderParams};
 use sui_tx::ws_client;
 
@@ -134,9 +134,12 @@ async fn main() -> Result<()> {
     );
 
     // -- Execute write (trader flow) -------------------------------------
-    let mm_account_id = sui_object_id_from_pt(best.mm_id)?;
-    let bucket_id_bytes: [u8; 32] = *best.quote.bucket_id.as_bytes();
-    let signer_account_id_bytes: [u8; 32] = *best.quote.signer_account_id.as_bytes();
+    // The collateral routing is read straight off the SIGNED quote — the
+    // PTB targets `{release_package}::{release_module}::release` directly.
+    let quote_signer_id = sui_object_id_from_pt(best.quote.signer_id)?;
+    let collateral_account_id = sui_object_id_from_pt(best.quote.collateral_source)?;
+    let release_package =
+        ObjectID::from_str(&best.quote.release_package.to_hex()).context("release_package")?;
     let signer_token_recipient = sui_address_from_pt(best.quote.signer_token_recipient)?;
 
     // The option coin type is the bucket's third type parameter; read it off
@@ -156,19 +159,21 @@ async fn main() -> Result<()> {
                 bucket_id: cli.bucket,
                 protocol_config_id: protocol_config,
                 treasury_id: treasury,
-                mm_account_id,
+                routing: QuoteRouting {
+                    quote_signer_id,
+                    collateral_account_id,
+                    release_package,
+                    release_module: &best.quote.release_module,
+                },
                 protocol_id: best.quote.protocol_id.clone(),
-                signer_account_id_bytes,
                 signer_token_recipient,
-                bucket_id_bytes,
                 write_amount: best.quote.write_amount,
                 premium: best.quote.premium,
                 valid_until_ms: best.quote.valid_until_ms,
                 nonce: best.quote.nonce,
                 signature: best.signature.clone(),
-                // Trader flow requires position_recipient == signer_token_recipient (the
-                // MM gets the Position Object); the trader receives the CallOption.
-                position_recipient: signer_token_recipient,
+                // Trader flow: the MM gets the Position at the quote's
+                // signer_token_recipient; the trader receives the CallOption.
                 call_token_recipient: trader_addr,
                 gas_budget: cli.gas_budget,
             };
@@ -177,7 +182,7 @@ async fn main() -> Result<()> {
         Product::Put => {
             // Put trader flow: both legs are settlement. The trader still mints
             // the premium from the settlement faucet (already resolved above);
-            // the MM posts the cash collateral from their Account.
+            // the MM posts the cash collateral via its release implementation.
             let params = ExecutePutTraderParams {
                 package,
                 underlying_type: &underlying_spec.coin_type,
@@ -189,19 +194,21 @@ async fn main() -> Result<()> {
                 bucket_id: cli.bucket,
                 protocol_config_id: protocol_config,
                 treasury_id: treasury,
-                mm_account_id,
+                routing: QuoteRouting {
+                    quote_signer_id,
+                    collateral_account_id,
+                    release_package,
+                    release_module: &best.quote.release_module,
+                },
                 protocol_id: best.quote.protocol_id.clone(),
-                signer_account_id_bytes,
                 signer_token_recipient,
-                bucket_id_bytes,
                 write_amount: best.quote.write_amount,
                 premium: best.quote.premium,
                 valid_until_ms: best.quote.valid_until_ms,
                 nonce: best.quote.nonce,
                 signature: best.signature.clone(),
-                // Trader flow requires position_recipient == signer_token_recipient
-                // (the MM writes the put / gets the Position); trader gets the puts.
-                position_recipient: signer_token_recipient,
+                // Trader flow: the MM (put writer) gets the Position at the
+                // quote's signer_token_recipient; the trader gets the puts.
                 put_token_recipient: trader_addr,
                 gas_budget: cli.gas_budget,
             };

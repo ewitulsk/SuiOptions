@@ -1,14 +1,15 @@
 module options_core::quote;
 
 use std::bcs;
+use std::string::String;
 use sui::clock::Clock;
 use sui::ecdsa_k1;
 use sui::ecdsa_r1;
 use sui::ed25519;
 
-use options_core::account::{Self, Account};
 use options_core::admin::{Self, ProtocolConfig};
 use options_core::errors;
+use options_core::quote_signer::{Self, QuoteSigner};
 
 const SCHEME_ED25519: u8 = 0;
 const SCHEME_SECP256K1: u8 = 1;
@@ -19,9 +20,19 @@ const SCHEME_SECP256R1: u8 = 2;
 /// BCS-encoded quote with SHA-256 before signing for the k1/r1 paths.
 const ECDSA_HASH_SHA256: u8 = 1;
 
+/// The signed payload. The full collateral routing — the source object AND
+/// the package/module whose `release` debits it — is INSIDE the signature,
+/// so no intermediary can substitute an MM's routing. BCS field order is
+/// normative for off-chain signers (spec §4.1).
 public struct Quote has copy, drop, store {
     protocol_id: vector<u8>,
-    signer_account_id: ID,
+    /// The `QuoteSigner` whose key + nonce table authorize this quote.
+    signer_id: ID,
+    /// The collateral object `release()` debits.
+    collateral_source: ID,
+    /// Package + module containing the standardized `release` function.
+    release_package: address,
+    release_module: String,
     signer_token_recipient: address,
     bucket_id: ID,
     write_amount: u64,
@@ -37,7 +48,10 @@ public struct SignedQuote has copy, drop, store {
 
 public fun new_quote(
     protocol_id: vector<u8>,
-    signer_account_id: ID,
+    signer_id: ID,
+    collateral_source: ID,
+    release_package: address,
+    release_module: String,
     signer_token_recipient: address,
     bucket_id: ID,
     write_amount: u64,
@@ -47,7 +61,10 @@ public fun new_quote(
 ): Quote {
     Quote {
         protocol_id,
-        signer_account_id,
+        signer_id,
+        collateral_source,
+        release_package,
+        release_module,
         signer_token_recipient,
         bucket_id,
         write_amount,
@@ -65,7 +82,10 @@ public fun quote(sq: &SignedQuote): &Quote { &sq.quote }
 public fun signature(sq: &SignedQuote): &vector<u8> { &sq.signature }
 
 public fun protocol_id(q: &Quote): &vector<u8> { &q.protocol_id }
-public fun signer_account_id(q: &Quote): ID { q.signer_account_id }
+public fun signer_id(q: &Quote): ID { q.signer_id }
+public fun collateral_source(q: &Quote): ID { q.collateral_source }
+public fun release_package(q: &Quote): address { q.release_package }
+public fun release_module(q: &Quote): &String { &q.release_module }
 public fun signer_token_recipient(q: &Quote): address { q.signer_token_recipient }
 public fun bucket_id(q: &Quote): ID { q.bucket_id }
 public fun write_amount(q: &Quote): u64 { q.write_amount }
@@ -74,17 +94,17 @@ public fun valid_until_ms(q: &Quote): u64 { q.valid_until_ms }
 public fun nonce(q: &Quote): u64 { q.nonce }
 
 public(package) fun verify_and_consume_quote(
-    account: &mut Account,
+    signer: &mut QuoteSigner,
     config: &ProtocolConfig,
     signed_quote: &SignedQuote,
     clock: &Clock,
 ): Quote {
     let q = signed_quote.quote;
-    check_non_signature_fields(&q, account, config, clock);
+    check_non_signature_fields(&q, signer, config, clock);
 
     let msg = bcs::to_bytes(&q);
-    let scheme = account::signing_scheme(account);
-    let pubkey = account::signing_pubkey(account);
+    let scheme = quote_signer::signing_scheme(signer);
+    let pubkey = quote_signer::signing_pubkey(signer);
     let sig = &signed_quote.signature;
     let valid = if (scheme == SCHEME_ED25519) {
         ed25519::ed25519_verify(sig, pubkey, &msg)
@@ -97,32 +117,32 @@ public(package) fun verify_and_consume_quote(
     };
     assert!(valid, errors::quote_signature_invalid());
 
-    account::consume_nonce(account, q.nonce, q.valid_until_ms);
+    quote_signer::consume_nonce(signer, q.nonce, q.valid_until_ms);
 
     q
 }
 
 fun check_non_signature_fields(
     q: &Quote,
-    account: &Account,
+    signer: &QuoteSigner,
     config: &ProtocolConfig,
     clock: &Clock,
 ) {
     assert!(&q.protocol_id == admin::protocol_id(config), errors::quote_protocol_mismatch());
-    assert!(q.signer_account_id == account::account_id(account), errors::quote_account_mismatch());
+    assert!(q.signer_id == quote_signer::signer_id(signer), errors::quote_account_mismatch());
     assert!(clock.timestamp_ms() < q.valid_until_ms, errors::quote_expired());
-    assert!(!account::has_nonce(account, q.nonce), errors::quote_nonce_used());
+    assert!(!quote_signer::has_nonce(signer, q.nonce), errors::quote_nonce_used());
 }
 
 #[test_only]
 public(package) fun verify_skip_sig(
-    account: &mut Account,
+    signer: &mut QuoteSigner,
     config: &ProtocolConfig,
     signed_quote: &SignedQuote,
     clock: &Clock,
 ): Quote {
     let q = signed_quote.quote;
-    check_non_signature_fields(&q, account, config, clock);
-    account::consume_nonce(account, q.nonce, q.valid_until_ms);
+    check_non_signature_fields(&q, signer, config, clock);
+    quote_signer::consume_nonce(signer, q.nonce, q.valid_until_ms);
     q
 }

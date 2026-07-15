@@ -1,12 +1,17 @@
 /// End-to-end lifecycle tests, one per RFQ flow.
 ///
-/// Each test threads the full protocol path: bucket creation → MM funding →
-/// two writes (so we exercise the cursor's FIFO assignment across positions)
-/// → partial exercise → expiry → both redemptions → burn of remaining
-/// (unexercised) call tokens → admin bucket cleanup → admin treasury withdraw.
-/// The accumulated fee, account balances, bucket balances, and cursor state
-/// are asserted after every step, so conservation across the whole lifecycle
-/// is verified — not just point invariants.
+/// Each test threads the full protocol path: bucket creation → two writes
+/// (so we exercise the cursor's FIFO assignment across positions) → partial
+/// exercise → expiry → both redemptions → burn of remaining (unexercised)
+/// call tokens → admin bucket cleanup → admin treasury withdraw. The
+/// accumulated fee, coin inventories, bucket balances, and cursor state are
+/// asserted after every step, so conservation across the whole lifecycle is
+/// verified — not just point invariants.
+///
+/// The MM side of each write is the two-step collateral protocol: a
+/// `request_*_flow` potato sized by the quote, fulfilled here with an
+/// inline-minted `Balance` standing in for the external release
+/// implementation (mm_collateral & co. live outside core).
 ///
 /// The call option is a per-bucket fungible `Coin<CALL>`: split/join are coin
 /// ops, and the bucket's coin supply tracks outstanding option amount.
@@ -16,7 +21,6 @@ module options_core::e2e_tests;
 use sui::coin::{Self, Coin};
 use sui::test_scenario::{Self as ts, Scenario};
 
-use options_core::account;
 use options_core::admin;
 use options_core::bucket::{Self, Bucket};
 use options_core::position::{Self, Position};
@@ -66,16 +70,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
     let mut scenario = ts::begin(th::admin_addr());
     let mut clock = th::init_protocol(&mut scenario);
     setup_protocol_with_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
-
-    // ---- Trader MM funds account with USDC (enough for both premiums).
-    ts::next_tx(&mut scenario, th::trader_mm_addr());
-    {
-        let mut acc = th::take_account(&scenario);
-        account::deposit(&mut acc, coin::mint_for_testing<USDC>(20_000_000, scenario.ctx()));
-        assert!(account::balance_of<USDC>(&acc) == 20_000_000, 0);
-        ts::return_shared(acc);
-    };
+    th::create_signer(&mut scenario, th::trader_mm_addr(), th::pubkey_a());
 
     // ---- Write #1: writer_addr writes 100 BTC. Premium 5_000_000, nonce 1.
     let write1_amount: u64 = 100;
@@ -88,12 +83,12 @@ fun test_e2e_writer_flow_full_lifecycle() {
         let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let config = th::take_config(&scenario);
         let mut treas = th::take_treasury(&scenario);
-        let mut mm = th::take_account(&scenario);
+        let mut signer = th::take_signer(&scenario);
         bucket_id = object::id(&b);
 
-        let q = quote::new_quote(
+        let q = th::new_test_quote(
             *admin::protocol_id(&config),
-            object::id(&mm),
+            object::id(&signer),
             th::trader_mm_addr(),
             bucket_id,
             write1_amount,
@@ -101,17 +96,17 @@ fun test_e2e_writer_flow_full_lifecycle() {
             EXPIRY_MS,
             1,
         );
-        bucket::execute_write_for_testing<BTC, USDC, CALL>(
+        let req = bucket::request_writer_flow_for_testing<BTC, USDC, CALL>(
+            &b, &mut signer, &config, quote::new_signed_quote(q, vector[]), &clock,
+        );
+        bucket::execute_writer_flow<BTC, USDC, CALL>(
             &mut b,
             &config,
             &mut treas,
-            &mut mm,
+            req,
+            coin::mint_for_testing<USDC>(write1_premium, scenario.ctx()).into_balance(),
             coin::mint_for_testing<BTC>(write1_amount, scenario.ctx()),
-            coin::zero<USDC>(scenario.ctx()),
-            bucket::writer_flow(),
             th::writer_addr(),
-            th::trader_mm_addr(),
-            quote::new_signed_quote(q, vector[]),
             &clock,
             scenario.ctx(),
         );
@@ -120,13 +115,12 @@ fun test_e2e_writer_flow_full_lifecycle() {
         assert!(bucket::underlying_balance(&b) == 100, 0);
         assert!(bucket::exercise_cursor(&b) == 0, 0);
         assert!(bucket::call_supply(&b) == 100, 0);
-        assert!(account::balance_of<USDC>(&mm) == 20_000_000 - write1_premium, 0);
         assert!(treasury::balance_of<USDC>(&treas) == write1_fee, 0);
 
         ts::return_shared(b);
         ts::return_shared(config);
         ts::return_shared(treas);
-        ts::return_shared(mm);
+        ts::return_shared(signer);
     };
 
     // Writer #1 receives net premium + position Object.
@@ -150,11 +144,11 @@ fun test_e2e_writer_flow_full_lifecycle() {
         let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let config = th::take_config(&scenario);
         let mut treas = th::take_treasury(&scenario);
-        let mut mm = th::take_account(&scenario);
+        let mut signer = th::take_signer(&scenario);
 
-        let q = quote::new_quote(
+        let q = th::new_test_quote(
             *admin::protocol_id(&config),
-            object::id(&mm),
+            object::id(&signer),
             th::trader_mm_addr(),
             bucket_id,
             write2_amount,
@@ -162,17 +156,17 @@ fun test_e2e_writer_flow_full_lifecycle() {
             EXPIRY_MS,
             2,
         );
-        bucket::execute_write_for_testing<BTC, USDC, CALL>(
+        let req = bucket::request_writer_flow_for_testing<BTC, USDC, CALL>(
+            &b, &mut signer, &config, quote::new_signed_quote(q, vector[]), &clock,
+        );
+        bucket::execute_writer_flow<BTC, USDC, CALL>(
             &mut b,
             &config,
             &mut treas,
-            &mut mm,
+            req,
+            coin::mint_for_testing<USDC>(write2_premium, scenario.ctx()).into_balance(),
             coin::mint_for_testing<BTC>(write2_amount, scenario.ctx()),
-            coin::zero<USDC>(scenario.ctx()),
-            bucket::writer_flow(),
             th::stranger_addr(),
-            th::trader_mm_addr(),
-            quote::new_signed_quote(q, vector[]),
             &clock,
             scenario.ctx(),
         );
@@ -180,13 +174,12 @@ fun test_e2e_writer_flow_full_lifecycle() {
         assert!(bucket::total_written(&b) == 150, 0);
         assert!(bucket::underlying_balance(&b) == 150, 0);
         assert!(bucket::call_supply(&b) == 150, 0);
-        assert!(account::balance_of<USDC>(&mm) == 20_000_000 - write1_premium - write2_premium, 0);
         assert!(treasury::balance_of<USDC>(&treas) == write1_fee + write2_fee, 0);
 
         ts::return_shared(b);
         ts::return_shared(config);
         ts::return_shared(treas);
-        ts::return_shared(mm);
+        ts::return_shared(signer);
     };
 
     ts::next_tx(&mut scenario, th::stranger_addr());
@@ -313,7 +306,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
 // ---------------------------------------------------------------------------
 //
 // Cast
-//   writer_mm_addr  — Writer MM (signs quotes; receives Positions)
+//   writer_mm_addr  — Writer MM (signs quotes; receives Positions + net premium)
 //   trader_addr     — Retail trader #1 (first buyer; underlying range [0,100))
 //   stranger_addr   — Retail trader #2 (second buyer; underlying range [100,180))
 //
@@ -332,17 +325,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
     let mut scenario = ts::begin(th::admin_addr());
     let mut clock = th::init_protocol(&mut scenario);
     setup_protocol_with_bucket(&mut scenario);
-    th::create_account(&mut scenario, th::writer_mm_addr(), th::pubkey_a());
-
-    // ---- Writer MM funds account with BTC (the underlying it will sell).
-    let mm_initial_btc: u64 = 1_000;
-    ts::next_tx(&mut scenario, th::writer_mm_addr());
-    {
-        let mut acc = th::take_account(&scenario);
-        account::deposit(&mut acc, coin::mint_for_testing<BTC>(mm_initial_btc, scenario.ctx()));
-        assert!(account::balance_of<BTC>(&acc) == mm_initial_btc, 0);
-        ts::return_shared(acc);
-    };
+    th::create_signer(&mut scenario, th::writer_mm_addr(), th::pubkey_a());
 
     // ---- Buy #1: trader_addr buys 100 BTC option. Premium 6_000_000, nonce 1.
     let buy1_amount: u64 = 100;
@@ -355,30 +338,30 @@ fun test_e2e_trader_flow_full_lifecycle() {
         let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let config = th::take_config(&scenario);
         let mut treas = th::take_treasury(&scenario);
-        let mut mm = th::take_account(&scenario);
+        let mut signer = th::take_signer(&scenario);
         bucket_id = object::id(&b);
 
-        let q = quote::new_quote(
+        let q = th::new_test_quote(
             *admin::protocol_id(&config),
-            object::id(&mm),
-            th::writer_mm_addr(),  // signer (MM) gets the position Object
+            object::id(&signer),
+            th::writer_mm_addr(),  // signer (MM) gets the position Object + net premium
             bucket_id,
             buy1_amount,
             buy1_premium,
             EXPIRY_MS,
             1,
         );
-        bucket::execute_write_for_testing<BTC, USDC, CALL>(
+        let req = bucket::request_trader_flow_for_testing<BTC, USDC, CALL>(
+            &b, &mut signer, &config, quote::new_signed_quote(q, vector[]), &clock,
+        );
+        bucket::execute_trader_flow<BTC, USDC, CALL>(
             &mut b,
             &config,
             &mut treas,
-            &mut mm,
-            coin::zero<BTC>(scenario.ctx()),
+            req,
+            coin::mint_for_testing<BTC>(buy1_amount, scenario.ctx()).into_balance(),
             coin::mint_for_testing<USDC>(buy1_premium, scenario.ctx()),
-            bucket::trader_flow(),
-            th::writer_mm_addr(),
             th::trader_addr(),
-            quote::new_signed_quote(q, vector[]),
             &clock,
             scenario.ctx(),
         );
@@ -386,30 +369,37 @@ fun test_e2e_trader_flow_full_lifecycle() {
         assert!(bucket::total_written(&b) == 100, 0);
         assert!(bucket::underlying_balance(&b) == 100, 0);
         assert!(bucket::call_supply(&b) == 100, 0);
-        assert!(account::balance_of<BTC>(&mm) == mm_initial_btc - buy1_amount, 0);
-        assert!(account::balance_of<USDC>(&mm) == buy1_net, 0);
         assert!(treasury::balance_of<USDC>(&treas) == buy1_fee, 0);
 
         ts::return_shared(b);
         ts::return_shared(config);
         ts::return_shared(treas);
-        ts::return_shared(mm);
+        ts::return_shared(signer);
+    };
+
+    // Writer MM receives buy #1's net premium.
+    ts::next_tx(&mut scenario, th::writer_mm_addr());
+    {
+        let net = ts::take_from_sender<Coin<USDC>>(&scenario);
+        assert!(net.value() == buy1_net, 0);
+        coin::burn_for_testing(net);
     };
 
     // ---- Buy #2: stranger_addr buys 80 BTC option. Premium 5_000_000, nonce 2.
     let buy2_amount: u64 = 80;
     let buy2_premium: u64 = 5_000_000;
     let buy2_fee = bps(buy2_premium);
+    let buy2_net = buy2_premium - buy2_fee;
     {
         ts::next_tx(&mut scenario, th::stranger_addr());
         let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let config = th::take_config(&scenario);
         let mut treas = th::take_treasury(&scenario);
-        let mut mm = th::take_account(&scenario);
+        let mut signer = th::take_signer(&scenario);
 
-        let q = quote::new_quote(
+        let q = th::new_test_quote(
             *admin::protocol_id(&config),
-            object::id(&mm),
+            object::id(&signer),
             th::writer_mm_addr(),
             bucket_id,
             buy2_amount,
@@ -417,17 +407,17 @@ fun test_e2e_trader_flow_full_lifecycle() {
             EXPIRY_MS,
             2,
         );
-        bucket::execute_write_for_testing<BTC, USDC, CALL>(
+        let req = bucket::request_trader_flow_for_testing<BTC, USDC, CALL>(
+            &b, &mut signer, &config, quote::new_signed_quote(q, vector[]), &clock,
+        );
+        bucket::execute_trader_flow<BTC, USDC, CALL>(
             &mut b,
             &config,
             &mut treas,
-            &mut mm,
-            coin::zero<BTC>(scenario.ctx()),
+            req,
+            coin::mint_for_testing<BTC>(buy2_amount, scenario.ctx()).into_balance(),
             coin::mint_for_testing<USDC>(buy2_premium, scenario.ctx()),
-            bucket::trader_flow(),
-            th::writer_mm_addr(),
             th::stranger_addr(),
-            quote::new_signed_quote(q, vector[]),
             &clock,
             scenario.ctx(),
         );
@@ -435,17 +425,20 @@ fun test_e2e_trader_flow_full_lifecycle() {
         assert!(bucket::total_written(&b) == 180, 0);
         assert!(bucket::underlying_balance(&b) == 180, 0);
         assert!(bucket::call_supply(&b) == 180, 0);
-        assert!(account::balance_of<BTC>(&mm) == mm_initial_btc - buy1_amount - buy2_amount, 0);
-        assert!(
-            account::balance_of<USDC>(&mm) == buy1_net + (buy2_premium - buy2_fee),
-            0,
-        );
         assert!(treasury::balance_of<USDC>(&treas) == buy1_fee + buy2_fee, 0);
 
         ts::return_shared(b);
         ts::return_shared(config);
         ts::return_shared(treas);
-        ts::return_shared(mm);
+        ts::return_shared(signer);
+    };
+
+    // Writer MM receives buy #2's net premium.
+    ts::next_tx(&mut scenario, th::writer_mm_addr());
+    {
+        let net = ts::take_from_sender<Coin<USDC>>(&scenario);
+        assert!(net.value() == buy2_net, 0);
+        coin::burn_for_testing(net);
     };
 
     // ---- Trader #1 exercises full 100. Cursor → 100.

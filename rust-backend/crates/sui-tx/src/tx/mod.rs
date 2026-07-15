@@ -2,25 +2,27 @@
 //!
 //! Two layers here:
 //!
-//! - Simple Move calls (admin operations, account create) use the high-level
-//!   `client.transaction_builder().move_call(...)` API. Everything's a
-//!   primitive or an object id, so JSON-encoded args work fine. See
-//!   [`admin`] and [`account`].
+//! - Simple Move calls (admin operations, quote-signer create) use the
+//!   high-level `client.transaction_builder().move_call(...)` API.
+//!   Everything's a primitive or an object id, so JSON-encoded args work
+//!   fine. See [`admin`] and [`signer`].
 //!
 //! - `execute_write` needs to splice a fresh `SignedQuote` value (built from
-//!   `quote::new_quote` + `quote::new_signed_quote`), split a coin from gas,
-//!   call `coin::zero<S>` for the empty side, and pass a `FlowKind` enum —
-//!   none of that fits the high-level builder. We drop down to
-//!   `ProgrammableTransactionBuilder` for that one. See [`execute_write`].
+//!   `quote::new_quote` + `quote::new_signed_quote`), mint the potato via
+//!   `request_*_flow`, route the MM-specified `release` call, and consume
+//!   both in `execute_*_flow` — none of that fits the high-level builder. We
+//!   drop down to `ProgrammableTransactionBuilder` for that one. See
+//!   [`execute_write`].
 
-pub mod account;
 pub mod admin;
 pub mod auction;
 pub mod coin_pkg;
 pub mod deepbook;
 pub mod execute_write;
 pub mod execute_write_put;
+pub mod mm_collateral;
 pub mod pyth_update;
+pub mod signer;
 pub mod sponsor;
 pub mod template;
 pub mod test_tokens;

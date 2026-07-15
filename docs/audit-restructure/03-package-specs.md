@@ -184,6 +184,34 @@ split changed only the auction plumbing:
   `AuctionBid`. `SwapRfqSettled` / `SwapRfqUnfilled` are unchanged in
   shape. Vault error codes keep their historical values (35–54).
 
+## 6b. Collateral abstraction addendum (v0.3)
+
+Implemented after this document's first revision; normative spec in
+`04-collateral-abstraction-plan.md`. Summary of what changed in
+`options_core`'s audit surface:
+
+- `Account` → `QuoteSigner`: signing key + consumed-nonce table only.
+  Core custodies NO market-maker funds (buckets/treasury still custody
+  protocol funds).
+- `collateral::CollateralRequest<T>`: a no-abilities hot potato minted
+  by `bucket::request_{writer,trader}_flow` (and put twins) after full
+  quote verification + nonce consumption. Carries the verified quote,
+  the demanded amount, and a flow tag (writer/trader) so a
+  premium-sized request can't be routed into the trader execute path —
+  load-bearing for puts, where both legs are the settlement asset.
+- `execute_{writer,trader}_flow` consume the potato + the released
+  `Balance` and run the write; amount/type/bucket binding re-checked.
+  Atomicity is structural: the potato can't be dropped or stored.
+- The quote's collateral routing (`collateral_source`,
+  `release_package`, `release_module`) is INSIDE the signed BCS
+  payload; `origin`-style unsigned hints do not exist here.
+- The release convention (`release<T>(account, &request, ctx):
+  Balance<T>`, must assert `source(request) == id(account)`) is
+  enforced socially + by the gas station's wildcard template shape, not
+  by core; a malicious implementation can only abort. First-party
+  implementation: `contracts/mm-collateral` (~150 lines, one MM per
+  published copy, publisher-owned).
+
 ## 7. Known accepted behaviors (flag for auditors, not bugs)
 
 - **Adversarial auction creators** exist by design (public `create`).

@@ -1,26 +1,29 @@
-// Programmable Transaction Block builder for the Earn (writer) composer.
+// Programmable Transaction Block builders for covered-call RFQ fills.
 //
-// Shape mirrors the Move signature in `contracts/sources/bucket.move`:
-//   bucket::execute_write<U, S, Call>(bucket, config, treasury, signer_account,
-//     underlying_in, premium_in, flow, position_recipient,
-//     call_token_recipient, signed_quote, clock, ctx)
+// Collateral-abstraction shape (contracts/core/sources/bucket.move +
+// collateral.move): core mints a no-abilities `CollateralRequest` potato
+// after verifying the signed quote; the MM's own collateral package
+// releases funds against it; core consumes potato + funds in the same tx.
+//
+//   quote::new_quote → quote::new_signed_quote
+//   → bucket::request_writer_flow / request_trader_flow   (mints the potato)
+//   → {release_package}::{release_module}::release<T>     (MM-specified)
+//   → bucket::execute_writer_flow / execute_trader_flow   (consumes both)
 //
 // `Quote` / `SignedQuote` are Move structs, not pure args, so we rebuild
 // them on chain from the MM's signed RFQ entry via `quote::new_quote` +
 // `quote::new_signed_quote`. The struct must BCS-encode to the exact bytes
-// the MM signed, so every field is reconstructed verbatim from the quote.
-//
-// Writer-flow invariants enforced by `execute_write_with_quote`
-// (FlowKind::Writer): signer_recipient == call_token_recipient;
-// premium_in.value() == 0; underlying_in.value() == write_amount. The writer
-// (ctx.sender()) receives the net premium and the Position Object; the MM/buyer
-// (signer_token_recipient) receives the CallOption.
+// the MM signed, so every field — including the collateral routing
+// (`collateral_source`, `release_package`, `release_module`) — is
+// reconstructed verbatim from the quote. The routing is INSIDE the signed
+// payload: a quote with bad routing simply fails to execute; it can never
+// move the wrong funds.
 
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID, fromHex } from "@mysten/sui/utils";
 
 import { ENV, PACKAGE_ID, PROTOCOL_CONFIG_ID, TREASURY_ID } from "../config";
-import type { RfqQuoteEntry } from "../api/quoting";
+import type { Quote, RfqQuoteEntry } from "../api/quoting";
 
 function requirePackage(): string {
   if (!PACKAGE_ID) {
@@ -33,6 +36,60 @@ function requirePackage(): string {
 
 function strip0x(s: string): string {
   return s.startsWith("0x") ? s.slice(2) : s;
+}
+
+/**
+ * Rebuild the signed quote on chain. Hex fields → vector<u8>;
+ * `release_module` is a `std::string::String` (pure string). Arg order is
+ * normative — it must BCS-encode to the exact bytes the MM signed.
+ */
+export function addSignedQuote(
+  tx: Transaction,
+  pkg: string,
+  entry: RfqQuoteEntry,
+) {
+  const q = entry.quote;
+  const quoteArg = tx.moveCall({
+    target: `${pkg}::quote::new_quote`,
+    arguments: [
+      tx.pure.vector("u8", Array.from(fromHex(strip0x(q.protocol_id)))),
+      tx.pure.id(q.signer_id),
+      tx.pure.id(q.collateral_source),
+      tx.pure.address(q.release_package),
+      tx.pure.string(q.release_module),
+      tx.pure.address(q.signer_token_recipient),
+      tx.pure.id(q.bucket_id),
+      tx.pure.u64(BigInt(q.write_amount)),
+      tx.pure.u64(BigInt(q.premium)),
+      tx.pure.u64(BigInt(q.valid_until_ms)),
+      tx.pure.u64(BigInt(q.nonce)),
+    ],
+  });
+  return tx.moveCall({
+    target: `${pkg}::quote::new_signed_quote`,
+    arguments: [
+      quoteArg,
+      tx.pure.vector("u8", Array.from(fromHex(strip0x(entry.signature)))),
+    ],
+  });
+}
+
+/**
+ * The MM-specified release call: debits `collateral_source` (a shared
+ * object of the MM's own collateral package) against the potato and returns
+ * `Balance<T>`. Target + source come straight from the signed quote.
+ */
+export function addRelease(
+  tx: Transaction,
+  q: Quote,
+  request: ReturnType<Transaction["moveCall"]>,
+  coinType: string,
+) {
+  return tx.moveCall({
+    target: `${q.release_package}::${q.release_module}::release`,
+    typeArguments: [coinType],
+    arguments: [tx.object(q.collateral_source), request],
+  });
 }
 
 export type WriteParams = {
@@ -49,74 +106,60 @@ export type WriteParams = {
 };
 
 /**
- * Build a writer-flow `execute_write` PTB from a signed RFQ quote.
- *
- * The signer's `Account` (`signer_account_id`) is a shared object
- * (`account::create_and_share_account` → `transfer::share_object`), so
- * `tx.object(...)` resolves its shared metadata via dapp-kit's SuiClient,
- * the same way the bucket / config / treasury args do elsewhere.
+ * Build a writer-flow PTB from a signed RFQ quote: the retail writer
+ * (ctx.sender()) supplies exactly `write_amount` of underlying and receives
+ * the Position + net premium; the MM's premium is released from their
+ * collateral source as `Balance<Settlement>`; the MM/buyer receives the
+ * CallOption at the quote's `signer_token_recipient`.
  */
 export function buildWriteTx(p: WriteParams): Transaction {
   const pkg = requirePackage();
   if (!PROTOCOL_CONFIG_ID || !TREASURY_ID) {
     throw new Error(
-      `Missing protocolConfigId/treasuryId for VITE_ENVIRONMENT="${ENV}" — cannot build execute_write`,
+      `Missing protocolConfigId/treasuryId for VITE_ENVIRONMENT="${ENV}" — cannot build the write PTB`,
     );
   }
   const q = p.entry.quote;
   const tx = new Transaction();
+  const typeArgs = [p.underlyingCoinType, p.settlementCoinType, p.callCoinType];
 
-  // Reconstruct the signed quote on chain. Hex fields → vector<u8>.
-  const quoteArg = tx.moveCall({
-    target: `${pkg}::quote::new_quote`,
+  const signedQuote = addSignedQuote(tx, pkg, p.entry);
+
+  // Verify the quote (consuming its nonce) and mint the premium demand.
+  const request = tx.moveCall({
+    target: `${pkg}::bucket::request_writer_flow`,
+    typeArguments: typeArgs,
     arguments: [
-      tx.pure.vector("u8", Array.from(fromHex(strip0x(q.protocol_id)))),
-      tx.pure.id(q.signer_account_id),
-      tx.pure.address(q.signer_token_recipient),
-      tx.pure.id(q.bucket_id),
-      tx.pure.u64(BigInt(q.write_amount)),
-      tx.pure.u64(BigInt(q.premium)),
-      tx.pure.u64(BigInt(q.valid_until_ms)),
-      tx.pure.u64(BigInt(q.nonce)),
-    ],
-  });
-  const signedQuote = tx.moveCall({
-    target: `${pkg}::quote::new_signed_quote`,
-    arguments: [
-      quoteArg,
-      tx.pure.vector("u8", Array.from(fromHex(strip0x(p.entry.signature)))),
+      tx.object(q.bucket_id),
+      tx.object(q.signer_id), // MM QuoteSigner (shared, mutable)
+      tx.object(PROTOCOL_CONFIG_ID),
+      signedQuote,
+      tx.object(SUI_CLOCK_OBJECT_ID),
     ],
   });
 
-  const flow = tx.moveCall({ target: `${pkg}::bucket::writer_flow` });
+  // MM premium, released from their collateral source.
+  const premiumFunds = addRelease(tx, q, request, p.settlementCoinType);
 
-  // Writer supplies exactly write_amount of underlying; the premium side is
-  // a zero Settlement coin (the MM's premium is debited from their Account).
+  // Writer supplies exactly write_amount of underlying.
   const underlying = tx.add(
     coinWithBalance({
       balance: BigInt(q.write_amount),
       type: p.underlyingCoinType,
     }),
   );
-  const premiumZero = tx.moveCall({
-    target: "0x2::coin::zero",
-    typeArguments: [p.settlementCoinType],
-  });
 
   tx.moveCall({
-    target: `${pkg}::bucket::execute_write`,
-    typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.callCoinType],
+    target: `${pkg}::bucket::execute_writer_flow`,
+    typeArguments: typeArgs,
     arguments: [
       tx.object(q.bucket_id),
       tx.object(PROTOCOL_CONFIG_ID),
       tx.object(TREASURY_ID),
-      tx.object(q.signer_account_id), // MM Account (shared, mutable)
+      request,
+      premiumFunds,
       underlying,
-      premiumZero,
-      flow,
       tx.pure.address(p.writer), // position_recipient = the writer
-      tx.pure.address(q.signer_token_recipient), // call_token_recipient = the MM/buyer
-      signedQuote,
       tx.object(SUI_CLOCK_OBJECT_ID),
     ],
   });
@@ -138,77 +181,61 @@ export type BuyParams = {
 };
 
 /**
- * Build a trader-flow `execute_write` PTB from a signed RFQ quote.
- *
- * Mirror of {@link buildWriteTx} for the Buy page. Trader-flow invariants
- * enforced by `execute_write_with_quote` (FlowKind::Trader):
- * signer_recipient == position_recipient; underlying_in.value() == 0;
- * premium_in.value() == gross_premium. The Writer MM (signer) supplies the
- * underlying from their Account and receives the Position Object; the trader
- * (ctx.sender()) pays the premium from their wallet and receives the
- * CallOption coin.
+ * Build a trader-flow PTB from a signed RFQ quote. Mirror of
+ * {@link buildWriteTx} for the Buy page: the writer MM's underlying is
+ * released from their collateral source as `Balance<Underlying>`; the
+ * trader (ctx.sender()) pays the premium from their wallet and receives
+ * the CallOption; the MM receives the Position + net premium at
+ * `signer_token_recipient`.
  */
 export function buildBuyTx(p: BuyParams): Transaction {
   const pkg = requirePackage();
   if (!PROTOCOL_CONFIG_ID || !TREASURY_ID) {
     throw new Error(
-      `Missing protocolConfigId/treasuryId for VITE_ENVIRONMENT="${ENV}" — cannot build execute_write`,
+      `Missing protocolConfigId/treasuryId for VITE_ENVIRONMENT="${ENV}" — cannot build the buy PTB`,
     );
   }
   const q = p.entry.quote;
   const tx = new Transaction();
+  const typeArgs = [p.underlyingCoinType, p.settlementCoinType, p.callCoinType];
 
-  // Reconstruct the signed quote on chain. Hex fields → vector<u8>.
-  const quoteArg = tx.moveCall({
-    target: `${pkg}::quote::new_quote`,
+  const signedQuote = addSignedQuote(tx, pkg, p.entry);
+
+  // Verify the quote (consuming its nonce) and mint the underlying demand.
+  const request = tx.moveCall({
+    target: `${pkg}::bucket::request_trader_flow`,
+    typeArguments: typeArgs,
     arguments: [
-      tx.pure.vector("u8", Array.from(fromHex(strip0x(q.protocol_id)))),
-      tx.pure.id(q.signer_account_id),
-      tx.pure.address(q.signer_token_recipient),
-      tx.pure.id(q.bucket_id),
-      tx.pure.u64(BigInt(q.write_amount)),
-      tx.pure.u64(BigInt(q.premium)),
-      tx.pure.u64(BigInt(q.valid_until_ms)),
-      tx.pure.u64(BigInt(q.nonce)),
-    ],
-  });
-  const signedQuote = tx.moveCall({
-    target: `${pkg}::quote::new_signed_quote`,
-    arguments: [
-      quoteArg,
-      tx.pure.vector("u8", Array.from(fromHex(strip0x(p.entry.signature)))),
+      tx.object(q.bucket_id),
+      tx.object(q.signer_id), // MM QuoteSigner (shared, mutable)
+      tx.object(PROTOCOL_CONFIG_ID),
+      signedQuote,
+      tx.object(SUI_CLOCK_OBJECT_ID),
     ],
   });
 
-  const flow = tx.moveCall({ target: `${pkg}::bucket::trader_flow` });
+  // MM write collateral (the underlying), released from their source.
+  const underlyingFunds = addRelease(tx, q, request, p.underlyingCoinType);
 
-  // Trader pays exactly the premium in settlement; the underlying side is a
-  // zero coin (the MM's underlying is debited from their Account).
+  // Trader pays exactly the premium in settlement.
   const premium = tx.add(
     coinWithBalance({
       balance: BigInt(q.premium),
       type: p.settlementCoinType,
     }),
   );
-  const underlyingZero = tx.moveCall({
-    target: "0x2::coin::zero",
-    typeArguments: [p.underlyingCoinType],
-  });
 
   tx.moveCall({
-    target: `${pkg}::bucket::execute_write`,
-    typeArguments: [p.underlyingCoinType, p.settlementCoinType, p.callCoinType],
+    target: `${pkg}::bucket::execute_trader_flow`,
+    typeArguments: typeArgs,
     arguments: [
       tx.object(q.bucket_id),
       tx.object(PROTOCOL_CONFIG_ID),
       tx.object(TREASURY_ID),
-      tx.object(q.signer_account_id), // MM Account (shared, mutable)
-      underlyingZero,
+      request,
+      underlyingFunds,
       premium,
-      flow,
-      tx.pure.address(q.signer_token_recipient), // position_recipient = the MM/writer
       tx.pure.address(p.trader), // call_token_recipient = the trader
-      signedQuote,
       tx.object(SUI_CLOCK_OBJECT_ID),
     ],
   });

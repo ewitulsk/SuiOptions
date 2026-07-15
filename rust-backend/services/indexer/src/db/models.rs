@@ -20,7 +20,7 @@ use crate::store::{
 };
 
 use super::schema::{
-    account_balances, accounts, bucket_deepbook_pools, buckets, event_participants,
+    accounts, bucket_deepbook_pools, buckets, event_participants,
     indexed_events, indexer_progress, positions, rfq_bids, rfqs, vault_rounds,
     vault_user_receipts, vaults,
 };
@@ -89,9 +89,7 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::BucketCleaned(_) => "BucketCleaned",
         ChainEvent::BucketInvalidated(_) => "BucketInvalidated",
         ChainEvent::BucketRevalidated(_) => "BucketRevalidated",
-        ChainEvent::AccountCreated(_) => "AccountCreated",
-        ChainEvent::AccountDeposit(_) => "AccountDeposit",
-        ChainEvent::AccountWithdraw(_) => "AccountWithdraw",
+        ChainEvent::SignerCreated(_) => "SignerCreated",
         ChainEvent::SigningKeyRotated(_) => "SigningKeyRotated",
         ChainEvent::FeeUpdated(_) => "FeeUpdated",
         ChainEvent::TreasuryWithdrawn(_) => "TreasuryWithdrawn",
@@ -137,7 +135,8 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
     }
 }
 
-// ---------- accounts / account_balances ----------
+// ---------- accounts (QuoteSigner registry — no balances; core holds no
+// MM funds under the collateral abstraction) ----------
 
 #[derive(Queryable, Identifiable, Insertable, AsChangeset, Debug, Clone)]
 #[diesel(table_name = accounts)]
@@ -150,16 +149,6 @@ pub struct AccountRow {
     /// Nullable for rows the backfill couldn't resolve. Field order matches
     /// the column order in `schema.rs` for `Queryable`.
     pub signing_scheme: Option<i16>,
-    pub updated_at_seq: i64,
-}
-
-#[derive(Queryable, Identifiable, Insertable, AsChangeset, Debug, Clone)]
-#[diesel(table_name = account_balances)]
-#[diesel(primary_key(account_id, asset_type))]
-pub struct AccountBalanceRow {
-    pub account_id: String,
-    pub asset_type: String,
-    pub balance: BigDecimal,
     pub updated_at_seq: i64,
 }
 
@@ -303,8 +292,7 @@ impl PositionRow {
     }
 }
 
-/// Helper used by `repo::hydrate_views` to fold per-asset balance rows into
-/// the `AccountState.balances` BTreeMap on the matching account.
+/// Row → in-memory QuoteSigner registration, used by `repo::hydrate_views`.
 pub fn account_row_into_state(row: AccountRow) -> anyhow::Result<(ObjectId, AccountState)> {
     let id = ObjectId::from_hex(&row.account_id)
         .map_err(|e| anyhow::anyhow!("account_id {}: {e}", row.account_id))?;
@@ -329,7 +317,6 @@ pub fn account_row_into_state(row: AccountRow) -> anyhow::Result<(ObjectId, Acco
             owner,
             signing_pubkey: row.signing_pubkey,
             signing_scheme,
-            balances: Default::default(),
         },
     ))
 }

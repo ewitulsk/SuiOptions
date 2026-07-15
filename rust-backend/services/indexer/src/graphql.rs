@@ -28,7 +28,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 use crate::db::models::{
-    AccountBalanceRow, AccountRow, BucketRow, IndexedEventRow, PositionRow, RfqBidRow, RfqRow,
+    AccountRow, BucketRow, IndexedEventRow, PositionRow, RfqBidRow, RfqRow,
     VaultReceiptRow, VaultRoundRow, VaultRow,
 };
 use crate::db::{BucketQuery, EventFilter, EventQuery, Repo};
@@ -155,44 +155,27 @@ impl BucketGql {
     }
 }
 
-/// One per-asset balance on an account. `balance_raw` is a decimal string.
-#[derive(SimpleObject)]
-pub struct AccountBalanceGql {
-    pub asset_type: String,
-    pub balance_raw: String,
-}
-
-impl From<AccountBalanceRow> for AccountBalanceGql {
-    fn from(r: AccountBalanceRow) -> Self {
-        AccountBalanceGql {
-            asset_type: r.asset_type,
-            balance_raw: r.balance.to_string(),
-        }
-    }
-}
-
-/// One account with its registered signing key and per-asset balances. Backs
-/// the JIT `account(id)` query that replaces the quoting-service's in-memory
-/// account mirror. `signing_pubkey_hex` is lowercase hex (no `0x`);
-/// `signing_scheme` is the on-chain u8 tag (0=Ed25519, 1=Secp256k1,
-/// 2=Secp256r1), null only for un-backfilled rows.
+/// One QuoteSigner registration (signing key + owner). Backs the JIT
+/// `account(id)` query the quoting-service authenticates MMs against. There
+/// are NO balances: core holds no MM funds under the collateral abstraction.
+/// `signing_pubkey_hex` is lowercase hex (no `0x`); `signing_scheme` is the
+/// on-chain u8 tag (0=Ed25519, 1=Secp256k1, 2=Secp256r1), null only for
+/// un-backfilled rows.
 #[derive(SimpleObject)]
 pub struct AccountGql {
     pub account_id: String,
     pub owner: Option<String>,
     pub signing_scheme: Option<i32>,
     pub signing_pubkey_hex: String,
-    pub balances: Vec<AccountBalanceGql>,
 }
 
 impl AccountGql {
-    fn build(acct: AccountRow, balances: Vec<AccountBalanceRow>) -> Self {
+    fn build(acct: AccountRow) -> Self {
         AccountGql {
             account_id: acct.account_id,
             owner: acct.owner,
             signing_scheme: acct.signing_scheme.map(|s| s as i32),
             signing_pubkey_hex: hex_encode(&acct.signing_pubkey),
-            balances: balances.into_iter().map(AccountBalanceGql::from).collect(),
         }
     }
 }
@@ -610,7 +593,7 @@ impl QueryRoot {
         Ok(rows)
     }
 
-    /// JIT: one account (signing key + per-asset balances), or null if unknown.
+    /// JIT: one QuoteSigner registration (signing key), or null if unknown.
     async fn account(
         &self,
         ctx: &Context<'_>,
@@ -618,7 +601,7 @@ impl QueryRoot {
     ) -> async_graphql::Result<Option<AccountGql>> {
         let repo = ctx.data_unchecked::<Repo>().clone();
         let row = db_query("account_by_id", move || repo.account_by_id(&id)).await?;
-        Ok(row.map(|(acct, bals)| AccountGql::build(acct, bals)))
+        Ok(row.map(AccountGql::build))
     }
 
     /// JIT: enriched positions held by `recipient` (mint-time owner-of-record).

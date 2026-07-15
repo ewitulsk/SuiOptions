@@ -6,8 +6,9 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
+pub mod collateral;
 pub mod deepbook;
 pub mod liquidity;
 pub mod onchain_put_rfq;
@@ -105,6 +106,29 @@ pub struct Cli {
 
     #[arg(long, default_value_t = 200_000_000)]
     pub gas_budget: u64,
+
+    /// Optional subcommand. Absent → run the bot (serve mode).
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Publish this MM's own copy of the `mm_collateral` package (compiled
+    /// against the current deployment's published options_core) and persist
+    /// `{package_id, account_id, upgrade_cap}` for serve mode. The package
+    /// is copied to a temp dir before publishing so the repo tree — notably
+    /// the template's `Published.toml` — is never mutated (each MM's publish
+    /// is theirs alone).
+    DeployCollateral {
+        /// Path to the mm-collateral Move package template.
+        #[arg(long, default_value = "../contracts/mm-collateral")]
+        contracts: PathBuf,
+        /// Where to persist the deployment record. Defaults to
+        /// `services/mm-bot/config/collateral.<network>.toml`.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 cli_spec::define_program! {

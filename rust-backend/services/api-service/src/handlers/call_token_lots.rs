@@ -132,7 +132,7 @@ pub async fn list_call_token_lots(
                 expiry_ms: bucket.expiry_ms as i64,
                 amount_raw: w.write_amount.to_string(),
                 premium_paid_raw: w.gross_premium.to_string(),
-                seller_account_id: w.signer_account_id.to_hex(),
+                seller_account_id: w.signer_id.to_hex(),
                 timestamp_ms: ev.timestamp_ms as i64,
             })
         })

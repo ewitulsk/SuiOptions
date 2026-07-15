@@ -2,33 +2,32 @@
 //! both work against [`AppState`] — never against raw fields — so any future
 //! refactor of how data is stored doesn't ripple out.
 //!
-//! Account balances, signing keys, and bucket state are NOT mirrored here:
-//! they're read just-in-time from the indexer's GraphQL API
-//! ([`indexer_graphql::IndexerClient`]). The only state this service owns is
-//! what the indexer can't tell it: in-flight quote reservations and the
-//! per-MM reputation score.
+//! Signing keys and bucket state are NOT mirrored here: they're read
+//! just-in-time from the indexer's GraphQL API
+//! ([`indexer_graphql::IndexerClient`]). Balance tracking and reservations
+//! are gone entirely (collateral abstraction, plan §7): a collateral
+//! implementation need not have a readable balance at all, so enforcement
+//! lives where it always really was — the on-chain revert — and the
+//! reputation system is the quality filter. The only state this service owns
+//! is the seen-nonce table and the per-MM reputation score.
 
 pub mod mm_registry;
+pub mod nonces;
 pub mod reputation;
-pub mod reservations;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use dashmap::DashMap;
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, Semaphore};
-use tokio::time::interval;
-use tracing::warn;
 
-use protocol_types::asset::AssetType;
 use protocol_types::ids::ObjectId;
 use protocol_types::sides::Side;
 
 pub use indexer_graphql::{Account, Bucket, IndexerClient};
 pub use mm_registry::{MmConnection, MmRegistry};
+pub use nonces::{InsertOutcome, NonceTable};
 pub use reputation::{ReputationStats, ReputationStore};
-pub use reservations::{InsertOutcome, Reservation, ReservationTable};
 
 /// Routed MM response — populated by the MM read task, drained by the RFQ
 /// orchestrator's matcher (or the bulk-view collector).
@@ -64,14 +63,15 @@ pub struct RfqObservation {
 }
 
 pub struct AppState {
-    pub reservations: ReservationTable,
+    /// Seen `(signer, nonce)` pairs — the nonce-unseen validation check.
+    pub nonces: NonceTable,
     pub reputation: ReputationStore,
     pub mms: MmRegistry,
-    /// JIT client for indexer account/bucket/event reads.
+    /// JIT client for indexer signer/bucket/event reads.
     pub indexer: IndexerClient,
-    /// Per-account high-water sequence for `WriteExecuted` reconciliation —
-    /// the cursor [`reconcile_executed`](Self::reconcile_executed) advances so
-    /// each pass only scans new executions.
+    /// Per-signer high-water sequence for `WriteExecuted` reconciliation —
+    /// the cursor [`record_fills`](Self::record_fills) advances so each pass
+    /// only scans new executions. Feeds the reputation fill-rate.
     reconcile_cursors: DashMap<ObjectId, u64>,
     /// `request_id → matcher_tx`. Populated when an RFQ is broadcast,
     /// removed when the RFQ completes. The MM read task looks up its
@@ -101,7 +101,7 @@ impl AppState {
     pub fn with_global_rfq_cap(cap: usize, indexer_graphql_url: String) -> Self {
         let (rfq_observers, _) = broadcast::channel(256);
         Self {
-            reservations: ReservationTable::default(),
+            nonces: NonceTable::default(),
             reputation: ReputationStore::default(),
             mms: MmRegistry::default(),
             indexer: IndexerClient::new(indexer_graphql_url),
@@ -126,100 +126,30 @@ impl AppState {
         self.bulk_view_refreshing.remove(&key);
     }
 
-    /// Spendable balance for `(account, asset)`: the JIT-fetched on-chain
-    /// balance minus our own active reservations in that asset. Callers must
-    /// [`reconcile_executed`](Self::reconcile_executed) first so reservations
-    /// whose write already landed (and is thus already reflected in the
-    /// on-chain balance) don't get double-counted.
-    pub fn available(&self, account: &Account, asset: &AssetType) -> u64 {
-        account
-            .balance(asset)
-            .saturating_sub(self.reservations.active_amount(account.account_id, asset))
-    }
-
-    /// Release reservations whose `WriteExecuted` the indexer now reports, and
-    /// record each as executed for reputation. We scan the indexer's event log
-    /// (via GraphQL) for this account since our last cursor.
-    ///
-    /// NOTE (speed-up): this runs on demand during quote validation, so an
-    /// idle MM's executed reservations aren't released until either it's quoted
-    /// again or its TTL evicts it. A short-interval background reconcile would
-    /// tighten that and is the obvious optimization if reservation-release
-    /// latency ever matters.
-    pub async fn reconcile_executed(&self, account: ObjectId) -> anyhow::Result<()> {
+    /// Record each of this signer's `WriteExecuted` fills the indexer now
+    /// reports as executed for reputation (the fill-rate half of the
+    /// composite score — the revert half is the on-chain revert the plan
+    /// leans on). We scan the indexer's event log (via GraphQL) for this
+    /// signer since our last cursor. Reservations are gone; this exists
+    /// purely so `quotes_executed` keeps counting.
+    pub async fn record_fills(&self, signer: ObjectId) -> anyhow::Result<()> {
         let after = self
             .reconcile_cursors
-            .get(&account)
+            .get(&signer)
             .map(|c| *c)
             .unwrap_or(0);
         let executed = self
             .indexer
-            .write_executed_for_account_since(account, after)
+            .write_executed_for_account_since(signer, after)
             .await?;
         let mut max_seq = after;
-        for (seq, nonce) in executed {
-            if self.reservations.release(account, nonce).is_some() {
-                self.reputation.record_executed(account);
-            }
+        for (seq, _nonce) in executed {
+            self.reputation.record_executed(signer);
             max_seq = max_seq.max(seq);
         }
         if max_seq > after {
-            self.reconcile_cursors.insert(account, max_seq);
+            self.reconcile_cursors.insert(signer, max_seq);
         }
         Ok(())
-    }
-}
-
-/// Background task: evict expired reservations every `tick`.
-pub fn spawn_reservation_evictor(state: Arc<AppState>, tick: Duration) {
-    tokio::spawn(async move {
-        let mut iv = interval(tick);
-        loop {
-            iv.tick().await;
-            let now = reservations::now_unix_ms();
-            let evicted = state.reservations.evict_expired(now);
-            for r in evicted {
-                warn!(account = %r.account_id, nonce = r.nonce, "evicting expired reservation");
-                state.reputation.record_expired_unused(r.account_id);
-                // No need to mutate balance: the on-chain balance is
-                // whatever the indexer reports; available re-derives on demand.
-            }
-        }
-    });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeMap;
-
-    fn account_with(account_id: ObjectId, usdc: u64) -> Account {
-        Account {
-            account_id,
-            owner: None,
-            signing_scheme: Some(protocol_types::SigningScheme::Ed25519),
-            signing_pubkey: vec![0xab; 32],
-            balances: BTreeMap::from([(AssetType::new("USDC"), usdc)]),
-        }
-    }
-
-    #[test]
-    fn available_subtracts_active_reservations() {
-        let s = AppState::with_global_rfq_cap(8, "http://127.0.0.1:1/graphql".into());
-        let account = ObjectId::new([0x01; 32]);
-        let acct = account_with(account, 1_000);
-        assert_eq!(s.available(&acct, &AssetType::new("USDC")), 1_000);
-
-        s.reservations.insert(Reservation {
-            account_id: account,
-            nonce: 1,
-            asset_type: AssetType::new("USDC"),
-            amount: 300,
-            valid_until_ms: 9_999,
-            created_at_ms: 0,
-        });
-        assert_eq!(s.available(&acct, &AssetType::new("USDC")), 700);
-        // A different asset is unaffected.
-        assert_eq!(s.available(&acct, &AssetType::new("BTC")), 0);
     }
 }

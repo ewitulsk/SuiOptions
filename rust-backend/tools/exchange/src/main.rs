@@ -24,7 +24,7 @@ use clap::Parser;
 use token_info_client::{Snapshot, TokenInfoClient};
 use sui_tx::sui_client::SuiClientWrapper;
 use sui_tx::tx::admin::{set_fee_bps, withdraw_treasury};
-use sui_tx::tx::test_tokens::{mint_and_deposit_into_account, mint_to_sender};
+use sui_tx::tx::test_tokens::{mint_and_deposit_into_collateral, mint_to_sender};
 
 use option_scheduler::roller::{self, ProductType, RollPlan};
 use option_scheduler::strike_grid::StrikeGrid;
@@ -150,13 +150,14 @@ async fn main() -> Result<()> {
         }
         Command::FundAccount {
             account,
+            collateral_package,
             token,
             amount,
         } => {
             let tokens = snapshot.test_tokens()?;
             let info = tokens.get(&token)?;
             let (pkg, module) = info.module_path()?;
-            let resp = mint_and_deposit_into_account(
+            let resp = mint_and_deposit_into_collateral(
                 &wrap.client,
                 &wrap.signer,
                 pkg,
@@ -164,7 +165,7 @@ async fn main() -> Result<()> {
                 info.faucet()?,
                 &info.coin_type,
                 account,
-                package,
+                collateral_package,
                 amount,
                 cli.gas_budget,
             )

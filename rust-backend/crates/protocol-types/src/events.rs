@@ -45,7 +45,10 @@ impl BucketCreated {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriteExecuted {
     pub bucket_id: ObjectId,
-    pub signer_account_id: ObjectId,
+    /// The `QuoteSigner` whose quote authorized this write.
+    pub signer_id: ObjectId,
+    /// The external collateral object the signer's funds released from.
+    pub collateral_source: ObjectId,
     pub signer_token_recipient: SuiAddress,
     pub executor: SuiAddress,
     pub position_id: ObjectId,
@@ -128,8 +131,8 @@ pub struct BucketRevalidated {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountCreated {
-    pub account_id: ObjectId,
+pub struct SignerCreated {
+    pub signer_id: ObjectId,
     pub owner: SuiAddress,
     /// Tag for the registered signing key. BCS-encodes as a single u8;
     /// must match the on-chain struct field order in `events.move`.
@@ -139,24 +142,8 @@ pub struct AccountCreated {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountDeposit {
-    pub account_id: ObjectId,
-    pub asset_type: AssetType,
-    #[serde(with = "u64_string")]
-    pub amount: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountWithdraw {
-    pub account_id: ObjectId,
-    pub asset_type: AssetType,
-    #[serde(with = "u64_string")]
-    pub amount: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SigningKeyRotated {
-    pub account_id: ObjectId,
+    pub signer_id: ObjectId,
     pub new_scheme: crate::SigningScheme,
     #[serde(with = "crate::coding::bytes_hex")]
     pub new_pubkey: Vec<u8>,
@@ -667,7 +654,10 @@ impl PutBucketCreated {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PutWriteExecuted {
     pub bucket_id: ObjectId,
-    pub signer_account_id: ObjectId,
+    /// The `QuoteSigner` whose quote authorized this write.
+    pub signer_id: ObjectId,
+    /// The external collateral object the signer's funds released from.
+    pub collateral_source: ObjectId,
     pub signer_token_recipient: SuiAddress,
     pub executor: SuiAddress,
     pub position_id: ObjectId,
@@ -841,9 +831,7 @@ pub enum ChainEvent {
     BucketCleaned(BucketCleaned),
     BucketInvalidated(BucketInvalidated),
     BucketRevalidated(BucketRevalidated),
-    AccountCreated(AccountCreated),
-    AccountDeposit(AccountDeposit),
-    AccountWithdraw(AccountWithdraw),
+    SignerCreated(SignerCreated),
     SigningKeyRotated(SigningKeyRotated),
     FeeUpdated(FeeUpdated),
     TreasuryWithdrawn(TreasuryWithdrawn),
