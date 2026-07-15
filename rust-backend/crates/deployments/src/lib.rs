@@ -212,6 +212,24 @@ pub struct PackageInfo {
     /// Optional — consumers must degrade gracefully where absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_tokens: Option<SessionTokensInfo>,
+    /// cctp_bridge package (Circle CCTP v1 entry point). Optional —
+    /// consumers must degrade gracefully where absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cctp_bridge: Option<CctpBridgeInfo>,
+}
+
+/// The published cctp_bridge package (cctp-contracts/). Only the package id
+/// is consumed downstream (frontend PTBs + gas-station templates).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CctpBridgeInfo {
+    pub package_id: String,
+}
+
+impl CctpBridgeInfo {
+    pub fn package(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.package_id).context("parsing cctpBridge packageId")
+    }
 }
 
 /// Off-chain token catalog entry. One per supported ticker, replicated
@@ -379,6 +397,7 @@ mod tests {
                 test_tokens: None,
                 deepbook: None,
                 session_tokens: None,
+                cctp_bridge: None,
             },
             token_info: BTreeMap::new(),
         };

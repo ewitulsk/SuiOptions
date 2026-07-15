@@ -1,0 +1,48 @@
+[package]
+name = "cctp-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+runtime-config = { workspace = true }
+observability = { workspace = true, features = ["axum"] }
+cli-spec = { workspace = true }
+
+sui-sdk = { workspace = true }
+sui-types = { workspace = true }
+sui-json-rpc-types = { workspace = true }
+sui-tx = { workspace = true }
+
+clap = { workspace = true }
+tokio = { workspace = true }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio"] }
+tower-http = { workspace = true }
+reqwest = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+metrics = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+bs58 = "0.5"
+bincode = "1"
+
+diesel = { workspace = true }
+diesel_migrations = { workspace = true }
+bigdecimal = { workspace = true }
+
+# Solana leg: light modular v3 crates only (tx building + signing); RPC goes
+# through reqwest JSON-RPC. The full solana-client tree stays out of this
+# workspace — the Sui crates here pin the framework/mainnet branch.
+solana-pubkey = "3"
+solana-keypair = "3"
+solana-signer = "3"
+solana-message = "3"
+solana-transaction = { version = "3", features = ["bincode"] }
+solana-instruction = "3"
+solana-hash = "3"
+sha2 = { workspace = true }

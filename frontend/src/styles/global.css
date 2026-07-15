@@ -43,3 +43,57 @@ html[data-mode="dark"] .live-buckets__table th, html[data-mode="dark"] .live-buc
   margin: 12px 0;
 }
 html[data-mode="dark"] .composer-status { border-color: rgba(255, 255, 255, 0.15); }
+
+/* --- Bridge page (CCTP) --- */
+
+.bridge-form { display: flex; flex-direction: column; gap: 14px; max-width: 520px; }
+.bridge-form__direction { display: inline-flex; gap: 6px; }
+.bridge-form__direction button {
+  padding: 8px 14px; border-radius: 10px; border: 1px solid rgba(0, 0, 0, 0.15);
+  background: transparent; cursor: pointer; font-size: 13px; font-weight: 600;
+}
+.bridge-form__direction button.is-active { background: rgba(0, 120, 200, 0.12); border-color: rgba(0, 120, 200, 0.5); }
+html[data-mode="dark"] .bridge-form__direction button { border-color: rgba(255, 255, 255, 0.15); color: inherit; }
+html[data-mode="dark"] .bridge-form__direction button.is-active { background: rgba(90, 180, 250, 0.15); border-color: rgba(90, 180, 250, 0.5); }
+.bridge-form__field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.bridge-form__field span { opacity: 0.65; font-weight: 600; }
+.bridge-form__field input {
+  padding: 9px 12px; border-radius: 10px; border: 1px solid rgba(0, 0, 0, 0.18);
+  background: transparent; font-size: 14px; color: inherit;
+}
+html[data-mode="dark"] .bridge-form__field input { border-color: rgba(255, 255, 255, 0.18); }
+.bridge-form__actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.bridge-form__hint { font-size: 12px; opacity: 0.6; }
+.bridge-form__secondary {
+  padding: 8px 14px; border-radius: 10px; border: 1px solid rgba(0, 0, 0, 0.2);
+  background: transparent; cursor: pointer; font-size: 13px; color: inherit;
+}
+html[data-mode="dark"] .bridge-form__secondary { border-color: rgba(255, 255, 255, 0.2); }
+.bridge-form__submit {
+  padding: 9px 18px; border-radius: 10px; border: none; cursor: pointer;
+  background: #0b78c8; color: #fff; font-size: 13px; font-weight: 700;
+}
+.bridge-form__submit:disabled { opacity: 0.5; cursor: default; }
+
+.bridge-list { display: flex; flex-direction: column; gap: 8px; }
+.bridge-row {
+  padding: 12px 14px; border-radius: 12px; border: 1px solid rgba(0, 0, 0, 0.1);
+  display: flex; flex-direction: column; gap: 6px;
+}
+html[data-mode="dark"] .bridge-row { border-color: rgba(255, 255, 255, 0.1); }
+.bridge-row--failed { border-color: rgba(176, 0, 32, 0.45); }
+.bridge-row__main { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.bridge-row__route { font-weight: 700; font-size: 13px; }
+.bridge-row__amount { font-size: 13px; }
+.bridge-row__status {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 2px 8px; border-radius: 999px; background: rgba(0, 0, 0, 0.07);
+}
+html[data-mode="dark"] .bridge-row__status { background: rgba(255, 255, 255, 0.1); }
+.bridge-row__status--complete { background: rgba(0, 160, 90, 0.15); color: #0a7a48; }
+.bridge-row__status--failed { background: rgba(176, 0, 32, 0.12); color: #b00020; }
+.bridge-row__status--minting, .bridge-row__status--attested { background: rgba(0, 120, 200, 0.12); color: #0b78c8; }
+.bridge-row__timer { font-size: 12px; opacity: 0.75; margin-left: auto; font-variant-numeric: tabular-nums; }
+.bridge-row__detail { display: flex; gap: 16px; font-size: 12px; opacity: 0.7; flex-wrap: wrap; }
+.bridge-row__detail code { font-size: 11px; }
+.bridge-row__error { color: #b00020; opacity: 1; }

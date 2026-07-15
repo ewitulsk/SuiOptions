@@ -27,11 +27,11 @@ export function useSubmitTransaction() {
   const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
   const { mutateAsync: signTransaction } = useSignTransaction();
 
-  return async function submit(tx: Transaction): Promise<void> {
+  return async function submit(tx: Transaction): Promise<string> {
     // Wallet-paid path: toggle off or no connected account.
     if (!isSponsorEnabled() || !account) {
-      await signAndExecute({ transaction: tx });
-      return;
+      const res = await signAndExecute({ transaction: tx });
+      return res.digest;
     }
 
     try {
@@ -49,10 +49,11 @@ export function useSubmitTransaction() {
       const { bytes: signedBytes, signature: userSignature } =
         await signTransaction({ transaction: txBytes });
 
-      await client.executeTransactionBlock({
+      const res = await client.executeTransactionBlock({
         transactionBlock: signedBytes,
         signature: [userSignature, sponsorSignature],
       });
+      return res.digest;
     } catch (err) {
       // No silent wallet-paid fallback: a sponsorship failure (gas station
       // down, balance too low, or the tx targets a non-allow-listed package)

@@ -13,11 +13,12 @@ use clap::Parser;
 use sui_sdk::SuiClientBuilder;
 
 use deployment_manager::deploy::{
-    create_and_share_treasury, publish_package, publish_session_package, publish_test_tokens,
+    create_and_share_treasury, publish_cctp_package, publish_package, publish_session_package,
+    publish_test_tokens,
 };
 use deployment_manager::json_store::{
-    Deployments, NetworkDeployment, PackageInfo, SessionTokensRecord, TestTokenRecord,
-    TestTokensRecord, TokenSpec,
+    CctpBridgeRecord, Deployments, NetworkDeployment, PackageInfo, SessionTokensRecord,
+    TestTokenRecord, TestTokensRecord, TokenSpec,
 };
 use deployment_manager::network::Network;
 use deployment_manager::signer::Signer;
@@ -71,6 +72,41 @@ async fn main() -> Result<()> {
 
     let mut store = Deployments::load_or_default(&output_path)?;
 
+    // --deploy-cctp publishes ONLY the cctp_bridge package and records it on
+    // the existing env entry — no protocol republish.
+    if cli.deploy_cctp {
+        let cctp_path = cli.cctp_contracts.canonicalize().with_context(|| {
+            format!("resolving cctp-contracts path {}", cli.cctp_contracts.display())
+        })?;
+        let mut record = store
+            .envs
+            .get(&env_key)
+            .cloned()
+            .with_context(|| format!("env {env_key} not found in deployments.json — deploy the protocol first"))?;
+
+        let signer = Signer::from_secrets(&secrets, network).context("loading signer")?;
+        let client = SuiClientBuilder::default()
+            .build(&rpc_url)
+            .await
+            .with_context(|| format!("building Sui client for {network}"))?;
+        let outcome = publish_cctp_package(&client, &signer, &cctp_path, network, cli.gas_budget)
+            .await
+            .with_context(|| format!("publishing cctp_bridge to {network}"))?;
+        tracing::info!(package = %outcome.package_id, "cctp_bridge published");
+
+        record.package_info.cctp_bridge = Some(CctpBridgeRecord {
+            package_id: outcome.package_id.to_string(),
+            upgrade_cap_id: outcome.upgrade_cap_id.to_string(),
+            publish_digest: outcome.digest,
+            deployed_at: chrono::Utc::now().to_rfc3339(),
+            network: network.as_str().to_owned(),
+        });
+        store.upsert(&env_key, record);
+        store.save(&output_path)?;
+        tracing::info!(path = %output_path.display(), env = %env_key, "cctpBridge recorded");
+        return Ok(());
+    }
+
     // Carry forward the existing testTokens record + off-chain catalog so
     // re-publishing the options package without `--deploy-tokens` doesn't
     // wipe them. Keyed by the env slot we're (re)deploying.
@@ -91,6 +127,10 @@ async fn main() -> Result<()> {
         .envs
         .get(&env_key)
         .and_then(|d| d.package_info.session_tokens.clone());
+    let previous_cctp = store
+        .envs
+        .get(&env_key)
+        .and_then(|d| d.package_info.cctp_bridge.clone());
 
     let record = deploy_one(
         network,
@@ -103,6 +143,7 @@ async fn main() -> Result<()> {
         previous_token_info,
         previous_deepbook,
         previous_session,
+        previous_cctp,
         cli.gas_budget,
         cli.skip_init,
     )
@@ -128,6 +169,7 @@ async fn deploy_one(
     previous_token_info: BTreeMap<String, TokenSpec>,
     previous_deepbook: Option<serde_json::Value>,
     previous_session: Option<SessionTokensRecord>,
+    previous_cctp: Option<CctpBridgeRecord>,
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
@@ -279,6 +321,7 @@ async fn deploy_one(
             test_tokens,
             deepbook: previous_deepbook,
             session_tokens,
+            cctp_bridge: previous_cctp,
         },
         token_info,
     })

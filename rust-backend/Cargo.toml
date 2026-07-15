@@ -25,6 +25,7 @@ members = [
     "services/auth-service",
     "services/gas-station",
     "services/price-charting",
+    "services/cctp-relay",
     "services/balance-monitor",
     "services/oracle-service",
     "tools/deployment-manager",
@@ -126,6 +127,7 @@ sui-json-rpc-types = { git = "https://github.com/mystenlabs/sui", package = "sui
 sui-transaction-builder = { git = "https://github.com/mystenlabs/sui", package = "sui-transaction-builder", branch = "framework/mainnet" }
 sui-data-ingestion-core = { git = "https://github.com/mystenlabs/sui", package = "sui-data-ingestion-core", branch = "framework/mainnet" }
 shared-crypto = { git = "https://github.com/mystenlabs/sui", package = "shared-crypto", branch = "framework/mainnet" }
+sui-package-alt = { git = "https://github.com/mystenlabs/sui", package = "sui-package-alt", branch = "framework/mainnet" }
 move-core-types = { git = "https://github.com/mystenlabs/sui", package = "move-core-types", branch = "framework/mainnet" }
 
 clap = { version = "4", features = ["derive", "env"] }

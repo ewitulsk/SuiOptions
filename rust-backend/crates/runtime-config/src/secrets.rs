@@ -53,6 +53,19 @@ pub struct Secrets {
     pub auth: AuthSecrets,
     #[serde(default)]
     pub pyth: PythSecrets,
+    #[serde(default)]
+    pub solana: SolanaSecrets,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SolanaSecrets {
+    /// Relayer keypairs (cctp-relay): base58-encoded 64-byte secret or a
+    /// JSON byte array (solana-cli id.json format). Keyed per network like
+    /// `[sui]`.
+    pub devnet: Option<String>,
+    pub mainnet: Option<String>,
+    /// Used when the per-network slot is unset.
+    pub default: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -134,6 +147,26 @@ impl Secrets {
             .ok_or_else(|| {
                 anyhow!(
                     "secrets.toml has no sui.{network} key and no sui.default \
+                     fallback"
+                )
+            })
+    }
+
+    /// Solana keypair for `network` (`mainnet` / `devnet`), falling back to
+    /// `solana.default`. Same contract as `sui_private_key`.
+    pub fn solana_private_key(&self, network: &str) -> Result<&str> {
+        debug!(network, "resolving solana private key");
+        let per_net = match network.to_ascii_lowercase().as_str() {
+            "mainnet" => &self.solana.mainnet,
+            "devnet" => &self.solana.devnet,
+            other => return Err(anyhow!("unknown solana network slot: {other}")),
+        };
+        per_net
+            .as_deref()
+            .or(self.solana.default.as_deref())
+            .ok_or_else(|| {
+                anyhow!(
+                    "secrets.toml has no solana.{network} key and no solana.default \
                      fallback"
                 )
             })

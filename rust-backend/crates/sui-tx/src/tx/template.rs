@@ -176,13 +176,16 @@ fn is_benign_coin_primitive(call: &ProgrammableMoveCall) -> bool {
 /// from token-info); `None` on networks without a DeepBook deployment —
 /// no DeepBook PTBs are sponsored there. `session` is the siws_session
 /// package id; `None` where session login isn't deployed — no session PTBs
-/// are sponsored there.
+/// are sponsored there. `cctp` is `(cctp_bridge package, Circle
+/// TokenMessengerMinter package)` — `None` where the bridge isn't deployed —
+/// mirroring frontend tx/bridge.ts.
 pub fn protocol_templates(
     protocol: ObjectID,
     test_tokens: &[(ObjectID, String)],
     allow_faucet: bool,
     deepbook: Option<ObjectID>,
     session: Option<ObjectID>,
+    cctp: Option<(ObjectID, ObjectID)>,
 ) -> Vec<PtbTemplate> {
     let t = |module: &str, function: &str| MoveTarget::new(protocol, module, function);
 
@@ -251,6 +254,26 @@ pub fn protocol_templates(
             required: vec![target.clone()],
             allowed: vec![target.clone()],
             arities: vec![(target, 3)],
+        });
+    }
+
+    // CCTP bridge burn (frontend tx/bridge.ts): our wrapper builds the ticket
+    // (and emits BridgeInitiated), then Circle's version-gated
+    // deposit_for_burn_with_package_auth burns the user's USDC. The coin comes
+    // from a coinWithBalance prelude. Only the user's own USDC moves, so the
+    // sponsor risks gas only.
+    if let Some((bridge, token_messenger_minter)) = cctp {
+        let prepare = MoveTarget::new(bridge, "bridge", "prepare_deposit_for_burn");
+        let burn = MoveTarget::new(
+            token_messenger_minter,
+            "deposit_for_burn",
+            "deposit_for_burn_with_package_auth",
+        );
+        templates.push(PtbTemplate {
+            name: "cctp_bridge".to_owned(),
+            required: vec![prepare.clone(), burn.clone()],
+            allowed: vec![prepare.clone(), burn.clone()],
+            arities: vec![(prepare, 1), (burn, 2)],
         });
     }
 
@@ -635,6 +658,14 @@ mod tests {
         ObjectID::from_hex_literal("0x5e55").unwrap()
     }
 
+    fn cctp_bridge_pkg() -> ObjectID {
+        ObjectID::from_hex_literal("0xcc79").unwrap()
+    }
+
+    fn cctp_tmm_pkg() -> ObjectID {
+        ObjectID::from_hex_literal("0xc12c1e").unwrap()
+    }
+
     fn templates() -> Vec<PtbTemplate> {
         protocol_templates(
             pkg(),
@@ -642,11 +673,60 @@ mod tests {
             true,
             Some(deepbook_pkg()),
             Some(session_pkg()),
+            Some((cctp_bridge_pkg(), cctp_tmm_pkg())),
         )
     }
 
     fn target(module: &str, function: &str) -> MoveTarget {
         MoveTarget::new(pkg(), module, function)
+    }
+
+    #[test]
+    fn cctp_bridge_flow_matches() {
+        // Mirrors frontend tx/bridge.ts: coinWithBalance plumbing, our
+        // prepare (1 type arg), Circle's burn (2 type args).
+        let pt = build(
+            &[
+                (MoveTarget::new(framework(), "coin", "zero"), 1),
+                (
+                    MoveTarget::new(cctp_bridge_pkg(), "bridge", "prepare_deposit_for_burn"),
+                    1,
+                ),
+                (
+                    MoveTarget::new(
+                        cctp_tmm_pkg(),
+                        "deposit_for_burn",
+                        "deposit_for_burn_with_package_auth",
+                    ),
+                    2,
+                ),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &pt), Some("cctp_bridge"));
+    }
+
+    #[test]
+    fn cctp_bridge_wrong_arity_is_rejected() {
+        // A forged burn call with the wrong generics must not be sponsored.
+        let pt = build(
+            &[
+                (
+                    MoveTarget::new(cctp_bridge_pkg(), "bridge", "prepare_deposit_for_burn"),
+                    1,
+                ),
+                (
+                    MoveTarget::new(
+                        cctp_tmm_pkg(),
+                        "deposit_for_burn",
+                        "deposit_for_burn_with_package_auth",
+                    ),
+                    3,
+                ),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates(), &pt), None);
     }
 
     #[test]
@@ -730,7 +810,7 @@ mod tests {
     #[test]
     fn faucet_rejected_when_disabled() {
         let no_faucet =
-            protocol_templates(pkg(), &[(pkg(), "tbtc".to_owned())], false, None, None);
+            protocol_templates(pkg(), &[(pkg(), "tbtc".to_owned())], false, None, None, None);
         let pt = build(&[(target("tbtc", "mint_to_sender"), 0)], false);
         assert_eq!(match_any(&no_faucet, &pt), None);
     }
@@ -977,7 +1057,7 @@ mod tests {
         assert_eq!(match_any(&templates(), &bad_arity), None);
 
         // No deepbook configured (devnet) → never sponsored.
-        let no_db = protocol_templates(pkg(), &[], false, None, None);
+        let no_db = protocol_templates(pkg(), &[], false, None, None, None);
         let pt = build(
             &[(
                 MoveTarget::new(deepbook_pkg(), "pool", "create_permissionless_pool"),
@@ -1180,7 +1260,7 @@ mod tests {
         assert_eq!(match_any(&templates(), &mixed), None);
 
         // No session package configured → session PTBs are never sponsored.
-        let no_session = protocol_templates(pkg(), &[], false, None, None);
+        let no_session = protocol_templates(pkg(), &[], false, None, None, None);
         let open = build(
             &[(MoveTarget::new(session_pkg(), "session", "verify_and_open_session"), 0)],
             false,

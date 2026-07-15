@@ -58,6 +58,21 @@ pub struct PackageInfo {
     /// `crates/deployments::SessionTokensInfo`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_tokens: Option<SessionTokensRecord>,
+    /// cctp_bridge package (via `--deploy-cctp`); carried forward on
+    /// protocol-only redeploys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cctp_bridge: Option<CctpBridgeRecord>,
+}
+
+/// The published cctp_bridge package (cctp-contracts/).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CctpBridgeRecord {
+    pub package_id: String,
+    pub upgrade_cap_id: String,
+    pub publish_digest: String,
+    pub deployed_at: String,
+    pub network: String,
 }
 
 /// The published siws_session package + its shared Registry.

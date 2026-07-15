@@ -4,6 +4,7 @@ import { Composer } from "./screens/Composer";
 import { Dashboard } from "./screens/Dashboard";
 import { VaultScreen } from "./screens/Vault";
 import { Activity } from "./screens/Activity";
+import { Bridge } from "./screens/Bridge";
 import { Admin } from "./screens/Admin";
 import { Debug } from "./screens/Debug";
 import { Faucet } from "./screens/Faucet";
@@ -23,6 +24,7 @@ export function App() {
         <Route path="/vault" element={<VaultScreen />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/activity" element={<Activity />} />
+        <Route path="/bridge" element={<Bridge />} />
         {/* Admin self-gates on AdminCap and redirects non-admins to /earn. */}
         <Route path="/admin" element={<Admin />} />
         {/* Faucet is testnet-only; on other envs it renders a "testnet only" notice. */}

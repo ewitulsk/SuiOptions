@@ -1,0 +1,25 @@
+# Multi-stage build for cctp-relay. Mirrors Dockerfile.price-charting — see
+# the platform note in Dockerfile.indexer (no $BUILDPLATFORM pinning).
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev clang cmake protobuf-compiler git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+RUN cargo build --release -p cctp-relay
+
+FROM debian:bookworm-slim
+# libpq5: Postgres runtime lib for the diesel connection.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 libpq5 curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /src/target/release/cctp-relay /usr/local/bin/cctp-relay
+COPY services/cctp-relay/config/ /app/config/
+
+ENV APP_ENV=staging
+# --secrets carries the relayer keys ([sui] + [solana]) rendered to
+# /run/secrets/cctp-relay.toml by render-secrets.sh and bind-mounted by
+# compose. REQUIRED at runtime — the relay cannot mint without keys.
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/cctp-relay --config /app/config/config.${APP_ENV}.toml --secrets /run/secrets/cctp-relay.toml"]
