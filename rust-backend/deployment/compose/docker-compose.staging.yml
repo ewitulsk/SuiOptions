@@ -137,25 +137,16 @@ services:
     restart: unless-stopped
     networks: [net]
 
-  # OHLC charting for DeepBook option pools (SO-156). Stores fills in the
-  # env's Tiger Data TimescaleDB (CHART_DATABASE_URL from Secrets Manager
-  # via render-secrets.sh); serves bars over REST + WS on 9011.
-  price-charting:
-    image: ${ECR}/options/price-charting:${PRICE_CHARTING_TAG}
-    environment:
-      APP_ENV: staging
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
-      CHART_DATABASE_URL: ${CHART_DATABASE_URL}
-      ORACLE_URL: http://oracle-service:9013
-      RUST_LOG: info,price_charting=debug
-    # Reads only [sui] rpc_url from /run/secrets/price-charting.toml (shared Sui
-    # RPC override). The watcher's poll loop is a heavy RPC consumer, so this is
-    # the main reason price-charting mounts secrets. Optional — absent → public RPC.
-    volumes:
-      - /opt/options/staging/secrets:/run/secrets:ro
-    depends_on: [token-info, api-service, indexer, oracle-service]
-    restart: unless-stopped
-    networks: [net]
+  # price-charting (SO-156) is temporarily undeclared: the staging Tiger Data
+  # TimescaleDB (h46j4hzjmy.…tsdb.cloud.timescale.com:35048) refuses
+  # connections (instance paused/stopped in the Tiger console, 2026-07-15) so
+  # the service can never pass its deploy health gate. Restore the block —
+  # OHLC charting for DeepBook option pools; stores fills in the env's Tiger
+  # Data TimescaleDB (CHART_DATABASE_URL from Secrets Manager via
+  # render-secrets.sh), serves bars over REST + WS on 9011, environment
+  # APP_ENV/OTEL/CHART_DATABASE_URL/ORACLE_URL=http://oracle-service:9013,
+  # secrets volume, depends_on [token-info, api-service, indexer,
+  # oracle-service] — once the tsdb instance is resumed.
 
   # CCTP bridge relay. Tracks Sui<->Solana USDC transfers, polls Circle's
   # attestation API, and auto-mints on the destination chain. Public port
