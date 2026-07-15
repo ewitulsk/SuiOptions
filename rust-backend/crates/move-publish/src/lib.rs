@@ -16,6 +16,8 @@
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
+
+pub mod collateral;
 use shared_crypto::intent::Intent;
 use sui_json_rpc_types::{
     ObjectChange, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,

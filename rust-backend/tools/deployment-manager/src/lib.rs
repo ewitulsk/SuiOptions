@@ -66,6 +66,25 @@ pub struct Cli {
     #[arg(long, default_value = "../cctp-contracts")]
     pub cctp_contracts: PathBuf,
 
+    /// Publish ONLY the mm_collateral template (contracts/mm-collateral) and
+    /// write the state file mm-bot serves from. Sign with the MM-BOT key
+    /// (`--secrets`), NOT the deployer — the created CollateralAccount is
+    /// owned by the publisher. Must re-run after every options_core republish
+    /// (the template deps on core by local path); the redeploy-contract
+    /// workflow does this right after the protocol publish.
+    #[arg(long)]
+    pub deploy_mm_collateral: bool,
+
+    /// Path to the mm-collateral Move package template.
+    #[arg(long, default_value = "../contracts/mm-collateral")]
+    pub mm_collateral_contracts: PathBuf,
+
+    /// Where `--deploy-mm-collateral` writes the state file. Defaults to
+    /// `services/mm-bot/config/collateral.<network>.toml` — the committed
+    /// path the deploy bundle ships to the host for the mm-bot mount.
+    #[arg(long)]
+    pub collateral_out: Option<PathBuf>,
+
     /// Gas budget (MIST) per transaction.
     #[arg(long, default_value_t = 500_000_000)]
     pub gas_budget: u64,

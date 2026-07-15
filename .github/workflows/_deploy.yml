@@ -281,10 +281,16 @@ jobs:
           # Bundle only the files the box needs to run deploy.sh for
           # this env. Per-env compose files are split so each env's
           # bundle carries only its own compose.
-          mkdir -p /tmp/bundle/nginx /tmp/bundle/deployments
+          mkdir -p /tmp/bundle/nginx /tmp/bundle/deployments /tmp/bundle/mm-bot
           cp deployment/ec2/deploy.sh         /tmp/bundle/
           cp deployment/ec2/render-secrets.sh /tmp/bundle/
           cp deployment/compose/docker-compose.${{ matrix.env }}.yml /tmp/bundle/
+          # mm-bot collateral routing state (committed by redeploy-contract's
+          # mm_collateral step). Bind-mounted into the mm-bot container at
+          # /run/mm-bot so a contract redeploy refreshes it without an image
+          # rebuild — same mechanism as deployments.json. Absent when the env
+          # has no mm-bot; the dir still ships so the compose mount resolves.
+          cp services/mm-bot/config/collateral.*.toml /tmp/bundle/mm-bot/ 2>/dev/null || true
           # deployments.json is no longer baked into the token-info image; it's
           # a runtime file mounted from /opt/options/<env>/deployments/. Ship it
           # in the bundle so the host file self-heals to the deployed commit on

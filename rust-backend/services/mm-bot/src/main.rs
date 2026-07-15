@@ -488,7 +488,8 @@ async fn main() -> Result<()> {
         let wrap = SuiClientWrapper::connect(&secrets_loaded, cfg.network).await?;
         let dep = collateral::deploy(
             &wrap.client,
-            &wrap.signer,
+            &wrap.signer.keypair,
+            wrap.signer.address,
             contracts,
             cfg.network.as_str(),
             cli.gas_budget,
@@ -514,7 +515,7 @@ async fn main() -> Result<()> {
     let (collateral_package, collateral_account) = collateral::resolve(
         cfg.collateral_package.as_deref(),
         cfg.collateral_account.as_deref(),
-        &collateral::default_state_path(cfg.network.as_str()),
+        &collateral::state_path_candidates(cfg.network.as_str()),
         cfg.network.as_str(),
     )?;
     tracing::info!(

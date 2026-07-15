@@ -268,6 +268,48 @@ jobs:
           fi
           ./target/release/deploy "${ARGS[@]}"
 
+      # ── 7b. Re-publish mm_collateral against the fresh options_core ──
+      # The mm-collateral template deps on core by LOCAL path, so every core
+      # republish orphans the previous collateral package — without this,
+      # mm-bot refuses to boot and its health gate rolls back the deploy.
+      # Signs with the MM-BOT key (the CollateralAccount must be owned by the
+      # bot's signer, not the deployer). Absent secret = mm-bot isn't deployed
+      # in this env (render-secrets convention) — skip. The state file is
+      # committed below and rides the deploy bundle onto the host
+      # (/opt/options/<env>/mm-bot), so it stays fresh under ALL build
+      # strategies — no image rebuild assumed.
+      - name: Publish mm_collateral
+        working-directory: rust-backend
+        env:
+          ENV: ${{ inputs.environment }}
+          NETWORK: ${{ steps.net.outputs.network }}
+          RPC_URL: ${{ inputs.rpc_url }}
+        run: |
+          if ! MM_JSON=$(aws secretsmanager get-secret-value \
+                --secret-id "options/$ENV/mm-bot" \
+                --query SecretString --output text 2>/dev/null); then
+            echo "options/$ENV/mm-bot secret absent — mm-bot not deployed here; skipping"
+            exit 0
+          fi
+          MM_KEY=$(echo "$MM_JSON" | jq -r '.sui_key')
+          if [ -z "$MM_KEY" ] || [ "$MM_KEY" = "null" ]; then
+            echo "::error::options/$ENV/mm-bot exists but has no sui_key"
+            exit 1
+          fi
+          printf '[sui]\n%s = "%s"\n' "$NETWORK" "$MM_KEY" \
+            > /tmp/deploy-secrets/mm-secrets.toml
+
+          ARGS=(
+            --env        "$ENV"
+            --network    "$NETWORK"
+            --secrets    /tmp/deploy-secrets/mm-secrets.toml
+            --deploy-mm-collateral
+          )
+          if [ -n "$RPC_URL" ]; then
+            ARGS+=(--rpc "$RPC_URL")
+          fi
+          ./target/release/deploy "${ARGS[@]}"
+
       # ── 8. Resolve the deployment checkpoint from the tx digest ──
       - name: Get deployment checkpoint
         id: checkpoint
@@ -503,6 +545,9 @@ jobs:
           # keep the repo's record in sync with what's live.
           git add contracts/core/Published.toml contracts/auction/Published.toml \
                   contracts/rfq/Published.toml contracts/vault/Published.toml
+          # mm-bot collateral routing for the fresh core (absent when this
+          # env has no mm-bot). Ships to the host in the deploy bundle.
+          git add rust-backend/services/mm-bot/config/collateral.*.toml || true
 
           git commit -m "[redeploy] Fresh ${ENV} contract deployment" \
             -m "Network: ${{ steps.net.outputs.network }}" \
