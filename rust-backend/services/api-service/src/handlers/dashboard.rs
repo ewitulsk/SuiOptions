@@ -41,7 +41,7 @@ pub struct EnrichedPositionDto {
     pub total_written_raw: String,
     pub exercise_cursor_raw: String,
     pub premium_received_raw: String,
-    /// `signer_account_id` from the minting `WriteExecuted` (the MM).
+    /// `signer_id` from the minting `WriteExecuted` (the MM's QuoteSigner).
     pub mm_account_id: String,
     /// Minting tx digest, for explorer links. Empty string if unknown.
     pub tx_digest: String,

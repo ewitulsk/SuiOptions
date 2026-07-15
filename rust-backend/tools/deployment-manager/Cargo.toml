@@ -17,6 +17,7 @@ runtime-config = { workspace = true }
 cli-spec       = { workspace = true }
 sui-tx         = { workspace = true }
 deployments    = { workspace = true }
+move-publish   = { workspace = true }
 
 sui-sdk = { workspace = true }
 sui-types = { workspace = true }

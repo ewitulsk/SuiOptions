@@ -90,7 +90,7 @@ pub async fn handle(
             crate::ws::auth::AuthError::SchemeUnknown => (
                 "auth_scheme_unknown",
                 format!(
-                    "indexer has not yet ingested an AccountCreated event for {} — \
+                    "indexer has not yet ingested a SignerCreated event for {} — \
                      check that the indexer is running against the current \
                      deployments.json packageId and has caught up to the \
                      checkpoint that created this Account",
@@ -266,9 +266,6 @@ fn out_type(m: &ServiceToMm) -> &'static str {
         ServiceToMm::AuthAck { .. } => "AuthAck",
         ServiceToMm::RFQBroadcast { .. } => "RFQBroadcast",
         ServiceToMm::BulkViewRFQBroadcast { .. } => "BulkViewRFQBroadcast",
-        ServiceToMm::AccountStateUpdate { .. } => "AccountStateUpdate",
-        ServiceToMm::ReservationConfirmed { .. } => "ReservationConfirmed",
-        ServiceToMm::ReservationReleased { .. } => "ReservationReleased",
         ServiceToMm::Error { .. } => "Error",
         ServiceToMm::Ping => "Ping",
     }

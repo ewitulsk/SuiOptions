@@ -57,7 +57,8 @@ pub struct VaultPairSpec {
 /// attempt where it left off.
 ///
 /// `existing_vault_id` is the vault id the caller matched from the indexer's
-/// `vaults` view for this pair (if any).
+/// `vaults` view for this pair (if any). `package` is the `options_vault`
+/// package id (four-package split).
 #[allow(clippy::too_many_arguments)]
 pub async fn ensure_vault(
     wrap: &SuiClientWrapper,

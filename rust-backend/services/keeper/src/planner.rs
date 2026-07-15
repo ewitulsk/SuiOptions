@@ -153,22 +153,25 @@ fn settle_due_swap(input: &PlanInput<'_>) -> Option<Action> {
 
 /// First discovered auction that needs resolving. During settling
 /// (`require_closed == false`) an invalidated/expired bucket routes to
-/// the recovery path; a deadline that passed settles normally.
+/// the recovery path; a deadline that passed settles normally. The
+/// generic auction object carries no bucket id — a vault RFQ slice is
+/// always on the round's `current_bucket`.
 fn settle_due_auction(input: &PlanInput<'_>, require_closed: bool) -> Option<Action> {
     let meta = input.bucket_meta?;
+    let bucket = input.view.current_bucket?;
     for rfq in input.auctions {
         let recovery = meta.invalidated && !require_closed;
         if recovery {
             return Some(Action::SettleRfqExpired {
                 rfq: rfq.rfq_id,
-                bucket: rfq.bucket_id,
+                bucket,
                 call_type: meta.call_type.clone(),
             });
         }
         if input.now_ms >= rfq.deadline_ms {
             return Some(Action::SettleRfq {
                 rfq: rfq.rfq_id,
-                bucket: rfq.bucket_id,
+                bucket,
                 call_type: meta.call_type.clone(),
             });
         }
@@ -263,7 +266,7 @@ mod tests {
     }
 
     fn rfq(deadline_ms: u64) -> RfqView {
-        RfqView { rfq_id: id(0xaa), bucket_id: id(0xb1), deadline_ms, amount: 250_000 }
+        RfqView { rfq_id: id(0xaa), deadline_ms, amount: 250_000 }
     }
 
     fn swap_rfq(deadline_ms: u64) -> SwapRfqView {

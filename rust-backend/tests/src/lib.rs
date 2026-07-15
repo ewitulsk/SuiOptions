@@ -16,7 +16,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use protocol_types::asset::AssetType;
-use protocol_types::events::{AccountCreated, AccountDeposit, BucketCreated, ChainEvent, IndexedEvent};
+use protocol_types::events::{BucketCreated, ChainEvent, IndexedEvent, SignerCreated};
 use protocol_types::ids::{ObjectId, SuiAddress};
 use protocol_types::messages::{
     AuthResponsePayload, MmHelloPayload, MmQuotePayload, MmToService, RetailHelloPayload,
@@ -45,26 +45,20 @@ impl Harness {
         let mm_sk = SigningKey::generate(&mut rand::rngs::OsRng);
         let bucket = ObjectId::new([0x22; 32]);
 
-        // Pre-seed: MM account with USDC balance, plus the bucket. The store
-        // no longer keeps an event log (that was fanout-only), so we capture
-        // the ingested events to serve the mock `events(...)` query from.
+        // Pre-seed: the MM's QuoteSigner registration, plus the bucket
+        // (there is no balance state to seed — collateral custody lives
+        // outside core). The store no longer keeps an event log (that was
+        // fanout-only), so we capture the ingested events to serve the mock
+        // `events(...)` query from.
         let seed_events = vec![
             store.ingest(
-                ChainEvent::AccountCreated(AccountCreated {
-                    account_id: mm_account,
+                ChainEvent::SignerCreated(SignerCreated {
+                    signer_id: mm_account,
                     owner: SuiAddress::new([0x33; 32]),
                     signing_scheme: protocol_types::SigningScheme::Ed25519,
                     signing_pubkey: mm_sk.verifying_key().to_bytes().to_vec(),
                 }),
                 1,
-            ),
-            store.ingest(
-                ChainEvent::AccountDeposit(AccountDeposit {
-                    account_id: mm_account,
-                    asset_type: AssetType::new("USDC"),
-                    amount: 1_000_000_000,
-                }),
-                2,
             ),
             store.ingest(
                 ChainEvent::BucketCreated(BucketCreated {
@@ -192,10 +186,6 @@ fn account_json(id: &str, a: &indexer::AccountState) -> serde_json::Value {
         "owner": a.owner.as_ref().map(|o| o.to_hex()),
         "signingScheme": a.signing_scheme.map(|s| s.as_u8() as i64),
         "signingPubkeyHex": hex::encode(&a.signing_pubkey),
-        "balances": a.balances.iter().map(|(asset, bal)| serde_json::json!({
-            "assetType": asset.as_str(),
-            "balanceRaw": bal.to_string(),
-        })).collect::<Vec<_>>(),
     })
 }
 
@@ -216,8 +206,8 @@ fn bucket_json(id: &str, b: &indexer::BucketState) -> serde_json::Value {
 }
 
 /// Serve the `events(...)` query from the captured seed events, applying the
-/// `sequence_gt` (`after`) + `eventType` + `payloadContains.signer_account_id`
-/// filters the quoting service uses for reservation reconciliation.
+/// `sequence_gt` (`after`) + `eventType` + `payloadContains.signer_id`
+/// filters the quoting service uses for reputation fill reconciliation.
 fn events_json(events: &[IndexedEvent], vars: &serde_json::Value) -> serde_json::Value {
     let after: u64 = vars
         .get("after")
@@ -231,7 +221,8 @@ fn events_json(events: &[IndexedEvent], vars: &serde_json::Value) -> serde_json:
         .unwrap_or_default();
     let want_signer = filter
         .and_then(|f| f.get("payloadContains"))
-        .and_then(|p| p.get("signer_account_id"))
+        .and_then(|p| p.get("payload"))
+        .and_then(|p| p.get("signer_id"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
@@ -244,7 +235,7 @@ fn events_json(events: &[IndexedEvent], vars: &serde_json::Value) -> serde_json:
                 return false;
             }
             match (&want_signer, &ev.event) {
-                (Some(want), ChainEvent::WriteExecuted(w)) => w.signer_account_id.to_hex() == *want,
+                (Some(want), ChainEvent::WriteExecuted(w)) => w.signer_id.to_hex() == *want,
                 (Some(_), _) => false,
                 (None, _) => true,
             }
@@ -382,7 +373,10 @@ pub fn build_signed_quote(
 ) -> MmQuotePayload {
     let q = Quote {
         protocol_id,
-        signer_account_id: mm_account,
+        signer_id: mm_account,
+        collateral_source: ObjectId::new([0xc0; 32]),
+        release_package: SuiAddress::new([0xd0; 32]),
+        release_module: "mm_collateral".into(),
         signer_token_recipient: SuiAddress::ZERO,
         bucket_id: bucket,
         write_amount,

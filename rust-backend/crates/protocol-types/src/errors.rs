@@ -17,7 +17,7 @@ pub enum ProtocolError {
     QuoteProtocolMismatch,
     #[error("quote bucket_id does not match provided bucket")]
     QuoteBucketMismatch,
-    #[error("quote signer_account_id does not match provided account")]
+    #[error("quote signer_id does not match provided QuoteSigner")]
     QuoteAccountMismatch,
     #[error("bucket has expired")]
     BucketExpired,

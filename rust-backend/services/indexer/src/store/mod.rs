@@ -15,35 +15,42 @@ use tracing::{debug, trace};
 
 use protocol_types::asset::AssetType;
 use protocol_types::events::{
-    AccountDeposit, AccountWithdraw, BucketCreated, ChainEvent, DeepBookPoolCreated, Exercised,
-    IndexedEvent, Redeemed, WriteExecuted,
+    BucketCreated, ChainEvent, DeepBookPoolCreated, Exercised, IndexedEvent, Redeemed,
+    WriteExecuted,
 };
 use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::db::models::{
-    u128_to_bigdecimal, u64_to_bigdecimal, AccountBalanceRow, AccountRow, BucketRow,
+    u128_to_bigdecimal, u64_to_bigdecimal, AccountRow, BucketRow,
     DeepBookPoolRow, EventParticipantRow, PositionRow, RfqBidRow, RfqRow, VaultReceiptRow,
     VaultRoundRow, VaultRow,
 };
 use crate::db::{CheckpointBatch, EventBuild, HydratedViews};
 
 /// Discriminator stored in the `option_kind` column on shared bucket /
-/// position / rfq tables. Calls are the historical default.
+/// position tables. Calls are the historical default.
 pub const OPTION_KIND_CALL: &str = "call";
 pub const OPTION_KIND_PUT: &str = "put";
 
-/// What we keep per Account: balances per asset type, plus the registered
-/// signing pubkey (so the quoting service can verify quotes locally as
-/// defense-in-depth even while it lazy-loads its own copy).
+/// Discriminator stored in the `auction_kind` column on the shared rfqs /
+/// rfq_bids tables: what a generic auction is *for*. `unknown` until an
+/// adapter/vault event (or the escrow/bid type pair) pins it down.
+pub const AUCTION_KIND_CALL: &str = OPTION_KIND_CALL;
+pub const AUCTION_KIND_PUT: &str = OPTION_KIND_PUT;
+pub const AUCTION_KIND_SWAP: &str = "swap";
+pub const AUCTION_KIND_UNKNOWN: &str = "unknown";
+
+/// What we keep per QuoteSigner: the registered signing pubkey + owner (so
+/// the quoting service can verify quotes and authenticate MMs). Core holds
+/// no MM funds anymore — there are no balances to materialize.
 #[derive(Clone, Debug, Default)]
 pub struct AccountState {
     pub owner: Option<SuiAddress>,
     pub signing_pubkey: Vec<u8>,
-    /// Registered signing scheme, set from `AccountCreated` /
+    /// Registered signing scheme, set from `SignerCreated` /
     /// `SigningKeyRotated`. `None` only for rows hydrated before the scheme
     /// column was backfilled.
     pub signing_scheme: Option<protocol_types::SigningScheme>,
-    pub balances: BTreeMap<AssetType, u64>,
 }
 
 /// What we keep per Bucket: cursor state + identity. Strike, scale, and
@@ -125,15 +132,26 @@ impl RfqStatus {
     }
 }
 
-/// One RFQ auction's lifecycle, from `RfqCreated` through `RfqBid`s to
-/// its terminal `RfqSettled` / `RfqExpiredUnsold` (C3).
+/// One auction's lifecycle, keyed by the generic `auction_id` (C3, four-
+/// package layout). Born at `AuctionCreated`, bid via `AuctionBid`, and
+/// completed by whichever venue consumes it: the options_rfq adapter
+/// (`RfqSettled`/`PutRfqSettled`/`*ExpiredUnsold`), the vault
+/// (`VaultRfqSettled`/`VaultRfqUnsold`, `SwapRfqSettled`/`SwapRfqUnfilled`),
+/// or the generic uncoupled path (`AuctionSettled`/`AuctionUnfilled`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RfqState {
-    pub bucket_id: ObjectId,
+    /// The options_rfq adapter's Rfq metadata object id; `None` for
+    /// vault-coupled and swap auctions (they have no adapter object).
+    pub meta_id: Option<ObjectId>,
+    /// Bucket the auction writes into. Filled from the adapter created
+    /// events / vault settle events, or inferred from the origin vault's
+    /// current bucket for coupled option auctions; `None` for swaps.
+    pub bucket_id: Option<ObjectId>,
     pub origin: ObjectId,
     pub amount: u64,
+    /// Reserve bid of the auction (reserve premium for option RFQs).
     pub reserve_premium: u64,
-    /// Tracks anti-snipe extensions via `RfqBid.new_deadline_ms`.
+    /// Tracks anti-snipe extensions via `AuctionBid.deadline_ms`.
     pub deadline_ms: u64,
     pub best_premium: Option<u64>,
     pub best_bidder: Option<SuiAddress>,
@@ -145,8 +163,33 @@ pub struct RfqState {
     pub gross_premium: Option<u64>,
     /// Protocol RFQ fee taken at settle (`gross_premium − net_premium`).
     pub fee: Option<u64>,
-    /// "call" or "put".
-    pub option_kind: String,
+    /// "call" | "put" | "swap" | "unknown".
+    pub auction_kind: String,
+}
+
+impl RfqState {
+    /// A blank open row for an auction we haven't classified yet. Real
+    /// fields land from `AuctionCreated` (or, defensively, whichever event
+    /// arrives first).
+    fn blank() -> Self {
+        RfqState {
+            meta_id: None,
+            bucket_id: None,
+            origin: ObjectId::ZERO,
+            amount: 0,
+            reserve_premium: 0,
+            deadline_ms: 0,
+            best_premium: None,
+            best_bidder: None,
+            status: RfqStatus::Open,
+            winner: None,
+            net_premium: None,
+            position_id: None,
+            gross_premium: None,
+            fee: None,
+            auction_kind: AUCTION_KIND_UNKNOWN.to_string(),
+        }
+    }
 }
 
 /// One covered-call vault's headline state, assembled from its event
@@ -232,7 +275,7 @@ struct Inner {
     positions: BTreeMap<(ObjectId, u128), PositionState>,
     /// bucket_id → its DeepBook venue (SO-152).
     deepbook_pools: BTreeMap<ObjectId, DeepBookPoolState>,
-    /// rfq_id → auction lifecycle (C3).
+    /// auction_id → auction lifecycle (C3).
     rfqs: BTreeMap<ObjectId, RfqState>,
     /// vault_id → headline state (D2).
     vaults: BTreeMap<ObjectId, VaultState>,
@@ -437,7 +480,7 @@ impl Store {
             .collect()
     }
 
-    /// One auction's lifecycle state (C3).
+    /// One auction's lifecycle state, by auction id (C3).
     pub fn rfq(&self, id: &ObjectId) -> Option<RfqState> {
         self.inner.read().rfqs.get(id).cloned()
     }
@@ -496,7 +539,7 @@ fn collect_participants(
             push(w.call_token_recipient.to_hex(), "call_token_recipient");
             push(w.signer_token_recipient.to_hex(), "signer_token_recipient");
             push(w.executor.to_hex(), "executor");
-            if let Some(o) = account_owner_hex(inner, &w.signer_account_id) {
+            if let Some(o) = account_owner_hex(inner, &w.signer_id) {
                 push(o, "signer_account_owner");
             }
         }
@@ -505,39 +548,36 @@ fn collect_participants(
         ChainEvent::ExpiredOptionBurned(b) => push(b.burner.to_hex(), "burner"),
         ChainEvent::BucketInvalidated(i) => push(i.admin.to_hex(), "admin"),
         ChainEvent::BucketRevalidated(r) => push(r.admin.to_hex(), "admin"),
-        ChainEvent::AccountCreated(a) => push(a.owner.to_hex(), "account_owner"),
-        ChainEvent::AccountDeposit(d) => {
-            if let Some(o) = account_owner_hex(inner, &d.account_id) {
-                push(o, "account_owner");
-            }
-        }
-        ChainEvent::AccountWithdraw(w) => {
-            if let Some(o) = account_owner_hex(inner, &w.account_id) {
-                push(o, "account_owner");
-            }
-        }
+        ChainEvent::SignerCreated(a) => push(a.owner.to_hex(), "account_owner"),
         ChainEvent::SigningKeyRotated(r) => {
-            if let Some(o) = account_owner_hex(inner, &r.account_id) {
+            if let Some(o) = account_owner_hex(inner, &r.signer_id) {
                 push(o, "account_owner");
             }
         }
         ChainEvent::TreasuryWithdrawn(t) => push(t.recipient.to_hex(), "treasury_recipient"),
         ChainEvent::CollateralizedWrite(w) => push(w.writer.to_hex(), "writer"),
-        ChainEvent::RfqBid(b) => {
+        ChainEvent::AuctionBid(b) => {
             push(b.bidder.to_hex(), "bidder");
-            push(b.call_recipient.to_hex(), "call_recipient");
+            push(b.token_recipient.to_hex(), "token_recipient");
+        }
+        ChainEvent::AuctionSettled(s) => {
+            push(s.bidder.to_hex(), "winner");
+            push(s.token_recipient.to_hex(), "token_recipient");
         }
         ChainEvent::RfqSettled(s) => {
             push(s.winner.to_hex(), "winner");
             push(s.call_recipient.to_hex(), "call_recipient");
             push(s.position_recipient.to_hex(), "position_recipient");
         }
+        ChainEvent::VaultRfqSettled(s) => {
+            push(s.winner.to_hex(), "winner");
+            push(s.call_recipient.to_hex(), "call_recipient");
+        }
         ChainEvent::VaultDeposit(d) => push(d.depositor.to_hex(), "depositor"),
         ChainEvent::SharesClaimed(c) => push(c.owner.to_hex(), "owner"),
         ChainEvent::WithdrawInitiated(w) => push(w.owner.to_hex(), "owner"),
         ChainEvent::WithdrawCompleted(w) => push(w.owner.to_hex(), "owner"),
         ChainEvent::InstantWithdraw(w) => push(w.owner.to_hex(), "owner"),
-        ChainEvent::SwapRfqBid(b) => push(b.bidder.to_hex(), "bidder"),
         ChainEvent::SwapRfqSettled(s) => push(s.winner.to_hex(), "winner"),
         // Fills are attributed by BalanceManager id, not wallet — the api-service
         // maps a wallet's BM back to it for cost-basis (SO-209). Both sides are
@@ -552,7 +592,7 @@ fn collect_participants(
             push(w.put_token_recipient.to_hex(), "put_token_recipient");
             push(w.signer_token_recipient.to_hex(), "signer_token_recipient");
             push(w.executor.to_hex(), "executor");
-            if let Some(o) = account_owner_hex(inner, &w.signer_account_id) {
+            if let Some(o) = account_owner_hex(inner, &w.signer_id) {
                 push(o, "signer_account_owner");
             }
         }
@@ -562,10 +602,6 @@ fn collect_participants(
         ChainEvent::PutBucketInvalidated(i) => push(i.admin.to_hex(), "admin"),
         ChainEvent::PutBucketRevalidated(r) => push(r.admin.to_hex(), "admin"),
         ChainEvent::PutCollateralizedWrite(w) => push(w.writer.to_hex(), "writer"),
-        ChainEvent::PutRfqBid(b) => {
-            push(b.bidder.to_hex(), "bidder");
-            push(b.put_recipient.to_hex(), "put_recipient");
-        }
         ChainEvent::PutRfqSettled(s) => {
             push(s.winner.to_hex(), "winner");
             push(s.put_recipient.to_hex(), "put_recipient");
@@ -577,9 +613,11 @@ fn collect_participants(
         | ChainEvent::BucketCleaned(_)
         | ChainEvent::FeeUpdated(_)
         | ChainEvent::DeepBookPoolCreated(_)
+        | ChainEvent::AuctionCreated(_)
+        | ChainEvent::AuctionUnfilled(_)
         | ChainEvent::RfqCreated(_)
         | ChainEvent::RfqExpiredUnsold(_)
-        | ChainEvent::SwapRfqCreated(_)
+        | ChainEvent::VaultRfqUnsold(_)
         | ChainEvent::SwapRfqUnfilled(_)
         | ChainEvent::VaultCreated(_)
         | ChainEvent::VaultBucketSelected(_)
@@ -651,46 +689,16 @@ fn stage_event_into_batch(
                 batch.buckets.push(bucket_row(r.bucket_id, state, sequence));
             }
         }
-        ChainEvent::AccountCreated(a) => {
-            if let Some(state) = inner.accounts.get(&a.account_id) {
-                batch.accounts.push(account_row(a.account_id, state, sequence));
-            }
-        }
-        ChainEvent::AccountDeposit(d) => {
-            if let Some(state) = inner.accounts.get(&d.account_id) {
-                // Deposit may also create the row if the account was never
-                // seen via AccountCreated (defensive — apply_account_delta
-                // calls .entry().or_default()).
-                batch
-                    .accounts
-                    .push(account_row(d.account_id, state, sequence));
-                if let Some(bal) = state.balances.get(&d.asset_type) {
-                    batch.account_balances.push(balance_row(
-                        d.account_id,
-                        &d.asset_type,
-                        *bal,
-                        sequence,
-                    ));
-                }
-            }
-        }
-        ChainEvent::AccountWithdraw(w) => {
-            if let Some(state) = inner.accounts.get(&w.account_id) {
-                if let Some(bal) = state.balances.get(&w.asset_type) {
-                    batch.account_balances.push(balance_row(
-                        w.account_id,
-                        &w.asset_type,
-                        *bal,
-                        sequence,
-                    ));
-                }
+        ChainEvent::SignerCreated(a) => {
+            if let Some(state) = inner.accounts.get(&a.signer_id) {
+                batch.accounts.push(account_row(a.signer_id, state, sequence));
             }
         }
         ChainEvent::SigningKeyRotated(r) => {
-            if let Some(state) = inner.accounts.get(&r.account_id) {
+            if let Some(state) = inner.accounts.get(&r.signer_id) {
                 batch
                     .accounts
-                    .push(account_row(r.account_id, state, sequence));
+                    .push(account_row(r.signer_id, state, sequence));
             }
         }
         ChainEvent::DeepBookPoolCreated(p) => {
@@ -714,34 +722,59 @@ fn stage_event_into_batch(
                 batch.buckets.push(bucket_row(w.bucket_id, state, sequence));
             }
         }
-        // ── RFQ lifecycle (C3): snapshot the post-apply auction state ──
-        ChainEvent::RfqCreated(r) => {
-            if let Some(state) = inner.rfqs.get(&r.rfq_id) {
-                batch.rfqs.push(rfq_row(r.rfq_id, state, sequence));
-            }
+        // ── auction / RFQ lifecycle (C3): snapshot the post-apply state,
+        //    keyed by the generic auction id ──
+        ChainEvent::AuctionCreated(a) => {
+            stage_rfq(inner, a.auction_id, sequence, batch);
         }
-        ChainEvent::RfqBid(b) => {
-            if let Some(state) = inner.rfqs.get(&b.rfq_id) {
-                batch.rfqs.push(rfq_row(b.rfq_id, state, sequence));
-            }
+        ChainEvent::AuctionBid(b) => {
+            stage_rfq(inner, b.auction_id, sequence, batch);
+            let kind = inner
+                .rfqs
+                .get(&b.auction_id)
+                .map(|r| r.auction_kind.clone())
+                .unwrap_or_else(|| AUCTION_KIND_UNKNOWN.to_string());
             batch.rfq_bids.push(RfqBidRow {
-                rfq_id: b.rfq_id.to_hex(),
+                rfq_id: b.auction_id.to_hex(),
                 sequence,
                 bidder: b.bidder.to_hex(),
-                call_recipient: b.call_recipient.to_hex(),
-                premium: u64_to_bigdecimal(b.premium),
-                option_kind: OPTION_KIND_CALL.to_string(),
+                call_recipient: b.token_recipient.to_hex(),
+                premium: u64_to_bigdecimal(b.amount),
+                auction_kind: kind,
             });
         }
+        ChainEvent::AuctionSettled(s) => {
+            stage_rfq(inner, s.auction_id, sequence, batch);
+        }
+        ChainEvent::AuctionUnfilled(u) => {
+            stage_rfq(inner, u.auction_id, sequence, batch);
+        }
+        ChainEvent::RfqCreated(r) => {
+            stage_rfq(inner, r.auction_id, sequence, batch);
+        }
         ChainEvent::RfqSettled(s) => {
-            if let Some(state) = inner.rfqs.get(&s.rfq_id) {
-                batch.rfqs.push(rfq_row(s.rfq_id, state, sequence));
-            }
+            stage_rfq(inner, s.auction_id, sequence, batch);
+            batch
+                .position_upserts
+                .push(settled_position_row(s, sequence, tx_digest, timestamp_ms));
         }
         ChainEvent::RfqExpiredUnsold(e) => {
-            if let Some(state) = inner.rfqs.get(&e.rfq_id) {
-                batch.rfqs.push(rfq_row(e.rfq_id, state, sequence));
-            }
+            stage_rfq(inner, e.auction_id, sequence, batch);
+        }
+        ChainEvent::VaultRfqSettled(s) => {
+            stage_rfq(inner, s.auction_id, sequence, batch);
+            batch
+                .position_upserts
+                .push(vault_settled_position_row(s, sequence, tx_digest, timestamp_ms));
+        }
+        ChainEvent::VaultRfqUnsold(u) => {
+            stage_rfq(inner, u.auction_id, sequence, batch);
+        }
+        ChainEvent::SwapRfqSettled(s) => {
+            stage_rfq(inner, s.swap_id, sequence, batch);
+        }
+        ChainEvent::SwapRfqUnfilled(u) => {
+            stage_rfq(inner, u.swap_id, sequence, batch);
         }
         // ── vault lifecycle (D2) ────────────────────────────────────
         ChainEvent::VaultCreated(v) => {
@@ -828,54 +861,35 @@ fn stage_event_into_batch(
             }
         }
         ChainEvent::PutRfqCreated(r) => {
-            if let Some(state) = inner.rfqs.get(&r.rfq_id) {
-                batch.rfqs.push(rfq_row(r.rfq_id, state, sequence));
-            }
-        }
-        ChainEvent::PutRfqBid(b) => {
-            if let Some(state) = inner.rfqs.get(&b.rfq_id) {
-                batch.rfqs.push(rfq_row(b.rfq_id, state, sequence));
-            }
-            batch.rfq_bids.push(RfqBidRow {
-                rfq_id: b.rfq_id.to_hex(),
-                sequence,
-                bidder: b.bidder.to_hex(),
-                // The put coin recipient lives in the shared `call_recipient`
-                // column.
-                call_recipient: b.put_recipient.to_hex(),
-                premium: u64_to_bigdecimal(b.premium),
-                option_kind: OPTION_KIND_PUT.to_string(),
-            });
+            stage_rfq(inner, r.auction_id, sequence, batch);
         }
         ChainEvent::PutRfqSettled(s) => {
-            if let Some(state) = inner.rfqs.get(&s.rfq_id) {
-                batch.rfqs.push(rfq_row(s.rfq_id, state, sequence));
-            }
+            stage_rfq(inner, s.auction_id, sequence, batch);
             batch
                 .position_upserts
                 .push(put_settled_position_row(s, sequence, tx_digest, timestamp_ms));
         }
         ChainEvent::PutRfqExpiredUnsold(e) => {
-            if let Some(state) = inner.rfqs.get(&e.rfq_id) {
-                batch.rfqs.push(rfq_row(e.rfq_id, state, sequence));
-            }
+            stage_rfq(inner, e.auction_id, sequence, batch);
         }
         ChainEvent::ExpiredOptionBurned(_)
         | ChainEvent::PutExpiredOptionBurned(_)
         | ChainEvent::FeeUpdated(_)
         | ChainEvent::TreasuryWithdrawn(_)
         | ChainEvent::VaultPositionRedeemed(_)
-        | ChainEvent::SwapRfqCreated(_)
-        | ChainEvent::SwapRfqBid(_)
-        | ChainEvent::SwapRfqSettled(_)
-        | ChainEvent::SwapRfqUnfilled(_)
         | ChainEvent::DeepBookOrderFilled(_)
         | ChainEvent::VaultConfigUpdated(_) => {
             // Log-only events: no materialised view to refresh (the swap
-            // auction's effect on the vault is picked up at finalize, as
-            // the old VaultProceedsSwapped path was). DeepBook fills live only
-            // in the event log + participants (SO-209), read on demand.
+            // auction's effect on the vault is picked up at finalize).
+            // DeepBook fills live only in the event log + participants
+            // (SO-209), read on demand.
         }
+    }
+}
+
+fn stage_rfq(inner: &Inner, auction_id: ObjectId, sequence: i64, batch: &mut CheckpointBatch) {
+    if let Some(state) = inner.rfqs.get(&auction_id) {
+        batch.rfqs.push(rfq_row(auction_id, state, sequence));
     }
 }
 
@@ -937,17 +951,16 @@ fn write_position_row(
         recipient: w.position_recipient.to_hex(),
         updated_at_seq: sequence,
         // SO-97 provenance: gross premium the writer received, the
-        // counterparty MM account, and the minting tx for explorer links.
+        // counterparty MM's QuoteSigner, and the minting tx for explorer links.
         premium_received: u64_to_bigdecimal(w.gross_premium),
-        mm_account_id: w.signer_account_id.to_hex(),
+        mm_account_id: w.signer_id.to_hex(),
         tx_digest: tx_digest.to_string(),
         minted_at_ms,
         option_kind: OPTION_KIND_CALL.to_string(),
     }
 }
 
-/// Position row for a `PutWriteExecuted`. Mirrors [`write_position_row`] but
-/// puts have no `signer_account_id` field, so MM-account provenance is unset.
+/// Position row for a `PutWriteExecuted`. Mirrors [`write_position_row`].
 fn put_write_position_row(
     w: &protocol_types::events::PutWriteExecuted,
     sequence: i64,
@@ -962,15 +975,39 @@ fn put_write_position_row(
         recipient: w.position_recipient.to_hex(),
         updated_at_seq: sequence,
         premium_received: u64_to_bigdecimal(w.gross_premium),
-        mm_account_id: w.signer_account_id.to_hex(),
+        mm_account_id: w.signer_id.to_hex(),
         tx_digest: tx_digest.to_string(),
         minted_at_ms,
         option_kind: OPTION_KIND_PUT.to_string(),
     }
 }
 
-/// Position row minted at a `PutRfqSettled`. The settle event carries the
-/// position id/recipient/range directly.
+/// Position row minted at an adapter `RfqSettled` — treated like a
+/// `WriteExecuted` ("position minted with premium X"). The settle event
+/// carries the position id/recipient/range directly.
+fn settled_position_row(
+    s: &protocol_types::events::RfqSettled,
+    sequence: i64,
+    tx_digest: &str,
+    minted_at_ms: i64,
+) -> PositionRow {
+    PositionRow {
+        bucket_id: s.bucket_id.to_hex(),
+        range_start: u128_to_bigdecimal(s.range_start),
+        range_end: u128_to_bigdecimal(s.range_end),
+        object_id: s.position_id.to_hex(),
+        recipient: s.position_recipient.to_hex(),
+        updated_at_seq: sequence,
+        premium_received: u64_to_bigdecimal(s.gross_premium),
+        // RFQ settles aren't tied to an MM off-chain account.
+        mm_account_id: ObjectId::ZERO.to_hex(),
+        tx_digest: tx_digest.to_string(),
+        minted_at_ms,
+        option_kind: OPTION_KIND_CALL.to_string(),
+    }
+}
+
+/// Position row minted at a `PutRfqSettled`. Mirrors [`settled_position_row`].
 fn put_settled_position_row(
     s: &protocol_types::events::PutRfqSettled,
     sequence: i64,
@@ -990,6 +1027,30 @@ fn put_settled_position_row(
         tx_digest: tx_digest.to_string(),
         minted_at_ms,
         option_kind: OPTION_KIND_PUT.to_string(),
+    }
+}
+
+/// Position row minted at a `VaultRfqSettled`. The Position object stays
+/// with the vault (the event carries no `position_recipient`), so the
+/// vault id doubles as the recipient address — both are 32 bytes.
+fn vault_settled_position_row(
+    s: &protocol_types::events::VaultRfqSettled,
+    sequence: i64,
+    tx_digest: &str,
+    minted_at_ms: i64,
+) -> PositionRow {
+    PositionRow {
+        bucket_id: s.bucket_id.to_hex(),
+        range_start: u128_to_bigdecimal(s.range_start),
+        range_end: u128_to_bigdecimal(s.range_end),
+        object_id: s.position_id.to_hex(),
+        recipient: SuiAddress::new(*s.vault_id.as_bytes()).to_hex(),
+        updated_at_seq: sequence,
+        premium_received: u64_to_bigdecimal(s.gross_premium),
+        mm_account_id: ObjectId::ZERO.to_hex(),
+        tx_digest: tx_digest.to_string(),
+        minted_at_ms,
+        option_kind: OPTION_KIND_CALL.to_string(),
     }
 }
 
@@ -1015,10 +1076,10 @@ fn deepbook_pool_row(
     }
 }
 
-fn rfq_row(id: ObjectId, state: &RfqState, sequence: i64) -> RfqRow {
+fn rfq_row(auction_id: ObjectId, state: &RfqState, sequence: i64) -> RfqRow {
     RfqRow {
-        rfq_id: id.to_hex(),
-        bucket_id: state.bucket_id.to_hex(),
+        rfq_id: auction_id.to_hex(),
+        bucket_id: state.bucket_id.map(|b| b.to_hex()),
         origin: state.origin.to_hex(),
         amount: u64_to_bigdecimal(state.amount),
         reserve_premium: u64_to_bigdecimal(state.reserve_premium),
@@ -1032,7 +1093,8 @@ fn rfq_row(id: ObjectId, state: &RfqState, sequence: i64) -> RfqRow {
         gross_premium: state.gross_premium.map(u64_to_bigdecimal),
         fee: state.fee.map(u64_to_bigdecimal),
         updated_at_seq: sequence,
-        option_kind: state.option_kind.clone(),
+        auction_kind: state.auction_kind.clone(),
+        meta_id: state.meta_id.map(|m| m.to_hex()),
     }
 }
 
@@ -1104,20 +1166,6 @@ fn account_row(id: ObjectId, state: &AccountState, sequence: i64) -> AccountRow 
     }
 }
 
-fn balance_row(
-    account_id: ObjectId,
-    asset_type: &AssetType,
-    balance: u64,
-    sequence: i64,
-) -> AccountBalanceRow {
-    AccountBalanceRow {
-        account_id: account_id.to_hex(),
-        asset_type: asset_type.as_str().to_string(),
-        balance: u64_to_bigdecimal(balance),
-        updated_at_seq: sequence,
-    }
-}
-
 fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
     match event {
         ChainEvent::BucketCreated(b) => apply_bucket_created(inner, b),
@@ -1141,19 +1189,17 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                 b.invalidated = false;
             }
         }
-        ChainEvent::AccountCreated(a) => {
+        ChainEvent::SignerCreated(a) => {
             let acct = inner
                 .accounts
-                .entry(a.account_id)
+                .entry(a.signer_id)
                 .or_insert_with(AccountState::default);
             acct.signing_pubkey = a.signing_pubkey.clone();
             acct.signing_scheme = Some(a.signing_scheme);
             acct.owner = Some(a.owner);
         }
-        ChainEvent::AccountDeposit(d) => apply_account_delta(inner, d, true),
-        ChainEvent::AccountWithdraw(w) => apply_account_delta(inner, w, false),
         ChainEvent::SigningKeyRotated(r) => {
-            if let Some(acct) = inner.accounts.get_mut(&r.account_id) {
+            if let Some(acct) = inner.accounts.get_mut(&r.signer_id) {
                 acct.signing_pubkey = r.new_pubkey.clone();
                 acct.signing_scheme = Some(r.new_scheme);
             }
@@ -1194,49 +1240,130 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                 b.total_written = w.range_end;
             }
         }
-        // ── RFQ lifecycle (C3) ──────────────────────────────────────
-        ChainEvent::RfqCreated(r) => {
+        // ── auction / RFQ lifecycle (C3, four-package layout) ──────
+        ChainEvent::AuctionCreated(a) => {
+            let (kind, bucket_id) = classify_auction(inner, a);
             inner.rfqs.insert(
-                r.rfq_id,
+                a.auction_id,
                 RfqState {
-                    bucket_id: r.bucket_id,
-                    origin: r.origin,
-                    amount: r.amount,
-                    reserve_premium: r.reserve_premium,
-                    deadline_ms: r.deadline_ms,
-                    best_premium: None,
-                    best_bidder: None,
-                    status: RfqStatus::Open,
-                    winner: None,
-                    net_premium: None,
-                    position_id: None,
-                    gross_premium: None,
-                    fee: None,
+                    meta_id: None,
+                    bucket_id,
+                    origin: a.origin,
+                    amount: a.amount,
+                    reserve_premium: a.reserve_bid,
+                    deadline_ms: a.deadline_ms,
+                    auction_kind: kind,
+                    ..RfqState::blank()
+                },
+            );
+        }
+        ChainEvent::AuctionBid(b) => {
+            if let Some(rfq) = inner.rfqs.get_mut(&b.auction_id) {
+                rfq.best_premium = Some(b.amount);
+                rfq.best_bidder = Some(b.bidder);
+                rfq.deadline_ms = b.deadline_ms;
+            }
+        }
+        // Generic terminal events (uncoupled settles). The adapter's richer
+        // RfqSettled/PutRfqSettled in the same tx fills in the economics.
+        ChainEvent::AuctionSettled(s) => {
+            let rfq = inner.rfqs.entry(s.auction_id).or_insert_with(RfqState::blank);
+            rfq.status = RfqStatus::Settled;
+            rfq.winner = Some(s.bidder);
+        }
+        ChainEvent::AuctionUnfilled(u) => {
+            let rfq = inner.rfqs.entry(u.auction_id).or_insert_with(RfqState::blank);
+            rfq.status = RfqStatus::ExpiredUnsold;
+        }
+        // Adapter creation events enrich the AuctionCreated-born row with
+        // the metadata object id, the bucket, and the option kind.
+        ChainEvent::RfqCreated(r) => {
+            let rfq = inner.rfqs.entry(r.auction_id).or_insert_with(RfqState::blank);
+            rfq.meta_id = Some(r.rfq_id);
+            rfq.bucket_id = Some(r.bucket_id);
+            rfq.origin = r.origin;
+            rfq.amount = r.amount;
+            rfq.reserve_premium = r.reserve_premium;
+            rfq.auction_kind = AUCTION_KIND_CALL.to_string();
+        }
+        ChainEvent::RfqSettled(s) => {
+            let rfq = inner.rfqs.entry(s.auction_id).or_insert_with(RfqState::blank);
+            rfq.meta_id = Some(s.rfq_id);
+            rfq.bucket_id = Some(s.bucket_id);
+            rfq.auction_kind = AUCTION_KIND_CALL.to_string();
+            rfq.status = RfqStatus::Settled;
+            rfq.winner = Some(s.winner);
+            rfq.net_premium = Some(s.net_premium);
+            rfq.position_id = Some(s.position_id);
+            rfq.gross_premium = Some(s.gross_premium);
+            rfq.fee = Some(s.fee);
+            // The settle mints a Position to the writer (mirrors the
+            // WriteExecuted path for direct writes).
+            inner.positions.insert(
+                (s.bucket_id, s.range_start),
+                PositionState {
+                    bucket_id: s.bucket_id,
+                    object_id: s.position_id,
+                    recipient: s.position_recipient,
+                    range_start: s.range_start,
+                    range_end: s.range_end,
                     option_kind: OPTION_KIND_CALL.to_string(),
                 },
             );
         }
-        ChainEvent::RfqBid(b) => {
-            if let Some(rfq) = inner.rfqs.get_mut(&b.rfq_id) {
-                rfq.best_premium = Some(b.premium);
-                rfq.best_bidder = Some(b.bidder);
-                rfq.deadline_ms = b.new_deadline_ms;
-            }
-        }
-        ChainEvent::RfqSettled(s) => {
-            if let Some(rfq) = inner.rfqs.get_mut(&s.rfq_id) {
-                rfq.status = RfqStatus::Settled;
-                rfq.winner = Some(s.winner);
-                rfq.net_premium = Some(s.net_premium);
-                rfq.position_id = Some(s.position_id);
-                rfq.gross_premium = Some(s.gross_premium);
-                rfq.fee = Some(s.fee);
-            }
-        }
         ChainEvent::RfqExpiredUnsold(e) => {
-            if let Some(rfq) = inner.rfqs.get_mut(&e.rfq_id) {
-                rfq.status = RfqStatus::ExpiredUnsold;
-            }
+            let rfq = inner.rfqs.entry(e.auction_id).or_insert_with(RfqState::blank);
+            rfq.meta_id = Some(e.rfq_id);
+            rfq.bucket_id = Some(e.bucket_id);
+            rfq.auction_kind = AUCTION_KIND_CALL.to_string();
+            rfq.status = RfqStatus::ExpiredUnsold;
+        }
+        // Vault-coupled RFQ settles: complete the AuctionCreated-born row.
+        ChainEvent::VaultRfqSettled(s) => {
+            let rfq = inner.rfqs.entry(s.auction_id).or_insert_with(RfqState::blank);
+            rfq.bucket_id = Some(s.bucket_id);
+            rfq.origin = s.vault_id;
+            rfq.auction_kind = AUCTION_KIND_CALL.to_string();
+            rfq.status = RfqStatus::Settled;
+            rfq.winner = Some(s.winner);
+            rfq.net_premium = Some(s.net_premium);
+            rfq.position_id = Some(s.position_id);
+            rfq.gross_premium = Some(s.gross_premium);
+            rfq.fee = Some(s.fee);
+            // The minted Position stays with the vault: the vault id doubles
+            // as the recipient address (both 32 bytes).
+            inner.positions.insert(
+                (s.bucket_id, s.range_start),
+                PositionState {
+                    bucket_id: s.bucket_id,
+                    object_id: s.position_id,
+                    recipient: SuiAddress::new(*s.vault_id.as_bytes()),
+                    range_start: s.range_start,
+                    range_end: s.range_end,
+                    option_kind: OPTION_KIND_CALL.to_string(),
+                },
+            );
+        }
+        ChainEvent::VaultRfqUnsold(u) => {
+            let rfq = inner.rfqs.entry(u.auction_id).or_insert_with(RfqState::blank);
+            rfq.bucket_id = Some(u.bucket_id);
+            rfq.origin = u.vault_id;
+            rfq.auction_kind = AUCTION_KIND_CALL.to_string();
+            rfq.status = RfqStatus::ExpiredUnsold;
+        }
+        // Proceeds-swap settles: `swap_id` is the generic auction id.
+        ChainEvent::SwapRfqSettled(s) => {
+            let rfq = inner.rfqs.entry(s.swap_id).or_insert_with(RfqState::blank);
+            rfq.origin = s.vault_id;
+            rfq.auction_kind = AUCTION_KIND_SWAP.to_string();
+            rfq.status = RfqStatus::Settled;
+            rfq.winner = Some(s.winner);
+        }
+        ChainEvent::SwapRfqUnfilled(u) => {
+            let rfq = inner.rfqs.entry(u.swap_id).or_insert_with(RfqState::blank);
+            rfq.origin = u.vault_id;
+            rfq.auction_kind = AUCTION_KIND_SWAP.to_string();
+            rfq.status = RfqStatus::ExpiredUnsold;
         }
         // ── vault lifecycle (D2) ────────────────────────────────────
         ChainEvent::VaultCreated(v) => {
@@ -1386,42 +1513,25 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
             }
         }
         ChainEvent::PutRfqCreated(r) => {
-            inner.rfqs.insert(
-                r.rfq_id,
-                RfqState {
-                    bucket_id: r.bucket_id,
-                    origin: r.origin,
-                    amount: r.amount,
-                    reserve_premium: r.reserve_premium,
-                    deadline_ms: r.deadline_ms,
-                    best_premium: None,
-                    best_bidder: None,
-                    status: RfqStatus::Open,
-                    winner: None,
-                    net_premium: None,
-                    position_id: None,
-                    gross_premium: None,
-                    fee: None,
-                    option_kind: OPTION_KIND_PUT.to_string(),
-                },
-            );
-        }
-        ChainEvent::PutRfqBid(b) => {
-            if let Some(rfq) = inner.rfqs.get_mut(&b.rfq_id) {
-                rfq.best_premium = Some(b.premium);
-                rfq.best_bidder = Some(b.bidder);
-                rfq.deadline_ms = b.new_deadline_ms;
-            }
+            let rfq = inner.rfqs.entry(r.auction_id).or_insert_with(RfqState::blank);
+            rfq.meta_id = Some(r.rfq_id);
+            rfq.bucket_id = Some(r.bucket_id);
+            rfq.origin = r.origin;
+            rfq.amount = r.amount;
+            rfq.reserve_premium = r.reserve_premium;
+            rfq.auction_kind = AUCTION_KIND_PUT.to_string();
         }
         ChainEvent::PutRfqSettled(s) => {
-            if let Some(rfq) = inner.rfqs.get_mut(&s.rfq_id) {
-                rfq.status = RfqStatus::Settled;
-                rfq.winner = Some(s.winner);
-                rfq.net_premium = Some(s.net_premium);
-                rfq.position_id = Some(s.position_id);
-                rfq.gross_premium = Some(s.gross_premium);
-                rfq.fee = Some(s.fee);
-            }
+            let rfq = inner.rfqs.entry(s.auction_id).or_insert_with(RfqState::blank);
+            rfq.meta_id = Some(s.rfq_id);
+            rfq.bucket_id = Some(s.bucket_id);
+            rfq.auction_kind = AUCTION_KIND_PUT.to_string();
+            rfq.status = RfqStatus::Settled;
+            rfq.winner = Some(s.winner);
+            rfq.net_premium = Some(s.net_premium);
+            rfq.position_id = Some(s.position_id);
+            rfq.gross_premium = Some(s.gross_premium);
+            rfq.fee = Some(s.fee);
             // The settle mints a Position to the writer (mirrors the
             // WriteExecuted path for direct writes).
             inner.positions.insert(
@@ -1437,18 +1547,50 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
             );
         }
         ChainEvent::PutRfqExpiredUnsold(e) => {
-            if let Some(rfq) = inner.rfqs.get_mut(&e.rfq_id) {
-                rfq.status = RfqStatus::ExpiredUnsold;
-            }
+            let rfq = inner.rfqs.entry(e.auction_id).or_insert_with(RfqState::blank);
+            rfq.meta_id = Some(e.rfq_id);
+            rfq.bucket_id = Some(e.bucket_id);
+            rfq.auction_kind = AUCTION_KIND_PUT.to_string();
+            rfq.status = RfqStatus::ExpiredUnsold;
         }
         ChainEvent::FeeUpdated(_)
         | ChainEvent::TreasuryWithdrawn(_)
         | ChainEvent::VaultPositionRedeemed(_)
-        | ChainEvent::SwapRfqCreated(_)
-        | ChainEvent::SwapRfqBid(_)
-        | ChainEvent::SwapRfqSettled(_)
-        | ChainEvent::SwapRfqUnfilled(_)
         | ChainEvent::VaultConfigUpdated(_) => {}
+    }
+}
+
+/// Classify a fresh auction from its origin + escrow/bid legs, and infer the
+/// bucket for coupled option auctions from the origin vault's current bucket
+/// (the venue's own settle event later confirms it).
+///
+/// When the origin is a known vault, compare the legs against the vault's
+/// coin types — CANONICAL forms on both sides, since `TypeName` event fields
+/// arrive without the `0x` prefix (SO-163):
+///   escrow = underlying, bid = settlement → call RFQ slice
+///   escrow = settlement, bid = settlement → put RFQ slice (cash collateral)
+///   escrow = settlement, bid = underlying → proceeds swap
+/// Anything else (standalone adapter auctions included) stays `unknown`
+/// until an options_rfq adapter event pins it down.
+fn classify_auction(
+    inner: &Inner,
+    a: &protocol_types::events::AuctionCreated,
+) -> (String, Option<ObjectId>) {
+    let Some(vault) = inner.vaults.get(&a.origin) else {
+        return (AUCTION_KIND_UNKNOWN.to_string(), None);
+    };
+    let escrow = a.escrow_type.to_canonical();
+    let bid = a.bid_type.to_canonical();
+    let underlying = vault.underlying_type.to_canonical();
+    let settlement = vault.settlement_type.to_canonical();
+    if escrow == underlying && bid == settlement {
+        (AUCTION_KIND_CALL.to_string(), vault.current_bucket)
+    } else if escrow == settlement && bid == settlement {
+        (AUCTION_KIND_PUT.to_string(), vault.current_bucket)
+    } else if escrow == settlement && bid == underlying {
+        (AUCTION_KIND_SWAP.to_string(), None)
+    } else {
+        (AUCTION_KIND_UNKNOWN.to_string(), None)
     }
 }
 
@@ -1551,51 +1693,11 @@ fn apply_put_write_executed(inner: &mut Inner, w: &protocol_types::events::PutWr
     );
 }
 
-fn apply_account_delta<E: AccountDelta>(inner: &mut Inner, e: &E, is_deposit: bool) {
-    let acct = inner.accounts.entry(e.account_id()).or_default();
-    let bal = acct.balances.entry(e.asset_type().clone()).or_insert(0);
-    if is_deposit {
-        *bal = bal.saturating_add(e.amount());
-    } else {
-        *bal = bal.saturating_sub(e.amount());
-    }
-}
-
-trait AccountDelta {
-    fn account_id(&self) -> ObjectId;
-    fn asset_type(&self) -> &AssetType;
-    fn amount(&self) -> u64;
-}
-
-impl AccountDelta for AccountDeposit {
-    fn account_id(&self) -> ObjectId {
-        self.account_id
-    }
-    fn asset_type(&self) -> &AssetType {
-        &self.asset_type
-    }
-    fn amount(&self) -> u64 {
-        self.amount
-    }
-}
-
-impl AccountDelta for AccountWithdraw {
-    fn account_id(&self) -> ObjectId {
-        self.account_id
-    }
-    fn asset_type(&self) -> &AssetType {
-        &self.asset_type
-    }
-    fn amount(&self) -> u64 {
-        self.amount
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use protocol_types::events::{
-        AccountCreated, AccountDeposit, BucketCreated, BucketInvalidated, BucketRevalidated,
+        BucketCreated, BucketInvalidated, BucketRevalidated, SignerCreated,
     };
 
     fn bucket_evt(id: u8) -> ChainEvent {
@@ -1640,7 +1742,8 @@ mod tests {
         store.ingest(
             ChainEvent::WriteExecuted(WriteExecuted {
                 bucket_id: id,
-                signer_account_id: ObjectId::ZERO,
+                signer_id: ObjectId::ZERO,
+                collateral_source: ObjectId::ZERO,
                 signer_token_recipient: SuiAddress::ZERO,
                 executor: SuiAddress::ZERO,
                 position_id: ObjectId::new([0x88; 32]),
@@ -1678,37 +1781,21 @@ mod tests {
     }
 
     #[test]
-    fn account_balances_apply_deposit_and_withdraw() {
+    fn signer_created_registers_key_and_owner() {
         let store = Store::default();
-        let acct = ObjectId::new([0xab; 32]);
+        let signer = ObjectId::new([0xab; 32]);
         store.ingest(
-            ChainEvent::AccountCreated(AccountCreated {
-                account_id: acct,
+            ChainEvent::SignerCreated(SignerCreated {
+                signer_id: signer,
                 owner: SuiAddress::new([0xcd; 32]),
                 signing_scheme: protocol_types::SigningScheme::Ed25519,
                 signing_pubkey: vec![0x01; 32],
             }),
             1,
         );
-        store.ingest(
-            ChainEvent::AccountDeposit(AccountDeposit {
-                account_id: acct,
-                asset_type: AssetType::new("USDC"),
-                amount: 1_000,
-            }),
-            2,
-        );
-        store.ingest(
-            ChainEvent::AccountWithdraw(AccountWithdraw {
-                account_id: acct,
-                asset_type: AssetType::new("USDC"),
-                amount: 250,
-            }),
-            3,
-        );
-        let s = store.account(&acct).unwrap();
-        assert_eq!(s.balances[&AssetType::new("USDC")], 750);
+        let s = store.account(&signer).unwrap();
         assert_eq!(s.signing_pubkey, vec![0x01; 32]);
+        assert_eq!(s.signing_scheme, Some(protocol_types::SigningScheme::Ed25519));
         assert_eq!(s.owner, Some(SuiAddress::new([0xcd; 32])));
     }
 
@@ -1743,61 +1830,103 @@ mod tests {
     }
 
     #[test]
-    fn rfq_lifecycle_created_bid_settled() {
-        use protocol_types::events::{RfqBid, RfqCreated, RfqSettled};
+    fn standalone_rfq_lifecycle_auction_created_enriched_bid_settled() {
+        use protocol_types::events::{
+            AuctionBid, AuctionCreated, AuctionSettled, RfqCreated, RfqSettled,
+        };
         let store = Store::default();
-        let rfq = ObjectId::new([0xaa; 32]);
+        let auction = ObjectId::new([0xaa; 32]);
+        let meta = ObjectId::new([0xad; 32]);
+        let bucket = ObjectId::new([0xb1; 32]);
+        let origin = ObjectId::new([0xf0; 32]);
         let bidder = SuiAddress::new([0x01; 32]);
         let sniper = SuiAddress::new([0x02; 32]);
 
+        // Generic venue creation (origin isn't a vault → kind unknown)…
         store.ingest(
-            ChainEvent::RfqCreated(RfqCreated {
-                rfq_id: rfq,
-                bucket_id: ObjectId::new([0xb1; 32]),
-                origin: ObjectId::new([0xf0; 32]),
+            ChainEvent::AuctionCreated(AuctionCreated {
+                auction_id: auction,
+                origin,
+                escrow_type: AssetType::new("9b::tbtc::TBTC"),
+                bid_type: AssetType::new("9b::tusdc::TUSDC"),
                 amount: 250_000_000,
-                reserve_premium: 47_619_000,
+                reserve_bid: 47_619_000,
                 deadline_ms: 1_000_000,
                 max_deadline_ms: 1_600_000,
                 min_increment_bps: 100,
+                coupled: false,
             }),
             1,
         );
-        assert_eq!(store.rfq(&rfq).unwrap().status, RfqStatus::Open);
+        let s = store.rfq(&auction).unwrap();
+        assert_eq!(s.status, RfqStatus::Open);
+        assert_eq!(s.auction_kind, AUCTION_KIND_UNKNOWN);
+        assert_eq!(s.bucket_id, None);
 
+        // …enriched by the adapter's creation event in the same tx.
         store.ingest(
-            ChainEvent::RfqBid(RfqBid {
-                rfq_id: rfq,
-                bidder,
-                call_recipient: bidder,
-                premium: 50_000_000,
-                previous_premium: 0,
-                new_deadline_ms: 1_000_000,
+            ChainEvent::RfqCreated(RfqCreated {
+                rfq_id: meta,
+                auction_id: auction,
+                bucket_id: bucket,
+                origin,
+                amount: 250_000_000,
+                reserve_premium: 47_619_000,
             }),
             2,
         );
-        // Snipe: higher bid pushes the deadline.
+        let s = store.rfq(&auction).unwrap();
+        assert_eq!(s.auction_kind, AUCTION_KIND_CALL);
+        assert_eq!(s.bucket_id, Some(bucket));
+        assert_eq!(s.meta_id, Some(meta));
+        assert_eq!(s.deadline_ms, 1_000_000, "auction params survive enrichment");
+
         store.ingest(
-            ChainEvent::RfqBid(RfqBid {
-                rfq_id: rfq,
-                bidder: sniper,
-                call_recipient: sniper,
-                premium: 51_000_000,
-                previous_premium: 50_000_000,
-                new_deadline_ms: 1_120_000,
+            ChainEvent::AuctionBid(AuctionBid {
+                auction_id: auction,
+                bidder,
+                token_recipient: bidder,
+                amount: 50_000_000,
+                previous_best: 0,
+                deadline_ms: 1_000_000,
             }),
             3,
         );
-        let s = store.rfq(&rfq).unwrap();
+        // Snipe: higher bid pushes the deadline.
+        store.ingest(
+            ChainEvent::AuctionBid(AuctionBid {
+                auction_id: auction,
+                bidder: sniper,
+                token_recipient: sniper,
+                amount: 51_000_000,
+                previous_best: 50_000_000,
+                deadline_ms: 1_120_000,
+            }),
+            4,
+        );
+        let s = store.rfq(&auction).unwrap();
         assert_eq!(s.best_premium, Some(51_000_000));
         assert_eq!(s.best_bidder, Some(sniper));
         assert_eq!(s.deadline_ms, 1_120_000);
 
+        // Uncoupled settle: generic event first, adapter economics after.
+        store.ingest(
+            ChainEvent::AuctionSettled(AuctionSettled {
+                auction_id: auction,
+                origin,
+                bidder: sniper,
+                token_recipient: sniper,
+                amount: 250_000_000,
+                winning_bid: 51_000_000,
+            }),
+            5,
+        );
         store.ingest(
             ChainEvent::RfqSettled(RfqSettled {
-                rfq_id: rfq,
-                bucket_id: ObjectId::new([0xb1; 32]),
-                origin: ObjectId::new([0xf0; 32]),
+                rfq_id: meta,
+                auction_id: auction,
+                bucket_id: bucket,
+                origin,
                 winner: sniper,
                 call_recipient: sniper,
                 position_id: ObjectId::new([0x99; 32]),
@@ -1809,15 +1938,130 @@ mod tests {
                 range_start: 0,
                 range_end: 250_000_000,
             }),
-            4,
+            6,
         );
-        let s = store.rfq(&rfq).unwrap();
+        let s = store.rfq(&auction).unwrap();
         assert_eq!(s.status, RfqStatus::Settled);
         assert_eq!(s.winner, Some(sniper));
         assert_eq!(s.net_premium, Some(50_490_000));
         assert_eq!(s.gross_premium, Some(51_000_000));
         assert_eq!(s.fee, Some(510_000));
         assert_eq!(s.position_id, Some(ObjectId::new([0x99; 32])));
+        // The settle minted the writer's Position (like WriteExecuted).
+        let writer = SuiAddress::new([0xf0; 32]);
+        assert_eq!(store.positions_for_recipient(&writer).len(), 1);
+    }
+
+    #[test]
+    fn coupled_auctions_classify_from_the_origin_vault_legs() {
+        use protocol_types::events::{
+            AuctionCreated, SwapRfqSettled, VaultBucketSelected, VaultCreated, VaultRfqSettled,
+        };
+        let store = Store::default();
+        let vault = ObjectId::new([0xf0; 32]);
+        let bucket = ObjectId::new([0xb1; 32]);
+        // TypeName event fields arrive WITHOUT the 0x prefix; the vault's
+        // types are compared canonically.
+        let underlying = "93c0::tbtc::TBTC";
+        let settlement = "9b72::tusdc::TUSDC";
+
+        store.ingest(
+            ChainEvent::VaultCreated(VaultCreated {
+                vault_id: vault,
+                underlying_type: AssetType::new(underlying),
+                settlement_type: AssetType::new(settlement),
+                share_type: AssetType::new("9b::vshare::VSHARE"),
+                mgmt_fee_bps_annual: 200,
+                perf_fee_bps: 1000,
+                round_ms: 604_800_000,
+                selling_window_ms: 43_200_000,
+                min_strike_bps_over_spot: 300,
+                max_strike_bps_over_spot: 6000,
+            }),
+            1,
+        );
+        store.ingest(
+            ChainEvent::VaultBucketSelected(VaultBucketSelected {
+                vault_id: vault,
+                round: 1,
+                bucket_id: bucket,
+                strike: 40_500,
+                strike_scale: 7,
+                expiry_ms: 2_000_000,
+                selling_ends_ms: 1_500_000,
+                spot: 3_470_000_000_000,
+                spot_scale: 12,
+            }),
+            2,
+        );
+
+        let created = |id: u8, escrow: &str, bid: &str| {
+            ChainEvent::AuctionCreated(AuctionCreated {
+                auction_id: ObjectId::new([id; 32]),
+                origin: vault,
+                // 0x-prefixed forms on the auction side must still match.
+                escrow_type: AssetType::new(format!("0x{escrow}")),
+                bid_type: AssetType::new(format!("0x{bid}")),
+                amount: 100,
+                reserve_bid: 10,
+                deadline_ms: 1_000,
+                max_deadline_ms: 2_000,
+                min_increment_bps: 100,
+                coupled: true,
+            })
+        };
+        // Covered-call slice: escrow underlying, bid settlement.
+        store.ingest(created(0x01, underlying, settlement), 3);
+        // Proceeds swap: escrow settlement, bid underlying.
+        store.ingest(created(0x02, settlement, underlying), 4);
+
+        let call = store.rfq(&ObjectId::new([0x01; 32])).unwrap();
+        assert_eq!(call.auction_kind, AUCTION_KIND_CALL);
+        assert_eq!(call.bucket_id, Some(bucket), "inferred from the vault's round");
+        let swap = store.rfq(&ObjectId::new([0x02; 32])).unwrap();
+        assert_eq!(swap.auction_kind, AUCTION_KIND_SWAP);
+        assert_eq!(swap.bucket_id, None);
+
+        // Vault settle completes the call slice + mints the vault's position.
+        store.ingest(
+            ChainEvent::VaultRfqSettled(VaultRfqSettled {
+                auction_id: ObjectId::new([0x01; 32]),
+                bucket_id: bucket,
+                vault_id: vault,
+                round: 1,
+                winner: SuiAddress::new([0x02; 32]),
+                call_recipient: SuiAddress::new([0x02; 32]),
+                position_id: ObjectId::new([0x99; 32]),
+                amount: 100,
+                gross_premium: 12,
+                fee: 1,
+                net_premium: 11,
+                range_start: 0,
+                range_end: 100,
+            }),
+            5,
+        );
+        let call = store.rfq(&ObjectId::new([0x01; 32])).unwrap();
+        assert_eq!(call.status, RfqStatus::Settled);
+        assert_eq!(call.gross_premium, Some(12));
+        let vault_as_addr = SuiAddress::new(*vault.as_bytes());
+        assert_eq!(store.positions_for_recipient(&vault_as_addr).len(), 1);
+
+        // Swap settle terminalizes the swap row.
+        store.ingest(
+            ChainEvent::SwapRfqSettled(SwapRfqSettled {
+                swap_id: ObjectId::new([0x02; 32]),
+                vault_id: vault,
+                round: 1,
+                winner: SuiAddress::new([0x03; 32]),
+                settlement_filled: 100,
+                underlying_in: 42,
+            }),
+            6,
+        );
+        let swap = store.rfq(&ObjectId::new([0x02; 32])).unwrap();
+        assert_eq!(swap.status, RfqStatus::Settled);
+        assert_eq!(swap.winner, Some(SuiAddress::new([0x03; 32])));
     }
 
     #[test]
@@ -1977,7 +2221,8 @@ mod tests {
         let buyer = SuiAddress::new([0x22; 32]);
         let we = ChainEvent::WriteExecuted(WriteExecuted {
             bucket_id: ObjectId::new([0x11; 32]),
-            signer_account_id: ObjectId::ZERO,
+            signer_id: ObjectId::ZERO,
+            collateral_source: ObjectId::ZERO,
             signer_token_recipient: buyer,
             executor: writer,
             position_id: ObjectId::new([0x88; 32]),
@@ -2002,7 +2247,7 @@ mod tests {
         assert!(has(&writer, "executor"));
         assert!(has(&buyer, "call_token_recipient"));
         assert!(has(&buyer, "signer_token_recipient"));
-        // Account owner unknown (no AccountCreated) → no signer_account_owner row.
+        // Signer owner unknown (no SignerCreated) → no signer_account_owner row.
         assert!(!parts.iter().any(|p| p.role == "signer_account_owner"));
         assert_eq!(staged.db_batch.events.len(), 1);
     }

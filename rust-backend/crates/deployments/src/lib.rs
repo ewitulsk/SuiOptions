@@ -163,31 +163,27 @@ impl DeepBookInfo {
     }
 }
 
-/// The siws_session (session-tokens) package backing wallet-rooted session
-/// sign-in (SIWS/SIWE). Published alongside the protocol package, which
-/// depends on it for the `_with_session` entrypoints. Absent where session
-/// login isn't deployed.
+/// One published sub-package of the contracts tree (auction /
+/// options_rfq / options_vault), recorded alongside the core package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionTokensInfo {
-    /// Published siws_session package id.
+pub struct SubPackageInfo {
     pub package_id: String,
-    /// Shared `registry::Registry` object created at publish (also the
-    /// signed-message `domain`).
-    pub registry_id: String,
+    pub upgrade_cap_id: String,
+    pub publish_digest: String,
+    pub deployed_at: String,
 }
 
-impl SessionTokensInfo {
+impl SubPackageInfo {
     pub fn package(&self) -> Result<ObjectID> {
-        ObjectID::from_str(&self.package_id).context("parsing sessionTokens packageId")
-    }
-    pub fn registry(&self) -> Result<ObjectID> {
-        ObjectID::from_str(&self.registry_id).context("parsing sessionTokens registryId")
+        ObjectID::from_str(&self.package_id).context("parsing sub-package packageId")
     }
 }
 
-/// On-chain artifacts from publishing the protocol Move package (and,
-/// on testnet, the test-tokens package).
+/// On-chain artifacts from publishing the protocol contracts tree (and,
+/// on testnet, the test-tokens package). `package_id` is the core
+/// (options_core) package; the sibling packages ride in `auction` /
+/// `rfq` / `vault`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageInfo {
@@ -208,10 +204,16 @@ pub struct PackageInfo {
     /// deployed (devnet) — consumers must treat it as optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deepbook: Option<DeepBookInfo>,
-    /// siws_session package + registry for wallet-rooted session login.
-    /// Optional — consumers must degrade gracefully where absent.
+    /// Generic auction package (the standalone venue). Absent on records
+    /// predating the four-package split.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_tokens: Option<SessionTokensInfo>,
+    pub auction: Option<SubPackageInfo>,
+    /// options_rfq adapter package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rfq: Option<SubPackageInfo>,
+    /// options_vault package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<SubPackageInfo>,
 }
 
 /// Off-chain token catalog entry. One per supported ticker, replicated
@@ -378,7 +380,9 @@ mod tests {
                 network: "testnet".into(),
                 test_tokens: None,
                 deepbook: None,
-                session_tokens: None,
+                auction: None,
+                rfq: None,
+                vault: None,
             },
             token_info: BTreeMap::new(),
         };

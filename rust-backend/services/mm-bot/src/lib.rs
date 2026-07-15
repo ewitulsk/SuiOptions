@@ -6,8 +6,9 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
+pub mod collateral;
 pub mod deepbook;
 pub mod liquidity;
 pub mod onchain_put_rfq;
@@ -16,10 +17,10 @@ pub mod onchain_swap;
 pub mod pricing;
 
 /// Move abort code emitted when a bid is outbid between read and submit
-/// (`errors::rfq_bid_too_low`, shared by `rfq` and `swap_auction`). This is
-/// the expected lost-race outcome, so it stays a `warn!` while every other
-/// bid failure fires the `tx-failed-*` alert.
-const RFQ_BID_TOO_LOW: u64 = 31;
+/// (`auction::errors::bid_too_low` in the generic auction package, shared
+/// by every venue). This is the expected lost-race outcome, so it stays a
+/// `warn!` while every other bid failure fires the `tx-failed-*` alert.
+const AUCTION_BID_TOO_LOW: u64 = 5;
 
 /// Pull the abort code out of a revert message like
 /// `… MoveAbort(MoveLocation { … }, 31) in command 2` (mirrors the keeper's
@@ -39,31 +40,38 @@ fn extract_abort_code(msg: &str) -> Option<u64> {
 }
 
 /// True when a bid failed only because someone outbid us between read and
-/// submit — the benign lost-race path that must not page.
+/// submit — the benign lost-race path that must not page. Requires the
+/// abort to come from the `auction` module so an unrelated code-5 abort
+/// (e.g. options_core `quote_bucket_mismatch`) still pages.
 pub(crate) fn is_benign_bid_loss(err: &anyhow::Error) -> bool {
-    extract_abort_code(&format!("{err:#}")) == Some(RFQ_BID_TOO_LOW)
+    let msg = format!("{err:#}");
+    extract_abort_code(&msg) == Some(AUCTION_BID_TOO_LOW)
+        && msg.contains("Identifier(\"auction\")")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn revert(code: u64) -> anyhow::Error {
+    fn revert(module: &str, code: u64) -> anyhow::Error {
         anyhow::anyhow!(
-            "rfq::bid reverted: MoveAbort(MoveLocation {{ module: ModuleId {{ \
-             address: abc, name: Identifier(\"rfq\") }}, function: 9, instruction: 12, \
+            "auction::bid reverted: MoveAbort(MoveLocation {{ module: ModuleId {{ \
+             address: abc, name: Identifier(\"{module}\") }}, function: 9, instruction: 12, \
              function_name: Some(\"bid\") }}, {code}) in command 3"
         )
     }
 
     #[test]
     fn bid_too_low_is_benign() {
-        assert!(is_benign_bid_loss(&revert(RFQ_BID_TOO_LOW)));
+        assert!(is_benign_bid_loss(&revert("auction", AUCTION_BID_TOO_LOW)));
     }
 
     #[test]
     fn other_aborts_are_not_benign() {
-        assert!(!is_benign_bid_loss(&revert(54)));
+        assert!(!is_benign_bid_loss(&revert("auction", 54)));
+        // Code 5 from another module (e.g. options_core's
+        // quote_bucket_mismatch) is NOT a lost bid race.
+        assert!(!is_benign_bid_loss(&revert("quote", AUCTION_BID_TOO_LOW)));
         assert!(!is_benign_bid_loss(&anyhow::anyhow!("insufficient gas")));
     }
 }
@@ -98,6 +106,29 @@ pub struct Cli {
 
     #[arg(long, default_value_t = 200_000_000)]
     pub gas_budget: u64,
+
+    /// Optional subcommand. Absent → run the bot (serve mode).
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Publish this MM's own copy of the `mm_collateral` package (compiled
+    /// against the current deployment's published options_core) and persist
+    /// `{package_id, account_id, upgrade_cap}` for serve mode. The package
+    /// is copied to a temp dir before publishing so the repo tree — notably
+    /// the template's `Published.toml` — is never mutated (each MM's publish
+    /// is theirs alone).
+    DeployCollateral {
+        /// Path to the mm-collateral Move package template.
+        #[arg(long, default_value = "../contracts/mm-collateral")]
+        contracts: PathBuf,
+        /// Where to persist the deployment record. Defaults to
+        /// `services/mm-bot/config/collateral.<network>.toml`.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 cli_spec::define_program! {

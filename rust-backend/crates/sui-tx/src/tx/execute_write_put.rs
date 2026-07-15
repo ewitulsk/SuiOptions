@@ -1,18 +1,15 @@
-//! Programmable transactions for `put_bucket::execute_write` (cash-secured
-//! puts) — the mirror of [`super::execute_write`].
+//! Programmable transactions for the cash-secured-put collateral protocol —
+//! the mirror of [`super::execute_write`].
 //!
-//! For puts BOTH coin legs are `Coin<Settlement>` (the collateral and the
-//! premium are cash), so both flows mint from the SETTLEMENT faucet:
+//! For puts BOTH legs are `Coin<Settlement>`/`Balance<Settlement>` (the
+//! collateral and the premium are cash), so both flows mint from the
+//! SETTLEMENT faucet and both requests release `Settlement`:
 //!
 //! - Writer flow: executor mints `collateral = ceil(write_amount × strike)`
-//!   settlement, premium side is `coin::zero<Settlement>`; the MM (signer /
-//!   put buyer) pays the premium from their Account.
-//! - Trader flow: executor mints the `premium` in settlement, collateral side
-//!   is `coin::zero<Settlement>`; the MM (signer / put writer) posts the cash
-//!   collateral from their Account.
-//!
-//! The `FlowKind` marker is the shared `bucket::writer_flow()` /
-//! `bucket::trader_flow()` (put_bucket reuses `bucket::FlowKind`).
+//!   settlement; the MM (signer / put buyer) pays the premium via its
+//!   `release` implementation.
+//! - Trader flow: executor mints the `premium` in settlement; the MM
+//!   (signer / put writer) posts the cash collateral via `release`.
 
 use std::str::FromStr;
 
@@ -24,10 +21,11 @@ use sui_sdk::SuiClient;
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{ObjectArg, SharedObjectMutability};
-use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION, SUI_FRAMEWORK_PACKAGE_ID};
+use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION};
 use tracing::info;
 
 use crate::sui_client::Signer;
+use crate::tx::execute_write::{build_request_and_release, FlowPrelude, QuoteRouting};
 use crate::tx::{shared_object_arg, submit_ptb};
 
 /// Inputs for the put writer-flow PTB: the executor (retail put writer) posts
@@ -50,13 +48,13 @@ pub struct ExecutePutWriterParams<'a> {
     pub bucket_id: ObjectID,
     pub protocol_config_id: ObjectID,
     pub treasury_id: ObjectID,
-    pub mm_account_id: ObjectID,
+
+    /// Signer + collateral routing, all derived from the signed quote.
+    pub routing: QuoteRouting<'a>,
 
     // Quote fields the MM signed over (BCS-canonical).
     pub protocol_id: Vec<u8>,
-    pub signer_account_id_bytes: [u8; 32],
     pub signer_token_recipient: SuiAddress,
-    pub bucket_id_bytes: [u8; 32],
     pub write_amount: u64,
     pub premium: u64,
     pub valid_until_ms: u64,
@@ -66,10 +64,9 @@ pub struct ExecutePutWriterParams<'a> {
     /// Cash collateral to mint and escrow = ceil(write_amount × strike).
     pub collateral: u64,
 
-    /// Writer flow: the executor (put writer) receives the Position.
+    /// Writer flow: the executor (put writer) receives the Position. The put
+    /// coin goes to the quote's `signer_token_recipient` on chain.
     pub position_recipient: SuiAddress,
-    /// Writer flow: must equal `signer_token_recipient` (the MM gets the puts).
-    pub put_token_recipient: SuiAddress,
 
     pub gas_budget: u64,
 }
@@ -89,21 +86,20 @@ pub struct ExecutePutTraderParams<'a> {
     pub bucket_id: ObjectID,
     pub protocol_config_id: ObjectID,
     pub treasury_id: ObjectID,
-    pub mm_account_id: ObjectID,
+
+    /// Signer + collateral routing, all derived from the signed quote.
+    pub routing: QuoteRouting<'a>,
 
     pub protocol_id: Vec<u8>,
-    pub signer_account_id_bytes: [u8; 32],
     pub signer_token_recipient: SuiAddress,
-    pub bucket_id_bytes: [u8; 32],
     pub write_amount: u64,
     pub premium: u64,
     pub valid_until_ms: u64,
     pub nonce: u64,
     pub signature: Vec<u8>,
 
-    /// Trader flow: must equal `signer_token_recipient` (the MM gets the Position).
-    pub position_recipient: SuiAddress,
-    /// Trader flow: the retail trader receives the put coins.
+    /// Trader flow: the retail trader receives the put coins. The Position
+    /// goes to the quote's `signer_token_recipient` on chain.
     pub put_token_recipient: SuiAddress,
 
     pub gas_budget: u64,
@@ -127,28 +123,18 @@ pub async fn execute_put_writer_flow(
         %p.package, %p.bucket_id,
         write_amount = p.write_amount, premium = p.premium,
         collateral = p.collateral, nonce = p.nonce,
-        "building put execute_write (writer flow) PTB"
+        release_package = %p.routing.release_package,
+        "building put execute_writer_flow PTB"
     );
     let mut pt = ProgrammableTransactionBuilder::new();
 
     let bucket = pt.obj(shared_object_arg(client, p.bucket_id, true).await?)?;
     let config = pt.obj(shared_object_arg(client, p.protocol_config_id, false).await?)?;
     let treasury = pt.obj(shared_object_arg(client, p.treasury_id, true).await?)?;
-    let mm_account = pt.obj(shared_object_arg(client, p.mm_account_id, true).await?)?;
     let faucet = pt.obj(shared_object_arg(client, p.settlement_faucet_id, true).await?)?;
     let clock = clock_arg(&mut pt)?;
 
-    let arg_protocol_id = pt.pure(&p.protocol_id)?;
-    let arg_signer_acct_id = pt.pure(&p.signer_account_id_bytes)?;
-    let arg_signer_token_recipient = pt.pure(&p.signer_token_recipient)?;
-    let arg_bucket_id = pt.pure(&p.bucket_id_bytes)?;
-    let arg_write_amount = pt.pure(&p.write_amount)?;
-    let arg_premium = pt.pure(&p.premium)?;
-    let arg_valid_until_ms = pt.pure(&p.valid_until_ms)?;
-    let arg_nonce = pt.pure(&p.nonce)?;
-    let arg_signature = pt.pure(&p.signature)?;
     let arg_position_recipient = pt.pure(&p.position_recipient)?;
-    let arg_put_token_recipient = pt.pure(&p.put_token_recipient)?;
     let arg_collateral_amount = pt.pure(&p.collateral)?;
 
     let s_tag = TypeTag::from_str(p.settlement_type)
@@ -158,7 +144,7 @@ pub async fn execute_put_writer_flow(
     let put_tag = TypeTag::from_str(p.put_type)
         .with_context(|| format!("parsing put type {}", p.put_type))?;
 
-    // 1. mint collateral settlement.
+    // 1. mint the cash collateral (executor side).
     let coin_collateral = pt.programmable_move_call(
         p.tokens_package,
         Identifier::new(p.settlement_module)
@@ -167,38 +153,47 @@ pub async fn execute_put_writer_flow(
         vec![],
         vec![faucet, arg_collateral_amount],
     );
-    // 2. coin::zero<Settlement>() — premium comes from the MM's Account.
-    let coin_premium_zero = pt.programmable_move_call(
-        SUI_FRAMEWORK_PACKAGE_ID,
-        Identifier::new("coin").unwrap(),
-        Identifier::new("zero").unwrap(),
-        vec![s_tag.clone()],
-        vec![],
-    );
-    let signed_quote = build_signed_quote(
-        &mut pt, p.package, arg_protocol_id, arg_signer_acct_id, arg_signer_token_recipient,
-        arg_bucket_id, arg_write_amount, arg_premium, arg_valid_until_ms, arg_nonce, arg_signature,
-    );
-    let flow = pt.programmable_move_call(
-        p.package,
-        Identifier::new("bucket").unwrap(),
-        Identifier::new("writer_flow").unwrap(),
-        vec![],
-        vec![],
-    );
+
+    // 2–5. quote → signed quote → request (premium demanded in Settlement)
+    // → release<Settlement>.
+    let (request, funds) = build_request_and_release(
+        client,
+        &mut pt,
+        FlowPrelude {
+            package: p.package,
+            request_module: "put_bucket",
+            request_function: "request_writer_flow",
+            request_type_args: vec![u_tag.clone(), s_tag.clone(), put_tag.clone()],
+            release_type: s_tag.clone(),
+            routing: &p.routing,
+            protocol_id: &p.protocol_id,
+            signer_token_recipient: p.signer_token_recipient,
+            bucket_id: p.bucket_id,
+            write_amount: p.write_amount,
+            premium: p.premium,
+            valid_until_ms: p.valid_until_ms,
+            nonce: p.nonce,
+            signature: &p.signature,
+        },
+        bucket,
+        config,
+        clock,
+    )
+    .await?;
+
+    // 6. put_bucket::execute_writer_flow<U, S, Put>(...)
     pt.programmable_move_call(
         p.package,
         Identifier::new("put_bucket").unwrap(),
-        Identifier::new("execute_write").unwrap(),
+        Identifier::new("execute_writer_flow").unwrap(),
         vec![u_tag, s_tag, put_tag],
         vec![
-            bucket, config, treasury, mm_account,
-            coin_collateral, coin_premium_zero, flow,
-            arg_position_recipient, arg_put_token_recipient, signed_quote, clock,
+            bucket, config, treasury, request, funds, coin_collateral,
+            arg_position_recipient, clock,
         ],
     );
 
-    submit_ptb(client, signer, pt, p.gas_budget, "put_bucket::execute_write (writer)").await
+    submit_ptb(client, signer, pt, p.gas_budget, "put_bucket::execute_writer_flow").await
 }
 
 /// Build + sign + submit the put trader-flow PTB.
@@ -210,27 +205,17 @@ pub async fn execute_put_trader_flow(
     info!(
         %p.package, %p.bucket_id,
         write_amount = p.write_amount, premium = p.premium, nonce = p.nonce,
-        "building put execute_write (trader flow) PTB"
+        release_package = %p.routing.release_package,
+        "building put execute_trader_flow PTB"
     );
     let mut pt = ProgrammableTransactionBuilder::new();
 
     let bucket = pt.obj(shared_object_arg(client, p.bucket_id, true).await?)?;
     let config = pt.obj(shared_object_arg(client, p.protocol_config_id, false).await?)?;
     let treasury = pt.obj(shared_object_arg(client, p.treasury_id, true).await?)?;
-    let mm_account = pt.obj(shared_object_arg(client, p.mm_account_id, true).await?)?;
     let faucet = pt.obj(shared_object_arg(client, p.settlement_faucet_id, true).await?)?;
     let clock = clock_arg(&mut pt)?;
 
-    let arg_protocol_id = pt.pure(&p.protocol_id)?;
-    let arg_signer_acct_id = pt.pure(&p.signer_account_id_bytes)?;
-    let arg_signer_token_recipient = pt.pure(&p.signer_token_recipient)?;
-    let arg_bucket_id = pt.pure(&p.bucket_id_bytes)?;
-    let arg_write_amount = pt.pure(&p.write_amount)?;
-    let arg_premium = pt.pure(&p.premium)?;
-    let arg_valid_until_ms = pt.pure(&p.valid_until_ms)?;
-    let arg_nonce = pt.pure(&p.nonce)?;
-    let arg_signature = pt.pure(&p.signature)?;
-    let arg_position_recipient = pt.pure(&p.position_recipient)?;
     let arg_put_token_recipient = pt.pure(&p.put_token_recipient)?;
     let arg_mint_amount = pt.pure(&p.premium)?;
 
@@ -241,15 +226,7 @@ pub async fn execute_put_trader_flow(
     let put_tag = TypeTag::from_str(p.put_type)
         .with_context(|| format!("parsing put type {}", p.put_type))?;
 
-    // 1. coin::zero<Settlement>() — collateral comes from the MM's Account.
-    let coin_collateral_zero = pt.programmable_move_call(
-        SUI_FRAMEWORK_PACKAGE_ID,
-        Identifier::new("coin").unwrap(),
-        Identifier::new("zero").unwrap(),
-        vec![s_tag.clone()],
-        vec![],
-    );
-    // 2. mint premium settlement.
+    // 1. mint the premium (executor side).
     let coin_premium = pt.programmable_move_call(
         p.tokens_package,
         Identifier::new(p.settlement_module)
@@ -258,68 +235,45 @@ pub async fn execute_put_trader_flow(
         vec![],
         vec![faucet, arg_mint_amount],
     );
-    let signed_quote = build_signed_quote(
-        &mut pt, p.package, arg_protocol_id, arg_signer_acct_id, arg_signer_token_recipient,
-        arg_bucket_id, arg_write_amount, arg_premium, arg_valid_until_ms, arg_nonce, arg_signature,
-    );
-    let flow = pt.programmable_move_call(
-        p.package,
-        Identifier::new("bucket").unwrap(),
-        Identifier::new("trader_flow").unwrap(),
-        vec![],
-        vec![],
-    );
+
+    // 2–5. quote → signed quote → request (cash collateral demanded)
+    // → release<Settlement>.
+    let (request, funds) = build_request_and_release(
+        client,
+        &mut pt,
+        FlowPrelude {
+            package: p.package,
+            request_module: "put_bucket",
+            request_function: "request_trader_flow",
+            request_type_args: vec![u_tag.clone(), s_tag.clone(), put_tag.clone()],
+            release_type: s_tag.clone(),
+            routing: &p.routing,
+            protocol_id: &p.protocol_id,
+            signer_token_recipient: p.signer_token_recipient,
+            bucket_id: p.bucket_id,
+            write_amount: p.write_amount,
+            premium: p.premium,
+            valid_until_ms: p.valid_until_ms,
+            nonce: p.nonce,
+            signature: &p.signature,
+        },
+        bucket,
+        config,
+        clock,
+    )
+    .await?;
+
+    // 6. put_bucket::execute_trader_flow<U, S, Put>(...)
     pt.programmable_move_call(
         p.package,
         Identifier::new("put_bucket").unwrap(),
-        Identifier::new("execute_write").unwrap(),
+        Identifier::new("execute_trader_flow").unwrap(),
         vec![u_tag, s_tag, put_tag],
         vec![
-            bucket, config, treasury, mm_account,
-            coin_collateral_zero, coin_premium, flow,
-            arg_position_recipient, arg_put_token_recipient, signed_quote, clock,
+            bucket, config, treasury, request, funds, coin_premium,
+            arg_put_token_recipient, clock,
         ],
     );
 
-    submit_ptb(client, signer, pt, p.gas_budget, "put_bucket::execute_write (trader)").await
-}
-
-/// Shared `quote::new_quote` → `quote::new_signed_quote` prelude.
-#[allow(clippy::too_many_arguments)]
-fn build_signed_quote(
-    pt: &mut ProgrammableTransactionBuilder,
-    package: ObjectID,
-    arg_protocol_id: sui_types::transaction::Argument,
-    arg_signer_acct_id: sui_types::transaction::Argument,
-    arg_signer_token_recipient: sui_types::transaction::Argument,
-    arg_bucket_id: sui_types::transaction::Argument,
-    arg_write_amount: sui_types::transaction::Argument,
-    arg_premium: sui_types::transaction::Argument,
-    arg_valid_until_ms: sui_types::transaction::Argument,
-    arg_nonce: sui_types::transaction::Argument,
-    arg_signature: sui_types::transaction::Argument,
-) -> sui_types::transaction::Argument {
-    let quote_val = pt.programmable_move_call(
-        package,
-        Identifier::new("quote").unwrap(),
-        Identifier::new("new_quote").unwrap(),
-        vec![],
-        vec![
-            arg_protocol_id,
-            arg_signer_acct_id,
-            arg_signer_token_recipient,
-            arg_bucket_id,
-            arg_write_amount,
-            arg_premium,
-            arg_valid_until_ms,
-            arg_nonce,
-        ],
-    );
-    pt.programmable_move_call(
-        package,
-        Identifier::new("quote").unwrap(),
-        Identifier::new("new_signed_quote").unwrap(),
-        vec![],
-        vec![quote_val, arg_signature],
-    )
+    submit_ptb(client, signer, pt, p.gas_budget, "put_bucket::execute_trader_flow").await
 }

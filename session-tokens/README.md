@@ -1,5 +1,12 @@
 # Session Tokens (Experimental) — SIWS / SIWE Session Keys for Sui
 
+> **Standalone demo.** This package is kept for demonstration purposes only.
+> It is NOT wired into the options protocol: the contracts have no
+> `siws_session` dependency, the deployment pipeline does not publish it,
+> and no service or frontend integrates it (the former integration was
+> removed during the audit restructure — see
+> `docs/audit-restructure/01-onchain-plan.md` Phase A).
+
 An experiment in **wallet-rooted session keys** for Sui. A user signs in **once**
 with a wallet they already have — a Solana wallet (Sign-In With Solana) or an
 Ethereum wallet (Sign-In With Ethereum, [EIP-4361](https://eips.ethereum.org/EIPS/eip-4361))

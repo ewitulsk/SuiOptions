@@ -4,10 +4,9 @@ import { fetchDashboardPnl, type BucketPnl } from "./client";
 /**
  * True cost-basis PnL for `wallet` (SO-209): per-bucket FIFO remaining lots +
  * realized PnL, from api-service `/dashboard/pnl`. `bm` is the wallet's DeepBook
- * BalanceManager id, so secondary-market buys/sells are attributed; pass `null`
- * for session/custody users (no personal BM → no fills). The dashboard
- * reconciles the returned lots against current holdings and adds unrealized
- * from the live spot.
+ * BalanceManager id, so secondary-market buys/sells are attributed. The
+ * dashboard reconciles the returned lots against current holdings and adds
+ * unrealized from the live spot.
  */
 export function useDashboardPnl(wallet: string | null, bm: string | null) {
   return useQuery<BucketPnl[], Error>({

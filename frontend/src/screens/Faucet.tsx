@@ -5,14 +5,13 @@
 // sign+execute idiom and `dash-hero` layout.
 
 import { useState } from "react";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 import type { Transaction } from "@mysten/sui/transactions";
 import { useSubmitTransaction } from "../tx/submit";
 
 import { Toast } from "../components/Toast";
 import { ENV, TEST_TOKENS, type TestToken } from "../config";
 import { buildMintTx } from "../tx/faucet";
-import { useUserIdentity } from "../session/identity";
-import { fundFromFaucet } from "../session/store";
 import { posthog } from "../lib/posthog";
 
 /** Display-units → raw smallest-units. Safe well past any faucet amount. */
@@ -23,9 +22,8 @@ function toRaw(amount: string, decimals: number): bigint {
 }
 
 export function Faucet() {
-  const identity = useUserIdentity();
-  const wallet = identity?.address ?? null;
-  const isSession = identity?.kind === "session";
+  const account = useCurrentAccount();
+  const wallet = account?.address ?? null;
   const submitTx = useSubmitTransaction();
 
   const [toast, setToast] = useState<string | null>(null);
@@ -40,9 +38,7 @@ export function Faucet() {
     setTimeout(() => setToast(null), 5000);
   };
 
-  // Session logins have no wallet to mint to — coins land in the options
-  // custody Account via `fundFromFaucet` (mint → deposit, one sponsored PTB).
-  // Wallet users mint straight to their address.
+  // Coins are minted straight to the connected wallet's address.
   const run = async (
     key: string,
     token: TestToken,
@@ -52,16 +48,12 @@ export function Faucet() {
   ) => {
     setBusy(key);
     try {
-      if (isSession) {
-        await fundFromFaucet(token, toRaw(amount, token.decimals));
-      } else {
-        await submitTx(walletBuild());
-      }
+      await submitTx(walletBuild());
       posthog.capture("faucet_tokens_minted", {
         token_symbol: token.symbol,
         amount: Number(amount),
         wallet_address: wallet,
-        auth: isSession ? "session" : "wallet",
+        auth: "wallet",
       });
       flash(`✓ ${ok}`);
     } catch (err) {
@@ -94,10 +86,8 @@ export function Faucet() {
               <h2 className="admin-section__title">Mint test tokens</h2>
               <div className="admin-section__sub">
                 {!wallet
-                  ? "connect a wallet or sign in to mint."
-                  : isSession
-                    ? "coins are minted into your session's custody account."
-                    : "coins are minted straight to your connected wallet."}
+                  ? "connect a wallet to mint."
+                  : "coins are minted straight to your connected wallet."}
               </div>
             </div>
 

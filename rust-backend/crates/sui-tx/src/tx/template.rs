@@ -50,22 +50,85 @@ impl fmt::Display for MoveTarget {
     }
 }
 
+/// What a `required`/`allowed` slot may match: an exact pinned target, or —
+/// for the collateral abstraction's MM-specified `release` implementation —
+/// ANY package/module whose function is named exactly `release` with exactly
+/// one type argument (plan §6). At most ONE call per PTB may match via the
+/// wildcard, and a wildcard never substitutes for a pinned target (exact
+/// matches are tried first).
+#[derive(Clone, PartialEq, Eq)]
+pub enum TargetMatcher {
+    Exact(MoveTarget),
+    /// Any package, any module — function name `release`, exactly 1 type arg.
+    AnyRelease,
+}
+
+impl TargetMatcher {
+    fn matches_call(&self, call: &ProgrammableMoveCall) -> bool {
+        match self {
+            TargetMatcher::Exact(t) => t.matches_call(call),
+            TargetMatcher::AnyRelease => {
+                call.function.as_str() == "release" && call.type_arguments.len() == 1
+            }
+        }
+    }
+}
+
+impl fmt::Display for TargetMatcher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TargetMatcher::Exact(t) => t.fmt(f),
+            TargetMatcher::AnyRelease => write!(f, "*::*::release<1>"),
+        }
+    }
+}
+
+impl From<MoveTarget> for TargetMatcher {
+    fn from(t: MoveTarget) -> Self {
+        TargetMatcher::Exact(t)
+    }
+}
+
 /// One sponsored PTB shape.
 pub struct PtbTemplate {
     pub name: String,
-    /// Move-call targets that must appear, in this order, as a subsequence of
+    /// Matchers that must be satisfied, in this order, as a subsequence of
     /// the PTB's Move calls.
-    pub required: Vec<MoveTarget>,
-    /// Every Move call in the PTB must target one of these. Superset of
-    /// `required` (e.g. adds `0x2::coin::zero`).
-    pub allowed: Vec<MoveTarget>,
-    /// Expected type-argument count, keyed by target. Targets absent here are
-    /// not arity-checked.
+    pub required: Vec<TargetMatcher>,
+    /// Every Move call in the PTB must satisfy one of these. Superset of
+    /// `required` (e.g. adds an optional exact target).
+    pub allowed: Vec<TargetMatcher>,
+    /// Expected type-argument count, keyed by exact target. Targets absent
+    /// here are not arity-checked (`AnyRelease` pins its own name + arity).
     pub arities: Vec<(MoveTarget, usize)>,
 }
 
 impl PtbTemplate {
+    /// Template with only exact targets (no wildcard slot).
+    fn exact_only(
+        name: String,
+        required: Vec<MoveTarget>,
+        allowed: Vec<MoveTarget>,
+        arities: Vec<(MoveTarget, usize)>,
+    ) -> Self {
+        Self {
+            name,
+            required: required.into_iter().map(TargetMatcher::Exact).collect(),
+            allowed: allowed.into_iter().map(TargetMatcher::Exact).collect(),
+            arities,
+        }
+    }
+
     /// Does `pt` match this template?
+    ///
+    /// Wildcard posture (plan §6): the `AnyRelease` slot sponsors a call into
+    /// an UNREVIEWED package, but that call only ever receives the potato
+    /// reference and the MM's own collateral object — it cannot touch sponsor
+    /// or executor assets not passed to it, so the sponsor risks gas alone
+    /// (bounded by `max_gas_budget_mist`). To keep that surface minimal, at
+    /// most one call per PTB may match via the wildcard, and exact matchers
+    /// always win over the wildcard so a foreign `release` can never stand in
+    /// for a pinned protocol call.
     pub fn matches(&self, pt: &ProgrammableTransaction) -> bool {
         // Collect Move calls in order; every non-Move-call command must be one
         // of the benign value-plumbing kinds the frontend emits (Publish /
@@ -87,24 +150,58 @@ impl PtbTemplate {
             }
         }
 
-        // (a) closed target set + (b) type-arg arity on anchor calls.
+        // (a) closed target set + (b) type-arg arity on anchor calls. Exact
+        // matchers are tried before the wildcard so a pinned call is never
+        // "used up" by the AnyRelease slot; wildcard matches are capped at 1.
+        let mut wildcard_matches = 0usize;
         for call in &calls {
-            let Some(target) = self.allowed.iter().find(|t| t.matches_call(call)) else {
-                return false;
-            };
-            if let Some((_, arity)) = self.arities.iter().find(|(t, _)| t == target) {
-                if call.type_arguments.len() != *arity {
-                    return false;
+            let exact = self.allowed.iter().find(|m| match m {
+                TargetMatcher::Exact(t) => t.matches_call(call),
+                TargetMatcher::AnyRelease => false,
+            });
+            match exact {
+                Some(TargetMatcher::Exact(target)) => {
+                    if let Some((_, arity)) = self.arities.iter().find(|(t, _)| t == target) {
+                        if call.type_arguments.len() != *arity {
+                            return false;
+                        }
+                    }
+                }
+                _ => {
+                    let wildcard_allowed = self
+                        .allowed
+                        .iter()
+                        .any(|m| matches!(m, TargetMatcher::AnyRelease) && m.matches_call(call));
+                    if !wildcard_allowed {
+                        return false;
+                    }
+                    wildcard_matches += 1;
+                    if wildcard_matches > 1 {
+                        return false;
+                    }
                 }
             }
         }
 
-        // (c) required targets appear, in order, as a subsequence.
+        // (c) required matchers are satisfied, in order, as a subsequence.
+        // The same exact-first discipline applies: a call that matches a
+        // pinned target satisfies only that pinned slot, never a pending
+        // AnyRelease slot.
         let mut req = self.required.iter();
         let mut want = req.next();
         for call in &calls {
-            if let Some(t) = want {
-                if t.matches_call(call) {
+            if let Some(m) = want {
+                let satisfied = match m {
+                    TargetMatcher::Exact(_) => m.matches_call(call),
+                    TargetMatcher::AnyRelease => {
+                        // Don't let a pinned call double as the wildcard slot.
+                        m.matches_call(call)
+                            && !self.allowed.iter().any(|a| {
+                                matches!(a, TargetMatcher::Exact(t) if t.matches_call(call))
+                            })
+                    }
+                };
+                if satisfied {
                     want = req.next();
                 }
             }
@@ -169,65 +266,76 @@ fn is_benign_coin_primitive(call: &ProgrammableMoveCall) -> bool {
 
 /// Build the sponsored-PTB templates for the protocol frontend.
 ///
-/// Mirrors the builders in `frontend/src/tx/{composer,dashboard,faucet,deepbook,session}.ts`.
+/// Mirrors the builders in `frontend/src/tx/{composer,dashboard,faucet,deepbook}.ts`.
+/// `protocol` is the `options_core` package id; `vault_pkg` is the
+/// `options_vault` package id the vault flows target (four-package split).
 /// `test_tokens` is the `(package, module)` of each faucet token (e.g.
 /// `(0xpkg, "tbtc")`), only used when `allow_faucet` is set (dev/staging).
 /// `deepbook` is DeepBook's UPGRADED package id (the one Move calls target,
 /// from token-info); `None` on networks without a DeepBook deployment —
-/// no DeepBook PTBs are sponsored there. `session` is the siws_session
-/// package id; `None` where session login isn't deployed — no session PTBs
-/// are sponsored there.
+/// no DeepBook PTBs are sponsored there.
 pub fn protocol_templates(
     protocol: ObjectID,
+    vault_pkg: ObjectID,
     test_tokens: &[(ObjectID, String)],
     allow_faucet: bool,
     deepbook: Option<ObjectID>,
-    session: Option<ObjectID>,
 ) -> Vec<PtbTemplate> {
     let t = |module: &str, function: &str| MoveTarget::new(protocol, module, function);
 
-    // write / buy differ only by writer_flow vs trader_flow. The executor's
-    // `coin::zero` is skipped as a benign coin primitive (see
+    // write / buy are now distinguished by their request/execute pair (the
+    // FlowKind markers are gone): new_quote → new_signed_quote →
+    // request_{writer,trader}_flow → <wildcard release> →
+    // execute_{writer,trader}_flow. The executor's `coin::zero` /
+    // `coinWithBalance` plumbing is skipped as benign (see
     // `is_benign_coin_primitive`), so it need not be pinned here. `module` is
-    // `bucket` for covered calls / `put_bucket` for cash-secured puts — both
-    // reuse the `bucket::{writer,trader}_flow` markers and an `execute_write`
-    // with the same 3-type-arg shape.
-    let execute_write_flow = |name: &str, flow: &str, module: &str| {
-        let targets = vec![
-            t("quote", "new_quote"),
-            t("quote", "new_signed_quote"),
-            t("bucket", flow),
-            t(module, "execute_write"),
+    // `bucket` for covered calls / `put_bucket` for cash-secured puts.
+    //
+    // The single `AnyRelease` slot sponsors the MM-specified collateral
+    // release — a call into an unreviewed package. Risk posture (plan §6):
+    // that call receives only the CollateralRequest reference and the MM's
+    // own collateral object, so it cannot touch sponsor or executor assets;
+    // a pathological `release` that burns compute is bounded by the existing
+    // `max_gas_budget_mist` cap. The sponsor risks gas alone, as today.
+    let execute_flow = |name: &str, request_fn: &str, execute_fn: &str, module: &str| {
+        let request = t(module, request_fn);
+        let execute = t(module, execute_fn);
+        let matchers = vec![
+            TargetMatcher::Exact(t("quote", "new_quote")),
+            TargetMatcher::Exact(t("quote", "new_signed_quote")),
+            TargetMatcher::Exact(request.clone()),
+            TargetMatcher::AnyRelease,
+            TargetMatcher::Exact(execute.clone()),
         ];
         PtbTemplate {
             name: name.to_owned(),
-            required: targets.clone(),
-            allowed: targets,
-            arities: vec![(t(module, "execute_write"), 3)],
+            required: matchers.clone(),
+            allowed: matchers,
+            arities: vec![(request, 3), (execute, 3)],
         }
     };
 
     // Single-anchor wallet flow (exercise / redeem) for either option module.
     let single_call = |name: &str, module: &str, function: &str| {
         let target = t(module, function);
-        PtbTemplate {
-            name: name.to_owned(),
-            required: vec![target.clone()],
-            allowed: vec![target.clone()],
-            arities: vec![(target, 3)],
-        }
+        PtbTemplate::exact_only(
+            name.to_owned(),
+            vec![target.clone()],
+            vec![target.clone()],
+            vec![(target, 3)],
+        )
     };
 
     let mut templates = vec![
-        execute_write_flow("write", "writer_flow", "bucket"),
-        execute_write_flow("buy", "trader_flow", "bucket"),
+        execute_flow("write", "request_writer_flow", "execute_writer_flow", "bucket"),
+        execute_flow("buy", "request_trader_flow", "execute_trader_flow", "bucket"),
         single_call("exercise", "bucket", "exercise"),
         single_call("redeem", "bucket", "redeem_position"),
         // Cash-secured put wallet flows (put_bucket.move). Same PTB shapes as
         // their call twins above; mirrors frontend tx/composer_put.ts and
         // tx/dashboard_put.ts.
-        execute_write_flow("put_write", "writer_flow", "put_bucket"),
-        execute_write_flow("put_buy", "trader_flow", "put_bucket"),
+        execute_flow("put_write", "request_writer_flow", "execute_writer_flow", "put_bucket"),
+        execute_flow("put_buy", "request_trader_flow", "execute_trader_flow", "put_bucket"),
         single_call("put_exercise", "put_bucket", "exercise"),
         single_call("put_redeem", "put_bucket", "redeem_position"),
     ];
@@ -237,7 +345,6 @@ pub fn protocol_templates(
     // `coinWithBalance` prelude. Every asset moved is the user's own (their
     // own coins in, receipts/shares/refunds back to them), so the sponsor only
     // risks gas — same posture as the `write`/`buy`/`exercise` wallet flows.
-    // The session twins are sponsored separately under `session_vault:*`.
     for function in [
         "deposit",
         "claim_shares",
@@ -245,206 +352,15 @@ pub fn protocol_templates(
         "complete_withdraw",
         "instant_withdraw_pending",
     ] {
-        let target = t("vault", function);
-        templates.push(PtbTemplate {
-            name: format!("vault:{function}"),
-            required: vec![target.clone()],
-            allowed: vec![target.clone()],
-            arities: vec![(target, 3)],
-        });
+        let target = MoveTarget::new(vault_pkg, "vault", function);
+        templates.push(PtbTemplate::exact_only(format!("vault:{function}"), vec![target.clone()], vec![target.clone()], vec![(target, 3)]));
     }
 
     if allow_faucet {
         for (pkg, module) in test_tokens {
             let mint = MoveTarget::new(*pkg, module, "mint_to_sender");
-            templates.push(PtbTemplate {
-                name: format!("faucet_mint:{module}"),
-                required: vec![mint.clone()],
-                allowed: vec![mint.clone()],
-                arities: vec![(mint, 0)],
-            });
+            templates.push(PtbTemplate::exact_only(format!("faucet_mint:{module}"), vec![mint.clone()], vec![mint.clone()], vec![(mint, 0)]));
         }
-    }
-
-    // Session-login PTB shapes (siws_session integration). A session user's
-    // ephemeral key holds no gas, so EVERY session interaction is sponsored:
-    // sign-in/revoke against the session package, and the `_with_session`
-    // twins of the protocol flows. Funds only ever move under the on-chain
-    // SessionCap the station never holds; the sponsor risks gas alone.
-    if let Some(sess) = session {
-        let s = |function: &str| MoveTarget::new(sess, "session", function);
-
-        for open in ["verify_and_open_session", "verify_and_open_session_eth"] {
-            let open = s(open);
-            templates.push(PtbTemplate {
-                name: format!("session_open:{}", open.function),
-                required: vec![open.clone()],
-                allowed: vec![open.clone()],
-                arities: vec![(open, 0)],
-            });
-        }
-        for revoke in ["revoke_all", "revoke_all_eth"] {
-            let revoke = s(revoke);
-            templates.push(PtbTemplate {
-                name: format!("session_revoke:{}", revoke.function),
-                required: vec![revoke.clone()],
-                allowed: vec![revoke.clone()],
-                arities: vec![(revoke, 0)],
-            });
-        }
-
-        let create_account = t("session_account", "create_and_share_account_with_session");
-        templates.push(PtbTemplate {
-            name: "session_account_create".to_owned(),
-            required: vec![create_account.clone()],
-            allowed: vec![create_account.clone()],
-            arities: vec![(create_account, 0)],
-        });
-
-        // write / buy twins: same quote prelude, no executor coins (the
-        // account custody funds the trade), so no `coin::zero`. `module` is
-        // `session_bucket` (calls) or `session_put_bucket` (puts).
-        let session_write_flow = |name: &str, flow: &str, module: &str| {
-            let targets = vec![
-                t("quote", "new_quote"),
-                t("quote", "new_signed_quote"),
-                t("bucket", flow),
-                t(module, "execute_write_with_session"),
-            ];
-            PtbTemplate {
-                name: name.to_owned(),
-                required: targets.clone(),
-                allowed: targets,
-                arities: vec![(t(module, "execute_write_with_session"), 3)],
-            }
-        };
-        templates.push(session_write_flow("session_write", "writer_flow", "session_bucket"));
-        templates.push(session_write_flow("session_buy", "trader_flow", "session_bucket"));
-        templates.push(session_write_flow(
-            "session_put_write",
-            "writer_flow",
-            "session_put_bucket",
-        ));
-        templates.push(session_write_flow(
-            "session_put_buy",
-            "trader_flow",
-            "session_put_bucket",
-        ));
-
-        let exercise = t("session_bucket", "exercise_with_session");
-        templates.push(PtbTemplate {
-            name: "session_exercise".to_owned(),
-            required: vec![exercise.clone()],
-            allowed: vec![exercise.clone()],
-            arities: vec![(exercise, 3)],
-        });
-        let redeem = t("session_bucket", "redeem_position_with_session");
-        templates.push(PtbTemplate {
-            name: "session_redeem".to_owned(),
-            required: vec![redeem.clone()],
-            allowed: vec![redeem.clone()],
-            arities: vec![(redeem, 3)],
-        });
-        let burn = t("session_bucket", "burn_expired_option_with_session");
-        templates.push(PtbTemplate {
-            name: "session_burn_expired".to_owned(),
-            required: vec![burn.clone()],
-            allowed: vec![burn.clone()],
-            arities: vec![(burn, 3)],
-        });
-
-        // Put session twins (session_put_bucket.move). The frontend builds only
-        // exercise / redeem custody flows for puts (tx/session.ts); no burn.
-        let put_exercise = t("session_put_bucket", "exercise_with_session");
-        templates.push(PtbTemplate {
-            name: "session_put_exercise".to_owned(),
-            required: vec![put_exercise.clone()],
-            allowed: vec![put_exercise.clone()],
-            arities: vec![(put_exercise, 3)],
-        });
-        let put_redeem = t("session_put_bucket", "redeem_position_with_session");
-        templates.push(PtbTemplate {
-            name: "session_put_redeem".to_owned(),
-            required: vec![put_redeem.clone()],
-            allowed: vec![put_redeem.clone()],
-            arities: vec![(put_redeem, 3)],
-        });
-
-        // Withdraw from custody to an external address. Authorization is a
-        // fresh host-wallet signature passed as args (verified on-chain); the
-        // entry pays the signed recipient directly, so there is no returned
-        // coin / TransferObjects. We still sponsor gas for the PTB shape.
-        for function in ["withdraw_with_root_sig", "withdraw_with_root_sig_eth"] {
-            let withdraw = t("session_account", function);
-            templates.push(PtbTemplate {
-                name: format!("session_{function}"),
-                required: vec![withdraw.clone()],
-                allowed: vec![withdraw.clone()],
-                arities: vec![(withdraw, 1)],
-            });
-        }
-
-        // Deposit into an options account (permissionless on-chain; only
-        // moves the sender's own coins in).
-        let deposit = t("account", "deposit");
-        templates.push(PtbTemplate {
-            name: "session_deposit".to_owned(),
-            required: vec![deposit.clone()],
-            allowed: vec![deposit.clone()],
-            arities: vec![(deposit.clone(), 1)],
-        });
-
-        // Testnet funding in one PTB: faucet `mint` (returns the coin) →
-        // `account::deposit` into custody.
-        if allow_faucet {
-            for (pkg, module) in test_tokens {
-                let mint = MoveTarget::new(*pkg, module, "mint");
-                templates.push(PtbTemplate {
-                    name: format!("session_fund:{module}"),
-                    required: vec![mint.clone(), deposit.clone()],
-                    allowed: vec![mint.clone(), deposit.clone()],
-                    arities: vec![(mint, 0), (deposit.clone(), 1)],
-                });
-            }
-        }
-
-        // Vault session twins (covered-call vault, doc 03): each is a single
-        // custody-funded call with the vault's 3 type args.
-        for function in [
-            "deposit_with_session",
-            "claim_shares_with_session",
-            "initiate_withdraw_with_session",
-            "complete_withdraw_with_session",
-            "instant_withdraw_pending_with_session",
-        ] {
-            let target = t("session_vault", function);
-            templates.push(PtbTemplate {
-                name: format!("session_vault:{function}"),
-                required: vec![target.clone()],
-                allowed: vec![target.clone()],
-                arities: vec![(target, 3)],
-            });
-        }
-
-        // DeepBook session twins: single custody-funded calls — the wrapper
-        // does the BalanceManager deposit / order / settle internally, so the
-        // PTB is one Move call (unlike the wallet DeepBook shapes below, which
-        // build the deposit/proof/order steps as separate commands). Enable
-        // takes no type args; the market order carries the pool's (Base, Quote).
-        let enable = t("session_deepbook", "enable_trading_with_session");
-        templates.push(PtbTemplate {
-            name: "session_deepbook:enable_trading".to_owned(),
-            required: vec![enable.clone()],
-            allowed: vec![enable.clone()],
-            arities: vec![(enable, 0)],
-        });
-        let market = t("session_deepbook", "place_market_order_with_session");
-        templates.push(PtbTemplate {
-            name: "session_deepbook:place_market_order".to_owned(),
-            required: vec![market.clone()],
-            allowed: vec![market.clone()],
-            arities: vec![(market, 2)],
-        });
     }
 
     // DeepBook PTB shapes (SO-154 venue creation + SO-157 trading). Coin
@@ -459,54 +375,24 @@ pub fn protocol_templates(
         let share = MoveTarget::new(framework(), "transfer", "public_share_object");
 
         let create = d("pool", "create_permissionless_pool");
-        templates.push(PtbTemplate {
-            name: "deepbook_create_pool".to_owned(),
-            required: vec![create.clone()],
-            allowed: vec![create.clone()],
-            arities: vec![(create, 2)],
-        });
+        templates.push(PtbTemplate::exact_only("deepbook_create_pool".to_owned(), vec![create.clone()], vec![create.clone()], vec![(create, 2)]));
 
         // Enable trading: new → register (emits the discovery event) → share.
         let bm_new = d("balance_manager", "new");
         let bm_register = d("balance_manager", "register_balance_manager");
-        templates.push(PtbTemplate {
-            name: "deepbook_bm_create".to_owned(),
-            required: vec![bm_new.clone(), bm_register.clone(), share.clone()],
-            allowed: vec![bm_new, bm_register, share.clone()],
-            arities: vec![(share, 1)],
-        });
+        templates.push(PtbTemplate::exact_only("deepbook_bm_create".to_owned(), vec![bm_new.clone(), bm_register.clone(), share.clone()], vec![bm_new, bm_register, share.clone()], vec![(share, 1)]));
 
         // Orders: optional exact-amount deposit, owner proof, place.
         let place_limit = d("pool", "place_limit_order");
-        templates.push(PtbTemplate {
-            name: "deepbook_place_limit".to_owned(),
-            required: vec![proof.clone(), place_limit.clone()],
-            allowed: vec![deposit.clone(), proof.clone(), place_limit.clone()],
-            arities: vec![(place_limit, 2), (deposit.clone(), 1)],
-        });
+        templates.push(PtbTemplate::exact_only("deepbook_place_limit".to_owned(), vec![proof.clone(), place_limit.clone()], vec![deposit.clone(), proof.clone(), place_limit.clone()], vec![(place_limit, 2), (deposit.clone(), 1)]));
         let place_market = d("pool", "place_market_order");
-        templates.push(PtbTemplate {
-            name: "deepbook_place_market".to_owned(),
-            required: vec![proof.clone(), place_market.clone()],
-            allowed: vec![deposit.clone(), proof.clone(), place_market.clone()],
-            arities: vec![(place_market.clone(), 2), (deposit.clone(), 1)],
-        });
+        templates.push(PtbTemplate::exact_only("deepbook_place_market".to_owned(), vec![proof.clone(), place_market.clone()], vec![deposit.clone(), proof.clone(), place_market.clone()], vec![(place_market.clone(), 2), (deposit.clone(), 1)]));
 
         // Cancels.
         let cancel = d("pool", "cancel_order");
-        templates.push(PtbTemplate {
-            name: "deepbook_cancel_order".to_owned(),
-            required: vec![proof.clone(), cancel.clone()],
-            allowed: vec![proof.clone(), cancel.clone()],
-            arities: vec![(cancel, 2)],
-        });
+        templates.push(PtbTemplate::exact_only("deepbook_cancel_order".to_owned(), vec![proof.clone(), cancel.clone()], vec![proof.clone(), cancel.clone()], vec![(cancel, 2)]));
         let cancel_all = d("pool", "cancel_all_orders");
-        templates.push(PtbTemplate {
-            name: "deepbook_cancel_all".to_owned(),
-            required: vec![proof.clone(), cancel_all.clone()],
-            allowed: vec![proof.clone(), cancel_all.clone()],
-            arities: vec![(cancel_all, 2)],
-        });
+        templates.push(PtbTemplate::exact_only("deepbook_cancel_all".to_owned(), vec![proof.clone(), cancel_all.clone()], vec![proof.clone(), cancel_all.clone()], vec![(cancel_all, 2)]));
 
         // Settle + drain assets back to the wallet (TransferObjects is a benign
         // command). Covers both "withdraw all" (base + quote) and the
@@ -514,45 +400,33 @@ pub fn protocol_templates(
         // shape with one `withdraw_all` instead of two.
         let settle = d("pool", "withdraw_settled_amounts");
         let withdraw_all = d("balance_manager", "withdraw_all");
-        templates.push(PtbTemplate {
-            name: "deepbook_withdraw".to_owned(),
-            required: vec![proof.clone(), settle.clone()],
-            allowed: vec![proof.clone(), settle.clone(), withdraw_all.clone()],
-            arities: vec![(settle.clone(), 2), (withdraw_all.clone(), 1)],
-        });
+        templates.push(PtbTemplate::exact_only("deepbook_withdraw".to_owned(), vec![proof.clone(), settle.clone()], vec![proof.clone(), settle.clone(), withdraw_all.clone()], vec![(settle.clone(), 2), (withdraw_all.clone(), 1)]));
 
         // Market buy/sell that delivers proceeds to the wallet in one PTB
         // (frontend `buildPlaceMarketOrderTx` with a `recipient`): fills settle
         // into the BM, so the same tx mints a fresh proof, settles, and drains
         // both assets back out (proof → place_market → proof → settle →
-        // withdraw_all ×1-2). The session twin folds this into a single
-        // `_with_session` call, which is why session market orders were
-        // sponsored and wallet ones were not. Every asset moved is the user's
-        // own — same posture as `deepbook_withdraw` — so the sponsor only risks
-        // gas. Kept separate from `deepbook_place_market` so a plain order still
+        // withdraw_all ×1-2). Every asset moved is the user's own — same
+        // posture as `deepbook_withdraw` — so the sponsor only risks gas.
+        // Kept separate from `deepbook_place_market` so a plain order still
         // can't smuggle a withdraw.
-        templates.push(PtbTemplate {
-            name: "deepbook_place_market_withdraw".to_owned(),
-            required: vec![
+        templates.push(PtbTemplate::exact_only("deepbook_place_market_withdraw".to_owned(), vec![
                 proof.clone(),
                 place_market.clone(),
                 settle.clone(),
                 withdraw_all.clone(),
-            ],
-            allowed: vec![
+            ], vec![
                 deposit.clone(),
                 proof.clone(),
                 place_market.clone(),
                 settle.clone(),
                 withdraw_all.clone(),
-            ],
-            arities: vec![
+            ], vec![
                 (place_market.clone(), 2),
                 (deposit.clone(), 1),
                 (settle.clone(), 2),
                 (withdraw_all.clone(), 1),
-            ],
-        });
+            ]));
 
         // Exercise an option whose coin the user parked in their DeepBook
         // trading account: settle + withdraw the option coin out of the BM, then
@@ -562,28 +436,18 @@ pub fn protocol_templates(
         // sponsor only risks gas. The closed `allowed` set keeps anything else
         // from riding along.
         let exercise = t("bucket", "exercise");
-        templates.push(PtbTemplate {
-            name: "exercise_with_bm_withdraw".to_owned(),
-            required: vec![proof.clone(), settle.clone(), withdraw_all.clone(), exercise.clone()],
-            allowed: vec![proof.clone(), settle.clone(), withdraw_all.clone(), exercise.clone()],
-            arities: vec![(settle.clone(), 2), (withdraw_all.clone(), 1), (exercise, 3)],
-        });
+        templates.push(PtbTemplate::exact_only("exercise_with_bm_withdraw".to_owned(), vec![proof.clone(), settle.clone(), withdraw_all.clone(), exercise.clone()], vec![proof.clone(), settle.clone(), withdraw_all.clone(), exercise.clone()], vec![(settle.clone(), 2), (withdraw_all.clone(), 1), (exercise, 3)]));
 
         // Same shape for a cash-secured put parked in the BM (buildExercisePutTx
         // with bmWithdraw): settle + withdraw the put coin out, then
         // put_bucket::exercise.
         let put_exercise = t("put_bucket", "exercise");
-        templates.push(PtbTemplate {
-            name: "put_exercise_with_bm_withdraw".to_owned(),
-            required: vec![
+        templates.push(PtbTemplate::exact_only("put_exercise_with_bm_withdraw".to_owned(), vec![
                 proof.clone(),
                 settle.clone(),
                 withdraw_all.clone(),
                 put_exercise.clone(),
-            ],
-            allowed: vec![proof, settle.clone(), withdraw_all.clone(), put_exercise.clone()],
-            arities: vec![(settle, 2), (withdraw_all, 1), (put_exercise, 3)],
-        });
+            ], vec![proof, settle.clone(), withdraw_all.clone(), put_exercise.clone()], vec![(settle, 2), (withdraw_all, 1), (put_exercise, 3)]));
     }
 
     templates
@@ -599,6 +463,10 @@ mod tests {
 
     fn pkg() -> ObjectID {
         ObjectID::from_hex_literal("0xabc").unwrap()
+    }
+
+    fn vault_pkg() -> ObjectID {
+        ObjectID::from_hex_literal("0xdef").unwrap()
     }
 
     /// Build a PTB from a list of `(target, type-arg count)` Move calls, with an
@@ -631,17 +499,13 @@ mod tests {
         ObjectID::from_hex_literal("0x22be4c").unwrap()
     }
 
-    fn session_pkg() -> ObjectID {
-        ObjectID::from_hex_literal("0x5e55").unwrap()
-    }
-
     fn templates() -> Vec<PtbTemplate> {
         protocol_templates(
             pkg(),
+            vault_pkg(),
             &[(pkg(), "tbtc".to_owned())],
             true,
             Some(deepbook_pkg()),
-            Some(session_pkg()),
         )
     }
 
@@ -649,16 +513,27 @@ mod tests {
         MoveTarget::new(pkg(), module, function)
     }
 
+    /// The MM's release implementation lives at some arbitrary package/module.
+    fn mm_release() -> MoveTarget {
+        let mm_pkg = ObjectID::from_hex_literal("0xfeed").unwrap();
+        MoveTarget::new(mm_pkg, "mm_collateral", "release")
+    }
+
+    /// The 5-call quote→request→release→execute shape for one flow.
+    fn flow_calls(module: &str, request_fn: &str, execute_fn: &str) -> Vec<(MoveTarget, usize)> {
+        vec![
+            (target("quote", "new_quote"), 0),
+            (target("quote", "new_signed_quote"), 0),
+            (target(module, request_fn), 3),
+            (mm_release(), 1),
+            (target(module, execute_fn), 3),
+        ]
+    }
+
     #[test]
     fn write_flow_matches() {
         let pt = build(
-            &[
-                (target("quote", "new_quote"), 0),
-                (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "writer_flow"), 0),
-                (MoveTarget::new(framework(), "coin", "zero"), 1),
-                (target("bucket", "execute_write"), 3),
-            ],
+            &flow_calls("bucket", "request_writer_flow", "execute_writer_flow"),
             true,
         );
         assert_eq!(match_any(&templates(), &pt), Some("write"));
@@ -667,13 +542,7 @@ mod tests {
     #[test]
     fn buy_flow_matches() {
         let pt = build(
-            &[
-                (target("quote", "new_quote"), 0),
-                (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "trader_flow"), 0),
-                (MoveTarget::new(framework(), "coin", "zero"), 1),
-                (target("bucket", "execute_write"), 3),
-            ],
+            &flow_calls("bucket", "request_trader_flow", "execute_trader_flow"),
             true,
         );
         assert_eq!(match_any(&templates(), &pt), Some("buy"));
@@ -689,28 +558,15 @@ mod tests {
 
     #[test]
     fn put_wallet_flows_match() {
-        // write / buy: same quote prelude + benign coin::zero, but the anchor
-        // is put_bucket::execute_write, and the flow marker still lives in the
-        // call `bucket` module.
+        // Same request → release → execute shape as calls, anchored on the
+        // put_bucket module.
         let write = build(
-            &[
-                (target("quote", "new_quote"), 0),
-                (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "writer_flow"), 0),
-                (MoveTarget::new(framework(), "coin", "zero"), 1),
-                (target("put_bucket", "execute_write"), 3),
-            ],
+            &flow_calls("put_bucket", "request_writer_flow", "execute_writer_flow"),
             true,
         );
         assert_eq!(match_any(&templates(), &write), Some("put_write"));
         let buy = build(
-            &[
-                (target("quote", "new_quote"), 0),
-                (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "trader_flow"), 0),
-                (MoveTarget::new(framework(), "coin", "zero"), 1),
-                (target("put_bucket", "execute_write"), 3),
-            ],
+            &flow_calls("put_bucket", "request_trader_flow", "execute_trader_flow"),
             true,
         );
         assert_eq!(match_any(&templates(), &buy), Some("put_buy"));
@@ -722,6 +578,73 @@ mod tests {
     }
 
     #[test]
+    fn two_wildcard_release_calls_rejected() {
+        // A second release-shaped call cannot ride along — even though each
+        // one individually satisfies the AnyRelease matcher.
+        let mut calls = flow_calls("bucket", "request_writer_flow", "execute_writer_flow");
+        let evil = MoveTarget::new(ObjectID::from_hex_literal("0xdead").unwrap(), "x", "release");
+        calls.insert(4, (evil, 1));
+        let pt = build(&calls, false);
+        assert_eq!(match_any(&templates(), &pt), None);
+    }
+
+    #[test]
+    fn wildcard_wrong_function_name_or_arity_rejected() {
+        // Wrong function name in the release slot.
+        let mut calls = flow_calls("bucket", "request_writer_flow", "execute_writer_flow");
+        calls[3] = (
+            MoveTarget::new(ObjectID::from_hex_literal("0xfeed").unwrap(), "mm_collateral", "steal"),
+            1,
+        );
+        assert_eq!(match_any(&templates(), &build(&calls, false)), None);
+
+        // Right name, wrong type-arg arity (2 instead of 1).
+        let mut calls = flow_calls("bucket", "request_writer_flow", "execute_writer_flow");
+        calls[3] = (mm_release(), 2);
+        assert_eq!(match_any(&templates(), &build(&calls, false)), None);
+    }
+
+    #[test]
+    fn wildcard_cannot_substitute_for_a_pinned_call() {
+        // Drop the pinned request_writer_flow and put an extra foreign
+        // `release` in its place: the wildcard slot must not stand in for the
+        // pinned call (and two release calls are refused anyway).
+        let pt = build(
+            &[
+                (target("quote", "new_quote"), 0),
+                (target("quote", "new_signed_quote"), 0),
+                (mm_release(), 1),
+                (target("bucket", "execute_writer_flow"), 3),
+            ],
+            false,
+        );
+        // Missing required request_writer_flow → no match.
+        assert_eq!(match_any(&templates(), &pt), None);
+
+        // A protocol call named like a wildcard (hypothetical
+        // `bucket::release<1>`) cannot satisfy the AnyRelease slot either:
+        // exact matchers win first, so the required wildcard slot stays
+        // unsatisfied. (There is no pinned `bucket::release` in any template,
+        // so this call fails the closed allowed set outright.)
+        let mut calls = flow_calls("bucket", "request_writer_flow", "execute_writer_flow");
+        calls[3] = (target("bucket", "release"), 1);
+        let pt = build(&calls, false);
+        // `bucket::release` is not a pinned target; it matches AnyRelease and
+        // the template still matches — the wildcard is package-agnostic by
+        // design. What must NOT happen is a pinned target doubling as the
+        // wildcard: replace the release call with a second execute call.
+        assert_eq!(match_any(&templates(), &pt), Some("write"));
+        let mut calls = flow_calls("bucket", "request_writer_flow", "execute_writer_flow");
+        calls[3] = (target("bucket", "execute_writer_flow"), 3);
+        let pt = build(&calls, false);
+        assert_eq!(
+            match_any(&templates(), &pt),
+            None,
+            "a pinned call must not satisfy the AnyRelease slot"
+        );
+    }
+
+    #[test]
     fn faucet_mint_matches() {
         let pt = build(&[(target("tbtc", "mint_to_sender"), 0)], false);
         assert_eq!(match_any(&templates(), &pt), Some("faucet_mint:tbtc"));
@@ -730,7 +653,7 @@ mod tests {
     #[test]
     fn faucet_rejected_when_disabled() {
         let no_faucet =
-            protocol_templates(pkg(), &[(pkg(), "tbtc".to_owned())], false, None, None);
+            protocol_templates(pkg(), vault_pkg(), &[(pkg(), "tbtc".to_owned())], false, None);
         let pt = build(&[(target("tbtc", "mint_to_sender"), 0)], false);
         assert_eq!(match_any(&no_faucet, &pt), None);
     }
@@ -977,7 +900,7 @@ mod tests {
         assert_eq!(match_any(&templates(), &bad_arity), None);
 
         // No deepbook configured (devnet) → never sponsored.
-        let no_db = protocol_templates(pkg(), &[], false, None, None);
+        let no_db = protocol_templates(pkg(), vault_pkg(), &[], false, None);
         let pt = build(
             &[(
                 MoveTarget::new(deepbook_pkg(), "pool", "create_permissionless_pool"),
@@ -989,235 +912,23 @@ mod tests {
     }
 
     #[test]
-    fn session_open_and_revoke_match() {
-        let s = |function: &str| MoveTarget::new(session_pkg(), "session", function);
-        for f in [
-            "verify_and_open_session",
-            "verify_and_open_session_eth",
-            "revoke_all",
-            "revoke_all_eth",
-        ] {
-            let pt = build(&[(s(f), 0)], false);
-            assert!(match_any(&templates(), &pt).is_some(), "{f} should match");
-        }
-        // Type args on the open call are refused (the entrypoints are
-        // non-generic since the multi-asset account rework).
-        let pt = build(&[(s("verify_and_open_session"), 1)], false);
-        assert_eq!(match_any(&templates(), &pt), None);
-    }
-
-    #[test]
-    fn session_flows_match_their_frontend_shapes() {
-        // account create
-        let create = build(
-            &[(target("session_account", "create_and_share_account_with_session"), 0)],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &create), Some("session_account_create"));
-
-        // write / buy twins: quote prelude + execute_write_with_session, no
-        // coin::zero.
-        let write = build(
-            &[
-                (target("quote", "new_quote"), 0),
-                (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "writer_flow"), 0),
-                (target("session_bucket", "execute_write_with_session"), 3),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &write), Some("session_write"));
-        let buy = build(
-            &[
-                (target("quote", "new_quote"), 0),
-                (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "trader_flow"), 0),
-                (target("session_bucket", "execute_write_with_session"), 3),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &buy), Some("session_buy"));
-
-        // exercise / redeem / burn twins.
-        let ex = build(&[(target("session_bucket", "exercise_with_session"), 3)], false);
-        assert_eq!(match_any(&templates(), &ex), Some("session_exercise"));
-        let rd = build(&[(target("session_bucket", "redeem_position_with_session"), 3)], false);
-        assert_eq!(match_any(&templates(), &rd), Some("session_redeem"));
-        let burn = build(
-            &[(target("session_bucket", "burn_expired_option_with_session"), 3)],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &burn), Some("session_burn_expired"));
-
-        // put session twins: write / buy / exercise / redeem (no burn).
-        let put_write = build(
-            &[
-                (target("quote", "new_quote"), 0),
-                (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "writer_flow"), 0),
-                (target("session_put_bucket", "execute_write_with_session"), 3),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &put_write), Some("session_put_write"));
-        let put_buy = build(
-            &[
-                (target("quote", "new_quote"), 0),
-                (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "trader_flow"), 0),
-                (target("session_put_bucket", "execute_write_with_session"), 3),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &put_buy), Some("session_put_buy"));
-        let put_ex = build(&[(target("session_put_bucket", "exercise_with_session"), 3)], false);
-        assert_eq!(match_any(&templates(), &put_ex), Some("session_put_exercise"));
-        let put_rd = build(
-            &[(target("session_put_bucket", "redeem_position_with_session"), 3)],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &put_rd), Some("session_put_redeem"));
-
-        // root-signed external withdrawal (Solana + Ethereum variants) / deposit.
-        let wd = build(&[(target("session_account", "withdraw_with_root_sig"), 1)], false);
-        assert_eq!(match_any(&templates(), &wd), Some("session_withdraw_with_root_sig"));
-        let wd_eth =
-            build(&[(target("session_account", "withdraw_with_root_sig_eth"), 1)], false);
-        assert_eq!(
-            match_any(&templates(), &wd_eth),
-            Some("session_withdraw_with_root_sig_eth"),
-        );
-        let dep = build(&[(target("account", "deposit"), 1)], true);
-        assert_eq!(match_any(&templates(), &dep), Some("session_deposit"));
-
-        // testnet funding: faucet mint (returning) → deposit.
-        let fund = build(
-            &[
-                (target("tbtc", "mint"), 0),
-                (target("account", "deposit"), 1),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &fund), Some("session_fund:tbtc"));
-
-        // vault twins: one custody-funded call each, 3 type args.
-        for f in [
-            "deposit_with_session",
-            "claim_shares_with_session",
-            "initiate_withdraw_with_session",
-            "complete_withdraw_with_session",
-            "instant_withdraw_pending_with_session",
-        ] {
-            let pt = build(&[(target("session_vault", f), 3)], false);
-            assert_eq!(
-                match_any(&templates(), &pt),
-                Some(format!("session_vault:{f}").as_str()),
-            );
-            // wrong arity refused
-            let bad = build(&[(target("session_vault", f), 2)], false);
-            assert_eq!(match_any(&templates(), &bad), None);
-        }
-        // the wallet-facing vault functions are sponsored under `vault:*`.
-        for f in [
-            "deposit",
-            "claim_shares",
-            "initiate_withdraw",
-            "complete_withdraw",
-            "instant_withdraw_pending",
-        ] {
-            let pt = build(&[(target("vault", f), 3)], false);
-            assert_eq!(match_any(&templates(), &pt), Some(format!("vault:{f}").as_str()));
-            // wrong arity refused
-            let bad = build(&[(target("vault", f), 2)], false);
-            assert_eq!(match_any(&templates(), &bad), None);
-        }
-
-        // DeepBook session twins: enable (no type args) + market order
-        // (2 type args, the pool's Base/Quote).
-        let enable = build(&[(target("session_deepbook", "enable_trading_with_session"), 0)], false);
-        assert_eq!(
-            match_any(&templates(), &enable),
-            Some("session_deepbook:enable_trading"),
-        );
-        let market =
-            build(&[(target("session_deepbook", "place_market_order_with_session"), 2)], false);
-        assert_eq!(
-            match_any(&templates(), &market),
-            Some("session_deepbook:place_market_order"),
-        );
-        // wrong arity refused
-        let bad = build(&[(target("session_deepbook", "place_market_order_with_session"), 3)], false);
-        assert_eq!(match_any(&templates(), &bad), None);
-    }
-
-    #[test]
-    fn session_templates_reject_riders_and_unconfigured() {
-        // A withdraw smuggled into a session buy PTB matches no template.
-        let evil = build(
-            &[
-                (target("quote", "new_quote"), 0),
-                (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "trader_flow"), 0),
-                (target("session_bucket", "execute_write_with_session"), 3),
-                (target("session_account", "withdraw_with_root_sig"), 1),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &evil), None);
-
-        // The wallet `execute_write` cannot be smuggled under a session
-        // template (and vice versa — the shapes are disjoint).
-        let mixed = build(
-            &[
-                (target("quote", "new_quote"), 0),
-                (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "writer_flow"), 0),
-                (target("bucket", "execute_write"), 3),
-                (target("session_bucket", "execute_write_with_session"), 3),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &mixed), None);
-
-        // No session package configured → session PTBs are never sponsored.
-        let no_session = protocol_templates(pkg(), &[], false, None, None);
-        let open = build(
-            &[(MoveTarget::new(session_pkg(), "session", "verify_and_open_session"), 0)],
-            false,
-        );
-        assert_eq!(match_any(&no_session, &open), None);
-    }
-
-    #[test]
     fn foreign_call_injection_rejected() {
         let evil = ObjectID::from_hex_literal("0xdead").unwrap();
-        let pt = build(
-            &[
-                (target("quote", "new_quote"), 0),
-                (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "writer_flow"), 0),
-                (MoveTarget::new(framework(), "coin", "zero"), 1),
-                (MoveTarget::new(evil, "drain", "all"), 0),
-                (target("bucket", "execute_write"), 3),
-            ],
-            false,
-        );
+        let mut calls = flow_calls("bucket", "request_writer_flow", "execute_writer_flow");
+        calls.insert(4, (MoveTarget::new(evil, "drain", "all"), 0));
+        let pt = build(&calls, false);
         assert_eq!(match_any(&templates(), &pt), None);
     }
 
     #[test]
     fn framework_call_other_than_coin_zero_rejected() {
         // Proves we whitelist `0x2::coin::zero`, not all of `0x2`.
-        let pt = build(
-            &[
-                (target("quote", "new_quote"), 0),
-                (target("quote", "new_signed_quote"), 0),
-                (target("bucket", "writer_flow"), 0),
-                (MoveTarget::new(framework(), "transfer", "public_transfer"), 1),
-                (target("bucket", "execute_write"), 3),
-            ],
-            false,
+        let mut calls = flow_calls("bucket", "request_writer_flow", "execute_writer_flow");
+        calls.insert(
+            4,
+            (MoveTarget::new(framework(), "transfer", "public_transfer"), 1),
         );
+        let pt = build(&calls, false);
         assert_eq!(match_any(&templates(), &pt), None);
     }
 
@@ -1282,9 +993,19 @@ mod tests {
         assert_eq!(match_any(&templates(), &withdraw), Some("deepbook_withdraw"));
 
         // `coin::zero<1>` is now skipped everywhere, not just in write/buy: a
-        // vault deposit carrying it still matches.
-        let vault_deposit = build(&[(target("vault", "deposit"), 3), (coin("zero"), 1)], false);
+        // vault deposit carrying it still matches. Vault flows target the
+        // options_vault package, not core.
+        let vault_deposit = build(
+            &[
+                (MoveTarget::new(vault_pkg(), "vault", "deposit"), 3),
+                (coin("zero"), 1),
+            ],
+            false,
+        );
         assert_eq!(match_any(&templates(), &vault_deposit), Some("vault:deposit"));
+        // The same call against the core package no longer matches.
+        let wrong_pkg = build(&[(target("vault", "deposit"), 3)], false);
+        assert_eq!(match_any(&templates(), &wrong_pkg), None);
     }
 
     #[test]

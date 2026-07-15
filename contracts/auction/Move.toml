@@ -1,0 +1,9 @@
+[package]
+name = "auction"
+version = "0.0.1"
+edition = "2024.beta"
+
+# Deliberately dependency-free (Sui framework only): the generic auction is
+# a standalone audit scope. Options-specific validation and settlement live
+# in downstream adapter packages.
+[dependencies]

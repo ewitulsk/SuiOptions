@@ -8,11 +8,11 @@
 //! Internal shape:
 //!
 //! - [`state`] owns the only mutable state this service keeps locally — the
-//!   live reservation table and MM reputation. Account balances, signing
-//!   keys, and bucket state are read just-in-time from the indexer's GraphQL
-//!   API.
+//!   seen-nonce table and MM reputation. Signing keys and bucket state are
+//!   read just-in-time from the indexer's GraphQL API. There is NO balance
+//!   or reservation tracking (collateral abstraction, plan §7).
 //! - [`rfq`] orchestrates one RFQ end to end: broadcast to MMs, collect with
-//!   a deadline, validate, reserve, sort, ship to retail.
+//!   a deadline, validate, sort, ship to retail.
 //! - [`ws`] is the transport. It owns no state — every interesting decision
 //!   happens in [`state`] or [`rfq`].
 
@@ -50,6 +50,6 @@ cli_spec::define_program! {
     working_dir = ".",
     description = "Stateful WS router between retail frontends and market-maker bots. \
                    Authenticates MMs via signature challenge, brokers RFQs with a deadline, \
-                   validates signed quotes, tracks reservations, scores reputation.",
+                   validates signed quotes, scores reputation.",
     cli         = crate::Cli,
 }

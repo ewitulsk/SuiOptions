@@ -15,6 +15,7 @@ use serde_json::Value;
 use sui_json_rpc_types::{EventFilter, SuiObjectDataOptions, SuiParsedData};
 use sui_sdk::SuiClient;
 use sui_types::base_types::ObjectID;
+use tracing::warn;
 
 /// Everything the planner needs from one `Vault<U, S, V>` object.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,10 +64,11 @@ pub struct VaultConfigView {
 }
 
 /// One live vault-coupled auction (the object still exists ⇒ unsettled).
+/// The generic `Auction` carries no bucket id — a vault RFQ slice is
+/// always on the vault's `current_bucket`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RfqView {
     pub rfq_id: ObjectID,
-    pub bucket_id: ObjectID,
     pub deadline_ms: u64,
     pub amount: u64,
 }
@@ -228,22 +230,22 @@ pub fn parse_vault_view(fields: &Value) -> Result<VaultView> {
     })
 }
 
-/// Parse an `RfqAuction` object's parsed-JSON field map.
+/// Parse a vault RFQ-slice `Auction<U, S>` object's parsed-JSON field map.
 pub fn parse_rfq_view(rfq_id: ObjectID, fields: &Value) -> Result<RfqView> {
     Ok(RfqView {
         rfq_id,
-        bucket_id: as_id(field(fields, "bucket_id")?).context("field bucket_id")?,
         deadline_ms: u64_field(fields, "deadline_ms")?,
         amount: u64_field(fields, "amount")?,
     })
 }
 
-/// Parse a `SwapAuction` object's parsed-JSON field map.
+/// Parse a proceeds-swap `Auction<S, U>` object's parsed-JSON field map
+/// (`amount` is the escrowed settlement).
 pub fn parse_swap_rfq_view(swap_id: ObjectID, fields: &Value) -> Result<SwapRfqView> {
     Ok(SwapRfqView {
         swap_id,
         deadline_ms: u64_field(fields, "deadline_ms")?,
-        amount_s: u64_field(fields, "amount_s")?,
+        amount_s: u64_field(fields, "amount")?,
     })
 }
 
@@ -273,88 +275,75 @@ pub async fn fetch_vault_view(client: &SuiClient, vault_id: ObjectID) -> Result<
     parse_vault_view(&fields).with_context(|| format!("parsing vault {vault_id}"))
 }
 
-/// Discover the vault's live coupled auctions, stateless: walk
-/// `RfqCreated` events (newest first) down to `cutoff_ms`, keep those
-/// with `origin == vault_id`, then read each object — still existing ⇒
-/// still open. Restart- and race-safe by construction.
-pub async fn discover_open_rfqs(
-    client: &SuiClient,
-    package: ObjectID,
-    vault_id: ObjectID,
-    cutoff_ms: u64,
-) -> Result<Vec<RfqView>> {
-    let filter = EventFilter::MoveEventType(StructTag {
-        address: package.into(),
-        module: Identifier::new("events").unwrap(),
-        name: Identifier::new("RfqCreated").unwrap(),
-        type_params: vec![],
-    });
-
-    let vault_hex = vault_id.to_string();
-    let mut candidates: Vec<ObjectID> = Vec::new();
-    let mut cursor = None;
-    'pages: loop {
-        let page = client
-            .event_api()
-            .query_events(filter.clone(), cursor, Some(100), true /* descending */)
-            .await
-            .context("querying RfqCreated events")?;
-        for ev in &page.data {
-            if ev.timestamp_ms.is_some_and(|t| t < cutoff_ms) {
-                break 'pages;
-            }
-            let origin = ev
-                .parsed_json
-                .get("origin")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            if origin.eq_ignore_ascii_case(&vault_hex) {
-                if let Some(id) = ev.parsed_json.get("rfq_id").and_then(|v| v.as_str()) {
-                    candidates.push(id.parse().context("parsing rfq_id from event")?);
-                }
-            }
-        }
-        if !page.has_next_page {
-            break;
-        }
-        cursor = page.next_cursor;
+/// A `TypeName` in event JSON: the inner ascii string, either bare or
+/// wrapped as `{"name": "..."}`. Chain TypeNames carry no `0x` prefix —
+/// compare canonically (move-type-normalization.md).
+fn type_name_str(v: &Value) -> Option<&str> {
+    match v {
+        Value::String(s) => Some(s),
+        Value::Object(m) => m.get("name").and_then(|n| n.as_str()),
+        _ => None,
     }
-
-    let mut open = Vec::new();
-    for rfq_id in candidates {
-        if let Some(fields) = fetch_fields(client, rfq_id).await? {
-            open.push(parse_rfq_view(rfq_id, &fields)?);
-        }
-    }
-    Ok(open)
 }
 
-/// Discover the vault's live coupled swap auctions, stateless: walk
-/// `SwapRfqCreated` events (newest first) down to `cutoff_ms`, keep those
-/// with `origin == vault_id`, then read each object — still existing ⇒
-/// still open. Mirrors [`discover_open_rfqs`] for the proceeds-swap path.
-pub async fn discover_open_swap_rfqs(
+/// Which kind of vault-coupled auction an `AuctionCreated` event
+/// announces, told apart by its legs: an RFQ slice is `Auction<U, S>`
+/// (underlying escrowed, premium bids); a proceeds swap is
+/// `Auction<S, U>` (settlement escrowed, underlying bids).
+pub fn classify_vault_auction(
+    parsed: &Value,
+    underlying_canonical: &str,
+    settlement_canonical: &str,
+) -> Option<AuctionKind> {
+    let escrow = protocol_types::asset::canonicalize_move_type(
+        parsed.get("escrow_type").and_then(type_name_str)?,
+    );
+    if escrow == underlying_canonical {
+        Some(AuctionKind::Rfq)
+    } else if escrow == settlement_canonical {
+        Some(AuctionKind::Swap)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuctionKind {
+    Rfq,
+    Swap,
+}
+
+/// Discover the vault's live coupled auctions (RFQ slices AND proceeds
+/// swaps), stateless: walk the auction package's `AuctionCreated` events
+/// (newest first) down to `cutoff_ms`, keep those with `origin ==
+/// vault_id`, classify by escrow leg, then read each object — still
+/// existing ⇒ still open. Restart- and race-safe by construction.
+pub async fn discover_open_auctions(
     client: &SuiClient,
-    package: ObjectID,
+    auction_package: ObjectID,
     vault_id: ObjectID,
+    underlying_type: &str,
+    settlement_type: &str,
     cutoff_ms: u64,
-) -> Result<Vec<SwapRfqView>> {
+) -> Result<(Vec<RfqView>, Vec<SwapRfqView>)> {
     let filter = EventFilter::MoveEventType(StructTag {
-        address: package.into(),
+        address: auction_package.into(),
         module: Identifier::new("events").unwrap(),
-        name: Identifier::new("SwapRfqCreated").unwrap(),
+        name: Identifier::new("AuctionCreated").unwrap(),
         type_params: vec![],
     });
 
+    let underlying = protocol_types::asset::canonicalize_move_type(underlying_type);
+    let settlement = protocol_types::asset::canonicalize_move_type(settlement_type);
     let vault_hex = vault_id.to_string();
-    let mut candidates: Vec<ObjectID> = Vec::new();
+    let mut candidates: Vec<(ObjectID, AuctionKind)> = Vec::new();
     let mut cursor = None;
     'pages: loop {
         let page = client
             .event_api()
             .query_events(filter.clone(), cursor, Some(100), true /* descending */)
             .await
-            .context("querying SwapRfqCreated events")?;
+            .context("querying AuctionCreated events")?;
         for ev in &page.data {
             if ev.timestamp_ms.is_some_and(|t| t < cutoff_ms) {
                 break 'pages;
@@ -364,10 +353,16 @@ pub async fn discover_open_swap_rfqs(
                 .get("origin")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            if origin.eq_ignore_ascii_case(&vault_hex) {
-                if let Some(id) = ev.parsed_json.get("swap_id").and_then(|v| v.as_str()) {
-                    candidates.push(id.parse().context("parsing swap_id from event")?);
-                }
+            if !origin.eq_ignore_ascii_case(&vault_hex) {
+                continue;
+            }
+            let Some(kind) = classify_vault_auction(&ev.parsed_json, &underlying, &settlement)
+            else {
+                warn!(vault = %vault_id, event = %ev.parsed_json, "unclassifiable vault auction event");
+                continue;
+            };
+            if let Some(id) = ev.parsed_json.get("auction_id").and_then(|v| v.as_str()) {
+                candidates.push((id.parse().context("parsing auction_id from event")?, kind));
             }
         }
         if !page.has_next_page {
@@ -376,13 +371,17 @@ pub async fn discover_open_swap_rfqs(
         cursor = page.next_cursor;
     }
 
-    let mut open = Vec::new();
-    for swap_id in candidates {
-        if let Some(fields) = fetch_fields(client, swap_id).await? {
-            open.push(parse_swap_rfq_view(swap_id, &fields)?);
+    let mut rfqs = Vec::new();
+    let mut swaps = Vec::new();
+    for (id, kind) in candidates {
+        if let Some(fields) = fetch_fields(client, id).await? {
+            match kind {
+                AuctionKind::Rfq => rfqs.push(parse_rfq_view(id, &fields)?),
+                AuctionKind::Swap => swaps.push(parse_swap_rfq_view(id, &fields)?),
+            }
         }
     }
-    Ok(open)
+    Ok((rfqs, swaps))
 }
 
 #[cfg(test)]
@@ -519,15 +518,36 @@ mod tests {
         let v = parse_rfq_view(
             rfq_id,
             &json!({
-                "bucket_id": BUCKET,
                 "deadline_ms": "1699999000000",
                 "amount": "250000000",
-                "reserve_premium": "47619000",
+                "reserve_bid": "47619000",
             }),
         )
         .unwrap();
-        assert_eq!(v.bucket_id, BUCKET.parse().unwrap());
         assert_eq!(v.deadline_ms, 1_699_999_000_000);
         assert_eq!(v.amount, 250_000_000);
+    }
+
+    #[test]
+    fn classifies_vault_auctions_by_escrow_leg() {
+        use protocol_types::asset::canonicalize_move_type;
+        let u = canonicalize_move_type("0xaa::tbtc::TBTC");
+        let s = canonicalize_move_type("0xbb::tusdc::TUSDC");
+        // Chain TypeNames carry no 0x prefix; the compare must bridge that.
+        let rfq = json!({
+            "escrow_type": {"name": "aa::tbtc::TBTC"},
+            "bid_type": {"name": "bb::tusdc::TUSDC"},
+        });
+        assert_eq!(classify_vault_auction(&rfq, &u, &s), Some(AuctionKind::Rfq));
+        let swap = json!({
+            "escrow_type": {"name": "bb::tusdc::TUSDC"},
+            "bid_type": {"name": "aa::tbtc::TBTC"},
+        });
+        assert_eq!(classify_vault_auction(&swap, &u, &s), Some(AuctionKind::Swap));
+        let foreign = json!({
+            "escrow_type": {"name": "cc::other::OTHER"},
+            "bid_type": {"name": "bb::tusdc::TUSDC"},
+        });
+        assert_eq!(classify_vault_auction(&foreign, &u, &s), None);
     }
 }

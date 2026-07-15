@@ -50,11 +50,6 @@ on:
         required: false
         type: boolean
         default: true
-      deploy_session:
-        description: 'Also publish the siws_session (session-tokens) package the protocol links against'
-        required: false
-        type: boolean
-        default: true
       rpc_url:
         description: 'JSON-RPC URL for publish + checkpoint resolution (blank = network default public fullnode)'
         required: false
@@ -267,9 +262,6 @@ jobs:
           )
           if [ "${{ inputs.deploy_tokens }}" = "true" ]; then
             ARGS+=(--deploy-tokens)
-          fi
-          if [ "${{ inputs.deploy_session }}" = "true" ]; then
-            ARGS+=(--deploy-session)
           fi
           if [ -n "$RPC_URL" ]; then
             ARGS+=(--rpc "$RPC_URL")
@@ -507,9 +499,10 @@ jobs:
 
           git add rust-backend/deployments.json
           git add "rust-backend/services/indexer/config/config.${ENV}.toml"
-          # A session republish rewrites the package's publish metadata to the
-          # fresh id; keep the repo's record in sync with what's live.
-          git add session-tokens/contracts/Move.toml session-tokens/contracts/Published.toml
+          # Each package publish rewrites its Published.toml to the fresh id;
+          # keep the repo's record in sync with what's live.
+          git add contracts/core/Published.toml contracts/auction/Published.toml \
+                  contracts/rfq/Published.toml contracts/vault/Published.toml
 
           git commit -m "[redeploy] Fresh ${ENV} contract deployment" \
             -m "Network: ${{ steps.net.outputs.network }}" \
