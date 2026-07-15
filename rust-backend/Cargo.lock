@@ -1596,6 +1596,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "solana-address 2.6.1",
  "solana-hash 3.1.0",
  "solana-instruction",
  "solana-keypair",
@@ -9478,6 +9479,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39c93e262f671bf402e1040e4a7e40b05d81da5956c7681948c975a0997517bb"
 dependencies = [
  "borsh",
+ "curve25519-dalek",
  "five8",
  "five8_const",
  "serde",

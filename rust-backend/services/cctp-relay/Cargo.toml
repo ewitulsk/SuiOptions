@@ -39,6 +39,12 @@ bigdecimal = { workspace = true }
 # through reqwest JSON-RPC. The full solana-client tree stays out of this
 # workspace — the Sui crates here pin the framework/mainnet branch.
 solana-pubkey = "3"
+# Not imported directly — this is the single unified address crate every
+# solana-* dep above funnels into. PDA derivation (find_program_address, used
+# for Circle's receive_message accounts and ATA derivation) PANICS at runtime
+# without `curve25519` ("bytes_are_curve_point is only available with the
+# curve25519 feature"), killing the relayer task while /health stays green.
+solana-address = { version = "2.6", features = ["curve25519"] }
 solana-keypair = "3"
 solana-signer = "3"
 solana-message = "3"

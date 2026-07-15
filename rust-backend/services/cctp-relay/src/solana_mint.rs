@@ -217,3 +217,23 @@ impl SolanaMinter {
         self.rpc.send_transaction(&encoded).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression (2026-07-15): find_program_address panics unless the unified
+    // solana-address crate has its `curve25519` feature enabled ("
+    // bytes_are_curve_point is only available with the `curve25519` feature").
+    // The panic killed the relayer task at the first real Solana mint while
+    // /health stayed green. Exercises the same PDA path the mint uses.
+    #[test]
+    fn derive_ata_does_not_panic_and_matches_known_ata() {
+        let owner: Pubkey = "GS7Cv3mDCXcTZD7Mjpaappv1vt5kULq5pstQEvx98DHW".parse().unwrap();
+        let mint: Pubkey = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".parse().unwrap();
+        assert_eq!(
+            derive_ata(&owner, &mint).to_string(),
+            "EcRkRB1ddw5cHNfhNAtwLSDkrfWDx7vN9exKbjEH9LUC"
+        );
+    }
+}
