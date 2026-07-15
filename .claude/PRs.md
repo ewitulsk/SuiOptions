@@ -48,3 +48,4 @@ PRs raised through Claude Code.
 | [#265](https://github.com/ewitulsk/SuiOptions/pull/265) | [SO-266](https://suioptions.atlassian.net/browse/SO-266) | SO-19 Frontend | Gate Exercise on Expired Options + Fix Off-Screen Popup Positioning |
 | [#274](https://github.com/ewitulsk/SuiOptions/pull/274) | [SO-272](https://suioptions.atlassian.net/browse/SO-272) | SO-19 Frontend | Fix Put Earn-Page Writer UI (USDC Collateral, Mirrored Outcomes, Dual-Denom Input) |
 | [#275](https://github.com/ewitulsk/SuiOptions/pull/275) | [SO-273](https://suioptions.atlassian.net/browse/SO-273) | — Gas Station | Sponsor Cash-Secured Put PTBs in Gas-Station Templates |
+| [#281](https://github.com/ewitulsk/SuiOptions/pull/281) | [SO-279](https://suioptions.atlassian.net/browse/SO-279) | — Socials | Engagement Tracking, Airdrop Points & Leaderboard MVP (Twitter Mentions + Discord Bot) |
