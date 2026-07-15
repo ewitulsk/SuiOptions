@@ -220,37 +220,11 @@ services:
     restart: unless-stopped
     networks: [net]
 
-  # Outgoing-tweet manager (multi-account). Staging-only — deliberately not
-  # declared in docker-compose.prod.yml. Internal-only port 9014 (never
-  # proxied by nginx); reads per-account OAuth credentials from
-  # /run/secrets/twitter-service.toml.
-  twitter-service:
-    image: ${ECR}/options/twitter-service:${TWITTER_SERVICE_TAG}
-    environment:
-      APP_ENV: staging
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
-      RUST_LOG: info,twitter_service=debug
-    volumes:
-      - /opt/options/staging/secrets:/run/secrets:ro
-    restart: unless-stopped
-    networks: [net]
-
-  # Slack + Discord slash-command bots (one container). Staging-only —
-  # deliberately not declared in docker-compose.prod.yml. Allow-listed users
-  # post tweets through twitter-service. Public port 9016 (proxied by nginx —
-  # Slack/Discord deliver signed webhooks). Reads the Slack signing secret +
-  # Discord public key from /run/secrets/social-bot.toml.
-  social-bot:
-    image: ${ECR}/options/social-bot:${SOCIAL_BOT_TAG}
-    environment:
-      APP_ENV: staging
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
-      RUST_LOG: info,social_bot=debug
-    volumes:
-      - /opt/options/staging/secrets:/run/secrets:ro
-    depends_on: [twitter-service]
-    restart: unless-stopped
-    networks: [net]
+  # twitter-service + social-bot (PR #280) are temporarily undeclared here —
+  # their external accounts/secrets aren't provisioned yet, and a declared
+  # service without real secrets would fail the deploy health gate. Restore
+  # the two blocks (and the nginx /staging/social-bot/ route + depends_on)
+  # once options/staging/{twitter-service,social-bot} hold real credentials.
 
   # Single public entrypoint per env. Strips the /staging/{quoting,api,indexer,scheduler,mm-bot}
   # prefix before forwarding. depends_on is start-order only; nginx
@@ -268,7 +242,7 @@ services:
     volumes:
       - /opt/options/staging/nginx/:/etc/nginx/options/:ro
     command: ["nginx", "-c", "/etc/nginx/options/nginx.conf", "-g", "daemon off;"]
-    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, keeper, social-bot]
+    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, keeper]
     restart: unless-stopped
     networks: [net]
 

@@ -150,10 +150,15 @@ if CCTP_JSON=$(fetch cctp-relay 2>/dev/null); then
     exit 1
   fi
   umask 077
+  # Both networks get the key (mirroring [solana] below) — the relay's
+  # [sui].network is config-driven and may be mainnet while the env's
+  # NETWORK is testnet. No $RPC_LINE here: the env's sui-rpc override is a
+  # testnet endpoint, which would point a mainnet relay at the wrong chain;
+  # the relay falls back to the public fullnode for its configured network.
   cat > "$DIR/cctp-relay.toml" <<CCTPEOF
 [sui]
-$NETWORK = "$SUI_KEY"
-$RPC_LINE
+testnet = "$SUI_KEY"
+mainnet = "$SUI_KEY"
 
 [solana]
 devnet = "$SOLANA_KEY"

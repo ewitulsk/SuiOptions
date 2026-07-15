@@ -51,13 +51,6 @@
         "registryId": "0x13ab9d66e0558ad91f98031d9cd6dcbf4c6318f834b5427f253d8261947f9156",
         "deepCoinType": "0x839472bcaa05bda0b7b26c69d7acba462829047bdbdb67a00a1d3b876e72220e::deep::DEEP",
         "poolCreationFee": "500000000"
-      },
-      "sessionTokens": {
-        "packageId": "0xc309f25410966dc16f9a372d013becba553625aad1fff4364c0e9284183625d5",
-        "registryId": "0x0732001896636018ba207e1a1c95c92fcddb0369e8c392be4bd0d86093f9d90d",
-        "upgradeCapId": "0x0d7b3cc947378671922ff56bb0bdc321ac4dbcb838a463cbe5c6a02cfd517570",
-        "publishDigest": "DQwWfXLZxyZGiLwBYkwpErKDYE1q7CZGpFuSTpCFowm5",
-        "deployedAt": "2026-06-19T06:36:07.463499405+00:00"
       }
     },
     "token_info": {
@@ -139,12 +132,12 @@
         "deepCoinType": "0x839472bcaa05bda0b7b26c69d7acba462829047bdbdb67a00a1d3b876e72220e::deep::DEEP",
         "poolCreationFee": "500000000"
       },
-      "sessionTokens": {
-        "packageId": "0x883a8a7440f5f963cc64577dd0bb8c8bb435171552f22c91abc669a9659e0cea",
-        "registryId": "0xb68ab5e63f4a55805f86ad65d9b6ade1d024f77bc0a1b37b6fcd9d2b1945d7bf",
-        "upgradeCapId": "0x2782ee6d728663f3872d101de9ce838365a980ce96cc46b77239193f41ed1707",
-        "publishDigest": "HkVMSWaYCNrj79bhJviWVpDecFRfzcQ4cQpDkDyNruTf",
-        "deployedAt": "2026-06-29T15:57:25.248468726+00:00"
+      "cctpBridge": {
+        "packageId": "0x926a68c5fd70fb4a0bbd0253d0b35b25b7bb24965b78f2a717b69fbadff4c978",
+        "upgradeCapId": "0xb0945782ba0293b5b3ac5b5281a84bcb95c7d63fbd542b611743b47e807197c2",
+        "publishDigest": "9kNWPYkHUMCpxBh4t1cxf9vpQXPsTSnKne7PRJS5iGaS",
+        "deployedAt": "2026-07-15T07:09:32.704635+00:00",
+        "network": "mainnet"
       }
     },
     "token_info": {
