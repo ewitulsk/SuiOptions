@@ -1,0 +1,4 @@
+network = "testnet"
+package_id = "0xfd5947773c6841c0d021fecaedbfbf61516b016a99357bdf2151e6e59314c1fa"
+account_id = "0x7c7b3cb461f1938d7f3e9ea4f64c473a49ebd27954240b65aead0d3e12d76ed5"
+upgrade_cap = "0xfdb7a4c2df7239473fa68a529fa88df7290651ea50638adf13386936a2bfd8ed"
