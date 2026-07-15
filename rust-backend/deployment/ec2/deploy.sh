@@ -255,6 +255,11 @@ health_path_for() {
 health_attempts_for() {
   case "$1" in
     option-scheduler) echo 150 ;;  # ~5 min
+    # mm-bot's first boot against a freshly published package must CREATE its
+    # on-chain Account (submit + finality) before /health goes green — 60s is
+    # a near-miss on every contract redeploy (it rolled back the whole stack
+    # on 2026-07-15). Same window as the scheduler.
+    mm-bot)           echo 150 ;;  # ~5 min
     *)                echo 30 ;;   # ~60s
   esac
 }
