@@ -48,6 +48,8 @@ public struct Quote has copy, drop {
     protocol_id: vector<u8>,
     signer_id: ID,               // the QuoteSigner (was signer_account_id)
     collateral_source: ID,       // NEW: the object release() debits
+    release_package: address,    // NEW: package containing release()
+    release_module: String,      // NEW: module containing release()
     signer_token_recipient: address,
     bucket_id: ID,
     write_amount: u64,
@@ -57,9 +59,13 @@ public struct Quote has copy, drop {
 }
 ```
 
-This changes the BCS signing payload — every off-chain signer follows
-(§5). One signer key may serve many collateral sources (e.g. per-asset
-accounts); the MM binds them per quote.
+The full release routing — source object AND target package/module — is
+**inside the signed payload**. Executors build the release call straight
+from quote fields; nothing routes on unsigned hints, so no intermediary
+(including our own quoting service) can corrupt an MM's routing to
+sabotage their fills. This changes the BCS signing payload — every
+off-chain signer follows (§5). One signer key may serve many collateral
+sources (e.g. per-asset accounts); the MM binds them per quote.
 
 ### 2.3 The potato
 
@@ -183,20 +189,25 @@ public struct CollateralAccount has key {
 
 ## 5. Quote wire format + PTB composition
 
-Off-chain quote envelope (WS JSON) gains, next to the signature:
+The WS quote JSON mirrors the new signed fields (decimal strings /
+hex as per the existing conventions):
 
 ```json
-"collateral": {
-  "source": "0x<CollateralAccount object id>",
-  "target": "0x<pkg>::<module>",        // function is always `release`
-  "objectType": "0x<pkg>::<module>::CollateralAccount"
+"quote": {
+  …,
+  "collateral_source": "0x<CollateralAccount object id>",
+  "release_package": "0x<pkg>",
+  "release_module": "mm_collateral"
 }
 ```
 
-`collateral_source` joins the BCS payload (§2.2); the `target`/
-`objectType` are unsigned routing hints (a wrong hint just aborts the
-tx — it cannot move the wrong funds, because core pins the source id
-inside the signed quote).
+No unsigned routing envelope: the PTB builder targets
+`{release_package}::{release_module}::release<T>` directly from the
+verified quote, resolving only the source object's shared version via
+RPC. A quote whose routing is wrong (package doesn't exist, module has
+no conforming `release`, source mismatch) simply fails to execute — it
+can never move the wrong funds, and the MM signed the routing, so the
+failure is attributably theirs.
 
 The executor PTB for a wallet trade becomes:
 
@@ -239,32 +250,36 @@ passed to it. The sponsor risks gas alone, as today; a pathological
 with two wildcard calls rejected, a wildcard with the wrong function
 name / type-arity rejected.
 
-## 7. Off-chain balance tracking (the real architectural consequence)
+## 7. Quoting service: balance tracking removed entirely
 
 Today the quoting service tracks MM `available_balance` from core
-`AccountDeposit`/`AccountWithdraw` events via the indexer. Those events
-no longer exist, and each MM's deposit/withdraw events live under their
-own package id — un-indexable without per-MM registration.
+account events and nets in-memory reservations against it, rejecting
+quotes that would oversubscribe an MM. Under the abstraction this is
+conceptually unsound, not just operationally awkward: a collateral
+implementation need not have a readable balance at all (an LP-backed
+account may source liquidity at release time). Any tracking would only
+ever cover the simple account while implying coverage of everything.
 
-Decision: **the quoting service polls collateral accounts over RPC.**
+Decision: **remove balance tracking AND the reservation subsystem.**
 
-- At MM WS auth, the MM declares `collateral.source` (+ objectType);
-  the service records it against the session.
-- A polling task reads each registered account's `Balance<T>` dynamic
-  fields on an interval (and on-demand after each observed
-  `WriteExecuted` mentioning that source); reservations stay in-memory
-  exactly as today, netted against the polled balance.
-- Staleness posture is unchanged in kind: the service already operates
-  on possibly-stale balances with the on-chain revert as the safety
-  net; polling widens the window slightly. Keep the existing
-  reservation TTLs; surface poll age in the MM `AccountStateUpdate`
-  message.
+- The quoting service becomes pure routing + reputation — its stated
+  design identity. Quote validation shrinks to: signature vs the
+  registered signing key, expiry, nonce-unseen, bucket sanity, and the
+  new routing fields present.
+- Enforcement is where it always really was: the on-chain revert. The
+  revert-rate reputation system becomes the quality filter with teeth
+  (filter/deprioritize MMs whose fills revert); MMs self-manage
+  inventory since every revert costs them fill rate and standing.
+- WS protocol: `AccountStateUpdate`, `ReservationConfirmed`,
+  `ReservationReleased` messages and the reservation TTL eviction task
+  are deleted. The spec's oversubscription scenario (§9.2 Scenario 1)
+  mitigation becomes reputation-only — update the spec text.
 
 Indexer: drop the `accounts` balance materialization + account
 deposit/withdraw decoding; keep `SignerCreated`/`SigningKeyRotated`
 (renamed from AccountCreated). `WriteExecuted`'s new
 `collateral_source` field flows into the events payload for
-attribution.
+attribution and revert/fill accounting.
 
 ## 8. mm-bot: deploy, don't create
 
@@ -280,10 +295,14 @@ own collateral package":
   image ships the Move sources for this.
 - Startup: still `create_and_share` a `QuoteSigner` in core (or reuse);
   config now carries `collateral_package` + `collateral_account`.
-- Quote signing: include `collateral_source` in the BCS payload and the
-  `collateral` envelope block in WS quotes.
+- Quote signing: include `collateral_source` + `release_package` +
+  `release_module` in the BCS payload (and the mirrored WS quote
+  fields).
 - Funding: `deposit` into its own account (replaces core
   `account::deposit`); the balance-monitor's account checks follow.
+  With `AccountStateUpdate` gone (§7), the bot tracks its own available
+  funds locally — it is the owner; RPC-reading its own account is
+  its own concern, not protocol infrastructure.
 
 ## 9. Sequencing
 
@@ -314,8 +333,11 @@ separation already covers cross-deployment replay).
 - **Gas-station sponsors calls into unreviewed packages.** Gas-only
   risk (see §6); acceptable, same posture as sponsoring user-owned
   asset moves today.
-- **Balance staleness** moves from event-push to poll (§7); the
-  on-chain revert remains the backstop, reputation tracking unchanged.
+- **No pre-trade feasibility check** (§7): retail may occasionally be
+  routed a quote that reverts on execution. This was always possible
+  (the old check was optimistic); the compensations are reputation
+  filtering with revert-rate teeth and MM self-interest. Watch the
+  realized revert rate on staging before prod.
 - **Per-MM deployment friction** is deliberate: the package id is the
   MM's trust boundary and there is no shared custody object to attack
   or to audit for cross-MM isolation. The `deploy-collateral`
