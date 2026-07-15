@@ -280,24 +280,26 @@ jobs:
           DIGEST=$(jq -r ".[\"$ENV\"].package_info.publishDigest" \
             rust-backend/deployments.json)
 
+          # The lookup goes through the Sui GraphQL RPC (JSON-RPC is
+          # deactivated on public testnet fullnodes — see
+          # docs/sui-json-rpc-migration.md). A custom RPC_URL still overrides
+          # the *publish* step above, but this read always uses the public
+          # GraphQL endpoint for the network.
           case "$NETWORK" in
-            testnet) RPC="https://fullnode.testnet.sui.io:443" ;;
+            testnet) GRAPHQL="https://graphql.testnet.sui.io/graphql" ;;
+            mainnet) GRAPHQL="https://graphql.mainnet.sui.io/graphql" ;;
           esac
-          # A custom RPC overrides the network default for both publish + lookup.
-          if [ -n "$RPC_URL" ]; then RPC="$RPC_URL"; fi
 
           # Retry a few times — the RPC may lag behind the publish.
           for attempt in 1 2 3 4 5; do
-            RESULT=$(curl -sf "$RPC" \
+            RESULT=$(curl -sf "$GRAPHQL" \
               -H "Content-Type: application/json" \
               -d "{
-                \"jsonrpc\": \"2.0\",
-                \"id\": 1,
-                \"method\": \"sui_getTransactionBlock\",
-                \"params\": [\"$DIGEST\", {\"showEffects\": true}]
+                \"query\": \"query(\$d: String!) { transaction(digest: \$d) { effects { checkpoint { sequenceNumber } } } }\",
+                \"variables\": { \"d\": \"$DIGEST\" }
               }")
 
-            CHECKPOINT=$(echo "$RESULT" | jq -r '.result.checkpoint // empty')
+            CHECKPOINT=$(echo "$RESULT" | jq -r '.data.transaction.effects.checkpoint.sequenceNumber // empty')
             if [ -n "$CHECKPOINT" ]; then
               break
             fi
