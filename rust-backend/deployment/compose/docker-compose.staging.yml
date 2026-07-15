@@ -105,6 +105,10 @@ services:
       RUST_LOG: info,mm_bot=debug
     volumes:
       - /opt/options/staging/secrets:/run/secrets:ro
+      # Collateral routing state from the deploy bundle (committed by the
+      # redeploy-contract workflow's mm_collateral step). Directory mount —
+      # a single-file mount would orphan on tar's unlink+create extraction.
+      - /opt/options/staging/mm-bot:/run/mm-bot:ro
     depends_on: [quoting, token-info, api-service, oracle-service]
     restart: unless-stopped
     networks: [net]

@@ -5980,11 +5980,13 @@ name = "move-publish"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde",
  "shared-crypto",
  "sui-json-rpc-types",
  "sui-move-build",
  "sui-sdk",
  "sui-types",
+ "toml 0.8.23",
  "tracing",
 ]
 

@@ -28,6 +28,7 @@ use deployment_manager::network::Network;
 use deployment_manager::signer::Signer;
 use deployment_manager::Cli;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -98,6 +99,49 @@ async fn main() -> Result<()> {
         store.upsert(&env_key, record);
         store.save(&output_path)?;
         tracing::info!(path = %output_path.display(), env = %env_key, "cctpBridge recorded");
+        return Ok(());
+    }
+
+    // --deploy-mm-collateral publishes ONLY the mm_collateral template and
+    // writes mm-bot's state file — no deployments.json involvement (the ids
+    // are one MM's private routing, not protocol infrastructure; they reach
+    // the bot via the committed state file riding the deploy bundle).
+    if cli.deploy_mm_collateral {
+        let mm_path = cli.mm_collateral_contracts.canonicalize().with_context(|| {
+            format!(
+                "resolving mm-collateral path {}",
+                cli.mm_collateral_contracts.display()
+            )
+        })?;
+        let signer = Signer::from_secrets(&secrets, network).context("loading signer")?;
+        let client = SuiClientBuilder::default()
+            .build(&rpc_url)
+            .await
+            .with_context(|| format!("building Sui client for {network}"))?;
+        let dep = move_publish::collateral::deploy(
+            &client,
+            &signer.keypair,
+            signer.address,
+            &mm_path,
+            network.as_str(),
+            cli.gas_budget,
+        )
+        .await
+        .with_context(|| format!("publishing mm_collateral to {network}"))?;
+        let out = cli.collateral_out.clone().unwrap_or_else(|| {
+            PathBuf::from(format!(
+                "services/mm-bot/config/collateral.{}.toml",
+                network.as_str()
+            ))
+        });
+        move_publish::collateral::store(&out, &dep)?;
+        tracing::info!(
+            path = %out.display(),
+            package = %dep.package_id,
+            account = %dep.account_id,
+            env = %env_key,
+            "mm_collateral recorded"
+        );
         return Ok(());
     }
 

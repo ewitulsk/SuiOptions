@@ -12,13 +12,12 @@ signing_scheme     = "ed25519"
 # signed payload. When these are unset, the bot reads the state file the
 # deploy-collateral subcommand writes
 # (services/mm-bot/config/collateral.<network>.toml).
-# Explicit ids (not the state file): in the container WORKDIR is /app and the
-# default state path (services/mm-bot/config/collateral.testnet.toml) never
-# resolves there. Published 2026-07-15 with the staging mm-bot key against the
-# fresh options_core; RE-PUBLISH (mm-bot deploy-collateral) + update these on
-# every contract redeploy — mm_collateral deps on options_core by local path.
-collateral_package = "0xfd5947773c6841c0d021fecaedbfbf61516b016a99357bdf2151e6e59314c1fa"
-collateral_account = "0x7c7b3cb461f1938d7f3e9ea4f64c473a49ebd27954240b65aead0d3e12d76ed5"
+# Deliberately unset: the redeploy-contract workflow re-publishes
+# mm_collateral after every core publish and the bot reads the resulting
+# state file from the deploy-bundle mount (/run/mm-bot/collateral.testnet.toml
+# — see collateral::state_path_candidates). Pin these only to override.
+# collateral_package = "0x..."
+# collateral_account = "0x..."
 # release_module     = "mm_collateral"
 
 
