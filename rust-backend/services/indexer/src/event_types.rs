@@ -1,11 +1,14 @@
 //! Event-type strings + BCS dispatch.
 //!
 //! Each Move event we care about has a fully-qualified type string of the
-//! form `{package_id}::events::{StructName}`. The Sui ingestion framework
+//! form `{package_id}::events::{StructName}`, where the package id is one
+//! of the FOUR packages of the contracts tree: `options_core` (buckets /
+//! accounts / treasury), `auction` (the generic venue), `options_rfq` (the
+//! option-RFQ adapter) and `options_vault`. The Sui ingestion framework
 //! hands us the type as a string; we match against this table to decide
 //! whether (and how) to deserialize the event's BCS bytes.
 //!
-//! Move source: `contracts/sources/events.move`.
+//! Move source: `contracts/{core,auction,rfq,vault}/sources/events.move`.
 //!
 //! The struct layouts on the protocol-types side were defined to BCS-match
 //! the Move structs exactly (see `protocol_types::quote::tests::
@@ -18,23 +21,37 @@ use serde::Deserialize;
 
 use protocol_types::asset::AssetType;
 use protocol_types::events::{
-    AccountCreated, AccountDeposit, AccountWithdraw, BucketCleaned, BucketCreated,
-    BucketInvalidated, BucketRevalidated, ChainEvent, CollateralizedWrite, Exercised,
-    ExpiredOptionBurned, FeeUpdated, InstantWithdraw, PutBucketCleaned, PutBucketCreated,
-    PutBucketInvalidated, PutBucketRevalidated, PutCollateralizedWrite, PutExercised,
-    PutExpiredOptionBurned, PutRedeemed, PutRfqBid, PutRfqCreated, PutRfqExpiredUnsold,
-    PutRfqSettled, PutWriteExecuted, Redeemed, RfqBid, RfqCreated, RfqExpiredUnsold, RfqSettled,
-    SharesClaimed, SigningKeyRotated, SwapRfqBid, SwapRfqCreated, SwapRfqSettled, SwapRfqUnfilled,
+    AuctionBid, AuctionCreated, AuctionSettled,
+    AuctionUnfilled, BucketCleaned, BucketCreated, BucketInvalidated, BucketRevalidated,
+    ChainEvent, CollateralizedWrite, Exercised, ExpiredOptionBurned, FeeUpdated, InstantWithdraw,
+    PutBucketCleaned, PutBucketCreated, PutBucketInvalidated, PutBucketRevalidated,
+    PutCollateralizedWrite, PutExercised, PutExpiredOptionBurned, PutRedeemed, PutRfqCreated,
+    PutRfqExpiredUnsold, PutRfqSettled, PutWriteExecuted, Redeemed, RfqCreated, RfqExpiredUnsold,
+    RfqSettled, SharesClaimed, SignerCreated, SigningKeyRotated, SwapRfqSettled, SwapRfqUnfilled,
     TreasuryWithdrawn, VaultBucketSelected, VaultConfigUpdated, VaultCreated, VaultDeposit,
-    VaultDepositsPaused, VaultFeesCharged, VaultPositionRedeemed, VaultRoundFinalized,
-    WithdrawCompleted, WithdrawInitiated, WriteExecuted,
+    VaultDepositsPaused, VaultFeesCharged, VaultPositionRedeemed, VaultRfqSettled, VaultRfqUnsold,
+    VaultRoundFinalized, WithdrawCompleted, WithdrawInitiated, WriteExecuted,
 };
 use protocol_types::ids::{ObjectId, SuiAddress};
 
 const EVENTS_MODULE: &str = "events";
 
+/// The four published package ids the protocol's events resolve to.
+/// All required — `main.rs` fails at boot when token-info is missing one.
+#[derive(Debug, Clone, Copy)]
+pub struct PackageIds<'a> {
+    /// options_core.
+    pub core: &'a str,
+    /// Generic auction venue.
+    pub auction: &'a str,
+    /// options_rfq adapter.
+    pub rfq: &'a str,
+    /// options_vault.
+    pub vault: &'a str,
+}
+
 /// All the event type strings the indexer subscribes to, derived from the
-/// runtime `package_id`. Constructed once at boot.
+/// runtime package ids. Constructed once at boot.
 #[derive(Debug, Clone)]
 pub struct EventTypes {
     pub bucket_created: String,
@@ -45,21 +62,24 @@ pub struct EventTypes {
     pub bucket_cleaned: String,
     pub bucket_invalidated: String,
     pub bucket_revalidated: String,
-    pub account_created: String,
-    pub account_deposit: String,
-    pub account_withdraw: String,
+    pub signer_created: String,
     pub signing_key_rotated: String,
     pub fee_updated: String,
     pub treasury_withdrawn: String,
-    // Write-core / RFQ events (guide docs 01–02).
+    // Write-core events (guide docs 01–02).
     pub collateralized_write: String,
+    // Generic auction venue events (auction package).
+    pub auction_created: String,
+    pub auction_bid: String,
+    pub auction_settled: String,
+    pub auction_unfilled: String,
+    // Option-RFQ adapter events (options_rfq package).
     pub rfq_created: String,
-    pub rfq_bid: String,
     pub rfq_settled: String,
     pub rfq_expired_unsold: String,
-    // Proceeds-swap auction events (swap_auction.move).
-    pub swap_rfq_created: String,
-    pub swap_rfq_bid: String,
+    // Vault-coupled RFQ settles + proceeds-swap settles (options_vault).
+    pub vault_rfq_settled: String,
+    pub vault_rfq_unsold: String,
     pub swap_rfq_settled: String,
     pub swap_rfq_unfilled: String,
     // Vault events (guide doc 03).
@@ -71,10 +91,12 @@ pub struct EventTypes {
     pub instant_withdraw: String,
     pub vault_bucket_selected: String,
     pub vault_position_redeemed: String,
-    pub vault_proceeds_swapped: String,
     pub vault_fees_charged: String,
     pub vault_round_finalized: String,
     pub vault_config_updated: String,
+    /// Active-config snapshot at each finalize. Absent from the old
+    /// single-package table (the store already handled the variant).
+    pub vault_config_applied: String,
     pub vault_deposits_paused: String,
     // Cash-secured put events (mirror of the call/RFQ events above).
     pub put_bucket_created: String,
@@ -87,7 +109,6 @@ pub struct EventTypes {
     pub put_bucket_invalidated: String,
     pub put_bucket_revalidated: String,
     pub put_rfq_created: String,
-    pub put_rfq_bid: String,
     pub put_rfq_settled: String,
     pub put_rfq_expired_unsold: String,
     /// Prefix of DeepBook's generic `pool::PoolCreated<Base, Quote>` event
@@ -101,58 +122,61 @@ pub struct EventTypes {
 }
 
 impl EventTypes {
-    pub fn for_package(package_id: &str, deepbook_original_package_id: Option<&str>) -> Self {
-        let mk = |name: &str| format!("{package_id}::{EVENTS_MODULE}::{name}");
+    pub fn for_packages(pkgs: PackageIds<'_>, deepbook_original_package_id: Option<&str>) -> Self {
+        let core = |name: &str| format!("{}::{EVENTS_MODULE}::{name}", pkgs.core);
+        let auction = |name: &str| format!("{}::{EVENTS_MODULE}::{name}", pkgs.auction);
+        let rfq = |name: &str| format!("{}::{EVENTS_MODULE}::{name}", pkgs.rfq);
+        let vault = |name: &str| format!("{}::{EVENTS_MODULE}::{name}", pkgs.vault);
         Self {
-            bucket_created: mk("BucketCreated"),
-            write_executed: mk("WriteExecuted"),
-            exercised: mk("Exercised"),
-            redeemed: mk("Redeemed"),
-            expired_option_burned: mk("ExpiredOptionBurned"),
-            bucket_cleaned: mk("BucketCleaned"),
-            bucket_invalidated: mk("BucketInvalidated"),
-            bucket_revalidated: mk("BucketRevalidated"),
-            account_created: mk("AccountCreated"),
-            account_deposit: mk("AccountDeposit"),
-            account_withdraw: mk("AccountWithdraw"),
-            signing_key_rotated: mk("SigningKeyRotated"),
-            fee_updated: mk("FeeUpdated"),
-            treasury_withdrawn: mk("TreasuryWithdrawn"),
-            collateralized_write: mk("CollateralizedWrite"),
-            rfq_created: mk("RfqCreated"),
-            rfq_bid: mk("RfqBid"),
-            rfq_settled: mk("RfqSettled"),
-            rfq_expired_unsold: mk("RfqExpiredUnsold"),
-            swap_rfq_created: mk("SwapRfqCreated"),
-            swap_rfq_bid: mk("SwapRfqBid"),
-            swap_rfq_settled: mk("SwapRfqSettled"),
-            swap_rfq_unfilled: mk("SwapRfqUnfilled"),
-            vault_created: mk("VaultCreated"),
-            vault_deposit: mk("VaultDeposit"),
-            shares_claimed: mk("SharesClaimed"),
-            withdraw_initiated: mk("WithdrawInitiated"),
-            withdraw_completed: mk("WithdrawCompleted"),
-            instant_withdraw: mk("InstantWithdraw"),
-            vault_bucket_selected: mk("VaultBucketSelected"),
-            vault_position_redeemed: mk("VaultPositionRedeemed"),
-            vault_proceeds_swapped: mk("VaultProceedsSwapped"),
-            vault_fees_charged: mk("VaultFeesCharged"),
-            vault_round_finalized: mk("VaultRoundFinalized"),
-            vault_config_updated: mk("VaultConfigUpdated"),
-            vault_deposits_paused: mk("VaultDepositsPaused"),
-            put_bucket_created: mk("PutBucketCreated"),
-            put_write_executed: mk("PutWriteExecuted"),
-            put_collateralized_write: mk("PutCollateralizedWrite"),
-            put_exercised: mk("PutExercised"),
-            put_redeemed: mk("PutRedeemed"),
-            put_expired_option_burned: mk("PutExpiredOptionBurned"),
-            put_bucket_cleaned: mk("PutBucketCleaned"),
-            put_bucket_invalidated: mk("PutBucketInvalidated"),
-            put_bucket_revalidated: mk("PutBucketRevalidated"),
-            put_rfq_created: mk("PutRfqCreated"),
-            put_rfq_bid: mk("PutRfqBid"),
-            put_rfq_settled: mk("PutRfqSettled"),
-            put_rfq_expired_unsold: mk("PutRfqExpiredUnsold"),
+            bucket_created: core("BucketCreated"),
+            write_executed: core("WriteExecuted"),
+            exercised: core("Exercised"),
+            redeemed: core("Redeemed"),
+            expired_option_burned: core("ExpiredOptionBurned"),
+            bucket_cleaned: core("BucketCleaned"),
+            bucket_invalidated: core("BucketInvalidated"),
+            bucket_revalidated: core("BucketRevalidated"),
+            signer_created: core("SignerCreated"),
+            signing_key_rotated: core("SigningKeyRotated"),
+            fee_updated: core("FeeUpdated"),
+            treasury_withdrawn: core("TreasuryWithdrawn"),
+            collateralized_write: core("CollateralizedWrite"),
+            auction_created: auction("AuctionCreated"),
+            auction_bid: auction("AuctionBid"),
+            auction_settled: auction("AuctionSettled"),
+            auction_unfilled: auction("AuctionUnfilled"),
+            rfq_created: rfq("RfqCreated"),
+            rfq_settled: rfq("RfqSettled"),
+            rfq_expired_unsold: rfq("RfqExpiredUnsold"),
+            vault_rfq_settled: vault("VaultRfqSettled"),
+            vault_rfq_unsold: vault("VaultRfqUnsold"),
+            swap_rfq_settled: vault("SwapRfqSettled"),
+            swap_rfq_unfilled: vault("SwapRfqUnfilled"),
+            vault_created: vault("VaultCreated"),
+            vault_deposit: vault("VaultDeposit"),
+            shares_claimed: vault("SharesClaimed"),
+            withdraw_initiated: vault("WithdrawInitiated"),
+            withdraw_completed: vault("WithdrawCompleted"),
+            instant_withdraw: vault("InstantWithdraw"),
+            vault_bucket_selected: vault("VaultBucketSelected"),
+            vault_position_redeemed: vault("VaultPositionRedeemed"),
+            vault_fees_charged: vault("VaultFeesCharged"),
+            vault_round_finalized: vault("VaultRoundFinalized"),
+            vault_config_updated: vault("VaultConfigUpdated"),
+            vault_config_applied: vault("VaultConfigApplied"),
+            vault_deposits_paused: vault("VaultDepositsPaused"),
+            put_bucket_created: core("PutBucketCreated"),
+            put_write_executed: core("PutWriteExecuted"),
+            put_collateralized_write: core("PutCollateralizedWrite"),
+            put_exercised: core("PutExercised"),
+            put_redeemed: core("PutRedeemed"),
+            put_expired_option_burned: core("PutExpiredOptionBurned"),
+            put_bucket_cleaned: core("PutBucketCleaned"),
+            put_bucket_invalidated: core("PutBucketInvalidated"),
+            put_bucket_revalidated: core("PutBucketRevalidated"),
+            put_rfq_created: rfq("PutRfqCreated"),
+            put_rfq_settled: rfq("PutRfqSettled"),
+            put_rfq_expired_unsold: rfq("PutRfqExpiredUnsold"),
             deepbook_pool_created_prefix: deepbook_original_package_id
                 .map(|pkg| format!("{pkg}::pool::PoolCreated<")),
             deepbook_order_filled: deepbook_original_package_id
@@ -160,7 +184,7 @@ impl EventTypes {
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 48] {
+    pub fn all_strings(&self) -> [&str; 49] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -170,19 +194,20 @@ impl EventTypes {
             &self.bucket_cleaned,
             &self.bucket_invalidated,
             &self.bucket_revalidated,
-            &self.account_created,
-            &self.account_deposit,
-            &self.account_withdraw,
+            &self.signer_created,
             &self.signing_key_rotated,
             &self.fee_updated,
             &self.treasury_withdrawn,
             &self.collateralized_write,
+            &self.auction_created,
+            &self.auction_bid,
+            &self.auction_settled,
+            &self.auction_unfilled,
             &self.rfq_created,
-            &self.rfq_bid,
             &self.rfq_settled,
             &self.rfq_expired_unsold,
-            &self.swap_rfq_created,
-            &self.swap_rfq_bid,
+            &self.vault_rfq_settled,
+            &self.vault_rfq_unsold,
             &self.swap_rfq_settled,
             &self.swap_rfq_unfilled,
             &self.vault_created,
@@ -196,6 +221,7 @@ impl EventTypes {
             &self.vault_fees_charged,
             &self.vault_round_finalized,
             &self.vault_config_updated,
+            &self.vault_config_applied,
             &self.vault_deposits_paused,
             &self.put_bucket_created,
             &self.put_write_executed,
@@ -207,7 +233,6 @@ impl EventTypes {
             &self.put_bucket_invalidated,
             &self.put_bucket_revalidated,
             &self.put_rfq_created,
-            &self.put_rfq_bid,
             &self.put_rfq_settled,
             &self.put_rfq_expired_unsold,
         ]
@@ -244,12 +269,8 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(BucketInvalidated, BucketInvalidated)
     } else if type_str == types.bucket_revalidated {
         decode!(BucketRevalidated, BucketRevalidated)
-    } else if type_str == types.account_created {
-        decode!(AccountCreated, AccountCreated)
-    } else if type_str == types.account_deposit {
-        decode!(AccountDeposit, AccountDeposit)
-    } else if type_str == types.account_withdraw {
-        decode!(AccountWithdraw, AccountWithdraw)
+    } else if type_str == types.signer_created {
+        decode!(SignerCreated, SignerCreated)
     } else if type_str == types.signing_key_rotated {
         decode!(SigningKeyRotated, SigningKeyRotated)
     } else if type_str == types.fee_updated {
@@ -258,18 +279,24 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(TreasuryWithdrawn, TreasuryWithdrawn)
     } else if type_str == types.collateralized_write {
         decode!(CollateralizedWrite, CollateralizedWrite)
+    } else if type_str == types.auction_created {
+        decode!(AuctionCreated, AuctionCreated)
+    } else if type_str == types.auction_bid {
+        decode!(AuctionBid, AuctionBid)
+    } else if type_str == types.auction_settled {
+        decode!(AuctionSettled, AuctionSettled)
+    } else if type_str == types.auction_unfilled {
+        decode!(AuctionUnfilled, AuctionUnfilled)
     } else if type_str == types.rfq_created {
         decode!(RfqCreated, RfqCreated)
-    } else if type_str == types.rfq_bid {
-        decode!(RfqBid, RfqBid)
     } else if type_str == types.rfq_settled {
         decode!(RfqSettled, RfqSettled)
     } else if type_str == types.rfq_expired_unsold {
         decode!(RfqExpiredUnsold, RfqExpiredUnsold)
-    } else if type_str == types.swap_rfq_created {
-        decode!(SwapRfqCreated, SwapRfqCreated)
-    } else if type_str == types.swap_rfq_bid {
-        decode!(SwapRfqBid, SwapRfqBid)
+    } else if type_str == types.vault_rfq_settled {
+        decode!(VaultRfqSettled, VaultRfqSettled)
+    } else if type_str == types.vault_rfq_unsold {
+        decode!(VaultRfqUnsold, VaultRfqUnsold)
     } else if type_str == types.swap_rfq_settled {
         decode!(SwapRfqSettled, SwapRfqSettled)
     } else if type_str == types.swap_rfq_unfilled {
@@ -296,6 +323,8 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(VaultRoundFinalized, VaultRoundFinalized)
     } else if type_str == types.vault_config_updated {
         decode!(VaultConfigUpdated, VaultConfigUpdated)
+    } else if type_str == types.vault_config_applied {
+        decode!(VaultConfigApplied, protocol_types::events::VaultConfigApplied)
     } else if type_str == types.vault_deposits_paused {
         decode!(VaultDepositsPaused, VaultDepositsPaused)
     } else if type_str == types.put_bucket_created {
@@ -318,8 +347,6 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(PutBucketRevalidated, PutBucketRevalidated)
     } else if type_str == types.put_rfq_created {
         decode!(PutRfqCreated, PutRfqCreated)
-    } else if type_str == types.put_rfq_bid {
-        decode!(PutRfqBid, PutRfqBid)
     } else if type_str == types.put_rfq_settled {
         decode!(PutRfqSettled, PutRfqSettled)
     } else if type_str == types.put_rfq_expired_unsold {
@@ -520,19 +547,41 @@ mod tests {
     use protocol_types::ids::{ObjectId, SuiAddress};
 
     const PKG: &str = "0x9584b7c2890c52fc0f4c678cd96a219df8081dfa04d78428bf6c29213fb3f090";
+    const AUCTION_PKG: &str = "0xa1";
+    const RFQ_PKG: &str = "0xf1";
+    const VAULT_PKG: &str = "0xe1";
     const DEEPBOOK_ORIG: &str =
         "0xfb28c4cbc6865bd1c897d26aecbe1f8792d1509a20ffec692c800660cbec6982";
 
+    fn pkgs() -> PackageIds<'static> {
+        PackageIds { core: PKG, auction: AUCTION_PKG, rfq: RFQ_PKG, vault: VAULT_PKG }
+    }
+
     fn types() -> EventTypes {
-        EventTypes::for_package(PKG, Some(DEEPBOOK_ORIG))
+        EventTypes::for_packages(pkgs(), Some(DEEPBOOK_ORIG))
     }
 
     #[test]
-    fn type_strings_match_move_module_path() {
+    fn type_strings_match_move_module_paths_per_package() {
         let t = types();
         assert_eq!(t.bucket_created, format!("{PKG}::events::BucketCreated"));
         assert_eq!(t.write_executed, format!("{PKG}::events::WriteExecuted"));
-        assert_eq!(t.account_deposit, format!("{PKG}::events::AccountDeposit"));
+        assert_eq!(t.signer_created, format!("{PKG}::events::SignerCreated"));
+        assert_eq!(
+            t.auction_created,
+            format!("{AUCTION_PKG}::events::AuctionCreated")
+        );
+        assert_eq!(t.rfq_created, format!("{RFQ_PKG}::events::RfqCreated"));
+        assert_eq!(t.put_rfq_settled, format!("{RFQ_PKG}::events::PutRfqSettled"));
+        assert_eq!(t.vault_created, format!("{VAULT_PKG}::events::VaultCreated"));
+        assert_eq!(
+            t.vault_rfq_settled,
+            format!("{VAULT_PKG}::events::VaultRfqSettled")
+        );
+        assert_eq!(
+            t.swap_rfq_settled,
+            format!("{VAULT_PKG}::events::SwapRfqSettled")
+        );
     }
 
     #[test]
@@ -560,7 +609,8 @@ mod tests {
         let t = types();
         let evt = WriteExecuted {
             bucket_id: ObjectId::new([0x11; 32]),
-            signer_account_id: ObjectId::new([0x22; 32]),
+            signer_id: ObjectId::new([0x22; 32]),
+            collateral_source: ObjectId::new([0x23; 32]),
             signer_token_recipient: SuiAddress::new([0x33; 32]),
             executor: SuiAddress::new([0x44; 32]),
             position_id: ObjectId::new([0xaa; 32]),
@@ -583,22 +633,67 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_decodes_auction_created() {
+        let t = types();
+        let evt = AuctionCreated {
+            auction_id: ObjectId::new([0xaa; 32]),
+            origin: ObjectId::new([0xf0; 32]),
+            escrow_type: AssetType::new("9b::tbtc::TBTC"),
+            bid_type: AssetType::new("9b::tusdc::TUSDC"),
+            amount: 250_000_000,
+            reserve_bid: 47_619_000,
+            deadline_ms: 1_700_000_900_000,
+            max_deadline_ms: 1_700_001_500_000,
+            min_increment_bps: 100,
+            coupled: true,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        match dispatch(&t, &t.auction_created, &bytes).unwrap() {
+            Some(ChainEvent::AuctionCreated(decoded)) => assert_eq!(decoded, evt),
+            other => panic!("expected AuctionCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn dispatch_decodes_rfq_created() {
         let t = types();
         let evt = RfqCreated {
             rfq_id: ObjectId::new([0xaa; 32]),
+            auction_id: ObjectId::new([0xac; 32]),
             bucket_id: ObjectId::new([0xb1; 32]),
             origin: ObjectId::new([0xf0; 32]),
             amount: 250_000_000,
             reserve_premium: 47_619_000,
-            deadline_ms: 1_700_000_900_000,
-            max_deadline_ms: 1_700_001_500_000,
-            min_increment_bps: 100,
         };
         let bytes = bcs::to_bytes(&evt).unwrap();
         match dispatch(&t, &t.rfq_created, &bytes).unwrap() {
             Some(ChainEvent::RfqCreated(decoded)) => assert_eq!(decoded, evt),
             other => panic!("expected RfqCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_vault_rfq_settled() {
+        let t = types();
+        let evt = VaultRfqSettled {
+            auction_id: ObjectId::new([0xac; 32]),
+            bucket_id: ObjectId::new([0xb1; 32]),
+            vault_id: ObjectId::new([0xf0; 32]),
+            round: 3,
+            winner: SuiAddress::new([0x01; 32]),
+            call_recipient: SuiAddress::new([0x02; 32]),
+            position_id: ObjectId::new([0x99; 32]),
+            amount: 250_000_000,
+            gross_premium: 51_000_000,
+            fee: 510_000,
+            net_premium: 50_490_000,
+            range_start: 0,
+            range_end: 250_000_000,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        match dispatch(&t, &t.vault_rfq_settled, &bytes).unwrap() {
+            Some(ChainEvent::VaultRfqSettled(decoded)) => assert_eq!(decoded, evt),
+            other => panic!("expected VaultRfqSettled, got {other:?}"),
         }
     }
 
@@ -690,7 +785,7 @@ mod tests {
             .unwrap()
             .is_none());
         // DeepBook unconfigured (devnet) → always None.
-        let no_db = EventTypes::for_package(PKG, None);
+        let no_db = EventTypes::for_packages(pkgs(), None);
         let real = format!("{DEEPBOOK_ORIG}::pool::PoolCreated<0x1::a::A, 0x2::b::B>");
         assert!(parse_deepbook_pool_created(&no_db, &real, &[1])
             .unwrap()

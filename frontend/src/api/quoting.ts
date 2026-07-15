@@ -10,7 +10,14 @@ export type Side = "writer" | "trader";
 export type Quote = {
   /** Hex-encoded protocol domain separator. */
   protocol_id: string;
-  signer_account_id: string;
+  /** The MM's `QuoteSigner` object (was `signer_account_id`). */
+  signer_id: string;
+  /** Collateral routing — signed fields, passed through to `new_quote`
+   *  verbatim. `release()` debits `collateral_source`; the call target is
+   *  `{release_package}::{release_module}::release<T>`. */
+  collateral_source: string;
+  release_package: string;
+  release_module: string;
   signer_token_recipient: string;
   bucket_id: string;
   /** u64 raw smallest-units of the underlying. */

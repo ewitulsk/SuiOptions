@@ -2,28 +2,28 @@
 //!
 //! Two layers here:
 //!
-//! - Simple Move calls (admin operations, account create) use the high-level
-//!   `client.transaction_builder().move_call(...)` API. Everything's a
-//!   primitive or an object id, so JSON-encoded args work fine. See
-//!   [`admin`] and [`account`].
+//! - Simple Move calls (admin operations, quote-signer create) use the
+//!   high-level `client.transaction_builder().move_call(...)` API.
+//!   Everything's a primitive or an object id, so JSON-encoded args work
+//!   fine. See [`admin`] and [`signer`].
 //!
 //! - `execute_write` needs to splice a fresh `SignedQuote` value (built from
-//!   `quote::new_quote` + `quote::new_signed_quote`), split a coin from gas,
-//!   call `coin::zero<S>` for the empty side, and pass a `FlowKind` enum —
-//!   none of that fits the high-level builder. We drop down to
-//!   `ProgrammableTransactionBuilder` for that one. See [`execute_write`].
+//!   `quote::new_quote` + `quote::new_signed_quote`), mint the potato via
+//!   `request_*_flow`, route the MM-specified `release` call, and consume
+//!   both in `execute_*_flow` — none of that fits the high-level builder. We
+//!   drop down to `ProgrammableTransactionBuilder` for that one. See
+//!   [`execute_write`].
 
-pub mod account;
 pub mod admin;
+pub mod auction;
 pub mod coin_pkg;
 pub mod deepbook;
 pub mod execute_write;
 pub mod execute_write_put;
+pub mod mm_collateral;
 pub mod pyth_update;
-pub mod rfq;
-pub mod rfq_put;
+pub mod signer;
 pub mod sponsor;
-pub mod swap_auction;
 pub mod template;
 pub mod test_tokens;
 pub mod vault;
@@ -39,9 +39,10 @@ use sui_types::base_types::ObjectID;
 use sui_types::object::Owner;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{
-    ObjectArg, SharedObjectMutability, Transaction, TransactionData,
+    Argument, ObjectArg, SharedObjectMutability, Transaction, TransactionData,
 };
 use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
+use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION};
 use tracing::{debug, trace};
 
 use sui_sdk::SuiClient;
@@ -82,6 +83,15 @@ pub async fn shared_object_arg(
         }),
         other => Err(anyhow!("object {id} is not shared: {:?}", other)),
     }
+}
+
+/// Immutable Clock argument, shared by every deadline-aware builder.
+pub(crate) fn clock_arg(pt: &mut ProgrammableTransactionBuilder) -> Result<Argument> {
+    Ok(pt.obj(ObjectArg::SharedObject {
+        id: SUI_CLOCK_OBJECT_ID,
+        initial_shared_version: SUI_CLOCK_OBJECT_SHARED_VERSION,
+        mutability: SharedObjectMutability::Immutable,
+    })?)
 }
 
 /// Gas-select, sign, submit, and assert success for a finished PTB. Shared

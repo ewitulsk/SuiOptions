@@ -54,7 +54,22 @@ async fn main() -> Result<()> {
         .with_context(|| {
             format!("fetching package_id from token-info at {}", cfg.token_info_url)
         })?;
-    let package_id = snapshot.package_info.package_id.clone();
+    let core_package_id = snapshot.package_info.package_id.clone();
+    // Four-package layout: the auction / options_rfq / options_vault ids are
+    // required — a deployment record missing one predates the split and can't
+    // be indexed, so fail at boot rather than silently dropping their events.
+    let auction_package_id = snapshot
+        .auction()
+        .map(|p| p.package_id.clone())
+        .ok_or_else(|| anyhow::anyhow!("token-info package_info is missing the auction package id"))?;
+    let rfq_package_id = snapshot
+        .rfq()
+        .map(|p| p.package_id.clone())
+        .ok_or_else(|| anyhow::anyhow!("token-info package_info is missing the rfq package id"))?;
+    let vault_package_id = snapshot
+        .vault()
+        .map(|p| p.package_id.clone())
+        .ok_or_else(|| anyhow::anyhow!("token-info package_info is missing the vault package id"))?;
     // DeepBook PoolCreated events resolve to the ORIGINAL package id (SO-152).
     // Absent on networks without a DeepBook deployment — ingestion of pool
     // events is simply off there.
@@ -63,7 +78,10 @@ async fn main() -> Result<()> {
         .map(|d| d.original_package_id.clone());
     info!(
         network = %cfg.network,
-        package_id = %package_id,
+        core_package_id = %core_package_id,
+        auction_package_id = %auction_package_id,
+        rfq_package_id = %rfq_package_id,
+        vault_package_id = %vault_package_id,
         deepbook_original = %deepbook_original.as_deref().unwrap_or("<none>"),
         token_info_url = %cfg.token_info_url,
         "resolved package ids from token-info"
@@ -186,7 +204,12 @@ async fn main() -> Result<()> {
     let worker = ProtocolEventWorker::new(
         Arc::clone(&store),
         repo.clone(),
-        &package_id,
+        indexer::event_types::PackageIds {
+            core: &core_package_id,
+            auction: &auction_package_id,
+            rfq: &rfq_package_id,
+            vault: &vault_package_id,
+        },
         deepbook_original.as_deref(),
         Arc::clone(&progress_state),
     );

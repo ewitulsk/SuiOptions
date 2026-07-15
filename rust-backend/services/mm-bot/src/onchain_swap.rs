@@ -1,16 +1,19 @@
 //! On-chain proceeds-swap bidder (vault-implementation-guide doc 05 §3.1).
 //!
 //! The inverse of [`crate::onchain_rfq`]: the vault sells its settlement
-//! proceeds for underlying through a `SwapAuction<U, S>`, and this loop is
-//! the buy side — it posts *underlying* and wins *settlement*. Higher
-//! underlying wins, so the auction is ascending in underlying exactly like
-//! the call RFQ is ascending in premium; only the coins are flipped.
+//! proceeds for underlying through a generic `Auction<S, U>` (settlement
+//! escrowed, underlying bids), and this loop is the buy side — it posts
+//! *underlying* and wins *settlement*. Higher underlying wins, so the
+//! auction is ascending in underlying exactly like the call RFQ is
+//! ascending in premium; only the coins are flipped.
 //!
 //! Self-contained discovery: there is no api-service endpoint for swap
-//! auctions, so the bot walks `SwapRfqCreated` events and reads each
-//! object (the same stateless pattern the keeper uses) — the object's
-//! generic params give the (U, S) pair, which the bot matches to a market
-//! it makes.
+//! auctions, so the bot walks the auction package's `AuctionCreated`
+//! events and reads each object (the same stateless pattern the keeper
+//! uses). A proceeds swap is recognized by its legs: coupled, escrow ==
+//! our settlement asset, bid != settlement (that excludes put RFQs, which
+//! are `Auction<S, S>`); the object's generic params then give the exact
+//! (S, U) pair, which the bot matches to a market it makes.
 //!
 //! Pricing: the bot values the escrowed settlement at the Pyth cross and
 //! will give at most `fair_underlying × (1 − bid_margin_bps)` for it; it
@@ -29,12 +32,15 @@ use serde_json::Value;
 use sui_json_rpc_types::{EventFilter, SuiObjectDataOptions, SuiParsedData};
 use sui_types::base_types::{MoveObjectType, ObjectID, ObjectType, SuiAddress};
 
+use protocol_types::asset::canonicalize_move_type;
 use pyth_client::{PriceCache, PriceFeedId};
 use sui_tx::sui_client::{Network, SuiClientWrapper};
-use sui_tx::tx::swap_auction::{bid, SwapBidParams};
+use sui_tx::tx::auction::{bid, AuctionBidParams, AuctionTypes};
 
 use api_service_client::ApiServiceClient;
-use crate::onchain_rfq::{decide_bid, AuctionView, BidderMarket, OnchainRfqConfig};
+use crate::onchain_rfq::{
+    decide_bid, parse_auction_view, AuctionView, BidderMarket, OnchainRfqConfig,
+};
 use crate::pricing::{compute_spot_from_cache, Staleness};
 
 const BPS_DENOM: u128 = 10_000;
@@ -56,7 +62,7 @@ pub struct OnchainSwapConfig {
     pub bidder: OnchainRfqConfig,
     /// Most the bot pays = `fair_underlying × (1 − bid_margin_bps/10⁴)`.
     pub bid_margin_bps: u64,
-    /// How far back to scan `SwapRfqCreated` events (swap auctions are
+    /// How far back to scan `AuctionCreated` events (swap auctions are
     /// short-lived; a day is generous).
     pub lookback_secs: u64,
 }
@@ -89,41 +95,6 @@ pub fn max_underlying_bid(amount_s: u64, spot_scaled: f64, bid_margin_bps: u64) 
 
 // ── chain reads ────────────────────────────────────────────────────────
 
-fn field<'a>(v: &'a Value, name: &str) -> Result<&'a Value> {
-    v.get(name).ok_or_else(|| anyhow!("missing field {name}"))
-}
-
-fn as_u64(v: &Value) -> Result<u64> {
-    match v {
-        Value::Number(n) => n.as_u64().ok_or_else(|| anyhow!("non-u64 {n}")),
-        Value::String(s) => s.parse().with_context(|| format!("parsing u64 {s:?}")),
-        other => Err(anyhow!("expected u64, got {other}")),
-    }
-}
-
-/// Parse a `SwapAuction`'s parsed-JSON fields into the shared
-/// [`AuctionView`] (mapping `amount_s`→amount, `reserve_underlying`→
-/// reserve, `bid_escrow`→best). RPC conventions: u64 as string, `Balance`
-/// unwrapped, `Option` null/inner.
-pub fn parse_swap_auction_view(fields: &Value) -> Result<AuctionView> {
-    let best_bidder = match field(fields, "best_bidder")? {
-        Value::Null => None,
-        Value::String(s) => Some(s.parse().with_context(|| format!("best_bidder {s:?}"))?),
-        other => return Err(anyhow!("unexpected best_bidder {other}")),
-    };
-    let escrow = as_u64(field(fields, "bid_escrow")?).context("field bid_escrow")?;
-    Ok(AuctionView {
-        amount: as_u64(field(fields, "amount_s")?).context("field amount_s")?,
-        reserve_premium: as_u64(field(fields, "reserve_underlying")?)
-            .context("field reserve_underlying")?,
-        deadline_ms: as_u64(field(fields, "deadline_ms")?).context("field deadline_ms")?,
-        min_increment_bps: as_u64(field(fields, "min_increment_bps")?)
-            .context("field min_increment_bps")?,
-        best_premium: best_bidder.is_some().then_some(escrow),
-        best_bidder,
-    })
-}
-
 /// One discovered open swap auction: its view plus the (U, S) coin types
 /// pulled from the object's generic params.
 struct OpenSwap {
@@ -133,8 +104,8 @@ struct OpenSwap {
     settlement_type: String,
 }
 
-/// Read a `SwapAuction` object: its view + the (U, S) type params. `None`
-/// if it no longer exists (settled mid-poll).
+/// Read a proceeds-swap `Auction<S, U>` object: its view + the (U, S)
+/// coin types. `None` if it no longer exists (settled mid-poll).
 async fn fetch_open_swap(
     client: &sui_sdk::SuiClient,
     swap_id: ObjectID,
@@ -150,14 +121,14 @@ async fn fetch_open_swap(
     let Some(data) = resp.data else {
         return Ok(None);
     };
-    let (underlying_type, settlement_type) = match &data.type_ {
+    let (settlement_type, underlying_type) = match &data.type_ {
         Some(ObjectType::Struct(tag)) => swap_type_params(tag)?,
         other => return Err(anyhow!("swap {swap_id} has unexpected type {other:?}")),
     };
     match data.content {
         Some(SuiParsedData::MoveObject(obj)) => Ok(Some(OpenSwap {
             swap_id,
-            view: parse_swap_auction_view(&obj.fields.to_json_value())?,
+            view: parse_auction_view(&obj.fields.to_json_value())?,
             underlying_type,
             settlement_type,
         })),
@@ -165,11 +136,12 @@ async fn fetch_open_swap(
     }
 }
 
-/// `(U, S)` coin-type strings from a `SwapAuction<U, S>` object type.
+/// `(S, U)` coin-type strings from a proceeds-swap `Auction<S, U>` object
+/// type (escrow = settlement, bids = underlying).
 fn swap_type_params(ty: &MoveObjectType) -> Result<(String, String)> {
     let params = ty.type_params();
     if params.len() != 2 {
-        return Err(anyhow!("SwapAuction expected 2 type params, got {}", params.len()));
+        return Err(anyhow!("Auction expected 2 type params, got {}", params.len()));
     }
     Ok((
         params[0].to_canonical_string(/* with_prefix */ true),
@@ -177,20 +149,52 @@ fn swap_type_params(ty: &MoveObjectType) -> Result<(String, String)> {
     ))
 }
 
-/// Walk `SwapRfqCreated` events newest-first down to `cutoff_ms`,
-/// collecting candidate swap ids (any vault — the bot filters by market
-/// after reading the object).
+/// A `TypeName` in event JSON: the inner ascii string, either bare or
+/// wrapped as `{"name": "..."}`. Chain TypeNames carry no `0x` prefix —
+/// compare canonically (move-type-normalization.md).
+fn type_name_str(v: &Value) -> Option<&str> {
+    match v {
+        Value::String(s) => Some(s),
+        Value::Object(m) => m.get("name").and_then(|n| n.as_str()),
+        _ => None,
+    }
+}
+
+/// Is this `AuctionCreated` event a vault proceeds swap for our
+/// settlement asset? Coupled, escrow == settlement, bid != settlement
+/// (a put RFQ escrows AND bids settlement; a call RFQ escrows
+/// underlying — neither matches).
+fn is_proceeds_swap_event(parsed: &Value, settlement_canonical: &str) -> bool {
+    if parsed.get("coupled").and_then(|v| v.as_bool()) != Some(true) {
+        return false;
+    }
+    let (Some(escrow), Some(bid)) = (
+        parsed.get("escrow_type").and_then(type_name_str),
+        parsed.get("bid_type").and_then(type_name_str),
+    ) else {
+        return false;
+    };
+    let escrow = canonicalize_move_type(escrow);
+    let bid = canonicalize_move_type(bid);
+    escrow == settlement_canonical && bid != settlement_canonical
+}
+
+/// Walk the auction package's `AuctionCreated` events newest-first down
+/// to `cutoff_ms`, collecting candidate proceeds-swap auctions (any vault
+/// — the bot filters by market after reading the object).
 async fn discover_swap_ids(
     client: &sui_sdk::SuiClient,
     package: ObjectID,
+    settlement_coin_type: &str,
     cutoff_ms: u64,
 ) -> Result<Vec<(ObjectID, String)>> {
     let filter = EventFilter::MoveEventType(StructTag {
         address: package.into(),
         module: Identifier::new("events").unwrap(),
-        name: Identifier::new("SwapRfqCreated").unwrap(),
+        name: Identifier::new("AuctionCreated").unwrap(),
         type_params: vec![],
     });
+    let settlement = canonicalize_move_type(settlement_coin_type);
     let mut ids = Vec::new();
     let mut cursor = None;
     'pages: loop {
@@ -198,19 +202,22 @@ async fn discover_swap_ids(
             .event_api()
             .query_events(filter.clone(), cursor, Some(100), true)
             .await
-            .context("querying SwapRfqCreated events")?;
+            .context("querying AuctionCreated events")?;
         for ev in &page.data {
             if ev.timestamp_ms.is_some_and(|t| t < cutoff_ms) {
                 break 'pages;
             }
-            if let Some(id) = ev.parsed_json.get("swap_id").and_then(|v| v.as_str()) {
+            if !is_proceeds_swap_event(&ev.parsed_json, &settlement) {
+                continue;
+            }
+            if let Some(id) = ev.parsed_json.get("auction_id").and_then(|v| v.as_str()) {
                 let origin = ev
                     .parsed_json
                     .get("origin")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string();
-                ids.push((id.parse().context("parsing swap_id")?, origin));
+                ids.push((id.parse().context("parsing auction_id")?, origin));
             }
         }
         if !page.has_next_page {
@@ -273,9 +280,10 @@ async fn tick(
 ) -> Result<()> {
     let now = now_ms();
     let cutoff = now.saturating_sub(p.cfg.lookback_secs.saturating_mul(1_000));
-    let candidates = discover_swap_ids(&wrap.client, p.package, cutoff).await?;
+    let candidates =
+        discover_swap_ids(&wrap.client, p.package, &p.settlement_coin_type, cutoff).await?;
     // Hard cutover: ignore proceeds-swaps from a paused (decommissioned)
-    // vault, keyed off the SwapRfqCreated `origin` (the vault id).
+    // vault, keyed off the AuctionCreated `origin` (the vault id).
     let paused = api
         .paused_vault_ids()
         .await
@@ -347,13 +355,18 @@ async fn tick(
             tracing::warn!(underlying, "no underlying coin large enough to fund the swap bid");
             continue;
         };
-        let params = SwapBidParams {
+        // A proceeds swap is `Auction<Settlement, Underlying>`: the vault's
+        // settlement escrowed, our underlying bid.
+        let params = AuctionBidParams {
             package: p.package,
-            underlying_type: &o.underlying_type,
-            settlement_type: &o.settlement_type,
-            swap_id: o.swap_id,
+            types: AuctionTypes {
+                escrow_type: &o.settlement_type,
+                bid_type: &o.underlying_type,
+            },
+            auction_id: o.swap_id,
             funding_coin: funding,
-            underlying,
+            amount: underlying,
+            token_recipient: our_address,
             gas_budget: p.cfg.bidder.gas_budget,
         };
         match bid(&wrap.client, &wrap.signer, &params).await {
@@ -365,8 +378,8 @@ async fn tick(
                 );
             }
             Err(e) => {
-                // Outbid between read and submit aborts with rfq_bid_too_low
-                // — replanned next poll, no alert.
+                // Outbid between read and submit aborts with auction
+                // bid_too_low — replanned next poll, no alert.
                 if crate::is_benign_bid_loss(&e) {
                     tracing::warn!(swap = %o.swap_id, underlying, error = %format!("{e:#}"), "swap bid failed (outbid)");
                 } else {
@@ -432,19 +445,50 @@ mod tests {
     }
 
     #[test]
-    fn parses_swap_auction_json() {
-        let v = parse_swap_auction_view(&json!({
-            "amount_s": "10030000",
-            "reserve_underlying": "208",
-            "deadline_ms": "400000",
-            "min_increment_bps": "500",
-            "best_bidder": null,
-            "bid_escrow": "0",
-        }))
-        .unwrap();
-        assert_eq!(v.amount, 10_030_000);
-        assert_eq!(v.reserve_premium, 208);
-        assert_eq!(v.best_premium, None);
+    fn recognizes_proceeds_swap_events() {
+        // Chain TypeNames carry no 0x prefix; ours are canonical — the
+        // comparison must bridge that (move-type-normalization.md).
+        let settlement = canonicalize_move_type("0xs::tusdc::TUSDC");
+        let swap = json!({
+            "auction_id": "0xaa",
+            "origin": "0xf0",
+            "escrow_type": {"name": "s::tusdc::TUSDC"},
+            "bid_type": {"name": "u::tbtc::TBTC"},
+            "coupled": true,
+        });
+        assert!(is_proceeds_swap_event(&swap, &settlement));
+
+        // A call RFQ slice escrows underlying — not a swap.
+        let call_rfq = json!({
+            "escrow_type": {"name": "u::tbtc::TBTC"},
+            "bid_type": {"name": "s::tusdc::TUSDC"},
+            "coupled": true,
+        });
+        assert!(!is_proceeds_swap_event(&call_rfq, &settlement));
+
+        // A put RFQ escrows AND bids settlement — not a swap.
+        let put_rfq = json!({
+            "escrow_type": {"name": "s::tusdc::TUSDC"},
+            "bid_type": {"name": "s::tusdc::TUSDC"},
+            "coupled": true,
+        });
+        assert!(!is_proceeds_swap_event(&put_rfq, &settlement));
+
+        // Uncoupled auctions are someone else's business.
+        let uncoupled = json!({
+            "escrow_type": {"name": "s::tusdc::TUSDC"},
+            "bid_type": {"name": "u::tbtc::TBTC"},
+            "coupled": false,
+        });
+        assert!(!is_proceeds_swap_event(&uncoupled, &settlement));
+
+        // TypeNames rendered as bare strings parse too.
+        let bare = json!({
+            "escrow_type": "s::tusdc::TUSDC",
+            "bid_type": "u::tbtc::TBTC",
+            "coupled": true,
+        });
+        assert!(is_proceeds_swap_event(&bare, &settlement));
     }
 
     #[test]

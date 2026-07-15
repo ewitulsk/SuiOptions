@@ -19,12 +19,12 @@ use sui_types::transaction::{Argument, Command};
 use tracing::info;
 
 use crate::sui_client::Signer;
-use crate::tx::rfq::clock_arg;
-use crate::tx::{owned_object_arg, shared_object_arg, submit_ptb};
+use crate::tx::{clock_arg, owned_object_arg, shared_object_arg, submit_ptb};
 
 /// Identity of one vault: its object id and the (U, S, VShare) triple its
 /// generic calls are instantiated with.
 pub struct VaultRefs<'a> {
+    /// The `options_vault` package id (from token-info `snapshot.vault()`).
     pub package: ObjectID,
     pub vault_id: ObjectID,
     pub underlying_type: &'a str,

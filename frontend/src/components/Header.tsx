@@ -15,8 +15,6 @@ import {
   setSponsorEnabled,
 } from "../state/sponsor";
 import { useAdminCap } from "../api/useAdminCap";
-import { useSession } from "../session/store";
-import { ConnectMenu, SessionMenu } from "./SessionMenu";
 import { ENV } from "../config";
 import { posthog } from "../lib/posthog";
 
@@ -208,7 +206,6 @@ export function Header() {
   const navigate = useNavigate();
   const { pathname } = useLocation();
   const account = useCurrentAccount();
-  const session = useSession();
   const [pickerOpen, setPickerOpen] = useState(false);
   const adminCap = useAdminCap(account?.address ?? null);
   const isAdmin = adminCap.data?.isAdmin ?? false;
@@ -358,10 +355,10 @@ export function Header() {
       <ThemeToggle />
       {account ? (
         <WalletMenu />
-      ) : session.phase === "active" ? (
-        <SessionMenu />
       ) : (
-        <ConnectMenu onSuiWallet={() => setPickerOpen(true)} />
+        <button className="header__connect" onClick={() => setPickerOpen(true)}>
+          Connect wallet
+        </button>
       )}
 
       {/* Single stable ConnectModal mount, controlled by `pickerOpen`.

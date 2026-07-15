@@ -1,11 +1,10 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::info;
 
-use quoting_service::{state, AppState, Cli, Config};
+use quoting_service::{AppState, Cli, Config};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,8 +22,6 @@ async fn main() -> Result<()> {
         cfg.max_inflight_rfqs_global,
         cfg.indexer_graphql_url.clone(),
     ));
-
-    state::spawn_reservation_evictor(Arc::clone(&app), Duration::from_millis(250));
 
     info!(addr = %cfg.bind_addr, "starting ws server");
     quoting_service::ws::serve(cfg.bind_addr, app, cfg).await

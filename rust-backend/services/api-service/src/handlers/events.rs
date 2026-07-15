@@ -2,8 +2,8 @@
 //!
 //! Sourced just-in-time from the indexer's `events(participant: wallet)` query.
 //! The indexer records a per-event address fan-out (the recipients of a write,
-//! the exerciser, the redeemer, and the account *owner* for deposits and
-//! withdraws), so that one query returns everything the feed needs. Each
+//! the exerciser, the redeemer), so that one query returns everything the
+//! feed needs. Each
 //! indexer event is then specialised to this wallet's perspective: a
 //! `WriteExecuted` is a "write" for the position recipient and a "buy" for the
 //! call-token recipient. `bucket_id` is joined to its bucket for
@@ -25,7 +25,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use protocol_types::asset::AssetType;
 use protocol_types::events::ChainEvent;
 use protocol_types::ids::{ObjectId, SuiAddress};
 
@@ -44,7 +43,7 @@ pub struct EventDto {
     pub ts_ms: i64,
     /// Pre-formatted ISO-8601 UTC — use directly as the UI's `ts`.
     pub ts_iso: String,
-    /// `EVENT_TYPE_META` key: position_opened | exercise | claim | deposit | withdraw.
+    /// `EVENT_TYPE_META` key: position_opened | exercise | claim.
     #[serde(rename = "type")]
     pub event_type: String,
     /// writer | trader | account.
@@ -71,14 +70,12 @@ pub struct EventsResponse {
     pub events: Vec<EventDto>,
 }
 
-/// Which coin's decimals/symbol scale a row's signed `value`. For
-/// write/exercise/claim it's read off the bucket; for deposit/withdraw it's
-/// the moved coin carried on the event itself.
+/// Which coin's decimals/symbol scale a row's signed `value` — read off the
+/// bucket for write/exercise/claim.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ValueAsset {
     BucketSettlement,
     BucketUnderlying,
-    Coin(AssetType),
 }
 
 /// One wallet-perspective activity row, before catalog/bucket enrichment.
@@ -146,26 +143,8 @@ fn rows_for(event: &ChainEvent, wallet: &SuiAddress) -> Vec<Row> {
             value_sign: 1,
             value_asset: ValueAsset::BucketSettlement,
         }),
-        // Deposits/withdraws matched this wallet via the account_owner
-        // participant role, so every returned one is attributable to it.
-        ChainEvent::AccountDeposit(d) => out.push(Row {
-            event_type: "deposit",
-            side: "account",
-            bucket_id: None,
-            underlying_amount: None,
-            value_amount: Some(d.amount),
-            value_sign: 1,
-            value_asset: ValueAsset::Coin(d.asset_type.clone()),
-        }),
-        ChainEvent::AccountWithdraw(w) => out.push(Row {
-            event_type: "withdraw",
-            side: "account",
-            bucket_id: None,
-            underlying_amount: None,
-            value_amount: Some(w.amount),
-            value_sign: -1,
-            value_asset: ValueAsset::Coin(w.asset_type.clone()),
-        }),
+        // Core account deposits/withdraws are gone (collateral custody lives
+        // in per-MM external packages the protocol indexer doesn't decode).
         _ => {}
     }
     out
@@ -247,7 +226,6 @@ fn enrich(
     let value_meta = match &row.value_asset {
         ValueAsset::BucketSettlement => settle_meta,
         ValueAsset::BucketUnderlying => asset_meta,
-        ValueAsset::Coin(t) => state.catalog.lookup(t.as_str()),
     };
     let (value_delta, value_unit) = match (row.value_amount, value_meta) {
         (Some(v), Some(m)) => (
@@ -279,7 +257,7 @@ fn enrich(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol_types::events::{AccountDeposit, WriteExecuted};
+    use protocol_types::events::WriteExecuted;
 
     #[test]
     fn write_executed_splits_into_writer_and_buyer_rows() {
@@ -288,7 +266,8 @@ mod tests {
         let buyer = SuiAddress::new([0x22; 32]);
         let we = ChainEvent::WriteExecuted(WriteExecuted {
             bucket_id: bucket,
-            signer_account_id: ObjectId::new([0x33; 32]),
+            signer_id: ObjectId::new([0x33; 32]),
+            collateral_source: ObjectId::new([0x34; 32]),
             signer_token_recipient: buyer,
             executor: writer,
             position_id: ObjectId::new([0x44; 32]),
@@ -322,22 +301,4 @@ mod tests {
         assert!(rows_for(&we, &SuiAddress::new([0x99; 32])).is_empty());
     }
 
-    #[test]
-    fn deposit_is_an_account_inflow_in_the_moved_coin() {
-        let owner = SuiAddress::new([0x11; 32]);
-        let ev = ChainEvent::AccountDeposit(AccountDeposit {
-            account_id: ObjectId::new([0x33; 32]),
-            asset_type: AssetType::new("USDC"),
-            amount: 1_000,
-        });
-        // The participant query already scoped this to `owner`, so it always
-        // produces a row regardless of the wallet passed.
-        let rows = rows_for(&ev, &owner);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].event_type, "deposit");
-        assert_eq!(rows[0].side, "account");
-        assert_eq!(rows[0].value_sign, 1);
-        assert_eq!(rows[0].value_asset, ValueAsset::Coin(AssetType::new("USDC")));
-        assert_eq!(rows[0].bucket_id, None);
-    }
 }

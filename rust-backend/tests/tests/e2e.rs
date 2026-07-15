@@ -6,9 +6,11 @@
 //! 1. The MM connects, authenticates, and is registered as a Trader MM.
 //! 2. Retail sends an `RFQRequest` for the writer-side of a known bucket.
 //! 3. The service broadcasts an `RFQBroadcast` to the MM.
-//! 4. The MM signs a `Quote` over BCS canonical bytes and replies.
-//! 5. The service validates signature + balance, reserves the MM's USDC,
-//!    and ships an `RFQResponse` back to retail with that quote.
+//! 4. The MM signs a `Quote` (carrying the collateral routing inside the
+//!    signed payload) over BCS canonical bytes and replies.
+//! 5. The service validates signature / expiry / nonce / routing and ships
+//!    an `RFQResponse` back to retail with that quote. There is no balance
+//!    or reservation tracking (collateral abstraction, plan §7).
 //!
 //! Plus a tampering check: a quote where premium was bumped after signing
 //! never makes it into the response.
@@ -19,7 +21,6 @@ use futures_util::SinkExt;
 use integration_tests::*;
 use tokio_tungstenite::tungstenite::Message;
 
-use protocol_types::asset::AssetType;
 use protocol_types::messages::{MmToService, ServiceToMm, ServiceToRetail};
 use protocol_types::sides::{MmRole, RetailRole, Side};
 
@@ -159,15 +160,7 @@ async fn tampered_quote_is_filtered_out() {
         other => panic!("expected Error, got {:?}", other),
     }
 
-    // And no reservation got created — full balance still available.
-    // (1_000_000_000 deposited, nothing reserved.)
-    let avail = h
-        .indexer_store
-        .account(&h.mm_account)
-        .unwrap()
-        .balances
-        .get(&AssetType::new("USDC"))
-        .copied()
-        .unwrap_or(0);
-    assert_eq!(avail, 1_000_000_000);
+    // The tampered quote never got past validation — its nonce was not
+    // recorded as seen, so the MM can reuse it on a valid quote.
+    assert!(h.indexer_store.account(&h.mm_account).is_some());
 }

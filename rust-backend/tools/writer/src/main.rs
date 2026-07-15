@@ -32,7 +32,7 @@ use protocol_types::sides::{RetailRole, Side};
 
 use token_info_client::TokenInfoClient;
 use sui_tx::sui_client::SuiClientWrapper;
-use sui_tx::tx::execute_write::{execute_writer_flow, ExecuteWriteParams};
+use sui_tx::tx::execute_write::{execute_writer_flow, ExecuteWriteParams, QuoteRouting};
 use sui_tx::tx::execute_write_put::{execute_put_writer_flow, ExecutePutWriterParams};
 use sui_tx::ws_client;
 
@@ -132,9 +132,12 @@ async fn main() -> Result<()> {
     );
 
     // -- Execute write ----------------------------------------------------
-    let mm_account_id = sui_object_id_from_pt(best.mm_id)?;
-    let bucket_id_bytes: [u8; 32] = *best.quote.bucket_id.as_bytes();
-    let signer_account_id_bytes: [u8; 32] = *best.quote.signer_account_id.as_bytes();
+    // The collateral routing is read straight off the SIGNED quote — the
+    // PTB targets `{release_package}::{release_module}::release` directly.
+    let quote_signer_id = sui_object_id_from_pt(best.quote.signer_id)?;
+    let collateral_account_id = sui_object_id_from_pt(best.quote.collateral_source)?;
+    let release_package =
+        ObjectID::from_str(&best.quote.release_package.to_hex()).context("release_package")?;
     let signer_token_recipient =
         sui_address_from_pt(best.quote.signer_token_recipient)?;
 
@@ -155,19 +158,20 @@ async fn main() -> Result<()> {
                 bucket_id: cli.bucket,
                 protocol_config_id: protocol_config,
                 treasury_id: treasury,
-                mm_account_id,
+                routing: QuoteRouting {
+                    quote_signer_id,
+                    collateral_account_id,
+                    release_package,
+                    release_module: &best.quote.release_module,
+                },
                 protocol_id: best.quote.protocol_id.clone(),
-                signer_account_id_bytes,
                 signer_token_recipient,
-                bucket_id_bytes,
                 write_amount: best.quote.write_amount,
                 premium: best.quote.premium,
                 valid_until_ms: best.quote.valid_until_ms,
                 nonce: best.quote.nonce,
                 signature: best.signature.clone(),
                 position_recipient: writer_addr,
-                // Writer flow requires signer_token_recipient == call_token_recipient.
-                call_token_recipient: signer_token_recipient,
                 gas_budget: cli.gas_budget,
             };
             execute_writer_flow(&wrap.client, &wrap.signer, &params).await?
@@ -192,11 +196,14 @@ async fn main() -> Result<()> {
                 bucket_id: cli.bucket,
                 protocol_config_id: protocol_config,
                 treasury_id: treasury,
-                mm_account_id,
+                routing: QuoteRouting {
+                    quote_signer_id,
+                    collateral_account_id,
+                    release_package,
+                    release_module: &best.quote.release_module,
+                },
                 protocol_id: best.quote.protocol_id.clone(),
-                signer_account_id_bytes,
                 signer_token_recipient,
-                bucket_id_bytes,
                 write_amount: best.quote.write_amount,
                 premium: best.quote.premium,
                 valid_until_ms: best.quote.valid_until_ms,
@@ -204,8 +211,6 @@ async fn main() -> Result<()> {
                 signature: best.signature.clone(),
                 collateral,
                 position_recipient: writer_addr,
-                // Writer flow requires signer_token_recipient == put_token_recipient.
-                put_token_recipient: signer_token_recipient,
                 gas_budget: cli.gas_budget,
             };
             execute_put_writer_flow(&wrap.client, &wrap.signer, &params).await?

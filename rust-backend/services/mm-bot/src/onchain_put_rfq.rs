@@ -3,16 +3,15 @@
 //!
 //! Standalone put auctions are surfaced by api-service under
 //! `GET /rfqs?status=open&kind=put` (`ApiServiceClient::open_put_rfqs`). The
-//! auction object has the same `RfqAuction` shape as the call auctions, so the
-//! chain-read (`parse_auction_view` / `fetch_auction_view`) and the pure bid
-//! decision (`decide_bid`) are reused verbatim from `onchain_rfq`.
+//! auction object is the same generic `Auction` shape as the call auctions
+//! (a put RFQ is `Auction<S, S>`: cash collateral escrowed, premium bids),
+//! so the chain-read (`parse_auction_view` / `fetch_auction_view`) and the
+//! pure bid decision (`decide_bid`) are reused verbatim from `onchain_rfq`.
 //!
-//! Two things differ from the call bidder:
-//!   1. **Pricing**: the bucket is a put, so the pricing brain runs the
-//!      Black-Scholes *put* leg (`RfqPricingInputs { is_put: true, .. }`).
-//!   2. **Bid PTB**: `rfq_put::bid` instead of `rfq::bid`. The `Put` coin type
-//!      flows in via `bucket.call_coin_type` (api-service serves the per-bucket
-//!      put coin under that field for put buckets).
+//! The one thing that differs from the call bidder is **pricing**: the
+//! bucket is a put, so the pricing brain runs the Black-Scholes *put* leg
+//! (`RfqPricingInputs { is_put: true, .. }`). The bid PTB is the same
+//! `auction::bid`, just with (Settlement, Settlement) type args.
 //!
 //! **Escrow accounting is identical to the call bidder**: the bid escrows the
 //! *premium* (settlement), NOT the put collateral. `max_concurrent_escrow`
@@ -29,7 +28,7 @@ use api_service_client::{ApiServiceClient, OpenRfq};
 use protocol_types::sides::Side;
 use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
 use sui_tx::sui_client::{Network, SuiClientWrapper};
-use sui_tx::tx::rfq_put::{bid, PutRfqBidParams, PutRfqTypes};
+use sui_tx::tx::auction::{bid, AuctionBidParams, AuctionTypes};
 
 use crate::onchain_rfq::{
     decide_bid, fetch_auction_view, now_ms, settlement_funding_coin, sui_object_id, AuctionView,
@@ -63,7 +62,7 @@ pub struct BidderParams {
     pub cfg: OnchainRfqConfig,
     pub secrets: runtime_config::Secrets,
     pub network: Network,
-    /// Options-protocol package (for the `rfq_put::bid` call).
+    /// Generic `auction` package (for the `auction::bid` call).
     pub package: sui_types::base_types::ObjectID,
     pub api_url: String,
     pub price_cache: PriceCache,
@@ -163,13 +162,6 @@ async fn tick(
             );
             continue;
         }
-        if bucket.call_coin_type.is_empty() {
-            tracing::warn!(
-                bucket = %rfq.bucket_id.to_hex(),
-                "api-service didn't return the put coin type; cannot build the bid PTB"
-            );
-            continue;
-        }
 
         let spot_scaled = match compute_spot_from_cache(
             &p.price_cache,
@@ -222,17 +214,18 @@ async fn tick(
             tracing::warn!(premium, "no settlement coin large enough to fund the put bid");
             continue;
         };
-        let params = PutRfqBidParams {
+        // A cash-secured-put RFQ auction is `Auction<Settlement, Settlement>`
+        // (collateral escrowed, premium bids).
+        let params = AuctionBidParams {
             package: p.package,
-            types: PutRfqTypes {
-                underlying_type: &bucket.asset_coin_type,
-                settlement_type: &bucket.settlement_coin_type,
-                put_type: &bucket.call_coin_type,
+            types: AuctionTypes {
+                escrow_type: &bucket.settlement_coin_type,
+                bid_type: &bucket.settlement_coin_type,
             },
-            rfq_id: sui_object_id(rfq.rfq_id)?,
+            auction_id: sui_object_id(rfq.rfq_id)?,
             funding_coin: funding,
-            premium,
-            put_recipient: our_address,
+            amount: premium,
+            token_recipient: our_address,
             gas_budget: p.cfg.gas_budget,
         };
         match bid(&wrap.client, &wrap.signer, &params).await {

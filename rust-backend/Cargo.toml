@@ -12,6 +12,7 @@ members = [
     "crates/oracle-client",
     "crates/api-service-client",
     "crates/indexer-graphql",
+    "crates/move-publish",
     "crates/auth-client",
     "crates/vault-sim",
     "crates/observability",
@@ -57,6 +58,7 @@ token-info-client = { path = "crates/token-info-client" }
 oracle-client  = { path = "crates/oracle-client" }
 api-service-client = { path = "crates/api-service-client" }
 indexer-graphql = { path = "crates/indexer-graphql" }
+move-publish   = { path = "crates/move-publish" }
 auth-client    = { path = "crates/auth-client" }
 vault-sim      = { path = "crates/vault-sim" }
 observability  = { path = "crates/observability" }

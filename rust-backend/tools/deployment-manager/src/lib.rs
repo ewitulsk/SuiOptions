@@ -40,8 +40,9 @@ pub struct Cli {
     #[arg(long)]
     pub rpc: Option<String>,
 
-    /// Path to the Move package containing the contracts.
-    /// Default assumes the manager is run from `rust-backend/`.
+    /// Path to the contracts tree root containing the four Move packages
+    /// (`core/`, `auction/`, `rfq/`, `vault/`), published in dependency
+    /// order. Default assumes the manager is run from `rust-backend/`.
     #[arg(short, long, default_value = "../contracts")]
     pub contracts: PathBuf,
 
@@ -84,18 +85,6 @@ pub struct Cli {
     #[arg(long, default_value = "../test-tokens")]
     pub test_tokens: PathBuf,
 
-    /// Also publish the siws_session (session-tokens) package the protocol
-    /// depends on, BEFORE the protocol publish. Rewrites the session
-    /// package's Move.toml address to the fresh id so the protocol links
-    /// against it, and records the package + Registry ids in
-    /// deployments.json. Required the first time a protocol build that
-    /// depends on a changed session package is deployed.
-    #[arg(long)]
-    pub deploy_session: bool,
-
-    /// Path to the siws_session Move package.
-    #[arg(long, default_value = "../session-tokens/contracts")]
-    pub session_contracts: PathBuf,
 }
 
 cli_spec::define_program! {

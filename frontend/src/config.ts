@@ -95,18 +95,18 @@ export const CCTP =
         solanaRpcUrl: "https://api.devnet.solana.com",
       };
 
-// WalletConnect projectId (from dashboard.reown.com). Required to offer the
-// "Sign in with WalletConnect" session login; when unset the option simply
-// doesn't render (same gating pattern as the session deployment ids).
-export const WALLETCONNECT_PROJECT_ID: string | undefined = import.meta.env
-  .VITE_WALLETCONNECT_PROJECT_ID as string | undefined;
-
 // Populated by `initConfig()`. Exported as live bindings — consumers that
 // `import { PACKAGE_ID }` see the value once initialization completes (which
 // happens before the first render).
 export let PACKAGE_ID: string | undefined;
 export let PROTOCOL_CONFIG_ID: string | undefined;
 export let TREASURY_ID: string | undefined;
+
+// The options_vault package of the four-package contracts tree.
+// `PACKAGE_ID` above is options_core (buckets/accounts/quotes); vault PTBs
+// and vault object types resolve against this one. `undefined` on records
+// predating the split.
+export let VAULT_PACKAGE_ID: string | undefined;
 
 // DeepBook v3 deployment ids (SO-151), served by token-info alongside the
 // protocol ids. All `undefined` on networks without a DeepBook deployment
@@ -117,12 +117,6 @@ export let DEEPBOOK_PACKAGE_ID: string | undefined;
  * `DEEPBOOK_PACKAGE_ID`. */
 export let DEEPBOOK_ORIGINAL_PACKAGE_ID: string | undefined;
 export let DEEPBOOK_REGISTRY_ID: string | undefined;
-
-// siws_session (session-tokens) deployment — wallet-rooted session login
-// (Phantom / MetaMask). Both `undefined` where session login isn't deployed;
-// the sign-in options simply don't render there.
-export let SESSION_PACKAGE_ID: string | undefined;
-export let SESSION_REGISTRY_ID: string | undefined;
 
 // cctp_bridge package (cctp-contracts/) — the protocol's CCTP entry point.
 // `undefined` until the package is published on this network; the Bridge
@@ -196,10 +190,7 @@ type PackageInfoDto = {
     deepCoinType: string;
     poolCreationFee: string;
   } | null;
-  sessionTokens?: {
-    packageId: string;
-    registryId: string;
-  } | null;
+  vault?: { packageId: string } | null;
   cctpBridge?: {
     packageId: string;
   } | null;
@@ -235,16 +226,15 @@ export async function initConfig(): Promise<void> {
   PACKAGE_ID = info.packageId;
   PROTOCOL_CONFIG_ID = info.protocolConfigId;
   TREASURY_ID = info.treasuryId ?? undefined;
+  VAULT_PACKAGE_ID = info.vault?.packageId;
 
   const db = info.deepbook;
   DEEPBOOK_PACKAGE_ID = db?.packageId;
   DEEPBOOK_ORIGINAL_PACKAGE_ID = db?.originalPackageId;
   DEEPBOOK_REGISTRY_ID = db?.registryId;
 
-  SESSION_PACKAGE_ID = info.sessionTokens?.packageId;
-  SESSION_REGISTRY_ID = info.sessionTokens?.registryId;
-
   CCTP_BRIDGE_PACKAGE_ID = info.cctpBridge?.packageId;
+
 
   const tt = info.testTokens;
   TEST_TOKENS = tt

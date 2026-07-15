@@ -28,7 +28,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 use crate::db::models::{
-    AccountBalanceRow, AccountRow, BucketRow, IndexedEventRow, PositionRow, RfqBidRow, RfqRow,
+    AccountRow, BucketRow, IndexedEventRow, PositionRow, RfqBidRow, RfqRow,
     VaultReceiptRow, VaultRoundRow, VaultRow,
 };
 use crate::db::{BucketQuery, EventFilter, EventQuery, Repo};
@@ -155,44 +155,27 @@ impl BucketGql {
     }
 }
 
-/// One per-asset balance on an account. `balance_raw` is a decimal string.
-#[derive(SimpleObject)]
-pub struct AccountBalanceGql {
-    pub asset_type: String,
-    pub balance_raw: String,
-}
-
-impl From<AccountBalanceRow> for AccountBalanceGql {
-    fn from(r: AccountBalanceRow) -> Self {
-        AccountBalanceGql {
-            asset_type: r.asset_type,
-            balance_raw: r.balance.to_string(),
-        }
-    }
-}
-
-/// One account with its registered signing key and per-asset balances. Backs
-/// the JIT `account(id)` query that replaces the quoting-service's in-memory
-/// account mirror. `signing_pubkey_hex` is lowercase hex (no `0x`);
-/// `signing_scheme` is the on-chain u8 tag (0=Ed25519, 1=Secp256k1,
-/// 2=Secp256r1), null only for un-backfilled rows.
+/// One QuoteSigner registration (signing key + owner). Backs the JIT
+/// `account(id)` query the quoting-service authenticates MMs against. There
+/// are NO balances: core holds no MM funds under the collateral abstraction.
+/// `signing_pubkey_hex` is lowercase hex (no `0x`); `signing_scheme` is the
+/// on-chain u8 tag (0=Ed25519, 1=Secp256k1, 2=Secp256r1), null only for
+/// un-backfilled rows.
 #[derive(SimpleObject)]
 pub struct AccountGql {
     pub account_id: String,
     pub owner: Option<String>,
     pub signing_scheme: Option<i32>,
     pub signing_pubkey_hex: String,
-    pub balances: Vec<AccountBalanceGql>,
 }
 
 impl AccountGql {
-    fn build(acct: AccountRow, balances: Vec<AccountBalanceRow>) -> Self {
+    fn build(acct: AccountRow) -> Self {
         AccountGql {
             account_id: acct.account_id,
             owner: acct.owner,
             signing_scheme: acct.signing_scheme.map(|s| s as i32),
             signing_pubkey_hex: hex_encode(&acct.signing_pubkey),
-            balances: balances.into_iter().map(AccountBalanceGql::from).collect(),
         }
     }
 }
@@ -206,11 +189,17 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-/// One on-chain RFQ auction (C3). Numeric fields are decimal strings.
+/// One on-chain auction (C3, four-package layout). Numeric fields are
+/// decimal strings.
 #[derive(SimpleObject)]
 pub struct RfqGql {
+    /// The generic auction object id (rows are keyed by auction now).
     pub rfq_id: String,
-    pub bucket_id: String,
+    /// The options_rfq adapter's Rfq metadata object id; null for
+    /// vault-coupled and swap auctions.
+    pub meta_id: Option<String>,
+    /// Null for swaps / not-yet-enriched coupled auctions.
+    pub bucket_id: Option<String>,
     /// Vault id (coupled auctions) or seller-address-as-id.
     pub origin: String,
     pub amount_raw: String,
@@ -227,14 +216,15 @@ pub struct RfqGql {
     pub gross_premium_raw: Option<String>,
     /// Protocol RFQ fee taken at settle (settled auctions only).
     pub fee_raw: Option<String>,
-    /// "call" or "put".
-    pub option_kind: String,
+    /// call | put | swap | unknown.
+    pub auction_kind: String,
 }
 
 impl From<RfqRow> for RfqGql {
     fn from(r: RfqRow) -> Self {
         RfqGql {
             rfq_id: r.rfq_id,
+            meta_id: r.meta_id,
             bucket_id: r.bucket_id,
             origin: r.origin,
             amount_raw: r.amount.to_string(),
@@ -248,7 +238,7 @@ impl From<RfqRow> for RfqGql {
             position_id: r.position_id,
             gross_premium_raw: r.gross_premium.map(|v| v.to_string()),
             fee_raw: r.fee.map(|v| v.to_string()),
-            option_kind: r.option_kind,
+            auction_kind: r.auction_kind,
         }
     }
 }
@@ -603,7 +593,7 @@ impl QueryRoot {
         Ok(rows)
     }
 
-    /// JIT: one account (signing key + per-asset balances), or null if unknown.
+    /// JIT: one QuoteSigner registration (signing key), or null if unknown.
     async fn account(
         &self,
         ctx: &Context<'_>,
@@ -611,7 +601,7 @@ impl QueryRoot {
     ) -> async_graphql::Result<Option<AccountGql>> {
         let repo = ctx.data_unchecked::<Repo>().clone();
         let row = db_query("account_by_id", move || repo.account_by_id(&id)).await?;
-        Ok(row.map(|(acct, bals)| AccountGql::build(acct, bals)))
+        Ok(row.map(AccountGql::build))
     }
 
     /// JIT: enriched positions held by `recipient` (mint-time owner-of-record).

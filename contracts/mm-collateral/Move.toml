@@ -1,0 +1,12 @@
+[package]
+name = "mm_collateral"
+version = "0.0.1"
+edition = "2024.beta"
+
+# TEMPLATE PACKAGE — not published by the deployment-manager. Each market
+# maker publishes their own copy (see `mm-bot deploy-collateral`): the
+# module `init` creates a single CollateralAccount owned by the publisher,
+# so the package id is the MM's identity boundary and there is no shared
+# custody object.
+[dependencies]
+options_core = { local = "../core" }

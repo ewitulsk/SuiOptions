@@ -45,7 +45,10 @@ impl BucketCreated {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriteExecuted {
     pub bucket_id: ObjectId,
-    pub signer_account_id: ObjectId,
+    /// The `QuoteSigner` whose quote authorized this write.
+    pub signer_id: ObjectId,
+    /// The external collateral object the signer's funds released from.
+    pub collateral_source: ObjectId,
     pub signer_token_recipient: SuiAddress,
     pub executor: SuiAddress,
     pub position_id: ObjectId,
@@ -128,8 +131,8 @@ pub struct BucketRevalidated {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountCreated {
-    pub account_id: ObjectId,
+pub struct SignerCreated {
+    pub signer_id: ObjectId,
     pub owner: SuiAddress,
     /// Tag for the registered signing key. BCS-encodes as a single u8;
     /// must match the on-chain struct field order in `events.move`.
@@ -139,24 +142,8 @@ pub struct AccountCreated {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountDeposit {
-    pub account_id: ObjectId,
-    pub asset_type: AssetType,
-    #[serde(with = "u64_string")]
-    pub amount: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountWithdraw {
-    pub account_id: ObjectId,
-    pub asset_type: AssetType,
-    #[serde(with = "u64_string")]
-    pub amount: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SigningKeyRotated {
-    pub account_id: ObjectId,
+    pub signer_id: ObjectId,
     pub new_scheme: crate::SigningScheme,
     #[serde(with = "crate::coding::bytes_hex")]
     pub new_pubkey: Vec<u8>,
@@ -258,37 +245,89 @@ pub struct CollateralizedWrite {
     pub range_end: u128,
 }
 
+// ─── generic auction venue (auction package, `{auction_pkg}::events`) ───
+
+/// One event set for every auction regardless of asset pair or coupling;
+/// `escrow_type` / `bid_type` carry the legs for indexing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RfqCreated {
-    pub rfq_id: ObjectId,
-    pub bucket_id: ObjectId,
-    /// Vault ID, or seller address-as-ID for standalone auctions.
+pub struct AuctionCreated {
+    pub auction_id: ObjectId,
+    /// Vault ID (coupled auctions) or caller-supplied attribution.
     pub origin: ObjectId,
+    /// Escrowed leg's coin type. BCS-matches the on-chain `TypeName` field.
+    pub escrow_type: AssetType,
+    /// Bid leg's coin type.
+    pub bid_type: AssetType,
     #[serde(with = "u64_string")]
     pub amount: u64,
     #[serde(with = "u64_string")]
-    pub reserve_premium: u64,
+    pub reserve_bid: u64,
     #[serde(with = "u64_string")]
     pub deadline_ms: u64,
     #[serde(with = "u64_string")]
     pub max_deadline_ms: u64,
     #[serde(with = "u64_string")]
     pub min_increment_bps: u64,
+    /// Coupled auctions are consumed by their venue (vault); uncoupled ones
+    /// settle through the generic path (`AuctionSettled`).
+    pub coupled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RfqBid {
-    pub rfq_id: ObjectId,
+pub struct AuctionBid {
+    pub auction_id: ObjectId,
     pub bidder: SuiAddress,
-    pub call_recipient: SuiAddress,
+    pub token_recipient: SuiAddress,
     #[serde(with = "u64_string")]
-    pub premium: u64,
+    pub amount: u64,
     /// 0 if this was the first bid.
     #[serde(with = "u64_string")]
-    pub previous_premium: u64,
+    pub previous_best: u64,
     /// Post-anti-snipe deadline.
     #[serde(with = "u64_string")]
-    pub new_deadline_ms: u64,
+    pub deadline_ms: u64,
+}
+
+/// Emitted by the uncoupled `settle` path only. Coupled venues emit their
+/// own settlement events (`VaultRfqSettled`, `SwapRfqSettled`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuctionSettled {
+    pub auction_id: ObjectId,
+    pub origin: ObjectId,
+    pub bidder: SuiAddress,
+    pub token_recipient: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub winning_bid: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuctionUnfilled {
+    pub auction_id: ObjectId,
+    pub origin: ObjectId,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub reserve_bid: u64,
+}
+
+// ─── option-RFQ adapter (options_rfq package, `{rfq_pkg}::events`) ───
+
+/// Adapter-level creation event: links the option-RFQ metadata object to
+/// its generic auction (which emits its own `AuctionCreated` with the
+/// deadline/increment params) and the bucket it will write into.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RfqCreated {
+    pub rfq_id: ObjectId,
+    pub auction_id: ObjectId,
+    pub bucket_id: ObjectId,
+    /// Caller-supplied attribution (seller address-as-ID).
+    pub origin: ObjectId,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub reserve_premium: u64,
 }
 
 /// Mirrors `WriteExecuted`'s economic fields so the positions
@@ -296,6 +335,7 @@ pub struct RfqBid {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RfqSettled {
     pub rfq_id: ObjectId,
+    pub auction_id: ObjectId,
     pub bucket_id: ObjectId,
     pub origin: ObjectId,
     pub winner: SuiAddress,
@@ -319,6 +359,7 @@ pub struct RfqSettled {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RfqExpiredUnsold {
     pub rfq_id: ObjectId,
+    pub auction_id: ObjectId,
     pub bucket_id: ObjectId,
     pub origin: ObjectId,
     #[serde(with = "u64_string")]
@@ -327,39 +368,55 @@ pub struct RfqExpiredUnsold {
     pub reserve_premium: u64,
 }
 
-// ─── proceeds-swap auction (swap_auction.move) ───
+// ─── vault-coupled RFQ settles (options_vault package) ───
 
+/// A vault-coupled RFQ auction settled into a covered write. Mirrors the
+/// adapter's `RfqSettled` economics; the auction's creation and bids are
+/// the generic `Auction*` events. The minted `Position` stays with the
+/// vault (no `position_recipient` field).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SwapRfqCreated {
-    pub swap_id: ObjectId,
-    /// Originating vault ID.
-    pub origin: ObjectId,
+pub struct VaultRfqSettled {
+    pub auction_id: ObjectId,
+    pub bucket_id: ObjectId,
+    pub vault_id: ObjectId,
     #[serde(with = "u64_string")]
-    pub amount_s: u64,
+    pub round: u64,
+    pub winner: SuiAddress,
+    pub call_recipient: SuiAddress,
+    pub position_id: ObjectId,
     #[serde(with = "u64_string")]
-    pub reserve_underlying: u64,
+    pub amount: u64,
     #[serde(with = "u64_string")]
-    pub deadline_ms: u64,
+    pub gross_premium: u64,
     #[serde(with = "u64_string")]
-    pub max_deadline_ms: u64,
+    pub fee: u64,
     #[serde(with = "u64_string")]
-    pub min_increment_bps: u64,
+    pub net_premium: u64,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
 }
 
+/// A vault-coupled RFQ auction resolved without a write: no bids, or the
+/// bucket expired/was invalidated mid-auction (escrows recovered).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SwapRfqBid {
-    pub swap_id: ObjectId,
-    pub bidder: SuiAddress,
-    /// Underlying offered by this bid.
+pub struct VaultRfqUnsold {
+    pub auction_id: ObjectId,
+    pub bucket_id: ObjectId,
+    pub vault_id: ObjectId,
     #[serde(with = "u64_string")]
-    pub underlying: u64,
-    /// 0 if this was the first bid.
+    pub round: u64,
     #[serde(with = "u64_string")]
-    pub previous_underlying: u64,
-    /// Post-anti-snipe deadline.
+    pub amount: u64,
     #[serde(with = "u64_string")]
-    pub new_deadline_ms: u64,
+    pub reserve_premium: u64,
 }
+
+// ─── proceeds-swap settles (options_vault package) ───
+//
+// Swap creation/bids surface as generic `AuctionCreated`/`AuctionBid`
+// (origin = vault id, escrow_type = settlement coin, bid_type = underlying).
 
 /// A swap auction filled in-band: `vault_id == origin`; carries `round`
 /// for the round-economics materializer (realized swap rate → perf fee).
@@ -597,7 +654,10 @@ impl PutBucketCreated {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PutWriteExecuted {
     pub bucket_id: ObjectId,
-    pub signer_account_id: ObjectId,
+    /// The `QuoteSigner` whose quote authorized this write.
+    pub signer_id: ObjectId,
+    /// The external collateral object the signer's funds released from.
+    pub collateral_source: ObjectId,
     pub signer_token_recipient: SuiAddress,
     pub executor: SuiAddress,
     pub position_id: ObjectId,
@@ -706,39 +766,23 @@ pub struct PutBucketRevalidated {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PutRfqCreated {
     pub rfq_id: ObjectId,
+    pub auction_id: ObjectId,
     pub bucket_id: ObjectId,
     pub origin: ObjectId,
+    /// Option notional in underlying units.
     #[serde(with = "u64_string")]
     pub amount: u64,
-    /// Cash collateral escrowed for the slice.
+    /// Cash collateral escrowed = ceil(amount × strike).
     #[serde(with = "u64_string")]
     pub collateral: u64,
     #[serde(with = "u64_string")]
     pub reserve_premium: u64,
-    #[serde(with = "u64_string")]
-    pub deadline_ms: u64,
-    #[serde(with = "u64_string")]
-    pub max_deadline_ms: u64,
-    #[serde(with = "u64_string")]
-    pub min_increment_bps: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PutRfqBid {
-    pub rfq_id: ObjectId,
-    pub bidder: SuiAddress,
-    pub put_recipient: SuiAddress,
-    #[serde(with = "u64_string")]
-    pub premium: u64,
-    #[serde(with = "u64_string")]
-    pub previous_premium: u64,
-    #[serde(with = "u64_string")]
-    pub new_deadline_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PutRfqSettled {
     pub rfq_id: ObjectId,
+    pub auction_id: ObjectId,
     pub bucket_id: ObjectId,
     pub origin: ObjectId,
     pub winner: SuiAddress,
@@ -762,6 +806,7 @@ pub struct PutRfqSettled {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PutRfqExpiredUnsold {
     pub rfq_id: ObjectId,
+    pub auction_id: ObjectId,
     pub bucket_id: ObjectId,
     pub origin: ObjectId,
     #[serde(with = "u64_string")]
@@ -786,21 +831,22 @@ pub enum ChainEvent {
     BucketCleaned(BucketCleaned),
     BucketInvalidated(BucketInvalidated),
     BucketRevalidated(BucketRevalidated),
-    AccountCreated(AccountCreated),
-    AccountDeposit(AccountDeposit),
-    AccountWithdraw(AccountWithdraw),
+    SignerCreated(SignerCreated),
     SigningKeyRotated(SigningKeyRotated),
     FeeUpdated(FeeUpdated),
     TreasuryWithdrawn(TreasuryWithdrawn),
     DeepBookPoolCreated(DeepBookPoolCreated),
     DeepBookOrderFilled(DeepBookOrderFilled),
     CollateralizedWrite(CollateralizedWrite),
+    AuctionCreated(AuctionCreated),
+    AuctionBid(AuctionBid),
+    AuctionSettled(AuctionSettled),
+    AuctionUnfilled(AuctionUnfilled),
     RfqCreated(RfqCreated),
-    RfqBid(RfqBid),
     RfqSettled(RfqSettled),
     RfqExpiredUnsold(RfqExpiredUnsold),
-    SwapRfqCreated(SwapRfqCreated),
-    SwapRfqBid(SwapRfqBid),
+    VaultRfqSettled(VaultRfqSettled),
+    VaultRfqUnsold(VaultRfqUnsold),
     SwapRfqSettled(SwapRfqSettled),
     SwapRfqUnfilled(SwapRfqUnfilled),
     VaultCreated(VaultCreated),
@@ -827,7 +873,6 @@ pub enum ChainEvent {
     PutBucketInvalidated(PutBucketInvalidated),
     PutBucketRevalidated(PutBucketRevalidated),
     PutRfqCreated(PutRfqCreated),
-    PutRfqBid(PutRfqBid),
     PutRfqSettled(PutRfqSettled),
     PutRfqExpiredUnsold(PutRfqExpiredUnsold),
 }

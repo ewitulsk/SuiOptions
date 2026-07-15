@@ -6,7 +6,7 @@
 // shape so UI components don't change.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { normalizeStructTag } from "@mysten/sui/utils";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 import { useSubmitTransaction } from "../tx/submit";
 import { posthog } from "../lib/posthog";
 import { useBuckets } from "../api/useBuckets";
@@ -18,10 +18,7 @@ import { useBulkView } from "../api/useBulkView";
 import { buildBuyTx, buildWriteTx } from "../tx/composer";
 import { buildBuyPutTx, buildWritePutTx } from "../tx/composer_put";
 import { formatPrice } from "../format";
-import { addSessionPutTrade, addSessionTrade } from "../tx/session";
 import { optionCoinType, seriesOptionType } from "../api/client";
-import { useUserIdentity } from "../session/identity";
-import { executeWithSession } from "../session/store";
 import type { ToastState } from "../components/Toast";
 import type { Bucket as ApiBucket, Series } from "../api/client";
 import type { RfqQuoteEntry, Side as ProtocolSide } from "../api/quoting";
@@ -204,12 +201,9 @@ export function useComposerState({
 }: ComposerStateOpts = {}): ComposerState {
   const [view, setView] = useState<View>(initialView);
   const [optionType, setOptionType] = useState<OptionType>(initialOptionType);
-  // Wallet user or session login — both can trade. For sessions, balances
-  // live in the options Account custody rather than at an address.
-  const identity = useUserIdentity();
-  const sessionState = identity?.kind === "session" ? identity.session : null;
-  const connected = !!identity;
-  const wallet = identity?.address ?? null;
+  const account = useCurrentAccount();
+  const connected = !!account;
+  const wallet = account?.address ?? null;
   const [amount, setAmount] = useState(initialAmount);
   const [selectedIdx, setSelectedIdx] = useState(initialIdx);
   const [confirmStage, setConfirmStage] = useState<ConfirmStage>(null);
@@ -320,24 +314,10 @@ export function useComposerState({
 
   // Wallet balances from on-chain `getBalance`, scaled by each side's
   // decimals. Resolve coin types from the selected series.
-  const underlyingBal = useCoinBalance(
-    sessionState ? null : wallet,
-    series?.asset_coin_type ?? null,
-  );
-  const settlementBal = useCoinBalance(
-    sessionState ? null : wallet,
-    series?.settlement_coin_type ?? null,
-  );
-  const custodyRaw = (coinType: string | undefined | null): string =>
-    coinType
-      ? (sessionState?.balances[normalizeStructTag(coinType)] ?? 0n).toString()
-      : "0";
-  const btcBalance = sessionState
-    ? scaleRaw(custodyRaw(series?.asset_coin_type), series?.asset_decimals ?? null)
-    : scaleRaw(underlyingBal.data ?? "0", series?.asset_decimals ?? null);
-  const usdcBalance = sessionState
-    ? scaleRaw(custodyRaw(series?.settlement_coin_type), series?.settlement_decimals ?? null)
-    : scaleRaw(settlementBal.data ?? "0", series?.settlement_decimals ?? null);
+  const underlyingBal = useCoinBalance(wallet, series?.asset_coin_type ?? null);
+  const settlementBal = useCoinBalance(wallet, series?.settlement_coin_type ?? null);
+  const btcBalance = scaleRaw(underlyingBal.data ?? "0", series?.asset_decimals ?? null);
+  const usdcBalance = scaleRaw(settlementBal.data ?? "0", series?.settlement_decimals ?? null);
 
   const settlementSymbol = series?.settlement_symbol ?? "USDC";
 
@@ -543,67 +523,45 @@ export function useComposerState({
       }
       setConfirmStage("broadcast");
       const isPut = optionType === "put";
-      if (sessionState) {
-        // Session login: custody-funded `_with_session` flow, sponsored and
-        // signed by the ephemeral key.
-        await executeWithSession(view === "trader" ? "buying" : "writing", (tx, ctx) =>
-          isPut
-            ? addSessionPutTrade(tx, ctx, {
+      let tx;
+      if (isPut) {
+        tx =
+          view === "trader"
+            ? buildBuyPutTx({
                 entry,
                 underlyingCoinType: series.asset_coin_type,
                 settlementCoinType: series.settlement_coin_type,
                 putCoinType: coinType,
-                flow: view === "trader" ? "trader" : "writer",
+                trader: wallet,
               })
-            : addSessionTrade(tx, ctx, {
+            : buildWritePutTx({
+                entry,
+                underlyingCoinType: series.asset_coin_type,
+                settlementCoinType: series.settlement_coin_type,
+                putCoinType: coinType,
+                strikeRaw: quoteBucket.strike_raw,
+                strikeScale: quoteBucket.strike_scale,
+                writer: wallet,
+              });
+      } else {
+        tx =
+          view === "trader"
+            ? buildBuyTx({
                 entry,
                 underlyingCoinType: series.asset_coin_type,
                 settlementCoinType: series.settlement_coin_type,
                 callCoinType: coinType,
-                flow: view === "trader" ? "trader" : "writer",
-              }),
-        );
-      } else {
-        let tx;
-        if (isPut) {
-          tx =
-            view === "trader"
-              ? buildBuyPutTx({
-                  entry,
-                  underlyingCoinType: series.asset_coin_type,
-                  settlementCoinType: series.settlement_coin_type,
-                  putCoinType: coinType,
-                  trader: wallet,
-                })
-              : buildWritePutTx({
-                  entry,
-                  underlyingCoinType: series.asset_coin_type,
-                  settlementCoinType: series.settlement_coin_type,
-                  putCoinType: coinType,
-                  strikeRaw: quoteBucket.strike_raw,
-                  strikeScale: quoteBucket.strike_scale,
-                  writer: wallet,
-                });
-        } else {
-          tx =
-            view === "trader"
-              ? buildBuyTx({
-                  entry,
-                  underlyingCoinType: series.asset_coin_type,
-                  settlementCoinType: series.settlement_coin_type,
-                  callCoinType: coinType,
-                  trader: wallet,
-                })
-              : buildWriteTx({
-                  entry,
-                  underlyingCoinType: series.asset_coin_type,
-                  settlementCoinType: series.settlement_coin_type,
-                  callCoinType: coinType,
-                  writer: wallet,
-                });
-        }
-        await submitTx(tx);
+                trader: wallet,
+              })
+            : buildWriteTx({
+                entry,
+                underlyingCoinType: series.asset_coin_type,
+                settlementCoinType: series.settlement_coin_type,
+                callCoinType: coinType,
+                writer: wallet,
+              });
       }
+      await submitTx(tx);
 
       const rangeStart = bucket.cursor + bucket.queued;
       const asset = series.asset_symbol;
@@ -630,7 +588,7 @@ export function useComposerState({
         premium: bestPremium,
         settlement_symbol: series.settlement_symbol,
         wallet_address: wallet,
-        auth: sessionState ? "session" : "wallet",
+        auth: "wallet",
       });
       // Reflect the new position on the Dashboard without a manual refresh.
       queryClient.invalidateQueries({ queryKey: ["buckets"] });
@@ -640,7 +598,7 @@ export function useComposerState({
       posthog.captureException(err, {
         action: view === "writer" ? "option_written" : "option_purchased",
         wallet_address: wallet,
-        auth: sessionState ? "session" : "wallet",
+        auth: "wallet",
       });
       setToast({ message: `failed · ${message}`, variant: "error" });
       setTimeout(() => setToast(null), 6000);

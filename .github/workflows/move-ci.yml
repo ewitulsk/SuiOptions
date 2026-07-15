@@ -1,9 +1,9 @@
 name: Move CI
 
-# Build + unit-test the options_protocol Move package on every change to the
-# contracts. There was no Move CI before, so latent compile/test breaks (e.g. a
-# missing type annotation, a test out of sync with a signature change) merged
-# undetected — this catches them.
+# Build + unit-test the four options-protocol Move packages on every change
+# to the contracts. There was no Move CI before, so latent compile/test
+# breaks (e.g. a missing type annotation, a test out of sync with a
+# signature change) merged undetected — this catches them.
 #
 # The sui CLI is pinned to 1.71.1, the SAME framework the Rust workspace pins
 # (`sui-move-build` @ branch framework/mainnet, rev 2f5992f1), which is what
@@ -15,12 +15,10 @@ on:
     branches: [staging, main]
     paths:
       - 'contracts/**'
-      - 'session-tokens/contracts/**'
       - '.github/workflows/move-ci.yml'
   pull_request:
     paths:
       - 'contracts/**'
-      - 'session-tokens/contracts/**'
       - '.github/workflows/move-ci.yml'
 
 permissions:
@@ -34,6 +32,10 @@ env:
 jobs:
   move:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [core, auction, rfq, vault, mm-collateral]
     steps:
       - uses: actions/checkout@v4
 
@@ -49,9 +51,9 @@ jobs:
         run: sui --version
 
       - name: Build
-        working-directory: contracts
+        working-directory: contracts/${{ matrix.package }}
         run: sui move build
 
       - name: Test
-        working-directory: contracts
+        working-directory: contracts/${{ matrix.package }}
         run: sui move test

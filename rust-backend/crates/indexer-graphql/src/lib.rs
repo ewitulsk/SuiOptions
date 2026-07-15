@@ -9,8 +9,6 @@
 //! precision-safe convention); we parse them back into `u64` / `u128` /
 //! `u8` here so callers get typed values.
 
-use std::collections::BTreeMap;
-
 use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -57,24 +55,16 @@ pub struct Bucket {
     pub deepbook_pool_id: Option<ObjectId>,
 }
 
-/// An account's registered signing key + per-asset balances. `signing_scheme`
-/// is `None` only for un-backfilled rows; callers treat that as "unknown
-/// signer" (reject), matching the pre-JIT behaviour.
+/// A QuoteSigner's registered signing key. Core holds no MM funds anymore
+/// (collateral custody lives in per-MM external packages), so there are no
+/// balances here. `signing_scheme` is `None` only for un-backfilled rows;
+/// callers treat that as "unknown signer" (reject).
 #[derive(Clone, Debug)]
 pub struct Account {
     pub account_id: ObjectId,
     pub owner: Option<SuiAddress>,
     pub signing_scheme: Option<SigningScheme>,
     pub signing_pubkey: Vec<u8>,
-    pub balances: BTreeMap<AssetType, u64>,
-}
-
-impl Account {
-    /// On-chain balance for `asset`, 0 if none recorded. Callers subtract
-    /// their own local reservations to get spendable balance.
-    pub fn balance(&self, asset: &AssetType) -> u64 {
-        self.balances.get(asset).copied().unwrap_or(0)
-    }
 }
 
 /// An enriched position (position row joined to its bucket + mint provenance).
@@ -100,11 +90,17 @@ pub struct Position {
     pub minted_at_ms: u64,
 }
 
-/// One on-chain RFQ auction from the indexer's materialized view (C3).
+/// One on-chain auction from the indexer's materialized view (C3, four-
+/// package layout). Rows are keyed by the generic auction id.
 #[derive(Clone, Debug)]
 pub struct Rfq {
+    /// The generic auction object id.
     pub rfq_id: ObjectId,
-    pub bucket_id: ObjectId,
+    /// The options_rfq adapter's Rfq metadata object id; `None` for
+    /// vault-coupled and swap auctions.
+    pub meta_id: Option<ObjectId>,
+    /// `None` for swaps / not-yet-enriched coupled auctions.
+    pub bucket_id: Option<ObjectId>,
     /// Vault id (coupled auctions) or seller-address-as-id.
     pub origin: ObjectId,
     pub amount: u64,
@@ -121,8 +117,9 @@ pub struct Rfq {
     pub gross_premium: Option<u64>,
     /// Protocol RFQ fee taken at settle (settled auctions only).
     pub fee: Option<u64>,
-    /// "call" or "put". Defaults to "call" if the server omits it.
-    pub option_kind: String,
+    /// "call" | "put" | "swap" | "unknown". Defaults to "call" if the
+    /// server omits it.
+    pub auction_kind: String,
 }
 
 /// One bid in an auction's history (C3).
@@ -263,10 +260,10 @@ impl IndexerClient {
         data.buckets.into_iter().map(Bucket::try_from).collect()
     }
 
-    /// One account (signing key + balances), or `None` if unknown.
+    /// One QuoteSigner (registered signing key), or `None` if unknown.
     pub async fn account(&self, account_id: ObjectId) -> Result<Option<Account>> {
         const Q: &str = "query($id:String!){account(id:$id){accountId owner signingScheme \
-            signingPubkeyHex balances{assetType balanceRaw}}}";
+            signingPubkeyHex}}";
         let data: AccountWrap = self
             .gql(Q, json!({ "id": account_id.to_hex() }))
             .await?;
@@ -310,9 +307,9 @@ impl IndexerClient {
         status: Option<&str>,
         origin: Option<ObjectId>,
     ) -> Result<Vec<Rfq>> {
-        const Q: &str = "query($s:String,$o:String){rfqs(status:$s,origin:$o){rfqId bucketId \
-            origin amountRaw reservePremiumRaw deadlineMs bestPremiumRaw bestBidder status \
-            winner netPremiumRaw positionId grossPremiumRaw feeRaw optionKind}}";
+        const Q: &str = "query($s:String,$o:String){rfqs(status:$s,origin:$o){rfqId metaId \
+            bucketId origin amountRaw reservePremiumRaw deadlineMs bestPremiumRaw bestBidder \
+            status winner netPremiumRaw positionId grossPremiumRaw feeRaw auctionKind}}";
         let vars = json!({ "s": status, "o": origin.map(|o| o.to_hex()) });
         let data: RfqsWrap = self.gql(Q, vars).await?;
         data.rfqs.into_iter().map(Rfq::try_from).collect()
@@ -396,10 +393,10 @@ impl IndexerClient {
             .unwrap_or(0))
     }
 
-    /// All `WriteExecuted` events for `account` with `sequence > after`, in
-    /// ascending order. Backs the quoting-service's reservation reconciliation
-    /// (the JIT replacement for observing live `WriteExecuted` frames).
-    /// Returns `(sequence, nonce)` pairs.
+    /// All `WriteExecuted` events for the QuoteSigner `account` with
+    /// `sequence > after`, in ascending order. Backs the quoting-service's
+    /// reputation fill accounting (the JIT replacement for observing live
+    /// `WriteExecuted` frames). Returns `(sequence, nonce)` pairs.
     pub async fn write_executed_for_account_since(
         &self,
         account: ObjectId,
@@ -410,7 +407,7 @@ impl IndexerClient {
         // `payload` for JSONB `@>` to hit.
         let filter = json!({
             "eventType": ["WriteExecuted"],
-            "payloadContains": { "payload": { "signer_account_id": account.to_hex() } },
+            "payloadContains": { "payload": { "signer_id": account.to_hex() } },
         });
         let events = self.scan_events(filter, after).await?;
         let mut out = Vec::with_capacity(events.len());
@@ -448,7 +445,7 @@ impl IndexerClient {
     ) -> Result<Vec<(u64, u64)>> {
         let filter = json!({
             "eventType": ["PutWriteExecuted"],
-            "payloadContains": { "payload": { "signer_account_id": account.to_hex() } },
+            "payloadContains": { "payload": { "signer_id": account.to_hex() } },
         });
         let events = self.scan_events(filter, after).await?;
         let mut out = Vec::with_capacity(events.len());
@@ -696,14 +693,6 @@ struct AccountJson {
     owner: Option<String>,
     signing_scheme: Option<i32>,
     signing_pubkey_hex: String,
-    balances: Vec<BalanceJson>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BalanceJson {
-    asset_type: String,
-    balance_raw: String,
 }
 
 #[derive(Deserialize)]
@@ -733,7 +722,10 @@ struct PositionJson {
 #[serde(rename_all = "camelCase")]
 struct RfqJson {
     rfq_id: String,
-    bucket_id: String,
+    #[serde(default)]
+    meta_id: Option<String>,
+    #[serde(default)]
+    bucket_id: Option<String>,
     origin: String,
     amount_raw: String,
     reserve_premium_raw: String,
@@ -749,7 +741,7 @@ struct RfqJson {
     #[serde(default)]
     fee_raw: Option<String>,
     #[serde(default = "default_option_kind")]
-    option_kind: String,
+    auction_kind: String,
 }
 
 #[derive(Deserialize)]
@@ -887,16 +879,11 @@ impl TryFrom<AccountJson> for Account {
             .signing_scheme
             .map(|v| SigningScheme::from_u8(parse_u8(v)?).map_err(|e| anyhow!("bad scheme: {e:?}")))
             .transpose()?;
-        let mut balances = BTreeMap::new();
-        for b in a.balances {
-            balances.insert(AssetType::new(b.asset_type), parse_u64(&b.balance_raw)?);
-        }
         Ok(Account {
             account_id: parse_object_id(&a.account_id)?,
             owner: a.owner.as_deref().map(parse_address).transpose()?,
             signing_scheme,
             signing_pubkey: decode_hex(&a.signing_pubkey_hex)?,
-            balances,
         })
     }
 }
@@ -931,7 +918,8 @@ impl TryFrom<RfqJson> for Rfq {
     fn try_from(r: RfqJson) -> Result<Self> {
         Ok(Rfq {
             rfq_id: parse_object_id(&r.rfq_id)?,
-            bucket_id: parse_object_id(&r.bucket_id)?,
+            meta_id: r.meta_id.as_deref().map(parse_object_id).transpose()?,
+            bucket_id: r.bucket_id.as_deref().map(parse_object_id).transpose()?,
             origin: parse_object_id(&r.origin)?,
             amount: parse_u64(&r.amount_raw)?,
             reserve_premium: parse_u64(&r.reserve_premium_raw)?,
@@ -944,7 +932,7 @@ impl TryFrom<RfqJson> for Rfq {
             position_id: r.position_id.as_deref().map(parse_object_id).transpose()?,
             gross_premium: r.gross_premium_raw.as_deref().map(parse_u64).transpose()?,
             fee: r.fee_raw.as_deref().map(parse_u64).transpose()?,
-            option_kind: r.option_kind,
+            auction_kind: r.auction_kind,
         })
     }
 }

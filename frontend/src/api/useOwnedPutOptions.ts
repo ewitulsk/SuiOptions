@@ -18,9 +18,6 @@ import type { OwnedCallOption } from "./useOwnedCallOptions";
 export function useOwnedPutOptions(
   wallet: string | null,
   series: Series[] | undefined,
-  /** Session custody balances (canonical type → raw) — used instead of
-   *  address-owned balances when the user is a session login. */
-  custodyBalances?: Record<string, bigint> | null,
 ) {
   const client = useSuiClient();
 
@@ -35,28 +32,12 @@ export function useOwnedPutOptions(
   }
   const typesKey = Array.from(putTypeToBucket.keys()).sort().join(",");
 
-  const custodyKey = custodyBalances
-    ? Object.entries(custodyBalances)
-        .map(([t, v]) => `${t}:${v}`)
-        .sort()
-        .join(",")
-    : null;
-
   return useQuery<OwnedCallOption[], Error>({
-    queryKey: ["owned-put-options", wallet, typesKey, custodyKey],
+    queryKey: ["owned-put-options", wallet, typesKey],
     enabled: wallet !== null && putTypeToBucket.size > 0,
     refetchInterval: 5_000,
     queryFn: async () => {
       if (!wallet) return [];
-      if (custodyBalances) {
-        const out: OwnedCallOption[] = [];
-        for (const [type, raw] of Object.entries(custodyBalances)) {
-          const bucket_id = putTypeToBucket.get(normalizeStructTag(type));
-          if (!bucket_id || raw <= 0n) continue;
-          out.push({ coin_type: normalizeStructTag(type), bucket_id, amount_raw: raw.toString() });
-        }
-        return out;
-      }
       const balances = await client.getAllBalances({ owner: wallet });
       const out: OwnedCallOption[] = [];
       for (const bal of balances) {

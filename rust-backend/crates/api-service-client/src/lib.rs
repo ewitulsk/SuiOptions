@@ -188,12 +188,19 @@ impl ApiServiceClient {
             .with_context(|| format!("decoding rfqs from {url}"))?;
         wire.rfqs
             .into_iter()
-            .map(|r| {
+            .filter_map(|mut r| {
+                // A call/put row is enriched with its bucket by the adapter /
+                // vault events; a still-unenriched row isn't priceable yet —
+                // skip it rather than fail the poll.
+                let bucket_id = r.bucket_id.take()?;
+                Some((r, bucket_id))
+            })
+            .map(|(r, bucket_id)| {
                 Ok(OpenRfq {
                     rfq_id: ObjectId::from_hex(&r.rfq_id)
                         .map_err(|e| anyhow::anyhow!("rfq_id {}: {e}", r.rfq_id))?,
-                    bucket_id: ObjectId::from_hex(&r.bucket_id)
-                        .map_err(|e| anyhow::anyhow!("bucket_id {}: {e}", r.bucket_id))?,
+                    bucket_id: ObjectId::from_hex(&bucket_id)
+                        .map_err(|e| anyhow::anyhow!("bucket_id {bucket_id}: {e}"))?,
                     origin: r.origin,
                     amount: r
                         .amount_raw
@@ -333,7 +340,10 @@ struct VaultStatusWire {
 #[derive(Deserialize)]
 struct RfqWire {
     rfq_id: String,
-    bucket_id: String,
+    /// Nullable on the wire: a row born from a bare `AuctionCreated` has no
+    /// bucket until the adapter/vault enrichment event lands.
+    #[serde(default)]
+    bucket_id: Option<String>,
     origin: String,
     amount_raw: String,
     reserve_premium_raw: String,

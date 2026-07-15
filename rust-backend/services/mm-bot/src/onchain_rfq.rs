@@ -1,7 +1,8 @@
 //! On-chain RFQ bidder (vault-implementation-guide doc 05 §3).
 //!
-//! The vault sells its weekly call slices through shared `RfqAuction`
-//! objects; this loop is the buy side. It runs beside the WS quoting flow
+//! The vault sells its weekly call slices through shared generic
+//! `Auction<U, S>` objects (the `auction` package); this loop is the buy
+//! side. It runs beside the WS quoting flow
 //! and shares the same pricing brain (`pricing::price_rfq` with the
 //! bid-markdown spread — the bot is *buying* the option, so its max bid
 //! is the marked-down mid times the slice size).
@@ -40,7 +41,7 @@ use api_service_client::{ApiServiceClient, OpenRfq};
 use protocol_types::sides::Side;
 use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
 use sui_tx::sui_client::{Network, SuiClientWrapper};
-use sui_tx::tx::rfq::{bid, RfqBidParams, RfqTypes};
+use sui_tx::tx::auction::{bid, AuctionBidParams, AuctionTypes};
 
 use pricing::smile::Smile;
 
@@ -117,11 +118,12 @@ impl Default for OnchainRfqConfig {
     }
 }
 
-/// Live auction state, read from the shared `RfqAuction` object (the
-/// indexer view may lag bids; the chain can't).
+/// Live auction state, read from the shared generic `Auction<E, B>`
+/// object (the indexer view may lag bids; the chain can't).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AuctionView {
     pub amount: u64,
+    /// The on-chain `reserve_bid` (premium for RFQs, underlying for swaps).
     pub reserve_premium: u64,
     pub deadline_ms: u64,
     pub min_increment_bps: u64,
@@ -211,8 +213,8 @@ fn as_u64(v: &Value) -> Result<u64> {
     }
 }
 
-/// Parse an `RfqAuction`'s parsed-JSON fields (RPC conventions: u64 as
-/// string, `Balance` unwrapped to its value, `Option` as null/inner).
+/// Parse a generic `Auction`'s parsed-JSON fields (RPC conventions: u64
+/// as string, `Balance` unwrapped to its value, `Option` as null/inner).
 pub fn parse_auction_view(fields: &Value) -> Result<AuctionView> {
     let best_bidder = match field(fields, "best_bidder")? {
         Value::Null => None,
@@ -222,8 +224,8 @@ pub fn parse_auction_view(fields: &Value) -> Result<AuctionView> {
     let escrow = as_u64(field(fields, "bid_escrow")?).context("field bid_escrow")?;
     Ok(AuctionView {
         amount: as_u64(field(fields, "amount")?).context("field amount")?,
-        reserve_premium: as_u64(field(fields, "reserve_premium")?)
-            .context("field reserve_premium")?,
+        reserve_premium: as_u64(field(fields, "reserve_bid")?)
+            .context("field reserve_bid")?,
         deadline_ms: as_u64(field(fields, "deadline_ms")?).context("field deadline_ms")?,
         min_increment_bps: as_u64(field(fields, "min_increment_bps")?)
             .context("field min_increment_bps")?,
@@ -274,7 +276,7 @@ pub struct BidderParams {
     pub cfg: OnchainRfqConfig,
     pub secrets: runtime_config::Secrets,
     pub network: Network,
-    /// Options-protocol package (for the `rfq::bid` call).
+    /// Generic `auction` package (for the `auction::bid` call).
     pub package: ObjectID,
     pub api_url: String,
     pub price_cache: PriceCache,
@@ -368,13 +370,6 @@ async fn tick(
         }) else {
             continue; // not a pair we make markets in
         };
-        if bucket.call_coin_type.is_empty() {
-            tracing::warn!(
-                bucket = %rfq.bucket_id.to_hex(),
-                "api-service didn't return call_coin_type; cannot build the bid PTB"
-            );
-            continue;
-        }
 
         let spot_scaled = match compute_spot_from_cache(
             &p.price_cache,
@@ -425,17 +420,17 @@ async fn tick(
             tracing::warn!(premium, "no settlement coin large enough to fund the bid");
             continue;
         };
-        let params = RfqBidParams {
+        // A covered-call RFQ auction is `Auction<Underlying, Settlement>`.
+        let params = AuctionBidParams {
             package: p.package,
-            types: RfqTypes {
-                underlying_type: &bucket.asset_coin_type,
-                settlement_type: &bucket.settlement_coin_type,
-                call_type: &bucket.call_coin_type,
+            types: AuctionTypes {
+                escrow_type: &bucket.asset_coin_type,
+                bid_type: &bucket.settlement_coin_type,
             },
-            rfq_id: sui_object_id(rfq.rfq_id)?,
+            auction_id: sui_object_id(rfq.rfq_id)?,
             funding_coin: funding,
-            premium,
-            call_recipient: our_address,
+            amount: premium,
+            token_recipient: our_address,
             gas_budget: p.cfg.gas_budget,
         };
         match bid(&wrap.client, &wrap.signer, &params).await {
@@ -452,7 +447,8 @@ async fn tick(
             }
             Err(e) => {
                 // A lost race (someone outbid between read and submit)
-                // aborts with rfq_bid_too_low — replanned next poll, no alert.
+                // aborts with auction bid_too_low — replanned next poll,
+                // no alert.
                 if crate::is_benign_bid_loss(&e) {
                     tracing::warn!(rfq = %rfq.rfq_id.to_hex(), premium, error = %format!("{e:#}"), "bid failed (outbid)");
                 } else {
@@ -601,10 +597,10 @@ mod tests {
     #[test]
     fn parses_auction_object_json() {
         // RPC conventions: u64 as strings, Balance unwrapped, Option null.
+        // Fields per `auction::auction::Auction`.
         let v = parse_auction_view(&json!({
-            "bucket_id": "0x00000000000000000000000000000000000000000000000000000000000000b1",
             "amount": "250000000",
-            "reserve_premium": "47619000",
+            "reserve_bid": "47619000",
             "created_ms": "1",
             "deadline_ms": "1000000",
             "snipe_window_ms": "60000",
@@ -612,12 +608,12 @@ mod tests {
             "max_deadline_ms": "1600000",
             "min_increment_bps": "100",
             "best_bidder": null,
-            "best_call_recipient": null,
+            "best_token_recipient": null,
             "bid_escrow": "0",
-            "position_recipient": "0x0",
             "proceeds_recipient": "0x0",
+            "refund_recipient": "0x0",
             "origin": "0x00000000000000000000000000000000000000000000000000000000000000f0",
-            "coupled": true,
+            "settle_authority": {"name": "abc::vault::VaultAuth"},
         }))
         .unwrap();
         assert_eq!(v.best_premium, None);
@@ -626,7 +622,7 @@ mod tests {
 
         let v = parse_auction_view(&json!({
             "amount": "250000000",
-            "reserve_premium": "47619000",
+            "reserve_bid": "47619000",
             "deadline_ms": "1120000",
             "min_increment_bps": "100",
             "best_bidder": addr(2).to_string(),

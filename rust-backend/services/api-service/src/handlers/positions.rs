@@ -66,7 +66,7 @@ pub struct PositionDto {
     /// smallest units. Frontend divides by `settlement_decimals` for USDC
     /// display.
     pub premium_received_raw: String,
-    /// `signer_account_id` from the originating `WriteExecuted`. The
+    /// `signer_id` from the originating `WriteExecuted`. The
     /// counterparty whose Account supplied/received the premium — the
     /// frontend renders this as a short-hex MM id under `soldTo`.
     pub mm_account_id: String,

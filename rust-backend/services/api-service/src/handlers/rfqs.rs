@@ -19,16 +19,21 @@ pub struct RfqsQuery {
     pub status: Option<String>,
     /// Origin filter — a vault id for coupled auctions.
     pub origin: Option<String>,
-    /// Option kind: `call` | `put`. Defaults to `call`, so existing callers
-    /// (and the call mm-bot) keep seeing call auctions unchanged. The put
-    /// bidder passes `?kind=put`.
+    /// Auction kind: `call` | `put` | `swap`. Defaults to `call`, so
+    /// existing callers (and the call mm-bot) keep seeing call auctions
+    /// unchanged. The put bidder passes `?kind=put`.
     pub kind: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct RfqDto {
+    /// The generic auction object id (rows are keyed by auction now).
     pub rfq_id: String,
-    pub bucket_id: String,
+    /// The options_rfq adapter's Rfq metadata object id; null for
+    /// vault-coupled and swap auctions.
+    pub meta_id: Option<String>,
+    /// Null for swaps / coupled auctions not yet enriched.
+    pub bucket_id: Option<String>,
     pub origin: String,
     pub amount_raw: String,
     pub reserve_premium_raw: String,
@@ -43,8 +48,8 @@ pub struct RfqDto {
     pub gross_premium_raw: Option<String>,
     /// Protocol RFQ fee taken at settle (settled auctions only).
     pub fee_raw: Option<String>,
-    /// `"call"` | `"put"` — the option kind this auction is for.
-    pub option_kind: String,
+    /// `"call"` | `"put"` | `"swap"` | `"unknown"` — what this auction is for.
+    pub auction_kind: String,
 }
 
 #[derive(Serialize)]
@@ -63,7 +68,7 @@ pub async fn list_rfqs(
     }
     // Default to "call" so pre-puts callers are unaffected.
     let kind = q.kind.as_deref().unwrap_or("call");
-    if !matches!(kind, "call" | "put") {
+    if !matches!(kind, "call" | "put" | "swap") {
         return Err(StatusCode::BAD_REQUEST);
     }
     let origin = match q.origin.as_deref() {
@@ -80,11 +85,12 @@ pub async fn list_rfqs(
         })?;
     let rfqs = rows
         .into_iter()
-        .filter(|r| r.option_kind == kind)
+        .filter(|r| r.auction_kind == kind)
         .map(|r| RfqDto {
-            option_kind: r.option_kind.clone(),
+            auction_kind: r.auction_kind.clone(),
             rfq_id: r.rfq_id.to_hex(),
-            bucket_id: r.bucket_id.to_hex(),
+            meta_id: r.meta_id.map(|m| m.to_hex()),
+            bucket_id: r.bucket_id.map(|b| b.to_hex()),
             origin: r.origin.to_hex(),
             amount_raw: r.amount.to_string(),
             reserve_premium_raw: r.reserve_premium.to_string(),

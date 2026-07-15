@@ -2488,6 +2488,7 @@ dependencies = [
  "cli-spec",
  "deployments",
  "move-core-types",
+ "move-publish",
  "protocol-types",
  "runtime-config",
  "serde",
@@ -5473,6 +5474,7 @@ dependencies = [
  "hex",
  "metrics",
  "move-core-types",
+ "move-publish",
  "observability",
  "oracle-client",
  "parking_lot 0.12.5",
@@ -5489,6 +5491,7 @@ dependencies = [
  "sui-types",
  "token-info-client",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
 ]
@@ -5969,6 +5972,19 @@ dependencies = [
  "enum-compat-util",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "move-publish"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "shared-crypto",
+ "sui-json-rpc-types",
+ "sui-move-build",
+ "sui-sdk",
+ "sui-types",
+ "tracing",
 ]
 
 [[package]]

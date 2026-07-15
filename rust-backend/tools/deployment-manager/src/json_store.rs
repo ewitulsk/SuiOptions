@@ -53,11 +53,16 @@ pub struct PackageInfo {
     /// `crates/deployments::DeepBookInfo`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deepbook: Option<serde_json::Value>,
-    /// siws_session package + Registry (via `--deploy-session`); carried
-    /// forward on protocol-only redeploys. Typed access lives in
-    /// `crates/deployments::SessionTokensInfo`.
+    /// The other three packages of the contracts tree, published in
+    /// dependency order alongside the core package (`packageId` above is
+    /// the core / options_core package). Typed access lives in
+    /// `crates/deployments::SubPackageInfo`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_tokens: Option<SessionTokensRecord>,
+    pub auction: Option<PackageRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rfq: Option<PackageRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<PackageRecord>,
     /// cctp_bridge package (via `--deploy-cctp`); carried forward on
     /// protocol-only redeploys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,13 +80,11 @@ pub struct CctpBridgeRecord {
     pub network: String,
 }
 
-/// The published siws_session package + its shared Registry.
+/// One published sub-package of the contracts tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionTokensRecord {
+pub struct PackageRecord {
     pub package_id: String,
-    /// Shared `registry::Registry` created by the package initializer.
-    pub registry_id: String,
     pub upgrade_cap_id: String,
     pub publish_digest: String,
     pub deployed_at: String,

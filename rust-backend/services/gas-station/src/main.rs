@@ -42,6 +42,14 @@ async fn main() -> Result<()> {
         .package()
         .context("protocol package id from token-info")?;
 
+    // Vault flows live in the options_vault package (four-package split);
+    // a deployment without it can't sponsor vault PTBs, so fail at boot.
+    let vault_pkg = snapshot
+        .vault()
+        .context("options_vault package missing from token-info package_info")?
+        .package()
+        .context("vault package id from token-info")?;
+
     // Faucet `mint_to_sender` is testnet-only; sponsor it on any non-mainnet
     // network (prod is itself a testnet deployment that ships test tokens).
     let allow_faucet = cfg.network != Network::Mainnet;
@@ -68,14 +76,6 @@ async fn main() -> Result<()> {
         .transpose()
         .context("deepbook package id from token-info")?;
 
-    // Session-login PTBs (siws_session) sponsor only where token-info
-    // reports the session package.
-    let session = snapshot
-        .session_tokens()
-        .map(|s| s.package())
-        .transpose()
-        .context("sessionTokens package id from token-info")?;
-
     // CCTP bridge PTBs sponsor only where the bridge package is configured
     // (published per network); Circle's TokenMessengerMinter id rides along.
     let cctp = match (&cfg.cctp_bridge_package, &cfg.cctp_token_messenger_package) {
@@ -87,7 +87,8 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
-    let templates = protocol_templates(protocol, &test_tokens, allow_faucet, deepbook, session, cctp);
+    let templates =
+        protocol_templates(protocol, vault_pkg, &test_tokens, allow_faucet, deepbook, cctp);
 
     info!(
         environment = %cfg.environment,
@@ -95,7 +96,6 @@ async fn main() -> Result<()> {
         sponsor = %sui.signer.address,
         templates = templates.len(),
         deepbook = deepbook.is_some(),
-        session = session.is_some(),
         faucet_tokens = test_tokens.len(),
         threshold_mist = cfg.min_balance_threshold_mist,
         max_gas_budget_mist = cfg.max_gas_budget_mist,

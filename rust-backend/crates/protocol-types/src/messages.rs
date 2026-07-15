@@ -16,11 +16,8 @@
 //!   service.
 //! - [`MmToService`] / [`ServiceToMm`] — market-maker bot ↔ quoting service.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
-use super::asset::AssetType;
 use super::coding::{u128_string, u64_string};
 use super::ids::ObjectId;
 use super::quote::{Quote, SignedQuote};
@@ -172,6 +169,8 @@ pub enum MmToService {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MmHelloPayload {
     pub roles: Vec<MmRole>,
+    /// The MM's on-chain `QuoteSigner` object id — the identity every quote's
+    /// `signer_id` must match. Field name kept for wire stability.
     pub account_id: ObjectId,
     /// Tag for the signing scheme used by `signing_pubkey` (and every
     /// signature this MM ships during the session). Must match the value
@@ -233,17 +232,6 @@ pub enum ServiceToMm {
         request_id: String,
         payload: BulkViewRfqBroadcastPayload,
     },
-    AccountStateUpdate {
-        payload: AccountStateUpdatePayload,
-    },
-    ReservationConfirmed {
-        request_id: String,
-        payload: ReservationPayload,
-    },
-    ReservationReleased {
-        request_id: String,
-        payload: ReservationPayload,
-    },
     Error {
         request_id: Option<String>,
         payload: ErrorPayload,
@@ -276,65 +264,6 @@ pub struct RfqBroadcastPayload {
     pub side: Side,
     #[serde(with = "u64_string")]
     pub deadline_ms: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountStateUpdatePayload {
-    pub account_id: ObjectId,
-    /// `asset_type → balance` (raw smallest-units, decimal-string in JSON).
-    pub balances: BTreeMap<AssetType, U64Str>,
-    pub active_reservations: BTreeMap<AssetType, U64Str>,
-    pub available: BTreeMap<AssetType, U64Str>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReservationPayload {
-    pub account_id: ObjectId,
-    #[serde(with = "u64_string")]
-    pub nonce: u64,
-    pub asset_type: AssetType,
-    #[serde(with = "u64_string")]
-    pub amount: u64,
-}
-
-/// `u64` map-value newtype — the workspace coding adapter can't be applied
-/// inside a `BTreeMap`'s value position directly (serde's `#[serde(with)]`
-/// only lives on fields). Wrap in a transparent newtype that uses the same
-/// adapter internally.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct U64Str(pub u64);
-
-impl From<u64> for U64Str {
-    fn from(v: u64) -> Self {
-        Self(v)
-    }
-}
-
-impl From<U64Str> for u64 {
-    fn from(v: U64Str) -> Self {
-        v.0
-    }
-}
-
-impl Serialize for U64Str {
-    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        if ser.is_human_readable() {
-            ser.serialize_str(&self.0.to_string())
-        } else {
-            ser.serialize_u64(self.0)
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for U64Str {
-    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        if de.is_human_readable() {
-            let s = String::deserialize(de)?;
-            s.parse::<u64>().map(U64Str).map_err(serde::de::Error::custom)
-        } else {
-            u64::deserialize(de).map(U64Str)
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -406,18 +335,6 @@ pub struct BulkViewMmPremium {
     pub premium: u64,
 }
 
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
-
-/// Recipient of a `ServiceToMm` after the service routes an RFQ.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReservationOutcome {
-    Confirmed,
-    Released,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,27 +376,6 @@ mod tests {
         assert!(s.contains("\"writer_mm\""));
         assert!(s.contains("\"signing_scheme\":\"ed25519\""));
         let back: MmToService = serde_json::from_str(&s).unwrap();
-        assert_eq!(back, msg);
-    }
-
-    #[test]
-    fn account_state_balances_use_decimal_strings() {
-        let mut bal = BTreeMap::new();
-        bal.insert(AssetType::new("USDC"), U64Str(1_000_000_000));
-        bal.insert(AssetType::new("BTC"), U64Str(50_000_000));
-        let msg = ServiceToMm::AccountStateUpdate {
-            payload: AccountStateUpdatePayload {
-                account_id: ObjectId::new([0x07; 32]),
-                balances: bal.clone(),
-                active_reservations: BTreeMap::new(),
-                available: bal,
-            },
-        };
-        let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
-        assert_eq!(v["payload"]["balances"]["USDC"], "1000000000");
-        assert_eq!(v["payload"]["balances"]["BTC"], "50000000");
-
-        let back: ServiceToMm = serde_json::from_value(v).unwrap();
         assert_eq!(back, msg);
     }
 
