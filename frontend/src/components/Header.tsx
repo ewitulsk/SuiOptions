@@ -313,6 +313,12 @@ export function Header() {
         >
           Activity
         </button>
+        <button
+          className={pathname === "/bridge" ? "is-active" : ""}
+          onClick={() => navigate("/bridge")}
+        >
+          Bridge
+        </button>
         {ENV === "testnet" && (
           <button
             className={pathname === "/faucet" ? "is-active" : ""}

@@ -45,6 +45,15 @@ pub struct Config {
     /// dev/staging, the test-token packages) seeds the sponsored-PTB templates
     /// built at boot.
     pub token_info_url: String,
+
+    /// cctp_bridge package id — enables sponsoring the CCTP bridge burn PTB.
+    /// Unset until the bridge package is published on this network.
+    #[serde(default)]
+    pub cctp_bridge_package: Option<String>,
+    /// Circle TokenMessengerMinter package id (per network). Required when
+    /// `cctp_bridge_package` is set.
+    #[serde(default)]
+    pub cctp_token_messenger_package: Option<String>,
 }
 
 fn default_cors() -> Vec<String> {

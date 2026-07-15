@@ -91,6 +91,14 @@ target "price-charting" {
   cache-to   = [{ type = "gha", mode = "max", scope = "price-charting" }]
 }
 
+target "cctp-relay" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.cctp-relay"
+  tags       = ["${ECR}/options/cctp-relay:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "cctp-relay" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "cctp-relay" }]
+}
+
 target "gas-station" {
   inherits   = ["_common"]
   dockerfile = "Dockerfile.gas-station"
@@ -124,5 +132,5 @@ target "oracle-service" {
 }
 
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper", "balance-monitor", "oracle-service"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay"]
 }

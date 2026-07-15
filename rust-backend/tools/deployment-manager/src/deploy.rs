@@ -100,6 +100,91 @@ async fn publish_package_inner(
     extract_publish_outcome(&resp)
 }
 
+/// Outcome of publishing the cctp_bridge package.
+pub struct CctpOutcome {
+    pub package_id: ObjectID,
+    pub upgrade_cap_id: ObjectID,
+    pub digest: String,
+}
+
+/// Publish the cctp-contracts package (no init step; the package has no
+/// one-time witness or shared state). Builds against the environment that
+/// matches `network` so the resolver links Circle's published testnet or
+/// mainnet packages (cctp-contracts/Move.toml [dep-replacements]).
+pub async fn publish_cctp_package(
+    client: &SuiClient,
+    signer: &Signer,
+    cctp_path: &Path,
+    network: crate::network::Network,
+    gas_budget: u64,
+) -> Result<CctpOutcome> {
+    tracing::info!(path = %cctp_path.display(), %network, "compiling cctp_bridge package");
+    let mut build_config = BuildConfig::new_for_testing();
+    build_config.environment = match network {
+        crate::network::Network::Mainnet => sui_package_alt::mainnet_environment(),
+        _ => sui_package_alt::testnet_environment(),
+    };
+    let compiled = build_config
+        .build(cctp_path)
+        .with_context(|| format!("compiling Move package at {}", cctp_path.display()))?;
+
+    let modules = compiled.get_package_bytes(/* with_unpublished_deps */ false);
+    let deps = compiled.get_dependency_storage_package_ids();
+    tracing::info!(modules = modules.len(), deps = deps.len(), "compiled cctp_bridge");
+
+    let tx_data = client
+        .transaction_builder()
+        .publish(signer.address, modules, deps, None, gas_budget)
+        .await
+        .context("building cctp publish tx")?;
+    let signature = Transaction::signature_from_signer(
+        tx_data.clone(),
+        Intent::sui_transaction(),
+        &signer.keypair,
+    );
+    let tx = Transaction::from_data(tx_data, vec![signature]);
+    let opts = SuiTransactionBlockResponseOptions::new()
+        .with_effects()
+        .with_object_changes();
+    let resp = client
+        .quorum_driver_api()
+        .execute_transaction_block(
+            tx,
+            opts,
+            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
+        )
+        .await
+        .context("submitting cctp publish tx")?;
+    assert_success(&resp)?;
+
+    let changes = resp
+        .object_changes
+        .as_ref()
+        .ok_or_else(|| anyhow!("cctp publish response missing object_changes"))?;
+    let mut package_id: Option<ObjectID> = None;
+    let mut upgrade_cap_id: Option<ObjectID> = None;
+    for change in changes {
+        match change {
+            ObjectChange::Published { package_id: pid, .. } => package_id = Some(*pid),
+            ObjectChange::Created { object_id, object_type, .. } => {
+                if object_type.address == SUI_FRAMEWORK_ADDRESS
+                    && object_type.module.as_str() == "package"
+                    && object_type.name.as_str() == "UpgradeCap"
+                {
+                    upgrade_cap_id = Some(*object_id);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(CctpOutcome {
+        package_id: package_id.ok_or_else(|| anyhow!("cctp publish created no package"))?,
+        upgrade_cap_id: upgrade_cap_id
+            .ok_or_else(|| anyhow!("cctp publish created no UpgradeCap"))?,
+        digest: resp.digest.to_string(),
+    })
+}
+
 fn extract_publish_outcome(resp: &SuiTransactionBlockResponse) -> Result<PublishOutcome> {
     let digest = resp.digest.to_string();
     let changes = resp

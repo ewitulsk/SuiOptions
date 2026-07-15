@@ -76,7 +76,19 @@ async fn main() -> Result<()> {
         .transpose()
         .context("deepbook package id from token-info")?;
 
-    let templates = protocol_templates(protocol, vault_pkg, &test_tokens, allow_faucet, deepbook);
+    // CCTP bridge PTBs sponsor only where the bridge package is configured
+    // (published per network); Circle's TokenMessengerMinter id rides along.
+    let cctp = match (&cfg.cctp_bridge_package, &cfg.cctp_token_messenger_package) {
+        (Some(bridge), Some(tmm)) => Some((
+            ObjectID::from_hex_literal(bridge).context("bad cctp_bridge_package")?,
+            ObjectID::from_hex_literal(tmm).context("bad cctp_token_messenger_package")?,
+        )),
+        (Some(_), None) => anyhow::bail!("cctp_bridge_package set without cctp_token_messenger_package"),
+        _ => None,
+    };
+
+    let templates =
+        protocol_templates(protocol, vault_pkg, &test_tokens, allow_faucet, deepbook, cctp);
 
     info!(
         environment = %cfg.environment,

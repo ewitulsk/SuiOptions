@@ -1,0 +1,13 @@
+[package]
+name = "cctp_bridge"
+version = "0.0.1"
+edition = "2024.beta"
+
+[dependencies]
+# Circle CCTP v1 on Sui. The testnet/mainnet branches carry the published
+# package IDs in their own Move.lock [env] sections, so the resolver links the
+# correct on-chain packages per network (same pattern as pyth in ../contracts).
+token_messenger_minter = { git = "https://github.com/circlefin/sui-cctp.git", subdir = "packages/token_messenger_minter", rev = "mainnet" }
+
+[dep-replacements]
+testnet.token_messenger_minter = { git = "https://github.com/circlefin/sui-cctp.git", subdir = "packages/token_messenger_minter", rev = "testnet" }

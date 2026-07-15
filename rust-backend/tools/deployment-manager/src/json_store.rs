@@ -63,6 +63,21 @@ pub struct PackageInfo {
     pub rfq: Option<PackageRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<PackageRecord>,
+    /// cctp_bridge package (via `--deploy-cctp`); carried forward on
+    /// protocol-only redeploys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cctp_bridge: Option<CctpBridgeRecord>,
+}
+
+/// The published cctp_bridge package (cctp-contracts/).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CctpBridgeRecord {
+    pub package_id: String,
+    pub upgrade_cap_id: String,
+    pub publish_digest: String,
+    pub deployed_at: String,
+    pub network: String,
 }
 
 /// One published sub-package of the contracts tree.

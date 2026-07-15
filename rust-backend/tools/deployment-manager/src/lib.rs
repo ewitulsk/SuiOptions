@@ -56,6 +56,16 @@ pub struct Cli {
     #[arg(short = 's', long, default_value = "tools/deployment-manager/config/secrets.toml")]
     pub secrets: PathBuf,
 
+    /// Publish ONLY the cctp_bridge package (cctp-contracts/) and record it
+    /// under the env's `cctpBridge` block. Skips the protocol publish
+    /// entirely; the env must already exist in deployments.json.
+    #[arg(long)]
+    pub deploy_cctp: bool,
+
+    /// Path to the cctp-contracts Move package.
+    #[arg(long, default_value = "../cctp-contracts")]
+    pub cctp_contracts: PathBuf,
+
     /// Gas budget (MIST) per transaction.
     #[arg(long, default_value_t = 500_000_000)]
     pub gas_budget: u64,

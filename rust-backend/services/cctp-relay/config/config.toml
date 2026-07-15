@@ -1,0 +1,30 @@
+# cctp-relay — local dev. Bridges Sui Testnet <-> Solana Devnet through
+# Circle's sandbox attestation API.
+
+environment = "dev"
+bind_addr   = "0.0.0.0:9015"
+
+database_url = "postgresql://postgres:postgres@127.0.0.1:5432/cctp_relay_dev"
+db_pool_size = 4
+
+iris_base_url = "https://iris-api-sandbox.circle.com"
+
+poll_interval_secs  = 10
+relay_interval_secs = 10
+max_mint_attempts   = 5
+
+allowed_origins = ["*"]
+
+[sui]
+network                        = "testnet"
+message_transmitter_package    = "0x4931e06dce648b3931f890035bd196920770e913e43e45990b383f6486fdd0a5"
+token_messenger_minter_package = "0x31cc14d80c175ae39777c0238f20594c6d4869cfab199f40b69f3319956b8beb"
+message_transmitter_state      = "0x98234bd0fa9ac12cc0a20a144a22e36d6a32f7e0a97baaeaf9c76cdc6d122d2e"
+token_messenger_minter_state   = "0x5252abd1137094ed1db3e0d75bc36abcd287aee4bc310f8e047727ef5682e7c2"
+usdc_treasury                  = "0x7170137d4a6431bf83351ac025baf462909bffe2877d87716374fb42b9629ebe"
+usdc_coin_type                 = "0xa1ec7fc00a6f40db9693ad1415d0c193ad3906494428cf252621037bd7117e29::usdc::USDC"
+
+[solana]
+network   = "devnet"
+rpc_url   = "https://api.devnet.solana.com"
+usdc_mint = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"

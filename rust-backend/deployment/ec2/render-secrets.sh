@@ -133,6 +133,34 @@ $RPC_LINE
 EOF
 fi
 
+# ---- cctp-relay secret -> rendered TOML -----------------------------------
+# Relayer keys for the CCTP bridge: a Sui key (mints on Sui) and a Solana
+# fee-payer keypair (mints on Solana; base58 64-byte or JSON-array format).
+# Both must stay funded with gas. Absent secret -> cctp-relay isn't deployed
+# in this env.
+if CCTP_JSON=$(fetch cctp-relay 2>/dev/null); then
+  SUI_KEY=$(echo "$CCTP_JSON" | jq -r '.sui_key')
+  SOLANA_KEY=$(echo "$CCTP_JSON" | jq -r '.solana_key')
+  if [ -z "$SUI_KEY" ] || [ "$SUI_KEY" = "null" ]; then
+    echo "missing sui_key in options/$ENV/cctp-relay" >&2
+    exit 1
+  fi
+  if [ -z "$SOLANA_KEY" ] || [ "$SOLANA_KEY" = "null" ]; then
+    echo "missing solana_key in options/$ENV/cctp-relay" >&2
+    exit 1
+  fi
+  umask 077
+  cat > "$DIR/cctp-relay.toml" <<CCTPEOF
+[sui]
+$NETWORK = "$SUI_KEY"
+$RPC_LINE
+
+[solana]
+devnet = "$SOLANA_KEY"
+mainnet = "$SOLANA_KEY"
+CCTPEOF
+fi
+
 # ---- auth-service secret -> rendered TOML --------------------------------
 # JWT signing secret. auth-service is the sole holder; token-info delegates
 # verification to it and never sees this value.

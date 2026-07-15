@@ -1,0 +1,23 @@
+skip_local_validator = true
+
+[toolchain]
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+cctp_bridge = "77R21RcDcQuhWPkTNHh7BeUgBstF2Nmsysp86QpZam86"
+
+[programs.devnet]
+cctp_bridge = "77R21RcDcQuhWPkTNHh7BeUgBstF2Nmsysp86QpZam86"
+
+[programs.mainnet]
+cctp_bridge = "77R21RcDcQuhWPkTNHh7BeUgBstF2Nmsysp86QpZam86"
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "cargo test"
