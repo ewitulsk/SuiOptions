@@ -57,6 +57,9 @@ backend/app/
 ├── scheduler/        # poll loop: every saved search on its interval, fan out to adapters
 ├── pipeline/         # normalize → dedupe → persist → enqueue for valuation
 ├── valuation/        # the AI layer (see §2)
+├── auth/             # simple auth service (see §3): login/logout/session endpoints,
+│                     # bcrypt password hashing, users table, require-auth dependency
+│                     # on every API route
 └── notify/           # Discord webhook first; Telegram/email later. Includes drafted
                       # outreach message in the alert — human copies/sends it.
 ```
@@ -76,10 +79,30 @@ marketplace is one adapter file + one row in the `sources` table.
 | `listings`       | normalized listings, `UNIQUE(source, external_id)` for dedup             |
 | `valuations`     | AI output per listing (versioned — re-valuation appends)                 |
 | `alerts`         | fired notifications + their channel/status                               |
-| `deals`          | manual lifecycle tracking: contacted → bought (cost) → sold (proceeds) → P&L |
+| `deals`          | manual lifecycle tracking with **actual money in / money out** (below)   |
+| `users`          | dashboard accounts for the simple auth service (below)                   |
 
-`deals` matters beyond bookkeeping: it becomes ground truth for evaluating and
-improving the valuation prompts/models (§2, eval harness).
+**`deals` — actual P&L tracking.** One row per pursued listing (FK → `listings`;
+also allows manual rows for off-platform finds). Status lifecycle:
+`watching → contacted → bought → listed → sold` (or `dead`). Money columns are
+what we *actually* paid/received, entered by hand from the dashboard:
+
+| column | notes |
+|--------|-------|
+| `buy_price` | what we actually handed the seller (set when status → `bought`) |
+| `buy_extra_costs` | gas/shipping/repair parts — anything spent to acquire/flip |
+| `bought_at`, `bought_by` | date + which user did the deal (`bought_by` FK → `users`) |
+| `sale_price` | what the buyer actually paid us (set when status → `sold`) |
+| `sale_fees` | platform fees + shipping we ate on the resale |
+| `sold_at`, `sale_channel` | date + where it resold (eBay, FB, local, …) |
+| `notes` | free text |
+
+`net_profit = sale_price − sale_fees − buy_price − buy_extra_costs` is computed
+(DB generated column), never entered — so the dashboard math can't drift from the
+data. Dashboard aggregates come straight off this table: realized P&L (sold),
+capital currently tied up (bought/listed, sum of costs), per-user and per-channel
+breakdowns, and **AI-estimate vs. actual** (join `valuations`) — which doubles as
+ground truth for the eval harness (§2).
 
 **Flow per poll tick:**
 scheduler → adapter.search() → normalize → skip already-seen → persist → valuation
@@ -150,12 +173,33 @@ Pages:
    alert threshold.
 3. **Listing detail** — full valuation history, raw AI rationale, re-run valuation
    (with a different model, for comparison).
-4. **Deals / P&L** — the bought→sold ledger and running profit.
-5. **Settings** — provider/model selection per stage, notification channels.
+4. **Deals / P&L** — the money page. A table of every deal with its status and
+   the actual numbers, plus entry forms:
+   - "Mark bought" (from the deal feed or here) opens a form: **actual buy price**,
+     extra costs, date (defaults today), notes → writes to `deals`.
+   - "Mark sold" opens: **actual sale price**, fees, channel, date → writes to
+     `deals`; the row's computed `net_profit` appears immediately.
+   - Numbers stay editable after the fact (typo fixes), full row history visible.
+   - Header stats: realized P&L (all-time / 30d), capital tied up in unsold
+     inventory, win rate, avg days bought→sold, per-user split, and an
+     "AI estimate vs. actual sale" scatter once there's enough data.
+5. **Settings** — provider/model selection per stage, notification channels,
+   user management (add user, reset password).
 
-Auth: single shared password → session cookie (this is a 2-person internal tool;
-no user system). Backend enforces it on the API, Caddy can add basic-auth as a
-second layer.
+**Auth — simple auth service, part of the backend (`app/auth/`).** Real user
+accounts (it's two people, but P&L entries need attribution — `bought_by` — and
+a shared password can't give you that):
+- `users` table: `username`, `password_hash` (bcrypt), `created_at`. First admin
+  user seeded from a Secrets Manager value on startup; more users added via the
+  settings page.
+- `POST /auth/login` → verifies bcrypt hash → sets a signed, HttpOnly, Secure
+  session cookie (`itsdangerous`-signed payload with user id + expiry; the
+  signing secret lives in Secrets Manager). `POST /auth/logout` clears it.
+- Every other API route sits behind a FastAPI dependency that validates the
+  cookie and injects `current_user`; the frontend redirects to `/login` on 401.
+- No OAuth, no JWT refresh dance, no roles — deliberately the simplest thing
+  that gives attributed, revocable logins. Caddy still fronts everything with
+  TLS; rate-limit `/auth/login` at the backend.
 
 ---
 
@@ -182,7 +226,8 @@ infra/
 │                      # S3 bundle bucket), EC2 instance profile (ECR pull, secrets read, SSM)
 ├── secrets.tf         # placeholders: scraper/llm (openai/anthropic/openrouter keys),
 │                      # scraper/db (random_password), scraper/notify (discord webhook),
-│                      # scraper/app (session secret, marketplace API keys, proxy creds)
+│                      # scraper/app (auth session-signing secret, seed admin password,
+│                      #              marketplace API keys, proxy creds)
 ├── security_groups.tf # 80/443 in, egress open
 ├── dns.tf             # optional Route53 A record (skip if zone id empty — same pattern
 │                      # as monorepo variables.tf)
@@ -268,7 +313,7 @@ semantics as `_deploy.yml`):
 | Phase | Scope | Verify |
 |-------|-------|--------|
 | **1. Vertical slice** | backend skeleton (FastAPI, DB, config), eBay adapter, scheduler, LiteLLM valuator (triage+full), Discord alert. Runs via local `docker compose up`. | A saved search finds a real underpriced eBay listing and posts a valued alert to Discord. |
-| **2. Dashboard** | frontend (deal feed, saved-search CRUD, listing detail), auth, deals/P&L tables. | Manage searches + review deals entirely from the browser. |
+| **2. Dashboard** | frontend (deal feed, saved-search CRUD, listing detail), auth service (users, login, sessions), deals/P&L page with buy/sell entry forms. | Log in, mark a deal bought at $80 and sold at $500, and see net profit + aggregates update. |
 | **3. Ship it** | `scraper/infra` terraform, workflows, first cloud deploy. | Push to `main` → CI green → auto-deploy → bot runs 24/7, alerts arrive. |
 | **4. More sources** | Reverb + GunBroker adapters (API), Craigslist (HTML). Adapter health monitoring. | Each new source produces deduped, valued listings for a week without manual poking. |
 | **5. Sharpen the AI** | eval harness on `deals` outcomes, prompt/model comparison in UI, outreach drafts, per-category prompt tuning. | Valuation error measured and trending down against real sold outcomes. |
