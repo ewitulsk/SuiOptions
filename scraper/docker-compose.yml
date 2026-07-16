@@ -1,0 +1,40 @@
+# Local development stack: `docker compose up` from scraper/.
+# Copy backend/.env.example -> backend/.env and fill in API keys first.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: scraper
+      POSTGRES_PASSWORD: scraper
+      POSTGRES_DB: scraper
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scraper"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://scraper:scraper@db:5432/scraper
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build: ./backend
+    command: python -m app.worker
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://scraper:scraper@db:5432/scraper
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
