@@ -1,6 +1,20 @@
 # scraper/frontend
 
-Vite + React 18 + TypeScript dashboard: deal feed, saved-search CRUD, listing
-detail with valuation history, deals/P&L ledger.
+Vite + React 18 + TypeScript dashboard (plan §3): login, deal feed with AI
+valuations and copyable outreach drafts, saved-search CRUD, and the Deals/P&L
+page — mark deals bought/sold with actual prices and watch net profit,
+capital tied up, win rate, and per-user splits update.
 
-Not yet implemented — see [../PLAN.md](../PLAN.md) §3 and build phase 2.
+## Run locally
+
+```bash
+npm install
+npm run dev        # http://localhost:5173, proxies /api + /auth to :8000
+```
+
+Start the backend first (see `../backend/README.md`). Log in with the seeded
+admin user (`SEED_ADMIN_PASSWORD`).
+
+```bash
+npm run build      # typecheck + production bundle to dist/
+```
