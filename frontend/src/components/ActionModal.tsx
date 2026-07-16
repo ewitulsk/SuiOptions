@@ -39,7 +39,7 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
                 {isPut ? "put" : "call"} at ${formatPrice(p.strike, { grouping: true })}
               </div>
               <div className="modal__sub">
-                tideline · bucket {p.asset.toLowerCase()}_{p.strike}_
+                pismo protocol · bucket {p.asset.toLowerCase()}_{p.strike}_
                 {p.expiry.replaceAll("-", "")}
               </div>
               <div className="modal__list">
@@ -110,7 +110,7 @@ export function ActionModal({ modal, spots, onSubmit, onClose }: Props) {
             <>
               <div className="modal__spinner"></div>
               <div className="modal__title">Signing exercise…</div>
-              <div className="modal__sub">tideline · waiting for wallet</div>
+              <div className="modal__sub">pismo protocol · waiting for wallet</div>
             </>
           )}
           {isBroadcast && (

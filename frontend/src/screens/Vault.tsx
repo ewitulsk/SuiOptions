@@ -109,9 +109,9 @@ function AssetGlyph({ asset }: { asset: string }) {
   return <TokenLogo symbol={asset} className="asset-glyph" fallback={fallback} />;
 }
 
-const SELECTED_VAULT_KEY = "tideline.selectedVault";
-const FOREGROUND_VAULT_KEY = "tideline.foregroundVault";
-const SEARCH_QUERY_KEY = "tideline.vaultSearch";
+const SELECTED_VAULT_KEY = "pismo.selectedVault";
+const FOREGROUND_VAULT_KEY = "pismo.foregroundVault";
+const SEARCH_QUERY_KEY = "pismo.vaultSearch";
 
 export function VaultScreen() {
   const vaults = useVaults();

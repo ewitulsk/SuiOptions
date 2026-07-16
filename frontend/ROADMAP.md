@@ -1,4 +1,4 @@
-# Frontend Roadmap — Tideline (SuiOptions)
+# Frontend Roadmap — Pismo Protocol (SuiOptions)
 
 > **Deliverable**: this document, copied to `frontend/ROADMAP.md` once approved.
 > Plan-mode constraints prevent writing to the repo until ExitPlanMode is accepted.
@@ -62,7 +62,7 @@ Goal: a user connects a wallet on testnet and sees their **real** account balanc
 
 - [ ] **F1.4** Spot price feed: replace local random walk with Pyth feed via `@pythnetwork/pyth-sui-js` (BTC/USD, SUI/USD). Wire into `mocks/composer.ts:useComposerState.spot` and `mocks/dashboard.ts:DASH_SPOTS`.
 - [ ] **F1.5** Account fetch: `suiClient.getObject({ id: <Account ID> })` → balances map. Replace hardcoded `btcBalance = 0.4321`, `usdcBalance = 5000`.
-- [ ] **F1.6** Bucket state fetch: read `Bucket<U,S>` shared object → `total_written`, `exercise_cursor`, `expiry_ms`, `strike`, `underlying_balance`. Feed `BucketBar` and `Tideline`.
+- [ ] **F1.6** Bucket state fetch: read `Bucket<U,S>` shared object → `total_written`, `exercise_cursor`, `expiry_ms`, `strike`, `underlying_balance`. Feed `BucketBar` and `QueueWave`.
 - [ ] **F1.7** Held call tokens: `getOwnedObjects` filter by `CallOption<U,S>` type → group by bucket → owned positions in Dashboard.
 - [ ] **F1.8** Owned Position Objects: same pattern → written positions in Dashboard.
 
@@ -153,7 +153,7 @@ Everything that has to be true before mainnet.
 
 ### Mobile + accessibility
 
-- [ ] **F3.8** Responsive breakpoints. Today: `width=1280` fixed-viewport. Need ≥360px portrait. Dashboard cards stack; tideline collapses; modals go full-bleed.
+- [ ] **F3.8** Responsive breakpoints. Today: `width=1280` fixed-viewport. Need ≥360px portrait. Dashboard cards stack; queue wave collapses; modals go full-bleed.
 - [ ] **F3.9** A11y pass: focus traps in modals, keyboard nav for tile selector, ARIA labels on icon-only buttons, color-contrast audit on Aqua palette (some `--aqua-ink-3` text on glass may fail AA).
 - [ ] **F3.10** Reduced-motion respect (`prefers-reduced-motion`) — currently `aqua-tide`, `aqua-pulse`, `aqua-heartbeat` run unconditionally.
 

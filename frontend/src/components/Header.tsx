@@ -269,8 +269,8 @@ export function Header() {
         </svg>
       </div>
       <div className="header__brand">
-        <img className="header__brand-mark" src="/tideline-mark.svg" width={36} height={36} alt="" />
-        tideline
+        <img className="header__brand-mark" src="/pismo-mark.svg" width={36} height={36} alt="" />
+        pismo protocol
       </div>
       <nav className="header__nav" ref={navRef}>
         <span

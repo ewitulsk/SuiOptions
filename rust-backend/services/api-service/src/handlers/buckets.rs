@@ -204,7 +204,7 @@ fn retain_non_invalidated(series: &mut Vec<SeriesDto>) {
 /// `GET /buckets/:bucket_id` — one bucket's cursor/queue state.
 ///
 /// A focused, cheaply-pollable single-row view: the writer composer's
-/// "YOUR PLACE IN THE QUEUE" tideline reads `exercise_cursor` (how far
+/// "YOUR PLACE IN THE QUEUE" queue wave reads `exercise_cursor` (how far
 /// FIFO assignment has eaten into the bucket) and `queued_ahead` (written
 /// underlying sitting ahead of the cursor, still unassigned) every few
 /// seconds without re-pulling the whole `/buckets` catalog. The numbers
@@ -265,7 +265,7 @@ pub async fn get_bucket(
         StatusCode::BAD_GATEWAY
     })?;
     // Cleaned buckets are settled-and-gone — treat them as absent so the
-    // tideline stops polling a stale id rather than rendering dead state.
+    // queue wave stops polling a stale id rather than rendering dead state.
     let bucket = bucket.filter(|b| !b.cleaned).ok_or(StatusCode::NOT_FOUND)?;
     let now_ms = Utc::now().timestamp_millis();
     Ok(Json(detail_dto_from(&bucket, &state.catalog, now_ms)))
@@ -752,7 +752,7 @@ mod tests {
     #[test]
     fn queued_ahead_is_written_minus_cursor() {
         // TBTC(8): 4.2 written, 1.0 assigned → 3.2 still queued ahead of
-        // the cursor. This is the number the tideline draws.
+        // the cursor. This is the number the queue wave draws.
         let cat = fixture_catalog();
         let dto = detail_dto_from(
             &mk_idx_bucket(ObjectId::new([0xaa; 32]), 420_000_000, 100_000_000),

@@ -2,12 +2,20 @@ import { useSyncExternalStore } from "react";
 
 export type ThemeMode = "light" | "dark";
 
-const STORAGE_KEY = "tideline-theme-mode";
+const STORAGE_KEY = "pismo-theme-mode";
+// Pre-rebrand key. Read once as a fallback so existing users keep their mode.
+const LEGACY_STORAGE_KEY = "tideline-theme-mode";
 
 function readStored(): ThemeMode {
   try {
     const v = localStorage.getItem(STORAGE_KEY);
     if (v === "light" || v === "dark") return v;
+    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (legacy === "light" || legacy === "dark") {
+      localStorage.setItem(STORAGE_KEY, legacy);
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
+      return legacy;
+    }
   } catch {}
   return "dark";
 }

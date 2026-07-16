@@ -1,4 +1,4 @@
-# Tideline Frontend
+# Pismo Protocol Frontend
 
 Aqua-themed UI for the SuiOptions protocol. MVP scaffold — UI shell is wired,
 data is mocked and ready to swap for real Sui SDK calls.
