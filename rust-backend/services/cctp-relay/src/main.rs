@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
         "relayer keys loaded — keep both funded with gas"
     );
 
-    let state = Arc::new(AppState::new(repo));
+    let state = Arc::new(AppState::new(repo, router::CctpConfigDto::from_config(&cfg)));
 
     watcher::spawn(watcher::WatcherParams {
         state: Arc::clone(&state),

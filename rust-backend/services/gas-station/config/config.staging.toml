@@ -17,10 +17,8 @@ gas_budget_buffer_bps = 2500
 token_info_url = "http://token-info:9005"
 
 # CCTP bridge burn PTB sponsorship (frontend tx/bridge.ts). Deliberately
-# UNSET: the staging cctp bridge went straight to MAINNET
-# (cctp_bridge 0x926a68c5fd70fb4a0bbd0253d0b35b25b7bb24965b78f2a717b69fbadff4c978,
-# see deployments.json cctpBridge + cctp-relay config.staging.toml), and this
-# gas-station sponsors on testnet — it cannot sponsor a mainnet PTB. Fill
-# these only if a testnet cctp_bridge is ever published for this env:
-# cctp_bridge_package         = "0x…"
+# UNSET: the staging bridge runs on MAINNET (see cctp-relay
+# config.staging.toml) while this gas-station sponsors on testnet — it cannot
+# sponsor a mainnet PTB. Fill this in only if the bridge is ever offered on
+# this env's own network:
 # cctp_token_messenger_package = "0x31cc14d80c175ae39777c0238f20594c6d4869cfab199f40b69f3319956b8beb"  # testnet (mainnet: 0x2aa6c5d56376c371f88a6cc42e852824994993cb9bab8d3e6450cbe3cb32b94e)

@@ -1,19 +1,23 @@
 // CCTP USDC bridge (Sui ↔ Solana, Circle CCTP v1).
 //
-// Burn-side entry points are our contracts on each chain (tx/bridge.ts PTB
-// on Sui; solana/bridge.ts Anchor ix on Solana). After the burn tx lands the
+// Both burn legs call Circle's CCTP contracts directly (tx/bridge.ts PTB on
+// Sui; solana/bridge.ts instruction on Solana). After the burn tx lands the
 // hash is registered with cctp-relay, which polls Circle's attestation API
 // and auto-submits the destination-chain mint — the list below tracks each
 // transfer's status and end-to-end duration live.
+//
+// The CCTP constants come from cctp-relay's `GET /config`, fetched here rather
+// than at app boot: the bridge is one page, so an unreachable relay degrades
+// this screen instead of failing the whole app.
 
 import { useEffect, useMemo, useState } from "react";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 import { PublicKey } from "@solana/web3.js";
 
 import { registerBridgeTransfer, type BridgeTransfer } from "../api/bridge";
+import { fetchCctpConfig, type CctpConfig } from "../api/cctpConfig";
 import { useBridgeTransfers } from "../api/useBridgeTransfers";
 import { Toast, type ToastState } from "../components/Toast";
-import { CCTP_BRIDGE_PACKAGE_ID, ENV } from "../config";
 import {
   connectPhantomWallet,
   deriveUsdcAta,
@@ -72,11 +76,26 @@ export function Bridge() {
   const [solanaWallet, setSolanaWallet] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [cctp, setCctp] = useState<CctpConfig | null>(null);
 
   const flash = (message: string, variant: ToastState["variant"] = "success") => {
     setToast({ message, variant });
     setTimeout(() => setToast(null), 6000);
   };
+
+  useEffect(() => {
+    let live = true;
+    fetchCctpConfig()
+      .then((c) => {
+        if (live) setCctp(c);
+      })
+      .catch(() => {
+        // Leave `cctp` null — the form renders its unavailable state.
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   // Prefill the destination from the connected wallet on the other chain.
   useEffect(() => {
@@ -116,18 +135,22 @@ export function Bridge() {
       flash("Enter a positive USDC amount", "error");
       return;
     }
+    if (!cctp) {
+      flash("Bridge configuration unavailable", "error");
+      return;
+    }
     setBusy(true);
     try {
       if (direction === "sui->solana") {
         if (!account) throw new Error("Connect a Sui wallet first");
         if (!destination) throw new Error("Enter the destination Solana wallet address");
         const owner = new PublicKey(destination);
-        const ata = deriveUsdcAta(owner);
+        const ata = deriveUsdcAta(owner, cctp.solana.usdcMint);
         const mintRecipientHex =
           "0x" +
           [...ata.toBytes()].map((b) => b.toString(16).padStart(2, "0")).join("");
         const digest = await submitTx(
-          buildSuiDepositForBurnTx({ amountRaw, mintRecipientHex }),
+          buildSuiDepositForBurnTx(cctp, { amountRaw, mintRecipientHex }),
         );
         await registerBridgeTransfer({
           txHash: digest,
@@ -139,7 +162,7 @@ export function Bridge() {
         if (!/^0x[0-9a-fA-F]{1,64}$/.test(destination.trim())) {
           throw new Error("Enter the destination Sui address (0x…)");
         }
-        const { signature, wallet } = await sendSolanaDepositForBurn({
+        const { signature, wallet } = await sendSolanaDepositForBurn(cctp, {
           amountRaw,
           suiRecipientHex: destination.trim(),
         });
@@ -166,25 +189,27 @@ export function Bridge() {
     }
   };
 
-  const suiSideReady = Boolean(CCTP_BRIDGE_PACKAGE_ID);
   const fromLabel = direction === "sui->solana" ? "Sui" : "Solana";
   const toLabel = direction === "sui->solana" ? "Solana" : "Sui";
+  // The networks the bridge actually runs on, straight from the relay — they
+  // are independent of this app's VITE_ENVIRONMENT.
+  const networkLabel = cctp
+    ? `Sui ${cctp.sui.network} ↔ Solana ${cctp.solana.network}`
+    : "Sui ↔ Solana";
 
   return (
     <div className="app__wrap">
       <div className="dash-hero">
         <div className="dash-hero__eyebrow">circle cctp · usdc</div>
         <h1 className="dash-hero__title">Bridge</h1>
-        <div className="dash-hero__addr">
-          {ENV === "mainnet" ? "Sui ↔ Solana" : "Sui Testnet ↔ Solana Devnet"}
-        </div>
+        <div className="dash-hero__addr">{networkLabel}</div>
       </div>
 
       <section className="admin-section">
         <div className="admin-section__head">
           <h2 className="admin-section__title">Transfer USDC</h2>
           <div className="admin-section__sub">
-            Burns USDC on {fromLabel} through our bridge contract; the relay
+            Burns USDC on {fromLabel} through Circle&apos;s CCTP; the relay
             service mints it on {toLabel} automatically.
           </div>
         </div>
@@ -207,9 +232,10 @@ export function Bridge() {
             </button>
           </div>
 
-          {direction === "sui->solana" && !suiSideReady ? (
+          {!cctp ? (
             <div className="admin-empty">
-              The cctp_bridge package isn&apos;t deployed on this network yet.
+              Bridge configuration unavailable — the relay service isn&apos;t
+              reachable right now.
             </div>
           ) : (
             <>

@@ -2,28 +2,25 @@
 //
 // Shape (must stay in lockstep with the gas station's `cctp_bridge` template
 // in `rust-backend/crates/sui-tx/src/tx/template.rs`):
-//   1. coinWithBalance(USDC, amount)                        — coin plumbing
-//   2. cctp_bridge::bridge::prepare_deposit_for_burn<USDC>  — our entry point
-//      (emits BridgeInitiated, returns the burn ticket)
-//   3. Circle token_messenger_minter::deposit_for_burn::
-//      deposit_for_burn_with_package_auth<USDC, BridgeAuth> — burns the coin
-//      and sends the cross-chain message.
+//   1. coinWithBalance(USDC, amount)                    — coin plumbing
+//   2. token_messenger_minter::deposit_for_burn::deposit_for_burn<USDC>
+//      — Circle's entry fun: burns the coin and sends the cross-chain
+//        message, with the user's own address as the message sender.
+//
+// We call Circle directly rather than through a wrapper package: the
+// package-auth ticket flow exists so a *package* can own the message (and
+// later `replace_deposit_for_burn` it), which we never do. Circle's own
+// guidance is that direct/EOA callers use `deposit_for_burn`.
 //
 // The mint recipient is the destination wallet's Solana USDC **token
 // account** (ATA), not the wallet itself, encoded as a 32-byte Sui address.
 
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
 
-import { CCTP, CCTP_BRIDGE_PACKAGE_ID, ENV } from "../config";
+import type { CctpConfig } from "../api/cctpConfig";
 
-function requireBridgePackage(): string {
-  if (!CCTP_BRIDGE_PACKAGE_ID) {
-    throw new Error(
-      `No cctp_bridge deployment for VITE_ENVIRONMENT="${ENV}" — cannot build bridge PTBs`,
-    );
-  }
-  return CCTP_BRIDGE_PACKAGE_ID;
-}
+/** Stablecoin DenyList — a fixed framework address on every network. */
+const DENY_LIST = "0x403";
 
 export type SuiDepositForBurnParams = {
   /** USDC to bridge, in base units (6 decimals). */
@@ -32,33 +29,27 @@ export type SuiDepositForBurnParams = {
   mintRecipientHex: string;
 };
 
-export function buildSuiDepositForBurnTx(p: SuiDepositForBurnParams): Transaction {
-  const bridge = requireBridgePackage();
+export function buildSuiDepositForBurnTx(
+  cctp: CctpConfig,
+  p: SuiDepositForBurnParams,
+): Transaction {
   const tx = new Transaction();
 
   const coin = tx.add(
-    coinWithBalance({ balance: p.amountRaw, type: CCTP.suiUsdcCoinType }),
+    coinWithBalance({ balance: p.amountRaw, type: cctp.sui.usdcCoinType }),
   );
 
-  const ticket = tx.moveCall({
-    target: `${bridge}::bridge::prepare_deposit_for_burn`,
-    typeArguments: [CCTP.suiUsdcCoinType],
+  tx.moveCall({
+    target: `${cctp.sui.tokenMessengerPackage}::deposit_for_burn::deposit_for_burn`,
+    typeArguments: [cctp.sui.usdcCoinType],
     arguments: [
       coin,
-      tx.pure.u32(CCTP.domainSolana),
+      tx.pure.u32(cctp.domainSolana),
       tx.pure.address(p.mintRecipientHex),
-    ],
-  });
-
-  tx.moveCall({
-    target: `${CCTP.suiTokenMessengerPackage}::deposit_for_burn::deposit_for_burn_with_package_auth`,
-    typeArguments: [CCTP.suiUsdcCoinType, `${bridge}::bridge::BridgeAuth`],
-    arguments: [
-      ticket,
-      tx.object(CCTP.suiTokenMessengerState),
-      tx.object(CCTP.suiMessageTransmitterState),
-      tx.object("0x403"), // stablecoin DenyList (fixed address)
-      tx.object(CCTP.suiUsdcTreasury),
+      tx.object(cctp.sui.tokenMessengerState),
+      tx.object(cctp.sui.messageTransmitterState),
+      tx.object(DENY_LIST),
+      tx.object(cctp.sui.usdcTreasury),
     ],
   });
 
