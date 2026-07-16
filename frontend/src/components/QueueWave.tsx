@@ -2,7 +2,7 @@ import type { Bucket } from "../types";
 
 type Props = { bucket: Bucket; amount: number; assetSymbol: string | null };
 
-export function Tideline({ bucket, amount, assetSymbol }: Props) {
+export function QueueWave({ bucket, amount, assetSymbol }: Props) {
   const asset = assetSymbol ?? "—";
   const { cursor, queued, cap } = bucket;
   const writtenStart = cursor + queued;
@@ -16,34 +16,34 @@ export function Tideline({ bucket, amount, assetSymbol }: Props) {
           <b>{queued.toFixed(3)} {asset}</b> behind
         </div>
       </div>
-      <div className="tideline">
-        <svg className="tideline__svg" viewBox="0 0 1200 24" preserveAspectRatio="none">
+      <div className="queue-wave">
+        <svg className="queue-wave__svg" viewBox="0 0 1200 24" preserveAspectRatio="none">
           <path
-            className="tideline__wave tideline__wave--back"
+            className="queue-wave__wave queue-wave__wave--back"
             d="M0,12 C100,4 200,20 300,12 C400,4 500,20 600,12 C700,4 800,20 900,12 C1000,4 1100,20 1200,12"
           />
           <path
-            className="tideline__wave"
+            className="queue-wave__wave"
             d="M0,14 C100,6 200,22 300,14 C400,6 500,22 600,14 C700,6 800,22 900,14 C1000,6 1100,22 1200,14"
           />
         </svg>
         <div
-          className="tideline__zone tideline__zone--exercised"
+          className="queue-wave__zone queue-wave__zone--exercised"
           style={{ left: 0, width: `${pct(cursor)}%` }}
         />
         <div
-          className="tideline__zone tideline__zone--queued"
+          className="queue-wave__zone queue-wave__zone--queued"
           style={{ left: `${pct(cursor)}%`, width: `${pct(queued)}%` }}
         />
         <div
-          className="tideline__zone tideline__zone--you"
+          className="queue-wave__zone queue-wave__zone--you"
           style={{ left: `${pct(writtenStart)}%`, width: `${pct(amount)}%` }}
         >
-          <span className="tideline__you-label">you · {amount.toFixed(4)} {asset}</span>
+          <span className="queue-wave__you-label">you · {amount.toFixed(4)} {asset}</span>
         </div>
-        <div className="tideline__cursor" style={{ left: `${pct(cursor)}%` }}>
-          <div className="tideline__cursor-dot"></div>
-          <span className="tideline__cursor-label">cursor</span>
+        <div className="queue-wave__cursor" style={{ left: `${pct(cursor)}%` }}>
+          <div className="queue-wave__cursor-dot"></div>
+          <span className="queue-wave__cursor-label">cursor</span>
         </div>
       </div>
       <div className="cursorbar__legend">

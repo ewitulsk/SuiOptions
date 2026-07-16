@@ -18,7 +18,7 @@ export function ConfirmModal({ stage, summary, view, optionType, onClose }: Prop
           <>
             <div className="modal__spinner"></div>
             <div className="modal__title">Signing quote…</div>
-            <div className="modal__sub">tideline · waiting for wallet</div>
+            <div className="modal__sub">pismo protocol · waiting for wallet</div>
           </>
         )}
         {stage === "broadcast" && (

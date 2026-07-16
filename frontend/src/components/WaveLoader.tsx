@@ -1,6 +1,6 @@
 // Cresting wave line shown in place of the hero premium while a firm RFQ
 // quote is in flight. Same ocean vocabulary as the header waves and the
-// writer Tideline: the SVG spans twice the visible window and drifts left by
+// writer QueueWave: the SVG spans twice the visible window and drifts left by
 // half its width (aqua-wave) for a seamless loop, with a gentle vertical swell.
 
 const WIDTH = 576; // viewBox width — two identical halves so -50% loops cleanly

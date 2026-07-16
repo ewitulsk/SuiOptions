@@ -10,15 +10,27 @@ import { useSyncExternalStore } from "react";
 
 import { fetchGasStationBalance, type GasStationBalance } from "../api/sponsor";
 
-const STORAGE_KEY = "tideline-sponsor-pref";
+const STORAGE_KEY = "pismo-sponsor-pref";
+// Pre-rebrand key. Read once as a fallback so an existing explicit choice
+// survives the rename — otherwise it silently reverts to balance-following.
+const LEGACY_STORAGE_KEY = "tideline-sponsor-pref";
 
 function readPref(): boolean | null {
   try {
-    const v = localStorage.getItem(STORAGE_KEY);
+    const v = localStorage.getItem(STORAGE_KEY) ?? migrateLegacyPref();
     if (v === "on") return true;
     if (v === "off") return false;
   } catch {}
   return null; // no explicit choice yet
+}
+
+/** Move a pre-rebrand pref onto the current key, returning its value. */
+function migrateLegacyPref(): string | null {
+  const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+  if (legacy === null) return null;
+  localStorage.setItem(STORAGE_KEY, legacy);
+  localStorage.removeItem(LEGACY_STORAGE_KEY);
+  return legacy;
 }
 
 // User's explicit preference, or null when they've never toggled.

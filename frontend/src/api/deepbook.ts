@@ -25,7 +25,10 @@ import {
 import { fromRawPrice } from "../tx/deepbook";
 import type { Bucket, Series } from "./client";
 
-const BM_CACHE_PREFIX = "tideline-bm-";
+const BM_CACHE_PREFIX = "pismo-bm-";
+// Pre-rebrand prefix. Without a fallback every existing wallet re-paginates
+// the BalanceManagerEvent stream on next visit.
+const LEGACY_BM_CACHE_PREFIX = "tideline-bm-";
 const BOOK_TICKS = 8n;
 
 /** The gRPC client type, inferred so SDK reshuffles can't break the import. */
@@ -99,6 +102,12 @@ export async function findBalanceManager(
 
   const cached = localStorage.getItem(BM_CACHE_PREFIX + owner);
   if (cached) return cached;
+  const legacy = localStorage.getItem(LEGACY_BM_CACHE_PREFIX + owner);
+  if (legacy) {
+    localStorage.setItem(BM_CACHE_PREFIX + owner, legacy);
+    localStorage.removeItem(LEGACY_BM_CACHE_PREFIX + owner);
+    return legacy;
+  }
 
   const want = normalizeSuiAddress(owner);
   let before: string | null = null;

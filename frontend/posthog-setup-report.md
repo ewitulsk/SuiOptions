@@ -1,7 +1,7 @@
 <wizard-report>
 # PostHog post-wizard report
 
-The wizard has completed a deep integration of PostHog analytics into the Tideline frontend — a React/Vite DeFi options trading app on Sui blockchain. A `posthog-js` singleton was initialized in `src/lib/posthog.ts` and imported at app boot via `main.tsx`. Users are identified by their Sui wallet address on connect, identities are reset on disconnect, and 10 events covering the full product lifecycle are instrumented across 6 files. Exception autocapture is enabled, and `captureException` calls are placed in all critical transaction error paths.
+The wizard has completed a deep integration of PostHog analytics into the Pismo Protocol frontend — a React/Vite DeFi options trading app on Sui blockchain. A `posthog-js` singleton was initialized in `src/lib/posthog.ts` and imported at app boot via `main.tsx`. Users are identified by their Sui wallet address on connect, identities are reset on disconnect, and 10 events covering the full product lifecycle are instrumented across 6 files. Exception autocapture is enabled, and `captureException` calls are placed in all critical transaction error paths.
 
 | Event | Description | File |
 |---|---|---|

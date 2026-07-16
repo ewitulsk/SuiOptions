@@ -9,7 +9,7 @@ import { BucketBar } from "../components/BucketBar";
 import { StrikeTiles } from "../components/StrikeTiles";
 import { ChainTable } from "../components/ChainTable";
 import { AmountInput } from "../components/AmountInput";
-import { Tideline } from "../components/Tideline";
+import { QueueWave } from "../components/QueueWave";
 import { WriterPanels, TraderPanels } from "../components/Panels";
 import { ChartPanel } from "../components/ChartPanel";
 import { TradePanel } from "../components/TradePanel";
@@ -301,7 +301,7 @@ export function Composer({ initialView }: Props) {
           }
         />
 
-        <Tideline bucket={s.bucket} amount={s.amount} assetSymbol={s.selectedAsset} />
+        <QueueWave bucket={s.bucket} amount={s.amount} assetSymbol={s.selectedAsset} />
 
         <WriterPanels
           premium={s.bestPremium}

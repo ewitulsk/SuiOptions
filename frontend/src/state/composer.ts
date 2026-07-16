@@ -452,7 +452,7 @@ export function useComposerState({
   const insufficientUsdc = bestPremium > usdcBalance;
   const insufficient = view === "writer" ? insufficientBtc : insufficientUsdc;
 
-  // Tideline state from the selected bucket's live cursor + total_written.
+  // QueueWave state from the selected bucket's live cursor + total_written.
   // `queued` is the amount written ahead of (but not yet exercised before)
   // a new write, which lands at `total_written`. `cap` extends past the new
   // write so its zone stays visible and the bar never divides by zero.
