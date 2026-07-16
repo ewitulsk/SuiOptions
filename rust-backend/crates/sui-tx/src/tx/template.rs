@@ -273,16 +273,16 @@ fn is_benign_coin_primitive(call: &ProgrammableMoveCall) -> bool {
 /// `(0xpkg, "tbtc")`), only used when `allow_faucet` is set (dev/staging).
 /// `deepbook` is DeepBook's UPGRADED package id (the one Move calls target,
 /// from token-info); `None` on networks without a DeepBook deployment —
-/// no DeepBook PTBs are sponsored there. `cctp` is `(cctp_bridge package,
-/// Circle TokenMessengerMinter package)` — `None` where the bridge isn't
-/// deployed — mirroring frontend tx/bridge.ts.
+/// no DeepBook PTBs are sponsored there. `cctp` is Circle's
+/// TokenMessengerMinter package — `None` where the bridge isn't configured —
+/// mirroring frontend tx/bridge.ts.
 pub fn protocol_templates(
     protocol: ObjectID,
     vault_pkg: ObjectID,
     test_tokens: &[(ObjectID, String)],
     allow_faucet: bool,
     deepbook: Option<ObjectID>,
-    cctp: Option<(ObjectID, ObjectID)>,
+    cctp: Option<ObjectID>,
 ) -> Vec<PtbTemplate> {
     let t = |module: &str, function: &str| MoveTarget::new(protocol, module, function);
 
@@ -359,23 +359,17 @@ pub fn protocol_templates(
         templates.push(PtbTemplate::exact_only(format!("vault:{function}"), vec![target.clone()], vec![target.clone()], vec![(target, 3)]));
     }
 
-    // CCTP bridge burn (frontend tx/bridge.ts): our wrapper builds the ticket
-    // (and emits BridgeInitiated), then Circle's version-gated
-    // deposit_for_burn_with_package_auth burns the user's USDC. The coin comes
-    // from a coinWithBalance prelude. Only the user's own USDC moves, so the
-    // sponsor risks gas only.
-    if let Some((bridge, token_messenger_minter)) = cctp {
-        let prepare = MoveTarget::new(bridge, "bridge", "prepare_deposit_for_burn");
-        let burn = MoveTarget::new(
-            token_messenger_minter,
-            "deposit_for_burn",
-            "deposit_for_burn_with_package_auth",
-        );
+    // CCTP bridge burn (frontend tx/bridge.ts): a single call straight into
+    // Circle's `deposit_for_burn` entry fun, which burns the user's USDC and
+    // sends the cross-chain message. The coin comes from a coinWithBalance
+    // prelude. Only the user's own USDC moves, so the sponsor risks gas only.
+    if let Some(token_messenger_minter) = cctp {
+        let burn = MoveTarget::new(token_messenger_minter, "deposit_for_burn", "deposit_for_burn");
         templates.push(PtbTemplate::exact_only(
             "cctp_bridge".to_owned(),
-            vec![prepare.clone(), burn.clone()],
-            vec![prepare.clone(), burn.clone()],
-            vec![(prepare, 1), (burn, 2)],
+            vec![burn.clone()],
+            vec![burn.clone()],
+            vec![(burn, 1)],
         ));
     }
 
@@ -522,10 +516,6 @@ mod tests {
         ObjectID::from_hex_literal("0x22be4c").unwrap()
     }
 
-    fn cctp_bridge_pkg() -> ObjectID {
-        ObjectID::from_hex_literal("0xcc79").unwrap()
-    }
-
     fn cctp_tmm_pkg() -> ObjectID {
         ObjectID::from_hex_literal("0xc12c1e").unwrap()
     }
@@ -538,7 +528,7 @@ mod tests {
             &[(pkg(), "tbtc".to_owned())],
             true,
             Some(deepbook_pkg()),
-            Some((cctp_bridge_pkg(), cctp_tmm_pkg())),
+            Some(cctp_tmm_pkg()),
         )
     }
 
@@ -565,22 +555,14 @@ mod tests {
 
     #[test]
     fn cctp_bridge_flow_matches() {
-        // Mirrors frontend tx/bridge.ts: coinWithBalance plumbing, our
-        // prepare (1 type arg), Circle's burn (2 type args).
+        // Mirrors frontend tx/bridge.ts: coinWithBalance plumbing, then a
+        // direct call into Circle's deposit_for_burn (1 type arg).
         let pt = build(
             &[
                 (MoveTarget::new(framework(), "coin", "zero"), 1),
                 (
-                    MoveTarget::new(cctp_bridge_pkg(), "bridge", "prepare_deposit_for_burn"),
+                    MoveTarget::new(cctp_tmm_pkg(), "deposit_for_burn", "deposit_for_burn"),
                     1,
-                ),
-                (
-                    MoveTarget::new(
-                        cctp_tmm_pkg(),
-                        "deposit_for_burn",
-                        "deposit_for_burn_with_package_auth",
-                    ),
-                    2,
                 ),
             ],
             false,
@@ -592,20 +574,10 @@ mod tests {
     fn cctp_bridge_wrong_arity_is_rejected() {
         // A forged burn call with the wrong generics must not be sponsored.
         let pt = build(
-            &[
-                (
-                    MoveTarget::new(cctp_bridge_pkg(), "bridge", "prepare_deposit_for_burn"),
-                    1,
-                ),
-                (
-                    MoveTarget::new(
-                        cctp_tmm_pkg(),
-                        "deposit_for_burn",
-                        "deposit_for_burn_with_package_auth",
-                    ),
-                    3,
-                ),
-            ],
+            &[(
+                MoveTarget::new(cctp_tmm_pkg(), "deposit_for_burn", "deposit_for_burn"),
+                3,
+            )],
             false,
         );
         assert_eq!(match_any(&templates(), &pt), None);

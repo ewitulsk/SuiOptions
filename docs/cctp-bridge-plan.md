@@ -1,20 +1,34 @@
 # CCTP v1 USDC Bridge: Sui ↔ Solana
 
-> **Implementation status (2026-07-15):** all code implemented and tested —
-> `cctp-contracts/` (Sui, tests pass), `solana-contracts/programs/cctp_bridge`
-> (LiteSVM test passes against Circle's real devnet programs),
-> `rust-backend/services/cctp-relay`, frontend `/bridge` page, gas-station
-> template, `deployment-manager --deploy-cctp`, and full deployment
-> registration. Remaining ops steps (need deployer keys/funds):
-> 1. `deploy --deploy-cctp -e staging -n testnet` (+ mainnet later), then set
->    `cctp_bridge_package` in gas-station configs.
-> 2. `anchor deploy` to devnet/mainnet (back up
->    `solana-contracts/target/deploy/cctp_bridge-keypair.json` — target/ is
->    gitignored; program id `77R21RcDcQuhWPkTNHh7BeUgBstF2Nmsysp86QpZam86`).
-> 3. Create AWS secret `options/<env>/cctp-relay` = `{"sui_key", "solana_key"}`,
+> **SUPERSEDED IN PART BY SO-278 (2026-07-16).** The wrapper-contract design
+> below (deliverable 1) is no longer the bridge path. Both burn legs now call
+> Circle's CCTP **directly** from the frontend: on Sui, a PTB calls Circle's
+> `deposit_for_burn` entry fun; on Solana, the instruction targets Circle's
+> TokenMessengerMinter. Circle's own guidance is that direct/EOA callers use
+> `deposit_for_burn` — the package-auth ticket flow exists so a *package* can
+> own the message and later `replace_deposit_for_burn` it, which we never do.
+> Nothing consumed our `BridgeInitiated` events (the relay polls iris by tx
+> hash), so removing the wrapper cost no functionality.
+>
+> Consequences: **no cctp_bridge package publish and no `anchor deploy` are
+> needed** (the Solana leg is no longer blocked on funding the program
+> deploy), and the protocol records no CCTP contract deployment. The Move /
+> Anchor sources are retained in-tree, and `deployment-manager --deploy-cctp`
+> still works, but nothing consumes what it records. The CCTP constants are
+> served by cctp-relay's `GET /config` rather than hardcoded per-`ENV` in the
+> frontend — the bridge runs on its own network, independent of the protocol's
+> (staging: protocol on testnet, bridge on mainnet).
+>
+> **Implementation status (2026-07-15):** `rust-backend/services/cctp-relay`,
+> frontend `/bridge` page, and the gas-station template are implemented and
+> tested. Remaining ops steps:
+> 1. Create AWS secret `options/<env>/cctp-relay` = `{"sui_key", "solana_key"}`,
 >    fund both relayer wallets with gas, create the `cctp_relay_<env>` DB, then
 >    force-all deploy (seeds `CCTP_RELAY_TAG`).
-> 4. Set `VITE_CCTP_URL` on Vercel; run the testnet e2e in Verification below.
+> 2. Set `VITE_CCTP_URL` on Vercel; run the e2e in Verification below.
+> 3. To sponsor the burn PTB, set `cctp_token_messenger_package` (Circle's
+>    TokenMessengerMinter) in the gas-station config for any env whose own
+>    network matches the bridge's.
 
 ## Context
 

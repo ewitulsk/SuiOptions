@@ -1,6 +1,11 @@
 //! HTTP API.
 //!
 //! - `GET /health` — liveness.
+//! - `GET /config` — the CCTP constants for the bridged networks. This
+//!   service owns them: the frontend fetches them here rather than carrying
+//!   its own copy keyed on `VITE_ENVIRONMENT`, which is what let staging
+//!   (protocol on testnet, bridge on mainnet) pair a mainnet bridge with
+//!   testnet Circle ids.
 //! - `POST /transfers` — register a burn tx: `{tx_hash, origin_chain,
 //!   wallet, destination_wallet?}`. Idempotent on (origin_chain, tx_hash).
 //! - `GET /transfers?wallet=…&open=true` — transfers for the bridge page,
@@ -19,13 +24,17 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
+use crate::config::Config;
 use crate::db::models::{chain, status, NewTransfer, TransferRow};
+use crate::solana_mint::{MESSAGE_TRANSMITTER, TOKEN_MESSENGER_MINTER};
 use crate::state::AppState;
+use crate::{DOMAIN_SOLANA, DOMAIN_SUI};
 
 pub async fn serve(addr: SocketAddr, state: Arc<AppState>, allowed_origins: &[String]) -> Result<()> {
     let cors = build_cors(allowed_origins)?;
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/config", get(get_config))
         .route("/transfers", post(create_transfer).get(list_transfers))
         .with_state(state)
         .merge(observability::middleware::metrics_route())
@@ -48,6 +57,71 @@ fn build_cors(allowed_origins: &[String]) -> Result<CorsLayer> {
         origins.push(o.parse()?);
     }
     Ok(CorsLayer::new().allow_origin(origins).allow_methods(Any).allow_headers(Any))
+}
+
+/// Circle's CCTP v1 deployment on the two bridged networks, as served to the
+/// frontend. Every value here is Circle's — the protocol publishes no bridge
+/// contract of its own; both burn legs call Circle directly.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CctpConfigDto {
+    pub domain_sui: u32,
+    pub domain_solana: u32,
+    pub sui: SuiCctpDto,
+    pub solana: SolanaCctpDto,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuiCctpDto {
+    /// `testnet` | `mainnet` — the network the burn PTB must be signed
+    /// against. Independent of the protocol's own network.
+    pub network: String,
+    pub message_transmitter_package: String,
+    pub token_messenger_package: String,
+    pub message_transmitter_state: String,
+    pub token_messenger_state: String,
+    pub usdc_treasury: String,
+    pub usdc_coin_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolanaCctpDto {
+    pub network: String,
+    pub rpc_url: String,
+    pub usdc_mint: String,
+    pub token_messenger_program: String,
+    pub message_transmitter_program: String,
+}
+
+impl CctpConfigDto {
+    pub fn from_config(cfg: &Config) -> Self {
+        Self {
+            domain_sui: DOMAIN_SUI,
+            domain_solana: DOMAIN_SOLANA,
+            sui: SuiCctpDto {
+                network: cfg.sui.network.to_string(),
+                message_transmitter_package: cfg.sui.message_transmitter_package.clone(),
+                token_messenger_package: cfg.sui.token_messenger_minter_package.clone(),
+                message_transmitter_state: cfg.sui.message_transmitter_state.clone(),
+                token_messenger_state: cfg.sui.token_messenger_minter_state.clone(),
+                usdc_treasury: cfg.sui.usdc_treasury.clone(),
+                usdc_coin_type: cfg.sui.usdc_coin_type.clone(),
+            },
+            solana: SolanaCctpDto {
+                network: cfg.solana.network.clone(),
+                rpc_url: cfg.solana.rpc_url.clone(),
+                usdc_mint: cfg.solana.usdc_mint.clone(),
+                token_messenger_program: TOKEN_MESSENGER_MINTER.to_string(),
+                message_transmitter_program: MESSAGE_TRANSMITTER.to_string(),
+            },
+        }
+    }
+}
+
+async fn get_config(State(state): State<Arc<AppState>>) -> Json<CctpConfigDto> {
+    Json(state.cctp_config.clone())
 }
 
 #[derive(Deserialize)]
@@ -163,4 +237,35 @@ async fn list_transfers(
 
 fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `GET /config` is the frontend's only source of CCTP constants, so the
+    /// wire keys are a contract (frontend/src/api/cctpConfig.ts) and the
+    /// similarly-named state ids must not get crossed. Builds the DTO from the
+    /// real dev config and pins both.
+    #[test]
+    fn config_dto_matches_the_dev_config() {
+        let cfg = Config::load("config/config.toml").expect("loading dev config");
+        let v = serde_json::to_value(CctpConfigDto::from_config(&cfg)).unwrap();
+
+        assert_eq!(v["domainSui"], 8);
+        assert_eq!(v["domainSolana"], 5);
+
+        // Each id lands on the field the burn PTB expects, not its neighbour.
+        assert_eq!(v["sui"]["tokenMessengerPackage"], cfg.sui.token_messenger_minter_package);
+        assert_eq!(v["sui"]["messageTransmitterPackage"], cfg.sui.message_transmitter_package);
+        assert_eq!(v["sui"]["tokenMessengerState"], cfg.sui.token_messenger_minter_state);
+        assert_eq!(v["sui"]["messageTransmitterState"], cfg.sui.message_transmitter_state);
+        assert_eq!(v["sui"]["usdcTreasury"], cfg.sui.usdc_treasury);
+        assert_eq!(v["sui"]["usdcCoinType"], cfg.sui.usdc_coin_type);
+
+        assert_eq!(v["solana"]["usdcMint"], cfg.solana.usdc_mint);
+        assert_eq!(v["solana"]["rpcUrl"], cfg.solana.rpc_url);
+        assert_eq!(v["solana"]["tokenMessengerProgram"], TOKEN_MESSENGER_MINTER);
+        assert_eq!(v["solana"]["messageTransmitterProgram"], MESSAGE_TRANSMITTER);
+    }
 }

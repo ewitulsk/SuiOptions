@@ -1,9 +1,13 @@
-// Solana→Sui leg of the CCTP bridge: builds the deposit_for_burn tx against
-// our cctp_bridge Anchor program (which CPIs into Circle's
-// TokenMessengerMinter) and sends it via Phantom's signAndSendTransaction.
+// Solana→Sui leg of the CCTP bridge: builds the deposit_for_burn tx directly
+// against Circle's TokenMessengerMinter and sends it via Phantom's
+// signAndSendTransaction.
 //
-// Account order mirrors `solana-contracts/programs/cctp_bridge/src/lib.rs`
-// (declared accounts, then Anchor's event-CPI pair).
+// We call Circle directly rather than through a wrapper program: the wrapper
+// existed to own the message and emit its own event, neither of which anything
+// consumes. Account order below mirrors Circle's `DepositForBurnContext`
+// (Anchor 0.28), with the event-CPI pair (event_authority, program) appended.
+// `owner` appears twice — once read-only as the burn authority, once writable
+// as `event_rent_payer`; the runtime unions the privileges.
 
 import { Buffer } from "buffer";
 
@@ -16,13 +20,12 @@ import {
   TransactionInstruction,
 } from "@solana/web3.js";
 
-import { CCTP } from "../config";
+import type { CctpConfig } from "../api/cctpConfig";
 
 const TOKEN_PROGRAM = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const ATA_PROGRAM = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 
-// sha256("global:deposit_for_burn")[..8] — same Anchor discriminator scheme
-// for our program and Circle's.
+// sha256("global:deposit_for_burn")[..8] — Circle's Anchor 0.28 discriminator.
 const DEPOSIT_FOR_BURN_DISCRIMINATOR = Uint8Array.from([
   215, 60, 61, 46, 114, 55, 128, 176,
 ]);
@@ -57,9 +60,9 @@ export async function connectPhantomWallet(): Promise<string> {
 }
 
 /** The wallet's associated USDC token account. */
-export function deriveUsdcAta(owner: PublicKey): PublicKey {
+export function deriveUsdcAta(owner: PublicKey, usdcMint: string): PublicKey {
   return PublicKey.findProgramAddressSync(
-    [owner.toBytes(), TOKEN_PROGRAM.toBytes(), new PublicKey(CCTP.solanaUsdcMint).toBytes()],
+    [owner.toBytes(), TOKEN_PROGRAM.toBytes(), new PublicKey(usdcMint).toBytes()],
     ATA_PROGRAM,
   )[0];
 }
@@ -77,6 +80,7 @@ export type SolanaDepositForBurnParams = {
  * signature.
  */
 export async function sendSolanaDepositForBurn(
+  cctp: CctpConfig,
   p: SolanaDepositForBurnParams,
 ): Promise<{ signature: string; wallet: string }> {
   const provider = phantomProvider();
@@ -86,10 +90,9 @@ export async function sendSolanaDepositForBurn(
   const { publicKey } = await provider.connect();
   const owner = new PublicKey(publicKey.toBytes());
 
-  const bridgeProgram = new PublicKey(CCTP.solanaBridgeProgram);
-  const tmm = new PublicKey(CCTP.solanaTokenMessengerProgram);
-  const mt = new PublicKey(CCTP.solanaMessageTransmitterProgram);
-  const usdcMint = new PublicKey(CCTP.solanaUsdcMint);
+  const tmm = new PublicKey(cctp.solana.tokenMessengerProgram);
+  const mt = new PublicKey(cctp.solana.messageTransmitterProgram);
+  const usdcMint = new PublicKey(cctp.solana.usdcMint);
 
   const pda = (seeds: (Uint8Array | Buffer)[], program: PublicKey) =>
     PublicKey.findProgramAddressSync(seeds, program)[0];
@@ -99,14 +102,13 @@ export async function sendSolanaDepositForBurn(
   const messageTransmitter = pda([utf8("message_transmitter")], mt);
   const tokenMessenger = pda([utf8("token_messenger")], tmm);
   const remoteTokenMessenger = pda(
-    [utf8("remote_token_messenger"), utf8(String(CCTP.domainSui))],
+    [utf8("remote_token_messenger"), utf8(String(cctp.domainSui))],
     tmm,
   );
   const tokenMinter = pda([utf8("token_minter")], tmm);
   const localToken = pda([utf8("local_token"), usdcMint.toBytes()], tmm);
   const tmmEventAuthority = pda([utf8("__event_authority")], tmm);
-  const bridgeEventAuthority = pda([utf8("__event_authority")], bridgeProgram);
-  const burnTokenAccount = deriveUsdcAta(owner);
+  const burnTokenAccount = deriveUsdcAta(owner, cctp.solana.usdcMint);
 
   // Fresh throwaway account Circle stores the MessageSent event data in;
   // must co-sign the tx.
@@ -117,13 +119,14 @@ export async function sendSolanaDepositForBurn(
   const data = new Uint8Array(8 + 8 + 4 + 32);
   data.set(DEPOSIT_FOR_BURN_DISCRIMINATOR, 0);
   new DataView(data.buffer).setBigUint64(8, p.amountRaw, true);
-  new DataView(data.buffer).setUint32(16, CCTP.domainSui, true);
+  new DataView(data.buffer).setUint32(16, cctp.domainSui, true);
   data.set(suiRecipient, 20);
 
   const ix = new TransactionInstruction({
-    programId: bridgeProgram,
+    programId: tmm,
     keys: [
-      { pubkey: owner, isSigner: true, isWritable: true },
+      { pubkey: owner, isSigner: true, isWritable: false },
+      { pubkey: owner, isSigner: true, isWritable: true }, // event_rent_payer
       { pubkey: senderAuthority, isSigner: false, isWritable: false },
       { pubkey: burnTokenAccount, isSigner: false, isWritable: true },
       { pubkey: messageTransmitter, isSigner: false, isWritable: true },
@@ -135,16 +138,15 @@ export async function sendSolanaDepositForBurn(
       { pubkey: messageSentEventData.publicKey, isSigner: true, isWritable: true },
       { pubkey: mt, isSigner: false, isWritable: false },
       { pubkey: tmm, isSigner: false, isWritable: false },
-      { pubkey: tmmEventAuthority, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      { pubkey: bridgeEventAuthority, isSigner: false, isWritable: false },
-      { pubkey: bridgeProgram, isSigner: false, isWritable: false },
+      { pubkey: tmmEventAuthority, isSigner: false, isWritable: false },
+      { pubkey: tmm, isSigner: false, isWritable: false },
     ],
     data: Buffer.from(data),
   });
 
-  const connection = new Connection(CCTP.solanaRpcUrl, "confirmed");
+  const connection = new Connection(cctp.solana.rpcUrl, "confirmed");
   const { blockhash } = await connection.getLatestBlockhash("confirmed");
 
   const tx = new Transaction({ feePayer: owner, recentBlockhash: blockhash });

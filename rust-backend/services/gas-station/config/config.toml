@@ -27,7 +27,6 @@ token_info_url = "http://127.0.0.1:9005"
 # Extra packages to sponsor beyond what token-info reports. Off-catalog only.
 additional_allowed_packages = []
 
-# CCTP bridge burn PTB sponsorship (frontend tx/bridge.ts). Set after the
-# cctp_bridge package is published on this network (see cctp-contracts/).
-# cctp_bridge_package         = "0x…"
+# CCTP bridge burn PTB sponsorship (frontend tx/bridge.ts). Set to Circle's
+# TokenMessengerMinter package for this network to sponsor the burn.
 # cctp_token_messenger_package = "0x31cc14d80c175ae39777c0238f20594c6d4869cfab199f40b69f3319956b8beb"  # testnet (mainnet: 0x2aa6c5d56376c371f88a6cc42e852824994993cb9bab8d3e6450cbe3cb32b94e)

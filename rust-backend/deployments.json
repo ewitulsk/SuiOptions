@@ -149,13 +149,6 @@
         "upgradeCapId": "0xc626a482f080fae2cc2a7a239eff01d214b650df5b225d9793fe0dafc89e4c66",
         "publishDigest": "QkeXQJzRTvdpVeedf5rznwJSx6pNW2qUkGYD3wrucFo",
         "deployedAt": "2026-07-15T14:42:27.333393167+00:00"
-      },
-      "cctpBridge": {
-        "packageId": "0x926a68c5fd70fb4a0bbd0253d0b35b25b7bb24965b78f2a717b69fbadff4c978",
-        "upgradeCapId": "0xb0945782ba0293b5b3ac5b5281a84bcb95c7d63fbd542b611743b47e807197c2",
-        "publishDigest": "9kNWPYkHUMCpxBh4t1cxf9vpQXPsTSnKne7PRJS5iGaS",
-        "deployedAt": "2026-07-15T07:09:32.704635+00:00",
-        "network": "mainnet"
       }
     },
     "token_info": {
