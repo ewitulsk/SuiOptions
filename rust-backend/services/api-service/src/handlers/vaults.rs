@@ -184,7 +184,7 @@ pub async fn get_vault(
     })?;
     // Live round state is best-effort: an RPC hiccup degrades to omitting the
     // live fields rather than failing the page (config/history stay served).
-    let live = match sui_rpc::fetch_vault_live(&state.http, &state.sui_rpc_url, &id).await {
+    let live = match sui_rpc::fetch_vault_live(&state.http, &state.sui_graphql_url, &id).await {
         Ok(live) => live,
         Err(e) => {
             tracing::warn!(error = %e, "vault live read failed; serving without live state");

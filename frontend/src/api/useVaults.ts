@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { useSuiClient } from "@mysten/dapp-kit";
 
 import { VAULT_PACKAGE_ID } from "../config";
+import { listAllOwnedObjects, useSuiGrpcClient } from "../lib/suiGrpc";
 import {
   fetchRfqBids,
   fetchVault,
@@ -99,12 +99,11 @@ type ReceiptFields = {
 };
 
 function parseReceipt(
-  data: { objectId: string; content?: unknown } | null | undefined,
+  data: { objectId: string; json?: unknown } | null | undefined,
   wantShares: boolean,
 ): OwnedReceipt | null {
-  const content = data?.content as { dataType?: string; fields?: ReceiptFields } | undefined;
-  if (!data || !content || content.dataType !== "moveObject" || !content.fields) return null;
-  const f = content.fields;
+  const f = data?.json as ReceiptFields | null | undefined;
+  if (!data || !f || !f.vault_id) return null;
   const amount = wantShares ? f.shares : f.amount;
   if (amount == null) return null;
   return {
@@ -122,13 +121,13 @@ function parseReceipt(
  *
  * The api-service `/receipts` endpoint aggregates by round and carries no
  * object id, so the actions read from the chain instead (mirrors
- * `useOwnedPositions`): `getOwnedObjects` filtered to the receipt struct types.
+ * `useOwnedPositions`): owned objects filtered to the receipt struct types.
  */
 export function useOwnedVaultReceipts(
   wallet: string | null,
   vaultId: string | null,
 ) {
-  const client = useSuiClient();
+  const client = useSuiGrpcClient();
   return useQuery<OwnedVaultReceipts, Error>({
     queryKey: ["vault-receipts-owned", wallet, vaultId, VAULT_PACKAGE_ID],
     enabled: wallet !== null && vaultId !== null && !!VAULT_PACKAGE_ID,
@@ -141,20 +140,10 @@ export function useOwnedVaultReceipts(
 
       const collect = async (structType: string, wantShares: boolean) => {
         const out: OwnedReceipt[] = [];
-        let cursor: string | null | undefined = undefined;
-        do {
-          const page = await client.getOwnedObjects({
-            owner: wallet,
-            filter: { StructType: structType },
-            options: { showContent: true },
-            cursor,
-          });
-          for (const item of page.data) {
-            const r = parseReceipt(item.data, wantShares);
-            if (r && r.vault_id === vaultId) out.push(r);
-          }
-          cursor = page.hasNextPage ? page.nextCursor : undefined;
-        } while (cursor);
+        for (const obj of await listAllOwnedObjects(client, wallet, structType)) {
+          const r = parseReceipt(obj, wantShares);
+          if (r && r.vault_id === vaultId) out.push(r);
+        }
         return out;
       };
 
@@ -172,15 +161,15 @@ export function useOwnedVaultReceipts(
  * held at their wallet address.
  */
 export function useShareBalance(wallet: string | null, shareType: string | null) {
-  const client = useSuiClient();
+  const client = useSuiGrpcClient();
   return useQuery<bigint, Error>({
     queryKey: ["vault-share-balance", wallet, shareType],
     enabled: wallet !== null && shareType !== null,
     refetchInterval: 10_000,
     queryFn: async () => {
       if (!wallet || !shareType) return 0n;
-      const bal = await client.getBalance({ owner: wallet, coinType: shareType });
-      return BigInt(bal.totalBalance);
+      const bal = await client.core.getBalance({ owner: wallet, coinType: shareType });
+      return BigInt(bal.balance.balance);
     },
   });
 }

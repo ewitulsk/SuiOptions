@@ -1,28 +1,35 @@
 // DeepBook read hooks (SO-157): BalanceManager discovery, order book,
-// open orders, BM balances. All chain reads go through devInspect — no
-// gas, no signatures — and return values decode with @mysten/sui's bcs.
+// open orders, BM balances. All chain reads go through a gRPC
+// `SimulateTransaction` with checks disabled (devInspect's replacement — no
+// gas, no signatures) and return values decode with @mysten/sui's bcs.
 //
 // BM discovery: our "enable trading" PTB registers the BalanceManager, which
 // emits `BalanceManagerEvent { balance_manager_id, owner }` (the only
 // creation-adjacent event on the deployed package — see
-// DEEPBOOK-FINDINGS.md §D). localStorage is just a cache over that query, so
-// a fresh browser profile recovers the same BM.
+// DEEPBOOK-FINDINGS.md §D). That event query goes through the Sui GraphQL
+// RPC (gRPC has no historical event filter). localStorage is just a cache
+// over that query, so a fresh browser profile recovers the same BM.
 
 import { useQuery } from "@tanstack/react-query";
-import { useSuiClient } from "@mysten/dapp-kit";
 import { bcs } from "@mysten/sui/bcs";
 import { Transaction } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID, normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils";
 
 import { DEEPBOOK_ORIGINAL_PACKAGE_ID, DEEPBOOK_PACKAGE_ID } from "../config";
+import {
+  suiGraphqlQuery,
+  useSuiGrpcClient,
+  useSuiNetwork,
+  type SuiNetwork,
+} from "../lib/suiGrpc";
 import { fromRawPrice } from "../tx/deepbook";
 import type { Bucket, Series } from "./client";
 
 const BM_CACHE_PREFIX = "tideline-bm-";
 const BOOK_TICKS = 8n;
 
-/** dapp-kit's client type, inferred so SDK reshuffles can't break the import. */
-type SuiClient = ReturnType<typeof useSuiClient>;
+/** The gRPC client type, inferred so SDK reshuffles can't break the import. */
+type SuiClient = ReturnType<typeof useSuiGrpcClient>;
 
 /** Pool identity the read hooks need. */
 export type PoolRef = {
@@ -35,6 +42,8 @@ export type PoolRef = {
 
 // ---- devInspect plumbing ----------------------------------------------------
 
+// `SimulateTransaction` with checks disabled is JSON-RPC devInspect's
+// replacement: no gas coin, no signature, and per-command BCS return values.
 async function devInspect(
   client: SuiClient,
   sender: string | null,
@@ -42,14 +51,18 @@ async function devInspect(
 ): Promise<Uint8Array[][]> {
   const tx = new Transaction();
   build(tx);
-  const res = await client.devInspectTransactionBlock({
-    sender: sender ?? normalizeSuiAddress("0x0"),
-    transactionBlock: tx,
+  tx.setSender(sender ?? normalizeSuiAddress("0x0"));
+  const res = await client.core.simulateTransaction({
+    transaction: tx,
+    checksEnabled: false,
+    include: { commandResults: true },
   });
-  if (res.error) throw new Error(`devInspect failed: ${res.error}`);
-  type ExecResult = { returnValues?: Array<[number[], string]> };
-  return ((res.results ?? []) as ExecResult[]).map((r) =>
-    (r.returnValues ?? []).map(([bytes]) => new Uint8Array(bytes)),
+  const status = (res.Transaction ?? res.FailedTransaction).status;
+  if (!status.success) {
+    throw new Error(`devInspect failed: ${status.error?.message ?? "execution failed"}`);
+  }
+  return (res.commandResults ?? []).map((r) =>
+    (r.returnValues ?? []).map((v) => v.bcs ?? new Uint8Array()),
   );
 }
 
@@ -58,8 +71,27 @@ const VEC_U128 = bcs.vector(bcs.u128());
 
 // ---- BalanceManager discovery ------------------------------------------------
 
+type BmEventsPage = {
+  events: {
+    pageInfo: { hasPreviousPage: boolean; startCursor: string | null };
+    nodes: Array<{
+      contents: { json: { owner?: string; balance_manager_id?: string } | null } | null;
+    }>;
+  };
+};
+
+// `last:` + `before:` walks the event stream newest-first, matching the old
+// JSON-RPC `order: "descending"` query.
+const BM_EVENTS_QUERY = `
+  query($type: String!, $before: String) {
+    events(last: 50, before: $before, filter: { type: $type }) {
+      pageInfo { hasPreviousPage startCursor }
+      nodes { contents { json } }
+    }
+  }`;
+
 export async function findBalanceManager(
-  client: SuiClient,
+  network: SuiNetwork,
   owner: string,
 ): Promise<string | null> {
   const orig = DEEPBOOK_ORIGINAL_PACKAGE_ID;
@@ -69,25 +101,24 @@ export async function findBalanceManager(
   if (cached) return cached;
 
   const want = normalizeSuiAddress(owner);
-  let cursor: { txDigest: string; eventSeq: string } | null | undefined;
+  let before: string | null = null;
   // BalanceManagerEvent only fires on register — a handful exist, so a few
   // pages cover the whole stream.
   for (let page = 0; page < 5; page++) {
-    const res = await client.queryEvents({
-      query: { MoveEventType: `${orig}::balance_manager::BalanceManagerEvent` },
-      cursor,
-      limit: 50,
-      order: "descending",
+    const res: BmEventsPage = await suiGraphqlQuery<BmEventsPage>(network, BM_EVENTS_QUERY, {
+      type: `${orig}::balance_manager::BalanceManagerEvent`,
+      before,
     });
-    for (const ev of res.data) {
-      const json = ev.parsedJson as { owner?: string; balance_manager_id?: string };
-      if (json.owner && normalizeSuiAddress(json.owner) === want && json.balance_manager_id) {
+    // Nodes come back oldest-first within the page; scan newest-first.
+    for (const ev of [...res.events.nodes].reverse()) {
+      const json = ev.contents?.json;
+      if (json?.owner && normalizeSuiAddress(json.owner) === want && json.balance_manager_id) {
         localStorage.setItem(BM_CACHE_PREFIX + owner, json.balance_manager_id);
         return json.balance_manager_id;
       }
     }
-    if (!res.hasNextPage || !res.nextCursor) break;
-    cursor = res.nextCursor;
+    if (!res.events.pageInfo.hasPreviousPage || !res.events.pageInfo.startCursor) break;
+    before = res.events.pageInfo.startCursor;
   }
   return null;
 }
@@ -98,12 +129,12 @@ export function cacheBalanceManager(owner: string, bmId: string) {
 
 /** The connected wallet's BalanceManager id, or null until one is created. */
 export function useBalanceManager(owner: string | null) {
-  const client = useSuiClient();
+  const network = useSuiNetwork();
   return useQuery<string | null, Error>({
     queryKey: ["deepbook-bm", owner],
     enabled: owner !== null && Boolean(DEEPBOOK_ORIGINAL_PACKAGE_ID),
     refetchInterval: 10_000,
-    queryFn: () => (owner ? findBalanceManager(client, owner) : null),
+    queryFn: () => (owner ? findBalanceManager(network, owner) : null),
   });
 }
 
@@ -152,7 +183,7 @@ export function useOrderBook(
   // wide chain doesn't fan out a devInspect per strike every 3s (SO-225).
   refetchInterval = 3_000,
 ) {
-  const client = useSuiClient();
+  const client = useSuiGrpcClient();
   return useQuery<OrderBook, Error>({
     queryKey: ["deepbook-book", pool?.poolId],
     enabled: Boolean(pool && DEEPBOOK_PACKAGE_ID),
@@ -185,7 +216,7 @@ export function useOrderBook(
 
 /** The BM's open order ids on one pool (`account_open_orders` → VecSet<u128>). */
 export function useOpenOrders(pool: PoolRef | null, bmId: string | null, viewer: string | null) {
-  const client = useSuiClient();
+  const client = useSuiGrpcClient();
   return useQuery<string[], Error>({
     queryKey: ["deepbook-open-orders", pool?.poolId, bmId],
     enabled: Boolean(pool && bmId && DEEPBOOK_PACKAGE_ID),
@@ -258,7 +289,7 @@ export function useOpenOrderDetails(
   orderIds: string[] | undefined,
   viewer: string | null,
 ) {
-  const client = useSuiClient();
+  const client = useSuiGrpcClient();
   const ids = orderIds ?? [];
   return useQuery<OpenOrder[], Error>({
     queryKey: ["deepbook-open-order-details", pool?.poolId, ids.join(",")],
@@ -294,7 +325,7 @@ export type BmBalances = { baseRaw: bigint; quoteRaw: bigint };
 
 /** The BM's available (unlocked) balances of the pool's two assets. */
 export function useBmBalances(pool: PoolRef | null, bmId: string | null, viewer: string | null) {
-  const client = useSuiClient();
+  const client = useSuiGrpcClient();
   return useQuery<BmBalances, Error>({
     queryKey: ["deepbook-bm-balances", pool?.poolId, bmId],
     enabled: Boolean(pool && bmId && DEEPBOOK_PACKAGE_ID),
@@ -330,7 +361,7 @@ export function useBmCoinBalances(
   coinTypes: string[],
   viewer: string | null,
 ) {
-  const client = useSuiClient();
+  const client = useSuiGrpcClient();
   // Stable, de-duplicated type list so the query key is order-independent.
   const types = Array.from(new Set(coinTypes.map((t) => normalizeStructTag(t)))).sort();
   return useQuery<Record<string, bigint>, Error>({

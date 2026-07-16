@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
         catalog,
         cfg.indexer_graphql_url.clone(),
         cfg.derived_metrics_url.clone(),
-        cfg.sui_rpc_url.clone(),
+        cfg.sui_graphql_url.clone(),
         cfg.price_charting_url.clone(),
     ));
 

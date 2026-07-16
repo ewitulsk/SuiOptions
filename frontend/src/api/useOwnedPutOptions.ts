@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { useSuiClient } from "@mysten/dapp-kit";
 import { normalizeStructTag } from "@mysten/sui/utils";
 
+import { listAllBalances, useSuiGrpcClient } from "../lib/suiGrpc";
 import { optionCoinType, seriesOptionType, type Series } from "./client";
 import type { OwnedCallOption } from "./useOwnedCallOptions";
 
@@ -19,7 +19,7 @@ export function useOwnedPutOptions(
   wallet: string | null,
   series: Series[] | undefined,
 ) {
-  const client = useSuiClient();
+  const client = useSuiGrpcClient();
 
   // Normalized put option coin type -> bucket id (put series only).
   const putTypeToBucket = new Map<string, string>();
@@ -38,16 +38,15 @@ export function useOwnedPutOptions(
     refetchInterval: 5_000,
     queryFn: async () => {
       if (!wallet) return [];
-      const balances = await client.getAllBalances({ owner: wallet });
       const out: OwnedCallOption[] = [];
-      for (const bal of balances) {
+      for (const bal of await listAllBalances(client, wallet)) {
         const bucket_id = putTypeToBucket.get(normalizeStructTag(bal.coinType));
         if (!bucket_id) continue;
-        if (BigInt(bal.totalBalance) <= 0n) continue;
+        if (BigInt(bal.balance) <= 0n) continue;
         out.push({
           coin_type: bal.coinType,
           bucket_id,
-          amount_raw: bal.totalBalance,
+          amount_raw: bal.balance,
         });
       }
       return out;

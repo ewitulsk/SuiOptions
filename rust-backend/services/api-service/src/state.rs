@@ -16,8 +16,8 @@ pub struct AppState {
     /// after the derived-metric-worker was folded into it). `None` on envs that
     /// don't run it — the apy endpoint then serves realized only.
     pub derived_metrics_url: Option<String>,
-    /// Sui fullnode JSON-RPC URL for the live-vault `sui_getObject` read.
-    pub sui_rpc_url: String,
+    /// Sui GraphQL RPC URL for the live-vault `object` query.
+    pub sui_graphql_url: String,
     /// price-charting read-API base URL (e.g. `http://price-charting:9013`).
     /// Used to mark exercises at the option-pool price at exercise time in the
     /// FIFO PnL ledger (SO-209). `None` → exercises are left unpriced.
@@ -31,14 +31,14 @@ impl AppState {
         catalog: TokenCatalog,
         indexer_graphql_url: String,
         derived_metrics_url: Option<String>,
-        sui_rpc_url: String,
+        sui_graphql_url: String,
         price_charting_url: Option<String>,
     ) -> Self {
         Self {
             catalog,
             indexer: IndexerClient::new(indexer_graphql_url),
             derived_metrics_url: derived_metrics_url.map(|u| u.trim_end_matches('/').to_string()),
-            sui_rpc_url,
+            sui_graphql_url,
             price_charting_url: price_charting_url.map(|u| u.trim_end_matches('/').to_string()),
             http: reqwest::Client::new(),
         }

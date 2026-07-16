@@ -3,12 +3,16 @@
 //! api-service is otherwise a pure indexer-read layer, but a few vault fields
 //! are *live* view values — balances and counters that change within a round
 //! as RFQs settle and deposits land — so events can't keep a fresh copy. One
-//! `sui_getObject` returns them all off the `Vault` object's parsed content.
+//! GraphQL `object` query returns them all off the `Vault` object's JSON
+//! contents. (This read used JSON-RPC `sui_getObject` until Sui deactivated
+//! JSON-RPC on public testnet fullnodes in July 2026 — see
+//! docs/sui-json-rpc-migration.md.)
 //!
-//! JSON-RPC parsed-content conventions (per `sui-json-rpc-types`, golden-tested
-//! by the keeper's localnet e2e): u64/u128 → decimal string · `Balance<T>` →
-//! its bare value · `Option` → null/inner · enums → `{"variant": name,
-//! "fields": {…}}`.
+//! GraphQL `contents.json` conventions (shared with gRPC's `json` rendering,
+//! golden-tested below against a live testnet vault): u64/u128 → decimal
+//! string · struct fields nested directly (no `fields` wrapper) · `Balance<T>`
+//! / `Supply<T>` → `{"value": …}` · `Option` → null/inner · enums →
+//! `{"@variant": name, …}` · `vector<u8>` → base64 string.
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -41,49 +45,55 @@ pub struct VaultLive {
     pub max_open_rfqs: u64,
 }
 
-/// Read one `Vault` object's live fields via `sui_getObject`. `Ok(None)` if the
-/// node doesn't know the object (deleted / wrong network); `Err` on transport
-/// or unexpected-shape failures. Callers degrade to omitting live fields.
+const VAULT_LIVE_QUERY: &str = "query($addr: SuiAddress!) {\
+ object(address: $addr) { asMoveObject { contents { json } } } }";
+
+/// Read one `Vault` object's live fields via the Sui GraphQL RPC. `Ok(None)`
+/// if the node doesn't know the object (deleted / wrong network); `Err` on
+/// transport or unexpected-shape failures. Callers degrade to omitting live
+/// fields.
 pub async fn fetch_vault_live(
     http: &reqwest::Client,
-    rpc_url: &str,
+    graphql_url: &str,
     vault_id: &ObjectId,
 ) -> Result<Option<VaultLive>> {
     let body = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "sui_getObject",
-        "params": [vault_id.to_hex(), { "showContent": true }],
+        "query": VAULT_LIVE_QUERY,
+        "variables": { "addr": vault_id.to_hex() },
     });
     let resp = http
-        .post(rpc_url)
+        .post(graphql_url)
         .json(&body)
         .send()
         .await
-        .context("sui_getObject request")?
+        .context("vault object query request")?
         .error_for_status()
-        .context("sui_getObject http status")?;
-    let parsed: Value = resp.json().await.context("decoding sui_getObject")?;
+        .context("vault object query http status")?;
+    let parsed: Value = resp.json().await.context("decoding vault object query")?;
 
-    // `result.data.content.fields`, or `result.error` for a missing object.
-    let result = parsed
-        .get("result")
-        .ok_or_else(|| anyhow!("sui_getObject missing result: {parsed}"))?;
-    let Some(data) = result.get("data").filter(|d| !d.is_null()) else {
+    if let Some(errors) = parsed.get("errors").filter(|e| !e.is_null()) {
+        return Err(anyhow!("vault object query errors: {errors}"));
+    }
+    // `data.object` is null for an unknown object; `contents.json` is the
+    // Move struct's fields rendered as JSON.
+    let data = parsed
+        .get("data")
+        .ok_or_else(|| anyhow!("vault object query missing data: {parsed}"))?;
+    let Some(object) = data.get("object").filter(|o| !o.is_null()) else {
         return Ok(None);
     };
-    let fields = data
-        .get("content")
-        .and_then(|c| c.get("fields"))
-        .ok_or_else(|| anyhow!("vault object has no content.fields"))?;
+    let fields = object
+        .get("asMoveObject")
+        .and_then(|m| m.get("contents"))
+        .and_then(|c| c.get("json"))
+        .filter(|j| !j.is_null())
+        .ok_or_else(|| anyhow!("vault object has no contents json"))?;
 
     Ok(Some(parse_vault_live(fields)?))
 }
 
 fn parse_vault_live(fields: &Value) -> Result<VaultLive> {
-    let config = field(fields, "config")?
-        .get("fields")
-        .ok_or_else(|| anyhow!("config has no fields"))?;
+    let config = field(fields, "config")?;
     Ok(VaultLive {
         phase: parse_phase(field(fields, "phase")?)?,
         selling_ends_ms: u64_field(fields, "selling_ends_ms")?,
@@ -98,15 +108,15 @@ fn parse_vault_live(fields: &Value) -> Result<VaultLive> {
     })
 }
 
-/// `Phase` is a Move enum → `{"variant": "Active"|"Settling", …}` (tolerate a
+/// `Phase` is a Move enum → `{"@variant": "Active"|"Settling", …}` (tolerate a
 /// bare string too). Maps to the DTO's lowercase `active` | `settling`.
 fn parse_phase(v: &Value) -> Result<String> {
     let variant = match v {
         Value::String(s) => s.as_str(),
         Value::Object(m) => m
-            .get("variant")
+            .get("@variant")
             .and_then(|x| x.as_str())
-            .ok_or_else(|| anyhow!("phase object has no variant: {v}"))?,
+            .ok_or_else(|| anyhow!("phase object has no @variant: {v}"))?,
         other => return Err(anyhow!("unrecognized phase encoding {other}")),
     };
     match variant {
@@ -120,7 +130,7 @@ fn field<'a>(v: &'a Value, name: &str) -> Result<&'a Value> {
     v.get(name).ok_or_else(|| anyhow!("missing field {name}"))
 }
 
-/// u64 fields cross the RPC wire as decimal strings; tolerate a JSON number.
+/// u64 fields cross the wire as decimal strings; tolerate a JSON number.
 fn u64_field(v: &Value, name: &str) -> Result<u64> {
     match field(v, name)? {
         Value::String(s) => s.parse().with_context(|| format!("field {name}: u64 {s:?}")),
@@ -133,13 +143,14 @@ fn u64_field(v: &Value, name: &str) -> Result<u64> {
 mod tests {
     use super::*;
 
-    /// A `Vault` object's parsed-JSON fields exactly as `sui_getObject` renders
-    /// them (verified against a live testnet vault): u64s as strings, `Balance`
-    /// bare, the `Phase` enum as a variant map, config nested under `fields`.
+    /// A `Vault` object's fields exactly as the GraphQL RPC renders
+    /// `contents.json` (verified against a live testnet vault): u64s as
+    /// strings, the `Phase` enum as an `@variant` map, config's fields nested
+    /// directly with no `fields` wrapper.
     fn vault_json(phase: &str) -> Value {
         json!({
             "round": "3",
-            "phase": { "type": "0x..::vault::Phase", "variant": phase, "fields": {} },
+            "phase": { "@variant": phase },
             "selling_ends_ms": "1699990000000",
             "open_rfqs": "2",
             "deployable": "5000000000",
@@ -148,11 +159,8 @@ mod tests {
             "claimable_shares": "88",
             "queued_withdraw_shares": "99",
             "config": {
-                "type": "0x..::vault::VaultConfig",
-                "fields": {
-                    "max_slice_amount": "1000000000000",
-                    "max_open_rfqs": "4",
-                },
+                "max_slice_amount": "1000000000000",
+                "max_open_rfqs": "4",
             },
         })
     }

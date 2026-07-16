@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { useSuiClient } from "@mysten/dapp-kit";
 import { normalizeStructTag } from "@mysten/sui/utils";
 
+import { listAllBalances, useSuiGrpcClient } from "../lib/suiGrpc";
 import type { Series } from "./client";
 
 /**
@@ -26,15 +26,15 @@ export type OwnedCallOption = {
  *
  * Option coins live in per-roll-published packages, so there's no single
  * struct-type filter to query. Instead we read every coin balance the wallet
- * holds (`getAllBalances`) and keep the ones whose type matches a known
- * bucket's `call_coin_type` (from `/buckets`). Returns an empty array until
- * both a wallet and at least one bucket coin type are known.
+ * holds (gRPC `StateService.ListBalances`) and keep the ones whose type
+ * matches a known bucket's `call_coin_type` (from `/buckets`). Returns an
+ * empty array until both a wallet and at least one bucket coin type are known.
  */
 export function useOwnedCallOptions(
   wallet: string | null,
   series: Series[] | undefined,
 ) {
-  const client = useSuiClient();
+  const client = useSuiGrpcClient();
 
   // Normalized option coin type -> bucket id.
   const callTypeToBucket = new Map<string, string>();
@@ -54,16 +54,15 @@ export function useOwnedCallOptions(
     refetchInterval: 5_000,
     queryFn: async () => {
       if (!wallet) return [];
-      const balances = await client.getAllBalances({ owner: wallet });
       const out: OwnedCallOption[] = [];
-      for (const bal of balances) {
+      for (const bal of await listAllBalances(client, wallet)) {
         const bucket_id = callTypeToBucket.get(normalizeStructTag(bal.coinType));
         if (!bucket_id) continue;
-        if (BigInt(bal.totalBalance) <= 0n) continue;
+        if (BigInt(bal.balance) <= 0n) continue;
         out.push({
           coin_type: bal.coinType,
           bucket_id,
-          amount_raw: bal.totalBalance,
+          amount_raw: bal.balance,
         });
       }
       return out;
