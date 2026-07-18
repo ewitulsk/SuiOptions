@@ -15,6 +15,7 @@ pub mod onchain_put_rfq;
 pub mod onchain_rfq;
 pub mod onchain_swap;
 pub mod pricing;
+pub mod sim;
 pub mod vault_deepbook;
 
 /// Move abort code emitted when a bid is outbid between read and submit
