@@ -594,6 +594,22 @@ public fun begin_force_session<W: drop>(
     new_session(vault, adapter, true)
 }
 
+/// Permissionless, always-available session for adapter CRANKS — the
+/// non-discretionary maintenance moves whose outcome is fixed by prior
+/// state (settle a finished auction, redeem an expired position, sweep
+/// settled venue amounts). Like a force session it can never `take`
+/// balances; unlike one it has no unlock condition, so adapters must
+/// expose through it only entry points that cannot grief the strategy.
+public fun begin_crank_session<W: drop>(
+    vault: &TradingVault,
+    reg: &IntegrationRegistry,
+    _witness: W,
+): Session {
+    let adapter = type_name::with_defining_ids<W>();
+    assert!(registry::is_adapter_allowed(reg, &adapter), errors::adapter_not_allowed());
+    new_session(vault, adapter, true)
+}
+
 fun new_session(vault: &TradingVault, adapter: TypeName, forced: bool): Session {
     Session {
         vault_id: object::id(vault),
@@ -666,6 +682,25 @@ public fun receive_position<P: key + store, W: drop>(
     assert!(registry::is_adapter_allowed(reg, &adapter), errors::adapter_not_allowed());
     let p = transfer::public_receive(&mut vault.id, receiving);
     store_position_internal(vault, adapter, p);
+}
+
+/// Sweep in a Coin that was transferred to the vault's own object
+/// address (e.g. RFQ premium routed to the vault). Witness-gated like
+/// `receive_position`; joins straight into free balances.
+public fun receive_coin<T, W: drop>(
+    vault: &mut TradingVault,
+    reg: &IntegrationRegistry,
+    _witness: W,
+    receiving: Receiving<Coin<T>>,
+) {
+    let adapter = type_name::with_defining_ids<W>();
+    assert!(registry::is_adapter_allowed(reg, &adapter), errors::adapter_not_allowed());
+    let c = transfer::public_receive(&mut vault.id, receiving);
+    if (c.value() == 0) {
+        c.destroy_zero();
+        return
+    };
+    put_balance_internal<T>(vault, c.into_balance());
 }
 
 public fun end_session(vault: &TradingVault, s: Session) {
@@ -794,6 +829,22 @@ fun assert_attestation_fresh(cfg: &VaultProtocolConfig, att: &PriceAttestation, 
     };
 }
 
+/// For adapters valuing their own holdings inside a position appraisal:
+/// asserts the attestation quotes into this vault's deposit asset and is
+/// fresh under the protocol backstop.
+public fun check_attestation(
+    vault: &TradingVault,
+    cfg: &VaultProtocolConfig,
+    att: &PriceAttestation,
+    clock: &Clock,
+) {
+    assert!(
+        price::quote_asset(att) == vault.config.deposit_asset,
+        errors::price_asset_mismatch(),
+    );
+    assert_attestation_fresh(cfg, att, clock);
+}
+
 // ═══════════════════════ closure and rotation ═══════════════════════
 
 public fun initiate_close(vault: &mut TradingVault, cap: &CuratorCap) {
@@ -903,6 +954,15 @@ fun take_balance_internal<T>(vault: &mut TradingVault, amount: u64): Balance<T> 
     out
 }
 
+/// Package-private outflow for the first-party `vault_mm` module: pulls
+/// quote-collateral without a session. Every caller must have already
+/// verified a core-minted `CollateralRequest` naming this vault as
+/// `collateral_source` and the vault as the output recipient — see
+/// `vault_mm.move` for the full authorization chain.
+public(package) fun release_for_mm<T>(vault: &mut TradingVault, amount: u64): Balance<T> {
+    take_balance_internal<T>(vault, amount)
+}
+
 fun free_balance_value<T>(vault: &TradingVault): u64 {
     let key = BalanceKey<T> {};
     if (!df::exists(&vault.id, key)) {
@@ -972,6 +1032,13 @@ fun stake_fields(vault: &TradingVault, key: StakeKey): (u128, u64, u64) {
     };
     let s = vault.stakes.borrow(key);
     (s.shares, s.cost_basis, s.locked_until_ms)
+}
+
+/// Immutable access to a custodied position (e.g. for appraisal reads).
+/// Mutation still requires a session's `take_position`/`put_position`.
+public fun borrow_position<P: key + store>(vault: &TradingVault, position_id: ID): &P {
+    assert!(df::exists(&vault.id, PositionTagKey { id: position_id }), errors::position_missing());
+    dof::borrow(&vault.id, PositionKey { id: position_id })
 }
 
 public fun has_position(vault: &TradingVault, position_id: ID): bool {

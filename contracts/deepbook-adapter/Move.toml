@@ -1,0 +1,22 @@
+[package]
+name = "deepbook_adapter"
+version = "0.0.1"
+edition = "2024.beta"
+
+[dependencies]
+deepbook = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook", rev = "main" }
+token = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/token", rev = "main" }
+trading_vault = { local = "../trading-vault" }
+options_core = { local = "../core" }
+
+# DeepBook publishes distinct package ids per network; the repo manifest
+# carries no published-at, so pin them here. Testnet ids mirror the
+# `deepbook` block in rust-backend/deployments.json; mainnet ids from
+# docs.sui.io DeepBookV3 contract information.
+[dep-replacements]
+testnet.deepbook = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook", rev = "main", original-id = "0x725378acc0bb8b9273cef82171f64f87d5c0348b189318d3f682db5024f42431", published-at = "0x725378acc0bb8b9273cef82171f64f87d5c0348b189318d3f682db5024f42431" }
+mainnet.deepbook = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook", rev = "main", original-id = "0x2c8d603bc51326b8c13cef9dd07031a408a48dddb541963357661df5d3204809", published-at = "0x337f4f4f6567fcd778d5454f27c16c70e2f274cc6377ea6249ddf491482ef497" }
+# DEEP coin package (deepbookv3 packages/token): testnet id from
+# deployments.json deepCoinType; mainnet from docs.sui.io DEEP token type.
+testnet.token = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/token", rev = "main", original-id = "0x839472bcaa05bda0b7b26c69d7acba462829047bdbdb67a00a1d3b876e72220e", published-at = "0x839472bcaa05bda0b7b26c69d7acba462829047bdbdb67a00a1d3b876e72220e" }
+mainnet.token = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/token", rev = "main", original-id = "0xdeeb7a4662eec9f2f3def03fb937a663dddaa2e215b8078a284d026b7946c270", published-at = "0xdeeb7a4662eec9f2f3def03fb937a663dddaa2e215b8078a284d026b7946c270" }
