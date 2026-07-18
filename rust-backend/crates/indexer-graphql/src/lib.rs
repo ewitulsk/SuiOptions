@@ -562,6 +562,50 @@ impl IndexerClient {
         self.scan_events(filter, 0).await
     }
 
+    /// The most recent (up to `max`) events matching `event_types` whose
+    /// payload contains `payload_fields`, returned ascending by sequence.
+    /// Backs the api-service trading-vault analytics endpoints (SO-293).
+    ///
+    /// `payload_fields` is the bare field match (e.g.
+    /// `{"vault_id": "0x…"}`); this method nests it under `payload` for the
+    /// caller, because the stored column is the tagged `ChainEvent` envelope
+    /// (`{"type":…,"payload":{…}}`) and a JSONB `@>` match against the bare
+    /// fields would silently return nothing.
+    ///
+    /// Pages `SEQUENCE_DESC` from the tip and stops at `max`, so when a
+    /// truncation happens it drops the OLDEST events.
+    pub async fn recent_events_with_payload(
+        &self,
+        event_types: &[&str],
+        payload_fields: serde_json::Value,
+        max: usize,
+    ) -> Result<Vec<IndexedEvent>> {
+        const Q: &str = "query($f:EventFilterInput,$limit:Int,$after:String){\
+            events(filter:$f,order:SEQUENCE_DESC,limit:$limit,after:$after){\
+            nodes{sequence timestampMs payload} nextCursor}}";
+        let filter = json!({
+            "eventType": event_types,
+            "payloadContains": { "payload": payload_fields },
+        });
+        let mut cursor: Option<String> = None;
+        let mut out: Vec<IndexedEvent> = Vec::new();
+        while out.len() < max {
+            let limit = EVENT_PAGE_LIMIT.min((max - out.len()) as i64);
+            let vars = json!({ "f": filter, "limit": limit, "after": cursor });
+            let data: EventsWrap = self.gql(Q, vars).await?;
+            for node in data.events.nodes {
+                out.push(node.into_indexed_event()?);
+            }
+            match data.events.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        out.truncate(max);
+        out.reverse();
+        Ok(out)
+    }
+
     /// Paginate the `events` query (ascending) for `filter`, starting after
     /// `after`, decoding each node's payload into a typed `IndexedEvent`.
     async fn scan_events(

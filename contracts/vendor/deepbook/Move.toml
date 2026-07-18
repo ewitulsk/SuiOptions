@@ -1,0 +1,10 @@
+[package]
+name = "deepbook"
+edition = "2024.beta"
+version = "0.0.1"
+
+[dependencies]
+token = { local = "../token" }
+
+[addresses]
+deepbook = "0x0"

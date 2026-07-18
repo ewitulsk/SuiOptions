@@ -1,12 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { TRADING_VAULT_PUBLISH_DIGEST } from "../config";
+import { TRADING_VAULT_OBJECTS, TRADING_VAULT_PUBLISH_DIGEST } from "../config";
 import { useSuiGrpcClient } from "../lib/suiGrpc";
+import { planAppraisal, type AppraisalPlan } from "../tx/appraisal";
 import {
   fetchTradingVault,
+  fetchTradingVaultPpsHistory,
+  fetchTradingVaultStake,
   fetchTradingVaults,
   type TradingVault,
   type TradingVaultDetail,
+  type TradingVaultPpsPoint,
+  type TradingVaultStake,
 } from "./tradingVaults";
 
 export function useTradingVaults() {
@@ -28,22 +33,46 @@ export function useTradingVault(vaultId: string | null) {
   });
 }
 
+/** Share-price history for the detail chart (SO-293). */
+export function useTradingVaultPpsHistory(vaultId: string | null) {
+  return useQuery<TradingVaultPpsPoint[], Error>({
+    queryKey: ["trading-vault-pps-history", vaultId],
+    enabled: vaultId !== null,
+    queryFn: () => fetchTradingVaultPpsHistory(vaultId as string),
+    refetchInterval: 30_000,
+  });
+}
+
+/** The connected wallet's stake in one vault (SO-293). */
+export function useTradingVaultStake(vaultId: string | null, address: string | null) {
+  return useQuery<TradingVaultStake, Error>({
+    queryKey: ["trading-vault-stake", vaultId, address],
+    enabled: vaultId !== null && address !== null,
+    queryFn: () => fetchTradingVaultStake(vaultId as string, address as string),
+    refetchInterval: 15_000,
+  });
+}
+
 /**
- * The shared `VaultProtocolConfig` object id for the trading_vault deployment.
- * token-info doesn't serve it, so it's resolved client-side ONCE from the
- * package's publish transaction (the object created with type
- * `…::registry::VaultProtocolConfig`) and cached for the session.
+ * The shared `VaultProtocolConfig` object id for the trading_vault
+ * deployment. Served directly by token-info since SO-292
+ * (`packageInfo.tradingVaultObjects`); older deployments fall back to
+ * resolving it client-side ONCE from the package's publish transaction (the
+ * object created with type `…::registry::VaultProtocolConfig`), cached for
+ * the session.
  *
  * `null` when the object can't be found in the publish tx; the query is
  * disabled entirely when the network has no trading-vault deployment.
  */
 export function useVaultProtocolConfigId() {
   const client = useSuiGrpcClient();
+  const servedId = TRADING_VAULT_OBJECTS?.vaultProtocolConfigId ?? null;
   return useQuery<string | null, Error>({
-    queryKey: ["trading-vault-protocol-config", TRADING_VAULT_PUBLISH_DIGEST],
-    enabled: !!TRADING_VAULT_PUBLISH_DIGEST,
+    queryKey: ["trading-vault-protocol-config", servedId, TRADING_VAULT_PUBLISH_DIGEST],
+    enabled: !!servedId || !!TRADING_VAULT_PUBLISH_DIGEST,
     staleTime: Infinity,
     queryFn: async () => {
+      if (servedId) return servedId;
       if (!TRADING_VAULT_PUBLISH_DIGEST) return null;
       const res = await client.core.getTransaction({
         digest: TRADING_VAULT_PUBLISH_DIGEST,
@@ -58,5 +87,27 @@ export function useVaultProtocolConfigId() {
       }
       return null;
     },
+  });
+}
+
+/**
+ * Pre-flight the SO-289 appraisal composer for a vault: discover holdings and
+ * resolve every Pyth leg. `data` feeds `buildAppraisedDepositTx`; an error's
+ * message is the human-readable reason deposits are blocked (e.g. a held
+ * asset with no Pyth feed). Re-plans when the vault's holdings move.
+ */
+export function useAppraisalPlan(vault: TradingVaultDetail | null) {
+  const client = useSuiGrpcClient();
+  return useQuery<AppraisalPlan, Error>({
+    queryKey: [
+      "trading-vault-appraisal-plan",
+      vault?.vaultId ?? null,
+      vault?.positionCount ?? 0,
+      vault?.updatedAtMs ?? 0,
+    ],
+    enabled: vault !== null,
+    staleTime: 60_000,
+    retry: 1,
+    queryFn: () => planAppraisal(client, vault as TradingVaultDetail),
   });
 }

@@ -106,6 +106,20 @@ async fn main() -> Result<()> {
     // token-info still rolls buckets, just without pools. The deployer signer
     // holds DEEP and the creation fee recycles to it (registry treasury), so
     // pools cost only gas.
+    // Trading-vault pool vetting (SO-292): configured when the adapter +
+    // recorded governance objects exist; each roll then allowlists its
+    // new pools automatically.
+    let vault_allowlist = match (snapshot.deepbook_adapter(), snapshot.trading_vault_objects()) {
+        (Some(dba), Some(objs)) => match (dba.package(), objs.pool_allowlist(), snapshot.admin_cap()) {
+            (Ok(adapter_pkg), Ok(allowlist_id), Ok(admin_cap)) => {
+                info!(%allowlist_id, "trading-vault pool vetting enabled");
+                Some(roller::VaultAllowlist { adapter_pkg, allowlist_id, admin_cap })
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+
     let deepbook_cfg = match snapshot.deepbook() {
         Some(db) => {
             let pool_cfg = DeepBookPoolCfg {
@@ -326,6 +340,7 @@ async fn main() -> Result<()> {
             admin_cap,
             &db_pool,
             deepbook_cfg.as_ref(),
+            vault_allowlist.as_ref(),
         )
         .await
         {
@@ -555,6 +570,7 @@ async fn tick_once(
     admin_cap: sui_types::base_types::ObjectID,
     db_pool: &db::DbPool,
     deepbook: Option<&DeepBookPoolCfg>,
+    vault_allowlist: Option<&roller::VaultAllowlist>,
 ) -> Result<()> {
     let now = now_ms();
     for meta in pairs {
@@ -739,6 +755,7 @@ async fn tick_once(
             admin_cap,
             &plan,
             pool_creation.as_ref(),
+            vault_allowlist,
             cli.gas_budget,
         )
         .await

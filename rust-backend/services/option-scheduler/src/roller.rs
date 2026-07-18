@@ -133,12 +133,22 @@ pub fn classify_error(err: &anyhow::Error) -> ErrorClass {
     ErrorClass::Ambiguous
 }
 
+/// Trading-vault pool-allowlisting context (SO-292): when configured,
+/// every pool a roll creates is immediately vetted for vault curators so
+/// the admin allowlist never goes stale across rolls.
+pub struct VaultAllowlist {
+    pub adapter_pkg: ObjectID,
+    pub allowlist_id: ObjectID,
+    pub admin_cap: ObjectID,
+}
+
 pub async fn submit(
     wrap: &SuiClientWrapper,
     package: ObjectID,
     admin_cap: ObjectID,
     plan: &RollPlan,
     pools: Option<&coin_pkg::PoolCreation>,
+    vault_allowlist: Option<&VaultAllowlist>,
     gas_budget: u64,
 ) -> Result<RollOutcome> {
     debug!(
@@ -236,7 +246,59 @@ pub async fn submit(
         );
     }
     info!(digest, bucket_count = bucket_ids.len(), "roll submitted");
+
+    // Vet the freshly created pools for trading-vault curators. Best
+    // effort: a failure here never fails the roll (the admin PTB can be
+    // re-run by hand), it just alerts.
+    if let Some(va) = vault_allowlist {
+        let pool_ids = extract_pool_ids(resp.object_changes.as_deref().unwrap_or(&[]));
+        if !pool_ids.is_empty() {
+            if let Err(e) = allowlist_pools(wrap, va, &pool_ids, gas_budget).await {
+                tracing::error!(
+                    alert_id = "tx-failed-scheduler",
+                    error = %format!("{e:#}"),
+                    pools = pool_ids.len(),
+                    "roll pools created but vault allowlisting failed — run allow_pool by hand"
+                );
+            } else {
+                info!(pools = pool_ids.len(), "roll pools vetted for trading vaults");
+            }
+        }
+    }
     Ok(RollOutcome { digest, bucket_ids })
+}
+
+pub(crate) fn extract_pool_ids(changes: &[ObjectChange]) -> Vec<ObjectID> {
+    changes
+        .iter()
+        .filter_map(|c| match c {
+            ObjectChange::Created { object_id, object_type, .. }
+                if object_type.module.as_str() == "pool"
+                    && object_type.name.as_str() == "Pool" =>
+            {
+                Some(*object_id)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+async fn allowlist_pools(
+    wrap: &SuiClientWrapper,
+    va: &VaultAllowlist,
+    pool_ids: &[ObjectID],
+    gas_budget: u64,
+) -> Result<()> {
+    sui_tx::tx::deepbook::allow_pools_for_vault(
+        &wrap.client,
+        &wrap.signer,
+        va.adapter_pkg,
+        va.admin_cap,
+        va.allowlist_id,
+        pool_ids,
+        gas_budget,
+    )
+    .await
 }
 
 /// Pair each harvested `TreasuryCap` to the strike its module was generated

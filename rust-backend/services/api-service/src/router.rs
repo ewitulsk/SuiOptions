@@ -57,6 +57,14 @@ pub async fn serve(
             "/trading-vaults/:vault_id",
             get(handlers::trading_vaults::get_trading_vault),
         )
+        .route(
+            "/trading-vaults/:vault_id/pps-history",
+            get(handlers::trading_vaults::get_pps_history),
+        )
+        .route(
+            "/trading-vaults/:vault_id/stake/:address",
+            get(handlers::trading_vaults::get_stake),
+        )
         .route("/vaults", get(handlers::vaults::list_vaults))
         .route("/vaults/:vault_id", get(handlers::vaults::get_vault))
         .route(

@@ -73,6 +73,25 @@ export let VAULT_PACKAGE_ID: string | undefined;
 export let TRADING_VAULT_PACKAGE_ID: string | undefined;
 export let TRADING_VAULT_PUBLISH_DIGEST: string | undefined;
 
+// Trading-vault adapter packages (SO-289). All `undefined` on deployments
+// predating the adapter publishes — the appraisal composer surfaces a clear
+// error instead of building an unresolvable PTB.
+export let ORACLE_PYTH_PACKAGE_ID: string | undefined;
+export let DEEPBOOK_ADAPTER_PACKAGE_ID: string | undefined;
+export let OPTIONS_ADAPTER_PACKAGE_ID: string | undefined;
+
+/** Shared governance objects created by the trading-vault family's inits,
+ * recorded at deploy time (SO-292). Absent on older deployments — consumers
+ * fall back to publish-digest discovery where they can. */
+export type TradingVaultObjects = {
+  vaultProtocolConfigId: string;
+  integrationRegistryId: string;
+  oracleRegistryId: string;
+  pythFeedRegistryId: string;
+  poolAllowlistId: string;
+};
+export let TRADING_VAULT_OBJECTS: TradingVaultObjects | undefined;
+
 // DeepBook v3 deployment ids (SO-151), served by token-info alongside the
 // protocol ids. All `undefined` on networks without a DeepBook deployment
 // (devnet) — DeepBook features simply don't render there.
@@ -82,6 +101,9 @@ export let DEEPBOOK_PACKAGE_ID: string | undefined;
  * `DEEPBOOK_PACKAGE_ID`. */
 export let DEEPBOOK_ORIGINAL_PACKAGE_ID: string | undefined;
 export let DEEPBOOK_REGISTRY_ID: string | undefined;
+/** Canonical DEEP coin type of the DeepBook deployment (locked-balance legs
+ * in trading-vault custody appraisals are valued in it). */
+export let DEEP_COIN_TYPE: string | undefined;
 
 // Testnet faucet tokens (SO-93). Each is a shared `Faucet` with a public
 // `mint_to_sender`. Only the testnet/dev deployment publishes these; on
@@ -152,6 +174,16 @@ type PackageInfoDto = {
   } | null;
   vault?: { packageId: string } | null;
   tradingVault?: { packageId: string; publishDigest: string } | null;
+  oraclePyth?: { packageId: string } | null;
+  deepbookAdapter?: { packageId: string } | null;
+  optionsAdapter?: { packageId: string } | null;
+  tradingVaultObjects?: {
+    vaultProtocolConfigId: string;
+    integrationRegistryId: string;
+    oracleRegistryId: string;
+    pythFeedRegistryId: string;
+    poolAllowlistId: string;
+  } | null;
 };
 
 type SupportedTokenDto = {
@@ -187,11 +219,16 @@ export async function initConfig(): Promise<void> {
   VAULT_PACKAGE_ID = info.vault?.packageId;
   TRADING_VAULT_PACKAGE_ID = info.tradingVault?.packageId;
   TRADING_VAULT_PUBLISH_DIGEST = info.tradingVault?.publishDigest;
+  ORACLE_PYTH_PACKAGE_ID = info.oraclePyth?.packageId;
+  DEEPBOOK_ADAPTER_PACKAGE_ID = info.deepbookAdapter?.packageId;
+  OPTIONS_ADAPTER_PACKAGE_ID = info.optionsAdapter?.packageId;
+  TRADING_VAULT_OBJECTS = info.tradingVaultObjects ?? undefined;
 
   const db = info.deepbook;
   DEEPBOOK_PACKAGE_ID = db?.packageId;
   DEEPBOOK_ORIGINAL_PACKAGE_ID = db?.originalPackageId;
   DEEPBOOK_REGISTRY_ID = db?.registryId;
+  DEEP_COIN_TYPE = db?.deepCoinType;
 
   const tt = info.testTokens;
   TEST_TOKENS = tt

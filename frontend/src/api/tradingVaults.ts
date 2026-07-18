@@ -76,6 +76,63 @@ export async function fetchTradingVault(vaultId: string): Promise<TradingVaultDe
   return (await res.json()) as TradingVaultDetail;
 }
 
+/** One share-price sample from the pps-history endpoint (SO-293). */
+export type TradingVaultPpsPoint = {
+  /** Event time (ms since epoch), decimal string. */
+  timestampMs: string;
+  /** u128 decimal string, pps × 1e12. */
+  ppsE12: string;
+  /** `deposit` | `fulfillment`. */
+  source: string;
+};
+
+export async function fetchTradingVaultPpsHistory(
+  vaultId: string,
+): Promise<TradingVaultPpsPoint[]> {
+  const res = await fetch(
+    `${API_BASE_URL}/trading-vaults/${encodeURIComponent(vaultId)}/pps-history`,
+  );
+  if (!res.ok) {
+    throw new Error(`GET /trading-vaults/:id/pps-history failed: ${res.status} ${res.statusText}`);
+  }
+  const body = (await res.json()) as { points: TradingVaultPpsPoint[] };
+  return body.points;
+}
+
+/** The connected wallet's stake in one vault (SO-293). Raw integer fields
+ * ship as decimal strings to preserve u128/u64 precision. */
+export type TradingVaultStake = {
+  /** u128 decimal string, atomic share units. */
+  shares: string;
+  /** u64 decimal string, deposit-asset smallest units. */
+  costBasis: string;
+  /** u64 decimal string at the latest pps, or null pre-appraisal. */
+  estimatedValue: string | null;
+  /** Ms since epoch, or null if the wallet never deposited. Ships as a
+   * decimal string on the wire; normalized to a number in the fetcher. */
+  lockedUntilMs: number | null;
+};
+
+export async function fetchTradingVaultStake(
+  vaultId: string,
+  address: string,
+): Promise<TradingVaultStake> {
+  const res = await fetch(
+    `${API_BASE_URL}/trading-vaults/${encodeURIComponent(vaultId)}/stake/${encodeURIComponent(address)}`,
+  );
+  if (!res.ok) {
+    throw new Error(`GET /trading-vaults/:id/stake/:address failed: ${res.status} ${res.statusText}`);
+  }
+  const body = (await res.json()) as Omit<TradingVaultStake, "lockedUntilMs"> & {
+    lockedUntilMs: string | number | null;
+  };
+  return {
+    ...body,
+    // Serialized as a decimal string like the other raw-int fields.
+    lockedUntilMs: body.lockedUntilMs == null ? null : Number(body.lockedUntilMs),
+  };
+}
+
 /**
  * The supported-token catalog entry for a coin type, or null when the asset
  * isn't in the catalog. Coin types arrive in non-byte-equal forms (with and

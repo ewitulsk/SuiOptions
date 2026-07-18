@@ -26,6 +26,7 @@ pub mod signer;
 pub mod sponsor;
 pub mod template;
 pub mod test_tokens;
+pub mod appraisal;
 pub mod trading_vault;
 pub mod vault;
 pub mod vault_create;
@@ -87,7 +88,7 @@ pub async fn shared_object_arg(
 }
 
 /// Immutable Clock argument, shared by every deadline-aware builder.
-pub(crate) fn clock_arg(pt: &mut ProgrammableTransactionBuilder) -> Result<Argument> {
+pub fn clock_arg(pt: &mut ProgrammableTransactionBuilder) -> Result<Argument> {
     Ok(pt.obj(ObjectArg::SharedObject {
         id: SUI_CLOCK_OBJECT_ID,
         initial_shared_version: SUI_CLOCK_OBJECT_SHARED_VERSION,

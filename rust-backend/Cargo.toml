@@ -39,6 +39,7 @@ members = [
     "tools/control-panel",
     "tools/mm-quote",
     "tools/deepbook-pool-test",
+    "tools/trading-vault-smoke",
     "tools/backtester",
     "tests",
 ]

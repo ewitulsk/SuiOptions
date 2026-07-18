@@ -253,6 +253,26 @@ public fun place_market_order<B, Q>(
     vault::end_session(vault, s);
 }
 
+/// Modify a resting order's quantity (SO-294).
+public fun modify_order<B, Q>(
+    vault: &mut TradingVault,
+    cap: &CuratorCap,
+    reg: &IntegrationRegistry,
+    custody_id: ID,
+    pool: &mut Pool<B, Q>,
+    order_id: u128,
+    new_quantity: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    let mut s = vault::begin_session(vault, cap, reg, DeepBookAdapter {});
+    let mut custody = take_custody(vault, &mut s, custody_id);
+    let proof = trader_proof(&mut custody, ctx);
+    pool::modify_order(pool, &mut custody.bm, &proof, order_id, new_quantity, clock, ctx);
+    vault::put_position(vault, &mut s, custody);
+    vault::end_session(vault, s);
+}
+
 public fun cancel_order<B, Q>(
     vault: &mut TradingVault,
     cap: &CuratorCap,

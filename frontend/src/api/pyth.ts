@@ -14,7 +14,9 @@ import { findToken } from "../config";
 
 // BETA hermes — Sui testnet feed ids (served by token-info) are the beta
 // set; stable hermes 404s on them. Mirrors the backend keeper/scheduler.
-const HERMES_BASE = "https://hermes-beta.pyth.network";
+// Exported for the trading-vault appraisal composer, which fetches one-shot
+// accumulator updates over REST from the same endpoint the stream uses.
+export const HERMES_BASE = "https://hermes-beta.pyth.network";
 
 export type PythPrice = {
   /** Hex feed id, lower-case, no `0x` prefix. */

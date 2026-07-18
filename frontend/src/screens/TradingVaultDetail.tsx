@@ -1,9 +1,11 @@
 // Curated trading-vault detail (SO-288), route `/vaults/:vaultId`.
 //
 // Header terms + share price/TVL from the api-service detail endpoint, the
-// custodied-positions table, and the user panel: deposit (begin_appraisal →
-// deposit, only while the vault holds nothing but its deposit asset) and
-// request-withdraw (always available; shares are a u128).
+// share-price chart (SO-293), the custodied-positions table, and the user
+// panel: deposit (appraisal-composed PTB — values every held asset and
+// position so `deposit` sees a complete NAV, SO-289), the wallet's stake,
+// and request-withdraw with a fee preview (always available; shares are a
+// u128).
 
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -16,11 +18,18 @@ import {
   type TradingVaultDetail as TradingVaultDetailDto,
   type TradingVaultPosition,
 } from "../api/tradingVaults";
-import { useTradingVault, useVaultProtocolConfigId } from "../api/useTradingVaults";
+import {
+  useAppraisalPlan,
+  useTradingVault,
+  useTradingVaultPpsHistory,
+  useTradingVaultStake,
+  useVaultProtocolConfigId,
+} from "../api/useTradingVaults";
 import { useTradingVaultActions } from "../state/tradingVault";
 import { useCoinBalance } from "../api/useCoinBalance";
 import { TRADING_VAULT_PACKAGE_ID } from "../config";
 import { TokenLogo } from "../components/TokenLogo";
+import { TradingVaultPpsChart } from "../components/TradingVaultPpsChart";
 import { Toast } from "../components/Toast";
 import { formatPrice } from "../format";
 import { StateBadge, fmtDurationMs, shortHex } from "./TradingVaults";
@@ -39,6 +48,16 @@ function fmtDateTime(ms: number | null | undefined): string {
 function adapterName(adapter: string): string {
   const parts = adapter.split("::");
   return parts.length > 1 ? parts.slice(1).join("::") : shortHex(adapter);
+}
+
+/** Exact raw→display conversion (no float), e.g. ("1500000", 6) → "1.5". */
+function rawToDecimalString(raw: string, decimals: number): string {
+  const digits = raw.replace(/^0+/, "") || "0";
+  if (decimals === 0) return digits;
+  const s = digits.padStart(decimals + 1, "0");
+  const int = s.slice(0, -decimals);
+  const frac = s.slice(-decimals).replace(/0+$/, "");
+  return frac ? `${int}.${frac}` : int;
 }
 
 export function TradingVaultDetailScreen() {
@@ -83,6 +102,7 @@ function VaultBody({ vault }: { vault: TradingVaultDetailDto }) {
   const symbol = token?.ticker ?? shortHex(vault.depositAsset);
   const pps = tradingVaultPps(vault);
   const tvl = tradingVaultTvl(vault, token?.decimals ?? null);
+  const ppsHistoryQ = useTradingVaultPpsHistory(vault.vaultId);
 
   return (
     <>
@@ -126,6 +146,11 @@ function VaultBody({ vault }: { vault: TradingVaultDetailDto }) {
 
       <div className="vault-grid">
         <div className="vault-grid__main">
+          <TradingVaultPpsChart
+            points={ppsHistoryQ.data ?? []}
+            loading={ppsHistoryQ.isLoading}
+            symbol={symbol}
+          />
           <PositionsCard positions={vault.positions} />
           <TermsCard vault={vault} symbol={symbol} />
         </div>
@@ -239,9 +264,14 @@ function UserPanel({
   const actions = useTradingVaultActions();
   const cfgQ = useVaultProtocolConfigId();
   const balQ = useCoinBalance(address, vault.depositAsset);
+  const planQ = useAppraisalPlan(vault);
+  const stakeQ = useTradingVaultStake(vault.vaultId, address);
 
   const [tab, setTab] = useState<"deposit" | "withdraw">("deposit");
   const [amount, setAmount] = useState("");
+  // "Max" fills the exact raw share balance; any manual edit reverts to the
+  // parsed input so partial withdrawals round like before.
+  const [maxUsed, setMaxUsed] = useState(false);
 
   if (!address) {
     return (
@@ -257,40 +287,86 @@ function UserPanel({
   const amountNum = Number(amount) || 0;
   const balance = decimals != null && balQ.data != null ? Number(balQ.data) / 10 ** decimals : null;
   const cfgId = cfgQ.data ?? null;
+  const stake = stakeQ.data ?? null;
+  const hasStake = stake != null && stake.shares !== "0";
+  const pps = tradingVaultPps(vault);
 
-  // Deposits require a complete appraisal; with positions (or non-deposit
-  // balances) in the vault, the single-leg PTB this screen builds would abort.
-  const appraisalBlocked = vault.positionCount > 0;
+  // Deposits require a complete appraisal. The composer plans every leg; if
+  // planning failed but the vault custodies nothing, the plain two-call PTB
+  // still works (the on-chain completeness check backstops us).
+  const plan = planQ.data ?? null;
+  const planError = planQ.isError ? planQ.error.message : null;
+  const canFallback = planError != null && vault.positionCount === 0;
+  const appraisalBlocked = plan == null && !canFallback;
   const depositDisabled =
     tab === "deposit" &&
     (appraisalBlocked || vault.depositsPaused || vault.state !== "open" || !cfgId);
-  const depositTitle = appraisalBlocked
-    ? "appraisal legs required — coming soon"
-    : vault.depositsPaused
-      ? "Deposits are paused"
-      : vault.state !== "open"
-        ? "The vault is no longer open for deposits"
-        : !cfgId
-          ? cfgQ.isLoading
-            ? "Resolving protocol config…"
-            : "Protocol config not found for this deployment"
+  const depositTitle = vault.depositsPaused
+    ? "Deposits are paused"
+    : vault.state !== "open"
+      ? "The vault is no longer open for deposits"
+      : !cfgId
+        ? cfgQ.isLoading
+          ? "Resolving protocol config…"
+          : "Protocol config not found for this deployment"
+        : appraisalBlocked
+          ? planError
+            ? `Deposit unavailable: ${planError}`
+            : "Analyzing vault holdings…"
           : undefined;
+
+  // Withdrawal fee preview: profit = max(0, value − basis), fee = profit ×
+  // curatorFeeBps/10⁴, payout = value − fee. Pro-rata basis like the
+  // contract; all display-unit floats — an estimate at the current share
+  // price, crystallized only at fulfillment.
+  let preview: { value: number; fee: number; payout: number } | null = null;
+  if (tab === "withdraw" && decimals != null && stake != null && pps != null) {
+    const userShares = Number(stake.shares);
+    const sharesRaw = maxUsed ? userShares : amountNum * 10 ** decimals;
+    if (sharesRaw > 0 && userShares > 0) {
+      const value = (sharesRaw * pps) / 10 ** decimals;
+      const basis =
+        (Number(stake.costBasis) * Math.min(1, sharesRaw / userShares)) / 10 ** decimals;
+      const profit = Math.max(0, value - basis);
+      const fee = (profit * vault.curatorFeeBps) / 10_000;
+      preview = { value, fee, payout: value - fee };
+    }
+  }
+
+  const now = Date.now();
+  const lockedMs =
+    stake?.lockedUntilMs != null && stake.lockedUntilMs > now
+      ? stake.lockedUntilMs - now
+      : null;
+
+  const onMax = () => {
+    if (!stake || decimals == null) return;
+    setAmount(rawToDecimalString(stake.shares, decimals));
+    setMaxUsed(true);
+  };
 
   const onSubmit = () => {
     if (decimals == null || amountNum <= 0) return;
-    const raw = BigInt(Math.round(amountNum * 10 ** decimals));
     if (tab === "deposit") {
       if (!cfgId) return;
-      actions.deposit({
-        vaultId: vault.vaultId,
-        protocolConfigId: cfgId,
-        depositCoinType: vault.depositAsset,
-        amountRaw: raw,
-      });
+      const raw = BigInt(Math.round(amountNum * 10 ** decimals));
+      if (plan) {
+        actions.depositAppraised({ plan, protocolConfigId: cfgId, amountRaw: raw });
+      } else {
+        actions.deposit({
+          vaultId: vault.vaultId,
+          protocolConfigId: cfgId,
+          depositCoinType: vault.depositAsset,
+          amountRaw: raw,
+        });
+      }
     } else {
+      const raw =
+        maxUsed && stake ? BigInt(stake.shares) : BigInt(Math.round(amountNum * 10 ** decimals));
       actions.requestWithdraw({ vaultId: vault.vaultId, sharesRaw: raw });
     }
     setAmount("");
+    setMaxUsed(false);
   };
 
   return (
@@ -310,6 +386,33 @@ function UserPanel({
         </button>
       </div>
 
+      {hasStake && decimals != null && (
+        <div className="vault-kv" style={{ marginBottom: 10 }}>
+          <div className="vault-kv__row">
+            <span>Your shares</span>
+            <span>{formatPrice(Number(stake.shares) / 10 ** decimals, { grouping: true })}</span>
+          </div>
+          <div className="vault-kv__row">
+            <span>Cost basis</span>
+            <span>
+              {formatPrice(Number(stake.costBasis) / 10 ** decimals, { grouping: true })} {symbol}
+            </span>
+          </div>
+          <div className="vault-kv__row">
+            <span>Est. value</span>
+            <span>
+              {stake.estimatedValue != null
+                ? `${formatPrice(Number(stake.estimatedValue) / 10 ** decimals, { grouping: true })} ${symbol}`
+                : "—"}
+            </span>
+          </div>
+          <div className="vault-kv__row">
+            <span>Lockup</span>
+            <span>{lockedMs != null ? `unlocks in ${fmtDurationMs(lockedMs)}` : "unlocked"}</span>
+          </div>
+        </div>
+      )}
+
       <div className="vault-invest__field">
         <input
           className="amount__input"
@@ -317,8 +420,22 @@ function UserPanel({
           min="0"
           placeholder="0.0"
           value={amount}
-          onChange={(e) => setAmount(e.target.value)}
+          onChange={(e) => {
+            setAmount(e.target.value);
+            setMaxUsed(false);
+          }}
         />
+        {tab === "withdraw" && (
+          <button
+            className="vault-invest__tab"
+            style={{ flex: "0 0 auto" }}
+            onClick={onMax}
+            disabled={!hasStake || decimals == null}
+            title="Withdraw your full share balance"
+          >
+            Max
+          </button>
+        )}
         <span className="vault-invest__unit">{tab === "deposit" ? symbol : "shares"}</span>
       </div>
       <div className="vault-invest__bal">
@@ -329,6 +446,23 @@ function UserPanel({
           : "queued FIFO — paid out as the curator frees funds"}
       </div>
 
+      {preview && (
+        <div className="vault-kv" style={{ marginBottom: 10 }}>
+          <div className="vault-kv__row">
+            <span>Est. value</span>
+            <span>{formatPrice(preview.value, { grouping: true })} {symbol}</span>
+          </div>
+          <div className="vault-kv__row">
+            <span>Curator fee ({(vault.curatorFeeBps / 100).toFixed(2)}% of profit)</span>
+            <span>{formatPrice(preview.fee, { grouping: true })} {symbol}</span>
+          </div>
+          <div className="vault-kv__row">
+            <span>Est. payout</span>
+            <span>{formatPrice(preview.payout, { grouping: true })} {symbol}</span>
+          </div>
+        </div>
+      )}
+
       <button
         className="vault-invest__cta"
         disabled={!!actions.busy || amountNum <= 0 || decimals == null || depositDisabled}
@@ -338,16 +472,21 @@ function UserPanel({
         {actions.busy
           ? `${actions.busy}…`
           : tab === "deposit"
-            ? appraisalBlocked
-              ? "Deposits need appraisal legs"
-              : `Deposit ${symbol}`
+            ? `Deposit ${symbol}`
             : "Request withdrawal"}
       </button>
 
-      {tab === "deposit" && appraisalBlocked && (
+      {tab === "deposit" && appraisalBlocked && planError && (
         <div className="vault-card__foot vault-prose__muted">
-          This vault custodies positions, so deposits need per-position appraisal
-          legs — coming soon. Withdrawal requests still work.
+          Deposits are blocked until the vault's holdings can be appraised:{" "}
+          {planError}. Withdrawal requests still work.
+        </div>
+      )}
+
+      {tab === "withdraw" && preview && (
+        <div className="vault-card__foot vault-prose__muted">
+          Estimated at the current share price — the final value, fee, and
+          payout crystallize when the withdrawal is fulfilled.
         </div>
       )}
 

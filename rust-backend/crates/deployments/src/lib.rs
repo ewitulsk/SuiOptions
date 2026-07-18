@@ -226,6 +226,41 @@ pub struct PackageInfo {
     /// Options RFQ-writer adapter for the trading vault (SO-285).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options_adapter: Option<SubPackageInfo>,
+    /// Trading-vault governance objects + activation digest (SO-292).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trading_vault_objects: Option<TradingVaultObjectsInfo>,
+}
+
+/// Shared governance objects the trading-vault family's inits create,
+/// recorded at deploy time by the activation step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradingVaultObjectsInfo {
+    pub vault_protocol_config_id: String,
+    pub integration_registry_id: String,
+    pub oracle_registry_id: String,
+    pub pyth_feed_registry_id: String,
+    pub pool_allowlist_id: String,
+    pub activation_digest: String,
+}
+
+impl TradingVaultObjectsInfo {
+    pub fn vault_protocol_config(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.vault_protocol_config_id)
+            .context("parsing vaultProtocolConfigId")
+    }
+    pub fn integration_registry(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.integration_registry_id).context("parsing integrationRegistryId")
+    }
+    pub fn oracle_registry(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.oracle_registry_id).context("parsing oracleRegistryId")
+    }
+    pub fn pyth_feed_registry(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.pyth_feed_registry_id).context("parsing pythFeedRegistryId")
+    }
+    pub fn pool_allowlist(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.pool_allowlist_id).context("parsing poolAllowlistId")
+    }
 }
 
 /// Off-chain token catalog entry. One per supported ticker, replicated
@@ -399,6 +434,7 @@ mod tests {
                 oracle_pyth: None,
                 deepbook_adapter: None,
                 options_adapter: None,
+                trading_vault_objects: None,
             },
             token_info: BTreeMap::new(),
         };

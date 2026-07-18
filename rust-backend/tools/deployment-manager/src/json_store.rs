@@ -73,10 +73,27 @@ pub struct PackageInfo {
     pub deepbook_adapter: Option<PackageRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options_adapter: Option<PackageRecord>,
+    /// Shared governance objects + activation digest for the
+    /// trading-vault family (SO-292): written by the post-publish
+    /// activation step so services read ids from token-info instead of
+    /// re-deriving them from publish digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trading_vault_objects: Option<TradingVaultObjectsRecord>,
     /// cctp_bridge package (via `--deploy-cctp`); carried forward on
     /// protocol-only redeploys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cctp_bridge: Option<CctpBridgeRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradingVaultObjectsRecord {
+    pub vault_protocol_config_id: String,
+    pub integration_registry_id: String,
+    pub oracle_registry_id: String,
+    pub pyth_feed_registry_id: String,
+    pub pool_allowlist_id: String,
+    pub activation_digest: String,
 }
 
 /// The published cctp_bridge package (cctp-contracts/).
