@@ -101,10 +101,14 @@ public struct IntegrationRegistry has key { id: UID, allowed: VecSet<TypeName> }
   stake is keyed by the cap's ID**, so skin-in-the-game moves with the role.
 - `vault.curator_cap_id` pins which cap is live. The configured
   `rotation_authority` (creator, curator, or either) may call
-  `rotate_curator(vault, auth, recipient)` which mints a fresh cap, updates
-  `curator_cap_id` (dead caps become inert), and converts the old cap-keyed
-  stake into an `Addr`-keyed stake for the old holder (normal lockup rules,
-  crystallized on withdrawal like anyone else's).
+  `rotate_curator_by_creator` / `rotate_curator_by_curator`, which mints a
+  fresh cap and updates `curator_cap_id`. The old cap becomes inert for
+  curation but **keeps its cap-keyed stake as a pure claim ticket**:
+  whoever holds it can queue that stake's withdrawal (normal lockup,
+  crystallized like anyone else's, no floor since it is no longer the
+  curator). No `Addr` conversion happens — a creator-forced rotation
+  doesn't know the holder's address, and the claim-ticket model needs no
+  such knowledge.
 - Every curator-gated function takes `&CuratorCap` and asserts
   `cap.vault_id == vault && object::id(cap) == vault.curator_cap_id`.
 
