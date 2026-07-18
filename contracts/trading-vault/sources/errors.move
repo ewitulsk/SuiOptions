@@ -1,0 +1,34 @@
+module trading_vault::errors;
+
+// Codes continue upward from options_vault (ends at 54) so off-chain
+// benign-abort classification stays collision-free across packages.
+public fun not_curator(): u64 { 70 }
+public fun wrong_vault(): u64 { 71 }
+public fun vault_not_open(): u64 { 72 }
+public fun vault_not_closing(): u64 { 73 }
+public fun vault_not_closed(): u64 { 74 }
+public fun adapter_not_allowed(): u64 { 75 }
+public fun oracle_not_allowed(): u64 { 76 }
+public fun deposit_asset_mismatch(): u64 { 77 }
+public fun insufficient_balance(): u64 { 78 }
+public fun still_locked(): u64 { 79 }
+public fun curator_floor(): u64 { 80 }
+public fun fee_too_high(): u64 { 81 }
+public fun appraisal_incomplete(): u64 { 82 }
+public fun appraisal_mismatch(): u64 { 83 }
+public fun price_stale(): u64 { 84 }
+public fun price_asset_mismatch(): u64 { 85 }
+public fun position_missing(): u64 { 86 }
+public fun already_appraised(): u64 { 87 }
+public fun too_many_positions(): u64 { 88 }
+public fun not_authorized(): u64 { 89 }
+public fun config_invalid(): u64 { 90 }
+public fun forced_session_take(): u64 { 91 }
+public fun residual_assets(): u64 { 92 }
+public fun positions_open(): u64 { 93 }
+public fun unwind_not_ready(): u64 { 94 }
+public fun stake_missing(): u64 { 95 }
+public fun price_invalid(): u64 { 96 }
+public fun vault_dead(): u64 { 97 }
+public fun protocol_paused(): u64 { 98 }
+public fun deposits_paused(): u64 { 99 }
