@@ -1,9 +1,25 @@
-# The HOUSE DeepBook deployment (see rust-backend/deployments.json
-# `deepbook` block): the scheduler's option pools and mm-bot's
-# BalanceManager live here, so the trading-vault adapter must link THIS
-# publish, not the canonical MystenLabs one the upstream repo pins.
+# Per-environment DeepBook linkage for the trading-vault adapter:
+#
+#   testnet → the HOUSE deployment (rust-backend/deployments.json
+#             `deepbook` block): the scheduler's option pools and
+#             mm-bot's BalanceManager live there, so staging/prod (both
+#             Sui testnet) must trade that publish.
+#   mainnet → the CANONICAL MystenLabs deployment (ids from the upstream
+#             deepbookv3 repo's own Published.toml; the original-id also
+#             matches the live mainnet Registry's app-key defining
+#             package).
+#
+# The upstream git dependency ships its own Published.toml pinning
+# canonical addresses for BOTH networks — which is why these sources are
+# vendored: on testnet the canonical pin is the wrong venue.
 [published.testnet]
 chain-id = "4c78adac"
 published-at = "0x725378acc0bb8b9273cef82171f64f87d5c0348b189318d3f682db5024f42431"
 original-id = "0x725378acc0bb8b9273cef82171f64f87d5c0348b189318d3f682db5024f42431"
 version = 1
+
+[published.mainnet]
+chain-id = "35834a8a"
+published-at = "0x0e735f8c93a95722efd73521aca7a7652c0bb71ed1daf41b26dfd7d1ff71f748"
+original-id = "0x2c8d603bc51326b8c13cef9dd07031a408a48dddb541963357661df5d3204809"
+version = 8
