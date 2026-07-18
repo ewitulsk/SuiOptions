@@ -25,6 +25,8 @@ public struct VaultClosed has copy, drop { vault_id: ID }
 
 public struct DepositsPaused has copy, drop { vault_id: ID, paused: bool }
 
+public struct MmReleaseToggled has copy, drop { vault_id: ID, enabled: bool }
+
 public struct CuratorRotated has copy, drop {
     vault_id: ID,
     old_cap_id: ID,
@@ -154,6 +156,10 @@ public(package) fun emit_vault_closed(vault_id: ID) {
 
 public(package) fun emit_deposits_paused(vault_id: ID, paused: bool) {
     event::emit(DepositsPaused { vault_id, paused });
+}
+
+public(package) fun emit_mm_release_toggled(vault_id: ID, enabled: bool) {
+    event::emit(MmReleaseToggled { vault_id, enabled });
 }
 
 public(package) fun emit_curator_rotated(
