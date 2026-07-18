@@ -415,24 +415,41 @@ pub async fn compose_appraisal(
     let clock = clock_arg(pt)?;
 
     // Attestations, shared across every leg that prices the same asset.
+    // Attest every needed asset a feed exists for; unpriceable assets
+    // get `option::none` legs and the ON-CHAIN checks decide — the
+    // adapters abort only when an unpriced component is actually
+    // nonzero (e.g. a pool's call-coin base with zero locked passes; a
+    // real unpriceable inventory correctly wedges the appraisal).
     let needed = holdings.assets_needing_attestation();
     let mut attestations: BTreeMap<String, Argument> = BTreeMap::new();
-    if !needed.is_empty() {
-        let legs = legs.ok_or_else(|| {
-            anyhow!("vault holds non-deposit assets but no price legs were supplied")
-        })?;
-        // One update covering every needed feed + the deposit asset's own.
-        let mut update_ids = Vec::new();
-        let mut update_types: Vec<&String> = needed.iter().collect();
-        let deposit_key = holdings.deposit_type.clone();
-        update_types.push(&deposit_key);
-        for t in &update_types {
-            let info = legs
-                .price_infos
-                .get(*t)
-                .ok_or_else(|| anyhow!("no PriceInfoObject for {t} (feed not seeded?)"))?;
-            if !update_ids.contains(info) {
-                update_ids.push(*info);
+    let attestable: Vec<String> = match &legs {
+        Some(l) => needed
+            .iter()
+            .filter(|t| l.price_infos.contains_key(*t))
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
+    // Hard requirement only where an amount is KNOWN nonzero client-side:
+    // non-deposit free balances (their Balance dfs are pruned at zero).
+    for asset in &holdings.free_assets {
+        if !attestable.contains(asset) {
+            return Err(anyhow!(
+                "free balance {asset} needs a price attestation but no feed/leg is available"
+            ));
+        }
+    }
+    if !attestable.is_empty() {
+        let legs = legs.as_ref().expect("attestable implies legs");
+        let deposit_info_id = *legs
+            .price_infos
+            .get(&holdings.deposit_type)
+            .ok_or_else(|| anyhow!("no PriceInfoObject for the deposit asset"))?;
+        let mut update_ids = vec![deposit_info_id];
+        for t in &attestable {
+            let info = legs.price_infos[t];
+            if !update_ids.contains(&info) {
+                update_ids.push(info);
             }
         }
         prepend_price_update(client, pt, legs.pyth, legs.accumulator_update, &update_ids)
@@ -441,9 +458,8 @@ pub async fn compose_appraisal(
 
         let feed_reg = pt.obj(shared_object_arg(client, refs.pyth_feed_registry_id, false).await?)?;
         let oracle_reg = pt.obj(shared_object_arg(client, refs.oracle_registry_id, false).await?)?;
-        let deposit_info_id = legs.price_infos[&holdings.deposit_type];
         let deposit_info = pt.obj(shared_object_arg(client, deposit_info_id, false).await?)?;
-        for asset in &needed {
+        for asset in &attestable {
             let asset_info = pt.obj(shared_object_arg(client, legs.price_infos[asset], false).await?)?;
             let asset_tag = TypeTag::from_str(asset).context("parsing asset type")?;
             let att = pt.programmable_move_call(
