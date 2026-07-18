@@ -276,6 +276,16 @@ fn is_benign_coin_primitive(call: &ProgrammableMoveCall) -> bool {
 /// no DeepBook PTBs are sponsored there. `cctp` is Circle's
 /// TokenMessengerMinter package — `None` where the bridge isn't configured —
 /// mirroring frontend tx/bridge.ts.
+/// The trading-vault package family (SO-282). All-or-nothing per deploy;
+/// `None` disables its templates.
+#[derive(Debug, Clone, Copy)]
+pub struct TradingVaultPkgs {
+    pub trading_vault: ObjectID,
+    pub oracle_pyth: ObjectID,
+    pub deepbook_adapter: Option<ObjectID>,
+    pub options_adapter: Option<ObjectID>,
+}
+
 pub fn protocol_templates(
     protocol: ObjectID,
     vault_pkg: ObjectID,
@@ -283,6 +293,7 @@ pub fn protocol_templates(
     allow_faucet: bool,
     deepbook: Option<ObjectID>,
     cctp: Option<ObjectID>,
+    trading_vault: Option<TradingVaultPkgs>,
 ) -> Vec<PtbTemplate> {
     let t = |module: &str, function: &str| MoveTarget::new(protocol, module, function);
 
@@ -467,6 +478,65 @@ pub fn protocol_templates(
             ], vec![proof, settle.clone(), withdraw_all.clone(), put_exercise.clone()], vec![(settle, 2), (withdraw_all, 1), (put_exercise, 3)]));
     }
 
+
+    // Curated trading vaults (SO-282): wallet-facing flows. Deposits ride
+    // an appraisal whose legs vary with vault holdings — the template
+    // anchors begin_appraisal → deposit and allows the oracle/adapter
+    // appraisal calls in between. Withdrawal requests and closed-stake
+    // distribution are single anchored calls. Curator/session ops are
+    // NOT sponsored (curators run bots with their own gas).
+    if let Some(tvp) = trading_vault {
+        let tvt = |module: &str, function: &str| MoveTarget::new(tvp.trading_vault, module, function);
+        let begin = tvt("vault", "begin_appraisal");
+        let deposit = tvt("vault", "deposit");
+        let mut appraisal_allowed = vec![
+            TargetMatcher::Exact(begin.clone()),
+            TargetMatcher::Exact(tvt("vault", "appraise_balance")),
+            TargetMatcher::Exact(tvt("vault", "record_position_value")),
+            TargetMatcher::Exact(tvt("vault_mm", "appraise_call_position")),
+            TargetMatcher::Exact(tvt("vault_mm", "appraise_put_position")),
+            TargetMatcher::Exact(tvt("vault_mm", "appraise_call_coin")),
+            TargetMatcher::Exact(MoveTarget::new(tvp.oracle_pyth, "oracle_pyth", "attest")),
+        ];
+        if let Some(dba) = tvp.deepbook_adapter {
+            for f in ["begin_custody_appraisal", "value_asset", "value_pool_locked", "finalize_custody_appraisal"] {
+                appraisal_allowed.push(TargetMatcher::Exact(MoveTarget::new(dba, "deepbook_adapter", f)));
+            }
+        }
+        if let Some(oa) = tvp.options_adapter {
+            for f in ["appraise_rfq_ticket", "appraise_call_position", "appraise_put_position"] {
+                appraisal_allowed.push(TargetMatcher::Exact(MoveTarget::new(oa, "options_adapter", f)));
+            }
+        }
+        let mut deposit_allowed = appraisal_allowed.clone();
+        deposit_allowed.push(TargetMatcher::Exact(deposit.clone()));
+        templates.push(PtbTemplate {
+            name: "trading_vault:deposit".to_owned(),
+            required: vec![TargetMatcher::Exact(begin.clone()), TargetMatcher::Exact(deposit.clone())],
+            allowed: deposit_allowed,
+            arities: vec![(begin, 1), (deposit, 1)],
+        });
+        let create = tvt("vault", "create_vault");
+        templates.push(PtbTemplate::exact_only(
+            "trading_vault:create_vault".to_owned(),
+            vec![create.clone()],
+            vec![create.clone()],
+            vec![(create, 1)],
+        ));
+        for (name, function) in [
+            ("trading_vault:request_withdraw", "request_withdraw"),
+            ("trading_vault:enqueue_closed_stake", "enqueue_closed_stake"),
+        ] {
+            let target = tvt("vault", function);
+            templates.push(PtbTemplate::exact_only(
+                name.to_owned(),
+                vec![target.clone()],
+                vec![target.clone()],
+                vec![(target, 0)],
+            ));
+        }
+    }
+
     templates
 }
 
@@ -529,6 +599,7 @@ mod tests {
             true,
             Some(deepbook_pkg()),
             Some(cctp_tmm_pkg()),
+            None,
         )
     }
 
@@ -706,7 +777,7 @@ mod tests {
     #[test]
     fn faucet_rejected_when_disabled() {
         let no_faucet =
-            protocol_templates(pkg(), vault_pkg(), &[(pkg(), "tbtc".to_owned())], false, None, None);
+            protocol_templates(pkg(), vault_pkg(), &[(pkg(), "tbtc".to_owned())], false, None, None, None);
         let pt = build(&[(target("tbtc", "mint_to_sender"), 0)], false);
         assert_eq!(match_any(&no_faucet, &pt), None);
     }
@@ -953,7 +1024,7 @@ mod tests {
         assert_eq!(match_any(&templates(), &bad_arity), None);
 
         // No deepbook configured (devnet) → never sponsored.
-        let no_db = protocol_templates(pkg(), vault_pkg(), &[], false, None, None);
+        let no_db = protocol_templates(pkg(), vault_pkg(), &[], false, None, None, None);
         let pt = build(
             &[(
                 MoveTarget::new(deepbook_pkg(), "pool", "create_permissionless_pool"),

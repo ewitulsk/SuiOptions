@@ -33,18 +33,19 @@ use protocol_types::ids::ObjectId;
 
 use crate::store::{
     AccountState, BucketState, DeepBookPoolState, PositionState, ReceiptKey, ReceiptState,
-    RfqState, VaultRoundState, VaultState,
+    RfqState, TradingVaultPositionState, TradingVaultState, VaultRoundState, VaultState,
 };
 
 use super::models::{
     account_row_into_state, event_type_tag, AccountRow,
     BucketRow, DeepBookPoolRow, EventParticipantRow, IndexedEventRow, NewIndexedEventRow,
-    PositionRow, ProgressRow, RfqBidRow, RfqRow, VaultReceiptRow, VaultRoundRow, VaultRow,
+    PositionRow, ProgressRow, RfqBidRow, RfqRow, TradingVaultPositionRow, TradingVaultRow,
+    VaultReceiptRow, VaultRoundRow, VaultRow,
 };
 use super::schema::{
     accounts, bucket_deepbook_pools, buckets, event_participants,
-    indexed_events, indexer_progress, positions, rfq_bids, rfqs, vault_rounds,
-    vault_user_receipts, vaults,
+    indexed_events, indexer_progress, positions, rfq_bids, rfqs, trading_vault_positions,
+    trading_vaults, vault_rounds, vault_user_receipts, vaults,
 };
 use super::DbPool;
 
@@ -78,6 +79,10 @@ pub struct CheckpointBatch {
     pub vault_rounds: Vec<VaultRoundRow>,
     /// Per-(vault, owner, round, kind) receipt aggregates (D2).
     pub vault_receipts: Vec<VaultReceiptRow>,
+    /// Curated trading vault headline snapshots (SO-282).
+    pub trading_vaults: Vec<TradingVaultRow>,
+    /// Adapter-position snapshots per trading vault (SO-282).
+    pub trading_vault_positions: Vec<TradingVaultPositionRow>,
 }
 
 impl CheckpointBatch {
@@ -97,6 +102,8 @@ impl CheckpointBatch {
             vaults: Vec::new(),
             vault_rounds: Vec::new(),
             vault_receipts: Vec::new(),
+            trading_vaults: Vec::new(),
+            trading_vault_positions: Vec::new(),
         }
     }
 
@@ -113,6 +120,8 @@ impl CheckpointBatch {
             && self.vaults.is_empty()
             && self.vault_rounds.is_empty()
             && self.vault_receipts.is_empty()
+            && self.trading_vaults.is_empty()
+            && self.trading_vault_positions.is_empty()
     }
 }
 
@@ -154,6 +163,8 @@ pub struct HydratedViews {
     pub vaults: BTreeMap<ObjectId, VaultState>,
     pub vault_rounds: BTreeMap<(ObjectId, u64), VaultRoundState>,
     pub vault_receipts: BTreeMap<ReceiptKey, ReceiptState>,
+    pub trading_vaults: BTreeMap<ObjectId, TradingVaultState>,
+    pub trading_vault_positions: BTreeMap<(ObjectId, ObjectId), TradingVaultPositionState>,
 }
 
 #[derive(Clone)]
@@ -392,6 +403,45 @@ impl Repo {
                     .context("upserting vault_user_receipts")?;
             }
 
+            for tv in &batch.trading_vaults {
+                diesel::insert_into(trading_vaults::table)
+                    .values(tv)
+                    .on_conflict(trading_vaults::vault_id)
+                    .do_update()
+                    .set((
+                        trading_vaults::curator.eq(&tv.curator),
+                        trading_vaults::curator_cap_id.eq(&tv.curator_cap_id),
+                        trading_vaults::state.eq(&tv.state),
+                        trading_vaults::deposits_paused.eq(tv.deposits_paused),
+                        trading_vaults::mm_release_enabled.eq(tv.mm_release_enabled),
+                        trading_vaults::total_shares.eq(&tv.total_shares),
+                        trading_vaults::position_count.eq(tv.position_count),
+                        trading_vaults::pending_withdrawals.eq(tv.pending_withdrawals),
+                        trading_vaults::latest_pps_e12.eq(&tv.latest_pps_e12),
+                        trading_vaults::updated_at_seq.eq(tv.updated_at_seq),
+                        trading_vaults::updated_at_ms.eq(tv.updated_at_ms),
+                    ))
+                    .execute(conn)
+                    .context("upserting trading_vaults")?;
+            }
+
+            for pos in &batch.trading_vault_positions {
+                diesel::insert_into(trading_vault_positions::table)
+                    .values(pos)
+                    .on_conflict((
+                        trading_vault_positions::vault_id,
+                        trading_vault_positions::position_id,
+                    ))
+                    .do_update()
+                    .set((
+                        trading_vault_positions::active.eq(pos.active),
+                        trading_vault_positions::removed_at_ms.eq(pos.removed_at_ms),
+                        trading_vault_positions::updated_at_seq.eq(pos.updated_at_seq),
+                    ))
+                    .execute(conn)
+                    .context("upserting trading_vault_positions")?;
+            }
+
             // Singleton progress row. The first checkpoint creates it; later
             // ones just update.
             let _s = tracing::info_span!("db_query", query = "upsert_indexer_progress").entered();
@@ -518,6 +568,27 @@ impl Repo {
             receipt_map.insert(key, state);
         }
 
+        let mut trading_vault_map: BTreeMap<ObjectId, TradingVaultState> = BTreeMap::new();
+        for row in trading_vaults::table
+            .load::<TradingVaultRow>(&mut conn)
+            .context("loading trading_vaults")?
+        {
+            let (id, state) = row.into_state()?;
+            trading_vault_map.insert(id, state);
+        }
+
+        let mut trading_vault_position_map: BTreeMap<
+            (ObjectId, ObjectId),
+            TradingVaultPositionState,
+        > = BTreeMap::new();
+        for row in trading_vault_positions::table
+            .load::<TradingVaultPositionRow>(&mut conn)
+            .context("loading trading_vault_positions")?
+        {
+            let (key, state) = row.into_state()?;
+            trading_vault_position_map.insert(key, state);
+        }
+
         debug!(
             accounts = acct_map.len(),
             buckets = bucket_map.len(),
@@ -525,6 +596,7 @@ impl Repo {
             deepbook_pools = deepbook_map.len(),
             rfqs = rfq_map.len(),
             vaults = vault_map.len(),
+            trading_vaults = trading_vault_map.len(),
             "hydration complete"
         );
         Ok(HydratedViews {
@@ -536,6 +608,8 @@ impl Repo {
             vaults: vault_map,
             vault_rounds: round_map,
             vault_receipts: receipt_map,
+            trading_vaults: trading_vault_map,
+            trading_vault_positions: trading_vault_position_map,
         })
     }
 
@@ -582,6 +656,38 @@ impl Repo {
             .first::<VaultRow>(&mut conn)
             .optional()
             .context("loading vault")
+    }
+
+    /// All curated trading vaults (SO-282).
+    pub fn trading_vaults_query(&self) -> Result<Vec<TradingVaultRow>> {
+        let mut conn = self.conn()?;
+        trading_vaults::table
+            .order(trading_vaults::vault_id.asc())
+            .load::<TradingVaultRow>(&mut conn)
+            .context("loading trading_vaults")
+    }
+
+    pub fn trading_vault_by_id(&self, vault_id: &str) -> Result<Option<TradingVaultRow>> {
+        let mut conn = self.conn()?;
+        trading_vaults::table
+            .find(vault_id)
+            .first::<TradingVaultRow>(&mut conn)
+            .optional()
+            .context("loading trading_vault")
+    }
+
+    /// Adapter positions for one trading vault (past ones included,
+    /// active=false), ascending by stored time.
+    pub fn trading_vault_positions_query(
+        &self,
+        vault_id: &str,
+    ) -> Result<Vec<TradingVaultPositionRow>> {
+        let mut conn = self.conn()?;
+        trading_vault_positions::table
+            .filter(trading_vault_positions::vault_id.eq(vault_id))
+            .order(trading_vault_positions::stored_at_ms.asc())
+            .load::<TradingVaultPositionRow>(&mut conn)
+            .context("loading trading_vault_positions")
     }
 
     /// Round history for one vault, ascending — the track record.

@@ -220,6 +220,12 @@ pub struct PackageInfo {
     /// Pyth oracle adapter for the trading vault.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_pyth: Option<SubPackageInfo>,
+    /// DeepBook spot-trading adapter for the trading vault (SO-284).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deepbook_adapter: Option<SubPackageInfo>,
+    /// Options RFQ-writer adapter for the trading vault (SO-285).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options_adapter: Option<SubPackageInfo>,
 }
 
 /// Off-chain token catalog entry. One per supported ticker, replicated
@@ -391,6 +397,8 @@ mod tests {
                 vault: None,
                 trading_vault: None,
                 oracle_pyth: None,
+                deepbook_adapter: None,
+                options_adapter: None,
             },
             token_info: BTreeMap::new(),
         };

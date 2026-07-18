@@ -3,6 +3,8 @@ import { Header } from "./components/Header";
 import { Composer } from "./screens/Composer";
 import { Dashboard } from "./screens/Dashboard";
 import { VaultScreen } from "./screens/Vault";
+import { TradingVaults } from "./screens/TradingVaults";
+import { TradingVaultDetailScreen } from "./screens/TradingVaultDetail";
 import { Activity } from "./screens/Activity";
 import { Bridge } from "./screens/Bridge";
 import { Admin } from "./screens/Admin";
@@ -22,6 +24,9 @@ export function App() {
         <Route path="/earn" element={<Composer key="writer" initialView="writer" />} />
         <Route path="/buy" element={<Composer key="trader" initialView="trader" />} />
         <Route path="/vault" element={<VaultScreen />} />
+        {/* Curated trading vaults (SO-288). */}
+        <Route path="/vaults" element={<TradingVaults />} />
+        <Route path="/vaults/:vaultId" element={<TradingVaultDetailScreen />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/activity" element={<Activity />} />
         <Route path="/bridge" element={<Bridge />} />

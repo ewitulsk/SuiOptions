@@ -7,4 +7,5 @@ pub mod option_metrics;
 pub mod pnl;
 pub mod positions;
 pub mod rfqs;
+pub mod trading_vaults;
 pub mod vaults;

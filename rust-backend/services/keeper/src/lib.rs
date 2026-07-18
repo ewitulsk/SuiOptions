@@ -20,6 +20,7 @@ pub mod slicing;
 pub mod state;
 pub mod strike;
 pub mod submit;
+pub mod trading_vault;
 
 #[derive(Parser, Debug)]
 #[command(

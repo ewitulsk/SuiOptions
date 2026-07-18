@@ -137,6 +137,26 @@ impl Snapshot {
         self.package_info.vault.as_ref()
     }
 
+    /// Curated trading-vault package (SO-283).
+    pub fn trading_vault(&self) -> Option<&SubPackageInfo> {
+        self.package_info.trading_vault.as_ref()
+    }
+
+    /// Pyth oracle adapter for the trading vault.
+    pub fn oracle_pyth(&self) -> Option<&SubPackageInfo> {
+        self.package_info.oracle_pyth.as_ref()
+    }
+
+    /// DeepBook spot adapter for the trading vault (SO-284).
+    pub fn deepbook_adapter(&self) -> Option<&SubPackageInfo> {
+        self.package_info.deepbook_adapter.as_ref()
+    }
+
+    /// Options RFQ-writer adapter for the trading vault (SO-285).
+    pub fn options_adapter(&self) -> Option<&SubPackageInfo> {
+        self.package_info.options_adapter.as_ref()
+    }
+
     // --- faucet accessors (testTokens passthrough) -------------------------
     //
     // Faucets are a testnet-only deploy artifact served from `/package-info`.
