@@ -252,8 +252,34 @@ async fn deploy_one(
             .with_context(|| format!("publishing options_vault to {network}"))?;
     tracing::info!(package = %vault_out.package_id, "options_vault published");
 
+    let trading_vault_out = publish_dep_package(
+        &client,
+        &signer,
+        &contracts_root.join("trading-vault"),
+        "trading_vault",
+        env,
+        gas_budget,
+    )
+    .await
+    .with_context(|| format!("publishing trading_vault to {network}"))?;
+    tracing::info!(package = %trading_vault_out.package_id, "trading_vault published");
+
+    let oracle_pyth_out = publish_dep_package(
+        &client,
+        &signer,
+        &contracts_root.join("oracle-pyth"),
+        "oracle_pyth",
+        env,
+        gas_budget,
+    )
+    .await
+    .with_context(|| format!("publishing oracle_pyth to {network}"))?;
+    tracing::info!(package = %oracle_pyth_out.package_id, "oracle_pyth published");
+
     let (auction, rfq, vault) =
         (Some(record(&auction_out)), Some(record(&rfq_out)), Some(record(&vault_out)));
+    let (trading_vault, oracle_pyth) =
+        (Some(record(&trading_vault_out)), Some(record(&oracle_pyth_out)));
 
     let (treasury_id, init_digest) = if skip_init {
         (None, None)
@@ -351,6 +377,8 @@ async fn deploy_one(
             auction,
             rfq,
             vault,
+            trading_vault,
+            oracle_pyth,
             cctp_bridge: previous_cctp,
         },
         token_info,

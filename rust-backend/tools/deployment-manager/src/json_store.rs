@@ -63,6 +63,12 @@ pub struct PackageInfo {
     pub rfq: Option<PackageRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<PackageRecord>,
+    /// Curated trading-vault package (SO-283) and its Pyth oracle
+    /// adapter, published after the options tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trading_vault: Option<PackageRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_pyth: Option<PackageRecord>,
     /// cctp_bridge package (via `--deploy-cctp`); carried forward on
     /// protocol-only redeploys.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1,0 +1,7 @@
+[package]
+name = "trading_vault"
+version = "0.0.1"
+edition = "2024.beta"
+
+[dependencies]
+options_core = { local = "../core" }

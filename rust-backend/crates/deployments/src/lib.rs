@@ -214,6 +214,12 @@ pub struct PackageInfo {
     /// options_vault package.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<SubPackageInfo>,
+    /// Curated trading-vault package (SO-283).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trading_vault: Option<SubPackageInfo>,
+    /// Pyth oracle adapter for the trading vault.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_pyth: Option<SubPackageInfo>,
 }
 
 /// Off-chain token catalog entry. One per supported ticker, replicated
@@ -383,6 +389,8 @@ mod tests {
                 auction: None,
                 rfq: None,
                 vault: None,
+                trading_vault: None,
+                oracle_pyth: None,
             },
             token_info: BTreeMap::new(),
         };
