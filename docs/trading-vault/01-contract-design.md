@@ -2,7 +2,7 @@
 
 **Status**: Draft v1 (2026-07-17)
 **Package**: `contracts/trading-vault` (`trading_vault`) — fifth protocol package
-**Depends on**: `options_core` (Treasury, AdminCap), `auction`/`options_rfq` (options adapter), DeepBook v3, Pyth (NAV pricing only)
+**Depends on**: `options_core` (Treasury, AdminCap), `auction`/`options_rfq` (options adapter), DeepBook v3. **No direct Pyth dependency** — pricing arrives through oracle adapter packages (§4.1); `contracts/oracle-pyth` is the first implementation.
 
 ---
 
@@ -30,8 +30,9 @@ it doesn't: a curator is just a cap holder, which can be a keeper wallet.
 | 3 | Curator fee payout | Auto-compounded: minted as vault shares into the curator's stake. Protocol's cut paid in cash to the core `Treasury`. |
 | 4 | Withdrawal liquidity | Full withdrawal-request queue in v1 (FIFO, permissionless fulfillment crank, force-unwind after grace period). |
 | 5 | Curator identity | `CuratorCap` object, programmatically transferable; per-vault rotation authority: Creator / Curator / Either. |
-| 6 | Oracle guardrails | **None on trading.** Curators trade with full freedom; no price bands, no oracle checks on orders. Pyth is used *only* as the NAV pricing source in appraisal. |
+| 6 | Oracle guardrails | **None on trading.** Curators trade with full freedom; no price bands, no oracle checks on orders. Oracles are used *only* as the NAV pricing source in appraisal (§4.1). |
 | 7 | Shares | Internal ledger with per-user cost basis. Non-transferable. No `Coin<VShare>` (permissionless creation can't mint OTW types; transferable shares would let profit escape the performance fee). |
+| 8 | Oracle abstraction | Pricing is generalized behind **oracle adapter packages** (same witness-allowlist pattern as integration adapters). Vault core defines a `PriceAttestation` interface and knows nothing about Pyth; `contracts/oracle-pyth` is the first adapter, others (Switchboard, DeepBook EWMA, …) can be allowlisted later. |
 
 ---
 
@@ -154,21 +155,70 @@ swept in permissionlessly via transfer-to-object receiving:
 Deposits and queue fulfillment need a fresh NAV in the same transaction.
 Mechanism: an `Appraisal` hot potato, completeness-checked.
 
+### 4.1 Oracle abstraction (decision 8)
+
+Vault core never touches an oracle SDK. It defines a price interface and an
+allowlist, mirroring the integration-adapter pattern:
+
+```move
+/// Minted only by allowlisted oracle adapters. `copy, drop` — a transient
+/// in-tx value, priced in deposit-asset units of a specific vault config.
+public struct PriceAttestation has copy, drop {
+    oracle: TypeName,        // adapter witness that minted it
+    asset: TypeName,         // the asset being priced
+    quote_asset: TypeName,   // must equal the vault's deposit asset
+    price: u128,             // asset→quote at PRICE_SCALE
+    timestamp_ms: u64,       // source publish time, adapter-reported
+}
+
+/// Shared, AdminCap-gated; separate from IntegrationRegistry so trading
+/// venues and price sources are governed independently.
+public struct OracleRegistry has key { id: UID, allowed: VecSet<TypeName> }
+
+/// The only mint path, witness-gated:
+public fun attest<W: drop>(
+    _w: W, reg: &OracleRegistry,
+    asset: TypeName, quote_asset: TypeName, price: u128, timestamp_ms: u64,
+): PriceAttestation
+```
+
+- All appraisal pricing consumes `PriceAttestation`s. Core additionally
+  enforces `now − timestamp_ms ≤ max_price_age_ms` (protocol config) against
+  the Clock — a cheap backstop even though adapters are trusted, audited
+  code.
+- **`contracts/oracle-pyth`** is the first adapter package (deps: vault core
+  + Pyth): wraps the existing `spot_cross` two-feed cross with its
+  staleness / confidence / exponent guardrails, takes `PriceInfoObject`s,
+  emits attestations. The Pyth `dep-replacements` churn lives only here.
+- Future adapters (Switchboard, DeepBook EWMA, a fixed 1:1 adapter for the
+  deposit asset itself) are new packages + one `OracleRegistry` entry; zero
+  vault-core changes. Different vaults can be priced by different oracles
+  without redeploying core.
+- Which oracle prices which asset is an off-chain PTB-construction concern
+  (backend picks the adapter when building appraisal PTBs); core only cares
+  that the attestation's minter is allowlisted, the quote asset matches, and
+  the timestamp is fresh. Staleness/confidence policy beyond the core age
+  backstop belongs to each adapter. As with decision 6, none of this
+  constrains the curator — attestations exist only to protect depositors'
+  share price.
+
+### 4.2 Appraisal flow
+
 - `begin_appraisal(vault, clock)` → potato recording the set of held asset
   types and `position_count`.
-- `appraise_balance<T>(vault, &mut Appraisal, &PriceInfoObject...)` — values
-  each free `Balance<T>` in deposit-asset units. Pricing reuses the
-  `spot_cross` two-feed cross (module copied from `options_vault::oracle`;
-  extract a shared lib only when the covered-call merge happens). Staleness /
-  confidence checks apply **to appraisal only** — they protect depositors'
-  share price, they do not constrain the curator (decision 6).
-- Each adapter exposes `appraise_*` for its position types (§6, §7).
+- `appraise_balance<T>(vault, &mut Appraisal, PriceAttestation)` — values
+  each free `Balance<T>` in deposit-asset units.
+- Each integration adapter exposes `appraise_*` for its position types
+  (§6, §7), likewise consuming `PriceAttestation`s for any non-quote assets
+  they hold.
 - Consuming functions require a complete appraisal: all held types covered,
   positions appraised == `position_count`, same tx.
 
-The frontend/backend builds the PTB from indexed vault state. `max_positions`
-bounds PTB size. Deposit assets must have a Pyth feed (the `token_info`
-catalog already maps symbol → `pythFeedId`).
+The frontend/backend builds the PTB from indexed vault state (fetching Pyth
+updates and choosing oracle adapters per asset). `max_positions` bounds PTB
+size. Deposit assets must be priceable by at least one allowlisted oracle
+adapter (for `oracle-pyth`, the `token_info` catalog already maps symbol →
+`pythFeedId`).
 
 **Share-inflation defenses**: virtual-share offset plus a minimum creator seed
 deposit at `create_vault`.
@@ -292,10 +342,11 @@ prove it). Also monitor DeepBook upgrades for any new shared-BM assumption.
 
 ### 6.3 Valuation
 
-`appraise_deepbook(vault, &mut Appraisal, pools…, price_infos…)`: sums
+`appraise_deepbook(vault, &mut Appraisal, pools…, attestations…)`: sums
 `balance_manager::balance<T>` (base/quote/DEEP) plus `locked_balance(pool,
-&bm)` for resting orders, cross-priced into deposit-asset units via Pyth.
-Resting orders are valued at locked cost, not optimistic marks.
+&bm)` for resting orders, cross-priced into deposit-asset units via
+`PriceAttestation`s (§4.1). Resting orders are valued at locked cost, not
+optimistic marks.
 
 ## 7. Options adapter
 
@@ -320,9 +371,14 @@ Resting orders are valued at locked cost, not optimistic marks.
   from a personal account). With no price guardrails (decision 6) this is
   accepted and disclosed, Hyperliquid-style. Mitigations: lockups, curator
   floor, pool vetting, full dashboard transparency.
-- **NAV games around deposit/fulfillment**: same-tx complete appraisal, Pyth
-  staleness/confidence bounds, locked-cost valuation of resting orders,
+- **NAV games around deposit/fulfillment**: same-tx complete appraisal,
+  oracle-adapter staleness/confidence guardrails plus the core
+  attestation-age backstop, locked-cost valuation of resting orders,
   fulfillment-time (not request-time) crystallization.
+- **Weak oracle adapter**: a manipulable price source (e.g. a thin-book EWMA
+  adapter) transfers value between depositors at deposit/fulfillment time.
+  Allowlisting an oracle adapter deserves the same scrutiny as an
+  integration adapter.
 - **Malicious adapter**: requires an AdminCap registry entry; removal is an
   instant kill switch. Same blast radius as AdminCap generally; multisig ops.
 - **Share inflation / first depositor**: virtual shares + creator seed.
@@ -331,23 +387,30 @@ Resting orders are valued at locked cost, not optimistic marks.
 
 ## 9. Package & deployment
 
-`contracts/trading-vault/Move.toml`: local deps on `core`, `auction`, `rfq`;
-DeepBook + Pyth with testnet/mainnet `dep-replacements` mirroring
-`vault/Move.toml`. First-party adapters live as modules in the package;
-third-party adapters ship as separate packages later.
+`contracts/trading-vault/Move.toml`: local deps on `core`, `auction`, `rfq`,
+DeepBook — **no Pyth**. `contracts/oracle-pyth/Move.toml`: local dep on
+`trading-vault` + Pyth with testnet/mainnet `dep-replacements` mirroring
+`vault/Move.toml` (all Pyth churn isolated here). First-party integration
+adapters live as modules in the trading-vault package; third-party adapters
+and additional oracle adapters ship as separate packages.
 
 Deployment checklist (per deployment-manager conventions):
-1. `publish_dep_package(…, "trading-vault", …)` after `vault` in
+1. `publish_dep_package(…, "trading-vault", …)` after `vault`, then
+   `publish_dep_package(…, "oracle-pyth", …)`, in
    `tools/deployment-manager/src/main.rs`.
-2. `trading_vault { packageId, upgradeCapId, publishDigest, deployedAt }`
-   record in `deployments.json` + `crates/deployments` types + `deploy.rs`.
+2. `trading_vault` and `oracle_pyth`
+   `{ packageId, upgradeCapId, publishDigest, deployedAt }` records in
+   `deployments.json` + `crates/deployments` types + `deploy.rs`; post-publish
+   admin PTB allowlists the Pyth adapter witness in `OracleRegistry`.
 3. Frontend PTBs (deposit / request / fulfill / curator ops) need gas-station
    templates in `sui-tx` `template.rs` `protocol_templates()`.
 
 ## 10. Phasing
 
-1. **Vault core** — vault/stakes/CuratorCap/registry/session/appraisal/queue/
-   fees/closure + Move unit tests locking the fee & share math.
+1. **Vault core** — vault/stakes/CuratorCap/registries/session/appraisal
+   (incl. the `PriceAttestation`/`OracleRegistry` interface)/queue/fees/
+   closure + the `oracle-pyth` adapter package + Move unit tests locking the
+   fee & share math.
 2. **DeepBook adapter** — wrapped-BM spike test first, then ops + appraisal.
 3. **Options adapter, RFQ-writer mode** + redeem cranks.
 4. **`vault_mm` release module** + mm-bot config surface.
