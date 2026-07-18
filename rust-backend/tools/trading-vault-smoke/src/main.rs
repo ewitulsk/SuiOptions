@@ -373,9 +373,13 @@ async fn main() -> Result<()> {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|e| e.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        let pool_underlyings = fetch_pool_underlyings(&cli.indexer_graphql)
-            .await
-            .unwrap_or_default();
+        let pool_underlyings = match fetch_pool_underlyings(&cli.indexer_graphql).await {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("    (indexer pool lookup failed: {e:#})");
+                BTreeMap::new()
+            }
+        };
         let deps = deployments::Deployments::load(&cli.deployments)?;
         let net = deps.for_env(&cli.env)?;
         let decimals_of = |coin_type: &str| -> Option<u8> {
@@ -402,13 +406,22 @@ async fn main() -> Result<()> {
                     || protocol_types::asset::canonicalize_move_type(parts[1])
                         != ids.deposit_coin_type
                 {
+                    eprintln!(
+                        "    skip {pid_str}: quote {} != deposit {}",
+                        parts.get(1).unwrap_or(&"?"),
+                        ids.deposit_coin_type
+                    );
                     continue;
                 }
                 // Grid derivation needs the underlying's decimals.
                 let Some(underlying) = pool_underlyings.get(&canon_id(pid_str)) else {
+                    eprintln!("    skip {pid_str}: not in indexer map");
                     continue;
                 };
-                let Some(base_decimals) = decimals_of(underlying) else { continue };
+                let Some(base_decimals) = decimals_of(underlying) else {
+                    eprintln!("    skip {pid_str}: no decimals for {underlying}");
+                    continue;
+                };
                 picked = Some((pid, parts[0].to_string(), parts[1].to_string(), base_decimals));
                 break;
             }
@@ -555,7 +568,18 @@ async fn main() -> Result<()> {
     // ── 7. verify: vault drained, stake gone.
     let step = Step("verify vault drained");
     let holdings = discover_holdings(&client, vault_id).await?;
-    if !holdings.is_cash_only() {
+    // An EMPTY DeepBook custody legitimately remains (durable adapter
+    // infrastructure, appraises at 0; removable via eject_empty_custody
+    // before closure). Anything else is residual value.
+    let residual = !holdings.free_assets.is_empty()
+        || holdings.positions.iter().any(|p| {
+            !matches!(
+                p,
+                sui_tx::tx::appraisal::PositionInfo::DeepBookCustody { assets, pools, .. }
+                    if assets.is_empty() && pools.is_empty()
+            )
+        });
+    if residual {
         bail!("vault still holds assets/positions after full exit: {holdings:?}");
     }
     step.ok();
