@@ -793,6 +793,10 @@ async fn main() -> Result<()> {
             secrets: secrets_loaded.clone(),
             network: cfg.network,
             adapter_package,
+            trading_vault_package: snapshot
+                .trading_vault()
+                .context("trading_vault package missing")?
+                .package()?,
             integration_registry: tv_objects.integration_registry()?,
             pool_allowlist: tv_objects.pool_allowlist()?,
             api_url: cli.api_url.clone(),

@@ -82,6 +82,8 @@ pub struct VaultQuoterParams {
     pub network: Network,
     /// The `deepbook-adapter` package id (module `deepbook_adapter`).
     pub adapter_package: ObjectID,
+    /// `trading_vault` package id (borrow_position reads).
+    pub trading_vault_package: ObjectID,
     /// Shared `IntegrationRegistry` (immutable in every call).
     pub integration_registry: ObjectID,
     /// Shared `PoolAllowlist` (immutable; place-order calls only).
@@ -116,6 +118,8 @@ pub(crate) fn client_order_id(unix_minute: u64, pool_index: usize, is_ask: bool)
 struct VaultRefs {
     /// `deepbook-adapter` package id.
     package: ObjectID,
+    /// `trading_vault` package id (for `vault::borrow_position` reads).
+    trading_vault_package: ObjectID,
     vault_id: ObjectID,
     curator_cap: ObjectID,
     registry: ObjectID,
@@ -344,6 +348,62 @@ async fn cancel_all_on_pool(
     submit_ptb(client, signer, pt, gas_budget, "vault-deepbook cancel").await
 }
 
+
+/// Read `deepbook_adapter::custody_balance<T>` for the vault's wrapped
+/// manager via dev-inspect (`vault::borrow_position` → getter). The BM
+/// is wrapped inside the custody, so `sui_tx::tx::deepbook::bm_balance`
+/// (which needs the BM as a tx input) cannot be used here.
+async fn custody_balance(
+    wrap: &SuiClientWrapper,
+    refs: &VaultRefs,
+    coin_type: &str,
+) -> anyhow::Result<u64> {
+    use sui_types::transaction::TransactionKind;
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let vault = pt.obj(shared_object_arg(&wrap.client, refs.vault_id, false).await?)?;
+    let custody_id_arg = pt.pure(&refs.custody_id)?;
+    let custody_type = TypeTag::from_str(&format!(
+        "{}::deepbook_adapter::DeepBookCustody",
+        refs.package
+    ))?;
+    let custody = pt.programmable_move_call(
+        refs.trading_vault_package,
+        Identifier::new("vault").unwrap(),
+        Identifier::new("borrow_position").unwrap(),
+        vec![custody_type],
+        vec![vault, custody_id_arg],
+    );
+    let tag = TypeTag::from_str(coin_type)?;
+    pt.programmable_move_call(
+        refs.package,
+        Identifier::new("deepbook_adapter").unwrap(),
+        Identifier::new("custody_balance").unwrap(),
+        vec![tag],
+        vec![custody],
+    );
+    let res = wrap
+        .client
+        .read_api()
+        .dev_inspect_transaction_block(
+            wrap.signer.address,
+            TransactionKind::ProgrammableTransaction(pt.finish()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .context("dev-inspecting custody_balance")?;
+    if let Some(err) = res.error {
+        anyhow::bail!("custody_balance dev-inspect failed: {err}");
+    }
+    let results = res.results.unwrap_or_default();
+    let (bytes, _) = results
+        .last()
+        .and_then(|r| r.return_values.first())
+        .ok_or_else(|| anyhow::anyhow!("custody_balance returned no values"))?;
+    bcs::from_bytes::<u64>(bytes).context("decoding custody balance")
+}
+
 // -- Quoter task -------------------------------------------------------------
 
 pub fn spawn_quoter(p: VaultQuoterParams) {
@@ -364,6 +424,7 @@ async fn run(p: VaultQuoterParams) -> Result<()> {
         .map_err(|e| anyhow!("bad trading_vault.curator_cap_id {}: {e}", p.cfg.curator_cap_id))?;
     let mut refs = VaultRefs {
         package: p.adapter_package,
+        trading_vault_package: p.trading_vault_package,
         vault_id,
         curator_cap,
         registry: p.integration_registry,
@@ -437,6 +498,12 @@ async fn cycle(
 ) -> Result<()> {
     let buckets = api.tradeable_buckets().await?;
     let now = now_ms();
+
+    // The custody's spendable settlement, budgeted across this tick's
+    // bids so a later pool's order can't abort the batch.
+    let mut quote_budget = custody_balance(wrap, refs, &p.settlement_coin_type)
+        .await
+        .unwrap_or(0);
 
     // Only pairs we source a Pyth spot for: settlement matches and the
     // underlying is one of the configured markets.
@@ -546,12 +613,26 @@ async fn cycle(
             continue;
         };
 
-        // Fixed per-side size (no inventory model: the custody's funding is
-        // the curator's concern), rounded down to the pool's lot.
+        // Inventory-aware sizing (SO-296 follow-up): a fresh custody has
+        // cash but no call inventory, so asks are gated on the custody's
+        // actual base balance — otherwise the ask aborts and takes the
+        // whole batched PTB (bids included) down with it. Buy-side
+        // market making starts immediately; asks appear once fills
+        // accumulate inventory.
         let qty = (p.db_cfg.quote_size / lot) * lot;
+        let base_held = custody_balance(wrap, refs, &b.call_coin_type)
+            .await
+            .unwrap_or(0);
+        let ask_qty = ((base_held.min(qty)) / lot) * lot;
+        let bid_notional = (qty as u128 * bid_raw as u128 / 1_000_000_000) as u64;
+        let bid_ok = qty >= min_size && quote_budget >= bid_notional;
+        if bid_ok {
+            quote_budget = quote_budget.saturating_sub(bid_notional);
+        }
         let plan = QuotePlan {
-            bid: (qty >= min_size).then_some(QuoteSide { price_raw: bid_raw, quantity: qty }),
-            ask: (qty >= min_size).then_some(QuoteSide { price_raw: ask_raw, quantity: qty }),
+            bid: bid_ok.then_some(QuoteSide { price_raw: bid_raw, quantity: qty }),
+            ask: (ask_qty >= min_size)
+                .then_some(QuoteSide { price_raw: ask_raw, quantity: ask_qty }),
             expire_timestamp_ms: now_expire,
         };
         if plan.bid.is_none() && plan.ask.is_none() {
