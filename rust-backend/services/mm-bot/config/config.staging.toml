@@ -154,5 +154,7 @@ enabled = true
 enabled = true
 
 # Testnet market simulator (SO-296) — see config.toml for knob docs.
-# [sim]
-# enabled = true
+# Spot pairs stay off until the bot wallet holds vendored DEEP for the
+# lazy pool-creation fee (the sim warns with the exact shortfall).
+[sim]
+enabled = true
