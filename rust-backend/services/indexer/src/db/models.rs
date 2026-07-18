@@ -16,13 +16,13 @@ use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::store::{
     AccountState, BucketState, DeepBookPoolState, PositionState, ReceiptState, RfqState,
-    RfqStatus, VaultRoundState, VaultState,
+    RfqStatus, TradingVaultPositionState, TradingVaultState, VaultRoundState, VaultState,
 };
 
 use super::schema::{
     accounts, bucket_deepbook_pools, buckets, event_participants,
-    indexed_events, indexer_progress, positions, rfq_bids, rfqs, vault_rounds,
-    vault_user_receipts, vaults,
+    indexed_events, indexer_progress, positions, rfq_bids, rfqs, trading_vault_positions,
+    trading_vaults, vault_rounds, vault_user_receipts, vaults,
 };
 
 // ---------- indexer_progress ----------
@@ -132,6 +132,30 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::PutRfqCreated(_) => "PutRfqCreated",
         ChainEvent::PutRfqSettled(_) => "PutRfqSettled",
         ChainEvent::PutRfqExpiredUnsold(_) => "PutRfqExpiredUnsold",
+        ChainEvent::TvVaultCreated(_) => "TvVaultCreated",
+        ChainEvent::TvVaultClosing(_) => "TvVaultClosing",
+        ChainEvent::TvVaultClosed(_) => "TvVaultClosed",
+        ChainEvent::TvDepositsPaused(_) => "TvDepositsPaused",
+        ChainEvent::TvMmReleaseToggled(_) => "TvMmReleaseToggled",
+        ChainEvent::TvCuratorRotated(_) => "TvCuratorRotated",
+        ChainEvent::TvDeposited(_) => "TvDeposited",
+        ChainEvent::TvWithdrawRequested(_) => "TvWithdrawRequested",
+        ChainEvent::TvWithdrawFulfilled(_) => "TvWithdrawFulfilled",
+        ChainEvent::TvSessionSettled(_) => "TvSessionSettled",
+        ChainEvent::TvPositionStored(_) => "TvPositionStored",
+        ChainEvent::TvPositionRemoved(_) => "TvPositionRemoved",
+        ChainEvent::TvAdapterAllowed(_) => "TvAdapterAllowed",
+        ChainEvent::TvAdapterDisallowed(_) => "TvAdapterDisallowed",
+        ChainEvent::TvOracleAllowed(_) => "TvOracleAllowed",
+        ChainEvent::TvOracleDisallowed(_) => "TvOracleDisallowed",
+        ChainEvent::TvProtocolConfigUpdated(_) => "TvProtocolConfigUpdated",
+        ChainEvent::TvCollateralReleased(_) => "TvCollateralReleased",
+        ChainEvent::TvCustodyCreated(_) => "TvCustodyCreated",
+        ChainEvent::TvPoolAllowed(_) => "TvPoolAllowed",
+        ChainEvent::TvPoolDisallowed(_) => "TvPoolDisallowed",
+        ChainEvent::TvRfqOpened(_) => "TvRfqOpened",
+        ChainEvent::TvRfqSettled(_) => "TvRfqSettled",
+        ChainEvent::TvPositionRedeemed(_) => "TvPositionRedeemed",
     }
 }
 
@@ -540,6 +564,111 @@ impl VaultReceiptRow {
             ReceiptState {
                 amount: bigdecimal_to_u64(&self.amount)?,
                 settled: bigdecimal_to_u64(&self.settled)?,
+            },
+        ))
+    }
+}
+
+// ---------- trading_vaults / trading_vault_positions (SO-282) ----------
+
+#[derive(Queryable, Identifiable, Insertable, AsChangeset, Debug, Clone)]
+#[diesel(table_name = trading_vaults)]
+#[diesel(primary_key(vault_id))]
+pub struct TradingVaultRow {
+    pub vault_id: String,
+    pub deposit_asset: String,
+    pub creator: String,
+    /// Current curator wallet (updated on TvCuratorRotated).
+    pub curator: String,
+    pub curator_cap_id: String,
+    /// "open" | "closing" | "closed".
+    pub state: String,
+    pub lockup_ms: i64,
+    pub curator_fee_bps: i64,
+    pub rotation_authority: i16,
+    pub max_positions: i64,
+    pub unwind_grace_ms: i64,
+    pub deposits_paused: bool,
+    pub mm_release_enabled: bool,
+    pub total_shares: BigDecimal,
+    pub position_count: i64,
+    pub pending_withdrawals: i64,
+    pub latest_pps_e12: Option<BigDecimal>,
+    pub updated_at_seq: i64,
+    pub updated_at_ms: i64,
+}
+
+impl TradingVaultRow {
+    pub fn into_state(self) -> anyhow::Result<(ObjectId, TradingVaultState)> {
+        let id = ObjectId::from_hex(&self.vault_id)
+            .map_err(|e| anyhow::anyhow!("trading vault_id {}: {e}", self.vault_id))?;
+        Ok((
+            id,
+            TradingVaultState {
+                deposit_asset: AssetType::new(self.deposit_asset),
+                creator: SuiAddress::from_hex(&self.creator)
+                    .map_err(|e| anyhow::anyhow!("trading vault creator {}: {e}", self.creator))?,
+                curator: SuiAddress::from_hex(&self.curator)
+                    .map_err(|e| anyhow::anyhow!("trading vault curator {}: {e}", self.curator))?,
+                curator_cap_id: ObjectId::from_hex(&self.curator_cap_id).map_err(|e| {
+                    anyhow::anyhow!("trading vault curator_cap_id {}: {e}", self.curator_cap_id)
+                })?,
+                state: self.state,
+                lockup_ms: self.lockup_ms as u64,
+                curator_fee_bps: self.curator_fee_bps as u64,
+                rotation_authority: u8::try_from(self.rotation_authority).map_err(|_| {
+                    anyhow::anyhow!(
+                        "rotation_authority out of u8 range: {}",
+                        self.rotation_authority
+                    )
+                })?,
+                max_positions: self.max_positions as u64,
+                unwind_grace_ms: self.unwind_grace_ms as u64,
+                deposits_paused: self.deposits_paused,
+                mm_release_enabled: self.mm_release_enabled,
+                total_shares: bigdecimal_to_u128(&self.total_shares)?,
+                position_count: self.position_count as u64,
+                pending_withdrawals: self.pending_withdrawals as u64,
+                latest_pps_e12: self
+                    .latest_pps_e12
+                    .as_ref()
+                    .map(bigdecimal_to_u128)
+                    .transpose()?,
+                updated_at_ms: self.updated_at_ms as u64,
+            },
+        ))
+    }
+}
+
+#[derive(Queryable, Identifiable, Insertable, AsChangeset, Debug, Clone)]
+#[diesel(table_name = trading_vault_positions)]
+#[diesel(primary_key(vault_id, position_id))]
+pub struct TradingVaultPositionRow {
+    pub vault_id: String,
+    pub position_id: String,
+    pub adapter: String,
+    /// false once TvPositionRemoved lands (rows are kept for history).
+    pub active: bool,
+    pub stored_at_ms: i64,
+    pub removed_at_ms: Option<i64>,
+    pub updated_at_seq: i64,
+}
+
+impl TradingVaultPositionRow {
+    pub fn into_state(
+        self,
+    ) -> anyhow::Result<((ObjectId, ObjectId), TradingVaultPositionState)> {
+        let vault = ObjectId::from_hex(&self.vault_id)
+            .map_err(|e| anyhow::anyhow!("tv position vault_id {}: {e}", self.vault_id))?;
+        let position = ObjectId::from_hex(&self.position_id)
+            .map_err(|e| anyhow::anyhow!("tv position_id {}: {e}", self.position_id))?;
+        Ok((
+            (vault, position),
+            TradingVaultPositionState {
+                adapter: AssetType::new(self.adapter),
+                active: self.active,
+                stored_at_ms: self.stored_at_ms as u64,
+                removed_at_ms: self.removed_at_ms.map(|v| v as u64),
             },
         ))
     }

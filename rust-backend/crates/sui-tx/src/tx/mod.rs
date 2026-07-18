@@ -26,6 +26,7 @@ pub mod signer;
 pub mod sponsor;
 pub mod template;
 pub mod test_tokens;
+pub mod trading_vault;
 pub mod vault;
 pub mod vault_create;
 

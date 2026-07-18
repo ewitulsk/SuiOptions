@@ -175,6 +175,44 @@ pub struct VaultRound {
     pub finalized_at_ms: Option<u64>,
 }
 
+/// One curated trading vault's headline state (SO-282), numbers parsed.
+#[derive(Clone, Debug)]
+pub struct TradingVault {
+    pub vault_id: ObjectId,
+    pub deposit_asset: AssetType,
+    pub creator: SuiAddress,
+    /// Current curator wallet (updated on TvCuratorRotated).
+    pub curator: SuiAddress,
+    pub curator_cap_id: ObjectId,
+    /// `open` | `closing` | `closed`.
+    pub state: String,
+    pub lockup_ms: u64,
+    pub curator_fee_bps: u64,
+    pub rotation_authority: u8,
+    pub max_positions: u64,
+    pub unwind_grace_ms: u64,
+    pub deposits_paused: bool,
+    pub mm_release_enabled: bool,
+    pub total_shares: u128,
+    pub position_count: u64,
+    pub pending_withdrawals: u64,
+    /// Observed deposit-asset-per-share price (1e12-scaled).
+    pub latest_pps_e12: Option<u128>,
+    pub updated_at_ms: u64,
+}
+
+/// One adapter position held by a trading vault (SO-282). Removed positions
+/// are kept with `active=false`.
+#[derive(Clone, Debug)]
+pub struct TradingVaultPosition {
+    pub vault_id: ObjectId,
+    pub position_id: ObjectId,
+    pub adapter: AssetType,
+    pub active: bool,
+    pub stored_at_ms: u64,
+    pub removed_at_ms: Option<u64>,
+}
+
 /// One realized-APY point: annualized pps growth landing at a finalized
 /// round's finalize time.
 #[derive(Clone, Debug)]
@@ -373,6 +411,37 @@ impl IndexerClient {
         data.vault_receipts
             .into_iter()
             .map(VaultReceipt::try_from)
+            .collect()
+    }
+
+    // ── trading vault views (SO-282) ──────────────────────────────────────
+
+    /// All curated trading vaults.
+    pub async fn trading_vaults(&self) -> Result<Vec<TradingVault>> {
+        const Q: &str = "query{tradingVaults{vaultId depositAsset creator curator curatorCapId \
+            state lockupMs curatorFeeBps rotationAuthority maxPositions unwindGraceMs \
+            depositsPaused mmReleaseEnabled totalSharesRaw positionCount pendingWithdrawals \
+            latestPpsE12Raw updatedAtMs}}";
+        let data: TradingVaultsWrap = self.gql(Q, json!({})).await?;
+        data.trading_vaults
+            .into_iter()
+            .map(TradingVault::try_from)
+            .collect()
+    }
+
+    /// Adapter positions for one trading vault (removed ones included,
+    /// `active=false`).
+    pub async fn trading_vault_positions(
+        &self,
+        vault_id: ObjectId,
+    ) -> Result<Vec<TradingVaultPosition>> {
+        const Q: &str = "query($id:String!){tradingVaultPositions(vaultId:$id){vaultId \
+            positionId adapter active storedAtMs removedAtMs}}";
+        let data: TradingVaultPositionsWrap =
+            self.gql(Q, json!({ "id": vault_id.to_hex() })).await?;
+        data.trading_vault_positions
+            .into_iter()
+            .map(TradingVaultPosition::try_from)
             .collect()
     }
 
@@ -632,6 +701,16 @@ struct VaultReceiptsWrap {
 struct VaultApyWrap {
     vault_apy: Vec<VaultApyJson>,
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TradingVaultsWrap {
+    trading_vaults: Vec<TradingVaultJson>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TradingVaultPositionsWrap {
+    trading_vault_positions: Vec<TradingVaultPositionJson>,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -808,6 +887,40 @@ struct VaultReceiptJson {
     kind: String,
     amount_raw: String,
     settled_raw: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TradingVaultJson {
+    vault_id: String,
+    deposit_asset: String,
+    creator: String,
+    curator: String,
+    curator_cap_id: String,
+    state: String,
+    lockup_ms: String,
+    curator_fee_bps: String,
+    rotation_authority: i32,
+    max_positions: String,
+    unwind_grace_ms: String,
+    deposits_paused: bool,
+    mm_release_enabled: bool,
+    total_shares_raw: String,
+    position_count: String,
+    pending_withdrawals: String,
+    latest_pps_e12_raw: Option<String>,
+    updated_at_ms: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TradingVaultPositionJson {
+    vault_id: String,
+    position_id: String,
+    adapter: String,
+    active: bool,
+    stored_at_ms: String,
+    removed_at_ms: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1003,6 +1116,46 @@ impl TryFrom<VaultRoundJson> for VaultRound {
             mgmt_fee: r.mgmt_fee_raw.as_deref().map(parse_u64).transpose()?,
             perf_fee: r.perf_fee_raw.as_deref().map(parse_u64).transpose()?,
             finalized_at_ms: r.finalized_at_ms.as_deref().map(parse_u64).transpose()?,
+        })
+    }
+}
+
+impl TryFrom<TradingVaultJson> for TradingVault {
+    type Error = anyhow::Error;
+    fn try_from(v: TradingVaultJson) -> Result<Self> {
+        Ok(TradingVault {
+            vault_id: parse_object_id(&v.vault_id)?,
+            deposit_asset: AssetType::new(v.deposit_asset),
+            creator: parse_address(&v.creator)?,
+            curator: parse_address(&v.curator)?,
+            curator_cap_id: parse_object_id(&v.curator_cap_id)?,
+            state: v.state,
+            lockup_ms: parse_u64(&v.lockup_ms)?,
+            curator_fee_bps: parse_u64(&v.curator_fee_bps)?,
+            rotation_authority: parse_u8(v.rotation_authority)?,
+            max_positions: parse_u64(&v.max_positions)?,
+            unwind_grace_ms: parse_u64(&v.unwind_grace_ms)?,
+            deposits_paused: v.deposits_paused,
+            mm_release_enabled: v.mm_release_enabled,
+            total_shares: parse_u128(&v.total_shares_raw)?,
+            position_count: parse_u64(&v.position_count)?,
+            pending_withdrawals: parse_u64(&v.pending_withdrawals)?,
+            latest_pps_e12: v.latest_pps_e12_raw.as_deref().map(parse_u128).transpose()?,
+            updated_at_ms: parse_u64(&v.updated_at_ms)?,
+        })
+    }
+}
+
+impl TryFrom<TradingVaultPositionJson> for TradingVaultPosition {
+    type Error = anyhow::Error;
+    fn try_from(p: TradingVaultPositionJson) -> Result<Self> {
+        Ok(TradingVaultPosition {
+            vault_id: parse_object_id(&p.vault_id)?,
+            position_id: parse_object_id(&p.position_id)?,
+            adapter: AssetType::new(p.adapter),
+            active: p.active,
+            stored_at_ms: parse_u64(&p.stored_at_ms)?,
+            removed_at_ms: p.removed_at_ms.as_deref().map(parse_u64).transpose()?,
         })
     }
 }

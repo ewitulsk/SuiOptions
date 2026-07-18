@@ -65,6 +65,14 @@ export let TREASURY_ID: string | undefined;
 // predating the split.
 export let VAULT_PACKAGE_ID: string | undefined;
 
+// The trading_vault package (curated trading vaults, SO-288). Both `undefined`
+// on records predating the trading-vault deployment — the /vaults screens
+// render an "unavailable on this network" empty state. The publish digest is
+// used client-side to resolve the shared `VaultProtocolConfig` object id
+// (token-info doesn't serve it).
+export let TRADING_VAULT_PACKAGE_ID: string | undefined;
+export let TRADING_VAULT_PUBLISH_DIGEST: string | undefined;
+
 // DeepBook v3 deployment ids (SO-151), served by token-info alongside the
 // protocol ids. All `undefined` on networks without a DeepBook deployment
 // (devnet) — DeepBook features simply don't render there.
@@ -143,6 +151,7 @@ type PackageInfoDto = {
     poolCreationFee: string;
   } | null;
   vault?: { packageId: string } | null;
+  tradingVault?: { packageId: string; publishDigest: string } | null;
 };
 
 type SupportedTokenDto = {
@@ -176,6 +185,8 @@ export async function initConfig(): Promise<void> {
   PROTOCOL_CONFIG_ID = info.protocolConfigId;
   TREASURY_ID = info.treasuryId ?? undefined;
   VAULT_PACKAGE_ID = info.vault?.packageId;
+  TRADING_VAULT_PACKAGE_ID = info.tradingVault?.packageId;
+  TRADING_VAULT_PUBLISH_DIGEST = info.tradingVault?.publishDigest;
 
   const db = info.deepbook;
   DEEPBOOK_PACKAGE_ID = db?.packageId;

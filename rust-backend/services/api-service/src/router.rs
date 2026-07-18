@@ -49,6 +49,14 @@ pub async fn serve(
             "/rfqs/:rfq_id/bids",
             get(handlers::rfqs::list_rfq_bids),
         )
+        .route(
+            "/trading-vaults",
+            get(handlers::trading_vaults::list_trading_vaults),
+        )
+        .route(
+            "/trading-vaults/:vault_id",
+            get(handlers::trading_vaults::get_trading_vault),
+        )
         .route("/vaults", get(handlers::vaults::list_vaults))
         .route("/vaults/:vault_id", get(handlers::vaults::get_vault))
         .route(

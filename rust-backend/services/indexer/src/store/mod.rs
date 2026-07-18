@@ -22,7 +22,8 @@ use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::db::models::{
     u128_to_bigdecimal, u64_to_bigdecimal, AccountRow, BucketRow,
-    DeepBookPoolRow, EventParticipantRow, PositionRow, RfqBidRow, RfqRow, VaultReceiptRow,
+    DeepBookPoolRow, EventParticipantRow, PositionRow, RfqBidRow, RfqRow,
+    TradingVaultPositionRow, TradingVaultRow, VaultReceiptRow,
     VaultRoundRow, VaultRow,
 };
 use crate::db::{CheckpointBatch, EventBuild, HydratedViews};
@@ -253,6 +254,45 @@ pub type ReceiptKey = (ObjectId, String, u64, String);
 pub const RECEIPT_DEPOSIT: &str = "deposit";
 pub const RECEIPT_WITHDRAW: &str = "withdraw";
 
+/// One curated trading vault's headline state (SO-282), assembled from its
+/// event stream. Balance-precise fields (NAV, per-asset holdings) need
+/// object reads and aren't modeled; what's here is exactly what the events
+/// state. `latest_pps_e12` is an *observed* deposit-asset-per-share price
+/// (1e12-scaled) inferred from the latest deposit or withdraw-fulfil.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TradingVaultState {
+    pub deposit_asset: AssetType,
+    pub creator: SuiAddress,
+    /// Current curator wallet; updated to `recipient` on TvCuratorRotated.
+    pub curator: SuiAddress,
+    pub curator_cap_id: ObjectId,
+    /// "open" | "closing" | "closed".
+    pub state: String,
+    pub lockup_ms: u64,
+    pub curator_fee_bps: u64,
+    pub rotation_authority: u8,
+    pub max_positions: u64,
+    pub unwind_grace_ms: u64,
+    pub deposits_paused: bool,
+    pub mm_release_enabled: bool,
+    pub total_shares: u128,
+    pub position_count: u64,
+    pub pending_withdrawals: u64,
+    pub latest_pps_e12: Option<u128>,
+    pub updated_at_ms: u64,
+}
+
+/// One adapter position held by a trading vault, keyed by
+/// (vault, position object id). Removed positions stay with `active=false`
+/// so "past positions" render.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TradingVaultPositionState {
+    pub adapter: AssetType,
+    pub active: bool,
+    pub stored_at_ms: u64,
+    pub removed_at_ms: Option<u64>,
+}
+
 /// Output of [`Store::stage_batch`]. The `indexed` events carry the assigned
 /// sequences (used for logging); `db_batch` is what
 /// [`crate::db::Repo::apply_checkpoint`] writes.
@@ -283,6 +323,10 @@ struct Inner {
     vault_rounds: BTreeMap<(ObjectId, u64), VaultRoundState>,
     /// (vault, owner, round, kind) → receipt aggregate (D2).
     vault_receipts: BTreeMap<ReceiptKey, ReceiptState>,
+    /// vault_id → curated trading vault headline state (SO-282).
+    trading_vaults: BTreeMap<ObjectId, TradingVaultState>,
+    /// (vault_id, position_id) → adapter position (SO-282).
+    trading_vault_positions: BTreeMap<(ObjectId, ObjectId), TradingVaultPositionState>,
 }
 
 impl Default for Inner {
@@ -297,6 +341,8 @@ impl Default for Inner {
             vaults: BTreeMap::new(),
             vault_rounds: BTreeMap::new(),
             vault_receipts: BTreeMap::new(),
+            trading_vaults: BTreeMap::new(),
+            trading_vault_positions: BTreeMap::new(),
         }
     }
 }
@@ -414,6 +460,8 @@ impl Store {
         inner.vaults = views.vaults;
         inner.vault_rounds = views.vault_rounds;
         inner.vault_receipts = views.vault_receipts;
+        inner.trading_vaults = views.trading_vaults;
+        inner.trading_vault_positions = views.trading_vault_positions;
         inner.next_sequence = last_sequence + 1;
     }
 
@@ -607,6 +655,35 @@ fn collect_participants(
             push(s.put_recipient.to_hex(), "put_recipient");
             push(s.position_recipient.to_hex(), "position_recipient");
         }
+        // ── curated trading vaults (SO-282) ──────────────────────────
+        ChainEvent::TvVaultCreated(v) => {
+            push(v.creator.to_hex(), "creator");
+            push(v.curator.to_hex(), "curator");
+        }
+        ChainEvent::TvDeposited(d) => push(d.depositor.to_hex(), "depositor"),
+        ChainEvent::TvWithdrawRequested(w) => push(w.recipient.to_hex(), "withdrawer"),
+        ChainEvent::TvWithdrawFulfilled(w) => push(w.recipient.to_hex(), "withdrawer"),
+        ChainEvent::TvCuratorRotated(r) => push(r.recipient.to_hex(), "curator"),
+        // The remaining trading-vault events carry no wallet addresses.
+        ChainEvent::TvVaultClosing(_)
+        | ChainEvent::TvVaultClosed(_)
+        | ChainEvent::TvDepositsPaused(_)
+        | ChainEvent::TvMmReleaseToggled(_)
+        | ChainEvent::TvSessionSettled(_)
+        | ChainEvent::TvPositionStored(_)
+        | ChainEvent::TvPositionRemoved(_)
+        | ChainEvent::TvAdapterAllowed(_)
+        | ChainEvent::TvAdapterDisallowed(_)
+        | ChainEvent::TvOracleAllowed(_)
+        | ChainEvent::TvOracleDisallowed(_)
+        | ChainEvent::TvProtocolConfigUpdated(_)
+        | ChainEvent::TvCollateralReleased(_)
+        | ChainEvent::TvCustodyCreated(_)
+        | ChainEvent::TvPoolAllowed(_)
+        | ChainEvent::TvPoolDisallowed(_)
+        | ChainEvent::TvRfqOpened(_)
+        | ChainEvent::TvRfqSettled(_)
+        | ChainEvent::TvPositionRedeemed(_) => {}
         // DeepBookPoolCreated carries no addresses (the creator isn't in the
         // event payload).
         ChainEvent::BucketCreated(_)
@@ -872,6 +949,58 @@ fn stage_event_into_batch(
         ChainEvent::PutRfqExpiredUnsold(e) => {
             stage_rfq(inner, e.auction_id, sequence, batch);
         }
+        // ── curated trading vaults (SO-282): snapshot the post-apply
+        //    vault (and position) state ──
+        ChainEvent::TvVaultCreated(v) => {
+            stage_trading_vault(inner, v.vault_id, sequence, batch);
+        }
+        ChainEvent::TvVaultClosing(c) => {
+            stage_trading_vault(inner, c.vault_id, sequence, batch);
+        }
+        ChainEvent::TvVaultClosed(c) => {
+            stage_trading_vault(inner, c.vault_id, sequence, batch);
+        }
+        ChainEvent::TvDepositsPaused(p) => {
+            stage_trading_vault(inner, p.vault_id, sequence, batch);
+        }
+        ChainEvent::TvMmReleaseToggled(t) => {
+            stage_trading_vault(inner, t.vault_id, sequence, batch);
+        }
+        ChainEvent::TvCuratorRotated(r) => {
+            stage_trading_vault(inner, r.vault_id, sequence, batch);
+        }
+        ChainEvent::TvDeposited(d) => {
+            stage_trading_vault(inner, d.vault_id, sequence, batch);
+        }
+        ChainEvent::TvWithdrawRequested(w) => {
+            stage_trading_vault(inner, w.vault_id, sequence, batch);
+        }
+        ChainEvent::TvWithdrawFulfilled(w) => {
+            stage_trading_vault(inner, w.vault_id, sequence, batch);
+        }
+        ChainEvent::TvPositionStored(p) => {
+            stage_trading_vault(inner, p.vault_id, sequence, batch);
+            stage_trading_vault_position(inner, p.vault_id, p.position_id, sequence, batch);
+        }
+        ChainEvent::TvPositionRemoved(p) => {
+            stage_trading_vault(inner, p.vault_id, sequence, batch);
+            stage_trading_vault_position(inner, p.vault_id, p.position_id, sequence, batch);
+        }
+        // Non-mutating trading-vault events: served from the generic event
+        // feed only.
+        ChainEvent::TvSessionSettled(_)
+        | ChainEvent::TvAdapterAllowed(_)
+        | ChainEvent::TvAdapterDisallowed(_)
+        | ChainEvent::TvOracleAllowed(_)
+        | ChainEvent::TvOracleDisallowed(_)
+        | ChainEvent::TvProtocolConfigUpdated(_)
+        | ChainEvent::TvCollateralReleased(_)
+        | ChainEvent::TvCustodyCreated(_)
+        | ChainEvent::TvPoolAllowed(_)
+        | ChainEvent::TvPoolDisallowed(_)
+        | ChainEvent::TvRfqOpened(_)
+        | ChainEvent::TvRfqSettled(_)
+        | ChainEvent::TvPositionRedeemed(_) => {}
         ChainEvent::ExpiredOptionBurned(_)
         | ChainEvent::PutExpiredOptionBurned(_)
         | ChainEvent::FeeUpdated(_)
@@ -910,6 +1039,33 @@ fn stage_vault_round(
         batch
             .vault_rounds
             .push(vault_round_row(vault_id, round, state, sequence));
+    }
+}
+
+fn stage_trading_vault(
+    inner: &Inner,
+    vault_id: ObjectId,
+    sequence: i64,
+    batch: &mut CheckpointBatch,
+) {
+    if let Some(state) = inner.trading_vaults.get(&vault_id) {
+        batch
+            .trading_vaults
+            .push(trading_vault_row(vault_id, state, sequence));
+    }
+}
+
+fn stage_trading_vault_position(
+    inner: &Inner,
+    vault_id: ObjectId,
+    position_id: ObjectId,
+    sequence: i64,
+    batch: &mut CheckpointBatch,
+) {
+    if let Some(state) = inner.trading_vault_positions.get(&(vault_id, position_id)) {
+        batch
+            .trading_vault_positions
+            .push(trading_vault_position_row(vault_id, position_id, state, sequence));
     }
 }
 
@@ -1140,6 +1296,47 @@ fn vault_round_row(
         mgmt_fee: state.mgmt_fee.map(u64_to_bigdecimal),
         perf_fee: state.perf_fee.map(u64_to_bigdecimal),
         finalized_at_ms: state.finalized_at_ms.map(|v| v as i64),
+        updated_at_seq: sequence,
+    }
+}
+
+fn trading_vault_row(id: ObjectId, s: &TradingVaultState, sequence: i64) -> TradingVaultRow {
+    TradingVaultRow {
+        vault_id: id.to_hex(),
+        deposit_asset: s.deposit_asset.as_str().to_string(),
+        creator: s.creator.to_hex(),
+        curator: s.curator.to_hex(),
+        curator_cap_id: s.curator_cap_id.to_hex(),
+        state: s.state.clone(),
+        lockup_ms: s.lockup_ms as i64,
+        curator_fee_bps: s.curator_fee_bps as i64,
+        rotation_authority: s.rotation_authority as i16,
+        max_positions: s.max_positions as i64,
+        unwind_grace_ms: s.unwind_grace_ms as i64,
+        deposits_paused: s.deposits_paused,
+        mm_release_enabled: s.mm_release_enabled,
+        total_shares: u128_to_bigdecimal(s.total_shares),
+        position_count: s.position_count as i64,
+        pending_withdrawals: s.pending_withdrawals as i64,
+        latest_pps_e12: s.latest_pps_e12.map(u128_to_bigdecimal),
+        updated_at_seq: sequence,
+        updated_at_ms: s.updated_at_ms as i64,
+    }
+}
+
+fn trading_vault_position_row(
+    vault_id: ObjectId,
+    position_id: ObjectId,
+    s: &TradingVaultPositionState,
+    sequence: i64,
+) -> TradingVaultPositionRow {
+    TradingVaultPositionRow {
+        vault_id: vault_id.to_hex(),
+        position_id: position_id.to_hex(),
+        adapter: s.adapter.as_str().to_string(),
+        active: s.active,
+        stored_at_ms: s.stored_at_ms as i64,
+        removed_at_ms: s.removed_at_ms.map(|v| v as i64),
         updated_at_seq: sequence,
     }
 }
@@ -1553,6 +1750,134 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
             rfq.auction_kind = AUCTION_KIND_PUT.to_string();
             rfq.status = RfqStatus::ExpiredUnsold;
         }
+        // ── curated trading vaults (SO-282) ─────────────────────────
+        ChainEvent::TvVaultCreated(v) => {
+            inner.trading_vaults.insert(
+                v.vault_id,
+                TradingVaultState {
+                    deposit_asset: v.deposit_asset.clone(),
+                    creator: v.creator,
+                    curator: v.curator,
+                    curator_cap_id: v.curator_cap_id,
+                    state: "open".to_string(),
+                    lockup_ms: v.lockup_ms,
+                    curator_fee_bps: v.curator_fee_bps,
+                    rotation_authority: v.rotation_authority,
+                    max_positions: v.max_positions,
+                    unwind_grace_ms: v.unwind_grace_ms,
+                    deposits_paused: false,
+                    mm_release_enabled: false,
+                    total_shares: 0,
+                    position_count: 0,
+                    pending_withdrawals: 0,
+                    latest_pps_e12: None,
+                    updated_at_ms: timestamp_ms,
+                },
+            );
+        }
+        ChainEvent::TvVaultClosing(c) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&c.vault_id) {
+                v.state = "closing".to_string();
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvVaultClosed(c) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&c.vault_id) {
+                v.state = "closed".to_string();
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvDepositsPaused(p) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&p.vault_id) {
+                v.deposits_paused = p.paused;
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvMmReleaseToggled(t) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&t.vault_id) {
+                v.mm_release_enabled = t.enabled;
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvCuratorRotated(r) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&r.vault_id) {
+                v.curator_cap_id = r.new_cap_id;
+                v.curator = r.recipient;
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvDeposited(d) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&d.vault_id) {
+                v.total_shares = d.total_shares;
+                // Observed deposit-asset-per-share price of this deposit.
+                if d.shares > 0 {
+                    v.latest_pps_e12 =
+                        Some((d.amount as u128).saturating_mul(1_000_000_000_000) / d.shares);
+                }
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvWithdrawRequested(w) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&w.vault_id) {
+                v.pending_withdrawals = v.pending_withdrawals.saturating_add(1);
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvWithdrawFulfilled(w) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&w.vault_id) {
+                v.total_shares = w.total_shares;
+                v.pending_withdrawals = v.pending_withdrawals.saturating_sub(1);
+                if w.value > 0 && w.shares > 0 {
+                    v.latest_pps_e12 =
+                        Some((w.value as u128).saturating_mul(1_000_000_000_000) / w.shares);
+                }
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvPositionStored(p) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&p.vault_id) {
+                v.position_count = v.position_count.saturating_add(1);
+                v.updated_at_ms = timestamp_ms;
+            }
+            inner.trading_vault_positions.insert(
+                (p.vault_id, p.position_id),
+                TradingVaultPositionState {
+                    adapter: p.adapter.clone(),
+                    active: true,
+                    stored_at_ms: timestamp_ms,
+                    removed_at_ms: None,
+                },
+            );
+        }
+        ChainEvent::TvPositionRemoved(p) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&p.vault_id) {
+                v.position_count = v.position_count.saturating_sub(1);
+                v.updated_at_ms = timestamp_ms;
+            }
+            // Keep the row (active=false) so "past positions" render.
+            if let Some(pos) = inner
+                .trading_vault_positions
+                .get_mut(&(p.vault_id, p.position_id))
+            {
+                pos.active = false;
+                pos.removed_at_ms = Some(timestamp_ms);
+            }
+        }
+        // Log-only trading-vault events: no materialised view — consumers
+        // read them from the generic event feed.
+        ChainEvent::TvSessionSettled(_)
+        | ChainEvent::TvAdapterAllowed(_)
+        | ChainEvent::TvAdapterDisallowed(_)
+        | ChainEvent::TvOracleAllowed(_)
+        | ChainEvent::TvOracleDisallowed(_)
+        | ChainEvent::TvProtocolConfigUpdated(_)
+        | ChainEvent::TvCollateralReleased(_)
+        | ChainEvent::TvCustodyCreated(_)
+        | ChainEvent::TvPoolAllowed(_)
+        | ChainEvent::TvPoolDisallowed(_)
+        | ChainEvent::TvRfqOpened(_)
+        | ChainEvent::TvRfqSettled(_)
+        | ChainEvent::TvPositionRedeemed(_) => {}
         ChainEvent::FeeUpdated(_)
         | ChainEvent::TreasuryWithdrawn(_)
         | ChainEvent::VaultPositionRedeemed(_)
