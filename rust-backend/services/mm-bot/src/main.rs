@@ -867,6 +867,23 @@ async fn main() -> Result<()> {
                         quote_size: cfg.deepbook.quote_size,
                         liquidity: Arc::clone(&liquidity),
                         has_faucets: snapshot.test_tokens().is_ok(),
+                        price_cache: price_cache.clone(),
+                        staleness,
+                        tokens: snapshot
+                            .tokens()
+                            .iter()
+                            .map(|t| mm_bot::sim::SimToken {
+                                symbol: t.ticker.clone(),
+                                coin_type: t.coin_type.clone(),
+                                decimals: t.decimals,
+                                feed: t
+                                    .pyth_feed_id
+                                    .as_deref()
+                                    .and_then(|f| protocol_types::PriceFeedId::from_hex(f).ok()),
+                            })
+                            .collect(),
+                        deep_coin_type: db.deep_coin_type.clone(),
+                        pool_creation_fee: db.pool_creation_fee_units().unwrap_or(500_000_000),
                     });
                 }
             }

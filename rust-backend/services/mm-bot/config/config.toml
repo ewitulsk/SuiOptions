@@ -190,3 +190,14 @@ enabled = false
 # taker_size_lots = 1
 # taker_max_notional_per_hour = 5000000000
 # taker_balance_manager_id = ""        # created + logged at boot; persist here
+# Spot pools (lazy): list pairs and the sim will find-or-CREATE the pool on
+# the first liquidity deployment (creation costs pool_creation_fee vendored
+# DEEP from the bot wallet — fund it once or the pair is skipped with a
+# warning), then band it around the Pyth cross and include it in taker flow.
+# Freshly created pools still need an admin allow_pool to be tradeable by
+# vault curators (the sim itself trades them directly).
+# spot_pairs = ["TSUI/TUSDC", "TBTC/TUSDC", "TWAL/TUSDC"]
+# spot_interval_secs = 60
+# spot_band_bps = 200
+# spot_notional_per_side = 100000000
+# spot_balance_manager_id = ""
