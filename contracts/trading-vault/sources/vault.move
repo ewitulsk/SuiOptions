@@ -90,6 +90,9 @@ public struct VaultConfig has copy, drop, store {
     /// unlock.
     unwind_grace_ms: u64,
     deposits_paused: bool,
+    /// Opt-in for the `vault_mm` release path: signed quotes from the
+    /// curator's bot may draw vault collateral. Off by default.
+    mm_release_enabled: bool,
 }
 
 public struct WithdrawRequest has store {
@@ -197,6 +200,7 @@ public fun create_vault<T>(
             max_positions,
             unwind_grace_ms,
             deposits_paused: false,
+            mm_release_enabled: false,
         },
         total_shares: 0,
         stakes: table::new(ctx),
@@ -916,6 +920,13 @@ public fun set_deposits_paused(vault: &mut TradingVault, cap: &CuratorCap, pause
     events::emit_deposits_paused(object::id(vault), paused);
 }
 
+/// Curator opt-in/out for the `vault_mm` quote-collateral path.
+public fun set_mm_release_enabled(vault: &mut TradingVault, cap: &CuratorCap, enabled: bool) {
+    assert_current_cap(vault, cap);
+    vault.config.mm_release_enabled = enabled;
+    events::emit_mm_release_toggled(object::id(vault), enabled);
+}
+
 // ════════════════════════════ internals ════════════════════════════
 
 fun assert_current_cap(vault: &TradingVault, cap: &CuratorCap) {
@@ -1013,6 +1024,8 @@ public fun curator_fee_bps(vault: &TradingVault): u64 { vault.config.curator_fee
 public fun max_positions(vault: &TradingVault): u64 { vault.config.max_positions }
 
 public fun unwind_grace_ms(vault: &TradingVault): u64 { vault.config.unwind_grace_ms }
+
+public fun mm_release_enabled(vault: &TradingVault): bool { vault.config.mm_release_enabled }
 
 public fun pending_withdrawals(vault: &TradingVault): u64 {
     vault.queue_tail - vault.queue_head
