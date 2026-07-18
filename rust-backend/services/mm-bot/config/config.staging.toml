@@ -152,3 +152,7 @@ enabled = true
 # bid_margin_bps/lookback_secs use struct defaults (20bps, 24h).
 [onchain_swap.bidder]
 enabled = true
+
+# Testnet market simulator (SO-296) — see config.toml for knob docs.
+# [sim]
+# enabled = true

@@ -247,6 +247,10 @@ struct BotConfig {
     /// knobs are reused from the `[deepbook]` section.
     #[serde(default)]
     trading_vault: mm_bot::vault_deepbook::TradingVaultConfig,
+    /// Testnet-only market simulator (SO-296): faucet-funded ask
+    /// inventory + noise takers around the deepbook quoter.
+    #[serde(default)]
+    sim: mm_bot::sim::SimConfig,
 
     /// On-chain RFQ bidder (doc 05 Â§3) â the buy side of the vault's
     /// weekly call-slice auctions. Off by default.
@@ -847,11 +851,33 @@ async fn main() -> Result<()> {
                     liquidity: Arc::clone(&liquidity),
                 });
                 tracing::info!(markets = cfg.underlying_symbols.len(), "deepbook quoting enabled");
+
+                // Testnet market simulator (SO-296): rides ON the quoter
+                // (which stays the maker) — self-writes ask inventory and
+                // runs noise takers. Hard-gated to testnet + faucets.
+                if cfg.sim.enabled {
+                    mm_bot::sim::spawn_sim(mm_bot::sim::SimParams {
+                        cfg: cfg.sim.clone(),
+                        secrets: secrets_loaded.clone(),
+                        network: cfg.network,
+                        handles,
+                        api_url: cli.api_url.clone(),
+                        core_package: snapshot.package()?,
+                        settlement_coin_type: settlement_coin_type.clone(),
+                        quote_size: cfg.deepbook.quote_size,
+                        liquidity: Arc::clone(&liquidity),
+                        has_faucets: snapshot.test_tokens().is_ok(),
+                    });
+                }
             }
             None => tracing::warn!(
                 "deepbook.enabled set but token-info reports no DeepBook deployment; quoting disabled"
             ),
         }
+    }
+
+    if cfg.sim.enabled && !cfg.deepbook.enabled {
+        tracing::warn!("[sim] enabled but [deepbook] quoter is disabled — sim needs the maker side; not started");
     }
 
     // The on-chain bidders bid through the generic `auction` package

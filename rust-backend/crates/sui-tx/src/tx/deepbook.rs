@@ -681,7 +681,9 @@ pub async fn cancel_all_on_pool(
 
 /// Gather wallet coins of `coin_type`, merge into one, split off `amount`.
 /// Returns the exact-amount coin argument.
-async fn gather_exact_coin(
+/// Gather an exact-amount Coin<T> argument from the signer's wallet
+/// (merging as needed). Public for the mm-bot simulator's funding PTBs.
+pub async fn gather_exact_coin(
     client: &SuiClient,
     signer: &Signer,
     pt: &mut ProgrammableTransactionBuilder,

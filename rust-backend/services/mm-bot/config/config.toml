@@ -172,3 +172,21 @@ enabled = false
 # # DeepBookCustody position id. Leave empty on first run: the bot calls
 # # init_custody once at boot and logs the id — persist it here afterwards.
 # custody_id     = ""
+
+# Testnet-only market simulator (SO-296). Rides ON the [deepbook] quoter
+# (which stays the maker): faucet-mints settlement for bids, SELF-WRITES
+# call inventory for asks (mint underlying -> bucket::write_collateralized;
+# Positions redeem after expiry), and runs a low-rate noise-taker loop from
+# a second BalanceManager so quotes actually fill. Hard-gated: refuses to
+# start unless network = testnet AND the token catalog has faucets. Sim
+# failures log at `warn` only — it never raises alert_ids.
+# [sim]
+# enabled = true
+# fund_interval_secs = 60
+# ask_refill_multiple = 4              # target ask inventory = quote_size x this
+# taker_enabled = true
+# taker_interval_secs = 45
+# taker_jitter_secs = 30
+# taker_size_lots = 1
+# taker_max_notional_per_hour = 5000000000
+# taker_balance_manager_id = ""        # created + logged at boot; persist here
