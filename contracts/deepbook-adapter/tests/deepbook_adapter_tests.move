@@ -180,6 +180,9 @@ fun wrapped_balance_manager_trades_on_pool() {
         let cfg = ts::take_shared<VaultProtocolConfig>(&sc);
         let mut ca = adapter::begin_custody_appraisal(&v, custody_id);
         adapter::value_asset<USDC>(&v, &cfg, &mut ca, option::none(), &clock);
+        // Order placement tracks the pool's base as a potential settled
+        // asset; zero balance appraises fine with a `none` leg.
+        adapter::value_asset<BASE>(&v, &cfg, &mut ca, option::none(), &clock);
         adapter::value_pool_locked<BASE, USDC>(
             &v,
             &cfg,

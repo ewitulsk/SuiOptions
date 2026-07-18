@@ -37,6 +37,7 @@ use trading_vault::vault::{Self, Appraisal, CuratorCap, Session, TradingVault};
 const E_POOL_NOT_ALLOWED: u64 = 1;
 const E_WRONG_CUSTODY: u64 = 2;
 const E_POOL_STILL_LOCKED: u64 = 3;
+const E_ASSET_STILL_HELD: u64 = 4;
 const E_APPRAISAL_INCOMPLETE: u64 = 5;
 const E_PRICE_ASSET_MISMATCH: u64 = 6;
 const E_VALUE_OVERFLOW: u64 = 7;
@@ -213,6 +214,7 @@ public fun place_limit_order<B, Q>(
         ctx,
     );
     track_pool(&mut custody, object::id(pool));
+    track_pool_assets<B, Q>(&mut custody);
     vault::put_position(vault, &mut s, custody);
     vault::end_session(vault, s);
 }
@@ -321,6 +323,7 @@ public fun withdraw_settled<B, Q>(
     let mut custody = take_custody(vault, &mut s, custody_id);
     let proof = trader_proof(&mut custody, ctx);
     pool::withdraw_settled_amounts(pool, &mut custody.bm, &proof);
+    track_pool_assets<B, Q>(&mut custody);
     vault::put_position(vault, &mut s, custody);
     vault::end_session(vault, s);
 }
@@ -342,6 +345,30 @@ public fun retire_pool<B, Q>(
     vault::end_session(vault, s);
 }
 
+/// Remove an EMPTY custody from vault accounting (its appraisal sets
+/// must both be empty) and hand the shell to `recipient`. Required
+/// before `finalize_close` — the custody is a position, and closure
+/// demands zero positions. The shell's caps only control the empty
+/// wrapped manager, so it is inert value-wise.
+public fun eject_empty_custody(
+    vault: &mut TradingVault,
+    cap: &CuratorCap,
+    reg: &IntegrationRegistry,
+    custody_id: ID,
+    recipient: address,
+    ctx: &mut TxContext,
+) {
+    let mut s = vault::begin_session(vault, cap, reg, DeepBookAdapter {});
+    let custody = take_custody(vault, &mut s, custody_id);
+    assert!(
+        custody.assets.is_empty() && custody.active_pools.is_empty(),
+        E_ASSET_STILL_HELD,
+    );
+    transfer::public_transfer(custody, recipient);
+    vault::end_session(vault, s);
+    let _ = ctx;
+}
+
 // ══════════════════════ permissionless cranks / unwind ══════════════════════
 
 /// Sweep settled amounts into the BalanceManager — benign, so it runs
@@ -355,6 +382,7 @@ public fun crank_withdraw_settled<B, Q>(
     let mut s = vault::begin_crank_session(vault, reg, DeepBookAdapter {});
     let mut custody = take_custody(vault, &mut s, custody_id);
     pool::withdraw_settled_amounts_permissionless(pool, &mut custody.bm);
+    track_pool_assets<B, Q>(&mut custody);
     vault::put_position(vault, &mut s, custody);
     vault::end_session(vault, s);
 }
@@ -508,6 +536,13 @@ fun deposit_to_bm<T>(custody: &mut DeepBookCustody, coin: Coin<T>, ctx: &TxConte
 fun withdraw_from_bm<T>(custody: &mut DeepBookCustody, amount: u64, ctx: &mut TxContext): Coin<T> {
     let DeepBookCustody { bm, withdraw_cap, .. } = custody;
     balance_manager::withdraw_with_cap(bm, withdraw_cap, amount, ctx)
+}
+
+fun track_pool_assets<B, Q>(custody: &mut DeepBookCustody) {
+    let b = type_name::with_defining_ids<B>();
+    let q = type_name::with_defining_ids<Q>();
+    if (!custody.assets.contains(&b)) { custody.assets.insert(b) };
+    if (!custody.assets.contains(&q)) { custody.assets.insert(q) };
 }
 
 fun track_pool(custody: &mut DeepBookCustody, pool_id: ID) {

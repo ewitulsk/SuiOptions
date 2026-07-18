@@ -661,15 +661,18 @@ async fn fulfill(
             .price_table
             .as_ref()
             .ok_or_else(|| anyhow!("price table unresolved — cannot appraise multi-asset vault"))?;
+        // Optimistic: resolve legs for the feeds we HAVE; the composer
+        // passes `none` for the rest and the chain aborts only if an
+        // unpriced component is actually nonzero.
         let mut feeds = Vec::new();
         let mut price_infos = BTreeMap::new();
         let mut all_types: Vec<String> = needed.iter().cloned().collect();
         all_types.push(holdings.deposit_type.clone());
         for t in &all_types {
-            let feed = ctx
-                .feeds
-                .get(t)
-                .ok_or_else(|| anyhow!("no pyth feed for {t} — cannot appraise"))?;
+            let Some(feed) = ctx.feeds.get(t) else {
+                debug!(vault = %vault_id, asset = %t, "no pyth feed; passing none leg");
+                continue;
+            };
             if !feeds.contains(feed) {
                 feeds.push(*feed);
             }
