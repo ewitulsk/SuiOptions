@@ -172,6 +172,42 @@ diesel::table! {
 }
 
 diesel::table! {
+    trading_vaults (vault_id) {
+        vault_id            -> Text,
+        deposit_asset       -> Text,
+        creator             -> Text,
+        curator             -> Text,
+        curator_cap_id      -> Text,
+        state               -> Text,
+        lockup_ms           -> Int8,
+        curator_fee_bps     -> Int8,
+        rotation_authority  -> Int2,
+        max_positions       -> Int8,
+        unwind_grace_ms     -> Int8,
+        deposits_paused     -> Bool,
+        mm_release_enabled  -> Bool,
+        total_shares        -> Numeric,
+        position_count      -> Int8,
+        pending_withdrawals -> Int8,
+        latest_pps_e12      -> Nullable<Numeric>,
+        updated_at_seq      -> Int8,
+        updated_at_ms       -> Int8,
+    }
+}
+
+diesel::table! {
+    trading_vault_positions (vault_id, position_id) {
+        vault_id       -> Text,
+        position_id    -> Text,
+        adapter        -> Text,
+        active         -> Bool,
+        stored_at_ms   -> Int8,
+        removed_at_ms  -> Nullable<Int8>,
+        updated_at_seq -> Int8,
+    }
+}
+
+diesel::table! {
     event_participants (sequence, address, role) {
         sequence -> Int8,
         address  -> Text,
@@ -195,4 +231,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     vaults,
     vault_rounds,
     vault_user_receipts,
+    trading_vaults,
+    trading_vault_positions,
 );

@@ -84,8 +84,35 @@ async fn main() -> Result<()> {
         .map(|tmm| ObjectID::from_hex_literal(tmm).context("bad cctp_token_messenger_package"))
         .transpose()?;
 
-    let templates =
-        protocol_templates(protocol, vault_pkg, &test_tokens, allow_faucet, deepbook, cctp);
+    // Trading-vault templates (SO-282): only when the core pair is
+    // deployed; adapter packages extend the appraisal allowlist.
+    let trading_vault = match (snapshot.trading_vault(), snapshot.oracle_pyth()) {
+        (Some(tv), Some(op)) => Some(sui_tx::tx::template::TradingVaultPkgs {
+            trading_vault: tv.package().context("trading_vault package id")?,
+            oracle_pyth: op.package().context("oracle_pyth package id")?,
+            deepbook_adapter: snapshot
+                .deepbook_adapter()
+                .map(|p| p.package())
+                .transpose()
+                .context("deepbook_adapter package id")?,
+            options_adapter: snapshot
+                .options_adapter()
+                .map(|p| p.package())
+                .transpose()
+                .context("options_adapter package id")?,
+        }),
+        _ => None,
+    };
+
+    let templates = protocol_templates(
+        protocol,
+        vault_pkg,
+        &test_tokens,
+        allow_faucet,
+        deepbook,
+        cctp,
+        trading_vault,
+    );
 
     info!(
         environment = %cfg.environment,

@@ -276,10 +276,36 @@ async fn deploy_one(
     .with_context(|| format!("publishing oracle_pyth to {network}"))?;
     tracing::info!(package = %oracle_pyth_out.package_id, "oracle_pyth published");
 
+    let deepbook_adapter_out = publish_dep_package(
+        &client,
+        &signer,
+        &contracts_root.join("deepbook-adapter"),
+        "deepbook_adapter",
+        env,
+        gas_budget,
+    )
+    .await
+    .with_context(|| format!("publishing deepbook_adapter to {network}"))?;
+    tracing::info!(package = %deepbook_adapter_out.package_id, "deepbook_adapter published");
+
+    let options_adapter_out = publish_dep_package(
+        &client,
+        &signer,
+        &contracts_root.join("options-adapter"),
+        "options_adapter",
+        env,
+        gas_budget,
+    )
+    .await
+    .with_context(|| format!("publishing options_adapter to {network}"))?;
+    tracing::info!(package = %options_adapter_out.package_id, "options_adapter published");
+
     let (auction, rfq, vault) =
         (Some(record(&auction_out)), Some(record(&rfq_out)), Some(record(&vault_out)));
     let (trading_vault, oracle_pyth) =
         (Some(record(&trading_vault_out)), Some(record(&oracle_pyth_out)));
+    let (deepbook_adapter, options_adapter) =
+        (Some(record(&deepbook_adapter_out)), Some(record(&options_adapter_out)));
 
     let (treasury_id, init_digest) = if skip_init {
         (None, None)
@@ -379,6 +405,8 @@ async fn deploy_one(
             vault,
             trading_vault,
             oracle_pyth,
+            deepbook_adapter,
+            options_adapter,
             cctp_bridge: previous_cctp,
         },
         token_info,

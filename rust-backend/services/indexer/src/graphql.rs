@@ -29,7 +29,7 @@ use tracing::info;
 
 use crate::db::models::{
     AccountRow, BucketRow, IndexedEventRow, PositionRow, RfqBidRow, RfqRow,
-    VaultReceiptRow, VaultRoundRow, VaultRow,
+    TradingVaultPositionRow, TradingVaultRow, VaultReceiptRow, VaultRoundRow, VaultRow,
 };
 use crate::db::{BucketQuery, EventFilter, EventQuery, Repo};
 use crate::progress::{ProgressSnapshot, ProgressState};
@@ -419,6 +419,83 @@ impl From<VaultReceiptRow> for VaultReceiptGql {
     }
 }
 
+/// One curated trading vault's headline state (SO-282). On-chain integers
+/// are decimal strings (precision-safe).
+#[derive(SimpleObject)]
+pub struct TradingVaultGql {
+    pub vault_id: String,
+    pub deposit_asset: String,
+    pub creator: String,
+    /// Current curator wallet (updated on TvCuratorRotated).
+    pub curator: String,
+    pub curator_cap_id: String,
+    /// open | closing | closed.
+    pub state: String,
+    pub lockup_ms: String,
+    pub curator_fee_bps: String,
+    pub rotation_authority: i32,
+    pub max_positions: String,
+    pub unwind_grace_ms: String,
+    pub deposits_paused: bool,
+    pub mm_release_enabled: bool,
+    pub total_shares_raw: String,
+    pub position_count: String,
+    pub pending_withdrawals: String,
+    /// Observed deposit-asset-per-share price (1e12-scaled).
+    pub latest_pps_e12_raw: Option<String>,
+    pub updated_at_ms: String,
+}
+
+impl From<TradingVaultRow> for TradingVaultGql {
+    fn from(v: TradingVaultRow) -> Self {
+        TradingVaultGql {
+            vault_id: v.vault_id,
+            deposit_asset: v.deposit_asset,
+            creator: v.creator,
+            curator: v.curator,
+            curator_cap_id: v.curator_cap_id,
+            state: v.state,
+            lockup_ms: v.lockup_ms.to_string(),
+            curator_fee_bps: v.curator_fee_bps.to_string(),
+            rotation_authority: v.rotation_authority as i32,
+            max_positions: v.max_positions.to_string(),
+            unwind_grace_ms: v.unwind_grace_ms.to_string(),
+            deposits_paused: v.deposits_paused,
+            mm_release_enabled: v.mm_release_enabled,
+            total_shares_raw: v.total_shares.to_string(),
+            position_count: v.position_count.to_string(),
+            pending_withdrawals: v.pending_withdrawals.to_string(),
+            latest_pps_e12_raw: v.latest_pps_e12.map(|p| p.to_string()),
+            updated_at_ms: v.updated_at_ms.to_string(),
+        }
+    }
+}
+
+/// One adapter position held by a trading vault. Removed positions stay
+/// with `active=false` so past positions render.
+#[derive(SimpleObject)]
+pub struct TradingVaultPositionGql {
+    pub vault_id: String,
+    pub position_id: String,
+    pub adapter: String,
+    pub active: bool,
+    pub stored_at_ms: String,
+    pub removed_at_ms: Option<String>,
+}
+
+impl From<TradingVaultPositionRow> for TradingVaultPositionGql {
+    fn from(p: TradingVaultPositionRow) -> Self {
+        TradingVaultPositionGql {
+            vault_id: p.vault_id,
+            position_id: p.position_id,
+            adapter: p.adapter,
+            active: p.active,
+            stored_at_ms: p.stored_at_ms.to_string(),
+            removed_at_ms: p.removed_at_ms.map(|v| v.to_string()),
+        }
+    }
+}
+
 #[derive(SimpleObject)]
 pub struct EventConnection {
     pub nodes: Vec<EventGql>,
@@ -718,6 +795,35 @@ impl QueryRoot {
         .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
         .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
         Ok(rows.into_iter().map(VaultReceiptGql::from).collect())
+    }
+
+    /// JIT: all curated trading vaults (SO-282).
+    async fn trading_vaults(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<Vec<TradingVaultGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let rows = tokio::task::spawn_blocking(move || repo.trading_vaults_query())
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+            .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(rows.into_iter().map(TradingVaultGql::from).collect())
+    }
+
+    /// JIT: adapter positions for one trading vault (removed ones included,
+    /// active=false).
+    async fn trading_vault_positions(
+        &self,
+        ctx: &Context<'_>,
+        vault_id: String,
+    ) -> async_graphql::Result<Vec<TradingVaultPositionGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let rows =
+            tokio::task::spawn_blocking(move || repo.trading_vault_positions_query(&vault_id))
+                .await
+                .map_err(|e| async_graphql::Error::new(format!("join error: {e}")))?
+                .map_err(|e| async_graphql::Error::new(format!("db error: {e}")))?;
+        Ok(rows.into_iter().map(TradingVaultPositionGql::from).collect())
     }
 
     /// Generalized event query over the full `indexed_events` log.

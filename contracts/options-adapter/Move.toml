@@ -1,0 +1,9 @@
+[package]
+name = "options_adapter"
+version = "0.0.1"
+edition = "2024.beta"
+
+[dependencies]
+options_core = { local = "../core" }
+auction = { local = "../auction" }
+trading_vault = { local = "../trading-vault" }

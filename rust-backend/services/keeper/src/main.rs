@@ -82,6 +82,37 @@ async fn main() -> Result<()> {
     let wrap = SuiClientWrapper::connect(&secrets, cli.network).await?;
     info!(signer = %wrap.signer.address, "keeper wallet connected (gas only)");
 
+    // Trading-vault fulfillment pass (SO-287): active only where the
+    // package is deployed; the shared VaultProtocolConfig id is
+    // recovered from the publish tx once at boot.
+    let trading_vault_ctx = match snapshot.trading_vault() {
+        Some(tv) => {
+            let package = tv.package().context("trading_vault package id")?;
+            match keeper::trading_vault::discover_protocol_config(
+                &wrap.client,
+                package,
+                &tv.publish_digest,
+            )
+            .await
+            {
+                Ok(protocol_config_id) => Some(keeper::trading_vault::TradingVaultCtx {
+                    package,
+                    protocol_config_id,
+                    treasury_id,
+                    gas_budget: cli.gas_budget,
+                }),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %format!("{e:#}"),
+                        "trading-vault protocol config discovery failed; pass disabled"
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+
     let pyth_handles = PythHandles {
         pyth_package: parse_id(&cfg.pyth.pyth_package_id, "pyth_package_id")?,
         wormhole_package: parse_id(&cfg.pyth.wormhole_package_id, "wormhole_package_id")?,
@@ -178,6 +209,9 @@ async fn main() -> Result<()> {
                     }
                 },
             }
+        }
+        if let Some(tvc) = &trading_vault_ctx {
+            keeper::trading_vault::tick(&wrap, &indexer, tvc).await;
         }
         metrics::histogram!("keeper_tick_duration_seconds").record(tick_started.elapsed().as_secs_f64());
         sleep(tick).await;

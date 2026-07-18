@@ -820,6 +820,271 @@ pub struct PutRfqExpiredUnsold {
 /// The variant name is what shows up as `"type"` over the wire; the payload
 /// rides under `"payload"`. This is the same envelope shape as the WS
 /// retail/MM messages so a generic event reader can treat both alike.
+
+// ═══════════════════ curated trading vaults (SO-282) ═══════════════════
+//
+// Emitted by the `trading_vault` package (modules `events` + `vault_mm`)
+// and its adapter packages (`deepbook_adapter`, `options_adapter`). Rust
+// names carry a `Tv` prefix because several Move names (VaultCreated,
+// DepositsPaused, RfqSettled) collide with options_vault events — the
+// dispatch table disambiguates by package id, the enum needs distinct
+// variants.
+
+/// One `VecMap<TypeName, u64>` entry (BCS: struct Entry { key, value }).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvTypeAmount {
+    pub key: AssetType,
+    #[serde(with = "u64_string")]
+    pub value: u64,
+}
+
+/// BCS shape of Move's `VecMap<TypeName, u64>`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvTypeAmountMap {
+    pub contents: Vec<TvTypeAmount>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvVaultCreated {
+    pub vault_id: ObjectId,
+    pub creator: SuiAddress,
+    pub curator: SuiAddress,
+    pub curator_cap_id: ObjectId,
+    pub deposit_asset: AssetType,
+    #[serde(with = "u64_string")]
+    pub lockup_ms: u64,
+    #[serde(with = "u64_string")]
+    pub curator_fee_bps: u64,
+    pub rotation_authority: u8,
+    #[serde(with = "u64_string")]
+    pub max_positions: u64,
+    #[serde(with = "u64_string")]
+    pub unwind_grace_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvVaultClosing {
+    pub vault_id: ObjectId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvVaultClosed {
+    pub vault_id: ObjectId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvDepositsPaused {
+    pub vault_id: ObjectId,
+    pub paused: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvMmReleaseToggled {
+    pub vault_id: ObjectId,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvCuratorRotated {
+    pub vault_id: ObjectId,
+    pub old_cap_id: ObjectId,
+    pub new_cap_id: ObjectId,
+    pub recipient: SuiAddress,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvDeposited {
+    pub vault_id: ObjectId,
+    pub depositor: SuiAddress,
+    pub curator_cap: Option<ObjectId>,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u128_string")]
+    pub shares: u128,
+    #[serde(with = "u128_string")]
+    pub total_shares: u128,
+    #[serde(with = "u64_string")]
+    pub locked_until_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvWithdrawRequested {
+    pub vault_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub seq: u64,
+    pub recipient: SuiAddress,
+    pub curator_cap: Option<ObjectId>,
+    #[serde(with = "u128_string")]
+    pub shares: u128,
+    #[serde(with = "u64_string")]
+    pub basis: u64,
+    #[serde(with = "u64_string")]
+    pub requested_at_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvWithdrawFulfilled {
+    pub vault_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub seq: u64,
+    pub recipient: SuiAddress,
+    #[serde(with = "u128_string")]
+    pub shares: u128,
+    #[serde(with = "u64_string")]
+    pub value: u64,
+    #[serde(with = "u64_string")]
+    pub basis: u64,
+    #[serde(with = "u64_string")]
+    pub profit: u64,
+    #[serde(with = "u64_string")]
+    pub gross_fee: u64,
+    #[serde(with = "u64_string")]
+    pub protocol_cut: u64,
+    #[serde(with = "u64_string")]
+    pub curator_net: u64,
+    #[serde(with = "u128_string")]
+    pub curator_shares_minted: u128,
+    #[serde(with = "u64_string")]
+    pub payout: u64,
+    #[serde(with = "u128_string")]
+    pub total_shares: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvSessionSettled {
+    pub vault_id: ObjectId,
+    pub adapter: AssetType,
+    pub forced: bool,
+    pub taken: TvTypeAmountMap,
+    pub returned: TvTypeAmountMap,
+    #[serde(with = "u64_string")]
+    pub positions_added: u64,
+    #[serde(with = "u64_string")]
+    pub positions_removed: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvPositionStored {
+    pub vault_id: ObjectId,
+    pub adapter: AssetType,
+    pub position_id: ObjectId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvPositionRemoved {
+    pub vault_id: ObjectId,
+    pub adapter: AssetType,
+    pub position_id: ObjectId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvAdapterAllowed {
+    pub adapter: AssetType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvAdapterDisallowed {
+    pub adapter: AssetType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvOracleAllowed {
+    pub oracle: AssetType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvOracleDisallowed {
+    pub oracle: AssetType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvProtocolConfigUpdated {
+    #[serde(with = "u64_string")]
+    pub min_curator_share_bps: u64,
+    pub enforce_curator_share: bool,
+    #[serde(with = "u64_string")]
+    pub max_curator_fee_bps: u64,
+    #[serde(with = "u64_string")]
+    pub protocol_fee_bps: u64,
+    #[serde(with = "u64_string")]
+    pub max_price_age_ms: u64,
+    pub paused: bool,
+}
+
+/// `trading_vault::vault_mm::CollateralReleased`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvCollateralReleased {
+    pub vault_id: ObjectId,
+    pub asset_type: AssetType,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    pub bucket_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub quote_nonce: u64,
+    pub is_writer_flow: bool,
+}
+
+/// `deepbook_adapter::deepbook_adapter::CustodyCreated`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvCustodyCreated {
+    pub vault_id: ObjectId,
+    pub custody_id: ObjectId,
+    pub balance_manager_id: ObjectId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvPoolAllowed {
+    pub pool_id: ObjectId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvPoolDisallowed {
+    pub pool_id: ObjectId,
+}
+
+/// `options_adapter::options_adapter::RfqOpened`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvRfqOpened {
+    pub vault_id: ObjectId,
+    pub ticket_id: ObjectId,
+    pub auction_id: ObjectId,
+    pub bucket_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub write_amount: u64,
+    #[serde(with = "u64_string")]
+    pub escrow_amount: u64,
+    #[serde(with = "u64_string")]
+    pub reserve_premium: u64,
+    pub is_put: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvRfqSettled {
+    pub vault_id: ObjectId,
+    pub ticket_id: ObjectId,
+    pub auction_id: ObjectId,
+    pub bucket_id: ObjectId,
+    pub filled: bool,
+    #[serde(with = "u64_string")]
+    pub net_premium: u64,
+    #[serde(with = "u64_string")]
+    pub fee: u64,
+    pub position_id: Option<ObjectId>,
+    pub is_put: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvPositionRedeemed {
+    pub vault_id: ObjectId,
+    pub bucket_id: ObjectId,
+    pub position_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub underlying_out: u64,
+    #[serde(with = "u64_string")]
+    pub settlement_out: u64,
+    pub is_put: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum ChainEvent {
@@ -875,6 +1140,31 @@ pub enum ChainEvent {
     PutRfqCreated(PutRfqCreated),
     PutRfqSettled(PutRfqSettled),
     PutRfqExpiredUnsold(PutRfqExpiredUnsold),
+    // curated trading vaults (SO-282)
+    TvVaultCreated(TvVaultCreated),
+    TvVaultClosing(TvVaultClosing),
+    TvVaultClosed(TvVaultClosed),
+    TvDepositsPaused(TvDepositsPaused),
+    TvMmReleaseToggled(TvMmReleaseToggled),
+    TvCuratorRotated(TvCuratorRotated),
+    TvDeposited(TvDeposited),
+    TvWithdrawRequested(TvWithdrawRequested),
+    TvWithdrawFulfilled(TvWithdrawFulfilled),
+    TvSessionSettled(TvSessionSettled),
+    TvPositionStored(TvPositionStored),
+    TvPositionRemoved(TvPositionRemoved),
+    TvAdapterAllowed(TvAdapterAllowed),
+    TvAdapterDisallowed(TvAdapterDisallowed),
+    TvOracleAllowed(TvOracleAllowed),
+    TvOracleDisallowed(TvOracleDisallowed),
+    TvProtocolConfigUpdated(TvProtocolConfigUpdated),
+    TvCollateralReleased(TvCollateralReleased),
+    TvCustodyCreated(TvCustodyCreated),
+    TvPoolAllowed(TvPoolAllowed),
+    TvPoolDisallowed(TvPoolDisallowed),
+    TvRfqOpened(TvRfqOpened),
+    TvRfqSettled(TvRfqSettled),
+    TvPositionRedeemed(TvPositionRedeemed),
 }
 
 /// An envelope wrapping a `ChainEvent` with the ordering metadata the indexer

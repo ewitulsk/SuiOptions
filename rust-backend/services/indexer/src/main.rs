@@ -76,6 +76,12 @@ async fn main() -> Result<()> {
     let deepbook_original = snapshot
         .deepbook()
         .map(|d| d.original_package_id.clone());
+    // Curated trading-vault packages (SO-282): optional — absent on
+    // deployments predating the product, where their event families are
+    // simply not subscribed.
+    let trading_vault_package_id = snapshot.trading_vault().map(|p| p.package_id.clone());
+    let deepbook_adapter_package_id = snapshot.deepbook_adapter().map(|p| p.package_id.clone());
+    let options_adapter_package_id = snapshot.options_adapter().map(|p| p.package_id.clone());
     info!(
         network = %cfg.network,
         core_package_id = %core_package_id,
@@ -83,6 +89,7 @@ async fn main() -> Result<()> {
         rfq_package_id = %rfq_package_id,
         vault_package_id = %vault_package_id,
         deepbook_original = %deepbook_original.as_deref().unwrap_or("<none>"),
+        trading_vault_package_id = %trading_vault_package_id.as_deref().unwrap_or("<none>"),
         token_info_url = %cfg.token_info_url,
         "resolved package ids from token-info"
     );
@@ -209,6 +216,9 @@ async fn main() -> Result<()> {
             auction: &auction_package_id,
             rfq: &rfq_package_id,
             vault: &vault_package_id,
+            trading_vault: trading_vault_package_id.as_deref(),
+            deepbook_adapter: deepbook_adapter_package_id.as_deref(),
+            options_adapter: options_adapter_package_id.as_deref(),
         },
         deepbook_original.as_deref(),
         Arc::clone(&progress_state),

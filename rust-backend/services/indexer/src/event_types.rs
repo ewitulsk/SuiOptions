@@ -31,6 +31,11 @@ use protocol_types::events::{
     TreasuryWithdrawn, VaultBucketSelected, VaultConfigUpdated, VaultCreated, VaultDeposit,
     VaultDepositsPaused, VaultFeesCharged, VaultPositionRedeemed, VaultRfqSettled, VaultRfqUnsold,
     VaultRoundFinalized, WithdrawCompleted, WithdrawInitiated, WriteExecuted,
+    TvVaultCreated, TvVaultClosing, TvVaultClosed, TvDepositsPaused, TvMmReleaseToggled,
+    TvCuratorRotated, TvDeposited, TvWithdrawRequested, TvWithdrawFulfilled, TvSessionSettled,
+    TvPositionStored, TvPositionRemoved, TvAdapterAllowed, TvAdapterDisallowed, TvOracleAllowed,
+    TvOracleDisallowed, TvProtocolConfigUpdated, TvCollateralReleased, TvCustodyCreated,
+    TvPoolAllowed, TvPoolDisallowed, TvRfqOpened, TvRfqSettled, TvPositionRedeemed,
 };
 use protocol_types::ids::{ObjectId, SuiAddress};
 
@@ -48,6 +53,14 @@ pub struct PackageIds<'a> {
     pub rfq: &'a str,
     /// options_vault.
     pub vault: &'a str,
+    /// trading_vault (curated vaults, SO-282). Optional: absent on
+    /// deployments predating the product; its event families simply
+    /// don't subscribe.
+    pub trading_vault: Option<&'a str>,
+    /// deepbook_adapter (SO-284), optional like `trading_vault`.
+    pub deepbook_adapter: Option<&'a str>,
+    /// options_adapter (SO-285), optional like `trading_vault`.
+    pub options_adapter: Option<&'a str>,
 }
 
 /// All the event type strings the indexer subscribes to, derived from the
@@ -119,6 +132,32 @@ pub struct EventTypes {
     /// DeepBook's non-generic `order_info::OrderFilled` type string (SO-209).
     /// Exact-matchable (zero type params); `None` without a DeepBook deploy.
     pub deepbook_order_filled: Option<String>,
+    // Curated trading vaults (SO-282). Built with an unmatchable
+    // placeholder when the packages aren't deployed.
+    pub tv_vault_created: String,
+    pub tv_vault_closing: String,
+    pub tv_vault_closed: String,
+    pub tv_deposits_paused: String,
+    pub tv_mm_release_toggled: String,
+    pub tv_curator_rotated: String,
+    pub tv_deposited: String,
+    pub tv_withdraw_requested: String,
+    pub tv_withdraw_fulfilled: String,
+    pub tv_session_settled: String,
+    pub tv_position_stored: String,
+    pub tv_position_removed: String,
+    pub tv_adapter_allowed: String,
+    pub tv_adapter_disallowed: String,
+    pub tv_oracle_allowed: String,
+    pub tv_oracle_disallowed: String,
+    pub tv_protocol_config_updated: String,
+    pub tv_collateral_released: String,
+    pub tv_custody_created: String,
+    pub tv_pool_allowed: String,
+    pub tv_pool_disallowed: String,
+    pub tv_rfq_opened: String,
+    pub tv_rfq_settled: String,
+    pub tv_position_redeemed: String,
 }
 
 impl EventTypes {
@@ -127,6 +166,24 @@ impl EventTypes {
         let auction = |name: &str| format!("{}::{EVENTS_MODULE}::{name}", pkgs.auction);
         let rfq = |name: &str| format!("{}::{EVENTS_MODULE}::{name}", pkgs.rfq);
         let vault = |name: &str| format!("{}::{EVENTS_MODULE}::{name}", pkgs.vault);
+        // Trading-vault families: an "unset" placeholder never matches a
+        // real on-chain type string.
+        let tv = |name: &str| match pkgs.trading_vault {
+            Some(pkg) => format!("{pkg}::{EVENTS_MODULE}::{name}"),
+            None => format!("unset::{EVENTS_MODULE}::{name}"),
+        };
+        let tv_mm = |name: &str| match pkgs.trading_vault {
+            Some(pkg) => format!("{pkg}::vault_mm::{name}"),
+            None => format!("unset::vault_mm::{name}"),
+        };
+        let dba = |name: &str| match pkgs.deepbook_adapter {
+            Some(pkg) => format!("{pkg}::deepbook_adapter::{name}"),
+            None => format!("unset::deepbook_adapter::{name}"),
+        };
+        let oa = |name: &str| match pkgs.options_adapter {
+            Some(pkg) => format!("{pkg}::options_adapter::{name}"),
+            None => format!("unset::options_adapter::{name}"),
+        };
         Self {
             bucket_created: core("BucketCreated"),
             write_executed: core("WriteExecuted"),
@@ -181,10 +238,34 @@ impl EventTypes {
                 .map(|pkg| format!("{pkg}::pool::PoolCreated<")),
             deepbook_order_filled: deepbook_original_package_id
                 .map(|pkg| format!("{pkg}::order_info::OrderFilled")),
+            tv_vault_created: tv("VaultCreated"),
+            tv_vault_closing: tv("VaultClosing"),
+            tv_vault_closed: tv("VaultClosed"),
+            tv_deposits_paused: tv("DepositsPaused"),
+            tv_mm_release_toggled: tv("MmReleaseToggled"),
+            tv_curator_rotated: tv("CuratorRotated"),
+            tv_deposited: tv("Deposited"),
+            tv_withdraw_requested: tv("WithdrawRequested"),
+            tv_withdraw_fulfilled: tv("WithdrawFulfilled"),
+            tv_session_settled: tv("SessionSettled"),
+            tv_position_stored: tv("PositionStored"),
+            tv_position_removed: tv("PositionRemoved"),
+            tv_adapter_allowed: tv("AdapterAllowed"),
+            tv_adapter_disallowed: tv("AdapterDisallowed"),
+            tv_oracle_allowed: tv("OracleAllowed"),
+            tv_oracle_disallowed: tv("OracleDisallowed"),
+            tv_protocol_config_updated: tv("ProtocolConfigUpdated"),
+            tv_collateral_released: tv_mm("CollateralReleased"),
+            tv_custody_created: dba("CustodyCreated"),
+            tv_pool_allowed: dba("PoolAllowed"),
+            tv_pool_disallowed: dba("PoolDisallowed"),
+            tv_rfq_opened: oa("RfqOpened"),
+            tv_rfq_settled: oa("RfqSettled"),
+            tv_position_redeemed: oa("PositionRedeemed"),
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 49] {
+    pub fn all_strings(&self) -> [&str; 73] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -235,6 +316,30 @@ impl EventTypes {
             &self.put_rfq_created,
             &self.put_rfq_settled,
             &self.put_rfq_expired_unsold,
+            &self.tv_vault_created,
+            &self.tv_vault_closing,
+            &self.tv_vault_closed,
+            &self.tv_deposits_paused,
+            &self.tv_mm_release_toggled,
+            &self.tv_curator_rotated,
+            &self.tv_deposited,
+            &self.tv_withdraw_requested,
+            &self.tv_withdraw_fulfilled,
+            &self.tv_session_settled,
+            &self.tv_position_stored,
+            &self.tv_position_removed,
+            &self.tv_adapter_allowed,
+            &self.tv_adapter_disallowed,
+            &self.tv_oracle_allowed,
+            &self.tv_oracle_disallowed,
+            &self.tv_protocol_config_updated,
+            &self.tv_collateral_released,
+            &self.tv_custody_created,
+            &self.tv_pool_allowed,
+            &self.tv_pool_disallowed,
+            &self.tv_rfq_opened,
+            &self.tv_rfq_settled,
+            &self.tv_position_redeemed,
         ]
     }
 }
@@ -351,6 +456,54 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(PutRfqSettled, PutRfqSettled)
     } else if type_str == types.put_rfq_expired_unsold {
         decode!(PutRfqExpiredUnsold, PutRfqExpiredUnsold)
+    } else if type_str == types.tv_vault_created {
+        decode!(TvVaultCreated, TvVaultCreated)
+    } else if type_str == types.tv_vault_closing {
+        decode!(TvVaultClosing, TvVaultClosing)
+    } else if type_str == types.tv_vault_closed {
+        decode!(TvVaultClosed, TvVaultClosed)
+    } else if type_str == types.tv_deposits_paused {
+        decode!(TvDepositsPaused, TvDepositsPaused)
+    } else if type_str == types.tv_mm_release_toggled {
+        decode!(TvMmReleaseToggled, TvMmReleaseToggled)
+    } else if type_str == types.tv_curator_rotated {
+        decode!(TvCuratorRotated, TvCuratorRotated)
+    } else if type_str == types.tv_deposited {
+        decode!(TvDeposited, TvDeposited)
+    } else if type_str == types.tv_withdraw_requested {
+        decode!(TvWithdrawRequested, TvWithdrawRequested)
+    } else if type_str == types.tv_withdraw_fulfilled {
+        decode!(TvWithdrawFulfilled, TvWithdrawFulfilled)
+    } else if type_str == types.tv_session_settled {
+        decode!(TvSessionSettled, TvSessionSettled)
+    } else if type_str == types.tv_position_stored {
+        decode!(TvPositionStored, TvPositionStored)
+    } else if type_str == types.tv_position_removed {
+        decode!(TvPositionRemoved, TvPositionRemoved)
+    } else if type_str == types.tv_adapter_allowed {
+        decode!(TvAdapterAllowed, TvAdapterAllowed)
+    } else if type_str == types.tv_adapter_disallowed {
+        decode!(TvAdapterDisallowed, TvAdapterDisallowed)
+    } else if type_str == types.tv_oracle_allowed {
+        decode!(TvOracleAllowed, TvOracleAllowed)
+    } else if type_str == types.tv_oracle_disallowed {
+        decode!(TvOracleDisallowed, TvOracleDisallowed)
+    } else if type_str == types.tv_protocol_config_updated {
+        decode!(TvProtocolConfigUpdated, TvProtocolConfigUpdated)
+    } else if type_str == types.tv_collateral_released {
+        decode!(TvCollateralReleased, TvCollateralReleased)
+    } else if type_str == types.tv_custody_created {
+        decode!(TvCustodyCreated, TvCustodyCreated)
+    } else if type_str == types.tv_pool_allowed {
+        decode!(TvPoolAllowed, TvPoolAllowed)
+    } else if type_str == types.tv_pool_disallowed {
+        decode!(TvPoolDisallowed, TvPoolDisallowed)
+    } else if type_str == types.tv_rfq_opened {
+        decode!(TvRfqOpened, TvRfqOpened)
+    } else if type_str == types.tv_rfq_settled {
+        decode!(TvRfqSettled, TvRfqSettled)
+    } else if type_str == types.tv_position_redeemed {
+        decode!(TvPositionRedeemed, TvPositionRedeemed)
     } else {
         Ok(None)
     }
@@ -550,11 +703,12 @@ mod tests {
     const AUCTION_PKG: &str = "0xa1";
     const RFQ_PKG: &str = "0xf1";
     const VAULT_PKG: &str = "0xe1";
+    const TV_PKG: &str = "0xt1";
     const DEEPBOOK_ORIG: &str =
         "0xfb28c4cbc6865bd1c897d26aecbe1f8792d1509a20ffec692c800660cbec6982";
 
     fn pkgs() -> PackageIds<'static> {
-        PackageIds { core: PKG, auction: AUCTION_PKG, rfq: RFQ_PKG, vault: VAULT_PKG }
+        PackageIds { core: PKG, auction: AUCTION_PKG, rfq: RFQ_PKG, vault: VAULT_PKG, trading_vault: Some(TV_PKG), deepbook_adapter: None, options_adapter: None }
     }
 
     fn types() -> EventTypes {

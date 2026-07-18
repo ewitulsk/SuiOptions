@@ -302,6 +302,12 @@ export function Header() {
           Vaults
         </button>
         <button
+          className={pathname.startsWith("/vaults") ? "is-active" : ""}
+          onClick={() => navigate("/vaults")}
+        >
+          Trading
+        </button>
+        <button
           className={pathname === "/dashboard" ? "is-active" : ""}
           onClick={() => navigate("/dashboard")}
         >

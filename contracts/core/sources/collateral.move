@@ -89,6 +89,16 @@ public fun is_writer_flow<T>(request: &CollateralRequest<T>): bool {
     }
 }
 
+/// Where the signer's side of the trade is routed (their `Coin<Call>` in
+/// writer flow; their `Position` + net premium in trader flow). Exposed
+/// so custody implementations whose funds belong to THIRD PARTIES (e.g.
+/// a curated vault backing an MM bot) can refuse to release unless the
+/// outputs come back to the custody object itself — without this, the
+/// quote signer could route the trade's proceeds to any address.
+public fun signer_token_recipient<T>(request: &CollateralRequest<T>): address {
+    quote::signer_token_recipient(&request.quote)
+}
+
 /// Test-only constructor so external implementations (mm_collateral, …)
 /// can unit-test `release` without running a full quote flow.
 #[test_only]
