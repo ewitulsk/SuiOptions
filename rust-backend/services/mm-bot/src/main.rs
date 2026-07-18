@@ -240,6 +240,14 @@ struct BotConfig {
     #[serde(default)]
     deepbook: mm_bot::deepbook::DeepBookQuoterConfig,
 
+    /// Trading-vault DeepBook quoting (SO-291): trade a curated vault's
+    /// DeepBook custody through the deepbook-adapter curator calls instead
+    /// of the bot's own BalanceManager. Off by default; mutually exclusive
+    /// with `[deepbook]` (vault mode wins). Cadence / sizing / batching
+    /// knobs are reused from the `[deepbook]` section.
+    #[serde(default)]
+    trading_vault: mm_bot::vault_deepbook::TradingVaultConfig,
+
     /// On-chain RFQ bidder (doc 05 Â§3) â the buy side of the vault's
     /// weekly call-slice auctions. Off by default.
     #[serde(default)]
@@ -745,11 +753,64 @@ async fn main() -> Result<()> {
         max_conf_bps: cfg.pyth.max_conf_bps,
     };
 
+    // Trading-vault DeepBook quoting (SO-291): same quoting brain as the
+    // plain quoter below, but the orders rest in a curated vault's DeepBook
+    // custody via the deepbook-adapter curator calls. Mutually exclusive with
+    // `[deepbook]` — vault mode wins if both are enabled.
+    if cfg.trading_vault.enabled && cfg.deepbook.enabled {
+        tracing::error!(
+            "[deepbook] and [trading_vault] quoters are mutually exclusive; preferring trading-vault mode"
+        );
+    }
+    if cfg.trading_vault.enabled {
+        let adapter_package = snapshot
+            .deepbook_adapter()
+            .context("deepbook-adapter package missing from token-info (required by [trading_vault])")?
+            .package()?;
+        let tv_objects = snapshot
+            .trading_vault_objects()
+            .context("trading-vault objects missing from token-info (required by [trading_vault])")?;
+        let quoter_markets = markets
+            .iter()
+            .map(|m| mm_bot::deepbook::QuoterMarket {
+                symbol: m.symbol.clone(),
+                coin_type: m.coin_type.clone(),
+                feed: m.feed,
+                decimals: m.decimals,
+                vol_buf: Arc::clone(&m.vol_buf),
+                vol_buf_long: Arc::clone(&m.vol_buf_long),
+                fallback_vol: m.fallback_vol,
+                smile: m.smile,
+            })
+            .collect();
+        mm_bot::vault_deepbook::spawn_quoter(mm_bot::vault_deepbook::VaultQuoterParams {
+            cfg: cfg.trading_vault.clone(),
+            db_cfg: cfg.deepbook.clone(),
+            secrets: secrets_loaded.clone(),
+            network: cfg.network,
+            adapter_package,
+            integration_registry: tv_objects.integration_registry()?,
+            pool_allowlist: tv_objects.pool_allowlist()?,
+            api_url: cli.api_url.clone(),
+            price_cache: price_cache.clone(),
+            markets: quoter_markets,
+            settlement_feed,
+            settlement_coin_type: settlement_coin_type.clone(),
+            settlement_decimals,
+            pricing: pricing_cfg,
+            staleness,
+        });
+        tracing::info!(
+            vault = %cfg.trading_vault.vault_id,
+            "trading-vault deepbook quoting enabled"
+        );
+    }
+
     // DeepBook quoting loop (SO-158): rest two-sided limit orders on every
     // tradeable bucket pool of the configured markets, priced by the same
     // Black-Scholes path that answers RFQs (one QuoterMarket per Market,
     // sharing its vol buffer — SO-159).
-    if cfg.deepbook.enabled {
+    if cfg.deepbook.enabled && !cfg.trading_vault.enabled {
         match snapshot.deepbook() {
             Some(db) => {
                 let handles = sui_tx::tx::deepbook::DeepBookHandles {

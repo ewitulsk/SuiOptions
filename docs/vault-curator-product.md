@@ -207,18 +207,75 @@ reviewers and future work don't have to re-derive them from diffs.
 - `VaultProtocolConfig` discovery client-side from the publish digest in
   `/package-info` (cached).
 
-## 9. Known follow-ups (explicitly out of this pass)
+## 9. Post-launch build (SO-289–294) — decisions
 
-1. Attestation-bearing appraisal composition (keeper + frontend) for
-   vaults holding positions/foreign assets — the Move surface is
-   complete; this is PTB-construction work.
-2. On-chain (testnet) smoke of the wrapped-BM flow — proven in Move
-   tests; a deployed-environment E2E belongs to the staging rollout.
-3. Premium mark-to-market for option positions (conservative intrinsic
-   marks today).
-4. NAV time-series snapshots (devInspect cron) for richer performance
-   charts; v1 charts can derive pps from deposit/fulfillment events.
-5. DeepBook adapter: modify_order pass-through; per-order client-id
-   conventions for bot bookkeeping.
-6. Covered-call vault merge (per epic decision: later; migration seeds
+- **Appraisal composer, twice, one shape** (SO-289): chain-only holdings
+  discovery (vault fields + dynamic fields — the tag df names the
+  appraising adapter, the dof's object type classifies the position), one
+  Hermes update covering every needed feed, ONE `attest` per asset reused
+  across legs (`PriceAttestation` is `copy`), `0x1::option::some/none`
+  for the Option arguments. Implemented in `sui_tx::tx::appraisal` (Rust,
+  keeper) and `frontend/src/tx/appraisal.ts` (TS, deposits) with
+  identical leg ordering. Held option coins (vault_mm writer flow) are
+  the one unsupported shape — they need an indexer bucket lookup;
+  explicit error until then.
+- **Vendored DeepBook linkage** — the gotcha of the round: the upstream
+  deepbookv3 git dependency ships its own `Published.toml` pinning the
+  CANONICAL testnet publish, which silently overrode our
+  `dep-replacements` address keys; the first published adapter linked
+  canonical DeepBook while the scheduler's pools and mm-bot's manager
+  live on the house publish (`deployments.json` `deepbook` block). Fix:
+  `contracts/vendor/{deepbook,token}` — vendored sources with
+  `Published.toml`s pinning the house ids (the linkage mechanism this
+  repo's publish flow actually honors). The house publish carries the
+  full modern API (`new_with_custom_owner_caps_v2` present), so current
+  sources are compatible. Takes effect on the next redeploy.
+- **Keeper crank suite** (SO-290): per vault per tick — settle due/dead
+  RFQ auctions, redeem expired positions (both adapter tags), sweep
+  settled amounts per custody pool, receive vault_mm transfer-ins
+  (Positions and option coins as positions; catalog membership decides
+  coin-vs-option-coin routing), force-unwind on queue starvation (head
+  age read from the queue table df), then fulfillment with a full
+  composed appraisal. Abort codes 82/83/78 and deadline/expiry races
+  classify benign; everything else raises `tx-failed-keeper`.
+- **mm-bot vault mode** (SO-291): parallel quoter through the adapter
+  entry points with the CuratorCap in the bot wallet; reuses the plain
+  quoter's pricing; fixed per-side size (custody funding is the
+  curator's out-of-band concern); mutually exclusive with the plain
+  quoter; `client_order_id = (unix_minute << 16) | (pool_index << 8) |
+  side` (SO-294 slice).
+- **Analytics are event-derived, no snapshot cron** (SO-293): pps series
+  from TvDeposited (`amount/shares`) + TvWithdrawFulfilled
+  (`value/shares`), per-address stake replayed from deposit/request
+  events (address stakes only; 5000-event scan cap, oldest dropped).
+  Honest v1: the series is only as dense as vault activity; a devInspect
+  NAV cron remains open if charts need uniform sampling.
+- **Sponsorship posture**: cash-only deposits/withdrawals sponsored;
+  attestation-bearing deposits are NOT (their PTBs carry pyth/wormhole
+  legs foreign to the template allowlist) — users pay their own gas on
+  those until pyth targets are template-allowed. Curator/session ops
+  stay unsponsored by design.
+- **Activation is now deploy-time** (SO-292): deployment-manager
+  resolves the governance objects from publish effects, runs the
+  witness-allowlist + feed-seeding PTB, and records
+  `trading_vault_objects` into deployments.json (services prefer it,
+  publish-effects discovery remains the fallback); the option-scheduler
+  allowlists every pool a roll creates (best-effort, alerts on failure);
+  `tools/trading-vault-smoke` exercises the live deployment end to end
+  (create → deposit → custody → wrapped-BM order → composed appraisal →
+  queue → full exit) with a `--skip-deepbook` cash-only mode.
+- **modify_order** added to the DeepBook adapter (SO-294); premium
+  mark-to-market remains open — it needs a vol-attestation oracle
+  design, not just plumbing.
+
+## 10. Known follow-ups (explicitly out of this pass)
+
+1. Premium mark-to-market for option positions (needs a vol-attestation
+   oracle adapter design).
+2. Held-option-coin appraisal in the composer (indexer bucket lookup).
+3. Pyth-leg gas-station templates so attestation-bearing deposits can be
+   sponsored.
+4. devInspect NAV cron if event-derived pps proves too sparse for
+   charts.
+5. Covered-call vault merge (per epic decision: later; migration seeds
    cost basis at migration-day NAV).

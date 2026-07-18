@@ -1,0 +1,6 @@
+# House DEEP token publish (deployments.json deepCoinType).
+[published.testnet]
+chain-id = "4c78adac"
+published-at = "0x839472bcaa05bda0b7b26c69d7acba462829047bdbdb67a00a1d3b876e72220e"
+original-id = "0x839472bcaa05bda0b7b26c69d7acba462829047bdbdb67a00a1d3b876e72220e"
+version = 1

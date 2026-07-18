@@ -16,6 +16,7 @@ protocol-types = { workspace = true }
 runtime-config = { workspace = true }
 cli-spec       = { workspace = true }
 sui-tx         = { workspace = true }
+hex            = "0.4"
 deployments    = { workspace = true }
 move-publish   = { workspace = true }
 

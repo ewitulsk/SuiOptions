@@ -153,3 +153,22 @@ TWAL = 1.0
 # the local stack serves deepbook ids from token-info.
 [deepbook]
 enabled = false
+
+# Trading-vault DeepBook quoting (SO-291): quote through a curated trading
+# vault's DeepBook custody (deepbook-adapter curator calls) instead of the
+# bot's own BalanceManager. Mutually exclusive with [deepbook] — if both are
+# enabled, vault mode wins. Cadence / sizing / batching knobs
+# (quote_interval_secs, quote_size, order_lifetime_secs, expiry_cutoff_secs,
+# max_pools_per_tx, gas_budget) are reused from the [deepbook] section above.
+# PREREQUISITE: the bot's Sui wallet must hold the vault's CuratorCap (every
+# adapter call takes it by reference), and the custody must be funded from
+# the vault's free balances out of band.
+# [trading_vault]
+# enabled        = true
+# # Shared TradingVault object id.
+# vault_id       = "0x..."
+# # The vault's CuratorCap object id (owned by this bot's wallet).
+# curator_cap_id = "0x..."
+# # DeepBookCustody position id. Leave empty on first run: the bot calls
+# # init_custody once at boot and logs the id — persist it here afterwards.
+# custody_id     = ""

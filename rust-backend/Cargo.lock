@@ -2488,6 +2488,7 @@ dependencies = [
  "clap",
  "cli-spec",
  "deployments",
+ "hex",
  "move-core-types",
  "move-publish",
  "protocol-types",
@@ -11939,6 +11940,27 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "trading-vault-smoke"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "deployments",
+ "move-core-types",
+ "protocol-types",
+ "reqwest",
+ "serde_json",
+ "shared-crypto",
+ "sui-json-rpc-types",
+ "sui-sdk",
+ "sui-tx",
+ "sui-types",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -116,6 +116,27 @@ quote_full_inventory = true
 tusdc_deposit_chunk = 1_000_000_000
 gas_budget          = 200_000_000
 
+# Trading-vault DeepBook quoting (SO-291): quote through a curated trading
+# vault's DeepBook custody (deepbook-adapter curator calls) instead of the
+# bot's own BalanceManager. Mutually exclusive with [deepbook] — if both are
+# enabled, vault mode wins (so flip [deepbook].enabled off when enabling
+# this). Cadence / sizing / batching knobs (quote_interval_secs, quote_size,
+# order_lifetime_secs, expiry_cutoff_secs, max_pools_per_tx, gas_budget) are
+# reused from the [deepbook] section above; quote_full_inventory does not
+# apply (vault mode always quotes fixed quote_size per side).
+# PREREQUISITE: the bot's Sui wallet must hold the vault's CuratorCap (every
+# adapter call takes it by reference), and the custody must be funded from
+# the vault's free balances out of band.
+# [trading_vault]
+# enabled        = true
+# # Shared TradingVault object id.
+# vault_id       = "0x..."
+# # The vault's CuratorCap object id (owned by this bot's wallet).
+# curator_cap_id = "0x..."
+# # DeepBookCustody position id. Leave empty on first run: the bot calls
+# # init_custody once at boot and logs the id — persist it here afterwards.
+# custody_id     = ""
+
 # On-chain RFQ bidder (C2): the mm-bot is the intended counterparty for the
 # vaults' on-chain RFQ auctions. Poll open auctions, price them with the same
 # Black-Scholes brain, and bid from the wallet under the escrow cap. Without

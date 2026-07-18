@@ -8,6 +8,7 @@ pub mod deploy;
 pub mod json_store;
 pub mod network;
 pub mod signer;
+pub mod trading_vault_init;
 
 use std::path::PathBuf;
 

@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
             // The manual tool rolls buckets only; pool creation stays with
             // the scheduler (pass None).
             let out =
-                roller::submit(&wrap, package, admin_cap, &plan, None, cli.gas_budget).await?;
+                roller::submit(&wrap, package, admin_cap, &plan, None, None, cli.gas_budget).await?;
             println!("✓ create-buckets digest: {}", out.digest);
             for id in &out.bucket_ids {
                 println!("  bucket: {id}");

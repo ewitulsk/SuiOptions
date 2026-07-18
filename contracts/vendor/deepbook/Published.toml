@@ -1,0 +1,9 @@
+# The HOUSE DeepBook deployment (see rust-backend/deployments.json
+# `deepbook` block): the scheduler's option pools and mm-bot's
+# BalanceManager live here, so the trading-vault adapter must link THIS
+# publish, not the canonical MystenLabs one the upstream repo pins.
+[published.testnet]
+chain-id = "4c78adac"
+published-at = "0x725378acc0bb8b9273cef82171f64f87d5c0348b189318d3f682db5024f42431"
+original-id = "0x725378acc0bb8b9273cef82171f64f87d5c0348b189318d3f682db5024f42431"
+version = 1

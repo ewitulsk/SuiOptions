@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use sui_types::base_types::{ObjectID, SuiAddress};
 use tracing::{info, warn};
 
-pub use deployments::{DeepBookInfo, PackageInfo, SubPackageInfo, TestTokens, TokenInfo};
+pub use deployments::{TradingVaultObjectsInfo, DeepBookInfo, PackageInfo, SubPackageInfo, TestTokens, TokenInfo};
 
 /// One supported-token catalog entry as served by `GET /tokens`.
 ///
@@ -155,6 +155,12 @@ impl Snapshot {
     /// Options RFQ-writer adapter for the trading vault (SO-285).
     pub fn options_adapter(&self) -> Option<&SubPackageInfo> {
         self.package_info.options_adapter.as_ref()
+    }
+
+    /// Trading-vault governance objects (registries, feed registry, pool
+    /// allowlist) recorded by the deploy-time activation step (SO-292).
+    pub fn trading_vault_objects(&self) -> Option<&TradingVaultObjectsInfo> {
+        self.package_info.trading_vault_objects.as_ref()
     }
 
     // --- faucet accessors (testTokens passthrough) -------------------------

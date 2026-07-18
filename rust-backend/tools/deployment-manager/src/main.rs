@@ -22,7 +22,7 @@ use deployment_manager::deploy::{
 };
 use deployment_manager::json_store::{
     CctpBridgeRecord, Deployments, NetworkDeployment, PackageInfo, PackageRecord,
-    TestTokenRecord, TestTokensRecord, TokenSpec,
+    TestTokenRecord, TestTokensRecord, TokenSpec, TradingVaultObjectsRecord,
 };
 use deployment_manager::network::Network;
 use deployment_manager::signer::Signer;
@@ -386,6 +386,44 @@ async fn deploy_one(
         previous_token_info
     };
 
+    // Activate the trading-vault family (SO-292): allowlist witnesses,
+    // seed Pyth feeds from the catalog, and record the governance object
+    // ids so services stop re-deriving them from publish digests. Pools
+    // are allowlisted per roll by the option-scheduler, not here.
+    let trading_vault_objects = {
+        let objects = deployment_manager::trading_vault_init::resolve_objects(
+            &client,
+            &trading_vault_out.digest,
+            &oracle_pyth_out.digest,
+            &deepbook_adapter_out.digest,
+        )
+        .await
+        .context("resolving trading-vault governance objects")?;
+        let activation_digest = deployment_manager::trading_vault_init::activate(
+            &client,
+            &signer,
+            &objects,
+            publish.admin_cap_id,
+            trading_vault_out.package_id,
+            oracle_pyth_out.package_id,
+            deepbook_adapter_out.package_id,
+            options_adapter_out.package_id,
+            &token_info,
+            gas_budget,
+        )
+        .await
+        .context("activating trading-vault registries")?;
+        tracing::info!(digest = %activation_digest, "trading-vault registries activated");
+        Some(TradingVaultObjectsRecord {
+            vault_protocol_config_id: objects.vault_protocol_config_id.to_string(),
+            integration_registry_id: objects.integration_registry_id.to_string(),
+            oracle_registry_id: objects.oracle_registry_id.to_string(),
+            pyth_feed_registry_id: objects.pyth_feed_registry_id.to_string(),
+            pool_allowlist_id: objects.pool_allowlist_id.to_string(),
+            activation_digest,
+        })
+    };
+
     Ok(NetworkDeployment {
         package_info: PackageInfo {
             package_id: publish.package_id.to_string(),
@@ -407,6 +445,7 @@ async fn deploy_one(
             oracle_pyth,
             deepbook_adapter,
             options_adapter,
+            trading_vault_objects,
             cctp_bridge: previous_cctp,
         },
         token_info,

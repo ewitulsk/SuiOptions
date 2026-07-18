@@ -261,11 +261,120 @@ fn reserve_fee_headroom(inventory: u64, bps: u64) -> u64 {
     ((inventory as u128).saturating_mul(keep) / 10_000) as u64
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+// -- Shared planning (SO-291) ------------------------------------------------
+//
+// The pricing half of the quote cycle is identical whether the orders rest in
+// the bot's own BalanceManager (this module) or a curated trading vault's
+// DeepBook custody (`vault_deepbook`); these helpers are that shared half.
+
+/// Spot + sigma for one market from the live cache. `None` when the feed is
+/// stale — callers leave that market's books as-is (orders self-expire).
+pub(crate) fn market_spot(
+    price_cache: &PriceCache,
+    m: &QuoterMarket,
+    settlement_feed: PriceFeedId,
+    settlement_decimals: u8,
+    staleness: Staleness,
+) -> Option<(f64, SigmaEstimate)> {
+    match compute_spot_from_cache(
+        price_cache,
+        m.feed,
+        settlement_feed,
+        m.decimals,
+        settlement_decimals,
+        staleness,
+    ) {
+        Ok(spot) => Some((
+            spot,
+            resolve_sigma(
+                m.vol_buf.read().current_annualized(),
+                m.vol_buf_long.read().current_annualized(),
+                m.fallback_vol,
+            ),
+        )),
+        Err(e) => {
+            tracing::warn!(
+                market = %m.symbol,
+                reason = e.as_str(),
+                "deepbook: no fresh spot; leaving this market's books as-is"
+            );
+            None
+        }
+    }
+}
+
+/// One bucket's two-sided fair quote on the DeepBook price grid, plus the
+/// pool's sizing grid.
+pub(crate) struct BucketQuote {
+    pub ask_raw: u64,
+    pub bid_raw: u64,
+    pub mid_raw: u64,
+    pub lot: u64,
+    pub min_size: u64,
+}
+
+/// Price one tradeable bucket with the RFQ engine (both sides) and round
+/// onto the pool's tick grid — up for the ask, down for the bid, always away
+/// from mid. `None` when either side prices/rounds to zero (not quotable).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn price_bucket_quote(
+    pricing: &PricingConfig,
+    market: &QuoterMarket,
+    b: &TradeableBucket,
+    quote_size: u64,
+    settlement_decimals: u8,
+    spot_scaled: f64,
+    sigma: SigmaEstimate,
+    now: u64,
+) -> Option<BucketQuote> {
+    let price_for = |side: Side| -> Option<f64> {
+        let inputs = RfqPricingInputs {
+            write_amount: quote_size,
+            side,
+            strike: b.strike_raw,
+            strike_scale: b.strike_scale,
+            expiry_ms: b.expiry_ms,
+            is_put: false, // deepbook quoting is call-only
+        };
+        let cfg_m = PricingConfig { smile: market.smile, ..*pricing };
+        match price_rfq(&cfg_m, &inputs, spot_scaled, sigma, now) {
+            PriceDecision::Quote { per_unit, .. } => Some(per_unit),
+            PriceDecision::Decline { .. } => None,
+        }
+    };
+    let (Some(ask_unit), Some(bid_unit)) = (price_for(Side::Trader), price_for(Side::Writer))
+    else {
+        tracing::debug!(pool = %b.pool_id, "priced to zero; not quoting");
+        return None;
+    };
+
+    let base_dec = b.asset_decimals.unwrap_or(market.decimals);
+    let quote_dec = b.settlement_decimals.unwrap_or(settlement_decimals);
+    let (tick, lot, min_size) = derived_pool_params(base_dec, quote_dec);
+
+    let ask_raw = {
+        let raw = (ask_unit * 1e9).ceil() as u64;
+        raw.div_ceil(tick).max(1) * tick
+    };
+    let bid_raw = ((bid_unit * 1e9).floor() as u64 / tick) * tick;
+    if bid_raw == 0 {
+        tracing::debug!(pool = %b.pool_id, "bid rounds to zero; not quoting");
+        return None;
+    }
+    Some(BucketQuote {
+        ask_raw,
+        bid_raw,
+        mid_raw: (ask_raw + bid_raw) / 2,
+        lot,
+        min_size,
+    })
 }
 
 pub fn spawn_quoter(p: QuoterParams) {
@@ -454,32 +563,13 @@ async fn cycle(
     let mut spots: HashMap<usize, Option<(f64, SigmaEstimate)>> = HashMap::new();
     for (_, mi) in &ours {
         spots.entry(*mi).or_insert_with(|| {
-            let m = &p.markets[*mi];
-            match compute_spot_from_cache(
+            market_spot(
                 &p.price_cache,
-                m.feed,
+                &p.markets[*mi],
                 p.settlement_feed,
-                m.decimals,
                 p.settlement_decimals,
                 p.staleness,
-            ) {
-                Ok(spot) => Some((
-                    spot,
-                    resolve_sigma(
-                        m.vol_buf.read().current_annualized(),
-                        m.vol_buf_long.read().current_annualized(),
-                        m.fallback_vol,
-                    ),
-                )),
-                Err(e) => {
-                    tracing::warn!(
-                        market = %m.symbol,
-                        reason = e.as_str(),
-                        "deepbook: no fresh spot; leaving this market's books as-is"
-                    );
-                    None
-                }
-            }
+            )
         });
     }
 
@@ -529,42 +619,19 @@ async fn cycle(
             continue;
         }
 
-        // Fair value: same engine, both sides.
-        let price_for = |side: Side| -> Option<f64> {
-            let inputs = RfqPricingInputs {
-                write_amount: p.cfg.quote_size,
-                side,
-                strike: b.strike_raw,
-                strike_scale: b.strike_scale,
-                expiry_ms: b.expiry_ms,
-                is_put: false, // deepbook quoting is call-only
-            };
-            let cfg_m = PricingConfig { smile: p.markets[*mi].smile, ..p.pricing };
-            match price_rfq(&cfg_m, &inputs, *spot_scaled, *sigma, now) {
-                PriceDecision::Quote { per_unit, .. } => Some(per_unit),
-                PriceDecision::Decline { .. } => None,
-            }
-        };
-        let (Some(ask_unit), Some(bid_unit)) = (price_for(Side::Trader), price_for(Side::Writer))
-        else {
-            tracing::debug!(pool = %pool_key, "priced to zero; not quoting");
+        // Fair value: same engine, both sides (shared with the vault quoter).
+        let Some(BucketQuote { ask_raw, bid_raw, mid_raw, lot, min_size }) = price_bucket_quote(
+            &p.pricing,
+            &p.markets[*mi],
+            b,
+            p.cfg.quote_size,
+            p.settlement_decimals,
+            *spot_scaled,
+            *sigma,
+            now,
+        ) else {
             continue;
         };
-
-        let base_dec = b.asset_decimals.unwrap_or(p.markets[*mi].decimals);
-        let quote_dec = b.settlement_decimals.unwrap_or(p.settlement_decimals);
-        let (tick, lot, min_size) = derived_pool_params(base_dec, quote_dec);
-
-        let ask_raw = {
-            let raw = (ask_unit * 1e9).ceil() as u64;
-            raw.div_ceil(tick).max(1) * tick
-        };
-        let bid_raw = ((bid_unit * 1e9).floor() as u64 / tick) * tick;
-        if bid_raw == 0 {
-            tracing::debug!(pool = %pool_key, "bid rounds to zero; not quoting");
-            continue;
-        }
-        let mid_raw = (ask_raw + bid_raw) / 2;
 
         // Call-coin inventory (BM + wallet), distinct per pool. Read before the
         // skip check so a change in inventory (newly swept fills) forces a

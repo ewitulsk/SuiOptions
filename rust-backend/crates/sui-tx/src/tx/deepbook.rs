@@ -231,6 +231,35 @@ pub async fn create_pool(
     Ok(pool)
 }
 
+/// Vet pools for trading-vault curators (SO-292): one PTB of
+/// `deepbook_adapter::allow_pool` calls, AdminCap-gated. Used by the
+/// option-scheduler after each roll so the allowlist never goes stale.
+pub async fn allow_pools_for_vault(
+    client: &SuiClient,
+    signer: &Signer,
+    adapter_pkg: ObjectID,
+    admin_cap: ObjectID,
+    allowlist_id: ObjectID,
+    pool_ids: &[ObjectID],
+    gas_budget: u64,
+) -> Result<()> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let admin = pt.obj(crate::tx::owned_object_arg(client, admin_cap).await?)?;
+    let list = pt.obj(shared_object_arg(client, allowlist_id, true).await?)?;
+    for pool_id in pool_ids {
+        let arg = pt.pure(pool_id)?;
+        pt.programmable_move_call(
+            adapter_pkg,
+            Identifier::new("deepbook_adapter").unwrap(),
+            Identifier::new("allow_pool").unwrap(),
+            vec![],
+            vec![admin, list, arg],
+        );
+    }
+    crate::tx::submit_ptb(client, signer, pt, gas_budget, "deepbook_adapter::allow_pool").await?;
+    Ok(())
+}
+
 /// Pull the created `pool::Pool<_, _>` object id out of a tx's ObjectChanges.
 fn pool_id_from_changes(changes: &[ObjectChange]) -> Option<ObjectID> {
     changes.iter().find_map(|c| match c {

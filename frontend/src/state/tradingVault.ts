@@ -8,6 +8,7 @@ import { useCurrentAccount } from "@mysten/dapp-kit";
 import type { Transaction } from "@mysten/sui/transactions";
 
 import { useSubmitTransaction } from "../tx/submit";
+import { buildAppraisedDepositTx, type AppraisedDepositParams } from "../tx/appraisal";
 import {
   buildCreateTradingVaultTx,
   buildTradingVaultDepositTx,
@@ -42,8 +43,13 @@ export function useTradingVaultActions() {
   }
 
   // One runner for every action: build the wallet PTB and submit it through
-  // `submitTx` (sponsored when the Gas toggle is on).
-  async function run(label: string, okMsg: string, buildTx: () => Transaction) {
+  // `submitTx` (sponsored when the Gas toggle is on). Builders may be async —
+  // the appraised deposit fetches a Hermes price update while building.
+  async function run(
+    label: string,
+    okMsg: string,
+    buildTx: () => Transaction | Promise<Transaction>,
+  ) {
     if (!address) {
       showToast({ message: "Connect a wallet to continue.", variant: "error" });
       return;
@@ -51,7 +57,7 @@ export function useTradingVaultActions() {
     setBusy(label);
     setToast(null);
     try {
-      await submitTx(buildTx());
+      await submitTx(await buildTx());
       showToast({ message: okMsg, variant: "success" });
       refresh();
     } catch (err) {
@@ -78,6 +84,15 @@ export function useTradingVaultActions() {
         "depositing",
         "Deposit complete — shares minted at NAV.",
         () => buildTradingVaultDepositTx(params),
+      ),
+
+    // SO-289: appraisal-composed deposit — values every held asset and
+    // custodied position in the same PTB so `deposit` sees a complete NAV.
+    depositAppraised: (params: AppraisedDepositParams) =>
+      run(
+        "depositing",
+        "Deposit complete — shares minted at NAV.",
+        () => buildAppraisedDepositTx(params),
       ),
 
     requestWithdraw: (params: TradingVaultWithdrawParams) =>
