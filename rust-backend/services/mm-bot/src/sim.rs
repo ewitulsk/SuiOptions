@@ -957,19 +957,15 @@ async fn taker_tick(
     let a_qty = pt.pure(qty)?;
     let a_bid = pt.pure(is_bid)?;
     let a_deep = pt.pure(false)?;
+    // No settled-amounts sweep here: an owner-proof market order settles its
+    // fills straight into the BM, so a same-PTB permissionless sweep finds
+    // nothing and aborts the whole tx with ENoBalanceToSettle.
     pt.programmable_move_call(
         p.handles.package,
         Identifier::new("pool").unwrap(),
         Identifier::new("place_market_order").unwrap(),
-        tags.clone(),
-        vec![pool, bm, proof, a_client, a_self, a_qty, a_bid, a_deep, clock],
-    );
-    pt.programmable_move_call(
-        p.handles.package,
-        Identifier::new("pool").unwrap(),
-        Identifier::new("withdraw_settled_amounts_permissionless").unwrap(),
         tags,
-        vec![pool, bm],
+        vec![pool, bm, proof, a_client, a_self, a_qty, a_bid, a_deep, clock],
     );
     submit_ptb(&wrap.client, &wrap.signer, pt, p.cfg.gas_budget, "sim::taker_order").await?;
     info!(pool = %b.pool_id, qty, is_bid, "[sim] taker crossed");
