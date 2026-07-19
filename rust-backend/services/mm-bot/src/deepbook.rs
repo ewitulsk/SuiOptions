@@ -393,7 +393,15 @@ async fn run(p: QuoterParams) -> anyhow::Result<()> {
     let bm_id = match &p.cfg.balance_manager_id {
         Some(s) => ObjectID::from_hex_literal(s)
             .map_err(|e| anyhow::anyhow!("bad deepbook.balance_manager_id {s}: {e}"))?,
-        None => match find_balance_manager(&wrap.client, &p.handles, wrap.signer.address).await? {
+        // The event scan pages historical txs, which pruned public
+        // fullnodes cannot serve — treat scan FAILURE like scan-empty and
+        // fall through to creation instead of killing the quoter task.
+        None => match find_balance_manager(&wrap.client, &p.handles, wrap.signer.address)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %format!("{e:#}"), "BalanceManager scan failed (pruned node?); creating fresh");
+                None
+            }) {
             Some(id) => {
                 tracing::info!(balance_manager = %id, "recovered registered BalanceManager");
                 id

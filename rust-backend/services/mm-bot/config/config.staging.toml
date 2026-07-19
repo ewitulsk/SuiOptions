@@ -96,6 +96,7 @@ TWAL = 1.0
 # to skip the event scan at boot:
 #   balance_manager_id = "0x…"
 [deepbook]
+balance_manager_id = "0x83f3c5fcee34cce2b678c2e13c2f0b8ff45680a1e570152dc1d8c0a5eb269e48"
 enabled             = true
 # SO-173: refresh on-chain quotes once a day, and place every pool's quotes in
 # one (chunked) tx. order_lifetime matches the cadence, so a missed daily
@@ -158,3 +159,6 @@ enabled = true
 # lazy pool-creation fee (the sim warns with the exact shortfall).
 [sim]
 enabled = true
+# Pinned so boot never depends on event scans or racing BM creation
+# (this wallet is shared with the keeper/scheduler).
+taker_balance_manager_id = "0xd8a379b403e5b2d628104fabd52cf2266bc42e27e81a9d0a7723e39285828309"
