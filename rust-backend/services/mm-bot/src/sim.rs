@@ -445,11 +445,23 @@ async fn spot_loop(p: &SimParams, shared: Arc<tokio::sync::Mutex<Vec<SpotPool>>>
     let bm_id = match p.cfg.spot_balance_manager_id.as_deref() {
         Some(id) if !id.is_empty() => ObjectID::from_hex_literal(id)?,
         _ => {
-            let id = create_balance_manager(&wrap.client, &wrap.signer, &p.handles, p.cfg.gas_budget)
-                .await
-                .context("creating sim spot BalanceManager")?;
-            info!(bm = %id, "[sim] created spot BalanceManager — persist as [sim].spot_balance_manager_id");
-            id
+            let mut created = None;
+            for attempt in 1..=8u32 {
+                match create_balance_manager(&wrap.client, &wrap.signer, &p.handles, p.cfg.gas_budget)
+                    .await
+                {
+                    Ok(id) => {
+                        info!(bm = %id, "[sim] created spot BalanceManager — persist as [sim].spot_balance_manager_id");
+                        created = Some(id);
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(attempt, error = %format!("{e:#}"), "[sim] spot BM creation failed; retrying");
+                        tokio::time::sleep(Duration::from_secs(15)).await;
+                    }
+                }
+            }
+            created.ok_or_else(|| anyhow!("spot BalanceManager creation kept failing"))?
         }
     };
 
@@ -693,15 +705,29 @@ async fn taker_loop(p: &SimParams, spot_pools: Arc<tokio::sync::Mutex<Vec<SpotPo
     let api = ApiServiceClient::new(p.api_url.clone());
     let mut rng = Rng::new();
 
-    // The taker's own BM (never the maker's): configured or created.
+    // The taker's own BM (never the maker's): configured or created —
+    // with retries, because boot-time gas-coin races with the other
+    // services sharing this wallet are routine.
     let bm_id = match p.cfg.taker_balance_manager_id.as_deref() {
         Some(id) if !id.is_empty() => ObjectID::from_hex_literal(id)?,
         _ => {
-            let id = create_balance_manager(&wrap.client, &wrap.signer, &p.handles, p.cfg.gas_budget)
-                .await
-                .context("creating sim taker BalanceManager")?;
-            info!(bm = %id, "[sim] created taker BalanceManager — persist as [sim].taker_balance_manager_id");
-            id
+            let mut created = None;
+            for attempt in 1..=8u32 {
+                match create_balance_manager(&wrap.client, &wrap.signer, &p.handles, p.cfg.gas_budget)
+                    .await
+                {
+                    Ok(id) => {
+                        info!(bm = %id, "[sim] created taker BalanceManager — persist as [sim].taker_balance_manager_id");
+                        created = Some(id);
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(attempt, error = %format!("{e:#}"), "[sim] taker BM creation failed; retrying");
+                        tokio::time::sleep(Duration::from_secs(15)).await;
+                    }
+                }
+            }
+            created.ok_or_else(|| anyhow!("taker BalanceManager creation kept failing"))?
         }
     };
 
