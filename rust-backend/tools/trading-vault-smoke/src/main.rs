@@ -51,6 +51,10 @@ struct Cli {
     /// Skip the DeepBook leg (vault-core-only smoke).
     #[arg(long, default_value_t = false)]
     skip_deepbook: bool,
+    /// Stop after create/deposit/custody-fund and leave the vault live
+    /// (for pointing a vault-mode mm-bot at it). Prints the ids to keep.
+    #[arg(long, default_value_t = false)]
+    keep_open: bool,
 }
 
 fn load_signer(address: &str) -> Result<Signer> {
@@ -355,6 +359,14 @@ async fn main() -> Result<()> {
         );
         submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::custody_fund").await?;
         step.ok();
+
+        if cli.keep_open {
+            println!("\nvault left open:");
+            println!("    vault_id       = \"{vault_id}\"");
+            println!("    curator_cap_id = \"{cap_id}\"");
+            println!("    custody_id     = \"{custody_id}\"");
+            return Ok(());
+        }
 
         // Pick an allowlisted pool quoted in the deposit asset.
         let step = Step("place resting bid through wrapped BM");
