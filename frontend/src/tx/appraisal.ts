@@ -32,6 +32,7 @@ import {
 } from "@mysten/sui/transactions";
 import { fromBase64, fromHex, normalizeStructTag, parseStructTag, toHex } from "@mysten/sui/utils";
 
+import { fetchBuckets, optionCoinType, seriesOptionType } from "../api/client";
 import { HERMES_BASE } from "../api/pyth";
 import { tokenForCoinType, type TradingVaultDetail } from "../api/tradingVaults";
 import {
@@ -99,7 +100,24 @@ export type OptionPositionPlan = {
   isPut: boolean;
   /** Canonical `Bucket<U,S,C>` / `PutBucket<U,S,P>` type args, in order. */
   bucketTypeArgs: [string, string, string];
+  /** VaultMm-tagged positions must appraise through `vault_mm` — the
+   * appraisal witness has to match the position's adapter tag. */
+  viaVaultMm: boolean;
 };
+
+/** One option-coin type the vault holds (custody balance or pool leg),
+ * priced via `options_oracle::attest_call/put` from its bucket. */
+export type OptionLegPlan = {
+  /** Canonical option coin type. */
+  coinType: string;
+  bucketId: string;
+  underlying: string;
+  settlement: string;
+  isPut: boolean;
+};
+
+/** A held option coin custodied as a position (vault_mm writer flow). */
+export type OptionCoinPlan = OptionLegPlan & { positionId: string };
 
 export type AppraisalPlan = {
   vaultId: string;
@@ -110,6 +128,10 @@ export type AppraisalPlan = {
   custodies: CustodyPlan[];
   rfqTickets: RfqTicketPlan[];
   optionPositions: OptionPositionPlan[];
+  /** Option-coin types priced via the options oracle (not Pyth). */
+  optionLegs: OptionLegPlan[];
+  /** Held option coins custodied as positions. */
+  optionCoins: OptionCoinPlan[];
   /** Non-deposit assets needing one `attest` each (canonical). */
   attestTypes: string[];
   /** Canonical coin type → Pyth feed id (lower-case hex, no 0x). Includes the
@@ -249,6 +271,24 @@ function feedIdFor(coinType: string): string | null {
   return (feed.startsWith("0x") ? feed.slice(2) : feed).toLowerCase();
 }
 
+/** Option-coin type → bucket identity, from the api-service bucket catalog
+ * (expired series included — their coins still need zero/dust marks). */
+async function optionBucketCatalog(): Promise<Map<string, Omit<OptionLegPlan, "coinType">>> {
+  const series = await fetchBuckets();
+  const map = new Map<string, Omit<OptionLegPlan, "coinType">>();
+  for (const s of series) {
+    for (const b of s.buckets) {
+      map.set(canon(optionCoinType(b)), {
+        bucketId: b.bucket_id,
+        underlying: canon(s.asset_coin_type),
+        settlement: canon(s.settlement_coin_type),
+        isPut: seriesOptionType(s) === "put",
+      });
+    }
+  }
+  return map;
+}
+
 /**
  * Discover the vault's holdings and pre-resolve everything the composer
  * needs. Throws with a human-readable reason when a deposit cannot be
@@ -283,13 +323,14 @@ export async function planAppraisal(
   const custodies: CustodyPlan[] = [];
   const rfqTickets: RfqTicketPlan[] = [];
   const optionPositions: OptionPositionPlan[] = [];
+  const coinPositions: { positionId: string; coinType: string }[] = [];
 
   if (active.length > 0) {
     const { objects } = await client.core.getObjects({
       objectIds: active.map((p) => p.positionId),
       include: { json: true },
     });
-    const bucketNeeded: { positionId: string; bucketId: string }[] = [];
+    const bucketNeeded: { positionId: string; bucketId: string; viaVaultMm: boolean }[] = [];
     for (let i = 0; i < active.length; i++) {
       const obj = objects[i];
       if (obj instanceof Error) {
@@ -330,7 +371,14 @@ export async function planAppraisal(
       } else if (type.endsWith("::position::Position") || "range_start" in fields) {
         const bucketId = idString(fields.bucket_id);
         if (!bucketId) throw new Error(`Option position ${obj.objectId} has no bucket_id`);
-        bucketNeeded.push({ positionId: obj.objectId, bucketId });
+        bucketNeeded.push({
+          positionId: obj.objectId,
+          bucketId,
+          viaVaultMm: active[i].adapter.endsWith("::vault_mm::VaultMm"),
+        });
+      } else if (type.includes("::coin::Coin<")) {
+        const inner = parseStructTag(type).typeParams[0];
+        coinPositions.push({ positionId: obj.objectId, coinType: normalizeStructTag(inner) });
       } else {
         throw new Error(`Unrecognized custodied position type ${shortType(type)}`);
       }
@@ -354,6 +402,7 @@ export async function planAppraisal(
         optionPositions.push({
           positionId: bucketNeeded[i].positionId,
           bucketId: bucketNeeded[i].bucketId,
+          viaVaultMm: bucketNeeded[i].viaVaultMm,
           isPut,
           bucketTypeArgs: [
             normalizeStructTag(tag.typeParams[0]),
@@ -391,6 +440,38 @@ export async function planAppraisal(
   if (anyPools && deepCanon && deepCanon !== depositType && feedIdFor(deepCanon)) {
     deepType = deepCanon;
     needed.add(deepCanon);
+  }
+
+  // Option-coin types price via `options_oracle` from their bucket, not
+  // Pyth: swap each mapped type out of the Pyth set and pull its bucket's
+  // underlying + settlement legs in. Held coin positions contribute their
+  // legs the same way.
+  const optionLegs: OptionLegPlan[] = [];
+  const optionCoins: OptionCoinPlan[] = [];
+  if (needed.size > 0 || coinPositions.length > 0) {
+    const catalog = await optionBucketCatalog();
+    for (const t of [...needed]) {
+      const leg = catalog.get(t);
+      if (!leg) continue;
+      needed.delete(t);
+      optionLegs.push({ ...leg, coinType: t });
+      if (leg.underlying !== depositType) needed.add(leg.underlying);
+      if (leg.settlement !== depositType) needed.add(leg.settlement);
+    }
+    for (const cp of coinPositions) {
+      const leg = catalog.get(cp.coinType);
+      if (!leg) {
+        throw new Error(
+          `Held option coin ${shortType(cp.coinType)} has no bucket in the catalog`,
+        );
+      }
+      optionCoins.push({ ...leg, coinType: cp.coinType, positionId: cp.positionId });
+      if (leg.underlying !== depositType) needed.add(leg.underlying);
+      if (leg.settlement !== depositType) needed.add(leg.settlement);
+    }
+    if ((optionLegs.length > 0 || optionCoins.length > 0) && !OPTIONS_ADAPTER_PACKAGE_ID) {
+      throw new Error("options-adapter package not deployed on this network");
+    }
   }
 
   // Optimistic legs (mirrors the Rust composer): types with no served feed —
@@ -449,6 +530,8 @@ export async function planAppraisal(
       custodies,
       rfqTickets,
       optionPositions,
+      optionLegs,
+      optionCoins,
       attestTypes,
       feedIdByType,
       priceInfoByFeed,
@@ -471,6 +554,8 @@ export async function planAppraisal(
     custodies,
     rfqTickets,
     optionPositions,
+    optionLegs,
+    optionCoins,
     attestTypes,
     feedIdByType,
     priceInfoByFeed: {},
@@ -658,6 +743,24 @@ export function composeAppraisal(
   const optAtt = (asset: string): TransactionArgument =>
     asset === plan.depositType || !attestations.has(asset) ? noneAtt() : someAtt(asset);
 
+  // 3b. Option-coin attestations: intrinsic via the options oracle, fed by
+  // the Pyth legs above (`none` for deposit-asset legs or once expired; a
+  // live bucket with a genuinely missing leg aborts on-chain).
+  if (plan.optionLegs.length > 0) {
+    const oa = requireId(OPTIONS_ADAPTER_PACKAGE_ID, "options-adapter package");
+    const gov = TRADING_VAULT_OBJECTS;
+    if (!gov) throw new Error("trading-vault governance objects unavailable");
+    const oracleReg = tx.object(gov.oracleRegistryId);
+    for (const leg of plan.optionLegs) {
+      const att = tx.moveCall({
+        target: `${oa}::options_oracle::${leg.isPut ? "attest_put" : "attest_call"}`,
+        typeArguments: [leg.underlying, leg.settlement, leg.coinType, plan.depositType],
+        arguments: [oracleReg, tx.object(leg.bucketId), optAtt(leg.underlying), optAtt(leg.settlement), clock],
+      });
+      attestations.set(leg.coinType, att);
+    }
+  }
+
   // 4. Non-deposit free balances.
   for (const t of plan.freeBalanceTypes) {
     const att = attestations.get(t);
@@ -719,8 +822,13 @@ export function composeAppraisal(
     }
     for (const pos of plan.optionPositions) {
       const [underlying, settlement] = pos.bucketTypeArgs;
+      const fn = pos.isPut ? "appraise_put_position" : "appraise_call_position";
+      // The appraisal witness must match the position's adapter tag.
+      const target = pos.viaVaultMm
+        ? `${vaultPkg}::vault_mm::${fn}`
+        : `${adapterPkg}::options_adapter::${fn}`;
       tx.moveCall({
-        target: `${adapterPkg}::options_adapter::${pos.isPut ? "appraise_put_position" : "appraise_call_position"}`,
+        target,
         typeArguments: pos.bucketTypeArgs,
         arguments: [
           vault,
@@ -734,6 +842,24 @@ export function composeAppraisal(
         ],
       });
     }
+  }
+
+  // 6b. Held option coins (vault_mm writer-flow custody).
+  for (const oc of plan.optionCoins) {
+    tx.moveCall({
+      target: `${vaultPkg}::vault_mm::${oc.isPut ? "appraise_put_coin" : "appraise_call_coin"}`,
+      typeArguments: [oc.underlying, oc.settlement, oc.coinType],
+      arguments: [
+        vault,
+        cfg,
+        appraisal,
+        tx.object(oc.bucketId),
+        tx.pure.id(oc.positionId),
+        optAtt(oc.underlying),
+        optAtt(oc.settlement),
+        clock,
+      ],
+    });
   }
 
   return appraisal;

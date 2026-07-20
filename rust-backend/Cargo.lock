@@ -11951,6 +11951,7 @@ dependencies = [
  "deployments",
  "move-core-types",
  "protocol-types",
+ "pyth-client",
  "reqwest",
  "serde_json",
  "shared-crypto",

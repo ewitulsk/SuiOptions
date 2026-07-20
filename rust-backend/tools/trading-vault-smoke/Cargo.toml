@@ -14,6 +14,7 @@ reqwest = { workspace = true }
 
 deployments = { workspace = true }
 protocol-types = { workspace = true }
+pyth-client = { workspace = true }
 sui-tx = { workspace = true }
 
 move-core-types = { workspace = true }
