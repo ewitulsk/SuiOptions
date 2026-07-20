@@ -114,6 +114,51 @@ impl VaultHoldings {
     }
 }
 
+/// Bucket identity for one option-coin type (indexer-supplied): lets the
+/// composer price `Coin<CALL_X>` holdings through
+/// `options_oracle::attest_call/put` instead of a (nonexistent) Pyth feed.
+#[derive(Debug, Clone)]
+pub struct OptionBucketInfo {
+    pub bucket_id: ObjectID,
+    /// Canonical underlying coin type.
+    pub underlying: String,
+    /// Canonical settlement coin type.
+    pub settlement: String,
+    pub is_put: bool,
+}
+
+/// The types that need PYTH attestations given the option-coin bucket map:
+/// mapped option-coin types are replaced by their bucket's underlying +
+/// settlement legs (the coin itself prices via the options oracle), and
+/// held option-coin positions contribute their legs too.
+pub fn pyth_assets_needed(
+    holdings: &VaultHoldings,
+    option_buckets: &BTreeMap<String, OptionBucketInfo>,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for t in holdings.assets_needing_attestation() {
+        match option_buckets.get(&t) {
+            Some(b) => {
+                out.insert(b.underlying.clone());
+                out.insert(b.settlement.clone());
+            }
+            None => {
+                out.insert(t);
+            }
+        }
+    }
+    for p in &holdings.positions {
+        if let PositionInfo::OptionCoin { call_type, .. } = p {
+            if let Some(b) = option_buckets.get(call_type) {
+                out.insert(b.underlying.clone());
+                out.insert(b.settlement.clone());
+            }
+        }
+    }
+    out.remove(&holdings.deposit_type);
+    out
+}
+
 fn canon(s: &str) -> String {
     protocol_types::asset::canonicalize_move_type(s)
 }
@@ -407,6 +452,7 @@ pub async fn compose_appraisal(
     refs: &AppraisalRefs,
     holdings: &VaultHoldings,
     legs: Option<PriceLegs<'_>>,
+    option_buckets: &BTreeMap<String, OptionBucketInfo>,
 ) -> Result<Argument> {
     let deposit_tag = TypeTag::from_str(&holdings.deposit_type)
         .context("parsing deposit type")?;
@@ -421,9 +467,10 @@ pub async fn compose_appraisal(
     // nonzero (e.g. a pool's call-coin base with zero locked passes; a
     // real unpriceable inventory correctly wedges the appraisal).
     let needed = holdings.assets_needing_attestation();
+    let pyth_needed = pyth_assets_needed(holdings, option_buckets);
     let mut attestations: BTreeMap<String, Argument> = BTreeMap::new();
     let attestable: Vec<String> = match &legs {
-        Some(l) => needed
+        Some(l) => pyth_needed
             .iter()
             .filter(|t| l.price_infos.contains_key(*t))
             .cloned()
@@ -433,7 +480,7 @@ pub async fn compose_appraisal(
     // Hard requirement only where an amount is KNOWN nonzero client-side:
     // non-deposit free balances (their Balance dfs are pruned at zero).
     for asset in &holdings.free_assets {
-        if !attestable.contains(asset) {
+        if !attestable.contains(asset) && !option_buckets.contains_key(asset) {
             return Err(anyhow!(
                 "free balance {asset} needs a price attestation but no feed/leg is available"
             ));
@@ -509,6 +556,42 @@ pub async fn compose_appraisal(
             none(pt)
         }
     };
+
+    // Option-coin attestations (SO-297): every mapped option-coin type the
+    // vault holds prices through `options_oracle::attest_call/put` —
+    // intrinsic from the bucket's terms plus the pyth legs above. Legs
+    // equal to the deposit asset (or moot on an expired bucket) pass
+    // `none`; a live bucket with a missing leg aborts on-chain, which is
+    // the correct wedge.
+    let option_types: Vec<(String, &OptionBucketInfo)> = needed
+        .iter()
+        .filter_map(|t| option_buckets.get(t).map(|b| (t.clone(), b)))
+        .collect();
+    if !option_types.is_empty() {
+        let oa = refs
+            .options_adapter_pkg
+            .ok_or_else(|| anyhow!("options adapter package unavailable for option-coin legs"))?;
+        let oracle_reg = pt.obj(shared_object_arg(client, refs.oracle_registry_id, false).await?)?;
+        for (coin_type, b) in &option_types {
+            let bucket = pt.obj(shared_object_arg(client, b.bucket_id, false).await?)?;
+            let u_opt = opt_for(pt, &attestations, &b.underlying, &holdings.deposit_type);
+            let s_opt = opt_for(pt, &attestations, &b.settlement, &holdings.deposit_type);
+            let function = if b.is_put { "attest_put" } else { "attest_call" };
+            let att = pt.programmable_move_call(
+                oa,
+                Identifier::new("options_oracle").unwrap(),
+                Identifier::new(function).unwrap(),
+                vec![
+                    TypeTag::from_str(&b.underlying)?,
+                    TypeTag::from_str(&b.settlement)?,
+                    TypeTag::from_str(coin_type)?,
+                    deposit_tag.clone(),
+                ],
+                vec![oracle_reg, bucket, u_opt, s_opt, clock],
+            );
+            attestations.insert(coin_type.clone(), att);
+        }
+    }
 
     // begin_appraisal AFTER the price update so nothing in the update
     // path can touch vault state mid-snapshot (it can't anyway; order is
@@ -632,10 +715,28 @@ pub async fn compose_appraisal(
                     vec![vault_ro, cfg, appraisal, bucket, pos_id, u_opt, s_opt, clock],
                 );
             }
-            PositionInfo::OptionCoin { id, .. } => {
-                bail!(
-                    "held option coin {id} needs a bucket lookup to appraise — \
-                     not supported by the composer yet (vault_mm writer-flow custody)"
+            PositionInfo::OptionCoin { id, call_type } => {
+                let Some(b) = option_buckets.get(call_type) else {
+                    bail!(
+                        "held option coin {id} ({call_type}) has no bucket mapping — \
+                         cannot appraise"
+                    );
+                };
+                let bucket = pt.obj(shared_object_arg(client, b.bucket_id, false).await?)?;
+                let pos_id = pt.pure(id)?;
+                let u_opt = opt_for(pt, &attestations, &b.underlying, &holdings.deposit_type);
+                let s_opt = opt_for(pt, &attestations, &b.settlement, &holdings.deposit_type);
+                let function = if b.is_put { "appraise_put_coin" } else { "appraise_call_coin" };
+                pt.programmable_move_call(
+                    refs.trading_vault_pkg,
+                    Identifier::new("vault_mm").unwrap(),
+                    Identifier::new(function).unwrap(),
+                    vec![
+                        TypeTag::from_str(&b.underlying)?,
+                        TypeTag::from_str(&b.settlement)?,
+                        TypeTag::from_str(call_type)?,
+                    ],
+                    vec![vault_ro, cfg, appraisal, bucket, pos_id, u_opt, s_opt, clock],
                 );
             }
         }

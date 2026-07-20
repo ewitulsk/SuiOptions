@@ -263,7 +263,9 @@ public fun appraise_put_position<U, S, P>(
     vault::record_position_value(vault, appraisal, VaultMm {}, position_id, value as u64);
 }
 
-/// A held call coin marks at intrinsic: max(spot − strike, 0).
+/// A held call coin marks at intrinsic: max(spot − strike, 0). Expired
+/// coins mark at zero (exercise is pre-expiry only) with no attestations
+/// needed.
 public fun appraise_call_coin<U, S, C>(
     vault: &TradingVault,
     cfg: &VaultProtocolConfig,
@@ -275,6 +277,10 @@ public fun appraise_call_coin<U, S, C>(
     clock: &Clock,
 ) {
     let call: &Coin<C> = vault::borrow_position(vault, coin_position_id);
+    if (clock.timestamp_ms() >= bucket::expiry_ms(bucket)) {
+        vault::record_position_value(vault, appraisal, VaultMm {}, coin_position_id, 0);
+        return
+    };
     let amount = call.value();
     let u_type = type_name::with_defining_ids<U>();
     let s_type = type_name::with_defining_ids<S>();
@@ -282,6 +288,35 @@ public fun appraise_call_coin<U, S, C>(
     let strike_s = bucket::required_settlement(bucket, amount);
     let strike_value = value_in_deposit(vault, cfg, s_type, strike_s, settlement_att, clock);
     let value = if (spot_value > strike_value) { spot_value - strike_value } else { 0 };
+    assert!(value <= (std::u64::max_value!() as u128), E_VALUE_OVERFLOW);
+    vault::record_position_value(vault, appraisal, VaultMm {}, coin_position_id, value as u64);
+}
+
+/// Put twin: a held put coin marks at max(strike payout − spot delivery
+/// cost, 0) — exercising delivers underlying against the floor-rounded
+/// strike payout. Expired puts mark at zero.
+public fun appraise_put_coin<U, S, P>(
+    vault: &TradingVault,
+    cfg: &VaultProtocolConfig,
+    appraisal: &mut Appraisal,
+    bucket: &PutBucket<U, S, P>,
+    coin_position_id: ID,
+    underlying_att: Option<PriceAttestation>,
+    settlement_att: Option<PriceAttestation>,
+    clock: &Clock,
+) {
+    let put: &Coin<P> = vault::borrow_position(vault, coin_position_id);
+    if (clock.timestamp_ms() >= put_bucket::expiry_ms(bucket)) {
+        vault::record_position_value(vault, appraisal, VaultMm {}, coin_position_id, 0);
+        return
+    };
+    let amount = put.value();
+    let u_type = type_name::with_defining_ids<U>();
+    let s_type = type_name::with_defining_ids<S>();
+    let payout_s = put_bucket::exercise_payout(bucket, amount);
+    let payout_value = value_in_deposit(vault, cfg, s_type, payout_s, settlement_att, clock);
+    let spot_value = value_in_deposit(vault, cfg, u_type, amount, underlying_att, clock);
+    let value = if (payout_value > spot_value) { payout_value - spot_value } else { 0 };
     assert!(value <= (std::u64::max_value!() as u128), E_VALUE_OVERFLOW);
     vault::record_position_value(vault, appraisal, VaultMm {}, coin_position_id, value as u64);
 }

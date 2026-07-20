@@ -36,7 +36,8 @@ use tracing::{debug, info, warn};
 use protocol_types::PriceFeedId;
 use sui_tx::sui_client::SuiClientWrapper;
 use sui_tx::tx::appraisal::{
-    compose_appraisal, discover_holdings, AppraisalRefs, PositionInfo, PriceLegs, VaultHoldings,
+    compose_appraisal, discover_holdings, pyth_assets_needed, AppraisalRefs, OptionBucketInfo,
+    PositionInfo, PriceLegs, VaultHoldings,
 };
 use sui_tx::tx::pyth_update::PythHandles;
 use sui_tx::tx::{clock_arg, shared_object_arg, submit_ptb};
@@ -172,6 +173,35 @@ pub async fn tick(wrap: &SuiClientWrapper, http: &reqwest::Client, indexer: &Ind
             return;
         }
     };
+    // Option-coin type → bucket map for appraisal legs. Expired buckets
+    // included — their coins still need (zero/dust) marks. Failure is
+    // non-fatal: cash-only vaults never consult the map.
+    let option_buckets = match indexer.buckets(false, None, None, None).await {
+        Ok(bs) => bs
+            .into_iter()
+            .map(|b| {
+                (
+                    protocol_types::asset::canonicalize_move_type(b.call_type.as_str()),
+                    OptionBucketInfo {
+                        bucket_id: ObjectID::from_hex_literal(&b.bucket_id.to_hex())
+                            .unwrap_or(ObjectID::ZERO),
+                        underlying: protocol_types::asset::canonicalize_move_type(
+                            b.asset_type.as_str(),
+                        ),
+                        settlement: protocol_types::asset::canonicalize_move_type(
+                            b.settlement_type.as_str(),
+                        ),
+                        is_put: b.option_kind == "put",
+                    },
+                )
+            })
+            .filter(|(_, b)| b.bucket_id != ObjectID::ZERO)
+            .collect(),
+        Err(e) => {
+            debug!(error = %format!("{e:#}"), "bucket map fetch failed; option-coin legs unavailable this tick");
+            std::collections::BTreeMap::new()
+        }
+    };
     for v in vaults {
         if v.state == "closed" && v.pending_withdrawals == 0 {
             continue;
@@ -180,7 +210,9 @@ pub async fn tick(wrap: &SuiClientWrapper, http: &reqwest::Client, indexer: &Ind
             Ok(id) => id,
             Err(_) => continue,
         };
-        if let Err(e) = tick_one(wrap, http, ctx, vault_id, v.pending_withdrawals).await {
+        if let Err(e) =
+            tick_one(wrap, http, ctx, vault_id, v.pending_withdrawals, &option_buckets).await
+        {
             classify_and_log(vault_id, &e);
         }
     }
@@ -211,6 +243,7 @@ async fn tick_one(
     ctx: &TradingVaultCtx,
     vault_id: ObjectID,
     pending_withdrawals: u64,
+    option_buckets: &BTreeMap<String, OptionBucketInfo>,
 ) -> Result<()> {
     let client = &wrap.client;
     let holdings = discover_holdings(client, vault_id).await?;
@@ -228,7 +261,7 @@ async fn tick_one(
     if pending_withdrawals > 0 {
         // Re-discover: the cranks above may have changed holdings.
         let holdings = discover_holdings(client, vault_id).await?;
-        fulfill(wrap, http, ctx, vault_id, &holdings).await?;
+        fulfill(wrap, http, ctx, vault_id, &holdings, option_buckets).await?;
     }
     Ok(())
 }
@@ -648,14 +681,17 @@ async fn fulfill(
     ctx: &TradingVaultCtx,
     vault_id: ObjectID,
     holdings: &VaultHoldings,
+    option_buckets: &BTreeMap<String, OptionBucketInfo>,
 ) -> Result<()> {
     let client = &wrap.client;
     let refs = refs_for(ctx, vault_id);
     let mut pt = ProgrammableTransactionBuilder::new();
 
-    let needed = holdings.assets_needing_attestation();
+    // Option-coin types price via the options oracle; only the remaining
+    // (underlying/settlement/plain) types need pyth feeds.
+    let needed = pyth_assets_needed(holdings, option_buckets);
     let appraisal = if needed.is_empty() {
-        compose_appraisal(client, &mut pt, &refs, holdings, None).await?
+        compose_appraisal(client, &mut pt, &refs, holdings, None, option_buckets).await?
     } else {
         let table = ctx
             .price_table
@@ -694,6 +730,7 @@ async fn fulfill(
             &refs,
             holdings,
             Some(PriceLegs { pyth: &ctx.pyth, accumulator_update: update, price_infos: &price_infos }),
+            option_buckets,
         )
         .await?
     };

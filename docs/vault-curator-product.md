@@ -268,14 +268,49 @@ reviewers and future work don't have to re-derive them from diffs.
   mark-to-market remains open — it needs a vol-attestation oracle
   design, not just plumbing.
 
+## 9b. Held-option-coin appraisal (SO-297) — decisions
+
+Implemented as an ORACLE ADAPTER, not new appraisal plumbing: the
+options-adapter package gained an `options_oracle` module whose
+allowlisted `OptionsOracle` witness mints ordinary `PriceAttestation`s
+for per-bucket option coins (`attest_call` / `attest_put`). Every
+existing appraisal path — custody `value_asset`, pool locked legs, free
+balances — then prices option coins like any other asset; vault core and
+the DeepBook adapter are untouched.
+
+- **Intrinsic only, from Pyth legs**: call = max(spot − strike_leg, dust),
+  put = max(strike_leg − spot, dust), where strike_leg = strike ×
+  price(S→deposit) / 10^strike_scale at the 1e12 scale. Never marked
+  from the pool's own book — resting-order marks are trivially
+  manipulable around deposits. Premium MtM stays a follow-up and slots
+  into the same `attest_*` functions when it lands.
+- **Dust floor**: `price::attest` rejects zero (broken-oracle guard), so
+  worthless (OTM/expired) coins mint at price 1 — an overstatement
+  bounded by amount/1e12 raw deposit units.
+- **Post-expiry = worthless**: exercise is pre-expiry only, so expired
+  coins attest at dust with NO input legs required, and the vault_mm
+  held-coin position appraisals (`appraise_call_coin`, new
+  `appraise_put_coin`) mark expired coins at zero.
+- **Bucket resolution is the caller's job**: composers take a
+  coin-type → bucket map (keeper: indexer `buckets()`; frontend: the
+  api-service bucket catalog; smoke: indexer GraphQL). The map is only
+  consulted for types the vault actually holds.
+- **Frontend parity fix**: VaultMm-tagged written positions now appraise
+  through `vault_mm::appraise_*_position` (the witness must match the
+  position's adapter tag; routing everything through options_adapter
+  aborted).
+- Verified live by `trading-vault-smoke --fill-bid`: self-writes calls,
+  fills the vault's resting bid, deposits and partially fulfills through
+  the option legs, and leaves the vault open holding CALL inventory.
+
 ## 10. Known follow-ups (explicitly out of this pass)
 
 1. Premium mark-to-market for option positions (needs a vol-attestation
-   oracle adapter design).
-2. Held-option-coin appraisal in the composer (indexer bucket lookup).
-3. Pyth-leg gas-station templates so attestation-bearing deposits can be
-   sponsored.
-4. devInspect NAV cron if event-derived pps proves too sparse for
+   oracle adapter design) — now an internal upgrade to
+   `options_oracle::attest_*`.
+2. Pyth-leg gas-station templates so attestation-bearing deposits can be
+   sponsored (option-coin legs ride the same unsponsored path today).
+3. devInspect NAV cron if event-derived pps proves too sparse for
    charts.
-5. Covered-call vault merge (per epic decision: later; migration seeds
+4. Covered-call vault merge (per epic decision: later; migration seeds
    cost basis at migration-day NAV).

@@ -118,6 +118,12 @@ public fun required_collateral<U, S, P>(bucket: &PutBucket<U, S, P>, amount: u64
     apply_strike_ceil(amount as u128, bucket.strike, bucket.strike_scale)
 }
 
+/// Settlement paid out for exercising `amount` put units (floor rounding —
+/// matches `exercise`).
+public fun exercise_payout<U, S, P>(bucket: &PutBucket<U, S, P>, amount: u64): u64 {
+    apply_strike_floor(amount as u128, bucket.strike, bucket.strike_scale)
+}
+
 /// Create one put bucket for the (Underlying, Settlement, Put) triple, taking
 /// ownership of the put coin's fresh (zero-supply) `TreasuryCap`. Mirrors
 /// `bucket::create_bucket`; the off-chain scheduler harvests the cap from a

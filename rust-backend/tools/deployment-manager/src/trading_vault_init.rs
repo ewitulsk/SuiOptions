@@ -189,15 +189,21 @@ pub async fn activate(
             vec![admin, ireg, t],
         );
     }
-    // Oracle witness.
-    let t = type_name_call(&mut pt, &format!("{oracle_pyth_pkg}::oracle_pyth::PythOracle"))?;
-    pt.programmable_move_call(
-        trading_vault_pkg,
-        Identifier::new("registry")?,
-        Identifier::new("allow_oracle")?,
-        vec![],
-        vec![admin, oreg, t],
-    );
+    // Oracle witnesses: Pyth for catalog assets, the options intrinsic
+    // oracle for per-bucket option coins (SO-297).
+    for witness in [
+        format!("{oracle_pyth_pkg}::oracle_pyth::PythOracle"),
+        format!("{options_adapter_pkg}::options_oracle::OptionsOracle"),
+    ] {
+        let t = type_name_call(&mut pt, &witness)?;
+        pt.programmable_move_call(
+            trading_vault_pkg,
+            Identifier::new("registry")?,
+            Identifier::new("allow_oracle")?,
+            vec![],
+            vec![admin, oreg, t],
+        );
+    }
 
     // Feed seeding from the token catalog (skip feed-less tokens).
     let mut seeded = 0usize;
