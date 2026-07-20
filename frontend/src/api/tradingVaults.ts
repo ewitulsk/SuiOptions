@@ -126,13 +126,12 @@ export async function fetchTradingVault(vaultId: string): Promise<TradingVaultDe
   if (!res.ok) {
     throw new Error(`GET /trading-vaults/:id failed: ${res.status} ${res.statusText}`);
   }
-  // Detail nests the vault: { vault: {...}, positions: [...] }.
-  const body = (await res.json()) as {
-    vault: TradingVaultWire;
+  // Detail flattens the vault fields to the top level, plus positions.
+  const body = (await res.json()) as TradingVaultWire & {
     positions: TradingVaultPositionWire[];
   };
   return {
-    ...mapVault(body.vault),
+    ...mapVault(body),
     positions: body.positions.map((p) => ({
       positionId: p.position_id,
       adapter: p.adapter,
