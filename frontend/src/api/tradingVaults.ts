@@ -1,8 +1,8 @@
 // HTTP client for the api-service curated trading-vault endpoints (SO-288).
 //
-// The backend handlers are being built in parallel; these types mirror the
-// agreed DTO shapes (camelCase, unlike the older snake_case vault DTOs). If
-// field names shift at integration, this file is the only place to adjust.
+// The list/detail endpoints ship snake_case DTOs (pps-history and stake ship
+// camelCase); the wire types + mappers below convert to the app-facing
+// camelCase types, and are the only place to adjust if the API shifts.
 //
 // Raw u128 fields (`totalSharesRaw`, `latestPpsE12Raw`) ship as decimal
 // strings to preserve precision; use them when building a tx and the scaled
@@ -57,15 +57,68 @@ export type TradingVaultDetail = TradingVault & {
   positions: TradingVaultPosition[];
 };
 
-export type TradingVaultsResponse = { vaults: TradingVault[] };
+/** Wire shape of one vault row: api-service ships these two endpoints in
+ * snake_case (unlike pps-history/stake, which are camelCase). */
+type TradingVaultWire = {
+  vault_id: string;
+  deposit_coin_type: string;
+  creator: string;
+  curator: string;
+  curator_cap_id: string;
+  state: "open" | "closing" | "closed";
+  lockup_ms: number;
+  curator_fee_bps: number;
+  rotation_authority: number;
+  max_positions: number;
+  unwind_grace_ms: number;
+  deposits_paused: boolean;
+  mm_release_enabled: boolean;
+  total_shares_raw: string;
+  position_count: number;
+  pending_withdrawals: number;
+  /** pps × 1e12 decimal string; absent before the first appraisal. */
+  pps_raw: string | null;
+  updated_at_ms: number;
+};
+
+type TradingVaultPositionWire = {
+  position_id: string;
+  adapter: string;
+  active: boolean;
+  stored_at_ms: number;
+  removed_at_ms: number | null;
+};
+
+function mapVault(w: TradingVaultWire): TradingVault {
+  return {
+    vaultId: w.vault_id,
+    depositAsset: w.deposit_coin_type,
+    creator: w.creator,
+    curator: w.curator,
+    curatorCapId: w.curator_cap_id,
+    state: w.state,
+    lockupMs: w.lockup_ms,
+    curatorFeeBps: w.curator_fee_bps,
+    rotationAuthority: w.rotation_authority,
+    maxPositions: w.max_positions,
+    unwindGraceMs: w.unwind_grace_ms,
+    depositsPaused: w.deposits_paused,
+    mmReleaseEnabled: w.mm_release_enabled,
+    totalSharesRaw: w.total_shares_raw,
+    positionCount: w.position_count,
+    pendingWithdrawals: w.pending_withdrawals,
+    latestPpsE12Raw: w.pps_raw ?? null,
+    updatedAtMs: w.updated_at_ms,
+  };
+}
 
 export async function fetchTradingVaults(): Promise<TradingVault[]> {
   const res = await fetch(`${API_BASE_URL}/trading-vaults`);
   if (!res.ok) {
     throw new Error(`GET /trading-vaults failed: ${res.status} ${res.statusText}`);
   }
-  const body: TradingVaultsResponse = await res.json();
-  return body.vaults;
+  const body = (await res.json()) as { vaults: TradingVaultWire[] };
+  return body.vaults.map(mapVault);
 }
 
 export async function fetchTradingVault(vaultId: string): Promise<TradingVaultDetail> {
@@ -73,7 +126,21 @@ export async function fetchTradingVault(vaultId: string): Promise<TradingVaultDe
   if (!res.ok) {
     throw new Error(`GET /trading-vaults/:id failed: ${res.status} ${res.statusText}`);
   }
-  return (await res.json()) as TradingVaultDetail;
+  // Detail nests the vault: { vault: {...}, positions: [...] }.
+  const body = (await res.json()) as {
+    vault: TradingVaultWire;
+    positions: TradingVaultPositionWire[];
+  };
+  return {
+    ...mapVault(body.vault),
+    positions: body.positions.map((p) => ({
+      positionId: p.position_id,
+      adapter: p.adapter,
+      active: p.active,
+      storedAtMs: p.stored_at_ms,
+      removedAtMs: p.removed_at_ms ?? null,
+    })),
+  };
 }
 
 /** One share-price sample from the pps-history endpoint (SO-293). */
