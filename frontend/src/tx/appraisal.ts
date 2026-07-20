@@ -393,7 +393,21 @@ export async function planAppraisal(
     needed.add(deepCanon);
   }
 
-  const attestTypes = [...needed].sort();
+  // Optimistic legs (mirrors the Rust composer): types with no served feed —
+  // e.g. option coins tracked by a custody from placing orders — get an
+  // `option::none` leg instead of blocking the plan. The chain aborts the
+  // appraisal only if such an asset's actual balance is nonzero, so this is
+  // exactly as strict as the contract. Free-balance assets still hard-error:
+  // `appraise_balance` needs a real attestation.
+  const attestTypes: string[] = [];
+  for (const t of [...needed].sort()) {
+    if (feedIdFor(t)) attestTypes.push(t);
+    else if (freeBalanceTypes.includes(t)) {
+      const token = tokenForCoinType(t);
+      throw new Error(`No Pyth feed for held asset ${token?.ticker ?? shortType(t)}`);
+    }
+    // else: feedless custody/pool/option leg — composed as `option::none`.
+  }
 
   // 4. Feed ids + PriceInfoObjects (deposit feed included — `attest` crosses
   //    the asset feed with the deposit feed).
@@ -418,8 +432,9 @@ export async function planAppraisal(
     for (const t of [...attestTypes, depositType]) {
       const feed = feedIdFor(t);
       if (!feed) {
+        // Only reachable for the deposit asset — attestTypes are pre-filtered.
         const token = tokenForCoinType(t);
-        throw new Error(`No Pyth feed for held asset ${token?.ticker ?? shortType(t)}`);
+        throw new Error(`No Pyth feed for deposit asset ${token?.ticker ?? shortType(t)}`);
       }
       feedIdByType[t] = feed;
     }
