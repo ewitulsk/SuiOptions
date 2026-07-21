@@ -176,7 +176,12 @@ impl Worker for ProtocolEventWorker {
             let Some(events) = &tx.events else { continue };
             let tx_digest = tx.transaction.digest().base58_encode();
             for (idx, event) in events.data.iter().enumerate() {
-                let type_str = event.type_.to_string();
+                // Canonical form (padded addresses): `Display` strips
+                // leading zeros, so a package id like 0x0909… never
+                // byte-matches the padded ids token-info serves (the
+                // move-type-normalization rule; bit us on the SO-299
+                // trading_vault publish).
+                let type_str = event.type_.to_canonical_string(true);
                 match event_types::dispatch(&self.types, &type_str, &event.contents) {
                     Ok(Some(parsed)) => {
                         debug!(
