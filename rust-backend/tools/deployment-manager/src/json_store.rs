@@ -102,10 +102,14 @@ pub struct TradingVaultObjectsRecord {
     pub pool_allowlist_id: String,
     /// Shared `EquityBook` created by the equity-oracle publish (SO-299),
     /// so the keeper reads it from token-info instead of publish effects.
-    pub equity_book_id: String,
+    /// Optional only for READING records written before that step — every
+    /// fresh deploy writes both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equity_book_id: Option<String>,
     /// Shared `VolBook` created by the options-adapter publish (premium
     /// mark-to-market), same discipline.
-    pub vol_book_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vol_book_id: Option<String>,
     pub activation_digest: String,
 }
 
