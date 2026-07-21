@@ -683,6 +683,11 @@ fn collect_participants(
         ChainEvent::SpreadUnwound(u) => push(u.caller.to_hex(), "caller"),
         ChainEvent::SpreadClosed(c) => push(c.closer.to_hex(), "closer"),
         ChainEvent::SpreadRedeemed(r) => push(r.redeemer.to_hex(), "redeemer"),
+        ChainEvent::PutSpreadWritten(w) => push(w.writer.to_hex(), "writer"),
+        ChainEvent::PutSpreadExercised(e) => push(e.exerciser.to_hex(), "exerciser"),
+        ChainEvent::PutSpreadClosed(c) => push(c.closer.to_hex(), "closer"),
+        ChainEvent::PutSpreadRedeemed(r) => push(r.redeemer.to_hex(), "redeemer"),
+        ChainEvent::VolPosted(p) => push(p.poster.to_hex(), "poster"),
         // The remaining trading-vault events carry no wallet addresses.
         ChainEvent::TvExternalAccountCleared(_)
         | ChainEvent::TvVaultClosing(_)
@@ -1062,7 +1067,12 @@ fn stage_event_into_batch(
         | ChainEvent::SpreadWritten(_)
         | ChainEvent::SpreadUnwound(_)
         | ChainEvent::SpreadClosed(_)
-        | ChainEvent::SpreadRedeemed(_) => {
+        | ChainEvent::SpreadRedeemed(_)
+        | ChainEvent::PutSpreadWritten(_)
+        | ChainEvent::PutSpreadExercised(_)
+        | ChainEvent::PutSpreadClosed(_)
+        | ChainEvent::PutSpreadRedeemed(_)
+        | ChainEvent::VolPosted(_) => {
             // Log-only events: no materialised view to refresh (the swap
             // auction's effect on the vault is picked up at finalize).
             // DeepBook fills live only in the event log + participants
@@ -1991,7 +2001,12 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
         | ChainEvent::SpreadWritten(_)
         | ChainEvent::SpreadUnwound(_)
         | ChainEvent::SpreadClosed(_)
-        | ChainEvent::SpreadRedeemed(_) => {}
+        | ChainEvent::SpreadRedeemed(_)
+        | ChainEvent::PutSpreadWritten(_)
+        | ChainEvent::PutSpreadExercised(_)
+        | ChainEvent::PutSpreadClosed(_)
+        | ChainEvent::PutSpreadRedeemed(_)
+        | ChainEvent::VolPosted(_) => {}
         ChainEvent::FeeUpdated(_)
         | ChainEvent::TreasuryWithdrawn(_)
         | ChainEvent::VaultPositionRedeemed(_)

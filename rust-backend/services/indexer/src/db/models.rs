@@ -173,6 +173,11 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::TvExternalReleased(_) => "TvExternalReleased",
         ChainEvent::TvExternalReturned(_) => "TvExternalReturned",
         ChainEvent::EquityPosted(_) => "EquityPosted",
+        ChainEvent::PutSpreadWritten(_) => "PutSpreadWritten",
+        ChainEvent::PutSpreadExercised(_) => "PutSpreadExercised",
+        ChainEvent::PutSpreadClosed(_) => "PutSpreadClosed",
+        ChainEvent::PutSpreadRedeemed(_) => "PutSpreadRedeemed",
+        ChainEvent::VolPosted(_) => "VolPosted",
     }
 }
 

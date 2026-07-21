@@ -27,9 +27,10 @@ use protocol_types::events::{
     InstantWithdraw, OffsetClosed,
     PutBucketCleaned, PutBucketCreated, PutBucketInvalidated, PutBucketRevalidated,
     PutCollateralizedWrite, PutExercised, PutExpiredOptionBurned, PutRedeemed, PutRfqCreated,
-    PutRfqExpiredUnsold, PutRfqSettled, PutWriteExecuted, Redeemed, RfqCreated, RfqExpiredUnsold,
+    PutRfqExpiredUnsold, PutRfqSettled, PutSpreadClosed, PutSpreadExercised, PutSpreadRedeemed,
+    PutSpreadWritten, PutWriteExecuted, Redeemed, RfqCreated, RfqExpiredUnsold,
     RfqSettled, SharesClaimed, SignerCreated, SigningKeyRotated, SpreadClosed, SpreadRedeemed,
-    SpreadUnwound, SpreadWritten, SwapRfqSettled, SwapRfqUnfilled,
+    SpreadUnwound, SpreadWritten, SwapRfqSettled, SwapRfqUnfilled, VolPosted,
     TreasuryWithdrawn, VaultBucketSelected, VaultConfigUpdated, VaultCreated, VaultDeposit,
     VaultDepositsPaused, VaultFeesCharged, VaultPositionRedeemed, VaultRfqSettled, VaultRfqUnsold,
     VaultRoundFinalized, WithdrawCompleted, WithdrawInitiated, WriteExecuted,
@@ -185,6 +186,12 @@ pub struct EventTypes {
     pub tv_external_released: String,
     pub tv_external_returned: String,
     pub equity_posted: String,
+    // Put-side spread compression + vol book (SO-301).
+    pub put_spread_written: String,
+    pub put_spread_exercised: String,
+    pub put_spread_closed: String,
+    pub put_spread_redeemed: String,
+    pub vol_posted: String,
 }
 
 impl EventTypes {
@@ -214,6 +221,10 @@ impl EventTypes {
         let eo = |name: &str| match pkgs.equity_oracle {
             Some(pkg) => format!("{pkg}::equity_oracle::{name}"),
             None => format!("unset::equity_oracle::{name}"),
+        };
+        let vb = |name: &str| match pkgs.options_adapter {
+            Some(pkg) => format!("{pkg}::vol_book::{name}"),
+            None => format!("unset::vol_book::{name}"),
         };
         Self {
             bucket_created: core("BucketCreated"),
@@ -313,10 +324,15 @@ impl EventTypes {
             tv_external_released: tv("ExternalReleased"),
             tv_external_returned: tv("ExternalReturned"),
             equity_posted: eo("EquityPosted"),
+            put_spread_written: core("PutSpreadWritten"),
+            put_spread_exercised: core("PutSpreadExercised"),
+            put_spread_closed: core("PutSpreadClosed"),
+            put_spread_redeemed: core("PutSpreadRedeemed"),
+            vol_posted: vb("VolPosted"),
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 90] {
+    pub fn all_strings(&self) -> [&str; 95] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -408,6 +424,11 @@ impl EventTypes {
             &self.tv_external_released,
             &self.tv_external_returned,
             &self.equity_posted,
+            &self.put_spread_written,
+            &self.put_spread_exercised,
+            &self.put_spread_closed,
+            &self.put_spread_redeemed,
+            &self.vol_posted,
         ]
     }
 }
@@ -534,6 +555,16 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(SpreadClosed, SpreadClosed)
     } else if type_str == types.spread_redeemed {
         decode!(SpreadRedeemed, SpreadRedeemed)
+    } else if type_str == types.put_spread_written {
+        decode!(PutSpreadWritten, PutSpreadWritten)
+    } else if type_str == types.put_spread_exercised {
+        decode!(PutSpreadExercised, PutSpreadExercised)
+    } else if type_str == types.put_spread_closed {
+        decode!(PutSpreadClosed, PutSpreadClosed)
+    } else if type_str == types.put_spread_redeemed {
+        decode!(PutSpreadRedeemed, PutSpreadRedeemed)
+    } else if type_str == types.vol_posted {
+        decode!(VolPosted, VolPosted)
     } else if type_str == types.tv_vault_created {
         decode!(TvVaultCreated, TvVaultCreated)
     } else if type_str == types.tv_vault_closing {

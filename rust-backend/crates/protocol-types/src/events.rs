@@ -898,6 +898,82 @@ pub struct SpreadRedeemed {
     pub amount: u64,
 }
 
+/// A compressed put write (SO-301): the range is backed by an escrowed
+/// long put plus gap cash instead of full strike collateral.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutSpreadWritten {
+    pub bucket_id: ObjectId,
+    pub long_bucket_id: ObjectId,
+    pub writer: SuiAddress,
+    pub position_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub top_up: u64,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
+}
+
+/// A fused assignment on a compressed put range: the delivered underlying
+/// exercised the escrowed long in the same call.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutSpreadExercised {
+    pub bucket_id: ObjectId,
+    pub long_bucket_id: ObjectId,
+    pub exerciser: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub payout: u64,
+    #[serde(with = "u128_string")]
+    pub cursor: u128,
+}
+
+/// Pre-expiry put-spread retirement: unassigned coins burned back, the
+/// whole escrow returned to the writer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutSpreadClosed {
+    pub bucket_id: ObjectId,
+    pub closer: SuiAddress,
+    pub position_id: ObjectId,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+}
+
+/// Post-expiry put-spread exit: remaining escrow back to the holder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutSpreadRedeemed {
+    pub bucket_id: ObjectId,
+    pub redeemer: SuiAddress,
+    pub position_id: ObjectId,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+}
+
+/// `options_adapter::vol_book::VolPosted` — keeper-attested realized vol
+/// for one underlying (premium mark-to-market, SO-301).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolPosted {
+    /// BCS-matches the on-chain `TypeName` field.
+    pub underlying: AssetType,
+    pub poster: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub vol_bps: u64,
+    #[serde(with = "u64_string")]
+    pub previous: u64,
+    pub seeded: bool,
+}
+
 /// Tagged union over every event the indexer may publish.
 ///
 /// The variant name is what shows up as `"type"` over the wire; the payload
@@ -1389,6 +1465,10 @@ pub enum ChainEvent {
     SpreadUnwound(SpreadUnwound),
     SpreadClosed(SpreadClosed),
     SpreadRedeemed(SpreadRedeemed),
+    PutSpreadWritten(PutSpreadWritten),
+    PutSpreadExercised(PutSpreadExercised),
+    PutSpreadClosed(PutSpreadClosed),
+    PutSpreadRedeemed(PutSpreadRedeemed),
     // curated trading vaults (SO-282)
     TvVaultCreated(TvVaultCreated),
     TvVaultClosing(TvVaultClosing),
@@ -1428,6 +1508,7 @@ pub enum ChainEvent {
     TvExternalReleased(TvExternalReleased),
     TvExternalReturned(TvExternalReturned),
     EquityPosted(EquityPosted),
+    VolPosted(VolPosted),
 }
 
 /// An envelope wrapping a `ChainEvent` with the ordering metadata the indexer

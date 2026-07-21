@@ -493,6 +493,16 @@ public fun appraise_put_position<U, S, P>(
 ) {
     let pos: &Position = vault::borrow_position(vault, position_id);
     assert!(position::bucket_id(pos) == object::id(bucket), E_BUCKET_MISMATCH);
+    // A compressed range is escrow-backed, not pool-backed — it marks
+    // via `appraise_put_spread_position`, never here.
+    assert!(
+        !put_bucket::range_overlaps_spread(
+            bucket,
+            position::range_start(pos),
+            position::range_end(pos),
+        ),
+        E_SPREAD_POSITION,
+    );
     let (exercised, unexercised) = split_ranges(
         position::range_start(pos),
         position::range_end(pos),
@@ -508,6 +518,70 @@ public fun appraise_put_position<U, S, P>(
             value_in_deposit(vault, cfg, s_type, collateral_s, settlement_att, clock);
         value = value + spot_value.min(collateral_value);
     };
+    assert!(value <= (std::u64::max_value!() as u128), E_VALUE_OVERFLOW);
+    vault::record_position_value(vault, appraisal, VaultMm {}, position_id, value as u64);
+}
+
+/// Conservative mark for a VaultMm-custodied put SPREAD position — a
+/// compressed range from `put_bucket::write_spread`, backed by its
+/// escrow (remaining long puts + gap cash incl. accrued assignment
+/// surplus). Mark = escrow cash + (long-put intrinsic − short-put
+/// intrinsic) on the UNASSIGNED remainder, floored at the escrow cash;
+/// assigned slices already settled at exercise time and contribute
+/// nothing beyond the surplus the escrow retained. Aborts unless the
+/// position's exact range is a live spread escrowed against
+/// `long_bucket`.
+public fun appraise_put_spread_position<U, S, P, LongPut>(
+    vault: &TradingVault,
+    cfg: &VaultProtocolConfig,
+    appraisal: &mut Appraisal,
+    bucket: &PutBucket<U, S, P>,
+    long_bucket: &PutBucket<U, S, LongPut>,
+    position_id: ID,
+    underlying_att: Option<PriceAttestation>,
+    settlement_att: Option<PriceAttestation>,
+    clock: &Clock,
+) {
+    let pos: &Position = vault::borrow_position(vault, position_id);
+    assert!(position::bucket_id(pos) == object::id(bucket), E_BUCKET_MISMATCH);
+    let (long_units, cash, long_bucket_id) = put_bucket::spread_escrow_view<U, S, P, LongPut>(
+        bucket,
+        position::range_start(pos),
+        position::range_end(pos),
+    );
+    assert!(long_bucket_id == object::id(long_bucket), E_LONG_BUCKET_MISMATCH);
+
+    let u_type = type_name::with_defining_ids<U>();
+    let s_type = type_name::with_defining_ids<S>();
+    let cash_value = value_in_deposit(vault, cfg, s_type, cash, settlement_att, clock);
+    if (long_units == 0) {
+        assert!(cash_value <= (std::u64::max_value!() as u128), E_VALUE_OVERFLOW);
+        vault::record_position_value(vault, appraisal, VaultMm {}, position_id, cash_value as u64);
+        return
+    };
+    let spot = value_in_deposit(vault, cfg, u_type, long_units, underlying_att, clock);
+    let long_strike = value_in_deposit(
+        vault,
+        cfg,
+        s_type,
+        put_bucket::exercise_payout(long_bucket, long_units),
+        settlement_att,
+        clock,
+    );
+    let short_strike = value_in_deposit(
+        vault,
+        cfg,
+        s_type,
+        put_bucket::exercise_payout(bucket, long_units),
+        settlement_att,
+        clock,
+    );
+    // (K_long − S)⁺ − (K_short − S)⁺ rewritten subtraction-safe, with a
+    // zero floor absorbing rounding dust when K_short > K_long exceeds
+    // the escrowed gap by a unit.
+    let lhs = cash_value + long_strike + spot.min(short_strike);
+    let rhs = short_strike + spot.min(long_strike);
+    let value = if (lhs > rhs) { lhs - rhs } else { 0 };
     assert!(value <= (std::u64::max_value!() as u128), E_VALUE_OVERFLOW);
     vault::record_position_value(vault, appraisal, VaultMm {}, position_id, value as u64);
 }

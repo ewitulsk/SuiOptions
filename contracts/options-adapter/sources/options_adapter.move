@@ -813,6 +813,17 @@ public fun appraise_put_position<U, S, P>(
 ) {
     let pos: &Position = vault::borrow_position(vault, position_id);
     assert!(position::bucket_id(pos) == object::id(bucket), E_BUCKET_MISMATCH);
+    // A compressed range is escrow-backed, not pool-backed — it marks
+    // via `vault_mm::appraise_put_spread_position` on the VaultMm
+    // custody path (no adapter flow can custody a spread position).
+    assert!(
+        !put_bucket::range_overlaps_spread(
+            bucket,
+            position::range_start(pos),
+            position::range_end(pos),
+        ),
+        E_SPREAD_POSITION,
+    );
     let (exercised, unexercised) = split_ranges(
         position::range_start(pos),
         position::range_end(pos),
