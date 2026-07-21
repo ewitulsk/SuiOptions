@@ -132,6 +132,11 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::PutRfqCreated(_) => "PutRfqCreated",
         ChainEvent::PutRfqSettled(_) => "PutRfqSettled",
         ChainEvent::PutRfqExpiredUnsold(_) => "PutRfqExpiredUnsold",
+        ChainEvent::OffsetClosed(_) => "OffsetClosed",
+        ChainEvent::SpreadWritten(_) => "SpreadWritten",
+        ChainEvent::SpreadUnwound(_) => "SpreadUnwound",
+        ChainEvent::SpreadClosed(_) => "SpreadClosed",
+        ChainEvent::SpreadRedeemed(_) => "SpreadRedeemed",
         ChainEvent::TvVaultCreated(_) => "TvVaultCreated",
         ChainEvent::TvVaultClosing(_) => "TvVaultClosing",
         ChainEvent::TvVaultClosed(_) => "TvVaultClosed",
@@ -156,6 +161,18 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::TvRfqOpened(_) => "TvRfqOpened",
         ChainEvent::TvRfqSettled(_) => "TvRfqSettled",
         ChainEvent::TvPositionRedeemed(_) => "TvPositionRedeemed",
+        ChainEvent::TvMmCoinExercised(_) => "TvMmCoinExercised",
+        ChainEvent::TvMmOffsetClosed(_) => "TvMmOffsetClosed",
+        ChainEvent::TvMmCoinReleased(_) => "TvMmCoinReleased",
+        ChainEvent::TvTakerSwapExecuted(_) => "TvTakerSwapExecuted",
+        ChainEvent::TvBidPlaced(_) => "TvBidPlaced",
+        ChainEvent::TvBidReclaimed(_) => "TvBidReclaimed",
+        ChainEvent::TvBidRedeemed(_) => "TvBidRedeemed",
+        ChainEvent::TvExternalAccountSet(_) => "TvExternalAccountSet",
+        ChainEvent::TvExternalAccountCleared(_) => "TvExternalAccountCleared",
+        ChainEvent::TvExternalReleased(_) => "TvExternalReleased",
+        ChainEvent::TvExternalReturned(_) => "TvExternalReturned",
+        ChainEvent::EquityPosted(_) => "EquityPosted",
     }
 }
 
@@ -596,6 +613,13 @@ pub struct TradingVaultRow {
     pub latest_pps_e12: Option<BigDecimal>,
     pub updated_at_seq: i64,
     pub updated_at_ms: i64,
+    /// External MM account wallet (SO-299); null when none is set.
+    pub external_account: Option<String>,
+    /// Outstanding external exposure (post latest release/return).
+    pub external_exposure: i64,
+    /// Latest keeper-posted account equity (EquityPosted).
+    pub latest_external_equity: Option<i64>,
+    pub external_equity_updated_at_ms: Option<i64>,
 }
 
 impl TradingVaultRow {
@@ -635,6 +659,12 @@ impl TradingVaultRow {
                     .map(bigdecimal_to_u128)
                     .transpose()?,
                 updated_at_ms: self.updated_at_ms as u64,
+                external_account: self.external_account,
+                external_exposure: self.external_exposure as u64,
+                latest_external_equity: self.latest_external_equity.map(|v| v as u64),
+                external_equity_updated_at_ms: self
+                    .external_equity_updated_at_ms
+                    .map(|v| v as u64),
             },
         ))
     }

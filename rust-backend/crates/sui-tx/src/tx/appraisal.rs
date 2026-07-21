@@ -39,6 +39,11 @@ pub struct AppraisalRefs {
     pub protocol_config_id: ObjectID,
     pub oracle_registry_id: ObjectID,
     pub pyth_feed_registry_id: ObjectID,
+    /// equity-oracle package (SO-299), for the external-account equity
+    /// leg. `None` where the package isn't deployed.
+    pub equity_oracle_pkg: Option<ObjectID>,
+    /// The equity-oracle package's shared `EquityBook`.
+    pub equity_book_id: Option<ObjectID>,
 }
 
 /// One custodied position, classified from its object type + adapter tag.
@@ -56,6 +61,19 @@ pub enum PositionInfo {
         auction_id: ObjectID,
         bucket_id: ObjectID,
         is_put: bool,
+    },
+    /// A live vault-funded bid on someone else's auction (SO-299): the
+    /// escrow marks at cost while the auction outputs are routed to the
+    /// ticket's own object address (see options_adapter::BidTicket).
+    BidTicket {
+        id: ObjectID,
+        /// The bid asset (canonical) — what the escrow cost is in.
+        escrow_type: String,
+        /// What a win delivers to the ticket address.
+        win_type: String,
+        auction_id: ObjectID,
+        escrow_amount: u64,
+        win_amount: u64,
     },
     /// A written option position (options_adapter or vault_mm tagged).
     OptionPosition {
@@ -80,6 +98,13 @@ pub struct VaultHoldings {
     /// Non-deposit free-balance types (canonical `0x…`).
     pub free_assets: Vec<String>,
     pub positions: Vec<PositionInfo>,
+    /// Registered external account's address (SO-299); `None` for vaults
+    /// without one.
+    pub external_account: Option<String>,
+    /// Canonical type of the pinned equity-oracle witness. When set, the
+    /// appraisal REQUIRES the external-equity leg (`external_pending` —
+    /// consumption aborts 82 without it).
+    pub external_equity_oracle: Option<String>,
 }
 
 impl VaultHoldings {
@@ -96,6 +121,9 @@ impl VaultHoldings {
                     }
                 }
                 PositionInfo::RfqTicket { escrow_type, .. } => {
+                    out.insert(escrow_type.clone());
+                }
+                PositionInfo::BidTicket { escrow_type, .. } => {
                     out.insert(escrow_type.clone());
                 }
                 PositionInfo::OptionPosition { underlying, settlement, .. } => {
@@ -253,6 +281,26 @@ pub async fn discover_holdings(
     let mut free_assets = type_name_set(move_field(&vault, "asset_types")?)?;
     free_assets.retain(|t| *t != deposit_type);
 
+    // External-account registration (SO-299). The field is an
+    // `Option<ExternalAccount>` — absent/null on vaults without one (and
+    // on pre-SO-299 deployments, where the field itself is missing).
+    let (external_account, external_equity_oracle) = match move_field(&vault, "external") {
+        Ok(v) => {
+            let j = serde_json::to_value(v)?;
+            let account = j
+                .pointer("/fields/account")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let oracle = j
+                .pointer("/fields/equity_oracle/fields/name")
+                .or_else(|| j.pointer("/fields/equity_oracle"))
+                .and_then(Value::as_str)
+                .map(canon);
+            (account, oracle)
+        }
+        Err(_) => (None, None),
+    };
+
     // Walk the vault's dynamic fields: adapter tags (plain df, value =
     // TypeName) and positions (dof, object_type = the custody struct).
     let mut tags: BTreeMap<ObjectID, String> = BTreeMap::new();
@@ -366,6 +414,37 @@ pub async fn discover_holdings(
                 bucket_id: id_field("bucket_id")?,
                 is_put,
             });
+        } else if ty.ends_with("::options_adapter::BidTicket") {
+            let fields = object_fields(client, pos_id).await?;
+            let type_field = |name: &str| -> Result<String> {
+                let j = serde_json::to_value(move_field(&fields, name)?)?;
+                Ok(canon(
+                    j.pointer("/fields/name")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow!("bid ticket missing {name}"))?,
+                ))
+            };
+            let u64_field = |name: &str| -> Result<u64> {
+                let j = serde_json::to_value(move_field(&fields, name)?)?;
+                j.as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| j.as_u64())
+                    .ok_or_else(|| anyhow!("bid ticket missing {name}"))
+            };
+            let auction_id = {
+                let j = serde_json::to_value(move_field(&fields, "auction_id")?)?;
+                j.as_str()
+                    .and_then(|s| ObjectID::from_hex_literal(s).ok())
+                    .ok_or_else(|| anyhow!("bid ticket missing auction_id"))?
+            };
+            positions.push(PositionInfo::BidTicket {
+                id: pos_id,
+                escrow_type: type_field("escrow_type")?,
+                win_type: type_field("win_type")?,
+                auction_id,
+                escrow_amount: u64_field("escrow_amount")?,
+                win_amount: u64_field("win_amount")?,
+            });
         } else if ty.ends_with("::position::Position") {
             let fields = object_fields(client, pos_id).await?;
             let bucket_json = serde_json::to_value(move_field(&fields, "bucket_id")?)?;
@@ -403,7 +482,13 @@ pub async fn discover_holdings(
         }
     }
 
-    Ok(VaultHoldings { deposit_type, free_assets, positions })
+    Ok(VaultHoldings {
+        deposit_type,
+        free_assets,
+        positions,
+        external_account,
+        external_equity_oracle,
+    })
 }
 
 /// Split top-level generic args, respecting nesting.
@@ -604,6 +689,38 @@ pub async fn compose_appraisal(
         vec![vault_ro],
     );
 
+    // External-account equity leg (SO-299): a configured vault marks the
+    // appraisal `external_pending` at begin_appraisal, and consumption
+    // aborts (82, appraisal_incomplete) without `record_external_equity`.
+    // Compose the pinned oracle's leg — and refuse outright (distinctive
+    // error, no silent incomplete appraisal) when the pinned witness
+    // isn't this deployment's `equity_oracle::EquityOracle` (e.g. a
+    // DbmOracle vault, whose leg this composer can't build yet).
+    if let Some(witness) = &holdings.external_equity_oracle {
+        let Some(eo_pkg) = refs.equity_oracle_pkg else {
+            return Err(anyhow!(
+                "unsupported external equity oracle: {witness} (equity-oracle package unresolved)"
+            ));
+        };
+        let expected = canon(&format!("{eo_pkg}::equity_oracle::EquityOracle"));
+        if canon(witness) != expected {
+            return Err(anyhow!("unsupported external equity oracle: {witness}"));
+        }
+        let book_id = refs.equity_book_id.ok_or_else(|| {
+            anyhow!("equity-oracle EquityBook id unresolved — cannot compose the equity leg")
+        })?;
+        let book = pt.obj(shared_object_arg(client, book_id, false).await?)?;
+        let oracle_reg = pt.obj(shared_object_arg(client, refs.oracle_registry_id, false).await?)?;
+        // equity_oracle::record(vault, book, reg, &mut appraisal, clock)
+        pt.programmable_move_call(
+            eo_pkg,
+            Identifier::new("equity_oracle").unwrap(),
+            Identifier::new("record").unwrap(),
+            vec![],
+            vec![vault_ro, book, oracle_reg, appraisal, clock],
+        );
+    }
+
     // Free balances.
     for asset in &holdings.free_assets {
         let att = *attestations
@@ -676,6 +793,20 @@ pub async fn compose_appraisal(
                     oa,
                     Identifier::new("options_adapter").unwrap(),
                     Identifier::new("appraise_rfq_ticket").unwrap(),
+                    vec![TypeTag::from_str(escrow_type)?],
+                    vec![vault_ro, cfg, appraisal, ticket_id, opt, clock],
+                );
+            }
+            PositionInfo::BidTicket { id, escrow_type, .. } => {
+                let oa = refs
+                    .options_adapter_pkg
+                    .ok_or_else(|| anyhow!("options adapter package unavailable"))?;
+                let ticket_id = pt.pure(id)?;
+                let opt = opt_for(pt, &attestations, escrow_type, &holdings.deposit_type);
+                pt.programmable_move_call(
+                    oa,
+                    Identifier::new("options_adapter").unwrap(),
+                    Identifier::new("appraise_bid_ticket").unwrap(),
                     vec![TypeTag::from_str(escrow_type)?],
                     vec![vault_ro, cfg, appraisal, ticket_id, opt, clock],
                 );

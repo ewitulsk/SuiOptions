@@ -444,6 +444,13 @@ pub struct TradingVaultGql {
     /// Observed deposit-asset-per-share price (1e12-scaled).
     pub latest_pps_e12_raw: Option<String>,
     pub updated_at_ms: String,
+    /// External MM account wallet (SO-299); null when none is set.
+    pub external_account: Option<String>,
+    /// Outstanding external exposure (deposit-asset units).
+    pub external_exposure: String,
+    /// Latest keeper-posted account equity (EquityPosted).
+    pub latest_external_equity: Option<String>,
+    pub external_equity_updated_at_ms: Option<String>,
 }
 
 impl From<TradingVaultRow> for TradingVaultGql {
@@ -467,6 +474,12 @@ impl From<TradingVaultRow> for TradingVaultGql {
             pending_withdrawals: v.pending_withdrawals.to_string(),
             latest_pps_e12_raw: v.latest_pps_e12.map(|p| p.to_string()),
             updated_at_ms: v.updated_at_ms.to_string(),
+            external_account: v.external_account,
+            external_exposure: v.external_exposure.to_string(),
+            latest_external_equity: v.latest_external_equity.map(|e| e.to_string()),
+            external_equity_updated_at_ms: v
+                .external_equity_updated_at_ms
+                .map(|t| t.to_string()),
         }
     }
 }

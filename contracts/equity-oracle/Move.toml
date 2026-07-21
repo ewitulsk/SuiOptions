@@ -1,0 +1,8 @@
+[package]
+name = "equity_oracle"
+version = "0.0.1"
+edition = "2024.beta"
+
+[dependencies]
+trading_vault = { local = "../trading-vault" }
+options_core = { local = "../core" }

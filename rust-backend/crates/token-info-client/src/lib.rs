@@ -157,6 +157,18 @@ impl Snapshot {
         self.package_info.options_adapter.as_ref()
     }
 
+    /// Keeper-attested equity oracle for trading-vault external accounts
+    /// (SO-299).
+    pub fn equity_oracle(&self) -> Option<&SubPackageInfo> {
+        self.package_info.equity_oracle.as_ref()
+    }
+
+    /// DeepBook-Margin computed equity oracle (SO-299). Emits no events;
+    /// the keeper needs its package id.
+    pub fn dbm_oracle(&self) -> Option<&SubPackageInfo> {
+        self.package_info.dbm_oracle.as_ref()
+    }
+
     /// Trading-vault governance objects (registries, feed registry, pool
     /// allowlist) recorded by the deploy-time activation step (SO-292).
     pub fn trading_vault_objects(&self) -> Option<&TradingVaultObjectsInfo> {
@@ -372,6 +384,13 @@ mod tests {
                 auction: None,
                 rfq: None,
                 vault: None,
+                trading_vault: None,
+                oracle_pyth: None,
+                deepbook_adapter: None,
+                options_adapter: None,
+                equity_oracle: None,
+                dbm_oracle: None,
+                trading_vault_objects: None,
             },
             tokens: vec![
                 tok(

@@ -1,10 +1,12 @@
-//! Price-to-premium simulator over the `mm-bot` primitives.
+//! Price simulator over the desk's pricing primitives (SO-299).
 //!
 //! Feed in the same inputs the bot would see (USD price of underlying and
-//! settlement, a strike, an expiry, etc.) and this prints what the bot
-//! would quote — including the intermediate quantities (spot scaled,
-//! strike scaled, time-to-expiry, per-unit Black-Scholes price) so the
-//! pricing path is easy to inspect by hand.
+//! settlement, a strike, an expiry, etc.) and this prints the model fair
+//! value — including the intermediate quantities (spot scaled, strike
+//! scaled, time-to-expiry, per-unit BAW price) so the pricing path is
+//! easy to inspect by hand. The old spread/smile quote model died in the
+//! SO-299 strategy reset; this tool now prints the AMERICAN (BAW) fair
+//! the desk marks against, at an explicit sigma.
 //!
 //! Examples:
 //!
@@ -15,7 +17,7 @@
 //!   --underlying-decimals 8 --settlement-decimals 6 \
 //!   --strike 60000000 --strike-scale 3 \
 //!   --days-to-expiry 30 --write-amount 100000000 \
-//!   --sigma 0.6 --rate 0.05
+//!   --sigma 0.6
 //! ```
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,13 +26,12 @@ use anyhow::{bail, Result};
 use clap::{Parser, ValueEnum};
 
 use mm_bot::pricing::{
-    compute_spot_from_prices, price_rfq, PriceDecision, PricingConfig, RfqPricingInputs,
-    SigmaEstimate, Smile, SpotError,
+    compute_spot_from_prices, rebase_strike_to_scale_zero, time_to_expiry_years, SpotError,
 };
-use protocol_types::sides::Side;
+use pricing::american::{call_price_baw, put_price_baw, AmericanInputs};
 
 /// Option product to price. `call` is the default so existing invocations are
-/// unchanged; `put` switches the Black-Scholes mid to the put pricer.
+/// unchanged; `put` switches to the American put pricer.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum Product {
     Call,
@@ -38,7 +39,7 @@ enum Product {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "mm-quote", about = "Simulate the mm-bot's premium for an RFQ given asset prices.")]
+#[command(name = "mm-quote", about = "Simulate the desk's model fair value for an option given asset prices.")]
 struct Args {
     /// USD price of the underlying asset (e.g. BTC).
     #[arg(long)]
@@ -85,13 +86,14 @@ struct Args {
     #[arg(long, default_value_t = 0.0)]
     rate: f64,
 
-    /// `call` or `put`. Selects the Black-Scholes pricer. Defaults to `call`.
+    /// Annualized staking/carry yield of the underlying (BAW dividend
+    /// rate; drives early-exercise optimality).
+    #[arg(long, default_value_t = 0.0)]
+    carry_yield: f64,
+
+    /// `call` or `put`. Selects the American pricer. Defaults to `call`.
     #[arg(long, value_enum, default_value_t = Product::Call)]
     product: Product,
-
-    /// Quote TTL in ms — sets `valid_until_ms = now + ttl`.
-    #[arg(long, default_value_t = 30_000)]
-    quote_ttl_ms: u64,
 
     /// Emit machine-readable JSON instead of a human-formatted block.
     #[arg(long)]
@@ -134,125 +136,59 @@ fn main() -> Result<()> {
         (None, None) => bail!("one of --days-to-expiry or --expiry-ms is required"),
     };
 
-    // The simulator exercises the pricing primitives directly — the pair gate
-    // and api-service lookup live in the bot, so here we just feed the inputs
-    // the user passed on the CLI straight into the pricer.
-    let inputs = RfqPricingInputs {
-        write_amount: args.write_amount,
-        // Simulator always pretends retail is trading (buying) — only the
-        // pricing primitives are exercised; `side` is informational.
-        side: Side::Trader,
-        strike: args.strike,
-        strike_scale: args.strike_scale,
-        expiry_ms,
-        // Put pricing routes through pricing::put_price_per_unit / put_greeks
-        // inside price_rfq.
-        is_put: matches!(args.product, Product::Put),
-    };
-
-    let cfg = PricingConfig {
+    let strike_scaled = rebase_strike_to_scale_zero(args.strike, args.strike_scale);
+    let t_years = time_to_expiry_years(expiry_ms, now);
+    let inputs = AmericanInputs {
+        spot: spot_scaled,
+        strike: strike_scaled,
+        t_years,
+        sigma: args.sigma,
         rate: args.rate,
-        quote_ttl_ms: args.quote_ttl_ms,
-        // Simulator prints the Black-Scholes mid — no spread.
-        ask_markup_bps: 0,
-        bid_markdown_bps: 0,
-        ask_vol_markup: 1.0,
-        bid_vol_markdown: 1.0,
-        ttl_charge_mult: 0.0,
-        fallback_vol_penalty: 1.0,
-        smile: Smile::default(),
-        max_quote_notional: 0,
-        size_widening_vol: 0.0,
-        size_ref_notional: 0,
+        carry_yield: args.carry_yield,
     };
-    let sigma = SigmaEstimate { sigma: args.sigma, is_fallback: false };
-    let decision = price_rfq(&cfg, &inputs, spot_scaled, sigma, now);
+    let per_unit = match args.product {
+        Product::Call => call_price_baw(&inputs),
+        Product::Put => put_price_baw(&inputs),
+    };
+    let premium = (per_unit * args.write_amount as f64).floor().max(0.0) as u64;
 
     if args.json {
-        print_json(&decision, spot_scaled, &inputs, now);
+        print!("{{");
+        print!("\"now_ms\":{now},");
+        print!("\"spot_scaled\":{spot_scaled},");
+        print!("\"strike\":\"{}\",", args.strike);
+        print!("\"strike_scale\":{},", args.strike_scale);
+        print!("\"strike_scaled\":{strike_scaled},");
+        print!("\"expiry_ms\":{expiry_ms},");
+        print!("\"write_amount\":{},", args.write_amount);
+        print!("\"t_years\":{t_years},");
+        print!("\"sigma\":{},", args.sigma);
+        print!("\"per_unit\":{per_unit},");
+        print!("\"premium\":{premium}");
+        println!("}}");
     } else {
-        print_human(&decision, spot_scaled, &inputs, now, &args);
+        println!("inputs:");
+        println!("  underlying_usd      = {}", args.underlying_usd);
+        println!("  settlement_usd      = {}", args.settlement_usd);
+        println!("  underlying_decimals = {}", args.underlying_decimals);
+        println!("  settlement_decimals = {}", args.settlement_decimals);
+        println!("  strike (raw)        = {}", args.strike);
+        println!("  strike_scale        = {}", args.strike_scale);
+        println!("  expiry_ms           = {expiry_ms}");
+        println!("  write_amount        = {}", args.write_amount);
+        println!("  sigma               = {}", args.sigma);
+        println!("  rate                = {}", args.rate);
+        println!("  carry_yield         = {}", args.carry_yield);
+        println!();
+        println!("derived:");
+        println!("  spot_scaled         = {spot_scaled}");
+        println!("  strike_scaled       = {strike_scaled}");
+        println!("  t_years             = {t_years}");
+        println!("  now_ms              = {now}");
+        println!();
+        println!("model fair (BAW American):");
+        println!("  per_unit            = {per_unit}");
+        println!("  premium (raw)       = {premium}");
     }
     Ok(())
-}
-
-fn print_human(
-    decision: &PriceDecision,
-    spot_scaled: f64,
-    inputs: &RfqPricingInputs,
-    now: u64,
-    args: &Args,
-) {
-    println!("inputs:");
-    println!("  underlying_usd      = {}", args.underlying_usd);
-    println!("  settlement_usd      = {}", args.settlement_usd);
-    println!("  underlying_decimals = {}", args.underlying_decimals);
-    println!("  settlement_decimals = {}", args.settlement_decimals);
-    println!("  strike (raw)        = {}", inputs.strike);
-    println!("  strike_scale        = {}", inputs.strike_scale);
-    println!("  expiry_ms           = {}", inputs.expiry_ms);
-    println!("  write_amount        = {}", inputs.write_amount);
-    println!("  sigma               = {}", args.sigma);
-    println!("  rate                = {}", args.rate);
-    println!();
-    println!("derived:");
-    println!("  spot_scaled         = {spot_scaled}");
-    println!("  now_ms              = {now}");
-    println!();
-    match decision {
-        PriceDecision::Quote {
-            premium,
-            valid_until_ms,
-            strike_scaled,
-            t_years,
-            per_unit,
-            ..
-        } => {
-            println!("decision: QUOTE");
-            println!("  strike_scaled      = {strike_scaled}");
-            println!("  t_years            = {t_years}");
-            println!("  per_unit (BS price)= {per_unit}");
-            println!("  premium (raw)      = {premium}");
-            println!("  valid_until_ms     = {valid_until_ms}");
-        }
-        PriceDecision::Decline { reason } => {
-            println!("decision: DECLINE");
-            println!("  reason             = {reason}");
-        }
-    }
-}
-
-fn print_json(decision: &PriceDecision, spot_scaled: f64, inputs: &RfqPricingInputs, now: u64) {
-    // Hand-roll the JSON so we don't take a serde_json dep just for this.
-    print!("{{");
-    print!("\"now_ms\":{now},");
-    print!("\"spot_scaled\":{spot_scaled},");
-    print!("\"strike\":\"{}\",", inputs.strike);
-    print!("\"strike_scale\":{},", inputs.strike_scale);
-    print!("\"expiry_ms\":{},", inputs.expiry_ms);
-    print!("\"write_amount\":{},", inputs.write_amount);
-    match decision {
-        PriceDecision::Quote {
-            premium,
-            valid_until_ms,
-            strike_scaled,
-            t_years,
-            sigma,
-            per_unit,
-            ..
-        } => {
-            print!("\"decision\":\"quote\",");
-            print!("\"strike_scaled\":{strike_scaled},");
-            print!("\"t_years\":{t_years},");
-            print!("\"sigma\":{sigma},");
-            print!("\"per_unit\":{per_unit},");
-            print!("\"premium\":{premium},");
-            print!("\"valid_until_ms\":{valid_until_ms}");
-        }
-        PriceDecision::Decline { reason } => {
-            print!("\"decision\":\"decline\",");
-            print!("\"reason\":\"{}\"", reason.replace('"', "\\\""));
-        }
-    }
-    println!("}}");
 }

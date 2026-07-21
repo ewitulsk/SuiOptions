@@ -100,6 +100,11 @@ async fn main() -> Result<()> {
                 .map(|p| p.package())
                 .transpose()
                 .context("options_adapter package id")?,
+            equity_oracle: snapshot
+                .equity_oracle()
+                .map(|p| p.package())
+                .transpose()
+                .context("equity_oracle package id")?,
         }),
         _ => None,
     };

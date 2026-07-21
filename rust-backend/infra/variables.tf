@@ -67,6 +67,12 @@ variable "ec2_root_volume_gb" {
   default     = 50
 }
 
+variable "staging_ec2_root_volume_gb" {
+  description = "EBS gp3 root volume size in GB for the shared staging host. Grown to 100 after containerd image snapshots filled the original 50 GB volume; EBS volumes can't shrink, so lowering this makes apply fail."
+  type        = number
+  default     = 100
+}
+
 variable "ssh_pubkey" {
   description = "Optional SSH public key (OpenSSH format) to add to the EC2 key pair. Leave empty to disable SSH; SSM Session Manager works regardless."
   type        = string

@@ -182,6 +182,23 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # Policy-gated co-signer for trading-vault external accounts (mm-bot V2,
+  # docs 03/04 §3b). Public port (9017, proxied by nginx). Reads its multisig
+  # member key from /run/secrets; appends the decision audit log to the
+  # hedge_signer_data volume.
+  hedge-signer:
+    image: ${ECR}/options/hedge-signer:${HEDGE_SIGNER_TAG}
+    environment:
+      APP_ENV: staging
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      RUST_LOG: info,hedge_signer=info
+    volumes:
+      - /opt/options/staging/secrets:/run/secrets:ro
+      - hedge_signer_data:/app/data
+    depends_on: [token-info]
+    restart: unless-stopped
+    networks: [net]
+
   # SUI balance gauges + low-balance alerts for the operational wallets
   # (SO-180). Derives addresses from the same rendered secrets the services
   # mount; scraped by Prometheus on 9012. Not proxied by nginx.
@@ -237,9 +254,13 @@ services:
     volumes:
       - /opt/options/staging/nginx/:/etc/nginx/options/:ro
     command: ["nginx", "-c", "/etc/nginx/options/nginx.conf", "-g", "daemon off;"]
-    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, keeper]
+    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, hedge-signer, keeper]
     restart: unless-stopped
     networks: [net]
 
 networks:
   net:
+
+volumes:
+  # hedge-signer's append-only decision audit log (/app/data/audit.jsonl).
+  hedge_signer_data:

@@ -284,6 +284,9 @@ pub struct TradingVaultPkgs {
     pub oracle_pyth: ObjectID,
     pub deepbook_adapter: Option<ObjectID>,
     pub options_adapter: Option<ObjectID>,
+    /// equity-oracle package (SO-299): deposits on external-configured
+    /// vaults carry an extra `equity_oracle::record` appraisal leg.
+    pub equity_oracle: Option<ObjectID>,
 }
 
 pub fn protocol_templates(
@@ -508,13 +511,27 @@ pub fn protocol_templates(
                 appraisal_allowed.push(TargetMatcher::Exact(MoveTarget::new(oa, "options_adapter", f)));
             }
         }
+        // External-account vaults (SO-299) carry a mandatory
+        // `equity_oracle::record` leg between begin_appraisal and the
+        // consumer — allowed (not required: most vaults have no external
+        // account), anchors unchanged.
+        let equity_record = tvp
+            .equity_oracle
+            .map(|eo| MoveTarget::new(eo, "equity_oracle", "record"));
+        if let Some(rec) = &equity_record {
+            appraisal_allowed.push(TargetMatcher::Exact(rec.clone()));
+        }
         let mut deposit_allowed = appraisal_allowed.clone();
         deposit_allowed.push(TargetMatcher::Exact(deposit.clone()));
+        let mut deposit_arities = vec![(begin.clone(), 1), (deposit.clone(), 1)];
+        if let Some(rec) = equity_record {
+            deposit_arities.push((rec, 0));
+        }
         templates.push(PtbTemplate {
             name: "trading_vault:deposit".to_owned(),
             required: vec![TargetMatcher::Exact(begin.clone()), TargetMatcher::Exact(deposit.clone())],
             allowed: deposit_allowed,
-            arities: vec![(begin, 1), (deposit, 1)],
+            arities: deposit_arities,
         });
         let create = tvt("vault", "create_vault");
         templates.push(PtbTemplate::exact_only(
@@ -1148,6 +1165,59 @@ mod tests {
             false,
         );
         assert_eq!(match_any(&templates(), &other_coin_fn), None);
+    }
+
+    #[test]
+    fn trading_vault_deposit_with_equity_record_leg() {
+        let tv_pkg = ObjectID::from_hex_literal("0x71ad").unwrap();
+        let op_pkg = ObjectID::from_hex_literal("0x0217").unwrap();
+        let eo_pkg = ObjectID::from_hex_literal("0xe071").unwrap();
+        let with_eo = |equity_oracle: Option<ObjectID>| {
+            protocol_templates(
+                pkg(),
+                vault_pkg(),
+                &[],
+                false,
+                None,
+                None,
+                Some(TradingVaultPkgs {
+                    trading_vault: tv_pkg,
+                    oracle_pyth: op_pkg,
+                    deepbook_adapter: None,
+                    options_adapter: None,
+                    equity_oracle,
+                }),
+            )
+        };
+        // A deposit on an external-configured vault: attest → begin_appraisal
+        // → equity_oracle::record → deposit (+ coinWithBalance prelude).
+        let calls = [
+            (MoveTarget::new(op_pkg, "oracle_pyth", "attest"), 2),
+            (MoveTarget::new(tv_pkg, "vault", "begin_appraisal"), 1),
+            (MoveTarget::new(eo_pkg, "equity_oracle", "record"), 0),
+            (MoveTarget::new(tv_pkg, "vault", "deposit"), 1),
+        ];
+        let pt = build(&calls, true);
+        assert_eq!(match_any(&with_eo(Some(eo_pkg)), &pt), Some("trading_vault:deposit"));
+
+        // Without the equity-oracle package configured, the record leg is
+        // a foreign call and the PTB is refused.
+        assert_eq!(match_any(&with_eo(None), &pt), None);
+
+        // A forged record call with type args fails the pinned arity.
+        let mut forged = calls.clone();
+        forged[2].1 = 1;
+        assert_eq!(match_any(&with_eo(Some(eo_pkg)), &build(&forged, true)), None);
+
+        // A plain deposit (no external account) still matches unchanged.
+        let plain = build(
+            &[
+                (MoveTarget::new(tv_pkg, "vault", "begin_appraisal"), 1),
+                (MoveTarget::new(tv_pkg, "vault", "deposit"), 1),
+            ],
+            true,
+        );
+        assert_eq!(match_any(&with_eo(Some(eo_pkg)), &plain), Some("trading_vault:deposit"));
     }
 
     #[test]

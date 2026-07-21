@@ -1,8 +1,9 @@
-# mm-bot config — prod env (testnet).
+# mm-bot config — prod env (testnet). The vol desk (SO-299).
 #
 # prod is a distinct testnet deployment from staging; this config mirrors
-# config.staging.toml so the bot makes markets identically against the prod
-# contract. Requires the options/prod/mm-bot secret (sui_key + quote_key).
+# config.staging.toml (minus the sim — prod gets no synthetic retail).
+# Requires the options/prod/mm-bot secret (sui_key + quote_key). See
+# config.toml for full knob documentation.
 
 network            = "testnet"
 
@@ -10,48 +11,17 @@ quoting_url        = "ws://quoting:9002/"
 
 signing_scheme     = "ed25519"
 
-# --- Collateral routing (collateral abstraction, plan 04 §8) -----------
-# Core holds no MM funds: each MM publishes its own mm_collateral package
-# (`mm-bot deploy-collateral`) and its quotes carry the routing INSIDE the
-# signed payload. When these are unset, the bot reads the state file the
-# deploy-collateral subcommand writes
-# (services/mm-bot/config/collateral.<network>.toml).
+# --- Collateral routing chassis ----------------------------------------
+# Unset: read from the deploy-bundle state file. Desk quotes route
+# through the trading vault (vault_mm), not here.
 # collateral_package = "0x..."
 # collateral_account = "0x..."
-# release_module     = "mm_collateral"
 
-
-# Derive mode: `underlying_symbols` left unset, so the bot makes markets in
-# every enabled token-info token with a Pyth feed (currently TBTC, TWAL)
-# and a watcher restarts the bot to pick up newly-listed underlyings. Pin an
-# explicit `underlying_symbols = [...]` list to opt out of auto-pickup, or add
-# `underlying_exclude = [...]` to skip specific tickers.
+# Derive mode (see staging).
 settlement_symbol  = "TUSDC"
 
 rate               = 0.0
 quote_ttl_ms       = 30_000
-
-# Minimum premium-space spread (deep-ITM floor); the primary spread is the
-# vol-space markup/markdown below.
-ask_markup_bps     = 100
-bid_markdown_bps   = 100
-# Vol-space spread: ask at sigma×1.10, bid at sigma×0.90.
-ask_vol_markup     = 1.10
-bid_vol_markdown   = 0.90
-# Last-look charge: |delta|·spot·sigma·√(ttl_years) on the ask / off the bid.
-ttl_charge_mult    = 1.0
-# Extra vol widening while the vol buffer is cold (fallback sigma in use).
-fallback_vol_penalty = 1.25
-
-# Size awareness. max_quote_notional caps any single RFQ's notional
-# (spot x write_amount, settlement smallest-units); 0 = no cap. Size
-# widening adds size_widening_vol of proportional vol spread per
-# size_ref_notional of notional, so big clips pay for the inventory they
-# move. 100_000_000_000 = 100k TUSDC at 6 decimals.
-max_quote_notional = 0
-size_widening_vol  = 0.10
-size_ref_notional  = 100_000_000_000
-
 
 roles = ["trader_mm", "writer_mm"]
 bulk_view_enabled = true
@@ -62,72 +32,28 @@ bootstrap_underlying_amount = 100_000_000_000
 underlying_replenish_threshold    = 20_000_000_000
 underlying_replenish_amount       = 100_000_000_000
 underlying_replenish_interval_secs = 60
-# Strike-dependent vol (see crates/pricing smile.rs): sigma(K) = sigma_atm x
-# (1 + skew*z + convexity*z^2), z = ln(K/S)/(sigma_atm*sqrt(tau)). Flat (0/0)
-# until calibrated from observed quotes; positive skew richens the upside
-# wing, positive convexity richens both wings. Per-symbol overrides:
-#   [smiles.TBTC]
-#   skew = 0.05
-[smile]
-skew      = 0.0
-convexity = 0.0
 
-
-# Live prices come from oracle-service (ORACLE_URL, set in compose). These
-# only tune the consumer-side staleness guards + the rolling-vol sampler.
+# Live prices come from oracle-service (ORACLE_URL, set in compose).
 [pyth]
 max_price_age_ms       = 5_000
 max_publish_lag_ms     = 10_000
-# Pyth confidence gate, bps of price; 0 = off (observe feeds before enabling).
 max_conf_bps           = 0
-# Short + long realized-vol windows; quoted sigma is max(short, long).
 vol_window_hours       = 24
 vol_long_window_hours  = 168
-# 5-minute sampling (1-minute bars mostly measure oracle jitter).
 vol_sample_interval_ms = 300_000
 fallback_vol           = 0.6
 [pyth.fallback_vols]
 TBTC = 0.45
 TWAL = 1.0
 
-# DeepBook quoting (SO-158): rest two-sided limit orders on every tradeable
-# bucket pool of the configured pair. The bot finds (or creates+registers)
-# its BalanceManager on first run and logs the id — pin it here afterwards
-# to skip the event scan at boot:
-#   balance_manager_id = "0x…"
-[deepbook]
-enabled             = true
-# SO-173: refresh on-chain quotes once a day, and place every pool's quotes in
-# one (chunked) tx. order_lifetime matches the cadence, so a missed daily
-# refresh simply lets the orders self-expire.
-quote_interval_secs = 86_400
-order_lifetime_secs = 86_400
-max_pools_per_tx    = 12
-max_quote_age_secs  = 120
-requote_drift_bps   = 50
-expiry_cutoff_secs  = 3600
-# Per-side size in call-coin atomic units (8-dec TBTC calls: 0.01 / side).
-# With quote_full_inventory on, this is the bid-side floor instead.
-quote_size          = 1_000_000
-# Demo mode: rest the bot's ENTIRE call-coin inventory as the ask, bid
-# mirrored to the same quantity (floored at quote_size).
-quote_full_inventory = true
-# BM settlement top-up chunk, atomic (1,000 TUSDC).
-tusdc_deposit_chunk = 1_000_000_000
-gas_budget          = 200_000_000
-
-# On-chain RFQ bidder (C2): the mm-bot is the intended counterparty for the
-# vaults' on-chain RFQ auctions. Poll open auctions, price them with the same
-# Black-Scholes brain, and bid from the wallet under the escrow cap. Without
-# this the keeper's slices expire unsold every round. Tuning uses the struct
-# defaults (poll 10s, ReservePlus, 300bps shade, 5,000-TUSDC escrow cap).
-[onchain_rfq]
-enabled = true
-
-# On-chain proceeds-swap bidder (C2): the buy side of the vault's
-# settlement→underlying swap auctions. Posts underlying, wins settlement,
-# pricing the escrow at the Pyth cross less bid_margin_bps. Reuses the RFQ
-# bidder knobs (poll 10s, escrow cap, rebid) under [onchain_swap.bidder];
-# bid_margin_bps/lookback_secs use struct defaults (20bps, 24h).
-[onchain_swap.bidder]
-enabled = true
+# ── The vol desk (SO-299) ───────────────────────────────────────────────
+# OFF until a prod TradingVault is provisioned for the desk (vault +
+# CuratorCap to this wallet + curator vault_mm toggle). Risk knobs
+# default to the 00-plan starting parameters — see config.toml.
+[desk]
+enabled = false
+# vault_id           = "0x..."
+# mm_release_enabled = true
+# Hedge venues: omit for the single legacy paper venue; declare
+# [[desk.hedge.venues]] entries (kind = "paper", name, slippage_bps,
+# funding_rate_annual) for multi-venue monitoring — see config.toml.

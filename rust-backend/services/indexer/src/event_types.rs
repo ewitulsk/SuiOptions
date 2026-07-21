@@ -23,11 +23,13 @@ use protocol_types::asset::AssetType;
 use protocol_types::events::{
     AuctionBid, AuctionCreated, AuctionSettled,
     AuctionUnfilled, BucketCleaned, BucketCreated, BucketInvalidated, BucketRevalidated,
-    ChainEvent, CollateralizedWrite, Exercised, ExpiredOptionBurned, FeeUpdated, InstantWithdraw,
+    ChainEvent, CollateralizedWrite, EquityPosted, Exercised, ExpiredOptionBurned, FeeUpdated,
+    InstantWithdraw, OffsetClosed,
     PutBucketCleaned, PutBucketCreated, PutBucketInvalidated, PutBucketRevalidated,
     PutCollateralizedWrite, PutExercised, PutExpiredOptionBurned, PutRedeemed, PutRfqCreated,
     PutRfqExpiredUnsold, PutRfqSettled, PutWriteExecuted, Redeemed, RfqCreated, RfqExpiredUnsold,
-    RfqSettled, SharesClaimed, SignerCreated, SigningKeyRotated, SwapRfqSettled, SwapRfqUnfilled,
+    RfqSettled, SharesClaimed, SignerCreated, SigningKeyRotated, SpreadClosed, SpreadRedeemed,
+    SpreadUnwound, SpreadWritten, SwapRfqSettled, SwapRfqUnfilled,
     TreasuryWithdrawn, VaultBucketSelected, VaultConfigUpdated, VaultCreated, VaultDeposit,
     VaultDepositsPaused, VaultFeesCharged, VaultPositionRedeemed, VaultRfqSettled, VaultRfqUnsold,
     VaultRoundFinalized, WithdrawCompleted, WithdrawInitiated, WriteExecuted,
@@ -36,6 +38,9 @@ use protocol_types::events::{
     TvPositionStored, TvPositionRemoved, TvAdapterAllowed, TvAdapterDisallowed, TvOracleAllowed,
     TvOracleDisallowed, TvProtocolConfigUpdated, TvCollateralReleased, TvCustodyCreated,
     TvPoolAllowed, TvPoolDisallowed, TvRfqOpened, TvRfqSettled, TvPositionRedeemed,
+    TvMmCoinExercised, TvMmOffsetClosed, TvMmCoinReleased, TvTakerSwapExecuted,
+    TvBidPlaced, TvBidReclaimed, TvBidRedeemed,
+    TvExternalAccountSet, TvExternalAccountCleared, TvExternalReleased, TvExternalReturned,
 };
 use protocol_types::ids::{ObjectId, SuiAddress};
 
@@ -61,6 +66,8 @@ pub struct PackageIds<'a> {
     pub deepbook_adapter: Option<&'a str>,
     /// options_adapter (SO-285), optional like `trading_vault`.
     pub options_adapter: Option<&'a str>,
+    /// equity_oracle (SO-299), optional like `trading_vault`.
+    pub equity_oracle: Option<&'a str>,
 }
 
 /// All the event type strings the indexer subscribes to, derived from the
@@ -124,6 +131,12 @@ pub struct EventTypes {
     pub put_rfq_created: String,
     pub put_rfq_settled: String,
     pub put_rfq_expired_unsold: String,
+    // Offset closes + spreads (options_core, SO-299).
+    pub offset_closed: String,
+    pub spread_written: String,
+    pub spread_unwound: String,
+    pub spread_closed: String,
+    pub spread_redeemed: String,
     /// Prefix of DeepBook's generic `pool::PoolCreated<Base, Quote>` event
     /// (SO-152). Built from DeepBook's ORIGINAL package id — Sui resolves
     /// event/struct types to the first publish, not the upgraded package
@@ -158,6 +171,20 @@ pub struct EventTypes {
     pub tv_rfq_opened: String,
     pub tv_rfq_settled: String,
     pub tv_position_redeemed: String,
+    // Trading-vault mm-desk custody ops + vault-funded bids (SO-299).
+    pub tv_mm_coin_exercised: String,
+    pub tv_mm_offset_closed: String,
+    pub tv_mm_coin_released: String,
+    pub tv_taker_swap_executed: String,
+    pub tv_bid_placed: String,
+    pub tv_bid_reclaimed: String,
+    pub tv_bid_redeemed: String,
+    // Trading-vault external accounts + equity oracle (SO-299).
+    pub tv_external_account_set: String,
+    pub tv_external_account_cleared: String,
+    pub tv_external_released: String,
+    pub tv_external_returned: String,
+    pub equity_posted: String,
 }
 
 impl EventTypes {
@@ -183,6 +210,10 @@ impl EventTypes {
         let oa = |name: &str| match pkgs.options_adapter {
             Some(pkg) => format!("{pkg}::options_adapter::{name}"),
             None => format!("unset::options_adapter::{name}"),
+        };
+        let eo = |name: &str| match pkgs.equity_oracle {
+            Some(pkg) => format!("{pkg}::equity_oracle::{name}"),
+            None => format!("unset::equity_oracle::{name}"),
         };
         Self {
             bucket_created: core("BucketCreated"),
@@ -234,6 +265,11 @@ impl EventTypes {
             put_rfq_created: rfq("PutRfqCreated"),
             put_rfq_settled: rfq("PutRfqSettled"),
             put_rfq_expired_unsold: rfq("PutRfqExpiredUnsold"),
+            offset_closed: core("OffsetClosed"),
+            spread_written: core("SpreadWritten"),
+            spread_unwound: core("SpreadUnwound"),
+            spread_closed: core("SpreadClosed"),
+            spread_redeemed: core("SpreadRedeemed"),
             deepbook_pool_created_prefix: deepbook_original_package_id
                 .map(|pkg| format!("{pkg}::pool::PoolCreated<")),
             deepbook_order_filled: deepbook_original_package_id
@@ -262,10 +298,25 @@ impl EventTypes {
             tv_rfq_opened: oa("RfqOpened"),
             tv_rfq_settled: oa("RfqSettled"),
             tv_position_redeemed: oa("PositionRedeemed"),
+            // Mm* structs are DEFINED in trading_vault::events (vault_mm
+            // only calls the emitters), so they resolve via `tv`, not
+            // `tv_mm`.
+            tv_mm_coin_exercised: tv("MmCoinExercised"),
+            tv_mm_offset_closed: tv("MmOffsetClosed"),
+            tv_mm_coin_released: tv("MmCoinReleased"),
+            tv_taker_swap_executed: dba("TakerSwapExecuted"),
+            tv_bid_placed: oa("BidPlaced"),
+            tv_bid_reclaimed: oa("BidReclaimed"),
+            tv_bid_redeemed: oa("BidRedeemed"),
+            tv_external_account_set: tv("ExternalAccountSet"),
+            tv_external_account_cleared: tv("ExternalAccountCleared"),
+            tv_external_released: tv("ExternalReleased"),
+            tv_external_returned: tv("ExternalReturned"),
+            equity_posted: eo("EquityPosted"),
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 73] {
+    pub fn all_strings(&self) -> [&str; 90] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -316,6 +367,11 @@ impl EventTypes {
             &self.put_rfq_created,
             &self.put_rfq_settled,
             &self.put_rfq_expired_unsold,
+            &self.offset_closed,
+            &self.spread_written,
+            &self.spread_unwound,
+            &self.spread_closed,
+            &self.spread_redeemed,
             &self.tv_vault_created,
             &self.tv_vault_closing,
             &self.tv_vault_closed,
@@ -340,6 +396,18 @@ impl EventTypes {
             &self.tv_rfq_opened,
             &self.tv_rfq_settled,
             &self.tv_position_redeemed,
+            &self.tv_mm_coin_exercised,
+            &self.tv_mm_offset_closed,
+            &self.tv_mm_coin_released,
+            &self.tv_taker_swap_executed,
+            &self.tv_bid_placed,
+            &self.tv_bid_reclaimed,
+            &self.tv_bid_redeemed,
+            &self.tv_external_account_set,
+            &self.tv_external_account_cleared,
+            &self.tv_external_released,
+            &self.tv_external_returned,
+            &self.equity_posted,
         ]
     }
 }
@@ -456,6 +524,16 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(PutRfqSettled, PutRfqSettled)
     } else if type_str == types.put_rfq_expired_unsold {
         decode!(PutRfqExpiredUnsold, PutRfqExpiredUnsold)
+    } else if type_str == types.offset_closed {
+        decode!(OffsetClosed, OffsetClosed)
+    } else if type_str == types.spread_written {
+        decode!(SpreadWritten, SpreadWritten)
+    } else if type_str == types.spread_unwound {
+        decode!(SpreadUnwound, SpreadUnwound)
+    } else if type_str == types.spread_closed {
+        decode!(SpreadClosed, SpreadClosed)
+    } else if type_str == types.spread_redeemed {
+        decode!(SpreadRedeemed, SpreadRedeemed)
     } else if type_str == types.tv_vault_created {
         decode!(TvVaultCreated, TvVaultCreated)
     } else if type_str == types.tv_vault_closing {
@@ -504,6 +582,30 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(TvRfqSettled, TvRfqSettled)
     } else if type_str == types.tv_position_redeemed {
         decode!(TvPositionRedeemed, TvPositionRedeemed)
+    } else if type_str == types.tv_mm_coin_exercised {
+        decode!(TvMmCoinExercised, TvMmCoinExercised)
+    } else if type_str == types.tv_mm_offset_closed {
+        decode!(TvMmOffsetClosed, TvMmOffsetClosed)
+    } else if type_str == types.tv_mm_coin_released {
+        decode!(TvMmCoinReleased, TvMmCoinReleased)
+    } else if type_str == types.tv_taker_swap_executed {
+        decode!(TvTakerSwapExecuted, TvTakerSwapExecuted)
+    } else if type_str == types.tv_bid_placed {
+        decode!(TvBidPlaced, TvBidPlaced)
+    } else if type_str == types.tv_bid_reclaimed {
+        decode!(TvBidReclaimed, TvBidReclaimed)
+    } else if type_str == types.tv_bid_redeemed {
+        decode!(TvBidRedeemed, TvBidRedeemed)
+    } else if type_str == types.tv_external_account_set {
+        decode!(TvExternalAccountSet, TvExternalAccountSet)
+    } else if type_str == types.tv_external_account_cleared {
+        decode!(TvExternalAccountCleared, TvExternalAccountCleared)
+    } else if type_str == types.tv_external_released {
+        decode!(TvExternalReleased, TvExternalReleased)
+    } else if type_str == types.tv_external_returned {
+        decode!(TvExternalReturned, TvExternalReturned)
+    } else if type_str == types.equity_posted {
+        decode!(EquityPosted, EquityPosted)
     } else {
         Ok(None)
     }
@@ -704,11 +806,12 @@ mod tests {
     const RFQ_PKG: &str = "0xf1";
     const VAULT_PKG: &str = "0xe1";
     const TV_PKG: &str = "0xt1";
+    const EQUITY_ORACLE_PKG: &str = "0xeq1";
     const DEEPBOOK_ORIG: &str =
         "0xfb28c4cbc6865bd1c897d26aecbe1f8792d1509a20ffec692c800660cbec6982";
 
     fn pkgs() -> PackageIds<'static> {
-        PackageIds { core: PKG, auction: AUCTION_PKG, rfq: RFQ_PKG, vault: VAULT_PKG, trading_vault: Some(TV_PKG), deepbook_adapter: None, options_adapter: None }
+        PackageIds { core: PKG, auction: AUCTION_PKG, rfq: RFQ_PKG, vault: VAULT_PKG, trading_vault: Some(TV_PKG), deepbook_adapter: None, options_adapter: None, equity_oracle: Some(EQUITY_ORACLE_PKG) }
     }
 
     fn types() -> EventTypes {
@@ -736,6 +839,23 @@ mod tests {
             t.swap_rfq_settled,
             format!("{VAULT_PKG}::events::SwapRfqSettled")
         );
+        assert_eq!(t.offset_closed, format!("{PKG}::events::OffsetClosed"));
+        assert_eq!(t.spread_written, format!("{PKG}::events::SpreadWritten"));
+        assert_eq!(
+            t.tv_external_account_set,
+            format!("{TV_PKG}::events::ExternalAccountSet")
+        );
+        // The equity oracle's event lives in its own module, not `events`.
+        assert_eq!(
+            t.equity_posted,
+            format!("{EQUITY_ORACLE_PKG}::equity_oracle::EquityPosted")
+        );
+        // Absent family → unmatchable placeholder.
+        let no_eo = EventTypes::for_packages(
+            PackageIds { equity_oracle: None, ..pkgs() },
+            Some(DEEPBOOK_ORIG),
+        );
+        assert_eq!(no_eo.equity_posted, "unset::equity_oracle::EquityPosted");
     }
 
     #[test]
@@ -871,6 +991,127 @@ mod tests {
         match dispatch(&t, &t.vault_round_finalized, &bytes).unwrap() {
             Some(ChainEvent::VaultRoundFinalized(decoded)) => assert_eq!(decoded, evt),
             other => panic!("expected VaultRoundFinalized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_offset_closed() {
+        let t = types();
+        let evt = OffsetClosed {
+            bucket_id: ObjectId::new([0xb1; 32]),
+            closer: SuiAddress::new([0x01; 32]),
+            position_id: ObjectId::new([0x99; 32]),
+            is_put: false,
+            amount: 250_000_000,
+            collateral_returned: 250_000_000,
+            range_start: 0,
+            range_end: 250_000_000,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        match dispatch(&t, &t.offset_closed, &bytes).unwrap() {
+            Some(ChainEvent::OffsetClosed(decoded)) => assert_eq!(decoded, evt),
+            other => panic!("expected OffsetClosed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_spread_written() {
+        let t = types();
+        let evt = SpreadWritten {
+            bucket_id: ObjectId::new([0xb1; 32]),
+            long_bucket_id: ObjectId::new([0xb2; 32]),
+            writer: SuiAddress::new([0x01; 32]),
+            position_id: ObjectId::new([0x99; 32]),
+            amount: 250_000_000,
+            exercise_cash: 12_500_000,
+            range_start: 250_000_000,
+            range_end: 500_000_000,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        match dispatch(&t, &t.spread_written, &bytes).unwrap() {
+            Some(ChainEvent::SpreadWritten(decoded)) => assert_eq!(decoded, evt),
+            other => panic!("expected SpreadWritten, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_tv_external_released() {
+        let t = types();
+        let evt = TvExternalReleased {
+            vault_id: ObjectId::new([0xf0; 32]),
+            account: SuiAddress::new([0x1a; 32]),
+            amount: 25_000_000,
+            exposure: 75_000_000,
+            nav: 1_000_000_000_000,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        match dispatch(&t, &t.tv_external_released, &bytes).unwrap() {
+            Some(ChainEvent::TvExternalReleased(decoded)) => assert_eq!(decoded, evt),
+            other => panic!("expected TvExternalReleased, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_tv_mm_coin_exercised() {
+        let t = types();
+        let evt = TvMmCoinExercised {
+            vault_id: ObjectId::new([0xf0; 32]),
+            bucket_id: ObjectId::new([0xb1; 32]),
+            coin_position_id: ObjectId::new([0xc1; 32]),
+            is_put: false,
+            amount: 250_000_000,
+            settlement_amount: 12_500_000,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        // Defined in trading_vault::events, so it must resolve via the
+        // trading_vault package's events module.
+        assert_eq!(t.tv_mm_coin_exercised, format!("{TV_PKG}::events::MmCoinExercised"));
+        match dispatch(&t, &t.tv_mm_coin_exercised, &bytes).unwrap() {
+            Some(ChainEvent::TvMmCoinExercised(decoded)) => assert_eq!(decoded, evt),
+            other => panic!("expected TvMmCoinExercised, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_tv_bid_placed() {
+        // The bid events live in the options_adapter package's module.
+        let oa_pkg = "0xoa1";
+        let t = EventTypes::for_packages(
+            PackageIds { options_adapter: Some(oa_pkg), ..pkgs() },
+            Some(DEEPBOOK_ORIG),
+        );
+        let evt = TvBidPlaced {
+            vault_id: ObjectId::new([0xf0; 32]),
+            ticket_id: ObjectId::new([0x71; 32]),
+            auction_id: ObjectId::new([0xac; 32]),
+            bucket_id: ObjectId::new([0xb1; 32]),
+            escrow_amount: 51_000_000,
+            win_type: AssetType::new("9b::call_3::CALL_3"),
+            win_amount: 250_000_000,
+            is_put: false,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        assert_eq!(t.tv_bid_placed, format!("{oa_pkg}::options_adapter::BidPlaced"));
+        match dispatch(&t, &t.tv_bid_placed, &bytes).unwrap() {
+            Some(ChainEvent::TvBidPlaced(decoded)) => assert_eq!(decoded, evt),
+            other => panic!("expected TvBidPlaced, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_equity_posted() {
+        let t = types();
+        let evt = EquityPosted {
+            vault_id: ObjectId::new([0xf0; 32]),
+            poster: SuiAddress::new([0x2b; 32]),
+            equity: 80_000_000,
+            previous: 75_000_000,
+            seeded: true,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        match dispatch(&t, &t.equity_posted, &bytes).unwrap() {
+            Some(ChainEvent::EquityPosted(decoded)) => assert_eq!(decoded, evt),
+            other => panic!("expected EquityPosted, got {other:?}"),
         }
     }
 

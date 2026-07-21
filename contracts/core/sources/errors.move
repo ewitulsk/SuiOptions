@@ -33,3 +33,13 @@ public fun treasury_cap_not_fresh(): u64 { 28 }
 // 56-58 retired (session custody codes).
 public fun put_collateral_mismatch(): u64 { 59 }
 public fun request_flow_mismatch(): u64 { 60 }
+// Exact-offset closure + spread collateral compression (mm-bot V2
+// protocol prerequisites).
+public fun close_exceeds_position(): u64 { 61 }
+public fun close_range_exercised(): u64 { 62 }
+public fun spread_unwind_required(): u64 { 63 }
+public fun spread_expiry_mismatch(): u64 { 64 }
+public fun spread_strike_too_high(): u64 { 65 }
+public fun spread_not_found(): u64 { 66 }
+public fun spread_bucket_mismatch(): u64 { 67 }
+public fun spread_position(): u64 { 68 }

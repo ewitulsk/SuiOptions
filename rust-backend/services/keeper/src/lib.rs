@@ -21,6 +21,7 @@ pub mod state;
 pub mod strike;
 pub mod submit;
 pub mod trading_vault;
+pub mod venue_equity;
 
 #[derive(Parser, Debug)]
 #[command(

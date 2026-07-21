@@ -199,6 +199,13 @@ pub struct TradingVault {
     /// Observed deposit-asset-per-share price (1e12-scaled).
     pub latest_pps_e12: Option<u128>,
     pub updated_at_ms: u64,
+    /// External MM account wallet (SO-299); `None` when none is set.
+    pub external_account: Option<SuiAddress>,
+    /// Outstanding external exposure (deposit-asset units).
+    pub external_exposure: u64,
+    /// Latest keeper-posted account equity (EquityPosted).
+    pub latest_external_equity: Option<u64>,
+    pub external_equity_updated_at_ms: Option<u64>,
 }
 
 /// One adapter position held by a trading vault (SO-282). Removed positions
@@ -421,7 +428,8 @@ impl IndexerClient {
         const Q: &str = "query{tradingVaults{vaultId depositAsset creator curator curatorCapId \
             state lockupMs curatorFeeBps rotationAuthority maxPositions unwindGraceMs \
             depositsPaused mmReleaseEnabled totalSharesRaw positionCount pendingWithdrawals \
-            latestPpsE12Raw updatedAtMs}}";
+            latestPpsE12Raw updatedAtMs externalAccount externalExposure latestExternalEquity \
+            externalEquityUpdatedAtMs}}";
         let data: TradingVaultsWrap = self.gql(Q, json!({})).await?;
         data.trading_vaults
             .into_iter()
@@ -954,6 +962,13 @@ struct TradingVaultJson {
     pending_withdrawals: String,
     latest_pps_e12_raw: Option<String>,
     updated_at_ms: String,
+    #[serde(default)]
+    external_account: Option<String>,
+    external_exposure: String,
+    #[serde(default)]
+    latest_external_equity: Option<String>,
+    #[serde(default)]
+    external_equity_updated_at_ms: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1186,6 +1201,18 @@ impl TryFrom<TradingVaultJson> for TradingVault {
             pending_withdrawals: parse_u64(&v.pending_withdrawals)?,
             latest_pps_e12: v.latest_pps_e12_raw.as_deref().map(parse_u128).transpose()?,
             updated_at_ms: parse_u64(&v.updated_at_ms)?,
+            external_account: v.external_account.as_deref().map(parse_address).transpose()?,
+            external_exposure: parse_u64(&v.external_exposure)?,
+            latest_external_equity: v
+                .latest_external_equity
+                .as_deref()
+                .map(parse_u64)
+                .transpose()?,
+            external_equity_updated_at_ms: v
+                .external_equity_updated_at_ms
+                .as_deref()
+                .map(parse_u64)
+                .transpose()?,
         })
     }
 }

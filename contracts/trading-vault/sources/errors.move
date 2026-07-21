@@ -32,3 +32,10 @@ public fun price_invalid(): u64 { 96 }
 public fun vault_dead(): u64 { 97 }
 public fun protocol_paused(): u64 { 98 }
 public fun deposits_paused(): u64 { 99 }
+// External-account custody (venue capital the vault cannot hold at the
+// Move level: perps margin, margin-spot, …).
+public fun external_not_configured(): u64 { 100 }
+public fun external_budget_exceeded(): u64 { 101 }
+public fun external_rate_limited(): u64 { 102 }
+public fun external_exposure_open(): u64 { 103 }
+public fun wrong_external_oracle(): u64 { 104 }

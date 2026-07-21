@@ -192,6 +192,10 @@ diesel::table! {
         latest_pps_e12      -> Nullable<Numeric>,
         updated_at_seq      -> Int8,
         updated_at_ms       -> Int8,
+        external_account    -> Nullable<Text>,
+        external_exposure   -> Int8,
+        latest_external_equity        -> Nullable<Int8>,
+        external_equity_updated_at_ms -> Nullable<Int8>,
     }
 }
 

@@ -102,6 +102,7 @@ async fn main() -> Result<()> {
         cli.gas_budget,
         cfg.pyth.hermes_url.clone(),
         pyth_handles.clone(),
+        &cfg.external,
     )
     .await
     {

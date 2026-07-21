@@ -23,8 +23,11 @@
 //! r = 0, is never optimal). The `r` parameter stays for tests and for any
 //! future funded-rate use.
 
+pub mod american;
+pub mod desk;
 pub mod grid;
 pub mod smile;
+pub mod surface;
 
 use tracing::trace;
 

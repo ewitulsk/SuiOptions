@@ -1,33 +1,22 @@
-//! Market-maker bot.
+//! Market-maker bot — the vol desk (SO-299).
 //!
 //! Phase 0 (once per deployment): `mm-bot deploy-collateral` publishes this
-//! MM's own copy of the `mm_collateral` package (collateral abstraction,
-//! plan §8) and persists `{package_id, account_id, upgrade_cap}`.
+//! MM's own copy of the `mm_collateral` package and persists
+//! `{package_id, account_id, upgrade_cap}` (legacy chassis; the desk's
+//! quotes route through the trading vault's `vault_mm` release instead).
 //!
-//! Phase 1: bootstrap.
-//!   - Reads its TOML config (incl. `signing_scheme`) + `MM_QUOTE_KEY`
-//!     (32-byte hex secret — interpretation depends on the scheme).
-//!   - Resolves the collateral routing: `collateral_package` /
-//!     `collateral_account` from the config, else the deploy-collateral
-//!     state file.
-//!   - Resolves its QuoteSigner from chain state for the *current*
-//!     deployment: looks up the `SignerCreated` event under the current
-//!     package for this bot's Sui address. If none exists (e.g. right after
-//!     a fresh contract deployment), calls
-//!     `quote_signer::create_and_share_signer(scheme, pubkey)` and funds the
-//!     MM's own CollateralAccount with `bootstrap_settlement_amount` via
-//!     `test_tokens::<sym>::mint` + `mm_collateral::deposit`.
+//! Phase 1: bootstrap — config + secrets, collateral routing, token-info
+//! catalog, per-market vol buffers fed from the oracle-service WS price
+//! cache, on-chain QuoteSigner (created + funded on first run).
 //!
-//! Phase 2: serve.
-//!   - Authenticates over WS via the scheme-aware challenge (§5.4.1).
-//!   - Loops on `RFQBroadcast`, prices each option via Black-Scholes using
-//!     the spot/vol/rate config, signs the BCS-encoded Quote (which carries
-//!     the collateral routing INSIDE the signed payload) with the configured
-//!     scheme, sends. Pongs Pings.
-//!
-//! The MM serves as a **Trader MM** by default (pays premium, receives the
-//! call token). `roles` in the TOML controls advertised roles to the
-//! quoting service.
+//! Phase 2: the desk (`mm_bot::desk`) — V1 delta-hedged long-vol fund
+//! (V2 two-sided maker behind `[desk.v2]`): book reconstructed from VAULT
+//! custody, limits engine, paper-hedged delta bands, on-chain auction
+//! bidder, exit ladder, monitors + nightly stress. The WS serve loop
+//! authenticates with the quoting service and prices RFQs through the
+//! desk; every quote's collateral routing points at the TRADING VAULT
+//! (`release_module = "vault_mm"`, outputs to the vault address) — the
+//! bot is the vault's curator and nothing else.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -49,23 +38,20 @@ use protocol_types::quote::Quote;
 use protocol_types::sides::MmRole;
 use protocol_types::SigningScheme;
 
-use pricing::smile::Smile;
-use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
 use api_service_client::ApiServiceClient;
-use token_info_client::{Snapshot, TokenInfoClient};
+use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
 use sui_tx::quote_signer::QuoteSigner;
 use sui_tx::sui_client::{Network, SuiClientWrapper};
 use sui_tx::tx::mm_collateral::balance_of as collateral_balance_of;
 use sui_tx::tx::signer::{create_and_share_signer, find_signer};
 use sui_tx::tx::test_tokens::mint_and_deposit_into_collateral;
 use sui_tx::ws_client;
+use token_info_client::{Snapshot, TokenInfoClient};
 
 use mm_bot::collateral;
+use mm_bot::desk::quote::{Decision, RfqInputs};
 use mm_bot::liquidity::{FaucetLiquiditySource, LiquiditySource};
-use mm_bot::pricing::{
-    compute_spot_from_cache, price_rfq, resolve_sigma, serves_pair, PriceDecision, PricingConfig,
-    RfqPricingInputs, SigmaEstimate, Staleness,
-};
+use mm_bot::pricing::{compute_spot_from_cache, serves_pair, Staleness};
 use mm_bot::{Cli, Command};
 
 // -- Config --------------------------------------------------------------
@@ -88,123 +74,51 @@ struct BotConfig {
 
     /// Quote-signing scheme. Stored on chain alongside the pubkey; the
     /// `MM_QUOTE_KEY` env var holds the 32-byte secret in this scheme.
-    /// One of `ed25519` / `secp256k1` / `secp256r1`.
     #[serde(default = "default_scheme")]
     signing_scheme: SigningScheme,
 
-    /// This MM's published mm_collateral package id (the quote's
-    /// `release_package`). Optional — when absent (the default) the bot
-    /// reads the state file written by `mm-bot deploy-collateral`.
+    /// This MM's published mm_collateral package id. Optional — when
+    /// absent the bot reads the state file written by
+    /// `mm-bot deploy-collateral`. Legacy chassis: the desk's quotes
+    /// route through the vault instead, but the account still backs the
+    /// signer bootstrap funding.
     #[serde(default)]
     collateral_package: Option<String>,
-    /// The shared `CollateralAccount` object id (the quote's
-    /// `collateral_source`). Optional, paired with `collateral_package`.
+    /// The shared `CollateralAccount` object id, paired with
+    /// `collateral_package`.
     #[serde(default)]
     collateral_account: Option<String>,
-    /// Module holding the standardized `release` function inside
-    /// `collateral_package` (the quote's `release_module`). Defaults to the
-    /// first-party template's module name.
-    #[serde(default = "default_release_module")]
-    release_module: String,
 
-    /// Explicit allowlist of underlyings to make markets in. Each symbol is
-    /// looked up in the token-info catalog (coin type, decimals, `pythFeedId`)
-    /// and quoted against the shared `settlement_symbol`.
-    ///
-    /// Empty (the default) ⇒ **derive mode**: the bot market-makes every
-    /// enabled token-info token that has a Pyth feed and isn't the settlement
-    /// asset, and a watcher restarts the bot to pick up newly-listed
-    /// underlyings (see `underlying_refresh_secs`). Non-empty ⇒ pin exactly
-    /// these and never auto-pick-up.
+    /// Explicit allowlist of underlyings to make markets in. Empty (the
+    /// default) ⇒ derive mode: every enabled token-info token with a Pyth
+    /// feed, with a watcher restart on new listings.
     #[serde(default = "default_underlying_symbols")]
     underlying_symbols: Vec<String>,
 
-    /// Tickers to never market-make, even in derive mode (e.g. stablecoins or
-    /// assets we list but don't quote). Case-insensitive. The settlement asset
-    /// is always excluded automatically.
+    /// Tickers to never market-make, even in derive mode.
     #[serde(default)]
     underlying_exclude: Vec<String>,
 
-    /// Derive mode only: how often to re-fetch token-info and check for a
-    /// newly-listed underlying. A new underlying confirmed across two
-    /// consecutive polls triggers a clean restart so boot rebuilds the market
-    /// set. Default 600s (10 min).
+    /// Derive mode only: token-info re-poll cadence for new listings.
     #[serde(default = "default_underlying_refresh_secs")]
     underlying_refresh_secs: u64,
 
     #[serde(default = "default_settlement")]
     settlement_symbol: String,
 
-    /// Annualized risk-free rate. Protocol convention is r = 0 (the serde
-    /// default): settlement is a stablecoin with no funded rate leg, and
-    /// r = 0 keeps fair value identical across keeper / api-service /
-    /// vault-sim / this bot. It also makes European put pricing exact for
-    /// the American-exercisable on-chain puts.
+    /// Annualized risk-free rate. Protocol convention is r = 0.
     #[serde(default)]
     rate: f64,
     #[serde(default = "default_quote_ttl_ms")]
     quote_ttl_ms: u64,
 
-    /// Ask-side *minimum* markup in basis points of premium, applied when
-    /// quoting as the Writer MM (retail buying — trader flow). The vol-space
-    /// spread (`ask_vol_markup`) usually dominates; this is the floor left
-    /// deep ITM where vega ≈ 0. Defaults to 100 (1%).
-    #[serde(default = "default_spread_bps")]
-    ask_markup_bps: u64,
-    /// Bid-side *minimum* markdown in basis points of premium, applied when
-    /// quoting as the Trader MM (retail writing — writer flow). Defaults to
-    /// 100 (1%).
-    #[serde(default = "default_spread_bps")]
-    bid_markdown_bps: u64,
-    /// Vol-space ask spread: sigma multiplier (≥ 1) when we sell options.
-    /// Defaults to 1.0 (disabled) so unconfigured deployments keep the
-    /// bps-only behavior.
-    #[serde(default = "default_vol_spread_neutral")]
-    ask_vol_markup: f64,
-    /// Vol-space bid spread: sigma multiplier (≤ 1) when we buy options.
-    /// Defaults to 1.0 (disabled).
-    #[serde(default = "default_vol_spread_neutral")]
-    bid_vol_markdown: f64,
-    /// Last-look charge multiplier on `|delta|·spot·sigma·√(ttl_years)`,
-    /// added to the ask / shaded off the bid. Defaults to 0.0 (disabled).
-    #[serde(default)]
-    ttl_charge_mult: f64,
-    /// Extra vol widening (≥ 1) while quoting on the fallback sigma (cold
-    /// vol buffer). Defaults to 1.0 (disabled).
-    #[serde(default = "default_vol_spread_neutral")]
-    fallback_vol_penalty: f64,
-    /// Default vol smile (skew/convexity in standardized log-moneyness z —
-    /// see `pricing::smile`). Flat by default; calibrate before enabling.
-    #[serde(default)]
-    smile: SmileConfig,
-    /// Per-symbol smile overrides, e.g. `[smiles.TBTC] skew = 0.05`.
-    #[serde(default)]
-    smiles: HashMap<String, SmileConfig>,
-    /// Decline any RFQ whose notional (spot × write_amount, settlement
-    /// smallest-units) exceeds this. Defaults to 0 (no cap).
-    #[serde(default)]
-    max_quote_notional: u64,
-    /// Size widening: extra proportional vol widening per
-    /// `size_ref_notional` of quote notional. Defaults to 0.0 (disabled).
-    #[serde(default)]
-    size_widening_vol: f64,
-    /// Reference notional (settlement smallest-units) for `size_widening_vol`.
-    #[serde(default)]
-    size_ref_notional: u64,
-
     /// Roles advertised to the quoting service.
     roles: Vec<MmRole>,
 
-    /// Opt in to answering unsigned bulk-view RFQs (indicative premiums for
-    /// the frontend's tiles). These are priced but never signed — no nonce is
-    /// consumed and nothing reaches the chain. Defaults to false.
+    /// Opt in to answering unsigned bulk-view RFQs (indicative premiums
+    /// for the frontend's tiles). Defaults to false.
     #[serde(default)]
     bulk_view_enabled: bool,
-
-    /// Where minted call tokens / position Objects should land. Defaults to
-    /// the bot's Sui address.
-    #[serde(default)]
-    token_recipient: Option<String>,
 
     /// On first run, mint+deposit this much settlement asset into the
     /// freshly-created Account so it can pay premiums.
@@ -212,14 +126,12 @@ struct BotConfig {
     bootstrap_settlement_amount: u64,
 
     /// On first run, mint+deposit this much *underlying* asset into the
-    /// freshly-created Account so it can write calls to retail traders
-    /// (writer-MM / ask side). In underlying smallest-units.
+    /// freshly-created Account. In underlying smallest-units.
     #[serde(default = "default_bootstrap_underlying_amount")]
     bootstrap_underlying_amount: u64,
 
     /// Background top-up: when the Account's underlying balance falls below
-    /// this, mint+deposit `underlying_replenish_amount` more. Set to 0 to
-    /// disable auto-replenish.
+    /// this, mint+deposit `underlying_replenish_amount` more. 0 disables.
     #[serde(default = "default_underlying_replenish_threshold")]
     underlying_replenish_threshold: u64,
 
@@ -231,46 +143,21 @@ struct BotConfig {
     #[serde(default = "default_replenish_interval_secs")]
     underlying_replenish_interval_secs: u64,
 
-    /// Pyth Hermes/Benchmarks settings. All fields have defaults.
+    /// Pyth staleness / vol-sampler settings. All fields have defaults.
     #[serde(default)]
     pyth: PythConfig,
 
-    /// DeepBook quoting loop (SO-158). Off by default; needs the network to
-    /// carry a DeepBook deployment in token-info.
+    /// The vol desk (SO-299) — V1 long-vol fund, V2 behind `[desk.v2]`.
     #[serde(default)]
-    deepbook: mm_bot::deepbook::DeepBookQuoterConfig,
+    desk: mm_bot::desk::DeskConfig,
 
-    /// Trading-vault DeepBook quoting (SO-291): trade a curated vault's
-    /// DeepBook custody through the deepbook-adapter curator calls instead
-    /// of the bot's own BalanceManager. Off by default; mutually exclusive
-    /// with `[deepbook]` (vault mode wins). Cadence / sizing / batching
-    /// knobs are reused from the `[deepbook]` section.
-    #[serde(default)]
-    trading_vault: mm_bot::vault_deepbook::TradingVaultConfig,
-    /// Testnet-only market simulator (SO-296): faucet-funded ask
-    /// inventory + noise takers around the deepbook quoter.
+    /// Testnet-only counterparty sim (SO-299): opens covered-call RFQ
+    /// auctions as a retail stand-in + redeems expired positions.
     #[serde(default)]
     sim: mm_bot::sim::SimConfig,
-
-    /// On-chain RFQ bidder (doc 05 Â§3) â the buy side of the vault's
-    /// weekly call-slice auctions. Off by default.
-    #[serde(default)]
-    onchain_rfq: mm_bot::onchain_rfq::OnchainRfqConfig,
-
-    /// On-chain cash-secured-PUT RFQ bidder — the put mirror of
-    /// `[onchain_rfq]` (same config shape). Off by default.
-    #[serde(default)]
-    onchain_put_rfq: mm_bot::onchain_rfq::OnchainRfqConfig,
-
-    /// On-chain proceeds-swap bidder (doc 05 §3.1) — the buy side of the
-    /// vault's settlement→underlying swap auctions. Off by default.
-    #[serde(default)]
-    onchain_swap: mm_bot::onchain_swap::OnchainSwapConfig,
 }
 
 /// Vol + staleness knobs for the live price cache fed from oracle-service.
-/// Prices/vol now come from oracle-service; these tune the consumer-side
-/// guards and the rolling-vol sampler.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 struct PythConfig {
@@ -278,29 +165,19 @@ struct PythConfig {
     /// than this. Catches a wedged or disconnected stream (oracle WS).
     max_price_age_ms: u64,
     /// Reject an RFQ if Pyth's publisher timestamp is older than this.
-    /// Catches the case where the stream is alive but Pyth itself isn't
-    /// publishing.
     max_publish_lag_ms: u64,
     /// Reject an RFQ if either feed's Pyth confidence interval exceeds this
-    /// many basis points of its price — a fresh feed that is unsure of
-    /// itself is exactly when quotes get picked off. 0 disables.
+    /// many basis points of its price. 0 disables.
     max_conf_bps: u64,
-    /// Rolling window (in hours) used to compute realized vol — the short,
-    /// regime-tracking window.
+    /// Rolling window (hours) for the short realized-vol window.
     vol_window_hours: u64,
-    /// Long realized-vol window (in hours). The quoted sigma is the max of
-    /// the two windows, so one calm day can't undercut what the trailing
-    /// week actually realized. Default 168 (7d).
+    /// Long realized-vol window (hours). Default 168 (7d).
     vol_long_window_hours: u64,
-    /// How often the live cache is sampled into the vol buffer. The vol
-    /// estimate annualizes from the samples' actual timestamps, so skipped
-    /// ticks (stale stream) don't bias it.
+    /// How often the live cache is sampled into the vol buffers.
     vol_sample_interval_ms: u64,
-    /// Volatility used until the buffer has enough samples. Once it does,
-    /// the live estimate takes over. Overridable per symbol below.
+    /// Volatility used until the buffer has enough samples.
     fallback_vol: f64,
-    /// Per-symbol overrides for `fallback_vol` (e.g. `TBTC = 0.45`): one
-    /// flat number is wrong in both directions for a majors/small-cap mix.
+    /// Per-symbol overrides for `fallback_vol` (e.g. `TBTC = 0.45`).
     fallback_vols: HashMap<String, f64>,
 }
 
@@ -319,27 +196,8 @@ impl Default for PythConfig {
     }
 }
 
-/// Serde mirror of [`pricing::smile::Smile`] (the pricing crate stays
-/// serde-free). Defaults to flat.
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(default)]
-struct SmileConfig {
-    skew: f64,
-    convexity: f64,
-}
-
-impl From<SmileConfig> for Smile {
-    fn from(c: SmileConfig) -> Self {
-        Smile { skew: c.skew, convexity: c.convexity }
-    }
-}
-
 fn default_scheme() -> SigningScheme {
     SigningScheme::Ed25519
-}
-
-fn default_release_module() -> String {
-    "mm_collateral".into()
 }
 
 fn default_underlying_symbols() -> Vec<String> {
@@ -358,12 +216,6 @@ fn default_quote_ttl_ms() -> u64 {
 fn default_bootstrap_amount() -> u64 {
     1_000_000_000_000
 } // 1e12 raw — plenty of settlement to quote with
-fn default_spread_bps() -> u64 {
-    100
-} // 1% minimum markup/markdown off the BS mid
-fn default_vol_spread_neutral() -> f64 {
-    1.0
-} // sigma multiplier of 1.0 = vol-space spread disabled
 fn default_bootstrap_underlying_amount() -> u64 {
     100_000_000_000
 } // 1e11 raw underlying — inventory to write against
@@ -380,8 +232,7 @@ fn default_replenish_interval_secs() -> u64 {
 // -- Markets -------------------------------------------------------------
 
 /// One underlying the bot makes markets in. Settlement is shared across all
-/// markets (every bucket settles in the configured `settlement_symbol`), so
-/// only the underlying-specific pricing context lives here.
+/// markets, so only the underlying-specific context lives here.
 struct Market {
     symbol: String,
     /// Canonical underlying coin type — the key a bucket's `asset_type` is
@@ -391,19 +242,14 @@ struct Market {
     decimals: u8,
     /// Short-window realized-vol buffer fed from this underlying's USD price.
     vol_buf: Arc<RwLock<RollingVolBuffer>>,
-    /// Long-window buffer (same samples); quoted sigma is max(short, long).
+    /// Long-window buffer (same samples).
     vol_buf_long: Arc<RwLock<RollingVolBuffer>>,
-    /// Sigma used while `vol_buf` is cold: the per-symbol override from
-    /// `[pyth].fallback_vols`, else the global `fallback_vol`.
+    /// Sigma used while the buffers are cold.
     fallback_vol: f64,
-    /// Vol smile for this underlying: the per-symbol override from
-    /// `[smiles]`, else the global `[smile]`.
-    smile: Smile,
 }
 
 /// Derive the underlying set from token-info: every enabled token that has a
 /// Pyth feed, excluding the settlement asset and any configured opt-outs.
-/// Sorted + deduped for stable logging and set comparison.
 fn derive_underlyings(snapshot: &Snapshot, settlement: &str, exclude: &[String]) -> Vec<String> {
     let mut out: Vec<String> = snapshot
         .tokens()
@@ -419,11 +265,8 @@ fn derive_underlyings(snapshot: &Snapshot, settlement: &str, exclude: &[String])
 }
 
 /// Derive mode only: poll token-info and cleanly restart the process when a new
-/// underlying is listed, so boot rebuilds the market set (the Pyth subscription
-/// and per-market tasks are fixed at boot, so a live add isn't possible).
-/// Debounced — a new underlying must appear on two consecutive polls before we
-/// restart, so a token-info blip never flaps the bot. Removals and fetch
-/// failures never trigger a restart.
+/// underlying is listed, so boot rebuilds the market set. Debounced — a new
+/// underlying must appear on two consecutive polls before we restart.
 fn spawn_underlying_watcher(
     token_info_url: String,
     booted: HashSet<String>,
@@ -454,8 +297,7 @@ fn spawn_underlying_watcher(
             let current: HashSet<String> = derive_underlyings(&snapshot, &settlement, &exclude)
                 .into_iter()
                 .collect();
-            // React to additions only — never restart on a removal or a blip
-            // that drops the set.
+            // React to additions only — never restart on a removal or a blip.
             let new: HashSet<String> = current.difference(&booted).cloned().collect();
             if new.is_empty() {
                 pending.clear();
@@ -469,8 +311,6 @@ fn spawn_underlying_watcher(
                     new_underlyings = ?names,
                     "new underlying(s) listed in token-info — restarting to make markets in them"
                 );
-                // Clean exit; the container restart policy reboots us and boot
-                // rebuilds the full market set + Pyth subscription.
                 std::process::exit(0);
             }
             let mut names: Vec<String> = new.iter().cloned().collect();
@@ -521,9 +361,9 @@ async fn main() -> Result<()> {
 
     observability::ops::spawn(cfg.health_addr);
 
-    // Collateral routing (plan §8): explicit config wins, else the state file
-    // written by `mm-bot deploy-collateral`. Required — quotes carry the
-    // routing inside the signed payload.
+    // Collateral routing chassis: explicit config wins, else the state file
+    // written by `mm-bot deploy-collateral`. Still required — the signer
+    // bootstrap funds this account.
     let (collateral_package, collateral_account) = collateral::resolve(
         cfg.collateral_package.as_deref(),
         cfg.collateral_account.as_deref(),
@@ -533,24 +373,15 @@ async fn main() -> Result<()> {
     tracing::info!(
         %collateral_package,
         %collateral_account,
-        release_module = %cfg.release_module,
-        "collateral routing resolved"
+        "collateral routing resolved (signer bootstrap funding)"
     );
     // Resolve the token catalog from token-info. Hard cutover: if token-info
-    // is unreachable after the retry window we crash (no deployments.json
-    // fallback).
+    // is unreachable after the retry window we crash.
     let snapshot = TokenInfoClient::new(&cli.token_info_url)
         .fetch_blocking_until_ready(30, std::time::Duration::from_secs(2))
         .await
         .with_context(|| format!("fetching catalog from token-info at {}", cli.token_info_url))?;
 
-    // /tokens catalog lookup (coin type, decimals, pyth feed). This is the
-    // source the pricing path reads from; the bootstrap path separately looks
-    // up the test-token faucet via `snapshot.faucet_token(symbol)`.
-    //
-    // Underlying set: an explicit `underlying_symbols` allowlist, or — when
-    // empty — derived from token-info's enabled catalog (with a watcher that
-    // restarts the bot to pick up new listings).
     let derive_mode = cfg.underlying_symbols.is_empty();
     let underlyings = if derive_mode {
         derive_underlyings(&snapshot, &cfg.settlement_symbol, &cfg.underlying_exclude)
@@ -582,7 +413,7 @@ async fn main() -> Result<()> {
         protocol_types::asset::canonicalize_move_type(&settlement_spec.coin_type);
 
     // Build one Market per underlying. Vol buffers are created here; their
-    // sampler tasks are spawned once the Pyth subscriber is up (below).
+    // sampler tasks are spawned once the price cache is up (below).
     let vol_window_ms = cfg.pyth.vol_window_hours.saturating_mul(3_600_000);
     let vol_long_window_ms = cfg.pyth.vol_long_window_hours.saturating_mul(3_600_000);
     let mut markets: Vec<Market> = Vec::with_capacity(underlyings.len());
@@ -607,7 +438,6 @@ async fn main() -> Result<()> {
                 .get(sym)
                 .copied()
                 .unwrap_or(cfg.pyth.fallback_vol),
-            smile: cfg.smiles.get(sym).copied().unwrap_or(cfg.smile).into(),
         });
     }
     tracing::info!(
@@ -636,25 +466,18 @@ async fn main() -> Result<()> {
     .await?;
     tracing::info!(signer_id = %signer_id, "quote signer ready on chain");
     let signer_id_pt = pt_object_id_from_sui(signer_id);
-    let collateral_account_pt = pt_object_id_from_sui(collateral_account);
-    let release_package_pt = PtSuiAddress::new(*pt_object_id_from_sui(collateral_package).as_bytes());
 
-    // Liquidity source: pulls settlement (and, via the same trait, any coin the
-    // bot needs) before quoting. Default = the test-token faucet; a real market
-    // maker swaps in their own funding source at this one site.
+    // Liquidity source: pulls settlement (and any coin the bot needs)
+    // before quoting. Default = the test-token faucet.
     let liquidity: Arc<dyn LiquiditySource> = Arc::new(FaucetLiquiditySource::new(
         snapshot.maybe_test_tokens(),
         collateral_package,
         cli.gas_budget,
     ));
 
-    // Keep each underlying's inventory topped up so the writer-MM (ask) side
-    // never runs dry mid-test. One task per underlying. Only relevant if we
-    // advertise writer_mm and auto-replenish is enabled.
+    // Keep each underlying's inventory topped up (writer-MM chassis).
     if cfg.roles.contains(&MmRole::WriterMm) && cfg.underlying_replenish_threshold > 0 {
         for sym in &underlyings {
-            // A derived underlying might not be a faucet/test token; skip
-            // auto-replenish for it rather than failing boot.
             let underlying = match snapshot.faucet_token(sym) {
                 Ok(t) => t,
                 Err(e) => {
@@ -682,18 +505,13 @@ async fn main() -> Result<()> {
     }
 
     // Live prices come from oracle-service (the single Pyth gateway) over its
-    // WS fanout. `subscribe()` returns a PriceCache a background task keeps
-    // current; the hot RFQ path reads it with the same `get_fresh` staleness
-    // check as when mm-bot owned the SSE connection itself.
+    // WS fanout.
     let oracle = oracle_client::OracleClient::new(&cli.oracle_url);
     let mut all_feeds: Vec<PriceFeedId> = markets.iter().map(|m| m.feed).collect();
     all_feeds.push(settlement_feed);
     let (price_cache, _ws_task) = oracle.subscribe();
 
-    // Maintain each market's rolling-vol buffer from the live cache on the
-    // configured cadence. No Benchmarks bootstrap: the buffer warms from the
-    // stream within a few samples and `fallback_vol` covers the brief
-    // cold-start window.
+    // Maintain each market's rolling-vol buffers from the live cache.
     for m in &markets {
         spawn_vol_sampler(
             cfg.pyth.clone(),
@@ -704,8 +522,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Derive mode: watch token-info for newly-listed underlyings and restart to
-    // pick them up. No-op when underlyings were pinned explicitly.
+    // Derive mode: watch token-info for newly-listed underlyings.
     if derive_mode {
         spawn_underlying_watcher(
             cli.token_info_url.clone(),
@@ -720,314 +537,144 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Don't enter the RFQ loop until every feed (all underlyings + settlement)
-    // has produced at least one observation. Otherwise early RFQs decline for
-    // stale data.
+    // Don't enter the RFQ loop until every feed has produced at least one
+    // observation.
     wait_for_first_prices(&price_cache, &all_feeds, Duration::from_secs(30)).await?;
 
-    // RFQ pricing context — built once, reused across reconnects.
-    let token_recipient = resolve_token_recipient(&cfg, &secrets_loaded)?;
     let protocol_id = snapshot.protocol_id_bytes()?;
-    let pricing_cfg = PricingConfig {
-        rate: cfg.rate,
-        quote_ttl_ms: cfg.quote_ttl_ms,
-        ask_markup_bps: cfg.ask_markup_bps,
-        bid_markdown_bps: cfg.bid_markdown_bps,
-        ask_vol_markup: cfg.ask_vol_markup,
-        bid_vol_markdown: cfg.bid_vol_markdown,
-        ttl_charge_mult: cfg.ttl_charge_mult,
-        fallback_vol_penalty: cfg.fallback_vol_penalty,
-        smile: cfg.smile.into(),
-        max_quote_notional: cfg.max_quote_notional,
-        size_widening_vol: cfg.size_widening_vol,
-        size_ref_notional: cfg.size_ref_notional,
-    };
-    // api-service client: the bot looks each RFQ's bucket up by address to get
-    // its true (strike, expiry, coin types) rather than trusting the broadcast.
     let api = ApiServiceClient::new(&cli.api_url);
-    tracing::info!(
-        api_url = %cli.api_url,
-        markets = ?cfg.underlying_symbols,
-        settlement = %cfg.settlement_symbol,
-        "bucket lookups via api-service; quoting these underlyings"
-    );
     let staleness = Staleness {
         max_price_age: Duration::from_millis(cfg.pyth.max_price_age_ms),
         max_publish_lag: Duration::from_millis(cfg.pyth.max_publish_lag_ms),
         max_conf_bps: cfg.pyth.max_conf_bps,
     };
 
-    // Trading-vault DeepBook quoting (SO-291): same quoting brain as the
-    // plain quoter below, but the orders rest in a curated vault's DeepBook
-    // custody via the deepbook-adapter curator calls. Mutually exclusive with
-    // `[deepbook]` — vault mode wins if both are enabled.
-    if cfg.trading_vault.enabled && cfg.deepbook.enabled {
-        tracing::error!(
-            "[deepbook] and [trading_vault] quoters are mutually exclusive; preferring trading-vault mode"
-        );
-    }
-    if cfg.trading_vault.enabled {
-        let adapter_package = snapshot
-            .deepbook_adapter()
-            .context("deepbook-adapter package missing from token-info (required by [trading_vault])")?
+    // ── the desk ────────────────────────────────────────────────────────
+    // Vault-only maker: quotes release collateral from the trading vault
+    // (`vault_mm`), auction winnings/exits land at the vault address.
+    let mut desk: Option<Arc<mm_bot::desk::Desk>> = None;
+    let mut vault_routing: Option<VaultRouting> = None;
+    if cfg.desk.enabled {
+        let trading_vault_package = snapshot
+            .trading_vault()
+            .context("trading_vault package missing from token-info (required by [desk])")?
             .package()?;
-        let tv_objects = snapshot
-            .trading_vault_objects()
-            .context("trading-vault objects missing from token-info (required by [trading_vault])")?;
-        let quoter_markets = markets
-            .iter()
-            .map(|m| mm_bot::deepbook::QuoterMarket {
-                symbol: m.symbol.clone(),
-                coin_type: m.coin_type.clone(),
-                feed: m.feed,
-                decimals: m.decimals,
-                vol_buf: Arc::clone(&m.vol_buf),
-                vol_buf_long: Arc::clone(&m.vol_buf_long),
-                fallback_vol: m.fallback_vol,
-                smile: m.smile,
-            })
-            .collect();
-        mm_bot::vault_deepbook::spawn_quoter(mm_bot::vault_deepbook::VaultQuoterParams {
-            cfg: cfg.trading_vault.clone(),
-            db_cfg: cfg.deepbook.clone(),
-            secrets: secrets_loaded.clone(),
-            network: cfg.network,
-            adapter_package,
-            trading_vault_package: snapshot
-                .trading_vault()
-                .context("trading_vault package missing")?
-                .package()?,
-            integration_registry: tv_objects.integration_registry()?,
-            pool_allowlist: tv_objects.pool_allowlist()?,
-            api_url: cli.api_url.clone(),
-            price_cache: price_cache.clone(),
-            markets: quoter_markets,
-            settlement_feed,
-            settlement_coin_type: settlement_coin_type.clone(),
-            settlement_decimals,
-            pricing: pricing_cfg,
-            staleness,
-        });
-        tracing::info!(
-            vault = %cfg.trading_vault.vault_id,
-            "trading-vault deepbook quoting enabled"
-        );
-    }
-
-    // DeepBook quoting loop (SO-158): rest two-sided limit orders on every
-    // tradeable bucket pool of the configured markets, priced by the same
-    // Black-Scholes path that answers RFQs (one QuoterMarket per Market,
-    // sharing its vol buffer — SO-159).
-    if cfg.deepbook.enabled && !cfg.trading_vault.enabled {
-        match snapshot.deepbook() {
-            Some(db) => {
-                let handles = sui_tx::tx::deepbook::DeepBookHandles {
+        let options_adapter_package = match snapshot.options_adapter() {
+            Some(a) => Some(a.package()?),
+            None => None,
+        };
+        let deepbook_adapter_package = match snapshot.deepbook_adapter() {
+            Some(a) => Some(a.package()?),
+            None => None,
+        };
+        // Shared governance objects the curator-session calls reference
+        // (recorded by the deploy-time activation step, SO-292).
+        let (integration_registry, pool_allowlist) = match snapshot.trading_vault_objects() {
+            Some(o) => (Some(o.integration_registry()?), Some(o.pool_allowlist()?)),
+            None => (None, None),
+        };
+        let (deepbook, deep_coin_type) = match snapshot.deepbook() {
+            Some(db) => (
+                Some(sui_tx::tx::deepbook::DeepBookHandles {
                     package: db.package()?,
                     original_package: db.original_package()?,
                     registry: db.registry()?,
-                };
-                let quoter_markets = markets
-                    .iter()
-                    .map(|m| mm_bot::deepbook::QuoterMarket {
-                        symbol: m.symbol.clone(),
-                        coin_type: m.coin_type.clone(),
-                        feed: m.feed,
-                        decimals: m.decimals,
-                        vol_buf: Arc::clone(&m.vol_buf),
-                        vol_buf_long: Arc::clone(&m.vol_buf_long),
-                        fallback_vol: m.fallback_vol,
-                        smile: m.smile,
-                    })
-                    .collect();
-                mm_bot::deepbook::spawn_quoter(mm_bot::deepbook::QuoterParams {
-                    cfg: cfg.deepbook.clone(),
-                    secrets: secrets_loaded.clone(),
-                    network: cfg.network,
-                    handles,
-                    api_url: cli.api_url.clone(),
-                    price_cache: price_cache.clone(),
-                    markets: quoter_markets,
-                    settlement_feed,
-                    settlement_coin_type: settlement_coin_type.clone(),
-                    settlement_decimals,
-                    pricing: pricing_cfg,
-                    staleness,
-                    liquidity: Arc::clone(&liquidity),
-                });
-                tracing::info!(markets = cfg.underlying_symbols.len(), "deepbook quoting enabled");
-
-                // Testnet market simulator (SO-296): rides ON the quoter
-                // (which stays the maker) — self-writes ask inventory and
-                // runs noise takers. Hard-gated to testnet + faucets.
-                if cfg.sim.enabled {
-                    mm_bot::sim::spawn_sim(mm_bot::sim::SimParams {
-                        cfg: cfg.sim.clone(),
-                        secrets: secrets_loaded.clone(),
-                        network: cfg.network,
-                        handles,
-                        api_url: cli.api_url.clone(),
-                        core_package: snapshot.package()?,
-                        settlement_coin_type: settlement_coin_type.clone(),
-                        quote_size: cfg.deepbook.quote_size,
-                        liquidity: Arc::clone(&liquidity),
-                        has_faucets: snapshot.test_tokens().is_ok(),
-                        price_cache: price_cache.clone(),
-                        staleness,
-                        tokens: snapshot
-                            .tokens()
-                            .iter()
-                            .map(|t| mm_bot::sim::SimToken {
-                                symbol: t.ticker.clone(),
-                                coin_type: t.coin_type.clone(),
-                                decimals: t.decimals,
-                                feed: t
-                                    .pyth_feed_id
-                                    .as_deref()
-                                    .and_then(|f| protocol_types::PriceFeedId::from_hex(f).ok()),
-                            })
-                            .collect(),
-                        deep_coin_type: db.deep_coin_type.clone(),
-                        pool_creation_fee: db.pool_creation_fee_units().unwrap_or(500_000_000),
-                    });
-                }
-            }
-            None => tracing::warn!(
-                "deepbook.enabled set but token-info reports no DeepBook deployment; quoting disabled"
+                }),
+                Some(db.deep_coin_type.clone()),
             ),
-        }
-    }
-
-    if cfg.sim.enabled && !cfg.deepbook.enabled {
-        tracing::warn!("[sim] enabled but [deepbook] quoter is disabled — sim needs the maker side; not started");
-    }
-
-    // The on-chain bidders bid through the generic `auction` package
-    // (four-package split); resolve it once, failing boot if any bidder
-    // is enabled on a deployment without it.
-    let auction_package = if cfg.onchain_rfq.enabled
-        || cfg.onchain_put_rfq.enabled
-        || cfg.onchain_swap.bidder.enabled
-    {
-        Some(
-            snapshot
-                .auction()
-                .context("auction package missing from token-info (required by the on-chain bidders)")?
-                .package()?,
-        )
+            None => (None, None),
+        };
+        let desk_markets = markets
+            .iter()
+            .map(|m| mm_bot::desk::DeskMarket {
+                symbol: m.symbol.clone(),
+                coin_type: m.coin_type.clone(),
+                feed: m.feed,
+                decimals: m.decimals,
+                vol_buf: Arc::clone(&m.vol_buf),
+                vol_buf_long: Arc::clone(&m.vol_buf_long),
+                fallback_vol: m.fallback_vol,
+            })
+            .collect();
+        let d = mm_bot::desk::spawn_desk(mm_bot::desk::DeskParams {
+            cfg: cfg.desk.clone(),
+            secrets: secrets_loaded.clone(),
+            network: cfg.network,
+            markets: desk_markets,
+            settlement_feed,
+            settlement_coin_type: settlement_coin_type.clone(),
+            settlement_decimals,
+            staleness,
+            price_cache: price_cache.clone(),
+            api_url: cli.api_url.clone(),
+            indexer_url: cli.indexer_graphql_url.clone(),
+            rate: cfg.rate,
+            quote_ttl_ms: cfg.quote_ttl_ms,
+            core_package: snapshot.package()?,
+            trading_vault_package,
+            options_adapter_package,
+            deepbook_adapter_package,
+            integration_registry,
+            pool_allowlist,
+            deepbook,
+            deep_coin_type,
+        })
+        .await?;
+        let vault_id = ObjectID::from_hex_literal(cfg.desk.vault_id.trim())
+            .map_err(|e| anyhow!("bad [desk].vault_id: {e}"))?;
+        vault_routing = Some(VaultRouting {
+            collateral_source: pt_object_id_from_sui(vault_id),
+            release_package: PtSuiAddress::new(
+                *pt_object_id_from_sui(trading_vault_package).as_bytes(),
+            ),
+            release_module: "vault_mm".to_string(),
+            signer_token_recipient: PtSuiAddress::new(*pt_object_id_from_sui(vault_id).as_bytes()),
+        });
+        desk = Some(d);
     } else {
-        None
-    };
-
-    // On-chain RFQ bidder (C2): poll open auctions, price them with the
-    // same brain, bid from the wallet under the escrow cap.
-    if cfg.onchain_rfq.enabled {
-        let bidder_markets = markets
-            .iter()
-            .map(|m| mm_bot::onchain_rfq::BidderMarket {
-                symbol: m.symbol.clone(),
-                coin_type: m.coin_type.clone(),
-                feed: m.feed,
-                decimals: m.decimals,
-                vol_buf: Arc::clone(&m.vol_buf),
-                vol_buf_long: Arc::clone(&m.vol_buf_long),
-                fallback_vol: m.fallback_vol,
-                smile: m.smile,
-            })
-            .collect();
-        mm_bot::onchain_rfq::spawn_bidder(mm_bot::onchain_rfq::BidderParams {
-            cfg: cfg.onchain_rfq.clone(),
-            secrets: secrets_loaded.clone(),
-            network: cfg.network,
-            package: auction_package.expect("resolved above"),
-            api_url: cli.api_url.clone(),
-            price_cache: price_cache.clone(),
-            markets: bidder_markets,
-            settlement_feed,
-            settlement_coin_type: settlement_coin_type.clone(),
-            settlement_decimals,
-            pricing: pricing_cfg,
-            staleness,
-        });
-        tracing::info!("onchain rfq bidder enabled");
+        tracing::warn!("[desk] disabled — the bot serves health/auth only and declines every RFQ");
     }
 
-    // On-chain cash-secured-PUT RFQ bidder: poll open put auctions, price them
-    // with the put leg of the same brain, bid the premium from the wallet under
-    // the escrow cap (same accounting as the call bidder).
-    if cfg.onchain_put_rfq.enabled {
-        let bidder_markets = markets
-            .iter()
-            .map(|m| mm_bot::onchain_put_rfq::BidderMarket {
-                symbol: m.symbol.clone(),
-                coin_type: m.coin_type.clone(),
-                feed: m.feed,
-                decimals: m.decimals,
-                vol_buf: Arc::clone(&m.vol_buf),
-                vol_buf_long: Arc::clone(&m.vol_buf_long),
-                fallback_vol: m.fallback_vol,
-                smile: m.smile,
-            })
-            .collect();
-        mm_bot::onchain_put_rfq::spawn_bidder(mm_bot::onchain_put_rfq::BidderParams {
-            cfg: cfg.onchain_put_rfq.clone(),
+    // Testnet counterparty sim (SO-299): opens covered-call RFQ auctions
+    // + redeems expired positions. Independent of any maker loop now.
+    if cfg.sim.enabled {
+        mm_bot::sim::spawn_sim(mm_bot::sim::SimParams {
+            cfg: cfg.sim.clone(),
             secrets: secrets_loaded.clone(),
             network: cfg.network,
-            package: auction_package.expect("resolved above"),
             api_url: cli.api_url.clone(),
-            price_cache: price_cache.clone(),
-            markets: bidder_markets,
-            settlement_feed,
+            core_package: snapshot.package()?,
+            rfq_package: match snapshot.rfq() {
+                Some(r) => Some(r.package()?),
+                None => None,
+            },
             settlement_coin_type: settlement_coin_type.clone(),
-            settlement_decimals,
-            pricing: pricing_cfg,
-            staleness,
-        });
-        tracing::info!("onchain put rfq bidder enabled");
-    }
-
-    // On-chain swap bidder: the buy side of the vault's proceeds-swap
-    // auctions (settlement → underlying), discovered straight from
-    // AuctionCreated events.
-    if cfg.onchain_swap.bidder.enabled {
-        let swap_markets = markets
-            .iter()
-            .map(|m| mm_bot::onchain_rfq::BidderMarket {
-                symbol: m.symbol.clone(),
-                coin_type: m.coin_type.clone(),
-                feed: m.feed,
-                decimals: m.decimals,
-                vol_buf: Arc::clone(&m.vol_buf),
-                vol_buf_long: Arc::clone(&m.vol_buf_long),
-                fallback_vol: m.fallback_vol,
-                smile: m.smile,
-            })
-            .collect();
-        mm_bot::onchain_swap::spawn_bidder(mm_bot::onchain_swap::SwapBidderParams {
-            cfg: cfg.onchain_swap.clone(),
-            secrets: secrets_loaded.clone(),
-            network: cfg.network,
-            package: auction_package.expect("resolved above"),
-            api_url: cli.api_url.clone(),
+            liquidity: Arc::clone(&liquidity),
+            has_faucets: snapshot.test_tokens().is_ok(),
             price_cache: price_cache.clone(),
-            markets: swap_markets,
-            settlement_feed,
-            settlement_coin_type: settlement_coin_type.clone(),
-            settlement_decimals,
             staleness,
+            tokens: snapshot
+                .tokens()
+                .iter()
+                .map(|t| mm_bot::sim::SimToken {
+                    symbol: t.ticker.clone(),
+                    coin_type: t.coin_type.clone(),
+                    decimals: t.decimals,
+                    feed: t
+                        .pyth_feed_id
+                        .as_deref()
+                        .and_then(|f| protocol_types::PriceFeedId::from_hex(f).ok()),
+                })
+                .collect(),
         });
-        tracing::info!("onchain swap bidder enabled");
     }
 
     // nonce is monotonic for the bot's lifetime — keep it across reconnects.
     let mut nonce_counter = now_ms();
 
     // Connect → authenticate → serve, reconnecting with capped exponential
-    // backoff. A transient auth rejection — the indexer hasn't ingested our
-    // SignerCreated yet (`auth_scheme_unknown`) — or a dropped connection is
-    // expected right after a redeploy, so we keep the process (and its
-    // /health endpoint) alive and retry until the indexer catches up. Only a
-    // permanent auth error (a key/scheme mismatch the indexer will never
-    // accept) is fatal.
+    // backoff (transient auth rejections are expected right after a
+    // redeploy while the indexer catches up).
     const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
     const MAX_BACKOFF: Duration = Duration::from_secs(30);
     let mut backoff = INITIAL_BACKOFF;
@@ -1138,9 +785,23 @@ async fn main() -> Result<()> {
                     let rfq_start = std::time::Instant::now();
                     let now = now_ms();
 
+                    let decline = |reason: String| MmToService::Decline {
+                        request_id: request_id.clone(),
+                        payload: protocol_types::messages::DeclinePayload { reason },
+                    };
+
+                    let (Some(desk_ref), Some(routing)) = (&desk, &vault_routing) else {
+                        if let Err(e) =
+                            ws_client::send_json(&mut ws, &decline("desk disabled".into())).await
+                        {
+                            tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
+                            break 'serve;
+                        }
+                        continue 'serve;
+                    };
+
                     // Resolve the bucket's true pricing inputs from api-service
-                    // by address. The broadcast carries no strike/expiry/pair, so
-                    // a spoofed or buggy upstream can't trick us into mispricing.
+                    // by address — never trust the broadcast.
                     let bucket = match api.bucket_pricing(payload.bucket_id).await {
                         Ok(Some(b)) => b,
                         not_found_or_err => {
@@ -1152,15 +813,7 @@ async fn main() -> Result<()> {
                             metrics::counter!("mm_bot_quote_failures_total", "reason" => "bucket_lookup")
                                 .increment(1);
                             tracing::debug!(?request_id, %reason, "declining");
-                            if let Err(e) = ws_client::send_json(
-                                &mut ws,
-                                &MmToService::Decline {
-                                    request_id,
-                                    payload: protocol_types::messages::DeclinePayload { reason },
-                                },
-                            )
-                            .await
-                            {
+                            if let Err(e) = ws_client::send_json(&mut ws, &decline(reason)).await {
                                 tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
                                 break 'serve;
                             }
@@ -1168,59 +821,46 @@ async fn main() -> Result<()> {
                         }
                     };
 
-                    // Pick the market whose pair this bucket belongs to. None
-                    // means we don't source a spot for it — decline.
-                    let market = match find_market(&markets, &bucket, &settlement_coin_type) {
-                        Some(m) => m,
-                        None => {
-                            let reason = format!(
-                                "pair not served: {}/{}",
-                                bucket.asset_coin_type, bucket.settlement_coin_type
-                            );
-                            metrics::counter!("mm_bot_quote_failures_total", "reason" => "pair_not_served")
-                                .increment(1);
-                            tracing::debug!(?request_id, %reason, "declining");
-                            if let Err(e) = ws_client::send_json(
-                                &mut ws,
-                                &MmToService::Decline {
-                                    request_id,
-                                    payload: protocol_types::messages::DeclinePayload { reason },
-                                },
-                            )
-                            .await
-                            {
-                                tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
-                                break 'serve;
-                            }
-                            continue 'serve;
+                    // Pick the market whose pair this bucket belongs to.
+                    let Some(mi) = markets.iter().position(|m| {
+                        serves_pair(
+                            &bucket.asset_coin_type,
+                            &bucket.settlement_coin_type,
+                            &m.coin_type,
+                            &settlement_coin_type,
+                        )
+                    }) else {
+                        let reason = format!(
+                            "pair not served: {}/{}",
+                            bucket.asset_coin_type, bucket.settlement_coin_type
+                        );
+                        metrics::counter!("mm_bot_quote_failures_total", "reason" => "pair_not_served")
+                            .increment(1);
+                        tracing::debug!(?request_id, %reason, "declining");
+                        if let Err(e) = ws_client::send_json(&mut ws, &decline(reason)).await {
+                            tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
+                            break 'serve;
                         }
+                        continue 'serve;
                     };
 
-                    // Live spot from Pyth for this market, scaled into the
-                    // bucket's units (settlement smallest-units per underlying
-                    // smallest-unit).
-                    let spot_scaled = match compute_spot_from_cache(
+                    // Live spot scaled into the bucket's units.
+                    let spot = match compute_spot_from_cache(
                         &price_cache,
-                        market.feed,
+                        markets[mi].feed,
                         settlement_feed,
-                        market.decimals,
+                        markets[mi].decimals,
                         settlement_decimals,
                         staleness,
                     ) {
                         Ok(s) => s,
                         Err(e) => {
-                            let reason: &'static str = e.as_str();
                             metrics::counter!("mm_bot_quote_failures_total", "reason" => "stale_price")
                                 .increment(1);
-                            tracing::debug!(?request_id, reason, "declining: stale market data");
+                            tracing::debug!(?request_id, reason = e.as_str(), "declining: stale market data");
                             if let Err(e) = ws_client::send_json(
                                 &mut ws,
-                                &MmToService::Decline {
-                                    request_id,
-                                    payload: protocol_types::messages::DeclinePayload {
-                                        reason: format!("stale market data: {reason}"),
-                                    },
-                                },
+                                &decline(format!("stale market data: {}", e.as_str())),
                             )
                             .await
                             {
@@ -1230,56 +870,33 @@ async fn main() -> Result<()> {
                             continue 'serve;
                         }
                     };
-                    let sigma = resolve_sigma(
-                        market.vol_buf.read().current_annualized(),
-                        market.vol_buf_long.read().current_annualized(),
-                        market.fallback_vol,
-                    );
 
-                    let inputs = RfqPricingInputs {
+                    let inputs = RfqInputs {
                         write_amount: payload.write_amount,
-                        side: payload.side,
+                        is_put: bucket.is_put,
                         strike: bucket.strike,
                         strike_scale: bucket.strike_scale,
                         expiry_ms: bucket.expiry_ms,
-                        is_put: bucket.is_put,
                     };
-                    let market_cfg = PricingConfig { smile: market.smile, ..pricing_cfg };
-                    match price_rfq(&market_cfg, &inputs, spot_scaled, sigma, now) {
-                        PriceDecision::Quote {
-                            premium,
-                            valid_until_ms,
-                            spot_scaled,
-                            strike_scaled,
-                            t_years,
-                            sigma,
-                            per_unit,
-                        } => {
-                            tracing::debug!(
-                                market = %market.symbol,
-                                spot = spot_scaled,
-                                sigma,
-                                strike = strike_scaled,
-                                strike_raw = %bucket.strike,
-                                strike_scale = bucket.strike_scale,
-                                t_years,
-                                per_unit,
-                                write_amount = payload.write_amount,
-                                premium,
-                                "priced"
-                            );
+                    match desk_ref
+                        .price_ws_rfq(payload.side, mi, inputs, spot, true, now)
+                        .await
+                    {
+                        Decision::Quote { premium } => {
                             nonce_counter = nonce_counter.wrapping_add(1);
+                            // Vault-only routing: collateral from the vault's
+                            // `vault_mm` release; outputs to the vault.
                             let quote = Quote {
                                 protocol_id: protocol_id.clone(),
                                 signer_id: signer_id_pt,
-                                collateral_source: collateral_account_pt,
-                                release_package: release_package_pt,
-                                release_module: cfg.release_module.clone(),
-                                signer_token_recipient: token_recipient,
+                                collateral_source: routing.collateral_source,
+                                release_package: routing.release_package,
+                                release_module: routing.release_module.clone(),
+                                signer_token_recipient: routing.signer_token_recipient,
                                 bucket_id: payload.bucket_id,
                                 write_amount: payload.write_amount,
                                 premium,
-                                valid_until_ms,
+                                valid_until_ms: now.saturating_add(cfg.quote_ttl_ms),
                                 nonce: nonce_counter,
                             };
                             let bytes = quote.to_bcs_bytes()?;
@@ -1304,19 +921,11 @@ async fn main() -> Result<()> {
                                 .record(rfq_start.elapsed().as_secs_f64());
                             tracing::info!(premium, nonce = nonce_counter, "quote sent");
                         }
-                        PriceDecision::Decline { reason } => {
+                        Decision::Decline { reason } => {
                             metrics::counter!("mm_bot_quote_failures_total", "reason" => "price_declined")
                                 .increment(1);
                             tracing::debug!(?request_id, %reason, "declining");
-                            if let Err(e) = ws_client::send_json(
-                                &mut ws,
-                                &MmToService::Decline {
-                                    request_id,
-                                    payload: protocol_types::messages::DeclinePayload { reason },
-                                },
-                            )
-                            .await
-                            {
+                            if let Err(e) = ws_client::send_json(&mut ws, &decline(reason)).await {
                                 tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
                                 break 'serve;
                             }
@@ -1334,80 +943,65 @@ async fn main() -> Result<()> {
                         "received bulk-view rfq broadcast"
                     );
                     let now = now_ms();
-                    // One spot/vol read per market for the whole batch; `None`
-                    // where that market's feed is currently stale.
-                    let spots: Vec<Option<(f64, SigmaEstimate, Smile)>> = markets
-                        .iter()
-                        .map(|m| {
-                            match compute_spot_from_cache(
-                                &price_cache,
-                                m.feed,
-                                settlement_feed,
-                                m.decimals,
-                                settlement_decimals,
-                                staleness,
-                            ) {
-                                Ok(spot) => Some((
-                                    spot,
-                                    resolve_sigma(
-                                        m.vol_buf.read().current_annualized(),
-                                        m.vol_buf_long.read().current_annualized(),
-                                        m.fallback_vol,
-                                    ),
-                                    m.smile,
-                                )),
-                                Err(_) => None,
-                            }
-                        })
-                        .collect();
-
                     let mut premiums = Vec::with_capacity(payload.bucket_ids.len());
-                    for bucket_id in &payload.bucket_ids {
-                        // Resolve each bucket from api-service (cached); skip ones
-                        // we can't price for any reason — a bulk-view bucket has
-                        // no per-bucket decline.
-                        let bucket = match api.bucket_pricing(*bucket_id).await {
-                            Ok(Some(b)) => b,
-                            Ok(None) => continue,
-                            Err(e) => {
-                                tracing::debug!(bucket_id = %bucket_id, error = %format!("{e:#}"), "bulk-view: bucket lookup failed; skipping");
-                                continue;
-                            }
-                        };
-                        // Match the bucket to one of our markets and grab that
-                        // market's spot/sigma; skip if unserved or stale.
-                        let Some((spot_scaled, sigma, smile)) = markets
+                    if let Some(desk_ref) = &desk {
+                        // One spot read per market for the whole batch; `None`
+                        // where that market's feed is currently stale.
+                        let spots: Vec<Option<f64>> = markets
                             .iter()
-                            .position(|m| {
-                                serves_pair(
-                                    &bucket.asset_coin_type,
-                                    &bucket.settlement_coin_type,
-                                    &m.coin_type,
-                                    &settlement_coin_type,
+                            .map(|m| {
+                                compute_spot_from_cache(
+                                    &price_cache,
+                                    m.feed,
+                                    settlement_feed,
+                                    m.decimals,
+                                    settlement_decimals,
+                                    staleness,
                                 )
+                                .ok()
                             })
-                            .and_then(|i| spots[i])
-                        else {
-                            continue;
-                        };
-                        // Reuse the signed-RFQ pricer; we keep only the premium —
-                        // no Quote is built, no nonce burned, nothing is signed.
-                        let inputs = RfqPricingInputs {
-                            write_amount: payload.write_amount,
-                            side: payload.side,
-                            strike: bucket.strike,
-                            strike_scale: bucket.strike_scale,
-                            expiry_ms: bucket.expiry_ms,
-                            is_put: bucket.is_put,
-                        };
-                        let market_cfg = PricingConfig { smile, ..pricing_cfg };
-                        if let PriceDecision::Quote { premium, .. } =
-                            price_rfq(&market_cfg, &inputs, spot_scaled, sigma, now)
-                        {
-                            premiums.push(BulkViewMmPremium {
-                                bucket_id: *bucket_id,
-                                premium,
-                            });
+                            .collect();
+                        for bucket_id in &payload.bucket_ids {
+                            let bucket = match api.bucket_pricing(*bucket_id).await {
+                                Ok(Some(b)) => b,
+                                Ok(None) => continue,
+                                Err(e) => {
+                                    tracing::debug!(bucket_id = %bucket_id, error = %format!("{e:#}"), "bulk-view: bucket lookup failed; skipping");
+                                    continue;
+                                }
+                            };
+                            let Some((mi, spot)) = markets
+                                .iter()
+                                .position(|m| {
+                                    serves_pair(
+                                        &bucket.asset_coin_type,
+                                        &bucket.settlement_coin_type,
+                                        &m.coin_type,
+                                        &settlement_coin_type,
+                                    )
+                                })
+                                .and_then(|i| spots[i].map(|s| (i, s)))
+                            else {
+                                continue;
+                            };
+                            let inputs = RfqInputs {
+                                write_amount: payload.write_amount,
+                                is_put: bucket.is_put,
+                                strike: bucket.strike,
+                                strike_scale: bucket.strike_scale,
+                                expiry_ms: bucket.expiry_ms,
+                            };
+                            // Indicative only: nothing is signed, no nonce is
+                            // burned, no premium is reserved.
+                            if let Decision::Quote { premium } = desk_ref
+                                .price_ws_rfq(payload.side, mi, inputs, spot, false, now)
+                                .await
+                            {
+                                premiums.push(BulkViewMmPremium {
+                                    bucket_id: *bucket_id,
+                                    premium,
+                                });
+                            }
                         }
                     }
                     if let Err(e) = ws_client::send_json(
@@ -1442,6 +1036,15 @@ async fn main() -> Result<()> {
 
 // -- helpers -------------------------------------------------------------
 
+/// The vault-only collateral routing baked into every signed quote
+/// (product decision, doc 05: the bot trades only as the vault's curator).
+struct VaultRouting {
+    collateral_source: PtObjectId,
+    release_package: PtSuiAddress,
+    release_module: String,
+    signer_token_recipient: PtSuiAddress,
+}
+
 fn load_config(path: &Path) -> Result<BotConfig> {
     let settings = config::Config::builder()
         .add_source(config::File::from(path).required(true))
@@ -1458,6 +1061,7 @@ fn load_config(path: &Path) -> Result<BotConfig> {
         roles = ?cfg.roles,
         quote_ttl_ms = cfg.quote_ttl_ms,
         rate = cfg.rate,
+        desk = cfg.desk.enabled,
         "bot config loaded"
     );
     Ok(cfg)
@@ -1488,9 +1092,7 @@ async fn resolve_signer(
 
     // The deployment is the source of truth — no local sidecar. If this
     // bot's Sui address already created a QuoteSigner under the current
-    // package, adopt it; otherwise bootstrap a fresh one. A fresh contract
-    // deployment (new package) has no such event, so the bot self-heals by
-    // creating a new signer against the package the indexer is watching.
+    // package, adopt it; otherwise bootstrap a fresh one.
     if let Some(signer_id) =
         find_signer(&wrap.client, package, wrap.signer.address, signer.scheme(), pubkey_bytes)
             .await?
@@ -1512,9 +1114,9 @@ async fn resolve_signer(
     tracing::info!(digest = %created.digest, signer_id = %created.signer_id, "quote signer created");
 
     // Fund the MM's own CollateralAccount with settlement so it can pay
-    // premiums on day one (Trader-MM / bid side). Create and fund are
-    // separate txs; a crash between them leaves the signer (adopted on the
-    // next boot) unfunded — acceptable for the test MM bot.
+    // premiums on day one. Create and fund are separate txs; a crash
+    // between them leaves the signer (adopted on the next boot) unfunded —
+    // acceptable for the test MM bot.
     let settlement = snapshot.faucet_token(&cfg.settlement_symbol)?;
     let (tokens_pkg, settlement_module) = settlement.module_path()?;
     let fund_resp = mint_and_deposit_into_collateral(
@@ -1537,9 +1139,7 @@ async fn resolve_signer(
         "collateral account funded (settlement)"
     );
 
-    // Fund it with each underlying so it can write calls to retail traders
-    // (Writer-MM / ask side). The background replenish tasks keep these topped
-    // up as the inventory drains.
+    // Fund it with each underlying so it can write calls to retail traders.
     for sym in &cfg.underlying_symbols {
         let underlying = snapshot.faucet_token(sym)?;
         let (u_tokens_pkg, underlying_module) = underlying.module_path()?;
@@ -1583,8 +1183,7 @@ enum AuthVerdict {
     /// SignerCreated yet). Retry until it catches up.
     Retryable { code: String, message: String },
     /// A permanent rejection (`auth_pubkey_mismatch` / `auth_signature_invalid`):
-    /// the registered key/scheme will never match what we present. Fatal —
-    /// retrying can't fix a misconfigured key.
+    /// the registered key/scheme will never match what we present.
     Fatal { code: String, message: String },
 }
 
@@ -1607,23 +1206,6 @@ async fn expect_auth_ack(ws: &mut ws_client::WsStream) -> Result<AuthVerdict> {
         }
         other => Err(anyhow!("expected AuthAck, got {:?}", other)),
     }
-}
-
-fn resolve_token_recipient(
-    cfg: &BotConfig,
-    secrets: &runtime_config::Secrets,
-) -> Result<PtSuiAddress> {
-    if let Some(s) = &cfg.token_recipient {
-        tracing::debug!(recipient = %s, "using configured token recipient");
-        return PtSuiAddress::from_hex(s).context("parsing token_recipient");
-    }
-    tracing::debug!("deriving token recipient from sui key");
-    // Derive the address from the same Sui key the bot signs gas with.
-    let raw = secrets.sui_private_key(cfg.network.as_str())?;
-    let kp = sui_types::crypto::SuiKeyPair::decode(raw.trim())
-        .map_err(|e| anyhow!("decoding sui key: {e}"))?;
-    let addr = sui_types::base_types::SuiAddress::from(&kp.public());
-    PtSuiAddress::from_hex(&addr.to_string()).context("converting sui address")
 }
 
 fn pt_object_id_from_sui(id: ObjectID) -> PtObjectId {
@@ -1664,30 +1246,11 @@ async fn wait_for_first_prices(
     }
 }
 
-/// Pick the market whose pair matches this bucket. `None` when no configured
-/// market quotes the bucket's `(underlying, settlement)` pair.
-fn find_market<'a>(
-    markets: &'a [Market],
-    bucket: &api_service_client::BucketPricing,
-    settlement_coin_type: &str,
-) -> Option<&'a Market> {
-    markets.iter().find(|m| {
-        serves_pair(
-            &bucket.asset_coin_type,
-            &bucket.settlement_coin_type,
-            &m.coin_type,
-            settlement_coin_type,
-        )
-    })
-}
-
 /// Inputs for the underlying-inventory replenish task.
 struct ReplenishParams {
     secrets: runtime_config::Secrets,
     network: Network,
-    /// The MM's own mm_collateral package + shared CollateralAccount — the
-    /// bot tracks its own available funds by RPC-reading its own account
-    /// (plan §8: its own concern, not protocol infrastructure).
+    /// The MM's own mm_collateral package + shared CollateralAccount.
     collateral_package: ObjectID,
     collateral_account: ObjectID,
     coin_type: String,
@@ -1695,16 +1258,13 @@ struct ReplenishParams {
     threshold: u64,
     top_up: u64,
     interval_secs: u64,
-    /// Source the top-up is pulled from (faucet by default). The faucet id /
-    /// module / gas are resolved inside the source from `coin_type`.
+    /// Source the top-up is pulled from (faucet by default).
     liquidity: Arc<dyn LiquiditySource>,
 }
 
 /// Periodically read the CollateralAccount's underlying balance (via
 /// devInspect, no gas) and mint+deposit a top-up when it drops below the
-/// configured threshold. Runs in its own tokio task with its own Sui client
-/// so it doesn't contend with the WS serve loop. Transient errors are logged
-/// and retried on the next tick — a wedged faucet shouldn't kill the bot.
+/// configured threshold.
 fn spawn_replenish_task(p: ReplenishParams) {
     tokio::spawn(async move {
         let wrap = match SuiClientWrapper::connect(&p.secrets, p.network).await {
@@ -1761,9 +1321,35 @@ fn spawn_replenish_task(p: ReplenishParams) {
     });
 }
 
-/// Maintain one market's vol buffer from the live price cache on the
-/// configured cadence. The buffer warms from the live stream (no Benchmarks
-/// bootstrap); `fallback_vol` covers the cold-start window.
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    fn parse(name: &str) -> BotConfig {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("config")
+            .join(name);
+        load_config(&path).unwrap_or_else(|e| panic!("{name}: {e:#}"))
+    }
+
+    #[test]
+    fn shipped_configs_parse_with_desk_defaults() {
+        for name in ["config.toml", "config.staging.toml", "config.prod.toml"] {
+            let cfg = parse(name);
+            // Desk ships disabled until a vault is provisioned per env.
+            assert!(!cfg.desk.enabled, "{name}: desk must ship disabled");
+            // Defaults are the 00-plan starting parameters.
+            assert_eq!(cfg.desk.limits.premium_budget_hard, 0.35, "{name}");
+            assert_eq!(cfg.desk.v1.base_spread_volpts, 0.05, "{name}");
+            assert!(!cfg.desk.v2.enabled, "{name}: v2 must ship disabled");
+        }
+        assert!(parse("config.staging.toml").sim.enabled);
+        assert!(!parse("config.prod.toml").sim.enabled);
+    }
+}
+
+/// Maintain one market's vol buffers from the live price cache on the
+/// configured cadence.
 fn spawn_vol_sampler(
     cfg: PythConfig,
     symbol: String,

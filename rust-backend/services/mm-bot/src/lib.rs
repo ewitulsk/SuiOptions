@@ -9,14 +9,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 pub mod collateral;
-pub mod deepbook;
+pub mod desk;
 pub mod liquidity;
-pub mod onchain_put_rfq;
-pub mod onchain_rfq;
-pub mod onchain_swap;
 pub mod pricing;
 pub mod sim;
-pub mod vault_deepbook;
 
 /// Move abort code emitted when a bid is outbid between read and submit
 /// (`auction::errors::bid_too_low` in the generic auction package, shared
@@ -99,6 +95,15 @@ pub struct Cli {
     /// pricing inputs delivered on the RFQ broadcast itself.
     #[arg(long, env = "API_URL", default_value = "http://127.0.0.1:9003")]
     pub api_url: String,
+
+    /// Indexer GraphQL endpoint. The desk reconstructs its book (NAV,
+    /// vault custody) from the trading-vault views here.
+    #[arg(
+        long,
+        env = "INDEXER_GRAPHQL_URL",
+        default_value = "http://127.0.0.1:9002/graphql"
+    )]
+    pub indexer_graphql_url: String,
 
     /// Per-binary secrets TOML. Holds the Sui signing key (under the
     /// network selected by `network` in the bot config) and the

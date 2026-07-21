@@ -727,7 +727,17 @@ async fn submit(
     pt: ProgrammableTransactionBuilder,
     gas_budget: u64,
 ) -> Result<SuiTransactionBlockResponse> {
-    let programmable = pt.finish();
+    submit_programmable(client, signer, pt.finish(), gas_budget).await
+}
+
+/// Same as [`submit`] for an already-finished PTB (callers that dev-inspect
+/// the transaction first need the `ProgrammableTransaction` twice).
+async fn submit_programmable(
+    client: &SuiClient,
+    signer: &Signer,
+    programmable: sui_types::transaction::ProgrammableTransaction,
+    gas_budget: u64,
+) -> Result<SuiTransactionBlockResponse> {
     let gas_coin = client
         .coin_read_api()
         .get_coins(signer.address, None, None, Some(5))
@@ -785,6 +795,209 @@ async fn submit(
     }
     debug!(digest = %resp.digest, "deepbook tx succeeded");
     Ok(resp)
+}
+
+// ── SO-299 desk exits: coin-based swap + flash-exercise ────────────────
+
+/// `Coin<T>::zero()` as a PTB argument (fee legs on whitelisted pools).
+fn zero_coin(pt: &mut ProgrammableTransactionBuilder, coin_type: &str) -> Result<Argument> {
+    let tag = TypeTag::from_str(coin_type).with_context(|| format!("parsing {coin_type}"))?;
+    Ok(pt.programmable_move_call(
+        ObjectID::from_hex_literal("0x2").unwrap(),
+        Identifier::new("coin").unwrap(),
+        Identifier::new("zero").unwrap(),
+        vec![tag],
+        vec![],
+    ))
+}
+
+fn nested(arg: Argument, i: u16) -> Argument {
+    match arg {
+        Argument::Result(cmd) => Argument::NestedResult(cmd, i),
+        other => other,
+    }
+}
+
+/// Taker-sell `amount` of `base_coin_type` from the wallet into `pool`'s
+/// standing bids via the coin-based `pool::swap_exact_base_for_quote` (no
+/// BalanceManager). All output coins (quote proceeds + any unfilled base
+/// + DEEP change) are transferred to `recipient`. Aborts (at dry-run) if
+/// the book can't return at least `min_quote_out`. `deep_coin_type` is
+/// the deployment's DEEP token type (token-info `deep_coin_type`) — the
+/// fee leg passes a zero coin, which fee-charging pools reject at
+/// dry-run (nothing is spent).
+#[allow(clippy::too_many_arguments)]
+pub async fn swap_base_for_quote(
+    client: &SuiClient,
+    signer: &Signer,
+    deepbook_package: ObjectID,
+    pool_id: ObjectID,
+    base_coin_type: &str,
+    quote_coin_type: &str,
+    deep_coin_type: &str,
+    amount: u64,
+    min_quote_out: u64,
+    recipient: sui_types::base_types::SuiAddress,
+    gas_budget: u64,
+) -> Result<SuiTransactionBlockResponse> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let base = gather_exact_coin(client, signer, &mut pt, base_coin_type, amount).await?;
+    let deep_zero = zero_coin(&mut pt, deep_coin_type)
+        .context("DEEP zero coin (fee leg) — pool must be whitelisted or fee-free")?;
+    let pool = pt.obj(shared_object_arg(client, pool_id, true).await?)?;
+    let tags = vec![
+        TypeTag::from_str(base_coin_type)?,
+        TypeTag::from_str(quote_coin_type)?,
+    ];
+    let min_out = pt.pure(&min_quote_out)?;
+    let clock = crate::tx::clock_arg(&mut pt)?;
+    let out = pt.programmable_move_call(
+        deepbook_package,
+        Identifier::new("pool").unwrap(),
+        Identifier::new("swap_exact_base_for_quote").unwrap(),
+        tags,
+        vec![pool, base, deep_zero, min_out, clock],
+    );
+    let recipient_arg = pt.pure(&recipient)?;
+    pt.command(sui_types::transaction::Command::TransferObjects(
+        vec![nested(out, 0), nested(out, 1), nested(out, 2)],
+        recipient_arg,
+    ));
+    submit(client, signer, pt, gas_budget).await
+}
+
+/// Inputs for [`flash_exercise_call`].
+pub struct FlashExerciseCallParams<'a> {
+    /// Upgraded DeepBook package (calls execute here).
+    pub deepbook_package: ObjectID,
+    /// options_core package (`bucket::exercise`).
+    pub core_package: ObjectID,
+    /// The UNDERLYING/SETTLEMENT spot pool: flash-loan source AND the
+    /// venue the exercised underlying is sold into.
+    pub spot_pool: ObjectID,
+    pub bucket: ObjectID,
+    pub underlying_type: &'a str,
+    pub settlement_type: &'a str,
+    pub call_coin_type: &'a str,
+    /// The deployment's DEEP token type (fee leg; zero coin passed).
+    pub deep_coin_type: &'a str,
+    /// Option units to exercise (wallet-held call coins).
+    pub amount: u64,
+    /// Exact settlement the exercise requires (`bucket::apply_strike`,
+    /// round-half-up) — also the flash-loan principal.
+    pub strike_cost: u64,
+    /// Where net proceeds (and any residue) land — the vault.
+    pub recipient: sui_types::base_types::SuiAddress,
+    pub gas_budget: u64,
+}
+
+/// Capital-light ITM exercise, one PTB (00-plan V1 §5):
+///
+///   `borrow_flashloan_quote(strike_cost)` → `bucket::exercise` → sell
+///   the exercised underlying via `swap_exact_base_for_quote` on the same
+///   spot pool → `return_flashloan_quote` → net proceeds to `recipient`.
+///
+/// Profitability is enforced STRUCTURALLY: the swap's `min_quote_out` is
+/// `strike_cost + 1`, so unless the sale strictly exceeds the repayment
+/// the transaction aborts. The PTB is dev-inspect pre-simulated and the
+/// call returns an error (nothing signed, no gas spent) when net ≤ 0 —
+/// callers ladder big sizes and simply retry later.
+pub async fn flash_exercise_call(
+    client: &SuiClient,
+    signer: &Signer,
+    p: &FlashExerciseCallParams<'_>,
+) -> Result<SuiTransactionBlockResponse> {
+    let pool_tags = vec![
+        TypeTag::from_str(p.underlying_type)?,
+        TypeTag::from_str(p.settlement_type)?,
+    ];
+    let bucket_tags = vec![
+        TypeTag::from_str(p.underlying_type)?,
+        TypeTag::from_str(p.settlement_type)?,
+        TypeTag::from_str(p.call_coin_type)?,
+    ];
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let pool = pt.obj(shared_object_arg(client, p.spot_pool, true).await?)?;
+    let bucket = pt.obj(shared_object_arg(client, p.bucket, true).await?)?;
+    let clock = crate::tx::clock_arg(&mut pt)?;
+
+    // 1. Borrow the strike cost from the spot pool.
+    let amt = pt.pure(&p.strike_cost)?;
+    let borrow = pt.programmable_move_call(
+        p.deepbook_package,
+        Identifier::new("pool").unwrap(),
+        Identifier::new("borrow_flashloan_quote").unwrap(),
+        pool_tags.clone(),
+        vec![pool, amt],
+    );
+    let borrowed_coin = nested(borrow, 0);
+    let flash_loan = nested(borrow, 1);
+
+    // 2. Exercise: call coins + the borrowed settlement → underlying.
+    let calls = gather_exact_coin(client, signer, &mut pt, p.call_coin_type, p.amount).await?;
+    let underlying = pt.programmable_move_call(
+        p.core_package,
+        Identifier::new("bucket").unwrap(),
+        Identifier::new("exercise").unwrap(),
+        bucket_tags,
+        vec![bucket, calls, borrowed_coin, clock],
+    );
+
+    // 3. Sell the underlying on the same spot pool. min_quote_out =
+    //    strike_cost + 1 makes an unprofitable exercise abort.
+    let deep_zero = zero_coin(&mut pt, p.deep_coin_type)?;
+    let min_out = pt.pure(&(p.strike_cost.saturating_add(1)))?;
+    let swap = pt.programmable_move_call(
+        p.deepbook_package,
+        Identifier::new("pool").unwrap(),
+        Identifier::new("swap_exact_base_for_quote").unwrap(),
+        pool_tags.clone(),
+        vec![pool, underlying, deep_zero, min_out, clock],
+    );
+    let base_residue = nested(swap, 0);
+    let quote_out = nested(swap, 1);
+    let deep_residue = nested(swap, 2);
+
+    // 4. Repay the loan out of the proceeds.
+    let repay_amt = pt.pure(&p.strike_cost)?;
+    let repay = pt.command(sui_types::transaction::Command::SplitCoins(
+        quote_out,
+        vec![repay_amt],
+    ));
+    pt.programmable_move_call(
+        p.deepbook_package,
+        Identifier::new("pool").unwrap(),
+        Identifier::new("return_flashloan_quote").unwrap(),
+        pool_tags,
+        vec![pool, nested(repay, 0), flash_loan],
+    );
+
+    // 5. Net proceeds (and residues) to the recipient.
+    let recipient = pt.pure(&p.recipient)?;
+    pt.command(sui_types::transaction::Command::TransferObjects(
+        vec![quote_out, base_residue, deep_residue],
+        recipient,
+    ));
+
+    // Pre-simulate: nothing is signed if the net is ≤ 0 (the swap's
+    // min_quote_out aborts) or any other assumption broke.
+    let programmable = pt.finish();
+    let inspect = client
+        .read_api()
+        .dev_inspect_transaction_block(
+            signer.address,
+            TransactionKind::ProgrammableTransaction(programmable.clone()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .context("dev-inspecting flash-exercise")?;
+    if let Some(err) = inspect.error {
+        bail!("flash-exercise pre-simulation failed (likely net ≤ 0): {err}");
+    }
+    submit_programmable(client, signer, programmable, p.gas_budget).await
 }
 
 #[cfg(test)]

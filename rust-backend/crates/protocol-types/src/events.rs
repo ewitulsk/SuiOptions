@@ -815,6 +815,89 @@ pub struct PutRfqExpiredUnsold {
     pub reserve_premium: u64,
 }
 
+// ═══════════════ offset closes + spreads (options_core, SO-299) ═══════════
+
+/// A fully-offset (long-vs-short same-bucket) position closed pre-expiry:
+/// option coins burned against the position range, collateral returned.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OffsetClosed {
+    pub bucket_id: ObjectId,
+    pub closer: SuiAddress,
+    pub position_id: ObjectId,
+    pub is_put: bool,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub collateral_returned: u64,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
+}
+
+/// A compressed (spread) write: the range is backed by an escrowed long
+/// option instead of full collateral.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpreadWritten {
+    pub bucket_id: ObjectId,
+    pub long_bucket_id: ObjectId,
+    pub writer: SuiAddress,
+    pub position_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub exercise_cash: u64,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
+}
+
+/// Permissionless physicalization: the escrowed long leg was exercised to
+/// fully collateralize the short range.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpreadUnwound {
+    pub bucket_id: ObjectId,
+    pub long_bucket_id: ObjectId,
+    pub caller: SuiAddress,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+}
+
+/// Pre-expiry spread buy-back: short coins burned, escrow returned to the
+/// writer, range tombstoned.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpreadClosed {
+    pub bucket_id: ObjectId,
+    pub closer: SuiAddress,
+    pub position_id: ObjectId,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+}
+
+/// Post-expiry redemption of a never-physicalized spread position: the
+/// untouched escrow goes back to the position holder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpreadRedeemed {
+    pub bucket_id: ObjectId,
+    pub redeemer: SuiAddress,
+    pub position_id: ObjectId,
+    #[serde(with = "u128_string")]
+    pub range_start: u128,
+    #[serde(with = "u128_string")]
+    pub range_end: u128,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+}
+
 /// Tagged union over every event the indexer may publish.
 ///
 /// The variant name is what shows up as `"type"` over the wire; the payload
@@ -1085,6 +1168,166 @@ pub struct TvPositionRedeemed {
     pub is_put: bool,
 }
 
+// ════════ trading-vault mm-desk custody ops + vault-funded bids (SO-299) ════════
+
+/// `trading_vault::events::MmCoinExercised` — a custodied option-coin
+/// position exercised under a curator session (`vault_mm::exercise_*_coin`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvMmCoinExercised {
+    pub vault_id: ObjectId,
+    pub bucket_id: ObjectId,
+    pub coin_position_id: ObjectId,
+    pub is_put: bool,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub settlement_amount: u64,
+}
+
+/// `trading_vault::events::MmOffsetClosed` — a written Position netted
+/// against same-bucket custodied option coins (`vault_mm::close_offset_*`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvMmOffsetClosed {
+    pub vault_id: ObjectId,
+    pub bucket_id: ObjectId,
+    pub position_id: ObjectId,
+    pub is_put: bool,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub collateral_returned: u64,
+    pub position_closed: bool,
+}
+
+/// `trading_vault::events::MmCoinReleased` — a VaultMm coin-custody
+/// position moved into the vault's free balances
+/// (`vault_mm::release_coin_to_balances`, the resale on-ramp).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvMmCoinReleased {
+    pub vault_id: ObjectId,
+    pub coin_position_id: ObjectId,
+    pub asset_type: AssetType,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+}
+
+/// `deepbook_adapter::deepbook_adapter::TakerSwapExecuted` — a curator
+/// taker swap of vault free balances against an allowlisted pool.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvTakerSwapExecuted {
+    pub vault_id: ObjectId,
+    pub pool_id: ObjectId,
+    pub base_for_quote: bool,
+    #[serde(with = "u64_string")]
+    pub amount_in: u64,
+    #[serde(with = "u64_string")]
+    pub amount_out: u64,
+    /// Input returned unfilled (lot rounding or a thin book).
+    #[serde(with = "u64_string")]
+    pub unswapped: u64,
+}
+
+/// `options_adapter::options_adapter::BidPlaced` — a vault-escrowed
+/// auction bid, minting a `BidTicket` custody position.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvBidPlaced {
+    pub vault_id: ObjectId,
+    pub ticket_id: ObjectId,
+    pub auction_id: ObjectId,
+    pub bucket_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub escrow_amount: u64,
+    pub win_type: AssetType,
+    #[serde(with = "u64_string")]
+    pub win_amount: u64,
+    pub is_put: bool,
+}
+
+/// `options_adapter::options_adapter::BidReclaimed` — a refunded/outbid
+/// ticket burned, returning its full escrow to the vault.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvBidReclaimed {
+    pub vault_id: ObjectId,
+    pub ticket_id: ObjectId,
+    pub auction_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub refunded: u64,
+}
+
+/// `options_adapter::options_adapter::BidRedeemed` — a won ticket burned,
+/// receiving the winnings into vault balances.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvBidRedeemed {
+    pub vault_id: ObjectId,
+    pub ticket_id: ObjectId,
+    pub auction_id: ObjectId,
+    pub win_type: AssetType,
+    #[serde(with = "u64_string")]
+    pub win_amount: u64,
+}
+
+// ════════ trading-vault external accounts + equity oracle (SO-299) ════════
+
+/// `trading_vault::events::ExternalAccountSet`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvExternalAccountSet {
+    pub vault_id: ObjectId,
+    pub account: SuiAddress,
+    /// Witness type of the allowlisted equity oracle appraising the account.
+    pub equity_oracle: AssetType,
+    #[serde(with = "u64_string")]
+    pub budget_bps: u64,
+    #[serde(with = "u64_string")]
+    pub daily_release_bps: u64,
+}
+
+/// `trading_vault::events::ExternalAccountCleared`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvExternalAccountCleared {
+    pub vault_id: ObjectId,
+}
+
+/// `trading_vault::events::ExternalReleased`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvExternalReleased {
+    pub vault_id: ObjectId,
+    pub account: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    /// Post-release outstanding external exposure.
+    #[serde(with = "u64_string")]
+    pub exposure: u64,
+    #[serde(with = "u128_string")]
+    pub nav: u128,
+}
+
+/// `trading_vault::events::ExternalReturned`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvExternalReturned {
+    pub vault_id: ObjectId,
+    pub from: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    /// Post-return outstanding external exposure.
+    #[serde(with = "u64_string")]
+    pub exposure: u64,
+}
+
+/// `equity_oracle::equity_oracle::EquityPosted` — keeper-attested equity of
+/// a trading vault's external account.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EquityPosted {
+    pub vault_id: ObjectId,
+    pub poster: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub equity: u64,
+    #[serde(with = "u64_string")]
+    pub previous: u64,
+    /// True for admin re-anchors (`seed_equity`), which bypass the delta
+    /// guardrail.
+    pub seeded: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum ChainEvent {
@@ -1140,6 +1383,12 @@ pub enum ChainEvent {
     PutRfqCreated(PutRfqCreated),
     PutRfqSettled(PutRfqSettled),
     PutRfqExpiredUnsold(PutRfqExpiredUnsold),
+    // offset closes + spreads (SO-299)
+    OffsetClosed(OffsetClosed),
+    SpreadWritten(SpreadWritten),
+    SpreadUnwound(SpreadUnwound),
+    SpreadClosed(SpreadClosed),
+    SpreadRedeemed(SpreadRedeemed),
     // curated trading vaults (SO-282)
     TvVaultCreated(TvVaultCreated),
     TvVaultClosing(TvVaultClosing),
@@ -1165,6 +1414,20 @@ pub enum ChainEvent {
     TvRfqOpened(TvRfqOpened),
     TvRfqSettled(TvRfqSettled),
     TvPositionRedeemed(TvPositionRedeemed),
+    // trading-vault mm-desk custody ops + vault-funded bids (SO-299)
+    TvMmCoinExercised(TvMmCoinExercised),
+    TvMmOffsetClosed(TvMmOffsetClosed),
+    TvMmCoinReleased(TvMmCoinReleased),
+    TvTakerSwapExecuted(TvTakerSwapExecuted),
+    TvBidPlaced(TvBidPlaced),
+    TvBidReclaimed(TvBidReclaimed),
+    TvBidRedeemed(TvBidRedeemed),
+    // trading-vault external accounts + equity oracle (SO-299)
+    TvExternalAccountSet(TvExternalAccountSet),
+    TvExternalAccountCleared(TvExternalAccountCleared),
+    TvExternalReleased(TvExternalReleased),
+    TvExternalReturned(TvExternalReturned),
+    EquityPosted(EquityPosted),
 }
 
 /// An envelope wrapping a `ChainEvent` with the ordering metadata the indexer
@@ -1199,6 +1462,44 @@ mod tests {
         assert_eq!(v["payload"]["asset_type"], "BTC");
         assert_eq!(v["payload"]["strike"], "50000000000");
         assert_eq!(v["payload"]["strike_scale"], 0);
+
+        let back: ChainEvent = serde_json::from_value(v).unwrap();
+        assert_eq!(back, evt);
+    }
+
+    #[test]
+    fn tv_external_released_tagged_envelope() {
+        let evt = ChainEvent::TvExternalReleased(TvExternalReleased {
+            vault_id: ObjectId::new([0x0f; 32]),
+            account: SuiAddress::new([0x1a; 32]),
+            amount: 25_000_000,
+            exposure: 75_000_000,
+            nav: 1_000_000_000_000,
+        });
+        let v: serde_json::Value = serde_json::to_value(&evt).unwrap();
+        assert_eq!(v["type"], "TvExternalReleased");
+        assert_eq!(v["payload"]["amount"], "25000000");
+        assert_eq!(v["payload"]["exposure"], "75000000");
+        assert_eq!(v["payload"]["nav"], "1000000000000");
+
+        let back: ChainEvent = serde_json::from_value(v).unwrap();
+        assert_eq!(back, evt);
+    }
+
+    #[test]
+    fn equity_posted_tagged_envelope() {
+        let evt = ChainEvent::EquityPosted(EquityPosted {
+            vault_id: ObjectId::new([0x0f; 32]),
+            poster: SuiAddress::new([0x2b; 32]),
+            equity: 80_000_000,
+            previous: 75_000_000,
+            seeded: false,
+        });
+        let v: serde_json::Value = serde_json::to_value(&evt).unwrap();
+        assert_eq!(v["type"], "EquityPosted");
+        assert_eq!(v["payload"]["equity"], "80000000");
+        assert_eq!(v["payload"]["previous"], "75000000");
+        assert_eq!(v["payload"]["seeded"], false);
 
         let back: ChainEvent = serde_json::from_value(v).unwrap();
         assert_eq!(back, evt);
