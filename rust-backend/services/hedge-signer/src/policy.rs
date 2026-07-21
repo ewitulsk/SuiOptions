@@ -22,6 +22,13 @@
 //! plumbing.
 //!
 //! Classification order: emergency → strict trigger → auto → deny.
+//!
+//! The [`bluefin`] submodule is the sibling policy for the FROST-signed
+//! Bluefin parent account (doc 03 §3b): it classifies detached venue
+//! payloads (login / authorize_account / withdraw / sui_tx) before the
+//! service contributes a threshold-signature share.
+
+pub mod bluefin;
 
 use std::collections::HashSet;
 use std::fmt;
@@ -93,6 +100,13 @@ pub struct VaultPolicy {
     /// Kept for the /policy summary only.
     pub allowed_pools: Vec<ObjectID>,
     pub curator_pubkey_b64: Option<String>,
+    /// The only wallet a Bluefin `authorize_account` payload may authorize.
+    /// `None` → every authorize payload is denied.
+    pub curator_wallet: Option<SuiAddress>,
+    /// Optional Bluefin internal-data-store pin (`ids` of authorize payloads).
+    pub bluefin_ids: Option<ObjectID>,
+    /// Optional Bluefin external-data-store pin (`eds` of withdraw payloads).
+    pub bluefin_eds: Option<ObjectID>,
 }
 
 impl VaultPolicy {
@@ -114,6 +128,33 @@ impl VaultPolicy {
         }
         let mut allowed_shared: HashSet<ObjectID> = allowed_pools.iter().copied().collect();
         allowed_shared.insert(vault_object);
+        let curator_wallet = cfg
+            .curator_wallet
+            .as_deref()
+            .map(|w| {
+                SuiAddress::from_str(w)
+                    .with_context(|| format!("curator_wallet for vault {}", cfg.vault_id))
+            })
+            .transpose()?;
+        let (bluefin_ids, bluefin_eds) = match &cfg.bluefin {
+            Some(b) => (
+                b.ids_id
+                    .as_deref()
+                    .map(|s| {
+                        ObjectID::from_hex_literal(s)
+                            .with_context(|| format!("bluefin.ids_id for vault {}", cfg.vault_id))
+                    })
+                    .transpose()?,
+                b.eds_id
+                    .as_deref()
+                    .map(|s| {
+                        ObjectID::from_hex_literal(s)
+                            .with_context(|| format!("bluefin.eds_id for vault {}", cfg.vault_id))
+                    })
+                    .transpose()?,
+            ),
+            None => (None, None),
+        };
         Ok(Self {
             vault_id: cfg.vault_id.clone(),
             external_account,
@@ -124,6 +165,9 @@ impl VaultPolicy {
             allowed_shared,
             allowed_pools,
             curator_pubkey_b64: cfg.curator_pubkey_b64.clone(),
+            curator_wallet,
+            bluefin_ids,
+            bluefin_eds,
         })
     }
 }
@@ -397,6 +441,8 @@ mod tests {
                 max_borrow_amount: 1_000_000,
                 allowed_pools: vec![pool_id().to_hex_literal(), manager_id().to_hex_literal()],
                 deepbook_margin_package: dbm_pkg().to_hex_literal(),
+                curator_wallet: None,
+                bluefin: None,
             },
             tv_pkg(),
         )

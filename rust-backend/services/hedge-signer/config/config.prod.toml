@@ -14,6 +14,12 @@ token_info_url = "http://token-info:9005"
 # Persisted on the hedge_signer_data docker volume (see compose).
 audit_log_path = "/app/data/audit.jsonl"
 
+# Per-vault FROST key shares (the service half of each vault's 2-of-2
+# threshold-ed25519 Bluefin parent key), written by the /frost/keygen
+# ceremony. On the persistent data volume — NOT in secrets.toml, which is
+# re-rendered from AWS Secrets Manager on every deploy.
+frost_shares_path = "/app/data/frost-shares.toml"
+
 # One [[vaults]] block per trading vault whose external account this service
 # co-signs for. None yet — filled in when the first prod external account is
 # provisioned (multisig ceremony + margin manager creation).
@@ -26,3 +32,10 @@ audit_log_path = "/app/data/audit.jsonl"
 # max_borrow_amount = 1000000000
 # allowed_pools = ["0x..."]    # pools + registry + margin pools + MarginManager
 # deepbook_margin_package = "0x..."
+# # Curator's day-to-day trading wallet: the ONLY wallet a Bluefin
+# # authorize_account payload may authorize on the FROST parent account.
+# curator_wallet = "0x..."
+# # Optional Bluefin object-id pins for the FROST payload policy.
+# [vaults.bluefin]
+# ids_id = "0x..."   # internal data store (authorize payloads)
+# eds_id = "0x..."   # external data store (withdraw payloads)

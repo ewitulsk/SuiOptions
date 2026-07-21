@@ -7,7 +7,9 @@ use clap::Parser;
 use tracing::info;
 
 use hedge_signer::audit::AuditLog;
+use hedge_signer::frost::{Ceremonies, ShareStore};
 use hedge_signer::policy::VaultPolicy;
+use hedge_signer::state::FrostState;
 use hedge_signer::{router, AppState, Cli, Config};
 use sui_tx::SuiClientWrapper;
 use token_info_client::TokenInfoClient;
@@ -52,8 +54,15 @@ async fn main() -> Result<()> {
     }
 
     // Fatal on failure: an unauditable signer must not boot.
-    let audit = AuditLog::open(&cfg.audit_log_path)
-        .with_context(|| format!("opening audit log {}", cfg.audit_log_path.display()))?;
+    let audit = Arc::new(
+        AuditLog::open(&cfg.audit_log_path)
+            .with_context(|| format!("opening audit log {}", cfg.audit_log_path.display()))?,
+    );
+
+    // FROST share store: missing file → empty (no keygen run yet); a
+    // present-but-corrupt file is fatal — never boot blind to shares.
+    let share_store = ShareStore::open(&cfg.frost_shares_path)
+        .with_context(|| format!("opening frost shares {}", cfg.frost_shares_path.display()))?;
 
     info!(
         environment = %cfg.environment,
@@ -62,10 +71,16 @@ async fn main() -> Result<()> {
         trading_vault = %trading_vault_pkg,
         vaults = vaults.len(),
         audit_log = %cfg.audit_log_path.display(),
+        frost_shares = %cfg.frost_shares_path.display(),
         "hedge-signer starting"
     );
 
+    let frost_state = Arc::new(FrostState {
+        vaults: vaults.clone(),
+        audit: audit.clone(),
+        ceremonies: Ceremonies::new(share_store),
+    });
     let state = Arc::new(AppState { sui, vaults, audit });
 
-    router::serve(cfg.bind_addr, state, &cfg.allowed_origins).await
+    router::serve(cfg.bind_addr, state, frost_state, &cfg.allowed_origins).await
 }
