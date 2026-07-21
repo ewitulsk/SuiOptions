@@ -55,7 +55,7 @@ resource "aws_instance" "host" {
   user_data_replace_on_change = false
 
   root_block_device {
-    volume_size           = var.ec2_root_volume_gb
+    volume_size           = var.staging_ec2_root_volume_gb
     volume_type           = "gp3"
     delete_on_termination = true
     encrypted             = true
