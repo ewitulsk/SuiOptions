@@ -280,6 +280,14 @@ pub struct TradingVaultState {
     pub pending_withdrawals: u64,
     pub latest_pps_e12: Option<u128>,
     pub updated_at_ms: u64,
+    /// External MM account wallet (SO-299); `None` when none is set.
+    pub external_account: Option<String>,
+    /// Outstanding external exposure, from the latest
+    /// TvExternalReleased/TvExternalReturned.
+    pub external_exposure: u64,
+    /// Latest keeper-posted account equity (EquityPosted).
+    pub latest_external_equity: Option<u64>,
+    pub external_equity_updated_at_ms: Option<u64>,
 }
 
 /// One adapter position held by a trading vault, keyed by
@@ -664,8 +672,20 @@ fn collect_participants(
         ChainEvent::TvWithdrawRequested(w) => push(w.recipient.to_hex(), "withdrawer"),
         ChainEvent::TvWithdrawFulfilled(w) => push(w.recipient.to_hex(), "withdrawer"),
         ChainEvent::TvCuratorRotated(r) => push(r.recipient.to_hex(), "curator"),
+        // ── external MM accounts + equity oracle (SO-299) ────────────
+        ChainEvent::TvExternalAccountSet(s) => push(s.account.to_hex(), "external_account"),
+        ChainEvent::TvExternalReleased(r) => push(r.account.to_hex(), "external_account"),
+        ChainEvent::TvExternalReturned(r) => push(r.from.to_hex(), "external_account"),
+        ChainEvent::EquityPosted(p) => push(p.poster.to_hex(), "poster"),
+        // ── offset closes + spreads (SO-299) ─────────────────────────
+        ChainEvent::OffsetClosed(c) => push(c.closer.to_hex(), "closer"),
+        ChainEvent::SpreadWritten(w) => push(w.writer.to_hex(), "writer"),
+        ChainEvent::SpreadUnwound(u) => push(u.caller.to_hex(), "caller"),
+        ChainEvent::SpreadClosed(c) => push(c.closer.to_hex(), "closer"),
+        ChainEvent::SpreadRedeemed(r) => push(r.redeemer.to_hex(), "redeemer"),
         // The remaining trading-vault events carry no wallet addresses.
-        ChainEvent::TvVaultClosing(_)
+        ChainEvent::TvExternalAccountCleared(_)
+        | ChainEvent::TvVaultClosing(_)
         | ChainEvent::TvVaultClosed(_)
         | ChainEvent::TvDepositsPaused(_)
         | ChainEvent::TvMmReleaseToggled(_)
@@ -986,6 +1006,22 @@ fn stage_event_into_batch(
             stage_trading_vault(inner, p.vault_id, sequence, batch);
             stage_trading_vault_position(inner, p.vault_id, p.position_id, sequence, batch);
         }
+        // External MM accounts + equity oracle (SO-299).
+        ChainEvent::TvExternalAccountSet(s) => {
+            stage_trading_vault(inner, s.vault_id, sequence, batch);
+        }
+        ChainEvent::TvExternalAccountCleared(c) => {
+            stage_trading_vault(inner, c.vault_id, sequence, batch);
+        }
+        ChainEvent::TvExternalReleased(r) => {
+            stage_trading_vault(inner, r.vault_id, sequence, batch);
+        }
+        ChainEvent::TvExternalReturned(r) => {
+            stage_trading_vault(inner, r.vault_id, sequence, batch);
+        }
+        ChainEvent::EquityPosted(p) => {
+            stage_trading_vault(inner, p.vault_id, sequence, batch);
+        }
         // Non-mutating trading-vault events: served from the generic event
         // feed only.
         ChainEvent::TvSessionSettled(_)
@@ -1007,11 +1043,17 @@ fn stage_event_into_batch(
         | ChainEvent::TreasuryWithdrawn(_)
         | ChainEvent::VaultPositionRedeemed(_)
         | ChainEvent::DeepBookOrderFilled(_)
-        | ChainEvent::VaultConfigUpdated(_) => {
+        | ChainEvent::VaultConfigUpdated(_)
+        | ChainEvent::OffsetClosed(_)
+        | ChainEvent::SpreadWritten(_)
+        | ChainEvent::SpreadUnwound(_)
+        | ChainEvent::SpreadClosed(_)
+        | ChainEvent::SpreadRedeemed(_) => {
             // Log-only events: no materialised view to refresh (the swap
             // auction's effect on the vault is picked up at finalize).
             // DeepBook fills live only in the event log + participants
-            // (SO-209), read on demand.
+            // (SO-209), read on demand. Offset/spread closes (SO-299) are
+            // likewise served from the event log.
         }
     }
 }
@@ -1321,6 +1363,10 @@ fn trading_vault_row(id: ObjectId, s: &TradingVaultState, sequence: i64) -> Trad
         latest_pps_e12: s.latest_pps_e12.map(u128_to_bigdecimal),
         updated_at_seq: sequence,
         updated_at_ms: s.updated_at_ms as i64,
+        external_account: s.external_account.clone(),
+        external_exposure: s.external_exposure as i64,
+        latest_external_equity: s.latest_external_equity.map(|v| v as i64),
+        external_equity_updated_at_ms: s.external_equity_updated_at_ms.map(|v| v as i64),
     }
 }
 
@@ -1772,6 +1818,10 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                     pending_withdrawals: 0,
                     latest_pps_e12: None,
                     updated_at_ms: timestamp_ms,
+                    external_account: None,
+                    external_exposure: 0,
+                    latest_external_equity: None,
+                    external_equity_updated_at_ms: None,
                 },
             );
         }
@@ -1863,6 +1913,41 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                 pos.removed_at_ms = Some(timestamp_ms);
             }
         }
+        // ── external MM accounts + equity oracle (SO-299) ────────────
+        ChainEvent::TvExternalAccountSet(s) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&s.vault_id) {
+                v.external_account = Some(s.account.to_hex());
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvExternalAccountCleared(c) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&c.vault_id) {
+                v.external_account = None;
+                v.external_exposure = 0;
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvExternalReleased(r) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&r.vault_id) {
+                v.external_exposure = r.exposure;
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvExternalReturned(r) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&r.vault_id) {
+                v.external_exposure = r.exposure;
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::EquityPosted(p) => {
+            // Only meaningful for a vault the view knows; a post for a
+            // foreign vault is ignored.
+            if let Some(v) = inner.trading_vaults.get_mut(&p.vault_id) {
+                v.latest_external_equity = Some(p.equity);
+                v.external_equity_updated_at_ms = Some(timestamp_ms);
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
         // Log-only trading-vault events: no materialised view — consumers
         // read them from the generic event feed.
         ChainEvent::TvSessionSettled(_)
@@ -1878,6 +1963,14 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
         | ChainEvent::TvRfqOpened(_)
         | ChainEvent::TvRfqSettled(_)
         | ChainEvent::TvPositionRedeemed(_) => {}
+        // Offset closes + spreads (SO-299) are log-only for now: they don't
+        // move the bucket cursor and the position ranges they retire aren't
+        // modeled in the shared positions view.
+        ChainEvent::OffsetClosed(_)
+        | ChainEvent::SpreadWritten(_)
+        | ChainEvent::SpreadUnwound(_)
+        | ChainEvent::SpreadClosed(_)
+        | ChainEvent::SpreadRedeemed(_) => {}
         ChainEvent::FeeUpdated(_)
         | ChainEvent::TreasuryWithdrawn(_)
         | ChainEvent::VaultPositionRedeemed(_)
@@ -2537,6 +2630,127 @@ mod tests {
         // Both events still land in the log.
         assert_eq!(staged.db_batch.events.len(), 2);
         assert_eq!(staged.db_batch.events[0].event_type, "DeepBookPoolCreated");
+    }
+
+    #[test]
+    fn trading_vault_external_account_lifecycle() {
+        use protocol_types::events::{
+            EquityPosted, TvExternalAccountCleared, TvExternalAccountSet, TvExternalReleased,
+            TvExternalReturned, TvVaultCreated,
+        };
+        let store = Store::default();
+        let vault = ObjectId::new([0xf0; 32]);
+        let account = SuiAddress::new([0x1a; 32]);
+
+        // Stage one event and return the (single) trading-vault row snapshot.
+        let mut checkpoint = 0u64;
+        let mut stage = |ev: ChainEvent, ts: u64| {
+            checkpoint += 1;
+            let staged = store
+                .stage_batch(checkpoint, ts, vec![(ev, "0xd".to_string(), 0)])
+                .unwrap();
+            assert_eq!(staged.db_batch.trading_vaults.len(), 1);
+            staged.db_batch.trading_vaults.into_iter().next().unwrap()
+        };
+
+        let row = stage(
+            ChainEvent::TvVaultCreated(TvVaultCreated {
+                vault_id: vault,
+                creator: SuiAddress::new([0x01; 32]),
+                curator: SuiAddress::new([0x02; 32]),
+                curator_cap_id: ObjectId::new([0x03; 32]),
+                deposit_asset: AssetType::new("9b::tusdc::TUSDC"),
+                lockup_ms: 0,
+                curator_fee_bps: 100,
+                rotation_authority: 0,
+                max_positions: 10,
+                unwind_grace_ms: 0,
+            }),
+            1_000,
+        );
+        assert_eq!(row.external_account, None);
+        assert_eq!(row.external_exposure, 0);
+        assert_eq!(row.latest_external_equity, None);
+
+        let row = stage(
+            ChainEvent::TvExternalAccountSet(TvExternalAccountSet {
+                vault_id: vault,
+                account,
+                equity_oracle: AssetType::new("9b::equity_oracle::EquityOracle"),
+                budget_bps: 2_000,
+                daily_release_bps: 500,
+            }),
+            2_000,
+        );
+        assert_eq!(row.external_account, Some(account.to_hex()));
+        assert_eq!(row.external_exposure, 0);
+
+        let row = stage(
+            ChainEvent::TvExternalReleased(TvExternalReleased {
+                vault_id: vault,
+                account,
+                amount: 75,
+                exposure: 75,
+                nav: 1_000,
+            }),
+            3_000,
+        );
+        assert_eq!(row.external_exposure, 75);
+
+        let row = stage(
+            ChainEvent::EquityPosted(EquityPosted {
+                vault_id: vault,
+                poster: SuiAddress::new([0x2b; 32]),
+                equity: 80,
+                previous: 75,
+                seeded: false,
+            }),
+            4_000,
+        );
+        assert_eq!(row.latest_external_equity, Some(80));
+        assert_eq!(row.external_equity_updated_at_ms, Some(4_000));
+
+        let row = stage(
+            ChainEvent::TvExternalReturned(TvExternalReturned {
+                vault_id: vault,
+                from: account,
+                amount: 50,
+                exposure: 25,
+            }),
+            5_000,
+        );
+        assert_eq!(row.external_exposure, 25);
+
+        let row = stage(
+            ChainEvent::TvExternalAccountCleared(TvExternalAccountCleared { vault_id: vault }),
+            6_000,
+        );
+        assert_eq!(row.external_account, None);
+        assert_eq!(row.external_exposure, 0);
+        // The last observed equity attestation survives the clear.
+        assert_eq!(row.latest_external_equity, Some(80));
+
+        // An EquityPosted for a vault the view doesn't know is ignored:
+        // nothing staged beyond the event row itself.
+        let staged = store
+            .stage_batch(
+                99,
+                7_000,
+                vec![(
+                    ChainEvent::EquityPosted(EquityPosted {
+                        vault_id: ObjectId::new([0xee; 32]),
+                        poster: SuiAddress::new([0x2b; 32]),
+                        equity: 1,
+                        previous: 0,
+                        seeded: true,
+                    }),
+                    "0xd".to_string(),
+                    0,
+                )],
+            )
+            .unwrap();
+        assert!(staged.db_batch.trading_vaults.is_empty());
+        assert_eq!(staged.db_batch.events.len(), 1);
     }
 
     #[test]

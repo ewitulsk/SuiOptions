@@ -165,6 +165,14 @@ async fn main() -> Result<()> {
         .envs
         .get(&env_key)
         .and_then(|d| d.package_info.cctp_bridge.clone());
+    let previous_equity_oracle = store
+        .envs
+        .get(&env_key)
+        .and_then(|d| d.package_info.equity_oracle.clone());
+    let previous_dbm_oracle = store
+        .envs
+        .get(&env_key)
+        .and_then(|d| d.package_info.dbm_oracle.clone());
 
     let record = deploy_one(
         network,
@@ -176,6 +184,8 @@ async fn main() -> Result<()> {
         previous_token_info,
         previous_deepbook,
         previous_cctp,
+        previous_equity_oracle,
+        previous_dbm_oracle,
         cli.gas_budget,
         cli.skip_init,
     )
@@ -200,6 +210,8 @@ async fn deploy_one(
     previous_token_info: BTreeMap<String, TokenSpec>,
     previous_deepbook: Option<serde_json::Value>,
     previous_cctp: Option<CctpBridgeRecord>,
+    previous_equity_oracle: Option<PackageRecord>,
+    previous_dbm_oracle: Option<PackageRecord>,
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
@@ -445,6 +457,10 @@ async fn deploy_one(
             oracle_pyth,
             deepbook_adapter,
             options_adapter,
+            // Not yet published by this tool; carried forward until the
+            // equity-oracle publish step lands (SO-299 follow-up).
+            equity_oracle: previous_equity_oracle,
+            dbm_oracle: previous_dbm_oracle,
             trading_vault_objects,
             cctp_bridge: previous_cctp,
         },

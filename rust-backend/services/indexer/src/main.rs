@@ -82,6 +82,7 @@ async fn main() -> Result<()> {
     let trading_vault_package_id = snapshot.trading_vault().map(|p| p.package_id.clone());
     let deepbook_adapter_package_id = snapshot.deepbook_adapter().map(|p| p.package_id.clone());
     let options_adapter_package_id = snapshot.options_adapter().map(|p| p.package_id.clone());
+    let equity_oracle_package_id = snapshot.equity_oracle().map(|p| p.package_id.clone());
     info!(
         network = %cfg.network,
         core_package_id = %core_package_id,
@@ -219,6 +220,7 @@ async fn main() -> Result<()> {
             trading_vault: trading_vault_package_id.as_deref(),
             deepbook_adapter: deepbook_adapter_package_id.as_deref(),
             options_adapter: options_adapter_package_id.as_deref(),
+            equity_oracle: equity_oracle_package_id.as_deref(),
         },
         deepbook_original.as_deref(),
         Arc::clone(&progress_state),

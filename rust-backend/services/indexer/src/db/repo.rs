@@ -420,6 +420,11 @@ impl Repo {
                         trading_vaults::latest_pps_e12.eq(&tv.latest_pps_e12),
                         trading_vaults::updated_at_seq.eq(tv.updated_at_seq),
                         trading_vaults::updated_at_ms.eq(tv.updated_at_ms),
+                        trading_vaults::external_account.eq(&tv.external_account),
+                        trading_vaults::external_exposure.eq(tv.external_exposure),
+                        trading_vaults::latest_external_equity.eq(tv.latest_external_equity),
+                        trading_vaults::external_equity_updated_at_ms
+                            .eq(tv.external_equity_updated_at_ms),
                     ))
                     .execute(conn)
                     .context("upserting trading_vaults")?;
