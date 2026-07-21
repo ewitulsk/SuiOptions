@@ -218,3 +218,34 @@ hedge cost pick the mix.
   two configs to keep coherent.
 - **Upgrade churn**: the margin package is young and upgrading
   (version-gated registry); pin against testnet, watch releases.
+
+## Phase 0 findings (2026-07-21, SO-301 follow-up)
+
+Testnet reality check (spike 1) — read live via publicnode RPC:
+
+- Canonical testnet ids (from `@mysten/deepbook-v3` 1.5.8 constants,
+  verified on-chain): margin package (latest)
+  `0xd6a42f4df4db73d68cbeb52be66698d2fe6a9464f45ad113ca52b0c6ebd918b6`,
+  ORIGINAL package (type tags)
+  `0xb8620c24c9ea1a4a41e79613d2b3d1d93648d1bb6f6b789a7c8f261c94110e4b`,
+  `MarginRegistry`
+  `0x48d7640dfae2c6e9ceeada197a7a1643984b5a24c55a0c6c023dac77e0339f75`
+  (versioned, v1).
+- Four margin-enabled pools; the one we care about, SUI/DBUSDC
+  (`0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5`),
+  is `enabled: true` with mainnet-identical risk params: liquidate 1.1,
+  borrow gate 1.2499, withdraw 2.0, target 1.25; liquidation rewards 2%
+  user + 3% pool. Margin pools: SUI
+  `0xcdbbe6a72e639b647296788e2e4b1cac5cea4246028ba388ba1332ff9a382eea`,
+  DBUSDC
+  `0xf08568da93834e1ee04f09902ac7b1e78d3fdf113ab4d2106c7265e95318b14d`.
+- 71 margin managers already registered on testnet — the mechanics are
+  exercised there.
+- Spikes 2–3 (multisig round-trip timing, gas posture) fold into the
+  staging hedge-signer bring-up, which performs exactly that ceremony.
+- Item 4 (getter surface callable externally) was settled earlier by the
+  dbm-oracle e2e test.
+- Decision (2026-07-21): custody posture is 2-of-2 with documented share
+  backups for V1 staging; revisit 2-of-3 with a cold share before
+  mainnet. Native multisig on DBM makes either trivial; Bluefin's FROST
+  substrate supports both.
