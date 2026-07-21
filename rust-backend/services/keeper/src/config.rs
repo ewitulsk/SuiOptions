@@ -62,6 +62,12 @@ fn default_slices() -> u64 {
 fn default_stagger_minutes() -> u64 {
     90
 }
+fn default_reconciliation_tolerance_bps() -> u64 {
+    2_000
+}
+fn default_equity_stale_alert_ms() -> u64 {
+    3_600_000
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct KeeperConfig {
@@ -81,6 +87,41 @@ pub struct KeeperConfig {
     /// Strategy knobs applied to every discovered vault.
     #[serde(default)]
     pub vault_defaults: VaultDefaults,
+
+    /// External-account (SO-299) knobs: reconciliation alert thresholds
+    /// and the operator/testing equity-post map.
+    #[serde(default)]
+    pub external: ExternalConfig,
+}
+
+/// External-account monitoring + equity-poster knobs (SO-299). All
+/// defaulted — the section may be absent entirely.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ExternalConfig {
+    /// Alert (`hedge-reconciliation`) when attested equity deviates from
+    /// recorded exposure by more than this many bps of exposure, in
+    /// either direction.
+    pub reconciliation_tolerance_bps: u64,
+
+    /// Alert when exposure > 0 but the equity mark is missing or older
+    /// than this.
+    pub equity_stale_alert_ms: u64,
+
+    /// Operator/testing equity source for the poster crank: vault id
+    /// (`"0x…"`) → target equity in deposit-asset units. Real venue
+    /// readers (Bluefin / DBM) are follow-ups; empty ⇒ posting disabled.
+    pub equity_posts: std::collections::BTreeMap<String, u64>,
+}
+
+impl Default for ExternalConfig {
+    fn default() -> Self {
+        Self {
+            reconciliation_tolerance_bps: default_reconciliation_tolerance_bps(),
+            equity_stale_alert_ms: default_equity_stale_alert_ms(),
+            equity_posts: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -254,6 +295,36 @@ mod tests {
         // No override ⇒ global target at every cadence.
         let d = VaultDefaults { short_round_target_delta: None, ..d };
         assert_eq!(d.target_delta_for(3_600_000), 0.20);
+    }
+
+    /// `[external]` defaults apply when the section is absent (as in the
+    /// shipped configs), and an explicit section overrides them.
+    #[test]
+    fn external_section_defaults_and_overrides() {
+        let cfg: KeeperConfig =
+            toml::from_str(include_str!("../config/config.staging.toml")).unwrap();
+        assert_eq!(cfg.external.reconciliation_tolerance_bps, 2_000);
+        assert_eq!(cfg.external.equity_stale_alert_ms, 3_600_000);
+        assert!(cfg.external.equity_posts.is_empty());
+
+        let cfg: KeeperConfig = toml::from_str(
+            r#"
+            indexer_graphql_url = "http://x/graphql"
+            [pyth]
+            pyth_package_id = "0x1"
+            wormhole_package_id = "0x1"
+            pyth_state_id = "0x1"
+            wormhole_state_id = "0x1"
+            [external]
+            reconciliation_tolerance_bps = 500
+            [external.equity_posts]
+            "0xabc" = 1000000
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.external.reconciliation_tolerance_bps, 500);
+        assert_eq!(cfg.external.equity_stale_alert_ms, 3_600_000);
+        assert_eq!(cfg.external.equity_posts.get("0xabc"), Some(&1_000_000));
     }
 
     /// The example config (local dev) must also parse.

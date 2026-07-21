@@ -10,9 +10,18 @@
 //!      (Positions, option coins, premium coins).
 //!   5. Force-unwind when the withdrawal queue head has aged past the
 //!      vault's grace period: cancel books + sweep manager balances.
-//!   6. Fulfill the withdrawal queue with a FULL attestation-bearing
+//!   6. Post external-account equity into the `EquityBook` (SO-299) when
+//!      a venue source has an opinion, stepping within the book's
+//!      on-chain guardrails ([`crate::venue_equity`]; the keeper wallet
+//!      must be an allowlisted poster).
+//!   7. Fulfill the withdrawal queue with a FULL attestation-bearing
 //!      appraisal (sui_tx::tx::appraisal composer) — cash-only vaults
-//!      need no price legs, everything else gets Pyth attestations.
+//!      need no price legs, everything else gets Pyth attestations;
+//!      external-configured vaults get the mandatory equity leg.
+//!
+//! Alongside the cranks, a read-only reconciliation monitor
+//! (`hedge-reconciliation` alert) compares each external account's
+//! recorded exposure against its attested equity every tick.
 //!
 //! Governance/object ids come from token-info's `trading_vault_objects`
 //! block when present (written by the deploy-time activation, SO-292);
@@ -43,6 +52,7 @@ use sui_tx::tx::pyth_update::PythHandles;
 use sui_tx::tx::{clock_arg, shared_object_arg, submit_ptb};
 
 use crate::discovery::{price_info_object_for, resolve_price_info_table, PriceInfoTable};
+use crate::venue_equity::{clamp_step, VenueEquitySource};
 
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
@@ -67,6 +77,24 @@ pub struct TradingVaultCtx {
     /// canonical coin type → Pyth feed, from the token catalog.
     pub feeds: BTreeMap<String, PriceFeedId>,
     pub price_table: Option<PriceInfoTable>,
+    /// equity-oracle package + its shared `EquityBook` (SO-299); `None`
+    /// where the package isn't deployed / the book is undiscoverable —
+    /// external-configured vaults then skip fulfillment with a clear log.
+    pub equity_oracle_pkg: Option<ObjectID>,
+    pub equity_book_id: Option<ObjectID>,
+    /// Venue equity source feeding the poster crank.
+    pub equity_source: Box<dyn VenueEquitySource>,
+    /// `hedge-reconciliation` thresholds (keeper config `[external]`).
+    pub reconciliation_tolerance_bps: u64,
+    pub equity_stale_alert_ms: u64,
+}
+
+/// Indexer view of a vault's external account, threaded into the tick.
+pub struct ExternalView {
+    pub account: SuiAddress,
+    pub exposure: u64,
+    pub equity: Option<u64>,
+    pub equity_updated_at_ms: Option<u64>,
 }
 
 /// The governance-object bundle, resolved from token-info or (fallback)
@@ -202,6 +230,24 @@ pub async fn tick(wrap: &SuiClientWrapper, http: &reqwest::Client, indexer: &Ind
             std::collections::BTreeMap::new()
         }
     };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    // EquityBook guardrail params (min_interval_ms, max_delta_bps), read
+    // once per tick — only when an external-configured vault exists.
+    let book_params = match ctx.equity_book_id {
+        Some(book_id) if vaults.iter().any(|v| v.external_account.is_some()) => {
+            match equity_book_params(&wrap.client, book_id).await {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    debug!(error = %format!("{e:#}"), "EquityBook params unreadable; no equity posts this tick");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
     for v in vaults {
         if v.state == "closed" && v.pending_withdrawals == 0 {
             continue;
@@ -210,8 +256,28 @@ pub async fn tick(wrap: &SuiClientWrapper, http: &reqwest::Client, indexer: &Ind
             Ok(id) => id,
             Err(_) => continue,
         };
-        if let Err(e) =
-            tick_one(wrap, http, ctx, vault_id, v.pending_withdrawals, &option_buckets).await
+        let external = v.external_account.as_ref().and_then(|a| {
+            Some(ExternalView {
+                account: SuiAddress::from_bytes(a.as_bytes()).ok()?,
+                exposure: v.external_exposure,
+                equity: v.latest_external_equity,
+                equity_updated_at_ms: v.external_equity_updated_at_ms,
+            })
+        });
+        if let Some(ext) = &external {
+            monitor_external(ctx, vault_id, ext, now_ms);
+        }
+        if let Err(e) = tick_one(
+            wrap,
+            http,
+            ctx,
+            vault_id,
+            v.pending_withdrawals,
+            &option_buckets,
+            external.as_ref(),
+            book_params,
+        )
+        .await
         {
             classify_and_log(vault_id, &e);
         }
@@ -224,7 +290,12 @@ fn classify_and_log(vault_id: ObjectID, e: &anyhow::Error) {
     // because holdings changed under us (82), insufficient free balance
     // (78), auction not yet past deadline / bucket state races.
     let benign = [", 82)", ", 83)", ", 78)", "deadline", "not expired"];
-    if benign.iter().any(|b| msg.contains(b)) {
+    // Equity-oracle E_TOO_SOON (3): another poster (or our previous tick)
+    // raced the min-interval window — benign, but ONLY for equity_oracle
+    // aborts so an unrelated code-3 abort still alerts. E_STALE (5) and
+    // E_NOT_POSTER (1) stay alerting.
+    let equity_race = msg.contains("equity_oracle") && msg.contains(", 3)");
+    if benign.iter().any(|b| msg.contains(b)) || equity_race {
         debug!(vault = %vault_id, error = %msg, "trading-vault crank lost a race; next tick");
     } else {
         tracing::error!(
@@ -237,6 +308,7 @@ fn classify_and_log(vault_id: ObjectID, e: &anyhow::Error) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn tick_one(
     wrap: &SuiClientWrapper,
     http: &reqwest::Client,
@@ -244,6 +316,8 @@ async fn tick_one(
     vault_id: ObjectID,
     pending_withdrawals: u64,
     option_buckets: &BTreeMap<String, OptionBucketInfo>,
+    external: Option<&ExternalView>,
+    book_params: Option<(u64, u64)>,
 ) -> Result<()> {
     let client = &wrap.client;
     let holdings = discover_holdings(client, vault_id).await?;
@@ -257,6 +331,10 @@ async fn tick_one(
     sweep_custody_settled(wrap, ctx, vault_id, &holdings).await;
     sweep_vault_address(wrap, ctx, vault_id).await;
     force_unwind_if_starved(wrap, ctx, vault_id, &holdings, now_ms).await;
+    if let Some(ext) = external {
+        // BEFORE fulfillment so its equity leg reads a fresh mark.
+        post_external_equity(wrap, ctx, vault_id, ext, book_params, now_ms).await;
+    }
 
     if pending_withdrawals > 0 {
         // Re-discover: the cranks above may have changed holdings.
@@ -276,6 +354,8 @@ fn refs_for(ctx: &TradingVaultCtx, vault_id: ObjectID) -> AppraisalRefs {
         protocol_config_id: ctx.protocol_config_id,
         oracle_registry_id: ctx.oracle_registry_id,
         pyth_feed_registry_id: ctx.pyth_feed_registry_id,
+        equity_oracle_pkg: ctx.equity_oracle_pkg,
+        equity_book_id: ctx.equity_book_id,
     }
 }
 
@@ -674,7 +754,130 @@ fn as_u64_ref(v: &Value) -> Option<u64> {
     as_u64(v)
 }
 
-/// Crank 6: fulfillment with a full appraisal.
+/// The EquityBook's poster guardrails: (min_interval_ms, max_delta_bps).
+async fn equity_book_params(client: &SuiClient, book_id: ObjectID) -> Result<(u64, u64)> {
+    let min_interval = as_u64(&json_field(client, book_id, "/fields/min_interval_ms").await?)
+        .ok_or_else(|| anyhow!("EquityBook min_interval_ms unreadable"))?;
+    let max_delta = as_u64(&json_field(client, book_id, "/fields/max_delta_bps").await?)
+        .ok_or_else(|| anyhow!("EquityBook max_delta_bps unreadable"))?;
+    Ok((min_interval, max_delta))
+}
+
+/// Read-only reconciliation monitor (SO-299): recorded exposure vs the
+/// attested equity mark, from the indexer view. Divergence past the
+/// tolerance — in either direction — or a missing/stale mark while
+/// exposure is open raises `hedge-reconciliation`.
+fn monitor_external(ctx: &TradingVaultCtx, vault_id: ObjectID, ext: &ExternalView, now_ms: u64) {
+    metrics::gauge!("keeper_external_exposure", "vault" => vault_id.to_string())
+        .set(ext.exposure as f64);
+    if let Some(eq) = ext.equity {
+        metrics::gauge!("keeper_external_equity", "vault" => vault_id.to_string()).set(eq as f64);
+        let deviation = eq.abs_diff(ext.exposure);
+        if (deviation as u128) * 10_000
+            > (ext.exposure as u128) * (ctx.reconciliation_tolerance_bps as u128)
+        {
+            tracing::error!(
+                alert_id = "hedge-reconciliation",
+                vault = %vault_id,
+                exposure = ext.exposure,
+                equity = eq,
+                "external account equity diverges from recorded exposure"
+            );
+        }
+    }
+    if ext.exposure > 0 {
+        let stale = match ext.equity_updated_at_ms {
+            Some(t) => now_ms.saturating_sub(t) > ctx.equity_stale_alert_ms,
+            None => true,
+        };
+        if ext.equity.is_none() || stale {
+            tracing::error!(
+                alert_id = "hedge-reconciliation",
+                vault = %vault_id,
+                exposure = ext.exposure,
+                equity = ext.equity,
+                updated_at_ms = ext.equity_updated_at_ms,
+                "external exposure open but the equity mark is missing or stale"
+            );
+        }
+    }
+}
+
+/// Crank 6: step the vault's EquityBook entry toward the venue-reported
+/// target, within the on-chain guardrails (`crate::venue_equity`). The
+/// keeper's wallet must be an allowlisted poster
+/// (`equity_oracle::add_poster`); a denied post aborts E_NOT_POSTER (1)
+/// → classified retry (alert). E_TOO_SOON (3) races are benign.
+async fn post_external_equity(
+    wrap: &SuiClientWrapper,
+    ctx: &TradingVaultCtx,
+    vault_id: ObjectID,
+    ext: &ExternalView,
+    book_params: Option<(u64, u64)>,
+    now_ms: u64,
+) {
+    let Some(target) = ctx.equity_source.equity_for(vault_id, ext.account) else {
+        return;
+    };
+    let result: Result<()> = async {
+        let (Some(pkg), Some(book_id)) = (ctx.equity_oracle_pkg, ctx.equity_book_id) else {
+            warn!(vault = %vault_id, "equity target set but the equity-oracle package/book is unresolved; skipping post");
+            return Ok(());
+        };
+        let Some((min_interval_ms, max_delta_bps)) = book_params else {
+            // Params were unreadable this tick (already logged in tick()).
+            return Ok(());
+        };
+        let Some(previous) = ext.equity else {
+            warn!(
+                vault = %vault_id,
+                target,
+                "no EquityBook entry for this vault — admin seed_equity required; skipping post"
+            );
+            return Ok(());
+        };
+        if previous == 0 && target > 0 {
+            warn!(
+                vault = %vault_id,
+                target,
+                "equity entry is zero — a poster cannot move it (bps-of-zero); admin seed_equity required"
+            );
+            return Ok(());
+        }
+        let updated_at = ext.equity_updated_at_ms.unwrap_or(0);
+        if now_ms.saturating_sub(updated_at) < min_interval_ms {
+            debug!(vault = %vault_id, "within the EquityBook min interval; next tick");
+            return Ok(());
+        }
+        let clamped = clamp_step(previous, target, max_delta_bps);
+        if clamped == previous {
+            debug!(vault = %vault_id, previous, target, "no postable equity step within the guardrails");
+            return Ok(());
+        }
+        let client = &wrap.client;
+        let mut pt = ProgrammableTransactionBuilder::new();
+        let book = pt.obj(shared_object_arg(client, book_id, true).await?)?;
+        let vid = pt.pure(vault_id)?;
+        let amount = pt.pure(clamped)?;
+        let clock = clock_arg(&mut pt)?;
+        pt.programmable_move_call(
+            pkg,
+            Identifier::new("equity_oracle").unwrap(),
+            Identifier::new("post_equity").unwrap(),
+            vec![],
+            vec![book, vid, amount, clock],
+        );
+        submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, "equity_oracle::post_equity").await?;
+        info!(vault = %vault_id, previous, posted = clamped, target, "external equity posted");
+        Ok(())
+    }
+    .await;
+    if let Err(e) = result {
+        classify_and_log(vault_id, &e);
+    }
+}
+
+/// Crank 7: fulfillment with a full appraisal.
 async fn fulfill(
     wrap: &SuiClientWrapper,
     http: &reqwest::Client,
@@ -798,6 +1001,7 @@ pub async fn build_ctx(
     gas_budget: u64,
     hermes_url: String,
     pyth: PythHandles,
+    external: &crate::config::ExternalConfig,
 ) -> Result<Option<TradingVaultCtx>> {
     let Some(tv) = snapshot.trading_vault() else { return Ok(None) };
     let Some(op) = snapshot.oracle_pyth() else { return Ok(None) };
@@ -833,6 +1037,34 @@ pub async fn build_ctx(
         warn!("pyth price_info table unresolved; multi-asset fulfillment disabled");
     }
 
+    // SO-299: equity-oracle package + its shared EquityBook (from the
+    // package's publish effects — the book is created in `init`).
+    let (equity_oracle_pkg, equity_book_id) = match snapshot.equity_oracle() {
+        Some(eo) => {
+            let pkg = eo.package().context("equity_oracle package id")?;
+            let book = created_of_types(client, &eo.publish_digest, &["equity_oracle::EquityBook"])
+                .await
+                .ok()
+                .and_then(|m| m.get("equity_oracle::EquityBook").copied());
+            if book.is_none() {
+                warn!("equity-oracle EquityBook not found in publish effects; external-equity legs disabled");
+            }
+            (Some(pkg), book)
+        }
+        None => (None, None),
+    };
+    let equity_source: Box<dyn VenueEquitySource> = if external.equity_posts.is_empty() {
+        Box::new(crate::venue_equity::Disabled)
+    } else {
+        let mut targets = BTreeMap::new();
+        for (k, amount) in &external.equity_posts {
+            let id = ObjectID::from_hex_literal(k)
+                .with_context(|| format!("[external.equity_posts] bad vault id {k:?}"))?;
+            targets.insert(id, *amount);
+        }
+        Box::new(crate::venue_equity::Fixed::new(targets))
+    };
+
     Ok(Some(TradingVaultCtx {
         trading_vault_pkg,
         oracle_pyth_pkg,
@@ -856,5 +1088,10 @@ pub async fn build_ctx(
         pyth,
         feeds,
         price_table,
+        equity_oracle_pkg,
+        equity_book_id,
+        equity_source,
+        reconciliation_tolerance_bps: external.reconciliation_tolerance_bps,
+        equity_stale_alert_ms: external.equity_stale_alert_ms,
     }))
 }

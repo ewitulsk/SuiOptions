@@ -331,6 +331,9 @@ async fn main() -> Result<()> {
         protocol_config_id: ids.protocol_config_id,
         oracle_registry_id: ids.oracle_registry_id,
         pyth_feed_registry_id: ids.pyth_feed_registry_id,
+        // SO-299: the smoke vault has no external account.
+        equity_oracle_pkg: None,
+        equity_book_id: None,
     };
     let http = reqwest::Client::new();
     let (pool_buckets, option_map) = match fetch_bucket_catalog(&cli.indexer_graphql).await {
