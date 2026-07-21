@@ -249,6 +249,10 @@ pub struct TradingVaultObjectsInfo {
     pub oracle_registry_id: String,
     pub pyth_feed_registry_id: String,
     pub pool_allowlist_id: String,
+    /// Shared `EquityBook` created by the equity-oracle publish (SO-299).
+    /// Absent on records written before the equity-oracle publish step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equity_book_id: Option<String>,
     pub activation_digest: String,
 }
 
@@ -268,6 +272,12 @@ impl TradingVaultObjectsInfo {
     }
     pub fn pool_allowlist(&self) -> Result<ObjectID> {
         ObjectID::from_str(&self.pool_allowlist_id).context("parsing poolAllowlistId")
+    }
+    pub fn equity_book(&self) -> Result<Option<ObjectID>> {
+        self.equity_book_id
+            .as_deref()
+            .map(|s| ObjectID::from_str(s).context("parsing equityBookId"))
+            .transpose()
     }
 }
 

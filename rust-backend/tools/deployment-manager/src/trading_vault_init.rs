@@ -42,6 +42,7 @@ pub struct TradingVaultObjects {
     pub oracle_registry_id: ObjectID,
     pub pyth_feed_registry_id: ObjectID,
     pub pool_allowlist_id: ObjectID,
+    pub equity_book_id: ObjectID,
 }
 
 /// Pull one publish tx's created objects and index them by
@@ -83,10 +84,12 @@ pub async fn resolve_objects(
     trading_vault_digest: &str,
     oracle_pyth_digest: &str,
     deepbook_adapter_digest: &str,
+    equity_oracle_digest: &str,
 ) -> Result<TradingVaultObjects> {
     let tv = created_by_type(client, trading_vault_digest).await?;
     let op = created_by_type(client, oracle_pyth_digest).await?;
     let dba = created_by_type(client, deepbook_adapter_digest).await?;
+    let eo = created_by_type(client, equity_oracle_digest).await?;
     let pick = |map: &BTreeMap<String, ObjectID>, key: &str| {
         map.get(key)
             .copied()
@@ -98,6 +101,7 @@ pub async fn resolve_objects(
         oracle_registry_id: pick(&tv, "registry::OracleRegistry")?,
         pyth_feed_registry_id: pick(&op, "oracle_pyth::PythFeedRegistry")?,
         pool_allowlist_id: pick(&dba, "deepbook_adapter::PoolAllowlist")?,
+        equity_book_id: pick(&eo, "equity_oracle::EquityBook")?,
     })
 }
 
@@ -135,6 +139,8 @@ pub async fn activate(
     oracle_pyth_pkg: ObjectID,
     deepbook_adapter_pkg: ObjectID,
     options_adapter_pkg: ObjectID,
+    equity_oracle_pkg: ObjectID,
+    dbm_oracle_pkg: ObjectID,
     token_info: &BTreeMap<String, TokenSpec>,
     gas_budget: u64,
 ) -> Result<String> {
@@ -190,10 +196,14 @@ pub async fn activate(
         );
     }
     // Oracle witnesses: Pyth for catalog assets, the options intrinsic
-    // oracle for per-bucket option coins (SO-297).
+    // oracle for per-bucket option coins (SO-297), and the two
+    // external-account equity oracles (SO-299) — keeper-attested and
+    // DeepBook-Margin computed.
     for witness in [
         format!("{oracle_pyth_pkg}::oracle_pyth::PythOracle"),
         format!("{options_adapter_pkg}::options_oracle::OptionsOracle"),
+        format!("{equity_oracle_pkg}::equity_oracle::EquityOracle"),
+        format!("{dbm_oracle_pkg}::dbm_oracle::DbmOracle"),
     ] {
         let t = type_name_call(&mut pt, &witness)?;
         pt.programmable_move_call(
