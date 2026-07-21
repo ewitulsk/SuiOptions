@@ -10,33 +10,43 @@
 //! ceiling rule, initial-bid policy, escrow cap, benign lost-race
 //! classification).
 //!
-//! Vault-only mandate: the auction's `token_recipient` is the VAULT
-//! address, so winner option coins land in vault custody (swept by the
-//! keeper as positions). **Accepted gap (documented)**: the bid escrow
-//! itself is funded from the bot wallet's settlement float, because the
-//! generic `auction::bid` call has no vault-release adapter yet — all
-//! OUTPUTS land in the vault; only the working float is wallet-side.
-//! TODO(SO-299): route bid funding through a vault release adapter.
+//! Vault-only mandate, escrow included (SO-299): bids are placed through
+//! `options_adapter::bid_on_auction`, which escrows the bid FROM VAULT
+//! free balances and mints a `BidTicket` position into vault custody.
+//! Every auction output (outbid refund, early-settle refund, won option
+//! coins) routes to the ticket's own address; the KEEPER's permissionless
+//! cranks (`reclaim_*_ticket` / `redeem_won_ticket`) burn tickets back
+//! into the vault — the desk never cranks them, it only observes.
+//!
+//! Reservation ledger: each live ticket's cost is reserved against NAV in
+//! the book when the bid is placed, and released when the indexer's
+//! position view shows the ticket burned (`active = false`). A rebid is a
+//! NEW ticket on the same auction; the outbid ticket's reservation clears
+//! the same way once the keeper reclaims it. `max_concurrent_escrow` caps
+//! the total cost across live tickets.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
+use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::Value;
-use sui_json_rpc_types::{SuiObjectDataOptions, SuiParsedData};
+use sui_json_rpc_types::{ObjectChange, SuiObjectDataOptions, SuiParsedData};
 use sui_types::base_types::{ObjectID, SuiAddress};
 
 use api_service_client::{ApiServiceClient, OpenRfq};
 use pyth_client::{PriceCache, PriceFeedId};
 use sui_tx::sui_client::{Network, SuiClientWrapper};
-use sui_tx::tx::auction::{bid, AuctionBidParams, AuctionTypes};
+use sui_tx::tx::{clock_arg, owned_object_arg, shared_object_arg, submit_ptb};
 
 use crate::pricing::{compute_spot_from_cache, serves_pair, Staleness};
 
+use super::book::Book;
 use super::model::{MarketModel, V1BidParams};
 use super::quote::{self, Decision, RfqInputs};
-use super::DeskShared;
+use super::{CuratorRefs, DeskShared};
 
 const ALERT_ID: &str = "tx-failed-mm-bot-desk";
 const BPS_DENOM: u128 = 10_000;
@@ -82,9 +92,9 @@ pub struct AuctionsConfig {
     pub initial_bid: InitialBidPolicy,
     pub shade_bps: u64,
     /// Top back up (to the min-increment floor) when outbid, while the
-    /// required bid stays under our max.
+    /// required bid stays under our max. A rebid mints a NEW ticket.
     pub rebid: bool,
-    /// Cap on total settlement locked across live best bids.
+    /// Cap on total vault settlement escrowed across live bid tickets.
     pub max_concurrent_escrow: u64,
     /// Don't open/raise inside this window before the deadline.
     pub min_deadline_lead_ms: u64,
@@ -130,17 +140,19 @@ pub enum NoBid {
 }
 
 /// The pure bid decision — unchanged mechanics from the old bidder.
-/// `locked_escrow` is the settlement already committed across other
-/// auctions; `max_bid` is the V1 bid for the whole slice.
+/// `we_are_best` is whether the auction's best bidder is one of OUR live
+/// tickets (the on-chain bidder identity is the ticket address, not the
+/// bot wallet); `locked_escrow` is the settlement already committed
+/// across live tickets; `max_bid` is the V1 bid for the whole slice.
 pub fn decide_bid(
     cfg: &AuctionsConfig,
     auction: &AuctionView,
     max_bid: u64,
-    our_address: SuiAddress,
+    we_are_best: bool,
     locked_escrow: u64,
     now_ms: u64,
 ) -> Result<u64, NoBid> {
-    if auction.best_bidder == Some(our_address) {
+    if we_are_best {
         return Err(NoBid::Winning);
     }
     if now_ms.saturating_add(cfg.min_deadline_lead_ms) >= auction.deadline_ms {
@@ -240,6 +252,14 @@ pub(crate) async fn fetch_auction_view(
 
 // ── the bidder loop ────────────────────────────────────────────────────
 
+/// One live vault-funded bid: a `BidTicket` in vault custody whose cost
+/// is reserved against NAV until the keeper cranks burn it.
+struct LiveBid {
+    auction_id: ObjectID,
+    amount: u64,
+    reservation: u64,
+}
+
 pub struct AuctionBidderParams {
     pub cfg: AuctionsConfig,
     pub v1: V1BidParams,
@@ -247,12 +267,14 @@ pub struct AuctionBidderParams {
     pub shared: Arc<DeskShared>,
     pub secrets: runtime_config::Secrets,
     pub network: Network,
-    /// Generic `auction` package (for the `auction::bid` call).
-    pub package: ObjectID,
-    /// The trading vault's address — every won slice's option coins land
-    /// here (vault-only mandate; keeper sweeps them into custody).
-    pub vault_address: SuiAddress,
+    /// options_adapter package (`bid_on_auction`).
+    pub options_adapter_package: ObjectID,
+    /// Curator-session refs — the bid escrows from THIS vault's balances.
+    pub curator: CuratorRefs,
+    /// Reservation ledger (live ticket costs reserve NAV).
+    pub book: Arc<RwLock<Book>>,
     pub api_url: String,
+    pub indexer_url: String,
     pub price_cache: PriceCache,
     pub models: Arc<Vec<MarketModel>>,
     pub settlement_feed: PriceFeedId,
@@ -276,21 +298,63 @@ pub fn spawn_bidder(p: AuctionBidderParams) {
 async fn run(p: AuctionBidderParams) -> Result<()> {
     let wrap = SuiClientWrapper::connect(&p.secrets, p.network).await?;
     let api = ApiServiceClient::new(&p.api_url);
-    let our_address = wrap.signer.address;
+    let indexer = indexer_graphql::IndexerClient::new(p.indexer_url.clone());
     tracing::info!(
-        address = %our_address,
-        vault = %p.vault_address,
+        vault = %p.curator.vault_id,
         poll_secs = p.cfg.poll_secs,
         policy = ?p.cfg.initial_bid,
         escrow_cap = p.cfg.max_concurrent_escrow,
-        "desk auction bidder starting (call + put channels)"
+        "desk auction bidder starting (vault-funded, call + put channels)"
     );
+    // Live tickets, keyed by ticket id. In-memory only: a restart drops
+    // the map (and the book's reservations with it) — live tickets still
+    // count in NAV at cost via appraisal, so the ledger stays sound.
+    let mut live: HashMap<ObjectID, LiveBid> = HashMap::new();
     let poll = Duration::from_secs(p.cfg.poll_secs.max(1));
     loop {
-        if let Err(e) = tick(&p, &wrap, &api, our_address).await {
+        if let Err(e) = tick(&p, &wrap, &api, &indexer, &mut live).await {
             tracing::warn!(error = %format!("{e:#}"), "auction bidder tick errored");
         }
         tokio::time::sleep(poll).await;
+    }
+}
+
+/// Release reservations for tickets the keeper cranks have burned: the
+/// indexer's position view keeps burned rows with `active = false`
+/// (definitive evidence — never released on mere absence, which could be
+/// indexer lag behind the placement).
+async fn observe_ticket_burns(
+    p: &AuctionBidderParams,
+    indexer: &indexer_graphql::IndexerClient,
+    live: &mut HashMap<ObjectID, LiveBid>,
+) {
+    if live.is_empty() {
+        return;
+    }
+    let vault_pt = protocol_types::ids::ObjectId::new(p.curator.vault_id.into_bytes());
+    let positions = match indexer.trading_vault_positions(vault_pt).await {
+        Ok(pos) => pos,
+        Err(e) => {
+            tracing::debug!(error = %format!("{e:#}"), "ticket-burn observation failed; retrying");
+            return;
+        }
+    };
+    let burned: Vec<ObjectID> = positions
+        .iter()
+        .filter(|pos| !pos.active)
+        .map(|pos| ObjectID::new(*pos.position_id.as_bytes()))
+        .filter(|id| live.contains_key(id))
+        .collect();
+    for ticket in burned {
+        if let Some(bid) = live.remove(&ticket) {
+            p.book.write().release_reservation(bid.reservation);
+            tracing::info!(
+                ticket = %ticket,
+                auction = %bid.auction_id,
+                amount = bid.amount,
+                "bid ticket burned by keeper crank; reservation released"
+            );
+        }
     }
 }
 
@@ -298,8 +362,11 @@ async fn tick(
     p: &AuctionBidderParams,
     wrap: &SuiClientWrapper,
     api: &ApiServiceClient,
-    our_address: SuiAddress,
+    indexer: &indexer_graphql::IndexerClient,
+    live: &mut HashMap<ObjectID, LiveBid>,
 ) -> Result<()> {
+    observe_ticket_burns(p, indexer, live).await;
+
     let mut open = api.open_rfqs().await.context("polling open rfqs")?;
     match api.open_put_rfqs().await {
         Ok(puts) => open.extend(puts),
@@ -312,8 +379,8 @@ async fn tick(
     let paused = api.paused_vault_ids().await.context("polling paused vaults")?;
     let now = now_ms();
 
-    // Live views first: locked escrow across ALL our standing best bids
-    // must be known before any new bid is sized.
+    // Live views first: the winning check + rebid floors need the chain's
+    // current best bid.
     let mut views: Vec<(OpenRfq, AuctionView)> = Vec::with_capacity(open.len());
     for rfq in open {
         if let Ok(vault) = protocol_types::ids::ObjectId::from_hex(&rfq.origin) {
@@ -327,11 +394,9 @@ async fn tick(
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "auction read failed"),
         }
     }
-    let mut locked: u64 = views
-        .iter()
-        .filter(|(_, v)| v.best_bidder == Some(our_address))
-        .filter_map(|(_, v)| v.best_premium)
-        .sum();
+    // Settlement locked across our live tickets (each escrowed from vault
+    // balances until its ticket burns).
+    let mut locked: u64 = live.values().map(|b| b.amount).sum();
 
     for (rfq, view) in views {
         let Some(bucket) = api.bucket_pricing(rfq.bucket_id.clone()).await? else {
@@ -347,6 +412,10 @@ async fn tick(
         }) else {
             continue; // not a pair the desk serves
         };
+        if bucket.call_coin_type.is_empty() {
+            tracing::debug!(rfq = %rfq.rfq_id.to_hex(), "no option coin type; cannot pin a win type");
+            continue;
+        }
         let (feed, decimals) = p.market_feeds[mi];
         let spot = match compute_spot_from_cache(
             &p.price_cache,
@@ -387,7 +456,15 @@ async fn tick(
             }
         };
 
-        let premium = match decide_bid(&p.cfg, &view, max_bid, our_address, locked, now) {
+        // The on-chain bidder identity is the ticket address: we're best
+        // exactly when the best bidder is one of our live tickets.
+        let auction_id = sui_object_id(&rfq.rfq_id)?;
+        let we_are_best = view.best_bidder.is_some_and(|best| {
+            live.iter().any(|(ticket, b)| {
+                b.auction_id == auction_id && SuiAddress::from(*ticket) == best
+            })
+        });
+        let premium = match decide_bid(&p.cfg, &view, max_bid, we_are_best, locked, now) {
             Ok(b) => b,
             Err(reason) => {
                 tracing::debug!(rfq = %rfq.rfq_id.to_hex(), ?reason, max_bid, "no bid");
@@ -395,47 +472,54 @@ async fn tick(
             }
         };
 
-        let Some(funding) = settlement_funding_coin(wrap, &p.settlement_coin_type, premium).await?
-        else {
-            tracing::warn!(premium, "no settlement coin large enough to fund the bid");
-            continue;
+        // Reserve the ticket cost against NAV before escrowing it.
+        let reservation = match p.book.write().reserve(premium, u64::MAX, now) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(rfq = %rfq.rfq_id.to_hex(), premium, ?e, "bid refused by reservation ledger");
+                continue;
+            }
         };
+
         // Call auctions are `Auction<Underlying, Settlement>`; put
         // auctions escrow settlement collateral: `Auction<Settlement,
-        // Settlement>`.
+        // Settlement>`. The win type is the bucket's option coin.
         let escrow_type = if bucket.is_put {
             &bucket.settlement_coin_type
         } else {
             &bucket.asset_coin_type
         };
-        let params = AuctionBidParams {
-            package: p.package,
-            types: AuctionTypes {
-                escrow_type,
-                bid_type: &bucket.settlement_coin_type,
-            },
-            auction_id: sui_object_id(&rfq.rfq_id)?,
-            funding_coin: funding,
-            amount: premium,
-            // Vault-only mandate: the winner's outputs land in the vault.
-            token_recipient: p.vault_address,
-            gas_budget: p.cfg.gas_budget,
-        };
-        match bid(&wrap.client, &wrap.signer, &params).await {
-            Ok(resp) => {
+        match place_bid(
+            p,
+            wrap,
+            auction_id,
+            escrow_type,
+            &bucket.settlement_coin_type,
+            &bucket.call_coin_type,
+            premium,
+            view.amount,
+            sui_object_id(&rfq.bucket_id)?,
+            bucket.is_put,
+        )
+        .await
+        {
+            Ok((digest, ticket_id)) => {
                 locked = locked.saturating_add(premium);
+                live.insert(ticket_id, LiveBid { auction_id, amount: premium, reservation });
                 metrics::counter!("mm_desk_auction_bids_total").increment(1);
                 tracing::info!(
                     rfq = %rfq.rfq_id.to_hex(),
+                    ticket = %ticket_id,
                     premium,
                     max_bid,
                     locked,
                     is_put = bucket.is_put,
-                    digest = %resp.digest,
-                    "auction bid placed (outputs → vault)"
+                    digest = %digest,
+                    "vault-funded auction bid placed (BidTicket in vault custody)"
                 );
             }
             Err(e) => {
+                p.book.write().release_reservation(reservation);
                 if crate::is_benign_bid_loss(&e) {
                     tracing::warn!(rfq = %rfq.rfq_id.to_hex(), premium, error = %format!("{e:#}"), "bid failed (outbid)");
                 } else {
@@ -453,29 +537,67 @@ async fn tick(
     Ok(())
 }
 
-/// The wallet's largest settlement coin with at least `premium` on it.
-pub(crate) async fn settlement_funding_coin(
+/// `options_adapter::bid_on_auction<E, B, W>` — escrow `bid_amount` from
+/// vault balances into the auction, minting a `BidTicket` position.
+/// Returns `(digest, ticket_id)`.
+#[allow(clippy::too_many_arguments)]
+async fn place_bid(
+    p: &AuctionBidderParams,
     wrap: &SuiClientWrapper,
-    settlement_coin_type: &str,
-    premium: u64,
-) -> Result<Option<ObjectID>> {
-    let coins = wrap
-        .client
-        .coin_read_api()
-        .get_coins(
-            wrap.signer.address,
-            Some(settlement_coin_type.to_string()),
-            None,
-            None,
-        )
-        .await
-        .context("listing settlement coins")?;
-    Ok(coins
-        .data
+    auction_id: ObjectID,
+    escrow_type: &str,
+    bid_type: &str,
+    win_type: &str,
+    bid_amount: u64,
+    win_amount: u64,
+    bucket_id: ObjectID,
+    is_put: bool,
+) -> Result<(String, ObjectID)> {
+    use move_core_types::identifier::Identifier;
+    use move_core_types::language_storage::TypeTag;
+    use std::str::FromStr;
+    use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let vault = pt.obj(shared_object_arg(&wrap.client, p.curator.vault_id, true).await?)?;
+    let cap = pt.obj(owned_object_arg(&wrap.client, p.curator.curator_cap).await?)?;
+    let reg = pt.obj(
+        shared_object_arg(&wrap.client, p.curator.integration_registry, false).await?,
+    )?;
+    let auction = pt.obj(shared_object_arg(&wrap.client, auction_id, true).await?)?;
+    let bid_amount_arg = pt.pure(&bid_amount)?;
+    let win_amount_arg = pt.pure(&win_amount)?;
+    let bucket_arg = pt.pure(&bucket_id)?;
+    let is_put_arg = pt.pure(&is_put)?;
+    let clock = clock_arg(&mut pt)?;
+    pt.programmable_move_call(
+        p.options_adapter_package,
+        Identifier::new("options_adapter").unwrap(),
+        Identifier::new("bid_on_auction").unwrap(),
+        vec![
+            TypeTag::from_str(escrow_type)?,
+            TypeTag::from_str(bid_type)?,
+            TypeTag::from_str(win_type)?,
+        ],
+        vec![vault, cap, reg, auction, bid_amount_arg, win_amount_arg, bucket_arg, is_put_arg, clock],
+    );
+    let resp =
+        submit_ptb(&wrap.client, &wrap.signer, pt, p.cfg.gas_budget, "desk auction bid").await?;
+    let suffix = "::options_adapter::BidTicket";
+    let ticket_id = resp
+        .object_changes
+        .unwrap_or_default()
         .into_iter()
-        .filter(|c| c.balance >= premium)
-        .max_by_key(|c| c.balance)
-        .map(|c| c.coin_object_id))
+        .find_map(|c| match c {
+            ObjectChange::Created { object_id, object_type, .. }
+                if object_type.to_string().ends_with(suffix) =>
+            {
+                Some(object_id)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("bid_on_auction succeeded but no BidTicket in object changes"))?;
+    Ok((resp.digest.to_string(), ticket_id))
 }
 
 pub(crate) fn sui_object_id(id: &protocol_types::ids::ObjectId) -> Result<ObjectID> {
@@ -518,54 +640,52 @@ mod tests {
     #[test]
     fn first_bid_follows_policy() {
         let a = auction(None);
-        let us = addr(1);
-        assert_eq!(decide_bid(&cfg(), &a, 60_000_000, us, 0, NOW), Ok(47_619_000));
+        assert_eq!(decide_bid(&cfg(), &a, 60_000_000, false, 0, NOW), Ok(47_619_000));
         let mut c = cfg();
         c.initial_bid = InitialBidPolicy::Max;
-        assert_eq!(decide_bid(&c, &a, 60_000_000, us, 0, NOW), Ok(60_000_000));
+        assert_eq!(decide_bid(&c, &a, 60_000_000, false, 0, NOW), Ok(60_000_000));
         c.initial_bid = InitialBidPolicy::Shaded;
-        assert_eq!(decide_bid(&c, &a, 60_000_000, us, 0, NOW), Ok(58_200_000));
-        assert_eq!(decide_bid(&c, &a, 47_700_000, us, 0, NOW), Ok(47_619_000));
+        assert_eq!(decide_bid(&c, &a, 60_000_000, false, 0, NOW), Ok(58_200_000));
+        assert_eq!(decide_bid(&c, &a, 47_700_000, false, 0, NOW), Ok(47_619_000));
     }
 
     #[test]
     fn rebid_matches_onchain_ceiling_rule() {
-        let us = addr(1);
         let a = auction(Some((50_000_000, 2)));
         // ceil(50_000_000 × 1.01) = 50_500_000.
-        assert_eq!(decide_bid(&cfg(), &a, 60_000_000, us, 0, NOW), Ok(50_500_000));
+        assert_eq!(decide_bid(&cfg(), &a, 60_000_000, false, 0, NOW), Ok(50_500_000));
         let mut a2 = auction(Some((33, 2)));
         a2.reserve_premium = 1;
-        assert_eq!(decide_bid(&cfg(), &a2, 1_000, us, 0, NOW), Ok(34));
+        assert_eq!(decide_bid(&cfg(), &a2, 1_000, false, 0, NOW), Ok(34));
         let mut a3 = auction(Some((50_000_000, 2)));
         a3.min_increment_bps = 0;
-        assert_eq!(decide_bid(&cfg(), &a3, 60_000_000, us, 0, NOW), Ok(50_000_001));
+        assert_eq!(decide_bid(&cfg(), &a3, 60_000_000, false, 0, NOW), Ok(50_000_001));
     }
 
     #[test]
     fn passes_when_winning_capped_or_priced_out() {
-        let us = addr(1);
+        // Our live ticket is the best bidder → no self-topping.
         let a = auction(Some((50_000_000, 1)));
-        assert_eq!(decide_bid(&cfg(), &a, 60_000_000, us, 0, NOW), Err(NoBid::Winning));
+        assert_eq!(decide_bid(&cfg(), &a, 60_000_000, true, 0, NOW), Err(NoBid::Winning));
         let a = auction(Some((59_900_000, 2)));
         assert!(matches!(
-            decide_bid(&cfg(), &a, 60_000_000, us, 0, NOW),
+            decide_bid(&cfg(), &a, 60_000_000, false, 0, NOW),
             Err(NoBid::FloorAboveMax { .. })
         ));
         let a = auction(None);
         assert!(matches!(
-            decide_bid(&cfg(), &a, 60_000_000, us, 4_960_000_000, NOW),
+            decide_bid(&cfg(), &a, 60_000_000, false, 4_960_000_000, NOW),
             Err(NoBid::EscrowCapped { .. })
         ));
         let a = auction(None);
         assert_eq!(
-            decide_bid(&cfg(), &a, 60_000_000, us, 0, 980_000),
+            decide_bid(&cfg(), &a, 60_000_000, false, 0, 980_000),
             Err(NoBid::DeadlineTooClose)
         );
         let mut c = cfg();
         c.rebid = false;
         let a = auction(Some((50_000_000, 2)));
-        assert_eq!(decide_bid(&c, &a, 60_000_000, us, 0, NOW), Err(NoBid::RebidDisabled));
+        assert_eq!(decide_bid(&c, &a, 60_000_000, false, 0, NOW), Err(NoBid::RebidDisabled));
     }
 
     #[test]

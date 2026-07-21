@@ -1168,6 +1168,104 @@ pub struct TvPositionRedeemed {
     pub is_put: bool,
 }
 
+// ════════ trading-vault mm-desk custody ops + vault-funded bids (SO-299) ════════
+
+/// `trading_vault::events::MmCoinExercised` — a custodied option-coin
+/// position exercised under a curator session (`vault_mm::exercise_*_coin`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvMmCoinExercised {
+    pub vault_id: ObjectId,
+    pub bucket_id: ObjectId,
+    pub coin_position_id: ObjectId,
+    pub is_put: bool,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub settlement_amount: u64,
+}
+
+/// `trading_vault::events::MmOffsetClosed` — a written Position netted
+/// against same-bucket custodied option coins (`vault_mm::close_offset_*`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvMmOffsetClosed {
+    pub vault_id: ObjectId,
+    pub bucket_id: ObjectId,
+    pub position_id: ObjectId,
+    pub is_put: bool,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub collateral_returned: u64,
+    pub position_closed: bool,
+}
+
+/// `trading_vault::events::MmCoinReleased` — a VaultMm coin-custody
+/// position moved into the vault's free balances
+/// (`vault_mm::release_coin_to_balances`, the resale on-ramp).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvMmCoinReleased {
+    pub vault_id: ObjectId,
+    pub coin_position_id: ObjectId,
+    pub asset_type: AssetType,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
+}
+
+/// `deepbook_adapter::deepbook_adapter::TakerSwapExecuted` — a curator
+/// taker swap of vault free balances against an allowlisted pool.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvTakerSwapExecuted {
+    pub vault_id: ObjectId,
+    pub pool_id: ObjectId,
+    pub base_for_quote: bool,
+    #[serde(with = "u64_string")]
+    pub amount_in: u64,
+    #[serde(with = "u64_string")]
+    pub amount_out: u64,
+    /// Input returned unfilled (lot rounding or a thin book).
+    #[serde(with = "u64_string")]
+    pub unswapped: u64,
+}
+
+/// `options_adapter::options_adapter::BidPlaced` — a vault-escrowed
+/// auction bid, minting a `BidTicket` custody position.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvBidPlaced {
+    pub vault_id: ObjectId,
+    pub ticket_id: ObjectId,
+    pub auction_id: ObjectId,
+    pub bucket_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub escrow_amount: u64,
+    pub win_type: AssetType,
+    #[serde(with = "u64_string")]
+    pub win_amount: u64,
+    pub is_put: bool,
+}
+
+/// `options_adapter::options_adapter::BidReclaimed` — a refunded/outbid
+/// ticket burned, returning its full escrow to the vault.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvBidReclaimed {
+    pub vault_id: ObjectId,
+    pub ticket_id: ObjectId,
+    pub auction_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub refunded: u64,
+}
+
+/// `options_adapter::options_adapter::BidRedeemed` — a won ticket burned,
+/// receiving the winnings into vault balances.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvBidRedeemed {
+    pub vault_id: ObjectId,
+    pub ticket_id: ObjectId,
+    pub auction_id: ObjectId,
+    pub win_type: AssetType,
+    #[serde(with = "u64_string")]
+    pub win_amount: u64,
+}
+
 // ════════ trading-vault external accounts + equity oracle (SO-299) ════════
 
 /// `trading_vault::events::ExternalAccountSet`.
@@ -1316,6 +1414,14 @@ pub enum ChainEvent {
     TvRfqOpened(TvRfqOpened),
     TvRfqSettled(TvRfqSettled),
     TvPositionRedeemed(TvPositionRedeemed),
+    // trading-vault mm-desk custody ops + vault-funded bids (SO-299)
+    TvMmCoinExercised(TvMmCoinExercised),
+    TvMmOffsetClosed(TvMmOffsetClosed),
+    TvMmCoinReleased(TvMmCoinReleased),
+    TvTakerSwapExecuted(TvTakerSwapExecuted),
+    TvBidPlaced(TvBidPlaced),
+    TvBidReclaimed(TvBidReclaimed),
+    TvBidRedeemed(TvBidRedeemed),
     // trading-vault external accounts + equity oracle (SO-299)
     TvExternalAccountSet(TvExternalAccountSet),
     TvExternalAccountCleared(TvExternalAccountCleared),

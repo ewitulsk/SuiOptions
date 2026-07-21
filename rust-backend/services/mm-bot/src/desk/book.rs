@@ -53,6 +53,16 @@ use sui_types::transaction::TransactionKind;
 
 use super::model::Greeks;
 
+/// One VaultMm coin-custody position: option coins stored AS a vault
+/// position (`receive_mm_option_coin` sweeps). These exit via the
+/// curator-session entries (`exercise_*_coin`, `close_offset_*`,
+/// `release_coin_to_balances`), all keyed by the position id.
+#[derive(Clone, Debug)]
+pub struct CoinPosition {
+    pub position_id: ObjectId,
+    pub amount: u64,
+}
+
 /// One held option line (long calls/puts bought from retail).
 #[derive(Clone, Debug)]
 pub struct Holding {
@@ -65,18 +75,28 @@ pub struct Holding {
     pub strike: u128,
     pub strike_scale: u8,
     pub expiry_ms: u64,
-    /// Units held in the VAULT's free balances (curator custody).
+    /// Units held in the VAULT's free balances (auction-win redemptions
+    /// land here; exits sell them via the deepbook-adapter taker swap).
     pub amount_vault: u64,
     /// Units held in the bot wallet (auction winnings pending sweep, or
     /// coins staged for exit execution).
     pub amount_wallet: u64,
+    /// Units custodied as VaultMm coin POSITIONS (writer-flow sweeps),
+    /// per position object.
+    pub coin_positions: Vec<CoinPosition>,
     /// The bucket's DeepBook option pool, when one exists (resale venue).
     pub pool_id: Option<String>,
 }
 
 impl Holding {
     pub fn amount(&self) -> u64 {
-        self.amount_vault.saturating_add(self.amount_wallet)
+        self.amount_vault
+            .saturating_add(self.amount_wallet)
+            .saturating_add(self.amount_coin_positions())
+    }
+    /// Units across the VaultMm coin-custody positions.
+    pub fn amount_coin_positions(&self) -> u64 {
+        self.coin_positions.iter().map(|c| c.amount).sum()
     }
     pub fn strike_scaled(&self) -> f64 {
         self.strike as f64 / 10f64.powi(self.strike_scale as i32)
@@ -87,6 +107,8 @@ impl Holding {
 #[derive(Clone, Debug)]
 pub struct Written {
     pub bucket_id: ObjectId,
+    /// The vault-custodied `Position` object id (offset-close target).
+    pub position_id: ObjectId,
     /// Canonical underlying coin type (selects the market model).
     pub asset_coin_type: String,
     pub is_put: bool,
@@ -376,7 +398,7 @@ pub async fn reconstruct(p: ReconstructParams<'_>) -> Result<Book> {
 
     let mut book = Book::new(nav, p.pnl_path);
     book.holdings =
-        fetch_holdings(p.wrap, p.api, p.trading_vault_package, p.vault_id).await?;
+        fetch_holdings(p.wrap, p.indexer, p.api, p.trading_vault_package, p.vault_id).await?;
     book.written = fetch_written(p.wrap, p.indexer, p.api, p.vault_id).await?;
     book.recompute_covered();
     tracing::info!(
@@ -390,17 +412,21 @@ pub async fn reconstruct(p: ReconstructParams<'_>) -> Result<Book> {
 }
 
 /// Held option coins: every live bucket's option-coin balance in the
-/// vault's free balances + the bot wallet float. Used at boot AND by the
-/// refresher's periodic custody re-sync (auction wins / sweeps change
-/// balances out-of-band).
+/// vault's free balances + VaultMm coin-custody positions + the bot
+/// wallet float. Used at boot AND by the refresher's periodic custody
+/// re-sync (auction wins / sweeps change balances out-of-band).
 pub async fn fetch_holdings(
     wrap: &sui_tx::sui_client::SuiClientWrapper,
+    indexer: &indexer_graphql::IndexerClient,
     api: &api_service_client::ApiServiceClient,
     trading_vault_package: ObjectID,
     vault_id: ObjectID,
 ) -> Result<Vec<Holding>> {
     let mut holdings = Vec::new();
     let buckets = api.tradeable_buckets().await.context("tradeable buckets")?;
+    // VaultMm coin-custody positions (writer-flow sweeps store option
+    // coins AS positions), keyed by the canonical option-coin type.
+    let mut coin_positions = fetch_coin_positions(wrap, indexer, vault_id).await?;
     for b in &buckets {
         if b.call_coin_type.is_empty() {
             continue;
@@ -415,7 +441,10 @@ pub async fn fetch_holdings(
             .await
             .map(|bal| u64::try_from(bal.total_balance).unwrap_or(u64::MAX))
             .unwrap_or(0);
-        if vault_held == 0 && wallet_held == 0 {
+        let positions = coin_positions
+            .remove(&protocol_types::asset::canonicalize_move_type(&b.call_coin_type))
+            .unwrap_or_default();
+        if vault_held == 0 && wallet_held == 0 && positions.is_empty() {
             continue;
         }
         // is_put isn't on TradeableBucket; resolve it from the cached
@@ -438,10 +467,71 @@ pub async fn fetch_holdings(
             expiry_ms: b.expiry_ms,
             amount_vault: vault_held,
             amount_wallet: wallet_held,
+            coin_positions: positions,
             pool_id: (!b.pool_id.is_empty()).then(|| b.pool_id.clone()),
         });
     }
     Ok(holdings)
+}
+
+/// VaultMm coin-custody positions: active vault positions whose object
+/// type is `0x2::coin::Coin<T>`, grouped by the canonical `T`. Ids come
+/// from the indexer's `trading_vault_positions` view (like
+/// [`fetch_written`]); amounts from on-chain object reads.
+async fn fetch_coin_positions(
+    wrap: &sui_tx::sui_client::SuiClientWrapper,
+    indexer: &indexer_graphql::IndexerClient,
+    vault_id: ObjectID,
+) -> Result<HashMap<String, Vec<CoinPosition>>> {
+    let vault_pt = ObjectId::new(vault_id.into_bytes());
+    let positions = indexer
+        .trading_vault_positions(vault_pt)
+        .await
+        .context("indexer trading_vault_positions")?;
+    let mut out: HashMap<String, Vec<CoinPosition>> = HashMap::new();
+    for pos in positions.iter().filter(|p| p.active) {
+        let pos_id = ObjectID::new(*pos.position_id.as_bytes());
+        let resp = wrap
+            .client
+            .read_api()
+            .get_object_with_options(
+                pos_id,
+                SuiObjectDataOptions::new().with_type().with_content(),
+            )
+            .await
+            .with_context(|| format!("reading vault position {pos_id}"))?;
+        let Some(data) = resp.data else {
+            continue; // removed since the indexer view was written
+        };
+        let ty = data.type_.as_ref().map(|t| t.to_string()).unwrap_or_default();
+        // `0x2::coin::Coin<T>` custody positions only; everything else
+        // (written Positions, custody objects, tickets) is not a coin.
+        let Some(inner) = ty
+            .strip_prefix("0x2::coin::Coin<")
+            .and_then(|rest| rest.strip_suffix('>'))
+        else {
+            continue;
+        };
+        let fields = match data.content {
+            Some(SuiParsedData::MoveObject(obj)) => obj.fields.to_json_value(),
+            _ => continue,
+        };
+        let amount = fields
+            .get("balance")
+            .and_then(|v| match v {
+                serde_json::Value::Number(n) => n.as_u64(),
+                serde_json::Value::String(s) => s.parse().ok(),
+                _ => None,
+            })
+            .unwrap_or(0);
+        if amount == 0 {
+            continue;
+        }
+        out.entry(protocol_types::asset::canonicalize_move_type(inner))
+            .or_default()
+            .push(CoinPosition { position_id: pos.position_id, amount });
+    }
+    Ok(out)
 }
 
 /// Written (short) positions: vault-custodied `Position` objects. Ids
@@ -508,6 +598,7 @@ pub async fn fetch_written(
         };
         written.push(Written {
             bucket_id,
+            position_id: pos.position_id,
             asset_coin_type: bucket.asset_coin_type.clone(),
             is_put: bucket.is_put,
             strike: bucket.strike,
@@ -596,10 +687,12 @@ pub async fn free_balance_of(
 // (`WriteExecuted`/`PutWriteExecuted` with `collateral_source == vault`
 // — for our quotes the vault IS the QuoteSigner's collateral source and
 // `signer_token_recipient` is the vault address, see `VaultRouting`) and
-// the auction-channel settles paying option tokens to the vault
-// (`RfqSettled`/`PutRfqSettled` with `call/put_recipient == vault`).
-// Generic `AuctionSettled` is deliberately excluded: the desk only bids
-// rfq call/put auctions, whose adapters emit the Rfq* settle events.
+// the auction-channel WINS. Vault-funded bids route every auction output
+// to the BidTicket's address (never the vault), so `RfqSettled`
+// recipients can't identify us; instead a win is detected when the
+// keeper redeems the ticket into the vault (`TvBidRedeemed` with our
+// vault_id), joined to its `TvBidPlaced` for the ticket cost + bucket
+// ([`classify_ticket_win`]).
 
 /// Persisted events-feed cursor (sequence high-water mark). Written
 /// AFTER fills are applied, so a crash between apply and persist
@@ -688,22 +781,40 @@ pub fn classify_fill(ev: &IndexedEvent, vault: ObjectId) -> Option<DetectedFill>
                 premium,
             })
         }
-        ChainEvent::RfqSettled(r) if r.call_recipient == vault_addr => Some(DetectedFill {
-            sequence: ev.sequence,
-            bucket_id: r.bucket_id,
-            side: FillSide::Bought,
-            amount: r.amount,
-            premium: r.gross_premium,
-        }),
-        ChainEvent::PutRfqSettled(r) if r.put_recipient == vault_addr => Some(DetectedFill {
-            sequence: ev.sequence,
-            bucket_id: r.bucket_id,
-            side: FillSide::Bought,
-            amount: r.amount,
-            premium: r.gross_premium,
-        }),
         _ => None,
     }
+}
+
+/// Auction-channel win detection under vault-funded bids (SO-299): the
+/// settle routes winnings to the TICKET address, never the vault, so a
+/// win becomes observable when the keeper's crank redeems the ticket
+/// into the vault (`TvBidRedeemed`). The ticket's `TvBidPlaced` (joined
+/// by ticket id) supplies the cost (escrow) and the bucket.
+pub fn classify_ticket_win(
+    ev: &IndexedEvent,
+    vault: ObjectId,
+    placed_by_ticket: &HashMap<ObjectId, protocol_types::events::TvBidPlaced>,
+) -> Option<DetectedFill> {
+    let ChainEvent::TvBidRedeemed(r) = &ev.event else {
+        return None;
+    };
+    if r.vault_id != vault {
+        return None;
+    }
+    let Some(placed) = placed_by_ticket.get(&r.ticket_id) else {
+        tracing::warn!(
+            ticket = %r.ticket_id.to_hex(),
+            "won ticket redeemed but its BidPlaced left the event window; fill not attributed"
+        );
+        return None;
+    };
+    Some(DetectedFill {
+        sequence: ev.sequence,
+        bucket_id: placed.bucket_id,
+        side: FillSide::Bought,
+        amount: placed.win_amount,
+        premium: placed.escrow_amount,
+    })
 }
 
 /// Apply detected fills (paired with their model fair TOTAL premium at
@@ -766,6 +877,7 @@ mod tests {
             expiry_ms: expiry,
             amount_vault: amount,
             amount_wallet: 0,
+            coin_positions: Vec::new(),
             pool_id: None,
         }
     }
@@ -773,6 +885,7 @@ mod tests {
     fn written(bucket: u8, expiry: u64, amount: u64) -> Written {
         Written {
             bucket_id: oid(bucket),
+            position_id: oid(bucket ^ 0x80),
             asset_coin_type: "0x1::a::A".into(),
             is_put: false,
             strike: 100,
@@ -933,32 +1046,48 @@ mod tests {
         let cursor_path = dir.join(format!("mm-desk-fill-cursor-test-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&cursor_path);
 
-        // Two canned fills: a WS-RFQ buy and an auction (RfqSettled) win.
+        // Two canned fills: a WS-RFQ buy and an auction win observed as
+        // a ticket redemption (TvBidRedeemed ⋈ TvBidPlaced).
         let ev1 = canned_event(100, canned_write_executed(9, 9));
-        let ev2 = canned_event(101, serde_json::json!({
-            "type": "RfqSettled",
+        let placed = canned_event(90, serde_json::json!({
+            "type": "TvBidPlaced",
             "payload": {
-                "rfq_id": hexid(2),
+                "vault_id": hexid(9),
+                "ticket_id": hexid(2),
                 "auction_id": hexid(3),
                 "bucket_id": hexid(1),
-                "origin": hexid(4),
-                "winner": hexid(8),
-                "call_recipient": hexid(9),
-                "position_id": hexid(6),
-                "position_recipient": hexid(4),
-                "amount": "2000",
-                "gross_premium": "900",
-                "fee": "90",
-                "net_premium": "810",
-                "range_start": "1000",
-                "range_end": "3000",
+                "escrow_amount": "900",
+                "win_type": "0x1::c::C",
+                "win_amount": "2000",
+                "is_put": false,
             }
         }));
+        let ev2 = canned_event(101, serde_json::json!({
+            "type": "TvBidRedeemed",
+            "payload": {
+                "vault_id": hexid(9),
+                "ticket_id": hexid(2),
+                "auction_id": hexid(3),
+                "win_type": "0x1::c::C",
+                "win_amount": "2000",
+            }
+        }));
+        let placed_by_ticket: HashMap<_, _> = match &placed.event {
+            ChainEvent::TvBidPlaced(b) => HashMap::from([(b.ticket_id, b.clone())]),
+            other => panic!("unexpected {other:?}"),
+        };
+        let win = classify_ticket_win(&ev2, vault, &placed_by_ticket).unwrap();
+        assert_eq!((win.amount, win.premium, win.side), (2000, 900, FillSide::Bought));
+        assert_eq!(win.bucket_id, oid(1));
+        // A redemption for someone else's vault is not ours; a missing
+        // BidPlaced join can't be attributed.
+        assert_eq!(classify_ticket_win(&ev2, oid(4), &placed_by_ticket), None);
+        assert_eq!(classify_ticket_win(&ev2, vault, &HashMap::new()), None);
         let fills: Vec<(DetectedFill, f64)> = vec![
             // Model fair 600 vs 500 paid → spread +100.
             (classify_fill(&ev1, vault).unwrap(), 600.0),
             // Model fair 850 vs 900 paid → spread −50.
-            (classify_fill(&ev2, vault).unwrap(), 850.0),
+            (win, 850.0),
         ];
 
         let mut book = Book::new(0, None);

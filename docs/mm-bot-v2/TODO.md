@@ -58,27 +58,41 @@ what is NOT done, grouped by how blocking it is. Companion docs:
 
 ## 2. In-code `TODO(SO-299)` stubs (compile + are clearly marked)
 
-- [ ] **Vault-held-coin exits** (`mm-bot desk/exits.rs`): resale and
-  exercise of option coins in VAULT custody need a curator adapter
-  entry point (take coin → sell/exercise → proceeds back in-session).
-  Today only wallet-float coins exit; vault-held coins log as
-  pending-adapter-support. This is the biggest functional stub — the
-  desk's book is vault-custody-first.
-- [ ] **Vault-funded auction bids** (`desk/auctions.rs`): on-chain RFQ
-  bids escrow from the bot-wallet float (all outputs → vault). Strict
-  vault custody needs an auction-bid adapter (escrow from vault
-  balances via a session-compatible flow). Accepted gap, documented in
-  module docs.
-- [ ] **V2 written-position reconstruction** (`desk/book.rs`): the book
-  rebuilds held coins/positions but not written-side inventory for the
-  V2 netting engine.
-- [ ] **Put-side exits** (`desk/exits.rs`): the exit ladder is
-  call-complete; puts hold-to-expiry only.
-- [ ] **Spread/scalp P&L attribution at fill detection**
-  (`desk/book.rs`): funding + theta lines accrue; spread capture is
-  attributed coarsely until fills are detected per-quote.
-- [ ] **Multi-venue monitor aggregation** (`desk/monitors.rs`):
-  delta-band/margin monitors assume one hedge venue (fine for paper).
+- [x] **Vault-held-coin exits** (`mm-bot desk/exits.rs`): DONE — resale
+  of vault custody runs `vault_mm::release_coin_to_balances` +
+  `deepbook_adapter::taker_swap_base_for_quote` in one curator PTB
+  (min_out at model fair − concession); exercise runs
+  `vault_mm::exercise_call_coin` (vault free settlement pays the
+  strike; no flash fallback for vault coins); step 0 of the ladder
+  nets written positions against same-bucket coin custody via
+  `close_offset_position` (gated by `[desk.exits]
+  offset_close_enabled`). The book now tracks VaultMm coin-custody
+  positions per holding. Residual gap: vault FREE-BALANCE coins
+  (auction-win redemptions) resale fine but have no exercise entry.
+- [x] **Vault-funded auction bids** (`desk/auctions.rs`): DONE — bids
+  place via `options_adapter::bid_on_auction` (escrow from vault
+  balances, BidTicket into vault custody; keeper cranks burn tickets).
+  Each live ticket's cost reserves NAV in the book; the reservation
+  releases when the indexer position view shows the ticket burned.
+  `max_concurrent_escrow` now caps total live-ticket cost. In-memory
+  ledger only: a bidder restart drops the reservations (tickets still
+  mark in NAV at cost via appraisal).
+- [x] **V2 written-position reconstruction** (`desk/book.rs`): DONE —
+  written inventory rebuilt from vault custody (indexer position ids +
+  on-chain reads), same-bucket covered netting feeds true net greeks and
+  the naked-short budget into the V2 gate.
+- [ ] **Put-side exits** (`desk/exits.rs`): puts now resale (wallet +
+  vault legs) and offset-close; put EXERCISE
+  (`vault_mm::exercise_put_coin` exists on-chain but the desk rung) is
+  still deferred — otherwise puts hold to expiry.
+- [x] **Spread/scalp P&L attribution at fill detection**
+  (`desk/book.rs`): DONE — cursor-persisted poller over indexer events
+  (WriteExecuted + TvBidRedeemed⋈TvBidPlaced for auction wins), spread
+  line at fair-at-detection, replay-safe across restarts.
+- [x] **Multi-venue monitor aggregation** (`desk/monitors.rs`): DONE —
+  `[[desk.hedge.venues]]` roster, summed shorts / min margin headroom /
+  notional-weighted funding, per-venue labelled gauges; legacy
+  single-venue config still parses.
 
 ## 3. Designed-for but deferred (follow-up tickets)
 

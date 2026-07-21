@@ -703,7 +703,14 @@ fn collect_participants(
         | ChainEvent::TvPoolDisallowed(_)
         | ChainEvent::TvRfqOpened(_)
         | ChainEvent::TvRfqSettled(_)
-        | ChainEvent::TvPositionRedeemed(_) => {}
+        | ChainEvent::TvPositionRedeemed(_)
+        | ChainEvent::TvMmCoinExercised(_)
+        | ChainEvent::TvMmOffsetClosed(_)
+        | ChainEvent::TvMmCoinReleased(_)
+        | ChainEvent::TvTakerSwapExecuted(_)
+        | ChainEvent::TvBidPlaced(_)
+        | ChainEvent::TvBidReclaimed(_)
+        | ChainEvent::TvBidRedeemed(_) => {}
         // DeepBookPoolCreated carries no addresses (the creator isn't in the
         // event payload).
         ChainEvent::BucketCreated(_)
@@ -1036,7 +1043,14 @@ fn stage_event_into_batch(
         | ChainEvent::TvPoolDisallowed(_)
         | ChainEvent::TvRfqOpened(_)
         | ChainEvent::TvRfqSettled(_)
-        | ChainEvent::TvPositionRedeemed(_) => {}
+        | ChainEvent::TvPositionRedeemed(_)
+        | ChainEvent::TvMmCoinExercised(_)
+        | ChainEvent::TvMmOffsetClosed(_)
+        | ChainEvent::TvMmCoinReleased(_)
+        | ChainEvent::TvTakerSwapExecuted(_)
+        | ChainEvent::TvBidPlaced(_)
+        | ChainEvent::TvBidReclaimed(_)
+        | ChainEvent::TvBidRedeemed(_) => {}
         ChainEvent::ExpiredOptionBurned(_)
         | ChainEvent::PutExpiredOptionBurned(_)
         | ChainEvent::FeeUpdated(_)
@@ -1962,7 +1976,14 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
         | ChainEvent::TvPoolDisallowed(_)
         | ChainEvent::TvRfqOpened(_)
         | ChainEvent::TvRfqSettled(_)
-        | ChainEvent::TvPositionRedeemed(_) => {}
+        | ChainEvent::TvPositionRedeemed(_)
+        | ChainEvent::TvMmCoinExercised(_)
+        | ChainEvent::TvMmOffsetClosed(_)
+        | ChainEvent::TvMmCoinReleased(_)
+        | ChainEvent::TvTakerSwapExecuted(_)
+        | ChainEvent::TvBidPlaced(_)
+        | ChainEvent::TvBidReclaimed(_)
+        | ChainEvent::TvBidRedeemed(_) => {}
         // Offset closes + spreads (SO-299) are log-only for now: they don't
         // move the bucket cursor and the position ranges they retire aren't
         // modeled in the shared positions view.

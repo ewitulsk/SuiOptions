@@ -404,12 +404,32 @@ pub struct DeskParams {
     pub quote_ttl_ms: u64,
     pub core_package: ObjectID,
     pub trading_vault_package: ObjectID,
-    /// Generic auction package — auctions channel disabled when absent.
-    pub auction_package: Option<ObjectID>,
+    /// options_adapter package — vault-funded auction bids disabled
+    /// when absent.
+    pub options_adapter_package: Option<ObjectID>,
+    /// deepbook_adapter package — vault-custody resale disabled when
+    /// absent.
+    pub deepbook_adapter_package: Option<ObjectID>,
+    /// Shared `IntegrationRegistry` / `PoolAllowlist` (token-info
+    /// `trading_vault_objects`). Curator-session flows need both.
+    pub integration_registry: Option<ObjectID>,
+    pub pool_allowlist: Option<ObjectID>,
     /// DeepBook deployment — resale/flash exits disabled when absent.
     pub deepbook: Option<DeepBookHandles>,
     /// The deployment's DEEP token type (token-info `deep_coin_type`).
     pub deep_coin_type: Option<String>,
+}
+
+/// Resolved on-chain identities for curator-session PTBs (vault-funded
+/// bids + vault-custody exits). The `CuratorCap` is owned by the bot
+/// wallet; callers refresh its object ref per tx (each submit bumps the
+/// owned object's version).
+#[derive(Clone, Copy, Debug)]
+pub struct CuratorRefs {
+    pub trading_vault_package: ObjectID,
+    pub vault_id: ObjectID,
+    pub curator_cap: ObjectID,
+    pub integration_registry: ObjectID,
 }
 
 /// Boot the desk: reconstruct the book from vault custody, then spawn the
@@ -470,6 +490,40 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
     .await
     .context("reconstructing the desk book from vault custody")?;
     let book = Arc::new(RwLock::new(book));
+
+    // Curator refs for vault-funded flows (bids escrowed from vault
+    // balances, vault-custody exits). The CuratorCap id comes from the
+    // indexer's trading_vaults view (written at TvVaultCreated /
+    // TvCuratorRotated); the registry from token-info. Missing either
+    // disables those flows with a warning — wallet-side exits and WS
+    // quoting still run.
+    let curator_cap = indexer
+        .trading_vaults()
+        .await
+        .ok()
+        .and_then(|vaults| {
+            let hex = vault_id.to_hex_literal();
+            vaults
+                .iter()
+                .find(|v| v.vault_id.to_hex() == hex || format!("0x{}", v.vault_id.to_hex()) == hex)
+                .map(|v| ObjectID::new(*v.curator_cap_id.as_bytes()))
+        });
+    let curator_refs = match (curator_cap, p.integration_registry) {
+        (Some(curator_cap), Some(integration_registry)) => Some(CuratorRefs {
+            trading_vault_package: p.trading_vault_package,
+            vault_id,
+            curator_cap,
+            integration_registry,
+        }),
+        (cap, reg) => {
+            tracing::warn!(
+                curator_cap_found = cap.is_some(),
+                integration_registry_found = reg.is_some(),
+                "curator refs unresolved — vault-funded bids and vault-custody exits disabled"
+            );
+            None
+        }
+    };
 
     // Hedge venue roster: `[[desk.hedge.venues]]`, or the compat default
     // of one paper venue from the legacy `paper_*` knobs. Every spec is
@@ -572,31 +626,37 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         });
     }
 
-    // On-chain auction channel.
+    // On-chain auction channel: bids escrow from VAULT balances via
+    // `options_adapter::bid_on_auction` (BidTicket custody).
     if p.cfg.auctions.enabled {
-        match p.auction_package {
-            Some(package) => auctions::spawn_bidder(auctions::AuctionBidderParams {
-                cfg: p.cfg.auctions.clone(),
-                v1: p.cfg.v1.into(),
-                limits: p.cfg.limits,
-                shared: Arc::clone(&shared),
-                secrets: p.secrets.clone(),
-                network: p.network,
-                package,
-                vault_address,
-                api_url: p.api_url.clone(),
-                price_cache: p.price_cache.clone(),
-                models: Arc::clone(&models),
-                settlement_feed: p.settlement_feed,
-                settlement_coin_type: p.settlement_coin_type.clone(),
-                settlement_decimals: p.settlement_decimals,
-                market_feeds: market_feeds.clone(),
-                staleness: p.staleness,
-                expected_holding_years: p.cfg.expected_holding_years,
-                slippage_bps: primary_spec.slippage_bps,
-            }),
-            None => tracing::warn!(
-                "[desk.auctions] enabled but no auction package in token-info; channel off"
+        match (p.options_adapter_package, curator_refs) {
+            (Some(options_adapter_package), Some(curator)) => {
+                auctions::spawn_bidder(auctions::AuctionBidderParams {
+                    cfg: p.cfg.auctions.clone(),
+                    v1: p.cfg.v1.into(),
+                    limits: p.cfg.limits,
+                    shared: Arc::clone(&shared),
+                    secrets: p.secrets.clone(),
+                    network: p.network,
+                    options_adapter_package,
+                    curator,
+                    book: Arc::clone(&book),
+                    api_url: p.api_url.clone(),
+                    indexer_url: p.indexer_url.clone(),
+                    price_cache: p.price_cache.clone(),
+                    models: Arc::clone(&models),
+                    settlement_feed: p.settlement_feed,
+                    settlement_coin_type: p.settlement_coin_type.clone(),
+                    settlement_decimals: p.settlement_decimals,
+                    market_feeds: market_feeds.clone(),
+                    staleness: p.staleness,
+                    expected_holding_years: p.cfg.expected_holding_years,
+                    slippage_bps: primary_spec.slippage_bps,
+                })
+            }
+            _ => tracing::warn!(
+                "[desk.auctions] enabled but options_adapter package or curator refs missing; \
+                 channel off"
             ),
         }
     }
@@ -618,6 +678,9 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         deep_coin_type: p.deep_coin_type.clone(),
         core_package: p.core_package,
         vault_address,
+        curator: curator_refs,
+        deepbook_adapter_package: p.deepbook_adapter_package,
+        pool_allowlist: p.pool_allowlist,
     });
 
     // Monitors + nightly stress over the WHOLE venue roster: summed
@@ -697,9 +760,14 @@ fn spawn_book_refresher(p: RefresherParams) {
             // sweeps / exits / new writes change custody out-of-band):
             // held coins AND written positions, then re-net `covered`.
             if tick_count % 5 == 1 {
-                let holdings =
-                    book::fetch_holdings(&p.wrap, &p.api, p.trading_vault_package, p.vault_id)
-                        .await;
+                let holdings = book::fetch_holdings(
+                    &p.wrap,
+                    &p.indexer,
+                    &p.api,
+                    p.trading_vault_package,
+                    p.vault_id,
+                )
+                .await;
                 let written =
                     book::fetch_written(&p.wrap, &p.indexer, &p.api, p.vault_id).await;
                 let mut b = p.book.write();
@@ -908,14 +976,12 @@ fn spawn_fill_poller(p: FillPollerParams) {
             };
 
             // Our fills: WS-RFQ writes released from the vault's
-            // collateral + auction settles paying option tokens to the
-            // vault (see the identity note in `book`).
+            // collateral + auction-channel wins observed as ticket
+            // redemptions (see the identity note in `book`).
             let vault_hex = p.vault_id.to_hex();
-            let queries: [(&[&str], serde_json::Value); 4] = [
+            let queries: [(&[&str], serde_json::Value); 2] = [
                 (&["WriteExecuted"], serde_json::json!({ "collateral_source": vault_hex })),
                 (&["PutWriteExecuted"], serde_json::json!({ "collateral_source": vault_hex })),
-                (&["RfqSettled"], serde_json::json!({ "call_recipient": vault_hex })),
-                (&["PutRfqSettled"], serde_json::json!({ "put_recipient": vault_hex })),
             ];
             let mut fills: Vec<book::DetectedFill> = Vec::new();
             let mut feed_ok = true;
@@ -931,6 +997,48 @@ fn spawn_fill_poller(p: FillPollerParams) {
                         tracing::debug!(error = %format!("{e:#}"), "fill poll failed; retrying next tick");
                         feed_ok = false;
                         break;
+                    }
+                }
+            }
+            // Auction wins: TvBidRedeemed ⋈ TvBidPlaced (by ticket).
+            // Placed events are fetched WITHOUT the cursor filter — the
+            // placement always precedes the redemption we attribute.
+            if feed_ok {
+                let vault_filter = serde_json::json!({ "vault_id": vault_hex });
+                let placed = p
+                    .indexer
+                    .recent_events_with_payload(&["TvBidPlaced"], vault_filter.clone(), MAX_EVENTS)
+                    .await;
+                let redeemed = p
+                    .indexer
+                    .recent_events_with_payload(&["TvBidRedeemed"], vault_filter, MAX_EVENTS)
+                    .await;
+                match (placed, redeemed) {
+                    (Ok(placed), Ok(redeemed)) => {
+                        let placed_by_ticket: HashMap<
+                            protocol_types::ids::ObjectId,
+                            protocol_types::events::TvBidPlaced,
+                        > = placed
+                            .iter()
+                            .filter_map(|ev| match &ev.event {
+                                protocol_types::events::ChainEvent::TvBidPlaced(b) => {
+                                    Some((b.ticket_id, b.clone()))
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        fills.extend(
+                            redeemed
+                                .iter()
+                                .filter(|ev| ev.sequence > cur.last_sequence)
+                                .filter_map(|ev| {
+                                    book::classify_ticket_win(ev, p.vault_id, &placed_by_ticket)
+                                }),
+                        );
+                    }
+                    (Err(e), _) | (_, Err(e)) => {
+                        tracing::debug!(error = %format!("{e:#}"), "ticket-win poll failed; retrying next tick");
+                        feed_ok = false;
                     }
                 }
             }

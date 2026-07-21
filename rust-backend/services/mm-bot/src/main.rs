@@ -559,9 +559,19 @@ async fn main() -> Result<()> {
             .trading_vault()
             .context("trading_vault package missing from token-info (required by [desk])")?
             .package()?;
-        let auction_package = match snapshot.auction() {
+        let options_adapter_package = match snapshot.options_adapter() {
             Some(a) => Some(a.package()?),
             None => None,
+        };
+        let deepbook_adapter_package = match snapshot.deepbook_adapter() {
+            Some(a) => Some(a.package()?),
+            None => None,
+        };
+        // Shared governance objects the curator-session calls reference
+        // (recorded by the deploy-time activation step, SO-292).
+        let (integration_registry, pool_allowlist) = match snapshot.trading_vault_objects() {
+            Some(o) => (Some(o.integration_registry()?), Some(o.pool_allowlist()?)),
+            None => (None, None),
         };
         let (deepbook, deep_coin_type) = match snapshot.deepbook() {
             Some(db) => (
@@ -602,7 +612,10 @@ async fn main() -> Result<()> {
             quote_ttl_ms: cfg.quote_ttl_ms,
             core_package: snapshot.package()?,
             trading_vault_package,
-            auction_package,
+            options_adapter_package,
+            deepbook_adapter_package,
+            integration_registry,
+            pool_allowlist,
             deepbook,
             deep_coin_type,
         })

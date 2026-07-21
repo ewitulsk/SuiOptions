@@ -142,14 +142,17 @@ enabled            = false
 # funding_rate_annual = 0.0   # default: paper_funding_rate_annual
 
 # [desk.auctions]             # on-chain RFQ channel (calls + puts)
+# Bids escrow from VAULT balances (options_adapter::bid_on_auction →
+# BidTicket custody; keeper cranks burn tickets back into the vault).
 # enabled = true
 # poll_secs = 10
 # initial_bid = "reserve_plus"
-# max_concurrent_escrow = 5_000_000_000
+# max_concurrent_escrow = 5_000_000_000  # cap on total live-ticket cost
 
 # [desk.exits]
 # enabled = true
 # tick_secs = 300
+# offset_close_enabled = true # step 0: net written vs held (close_offset)
 # concession_volpts = 1.0     # resale accepts fair − 1 vol pt
 # carry_mult = 1.1            # exercise when carry > time value × 1.1
 # near_expiry_hours = 24.0

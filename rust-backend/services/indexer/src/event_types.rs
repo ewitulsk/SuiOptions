@@ -38,6 +38,8 @@ use protocol_types::events::{
     TvPositionStored, TvPositionRemoved, TvAdapterAllowed, TvAdapterDisallowed, TvOracleAllowed,
     TvOracleDisallowed, TvProtocolConfigUpdated, TvCollateralReleased, TvCustodyCreated,
     TvPoolAllowed, TvPoolDisallowed, TvRfqOpened, TvRfqSettled, TvPositionRedeemed,
+    TvMmCoinExercised, TvMmOffsetClosed, TvMmCoinReleased, TvTakerSwapExecuted,
+    TvBidPlaced, TvBidReclaimed, TvBidRedeemed,
     TvExternalAccountSet, TvExternalAccountCleared, TvExternalReleased, TvExternalReturned,
 };
 use protocol_types::ids::{ObjectId, SuiAddress};
@@ -169,6 +171,14 @@ pub struct EventTypes {
     pub tv_rfq_opened: String,
     pub tv_rfq_settled: String,
     pub tv_position_redeemed: String,
+    // Trading-vault mm-desk custody ops + vault-funded bids (SO-299).
+    pub tv_mm_coin_exercised: String,
+    pub tv_mm_offset_closed: String,
+    pub tv_mm_coin_released: String,
+    pub tv_taker_swap_executed: String,
+    pub tv_bid_placed: String,
+    pub tv_bid_reclaimed: String,
+    pub tv_bid_redeemed: String,
     // Trading-vault external accounts + equity oracle (SO-299).
     pub tv_external_account_set: String,
     pub tv_external_account_cleared: String,
@@ -288,6 +298,16 @@ impl EventTypes {
             tv_rfq_opened: oa("RfqOpened"),
             tv_rfq_settled: oa("RfqSettled"),
             tv_position_redeemed: oa("PositionRedeemed"),
+            // Mm* structs are DEFINED in trading_vault::events (vault_mm
+            // only calls the emitters), so they resolve via `tv`, not
+            // `tv_mm`.
+            tv_mm_coin_exercised: tv("MmCoinExercised"),
+            tv_mm_offset_closed: tv("MmOffsetClosed"),
+            tv_mm_coin_released: tv("MmCoinReleased"),
+            tv_taker_swap_executed: dba("TakerSwapExecuted"),
+            tv_bid_placed: oa("BidPlaced"),
+            tv_bid_reclaimed: oa("BidReclaimed"),
+            tv_bid_redeemed: oa("BidRedeemed"),
             tv_external_account_set: tv("ExternalAccountSet"),
             tv_external_account_cleared: tv("ExternalAccountCleared"),
             tv_external_released: tv("ExternalReleased"),
@@ -296,7 +316,7 @@ impl EventTypes {
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 83] {
+    pub fn all_strings(&self) -> [&str; 90] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -376,6 +396,13 @@ impl EventTypes {
             &self.tv_rfq_opened,
             &self.tv_rfq_settled,
             &self.tv_position_redeemed,
+            &self.tv_mm_coin_exercised,
+            &self.tv_mm_offset_closed,
+            &self.tv_mm_coin_released,
+            &self.tv_taker_swap_executed,
+            &self.tv_bid_placed,
+            &self.tv_bid_reclaimed,
+            &self.tv_bid_redeemed,
             &self.tv_external_account_set,
             &self.tv_external_account_cleared,
             &self.tv_external_released,
@@ -555,6 +582,20 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(TvRfqSettled, TvRfqSettled)
     } else if type_str == types.tv_position_redeemed {
         decode!(TvPositionRedeemed, TvPositionRedeemed)
+    } else if type_str == types.tv_mm_coin_exercised {
+        decode!(TvMmCoinExercised, TvMmCoinExercised)
+    } else if type_str == types.tv_mm_offset_closed {
+        decode!(TvMmOffsetClosed, TvMmOffsetClosed)
+    } else if type_str == types.tv_mm_coin_released {
+        decode!(TvMmCoinReleased, TvMmCoinReleased)
+    } else if type_str == types.tv_taker_swap_executed {
+        decode!(TvTakerSwapExecuted, TvTakerSwapExecuted)
+    } else if type_str == types.tv_bid_placed {
+        decode!(TvBidPlaced, TvBidPlaced)
+    } else if type_str == types.tv_bid_reclaimed {
+        decode!(TvBidReclaimed, TvBidReclaimed)
+    } else if type_str == types.tv_bid_redeemed {
+        decode!(TvBidRedeemed, TvBidRedeemed)
     } else if type_str == types.tv_external_account_set {
         decode!(TvExternalAccountSet, TvExternalAccountSet)
     } else if type_str == types.tv_external_account_cleared {
@@ -1007,6 +1048,53 @@ mod tests {
         match dispatch(&t, &t.tv_external_released, &bytes).unwrap() {
             Some(ChainEvent::TvExternalReleased(decoded)) => assert_eq!(decoded, evt),
             other => panic!("expected TvExternalReleased, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_tv_mm_coin_exercised() {
+        let t = types();
+        let evt = TvMmCoinExercised {
+            vault_id: ObjectId::new([0xf0; 32]),
+            bucket_id: ObjectId::new([0xb1; 32]),
+            coin_position_id: ObjectId::new([0xc1; 32]),
+            is_put: false,
+            amount: 250_000_000,
+            settlement_amount: 12_500_000,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        // Defined in trading_vault::events, so it must resolve via the
+        // trading_vault package's events module.
+        assert_eq!(t.tv_mm_coin_exercised, format!("{TV_PKG}::events::MmCoinExercised"));
+        match dispatch(&t, &t.tv_mm_coin_exercised, &bytes).unwrap() {
+            Some(ChainEvent::TvMmCoinExercised(decoded)) => assert_eq!(decoded, evt),
+            other => panic!("expected TvMmCoinExercised, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_tv_bid_placed() {
+        // The bid events live in the options_adapter package's module.
+        let oa_pkg = "0xoa1";
+        let t = EventTypes::for_packages(
+            PackageIds { options_adapter: Some(oa_pkg), ..pkgs() },
+            Some(DEEPBOOK_ORIG),
+        );
+        let evt = TvBidPlaced {
+            vault_id: ObjectId::new([0xf0; 32]),
+            ticket_id: ObjectId::new([0x71; 32]),
+            auction_id: ObjectId::new([0xac; 32]),
+            bucket_id: ObjectId::new([0xb1; 32]),
+            escrow_amount: 51_000_000,
+            win_type: AssetType::new("9b::call_3::CALL_3"),
+            win_amount: 250_000_000,
+            is_put: false,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        assert_eq!(t.tv_bid_placed, format!("{oa_pkg}::options_adapter::BidPlaced"));
+        match dispatch(&t, &t.tv_bid_placed, &bytes).unwrap() {
+            Some(ChainEvent::TvBidPlaced(decoded)) => assert_eq!(decoded, evt),
+            other => panic!("expected TvBidPlaced, got {other:?}"),
         }
     }
 
