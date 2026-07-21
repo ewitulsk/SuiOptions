@@ -47,6 +47,25 @@ pub struct AppraisalRefs {
     /// The options-adapter package's shared `VolBook` (premium
     /// mark-to-market). Required whenever option-coin legs compose.
     pub vol_book_id: Option<ObjectID>,
+    /// Trustless DeepBook-Margin equity leg (SO-299 phase C): set for a
+    /// vault whose pinned witness is `dbm_oracle::DbmOracle` — the
+    /// composer then records equity via the dbm-oracle adapter instead
+    /// of `equity_oracle::record`.
+    pub dbm: Option<DbmLegInfo>,
+}
+
+/// Chain identity of a vault's DeepBook-Margin external account, for the
+/// on-chain-computed equity leg (`dbm_oracle::record{,_no_debt}`).
+#[derive(Debug, Clone)]
+pub struct DbmLegInfo {
+    pub dbm_oracle_pkg: ObjectID,
+    pub margin_manager_id: ObjectID,
+    pub deepbook_pool_id: ObjectID,
+    pub base_margin_pool_id: ObjectID,
+    pub quote_margin_pool_id: ObjectID,
+    /// Canonical base/quote coin types of the manager's pool.
+    pub base_type: String,
+    pub quote_type: String,
 }
 
 /// One custodied position, classified from its object type + adapter tag.
@@ -160,11 +179,13 @@ pub struct OptionBucketInfo {
 
 /// The types that need PYTH attestations given the option-coin bucket map:
 /// mapped option-coin types are replaced by their bucket's underlying +
-/// settlement legs (the coin itself prices via the options oracle), and
-/// held option-coin positions contribute their legs too.
+/// settlement legs (the coin itself prices via the options oracle), held
+/// option-coin positions contribute their legs, and a DBM equity leg
+/// contributes its manager's base + quote.
 pub fn pyth_assets_needed(
     holdings: &VaultHoldings,
     option_buckets: &BTreeMap<String, OptionBucketInfo>,
+    dbm: Option<&DbmLegInfo>,
 ) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for t in holdings.assets_needing_attestation() {
@@ -185,6 +206,10 @@ pub fn pyth_assets_needed(
                 out.insert(b.settlement.clone());
             }
         }
+    }
+    if let Some(d) = dbm {
+        out.insert(d.base_type.clone());
+        out.insert(d.quote_type.clone());
     }
     out.remove(&holdings.deposit_type);
     out
@@ -555,7 +580,7 @@ pub async fn compose_appraisal(
     // nonzero (e.g. a pool's call-coin base with zero locked passes; a
     // real unpriceable inventory correctly wedges the appraisal).
     let needed = holdings.assets_needing_attestation();
-    let pyth_needed = pyth_assets_needed(holdings, option_buckets);
+    let pyth_needed = pyth_assets_needed(holdings, option_buckets, refs.dbm.as_ref());
     let mut attestations: BTreeMap<String, Argument> = BTreeMap::new();
     let attestable: Vec<String> = match &legs {
         Some(l) => pyth_needed
@@ -699,33 +724,93 @@ pub async fn compose_appraisal(
     // External-account equity leg (SO-299): a configured vault marks the
     // appraisal `external_pending` at begin_appraisal, and consumption
     // aborts (82, appraisal_incomplete) without `record_external_equity`.
-    // Compose the pinned oracle's leg — and refuse outright (distinctive
-    // error, no silent incomplete appraisal) when the pinned witness
-    // isn't this deployment's `equity_oracle::EquityOracle` (e.g. a
-    // DbmOracle vault, whose leg this composer can't build yet).
+    // Compose the pinned oracle's leg — the trustless DBM adapter when
+    // the caller supplied `refs.dbm`, else the attested EquityBook path —
+    // and refuse outright (distinctive error, no silent incomplete
+    // appraisal) when the pinned witness doesn't match the leg we'd build.
     if let Some(witness) = &holdings.external_equity_oracle {
-        let Some(eo_pkg) = refs.equity_oracle_pkg else {
-            return Err(anyhow!(
-                "unsupported external equity oracle: {witness} (equity-oracle package unresolved)"
-            ));
-        };
-        let expected = canon(&format!("{eo_pkg}::equity_oracle::EquityOracle"));
-        if canon(witness) != expected {
-            return Err(anyhow!("unsupported external equity oracle: {witness}"));
+        if let Some(dbm) = &refs.dbm {
+            let expected = canon(&format!("{}::dbm_oracle::DbmOracle", dbm.dbm_oracle_pkg));
+            if canon(witness) != expected {
+                return Err(anyhow!(
+                    "vault pins external equity oracle {witness} but the DBM leg config \
+                     expects {expected}"
+                ));
+            }
+            // Debt side from the manager's borrowed-share fields: zero on
+            // both ⇒ `record_no_debt`; else `record` with the borrowed
+            // side's margin pool as DebtAsset (`calculate_debts` aborts on
+            // the wrong pool, so the selection is chain-checked too).
+            let mgr = object_fields(client, dbm.margin_manager_id).await?;
+            let shares = |name: &str| -> Result<u64> {
+                let j = serde_json::to_value(move_field(&mgr, name)?)?;
+                j.as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| j.as_u64())
+                    .ok_or_else(|| anyhow!("margin manager missing {name}"))
+            };
+            let base_shares = shares("borrowed_base_shares")?;
+            let quote_shares = shares("borrowed_quote_shares")?;
+
+            let oracle_reg =
+                pt.obj(shared_object_arg(client, refs.oracle_registry_id, false).await?)?;
+            let manager = pt.obj(shared_object_arg(client, dbm.margin_manager_id, false).await?)?;
+            let pool = pt.obj(shared_object_arg(client, dbm.deepbook_pool_id, false).await?)?;
+            let b_opt = opt_for(pt, &attestations, &dbm.base_type, &holdings.deposit_type);
+            let q_opt = opt_for(pt, &attestations, &dbm.quote_type, &holdings.deposit_type);
+            let base_tag = TypeTag::from_str(&dbm.base_type).context("dbm base_type")?;
+            let quote_tag = TypeTag::from_str(&dbm.quote_type).context("dbm quote_type")?;
+            if base_shares == 0 && quote_shares == 0 {
+                pt.programmable_move_call(
+                    dbm.dbm_oracle_pkg,
+                    Identifier::new("dbm_oracle").unwrap(),
+                    Identifier::new("record_no_debt").unwrap(),
+                    vec![base_tag, quote_tag],
+                    vec![vault_ro, oracle_reg, cfg, appraisal, manager, pool, b_opt, q_opt, clock],
+                );
+            } else {
+                let (debt_pool_id, debt_tag) = if base_shares > 0 {
+                    (dbm.base_margin_pool_id, base_tag.clone())
+                } else {
+                    (dbm.quote_margin_pool_id, quote_tag.clone())
+                };
+                let margin_pool = pt.obj(shared_object_arg(client, debt_pool_id, false).await?)?;
+                pt.programmable_move_call(
+                    dbm.dbm_oracle_pkg,
+                    Identifier::new("dbm_oracle").unwrap(),
+                    Identifier::new("record").unwrap(),
+                    vec![base_tag, quote_tag, debt_tag],
+                    vec![
+                        vault_ro, oracle_reg, cfg, appraisal, manager, pool, margin_pool, b_opt,
+                        q_opt, clock,
+                    ],
+                );
+            }
+        } else {
+            let Some(eo_pkg) = refs.equity_oracle_pkg else {
+                return Err(anyhow!(
+                    "unsupported external equity oracle: {witness} (equity-oracle package unresolved)"
+                ));
+            };
+            let expected = canon(&format!("{eo_pkg}::equity_oracle::EquityOracle"));
+            if canon(witness) != expected {
+                return Err(anyhow!("unsupported external equity oracle: {witness}"));
+            }
+            let book_id = refs.equity_book_id.ok_or_else(|| {
+                anyhow!("equity-oracle EquityBook id unresolved — cannot compose the equity leg")
+            })?;
+            let book = pt.obj(shared_object_arg(client, book_id, false).await?)?;
+            let oracle_reg =
+                pt.obj(shared_object_arg(client, refs.oracle_registry_id, false).await?)?;
+            // equity_oracle::record(vault, book, reg, &mut appraisal, clock)
+            pt.programmable_move_call(
+                eo_pkg,
+                Identifier::new("equity_oracle").unwrap(),
+                Identifier::new("record").unwrap(),
+                vec![],
+                vec![vault_ro, book, oracle_reg, appraisal, clock],
+            );
         }
-        let book_id = refs.equity_book_id.ok_or_else(|| {
-            anyhow!("equity-oracle EquityBook id unresolved — cannot compose the equity leg")
-        })?;
-        let book = pt.obj(shared_object_arg(client, book_id, false).await?)?;
-        let oracle_reg = pt.obj(shared_object_arg(client, refs.oracle_registry_id, false).await?)?;
-        // equity_oracle::record(vault, book, reg, &mut appraisal, clock)
-        pt.programmable_move_call(
-            eo_pkg,
-            Identifier::new("equity_oracle").unwrap(),
-            Identifier::new("record").unwrap(),
-            vec![],
-            vec![vault_ro, book, oracle_reg, appraisal, clock],
-        );
     }
 
     // Free balances.
@@ -880,4 +965,38 @@ pub async fn compose_appraisal(
         }
     }
     Ok(appraisal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dbm_leg_adds_base_and_quote_to_pyth_needs() {
+        let holdings = VaultHoldings {
+            deposit_type: "0xa::tusdc::TUSDC".into(),
+            free_assets: vec![],
+            positions: vec![],
+            external_account: Some("0xee".into()),
+            external_equity_oracle: Some("0xd0::dbm_oracle::DbmOracle".into()),
+        };
+        let none = pyth_assets_needed(&holdings, &BTreeMap::new(), None);
+        assert!(none.is_empty());
+
+        let dbm = DbmLegInfo {
+            dbm_oracle_pkg: ObjectID::from_hex_literal("0xd0").unwrap(),
+            margin_manager_id: ObjectID::from_hex_literal("0x11").unwrap(),
+            deepbook_pool_id: ObjectID::from_hex_literal("0x12").unwrap(),
+            base_margin_pool_id: ObjectID::from_hex_literal("0x13").unwrap(),
+            quote_margin_pool_id: ObjectID::from_hex_literal("0x14").unwrap(),
+            base_type: "0x2::sui::SUI".into(),
+            // The quote IS the deposit asset: it must NOT need a pyth leg.
+            quote_type: "0xa::tusdc::TUSDC".into(),
+        };
+        let needed = pyth_assets_needed(&holdings, &BTreeMap::new(), Some(&dbm));
+        assert_eq!(
+            needed.into_iter().collect::<Vec<_>>(),
+            vec!["0x2::sui::SUI".to_string()]
+        );
+    }
 }

@@ -52,3 +52,17 @@ vol_window_days = 30
 [vault_defaults.slicing]
 slices = 4
 stagger_minutes = 90
+
+# Trustless DeepBook-Margin equity legs (SO-299 phase C): one block per
+# vault whose pinned external-equity witness is dbm_oracle::DbmOracle.
+# The appraisal then composes dbm_oracle::record{,_no_debt} against the
+# vault's MarginManager instead of the attested equity_oracle::record.
+# Live testnet ids from docs/mm-bot-v2/04 Phase 0 findings; the manager
+# id is minted by the multisig at hedge bring-up.
+# [external.dbm."0x<vault_id>"]
+# margin_manager_id    = "0x..."
+# deepbook_pool_id     = "0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5"  # SUI/DBUSDC
+# base_margin_pool_id  = "0xcdbbe6a72e639b647296788e2e4b1cac5cea4246028ba388ba1332ff9a382eea"  # SUI
+# quote_margin_pool_id = "0xf08568da93834e1ee04f09902ac7b1e78d3fdf113ab4d2106c7265e95318b14d"  # DBUSDC
+# base_type            = "0x2::sui::SUI"
+# quote_type           = "0x..."   # DBUSDC coin type
