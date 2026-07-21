@@ -84,6 +84,9 @@ csv = "1"
 rayon = "1"
 
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+# hedge-signer: FROST 2-of-2 threshold-ed25519 (ZF frost project). Pinned
+# exactly — key-share and ceremony wire formats must not drift under us.
+frost-ed25519 = "=3.0.0"
 rand = "0.8"
 # vault-sim synthetic path generation: seeded, reproducible streams.
 rand_chacha = "0.3"

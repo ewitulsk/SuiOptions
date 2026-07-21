@@ -16,6 +16,10 @@
 **/config/secrets.toml
 !secrets.example.toml
 
+# hedge-signer's persisted FROST key shares (written by the /frost/keygen
+# ceremony) — secret material, never committed.
+**/config/frost-shares.toml
+
 # MM bot's persisted Account bootstrap state — written on first run and
 # read on subsequent runs. Re-creating it after a redeploy is fine.
 **/mm-bot.account.json

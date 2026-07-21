@@ -29,12 +29,24 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = "0.22"
 bcs = { workspace = true }
+toml = { workspace = true }
 
 sui-types = { workspace = true }
 shared-crypto = { workspace = true }
+
+# FROST 2-of-2 threshold-ed25519 substrate (Bluefin parent account).
+frost-ed25519 = { workspace = true }
+rand = { workspace = true }
+blake2 = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
 
 anyhow = { workspace = true }
 
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 metrics = { workspace = true }
+
+[dev-dependencies]
+# e2e test verifies the aggregated FROST signature as plain ed25519.
+ed25519-dalek = { workspace = true }

@@ -31,6 +31,15 @@ pub struct Config {
     /// failure at boot is fatal.
     pub audit_log_path: PathBuf,
 
+    /// TOML file the per-vault FROST key shares are persisted in (the
+    /// service half of each vault's 2-of-2 threshold-ed25519 parent key).
+    /// Written by the /frost/keygen ceremony; loaded at boot. Lives NEXT TO
+    /// secrets.toml in dev but NOT inside it: deployed secrets.toml is
+    /// re-rendered from AWS Secrets Manager on every deploy, which would
+    /// discard runtime-generated shares — so deployed envs point this at the
+    /// persistent data volume instead.
+    pub frost_shares_path: PathBuf,
+
     /// The vaults whose external accounts this service co-signs for.
     #[serde(default)]
     pub vaults: Vec<VaultConfig>,
@@ -71,6 +80,28 @@ pub struct VaultConfig {
     /// The canonical `deepbook_margin` package id. Third-party — NOT in
     /// deployments.json — so it is pinned here per vault.
     pub deepbook_margin_package: String,
+
+    /// The curator's day-to-day trading wallet. The ONLY wallet a Bluefin
+    /// `authorize_account` payload may authorize on the vault's parent
+    /// account. Absent → every authorize payload is denied.
+    #[serde(default)]
+    pub curator_wallet: Option<String>,
+
+    /// Bluefin-specific pins for the FROST payload policy.
+    #[serde(default)]
+    pub bluefin: Option<BluefinVaultConfig>,
+}
+
+/// Optional Bluefin object-id pins. When set, payloads naming a different
+/// store are denied; when unset the corresponding check is skipped.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BluefinVaultConfig {
+    /// Bluefin internal data store id (`ids` field of authorize payloads).
+    #[serde(default)]
+    pub ids_id: Option<String>,
+    /// Bluefin external data store id (`eds` field of withdraw payloads).
+    #[serde(default)]
+    pub eds_id: Option<String>,
 }
 
 fn default_cors() -> Vec<String> {

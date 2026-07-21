@@ -9,12 +9,13 @@ use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
-use crate::handlers;
-use crate::state::AppState;
+use crate::state::{AppState, FrostState};
+use crate::{frost_handlers, handlers};
 
 pub async fn serve(
     addr: SocketAddr,
     state: Arc<AppState>,
+    frost_state: Arc<FrostState>,
     allowed_origins: &[String],
 ) -> Result<()> {
     let cors = build_cors(allowed_origins)?;
@@ -25,6 +26,7 @@ pub async fn serve(
         .route("/policy", get(handlers::policy))
         .route("/sign", post(handlers::sign))
         .with_state(state)
+        .merge(frost_router(frost_state))
         .merge(observability::middleware::metrics_route())
         .layer(axum::middleware::from_fn(
             observability::middleware::http_obs,
@@ -35,6 +37,18 @@ pub async fn serve(
     info!(%addr, "hedge-signer http listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// The FROST threshold-signing surface (keygen + two-round signing +
+/// group-pubkey lookup), on its own state — no Sui RPC client needed.
+pub fn frost_router(state: Arc<FrostState>) -> Router {
+    Router::new()
+        .route("/frost/pubkey/:vault_id", get(frost_handlers::pubkey))
+        .route("/frost/keygen/round1", post(frost_handlers::keygen_round1))
+        .route("/frost/keygen/round2", post(frost_handlers::keygen_round2))
+        .route("/frost/sign/round1", post(frost_handlers::sign_round1))
+        .route("/frost/sign/round2", post(frost_handlers::sign_round2))
+        .with_state(state)
 }
 
 fn build_cors(allowed_origins: &[String]) -> Result<CorsLayer> {
