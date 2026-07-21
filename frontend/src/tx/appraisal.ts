@@ -39,6 +39,8 @@ import {
   DEEP_COIN_TYPE,
   DEEPBOOK_ADAPTER_PACKAGE_ID,
   ENV,
+  EQUITY_ORACLE_PACKAGE_ID,
+  EQUITY_ORACLE_PUBLISH_DIGEST,
   OPTIONS_ADAPTER_PACKAGE_ID,
   ORACLE_PYTH_PACKAGE_ID,
   TRADING_VAULT_OBJECTS,
@@ -119,6 +121,16 @@ export type OptionLegPlan = {
 /** A held option coin custodied as a position (vault_mm writer flow). */
 export type OptionCoinPlan = OptionLegPlan & { positionId: string };
 
+/** The external-account equity leg (SO-299): a vault with an external
+ * account marks every appraisal `external_pending`, so consumption needs
+ * `equity_oracle::record` from the keeper-posted `EquityBook`. */
+export type ExternalEquityPlan = {
+  /** equity-oracle package id (the pinned witness's package). */
+  oraclePkg: string;
+  /** Shared `EquityBook` object id. */
+  bookId: string;
+};
+
 export type AppraisalPlan = {
   vaultId: string;
   /** Canonical deposit coin type. */
@@ -141,6 +153,9 @@ export type AppraisalPlan = {
   priceInfoByFeed: Record<string, string>;
   /** Canonical DEEP type when locked-DEEP legs can be attested, else null. */
   deepType: string | null;
+  /** Non-null when the vault has an external account — its equity leg is
+   * mandatory for a complete appraisal. */
+  externalEquity: ExternalEquityPlan | null;
 };
 
 // ══════════════════════════ Move-JSON tolerant reads ══════════════════════════
@@ -161,7 +176,7 @@ function structFields(v: unknown): Record<string, unknown> | null {
   return asRecord(r.fields) ?? r;
 }
 
-function vecSetItems(v: unknown): unknown[] {
+export function vecSetItems(v: unknown): unknown[] {
   if (Array.isArray(v)) return v;
   const c = structFields(v)?.contents;
   return Array.isArray(c) ? c : [];
@@ -173,7 +188,7 @@ function typeNameString(v: unknown): string | null {
   return typeof n === "string" ? n : null;
 }
 
-function idString(v: unknown): string | null {
+export function idString(v: unknown): string | null {
   if (typeof v === "string") return v;
   const f = structFields(v);
   if (!f) return null;
@@ -263,6 +278,35 @@ async function resolvePriceInfoObjectId(
   return objectId;
 }
 
+// ═══════════════════════════ EquityBook cache ═══════════════════════════
+
+// The equity-oracle's shared `EquityBook` is created once in its `init`;
+// resolve it from the package's publish effects (token-info doesn't serve
+// the id — same fallback pattern as `useVaultProtocolConfigId`) and cache
+// for the session.
+let equityBookCache: string | null = null;
+
+async function resolveEquityBookId(client: SuiGrpcClient): Promise<string> {
+  if (equityBookCache) return equityBookCache;
+  if (!EQUITY_ORACLE_PUBLISH_DIGEST) {
+    throw new Error("equity-oracle publish digest unavailable — cannot resolve the EquityBook");
+  }
+  const res = await client.core.getTransaction({
+    digest: EQUITY_ORACLE_PUBLISH_DIGEST,
+    include: { effects: true, objectTypes: true },
+  });
+  const txn = res.Transaction ?? res.FailedTransaction;
+  const types = txn.objectTypes ?? {};
+  for (const change of txn.effects?.changedObjects ?? []) {
+    if (change.idOperation !== "Created") continue;
+    if (types[change.objectId]?.endsWith("::equity_oracle::EquityBook")) {
+      equityBookCache = change.objectId;
+      return change.objectId;
+    }
+  }
+  throw new Error("EquityBook not found in the equity-oracle publish transaction");
+}
+
 // ═══════════════════════════════ planning ═══════════════════════════════
 
 function feedIdFor(coinType: string): string | null {
@@ -317,6 +361,31 @@ export async function planAppraisal(
     .filter((t): t is string => t !== null)
     .map(canon);
   const freeBalanceTypes = freeTypes.filter((t) => t !== depositType);
+
+  // 1b. External account (SO-299): a configured vault marks every appraisal
+  //     `external_pending` at begin_appraisal, and consumption aborts
+  //     without the pinned oracle's `record_external_equity` leg. Plan the
+  //     keeper-posted equity_oracle leg — and refuse with a clear reason
+  //     (mirroring the Rust composer) when the pinned witness isn't this
+  //     deployment's `equity_oracle::EquityOracle` (e.g. a DbmOracle vault,
+  //     whose computed leg this composer can't build yet).
+  let externalEquity: ExternalEquityPlan | null = null;
+  const extRaw = structFields(json)?.external ?? asRecord(json)?.external;
+  const ext = Array.isArray(extRaw) ? extRaw[0] : extRaw;
+  if (ext != null) {
+    const witness = typeNameString(structFields(ext)?.equity_oracle);
+    if (!witness) throw new Error("vault external account has no pinned equity oracle");
+    if (!EQUITY_ORACLE_PACKAGE_ID) {
+      throw new Error("equity-oracle package not deployed on this network");
+    }
+    if (canon(witness) !== canon(`${EQUITY_ORACLE_PACKAGE_ID}::equity_oracle::EquityOracle`)) {
+      throw new Error(`unsupported external equity oracle ${shortType(canon(witness))}`);
+    }
+    externalEquity = {
+      oraclePkg: EQUITY_ORACLE_PACKAGE_ID,
+      bookId: await resolveEquityBookId(client),
+    };
+  }
 
   // 2. Classify every active custodied position via its object type.
   const active = vault.positions.filter((p) => p.active);
@@ -536,6 +605,7 @@ export async function planAppraisal(
       feedIdByType,
       priceInfoByFeed,
       deepType,
+      externalEquity,
     };
   }
 
@@ -560,6 +630,7 @@ export async function planAppraisal(
     feedIdByType,
     priceInfoByFeed: {},
     deepType,
+    externalEquity,
   };
 }
 
@@ -656,6 +727,23 @@ export function composeAppraisal(
     typeArguments: [plan.depositType],
     arguments: [vault],
   });
+
+  // 1b. External-account equity leg (SO-299): mandatory whenever the vault
+  // has an external account. The chain gates the EquityBook entry's age.
+  if (plan.externalEquity) {
+    const gov = TRADING_VAULT_OBJECTS;
+    if (!gov) throw new Error("trading-vault governance objects unavailable");
+    tx.moveCall({
+      target: `${plan.externalEquity.oraclePkg}::equity_oracle::record`,
+      arguments: [
+        vault,
+        tx.object(plan.externalEquity.bookId),
+        tx.object(gov.oracleRegistryId),
+        appraisal,
+        clock,
+      ],
+    });
+  }
 
   // 2. Pyth update prefix + 3. one attestation per asset.
   const attestations = new Map<string, TransactionResult>();
@@ -906,6 +994,52 @@ export async function buildAppraisedDepositTx(p: AppraisedDepositParams): Promis
       tx.object(p.protocolConfigId),
       appraisal,
       funds,
+      tx.object(CLOCK_ID),
+    ],
+  });
+  return tx;
+}
+
+// ═══════════════════════════ external release ═══════════════════════════
+
+export type ReleaseExternalParams = {
+  plan: AppraisalPlan;
+  /** Shared `VaultProtocolConfig` object id. */
+  protocolConfigId: string;
+  /** The curator's owned `CuratorCap` object id. */
+  curatorCapId: string;
+  /** Release amount in deposit-asset smallest units. */
+  amountRaw: bigint;
+};
+
+/**
+ * `vault::release_external<T>` (SO-299): the same appraisal-leg sequence as
+ * a deposit piped into the curator-gated budgeted release — the chain binds
+ * the external budget and daily release window against the NAV this
+ * appraisal snapshots, so no client-side limit enforcement is attempted.
+ */
+export async function buildReleaseExternalTx(p: ReleaseExternalParams): Promise<Transaction> {
+  const vaultPkg = requireId(TRADING_VAULT_PACKAGE_ID, "trading-vault package");
+  const accumulatorUpdate =
+    p.plan.attestTypes.length > 0
+      ? await fetchHermesAccumulatorUpdate([
+          ...new Set(Object.values(p.plan.feedIdByType)),
+        ])
+      : null;
+
+  const tx = new Transaction();
+  const appraisal = composeAppraisal(tx, p.plan, {
+    protocolConfigId: p.protocolConfigId,
+    accumulatorUpdate,
+  });
+  tx.moveCall({
+    target: `${vaultPkg}::vault::release_external`,
+    typeArguments: [p.plan.depositType],
+    arguments: [
+      tx.object(p.plan.vaultId),
+      tx.object(p.curatorCapId),
+      appraisal,
+      tx.pure.u64(p.amountRaw),
       tx.object(CLOCK_ID),
     ],
   });

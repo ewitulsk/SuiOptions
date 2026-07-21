@@ -80,6 +80,12 @@ export let ORACLE_PYTH_PACKAGE_ID: string | undefined;
 export let DEEPBOOK_ADAPTER_PACKAGE_ID: string | undefined;
 export let OPTIONS_ADAPTER_PACKAGE_ID: string | undefined;
 
+// Keeper-attested equity oracle for trading-vault external accounts
+// (SO-299). The publish digest resolves the shared `EquityBook` client-side
+// (token-info doesn't serve it), mirroring the publish-digest fallback below.
+export let EQUITY_ORACLE_PACKAGE_ID: string | undefined;
+export let EQUITY_ORACLE_PUBLISH_DIGEST: string | undefined;
+
 /** Shared governance objects created by the trading-vault family's inits,
  * recorded at deploy time (SO-292). Absent on older deployments — consumers
  * fall back to publish-digest discovery where they can. */
@@ -179,6 +185,7 @@ type PackageInfoDto = {
   oraclePyth?: { packageId: string } | null;
   deepbookAdapter?: { packageId: string } | null;
   optionsAdapter?: { packageId: string } | null;
+  equityOracle?: { packageId: string; publishDigest: string } | null;
   tradingVaultObjects?: {
     vaultProtocolConfigId: string;
     integrationRegistryId: string;
@@ -225,6 +232,8 @@ export async function initConfig(): Promise<void> {
   ORACLE_PYTH_PACKAGE_ID = info.oraclePyth?.packageId;
   DEEPBOOK_ADAPTER_PACKAGE_ID = info.deepbookAdapter?.packageId;
   OPTIONS_ADAPTER_PACKAGE_ID = info.optionsAdapter?.packageId;
+  EQUITY_ORACLE_PACKAGE_ID = info.equityOracle?.packageId;
+  EQUITY_ORACLE_PUBLISH_DIGEST = info.equityOracle?.publishDigest;
   TRADING_VAULT_OBJECTS = info.tradingVaultObjects ?? undefined;
 
   const db = info.deepbook;

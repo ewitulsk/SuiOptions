@@ -36,9 +36,12 @@ export function useSubmitTransaction() {
     return (res.Transaction ?? res.FailedTransaction).digest;
   }
 
-  return async function submit(tx: Transaction): Promise<string> {
-    // Wallet-paid path: toggle off or no connected account.
-    if (!isSponsorEnabled() || !account) {
+  // `sponsor: false` forces the wallet-paid path regardless of the toggle —
+  // curator/session ops are never allowlisted by the gas station (sui-tx
+  // template.rs: curators pay their own gas).
+  return async function submit(tx: Transaction, opts?: { sponsor?: boolean }): Promise<string> {
+    // Wallet-paid path: toggle off, sponsorship opted out, or no account.
+    if (!isSponsorEnabled() || !account || opts?.sponsor === false) {
       if (account) tx.setSenderIfNotSet(account.address);
       const built = toBase64(await tx.build({ client }));
       const { bytes: signedBytes, signature } = await signTransaction({ transaction: built });

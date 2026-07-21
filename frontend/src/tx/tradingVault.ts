@@ -8,7 +8,12 @@
 
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
 
-import { ENV, TRADING_VAULT_PACKAGE_ID } from "../config";
+import {
+  DEEPBOOK_ADAPTER_PACKAGE_ID,
+  ENV,
+  TRADING_VAULT_OBJECTS,
+  TRADING_VAULT_PACKAGE_ID,
+} from "../config";
 
 const CLOCK_ID = "0x6";
 
@@ -117,6 +122,56 @@ export function buildTradingVaultWithdrawTx(p: TradingVaultWithdrawParams): Tran
     arguments: [
       tx.object(p.vaultId),
       tx.pure.u128(p.sharesRaw),
+      tx.object(CLOCK_ID),
+    ],
+  });
+  return tx;
+}
+
+export type CuratorTakerSwapParams = {
+  vaultId: string;
+  /** The curator's owned `CuratorCap` object id. */
+  curatorCapId: string;
+  /** Allowlisted DeepBook `Pool<B, Q>` object id + its type args. */
+  poolId: string;
+  baseType: string;
+  quoteType: string;
+  /** true = sell Base for Quote, false = buy Base with Quote. */
+  baseForQuote: boolean;
+  /** Input amount in the input asset's smallest units. */
+  amountRaw: bigint;
+  /** Minimum acceptable output in the output asset's smallest units. */
+  minOutRaw: bigint;
+};
+
+/**
+ * `deepbook_adapter::taker_swap_base_for_quote` / `taker_swap_quote_for_base`
+ * (SO-299 spot tab): a curator taker swap of vault FREE balances against an
+ * allowlisted pool — a single session-gated call, no custody or appraisal
+ * needed. The custody surface (`init_custody` → BM deposits → resting
+ * limit/market orders) is deferred: it needs custody discovery, order
+ * management, and per-pool book UX well beyond a first spot tab.
+ *
+ * Curator ops are NOT gas-sponsored (sui-tx template.rs) — submit wallet-paid.
+ */
+export function buildCuratorTakerSwapTx(p: CuratorTakerSwapParams): Transaction {
+  const pkg = DEEPBOOK_ADAPTER_PACKAGE_ID;
+  if (!pkg) throw new Error("deepbook-adapter package not deployed on this network");
+  const gov = TRADING_VAULT_OBJECTS;
+  if (!gov) throw new Error("trading-vault governance objects not served by token-info");
+  const fn = p.baseForQuote ? "taker_swap_base_for_quote" : "taker_swap_quote_for_base";
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${pkg}::deepbook_adapter::${fn}`,
+    typeArguments: [p.baseType, p.quoteType],
+    arguments: [
+      tx.object(p.vaultId),
+      tx.object(p.curatorCapId),
+      tx.object(gov.integrationRegistryId),
+      tx.object(gov.poolAllowlistId),
+      tx.object(p.poolId),
+      tx.pure.u64(p.amountRaw),
+      tx.pure.u64(p.minOutRaw),
       tx.object(CLOCK_ID),
     ],
   });
