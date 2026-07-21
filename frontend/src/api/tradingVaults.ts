@@ -42,6 +42,16 @@ export type TradingVault = {
   /** u128 decimal string, pps × 1e12; null before the first appraisal. */
   latestPpsE12Raw: string | null;
   updatedAtMs: number;
+  /** External MM account wallet (SO-299); null when none is set. */
+  externalAccount: string | null;
+  /** u64 decimal string, deposit-asset smallest units. */
+  externalExposure: string;
+  /** u64 decimal string, deposit-asset smallest units; null before the first
+   * keeper-posted equity mark. */
+  latestExternalEquity: string | null;
+  /** Ms since epoch, or null before the first equity mark. Ships as a decimal
+   * string on the wire; normalized to a number in the mapper. */
+  externalEquityUpdatedAtMs: number | null;
 };
 
 /** One custodied position row from the detail endpoint. */
@@ -79,6 +89,12 @@ type TradingVaultWire = {
   /** pps × 1e12 decimal string; absent before the first appraisal. */
   pps_raw: string | null;
   updated_at_ms: number;
+  external_account: string | null;
+  /** u64 decimal string, deposit-asset smallest units. */
+  external_exposure: string;
+  latest_external_equity: string | null;
+  /** Ms since epoch, decimal string. */
+  external_equity_updated_at_ms: string | null;
 };
 
 type TradingVaultPositionWire = {
@@ -109,6 +125,11 @@ function mapVault(w: TradingVaultWire): TradingVault {
     pendingWithdrawals: w.pending_withdrawals,
     latestPpsE12Raw: w.pps_raw ?? null,
     updatedAtMs: w.updated_at_ms,
+    externalAccount: w.external_account ?? null,
+    externalExposure: w.external_exposure,
+    latestExternalEquity: w.latest_external_equity ?? null,
+    externalEquityUpdatedAtMs:
+      w.external_equity_updated_at_ms == null ? null : Number(w.external_equity_updated_at_ms),
   };
 }
 

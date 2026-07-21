@@ -44,6 +44,17 @@ function fmtDateTime(ms: number | null | undefined): string {
   });
 }
 
+/** Relative age of a timestamp: "just now", "5m ago", "3h ago", "2d ago". */
+function fmtAgo(ms: number): string {
+  const age = Date.now() - ms;
+  if (age < 60_000) return "just now";
+  const mins = Math.round(age / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
 /** Adapter short-name: the module path after the package address. */
 function adapterName(adapter: string): string {
   const parts = adapter.split("::");
@@ -152,6 +163,7 @@ function VaultBody({ vault }: { vault: TradingVaultDetailDto }) {
             symbol={symbol}
           />
           <PositionsCard positions={vault.positions} />
+          <ExternalAccountCard vault={vault} symbol={symbol} decimals={token?.decimals ?? null} />
           <TermsCard vault={vault} symbol={symbol} />
         </div>
         <div className="vault-grid__side">
@@ -204,6 +216,62 @@ function TermsCard({ vault, symbol }: { vault: TradingVaultDetailDto; symbol: st
       </div>
       <div className="vault-card__foot vault-prose__muted">
         Deposit asset {symbol} · updated {fmtDateTime(vault.updatedAtMs)}
+      </div>
+    </div>
+  );
+}
+
+/** External MM account (SO-299): read-only view of the whitelisted external
+ * wallet, its outstanding exposure, and the latest keeper-posted equity mark.
+ * Renders nothing when the vault has no external account. */
+function ExternalAccountCard({
+  vault,
+  symbol,
+  decimals,
+}: {
+  vault: TradingVaultDetailDto;
+  symbol: string;
+  decimals: number | null;
+}) {
+  if (vault.externalAccount == null) return null;
+
+  const toDisplay = (raw: string): string =>
+    decimals != null ? formatPrice(Number(raw) / 10 ** decimals, { grouping: true }) : raw;
+
+  return (
+    <div className="vault-card">
+      <div className="vault-card__head">External account</div>
+      <div className="vault-kv">
+        <div className="vault-kv__row">
+          <span>Account</span>
+          <span title={vault.externalAccount}>{shortHex(vault.externalAccount)}</span>
+        </div>
+        <div className="vault-kv__row">
+          <span>Outstanding exposure</span>
+          <span>
+            {toDisplay(vault.externalExposure)} {symbol}
+          </span>
+        </div>
+        <div className="vault-kv__row">
+          <span>Latest posted equity</span>
+          <span>
+            {vault.latestExternalEquity != null
+              ? `${toDisplay(vault.latestExternalEquity)} ${symbol}`
+              : "—"}
+          </span>
+        </div>
+        <div className="vault-kv__row">
+          <span>Equity mark</span>
+          <span>
+            {vault.externalEquityUpdatedAtMs != null
+              ? fmtAgo(vault.externalEquityUpdatedAtMs)
+              : "never posted"}
+          </span>
+        </div>
+      </div>
+      <div className="vault-card__foot vault-prose__muted">
+        Funds released to this account trade off-vault; equity marks are posted
+        by the curator's keeper.
       </div>
     </div>
   );
