@@ -45,8 +45,8 @@ use tracing::{debug, info, warn};
 use protocol_types::PriceFeedId;
 use sui_tx::sui_client::SuiClientWrapper;
 use sui_tx::tx::appraisal::{
-    compose_appraisal, discover_holdings, pyth_assets_needed, AppraisalRefs, OptionBucketInfo,
-    PositionInfo, PriceLegs, VaultHoldings,
+    compose_appraisal, discover_holdings, pyth_assets_needed, AppraisalRefs, DbmLegInfo,
+    OptionBucketInfo, PositionInfo, PriceLegs, VaultHoldings,
 };
 use sui_tx::tx::pyth_update::PythHandles;
 use sui_tx::tx::{clock_arg, shared_object_arg, submit_ptb};
@@ -94,6 +94,10 @@ pub struct TradingVaultCtx {
     /// `hedge-reconciliation` thresholds (keeper config `[external]`).
     pub reconciliation_tolerance_bps: u64,
     pub equity_stale_alert_ms: u64,
+    /// Per-vault trustless DBM equity legs (`[external.dbm]`, SO-299
+    /// phase C): a listed vault's appraisal composes
+    /// `dbm_oracle::record{,_no_debt}` instead of `equity_oracle::record`.
+    pub dbm: BTreeMap<ObjectID, DbmLegInfo>,
 }
 
 /// Indexer view of a vault's external account, threaded into the tick.
@@ -376,6 +380,7 @@ fn refs_for(ctx: &TradingVaultCtx, vault_id: ObjectID) -> AppraisalRefs {
         equity_oracle_pkg: ctx.equity_oracle_pkg,
         equity_book_id: ctx.equity_book_id,
         vol_book_id: ctx.vol_book_id,
+        dbm: ctx.dbm.get(&vault_id).cloned(),
     }
 }
 
@@ -1171,8 +1176,9 @@ async fn fulfill(
     let mut pt = ProgrammableTransactionBuilder::new();
 
     // Option-coin types price via the options oracle; only the remaining
-    // (underlying/settlement/plain) types need pyth feeds.
-    let needed = pyth_assets_needed(holdings, option_buckets);
+    // (underlying/settlement/plain) types need pyth feeds — plus the DBM
+    // equity leg's base/quote for a dbm-configured vault.
+    let needed = pyth_assets_needed(holdings, option_buckets, refs.dbm.as_ref());
     let appraisal = if needed.is_empty() {
         compose_appraisal(client, &mut pt, &refs, holdings, None, option_buckets).await?
     } else {
@@ -1365,6 +1371,38 @@ pub async fn build_ctx(
             (None, None) => None,
         }
     };
+    // Trustless DBM equity legs (SO-299 phase C): per-vault manager
+    // identity from `[external.dbm]`, package from the snapshot. Config
+    // without a deployed dbm-oracle package is a boot error — the listed
+    // vault's appraisals could never complete.
+    let mut dbm: BTreeMap<ObjectID, DbmLegInfo> = BTreeMap::new();
+    if !external.dbm.is_empty() {
+        let dbm_oracle_pkg = snapshot
+            .dbm_oracle()
+            .map(|p| p.package())
+            .transpose()?
+            .context("[external.dbm] configured but token-info has no dbm_oracle package")?;
+        for (k, v) in &external.dbm {
+            let vault = ObjectID::from_hex_literal(k)
+                .with_context(|| format!("[external.dbm] bad vault id {k:?}"))?;
+            let id = |field: &str, s: &str| -> Result<ObjectID> {
+                ObjectID::from_hex_literal(s)
+                    .with_context(|| format!("[external.dbm.{k}] bad {field} {s:?}"))
+            };
+            dbm.insert(
+                vault,
+                DbmLegInfo {
+                    dbm_oracle_pkg,
+                    margin_manager_id: id("margin_manager_id", &v.margin_manager_id)?,
+                    deepbook_pool_id: id("deepbook_pool_id", &v.deepbook_pool_id)?,
+                    base_margin_pool_id: id("base_margin_pool_id", &v.base_margin_pool_id)?,
+                    quote_margin_pool_id: id("quote_margin_pool_id", &v.quote_margin_pool_id)?,
+                    base_type: protocol_types::asset::canonicalize_move_type(&v.base_type),
+                    quote_type: protocol_types::asset::canonicalize_move_type(&v.quote_type),
+                },
+            );
+        }
+    }
     let equity_source: Box<dyn VenueEquitySource> = if external.equity_posts.is_empty() {
         Box::new(crate::venue_equity::Disabled)
     } else {
@@ -1408,5 +1446,6 @@ pub async fn build_ctx(
         vol_window_days,
         reconciliation_tolerance_bps: external.reconciliation_tolerance_bps,
         equity_stale_alert_ms: external.equity_stale_alert_ms,
+        dbm,
     }))
 }

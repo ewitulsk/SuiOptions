@@ -32,6 +32,9 @@ sui-sdk = { workspace = true }
 sui-json-rpc-types = { workspace = true }
 # StructTag for the swap-auction event filter (onchain_swap discovery).
 move-core-types = { workspace = true }
+# DBM hedge venue: multisig tx ceremony through hedge-signer (SO-299).
+shared-crypto = { workspace = true }
+base64 = "0.22"
 
 # Async / WS
 tokio = { workspace = true }

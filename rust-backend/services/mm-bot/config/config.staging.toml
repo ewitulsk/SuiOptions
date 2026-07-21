@@ -65,6 +65,27 @@ enabled = false
 # Hedge venues: omit for the single legacy paper venue; declare
 # [[desk.hedge.venues]] entries (kind = "paper", name, slippage_bps,
 # funding_rate_annual) for multi-venue monitoring — see config.toml.
+#
+# DeepBook-Margin venue (SO-299 phase C) — live testnet ids from
+# docs/mm-bot-v2/04 Phase 0 findings. Fill in the manager (created by the
+# multisig at bring-up), the Pyth PriceInfoObjects, the hedge-signer URL
+# and the 2-of-2 address to go live; without signer_url + multisig_address
+# the venue is read-only (position/borrow-APR/headroom monitoring).
+# [[desk.hedge.venues]]
+# kind                = "deepbook_margin"
+# name                = "dbm"
+# margin_package      = "0xd6a42f4df4db73d68cbeb52be66698d2fe6a9464f45ad113ca52b0c6ebd918b6"
+# margin_registry_id  = "0x48d7640dfae2c6e9ceeada197a7a1643984b5a24c55a0c6c023dac77e0339f75"
+# deepbook_pool_id    = "0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5"  # SUI/DBUSDC
+# base_margin_pool_id = "0xcdbbe6a72e639b647296788e2e4b1cac5cea4246028ba388ba1332ff9a382eea"  # SUI
+# quote_margin_pool_id = "0xf08568da93834e1ee04f09902ac7b1e78d3fdf113ab4d2106c7265e95318b14d" # DBUSDC
+# base_type           = "0x2::sui::SUI"
+# quote_type          = "0x..."   # DBUSDC coin type
+# margin_manager_id   = "0x..."   # created by the multisig at bring-up
+# base_price_info_id  = "0x..."   # Pyth PriceInfoObject, SUI/USD (testnet beta feed)
+# quote_price_info_id = "0x..."   # Pyth PriceInfoObject, USDC/USD
+# signer_url          = "http://hedge-signer:9017"
+# multisig_address    = "0x..."   # the 2-of-2 external account
 
 # ── Testnet counterparty sim (SO-299) ──────────────────────────────────
 # Retail stand-in: opens covered-call RFQ auctions (the desk's auction
