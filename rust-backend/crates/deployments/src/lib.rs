@@ -253,6 +253,10 @@ pub struct TradingVaultObjectsInfo {
     /// Absent on records written before the equity-oracle publish step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equity_book_id: Option<String>,
+    /// Shared `VolBook` created by the options-adapter publish (premium
+    /// mark-to-market). Absent on records written before that step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vol_book_id: Option<String>,
     pub activation_digest: String,
 }
 
@@ -277,6 +281,12 @@ impl TradingVaultObjectsInfo {
         self.equity_book_id
             .as_deref()
             .map(|s| ObjectID::from_str(s).context("parsing equityBookId"))
+            .transpose()
+    }
+    pub fn vol_book(&self) -> Result<Option<ObjectID>> {
+        self.vol_book_id
+            .as_deref()
+            .map(|s| ObjectID::from_str(s).context("parsing volBookId"))
             .transpose()
     }
 }

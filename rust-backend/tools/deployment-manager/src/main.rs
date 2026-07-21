@@ -419,6 +419,7 @@ async fn deploy_one(
             &trading_vault_out.digest,
             &oracle_pyth_out.digest,
             &deepbook_adapter_out.digest,
+            &options_adapter_out.digest,
             &equity_oracle_out.digest,
         )
         .await
@@ -447,6 +448,7 @@ async fn deploy_one(
             pyth_feed_registry_id: objects.pyth_feed_registry_id.to_string(),
             pool_allowlist_id: objects.pool_allowlist_id.to_string(),
             equity_book_id: objects.equity_book_id.to_string(),
+            vol_book_id: objects.vol_book_id.to_string(),
             activation_digest,
         })
     };

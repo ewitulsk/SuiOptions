@@ -84,6 +84,13 @@ pub struct TradingVaultCtx {
     pub equity_book_id: Option<ObjectID>,
     /// Venue equity source feeding the poster crank.
     pub equity_source: Box<dyn VenueEquitySource>,
+    /// options-adapter's shared `VolBook` (premium marks, SO-299
+    /// follow-up); `None` where undiscoverable — option-coin marks stay
+    /// intrinsic-only and the vol crank skips.
+    pub vol_book_id: Option<ObjectID>,
+    /// oracle-service client + realized-vol window for the vol crank.
+    pub oracle: oracle_client::OracleClient,
+    pub vol_window_days: u32,
     /// `hedge-reconciliation` thresholds (keeper config `[external]`).
     pub reconciliation_tolerance_bps: u64,
     pub equity_stale_alert_ms: u64,
@@ -248,6 +255,7 @@ pub async fn tick(wrap: &SuiClientWrapper, http: &reqwest::Client, indexer: &Ind
         }
         _ => None,
     };
+    post_vols(wrap, ctx, now_ms).await;
     for v in vaults {
         if v.state == "closed" && v.pending_withdrawals == 0 {
             continue;
@@ -295,6 +303,8 @@ fn classify_and_log(vault_id: ObjectID, e: &anyhow::Error) {
     // aborts so an unrelated code-3 abort still alerts. E_STALE (5) and
     // E_NOT_POSTER (1) stay alerting.
     let equity_race = msg.contains("equity_oracle") && msg.contains(", 3)");
+    // vol_book E_TOO_SOON (3): same min-interval race shape.
+    let vol_race = msg.contains("vol_book") && msg.contains(", 3)");
     // Bid-ticket cranks (SO-299) losing races: still the best bidder when
     // a donated look-alike coin was fed in (options_adapter
     // E_STILL_BEST_BIDDER, 10), ticket already burned by a racing cranker
@@ -303,7 +313,7 @@ fn classify_and_log(vault_id: ObjectID, e: &anyhow::Error) {
     let bid_ticket_race = (msg.contains("options_adapter") && msg.contains(", 10)"))
         || (msg.contains("vault") && msg.contains(", 86)"))
         || msg.contains("not available for consumption");
-    if benign.iter().any(|b| msg.contains(b)) || equity_race || bid_ticket_race {
+    if benign.iter().any(|b| msg.contains(b)) || equity_race || vol_race || bid_ticket_race {
         debug!(vault = %vault_id, error = %msg, "trading-vault crank lost a race; next tick");
     } else {
         tracing::error!(
@@ -365,7 +375,138 @@ fn refs_for(ctx: &TradingVaultCtx, vault_id: ObjectID) -> AppraisalRefs {
         pyth_feed_registry_id: ctx.pyth_feed_registry_id,
         equity_oracle_pkg: ctx.equity_oracle_pkg,
         equity_book_id: ctx.equity_book_id,
+        vol_book_id: ctx.vol_book_id,
     }
+}
+
+/// Crank 7: step VolBook entries toward oracle-service realized vol,
+/// within the on-chain guardrails (mirrors the equity crank). Only
+/// admin-seeded underlyings move; the keeper wallet must be an
+/// allowlisted poster (`vol_book::add_poster`). Runs once per tick over
+/// the token catalog.
+async fn post_vols(wrap: &SuiClientWrapper, ctx: &TradingVaultCtx, now_ms: u64) {
+    let Some(book_id) = ctx.vol_book_id else { return };
+    if ctx.feeds.is_empty() {
+        return;
+    }
+    let client = &wrap.client;
+    let (min_interval_ms, max_delta_bps, entries_table) =
+        match vol_book_meta(client, book_id).await {
+            Ok(m) => m,
+            Err(e) => {
+                debug!(error = %format!("{e:#}"), "VolBook unreadable; no vol posts this tick");
+                return;
+            }
+        };
+    for (coin_type, feed) in &ctx.feeds {
+        let result: Result<()> = async {
+            // Only seeded underlyings are postable; a zero entry cannot
+            // be moved by a poster (admin re-seed required).
+            let Some((previous, updated_at)) =
+                vol_entry(client, entries_table, coin_type).await?
+            else {
+                return Ok(());
+            };
+            if previous == 0 {
+                debug!(underlying = %coin_type, "vol entry is zero; admin seed_vol required");
+                return Ok(());
+            }
+            if now_ms.saturating_sub(updated_at) < min_interval_ms {
+                return Ok(());
+            }
+            let sigma = match ctx.oracle.realized_vol(*feed, ctx.vol_window_days).await {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!(underlying = %coin_type, error = %format!("{e:#}"), "realized vol unavailable; skipping post");
+                    return Ok(());
+                }
+            };
+            if !(sigma.is_finite() && sigma > 0.0) {
+                return Ok(());
+            }
+            let target = (sigma * 10_000.0).round() as u64;
+            let clamped = clamp_step(previous, target, max_delta_bps);
+            if clamped == previous {
+                return Ok(());
+            }
+            let mut pt = ProgrammableTransactionBuilder::new();
+            let book = pt.obj(shared_object_arg(client, book_id, true).await?)?;
+            let tag = TypeTag::from_str(coin_type)
+                .with_context(|| format!("parsing underlying type {coin_type}"))?;
+            let underlying = pt.programmable_move_call(
+                ObjectID::from_hex_literal("0x1").unwrap(),
+                Identifier::new("type_name").unwrap(),
+                Identifier::new("with_defining_ids").unwrap(),
+                vec![tag],
+                vec![],
+            );
+            let amount = pt.pure(clamped)?;
+            let clock = clock_arg(&mut pt)?;
+            pt.programmable_move_call(
+                ctx.options_adapter_pkg
+                    .ok_or_else(|| anyhow!("options_adapter package unresolved"))?,
+                Identifier::new("vol_book").unwrap(),
+                Identifier::new("post_vol").unwrap(),
+                vec![],
+                vec![book, underlying, amount, clock],
+            );
+            submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, "vol_book::post_vol").await?;
+            info!(underlying = %coin_type, previous, posted = clamped, target, "realized vol posted");
+            Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            classify_and_log(book_id, &e);
+        }
+    }
+}
+
+/// The VolBook's poster guardrails + entries table id:
+/// (min_interval_ms, max_delta_bps, entries table).
+async fn vol_book_meta(client: &SuiClient, book_id: ObjectID) -> Result<(u64, u64, ObjectID)> {
+    let min_interval = as_u64(&json_field(client, book_id, "/fields/min_interval_ms").await?)
+        .ok_or_else(|| anyhow!("VolBook min_interval_ms unreadable"))?;
+    let max_delta = as_u64(&json_field(client, book_id, "/fields/max_delta_bps").await?)
+        .ok_or_else(|| anyhow!("VolBook max_delta_bps unreadable"))?;
+    let table = json_field(client, book_id, "/fields/entries/fields/id/id").await?;
+    let table_id = table
+        .as_str()
+        .and_then(|s| ObjectID::from_hex_literal(s).ok())
+        .ok_or_else(|| anyhow!("VolBook entries table id unreadable"))?;
+    Ok((min_interval, max_delta, table_id))
+}
+
+/// One VolBook entry `(vol_bps, updated_at_ms)`, or `None` when the
+/// underlying was never seeded. The table is keyed by
+/// `0x1::type_name::TypeName`, whose `name` is the canonical type
+/// WITHOUT the `0x` prefix.
+async fn vol_entry(
+    client: &SuiClient,
+    entries_table: ObjectID,
+    canonical_type: &str,
+) -> Result<Option<(u64, u64)>> {
+    use sui_types::dynamic_field::DynamicFieldName;
+    let name = canonical_type.trim_start_matches("0x");
+    let resp = client
+        .read_api()
+        .get_dynamic_field_object(
+            entries_table,
+            DynamicFieldName {
+                type_: TypeTag::from_str("0x1::type_name::TypeName").expect("static type tag"),
+                value: serde_json::json!({ "name": name }),
+            },
+        )
+        .await
+        .context("reading VolBook entry")?;
+    let Some(data) = resp.data else {
+        return Ok(None);
+    };
+    let vol = as_u64(&json_field(client, data.object_id, "/fields/value/fields/vol_bps").await?)
+        .ok_or_else(|| anyhow!("VolBook entry vol_bps unreadable"))?;
+    let at =
+        as_u64(&json_field(client, data.object_id, "/fields/value/fields/updated_at_ms").await?)
+            .ok_or_else(|| anyhow!("VolBook entry updated_at_ms unreadable"))?;
+    Ok(Some((vol, at)))
 }
 
 async fn json_field(client: &SuiClient, id: ObjectID, pointer: &str) -> Result<Value> {
@@ -1141,6 +1282,8 @@ pub async fn build_ctx(
     hermes_url: String,
     pyth: PythHandles,
     external: &crate::config::ExternalConfig,
+    oracle: oracle_client::OracleClient,
+    vol_window_days: u32,
 ) -> Result<Option<TradingVaultCtx>> {
     let Some(tv) = snapshot.trading_vault() else { return Ok(None) };
     let Some(op) = snapshot.oracle_pyth() else { return Ok(None) };
@@ -1203,6 +1346,25 @@ pub async fn build_ctx(
         }
         None => (None, None),
     };
+    // VolBook (premium marks): recorded id first, publish-effects scrape
+    // as the fallback for pre-record deployments.
+    let vol_book_id = {
+        let recorded = snapshot
+            .trading_vault_objects()
+            .map(|o| o.vol_book())
+            .transpose()?
+            .flatten();
+        match (recorded, snapshot.options_adapter()) {
+            (Some(id), _) => Some(id),
+            (None, Some(oa)) => {
+                created_of_types(client, &oa.publish_digest, &["vol_book::VolBook"])
+                    .await
+                    .ok()
+                    .and_then(|m| m.get("vol_book::VolBook").copied())
+            }
+            (None, None) => None,
+        }
+    };
     let equity_source: Box<dyn VenueEquitySource> = if external.equity_posts.is_empty() {
         Box::new(crate::venue_equity::Disabled)
     } else {
@@ -1241,6 +1403,9 @@ pub async fn build_ctx(
         equity_oracle_pkg,
         equity_book_id,
         equity_source,
+        vol_book_id,
+        oracle,
+        vol_window_days,
         reconciliation_tolerance_bps: external.reconciliation_tolerance_bps,
         equity_stale_alert_ms: external.equity_stale_alert_ms,
     }))

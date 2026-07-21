@@ -43,6 +43,7 @@ pub struct TradingVaultObjects {
     pub pyth_feed_registry_id: ObjectID,
     pub pool_allowlist_id: ObjectID,
     pub equity_book_id: ObjectID,
+    pub vol_book_id: ObjectID,
 }
 
 /// Pull one publish tx's created objects and index them by
@@ -84,11 +85,13 @@ pub async fn resolve_objects(
     trading_vault_digest: &str,
     oracle_pyth_digest: &str,
     deepbook_adapter_digest: &str,
+    options_adapter_digest: &str,
     equity_oracle_digest: &str,
 ) -> Result<TradingVaultObjects> {
     let tv = created_by_type(client, trading_vault_digest).await?;
     let op = created_by_type(client, oracle_pyth_digest).await?;
     let dba = created_by_type(client, deepbook_adapter_digest).await?;
+    let oa = created_by_type(client, options_adapter_digest).await?;
     let eo = created_by_type(client, equity_oracle_digest).await?;
     let pick = |map: &BTreeMap<String, ObjectID>, key: &str| {
         map.get(key)
@@ -102,6 +105,7 @@ pub async fn resolve_objects(
         pyth_feed_registry_id: pick(&op, "oracle_pyth::PythFeedRegistry")?,
         pool_allowlist_id: pick(&dba, "deepbook_adapter::PoolAllowlist")?,
         equity_book_id: pick(&eo, "equity_oracle::EquityBook")?,
+        vol_book_id: pick(&oa, "vol_book::VolBook")?,
     })
 }
 

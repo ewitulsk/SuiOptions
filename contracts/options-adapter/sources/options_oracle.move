@@ -25,6 +25,15 @@
 /// The attestation's timestamp is the OLDEST input leg (the freshness
 /// backstop sees the weakest link); legs equal to the quote asset are
 /// 1:1 and contribute the current chain time.
+///
+/// Premium mark-to-market (SO-299 follow-up): on top of intrinsic, a
+/// BOUNDED time-value term prices the optionality when the `VolBook`
+/// carries a fresh keeper-posted vol for the underlying —
+/// Brenner–Subrahmanyam at the money (0.4·S·σ·√T), decayed
+/// hyperbolically away from the money, capped at the no-arbitrage
+/// bound (call ≤ spot, put ≤ strike). No vol posted (or stale) means
+/// extrinsic 0 — exactly the historical intrinsic-only mark; appraisals
+/// never wedge on the vol path.
 module options_adapter::options_oracle;
 
 use std::type_name::{Self, TypeName};
@@ -32,6 +41,8 @@ use sui::clock::Clock;
 
 use options_core::bucket::{Self, Bucket};
 use options_core::put_bucket::{Self, PutBucket};
+
+use options_adapter::vol_book::{Self, VolBook};
 
 use trading_vault::price::{Self, PriceAttestation};
 use trading_vault::registry::OracleRegistry;
@@ -44,6 +55,8 @@ const E_PRICE_OVERFLOW: u64 = 4;
 /// The dust floor for worthless coins (`price::attest` requires > 0).
 const DUST_PRICE: u128 = 1;
 
+const YEAR_MS: u128 = 31_536_000_000; // 365d
+
 /// Witness minted only by this module; allowlist in `OracleRegistry`.
 public struct OptionsOracle has drop {}
 
@@ -53,6 +66,7 @@ public struct OptionsOracle has drop {}
 public fun attest_call<U, S, C, Q>(
     reg: &OracleRegistry,
     bucket: &Bucket<U, S, C>,
+    vol: &VolBook,
     underlying_att: Option<PriceAttestation>,
     settlement_att: Option<PriceAttestation>,
     clock: &Clock,
@@ -66,8 +80,13 @@ public fun attest_call<U, S, C, Q>(
     let (price_u, ts_u) = leg_price<U>(q, underlying_att, now);
     let (price_s, ts_s) = leg_price<S>(q, settlement_att, now);
     let strike_leg = strike_in_quote(bucket::strike(bucket), bucket::strike_scale(bucket), price_s);
-    let intrinsic = if (price_u > strike_leg) { price_u - strike_leg } else { DUST_PRICE };
-    price::attest(OptionsOracle {}, reg, c, q, intrinsic.max(DUST_PRICE), ts_u.min(ts_s))
+    let intrinsic = if (price_u > strike_leg) { price_u - strike_leg } else { 0 };
+    let vol_bps = vol_book::current_vol_bps(vol, type_name::with_defining_ids<U>(), clock);
+    let extrinsic =
+        extrinsic_in_quote(vol_bps, price_u, strike_leg, bucket::expiry_ms(bucket) - now);
+    // No-arbitrage bound: a call is never worth more than the underlying.
+    let value = (intrinsic + extrinsic).min(price_u);
+    price::attest(OptionsOracle {}, reg, c, q, value.max(DUST_PRICE), ts_u.min(ts_s))
 }
 
 /// Put twin: intrinsic = max(strike_leg − spot, dust). The holder must
@@ -75,6 +94,7 @@ public fun attest_call<U, S, C, Q>(
 public fun attest_put<U, S, P, Q>(
     reg: &OracleRegistry,
     bucket: &PutBucket<U, S, P>,
+    vol: &VolBook,
     underlying_att: Option<PriceAttestation>,
     settlement_att: Option<PriceAttestation>,
     clock: &Clock,
@@ -89,8 +109,13 @@ public fun attest_put<U, S, P, Q>(
     let (price_s, ts_s) = leg_price<S>(q, settlement_att, now);
     let strike_leg =
         strike_in_quote(put_bucket::strike(bucket), put_bucket::strike_scale(bucket), price_s);
-    let intrinsic = if (strike_leg > price_u) { strike_leg - price_u } else { DUST_PRICE };
-    price::attest(OptionsOracle {}, reg, p, q, intrinsic.max(DUST_PRICE), ts_u.min(ts_s))
+    let intrinsic = if (strike_leg > price_u) { strike_leg - price_u } else { 0 };
+    let vol_bps = vol_book::current_vol_bps(vol, type_name::with_defining_ids<U>(), clock);
+    let extrinsic =
+        extrinsic_in_quote(vol_bps, price_u, strike_leg, put_bucket::expiry_ms(bucket) - now);
+    // No-arbitrage bound: a put is never worth more than its strike.
+    let value = (intrinsic + extrinsic).min(strike_leg);
+    price::attest(OptionsOracle {}, reg, p, q, value.max(DUST_PRICE), ts_u.min(ts_s))
 }
 
 // ═══════════════════════════════ internals ═══════════════════════════════
@@ -127,7 +152,41 @@ fun strike_in_quote(strike: u128, strike_scale: u8, price_s: u128): u128 {
     v as u128
 }
 
+/// Bounded time value per raw unit in `Q` at 1e12 scale:
+/// 0.4·S·σ·√T at the money (Brenner–Subrahmanyam), decayed
+/// hyperbolically away from the money —
+/// `atm · base / (base + 2·|S − K|)` with `base = min(S, K)` — and 0
+/// whenever no fresh vol is posted. σ enters as annualized bps, √T in
+/// 1e4 fixed point.
+fun extrinsic_in_quote(vol_bps: u64, price_u: u128, strike_leg: u128, tt_ms: u64): u128 {
+    if (vol_bps == 0 || price_u == 0 || strike_leg == 0) {
+        return 0
+    };
+    // √(T years) in 1e4 fixed point: sqrt(tt_ms·1e8 / YEAR_MS).
+    let sqrt_t = ((tt_ms as u128) * 100_000_000 / YEAR_MS).sqrt();
+    // 0.4 = 2/5; vol_bps and sqrt_t each carry 1e4.
+    let atm = (price_u as u256) * (vol_bps as u256) * (sqrt_t as u256) * 2 / 5 / 100_000_000;
+    let (base, diff) = if (price_u > strike_leg) {
+        ((strike_leg as u256), ((price_u - strike_leg) as u256))
+    } else {
+        ((price_u as u256), ((strike_leg - price_u) as u256))
+    };
+    let v = atm * base / (base + 2 * diff);
+    assert!(v <= (std::u128::max_value!() as u256), E_PRICE_OVERFLOW);
+    v as u128
+}
+
 #[test_only]
 public fun strike_in_quote_for_testing(strike: u128, strike_scale: u8, price_s: u128): u128 {
     strike_in_quote(strike, strike_scale, price_s)
+}
+
+#[test_only]
+public fun extrinsic_in_quote_for_testing(
+    vol_bps: u64,
+    price_u: u128,
+    strike_leg: u128,
+    tt_ms: u64,
+): u128 {
+    extrinsic_in_quote(vol_bps, price_u, strike_leg, tt_ms)
 }
