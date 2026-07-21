@@ -5499,6 +5499,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
+ "indexer-graphql",
  "metrics",
  "move-core-types",
  "move-publish",
@@ -5530,7 +5531,7 @@ dependencies = [
  "anyhow",
  "clap",
  "mm-bot",
- "protocol-types",
+ "pricing",
 ]
 
 [[package]]

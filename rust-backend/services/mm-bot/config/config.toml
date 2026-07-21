@@ -1,203 +1,179 @@
-# Market-maker bot config.
+# Market-maker bot config — the vol desk (SO-299).
 #
-# Everything chain-side (package, ProtocolConfig, Treasury, test-token
-# package, per-symbol faucets, coin types) is resolved from
-# `deployments.json` at boot. This file controls the bot's *behaviour*:
-# what pair to quote on, its pricing inputs, and what it advertises to
-# the quoting service.
+# Everything chain-side (packages, objects, coin types, faucets) is
+# resolved from token-info at boot. This file controls the bot's
+# *behaviour*: what pairs it serves, the desk's risk parameters, and what
+# it advertises to the quoting service.
 #
 # Secrets live in `secrets.toml` ([sui] for gas, [mm_bot].quote_key for
 # the Quote signing key).
 
-# Sui network: selects the deployments.json slot, the [sui].<network>
-# secret slot, and the Sui RPC URL. One of: mainnet / testnet / devnet.
+# Sui network: selects the deployments slot, the [sui].<network> secret
+# slot, and the Sui RPC URL. One of: mainnet / testnet / devnet.
 network            = "testnet"
 
 quoting_url        = "ws://127.0.0.1:9002/"
 
-# Signature scheme this MM uses for both the WS auth challenge and every
-# Quote. The chain's `Account.signing_scheme` must hold the same tag; if
-# they diverge, every quote reverts with `quote_signature_invalid`.
+# Signature scheme for both the WS auth challenge and every Quote.
 # One of: "ed25519" / "secp256k1" / "secp256r1".
 signing_scheme     = "ed25519"
 
-# --- Collateral routing (collateral abstraction, plan 04 §8) -----------
-# Core holds no MM funds: each MM publishes its own mm_collateral package
-# (`mm-bot deploy-collateral`) and its quotes carry the routing INSIDE the
-# signed payload. When these are unset, the bot reads the state file the
-# deploy-collateral subcommand writes
-# (services/mm-bot/config/collateral.<network>.toml).
+# --- Collateral routing chassis ----------------------------------------
+# Each MM publishes its own mm_collateral package (`mm-bot
+# deploy-collateral`); the account backs the signer bootstrap funding.
+# NOTE: the desk's QUOTES no longer route here — they release collateral
+# from the trading vault ([desk] below, `vault_mm`).
 # collateral_package = "0x..."
 # collateral_account = "0x..."
-# release_module     = "mm_collateral"
 
-
-# Pair to make markets on. Must exist under
-# `deployments.testTokens.tokens.<SYMBOL>`, and each entry there must
-# carry a `pythFeedId` — the bot pulls live USD prices for both legs and
-# computes the cross + scale into the bucket's on-chain units.
+# Pairs. `underlying_symbols` empty/unset ⇒ derive mode (every enabled
+# token-info token with a Pyth feed; watcher restarts on new listings).
 underlying_symbols = ["TBTC", "TWAL"]
 settlement_symbol  = "TUSDC"
 
-# Annualized risk-free rate. Protocol convention is r = 0 (settlement is a
-# stablecoin with no funded rate leg), which keeps fair value identical
-# across the keeper, api-service, vault-sim, and this bot. Note r > 0 also
-# reintroduces the American-put early-exercise premium that European
-# Black-Scholes doesn't model (see crates/pricing).
+# Annualized risk-free rate. Protocol convention is r = 0.
 rate               = 0.0
 
-# How long the bot's signed quotes stay valid.
+# How long the bot's signed quotes stay valid (also the premium
+# reservation TTL).
 quote_ttl_ms       = 30_000
 
-# Two-sided spread. The primary spread is in VOL space — the ask leg prices
-# at sigma × ask_vol_markup, the bid leg at sigma × bid_vol_markdown — so the
-# spread scales with the vega being warehoused. The bps knobs are the
-# *minimum* premium-space spread, all that separates the sides deep ITM where
-# vega ≈ 0.
-ask_markup_bps     = 100
-bid_markdown_bps   = 100
-ask_vol_markup     = 1.10
-bid_vol_markdown   = 0.90
-
-# Last-look charge: a signed quote is a free 30s option for the taker (they
-# execute only when the market moved their way during the TTL). Charge the
-# expected favorable move — mult × |delta|·spot·sigma·√(ttl_years) — on the
-# ask, and shade it off the bid. 0.0 disables.
-ttl_charge_mult    = 1.0
-
-# Extra vol widening while quoting on the fallback sigma (vol buffer still
-# cold): ask sigma ×= this, bid sigma ÷= this. 1.0 disables.
-fallback_vol_penalty = 1.25
-
-# Size awareness. max_quote_notional caps any single RFQ's notional
-# (spot x write_amount, settlement smallest-units); 0 = no cap. Size
-# widening adds size_widening_vol of proportional vol spread per
-# size_ref_notional of notional, so big clips pay for the inventory they
-# move. 100_000_000_000 = 100k TUSDC at 6 decimals.
-max_quote_notional = 0
-size_widening_vol  = 0.10
-size_ref_notional  = 100_000_000_000
-
-
-# Both roles by default; a single Account can serve writer + trader.
+# Both roles by default; writer_mm only matters once [desk.v2] is on.
 roles = ["trader_mm", "writer_mm"]
 
 # Answer unsigned bulk-view RFQs (indicative premiums for the frontend's
-# tiles). Priced with the same model as signed RFQs but never signed — no
-# nonce is consumed and nothing reaches the chain. Defaults to false.
+# tiles). Priced by the desk but never signed and never reserved.
 bulk_view_enabled = true
 
-# Settlement deposited into the freshly-bootstrapped Account on first run
-# so it can pay premiums right away (Trader-MM / bid side). In TUSDC
-# smallest-units.
+# First-run bootstrap funding of the MM's own CollateralAccount (chassis).
 bootstrap_settlement_amount = 1_000_000_000_000
-
-# Underlying deposited into the freshly-bootstrapped Account on first run so it
-# can write calls to retail traders (Writer-MM / ask side). In TBTC
-# smallest-units.
 bootstrap_underlying_amount = 100_000_000_000
 
-# Background inventory top-up (Writer-MM side): when the Account's underlying
-# balance falls below `underlying_replenish_threshold`, mint+deposit
-# `underlying_replenish_amount` more via the test faucet. Set the threshold to
-# 0 to disable. `underlying_replenish_interval_secs` is how often we check.
+# Background inventory top-up (chassis). Threshold 0 disables.
 underlying_replenish_threshold    = 20_000_000_000
 underlying_replenish_amount       = 100_000_000_000
 underlying_replenish_interval_secs = 60
-# Optional: where minted call tokens / position NFTs should land. Leave
-# unset to derive from the Sui wallet key.
-# token_recipient = "0xabc..."
 
-# Strike-dependent vol (see crates/pricing smile.rs): sigma(K) = sigma_atm x
-# (1 + skew*z + convexity*z^2), z = ln(K/S)/(sigma_atm*sqrt(tau)). Flat (0/0)
-# until calibrated from observed quotes; positive skew richens the upside
-# wing, positive convexity richens both wings. Per-symbol overrides:
-#   [smiles.TBTC]
-#   skew = 0.05
-[smile]
-skew      = 0.0
-convexity = 0.0
-
-
-# Live prices come from oracle-service (--oracle-url / ORACLE_URL, default
-# http://127.0.0.1:9013). All fields are optional — these are the defaults
-# from `PythConfig::default()` written out explicitly so the knobs are
-# discoverable.
+# Live prices come from oracle-service (--oracle-url / ORACLE_URL).
 [pyth]
-# Reject an RFQ if our last *observation* of either price is older than
-# this. Catches a wedged or disconnected oracle WS stream.
 max_price_age_ms       = 5_000
-# Reject if Pyth's publisher timestamp is older than this. Catches the
-# case where the stream is alive but Pyth itself isn't publishing.
 max_publish_lag_ms     = 10_000
-# Reject if either feed's Pyth confidence interval exceeds this many bps of
-# its price — fresh-but-unsure feeds are when quotes get picked off. 0 = off;
-# observe conf/price on our feeds before enabling.
+# Pyth confidence gate, bps of price; 0 = off.
 max_conf_bps           = 0
-# Short rolling window for realized vol; the quoted sigma is
-# max(short, long) so one calm day can't undercut the trailing week.
+# Short + long realized-vol windows feeding the desk's vol surface.
 vol_window_hours       = 24
 vol_long_window_hours  = 168
-# Live-cache sample cadence into the vol buffers. Annualization uses the
-# samples' actual timestamps, so skipped ticks don't bias sigma. 5-minute
-# sampling: 1-minute bars mostly measure oracle jitter, not diffusion.
 vol_sample_interval_ms = 300_000
-# Sigma used until the buffer has enough samples, then live takes over.
-# Per-symbol overrides below; this is the default for anything unlisted.
 fallback_vol           = 0.6
 [pyth.fallback_vols]
 TBTC = 0.45
 TWAL = 1.0
 
-# DeepBook quoting (SO-158). Off by default for local runs — flip on once
-# the local stack serves deepbook ids from token-info.
-[deepbook]
-enabled = false
+# ── The vol desk (SO-299) ───────────────────────────────────────────────
+# V1: delta-hedged long-vol fund — buys retail's covered calls (WS RFQs +
+# on-chain auctions), paper-hedges delta on bands, runs the exit ladder
+# (resale → hold → automated/flash exercise), monitors + nightly stress.
+# V2 (two-sided writing) stays behind [desk.v2].
+#
+# VAULT-ONLY MAKER: the bot trades exclusively as the trading vault's
+# curator. Quotes release collateral from the vault (`vault_mm`); all
+# outputs (positions, option coins, exit proceeds) land at the vault
+# address. The desk refuses to boot without vault_id and the
+# mm_release_enabled attestation (curator must have toggled the vault's
+# vault_mm release path ON).
+#
+# All [desk.*] knobs default to the 00-plan starting parameters — only
+# the vault wiring is required.
+[desk]
+enabled            = false
+# vault_id           = "0x..."   # the TradingVault this desk curates
+# mm_release_enabled = true      # attestation: vault_mm toggled on-chain
+# expected_holding_years = 0.0575  # ~21d — hedge-cost horizon in the bid
+# pnl_jsonl_path = "services/mm-bot/state/desk-pnl.jsonl"
+# state_dir      = "services/mm-bot/state"
+# refresh_secs   = 60
+# Per-underlying staking yield (BAW carry; drives early exercise):
+# [desk.carry_yields]
+# TSUI = 0.025
 
-# Trading-vault DeepBook quoting (SO-291): quote through a curated trading
-# vault's DeepBook custody (deepbook-adapter curator calls) instead of the
-# bot's own BalanceManager. Mutually exclusive with [deepbook] — if both are
-# enabled, vault mode wins. Cadence / sizing / batching knobs
-# (quote_interval_secs, quote_size, order_lifetime_secs, expiry_cutoff_secs,
-# max_pools_per_tx, gas_budget) are reused from the [deepbook] section above.
-# PREREQUISITE: the bot's Sui wallet must hold the vault's CuratorCap (every
-# adapter call takes it by reference), and the custody must be funded from
-# the vault's free balances out of band.
-# [trading_vault]
-# enabled        = true
-# # Shared TradingVault object id.
-# vault_id       = "0x..."
-# # The vault's CuratorCap object id (owned by this bot's wallet).
-# curator_cap_id = "0x..."
-# # DeepBookCustody position id. Leave empty on first run: the bot calls
-# # init_custody once at boot and logs the id — persist it here afterwards.
-# custody_id     = ""
+# [desk.surface]              # vol surface shaping
+# risk_premium = 0.05         # +5 vol pts over realized
+# skew = 0.0
+# convexity = 0.0
+# floor_vol = 0.10
+# cap_vol = 5.0
 
-# Testnet-only market simulator (SO-296). Rides ON the [deepbook] quoter
-# (which stays the maker): faucet-mints settlement for bids, SELF-WRITES
-# call inventory for asks (mint underlying -> bucket::write_collateralized;
-# Positions redeem after expiry), and runs a low-rate noise-taker loop from
-# a second BalanceManager so quotes actually fill. Hard-gated: refuses to
-# start unless network = testnet AND the token catalog has faucets. Sim
-# failures log at `warn` only — it never raises alert_ids.
+# [desk.v1]                   # bid discipline (vol pts are decimals)
+# base_spread_volpts = 0.05   # bid at fair − 5 vol pts
+# size_penalty_volpts_per_pct_nav = 0.01
+# size_penalty_quadratic_from_pct = 3.0
+# inventory_penalty_max_volpts = 0.10
+# inventory_penalty_start_util = 0.6
+# max_single_fill_pct_nav = 5.0
+
+# [desk.limits]
+# premium_budget_soft = 0.30
+# premium_budget_hard = 0.35
+# vega_cap_nav_per_volpt = 0.005
+# theta_soft_nav_per_day = 0.0010   # 10 bps
+# theta_hard_nav_per_day = 0.0015   # 15 bps
+# per_expiry_max = 0.30
+# per_strike_bucket_max = 0.15
+# kill_drawdown = 0.10              # stop new buys: NAV −10% in 7d
+# kill_window_days = 7.0
+
+# [desk.hedge]                # paper venue until a real one lands
+# band_pct_nav = 1.5
+# band_wide_pct_nav = 2.5
+# funding_widen_threshold = -0.25   # widen when shorts pay > 25%/yr
+# interval_secs = 30
+# paper_slippage_bps = 5.0
+# paper_funding_rate_annual = 0.0
+
+# [desk.auctions]             # on-chain RFQ channel (calls + puts)
+# enabled = true
+# poll_secs = 10
+# initial_bid = "reserve_plus"
+# max_concurrent_escrow = 5_000_000_000
+
+# [desk.exits]
+# enabled = true
+# tick_secs = 300
+# concession_volpts = 1.0     # resale accepts fair − 1 vol pt
+# carry_mult = 1.1            # exercise when carry > time value × 1.1
+# near_expiry_hours = 24.0
+# max_slice = 1_000_000_000   # flash-exercise ladder chunk
+# [desk.exits.spot_pools]     # UNDERLYING/SETTLEMENT pools for flash
+# TSUI = "0x..."
+
+# [desk.monitors]
+# interval_secs = 60
+# bleed_window_hours = 24.0
+# stress_interval_secs = 86_400
+# stress_max_drawdown = 0.25  # V2 gate
+
+# [desk.v2]                   # two-sided maker — OFF until ungated
+# enabled = false
+# base_spread_volpts = 0.03
+# vega_band_long = 0.005
+# vega_band_short = 0.0015
+# skew_k = -0.01              # negative: sell inventory when long
+# write_cap_pct_nav = 3.0
+# buy_cap_pct_nav = 5.0
+# near_expiry_hours = 48.0
+# near_expiry_spread_mult = 2.0
+# near_expiry_size_mult = 0.5
+# naked_vega_cap_nav_per_volpt = 0.001
+
+# ── Testnet counterparty sim (SO-299) ──────────────────────────────────
+# The desk's test counterparty: opens covered-call RFQ auctions as a
+# retail stand-in (faucet-minted underlying → rfq::create_call_auction)
+# and redeems expired wallet Positions. Hard-gated: testnet + faucets
+# only; never raises alert_ids.
 # [sim]
 # enabled = true
-# fund_interval_secs = 60
-# ask_refill_multiple = 4              # target ask inventory = quote_size x this
-# taker_enabled = true
-# taker_interval_secs = 45
-# taker_jitter_secs = 30
-# taker_size_lots = 1
-# taker_max_notional_per_hour = 5000000000
-# taker_balance_manager_id = ""        # created + logged at boot; persist here
-# Spot pools (lazy): list pairs and the sim will find-or-CREATE the pool on
-# the first liquidity deployment (creation costs pool_creation_fee vendored
-# DEEP from the bot wallet — fund it once or the pair is skipped with a
-# warning), then band it around the Pyth cross and include it in taker flow.
-# Freshly created pools still need an admin allow_pool to be tradeable by
-# vault curators (the sim itself trades them directly).
-# spot_pairs = ["TSUI/TUSDC", "TBTC/TUSDC", "TWAL/TUSDC"]
-# spot_interval_secs = 60
-# spot_band_bps = 200
-# spot_notional_per_side = 100000000
-# spot_balance_manager_id = ""
+# fund_interval_secs = 120
+# auction_amount = 100_000_000
+# auction_reserve_bps = 50    # reserve = 0.5% of slice spot notional
+# auction_duration_secs = 600
+# max_open_auctions = 3

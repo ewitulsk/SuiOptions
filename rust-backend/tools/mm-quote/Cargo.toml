@@ -9,8 +9,8 @@ name = "mm-quote"
 path = "src/main.rs"
 
 [dependencies]
-mm-bot         = { path = "../../services/mm-bot" }
-protocol-types = { workspace = true }
+mm-bot  = { path = "../../services/mm-bot" }
+pricing = { workspace = true }
 
 clap   = { workspace = true }
 anyhow = { workspace = true }

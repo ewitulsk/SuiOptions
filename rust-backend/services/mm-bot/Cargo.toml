@@ -22,6 +22,7 @@ oracle-client  = { workspace = true }
 pricing        = { workspace = true }
 token-info-client = { workspace = true }
 api-service-client = { workspace = true }
+indexer-graphql = { workspace = true }
 move-publish   = { workspace = true }
 
 # Sui SDK (used directly for derive token recipient from secret key).
