@@ -8,12 +8,19 @@ import { useCurrentAccount } from "@mysten/dapp-kit";
 import type { Transaction } from "@mysten/sui/transactions";
 
 import { useSubmitTransaction } from "../tx/submit";
-import { buildAppraisedDepositTx, type AppraisedDepositParams } from "../tx/appraisal";
+import {
+  buildAppraisedDepositTx,
+  buildReleaseExternalTx,
+  type AppraisedDepositParams,
+  type ReleaseExternalParams,
+} from "../tx/appraisal";
 import {
   buildCreateTradingVaultTx,
+  buildCuratorTakerSwapTx,
   buildTradingVaultDepositTx,
   buildTradingVaultWithdrawTx,
   type CreateTradingVaultParams,
+  type CuratorTakerSwapParams,
   type TradingVaultDepositParams,
   type TradingVaultWithdrawParams,
 } from "../tx/tradingVault";
@@ -49,6 +56,7 @@ export function useTradingVaultActions() {
     label: string,
     okMsg: string,
     buildTx: () => Transaction | Promise<Transaction>,
+    opts?: { sponsor?: boolean },
   ) {
     if (!address) {
       showToast({ message: "Connect a wallet to continue.", variant: "error" });
@@ -57,7 +65,7 @@ export function useTradingVaultActions() {
     setBusy(label);
     setToast(null);
     try {
-      await submitTx(await buildTx());
+      await submitTx(await buildTx(), opts);
       showToast({ message: okMsg, variant: "success" });
       refresh();
     } catch (err) {
@@ -100,6 +108,23 @@ export function useTradingVaultActions() {
         "requesting withdrawal",
         "Withdrawal queued — paid out FIFO as the curator frees funds.",
         () => buildTradingVaultWithdrawTx(params),
+      ),
+
+    // Curator ops (SO-299) are never gas-sponsored — always wallet-paid.
+    releaseExternal: (params: ReleaseExternalParams) =>
+      run(
+        "releasing",
+        "Released to the external account.",
+        () => buildReleaseExternalTx(params),
+        { sponsor: false },
+      ),
+
+    spotSwap: (params: CuratorTakerSwapParams) =>
+      run(
+        "swapping",
+        "Swap executed against vault free balances.",
+        () => buildCuratorTakerSwapTx(params),
+        { sponsor: false },
       ),
   };
 }

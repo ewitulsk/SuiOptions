@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
+import { normalizeStructTag, parseStructTag } from "@mysten/sui/utils";
 
 import { TRADING_VAULT_OBJECTS, TRADING_VAULT_PUBLISH_DIGEST } from "../config";
 import { useSuiGrpcClient } from "../lib/suiGrpc";
-import { planAppraisal, type AppraisalPlan } from "../tx/appraisal";
+import { idString, planAppraisal, vecSetItems, type AppraisalPlan } from "../tx/appraisal";
 import {
   fetchTradingVault,
   fetchTradingVaultPpsHistory,
@@ -86,6 +87,57 @@ export function useVaultProtocolConfigId() {
         if (type?.endsWith("::registry::VaultProtocolConfig")) return change.objectId;
       }
       return null;
+    },
+  });
+}
+
+/** One admin-allowlisted DeepBook pool the curator may trade (SO-299). */
+export type AllowlistedPool = {
+  poolId: string;
+  /** Canonical coin types from the pool's `Pool<B, Q>` type args. */
+  baseType: string;
+  quoteType: string;
+};
+
+/**
+ * The deepbook-adapter's `PoolAllowlist` (shared, admin-governed), resolved
+ * to pool ids + type args by reading the allowlist object and each pool.
+ * No service serves this today, so it's a direct chain read; the set only
+ * moves on admin action, so a long stale time is fine.
+ */
+export function useAllowlistedPools(enabled: boolean) {
+  const client = useSuiGrpcClient();
+  const listId = TRADING_VAULT_OBJECTS?.poolAllowlistId ?? null;
+  return useQuery<AllowlistedPool[], Error>({
+    queryKey: ["trading-vault-pool-allowlist", listId],
+    enabled: enabled && listId !== null,
+    staleTime: 300_000,
+    queryFn: async () => {
+      const res = await client.core.getObject({
+        objectId: listId as string,
+        include: { json: true },
+      });
+      const json = res.object.json as { allowed?: unknown; fields?: { allowed?: unknown } } | null;
+      const ids = vecSetItems(json?.allowed ?? json?.fields?.allowed)
+        .map(idString)
+        .filter((id): id is string => id !== null);
+      if (ids.length === 0) return [];
+      const { objects } = await client.core.getObjects({ objectIds: ids, include: {} });
+      const pools: AllowlistedPool[] = [];
+      for (let i = 0; i < ids.length; i++) {
+        const obj = objects[i];
+        // A delisted-then-deleted pool shouldn't brick the tab — skip
+        // unreadable entries.
+        if (obj instanceof Error) continue;
+        const params = parseStructTag(obj.type).typeParams;
+        if (params.length < 2) continue;
+        pools.push({
+          poolId: ids[i],
+          baseType: normalizeStructTag(params[0]),
+          quoteType: normalizeStructTag(params[1]),
+        });
+      }
+      return pools;
     },
   });
 }

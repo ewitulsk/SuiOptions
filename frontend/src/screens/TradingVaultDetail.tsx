@@ -10,6 +10,7 @@
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useCurrentAccount } from "@mysten/dapp-kit";
+import { normalizeSuiAddress } from "@mysten/sui/utils";
 
 import {
   tokenForCoinType,
@@ -19,15 +20,17 @@ import {
   type TradingVaultPosition,
 } from "../api/tradingVaults";
 import {
+  useAllowlistedPools,
   useAppraisalPlan,
   useTradingVault,
   useTradingVaultPpsHistory,
   useTradingVaultStake,
   useVaultProtocolConfigId,
+  type AllowlistedPool,
 } from "../api/useTradingVaults";
 import { useTradingVaultActions } from "../state/tradingVault";
 import { useCoinBalance } from "../api/useCoinBalance";
-import { TRADING_VAULT_PACKAGE_ID } from "../config";
+import { DEEPBOOK_ADAPTER_PACKAGE_ID, TRADING_VAULT_PACKAGE_ID } from "../config";
 import { TokenLogo } from "../components/TokenLogo";
 import { TradingVaultPpsChart } from "../components/TradingVaultPpsChart";
 import { Toast } from "../components/Toast";
@@ -109,11 +112,15 @@ export function TradingVaultDetailScreen() {
 }
 
 function VaultBody({ vault }: { vault: TradingVaultDetailDto }) {
+  const account = useCurrentAccount();
   const token = tokenForCoinType(vault.depositAsset);
   const symbol = token?.ticker ?? shortHex(vault.depositAsset);
   const pps = tradingVaultPps(vault);
   const tvl = tradingVaultTvl(vault, token?.decimals ?? null);
   const ppsHistoryQ = useTradingVaultPpsHistory(vault.vaultId);
+  const isCurator =
+    account?.address != null &&
+    normalizeSuiAddress(account.address) === normalizeSuiAddress(vault.curator);
 
   return (
     <>
@@ -164,6 +171,9 @@ function VaultBody({ vault }: { vault: TradingVaultDetailDto }) {
           />
           <PositionsCard positions={vault.positions} />
           <ExternalAccountCard vault={vault} symbol={symbol} decimals={token?.decimals ?? null} />
+          {isCurator && (
+            <CuratorPanel vault={vault} symbol={symbol} decimals={token?.decimals ?? null} />
+          )}
           <TermsCard vault={vault} symbol={symbol} />
         </div>
         <div className="vault-grid__side">
@@ -274,6 +284,389 @@ function ExternalAccountCard({
         by the curator's keeper.
       </div>
     </div>
+  );
+}
+
+// ── curator section (SO-299) ────────────────────────────────────────────────
+
+// Same field look as the create-vault form on the list screen.
+const curatorFieldStyle: React.CSSProperties = {
+  width: "100%",
+  padding: 6,
+  borderRadius: 6,
+  border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))",
+  background: "transparent",
+  color: "inherit",
+};
+
+function CuratorField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label style={{ fontSize: 11, opacity: 0.8, display: "block" }}>
+      {label}
+      {children}
+    </label>
+  );
+}
+
+/**
+ * Curator-only controls, shown when the connected wallet IS the vault's
+ * curator: the hedge panel (budgeted `release_external` + sweep-back recipe)
+ * and vault spot trading via the deepbook-adapter taker-swap surface.
+ * Curator ops are never gas-sponsored — the curator's wallet pays gas.
+ */
+function CuratorPanel({
+  vault,
+  symbol,
+  decimals,
+}: {
+  vault: TradingVaultDetailDto;
+  symbol: string;
+  decimals: number | null;
+}) {
+  const actions = useTradingVaultActions();
+  const cfgQ = useVaultProtocolConfigId();
+  const planQ = useAppraisalPlan(vault);
+  const [tab, setTab] = useState<"hedge" | "spot">("hedge");
+
+  return (
+    <div className="vault-card">
+      <div className="vault-card__head">Curator</div>
+      <div className="vault-invest__tabs">
+        <button
+          className={"vault-invest__tab" + (tab === "hedge" ? " is-active" : "")}
+          onClick={() => setTab("hedge")}
+        >
+          Hedge
+        </button>
+        <button
+          className={"vault-invest__tab" + (tab === "spot" ? " is-active" : "")}
+          onClick={() => setTab("spot")}
+        >
+          Spot
+        </button>
+      </div>
+      {tab === "hedge" ? (
+        <HedgePanel
+          vault={vault}
+          symbol={symbol}
+          decimals={decimals}
+          actions={actions}
+          cfgId={cfgQ.data ?? null}
+          plan={planQ.data ?? null}
+          planError={planQ.isError ? planQ.error.message : null}
+        />
+      ) : (
+        <SpotPanel vault={vault} actions={actions} />
+      )}
+      <div className="vault-card__foot vault-prose__muted">
+        Curator transactions are not gas-sponsored — your wallet pays gas.
+      </div>
+      {actions.toast && <Toast message={actions.toast.message} variant={actions.toast.variant} />}
+    </div>
+  );
+}
+
+/**
+ * Release vault capital to the registered external account. The budget
+ * (budgetBps × NAV) and daily release window are enforced ON-CHAIN against
+ * the NAV appraised in the same transaction — the API doesn't serve the
+ * limit parameters yet, so no client-side headroom preview is attempted.
+ * Sweep-back has no wallet path (the sweep tx is sent BY the external
+ * account itself), so it ships as an instructional recipe.
+ */
+function HedgePanel({
+  vault,
+  symbol,
+  decimals,
+  actions,
+  cfgId,
+  plan,
+  planError,
+}: {
+  vault: TradingVaultDetailDto;
+  symbol: string;
+  decimals: number | null;
+  actions: ReturnType<typeof useTradingVaultActions>;
+  cfgId: string | null;
+  plan: ReturnType<typeof useAppraisalPlan>["data"] | null;
+  planError: string | null;
+}) {
+  const [amount, setAmount] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  if (vault.externalAccount == null) {
+    return (
+      <div className="vault-card__body vault-prose__muted">
+        No external account is registered for this vault. Registration
+        (set_external_account) is an admin act, like allowlisting an adapter.
+      </div>
+    );
+  }
+
+  const amountNum = Number(amount) || 0;
+  const disabled =
+    !!actions.busy || amountNum <= 0 || decimals == null || plan == null || !cfgId ||
+    vault.state !== "open";
+  const title =
+    vault.state !== "open"
+      ? "The vault is no longer open"
+      : !cfgId
+        ? "Protocol config unavailable"
+        : plan == null
+          ? planError
+            ? `Release unavailable: ${planError}`
+            : "Analyzing vault holdings…"
+          : undefined;
+
+  const onRelease = () => {
+    if (decimals == null || amountNum <= 0 || plan == null || !cfgId) return;
+    actions.releaseExternal({
+      plan,
+      protocolConfigId: cfgId,
+      curatorCapId: vault.curatorCapId,
+      amountRaw: BigInt(Math.round(amountNum * 10 ** decimals)),
+    });
+    setAmount("");
+  };
+
+  // The recipe intentionally shows the full ids — it's meant to be pasted
+  // into the co-sign tooling, not read.
+  const sweepRecipe =
+    `vault::return_external<${vault.depositAsset}>\n` +
+    `  package: ${TRADING_VAULT_PACKAGE_ID ?? "<trading-vault package>"}\n` +
+    `  vault:   ${vault.vaultId}\n` +
+    `  funds:   Coin<${symbol}> paid back from the external account\n` +
+    `  sender:  ${vault.externalAccount} (MUST be the external account)`;
+
+  const onCopy = () => {
+    void navigator.clipboard.writeText(sweepRecipe).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  return (
+    <>
+      <div className="vault-invest__field">
+        <input
+          className="amount__input"
+          type="number"
+          min="0"
+          placeholder="0.0"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+        />
+        <span className="vault-invest__unit">{symbol}</span>
+      </div>
+      <div className="vault-invest__bal">
+        budget and daily release window are enforced on-chain at release time
+      </div>
+      <button
+        className="vault-invest__cta"
+        disabled={disabled}
+        onClick={onRelease}
+        title={title}
+      >
+        {actions.busy ? `${actions.busy}…` : `Release ${symbol} to external account`}
+      </button>
+
+      <div className="vault-kv" style={{ marginTop: 12 }}>
+        <div className="vault-kv__row">
+          <span>External account</span>
+          <span title={vault.externalAccount}>{shortHex(vault.externalAccount)}</span>
+        </div>
+        <div className="vault-kv__row">
+          <span>Outstanding exposure</span>
+          <span>
+            {decimals != null
+              ? formatPrice(Number(vault.externalExposure) / 10 ** decimals, { grouping: true })
+              : vault.externalExposure}{" "}
+            {symbol}
+          </span>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <div className="vault-prose__muted" style={{ fontSize: 12, marginBottom: 6 }}>
+          Sweep-back: funds return via return_external, sent BY the external
+          account — there is no wallet path here. For the jointly-controlled
+          account the transaction runs through the hedge-signer co-sign
+          ceremony.
+        </div>
+        <pre
+          style={{
+            margin: 0,
+            padding: 8,
+            fontSize: 11,
+            lineHeight: 1.5,
+            borderRadius: 6,
+            border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))",
+            overflowX: "auto",
+          }}
+        >
+          {sweepRecipe}
+        </pre>
+        <button
+          className="vault-invest__tab"
+          style={{ marginTop: 6 }}
+          onClick={onCopy}
+        >
+          {copied ? "Copied" : "Copy recipe"}
+        </button>
+      </div>
+    </>
+  );
+}
+
+/**
+ * Vault spot trading: curator taker swaps of vault FREE balances against an
+ * admin-allowlisted DeepBook pool (`taker_swap_base_for_quote` /
+ * `taker_swap_quote_for_base` — no price guardrails by design, `min_out` is
+ * the only brake). The custody surface (BalanceManager + resting limit
+ * orders) is deferred — see `buildCuratorTakerSwapTx`.
+ */
+function SpotPanel({
+  vault,
+  actions,
+}: {
+  vault: TradingVaultDetailDto;
+  actions: ReturnType<typeof useTradingVaultActions>;
+}) {
+  const poolsQ = useAllowlistedPools(Boolean(DEEPBOOK_ADAPTER_PACKAGE_ID));
+  const pools = poolsQ.data ?? [];
+  const [poolId, setPoolId] = useState("");
+  const [side, setSide] = useState<"sell" | "buy">("sell");
+  const [amount, setAmount] = useState("");
+  const [minOut, setMinOut] = useState("");
+
+  if (!DEEPBOOK_ADAPTER_PACKAGE_ID) {
+    return (
+      <div className="vault-card__body vault-prose__muted">
+        The deepbook-adapter package is not deployed on this network.
+      </div>
+    );
+  }
+  if (poolsQ.isLoading) {
+    return <div className="vault-card__body vault-prose__muted">Loading allowlisted pools…</div>;
+  }
+  if (pools.length === 0) {
+    return (
+      <div className="vault-card__body vault-prose__muted">
+        No DeepBook pools are allowlisted for curator trading. Allowlisting
+        (allow_pool) is an admin act.
+      </div>
+    );
+  }
+
+  const pool: AllowlistedPool = pools.find((p) => p.poolId === poolId) ?? pools[0];
+  const baseToken = tokenForCoinType(pool.baseType);
+  const quoteToken = tokenForCoinType(pool.quoteType);
+  const baseSym = baseToken?.ticker ?? shortHex(pool.baseType);
+  const quoteSym = quoteToken?.ticker ?? shortHex(pool.quoteType);
+  // sell = base in, quote out; buy = quote in, base out.
+  const inToken = side === "sell" ? baseToken : quoteToken;
+  const outToken = side === "sell" ? quoteToken : baseToken;
+  const inSym = side === "sell" ? baseSym : quoteSym;
+  const outSym = side === "sell" ? quoteSym : baseSym;
+
+  const amountNum = Number(amount) || 0;
+  const minOutNum = Number(minOut);
+  const decimalsKnown = inToken != null && outToken != null;
+  const valid =
+    decimalsKnown && amountNum > 0 && Number.isFinite(minOutNum) && minOutNum >= 0;
+  const title = !decimalsKnown
+    ? "Pool assets are not in the token catalog"
+    : minOut.trim() === ""
+      ? "Set Min received — it is the only slippage brake"
+      : undefined;
+
+  const onSwap = () => {
+    if (!valid || !inToken || !outToken) return;
+    actions.spotSwap({
+      vaultId: vault.vaultId,
+      curatorCapId: vault.curatorCapId,
+      poolId: pool.poolId,
+      baseType: pool.baseType,
+      quoteType: pool.quoteType,
+      baseForQuote: side === "sell",
+      amountRaw: BigInt(Math.round(amountNum * 10 ** inToken.decimals)),
+      minOutRaw: BigInt(Math.round(minOutNum * 10 ** outToken.decimals)),
+    });
+    setAmount("");
+    setMinOut("");
+  };
+
+  return (
+    <>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+          gap: 10,
+          marginBottom: 10,
+        }}
+      >
+        <CuratorField label="Pool">
+          <select
+            style={curatorFieldStyle}
+            value={pool.poolId}
+            onChange={(e) => setPoolId(e.target.value)}
+          >
+            {pools.map((p) => {
+              const b = tokenForCoinType(p.baseType)?.ticker ?? shortHex(p.baseType);
+              const q = tokenForCoinType(p.quoteType)?.ticker ?? shortHex(p.quoteType);
+              return (
+                <option key={p.poolId} value={p.poolId}>
+                  {b}/{q}
+                </option>
+              );
+            })}
+          </select>
+        </CuratorField>
+        <CuratorField label="Side">
+          <select
+            style={curatorFieldStyle}
+            value={side}
+            onChange={(e) => setSide(e.target.value as "sell" | "buy")}
+          >
+            <option value="sell">Sell {baseSym} for {quoteSym}</option>
+            <option value="buy">Buy {baseSym} with {quoteSym}</option>
+          </select>
+        </CuratorField>
+        <CuratorField label={`Amount (${inSym})`}>
+          <input
+            style={curatorFieldStyle}
+            type="number"
+            min="0"
+            placeholder="0.0"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+          />
+        </CuratorField>
+        <CuratorField label={`Min received (${outSym})`}>
+          <input
+            style={curatorFieldStyle}
+            type="number"
+            min="0"
+            placeholder="0.0"
+            value={minOut}
+            onChange={(e) => setMinOut(e.target.value)}
+          />
+        </CuratorField>
+      </div>
+      <div className="vault-invest__bal">
+        swaps the vault's free {inSym} — no price guardrails, min received is
+        the only brake
+      </div>
+      <button
+        className="vault-invest__cta"
+        disabled={!!actions.busy || !valid || minOut.trim() === ""}
+        onClick={onSwap}
+        title={title}
+      >
+        {actions.busy ? `${actions.busy}…` : `Swap ${inSym} → ${outSym}`}
+      </button>
+    </>
   );
 }
 
