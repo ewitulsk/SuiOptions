@@ -57,9 +57,9 @@ TWAL = 1.0
 # on as curator, then fill these in (all risk knobs default to the 00-plan
 # starting parameters — see config.toml for the full list).
 [desk]
-enabled = false
-# vault_id           = "0x..."
-# mm_release_enabled = true
+enabled = true
+vault_id           = "0x31c0c534aea84e9dd48035058d0d13d01f4cee61690d2bbb5aee31beaadb4cd8"
+mm_release_enabled = true
 # [desk.exits.spot_pools]     # spot pools for flash-exercise, per symbol
 # TSUI = "0x..."
 # Hedge venues: omit for the single legacy paper venue; declare
