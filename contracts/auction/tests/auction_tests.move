@@ -22,6 +22,8 @@ const BIDDER_A: address = @0xB0B;
 const BIDDER_B: address = @0xCAFE;
 const PROCEEDS: address = @0xFEED;
 const REFUND: address = @0xF00D;
+/// Stand-in for an object address the bidder wants outputs routed to.
+const RECIPIENT: address = @0x0EC1;
 
 const AMOUNT: u64 = 1_000_000;
 const RESERVE: u64 = 500_000;
@@ -211,6 +213,64 @@ fun test_anti_snipe_extends_deadline_capped() {
     // still lands.
     clock.increment_for_testing(51_000);
     place_bid(&mut scenario, &clock, BIDDER_B, 600_000);
+    clock.destroy_for_testing();
+    scenario.end();
+}
+
+// --- bid_with_recipient ---
+
+#[test]
+fun test_bid_with_recipient_routes_outbid_refund_to_recipient() {
+    let mut scenario = ts::begin(SELLER);
+    let clock = new_clock(&mut scenario);
+    create_uncoupled(&mut scenario, &clock);
+
+    // A bids naming RECIPIENT as the bidder identity + token recipient.
+    ts::next_tx(&mut scenario, BIDDER_A);
+    let mut a = ts::take_shared<Auction<GOLD, USD>>(&scenario);
+    auc::bid_with_recipient<GOLD, USD>(
+        &mut a,
+        coin::mint_for_testing<USD>(600_000, scenario.ctx()),
+        RECIPIENT,
+        RECIPIENT,
+        &clock,
+        scenario.ctx(),
+    );
+    assert!(auc::best_bidder(&a) == option::some(RECIPIENT));
+    ts::return_shared(a);
+
+    // B outbids: the refund routes to RECIPIENT, not the signer A.
+    place_bid(&mut scenario, &clock, BIDDER_B, 630_000);
+    assert_coin_value<USD>(&mut scenario, RECIPIENT, 600_000);
+    clock.destroy_for_testing();
+    scenario.end();
+}
+
+#[test]
+fun test_bid_with_recipient_win_routes_escrow_to_recipient() {
+    let mut scenario = ts::begin(SELLER);
+    let mut clock = new_clock(&mut scenario);
+    create_uncoupled(&mut scenario, &clock);
+
+    ts::next_tx(&mut scenario, BIDDER_A);
+    let mut a = ts::take_shared<Auction<GOLD, USD>>(&scenario);
+    auc::bid_with_recipient<GOLD, USD>(
+        &mut a,
+        coin::mint_for_testing<USD>(600_000, scenario.ctx()),
+        RECIPIENT,
+        RECIPIENT,
+        &clock,
+        scenario.ctx(),
+    );
+    ts::return_shared(a);
+
+    clock.increment_for_testing(DURATION_MS + MAX_EXTENSION_MS);
+    ts::next_tx(&mut scenario, BIDDER_B);
+    let a = ts::take_shared<Auction<GOLD, USD>>(&scenario);
+    auc::settle<GOLD, USD>(a, &clock, scenario.ctx());
+
+    assert_coin_value<GOLD>(&mut scenario, RECIPIENT, AMOUNT);
+    assert_coin_value<USD>(&mut scenario, PROCEEDS, 600_000);
     clock.destroy_for_testing();
     scenario.end();
 }

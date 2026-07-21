@@ -229,6 +229,35 @@ public fun bid<Escrow, Bid>(
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
+    bid_impl(auction, bid_in, ctx.sender(), token_recipient, clock, ctx)
+}
+
+/// `bid` with an explicit bidder identity: `bidder` (not `ctx.sender()`)
+/// is recorded as the best bidder, so the outbid refund — and the
+/// `FinalizedBid.bidder` a coupled venue's early-refund path pays — route
+/// to it. Lets a custody object (e.g. a trading-vault bid ticket) be the
+/// economic bidder while a bot wallet signs: `bidder` can be an OBJECT
+/// address whose owner receives every auction output via
+/// transfer-to-object. Additive; `bid` behaves exactly as before.
+public fun bid_with_recipient<Escrow, Bid>(
+    auction: &mut Auction<Escrow, Bid>,
+    bid_in: Coin<Bid>,
+    bidder: address,
+    token_recipient: address,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    bid_impl(auction, bid_in, bidder, token_recipient, clock, ctx)
+}
+
+fun bid_impl<Escrow, Bid>(
+    auction: &mut Auction<Escrow, Bid>,
+    bid_in: Coin<Bid>,
+    bidder: address,
+    token_recipient: address,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
     let now = clock.timestamp_ms();
     assert!(now < auction.deadline_ms, errors::auction_closed());
 
@@ -254,7 +283,7 @@ public fun bid<Escrow, Bid>(
         transfer::public_transfer(refund, *auction.best_bidder.borrow());
     };
     auction.bid_escrow.join(bid_in.into_balance());
-    auction.best_bidder = option::some(ctx.sender());
+    auction.best_bidder = option::some(bidder);
     auction.best_token_recipient = option::some(token_recipient);
 
     // Anti-snipe: late best bids extend the deadline (capped).
@@ -265,7 +294,7 @@ public fun bid<Escrow, Bid>(
 
     events::emit_auction_bid(
         object::id(auction),
-        ctx.sender(),
+        bidder,
         token_recipient,
         value,
         previous,

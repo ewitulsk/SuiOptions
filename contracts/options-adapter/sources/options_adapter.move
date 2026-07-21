@@ -17,12 +17,19 @@
 /// escrow cost. Option `Position`s are appraised at their conservative
 /// exercise-now mark: exercised range at strike proceeds, unexercised
 /// range at min(spot, strike) — premium upside is never marked.
+///
+/// The vault also acts as auction BIDDER (the mm-bot desk buying option
+/// coins, SO-299): `bid_on_auction` escrows a bid from vault funds into
+/// any premium/swap auction with all outputs routed to a `BidTicket`
+/// position's own object address — see the `BidTicket` docs for why the
+/// transfer-to-object payout is the burn proof.
 module options_adapter::options_adapter;
 
 use std::type_name::{Self, TypeName};
 use sui::clock::Clock;
-use sui::coin;
+use sui::coin::{Self, Coin};
 use sui::event;
+use sui::transfer::Receiving;
 
 use auction::auction::{Self as auctions, Auction};
 use options_core::admin::ProtocolConfig;
@@ -43,6 +50,12 @@ const E_MISSING_ATTESTATION: u64 = 5;
 const E_VALUE_OVERFLOW: u64 = 6;
 const E_ESCROW_TYPE_MISMATCH: u64 = 7;
 const E_AMOUNT_OVERFLOW: u64 = 8;
+const E_VAULT_NOT_OPEN: u64 = 9;
+const E_STILL_BEST_BIDDER: u64 = 10;
+const E_REFUND_MISMATCH: u64 = 11;
+const E_WIN_TYPE_MISMATCH: u64 = 12;
+const E_WIN_MISMATCH: u64 = 13;
+const E_ZERO_AMOUNT: u64 = 14;
 
 /// Adapter witness: allowlist in `IntegrationRegistry`; also the
 /// auctions' settle authority.
@@ -61,6 +74,66 @@ public struct RfqTicket has key, store {
     escrow_amount: u64,
     escrow_type: TypeName,
     is_put: bool,
+}
+
+/// Live vault-funded bid on someone ELSE's auction (the desk BUYING
+/// option coins): the bid escrow left the vault into the shared
+/// `Auction`, so the ticket holds its value in NAV at cost.
+///
+/// Output routing is the load-bearing design: the bid is placed with the
+/// TICKET's own object address as both the bidder identity (refund
+/// target) and the `token_recipient` (win target), so every auction
+/// output — outbid refund, early-settle refund, won tokens — lands as a
+/// transfer-to-object at the ticket. The burn cranks below RECEIVE that
+/// coin into the vault in the same transaction that burns the ticket:
+/// the coin is unforgeable-without-value proof the auction paid out, no
+/// burn can drop NAV below the ticket's cost mark, and no path can pay
+/// the curator. (Auction objects are deleted at settle, so no gate on
+/// the auction itself can cover the won/refunded-after-settle cases.)
+public struct BidTicket has key, store {
+    id: UID,
+    vault_id: ID,
+    auction_id: ID,
+    /// The bucket whose option coins the auction sells (informational —
+    /// caller-supplied, for off-chain classification).
+    bucket_id: ID,
+    /// Bid escrowed into the auction, in `escrow_type` (the auction's
+    /// Bid asset). A refund returns exactly this.
+    escrow_amount: u64,
+    escrow_type: TypeName,
+    /// What a win delivers to the ticket address: `win_amount` of
+    /// `win_type` (the bucket's option coin for coupled RFQ auctions,
+    /// the auction's escrow asset for plain swap auctions).
+    win_type: TypeName,
+    win_amount: u64,
+    is_put: bool,
+    placed_at_ms: u64,
+}
+
+public struct BidPlaced has copy, drop {
+    vault_id: ID,
+    ticket_id: ID,
+    auction_id: ID,
+    bucket_id: ID,
+    escrow_amount: u64,
+    win_type: TypeName,
+    win_amount: u64,
+    is_put: bool,
+}
+
+public struct BidReclaimed has copy, drop {
+    vault_id: ID,
+    ticket_id: ID,
+    auction_id: ID,
+    refunded: u64,
+}
+
+public struct BidRedeemed has copy, drop {
+    vault_id: ID,
+    ticket_id: ID,
+    auction_id: ID,
+    win_type: TypeName,
+    win_amount: u64,
 }
 
 public struct RfqOpened has copy, drop {
@@ -476,6 +549,169 @@ public fun redeem_put_position<U, S, P>(
     vault::end_session(vault, s);
 }
 
+// ═══════════════════ vault-funded auction bids ═══════════════════
+
+/// Curator bids `bid_amount` of the vault's `B` on a live auction
+/// selling `E` (the desk BUYING option coins from retail). Open vaults
+/// only — a Closing vault unwinds, it does not take new risk.
+///
+/// `W`/`win_amount` pin what a win must deliver (the bucket's option
+/// coin and the write amount for coupled RFQ auctions; `E` and the
+/// auction amount for plain swap auctions). Both auction outputs are
+/// routed to the minted `BidTicket`'s own address (see the struct docs);
+/// a wrong `W`/`win_amount` can only strand the ticket's redemption —
+/// it can never route value to the curator.
+public fun bid_on_auction<E, B, W>(
+    vault: &mut TradingVault,
+    cap: &CuratorCap,
+    reg: &IntegrationRegistry,
+    auction: &mut Auction<E, B>,
+    bid_amount: u64,
+    win_amount: u64,
+    bucket_id: ID,
+    is_put: bool,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): ID {
+    assert!(vault::is_open(vault), E_VAULT_NOT_OPEN);
+    assert!(bid_amount > 0 && win_amount > 0, E_ZERO_AMOUNT);
+    let mut s = vault::begin_session(vault, cap, reg, OptionsAdapter {});
+    let vault_id = vault::session_vault_id(&s);
+    let ticket = BidTicket {
+        id: object::new(ctx),
+        vault_id,
+        auction_id: object::id(auction),
+        bucket_id,
+        escrow_amount: bid_amount,
+        escrow_type: type_name::with_defining_ids<B>(),
+        win_type: type_name::with_defining_ids<W>(),
+        win_amount,
+        is_put,
+        placed_at_ms: clock.timestamp_ms(),
+    };
+    let ticket_id = object::id(&ticket);
+    let ticket_addr = ticket_id.to_address();
+    let escrow = vault::take<B>(vault, &mut s, bid_amount);
+    auctions::bid_with_recipient(
+        auction,
+        coin::from_balance(escrow, ctx),
+        ticket_addr,
+        ticket_addr,
+        clock,
+        ctx,
+    );
+    event::emit(BidPlaced {
+        vault_id,
+        ticket_id,
+        auction_id: object::id(auction),
+        bucket_id,
+        escrow_amount: bid_amount,
+        win_type: type_name::with_defining_ids<W>(),
+        win_amount,
+        is_put,
+    });
+    vault::put_position(vault, &mut s, ticket);
+    vault::end_session(vault, s);
+    ticket_id
+}
+
+/// Permissionless: reclaim an OUTBID ticket while its auction is still
+/// live — the auction already push-transferred the full refund to the
+/// ticket address when the outbid landed. Receives the refund into the
+/// vault and burns the ticket. Aborts while the ticket is still the best
+/// bidder (its escrow is live in the auction; a donated look-alike coin
+/// cannot force an early burn through this path).
+public fun reclaim_outbid_ticket<E, B>(
+    vault: &mut TradingVault,
+    reg: &IntegrationRegistry,
+    ticket_id: ID,
+    auction: &Auction<E, B>,
+    refund: Receiving<Coin<B>>,
+) {
+    let mut s = vault::begin_crank_session(vault, reg, OptionsAdapter {});
+    let mut ticket = vault::take_position<BidTicket>(vault, &mut s, ticket_id);
+    assert!(ticket.auction_id == object::id(auction), E_WRONG_TICKET);
+    let best = auctions::best_bidder(auction);
+    let ticket_addr = ticket_id.to_address();
+    assert!(
+        best.is_none() || *best.borrow() != ticket_addr,
+        E_STILL_BEST_BIDDER,
+    );
+    let coin = transfer::public_receive(&mut ticket.id, refund);
+    reclaim_impl(vault, &mut s, ticket, coin);
+    vault::end_session(vault, s);
+}
+
+/// Permissionless: reclaim a REFUNDED ticket after its auction object is
+/// gone (a third party settled a won-by-someone-else auction, or the
+/// seller's dead-bucket recovery refunded the standing bid). The
+/// received coin must equal the escrow exactly, so the burn always
+/// returns the ticket's full cost mark to the vault; the narrow residual
+/// (an adversary donating an exact-amount coin to trigger the burn while
+/// the real escrow is still live) costs the adversary at least what it
+/// strands and leaves NAV whole at cost.
+public fun reclaim_refunded_ticket<B>(
+    vault: &mut TradingVault,
+    reg: &IntegrationRegistry,
+    ticket_id: ID,
+    refund: Receiving<Coin<B>>,
+) {
+    let mut s = vault::begin_crank_session(vault, reg, OptionsAdapter {});
+    let mut ticket = vault::take_position<BidTicket>(vault, &mut s, ticket_id);
+    let coin = transfer::public_receive(&mut ticket.id, refund);
+    reclaim_impl(vault, &mut s, ticket, coin);
+    vault::end_session(vault, s);
+}
+
+/// Permissionless: redeem a WON ticket after the auction settled — the
+/// settle routed `win_amount` of `W` to the ticket address (the
+/// `token_recipient`). Receives the winnings into the vault's free
+/// balances (option coins appraise via the options oracle) and burns the
+/// ticket. The pinned type + amount mean a burn can only ever be
+/// triggered by delivering at least the win itself.
+public fun redeem_won_ticket<W>(
+    vault: &mut TradingVault,
+    reg: &IntegrationRegistry,
+    ticket_id: ID,
+    winnings: Receiving<Coin<W>>,
+) {
+    let mut s = vault::begin_crank_session(vault, reg, OptionsAdapter {});
+    let mut ticket = vault::take_position<BidTicket>(vault, &mut s, ticket_id);
+    assert!(type_name::with_defining_ids<W>() == ticket.win_type, E_WIN_TYPE_MISMATCH);
+    let coin = transfer::public_receive(&mut ticket.id, winnings);
+    assert!(coin.value() >= ticket.win_amount, E_WIN_MISMATCH);
+    let BidTicket { id, vault_id, auction_id, win_type, .. } = ticket;
+    id.delete();
+    assert!(vault_id == vault::session_vault_id(&s), E_WRONG_TICKET);
+    event::emit(BidRedeemed {
+        vault_id,
+        ticket_id,
+        auction_id,
+        win_type,
+        win_amount: coin.value(),
+    });
+    vault::put<W>(vault, &mut s, coin.into_balance());
+    vault::end_session(vault, s);
+}
+
+/// Shared refund-side burn: the received coin must be the full escrow,
+/// so NAV holds exactly at the ticket's cost mark across the burn.
+fun reclaim_impl<B>(
+    vault: &mut TradingVault,
+    s: &mut trading_vault::vault::Session,
+    ticket: BidTicket,
+    coin: Coin<B>,
+) {
+    let BidTicket { id, vault_id, auction_id, escrow_amount, escrow_type, .. } = ticket;
+    let ticket_id = id.to_inner();
+    id.delete();
+    assert!(vault_id == vault::session_vault_id(s), E_WRONG_TICKET);
+    assert!(type_name::with_defining_ids<B>() == escrow_type, E_ESCROW_TYPE_MISMATCH);
+    assert!(coin.value() == escrow_amount, E_REFUND_MISMATCH);
+    event::emit(BidReclaimed { vault_id, ticket_id, auction_id, refunded: escrow_amount });
+    vault::put<B>(vault, s, coin.into_balance());
+}
+
 // ══════════════════════════════ appraisal ══════════════════════════════
 
 /// An open RFQ marks at escrow cost (premium upside never marked).
@@ -489,6 +725,23 @@ public fun appraise_rfq_ticket<E>(
 ) {
     let ticket: &RfqTicket = vault::borrow_position(vault, ticket_id);
     assert!(type_name::with_defining_ids<E>() == ticket.escrow_type, E_ESCROW_TYPE_MISMATCH);
+    let value = value_in_deposit(vault, cfg, ticket.escrow_type, ticket.escrow_amount, att, clock);
+    assert!(value <= (std::u64::max_value!() as u128), E_VALUE_OVERFLOW);
+    vault::record_position_value(vault, appraisal, OptionsAdapter {}, ticket_id, value as u64);
+}
+
+/// A live vault-funded bid marks at escrow cost, mirroring
+/// `appraise_rfq_ticket` (win upside never marked).
+public fun appraise_bid_ticket<B>(
+    vault: &TradingVault,
+    cfg: &VaultProtocolConfig,
+    appraisal: &mut Appraisal,
+    ticket_id: ID,
+    att: Option<PriceAttestation>,
+    clock: &Clock,
+) {
+    let ticket: &BidTicket = vault::borrow_position(vault, ticket_id);
+    assert!(type_name::with_defining_ids<B>() == ticket.escrow_type, E_ESCROW_TYPE_MISMATCH);
     let value = value_in_deposit(vault, cfg, ticket.escrow_type, ticket.escrow_amount, att, clock);
     assert!(value <= (std::u64::max_value!() as u128), E_VALUE_OVERFLOW);
     vault::record_position_value(vault, appraisal, OptionsAdapter {}, ticket_id, value as u64);
@@ -646,3 +899,15 @@ public fun ticket_write_amount(t: &RfqTicket): u64 { t.write_amount }
 public fun ticket_escrow_amount(t: &RfqTicket): u64 { t.escrow_amount }
 
 public fun ticket_is_put(t: &RfqTicket): bool { t.is_put }
+
+public fun bid_ticket_auction_id(t: &BidTicket): ID { t.auction_id }
+
+public fun bid_ticket_bucket_id(t: &BidTicket): ID { t.bucket_id }
+
+public fun bid_ticket_escrow_amount(t: &BidTicket): u64 { t.escrow_amount }
+
+public fun bid_ticket_win_amount(t: &BidTicket): u64 { t.win_amount }
+
+public fun bid_ticket_is_put(t: &BidTicket): bool { t.is_put }
+
+public fun bid_ticket_placed_at_ms(t: &BidTicket): u64 { t.placed_at_ms }

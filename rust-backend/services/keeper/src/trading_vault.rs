@@ -295,7 +295,15 @@ fn classify_and_log(vault_id: ObjectID, e: &anyhow::Error) {
     // aborts so an unrelated code-3 abort still alerts. E_STALE (5) and
     // E_NOT_POSTER (1) stay alerting.
     let equity_race = msg.contains("equity_oracle") && msg.contains(", 3)");
-    if benign.iter().any(|b| msg.contains(b)) || equity_race {
+    // Bid-ticket cranks (SO-299) losing races: still the best bidder when
+    // a donated look-alike coin was fed in (options_adapter
+    // E_STILL_BEST_BIDDER, 10), ticket already burned by a racing cranker
+    // (vault position_missing, 86), or the auction/receiving input was
+    // consumed between compose and execute.
+    let bid_ticket_race = (msg.contains("options_adapter") && msg.contains(", 10)"))
+        || (msg.contains("vault") && msg.contains(", 86)"))
+        || msg.contains("not available for consumption");
+    if benign.iter().any(|b| msg.contains(b)) || equity_race || bid_ticket_race {
         debug!(vault = %vault_id, error = %msg, "trading-vault crank lost a race; next tick");
     } else {
         tracing::error!(
@@ -327,6 +335,7 @@ async fn tick_one(
         .unwrap_or(0);
 
     settle_due_tickets(wrap, ctx, vault_id, &holdings, now_ms).await;
+    crank_bid_tickets(wrap, ctx, vault_id, &holdings).await;
     redeem_expired_positions(wrap, ctx, vault_id, &holdings, now_ms).await;
     sweep_custody_settled(wrap, ctx, vault_id, &holdings).await;
     sweep_vault_address(wrap, ctx, vault_id).await;
@@ -443,6 +452,136 @@ async fn settle_due_tickets(
             submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, "options_adapter::settle_rfq")
                 .await?;
             info!(vault = %vault_id, ticket = %id, function, "rfq ticket settled");
+            Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            classify_and_log(vault_id, &e);
+        }
+    }
+}
+
+/// Crank 1b (SO-299): burn vault-funded `BidTicket`s whose auction has
+/// already paid the ticket's own object address — an outbid/early-settle
+/// refund (reclaim) or the won tokens (redeem). The coin AT the ticket
+/// address is the on-chain burn proof, so with nothing parked there the
+/// ticket is still live and the pass skips it; a burn can therefore
+/// never drop the escrowed value out of NAV.
+async fn crank_bid_tickets(
+    wrap: &SuiClientWrapper,
+    ctx: &TradingVaultCtx,
+    vault_id: ObjectID,
+    holdings: &VaultHoldings,
+) {
+    let Some(oa) = ctx.options_adapter_pkg else { return };
+    for p in &holdings.positions {
+        let PositionInfo::BidTicket {
+            id,
+            escrow_type,
+            win_type,
+            auction_id,
+            escrow_amount,
+            win_amount,
+        } = p
+        else {
+            continue;
+        };
+        let result: Result<()> = async {
+            let client = &wrap.client;
+            let owner = SuiAddress::from(*id);
+            let page = client
+                .read_api()
+                .get_owned_objects(
+                    owner,
+                    Some(SuiObjectResponseQuery::new(
+                        None,
+                        Some(SuiObjectDataOptions::new().with_type().with_content()),
+                    )),
+                    None,
+                    Some(20),
+                )
+                .await
+                .context("listing bid-ticket-address objects")?;
+            // The auction's payout, if it landed: the win (pinned type,
+            // at least the pinned amount) or the refund (exact escrow).
+            let mut won = None;
+            let mut refunded = None;
+            for obj in &page.data {
+                let Some(d) = obj.data.as_ref() else { continue };
+                let Some(t) = d.type_.as_ref().map(|t| t.to_string()) else { continue };
+                let Some(inner) = t
+                    .strip_prefix("0x2::coin::Coin<")
+                    .or_else(|| t.split_once("::coin::Coin<").map(|(_, r)| r))
+                else {
+                    continue;
+                };
+                let coin_type =
+                    protocol_types::asset::canonicalize_move_type(inner.trim_end_matches('>'));
+                let balance = d
+                    .content
+                    .as_ref()
+                    .and_then(|c| serde_json::to_value(c).ok())
+                    .and_then(|j| j.pointer("/fields/balance").and_then(as_u64_ref))
+                    .unwrap_or(0);
+                if coin_type == *win_type && balance >= *win_amount {
+                    won = Some((d.object_id, d.version, d.digest));
+                } else if coin_type == *escrow_type && balance == *escrow_amount {
+                    refunded = Some((d.object_id, d.version, d.digest));
+                }
+            }
+            if won.is_none() && refunded.is_none() {
+                return Ok(()); // still live in the auction
+            }
+
+            let mut pt = ProgrammableTransactionBuilder::new();
+            let vault = pt.obj(shared_object_arg(client, vault_id, true).await?)?;
+            let ireg =
+                pt.obj(shared_object_arg(client, ctx.integration_registry_id, false).await?)?;
+            let ticket_arg = pt.pure(id)?;
+            let (label, action) = if let Some(re) = won {
+                let receiving = pt.obj(ObjectArg::Receiving(re))?;
+                pt.programmable_move_call(
+                    oa,
+                    Identifier::new("options_adapter").unwrap(),
+                    Identifier::new("redeem_won_ticket").unwrap(),
+                    vec![TypeTag::from_str(win_type)?],
+                    vec![vault, ireg, ticket_arg, receiving],
+                );
+                ("options_adapter::redeem_won_ticket", "won bid ticket redeemed")
+            } else {
+                let re = refunded.expect("checked above");
+                // Prefer the strict variant while the auction object
+                // still exists (asserts the vault is no longer the best
+                // bidder); after settle deletes it, the exact-refund
+                // check alone gates the burn.
+                match object_type_of(client, *auction_id).await.ok() {
+                    Some(auction_ty) => {
+                        let auction =
+                            pt.obj(shared_object_arg(client, *auction_id, false).await?)?;
+                        let receiving = pt.obj(ObjectArg::Receiving(re))?;
+                        pt.programmable_move_call(
+                            oa,
+                            Identifier::new("options_adapter").unwrap(),
+                            Identifier::new("reclaim_outbid_ticket").unwrap(),
+                            bucket_type_args(&auction_ty)?,
+                            vec![vault, ireg, ticket_arg, auction, receiving],
+                        );
+                    }
+                    None => {
+                        let receiving = pt.obj(ObjectArg::Receiving(re))?;
+                        pt.programmable_move_call(
+                            oa,
+                            Identifier::new("options_adapter").unwrap(),
+                            Identifier::new("reclaim_refunded_ticket").unwrap(),
+                            vec![TypeTag::from_str(escrow_type)?],
+                            vec![vault, ireg, ticket_arg, receiving],
+                        );
+                    }
+                }
+                ("options_adapter::reclaim_bid_ticket", "outbid bid ticket reclaimed")
+            };
+            submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, label).await?;
+            info!(vault = %vault_id, ticket = %id, action, "bid ticket burned");
             Ok(())
         }
         .await;

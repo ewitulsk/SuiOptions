@@ -62,6 +62,19 @@ pub enum PositionInfo {
         bucket_id: ObjectID,
         is_put: bool,
     },
+    /// A live vault-funded bid on someone else's auction (SO-299): the
+    /// escrow marks at cost while the auction outputs are routed to the
+    /// ticket's own object address (see options_adapter::BidTicket).
+    BidTicket {
+        id: ObjectID,
+        /// The bid asset (canonical) — what the escrow cost is in.
+        escrow_type: String,
+        /// What a win delivers to the ticket address.
+        win_type: String,
+        auction_id: ObjectID,
+        escrow_amount: u64,
+        win_amount: u64,
+    },
     /// A written option position (options_adapter or vault_mm tagged).
     OptionPosition {
         id: ObjectID,
@@ -108,6 +121,9 @@ impl VaultHoldings {
                     }
                 }
                 PositionInfo::RfqTicket { escrow_type, .. } => {
+                    out.insert(escrow_type.clone());
+                }
+                PositionInfo::BidTicket { escrow_type, .. } => {
                     out.insert(escrow_type.clone());
                 }
                 PositionInfo::OptionPosition { underlying, settlement, .. } => {
@@ -397,6 +413,37 @@ pub async fn discover_holdings(
                 auction_id: id_field("auction_id")?,
                 bucket_id: id_field("bucket_id")?,
                 is_put,
+            });
+        } else if ty.ends_with("::options_adapter::BidTicket") {
+            let fields = object_fields(client, pos_id).await?;
+            let type_field = |name: &str| -> Result<String> {
+                let j = serde_json::to_value(move_field(&fields, name)?)?;
+                Ok(canon(
+                    j.pointer("/fields/name")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow!("bid ticket missing {name}"))?,
+                ))
+            };
+            let u64_field = |name: &str| -> Result<u64> {
+                let j = serde_json::to_value(move_field(&fields, name)?)?;
+                j.as_str()
+                    .and_then(|s| s.parse().ok())
+                    .or_else(|| j.as_u64())
+                    .ok_or_else(|| anyhow!("bid ticket missing {name}"))
+            };
+            let auction_id = {
+                let j = serde_json::to_value(move_field(&fields, "auction_id")?)?;
+                j.as_str()
+                    .and_then(|s| ObjectID::from_hex_literal(s).ok())
+                    .ok_or_else(|| anyhow!("bid ticket missing auction_id"))?
+            };
+            positions.push(PositionInfo::BidTicket {
+                id: pos_id,
+                escrow_type: type_field("escrow_type")?,
+                win_type: type_field("win_type")?,
+                auction_id,
+                escrow_amount: u64_field("escrow_amount")?,
+                win_amount: u64_field("win_amount")?,
             });
         } else if ty.ends_with("::position::Position") {
             let fields = object_fields(client, pos_id).await?;
@@ -746,6 +793,20 @@ pub async fn compose_appraisal(
                     oa,
                     Identifier::new("options_adapter").unwrap(),
                     Identifier::new("appraise_rfq_ticket").unwrap(),
+                    vec![TypeTag::from_str(escrow_type)?],
+                    vec![vault_ro, cfg, appraisal, ticket_id, opt, clock],
+                );
+            }
+            PositionInfo::BidTicket { id, escrow_type, .. } => {
+                let oa = refs
+                    .options_adapter_pkg
+                    .ok_or_else(|| anyhow!("options adapter package unavailable"))?;
+                let ticket_id = pt.pure(id)?;
+                let opt = opt_for(pt, &attestations, escrow_type, &holdings.deposit_type);
+                pt.programmable_move_call(
+                    oa,
+                    Identifier::new("options_adapter").unwrap(),
+                    Identifier::new("appraise_bid_ticket").unwrap(),
                     vec![TypeTag::from_str(escrow_type)?],
                     vec![vault_ro, cfg, appraisal, ticket_id, opt, clock],
                 );
