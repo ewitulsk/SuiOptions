@@ -42,6 +42,7 @@ const E_APPRAISAL_INCOMPLETE: u64 = 5;
 const E_PRICE_ASSET_MISMATCH: u64 = 6;
 const E_VALUE_OVERFLOW: u64 = 7;
 const E_MISSING_ATTESTATION: u64 = 8;
+const E_MIN_OUT_NOT_MET: u64 = 9;
 
 /// Adapter witness: allowlist this in `IntegrationRegistry` to enable.
 public struct DeepBookAdapter has drop {}
@@ -74,6 +75,18 @@ public struct CustodyCreated has copy, drop {
 }
 
 public struct PoolAllowed has copy, drop { pool_id: ID }
+
+/// A curator taker swap of vault free balances against an allowlisted
+/// pool. `unswapped` is the input returned unfilled (lot rounding or a
+/// thin book).
+public struct TakerSwapExecuted has copy, drop {
+    vault_id: ID,
+    pool_id: ID,
+    base_for_quote: bool,
+    amount_in: u64,
+    amount_out: u64,
+    unswapped: u64,
+}
 
 public struct PoolDisallowed has copy, drop { pool_id: ID }
 
@@ -367,6 +380,105 @@ public fun eject_empty_custody(
     transfer::public_transfer(custody, recipient);
     vault::end_session(vault, s);
     let _ = ctx;
+}
+
+// ═══════════════════════════ taker swaps ═══════════════════════════
+//
+// Direct taker exits for vault FREE balances (SO-299): take from the
+// vault, swap against an allowlisted pool, put proceeds (plus any
+// unswapped remainder and DEEP change) straight back — all inside one
+// curator session. Deliberately NOT routed through the wrapped-BM
+// custody: the custody exists for RESTING orders (working capital
+// warehoused against the book, tracked by the custody appraisal); a
+// taker exit is one-shot and should not require custody setup or leave
+// an appraisal-tracked asset entry behind. This is the resale leg for
+// option coins freed by `vault_mm::release_coin_to_balances` —
+// release<CALL> → taker_swap_base_for_quote<CALL, USDC> in one PTB.
+//
+// Fees are paid in the input asset (a zero DEEP coin is passed), so no
+// DEEP balance is required; `vault::put` drops zero balances, keeping
+// `asset_types` clean when there is no remainder or DEEP change.
+
+/// Sell `amount` of Base from vault free balances for Quote. `min_out`
+/// binds the actual Quote received: the pool checks it too, EXCEPT when
+/// the input rounds below the pool's min size and comes back unswapped —
+/// the local assert also catches that — so a curator typo can never
+/// donate value to a book.
+public fun taker_swap_base_for_quote<B, Q>(
+    vault: &mut TradingVault,
+    cap: &CuratorCap,
+    reg: &IntegrationRegistry,
+    list: &PoolAllowlist,
+    pool: &mut Pool<B, Q>,
+    amount: u64,
+    min_out: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    assert!(list.allowed.contains(&object::id(pool)), E_POOL_NOT_ALLOWED);
+    let mut s = vault::begin_session(vault, cap, reg, DeepBookAdapter {});
+    let base_in = sui::coin::from_balance(vault::take<B>(vault, &mut s, amount), ctx);
+    let (base_rem, quote_out, deep_rem) = pool::swap_exact_base_for_quote(
+        pool,
+        base_in,
+        sui::coin::zero<DEEP>(ctx),
+        min_out,
+        clock,
+        ctx,
+    );
+    assert!(quote_out.value() >= min_out, E_MIN_OUT_NOT_MET);
+    event::emit(TakerSwapExecuted {
+        vault_id: object::id(vault),
+        pool_id: object::id(pool),
+        base_for_quote: true,
+        amount_in: amount,
+        amount_out: quote_out.value(),
+        unswapped: base_rem.value(),
+    });
+    vault::put<B>(vault, &mut s, base_rem.into_balance());
+    vault::put<Q>(vault, &mut s, quote_out.into_balance());
+    vault::put<DEEP>(vault, &mut s, deep_rem.into_balance());
+    vault::end_session(vault, s);
+}
+
+/// Buy Base with `amount` of Quote from vault free balances. Same
+/// `min_out` semantics as `taker_swap_base_for_quote`, on the Base
+/// received.
+public fun taker_swap_quote_for_base<B, Q>(
+    vault: &mut TradingVault,
+    cap: &CuratorCap,
+    reg: &IntegrationRegistry,
+    list: &PoolAllowlist,
+    pool: &mut Pool<B, Q>,
+    amount: u64,
+    min_out: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    assert!(list.allowed.contains(&object::id(pool)), E_POOL_NOT_ALLOWED);
+    let mut s = vault::begin_session(vault, cap, reg, DeepBookAdapter {});
+    let quote_in = sui::coin::from_balance(vault::take<Q>(vault, &mut s, amount), ctx);
+    let (base_out, quote_rem, deep_rem) = pool::swap_exact_quote_for_base(
+        pool,
+        quote_in,
+        sui::coin::zero<DEEP>(ctx),
+        min_out,
+        clock,
+        ctx,
+    );
+    assert!(base_out.value() >= min_out, E_MIN_OUT_NOT_MET);
+    event::emit(TakerSwapExecuted {
+        vault_id: object::id(vault),
+        pool_id: object::id(pool),
+        base_for_quote: false,
+        amount_in: amount,
+        amount_out: base_out.value(),
+        unswapped: quote_rem.value(),
+    });
+    vault::put<B>(vault, &mut s, base_out.into_balance());
+    vault::put<Q>(vault, &mut s, quote_rem.into_balance());
+    vault::put<DEEP>(vault, &mut s, deep_rem.into_balance());
+    vault::end_session(vault, s);
 }
 
 // ══════════════════════ permissionless cranks / unwind ══════════════════════

@@ -42,6 +42,7 @@ use options_core::collateral::{Self, CollateralRequest};
 use options_core::position::{Self, Position};
 use options_core::put_bucket::{Self, PutBucket};
 
+use trading_vault::events;
 use trading_vault::price::{Self, PriceAttestation};
 use trading_vault::registry::{IntegrationRegistry, VaultProtocolConfig};
 use trading_vault::vault::{Self, Appraisal, CuratorCap, TradingVault};
@@ -165,10 +166,18 @@ public fun redeem_put_position<U, S, P>(
     vault::end_session(vault, s);
 }
 
-/// Curator exercises `amount` of a custodied call coin, paying strike
-/// settlement from vault balances; the remainder (if any) stays in
-/// custody under the same position id.
-public fun exercise_calls<U, S, C>(
+/// Curator exercises `amount` of a custodied call coin, paying
+/// `required_settlement` from vault free balances; the freed underlying
+/// returns to free balances and the remainder (if any) stays in custody
+/// under the same position id (net-zero position count, so
+/// `max_positions` can never bind here).
+///
+/// Cap-gated by design — NOT exposed as a crank: exercising is
+/// discretionary (it trades time value for intrinsic and spends vault
+/// settlement), so a permissionless caller could grief the strategy by
+/// exercising OTM or too early. Post-expiry cleanup has its own crank
+/// (`redeem_*_position`); pre-expiry exercise stays a curator call.
+public fun exercise_call_coin<U, S, C>(
     vault: &mut TradingVault,
     cap: &CuratorCap,
     reg: &IntegrationRegistry,
@@ -193,6 +202,178 @@ public fun exercise_calls<U, S, C>(
     } else {
         call.destroy_zero();
     };
+    events::emit_mm_coin_exercised(
+        object::id(vault),
+        object::id(bucket),
+        coin_position_id,
+        false,
+        amount,
+        payment_amount,
+    );
+    vault::end_session(vault, s);
+}
+
+/// Put twin: deliver `amount` underlying from vault free balances
+/// against the custodied put coin; the strike payout returns as free
+/// settlement. Cap-gated for the same reason as `exercise_call_coin`.
+public fun exercise_put_coin<U, S, P>(
+    vault: &mut TradingVault,
+    cap: &CuratorCap,
+    reg: &IntegrationRegistry,
+    bucket: &mut PutBucket<U, S, P>,
+    coin_position_id: ID,
+    amount: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    let mut s = vault::begin_session(vault, cap, reg, VaultMm {});
+    let mut put: Coin<P> = vault::take_position<Coin<P>>(vault, &mut s, coin_position_id);
+    let delivery = sui::coin::from_balance(
+        vault::take<U>(vault, &mut s, amount),
+        ctx,
+    );
+    let slice = put.split(amount, ctx);
+    let s_out = put_bucket::exercise(bucket, slice, delivery, clock, ctx);
+    let payout = s_out.value();
+    vault::put<S>(vault, &mut s, s_out.into_balance());
+    if (put.value() > 0) {
+        vault::put_position(vault, &mut s, put);
+    } else {
+        put.destroy_zero();
+    };
+    events::emit_mm_coin_exercised(
+        object::id(vault),
+        object::id(bucket),
+        coin_position_id,
+        true,
+        amount,
+        payout,
+    );
+    vault::end_session(vault, s);
+}
+
+// ═══════════════════════ offset closure / release ═══════════════════════
+
+/// Net `amount` of a custodied same-bucket call coin against a custodied
+/// written `Position` (both VaultMm-tagged) via `bucket::close_offset`,
+/// returning the freed underlying to free balances. The coin remainder
+/// re-stores under its position id; the shrunk `Position` re-stores
+/// unless fully closed, in which case it is destroyed
+/// (`position::destroy_empty`). Curator-only: closing early is as
+/// discretionary as exercising.
+public fun close_offset_position<U, S, C>(
+    vault: &mut TradingVault,
+    cap: &CuratorCap,
+    reg: &IntegrationRegistry,
+    bucket: &mut Bucket<U, S, C>,
+    position_id: ID,
+    coin_position_id: ID,
+    amount: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    let mut s = vault::begin_session(vault, cap, reg, VaultMm {});
+    let mut pos = vault::take_position<Position>(vault, &mut s, position_id);
+    let mut call: Coin<C> = vault::take_position<Coin<C>>(vault, &mut s, coin_position_id);
+    let slice = call.split(amount, ctx);
+    let freed = bucket::close_offset(bucket, &mut pos, slice, clock, ctx);
+    let collateral_returned = freed.value();
+    vault::put<U>(vault, &mut s, freed.into_balance());
+    if (call.value() > 0) {
+        vault::put_position(vault, &mut s, call);
+    } else {
+        call.destroy_zero();
+    };
+    let position_closed = position::amount(&pos) == 0;
+    if (position_closed) {
+        position::destroy_empty(pos);
+    } else {
+        vault::put_position(vault, &mut s, pos);
+    };
+    events::emit_mm_offset_closed(
+        object::id(vault),
+        object::id(bucket),
+        position_id,
+        false,
+        amount,
+        collateral_returned,
+        position_closed,
+    );
+    vault::end_session(vault, s);
+}
+
+/// Put twin: nets custodied put coins against the custodied written put
+/// `Position`, returning the freed cash collateral
+/// (`floor(amount × strike)`) to free balances.
+public fun close_offset_put_position<U, S, P>(
+    vault: &mut TradingVault,
+    cap: &CuratorCap,
+    reg: &IntegrationRegistry,
+    bucket: &mut PutBucket<U, S, P>,
+    position_id: ID,
+    coin_position_id: ID,
+    amount: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    let mut s = vault::begin_session(vault, cap, reg, VaultMm {});
+    let mut pos = vault::take_position<Position>(vault, &mut s, position_id);
+    let mut put: Coin<P> = vault::take_position<Coin<P>>(vault, &mut s, coin_position_id);
+    let slice = put.split(amount, ctx);
+    let freed = put_bucket::close_offset(bucket, &mut pos, slice, clock, ctx);
+    let collateral_returned = freed.value();
+    vault::put<S>(vault, &mut s, freed.into_balance());
+    if (put.value() > 0) {
+        vault::put_position(vault, &mut s, put);
+    } else {
+        put.destroy_zero();
+    };
+    let position_closed = position::amount(&pos) == 0;
+    if (position_closed) {
+        position::destroy_empty(pos);
+    } else {
+        vault::put_position(vault, &mut s, pos);
+    };
+    events::emit_mm_offset_closed(
+        object::id(vault),
+        object::id(bucket),
+        position_id,
+        true,
+        amount,
+        collateral_returned,
+        position_closed,
+    );
+    vault::end_session(vault, s);
+}
+
+/// Move a VaultMm-custodied coin (option coins from the writer-flow
+/// sweep) out of position custody into the vault's FREE balances.
+///
+/// Coins were historically kept AS POSITIONS because an unpriceable
+/// free-balance asset type wedges every appraisal. Since SO-297,
+/// `options_oracle` attests option-coin intrinsics, so the coin is
+/// appraisable as a free balance (`appraise_balance` with an
+/// attestation for `T`) and freeing it is safe. This is the resale
+/// on-ramp: compose in one PTB with the deepbook adapter's taker swap
+/// (`release_coin_to_balances<CALL>` →
+/// `taker_swap_base_for_quote<CALL, USDC>`). The inverse is not needed:
+/// the receive path (`receive_mm_option_coin`) already stores incoming
+/// coins as positions.
+public fun release_coin_to_balances<T>(
+    vault: &mut TradingVault,
+    cap: &CuratorCap,
+    reg: &IntegrationRegistry,
+    coin_position_id: ID,
+) {
+    let mut s = vault::begin_session(vault, cap, reg, VaultMm {});
+    let c: Coin<T> = vault::take_position<Coin<T>>(vault, &mut s, coin_position_id);
+    events::emit_mm_coin_released(
+        object::id(vault),
+        coin_position_id,
+        type_name::with_defining_ids<T>(),
+        c.value(),
+    );
+    vault::put<T>(vault, &mut s, c.into_balance());
     vault::end_session(vault, s);
 }
 

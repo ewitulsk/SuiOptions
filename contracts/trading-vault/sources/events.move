@@ -126,6 +126,44 @@ public struct ExternalReturned has copy, drop {
     exposure: u64,
 }
 
+// ───────────────────────── mm desk (vault_mm) ─────────────────────────
+
+/// `amount` custodied option-coin units exercised under a curator
+/// session. Calls: `settlement_amount` left the vault as the strike
+/// payment and `amount` underlying came back. Puts: `amount` underlying
+/// left as delivery and `settlement_amount` came back as the payout.
+public struct MmCoinExercised has copy, drop {
+    vault_id: ID,
+    bucket_id: ID,
+    coin_position_id: ID,
+    is_put: bool,
+    amount: u64,
+    settlement_amount: u64,
+}
+
+/// A written Position netted against same-bucket option coins held in
+/// VaultMm custody (`close_offset`), freeing `collateral_returned`
+/// (underlying for calls, cash for puts) into vault balances.
+public struct MmOffsetClosed has copy, drop {
+    vault_id: ID,
+    bucket_id: ID,
+    position_id: ID,
+    is_put: bool,
+    amount: u64,
+    collateral_returned: u64,
+    position_closed: bool,
+}
+
+/// A VaultMm-custodied coin moved from position custody into the
+/// vault's free balances (post-SO-297: option coins are appraisable as
+/// free balances).
+public struct MmCoinReleased has copy, drop {
+    vault_id: ID,
+    coin_position_id: ID,
+    asset_type: TypeName,
+    amount: u64,
+}
+
 // ─────────────────────────── protocol admin ───────────────────────────
 
 public struct AdapterAllowed has copy, drop { adapter: TypeName }
@@ -335,6 +373,53 @@ public(package) fun emit_external_returned(
     exposure: u64,
 ) {
     event::emit(ExternalReturned { vault_id, from, amount, exposure });
+}
+
+public(package) fun emit_mm_coin_exercised(
+    vault_id: ID,
+    bucket_id: ID,
+    coin_position_id: ID,
+    is_put: bool,
+    amount: u64,
+    settlement_amount: u64,
+) {
+    event::emit(MmCoinExercised {
+        vault_id,
+        bucket_id,
+        coin_position_id,
+        is_put,
+        amount,
+        settlement_amount,
+    });
+}
+
+public(package) fun emit_mm_offset_closed(
+    vault_id: ID,
+    bucket_id: ID,
+    position_id: ID,
+    is_put: bool,
+    amount: u64,
+    collateral_returned: u64,
+    position_closed: bool,
+) {
+    event::emit(MmOffsetClosed {
+        vault_id,
+        bucket_id,
+        position_id,
+        is_put,
+        amount,
+        collateral_returned,
+        position_closed,
+    });
+}
+
+public(package) fun emit_mm_coin_released(
+    vault_id: ID,
+    coin_position_id: ID,
+    asset_type: TypeName,
+    amount: u64,
+) {
+    event::emit(MmCoinReleased { vault_id, coin_position_id, asset_type, amount });
 }
 
 public(package) fun emit_adapter_allowed(adapter: TypeName) {
