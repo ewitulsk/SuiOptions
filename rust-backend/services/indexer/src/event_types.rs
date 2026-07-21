@@ -1237,4 +1237,22 @@ mod tests {
             ]
         );
     }
+
+    /// SO-299 regression: a package id with a LEADING ZERO renders
+    /// short-form from `Display` (0x909…) and never byte-matches the
+    /// padded id token-info serves (0x0909…). The worker must dispatch
+    /// on the canonical rendering.
+    #[test]
+    fn leading_zero_package_dispatches_canonically() {
+        let padded = "0x0909ea478c484259b693faad871bf51affbefb78f630364554cbab51eeba0a2e";
+        let tag =
+            sui_types::parse_sui_struct_tag(&format!("{padded}::events::Deposited")).unwrap();
+        // Display strips the zero — the historical bug.
+        assert!(tag.to_string().starts_with("0x909ea478"));
+        // Canonical keeps it, matching the token-info-built string.
+        assert_eq!(
+            tag.to_canonical_string(true),
+            format!("{padded}::events::Deposited"),
+        );
+    }
 }
