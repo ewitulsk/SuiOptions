@@ -62,6 +62,9 @@ enabled = false
 # mm_release_enabled = true
 # [desk.exits.spot_pools]     # spot pools for flash-exercise, per symbol
 # TSUI = "0x..."
+# Hedge venues: omit for the single legacy paper venue; declare
+# [[desk.hedge.venues]] entries (kind = "paper", name, slippage_bps,
+# funding_rate_annual) for multi-venue monitoring — see config.toml.
 
 # ── Testnet counterparty sim (SO-299) ──────────────────────────────────
 # Retail stand-in: opens covered-call RFQ auctions (the desk's auction

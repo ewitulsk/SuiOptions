@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +51,10 @@ pub struct HedgeConfig {
     pub paper_funding_rate_annual: f64,
     /// Paper venue state file (per-underlying suffix is appended).
     pub paper_state_path: String,
+    /// Multi-venue roster (`[[desk.hedge.venues]]`). Empty = the legacy
+    /// single paper venue built from the `paper_*` knobs above, so
+    /// pre-multi-venue configs keep working unchanged.
+    pub venues: Vec<HedgeVenueToml>,
 }
 
 impl Default for HedgeConfig {
@@ -63,7 +67,69 @@ impl Default for HedgeConfig {
             paper_slippage_bps: 5.0,
             paper_funding_rate_annual: 0.0,
             paper_state_path: "services/mm-bot/state/paper-hedge".into(),
+            venues: Vec::new(),
         }
+    }
+}
+
+/// One `[[desk.hedge.venues]]` entry. Only the paper venue exists today;
+/// real venues (DeepBook margin, Bluefin) plug in behind `kind`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct HedgeVenueToml {
+    pub kind: String,
+    /// Gauge/alert label + state-file key. Defaults to "paper" for the
+    /// first entry, "paper{n}" after.
+    pub name: Option<String>,
+    /// Defaults to `paper_slippage_bps`.
+    pub slippage_bps: Option<f64>,
+    /// Defaults to `paper_funding_rate_annual`.
+    pub funding_rate_annual: Option<f64>,
+}
+
+/// A resolved venue to instantiate (per underlying market).
+#[derive(Clone, Debug, PartialEq)]
+pub struct VenueSpec {
+    pub name: String,
+    pub slippage_bps: f64,
+    pub funding_rate_annual: f64,
+}
+
+impl HedgeConfig {
+    /// Resolve the venue roster: the `venues` array when present, else
+    /// the compat default of ONE paper venue from the legacy `paper_*`
+    /// knobs. Always non-empty; the first spec is the desk's primary
+    /// (execution) venue.
+    pub fn venue_specs(&self) -> Result<Vec<VenueSpec>> {
+        if self.venues.is_empty() {
+            return Ok(vec![VenueSpec {
+                name: "paper".into(),
+                slippage_bps: self.paper_slippage_bps,
+                funding_rate_annual: self.paper_funding_rate_annual,
+            }]);
+        }
+        let mut out = Vec::with_capacity(self.venues.len());
+        for (i, v) in self.venues.iter().enumerate() {
+            if v.kind != "paper" {
+                bail!(
+                    "[[desk.hedge.venues]] kind {:?} not supported yet (only \"paper\")",
+                    v.kind
+                );
+            }
+            let name = v.name.clone().unwrap_or_else(|| {
+                if i == 0 { "paper".into() } else { format!("paper{}", i + 1) }
+            });
+            if out.iter().any(|s: &VenueSpec| s.name == name) {
+                bail!("[[desk.hedge.venues]] duplicate venue name {name:?}");
+            }
+            out.push(VenueSpec {
+                name,
+                slippage_bps: v.slippage_bps.unwrap_or(self.paper_slippage_bps),
+                funding_rate_annual: v
+                    .funding_rate_annual
+                    .unwrap_or(self.paper_funding_rate_annual),
+            });
+        }
+        Ok(out)
     }
 }
 
@@ -123,6 +189,7 @@ pub struct PaperState {
 /// real and persisted to a JSON state file so restarts don't reset the
 /// position.
 pub struct PaperVenue {
+    name: String,
     path: PathBuf,
     slippage_bps: f64,
     funding_rate_annual: f64,
@@ -131,11 +198,22 @@ pub struct PaperVenue {
 
 impl PaperVenue {
     pub fn load(path: PathBuf, slippage_bps: f64, funding_rate_annual: f64) -> Self {
+        Self::load_named("paper", path, slippage_bps, funding_rate_annual)
+    }
+
+    /// A paper venue with an explicit monitor label (multi-venue roster).
+    pub fn load_named(
+        name: impl Into<String>,
+        path: PathBuf,
+        slippage_bps: f64,
+        funding_rate_annual: f64,
+    ) -> Self {
         let state: PaperState = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         Self {
+            name: name.into(),
             path,
             slippage_bps,
             funding_rate_annual,
@@ -194,7 +272,7 @@ impl PaperVenue {
 #[async_trait]
 impl HedgeVenue for PaperVenue {
     fn name(&self) -> &str {
-        "paper"
+        &self.name
     }
 
     async fn position_units(&self) -> Result<f64> {
@@ -207,7 +285,7 @@ impl HedgeVenue for PaperVenue {
         Self::apply_fill(&mut state, delta, spot, self.slippage_bps);
         self.persist(&state)?;
         tracing::info!(
-            venue = "paper",
+            venue = %self.name,
             target = target_short_units,
             short = state.short_units,
             realized = state.realized_pnl,
@@ -277,6 +355,50 @@ mod tests {
         assert_eq!(s.avg_entry, 0.0);
         // Slippage: 10×0.1 + 10×0.11 + 20×0.09 = 3.9.
         assert!((s.slippage_paid - 3.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn legacy_single_venue_config_still_parses_to_one_paper_venue() {
+        // A pre-multi-venue [desk.hedge] TOML: no `venues` array at all.
+        let cfg: HedgeConfig = toml::from_str(
+            "band_pct_nav = 2.0\npaper_slippage_bps = 3.0\npaper_funding_rate_annual = 0.1\n",
+        )
+        .unwrap();
+        assert!((cfg.band_pct_nav - 2.0).abs() < 1e-12);
+        let specs = cfg.venue_specs().unwrap();
+        assert_eq!(
+            specs,
+            vec![VenueSpec {
+                name: "paper".into(),
+                slippage_bps: 3.0,
+                funding_rate_annual: 0.1,
+            }]
+        );
+    }
+
+    #[test]
+    fn venues_array_parses_with_defaults_and_rejects_unknown_kinds() {
+        let cfg: HedgeConfig = toml::from_str(
+            "paper_slippage_bps = 3.0\n\
+             [[venues]]\n\
+             kind = \"paper\"\n\
+             [[venues]]\n\
+             kind = \"paper\"\n\
+             name = \"paper-b\"\n\
+             slippage_bps = 7.0\n\
+             funding_rate_annual = -0.2\n",
+        )
+        .unwrap();
+        let specs = cfg.venue_specs().unwrap();
+        assert_eq!(specs.len(), 2);
+        // First entry inherits the legacy knobs and the "paper" name (and
+        // with it the legacy state-file path).
+        assert_eq!(specs[0], VenueSpec { name: "paper".into(), slippage_bps: 3.0, funding_rate_annual: 0.0 });
+        assert_eq!(specs[1], VenueSpec { name: "paper-b".into(), slippage_bps: 7.0, funding_rate_annual: -0.2 });
+
+        let bad: HedgeConfig =
+            toml::from_str("[[venues]]\nkind = \"bluefin\"\n").unwrap();
+        assert!(bad.venue_specs().is_err());
     }
 
     #[tokio::test]

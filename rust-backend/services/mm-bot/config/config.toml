@@ -130,6 +130,17 @@ enabled            = false
 # paper_slippage_bps = 5.0
 # paper_funding_rate_annual = 0.0
 
+# Multi-venue hedging: declare [[desk.hedge.venues]] entries to run
+# several venues (per-venue labelled gauges, min-margin alerts naming
+# the venue, notional-weighted funding into pricing; the FIRST entry is
+# the primary execution venue the rebalancer trades). Omit the array to
+# keep the single legacy paper venue built from the paper_* knobs above.
+# [[desk.hedge.venues]]
+# kind = "paper"              # only "paper" until real venues land
+# name = "paper"              # gauge/alert label + state-file key
+# slippage_bps = 5.0          # default: paper_slippage_bps
+# funding_rate_annual = 0.0   # default: paper_funding_rate_annual
+
 # [desk.auctions]             # on-chain RFQ channel (calls + puts)
 # enabled = true
 # poll_secs = 10

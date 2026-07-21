@@ -297,6 +297,10 @@ pub struct Desk {
     pub shared: Arc<DeskShared>,
     pub book: Arc<RwLock<Book>>,
     pub models: Arc<Vec<MarketModel>>,
+    /// Every hedge-venue instance (each `[[desk.hedge.venues]]` spec ×
+    /// underlying). `Arc` rather than `Box` because rebalancers and
+    /// monitors share the instances.
+    pub hedge_venues: Vec<Arc<dyn hedge::HedgeVenue>>,
     v1: V1BidParams,
     v2: Option<V2Params>,
     limits: LimitsConfig,
@@ -467,27 +471,52 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
     .context("reconstructing the desk book from vault custody")?;
     let book = Arc::new(RwLock::new(book));
 
+    // Hedge venue roster: `[[desk.hedge.venues]]`, or the compat default
+    // of one paper venue from the legacy `paper_*` knobs. Every spec is
+    // instantiated per underlying; the FIRST spec is the primary
+    // (execution) venue the rebalancer trades — the rest are monitored
+    // (position/margin/funding feed the aggregates).
+    let venue_specs = p.cfg.hedge.venue_specs()?;
+    let primary_spec = venue_specs[0].clone();
+
     let shared = Arc::new(DeskShared {
         exposure: RwLock::new(BookExposure::default()),
         book_delta_units: RwLock::new(HashMap::new()),
         naked_written_units: RwLock::new(0),
-        funding_rate_annual: RwLock::new(p.cfg.hedge.paper_funding_rate_annual),
+        funding_rate_annual: RwLock::new(primary_spec.funding_rate_annual),
         stress_blocked: AtomicBool::new(false),
         expected_holding_years: p.cfg.expected_holding_years,
-        slippage_bps: p.cfg.hedge.paper_slippage_bps,
+        slippage_bps: primary_spec.slippage_bps,
     });
 
-    // Hedge venues: one paper venue per underlying (real venues are
-    // follow-ups behind the same trait).
-    let mut venues: Vec<Arc<dyn hedge::HedgeVenue>> = Vec::new();
+    let mut hedge_venues: Vec<Arc<dyn hedge::HedgeVenue>> = Vec::new();
+    let mut monitor_venues: Vec<monitors::MonitorVenue> = Vec::new();
+    // Per-market PRIMARY venue, aligned with `p.markets`.
+    let mut primary_venues: Vec<Arc<dyn hedge::HedgeVenue>> = Vec::new();
     for m in &p.markets {
-        let path = std::path::PathBuf::from(&p.cfg.state_dir)
-            .join(format!("paper-hedge-{}.json", m.symbol.to_lowercase()));
-        venues.push(Arc::new(hedge::PaperVenue::load(
-            path,
-            p.cfg.hedge.paper_slippage_bps,
-            p.cfg.hedge.paper_funding_rate_annual,
-        )));
+        for (vi, spec) in venue_specs.iter().enumerate() {
+            // The "paper"-named venue keeps the legacy per-symbol state
+            // filename so existing state survives the multi-venue change.
+            let file = if spec.name == "paper" {
+                format!("paper-hedge-{}.json", m.symbol.to_lowercase())
+            } else {
+                format!("paper-hedge-{}-{}.json", spec.name, m.symbol.to_lowercase())
+            };
+            let venue: Arc<dyn hedge::HedgeVenue> = Arc::new(hedge::PaperVenue::load_named(
+                spec.name.clone(),
+                std::path::PathBuf::from(&p.cfg.state_dir).join(file),
+                spec.slippage_bps,
+                spec.funding_rate_annual,
+            ));
+            if vi == 0 {
+                primary_venues.push(Arc::clone(&venue));
+            }
+            monitor_venues.push(monitors::MonitorVenue {
+                symbol: m.symbol.clone(),
+                venue: Arc::clone(&venue),
+            });
+            hedge_venues.push(venue);
+        }
     }
 
     // Book refresher: marks, greeks, NAV, custody re-sync, kill switch,
@@ -509,11 +538,27 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         staleness: p.staleness,
     });
 
-    // Hedge rebalancers (bands, not clocks).
+    // Fill detection → spread-line P&L attribution, resumed from the
+    // persisted events-feed cursor.
+    spawn_fill_poller(FillPollerParams {
+        cfg: p.cfg.clone(),
+        indexer: indexer_graphql::IndexerClient::new(p.indexer_url.clone()),
+        api: api_service_client::ApiServiceClient::new(&p.api_url),
+        book: Arc::clone(&book),
+        models: Arc::clone(&models),
+        market_feeds: market_feeds.clone(),
+        price_cache: p.price_cache.clone(),
+        settlement_feed: p.settlement_feed,
+        settlement_decimals: p.settlement_decimals,
+        staleness: p.staleness,
+        vault_id: protocol_types::ids::ObjectId::new(vault_id.into_bytes()),
+    });
+
+    // Hedge rebalancers (bands, not clocks) — primary venue per market.
     for (i, m) in p.markets.iter().enumerate() {
         spawn_rebalancer(RebalancerParams {
             hedge_cfg: p.cfg.hedge.clone(),
-            venue: Arc::clone(&venues[i]),
+            venue: Arc::clone(&primary_venues[i]),
             shared: Arc::clone(&shared),
             book: Arc::clone(&book),
             coin_type: m.coin_type.clone(),
@@ -548,7 +593,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
                 market_feeds: market_feeds.clone(),
                 staleness: p.staleness,
                 expected_holding_years: p.cfg.expected_holding_years,
-                slippage_bps: p.cfg.hedge.paper_slippage_bps,
+                slippage_bps: primary_spec.slippage_bps,
             }),
             None => tracing::warn!(
                 "[desk.auctions] enabled but no auction package in token-info; channel off"
@@ -575,9 +620,10 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         vault_address,
     });
 
-    // Monitors + nightly stress (first venue feeds the funding/margin
-    // gauges; multi-venue aggregation is a TODO(SO-299) refinement).
-    if let Some(v0) = venues.first() {
+    // Monitors + nightly stress over the WHOLE venue roster: summed
+    // shorts per underlying for the delta band, min margin headroom
+    // (alerts name the venue), notional-weighted funding into pricing.
+    if !monitor_venues.is_empty() {
         monitors::spawn_monitors(monitors::MonitorsParams {
             cfg: p.cfg.monitors,
             limits: p.cfg.limits,
@@ -589,7 +635,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
             settlement_feed: p.settlement_feed,
             settlement_decimals: p.settlement_decimals,
             staleness: p.staleness,
-            hedge: Arc::clone(v0),
+            venues: monitor_venues,
             hedge_band_pct_nav: p.cfg.hedge.band_pct_nav,
         });
     }
@@ -597,6 +643,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
     tracing::info!(
         vault = %vault_id,
         markets = p.markets.len(),
+        hedge_venues = venue_specs.len(),
         v2 = p.cfg.v2.enabled,
         "desk started (vault-only maker)"
     );
@@ -609,6 +656,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         shared,
         book,
         models,
+        hedge_venues,
     }))
 }
 
@@ -646,16 +694,28 @@ fn spawn_book_refresher(p: RefresherParams) {
             tick_count += 1;
 
             // Custody re-sync every 5th tick (auction wins / keeper
-            // sweeps / exits change balances out-of-band).
+            // sweeps / exits / new writes change custody out-of-band):
+            // held coins AND written positions, then re-net `covered`.
             if tick_count % 5 == 1 {
-                match book::fetch_holdings(&p.wrap, &p.api, p.trading_vault_package, p.vault_id)
-                    .await
-                {
-                    Ok(holdings) => p.book.write().holdings = holdings,
+                let holdings =
+                    book::fetch_holdings(&p.wrap, &p.api, p.trading_vault_package, p.vault_id)
+                        .await;
+                let written =
+                    book::fetch_written(&p.wrap, &p.indexer, &p.api, p.vault_id).await;
+                let mut b = p.book.write();
+                match holdings {
+                    Ok(h) => b.holdings = h,
                     Err(e) => {
                         tracing::debug!(error = %format!("{e:#}"), "custody re-sync failed; keeping holdings")
                     }
                 }
+                match written {
+                    Ok(w) => b.written = w,
+                    Err(e) => {
+                        tracing::debug!(error = %format!("{e:#}"), "written re-sync failed; keeping written lines")
+                    }
+                }
+                b.recompute_covered();
             }
 
             // NAV from the indexer view (pps × shares; see book docs).
@@ -717,12 +777,42 @@ fn spawn_book_refresher(p: RefresherParams) {
                 exposure.premium_by_strike_bucket[limits::strike_bucket(k, spot)] += mark * amt;
                 *delta_by_coin.entry(h.asset_coin_type.clone()).or_default() += g.delta * amt;
             }
+            // Written lines subtract their full greeks so quoting sees
+            // TRUE nets (net vega = held − written, same for delta/
+            // gamma/theta). A written bucket with no held coin still
+            // needs per-unit greeks computed here.
             for w in &written {
-                if let Some(g) = per_unit.get(&w.bucket_id) {
-                    let amt = w.amount as f64;
-                    exposure.net_vega_per_volpt -= g.vega * amt / 100.0;
-                    exposure.theta_cost_per_day -= (-g.theta * amt).max(0.0);
-                }
+                let Some(mi) = p.models.iter().position(|m| m.coin_type == w.asset_coin_type)
+                else {
+                    continue;
+                };
+                let g = match per_unit.get(&w.bucket_id).copied() {
+                    Some(g) => g,
+                    None => {
+                        let (feed, decimals) = p.market_feeds[mi];
+                        let Ok(spot) = compute_spot_from_cache(
+                            &p.price_cache,
+                            feed,
+                            p.settlement_feed,
+                            decimals,
+                            p.settlement_decimals,
+                            p.staleness,
+                        ) else {
+                            continue;
+                        };
+                        let t =
+                            w.expiry_ms.saturating_sub(now) as f64 / 1000.0 / 86_400.0 / 365.0;
+                        let k = w.strike_scaled();
+                        let (sigma, _) = p.models[mi].sigma(spot, k, t);
+                        let g = p.models[mi].greeks_per_unit(w.is_put, spot, k, t, sigma);
+                        per_unit.insert(w.bucket_id, g);
+                        g
+                    }
+                };
+                let amt = w.amount as f64;
+                exposure.net_vega_per_volpt -= g.vega * amt / 100.0;
+                exposure.theta_cost_per_day -= (-g.theta * amt).max(0.0);
+                *delta_by_coin.entry(w.asset_coin_type.clone()).or_default() -= g.delta * amt;
             }
 
             // Theta accrual → P&L attribution.
@@ -755,6 +845,170 @@ fn spawn_book_refresher(p: RefresherParams) {
     });
 }
 
+// ── fill poller (spread-line P&L attribution) ──────────────────────────
+
+struct FillPollerParams {
+    cfg: DeskConfig,
+    indexer: indexer_graphql::IndexerClient,
+    api: api_service_client::ApiServiceClient,
+    book: Arc<RwLock<Book>>,
+    models: Arc<Vec<MarketModel>>,
+    market_feeds: Vec<(PriceFeedId, u8)>,
+    price_cache: PriceCache,
+    settlement_feed: PriceFeedId,
+    settlement_decimals: u8,
+    staleness: Staleness,
+    vault_id: protocol_types::ids::ObjectId,
+}
+
+/// How a detected fill priced this tick.
+enum FairOutcome {
+    Total(f64),
+    /// Permanently unpriceable (bucket unknown / not a served market):
+    /// skip the fill with a zero-spread warn and advance past it.
+    Skip,
+    /// Transient (api error / stale spot): stop the batch, retry next
+    /// tick — the cursor stays put so nothing is lost.
+    Retry,
+}
+
+/// Poll the indexer events feed since the persisted cursor and attribute
+/// each detected fill to the spread line (see `book::apply_fills` for
+/// the documented fair-at-detection approximation). First boot seeds the
+/// cursor at the indexer head so pre-desk history is never replayed as
+/// fills; afterwards the cursor only advances write-after-apply.
+fn spawn_fill_poller(p: FillPollerParams) {
+    tokio::spawn(async move {
+        let cursor_path =
+            std::path::PathBuf::from(&p.cfg.state_dir).join("desk-fill-cursor.json");
+        let mut cursor = book::FillCursor::load(&cursor_path);
+        let mut ticker = tokio::time::interval(Duration::from_secs(p.cfg.refresh_secs.max(15)));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Newest events fetched per query, per tick. Fills between polls
+        // beyond this bound would be dropped — far beyond any realistic
+        // per-minute fill rate on this protocol.
+        const MAX_EVENTS: usize = 500;
+        loop {
+            ticker.tick().await;
+            let mut cur = match cursor {
+                Some(c) => c,
+                None => match p.indexer.head_sequence().await {
+                    Ok(head) => {
+                        let c = book::FillCursor { last_sequence: head };
+                        c.persist(&cursor_path);
+                        tracing::info!(head, "fill cursor seeded at indexer head");
+                        cursor = Some(c);
+                        c
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %format!("{e:#}"), "fill cursor seed failed; retrying");
+                        continue;
+                    }
+                },
+            };
+
+            // Our fills: WS-RFQ writes released from the vault's
+            // collateral + auction settles paying option tokens to the
+            // vault (see the identity note in `book`).
+            let vault_hex = p.vault_id.to_hex();
+            let queries: [(&[&str], serde_json::Value); 4] = [
+                (&["WriteExecuted"], serde_json::json!({ "collateral_source": vault_hex })),
+                (&["PutWriteExecuted"], serde_json::json!({ "collateral_source": vault_hex })),
+                (&["RfqSettled"], serde_json::json!({ "call_recipient": vault_hex })),
+                (&["PutRfqSettled"], serde_json::json!({ "put_recipient": vault_hex })),
+            ];
+            let mut fills: Vec<book::DetectedFill> = Vec::new();
+            let mut feed_ok = true;
+            for (types, fields) in queries {
+                match p.indexer.recent_events_with_payload(types, fields, MAX_EVENTS).await {
+                    Ok(events) => fills.extend(
+                        events
+                            .iter()
+                            .filter(|ev| ev.sequence > cur.last_sequence)
+                            .filter_map(|ev| book::classify_fill(ev, p.vault_id)),
+                    ),
+                    Err(e) => {
+                        tracing::debug!(error = %format!("{e:#}"), "fill poll failed; retrying next tick");
+                        feed_ok = false;
+                        break;
+                    }
+                }
+            }
+            if !feed_ok || fills.is_empty() {
+                continue;
+            }
+            fills.sort_by_key(|f| f.sequence);
+
+            // Price each fill at the CURRENT surface, in order; stop at
+            // the first transient failure so the cursor never jumps a
+            // fill that could still be priced.
+            let now = auctions::now_ms();
+            let mut priced: Vec<(book::DetectedFill, f64)> = Vec::new();
+            for f in fills {
+                match fill_fair_total(&p, &f, now).await {
+                    FairOutcome::Total(fair) => priced.push((f, fair)),
+                    FairOutcome::Skip => {
+                        tracing::warn!(
+                            seq = f.sequence,
+                            bucket = %f.bucket_id.to_hex(),
+                            "fill unpriceable (bucket/market unknown); spread 0 recorded"
+                        );
+                        // fair == premium ⇒ zero spread, cursor advances.
+                        let fair = f.premium as f64;
+                        priced.push((f, fair));
+                    }
+                    FairOutcome::Retry => break,
+                }
+            }
+            if priced.is_empty() {
+                continue;
+            }
+            let applied = {
+                let mut b = p.book.write();
+                book::apply_fills(&mut b, &mut cur, &cursor_path, &priced, now)
+            };
+            cursor = Some(cur);
+            if applied > 0 {
+                tracing::info!(applied, cursor = cur.last_sequence, "fills attributed to spread line");
+            }
+        }
+    });
+}
+
+/// Model fair TOTAL premium for a fill at the current surface.
+async fn fill_fair_total(
+    p: &FillPollerParams,
+    f: &book::DetectedFill,
+    now_ms: u64,
+) -> FairOutcome {
+    let bucket = match p.api.bucket_pricing(f.bucket_id).await {
+        Ok(Some(b)) => b,
+        Ok(None) => return FairOutcome::Skip,
+        Err(e) => {
+            tracing::debug!(error = %format!("{e:#}"), "bucket lookup failed for fill");
+            return FairOutcome::Retry;
+        }
+    };
+    let Some(mi) = p.models.iter().position(|m| m.coin_type == bucket.asset_coin_type) else {
+        return FairOutcome::Skip;
+    };
+    let (feed, decimals) = p.market_feeds[mi];
+    let Ok(spot) = compute_spot_from_cache(
+        &p.price_cache,
+        feed,
+        p.settlement_feed,
+        decimals,
+        p.settlement_decimals,
+        p.staleness,
+    ) else {
+        return FairOutcome::Retry;
+    };
+    let t = bucket.expiry_ms.saturating_sub(now_ms) as f64 / 1000.0 / 86_400.0 / 365.0;
+    let k = bucket.strike as f64 / 10f64.powi(bucket.strike_scale as i32);
+    let (sigma, _) = p.models[mi].sigma(spot, k, t);
+    FairOutcome::Total(p.models[mi].fair_per_unit(bucket.is_put, spot, k, t, sigma) * f.amount as f64)
+}
+
 // ── hedge rebalancer ───────────────────────────────────────────────────
 
 struct RebalancerParams {
@@ -782,6 +1036,9 @@ fn spawn_rebalancer(p: RebalancerParams) {
         let mut last_realized = p.venue.realized_pnl().await.unwrap_or(0.0);
         loop {
             ticker.tick().await;
+            // The venue's own funding drives THIS band decision; the
+            // aggregate (notional-weighted across venues) that pricing
+            // consumes is written by the monitors.
             let funding = match p.venue.funding_rate_annual().await {
                 Ok(f) => f,
                 Err(e) => {
@@ -789,7 +1046,6 @@ fn spawn_rebalancer(p: RebalancerParams) {
                     continue;
                 }
             };
-            *p.shared.funding_rate_annual.write() = funding;
             let Ok(spot) = compute_spot_from_cache(
                 &p.price_cache,
                 p.feed,
@@ -840,4 +1096,45 @@ fn spawn_rebalancer(p: RebalancerParams) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_single_venue_desk_toml_still_parses() {
+        // A pre-multi-venue `[desk]` section: `[desk.hedge]` scalar knobs
+        // only, no `[[desk.hedge.venues]]` array.
+        let cfg: DeskConfig = toml::from_str(
+            "enabled = true\n\
+             vault_id = \"0x1\"\n\
+             mm_release_enabled = true\n\
+             [hedge]\n\
+             band_pct_nav = 2.0\n\
+             paper_slippage_bps = 3.0\n",
+        )
+        .unwrap();
+        assert!(cfg.enabled);
+        let specs = cfg.hedge.venue_specs().unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "paper");
+        assert!((specs[0].slippage_bps - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn desk_toml_with_venue_array_parses() {
+        let cfg: DeskConfig = toml::from_str(
+            "vault_id = \"0x1\"\n\
+             [[hedge.venues]]\n\
+             kind = \"paper\"\n\
+             [[hedge.venues]]\n\
+             kind = \"paper\"\n\
+             name = \"paper-b\"\n",
+        )
+        .unwrap();
+        let specs = cfg.hedge.venue_specs().unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[1].name, "paper-b");
+    }
 }

@@ -7,14 +7,24 @@
 //!   - `mm-desk-theta-governor`  theta bleed over the hard cap
 //!   - `mm-desk-bleed`           rolling (scalp+spread) < (theta+funding)
 //!   - `mm-desk-reserves`        reservations + deployed over NAV
-//!   - `mm-desk-margin-headroom` hedge margin headroom under floor
+//!   - `mm-desk-margin-headroom` a hedge venue's margin headroom under
+//!     the floor (the alert names the venue)
 //!   - `mm-desk-kill-switch`     the NAV-drawdown switch latched
+//!
+//! Multi-venue aggregation (SO-299): the monitors hold the whole hedge
+//! roster. The delta band compares each underlying's book delta against
+//! the TOTAL short across that underlying's venues; margin headroom is
+//! the MIN across venues; the funding rate fed to pricing
+//! (`DeskShared::funding_rate_annual`) is the notional-weighted average
+//! across venues (simple mean while every venue is flat). Gauges carry
+//! `venue`/`symbol` labels.
 //!
 //! The nightly stress job revalues the live book via the model at
 //! −60% / +80% spot gaps, projects theta over a flat 6 months, and
 //! haircuts funding −50%; worst drawdown > 25% NAV sets the V2 gate
 //! (`DeskShared::stress_blocked`) that blocks new short risk.
 
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,6 +71,80 @@ impl Default for MonitorsConfig {
     }
 }
 
+/// One monitored hedge-venue instance: `venue` hedges `symbol`.
+pub struct MonitorVenue {
+    pub symbol: String,
+    pub venue: Arc<dyn HedgeVenue>,
+}
+
+/// One venue's monitor snapshot (pure input to [`aggregate_venues`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct VenueReading {
+    pub name: String,
+    pub symbol: String,
+    /// Short position, underlying units (positive = short).
+    pub short_units: f64,
+    pub funding_annual: f64,
+    pub margin_headroom: f64,
+    /// |short| × spot, settlement raw — the funding weight.
+    pub notional: f64,
+}
+
+/// Cross-venue aggregates the monitors act on.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VenueAggregate {
+    /// Total hedge short per underlying symbol (delta-band input).
+    pub short_by_symbol: HashMap<String, f64>,
+    /// The venue with the least margin room: (venue name, headroom).
+    pub min_headroom: Option<(String, f64)>,
+    /// Notional-weighted funding across venues; simple mean when every
+    /// venue is flat (all weights zero).
+    pub funding_weighted: f64,
+}
+
+/// Pure multi-venue aggregation (unit-tested).
+pub fn aggregate_venues(readings: &[VenueReading]) -> VenueAggregate {
+    let mut agg = VenueAggregate::default();
+    let mut weighted_sum = 0.0;
+    let mut weight = 0.0;
+    for r in readings {
+        *agg.short_by_symbol.entry(r.symbol.clone()).or_default() += r.short_units;
+        weighted_sum += r.funding_annual * r.notional;
+        weight += r.notional;
+        let worse = match &agg.min_headroom {
+            Some((_, h)) => r.margin_headroom < *h,
+            None => true,
+        };
+        if worse {
+            agg.min_headroom = Some((r.name.clone(), r.margin_headroom));
+        }
+    }
+    agg.funding_weighted = if weight > 0.0 {
+        weighted_sum / weight
+    } else if readings.is_empty() {
+        0.0
+    } else {
+        readings.iter().map(|r| r.funding_annual).sum::<f64>() / readings.len() as f64
+    };
+    agg
+}
+
+/// Read one venue's snapshot at `spot` (its underlying's price); `None`
+/// when any venue call errors (the tick logs and moves on).
+pub async fn read_venue(mv: &MonitorVenue, spot: f64) -> Option<VenueReading> {
+    let short_units = mv.venue.position_units().await.ok()?;
+    let funding_annual = mv.venue.funding_rate_annual().await.ok()?;
+    let margin_headroom = mv.venue.margin_headroom().await.ok()?;
+    Some(VenueReading {
+        name: mv.venue.name().to_string(),
+        symbol: mv.symbol.clone(),
+        short_units,
+        funding_annual,
+        margin_headroom,
+        notional: short_units.abs() * spot.max(0.0),
+    })
+}
+
 pub struct MonitorsParams {
     pub cfg: MonitorsConfig,
     pub limits: LimitsConfig,
@@ -72,7 +156,8 @@ pub struct MonitorsParams {
     pub settlement_feed: PriceFeedId,
     pub settlement_decimals: u8,
     pub staleness: Staleness,
-    pub hedge: Arc<dyn HedgeVenue>,
+    /// The whole hedge roster (every venue instance, per underlying).
+    pub venues: Vec<MonitorVenue>,
     pub hedge_band_pct_nav: f64,
 }
 
@@ -113,9 +198,50 @@ fn clone_params(p: &MonitorsParams) -> MonitorsParams {
         settlement_feed: p.settlement_feed,
         settlement_decimals: p.settlement_decimals,
         staleness: p.staleness,
-        hedge: Arc::clone(&p.hedge),
+        venues: p
+            .venues
+            .iter()
+            .map(|v| MonitorVenue { symbol: v.symbol.clone(), venue: Arc::clone(&v.venue) })
+            .collect(),
         hedge_band_pct_nav: p.hedge_band_pct_nav,
     }
+}
+
+/// Fresh spot per model symbol (venues + stress share it per tick).
+fn spots_by_symbol(p: &MonitorsParams) -> HashMap<String, f64> {
+    let mut out = HashMap::new();
+    for (i, model) in p.models.iter().enumerate() {
+        let (feed, decimals) = p.market_feeds[i];
+        if let Ok(s) = compute_spot_from_cache(
+            &p.price_cache,
+            feed,
+            p.settlement_feed,
+            decimals,
+            p.settlement_decimals,
+            p.staleness,
+        ) {
+            out.insert(model.symbol.clone(), s);
+        }
+    }
+    out
+}
+
+/// Read every venue on the roster; failed venue reads are logged and
+/// dropped from the tick's aggregates.
+async fn read_all_venues(p: &MonitorsParams, spots: &HashMap<String, f64>) -> Vec<VenueReading> {
+    let mut readings = Vec::with_capacity(p.venues.len());
+    for mv in &p.venues {
+        let spot = spots.get(&mv.symbol).copied().unwrap_or(0.0);
+        match read_venue(mv, spot).await {
+            Some(r) => readings.push(r),
+            None => tracing::warn!(
+                venue = mv.venue.name(),
+                symbol = %mv.symbol,
+                "hedge venue read failed; excluded from this tick's aggregates"
+            ),
+        }
+    }
+    readings
 }
 
 async fn monitor_tick(p: &MonitorsParams, bleed_samples: &mut Vec<(u64, f64, f64)>) {
@@ -170,29 +296,49 @@ async fn monitor_tick(p: &MonitorsParams, bleed_samples: &mut Vec<(u64, f64, f64
         tracing::error!(alert_id = "mm-desk-kill-switch", nav, "kill switch latched: new buys stopped");
     }
 
-    // Delta vs band, per market. The monitor's hedge handle covers the
-    // first venue; per-market monitoring shares the aggregate short
-    // (single-underlying deployments; refine with multi-venue wiring).
-    let funding = p.hedge.funding_rate_annual().await.unwrap_or(0.0);
-    metrics::gauge!("mm_desk_funding_rate_annual").set(funding);
-    let hedge_short = p.hedge.position_units().await.unwrap_or(0.0);
-    metrics::gauge!("mm_desk_hedge_short_units").set(hedge_short);
+    // Venue roster: per-venue labelled gauges + margin-floor alerts, then
+    // the cross-venue aggregates.
+    let spots = spots_by_symbol(p);
+    let readings = read_all_venues(p, &spots).await;
+    for r in &readings {
+        metrics::gauge!("mm_desk_hedge_short_units", "venue" => r.name.clone(), "symbol" => r.symbol.clone())
+            .set(r.short_units);
+        metrics::gauge!("mm_desk_funding_rate_annual", "venue" => r.name.clone(), "symbol" => r.symbol.clone())
+            .set(r.funding_annual);
+        metrics::gauge!("mm_desk_margin_headroom", "venue" => r.name.clone(), "symbol" => r.symbol.clone())
+            .set(r.margin_headroom);
+        if r.margin_headroom < p.cfg.margin_headroom_floor {
+            tracing::error!(
+                alert_id = "mm-desk-margin-headroom",
+                venue = %r.name,
+                symbol = %r.symbol,
+                headroom = r.margin_headroom,
+                floor = p.cfg.margin_headroom_floor,
+                "hedge margin headroom under the floor"
+            );
+        }
+    }
+    let agg = aggregate_venues(&readings);
+    if let Some((_, headroom)) = &agg.min_headroom {
+        metrics::gauge!("mm_desk_margin_headroom_min").set(*headroom);
+    }
+    if !readings.is_empty() {
+        // The funding input to pricing: notional-weighted across venues.
+        metrics::gauge!("mm_desk_funding_rate_annual_weighted").set(agg.funding_weighted);
+        *p.shared.funding_rate_annual.write() = agg.funding_weighted;
+    }
+
+    // Delta vs band, per market, against the TOTAL short across that
+    // market's venues.
     let deltas = p.shared.book_delta_units.read().clone();
-    for (i, model) in p.models.iter().enumerate() {
+    for model in p.models.iter() {
         let delta_units = deltas.get(&model.coin_type).copied().unwrap_or(0.0);
         metrics::gauge!("mm_desk_book_delta_units", "symbol" => model.symbol.clone())
             .set(delta_units);
-        let (feed, decimals) = p.market_feeds[i];
-        let Ok(spot) = compute_spot_from_cache(
-            &p.price_cache,
-            feed,
-            p.settlement_feed,
-            decimals,
-            p.settlement_decimals,
-            p.staleness,
-        ) else {
+        let Some(spot) = spots.get(&model.symbol).copied() else {
             continue;
         };
+        let hedge_short = agg.short_by_symbol.get(&model.symbol).copied().unwrap_or(0.0);
         let band = super::hedge::band_units_for(p.hedge_band_pct_nav, nav, spot);
         let net = delta_units - hedge_short;
         metrics::gauge!("mm_desk_delta_net_of_hedge_units", "symbol" => model.symbol.clone())
@@ -206,18 +352,6 @@ async fn monitor_tick(p: &MonitorsParams, bleed_samples: &mut Vec<(u64, f64, f64
                 "net-of-hedge delta outside the band"
             );
         }
-    }
-
-    // Margin headroom.
-    let headroom = p.hedge.margin_headroom().await.unwrap_or(1.0);
-    metrics::gauge!("mm_desk_margin_headroom").set(headroom);
-    if headroom < p.cfg.margin_headroom_floor {
-        tracing::error!(
-            alert_id = "mm-desk-margin-headroom",
-            headroom,
-            floor = p.cfg.margin_headroom_floor,
-            "hedge margin headroom under the floor"
-        );
     }
 
     // Bleed: rolling (scalp + spread) vs (theta + funding cost).
@@ -243,25 +377,9 @@ async fn monitor_tick(p: &MonitorsParams, bleed_samples: &mut Vec<(u64, f64, f64
     }
 }
 
-fn first_fresh_spot(p: &MonitorsParams) -> Option<f64> {
-    for (i, _) in p.models.iter().enumerate() {
-        let (feed, decimals) = p.market_feeds[i];
-        if let Ok(s) = compute_spot_from_cache(
-            &p.price_cache,
-            feed,
-            p.settlement_feed,
-            decimals,
-            p.settlement_decimals,
-            p.staleness,
-        ) {
-            return Some(s);
-        }
-    }
-    None
-}
-
 /// Revalue the live book under the 00-plan stress scenarios and set the
-/// V2 gate. Results are logged + exported as gauges.
+/// V2 gate. Results are logged + exported as gauges. Hedge legs use the
+/// per-underlying total short across venues at that underlying's spot.
 async fn stress_tick(p: &MonitorsParams) {
     let holdings = p.book.read().holdings.clone();
     let nav = p.shared.exposure.read().nav;
@@ -272,24 +390,26 @@ async fn stress_tick(p: &MonitorsParams) {
     let now = super::auctions::now_ms();
     let mut worst_drawdown: f64 = 0.0;
 
-    // Spot gaps: −60% / +80%, book delta-hedged (the hedge short offsets
-    // spot P&L 1:1 on delta; the option legs reprice through the model).
-    let hedge_short = p.hedge.position_units().await.unwrap_or(0.0);
+    let spots = spots_by_symbol(p);
+    let readings = read_all_venues(p, &spots).await;
+    let agg = aggregate_venues(&readings);
+    // Per-symbol hedge notional (short × that symbol's spot).
+    let hedge_notional: f64 = agg
+        .short_by_symbol
+        .iter()
+        .map(|(sym, short)| short * spots.get(sym).copied().unwrap_or(0.0))
+        .sum();
+
+    // Spot gaps: −60% / +80%, book delta-hedged (each underlying's hedge
+    // short offsets spot P&L 1:1 on delta; the option legs reprice
+    // through the model).
     for gap in [-0.60, 0.80] {
         let mut pnl = 0.0;
         for h in &holdings {
             let Some(mi) = p.models.iter().position(|m| m.coin_type == h.asset_coin_type) else {
                 continue;
             };
-            let (feed, decimals) = p.market_feeds[mi];
-            let Ok(spot) = compute_spot_from_cache(
-                &p.price_cache,
-                feed,
-                p.settlement_feed,
-                decimals,
-                p.settlement_decimals,
-                p.staleness,
-            ) else {
+            let Some(spot) = spots.get(&p.models[mi].symbol).copied() else {
                 continue;
             };
             let t = h.expiry_ms.saturating_sub(now) as f64 / 1000.0 / 86_400.0 / 365.0;
@@ -299,13 +419,8 @@ async fn stress_tick(p: &MonitorsParams) {
             let after = p.models[mi].fair_per_unit(h.is_put, spot * (1.0 + gap), k, t, sigma);
             pnl += (after - before) * h.amount() as f64;
         }
-        // Hedge leg: a short of `hedge_short` units gains when spot falls.
-        // Applied against the first fresh spot (single-underlying
-        // deployments; multi-underlying hedge attribution is a
-        // TODO(SO-299) refinement).
-        if let Some(spot) = first_fresh_spot(p) {
-            pnl += -hedge_short * spot * gap;
-        }
+        // Hedge legs: a short gains when spot falls, per underlying.
+        pnl += -hedge_notional * gap;
         let drawdown = (-pnl / nav).max(0.0);
         worst_drawdown = worst_drawdown.max(drawdown);
         metrics::gauge!("mm_desk_stress_drawdown", "scenario" => if gap < 0.0 { "gap_down_60" } else { "gap_up_80" })
@@ -318,9 +433,9 @@ async fn stress_tick(p: &MonitorsParams) {
     worst_drawdown = worst_drawdown.max(flat_6mo);
     metrics::gauge!("mm_desk_stress_drawdown", "scenario" => "flat_6mo").set(flat_6mo);
 
-    // Funding −50%: the funding leg halves for the projection window.
-    let funding = p.hedge.funding_rate_annual().await.unwrap_or(0.0);
-    let hedge_notional = hedge_short * first_fresh_spot(p).unwrap_or(0.0);
+    // Funding −50%: the (notional-weighted) funding leg halves for the
+    // projection window.
+    let funding = agg.funding_weighted;
     let funding_hit = if funding > 0.0 {
         (funding * 0.5 * hedge_notional * (30.0 / 365.0) / nav).max(0.0)
     } else {
@@ -340,5 +455,80 @@ async fn stress_tick(p: &MonitorsParams) {
         );
     } else {
         tracing::info!(worst_drawdown, "nightly stress complete");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::desk::hedge::PaperVenue;
+
+    fn reading(name: &str, symbol: &str, short: f64, funding: f64, headroom: f64, spot: f64) -> VenueReading {
+        VenueReading {
+            name: name.into(),
+            symbol: symbol.into(),
+            short_units: short,
+            funding_annual: funding,
+            margin_headroom: headroom,
+            notional: short.abs() * spot,
+        }
+    }
+
+    #[test]
+    fn aggregate_sums_shorts_takes_min_headroom_and_weights_funding() {
+        let readings = vec![
+            reading("paper", "TBTC", 10.0, 0.10, 0.50, 100.0), // notional 1000
+            reading("paper-b", "TBTC", 5.0, 0.40, 0.20, 100.0), // notional 500
+            reading("paper", "TWAL", 7.0, 0.10, 0.90, 0.0),     // flat weight
+        ];
+        let agg = aggregate_venues(&readings);
+        assert!((agg.short_by_symbol["TBTC"] - 15.0).abs() < 1e-9);
+        assert!((agg.short_by_symbol["TWAL"] - 7.0).abs() < 1e-9);
+        // Min headroom names the venue.
+        assert_eq!(agg.min_headroom, Some(("paper-b".into(), 0.20)));
+        // Weighted funding: (0.10×1000 + 0.40×500) / 1500 = 0.20.
+        assert!((agg.funding_weighted - 0.20).abs() < 1e-9, "{}", agg.funding_weighted);
+    }
+
+    #[test]
+    fn aggregate_falls_back_to_mean_funding_when_all_flat() {
+        let readings = vec![
+            reading("a", "TBTC", 0.0, 0.10, 1.0, 100.0),
+            reading("b", "TBTC", 0.0, 0.30, 1.0, 100.0),
+        ];
+        let agg = aggregate_venues(&readings);
+        assert!((agg.funding_weighted - 0.20).abs() < 1e-9);
+        assert_eq!(aggregate_venues(&[]).funding_weighted, 0.0);
+    }
+
+    #[tokio::test]
+    async fn two_paper_venues_aggregate_summed_delta_and_min_margin() {
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let path_a = dir.join(format!("mm-desk-mv-a-{pid}.json"));
+        let path_b = dir.join(format!("mm-desk-mv-b-{pid}.json"));
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+        let a = PaperVenue::load_named("paper", path_a.clone(), 0.0, 0.10);
+        let b = PaperVenue::load_named("paper-b", path_b.clone(), 0.0, 0.30);
+        a.adjust_to(10.0, 100.0).await.unwrap();
+        b.adjust_to(5.0, 100.0).await.unwrap();
+        let venues = vec![
+            MonitorVenue { symbol: "TBTC".into(), venue: Arc::new(a) },
+            MonitorVenue { symbol: "TBTC".into(), venue: Arc::new(b) },
+        ];
+        let mut readings = Vec::new();
+        for mv in &venues {
+            readings.push(read_venue(mv, 100.0).await.unwrap());
+        }
+        let agg = aggregate_venues(&readings);
+        // Summed short across both venues on the same underlying.
+        assert!((agg.short_by_symbol["TBTC"] - 15.0).abs() < 1e-9);
+        // Paper margin never binds: min is 1.0 and still names a venue.
+        assert_eq!(agg.min_headroom.as_ref().map(|(_, h)| *h), Some(1.0));
+        // Weighted funding: (0.10×1000 + 0.30×500) / 1500.
+        assert!((agg.funding_weighted - (0.10 * 1000.0 + 0.30 * 500.0) / 1500.0).abs() < 1e-9);
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
     }
 }

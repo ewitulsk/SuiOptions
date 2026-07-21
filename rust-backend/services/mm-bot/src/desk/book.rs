@@ -18,20 +18,35 @@
 //!     `vault::free_balance_of<OptionCoin>` dev-inspect (the
 //!     `custody_balance` pattern from the old vault_deepbook quoter),
 //!     plus the bot wallet's own float of the same coin types.
-//!   - Written positions: TODO(SO-299) — no V2 writes exist yet; the
-//!     ledger starts empty and is populated at write time. Reconstruction
-//!     from vault-held `Position`s lands with the V2 desk.
+//!   - Written positions: vault-custodied `Position` objects. Ids come
+//!     from the indexer's `trading_vault_positions` view (the same
+//!     indexer source the NAV path uses), amount + bucket from on-chain
+//!     object reads, strike/expiry/kind from the api-service
+//!     bucket-metadata path the holdings reconstruction already uses.
+//!     This mirrors `sui_tx::tx::appraisal::discover_holdings`'
+//!     classification (`::position::Position` type suffix; RfqTickets,
+//!     DeepBook custody and coin objects are not written inventory)
+//!     without pulling in the appraisal composer's full
+//!     dynamic-field walk. Same-bucket held coins mark written lines
+//!     `covered` ([`Book::recompute_covered`]); the uncovered remainder
+//!     is the V2 naked-short budget.
+//!
+//! Fill detection (P&L attribution): [`classify_fill`] + [`apply_fills`]
+//! turn indexer events into spread-line records, resumed from a
+//! persisted sequence cursor ([`FillCursor`], write-after-apply).
 
 use std::collections::HashMap;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
-use protocol_types::ids::ObjectId;
-use serde::Serialize;
+use protocol_types::events::{ChainEvent, IndexedEvent};
+use protocol_types::ids::{ObjectId, SuiAddress};
+use serde::{Deserialize, Serialize};
+use sui_json_rpc_types::{SuiObjectDataOptions, SuiParsedData};
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::TransactionKind;
@@ -72,6 +87,8 @@ impl Holding {
 #[derive(Clone, Debug)]
 pub struct Written {
     pub bucket_id: ObjectId,
+    /// Canonical underlying coin type (selects the market model).
+    pub asset_coin_type: String,
     pub is_put: bool,
     pub strike: u128,
     pub strike_scale: u8,
@@ -85,6 +102,9 @@ pub struct Written {
 impl Written {
     pub fn naked(&self) -> u64 {
         self.amount.saturating_sub(self.covered)
+    }
+    pub fn strike_scaled(&self) -> f64 {
+        self.strike as f64 / 10f64.powi(self.strike_scale as i32)
     }
 }
 
@@ -221,6 +241,22 @@ impl Book {
         self.written.iter().map(Written::naked).sum()
     }
 
+    /// Re-derive each written line's `covered` from the current holdings:
+    /// held coins in the SAME bucket offset written amounts (allocated in
+    /// ledger order when several lines share a bucket). Call after any
+    /// holdings or written refresh; the remainder is the naked budget.
+    pub fn recompute_covered(&mut self) {
+        let mut avail: HashMap<ObjectId, u64> = HashMap::new();
+        for h in &self.holdings {
+            *avail.entry(h.bucket_id).or_default() += h.amount();
+        }
+        for w in &mut self.written {
+            let a = avail.entry(w.bucket_id).or_default();
+            w.covered = w.amount.min(*a);
+            *a -= w.covered;
+        }
+    }
+
     /// Net greeks per expiry (ms) bucket and in total. Longs count
     /// positive, written shorts negative. `marks` maps bucket_id →
     /// per-unit greeks (computed by the caller via [`MarketModel`], so
@@ -341,11 +377,13 @@ pub async fn reconstruct(p: ReconstructParams<'_>) -> Result<Book> {
     let mut book = Book::new(nav, p.pnl_path);
     book.holdings =
         fetch_holdings(p.wrap, p.api, p.trading_vault_package, p.vault_id).await?;
-    // TODO(SO-299): reconstruct `written` from vault-held Positions once
-    // the V2 desk writes; empty until then.
+    book.written = fetch_written(p.wrap, p.indexer, p.api, p.vault_id).await?;
+    book.recompute_covered();
     tracing::info!(
         nav = book.nav,
         holdings = book.holdings.len(),
+        written = book.written.len(),
+        naked = book.naked_written_units(),
         "book reconstructed from vault custody"
     );
     Ok(book)
@@ -406,6 +444,97 @@ pub async fn fetch_holdings(
     Ok(holdings)
 }
 
+/// Written (short) positions: vault-custodied `Position` objects. Ids
+/// from the indexer's `trading_vault_positions` view (active only),
+/// amount + bucket from on-chain object reads, series metadata from the
+/// bucket-pricing lookup. Used at boot AND by the refresher's periodic
+/// custody re-sync (new writes/offset closes land out-of-band). Callers
+/// run [`Book::recompute_covered`] after installing the result.
+pub async fn fetch_written(
+    wrap: &sui_tx::sui_client::SuiClientWrapper,
+    indexer: &indexer_graphql::IndexerClient,
+    api: &api_service_client::ApiServiceClient,
+    vault_id: ObjectID,
+) -> Result<Vec<Written>> {
+    let vault_pt = ObjectId::new(vault_id.into_bytes());
+    let positions = indexer
+        .trading_vault_positions(vault_pt)
+        .await
+        .context("indexer trading_vault_positions")?;
+    let mut written = Vec::new();
+    for pos in positions.iter().filter(|p| p.active) {
+        let pos_id = ObjectID::new(*pos.position_id.as_bytes());
+        let resp = wrap
+            .client
+            .read_api()
+            .get_object_with_options(
+                pos_id,
+                SuiObjectDataOptions::new().with_type().with_content(),
+            )
+            .await
+            .with_context(|| format!("reading vault position {pos_id}"))?;
+        let Some(data) = resp.data else {
+            continue; // removed since the indexer view was written
+        };
+        let ty = data.type_.as_ref().map(|t| t.to_string()).unwrap_or_default();
+        // discover_holdings' classification: only `::position::Position`
+        // objects are written option inventory (RfqTickets, DeepBook
+        // custody and held coins are not).
+        if !ty.ends_with("::position::Position") {
+            continue;
+        }
+        let fields = match data.content {
+            Some(SuiParsedData::MoveObject(obj)) => obj.fields.to_json_value(),
+            other => return Err(anyhow!("position {pos_id} has unexpected content: {other:?}")),
+        };
+        let bucket_id = fields
+            .get("bucket_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|s| ObjectId::from_hex(s).ok())
+            .ok_or_else(|| anyhow!("position {pos_id} missing bucket_id"))?;
+        let range_start = json_u128(&fields, "range_start")?;
+        let range_end = json_u128(&fields, "range_end")?;
+        let amount = u64::try_from(range_end.saturating_sub(range_start)).unwrap_or(u64::MAX);
+        if amount == 0 {
+            continue; // fully offset-closed, awaiting destroy_empty
+        }
+        let Some(bucket) = api.bucket_pricing(bucket_id).await? else {
+            tracing::warn!(
+                position = %pos_id,
+                bucket = %bucket_id,
+                "written position's bucket unknown to api-service; skipping line"
+            );
+            continue;
+        };
+        written.push(Written {
+            bucket_id,
+            asset_coin_type: bucket.asset_coin_type.clone(),
+            is_put: bucket.is_put,
+            strike: bucket.strike,
+            strike_scale: bucket.strike_scale,
+            expiry_ms: bucket.expiry_ms,
+            amount,
+            covered: 0,
+        });
+    }
+    Ok(written)
+}
+
+/// A `u128` position field that may arrive as a JSON number or string.
+fn json_u128(fields: &serde_json::Value, name: &str) -> Result<u128> {
+    let v = fields
+        .get(name)
+        .ok_or_else(|| anyhow!("position missing field {name}"))?;
+    match v {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .map(u128::from)
+            .ok_or_else(|| anyhow!("non-u64 {name}: {n}")),
+        serde_json::Value::String(s) => s.parse().with_context(|| format!("parsing {name} {s:?}")),
+        other => Err(anyhow!("unexpected {name}: {other}")),
+    }
+}
+
 /// `vault::free_balance_of<T>(vault)` via dev-inspect (the old
 /// vault_deepbook `custody_balance` pattern).
 pub async fn free_balance_of(
@@ -447,6 +576,176 @@ pub async fn free_balance_of(
     bcs::from_bytes::<u64>(bytes).context("decoding free balance")
 }
 
+// ── fill detection → spread-line attribution ───────────────────────────
+//
+// A poller (spawned in `mod.rs`) scans the indexer events feed for fills
+// that touch OUR vault and books the spread line:
+//
+//   spread += (model fair at the current surface − premium paid)   [buys]
+//   spread += (premium received − model fair at the current surface) [writes]
+//
+// **V1 attribution approximation (documented)**: fair is evaluated at
+// DETECTION time, not at the on-chain fill time — the surface may have
+// moved between the fill and the poll that observes it, so the
+// spread-vs-scalp/theta split is approximate while the P&L total stays
+// exact. The scalp line comes from `HedgeVenue::realized_pnl` deltas in
+// the rebalancer; theta/funding accrue in the refresher.
+//
+// Identity: the desk is a vault-only maker, so "our" fills are exactly
+// the events whose collateral released from the vault
+// (`WriteExecuted`/`PutWriteExecuted` with `collateral_source == vault`
+// — for our quotes the vault IS the QuoteSigner's collateral source and
+// `signer_token_recipient` is the vault address, see `VaultRouting`) and
+// the auction-channel settles paying option tokens to the vault
+// (`RfqSettled`/`PutRfqSettled` with `call/put_recipient == vault`).
+// Generic `AuctionSettled` is deliberately excluded: the desk only bids
+// rfq call/put auctions, whose adapters emit the Rfq* settle events.
+
+/// Persisted events-feed cursor (sequence high-water mark). Written
+/// AFTER fills are applied, so a crash between apply and persist
+/// re-applies at most one batch; a clean restart never double-counts.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct FillCursor {
+    #[serde(default)]
+    pub last_sequence: u64,
+}
+
+impl FillCursor {
+    /// `None` when no cursor file exists yet (first boot — the poller
+    /// seeds from the indexer head so history isn't replayed as fills).
+    pub fn load(path: &Path) -> Option<Self> {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    }
+
+    pub fn persist(&self, path: &Path) {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).ok();
+        }
+        if let Err(e) = serde_json::to_string(self).map_err(anyhow::Error::from).and_then(|s| {
+            std::fs::write(path, s).map_err(anyhow::Error::from)
+        }) {
+            tracing::warn!(error = %format!("{e:#}"), path = %path.display(), "fill cursor persist failed");
+        }
+    }
+}
+
+/// Which side of a detected fill the desk was on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FillSide {
+    /// The desk paid premium and holds the option (V1 flows).
+    Bought,
+    /// The desk received premium and holds the short (V2 flow).
+    Wrote,
+}
+
+/// One fill the desk participated in, normalized across event shapes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DetectedFill {
+    pub sequence: u64,
+    pub bucket_id: ObjectId,
+    pub side: FillSide,
+    /// Underlying units filled.
+    pub amount: u64,
+    /// Premium paid (Bought: the gross premium our collateral released /
+    /// our winning bid) or received (Wrote: net of protocol fee),
+    /// settlement raw.
+    pub premium: u64,
+}
+
+/// Classify one indexed event as a desk fill, or `None` when it isn't
+/// ours / isn't a fill. `vault` is the trading vault's object id (its
+/// address is the same 32 bytes).
+pub fn classify_fill(ev: &IndexedEvent, vault: ObjectId) -> Option<DetectedFill> {
+    let vault_addr = SuiAddress::new(*vault.as_bytes());
+    match &ev.event {
+        ChainEvent::WriteExecuted(w) if w.collateral_source == vault => {
+            let (side, premium) = if w.call_token_recipient == vault_addr {
+                (FillSide::Bought, w.gross_premium)
+            } else {
+                (FillSide::Wrote, w.net_premium)
+            };
+            Some(DetectedFill {
+                sequence: ev.sequence,
+                bucket_id: w.bucket_id,
+                side,
+                amount: w.write_amount,
+                premium,
+            })
+        }
+        ChainEvent::PutWriteExecuted(w) if w.collateral_source == vault => {
+            let (side, premium) = if w.put_token_recipient == vault_addr {
+                (FillSide::Bought, w.gross_premium)
+            } else {
+                (FillSide::Wrote, w.net_premium)
+            };
+            Some(DetectedFill {
+                sequence: ev.sequence,
+                bucket_id: w.bucket_id,
+                side,
+                amount: w.write_amount,
+                premium,
+            })
+        }
+        ChainEvent::RfqSettled(r) if r.call_recipient == vault_addr => Some(DetectedFill {
+            sequence: ev.sequence,
+            bucket_id: r.bucket_id,
+            side: FillSide::Bought,
+            amount: r.amount,
+            premium: r.gross_premium,
+        }),
+        ChainEvent::PutRfqSettled(r) if r.put_recipient == vault_addr => Some(DetectedFill {
+            sequence: ev.sequence,
+            bucket_id: r.bucket_id,
+            side: FillSide::Bought,
+            amount: r.amount,
+            premium: r.gross_premium,
+        }),
+        _ => None,
+    }
+}
+
+/// Apply detected fills (paired with their model fair TOTAL premium at
+/// detection) to the spread line, advance the cursor, then persist it
+/// (write-after-apply). Fills at or below the cursor are skipped, so a
+/// replay of an already-applied batch is a no-op. Returns how many fills
+/// were applied.
+pub fn apply_fills(
+    book: &mut Book,
+    cursor: &mut FillCursor,
+    cursor_path: &Path,
+    fills: &[(DetectedFill, f64)],
+    now_ms: u64,
+) -> usize {
+    let mut applied = 0;
+    for (f, fair_total) in fills {
+        if f.sequence <= cursor.last_sequence {
+            continue;
+        }
+        let (spread, label) = match f.side {
+            FillSide::Bought => (fair_total - f.premium as f64, "bought"),
+            FillSide::Wrote => (f.premium as f64 - fair_total, "wrote"),
+        };
+        let note = format!(
+            "fill seq={} bucket={} {} amount={} premium={}",
+            f.sequence,
+            f.bucket_id.to_hex(),
+            label,
+            f.amount,
+            f.premium
+        );
+        book.record_pnl(PnlLine::Spread, spread, &note, now_ms);
+        metrics::counter!("mm_desk_fills_total", "side" => label).increment(1);
+        cursor.last_sequence = f.sequence;
+        applied += 1;
+    }
+    if applied > 0 {
+        cursor.persist(cursor_path);
+    }
+    applied
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +767,19 @@ mod tests {
             amount_vault: amount,
             amount_wallet: 0,
             pool_id: None,
+        }
+    }
+
+    fn written(bucket: u8, expiry: u64, amount: u64) -> Written {
+        Written {
+            bucket_id: oid(bucket),
+            asset_coin_type: "0x1::a::A".into(),
+            is_put: false,
+            strike: 100,
+            strike_scale: 0,
+            expiry_ms: expiry,
+            amount,
+            covered: 0,
         }
     }
 
@@ -498,15 +810,7 @@ mod tests {
         let mut b = Book::new(0, None);
         b.holdings.push(holding(1, 100, 10));
         b.holdings.push(holding(2, 200, 5));
-        b.written.push(Written {
-            bucket_id: oid(3),
-            is_put: false,
-            strike: 100,
-            strike_scale: 0,
-            expiry_ms: 100,
-            amount: 4,
-            covered: 0,
-        });
+        b.written.push(written(3, 100, 4));
         let g = Greeks { delta: 0.5, gamma: 0.01, vega: 20.0, theta: -5.0, rho: 0.0 };
         let mut per_unit = HashMap::new();
         per_unit.insert(oid(1), g);
@@ -526,25 +830,152 @@ mod tests {
     #[test]
     fn naked_written_units_sums_uncovered() {
         let mut b = Book::new(0, None);
-        b.written.push(Written {
-            bucket_id: oid(1),
-            is_put: false,
-            strike: 100,
-            strike_scale: 0,
-            expiry_ms: 1,
-            amount: 10,
-            covered: 7,
-        });
-        b.written.push(Written {
-            bucket_id: oid(2),
-            is_put: true,
-            strike: 100,
-            strike_scale: 0,
-            expiry_ms: 1,
-            amount: 5,
-            covered: 5,
-        });
+        b.written.push(Written { covered: 7, ..written(1, 1, 10) });
+        b.written.push(Written { is_put: true, covered: 5, ..written(2, 1, 5) });
         assert_eq!(b.naked_written_units(), 3);
+    }
+
+    #[test]
+    fn covered_netting_offsets_same_bucket_and_computes_naked() {
+        let mut b = Book::new(0, None);
+        // Bucket 1: 10 held, 6 written → fully covered write, 4 held spare.
+        // Bucket 2: nothing held, 4 written → fully naked.
+        b.holdings.push(holding(1, 100, 10));
+        b.written.push(written(1, 100, 6));
+        b.written.push(written(2, 100, 4));
+        b.recompute_covered();
+        assert_eq!(b.written[0].covered, 6);
+        assert_eq!(b.written[1].covered, 0);
+        assert_eq!(b.naked_written_units(), 4);
+
+        // Held shrinks to 3 (partial cover); second line in the SAME
+        // bucket gets nothing once the first drained the held amount.
+        b.holdings[0].amount_vault = 3;
+        b.written.push(written(1, 100, 5));
+        b.recompute_covered();
+        assert_eq!(b.written[0].covered, 3);
+        assert_eq!(b.written[2].covered, 0);
+        assert_eq!(b.naked_written_units(), 3 + 4 + 5);
+
+        // Net greeks see the true net: bucket 1 expiry-100 holds 3 long
+        // vs 6 + 5 written, bucket 2 adds 4 written → net −12 units.
+        let g = Greeks { delta: 1.0, gamma: 0.0, vega: 1.0, theta: 0.0, rho: 0.0 };
+        let mut per_unit = HashMap::new();
+        per_unit.insert(oid(1), g);
+        per_unit.insert(oid(2), g);
+        let (_, total) = b.net_greeks(&per_unit);
+        assert!((total.delta_units - (3.0 - 6.0 - 5.0 - 4.0)).abs() < 1e-9);
+    }
+
+    // ── fill detection ─────────────────────────────────────────────────
+
+    fn hexid(b: u8) -> String {
+        oid(b).to_hex()
+    }
+
+    /// Decode a canned IndexedEvent from the exact wire JSON the indexer
+    /// GraphQL client produces (tagged ChainEvent envelope).
+    fn canned_event(seq: u64, event: serde_json::Value) -> IndexedEvent {
+        serde_json::from_value(serde_json::json!({
+            "sequence": seq.to_string(),
+            "timestamp_ms": "1000",
+            "event": event,
+        }))
+        .unwrap()
+    }
+
+    fn canned_write_executed(collateral_source: u8, call_recipient: u8) -> serde_json::Value {
+        serde_json::json!({
+            "type": "WriteExecuted",
+            "payload": {
+                "bucket_id": hexid(1),
+                "signer_id": hexid(7),
+                "collateral_source": hexid(collateral_source),
+                "signer_token_recipient": hexid(9),
+                "executor": hexid(8),
+                "position_id": hexid(6),
+                "position_recipient": hexid(8),
+                "call_token_recipient": hexid(call_recipient),
+                "write_amount": "1000",
+                "gross_premium": "500",
+                "fee": "50",
+                "net_premium": "450",
+                "range_start": "0",
+                "range_end": "1000",
+                "nonce": "1",
+            }
+        })
+    }
+
+    #[test]
+    fn classify_fill_scopes_to_our_vault_and_sides() {
+        let vault = oid(9);
+        // Our V1 buy: collateral from the vault, tokens to the vault.
+        let ev = canned_event(10, canned_write_executed(9, 9));
+        let f = classify_fill(&ev, vault).unwrap();
+        assert_eq!(f.side, FillSide::Bought);
+        assert_eq!((f.amount, f.premium), (1000, 500));
+        // Our V2 write: collateral from the vault, tokens to retail →
+        // premium is the NET the vault receives.
+        let ev = canned_event(11, canned_write_executed(9, 3));
+        let f = classify_fill(&ev, vault).unwrap();
+        assert_eq!(f.side, FillSide::Wrote);
+        assert_eq!(f.premium, 450);
+        // Someone else's fill: not ours.
+        let ev = canned_event(12, canned_write_executed(4, 4));
+        assert_eq!(classify_fill(&ev, vault), None);
+    }
+
+    #[test]
+    fn fill_replay_attributes_spread_and_cursor_survives_rerun() {
+        let vault = oid(9);
+        let dir = std::env::temp_dir();
+        let cursor_path = dir.join(format!("mm-desk-fill-cursor-test-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&cursor_path);
+
+        // Two canned fills: a WS-RFQ buy and an auction (RfqSettled) win.
+        let ev1 = canned_event(100, canned_write_executed(9, 9));
+        let ev2 = canned_event(101, serde_json::json!({
+            "type": "RfqSettled",
+            "payload": {
+                "rfq_id": hexid(2),
+                "auction_id": hexid(3),
+                "bucket_id": hexid(1),
+                "origin": hexid(4),
+                "winner": hexid(8),
+                "call_recipient": hexid(9),
+                "position_id": hexid(6),
+                "position_recipient": hexid(4),
+                "amount": "2000",
+                "gross_premium": "900",
+                "fee": "90",
+                "net_premium": "810",
+                "range_start": "1000",
+                "range_end": "3000",
+            }
+        }));
+        let fills: Vec<(DetectedFill, f64)> = vec![
+            // Model fair 600 vs 500 paid → spread +100.
+            (classify_fill(&ev1, vault).unwrap(), 600.0),
+            // Model fair 850 vs 900 paid → spread −50.
+            (classify_fill(&ev2, vault).unwrap(), 850.0),
+        ];
+
+        let mut book = Book::new(0, None);
+        let mut cursor = FillCursor::default();
+        let applied = apply_fills(&mut book, &mut cursor, &cursor_path, &fills, 1);
+        assert_eq!(applied, 2);
+        assert!((book.pnl.spread - 50.0).abs() < 1e-9);
+        assert_eq!(cursor.last_sequence, 101);
+
+        // Restart: reload the persisted cursor, replay the same batch —
+        // nothing double-counts.
+        let mut cursor2 = FillCursor::load(&cursor_path).expect("cursor persisted");
+        assert_eq!(cursor2.last_sequence, 101);
+        let applied = apply_fills(&mut book, &mut cursor2, &cursor_path, &fills, 2);
+        assert_eq!(applied, 0);
+        assert!((book.pnl.spread - 50.0).abs() < 1e-9);
+        let _ = std::fs::remove_file(&cursor_path);
     }
 
     #[test]

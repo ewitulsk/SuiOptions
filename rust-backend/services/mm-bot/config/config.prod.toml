@@ -54,3 +54,6 @@ TWAL = 1.0
 enabled = false
 # vault_id           = "0x..."
 # mm_release_enabled = true
+# Hedge venues: omit for the single legacy paper venue; declare
+# [[desk.hedge.venues]] entries (kind = "paper", name, slippage_bps,
+# funding_rate_annual) for multi-venue monitoring — see config.toml.
