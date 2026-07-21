@@ -45,6 +45,8 @@ public fun other_adapter(): OtherAdapter { OtherAdapter {} }
 
 public fun rogue_oracle(): RogueOracle { RogueOracle {} }
 
+public fun test_oracle(): TestOracle { TestOracle {} }
+
 public fun new_position(scenario: &mut Scenario): TestPosition {
     TestPosition { id: object::new(scenario.ctx()) }
 }

@@ -568,3 +568,143 @@ public fun new_collateralized_write_for_testing(
 ): CollateralizedWrite {
     CollateralizedWrite { bucket_id, writer, amount, range_start, range_end }
 }
+
+// ───────── exact-offset closure + spread collateral compression ─────────
+
+/// A writer netted their own long option coins against their `Position`:
+/// `amount` units burned, the closed range tombstoned out of the exercise
+/// queue, collateral returned. `is_put` distinguishes the two bucket kinds
+/// (collateral is underlying for calls, cash for puts).
+public struct OffsetClosed has copy, drop {
+    bucket_id: ID,
+    closer: address,
+    position_id: ID,
+    is_put: bool,
+    amount: u64,
+    collateral_returned: u64,
+    range_start: u128,
+    range_end: u128,
+}
+
+/// A compressed (spread) write: the range is backed by an escrowed long
+/// call from `long_bucket_id` plus its exercise cash, not by underlying.
+public struct SpreadWritten has copy, drop {
+    bucket_id: ID,
+    long_bucket_id: ID,
+    writer: address,
+    position_id: ID,
+    amount: u64,
+    exercise_cash: u64,
+    range_start: u128,
+    range_end: u128,
+}
+
+/// Permissionless physicalization: the escrowed long call was exercised and
+/// the resulting underlying now backs the range like an ordinary write.
+public struct SpreadUnwound has copy, drop {
+    bucket_id: ID,
+    long_bucket_id: ID,
+    caller: address,
+    range_start: u128,
+    range_end: u128,
+    amount: u64,
+}
+
+/// Pre-expiry spread buy-back: short coins burned, escrow returned to the
+/// writer, range tombstoned.
+public struct SpreadClosed has copy, drop {
+    bucket_id: ID,
+    closer: address,
+    position_id: ID,
+    range_start: u128,
+    range_end: u128,
+    amount: u64,
+}
+
+/// Post-expiry redemption of a never-physicalized spread position: the
+/// untouched escrow goes back to the position holder.
+public struct SpreadRedeemed has copy, drop {
+    bucket_id: ID,
+    redeemer: address,
+    position_id: ID,
+    range_start: u128,
+    range_end: u128,
+    amount: u64,
+}
+
+public(package) fun emit_offset_closed(
+    bucket_id: ID,
+    closer: address,
+    position_id: ID,
+    is_put: bool,
+    amount: u64,
+    collateral_returned: u64,
+    range_start: u128,
+    range_end: u128,
+) {
+    event::emit(OffsetClosed {
+        bucket_id,
+        closer,
+        position_id,
+        is_put,
+        amount,
+        collateral_returned,
+        range_start,
+        range_end,
+    });
+}
+
+public(package) fun emit_spread_written(
+    bucket_id: ID,
+    long_bucket_id: ID,
+    writer: address,
+    position_id: ID,
+    amount: u64,
+    exercise_cash: u64,
+    range_start: u128,
+    range_end: u128,
+) {
+    event::emit(SpreadWritten {
+        bucket_id,
+        long_bucket_id,
+        writer,
+        position_id,
+        amount,
+        exercise_cash,
+        range_start,
+        range_end,
+    });
+}
+
+public(package) fun emit_spread_unwound(
+    bucket_id: ID,
+    long_bucket_id: ID,
+    caller: address,
+    range_start: u128,
+    range_end: u128,
+    amount: u64,
+) {
+    event::emit(SpreadUnwound { bucket_id, long_bucket_id, caller, range_start, range_end, amount });
+}
+
+public(package) fun emit_spread_closed(
+    bucket_id: ID,
+    closer: address,
+    position_id: ID,
+    range_start: u128,
+    range_end: u128,
+    amount: u64,
+) {
+    event::emit(SpreadClosed { bucket_id, closer, position_id, range_start, range_end, amount });
+}
+
+public(package) fun emit_spread_redeemed(
+    bucket_id: ID,
+    redeemer: address,
+    position_id: ID,
+    range_start: u128,
+    range_end: u128,
+    amount: u64,
+) {
+    event::emit(SpreadRedeemed { bucket_id, redeemer, position_id, range_start, range_end, amount });
+}

@@ -1,0 +1,11 @@
+[package]
+name = "dbm_oracle"
+version = "0.0.1"
+edition = "2024.alpha"
+
+[dependencies]
+trading_vault = { local = "../trading-vault" }
+options_core = { local = "../core" }
+deepbook_margin = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook_margin", rev = "main" }
+deepbook = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook", rev = "main" }
+pyth = { git = "https://github.com/pyth-network/pyth-crosschain.git", subdir = "target_chains/sui/contracts", rev = "sui-contract-mainnet" }

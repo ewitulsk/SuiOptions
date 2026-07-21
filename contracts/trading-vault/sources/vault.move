@@ -43,7 +43,7 @@ use options_core::treasury::{Self, Treasury};
 use trading_vault::errors;
 use trading_vault::events;
 use trading_vault::price::{Self, PriceAttestation};
-use trading_vault::registry::{Self, IntegrationRegistry, VaultProtocolConfig};
+use trading_vault::registry::{Self, IntegrationRegistry, OracleRegistry, VaultProtocolConfig};
 
 const BPS_DENOM: u128 = 10_000;
 
@@ -120,6 +120,41 @@ public struct TradingVault has key {
     queue: Table<u64, WithdrawRequest>,
     queue_head: u64,
     queue_tail: u64,
+    /// Optional registered external account (see the external-account
+    /// section below). `None` for vaults without one.
+    external: Option<ExternalAccount>,
+}
+
+/// Capital deployed to a venue the vault cannot custody at the Move level
+/// (a perps account, a margin manager, …) — a jointly-controlled address
+/// registered by the protocol admin. Strategy-neutral: what the account
+/// does (hedge, basis, carry) is the curator's business; the vault
+/// enforces WHERE funds may go and HOW MUCH.
+///
+/// Move-enforced guarantees:
+///   • releases only ever pay the registered address (`release_external`),
+///     curator-gated, capped at `budget_bps` of appraised NAV and
+///     rate-limited to `daily_release_bps` of NAV per 24h window;
+///   • the account's value enters every appraisal through an equity
+///     attestation from the PINNED, allowlisted `equity_oracle` witness —
+///     an appraisal is incomplete without it;
+///   • returns are accepted only from the registered address itself and
+///     reduce `exposure`.
+/// What signatures cannot prevent (adversarial trading at the venue) is
+/// bounded by the budget and detected by off-chain reconciliation of
+/// `exposure` vs attested equity.
+public struct ExternalAccount has store {
+    account: address,
+    /// Oracle-adapter witness whose equity attestations value the account.
+    equity_oracle: TypeName,
+    /// Max total exposure, in bps of NAV at release time.
+    budget_bps: u64,
+    /// Max released per 24h window, in bps of NAV at release time.
+    daily_release_bps: u64,
+    /// released − returned, in deposit-asset units (cost, floored at 0).
+    exposure: u64,
+    released_in_window: u64,
+    window_start_ms: u64,
 }
 
 /// Transferable curator role. Holding the cap named by
@@ -165,7 +200,13 @@ public struct Appraisal {
     /// invalidates the snapshot and aborts at consume.
     types_snapshot: VecSet<TypeName>,
     deposit_balance_snapshot: u64,
+    /// True while a configured external account still needs its equity
+    /// leg (`record_external_equity`).
+    external_pending: bool,
 }
+
+/// Rolling window for the external-account release rate limit.
+const RELEASE_WINDOW_MS: u64 = 86_400_000;
 
 // ═══════════════════════════════ creation ═══════════════════════════════
 
@@ -209,6 +250,7 @@ public fun create_vault<T>(
         queue: table::new(ctx),
         queue_head: 0,
         queue_tail: 0,
+        external: option::none(),
     };
     let vault_id = object::id(&vault);
     let cap = CuratorCap { id: object::new(ctx), vault_id };
@@ -754,6 +796,7 @@ public fun begin_appraisal<T>(vault: &TradingVault): Appraisal {
         position_total: vault.position_count,
         types_snapshot: vault.asset_types,
         deposit_balance_snapshot: deposit_balance,
+        external_pending: vault.external.is_some(),
     }
 }
 
@@ -813,9 +856,11 @@ fun consume_appraisal<T>(vault: &TradingVault, a: Appraisal): u128 {
         position_total,
         types_snapshot,
         deposit_balance_snapshot,
+        external_pending,
     } = a;
     assert!(vault_id == object::id(vault), errors::wrong_vault());
     assert!(remaining_types.is_empty(), errors::appraisal_incomplete());
+    assert!(!external_pending, errors::appraisal_incomplete());
     assert!(appraised_positions.length() == position_total, errors::appraisal_incomplete());
     // Nothing may have moved since begin (same-PTB sessions invalidate).
     assert!(position_total == vault.position_count, errors::appraisal_mismatch());
@@ -849,6 +894,156 @@ public fun check_attestation(
     assert_attestation_fresh(cfg, att, clock);
 }
 
+// ═══════════════════════ external account ═══════════════════════
+
+/// Register (or rotate) the vault's external account. Admin-gated: the
+/// account address and its limits are a protocol-trust decision, like
+/// allowlisting an adapter. The pinned `equity_oracle` witness must be on
+/// the oracle allowlist. Rotation repoints address/oracle/limits; live
+/// exposure and the release window carry over.
+public fun set_external_account(
+    _: &AdminCap,
+    vault: &mut TradingVault,
+    reg: &OracleRegistry,
+    account: address,
+    equity_oracle: TypeName,
+    budget_bps: u64,
+    daily_release_bps: u64,
+) {
+    assert!(
+        budget_bps <= (BPS_DENOM as u64) && daily_release_bps <= (BPS_DENOM as u64),
+        errors::config_invalid(),
+    );
+    assert!(registry::is_oracle_allowed(reg, &equity_oracle), errors::oracle_not_allowed());
+    if (vault.external.is_some()) {
+        let ext = vault.external.borrow_mut();
+        ext.account = account;
+        ext.equity_oracle = equity_oracle;
+        ext.budget_bps = budget_bps;
+        ext.daily_release_bps = daily_release_bps;
+    } else {
+        vault.external.fill(ExternalAccount {
+            account,
+            equity_oracle,
+            budget_bps,
+            daily_release_bps,
+            exposure: 0,
+            released_in_window: 0,
+            window_start_ms: 0,
+        });
+    };
+    events::emit_external_account_set(
+        object::id(vault),
+        account,
+        equity_oracle,
+        budget_bps,
+        daily_release_bps,
+    );
+}
+
+/// Deregister the external account. Only once every released unit has
+/// been returned — an appraisal must never silently drop live exposure.
+public fun clear_external_account(_: &AdminCap, vault: &mut TradingVault) {
+    assert!(vault.external.is_some(), errors::external_not_configured());
+    let ExternalAccount { exposure, .. } = vault.external.extract();
+    assert!(exposure == 0, errors::external_exposure_open());
+    events::emit_external_account_cleared(object::id(vault));
+}
+
+/// Curator-gated, budgeted release of deposit-asset capital to the
+/// registered external account — the ONLY vault outflow that does not
+/// return in-transaction. Consumes a complete `Appraisal` so both limits
+/// bind against true NAV at release time.
+public fun release_external<T>(
+    vault: &mut TradingVault,
+    cap: &CuratorCap,
+    appraisal: Appraisal,
+    amount: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    assert_current_cap(vault, cap);
+    assert!(vault.state == VaultState::Open, errors::vault_not_open());
+    assert!(
+        type_name::with_defining_ids<T>() == vault.config.deposit_asset,
+        errors::deposit_asset_mismatch(),
+    );
+    assert!(amount > 0, core_errors::zero_amount());
+    assert!(vault.external.is_some(), errors::external_not_configured());
+    let nav = consume_appraisal<T>(vault, appraisal);
+
+    let now = clock.timestamp_ms();
+    let (account, exposure_after) = {
+        let ext = vault.external.borrow_mut();
+        if (now >= ext.window_start_ms + RELEASE_WINDOW_MS) {
+            ext.window_start_ms = now;
+            ext.released_in_window = 0;
+        };
+        let budget = nav * (ext.budget_bps as u128) / BPS_DENOM;
+        assert!(
+            (ext.exposure as u128) + (amount as u128) <= budget,
+            errors::external_budget_exceeded(),
+        );
+        let daily = nav * (ext.daily_release_bps as u128) / BPS_DENOM;
+        assert!(
+            (ext.released_in_window as u128) + (amount as u128) <= daily,
+            errors::external_rate_limited(),
+        );
+        ext.exposure = ext.exposure + amount;
+        ext.released_in_window = ext.released_in_window + amount;
+        (ext.account, ext.exposure)
+    };
+    transfer::public_transfer(
+        coin::from_balance(take_balance_internal<T>(vault, amount), ctx),
+        account,
+    );
+    events::emit_external_released(object::id(vault), account, amount, exposure_after, nav);
+}
+
+/// Repatriation: the registered account (and only it — the sweep tx is
+/// sent BY the jointly-controlled address) pays deposit-asset funds back
+/// into free balances, reducing exposure. Amounts beyond the recorded
+/// exposure (venue profit) floor it at zero.
+public fun return_external<T>(vault: &mut TradingVault, funds: Coin<T>, ctx: &TxContext) {
+    assert!(vault.external.is_some(), errors::external_not_configured());
+    assert!(
+        type_name::with_defining_ids<T>() == vault.config.deposit_asset,
+        errors::deposit_asset_mismatch(),
+    );
+    let amount = funds.value();
+    assert!(amount > 0, core_errors::zero_amount());
+    let exposure_after = {
+        let ext = vault.external.borrow_mut();
+        assert!(ctx.sender() == ext.account, errors::not_authorized());
+        ext.exposure = if (ext.exposure > amount) { ext.exposure - amount } else { 0 };
+        ext.exposure
+    };
+    put_balance_internal<T>(vault, funds.into_balance());
+    events::emit_external_returned(object::id(vault), ctx.sender(), amount, exposure_after);
+}
+
+/// The external account's equity leg of an appraisal, in deposit-asset
+/// units. Only the PINNED oracle-adapter witness may record it, and only
+/// while that witness stays allowlisted (delisting is an instant kill
+/// switch). The adapter owns how `equity` is derived — attested by a
+/// keeper under guardrails, or computed on-chain from venue state.
+public fun record_external_equity<W: drop>(
+    vault: &TradingVault,
+    reg: &OracleRegistry,
+    a: &mut Appraisal,
+    _witness: W,
+    equity: u64,
+) {
+    assert!(a.vault_id == object::id(vault), errors::wrong_vault());
+    assert!(vault.external.is_some(), errors::external_not_configured());
+    let w = type_name::with_defining_ids<W>();
+    assert!(w == vault.external.borrow().equity_oracle, errors::wrong_external_oracle());
+    assert!(registry::is_oracle_allowed(reg, &w), errors::oracle_not_allowed());
+    assert!(a.external_pending, errors::already_appraised());
+    a.external_pending = false;
+    a.total_value = a.total_value + (equity as u128);
+}
+
 // ═══════════════════════ closure and rotation ═══════════════════════
 
 public fun initiate_close(vault: &mut TradingVault, cap: &CuratorCap) {
@@ -871,6 +1066,11 @@ fun initiate_close_internal(vault: &mut TradingVault) {
 public fun finalize_close(vault: &mut TradingVault) {
     assert!(vault.state == VaultState::Closing, errors::vault_not_closing());
     assert!(vault.position_count == 0, errors::positions_open());
+    // Live external exposure is off-vault capital: it must be repatriated
+    // (or written off via admin re-registration) before the terminal state.
+    if (vault.external.is_some()) {
+        assert!(vault.external.borrow().exposure == 0, errors::external_exposure_open());
+    };
     let n = vault.asset_types.length();
     let clean = n == 0
         || (n == 1 && vault.asset_types.contains(&vault.config.deposit_asset));
@@ -1029,6 +1229,30 @@ public fun mm_release_enabled(vault: &TradingVault): bool { vault.config.mm_rele
 
 public fun pending_withdrawals(vault: &TradingVault): u64 {
     vault.queue_tail - vault.queue_head
+}
+
+public fun has_external_account(vault: &TradingVault): bool { vault.external.is_some() }
+
+public fun external_account(vault: &TradingVault): address {
+    assert!(vault.external.is_some(), errors::external_not_configured());
+    vault.external.borrow().account
+}
+
+public fun external_exposure(vault: &TradingVault): u64 {
+    if (vault.external.is_none()) { return 0 };
+    vault.external.borrow().exposure
+}
+
+public fun external_equity_oracle(vault: &TradingVault): TypeName {
+    assert!(vault.external.is_some(), errors::external_not_configured());
+    vault.external.borrow().equity_oracle
+}
+
+/// (budget_bps, daily_release_bps, released_in_window, window_start_ms).
+public fun external_limits(vault: &TradingVault): (u64, u64, u64, u64) {
+    assert!(vault.external.is_some(), errors::external_not_configured());
+    let ext = vault.external.borrow();
+    (ext.budget_bps, ext.daily_release_bps, ext.released_in_window, ext.window_start_ms)
 }
 
 public fun stake_of(vault: &TradingVault, owner: address): (u128, u64, u64) {

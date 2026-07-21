@@ -99,6 +99,33 @@ public struct PositionRemoved has copy, drop {
     position_id: ID,
 }
 
+// ─────────────────────────── external account ───────────────────────────
+
+public struct ExternalAccountSet has copy, drop {
+    vault_id: ID,
+    account: address,
+    equity_oracle: TypeName,
+    budget_bps: u64,
+    daily_release_bps: u64,
+}
+
+public struct ExternalAccountCleared has copy, drop { vault_id: ID }
+
+public struct ExternalReleased has copy, drop {
+    vault_id: ID,
+    account: address,
+    amount: u64,
+    exposure: u64,
+    nav: u128,
+}
+
+public struct ExternalReturned has copy, drop {
+    vault_id: ID,
+    from: address,
+    amount: u64,
+    exposure: u64,
+}
+
 // ─────────────────────────── protocol admin ───────────────────────────
 
 public struct AdapterAllowed has copy, drop { adapter: TypeName }
@@ -269,6 +296,45 @@ public(package) fun emit_position_stored(vault_id: ID, adapter: TypeName, positi
 
 public(package) fun emit_position_removed(vault_id: ID, adapter: TypeName, position_id: ID) {
     event::emit(PositionRemoved { vault_id, adapter, position_id });
+}
+
+public(package) fun emit_external_account_set(
+    vault_id: ID,
+    account: address,
+    equity_oracle: TypeName,
+    budget_bps: u64,
+    daily_release_bps: u64,
+) {
+    event::emit(ExternalAccountSet {
+        vault_id,
+        account,
+        equity_oracle,
+        budget_bps,
+        daily_release_bps,
+    });
+}
+
+public(package) fun emit_external_account_cleared(vault_id: ID) {
+    event::emit(ExternalAccountCleared { vault_id });
+}
+
+public(package) fun emit_external_released(
+    vault_id: ID,
+    account: address,
+    amount: u64,
+    exposure: u64,
+    nav: u128,
+) {
+    event::emit(ExternalReleased { vault_id, account, amount, exposure, nav });
+}
+
+public(package) fun emit_external_returned(
+    vault_id: ID,
+    from: address,
+    amount: u64,
+    exposure: u64,
+) {
+    event::emit(ExternalReturned { vault_id, from, amount, exposure });
 }
 
 public(package) fun emit_adapter_allowed(adapter: TypeName) {

@@ -98,7 +98,16 @@ public struct PutBucket<phantom Underlying, phantom Settlement, phantom Put> has
     /// Sole mint/burn authority for the put coin. Never exposed by ref.
     put_treasury: TreasuryCap<Put>,
     invalidated: bool,
+    /// Exact-offset closure tombstones — the put mirror of
+    /// `bucket::Bucket.closed`: sorted, disjoint, every interval ≥ the
+    /// cursor; the cursor skips them. See `close_offset`.
+    closed: vector<PutClosedInterval>,
+    /// Total units across `closed` — subtracted from exercise capacity.
+    closed_pending: u128,
 }
+
+/// A tombstoned (offset-closed) slice of the write space.
+public struct PutClosedInterval has copy, drop, store { start: u128, end: u128 }
 
 /// ceil((amount × strike) / 10^strike_scale) — collateral sizing.
 fun apply_strike_ceil(amount: u128, strike: u128, strike_scale: u8): u64 {
@@ -157,6 +166,8 @@ public fun create_put_bucket<Underlying, Settlement, Put>(
         settlement_balance: balance::zero<Settlement>(),
         put_treasury,
         invalidated: false,
+        closed: vector[],
+        closed_pending: 0,
     };
     let bucket_id = object::id(&bucket);
     events::emit_put_bucket_created(
@@ -459,7 +470,8 @@ public fun exercise<Underlying, Settlement, Put>(
     // The holder must deliver exactly one underlying unit per put unit.
     assert!(underlying_delivery.value() == amount, errors::amount_mismatch());
     assert!(
-        bucket.exercise_cursor + (amount as u128) <= bucket.total_written,
+        bucket.exercise_cursor + (amount as u128) + bucket.closed_pending
+            <= bucket.total_written,
         errors::cursor_overflow(),
     );
 
@@ -468,7 +480,7 @@ public fun exercise<Underlying, Settlement, Put>(
     coin::burn(&mut bucket.put_treasury, put);
 
     bucket.underlying_balance.join(underlying_delivery.into_balance());
-    bucket.exercise_cursor = bucket.exercise_cursor + (amount as u128);
+    advance_cursor(bucket, amount);
 
     let payout = apply_strike_floor(amount as u128, bucket.strike, bucket.strike_scale);
     let settlement = coin::from_balance(bucket.settlement_balance.split(payout), ctx);
@@ -538,6 +550,102 @@ public fun redeem_position<Underlying, Settlement, Put>(
     (underlying, settlement)
 }
 
+// ─────────────────────── exact-offset closure ───────────────────────
+
+/// Net `put.value()` units of same-bucket put coins against the caller's
+/// own `Position`, returning the freed cash collateral
+/// (`floor(amount × strike)` — the same holder-favoring rounding as every
+/// other cash payout; the ceil-floor delta stays as bucket dust). The put
+/// mirror of `bucket::close_offset`: burn the coins, shrink the position
+/// from its range end, tombstone the slice so the cursor skips it. The
+/// closed units also count toward `total_redeemed` (they can never be
+/// redeemed), keeping the cleanup gate reachable.
+public fun close_offset<Underlying, Settlement, Put>(
+    bucket: &mut PutBucket<Underlying, Settlement, Put>,
+    position: &mut Position,
+    put: Coin<Put>,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): Coin<Settlement> {
+    assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
+    let amount = put.value();
+    assert!(amount > 0, errors::zero_amount());
+    assert!(
+        position::bucket_id(position) == object::id(bucket),
+        errors::position_bucket_mismatch(),
+    );
+    let rs = position::range_start(position);
+    let re = position::range_end(position);
+    assert!((amount as u128) <= re - rs, errors::close_exceeds_position());
+    let cut = re - (amount as u128);
+    assert!(bucket.exercise_cursor <= cut, errors::close_range_exercised());
+
+    coin::burn(&mut bucket.put_treasury, put);
+    position::shrink_end(position, amount as u128);
+    insert_closed(bucket, cut, re);
+    bucket.total_redeemed = bucket.total_redeemed + (amount as u128);
+    let refund = apply_strike_floor(amount as u128, bucket.strike, bucket.strike_scale);
+    let out = coin::from_balance(bucket.settlement_balance.split(refund), ctx);
+    events::emit_offset_closed(
+        object::id(bucket),
+        ctx.sender(),
+        object::id(position),
+        true,
+        amount,
+        refund,
+        cut,
+        re,
+    );
+    out
+}
+
+/// Advance the cursor by `amount` exercisable units, jumping over closed
+/// intervals (consuming them). Capacity was already checked against
+/// `closed_pending`. Mirror of `bucket::advance_cursor` minus spreads.
+fun advance_cursor<U, S, P>(bucket: &mut PutBucket<U, S, P>, amount: u64) {
+    let mut remaining = amount as u128;
+    let mut cur = bucket.exercise_cursor;
+    while (remaining > 0) {
+        if (!bucket.closed.is_empty() && bucket.closed[0].start == cur) {
+            let PutClosedInterval { start, end } = bucket.closed.remove(0);
+            bucket.closed_pending = bucket.closed_pending - (end - start);
+            cur = end;
+            continue
+        };
+        let limit = if (bucket.closed.is_empty()) { bucket.total_written }
+        else { bucket.closed[0].start };
+        let step = if (remaining < limit - cur) { remaining } else { limit - cur };
+        cur = cur + step;
+        remaining = remaining - step;
+    };
+    // Eagerly consume tombstones the cursor stopped flush against (see
+    // `bucket::advance_cursor`).
+    while (!bucket.closed.is_empty() && bucket.closed[0].start == cur) {
+        let PutClosedInterval { start, end } = bucket.closed.remove(0);
+        bucket.closed_pending = bucket.closed_pending - (end - start);
+        cur = end;
+    };
+    bucket.exercise_cursor = cur;
+}
+
+/// Sorted-insert with adjacency merging; mirror of `bucket::insert_closed`.
+fun insert_closed<U, S, P>(bucket: &mut PutBucket<U, S, P>, start: u128, end: u128) {
+    let mut i = 0;
+    while (i < bucket.closed.length() && bucket.closed[i].start < start) {
+        i = i + 1;
+    };
+    bucket.closed.insert(PutClosedInterval { start, end }, i);
+    if (i + 1 < bucket.closed.length() && bucket.closed[i].end == bucket.closed[i + 1].start) {
+        let PutClosedInterval { start: _, end: right_end } = bucket.closed.remove(i + 1);
+        bucket.closed[i].end = right_end;
+    };
+    if (i > 0 && bucket.closed[i - 1].end == bucket.closed[i].start) {
+        let PutClosedInterval { start: _, end: cur_end } = bucket.closed.remove(i);
+        bucket.closed[i - 1].end = cur_end;
+    };
+    bucket.closed_pending = bucket.closed_pending + (end - start);
+}
+
 public fun burn_expired_option<Underlying, Settlement, Put>(
     bucket: &mut PutBucket<Underlying, Settlement, Put>,
     put: Coin<Put>,
@@ -573,6 +681,8 @@ public fun cleanup_bucket<Underlying, Settlement, Put>(
         settlement_balance,
         put_treasury,
         invalidated: _,
+        closed: _,
+        closed_pending: _,
     } = bucket;
     // Every position must be redeemed before cleanup, so the only cash left
     // is rounding dust (never an unredeemed writer's collateral).
@@ -635,6 +745,9 @@ public fun total_redeemed<U, S, P>(bucket: &PutBucket<U, S, P>): u128 { bucket.t
 public fun asset_type<U, S, P>(bucket: &PutBucket<U, S, P>): TypeName { bucket.asset_type }
 public fun settlement_type<U, S, P>(bucket: &PutBucket<U, S, P>): TypeName { bucket.settlement_type }
 public fun put_type<U, S, P>(bucket: &PutBucket<U, S, P>): TypeName { bucket.put_type }
+
+/// Units tombstoned by offset closure not yet jumped by the cursor.
+public fun closed_pending<U, S, P>(bucket: &PutBucket<U, S, P>): u128 { bucket.closed_pending }
 
 public fun put_supply<U, S, P>(bucket: &PutBucket<U, S, P>): u64 {
     coin::total_supply(&bucket.put_treasury)
