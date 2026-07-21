@@ -1176,15 +1176,26 @@ pub async fn build_ctx(
         warn!("pyth price_info table unresolved; multi-asset fulfillment disabled");
     }
 
-    // SO-299: equity-oracle package + its shared EquityBook (from the
-    // package's publish effects — the book is created in `init`).
+    // SO-299: equity-oracle package + its shared EquityBook — from the
+    // deploy record when present, else the package's publish effects
+    // (records written before the activation step recorded the book).
     let (equity_oracle_pkg, equity_book_id) = match snapshot.equity_oracle() {
         Some(eo) => {
             let pkg = eo.package().context("equity_oracle package id")?;
-            let book = created_of_types(client, &eo.publish_digest, &["equity_oracle::EquityBook"])
-                .await
-                .ok()
-                .and_then(|m| m.get("equity_oracle::EquityBook").copied());
+            let recorded = snapshot
+                .trading_vault_objects()
+                .map(|o| o.equity_book())
+                .transpose()?
+                .flatten();
+            let book = match recorded {
+                Some(id) => Some(id),
+                None => {
+                    created_of_types(client, &eo.publish_digest, &["equity_oracle::EquityBook"])
+                        .await
+                        .ok()
+                        .and_then(|m| m.get("equity_oracle::EquityBook").copied())
+                }
+            };
             if book.is_none() {
                 warn!("equity-oracle EquityBook not found in publish effects; external-equity legs disabled");
             }

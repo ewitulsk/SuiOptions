@@ -105,6 +105,18 @@ async fn main() -> Result<()> {
                 .map(|p| p.package())
                 .transpose()
                 .context("equity_oracle package id")?,
+            pyth: cfg
+                .pyth
+                .as_ref()
+                .map(|p| {
+                    anyhow::Ok(sui_tx::tx::template::PythPkgs {
+                        pyth: ObjectID::from_hex_literal(&p.pyth_package_id)
+                            .context("bad pyth_package_id")?,
+                        wormhole: ObjectID::from_hex_literal(&p.wormhole_package_id)
+                            .context("bad wormhole_package_id")?,
+                    })
+                })
+                .transpose()?,
         }),
         _ => None,
     };

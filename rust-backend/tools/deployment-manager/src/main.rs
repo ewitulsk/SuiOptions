@@ -165,15 +165,6 @@ async fn main() -> Result<()> {
         .envs
         .get(&env_key)
         .and_then(|d| d.package_info.cctp_bridge.clone());
-    let previous_equity_oracle = store
-        .envs
-        .get(&env_key)
-        .and_then(|d| d.package_info.equity_oracle.clone());
-    let previous_dbm_oracle = store
-        .envs
-        .get(&env_key)
-        .and_then(|d| d.package_info.dbm_oracle.clone());
-
     let record = deploy_one(
         network,
         &rpc_url,
@@ -184,8 +175,6 @@ async fn main() -> Result<()> {
         previous_token_info,
         previous_deepbook,
         previous_cctp,
-        previous_equity_oracle,
-        previous_dbm_oracle,
         cli.gas_budget,
         cli.skip_init,
     )
@@ -210,8 +199,6 @@ async fn deploy_one(
     previous_token_info: BTreeMap<String, TokenSpec>,
     previous_deepbook: Option<serde_json::Value>,
     previous_cctp: Option<CctpBridgeRecord>,
-    previous_equity_oracle: Option<PackageRecord>,
-    previous_dbm_oracle: Option<PackageRecord>,
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
@@ -312,6 +299,30 @@ async fn deploy_one(
     .with_context(|| format!("publishing options_adapter to {network}"))?;
     tracing::info!(package = %options_adapter_out.package_id, "options_adapter published");
 
+    let equity_oracle_out = publish_dep_package(
+        &client,
+        &signer,
+        &contracts_root.join("equity-oracle"),
+        "equity_oracle",
+        env,
+        gas_budget,
+    )
+    .await
+    .with_context(|| format!("publishing equity_oracle to {network}"))?;
+    tracing::info!(package = %equity_oracle_out.package_id, "equity_oracle published");
+
+    let dbm_oracle_out = publish_dep_package(
+        &client,
+        &signer,
+        &contracts_root.join("dbm-oracle"),
+        "dbm_oracle",
+        env,
+        gas_budget,
+    )
+    .await
+    .with_context(|| format!("publishing dbm_oracle to {network}"))?;
+    tracing::info!(package = %dbm_oracle_out.package_id, "dbm_oracle published");
+
     let (auction, rfq, vault) =
         (Some(record(&auction_out)), Some(record(&rfq_out)), Some(record(&vault_out)));
     let (trading_vault, oracle_pyth) =
@@ -408,6 +419,7 @@ async fn deploy_one(
             &trading_vault_out.digest,
             &oracle_pyth_out.digest,
             &deepbook_adapter_out.digest,
+            &equity_oracle_out.digest,
         )
         .await
         .context("resolving trading-vault governance objects")?;
@@ -420,6 +432,8 @@ async fn deploy_one(
             oracle_pyth_out.package_id,
             deepbook_adapter_out.package_id,
             options_adapter_out.package_id,
+            equity_oracle_out.package_id,
+            dbm_oracle_out.package_id,
             &token_info,
             gas_budget,
         )
@@ -432,6 +446,7 @@ async fn deploy_one(
             oracle_registry_id: objects.oracle_registry_id.to_string(),
             pyth_feed_registry_id: objects.pyth_feed_registry_id.to_string(),
             pool_allowlist_id: objects.pool_allowlist_id.to_string(),
+            equity_book_id: objects.equity_book_id.to_string(),
             activation_digest,
         })
     };
@@ -457,10 +472,8 @@ async fn deploy_one(
             oracle_pyth,
             deepbook_adapter,
             options_adapter,
-            // Not yet published by this tool; carried forward until the
-            // equity-oracle publish step lands (SO-299 follow-up).
-            equity_oracle: previous_equity_oracle,
-            dbm_oracle: previous_dbm_oracle,
+            equity_oracle: Some(record(&equity_oracle_out)),
+            dbm_oracle: Some(record(&dbm_oracle_out)),
             trading_vault_objects,
             cctp_bridge: previous_cctp,
         },

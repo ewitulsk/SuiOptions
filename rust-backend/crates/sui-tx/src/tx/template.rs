@@ -250,6 +250,11 @@ fn framework() -> ObjectID {
     ObjectID::from_hex_literal("0x2").expect("0x2 is a valid ObjectID")
 }
 
+/// The Move stdlib package (`0x1`), home of `option::{some,none}`.
+fn stdlib() -> ObjectID {
+    ObjectID::from_hex_literal("0x1").expect("0x1 is a valid ObjectID")
+}
+
 /// The value-neutral `0x2::coin` primitives the `coinWithBalance` intent
 /// resolver injects around its split/merge prelude: `zero<T>()` mints an empty
 /// coin, `destroy_zero<T>(c)` aborts unless `c` is empty. Neither can move
@@ -287,6 +292,17 @@ pub struct TradingVaultPkgs {
     /// equity-oracle package (SO-299): deposits on external-configured
     /// vaults carry an extra `equity_oracle::record` appraisal leg.
     pub equity_oracle: Option<ObjectID>,
+    /// Pyth + Wormhole (latest upgraded) package ids: enables the Pyth
+    /// price-update prefix legs on attestation-bearing deposits. `None`
+    /// leaves those deposits unsponsorable.
+    pub pyth: Option<PythPkgs>,
+}
+
+/// The on-chain Pyth deployment the price-update prefix calls target.
+#[derive(Debug, Clone, Copy)]
+pub struct PythPkgs {
+    pub pyth: ObjectID,
+    pub wormhole: ObjectID,
 }
 
 pub fn protocol_templates(
@@ -521,11 +537,42 @@ pub fn protocol_templates(
         if let Some(rec) = &equity_record {
             appraisal_allowed.push(TargetMatcher::Exact(rec.clone()));
         }
+        // Attestation-bearing deposits prepend the Pyth price-update
+        // legs (wormhole verify → authenticated infos → per-feed update
+        // → potato destroy) and wrap attestations in `0x1::option`
+        // calls. All value-neutral: the sponsor risks gas plus the
+        // 1-MIST-per-feed update fee split from it.
+        let mut pyth_legs = Vec::new();
+        if let Some(pp) = tvp.pyth {
+            pyth_legs.push(MoveTarget::new(pp.wormhole, "vaa", "parse_and_verify"));
+            for f in [
+                "create_authenticated_price_infos_using_accumulator",
+                "update_single_price_feed",
+            ] {
+                pyth_legs.push(MoveTarget::new(pp.pyth, "pyth", f));
+            }
+            pyth_legs.push(MoveTarget::new(pp.pyth, "hot_potato_vector", "destroy"));
+        }
+        let option_wraps =
+            [MoveTarget::new(stdlib(), "option", "some"), MoveTarget::new(stdlib(), "option", "none")];
+        for t in pyth_legs.iter().chain(option_wraps.iter()) {
+            appraisal_allowed.push(TargetMatcher::Exact(t.clone()));
+        }
         let mut deposit_allowed = appraisal_allowed.clone();
         deposit_allowed.push(TargetMatcher::Exact(deposit.clone()));
         let mut deposit_arities = vec![(begin.clone(), 1), (deposit.clone(), 1)];
         if let Some(rec) = equity_record {
             deposit_arities.push((rec, 0));
+        }
+        // Pin the prefix-leg arities: the four Pyth calls take 0 type
+        // args except the potato destroy (`<PriceInfo>`); the option
+        // wrappers take exactly 1.
+        for t in pyth_legs {
+            let arity = usize::from(t.module == "hot_potato_vector");
+            deposit_arities.push((t, arity));
+        }
+        for t in option_wraps {
+            deposit_arities.push((t, 1));
         }
         templates.push(PtbTemplate {
             name: "trading_vault:deposit".to_owned(),
@@ -1186,6 +1233,7 @@ mod tests {
                     deepbook_adapter: None,
                     options_adapter: None,
                     equity_oracle,
+                    pyth: None,
                 }),
             )
         };
@@ -1218,6 +1266,62 @@ mod tests {
             true,
         );
         assert_eq!(match_any(&with_eo(Some(eo_pkg)), &plain), Some("trading_vault:deposit"));
+    }
+
+    #[test]
+    fn trading_vault_deposit_with_pyth_prefix() {
+        let tv_pkg = ObjectID::from_hex_literal("0x71ad").unwrap();
+        let op_pkg = ObjectID::from_hex_literal("0x0217").unwrap();
+        let pyth_pkg = ObjectID::from_hex_literal("0xabf8").unwrap();
+        let wh_pkg = ObjectID::from_hex_literal("0xf473").unwrap();
+        let with_pyth = |pyth: Option<PythPkgs>| {
+            protocol_templates(
+                pkg(),
+                vault_pkg(),
+                &[],
+                false,
+                None,
+                None,
+                Some(TradingVaultPkgs {
+                    trading_vault: tv_pkg,
+                    oracle_pyth: op_pkg,
+                    deepbook_adapter: None,
+                    options_adapter: None,
+                    equity_oracle: None,
+                    pyth,
+                }),
+            )
+        };
+        let handles = PythPkgs { pyth: pyth_pkg, wormhole: wh_pkg };
+        // Attestation-bearing deposit: pyth update prefix → attest →
+        // begin_appraisal → option-wrapped appraisal legs → deposit.
+        let calls = [
+            (MoveTarget::new(wh_pkg, "vaa", "parse_and_verify"), 0),
+            (
+                MoveTarget::new(pyth_pkg, "pyth", "create_authenticated_price_infos_using_accumulator"),
+                0,
+            ),
+            (MoveTarget::new(pyth_pkg, "pyth", "update_single_price_feed"), 0),
+            (MoveTarget::new(pyth_pkg, "pyth", "update_single_price_feed"), 0),
+            (MoveTarget::new(pyth_pkg, "hot_potato_vector", "destroy"), 1),
+            (MoveTarget::new(op_pkg, "oracle_pyth", "attest"), 2),
+            (MoveTarget::new(tv_pkg, "vault", "begin_appraisal"), 1),
+            (MoveTarget::new(stdlib(), "option", "some"), 1),
+            (MoveTarget::new(stdlib(), "option", "none"), 1),
+            (MoveTarget::new(tv_pkg, "vault", "appraise_balance"), 2),
+            (MoveTarget::new(tv_pkg, "vault", "deposit"), 1),
+        ];
+        let pt = build(&calls, true);
+        assert_eq!(match_any(&with_pyth(Some(handles)), &pt), Some("trading_vault:deposit"));
+
+        // Without the Pyth packages configured the prefix legs are
+        // foreign calls and the PTB is refused.
+        assert_eq!(match_any(&with_pyth(None), &pt), None);
+
+        // A forged potato destroy with the wrong type arity is refused.
+        let mut forged = calls.clone();
+        forged[4].1 = 2;
+        assert_eq!(match_any(&with_pyth(Some(handles)), &build(&forged, true)), None);
     }
 
     #[test]

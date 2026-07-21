@@ -100,6 +100,9 @@ pub struct TradingVaultObjectsRecord {
     pub oracle_registry_id: String,
     pub pyth_feed_registry_id: String,
     pub pool_allowlist_id: String,
+    /// Shared `EquityBook` created by the equity-oracle publish (SO-299),
+    /// so the keeper reads it from token-info instead of publish effects.
+    pub equity_book_id: String,
     pub activation_digest: String,
 }
 

@@ -51,6 +51,19 @@ pub struct Config {
     /// `deposit_for_burn` directly. Unset where the bridge isn't offered.
     #[serde(default)]
     pub cctp_token_messenger_package: Option<String>,
+
+    /// Pyth + Wormhole (latest upgraded) package ids for this network —
+    /// enables sponsoring the Pyth price-update prefix legs on
+    /// attestation-bearing trading-vault deposits. Unset leaves those
+    /// deposits unsponsorable.
+    #[serde(default)]
+    pub pyth: Option<PythConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PythConfig {
+    pub pyth_package_id: String,
+    pub wormhole_package_id: String,
 }
 
 fn default_cors() -> Vec<String> {
