@@ -55,6 +55,8 @@ const E_PRICE_ASSET_MISMATCH: u64 = 5;
 const E_MISSING_ATTESTATION: u64 = 6;
 const E_VALUE_OVERFLOW: u64 = 7;
 const E_AMOUNT_OVERFLOW: u64 = 8;
+const E_SPREAD_POSITION: u64 = 9;
+const E_LONG_BUCKET_MISMATCH: u64 = 10;
 
 /// Adapter witness for sweeps/cranks/appraisal; allowlist to enable.
 public struct VaultMm has drop {}
@@ -394,6 +396,16 @@ public fun appraise_call_position<U, S, C>(
 ) {
     let pos: &Position = vault::borrow_position(vault, position_id);
     assert!(position::bucket_id(pos) == object::id(bucket), E_BUCKET_MISMATCH);
+    // A compressed range is escrow-backed, not pool-backed — it marks
+    // via `appraise_call_spread_position`, never here.
+    assert!(
+        !bucket::range_overlaps_spread(
+            bucket,
+            position::range_start(pos),
+            position::range_end(pos),
+        ),
+        E_SPREAD_POSITION,
+    );
     let (exercised, unexercised) = split_ranges(
         position::range_start(pos),
         position::range_end(pos),
@@ -409,6 +421,62 @@ public fun appraise_call_position<U, S, C>(
         let strike_value = value_in_deposit(vault, cfg, s_type, strike_s, settlement_att, clock);
         value = value + spot_value.min(strike_value);
     };
+    assert!(value <= (std::u64::max_value!() as u128), E_VALUE_OVERFLOW);
+    vault::record_position_value(vault, appraisal, VaultMm {}, position_id, value as u64);
+}
+
+/// Conservative mark for a VaultMm-custodied SPREAD position — a
+/// compressed range from `bucket::write_spread`, not yet physicalized,
+/// backed by its escrow (long coins + exact long-exercise cash), not
+/// pool underlying. Mark = escrow cash + (long intrinsic − short
+/// intrinsic): equal to the physical min(spot, strike) mark whenever
+/// spot ≥ strike_long, floored at the escrowed cash below it. Aborts
+/// unless the position's exact range is a live spread escrowed against
+/// `long_bucket`. Mirrors `options_adapter`.
+public fun appraise_call_spread_position<U, S, C, LongCall>(
+    vault: &TradingVault,
+    cfg: &VaultProtocolConfig,
+    appraisal: &mut Appraisal,
+    bucket: &Bucket<U, S, C>,
+    long_bucket: &Bucket<U, S, LongCall>,
+    position_id: ID,
+    underlying_att: Option<PriceAttestation>,
+    settlement_att: Option<PriceAttestation>,
+    clock: &Clock,
+) {
+    let pos: &Position = vault::borrow_position(vault, position_id);
+    assert!(position::bucket_id(pos) == object::id(bucket), E_BUCKET_MISMATCH);
+    let (long_units, cash, long_bucket_id) = bucket::spread_escrow_view<U, S, C, LongCall>(
+        bucket,
+        position::range_start(pos),
+        position::range_end(pos),
+    );
+    assert!(long_bucket_id == object::id(long_bucket), E_LONG_BUCKET_MISMATCH);
+
+    let u_type = type_name::with_defining_ids<U>();
+    let s_type = type_name::with_defining_ids<S>();
+    let spot = value_in_deposit(vault, cfg, u_type, long_units, underlying_att, clock);
+    let long_strike = value_in_deposit(
+        vault,
+        cfg,
+        s_type,
+        bucket::required_settlement(long_bucket, long_units),
+        settlement_att,
+        clock,
+    );
+    let short_strike = value_in_deposit(
+        vault,
+        cfg,
+        s_type,
+        bucket::required_settlement(bucket, long_units),
+        settlement_att,
+        clock,
+    );
+    let cash_value = value_in_deposit(vault, cfg, s_type, cash, settlement_att, clock);
+    // (spot − K_long)⁺ − (spot − K_short)⁺ rewritten subtraction-safe:
+    // min(spot, K_short) − min(spot, K_long), with K_long ≤ K_short
+    // guaranteed by `write_spread`.
+    let value = cash_value + spot.min(short_strike) - spot.min(long_strike);
     assert!(value <= (std::u64::max_value!() as u128), E_VALUE_OVERFLOW);
     vault::record_position_value(vault, appraisal, VaultMm {}, position_id, value as u64);
 }

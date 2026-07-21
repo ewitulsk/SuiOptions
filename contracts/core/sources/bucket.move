@@ -977,6 +977,30 @@ public fun closed_pending<U, S, C>(bucket: &Bucket<U, S, C>): u128 { bucket.clos
 /// Live (not yet physicalized/closed/redeemed) compressed ranges.
 public fun spread_count<U, S, C>(bucket: &Bucket<U, S, C>): u64 { bucket.spreads.length() }
 
+/// Does [start, end) overlap any live compressed range? Escrow-backed
+/// ranges are not pool-backed — appraisals must value them from their
+/// escrow, not from the pool's underlying.
+public fun range_overlaps_spread<U, S, C>(
+    bucket: &Bucket<U, S, C>,
+    start: u128,
+    end: u128,
+): bool {
+    overlaps_spread(bucket, start, end)
+}
+
+/// Escrow view for the live compressed range exactly [start, end):
+/// (escrowed long units, escrowed exercise cash, long bucket id).
+/// Aborts `spread_not_found` unless the exact range is live.
+public fun spread_escrow_view<U, S, C, LongCall>(
+    bucket: &Bucket<U, S, C>,
+    start: u128,
+    end: u128,
+): (u64, u64, ID) {
+    find_spread_exact(bucket, start, end);
+    let escrow: &SpreadEscrow<LongCall, S> = df::borrow(&bucket.id, SpreadEscrowKey { start });
+    (escrow.long.value(), escrow.cash.value(), escrow.long_bucket_id)
+}
+
 public fun call_supply<U, S, C>(bucket: &Bucket<U, S, C>): u64 {
     coin::total_supply(&bucket.call_treasury)
 }
