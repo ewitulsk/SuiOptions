@@ -107,6 +107,8 @@ services:
       TOKEN_INFO_URL: http://token-info:9005
       ORACLE_URL: http://oracle-service:9013
       API_URL: http://api-service:9003
+      # The desk reconstructs its book from the indexer (SO-299).
+      INDEXER_GRAPHQL_URL: http://indexer:9002/graphql
       RUST_LOG: info,mm_bot=info
     volumes:
       - /opt/options/prod/secrets:/run/secrets:ro
