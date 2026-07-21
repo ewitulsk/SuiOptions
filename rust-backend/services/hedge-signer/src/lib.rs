@@ -1,0 +1,67 @@
+//! hedge-signer.
+//!
+//! Protocol-side co-signer for a trading vault's EXTERNAL ACCOUNT — the
+//! jointly-controlled address that holds venue capital (docs/mm-bot-v2 03/04
+//! §3b). V1 targets the DeepBook Margin posture: the external account is a
+//! native Sui 2-of-2 multisig (curator key + this service's key), so every
+//! account transaction needs both signatures. This service contributes its
+//! signature ONLY when the transaction passes the policy engine
+//! ([`policy`]): auto-approve for trading inside the margin perimeter,
+//! strict for anything that moves value out (sweeps must pay the vault),
+//! emergency fast-track for margin top-ups. Every decision is appended to
+//! an audit log ([`audit`]).
+//!
+//! The Bluefin/FROST substrate (threshold-ed25519 co-signing of detached
+//! venue payloads) is a follow-up: it will slot in as a sibling policy +
+//! signing module behind the same HTTP surface. Nothing here does MPC.
+//!
+//! Endpoints (all on one public port, proxied by nginx):
+//! - `GET /health`
+//! - `GET /pubkey` — the service key's public key, address, and scheme (so
+//!   operators can construct the 2-of-2 multisig address).
+//! - `GET /policy` — summary of the loaded policy (no secrets).
+//! - `POST /sign` — classify a `TransactionData` and, on approval, return
+//!   the service signature over it.
+
+pub mod audit;
+pub mod config;
+pub mod handlers;
+pub mod policy;
+pub mod router;
+pub mod state;
+
+pub use config::Config;
+pub use state::AppState;
+
+use std::path::PathBuf;
+
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "hedge-signer",
+    about = "Policy-gated co-signer for trading-vault external accounts (2-of-2 multisig member)."
+)]
+pub struct Cli {
+    #[arg(short, long, default_value = "services/hedge-signer/config/config.toml")]
+    pub config: PathBuf,
+
+    /// Secrets TOML holding the service's `[sui]` signing key. No env-var
+    /// fallback.
+    #[arg(
+        short = 's',
+        long,
+        default_value = "services/hedge-signer/config/secrets.toml"
+    )]
+    pub secrets: PathBuf,
+}
+
+cli_spec::define_program! {
+    id          = "hedge-signer",
+    cargo_pkg   = "hedge-signer",
+    working_dir = ".",
+    description = "Hedge signer. Holds the protocol member key of each trading vault's 2-of-2 \
+                   external account and countersigns account transactions that pass the \
+                   three-tier policy engine (auto / strict / emergency).",
+    cli         = crate::Cli,
+}

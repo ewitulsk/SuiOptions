@@ -199,6 +199,27 @@ $RPC_LINE
 EOF
 fi
 
+# ---- hedge-signer secret -> rendered TOML --------------------------------
+# The service's multisig member key (the protocol half of each trading
+# vault's 2-of-2 external account). One Sui key per env, in the network
+# slot the service's config expects (staging/prod → testnet). Absent
+# secret -> hedge-signer isn't provisioned in this env yet; the container
+# would crash-loop on the missing file, so create options/<env>/hedge-signer
+# with {"sui_key": "suiprivkey1..."} before the first deploy including it.
+if HEDGE_JSON=$(fetch hedge-signer 2>/dev/null); then
+  SUI_KEY=$(echo "$HEDGE_JSON" | jq -r '.sui_key')
+  if [ -z "$SUI_KEY" ] || [ "$SUI_KEY" = "null" ]; then
+    echo "missing sui_key in options/$ENV/hedge-signer" >&2
+    exit 1
+  fi
+  umask 077
+  cat > "$DIR/hedge-signer.toml" <<EOF
+[sui]
+$NETWORK = "$SUI_KEY"
+$RPC_LINE
+EOF
+fi
+
 # ---- vault-keeper secret -> rendered TOML ---------------------------------
 # Plain gas wallet (NOT the deployer key — the keeper holds no capability
 # objects; vault.move validates every crank on-chain). One Sui key per

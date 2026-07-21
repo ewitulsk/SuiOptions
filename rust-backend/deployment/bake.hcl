@@ -107,6 +107,14 @@ target "gas-station" {
   cache-to   = [{ type = "gha", mode = "max", scope = "gas-station" }]
 }
 
+target "hedge-signer" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.hedge-signer"
+  tags       = ["${ECR}/options/hedge-signer:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "hedge-signer" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "hedge-signer" }]
+}
+
 target "keeper" {
   inherits   = ["_common"]
   dockerfile = "Dockerfile.keeper"
@@ -148,5 +156,5 @@ target "social-bot" {
 }
 
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot"]
 }

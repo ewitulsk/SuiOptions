@@ -1,0 +1,43 @@
+# hedge-signer config (local dev).
+#
+# Policy-gated co-signer for trading-vault external accounts (docs/mm-bot-v2
+# 03/04 §3b). The service signing key — the protocol member of each 2-of-2
+# multisig — is read from the secrets TOML (`--secrets`, default
+# services/hedge-signer/config/secrets.toml) under the `[sui]` slot for
+# `network` below; copy secrets.example.toml to secrets.toml and fill it in.
+
+environment = "dev"
+
+bind_addr   = "127.0.0.1:9017"
+network     = "testnet"
+
+allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+# token-info supplies the trading_vault package id the strict-tier
+# `return_external` target is pinned against.
+token_info_url = "http://127.0.0.1:9005"
+
+# Append-only JSONL decision log; one line per /sign request.
+audit_log_path = "services/hedge-signer/data/audit.jsonl"
+
+# One [[vaults]] block per trading vault whose external account this service
+# co-signs for. Empty by default — the service boots and refuses every /sign.
+#
+# [[vaults]]
+# # TradingVault shared-object id (also the sweep destination address).
+# vault_id         = "0x..."
+# # The 2-of-2 multisig address (curator key + this service's /pubkey key).
+# external_account = "0x..."
+# # = vault_id as an address; every strict-tier transfer must pay it.
+# vault_address    = "0x..."
+# # Curator's flag-prefixed member pubkey, base64. Informational only.
+# curator_pubkey_b64 = ""
+# # Per-tx cap on the pure u64 amount of borrow_base / borrow_quote.
+# max_borrow_amount = 1000000000
+# # Shared-object allowlist for the perimeter: the DeepBook pools the account
+# # may trade PLUS the margin registry / margin pools / the account's own
+# # MarginManager. Clock (0x6) and the vault object are implicit.
+# allowed_pools = ["0x...", "0x..."]
+# # Canonical deepbook_margin package id (third-party — not in
+# # deployments.json, so pinned here).
+# deepbook_margin_package = "0x..."

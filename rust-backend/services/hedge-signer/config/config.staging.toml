@@ -1,0 +1,28 @@
+# hedge-signer config — staging env (testnet).
+
+environment = "staging"
+
+bind_addr   = "0.0.0.0:9017"
+network     = "testnet"
+
+allowed_origins = ["*"]
+
+# token-info supplies the trading_vault package id the strict-tier
+# `return_external` target is pinned against.
+token_info_url = "http://token-info:9005"
+
+# Persisted on the hedge_signer_data docker volume (see compose).
+audit_log_path = "/app/data/audit.jsonl"
+
+# One [[vaults]] block per trading vault whose external account this service
+# co-signs for. None yet — filled in when the first staging external account
+# is provisioned (multisig ceremony + margin manager creation).
+#
+# [[vaults]]
+# vault_id         = "0x..."   # TradingVault shared-object id
+# external_account = "0x..."   # the 2-of-2 multisig address
+# vault_address    = "0x..."   # = vault_id as an address
+# curator_pubkey_b64 = ""      # informational
+# max_borrow_amount = 1000000000
+# allowed_pools = ["0x..."]    # pools + registry + margin pools + MarginManager
+# deepbook_margin_package = "0x..."
