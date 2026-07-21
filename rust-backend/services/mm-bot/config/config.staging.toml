@@ -58,7 +58,7 @@ TWAL = 1.0
 # starting parameters — see config.toml for the full list).
 [desk]
 enabled = true
-vault_id           = "0x31c0c534aea84e9dd48035058d0d13d01f4cee61690d2bbb5aee31beaadb4cd8"
+vault_id           = "0x70bb15b0046b8f6fd736b2cf58b178d84b8c2418925bbdd81caa5e74098d9a6d"
 mm_release_enabled = true
 # [desk.exits.spot_pools]     # spot pools for flash-exercise, per symbol
 # TSUI = "0x..."
