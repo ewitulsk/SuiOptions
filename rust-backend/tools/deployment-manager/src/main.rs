@@ -447,8 +447,8 @@ async fn deploy_one(
             oracle_registry_id: objects.oracle_registry_id.to_string(),
             pyth_feed_registry_id: objects.pyth_feed_registry_id.to_string(),
             pool_allowlist_id: objects.pool_allowlist_id.to_string(),
-            equity_book_id: objects.equity_book_id.to_string(),
-            vol_book_id: objects.vol_book_id.to_string(),
+            equity_book_id: Some(objects.equity_book_id.to_string()),
+            vol_book_id: Some(objects.vol_book_id.to_string()),
             activation_digest,
         })
     };
