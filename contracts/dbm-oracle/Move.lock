@@ -5,7 +5,7 @@
 version = 4
 
 [pinned.testnet.MoveStdlib]
-source = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/move-stdlib", rev = "73dd2c2ba6f9fdb21d7ffde2b50a3f2f0ac39bc1" }
+source = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/move-stdlib", rev = "b9149cbf0b2cb9ae5ed830407a9b48c7ae3fd36c" }
 use_environment = "testnet"
 manifest_digest = "C4FE4C91DE74CBF223B2E380AE40F592177D21870DC2D7EB6227D2D694E05363"
 deps = {}
@@ -22,8 +22,14 @@ use_environment = "testnet"
 manifest_digest = "9942AAB3725BC51DADB046B4440A3D008E554C9286ECC72B3DE5CC0309C0D63D"
 deps = { Sui = "Sui_1", Wormhole = "Wormhole" }
 
+[pinned.testnet.Pyth_1]
+source = { git = "https://github.com/pyth-network/pyth-crosschain.git", subdir = "target_chains/sui/contracts", rev = "62c7a5bc0fc857ba6417ad780190552d4919ceca" }
+use_environment = "testnet"
+manifest_digest = "EE442EEB0E1F71B244DBB1E016B1D0D8F67061BDAFA606B6C86F093D15CA0755"
+deps = { Sui = "Sui_1", Wormhole = "Wormhole_1" }
+
 [pinned.testnet.Sui]
-source = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "73dd2c2ba6f9fdb21d7ffde2b50a3f2f0ac39bc1" }
+source = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "b9149cbf0b2cb9ae5ed830407a9b48c7ae3fd36c" }
 use_environment = "testnet"
 manifest_digest = "7AFB66695545775FBFBB2D3078ADFD084244D5002392E837FDE21D9EA1C6D01C"
 deps = { MoveStdlib = "MoveStdlib" }
@@ -40,11 +46,17 @@ use_environment = "testnet"
 manifest_digest = "6996F1AB8CD448FFBA142C085C488FE8A46B485E61E38A1891EFA52B30D9C12E"
 deps = { Sui = "Sui_1" }
 
+[pinned.testnet.Wormhole_1]
+source = { git = "https://github.com/wormhole-foundation/wormhole.git", subdir = "sui/wormhole", rev = "1b1cb69e809e0e7081cf1bf9b2779c41c14fc7f0" }
+use_environment = "testnet"
+manifest_digest = "6996F1AB8CD448FFBA142C085C488FE8A46B485E61E38A1891EFA52B30D9C12E"
+deps = { Sui = "Sui_1" }
+
 [pinned.testnet.dbm_oracle]
 source = { root = true }
 use_environment = "testnet"
-manifest_digest = "72A741D05CDDA102C2D73B3418611F3AE6BA4F9EB6E0CE9A4C2304F7E45FC0EE"
-deps = { deepbook = "deepbook", deepbook_margin = "deepbook_margin", options_core = "options_core", pyth = "Pyth", std = "MoveStdlib", sui = "Sui", trading_vault = "trading_vault" }
+manifest_digest = "C079E659D0E58439B774393287559B35F2AF7285FA2901B48C172C932655E1DC"
+deps = { deepbook = "deepbook", deepbook_margin = "deepbook_margin", options_core = "options_core", pyth = "Pyth_1", std = "MoveStdlib", sui = "Sui", trading_vault = "trading_vault" }
 
 [pinned.testnet.deepbook]
 source = { git = "https://github.com/MystenLabs/deepbookv3.git", subdir = "packages/deepbook", rev = "5417e9ae5398fbd107dcf68e6d9c345101528118" }
