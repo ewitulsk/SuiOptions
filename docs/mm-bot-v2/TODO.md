@@ -28,14 +28,16 @@ what is NOT done, grouped by how blocking it is. Companion docs:
   into the bot wallet, `set_mm_release_enabled(true)`, fund custody,
   seed LP deposit; then flip `[desk] enabled = true` in mm-bot config.
   Until then the desk declines all RFQs by design.
-- [ ] **Rollout sequencing around the teardown.** The mm-bot commit
-  removes the legacy `onchain_swap`/`onchain_rfq`/`onchain_put_rfq`
-  bidders — the covered-call vault's slice and proceeds-swap auctions
-  have **no bidder** between deploying this mm-bot and either (a)
-  provisioning the desk (replaces the RFQ side only) or (b) winding
-  down options_vault rounds. The swap auctions have no successor at
-  all (intentional per 00-plan Phase 0). Prod vaults wedge in settling
-  without a swap bidder — sequence deliberately.
+- [ ] **Hard cutover (decided 2026-07-20 — no phased sequencing).**
+  Everything is testnet; deploy the whole stack at once. Consequence,
+  accepted: the legacy `onchain_swap`/`onchain_rfq`/`onchain_put_rfq`
+  bidders are gone, so any in-flight options_vault covered-call rounds
+  lose their only auction bidder and will wedge in settling. As part of
+  the cutover, don't leave them dangling: pause/`initiate_close` the
+  legacy covered-call vaults (or just let dead rounds sit — testnet
+  funds), and silence any keeper alerts they generate. The trading-vault
+  desk is the successor product; options_vault merges into it later per
+  the epic decision.
 - [ ] **hedge-signer bring-up**: create AWS secret
   `options/<env>/hedge-signer` (`{"sui_key": "suiprivkey1…"}`),
   `terraform apply` the new ECR repo (mind the local-state drift —
