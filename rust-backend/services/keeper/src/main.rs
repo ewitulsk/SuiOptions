@@ -91,27 +91,6 @@ async fn main() -> Result<()> {
         update_fee_mist: cfg.pyth.update_fee_mist,
     };
 
-    // Trading-vault pass (SO-287/290): active only where the package
-    // family is deployed. Governance ids prefer token-info's recorded
-    // block, falling back to publish-effects discovery.
-    let trading_vault_ctx = match keeper::trading_vault::build_ctx(
-        &wrap.client,
-        &snapshot,
-        treasury_id,
-        protocol_config_id,
-        cli.gas_budget,
-        cfg.pyth.hermes_url.clone(),
-        pyth_handles.clone(),
-        &cfg.external,
-    )
-    .await
-    {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            tracing::warn!(error = %format!("{e:#}"), "trading-vault ctx build failed; pass disabled");
-            None
-        }
-    };
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .default_headers(pyth_client::auth_headers(secrets.pyth_api_key()))
@@ -126,6 +105,29 @@ async fn main() -> Result<()> {
         .fetch_blocking_until_ready(30, Duration::from_secs(2))
         .await
         .with_context(|| format!("oracle-service at {} unreachable", cli.oracle_url))?;
+    // Trading-vault pass (SO-287/290): active only where the package
+    // family is deployed. Governance ids prefer token-info's recorded
+    // block, falling back to publish-effects discovery.
+    let trading_vault_ctx = match keeper::trading_vault::build_ctx(
+        &wrap.client,
+        &snapshot,
+        treasury_id,
+        protocol_config_id,
+        cli.gas_budget,
+        cfg.pyth.hermes_url.clone(),
+        pyth_handles.clone(),
+        &cfg.external,
+        oracle.clone(),
+        cfg.vault_defaults.vol_window_days,
+    )
+    .await
+    {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "trading-vault ctx build failed; pass disabled");
+            None
+        }
+    };
     let indexer = IndexerClient::new(cfg.indexer_graphql_url.clone());
     info!(
         indexer = %cfg.indexer_graphql_url,

@@ -9,7 +9,7 @@ use sui::test_scenario::{Self as ts, Scenario};
 use options_core::bucket::{Self, Bucket};
 use options_core::position::{Self, Position};
 use options_core::put_bucket::{Self, PutBucket};
-use options_core::test_helpers::{Self as th, BTC, USDC, CALL, CALL2, PUT};
+use options_core::test_helpers::{Self as th, BTC, USDC, CALL, CALL2, PUT, PUT2};
 
 const STRIKE: u128 = 6; // 6 USDC-units per BTC-unit
 const LONG_STRIKE: u128 = 5;
@@ -722,4 +722,370 @@ fun test_close_offset_on_spread_position_aborts() {
     ts::return_shared(short_b);
     clock.destroy_for_testing();
     ts::end(scenario);
+}
+
+// ───────────────────── put spread compression ─────────────────────
+
+/// The long-put bucket (PUT2) used as the put spread's long leg.
+fun setup_put_pair(scenario: &mut Scenario, short_strike: u128, long_strike: u128, scale: u8) {
+    th::new_put_bucket<BTC, USDC, PUT>(scenario, EXPIRY_MS, short_strike, scale);
+    th::new_put_bucket<BTC, USDC, PUT2>(scenario, EXPIRY_MS, long_strike, scale);
+}
+
+/// Writer self-writes `amount` longs physically, then compresses a
+/// same-size short against them. Returns (spread position, short puts).
+fun put_spread_write(
+    scenario: &mut Scenario,
+    short_b: &mut PutBucket<BTC, USDC, PUT>,
+    long_b: &mut PutBucket<BTC, USDC, PUT2>,
+    amount: u64,
+    clock: &sui::clock::Clock,
+): (Position, Coin<PUT>) {
+    let long_collateral = put_bucket::required_collateral(long_b, amount);
+    let (long_pos, long_coins) = put_bucket::write_collateralized<BTC, USDC, PUT2>(
+        long_b,
+        coin::mint_for_testing<USDC>(long_collateral, scenario.ctx()),
+        amount,
+        clock,
+        scenario.ctx(),
+    );
+    transfer::public_transfer(long_pos, th::writer_addr());
+    let top_up = put_bucket::required_spread_top_up(short_b, long_b, amount);
+    put_bucket::write_spread<BTC, USDC, PUT, PUT2>(
+        short_b,
+        long_b,
+        long_coins,
+        coin::mint_for_testing<USDC>(top_up, scenario.ctx()),
+        clock,
+        scenario.ctx(),
+    )
+}
+
+#[test]
+fun test_put_spread_full_assignment_conserves() {
+    // Ks 6 > Kl 5, scale 0: top_up = g(100)+1 = (600−500)+1 = 101.
+    let mut scenario = ts::begin(th::admin_addr());
+    let mut clock = th::init_protocol(&mut scenario);
+    setup_put_pair(&mut scenario, STRIKE, LONG_STRIKE, 0);
+
+    ts::next_tx(&mut scenario, th::writer_addr());
+    let mut sb = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
+    let mut lb = ts::take_shared<PutBucket<BTC, USDC, PUT2>>(&scenario);
+    let (pos, puts) = put_spread_write(&mut scenario, &mut sb, &mut lb, 100, &clock);
+    // Short bucket pool cash untouched by the spread write.
+    assert!(put_bucket::settlement_balance(&sb) == 0, 0);
+    let (long_left, cash, _) =
+        put_bucket::spread_escrow_view<BTC, USDC, PUT, PUT2>(&sb, 0, 100);
+    assert!(long_left == 100 && cash == 101, 0);
+
+    // Assign in two chunks: 40 then 60. Payouts telescope ceil(a·6).
+    ts::next_tx(&mut scenario, th::trader_addr());
+    let mut puts = puts;
+    let first = coin::split(&mut puts, 40, scenario.ctx());
+    let pay1 = put_bucket::exercise_spread<BTC, USDC, PUT, PUT2>(
+        &mut sb,
+        &mut lb,
+        first,
+        coin::mint_for_testing<BTC>(40, scenario.ctx()),
+        &clock,
+        scenario.ctx(),
+    );
+    assert!(pay1.value() == 240, 0); // 40 × 6, exact at scale 0
+    let pay2 = put_bucket::exercise_spread<BTC, USDC, PUT, PUT2>(
+        &mut sb,
+        &mut lb,
+        puts,
+        coin::mint_for_testing<BTC>(60, scenario.ctx()),
+        &clock,
+        scenario.ctx(),
+    );
+    assert!(pay2.value() == 360, 0);
+    assert!(put_bucket::exercise_cursor(&sb) == 100, 0);
+    // The delivered underlying assigned the LONG bucket, not this one.
+    assert!(put_bucket::underlying_balance(&sb) == 0, 0);
+    assert!(put_bucket::underlying_balance(&lb) == 100, 0);
+    // Only the 1-unit cushion is left in escrow.
+    let (long_left, cash, _) =
+        put_bucket::spread_escrow_view<BTC, USDC, PUT, PUT2>(&sb, 0, 100);
+    assert!(long_left == 0 && cash == 1, 0);
+
+    // Post-expiry: the writer redeems the residue; the range retires.
+    clock.set_for_testing(EXPIRY_MS + 1);
+    ts::next_tx(&mut scenario, th::writer_addr());
+    let (long_back, cash_back) = put_bucket::redeem_spread_position<BTC, USDC, PUT, PUT2>(
+        &mut sb,
+        pos,
+        &clock,
+        scenario.ctx(),
+    );
+    assert!(long_back.value() == 0 && cash_back.value() == 1, 0);
+    assert!(put_bucket::spread_count(&sb) == 0, 0);
+    assert!(put_bucket::total_redeemed(&sb) == 100, 0);
+
+    coin::burn_for_testing(pay1);
+    coin::burn_for_testing(pay2);
+    coin::burn_for_testing(long_back);
+    coin::burn_for_testing(cash_back);
+    ts::return_shared(sb);
+    ts::return_shared(lb);
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+fun test_put_spread_partial_assign_close_and_continue() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_put_pair(&mut scenario, STRIKE, LONG_STRIKE, 0);
+
+    ts::next_tx(&mut scenario, th::writer_addr());
+    let mut sb = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
+    let mut lb = ts::take_shared<PutBucket<BTC, USDC, PUT2>>(&scenario);
+    let (pos, mut puts) = put_spread_write(&mut scenario, &mut sb, &mut lb, 100, &clock);
+
+    // Assign 30, then close the 70-unit remainder pre-expiry.
+    ts::next_tx(&mut scenario, th::trader_addr());
+    let chunk = coin::split(&mut puts, 30, scenario.ctx());
+    let pay = put_bucket::exercise_spread<BTC, USDC, PUT, PUT2>(
+        &mut sb,
+        &mut lb,
+        chunk,
+        coin::mint_for_testing<BTC>(30, scenario.ctx()),
+        &clock,
+        scenario.ctx(),
+    );
+    assert!(pay.value() == 180, 0);
+
+    ts::next_tx(&mut scenario, th::writer_addr());
+    let (long_back, cash_back) = put_bucket::close_spread<BTC, USDC, PUT, PUT2>(
+        &mut sb,
+        pos,
+        puts,
+        &clock,
+        scenario.ctx(),
+    );
+    // 70 longs back; cash back = 101 − 30 drawn = 71.
+    assert!(long_back.value() == 70, 0);
+    assert!(cash_back.value() == 71, 0);
+    assert!(put_bucket::spread_count(&sb) == 0, 0);
+    assert!(put_bucket::total_redeemed(&sb) == 100, 0);
+
+    // The bucket keeps working: a physical write after the spread range
+    // exercises across the tombstone.
+    ts::next_tx(&mut scenario, th::writer_addr());
+    let phys_collateral = put_bucket::required_collateral(&sb, 50);
+    let (pos2, puts2) = put_bucket::write_collateralized<BTC, USDC, PUT>(
+        &mut sb,
+        coin::mint_for_testing<USDC>(phys_collateral, scenario.ctx()),
+        50,
+        &clock,
+        scenario.ctx(),
+    );
+    ts::next_tx(&mut scenario, th::trader_addr());
+    let pay2 = put_bucket::exercise<BTC, USDC, PUT>(
+        &mut sb,
+        puts2,
+        coin::mint_for_testing<BTC>(50, scenario.ctx()),
+        &clock,
+        scenario.ctx(),
+    );
+    assert!(pay2.value() == 300, 0);
+    // Cursor swept 30 → tombstone jump → through [100,150).
+    assert!(put_bucket::exercise_cursor(&sb) == 150, 0);
+
+    transfer::public_transfer(pos2, th::writer_addr());
+    coin::burn_for_testing(pay);
+    coin::burn_for_testing(pay2);
+    coin::burn_for_testing(long_back);
+    coin::burn_for_testing(cash_back);
+    ts::return_shared(sb);
+    ts::return_shared(lb);
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+fun test_put_spread_fractional_strikes_stay_solvent() {
+    // Ks 1.5 / Kl 1.3 (scale 1): adversarial rounding, unit-sized chunks.
+    // top_up = g(7)+1 = ceil(10.5)−floor(9.1)+1 = 11−9+1 = 3.
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_put_pair(&mut scenario, 15, 13, 1);
+
+    ts::next_tx(&mut scenario, th::writer_addr());
+    let mut sb = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
+    let mut lb = ts::take_shared<PutBucket<BTC, USDC, PUT2>>(&scenario);
+    let (pos, mut puts) = put_spread_write(&mut scenario, &mut sb, &mut lb, 7, &clock);
+    let (_, cash0, _) = put_bucket::spread_escrow_view<BTC, USDC, PUT, PUT2>(&sb, 0, 7);
+    assert!(cash0 == 3, 0);
+
+    // Assign 1, 2, 3, 1 — payouts telescope ceil(a×1.5): 2,3,5,1 = 11.
+    ts::next_tx(&mut scenario, th::trader_addr());
+    let mut total_paid = 0;
+    let mut i = 0;
+    let chunks = vector[1u64, 2, 3, 1];
+    while (i < chunks.length()) {
+        let n = chunks[i];
+        let c = coin::split(&mut puts, n, scenario.ctx());
+        let pay = put_bucket::exercise_spread<BTC, USDC, PUT, PUT2>(
+            &mut sb,
+            &mut lb,
+            c,
+            coin::mint_for_testing<BTC>(n, scenario.ctx()),
+            &clock,
+            scenario.ctx(),
+        );
+        total_paid = total_paid + pay.value();
+        coin::burn_for_testing(pay);
+        i = i + 1;
+    };
+    coin::destroy_zero(puts);
+    // Per-chunk targets telescope ceil(a×1.5): 2,3,4,2. The long proceeds
+    // Σfloor(n×1.3) = 7 leak 2 units vs the aggregate floor(9.1) = 9, one
+    // more than the drawn cushion — the final chunk's clamp bites and the
+    // exerciser bears exactly that unit: total 10, not 11.
+    assert!(total_paid == 10, 0);
+    let (long_left, cash_left, _) =
+        put_bucket::spread_escrow_view<BTC, USDC, PUT, PUT2>(&sb, 0, 7);
+    assert!(long_left == 0, 0);
+    // Exact conservation: Σpay + escrow remainder == Σproceeds + top_up.
+    assert!(total_paid + cash_left == 7 + 3, 0);
+    assert!(cash_left == 0, 0);
+    // The short pool never funded a spread payout.
+    assert!(put_bucket::settlement_balance(&sb) == 0, 0);
+
+    transfer::public_transfer(pos, th::writer_addr());
+    ts::return_shared(sb);
+    ts::return_shared(lb);
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+fun test_put_spread_higher_long_strike_surplus_to_writer() {
+    // Kl 6 > Ks 5: fully covered, top_up = 0+1 = 1; every assignment's
+    // long surplus accrues to the writer's escrow.
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_put_pair(&mut scenario, LONG_STRIKE, STRIKE, 0);
+
+    ts::next_tx(&mut scenario, th::writer_addr());
+    let mut sb = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
+    let mut lb = ts::take_shared<PutBucket<BTC, USDC, PUT2>>(&scenario);
+    let (pos, puts) = put_spread_write(&mut scenario, &mut sb, &mut lb, 10, &clock);
+
+    ts::next_tx(&mut scenario, th::trader_addr());
+    let pay = put_bucket::exercise_spread<BTC, USDC, PUT, PUT2>(
+        &mut sb,
+        &mut lb,
+        puts,
+        coin::mint_for_testing<BTC>(10, scenario.ctx()),
+        &clock,
+        scenario.ctx(),
+    );
+    // Exerciser gets the SHORT strike (50), not the long proceeds (60).
+    assert!(pay.value() == 50, 0);
+    let (_, cash_left, _) = put_bucket::spread_escrow_view<BTC, USDC, PUT, PUT2>(&sb, 0, 10);
+    // Writer's escrow: 1 cushion + 10 surplus.
+    assert!(cash_left == 11, 0);
+
+    ts::next_tx(&mut scenario, th::writer_addr());
+    let (long_back, cash_back) = put_bucket::close_spread<BTC, USDC, PUT, PUT2>(
+        &mut sb,
+        pos,
+        coin::zero<PUT>(scenario.ctx()),
+        &clock,
+        scenario.ctx(),
+    );
+    assert!(long_back.value() == 0 && cash_back.value() == 11, 0);
+
+    coin::burn_for_testing(pay);
+    coin::burn_for_testing(long_back);
+    coin::burn_for_testing(cash_back);
+    ts::return_shared(sb);
+    ts::return_shared(lb);
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = 69, location = options_core::put_bucket)]
+fun test_plain_put_exercise_refuses_spread_range() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_put_pair(&mut scenario, STRIKE, LONG_STRIKE, 0);
+
+    ts::next_tx(&mut scenario, th::writer_addr());
+    let mut sb = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
+    let mut lb = ts::take_shared<PutBucket<BTC, USDC, PUT2>>(&scenario);
+    let (_pos, puts) = put_spread_write(&mut scenario, &mut sb, &mut lb, 10, &clock);
+
+    ts::next_tx(&mut scenario, th::trader_addr());
+    let _pay = put_bucket::exercise<BTC, USDC, PUT>(
+        &mut sb,
+        puts,
+        coin::mint_for_testing<BTC>(10, scenario.ctx()),
+        &clock,
+        scenario.ctx(),
+    );
+    abort 99
+}
+
+#[test]
+#[expected_failure(abort_code = 70, location = options_core::put_bucket)]
+fun test_put_spread_exercise_before_cursor_reaches_it_aborts() {
+    // A physical write sits ahead of the spread range in the queue.
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    setup_put_pair(&mut scenario, STRIKE, LONG_STRIKE, 0);
+
+    ts::next_tx(&mut scenario, th::writer_addr());
+    let mut sb = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
+    let mut lb = ts::take_shared<PutBucket<BTC, USDC, PUT2>>(&scenario);
+    let phys_collateral = put_bucket::required_collateral(&sb, 20);
+    let (pos0, puts0) = put_bucket::write_collateralized<BTC, USDC, PUT>(
+        &mut sb,
+        coin::mint_for_testing<USDC>(phys_collateral, scenario.ctx()),
+        20,
+        &clock,
+        scenario.ctx(),
+    );
+    transfer::public_transfer(pos0, th::writer_addr());
+    let (_pos, spread_puts) = put_spread_write(&mut scenario, &mut sb, &mut lb, 10, &clock);
+    transfer::public_transfer(puts0, th::writer_addr());
+
+    ts::next_tx(&mut scenario, th::trader_addr());
+    let _pay = put_bucket::exercise_spread<BTC, USDC, PUT, PUT2>(
+        &mut sb,
+        &mut lb,
+        spread_puts,
+        coin::mint_for_testing<BTC>(10, scenario.ctx()),
+        &clock,
+        scenario.ctx(),
+    );
+    abort 99
+}
+
+#[test]
+#[expected_failure(abort_code = 68, location = options_core::put_bucket)]
+fun test_put_spread_position_rejected_by_plain_redeem() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let mut clock = th::init_protocol(&mut scenario);
+    setup_put_pair(&mut scenario, STRIKE, LONG_STRIKE, 0);
+
+    ts::next_tx(&mut scenario, th::writer_addr());
+    let mut sb = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
+    let mut lb = ts::take_shared<PutBucket<BTC, USDC, PUT2>>(&scenario);
+    let (pos, puts) = put_spread_write(&mut scenario, &mut sb, &mut lb, 10, &clock);
+    transfer::public_transfer(puts, th::writer_addr());
+
+    clock.set_for_testing(EXPIRY_MS + 1);
+    ts::next_tx(&mut scenario, th::writer_addr());
+    let (_u, _s) = put_bucket::redeem_position<BTC, USDC, PUT>(
+        &mut sb,
+        pos,
+        &clock,
+        scenario.ctx(),
+    );
+    abort 99
 }

@@ -16,6 +16,7 @@ use trading_vault::price as tv_price;
 use trading_vault::registry as tv_registry;
 use trading_vault::registry::{IntegrationRegistry, OracleRegistry, VaultProtocolConfig};
 use trading_vault::vault::{Self, CuratorCap, TradingVault};
+use trading_vault::vault_mm;
 
 use options_adapter::options_adapter::{Self as adapter, RfqTicket};
 
@@ -884,4 +885,215 @@ fun redeem_after_expiry_returns_funds() {
 
     clock.destroy_for_testing();
     sc.end();
+}
+
+// ═══════════════════ spread-position appraisal ═══════════════════
+
+/// Long-leg option coin (strike-1.0 bucket) for the spread tests.
+public struct LCALL has drop {}
+
+/// World on top of `setup`: a strike-1.0 long bucket beside the standard
+/// strike-2.0 short bucket; MM writes 100k long calls, compresses a
+/// same-size short against them, and the spread `Position` is swept into
+/// vault custody (VaultMm sweep — custody source is irrelevant to
+/// appraisal). Returns (clock, spread position id).
+fun setup_spread(sc: &mut Scenario): (Clock, ID) {
+    let clock = setup(sc);
+
+    ts::next_tx(sc, ADMIN);
+    let admin_cap = ts::take_from_sender<AdminCap>(sc);
+    let mut ireg = ts::take_shared<IntegrationRegistry>(sc);
+    tv_registry::allow_adapter(
+        &admin_cap,
+        &mut ireg,
+        type_name::with_defining_ids<vault_mm::VaultMm>(),
+    );
+    ts::return_shared(ireg);
+    let tcap = coin::create_treasury_cap_for_testing<LCALL>(sc.ctx());
+    bucket::create_bucket<UND, QUOTE, LCALL>(
+        &admin_cap,
+        tcap,
+        EXPIRY_MS,
+        1_000_000_000_000, // strike 1.0 QUOTE per UND
+        12,
+        sc.ctx(),
+    );
+    ts::return_to_sender(sc, admin_cap);
+
+    ts::next_tx(sc, MM);
+    let mut long_bucket = ts::take_shared<Bucket<UND, QUOTE, LCALL>>(sc);
+    let mut short_bucket = ts::take_shared<Bucket<UND, QUOTE, CALL>>(sc);
+    let (long_pos, long_coins) = bucket::write_collateralized<UND, QUOTE, LCALL>(
+        &mut long_bucket,
+        coin::from_balance(balance::create_for_testing<UND>(100_000), sc.ctx()),
+        &clock,
+        sc.ctx(),
+    );
+    let (spread_pos, short_coins) = bucket::write_spread<UND, QUOTE, CALL, LCALL>(
+        &mut short_bucket,
+        &long_bucket,
+        long_coins,
+        // Exactly required_settlement(long_bucket, 100k) = 100k QUOTE.
+        coin::from_balance(balance::create_for_testing<QUOTE>(100_000), sc.ctx()),
+        &clock,
+        sc.ctx(),
+    );
+    transfer::public_transfer(long_pos, MM);
+    transfer::public_transfer(short_coins, MM);
+    let v = ts::take_shared<TradingVault>(sc);
+    let vault_id = object::id(&v);
+    let pos_id = object::id(&spread_pos);
+    transfer::public_transfer(spread_pos, vault_id.to_address());
+    ts::return_shared(v);
+    ts::return_shared(short_bucket);
+    ts::return_shared(long_bucket);
+
+    ts::next_tx(sc, MM);
+    let mut v = ts::take_shared<TradingVault>(sc);
+    let ireg = ts::take_shared<IntegrationRegistry>(sc);
+    let ticket = ts::most_recent_receiving_ticket<options_core::position::Position>(&vault_id);
+    vault_mm::receive_mm_position(&mut v, &ireg, ticket);
+    ts::return_shared(ireg);
+    ts::return_shared(v);
+    (clock, pos_id)
+}
+
+#[test]
+#[expected_failure(abort_code = 15, location = options_adapter::options_adapter)] // E_SPREAD_POSITION
+fun physical_appraisal_rejects_spread_position() {
+    let mut sc = ts::begin(ADMIN);
+    let (clock, pos_id) = setup_spread(&mut sc);
+
+    ts::next_tx(&mut sc, ALICE);
+    let v = ts::take_shared<TradingVault>(&sc);
+    let cfg = ts::take_shared<VaultProtocolConfig>(&sc);
+    let bucket = ts::take_shared<Bucket<UND, QUOTE, CALL>>(&sc);
+    let mut appraisal = vault::begin_appraisal<UND>(&v);
+    adapter::appraise_call_position<UND, QUOTE, CALL>(
+        &v,
+        &cfg,
+        &mut appraisal,
+        &bucket,
+        pos_id,
+        option::none(),
+        option::none(),
+        &clock,
+    );
+    abort 0
+}
+
+#[test]
+fun spread_position_appraises_from_escrow() {
+    let mut sc = ts::begin(ADMIN);
+    let (clock, pos_id) = setup_spread(&mut sc);
+
+    ts::next_tx(&mut sc, ALICE);
+    let v = ts::take_shared<TradingVault>(&sc);
+    let cfg = ts::take_shared<VaultProtocolConfig>(&sc);
+    let oreg = ts::take_shared<OracleRegistry>(&sc);
+    let short_bucket = ts::take_shared<Bucket<UND, QUOTE, CALL>>(&sc);
+    let long_bucket = ts::take_shared<Bucket<UND, QUOTE, LCALL>>(&sc);
+
+    // Spot 1 UND = 2 QUOTE (0.5 UND per QUOTE): cash 100k QUOTE → 50k
+    // UND, long intrinsic 100k − 50k = 50k, short intrinsic 0 at the
+    // boundary → mark = 100k UND, the physical min(spot, strike). NAV
+    // = 1M free + 100k.
+    let att = tv_price::attest(
+        TestOracle {},
+        &oreg,
+        type_name::with_defining_ids<QUOTE>(),
+        type_name::with_defining_ids<UND>(),
+        500_000_000_000,
+        clock.timestamp_ms(),
+    );
+    let mut appraisal = vault::begin_appraisal<UND>(&v);
+    vault_mm::appraise_call_spread_position<UND, QUOTE, CALL, LCALL>(
+        &v,
+        &cfg,
+        &mut appraisal,
+        &short_bucket,
+        &long_bucket,
+        pos_id,
+        option::none(),
+        option::some(att),
+        &clock,
+    );
+    assert!(vault::appraisal_value(&appraisal) == 1_000_000 + 100_000);
+    sui::test_utils::destroy(appraisal);
+
+    // Spot below the long strike (4.0 UND per QUOTE → spot 100k UND,
+    // K_long 400k, K_short 800k): both intrinsics zero, mark floors at
+    // the escrowed cash (100k QUOTE → 400k UND). NAV = 1M + 400k.
+    let att_otm = tv_price::attest(
+        TestOracle {},
+        &oreg,
+        type_name::with_defining_ids<QUOTE>(),
+        type_name::with_defining_ids<UND>(),
+        4_000_000_000_000,
+        clock.timestamp_ms(),
+    );
+    let mut appraisal = vault::begin_appraisal<UND>(&v);
+    vault_mm::appraise_call_spread_position<UND, QUOTE, CALL, LCALL>(
+        &v,
+        &cfg,
+        &mut appraisal,
+        &short_bucket,
+        &long_bucket,
+        pos_id,
+        option::none(),
+        option::some(att_otm),
+        &clock,
+    );
+    assert!(vault::appraisal_value(&appraisal) == 1_000_000 + 400_000);
+    sui::test_utils::destroy(appraisal);
+
+    ts::return_shared(long_bucket);
+    ts::return_shared(short_bucket);
+    ts::return_shared(oreg);
+    ts::return_shared(cfg);
+    ts::return_shared(v);
+    clock.destroy_for_testing();
+    sc.end();
+}
+
+#[test]
+#[expected_failure(abort_code = 10, location = trading_vault::vault_mm)] // E_LONG_BUCKET_MISMATCH
+fun spread_appraisal_wrong_long_bucket_aborts() {
+    let mut sc = ts::begin(ADMIN);
+    let (clock, pos_id) = setup_spread(&mut sc);
+
+    // A second LCALL bucket (same coin type, different object): escrow
+    // types line up but the escrowed long bucket id does not.
+    ts::next_tx(&mut sc, ADMIN);
+    let admin_cap = ts::take_from_sender<AdminCap>(&sc);
+    let tcap = coin::create_treasury_cap_for_testing<LCALL>(sc.ctx());
+    bucket::create_bucket<UND, QUOTE, LCALL>(
+        &admin_cap,
+        tcap,
+        EXPIRY_MS,
+        1_000_000_000_000,
+        12,
+        sc.ctx(),
+    );
+    ts::return_to_sender(&sc, admin_cap);
+
+    ts::next_tx(&mut sc, ALICE);
+    let v = ts::take_shared<TradingVault>(&sc);
+    let cfg = ts::take_shared<VaultProtocolConfig>(&sc);
+    let short_bucket = ts::take_shared<Bucket<UND, QUOTE, CALL>>(&sc);
+    // most_recent: the wrong (fresh) LCALL bucket.
+    let wrong_long = ts::take_shared<Bucket<UND, QUOTE, LCALL>>(&sc);
+    let mut appraisal = vault::begin_appraisal<UND>(&v);
+    vault_mm::appraise_call_spread_position<UND, QUOTE, CALL, LCALL>(
+        &v,
+        &cfg,
+        &mut appraisal,
+        &short_bucket,
+        &wrong_long,
+        pos_id,
+        option::none(),
+        option::none(),
+        &clock,
+    );
+    abort 0
 }

@@ -89,6 +89,8 @@ export type TradingVaultObjects = {
   oracleRegistryId: string;
   pythFeedRegistryId: string;
   poolAllowlistId: string;
+  /** Options-adapter VolBook (premium marks) — absent on older deploys. */
+  volBookId?: string | null;
 };
 export let TRADING_VAULT_OBJECTS: TradingVaultObjects | undefined;
 
@@ -183,6 +185,7 @@ type PackageInfoDto = {
     oracleRegistryId: string;
     pythFeedRegistryId: string;
     poolAllowlistId: string;
+    volBookId?: string | null;
   } | null;
 };
 

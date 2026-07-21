@@ -44,6 +44,9 @@ pub struct AppraisalRefs {
     pub equity_oracle_pkg: Option<ObjectID>,
     /// The equity-oracle package's shared `EquityBook`.
     pub equity_book_id: Option<ObjectID>,
+    /// The options-adapter package's shared `VolBook` (premium
+    /// mark-to-market). Required whenever option-coin legs compose.
+    pub vol_book_id: Option<ObjectID>,
 }
 
 /// One custodied position, classified from its object type + adapter tag.
@@ -656,7 +659,11 @@ pub async fn compose_appraisal(
         let oa = refs
             .options_adapter_pkg
             .ok_or_else(|| anyhow!("options adapter package unavailable for option-coin legs"))?;
+        let vol_book_id = refs
+            .vol_book_id
+            .ok_or_else(|| anyhow!("vol book unavailable for option-coin legs"))?;
         let oracle_reg = pt.obj(shared_object_arg(client, refs.oracle_registry_id, false).await?)?;
+        let vol_book = pt.obj(shared_object_arg(client, vol_book_id, false).await?)?;
         for (coin_type, b) in &option_types {
             let bucket = pt.obj(shared_object_arg(client, b.bucket_id, false).await?)?;
             let u_opt = opt_for(pt, &attestations, &b.underlying, &holdings.deposit_type);
@@ -672,7 +679,7 @@ pub async fn compose_appraisal(
                     TypeTag::from_str(coin_type)?,
                     deposit_tag.clone(),
                 ],
-                vec![oracle_reg, bucket, u_opt, s_opt, clock],
+                vec![oracle_reg, bucket, vol_book, u_opt, s_opt, clock],
             );
             attestations.insert(coin_type.clone(), att);
         }

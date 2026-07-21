@@ -15,6 +15,7 @@ use trading_vault::registry as tv_registry;
 use trading_vault::registry::OracleRegistry;
 
 use options_adapter::options_oracle::{Self as oracle, OptionsOracle};
+use options_adapter::vol_book::{Self, VolBook};
 
 /// Underlying (8 decimals in spirit; decimals live in the price legs).
 public struct UND has drop {}
@@ -22,20 +23,25 @@ public struct UND has drop {}
 public struct QUOTE has drop {}
 public struct CALL has drop {}
 public struct PUT has drop {}
+/// A long-dated call for the no-arbitrage-cap test.
+public struct FARCALL has drop {}
 
 /// Input-leg oracle for the U→Q attestation.
 public struct TestOracle has drop {}
 
 const ADMIN: address = @0xA1;
+const KEEPER: address = @0xB7;
 const EXPIRY_MS: u64 = 10_000_000;
 /// Strike 2.0 QUOTE per UND raw unit, scale 12.
 const STRIKE: u128 = 2_000_000_000_000;
 const SCALE_1E12: u128 = 1_000_000_000_000;
+const YEAR_MS: u64 = 31_536_000_000;
 
 fun setup(sc: &mut Scenario): Clock {
     ts::next_tx(sc, ADMIN);
     admin::init_for_testing(sc.ctx());
     tv_registry::init_for_testing(sc.ctx());
+    vol_book::init_for_testing(sc.ctx());
 
     ts::next_tx(sc, ADMIN);
     let admin_cap = ts::take_from_sender<AdminCap>(sc);
@@ -69,6 +75,23 @@ fun und_att(oreg: &OracleRegistry, price: u128, ts_ms: u64): tv_price::PriceAtte
     )
 }
 
+/// Admin seeds `vol_bps` for UND at the current clock.
+fun seed_und_vol(sc: &mut Scenario, vol_bps: u64, clock: &Clock) {
+    ts::next_tx(sc, ADMIN);
+    let admin_cap = ts::take_from_sender<AdminCap>(sc);
+    let mut vb = ts::take_shared<VolBook>(sc);
+    vol_book::seed_vol(
+        &admin_cap,
+        &mut vb,
+        type_name::with_defining_ids<UND>(),
+        vol_bps,
+        clock,
+        sc.ctx(),
+    );
+    ts::return_shared(vb);
+    ts::return_to_sender(sc, admin_cap);
+}
+
 #[test]
 fun itm_call_prices_at_intrinsic() {
     let mut sc = ts::begin(ADMIN);
@@ -76,13 +99,16 @@ fun itm_call_prices_at_intrinsic() {
     clock.set_for_testing(5_000);
 
     ts::next_tx(&mut sc, ADMIN);
-    // Spot 3.5 Q/UND, strike 2.0 → intrinsic 1.5 at 1e12.
+    // Spot 3.5 Q/UND, strike 2.0 → intrinsic 1.5 at 1e12; no vol
+    // posted → no extrinsic.
     let b = ts::take_shared<bucket::Bucket<UND, QUOTE, CALL>>(&sc);
     let oreg = ts::take_shared<OracleRegistry>(&sc);
+    let vb = ts::take_shared<VolBook>(&sc);
     let att = und_att(&oreg, 3_500_000_000_000, 4_000);
     let out = oracle::attest_call<UND, QUOTE, CALL, QUOTE>(
         &oreg,
         &b,
+        &vb,
         option::some(att),
         option::none(), // S == Q → 1:1 leg
         &clock,
@@ -92,6 +118,7 @@ fun itm_call_prices_at_intrinsic() {
     assert!(tv_price::quote_asset(&out) == type_name::with_defining_ids<QUOTE>());
     // Timestamp is the weakest (oldest) leg — the U attestation.
     assert!(tv_price::timestamp_ms(&out) == 4_000);
+    ts::return_shared(vb);
     ts::return_shared(oreg);
     ts::return_shared(b);
     clock.destroy_for_testing();
@@ -105,18 +132,21 @@ fun otm_call_prices_at_dust() {
     clock.set_for_testing(5_000);
 
     ts::next_tx(&mut sc, ADMIN);
-    // Spot 1.0 < strike 2.0 → dust floor 1.
+    // Spot 1.0 < strike 2.0, no vol → dust floor 1.
     let b = ts::take_shared<bucket::Bucket<UND, QUOTE, CALL>>(&sc);
     let oreg = ts::take_shared<OracleRegistry>(&sc);
+    let vb = ts::take_shared<VolBook>(&sc);
     let att = und_att(&oreg, SCALE_1E12, 5_000);
     let out = oracle::attest_call<UND, QUOTE, CALL, QUOTE>(
         &oreg,
         &b,
+        &vb,
         option::some(att),
         option::none(),
         &clock,
     );
     assert!(tv_price::price(&out) == 1);
+    ts::return_shared(vb);
     ts::return_shared(oreg);
     ts::return_shared(b);
     clock.destroy_for_testing();
@@ -132,15 +162,18 @@ fun expired_call_prices_at_dust_without_attestations() {
     ts::next_tx(&mut sc, ADMIN);
     let b = ts::take_shared<bucket::Bucket<UND, QUOTE, CALL>>(&sc);
     let oreg = ts::take_shared<OracleRegistry>(&sc);
+    let vb = ts::take_shared<VolBook>(&sc);
     let out = oracle::attest_call<UND, QUOTE, CALL, QUOTE>(
         &oreg,
         &b,
+        &vb,
         option::none(),
         option::none(),
         &clock,
     );
     assert!(tv_price::price(&out) == 1);
     assert!(tv_price::timestamp_ms(&out) == EXPIRY_MS + 1);
+    ts::return_shared(vb);
     ts::return_shared(oreg);
     ts::return_shared(b);
     clock.destroy_for_testing();
@@ -154,19 +187,22 @@ fun itm_put_prices_at_intrinsic() {
     clock.set_for_testing(5_000);
 
     ts::next_tx(&mut sc, ADMIN);
-    // Spot 0.5 < strike 2.0 → put intrinsic 1.5.
+    // Spot 0.5 < strike 2.0 → put intrinsic 1.5; no vol posted.
     let b = ts::take_shared<put_bucket::PutBucket<UND, QUOTE, PUT>>(&sc);
     let oreg = ts::take_shared<OracleRegistry>(&sc);
+    let vb = ts::take_shared<VolBook>(&sc);
     let att = und_att(&oreg, 500_000_000_000, 5_000);
     let out = oracle::attest_put<UND, QUOTE, PUT, QUOTE>(
         &oreg,
         &b,
+        &vb,
         option::some(att),
         option::none(),
         &clock,
     );
     assert!(tv_price::price(&out) == 1_500_000_000_000);
     assert!(tv_price::asset(&out) == type_name::with_defining_ids<PUT>());
+    ts::return_shared(vb);
     ts::return_shared(oreg);
     ts::return_shared(b);
     clock.destroy_for_testing();
@@ -183,9 +219,11 @@ fun live_call_without_underlying_attestation_aborts() {
     ts::next_tx(&mut sc, ADMIN);
     let b = ts::take_shared<bucket::Bucket<UND, QUOTE, CALL>>(&sc);
     let oreg = ts::take_shared<OracleRegistry>(&sc);
+    let vb = ts::take_shared<VolBook>(&sc);
     let out = oracle::attest_call<UND, QUOTE, CALL, QUOTE>(
         &oreg,
         &b,
+        &vb,
         option::none(),
         option::none(),
         &clock,
@@ -202,4 +240,213 @@ fun strike_leg_scales_with_settlement_price() {
     );
     // Degenerate scale 0: strike is a plain raw ratio.
     assert!(oracle::strike_in_quote_for_testing(3, 0, SCALE_1E12) == 3 * SCALE_1E12);
+}
+
+// ═══════════════════ premium mark-to-market ═══════════════════
+
+#[test]
+fun extrinsic_formula_exact_values() {
+    // ATM, 80% vol, one year: 0.4·1·0.8·1 = 0.32 at 1e12, exactly.
+    assert!(
+        oracle::extrinsic_in_quote_for_testing(8_000, SCALE_1E12, SCALE_1E12, YEAR_MS)
+            == 320_000_000_000,
+    );
+    // 2× spot vs strike: atm = 0.4·2·0.8 = 0.64, decay base=K diff=K →
+    // ×1/3 → 213_333_333_333 (floor).
+    assert!(
+        oracle::extrinsic_in_quote_for_testing(8_000, 2 * SCALE_1E12, SCALE_1E12, YEAR_MS)
+            == 213_333_333_333,
+    );
+    // No vol → no extrinsic.
+    assert!(oracle::extrinsic_in_quote_for_testing(0, SCALE_1E12, SCALE_1E12, YEAR_MS) == 0);
+}
+
+#[test]
+fun atm_call_marks_time_value_when_vol_posted() {
+    let mut sc = ts::begin(ADMIN);
+    let mut clock = setup(&mut sc);
+    clock.set_for_testing(5_000);
+    seed_und_vol(&mut sc, 8_000, &clock);
+
+    ts::next_tx(&mut sc, ADMIN);
+    // Spot == strike (2.0): intrinsic 0, mark = pure extrinsic.
+    let b = ts::take_shared<bucket::Bucket<UND, QUOTE, CALL>>(&sc);
+    let oreg = ts::take_shared<OracleRegistry>(&sc);
+    let vb = ts::take_shared<VolBook>(&sc);
+    let att = und_att(&oreg, STRIKE, 5_000);
+    let out = oracle::attest_call<UND, QUOTE, CALL, QUOTE>(
+        &oreg,
+        &b,
+        &vb,
+        option::some(att),
+        option::none(),
+        &clock,
+    );
+    let expected =
+        oracle::extrinsic_in_quote_for_testing(8_000, STRIKE, STRIKE, EXPIRY_MS - 5_000);
+    assert!(expected > 0);
+    assert!(tv_price::price(&out) == expected);
+    ts::return_shared(vb);
+    ts::return_shared(oreg);
+    ts::return_shared(b);
+    clock.destroy_for_testing();
+    sc.end();
+}
+
+#[test]
+fun stale_vol_degrades_to_intrinsic() {
+    let mut sc = ts::begin(ADMIN);
+    let mut clock = setup(&mut sc);
+    clock.set_for_testing(1_000);
+    seed_und_vol(&mut sc, 8_000, &clock);
+
+    // Past the 1h staleness window (bucket still live).
+    clock.set_for_testing(5_000_000);
+    ts::next_tx(&mut sc, ADMIN);
+    let b = ts::take_shared<bucket::Bucket<UND, QUOTE, CALL>>(&sc);
+    let oreg = ts::take_shared<OracleRegistry>(&sc);
+    let vb = ts::take_shared<VolBook>(&sc);
+    let att = und_att(&oreg, 3_500_000_000_000, 5_000_000);
+    let out = oracle::attest_call<UND, QUOTE, CALL, QUOTE>(
+        &oreg,
+        &b,
+        &vb,
+        option::some(att),
+        option::none(),
+        &clock,
+    );
+    // Intrinsic only: 3.5 − 2.0 = 1.5.
+    assert!(tv_price::price(&out) == 1_500_000_000_000);
+    ts::return_shared(vb);
+    ts::return_shared(oreg);
+    ts::return_shared(b);
+    clock.destroy_for_testing();
+    sc.end();
+}
+
+#[test]
+fun call_mark_capped_at_spot() {
+    let mut sc = ts::begin(ADMIN);
+    let mut clock = setup(&mut sc);
+    clock.set_for_testing(5_000);
+    seed_und_vol(&mut sc, 40_000, &clock);
+
+    // A year-dated bucket so √T ≈ 1 and the extrinsic term is huge.
+    ts::next_tx(&mut sc, ADMIN);
+    let admin_cap = ts::take_from_sender<AdminCap>(&sc);
+    let tcap = coin::create_treasury_cap_for_testing<FARCALL>(sc.ctx());
+    bucket::create_bucket<UND, QUOTE, FARCALL>(
+        &admin_cap,
+        tcap,
+        YEAR_MS + 5_000,
+        STRIKE,
+        12,
+        sc.ctx(),
+    );
+    ts::return_to_sender(&sc, admin_cap);
+
+    ts::next_tx(&mut sc, ADMIN);
+    // Spot 4.0, strike 2.0, 400% vol, 1y: intrinsic 2.0 + extrinsic
+    // ~2.13 exceeds spot → capped at spot 4.0.
+    let b = ts::take_shared<bucket::Bucket<UND, QUOTE, FARCALL>>(&sc);
+    let oreg = ts::take_shared<OracleRegistry>(&sc);
+    let vb = ts::take_shared<VolBook>(&sc);
+    let att = und_att(&oreg, 4_000_000_000_000, 5_000);
+    let out = oracle::attest_call<UND, QUOTE, FARCALL, QUOTE>(
+        &oreg,
+        &b,
+        &vb,
+        option::some(att),
+        option::none(),
+        &clock,
+    );
+    assert!(tv_price::price(&out) == 4_000_000_000_000);
+    ts::return_shared(vb);
+    ts::return_shared(oreg);
+    ts::return_shared(b);
+    clock.destroy_for_testing();
+    sc.end();
+}
+
+#[test]
+#[expected_failure(abort_code = 1, location = options_adapter::vol_book)] // E_NOT_POSTER
+fun non_poster_cannot_post_vol() {
+    let mut sc = ts::begin(ADMIN);
+    let clock = setup(&mut sc);
+    seed_und_vol(&mut sc, 8_000, &clock);
+
+    ts::next_tx(&mut sc, KEEPER);
+    let mut vb = ts::take_shared<VolBook>(&sc);
+    vol_book::post_vol(
+        &mut vb,
+        type_name::with_defining_ids<UND>(),
+        8_100,
+        &clock,
+        sc.ctx(),
+    );
+    abort 99
+}
+
+#[test]
+#[expected_failure(abort_code = 4, location = options_adapter::vol_book)] // E_DELTA_TOO_LARGE
+fun vol_post_delta_capped() {
+    let mut sc = ts::begin(ADMIN);
+    let mut clock = setup(&mut sc);
+    clock.set_for_testing(1_000);
+    seed_und_vol(&mut sc, 8_000, &clock);
+
+    ts::next_tx(&mut sc, ADMIN);
+    let admin_cap = ts::take_from_sender<AdminCap>(&sc);
+    let mut vb = ts::take_shared<VolBook>(&sc);
+    vol_book::add_poster(&admin_cap, &mut vb, KEEPER);
+    ts::return_shared(vb);
+    ts::return_to_sender(&sc, admin_cap);
+
+    // Past the min interval, but +25% > the 20% delta cap.
+    clock.set_for_testing(100_000);
+    ts::next_tx(&mut sc, KEEPER);
+    let mut vb = ts::take_shared<VolBook>(&sc);
+    vol_book::post_vol(
+        &mut vb,
+        type_name::with_defining_ids<UND>(),
+        10_000,
+        &clock,
+        sc.ctx(),
+    );
+    abort 99
+}
+
+#[test]
+fun poster_updates_within_guardrails() {
+    let mut sc = ts::begin(ADMIN);
+    let mut clock = setup(&mut sc);
+    clock.set_for_testing(1_000);
+    seed_und_vol(&mut sc, 8_000, &clock);
+
+    ts::next_tx(&mut sc, ADMIN);
+    let admin_cap = ts::take_from_sender<AdminCap>(&sc);
+    let mut vb = ts::take_shared<VolBook>(&sc);
+    vol_book::add_poster(&admin_cap, &mut vb, KEEPER);
+    ts::return_shared(vb);
+    ts::return_to_sender(&sc, admin_cap);
+
+    clock.set_for_testing(100_000);
+    ts::next_tx(&mut sc, KEEPER);
+    let mut vb = ts::take_shared<VolBook>(&sc);
+    vol_book::post_vol(
+        &mut vb,
+        type_name::with_defining_ids<UND>(),
+        9_000,
+        &clock,
+        sc.ctx(),
+    );
+    let (vol, at) = vol_book::entry(&vb, type_name::with_defining_ids<UND>());
+    assert!(vol == 9_000);
+    assert!(at == 100_000);
+    assert!(
+        vol_book::current_vol_bps(&vb, type_name::with_defining_ids<UND>(), &clock) == 9_000,
+    );
+    ts::return_shared(vb);
+    clock.destroy_for_testing();
+    sc.end();
 }

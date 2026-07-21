@@ -100,6 +100,7 @@ struct Ids {
     oracle_registry_id: ObjectID,
     pyth_feed_registry_id: ObjectID,
     pool_allowlist_id: ObjectID,
+    vol_book_id: Option<ObjectID>,
     treasury_id: ObjectID,
     deposit_coin_type: String,
     deposit_module: String,
@@ -163,6 +164,12 @@ async fn resolve_ids(client: &SuiClient, cli: &Cli) -> Result<Ids> {
         oracle_registry_id: oreg,
         pyth_feed_registry_id: freg,
         pool_allowlist_id: plist,
+        vol_book_id: pi
+            .trading_vault_objects
+            .as_ref()
+            .map(|o| o.vol_book())
+            .transpose()?
+            .flatten(),
         treasury_id: net.treasury()?,
         deposit_coin_type: protocol_types::asset::canonicalize_move_type(&tusdc.coin_type),
         deposit_module: "tusdc".into(),
@@ -334,6 +341,7 @@ async fn main() -> Result<()> {
         // SO-299: the smoke vault has no external account.
         equity_oracle_pkg: None,
         equity_book_id: None,
+        vol_book_id: ids.vol_book_id,
     };
     let http = reqwest::Client::new();
     let (pool_buckets, option_map) = match fetch_bucket_catalog(&cli.indexer_graphql).await {

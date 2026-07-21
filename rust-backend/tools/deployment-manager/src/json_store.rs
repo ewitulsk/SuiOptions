@@ -103,6 +103,9 @@ pub struct TradingVaultObjectsRecord {
     /// Shared `EquityBook` created by the equity-oracle publish (SO-299),
     /// so the keeper reads it from token-info instead of publish effects.
     pub equity_book_id: String,
+    /// Shared `VolBook` created by the options-adapter publish (premium
+    /// mark-to-market), same discipline.
+    pub vol_book_id: String,
     pub activation_digest: String,
 }
 

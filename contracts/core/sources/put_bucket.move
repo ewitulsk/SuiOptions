@@ -60,6 +60,8 @@ use sui::balance::{Self, Balance};
 use sui::clock::Clock;
 use sui::coin::{Self, Coin, TreasuryCap};
 
+use sui::dynamic_field as df;
+
 use options_core::admin::{AdminCap, ProtocolConfig};
 use options_core::bucket;
 use options_core::collateral::{Self, CollateralRequest};
@@ -104,10 +106,32 @@ public struct PutBucket<phantom Underlying, phantom Settlement, phantom Put> has
     closed: vector<PutClosedInterval>,
     /// Total units across `closed` — subtracted from exercise capacity.
     closed_pending: u128,
+    /// Live compressed (spread-backed) ranges, sorted by start (FIFO
+    /// append order). Unlike the call side, the cursor CAN pass through
+    /// one — but only via `exercise_spread` (assignment funds the long
+    /// exercise); the plain path refuses. A range stays here, possibly
+    /// partially assigned, until `close_spread` / `redeem_spread_position`
+    /// retires it. See the "put spread compression" section.
+    spreads: vector<PutSpreadRange>,
 }
 
 /// A tombstoned (offset-closed) slice of the write space.
 public struct PutClosedInterval has copy, drop, store { start: u128, end: u128 }
+
+/// One live compressed range.
+public struct PutSpreadRange has copy, drop, store { start: u128, end: u128 }
+
+/// Dynamic-field key for a compressed range's escrow, by range start.
+public struct PutSpreadEscrowKey has copy, drop, store { start: u128 }
+
+/// What backs a compressed put range: the long puts (consumed pro-rata
+/// as the range is assigned) plus the gap cash — sized so escrow + long
+/// proceeds provably cover every assignment path (see `write_spread`).
+public struct PutSpreadEscrow<phantom LongPut, phantom Settlement> has store {
+    long: Balance<LongPut>,
+    cash: Balance<Settlement>,
+    long_bucket_id: ID,
+}
 
 /// ceil((amount × strike) / 10^strike_scale) — collateral sizing.
 fun apply_strike_ceil(amount: u128, strike: u128, strike_scale: u8): u64 {
@@ -168,6 +192,7 @@ public fun create_put_bucket<Underlying, Settlement, Put>(
         invalidated: false,
         closed: vector[],
         closed_pending: 0,
+        spreads: vector[],
     };
     let bucket_id = object::id(&bucket);
     events::emit_put_bucket_created(
@@ -510,6 +535,8 @@ public fun redeem_position<Underlying, Settlement, Put>(
     let bucket_id = object::id(bucket);
     let (position_id, position_bucket_id, rs, re) = position::burn(position);
     assert!(position_bucket_id == bucket_id, errors::position_bucket_mismatch());
+    // Spread positions settle from their escrow, never from the pool.
+    assert!(!overlaps_spread(bucket, rs, re), errors::spread_position());
 
     let cursor = bucket.exercise_cursor;
     let exercised: u128 = if (cursor <= rs) {
@@ -579,6 +606,8 @@ public fun close_offset<Underlying, Settlement, Put>(
     assert!((amount as u128) <= re - rs, errors::close_exceeds_position());
     let cut = re - (amount as u128);
     assert!(bucket.exercise_cursor <= cut, errors::close_range_exercised());
+    // Spread positions are escrow-backed; they exit via `close_spread`.
+    assert!(!overlaps_spread(bucket, cut, re), errors::spread_position());
 
     coin::burn(&mut bucket.put_treasury, put);
     position::shrink_end(position, amount as u128);
@@ -600,8 +629,10 @@ public fun close_offset<Underlying, Settlement, Put>(
 }
 
 /// Advance the cursor by `amount` exercisable units, jumping over closed
-/// intervals (consuming them). Capacity was already checked against
-/// `closed_pending`. Mirror of `bucket::advance_cursor` minus spreads.
+/// intervals (consuming them), refusing to enter a spread range — its
+/// collateral is escrow, not pool cash, so only `exercise_spread` may
+/// carry the cursor through it. Capacity was already checked against
+/// `closed_pending`. Mirror of `bucket::advance_cursor`.
 fun advance_cursor<U, S, P>(bucket: &mut PutBucket<U, S, P>, amount: u64) {
     let mut remaining = amount as u128;
     let mut cur = bucket.exercise_cursor;
@@ -612,8 +643,11 @@ fun advance_cursor<U, S, P>(bucket: &mut PutBucket<U, S, P>, amount: u64) {
             cur = end;
             continue
         };
-        let limit = if (bucket.closed.is_empty()) { bucket.total_written }
+        let next_closed = if (bucket.closed.is_empty()) { bucket.total_written }
         else { bucket.closed[0].start };
+        let next_spread = next_spread_start(bucket, cur);
+        assert!(cur < next_spread, errors::put_spread_exercise_required());
+        let limit = if (next_closed < next_spread) { next_closed } else { next_spread };
         let step = if (remaining < limit - cur) { remaining } else { limit - cur };
         cur = cur + step;
         remaining = remaining - step;
@@ -626,6 +660,45 @@ fun advance_cursor<U, S, P>(bucket: &mut PutBucket<U, S, P>, amount: u64) {
         cur = end;
     };
     bucket.exercise_cursor = cur;
+}
+
+/// The start of the first live spread range the cursor has not fully
+/// passed (`end > cur`), or `total_written` if none — ranges the cursor
+/// exited stay in the vector until closed/redeemed but no longer bound
+/// the plain path.
+fun next_spread_start<U, S, P>(bucket: &PutBucket<U, S, P>, cur: u128): u128 {
+    let mut i = 0;
+    while (i < bucket.spreads.length()) {
+        if (bucket.spreads[i].end > cur) {
+            return bucket.spreads[i].start
+        };
+        i = i + 1;
+    };
+    bucket.total_written
+}
+
+fun overlaps_spread<U, S, P>(bucket: &PutBucket<U, S, P>, start: u128, end: u128): bool {
+    let mut i = 0;
+    while (i < bucket.spreads.length()) {
+        let sp = &bucket.spreads[i];
+        if (sp.start < end && start < sp.end) {
+            return true
+        };
+        i = i + 1;
+    };
+    false
+}
+
+fun find_spread_exact<U, S, P>(bucket: &PutBucket<U, S, P>, start: u128, end: u128): u64 {
+    let mut i = 0;
+    while (i < bucket.spreads.length()) {
+        if (bucket.spreads[i].start == start) {
+            assert!(bucket.spreads[i].end == end, errors::spread_not_found());
+            return i
+        };
+        i = i + 1;
+    };
+    abort errors::spread_not_found()
 }
 
 /// Sorted-insert with adjacency merging; mirror of `bucket::insert_closed`.
@@ -644,6 +717,297 @@ fun insert_closed<U, S, P>(bucket: &mut PutBucket<U, S, P>, start: u128, end: u1
         bucket.closed[i - 1].end = cur_end;
     };
     bucket.closed_pending = bucket.closed_pending + (end - start);
+}
+
+// ─────────────────── put spread collateral compression ───────────────────
+//
+// A short put backed by an escrowed LONG put plus the strike-gap cash
+// instead of the full `ceil(amount × strike)` collateral. Physical
+// settlement makes assignment special: the cash owed to an exerciser can
+// only come from exercising the escrowed long — WITH THE UNDERLYING THE
+// ASSIGNMENT ITSELF DELIVERS. There is therefore no pre-physicalization
+// crank (the call side's `unwind_spread`); instead the unwind is fused
+// into a spread-aware exercise entry (`exercise_spread`), and the plain
+// path refuses to carry the cursor into a compressed range.
+//
+// Escrow sizing and the partial-assignment ledger: with cumulative
+// assigned units a, the exerciser payout TARGET telescopes on the short
+// leg — pay(a₀→a₁) = ceil(a₁·Ks) − ceil(a₀·Ks) — so total payouts are
+// exact-aggregate regardless of chunking (within one unit of the plain
+// `floor(n·Ks)` per exercise, holder-favoring). Funding per chunk is the
+// REAL long proceeds `floor(n·Kl)`: any excess over the target is the
+// writer's surplus and joins the escrow cash; any deficit draws from the
+// escrow cash, clamped to what it holds. The escrow is provisioned with
+//   g(A) + 1,   g(a) = max(ceil(a·Ks) − floor(a·Kl), 0),
+// which covers the aggregate gap; per-chunk floor losses on the long
+// proceeds (≤ 1 unit each) are borne by the payout clamp, never by the
+// pool — the design is solvent by construction, with dust-bounded payout
+// deviation, the same aggregate-rounding posture the cash leg documents.
+//
+// The short bucket's pooled `settlement_balance` is never touched by
+// spread flows, so the module-doc solvency proof is unaffected.
+
+/// The gap cash required to escrow `amount` units: g(amount) + 1.
+public fun required_spread_top_up<U, S, P, LU, LS, LP>(
+    bucket: &PutBucket<U, S, P>,
+    long_bucket: &PutBucket<LU, LS, LP>,
+    amount: u64,
+): u64 {
+    spread_cash_need(
+        amount as u128,
+        bucket.strike,
+        bucket.strike_scale,
+        long_bucket.strike,
+        long_bucket.strike_scale,
+    ) + 1
+}
+
+/// g(a): the escrow cash needed once `a` units are assigned.
+fun spread_cash_need(a: u128, strike: u128, scale: u8, l_strike: u128, l_scale: u8): u64 {
+    let need = apply_strike_ceil(a, strike, scale);
+    let have = apply_strike_floor(a, l_strike, l_scale);
+    if (need > have) { need - have } else { 0 }
+}
+
+/// Write `long.value()` units backed by escrowed long puts plus exactly
+/// `required_spread_top_up` gap cash. The long leg must be exercisable
+/// whenever this bucket is (equal-or-later expiry); any strike works —
+/// the gap cash covers the difference (zero gap + cushion when the long
+/// strike is equal-or-higher).
+public fun write_spread<Underlying, Settlement, Put, LongPut>(
+    bucket: &mut PutBucket<Underlying, Settlement, Put>,
+    long_bucket: &PutBucket<Underlying, Settlement, LongPut>,
+    long: Coin<LongPut>,
+    top_up: Coin<Settlement>,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): (Position, Coin<Put>) {
+    assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
+    assert!(!bucket.invalidated, errors::bucket_invalidated());
+    let amount = long.value();
+    assert!(amount > 0, errors::zero_amount());
+    assert!(long_bucket.expiry_ms >= bucket.expiry_ms, errors::spread_expiry_mismatch());
+    assert!(
+        top_up.value() == required_spread_top_up(bucket, long_bucket, amount),
+        errors::settlement_amount_mismatch(),
+    );
+
+    let range_start = bucket.total_written;
+    let range_end = range_start + (amount as u128);
+    bucket.total_written = range_end;
+    bucket.spreads.push_back(PutSpreadRange { start: range_start, end: range_end });
+    let top_up_amount = top_up.value();
+    df::add(
+        &mut bucket.id,
+        PutSpreadEscrowKey { start: range_start },
+        PutSpreadEscrow<LongPut, Settlement> {
+            long: long.into_balance(),
+            cash: top_up.into_balance(),
+            long_bucket_id: object::id(long_bucket),
+        },
+    );
+
+    let position = position::mint(object::id(bucket), range_start, range_end, ctx);
+    let put = coin::mint(&mut bucket.put_treasury, amount, ctx);
+    events::emit_put_spread_written(
+        object::id(bucket),
+        object::id(long_bucket),
+        ctx.sender(),
+        object::id(&position),
+        amount,
+        top_up_amount,
+        range_start,
+        range_end,
+    );
+    (position, put)
+}
+
+/// Exercise into the compressed range at the cursor: burn the puts,
+/// route the delivered underlying through the escrowed long's exercise,
+/// and pay out the proceeds plus the telescoped escrow draw. The plain
+/// `exercise` aborts `put_spread_exercise_required` at a spread range —
+/// this is the entry that carries the cursor through it.
+public fun exercise_spread<Underlying, Settlement, Put, LongPut>(
+    bucket: &mut PutBucket<Underlying, Settlement, Put>,
+    long_bucket: &mut PutBucket<Underlying, Settlement, LongPut>,
+    put: Coin<Put>,
+    underlying_delivery: Coin<Underlying>,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): Coin<Settlement> {
+    assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
+    let amount = put.value();
+    assert!(amount > 0, errors::zero_amount());
+    assert!(underlying_delivery.value() == amount, errors::amount_mismatch());
+
+    let cur = bucket.exercise_cursor;
+    let range_start = next_spread_start(bucket, cur);
+    // The cursor must have reached the range (plain capacity before it
+    // exercises via the plain path first) …
+    assert!(range_start <= cur, errors::put_spread_not_at_cursor());
+    let idx = find_spread(bucket, range_start);
+    let range_end = bucket.spreads[idx].end;
+    // … and the exercise must stay inside it (split across the boundary).
+    assert!(cur + (amount as u128) <= range_end, errors::cursor_overflow());
+
+    coin::burn(&mut bucket.put_treasury, put);
+
+    let a0 = cur - range_start;
+    let a1 = a0 + (amount as u128);
+    let strike = bucket.strike;
+    let strike_scale = bucket.strike_scale;
+    let bucket_id = object::id(bucket);
+
+    let escrow: &mut PutSpreadEscrow<LongPut, Settlement> =
+        df::borrow_mut(&mut bucket.id, PutSpreadEscrowKey { start: range_start });
+    assert!(escrow.long_bucket_id == object::id(long_bucket), errors::spread_bucket_mismatch());
+    let long_bucket_id = escrow.long_bucket_id;
+    let long_coins = coin::from_balance(escrow.long.split(amount), ctx);
+
+    // Telescoped short-leg payout target: exact in aggregate however the
+    // range is chunked.
+    let target = apply_strike_ceil(a1, strike, strike_scale)
+        - apply_strike_ceil(a0, strike, strike_scale);
+
+    // The delivered underlying exercises the escrowed long; proceeds
+    // above the target are the writer's surplus (escrowed), a deficit
+    // draws from the escrow cash (clamped — see the section comment).
+    let proceeds = exercise(long_bucket, long_coins, underlying_delivery, clock, ctx);
+    let mut pay = proceeds.into_balance();
+    let have = pay.value();
+    if (have > target) {
+        escrow.cash.join(pay.split(have - target));
+    } else if (have < target) {
+        let deficit = target - have;
+        let take = if (deficit > escrow.cash.value()) { escrow.cash.value() } else { deficit };
+        pay.join(escrow.cash.split(take));
+    };
+
+    // Carry the cursor through the assigned slice; flush any tombstones
+    // it lands against (none can exist inside the range itself).
+    let mut new_cur = cur + (amount as u128);
+    while (!bucket.closed.is_empty() && bucket.closed[0].start == new_cur) {
+        let PutClosedInterval { start, end } = bucket.closed.remove(0);
+        bucket.closed_pending = bucket.closed_pending - (end - start);
+        new_cur = end;
+    };
+    bucket.exercise_cursor = new_cur;
+
+    let payout = pay.value();
+    events::emit_put_spread_exercised(
+        bucket_id,
+        long_bucket_id,
+        ctx.sender(),
+        amount,
+        payout,
+        new_cur,
+    );
+    coin::from_balance(pay, ctx)
+}
+
+/// Pre-expiry retirement of a spread position: burn back the UNASSIGNED
+/// remainder's coins, tombstone that remainder, and return the whole
+/// escrow (remaining longs + cash — including any assignment surplus).
+/// The assigned slice already settled at exercise time, so the whole
+/// range counts as redeemed and the position is consumed.
+public fun close_spread<Underlying, Settlement, Put, LongPut>(
+    bucket: &mut PutBucket<Underlying, Settlement, Put>,
+    position: Position,
+    put: Coin<Put>,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): (Coin<LongPut>, Coin<Settlement>) {
+    assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
+    let (position_id, position_bucket_id, rs, re) = position::burn(position);
+    assert!(position_bucket_id == object::id(bucket), errors::position_bucket_mismatch());
+    let idx = find_spread_exact(bucket, rs, re);
+
+    let cur = bucket.exercise_cursor;
+    let assigned_end = if (cur <= rs) { rs } else if (cur >= re) { re } else { cur };
+    let remaining = re - assigned_end;
+    assert!((put.value() as u128) == remaining, errors::amount_mismatch());
+    coin::burn(&mut bucket.put_treasury, put);
+    if (remaining > 0) {
+        insert_closed(bucket, assigned_end, re);
+    };
+    bucket.total_redeemed = bucket.total_redeemed + (re - rs);
+    bucket.spreads.remove(idx);
+    let PutSpreadEscrow<LongPut, Settlement> { long, cash, long_bucket_id: _ } =
+        df::remove(&mut bucket.id, PutSpreadEscrowKey { start: rs });
+    events::emit_put_spread_closed(
+        object::id(bucket),
+        ctx.sender(),
+        position_id,
+        rs,
+        re,
+        remaining as u64,
+    );
+    (coin::from_balance(long, ctx), coin::from_balance(cash, ctx))
+}
+
+/// Post-expiry exit for a spread position: the remaining escrow
+/// (unassigned longs + cash, including assignment surplus) back to the
+/// holder. The unassigned coins expire worthless as usual
+/// (`burn_expired_option`).
+public fun redeem_spread_position<Underlying, Settlement, Put, LongPut>(
+    bucket: &mut PutBucket<Underlying, Settlement, Put>,
+    position: Position,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): (Coin<LongPut>, Coin<Settlement>) {
+    assert!(clock.timestamp_ms() >= bucket.expiry_ms, errors::bucket_not_expired());
+    let (position_id, position_bucket_id, rs, re) = position::burn(position);
+    assert!(position_bucket_id == object::id(bucket), errors::position_bucket_mismatch());
+    let idx = find_spread_exact(bucket, rs, re);
+    bucket.total_redeemed = bucket.total_redeemed + (re - rs);
+    bucket.spreads.remove(idx);
+    let PutSpreadEscrow<LongPut, Settlement> { long, cash, long_bucket_id: _ } =
+        df::remove(&mut bucket.id, PutSpreadEscrowKey { start: rs });
+    events::emit_put_spread_redeemed(
+        object::id(bucket),
+        ctx.sender(),
+        position_id,
+        rs,
+        re,
+        (re - rs) as u64,
+    );
+    (coin::from_balance(long, ctx), coin::from_balance(cash, ctx))
+}
+
+fun find_spread<U, S, P>(bucket: &PutBucket<U, S, P>, start: u128): u64 {
+    let mut i = 0;
+    while (i < bucket.spreads.length()) {
+        if (bucket.spreads[i].start == start) {
+            return i
+        };
+        i = i + 1;
+    };
+    abort errors::spread_not_found()
+}
+
+/// Live (not yet closed/redeemed) compressed ranges.
+public fun spread_count<U, S, P>(bucket: &PutBucket<U, S, P>): u64 { bucket.spreads.length() }
+
+/// Does [start, end) overlap any live compressed range?
+public fun range_overlaps_spread<U, S, P>(
+    bucket: &PutBucket<U, S, P>,
+    start: u128,
+    end: u128,
+): bool {
+    overlaps_spread(bucket, start, end)
+}
+
+/// Escrow view for the live compressed range exactly [start, end):
+/// (remaining long units, escrow cash, long bucket id).
+public fun spread_escrow_view<U, S, P, LongPut>(
+    bucket: &PutBucket<U, S, P>,
+    start: u128,
+    end: u128,
+): (u64, u64, ID) {
+    find_spread_exact(bucket, start, end);
+    let escrow: &PutSpreadEscrow<LongPut, S> =
+        df::borrow(&bucket.id, PutSpreadEscrowKey { start });
+    (escrow.long.value(), escrow.cash.value(), escrow.long_bucket_id)
 }
 
 public fun burn_expired_option<Underlying, Settlement, Put>(
@@ -683,7 +1047,11 @@ public fun cleanup_bucket<Underlying, Settlement, Put>(
         invalidated: _,
         closed: _,
         closed_pending: _,
+        spreads,
     } = bucket;
+    // Every spread range must be closed or redeemed (their escrows are
+    // dynamic fields on the bucket — none may remain).
+    assert!(spreads.is_empty(), errors::bucket_not_drained());
     // Every position must be redeemed before cleanup, so the only cash left
     // is rounding dust (never an unredeemed writer's collateral).
     assert!(total_redeemed == total_written, errors::bucket_not_drained());

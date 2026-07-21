@@ -43,3 +43,5 @@ public fun spread_strike_too_high(): u64 { 65 }
 public fun spread_not_found(): u64 { 66 }
 public fun spread_bucket_mismatch(): u64 { 67 }
 public fun spread_position(): u64 { 68 }
+public fun put_spread_exercise_required(): u64 { 69 }
+public fun put_spread_not_at_cursor(): u64 { 70 }

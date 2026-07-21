@@ -708,3 +708,115 @@ public(package) fun emit_spread_redeemed(
 ) {
     event::emit(SpreadRedeemed { bucket_id, redeemer, position_id, range_start, range_end, amount });
 }
+
+// ─────────────── put-side spread compression (SO-301) ───────────────
+
+/// A put write backed by an escrowed long put + gap cash instead of the
+/// full strike collateral.
+public struct PutSpreadWritten has copy, drop {
+    bucket_id: ID,
+    long_bucket_id: ID,
+    writer: address,
+    position_id: ID,
+    amount: u64,
+    /// The escrowed gap cash (incl. the 1-unit rounding cushion).
+    top_up: u64,
+    range_start: u128,
+    range_end: u128,
+}
+
+/// A fused assignment: the exerciser's delivered underlying exercised
+/// the escrowed long in the same call; payout = long proceeds ± the
+/// telescoped escrow draw.
+public struct PutSpreadExercised has copy, drop {
+    bucket_id: ID,
+    long_bucket_id: ID,
+    exerciser: address,
+    amount: u64,
+    payout: u64,
+    cursor: u128,
+}
+
+/// Pre-expiry retirement: the unassigned remainder's coins burned back,
+/// the whole escrow (remaining longs + cash) returned to the writer.
+public struct PutSpreadClosed has copy, drop {
+    bucket_id: ID,
+    closer: address,
+    position_id: ID,
+    range_start: u128,
+    range_end: u128,
+    /// Unassigned units burned back (assigned units settled at exercise).
+    amount: u64,
+}
+
+/// Post-expiry exit: remaining escrow back to the position holder.
+public struct PutSpreadRedeemed has copy, drop {
+    bucket_id: ID,
+    redeemer: address,
+    position_id: ID,
+    range_start: u128,
+    range_end: u128,
+    amount: u64,
+}
+
+public(package) fun emit_put_spread_written(
+    bucket_id: ID,
+    long_bucket_id: ID,
+    writer: address,
+    position_id: ID,
+    amount: u64,
+    top_up: u64,
+    range_start: u128,
+    range_end: u128,
+) {
+    event::emit(PutSpreadWritten {
+        bucket_id,
+        long_bucket_id,
+        writer,
+        position_id,
+        amount,
+        top_up,
+        range_start,
+        range_end,
+    });
+}
+
+public(package) fun emit_put_spread_exercised(
+    bucket_id: ID,
+    long_bucket_id: ID,
+    exerciser: address,
+    amount: u64,
+    payout: u64,
+    cursor: u128,
+) {
+    event::emit(PutSpreadExercised {
+        bucket_id,
+        long_bucket_id,
+        exerciser,
+        amount,
+        payout,
+        cursor,
+    });
+}
+
+public(package) fun emit_put_spread_closed(
+    bucket_id: ID,
+    closer: address,
+    position_id: ID,
+    range_start: u128,
+    range_end: u128,
+    amount: u64,
+) {
+    event::emit(PutSpreadClosed { bucket_id, closer, position_id, range_start, range_end, amount });
+}
+
+public(package) fun emit_put_spread_redeemed(
+    bucket_id: ID,
+    redeemer: address,
+    position_id: ID,
+    range_start: u128,
+    range_end: u128,
+    amount: u64,
+) {
+    event::emit(PutSpreadRedeemed { bucket_id, redeemer, position_id, range_start, range_end, amount });
+}

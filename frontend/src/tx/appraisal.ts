@@ -750,12 +750,14 @@ export function composeAppraisal(
     const oa = requireId(OPTIONS_ADAPTER_PACKAGE_ID, "options-adapter package");
     const gov = TRADING_VAULT_OBJECTS;
     if (!gov) throw new Error("trading-vault governance objects unavailable");
+    if (!gov.volBookId) throw new Error("vol book unavailable for option-coin legs");
     const oracleReg = tx.object(gov.oracleRegistryId);
+    const volBook = tx.object(gov.volBookId);
     for (const leg of plan.optionLegs) {
       const att = tx.moveCall({
         target: `${oa}::options_oracle::${leg.isPut ? "attest_put" : "attest_call"}`,
         typeArguments: [leg.underlying, leg.settlement, leg.coinType, plan.depositType],
-        arguments: [oracleReg, tx.object(leg.bucketId), optAtt(leg.underlying), optAtt(leg.settlement), clock],
+        arguments: [oracleReg, tx.object(leg.bucketId), volBook, optAtt(leg.underlying), optAtt(leg.settlement), clock],
       });
       attestations.set(leg.coinType, att);
     }
