@@ -58,4 +58,7 @@ allowed_pools = [
   "0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5",  # SUI/DBUSDC pool
   "0xcdbbe6a72e639b647296788e2e4b1cac5cea4246028ba388ba1332ff9a382eea",  # SUI margin pool
   "0xf08568da93834e1ee04f09902ac7b1e78d3fdf113ab4d2106c7265e95318b14d",  # DBUSDC margin pool
+  "0x3a525f86d2dfbdea49d2638f4c62f2c71482abcecf2551592aedb8e4421d366a",  # the vault's MarginManager
+  "0x1ebb295c789cc42b3b2a1606482cd1c7124076a0f5676718501fda8c7fd075a0",  # SUI/USD PriceInfoObject
+  "0x9c4dd4008297ffa5e480684b8100ec21cc934405ed9a25d4e4d7b6259aad9c81",  # USDC/USD PriceInfoObject
 ]
