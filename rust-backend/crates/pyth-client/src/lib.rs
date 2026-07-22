@@ -25,6 +25,7 @@ pub mod benchmark_cache;
 pub mod cache;
 pub mod http;
 pub mod sigma;
+pub mod spot;
 pub mod stream;
 pub mod types;
 pub mod vol;
@@ -54,6 +55,7 @@ pub fn auth_headers(api_key: Option<&str>) -> HeaderMap {
 pub use benchmark::benchmark_feed_id;
 pub use benchmark_cache::BenchmarkVol;
 pub use cache::{CachedPrice, PriceCache};
+pub use spot::{compute_spot_from_cache, compute_spot_from_prices, SpotError, Staleness};
 pub use http::{benchmark_at, benchmarks_at, latest, latest_with_update_data};
 pub use stream::{spawn_subscriber, StreamEvent};
 pub use types::{HermesEnvelope, PriceFeedId, PriceUpdate, PythPrice};

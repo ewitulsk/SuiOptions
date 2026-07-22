@@ -1,0 +1,24 @@
+# market-sim config — staging env (testnet).
+#
+# The DeepBook spot-liquidity simulator: faucet-funded bid/ask bands around
+# the Pyth cross on the pairs below. token-info / oracle-service URLs come
+# from the TOKEN_INFO_URL / ORACLE_URL env vars (compose).
+
+environment = "staging"
+network     = "testnet"
+
+health_addr = "0.0.0.0:9018"
+
+enabled = true
+
+# Every faucet token against the settlement asset. Pools are created lazily
+# (500 vendored DEEP each from the service wallet — see the SO-302 runbook).
+spot_pairs = ["TBTC/TUSDC", "TSUI/TUSDC", "TWAL/TUSDC", "TDEEP/TUSDC"]
+
+spot_interval_secs     = 60
+spot_band_bps          = 200
+spot_notional_per_side = 100000000
+
+# Created at boot and logged on first run — pin the logged id here so
+# restarts reuse it instead of minting a new BalanceManager.
+# spot_balance_manager_id = "0x..."

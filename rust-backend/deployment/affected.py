@@ -34,7 +34,7 @@ from typing import Iterable
 
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -71,6 +71,8 @@ REBUILD_ALL_GLOBS = [
 #   auth-service     : runtime-config, cli-spec, protocol-types
 #   gas-station      : runtime-config, cli-spec, sui-tx
 #   hedge-signer     : runtime-config, cli-spec, sui-tx, token-info-client
+#   market-sim       : protocol-types, runtime-config, cli-spec, sui-tx,
+#                      pyth-client, oracle-client, token-info-client
 #   balance-monitor  : runtime-config, cli-spec, sui-tx, observability
 #   twitter-service  : runtime-config, cli-spec
 #   social-bot       : runtime-config, cli-spec
@@ -190,6 +192,20 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/crates/cli-spec/**",
         "rust-backend/crates/sui-tx/**",
         "rust-backend/crates/token-info-client/**",
+    ],
+    "market-sim": [
+        "rust-backend/services/market-sim/**",
+        "rust-backend/Dockerfile.market-sim",
+        "rust-backend/crates/protocol-types/**",
+        "rust-backend/crates/runtime-config/**",
+        "rust-backend/crates/observability/**",
+        "rust-backend/crates/cli-spec/**",
+        "rust-backend/crates/sui-tx/**",
+        "rust-backend/crates/pyth-client/**",
+        "rust-backend/crates/oracle-client/**",
+        "rust-backend/crates/token-info-client/**",
+        # token-info-client re-exports deployments types (DeepBookInfo).
+        "rust-backend/crates/deployments/**",
     ],
     "balance-monitor": [
         "rust-backend/services/balance-monitor/**",

@@ -199,6 +199,24 @@ $RPC_LINE
 EOF
 fi
 
+# ---- market-sim secret -> rendered TOML ----------------------------------
+# The spot-liquidity simulator's dedicated wallet key (SO-302). One Sui key
+# per env, in the network slot the service's config expects. Staging-only —
+# absent secret -> market-sim isn't deployed in this env, silently skipped.
+if MS_JSON=$(fetch market-sim 2>/dev/null); then
+  SUI_KEY=$(echo "$MS_JSON" | jq -r '.sui_key')
+  if [ -z "$SUI_KEY" ] || [ "$SUI_KEY" = "null" ]; then
+    echo "missing sui_key in options/$ENV/market-sim" >&2
+    exit 1
+  fi
+  umask 077
+  cat > "$DIR/market-sim.toml" <<EOF
+[sui]
+$NETWORK = "$SUI_KEY"
+$RPC_LINE
+EOF
+fi
+
 # ---- hedge-signer secret -> rendered TOML --------------------------------
 # The service's multisig member key (the protocol half of each trading
 # vault's 2-of-2 external account). One Sui key per env, in the network

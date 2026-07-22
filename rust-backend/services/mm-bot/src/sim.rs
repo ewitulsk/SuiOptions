@@ -2,7 +2,10 @@
 //!
 //! The old sim rode on the DeepBook resting quoter (self-written ask
 //! inventory, noise takers, spot bands); that maker died in the strategy
-//! reset, so the sim's job changed with it:
+//! reset, so the sim's job changed with it. The spot-band DeepBook
+//! liquidity simulation now lives in its own service —
+//! `services/market-sim` (SO-302). This module keeps only the
+//! options-side counterparty:
 //!
 //!   1. **Retail stand-in (writer pass)** — periodically OPENS on-chain
 //!      covered-call RFQ auctions against live call buckets:
@@ -19,8 +22,9 @@
 //!      back to underlying + settlement after expiry so value recycles
 //!      across rolls (unchanged from the old sim).
 //!
-//! The old noise-taker / spot-band loops are GONE (their config keys are
-//! silently ignored). HARD testnet gate: refuses to start unless the
+//! The old noise-taker / spot-band loops are GONE from this module (their
+//! config keys are silently ignored; the spot bands live on in
+//! market-sim). HARD testnet gate: refuses to start unless the
 //! network is testnet AND the token catalog carries faucets. Failures log
 //! at `warn` — the simulator must never page anyone.
 

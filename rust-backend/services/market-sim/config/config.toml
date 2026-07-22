@@ -1,0 +1,14 @@
+# market-sim config — local dev (testnet).
+#
+# Disabled by default so a stray local run doesn't quote against the shared
+# staging deployment. Enable + list pairs deliberately; point TOKEN_INFO_URL
+# / ORACLE_URL at local or staging services first.
+
+environment = "dev"
+network     = "testnet"
+
+health_addr = "127.0.0.1:9018"
+
+enabled = false
+
+# spot_pairs = ["TBTC/TUSDC"]

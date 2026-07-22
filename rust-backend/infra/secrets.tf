@@ -107,6 +107,29 @@ resource "aws_secretsmanager_secret_version" "mm_bot_placeholder" {
   }
 }
 
+# market-sim secret — the simulator's dedicated wallet key (SO-302). NOT
+# mm-bot's key: a shared wallet means gas-coin races with the desk. Fund it
+# with testnet SUI (gas) + vendored DEEP (pool creation) after filling.
+# Staging-only, like mm-bot. Placeholder shape, fill by hand after apply.
+resource "aws_secretsmanager_secret" "market_sim" {
+  for_each                = toset(["staging"])
+  name                    = "options/${each.key}/market-sim"
+  description             = "market-sim wallet signing key (JSON: sui_key)."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "market_sim_placeholder" {
+  for_each  = aws_secretsmanager_secret.market_sim
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    sui_key = "REPLACE_ME"
+  })
+  lifecycle {
+    # Operator updates this by hand after apply; don't drift back.
+    ignore_changes = [secret_string]
+  }
+}
+
 # gas-station secret per env — the sponsor (gas payer) key. Placeholder shape,
 # fill the real suiprivkey by hand after apply.
 resource "aws_secretsmanager_secret" "gas_station" {

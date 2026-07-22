@@ -201,6 +201,24 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # DeepBook spot-liquidity simulator (SO-302): faucet-funded bid/ask bands
+  # around the Pyth cross on the configured spot pairs. Testnet-only toy —
+  # staging compose only, never prod. Health/metrics on 9018 (proxied by
+  # nginx for the deploy gate).
+  market-sim:
+    image: ${ECR}/options/market-sim:${MARKET_SIM_TAG}
+    environment:
+      APP_ENV: staging
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      TOKEN_INFO_URL: http://token-info:9005
+      ORACLE_URL: http://oracle-service:9013
+      RUST_LOG: info,market_sim=debug
+    volumes:
+      - /opt/options/staging/secrets:/run/secrets:ro
+    depends_on: [token-info, oracle-service]
+    restart: unless-stopped
+    networks: [net]
+
   # SUI balance gauges + low-balance alerts for the operational wallets
   # (SO-180). Derives addresses from the same rendered secrets the services
   # mount; scraped by Prometheus on 9012. Not proxied by nginx.
@@ -256,7 +274,7 @@ services:
     volumes:
       - /opt/options/staging/nginx/:/etc/nginx/options/:ro
     command: ["nginx", "-c", "/etc/nginx/options/nginx.conf", "-g", "daemon off;"]
-    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, hedge-signer, keeper]
+    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, hedge-signer, market-sim, keeper]
     restart: unless-stopped
     networks: [net]
 

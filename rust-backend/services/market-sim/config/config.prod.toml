@@ -1,0 +1,14 @@
+# market-sim config — prod env.
+#
+# DISABLED: prod is itself a testnet deployment, so the sim's testnet gate
+# alone would NOT stop it — this flag is the real guard. market-sim is also
+# not declared in docker-compose.prod.yml; this file exists so an
+# accidental APP_ENV=prod container boots inert (parked, health green)
+# instead of crashing on a missing config.
+
+environment = "prod"
+network     = "testnet"
+
+health_addr = "0.0.0.0:9018"
+
+enabled = false

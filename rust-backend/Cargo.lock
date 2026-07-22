@@ -5400,6 +5400,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e2e65a1a2e43cfcb47a895c4c8b10d1f4a61097f9f254f183aee60cad9c651d"
 
 [[package]]
+name = "market-sim"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "cli-spec",
+ "move-core-types",
+ "observability",
+ "oracle-client",
+ "protocol-types",
+ "pyth-client",
+ "runtime-config",
+ "serde",
+ "sui-sdk",
+ "sui-tx",
+ "sui-types",
+ "token-info-client",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "match-lookup"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
