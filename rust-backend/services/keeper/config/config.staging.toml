@@ -66,3 +66,14 @@ stagger_minutes = 90
 # quote_margin_pool_id = "0xf08568da93834e1ee04f09902ac7b1e78d3fdf113ab4d2106c7265e95318b14d"  # DBUSDC
 # base_type            = "0x2::sui::SUI"
 # quote_type           = "0x..."   # DBUSDC coin type
+
+# Trustless DBM equity legs for the desk vault's external account
+# (SO-299): the appraisal composer reads the MarginManager instead of the
+# attested EquityBook.
+[external.dbm."0x70bb15b0046b8f6fd736b2cf58b178d84b8c2418925bbdd81caa5e74098d9a6d"]
+margin_manager_id    = "0x3a525f86d2dfbdea49d2638f4c62f2c71482abcecf2551592aedb8e4421d366a"
+deepbook_pool_id     = "0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5"
+base_margin_pool_id  = "0xcdbbe6a72e639b647296788e2e4b1cac5cea4246028ba388ba1332ff9a382eea"
+quote_margin_pool_id = "0xf08568da93834e1ee04f09902ac7b1e78d3fdf113ab4d2106c7265e95318b14d"
+base_type            = "0x2::sui::SUI"
+quote_type           = "0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDC::DBUSDC"
