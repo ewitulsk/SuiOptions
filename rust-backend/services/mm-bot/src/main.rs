@@ -1336,13 +1336,20 @@ mod config_tests {
     fn shipped_configs_parse_with_desk_defaults() {
         for name in ["config.toml", "config.staging.toml", "config.prod.toml"] {
             let cfg = parse(name);
-            // Desk ships disabled until a vault is provisioned per env.
-            assert!(!cfg.desk.enabled, "{name}: desk must ship disabled");
+            // An enabled desk must be fully wired to its provisioned
+            // vault (staging is live per SO-299); envs without one ship
+            // disabled.
+            if cfg.desk.enabled {
+                assert!(!cfg.desk.vault_id.is_empty(), "{name}: enabled desk needs vault_id");
+                assert!(cfg.desk.mm_release_enabled, "{name}: enabled desk needs mm release");
+            }
             // Defaults are the 00-plan starting parameters.
             assert_eq!(cfg.desk.limits.premium_budget_hard, 0.35, "{name}");
             assert_eq!(cfg.desk.v1.base_spread_volpts, 0.05, "{name}");
             assert!(!cfg.desk.v2.enabled, "{name}: v2 must ship disabled");
         }
+        // Prod has no provisioned vault yet — desk stays off there.
+        assert!(!parse("config.prod.toml").desk.enabled, "prod desk must ship disabled");
         assert!(parse("config.staging.toml").sim.enabled);
         assert!(!parse("config.prod.toml").sim.enabled);
     }
