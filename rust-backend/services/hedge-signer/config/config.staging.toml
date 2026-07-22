@@ -39,3 +39,23 @@ frost_shares_path = "/app/data/frost-shares.toml"
 # [vaults.bluefin]
 # ids_id = "0x..."   # internal data store (authorize payloads)
 # eds_id = "0x..."   # external data store (withdraw payloads)
+
+# The desk's trading vault (SO-299 DBM bring-up). allowed_pools: canonical
+# testnet DeepBook registry + SUI/DBUSDC pool + both margin pools + the
+# margin registry; the MarginManager id is appended after the creation
+# ceremony (second config pass).
+[[vaults]]
+vault_id                = "0x70bb15b0046b8f6fd736b2cf58b178d84b8c2418925bbdd81caa5e74098d9a6d"
+external_account        = "0xec548755761294d67138a047e6b82d1c19181ee2e6a8bb42be46b57635abc329"
+vault_address           = "0x70bb15b0046b8f6fd736b2cf58b178d84b8c2418925bbdd81caa5e74098d9a6d"
+curator_pubkey_b64      = "APA0XRE2zMOQIqzLHCnp0/cILfKUqRGZlwBWGMsXYWTe"
+curator_wallet          = "0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865"
+max_borrow_amount       = 500000000000  # 500 SUI per tx
+deepbook_margin_package = "0xd6a42f4df4db73d68cbeb52be66698d2fe6a9464f45ad113ca52b0c6ebd918b6"
+allowed_pools = [
+  "0x48d7640dfae2c6e9ceeada197a7a1643984b5a24c55a0c6c023dac77e0339f75",  # MarginRegistry
+  "0x7c256edbda983a2cd6f946655f4bf3f00a41043993781f8674a7046e8c0e11d1",  # DeepBook Registry
+  "0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5",  # SUI/DBUSDC pool
+  "0xcdbbe6a72e639b647296788e2e4b1cac5cea4246028ba388ba1332ff9a382eea",  # SUI margin pool
+  "0xf08568da93834e1ee04f09902ac7b1e78d3fdf113ab4d2106c7265e95318b14d",  # DBUSDC margin pool
+]
