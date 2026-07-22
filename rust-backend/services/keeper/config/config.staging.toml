@@ -32,6 +32,8 @@ hermes_url     = "https://hermes-beta.pyth.network"
 pyth_package_id     = "0xabf837e98c26087cba0883c0a7a28326b1fa3c5e1e2c5abdb486f9e8f594c837"
 wormhole_package_id = "0xf47329f4344f3bf0f8e436e2f7b485466cff300f12a166563995d3888c296a94"
 pyth_state_id       = "0x243759059f4c3111179da5878c12f68d612c21a8d54d85edc86164bb18be1c7c"
+# The state's price_info table (publicnode can't serve the dynamic-field lookup):
+price_info_table_id = "0xcb858b77d8068c6c8c0d8a4ddfba95053268e4a31f8ecc49adccc4ec1570d3a7"
 wormhole_state_id   = "0x31358d198147da50db32eda2562951d53973a0c0ad5ed738e9b17d88b213d790"
 update_fee_mist     = 1
 

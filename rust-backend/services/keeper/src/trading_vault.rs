@@ -51,7 +51,7 @@ use sui_tx::tx::appraisal::{
 use sui_tx::tx::pyth_update::PythHandles;
 use sui_tx::tx::{clock_arg, shared_object_arg, submit_ptb};
 
-use crate::discovery::{price_info_object_for, resolve_price_info_table, PriceInfoTable};
+use crate::discovery::{price_info_object_for, resolve_price_info_table_from, PriceInfoTable};
 use crate::venue_equity::{clamp_step, VenueEquitySource};
 
 use move_core_types::identifier::Identifier;
@@ -1328,7 +1328,7 @@ pub async fn build_ctx(
             }
         }
     }
-    let price_table = resolve_price_info_table(client, pyth.pyth_state_id).await.ok();
+    let price_table = resolve_price_info_table_from(client, &pyth).await.ok();
     if price_table.is_none() {
         warn!("pyth price_info table unresolved; multi-asset fulfillment disabled");
     }

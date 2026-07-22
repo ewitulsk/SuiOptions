@@ -66,6 +66,38 @@ pub struct PriceInfoTable {
     identifier_type: TypeTag,
 }
 
+/// Resolve the `b"price_info"` table from the handles: the pinned id
+/// when configured (a plain object read — survives RPC providers whose
+/// dynamic-field index is broken), else the state's dynamic field.
+pub async fn resolve_price_info_table_from(
+    client: &SuiClient,
+    handles: &sui_tx::tx::pyth_update::PythHandles,
+) -> Result<PriceInfoTable> {
+    match handles.price_info_table_id {
+        Some(id) => resolve_price_info_table_pinned(client, id).await,
+        None => resolve_price_info_table(client, handles.pyth_state_id).await,
+    }
+}
+
+/// Pinned path: read the table object directly and parse its key type.
+async fn resolve_price_info_table_pinned(
+    client: &SuiClient,
+    table_id: ObjectID,
+) -> Result<PriceInfoTable> {
+    let resp = client
+        .read_api()
+        .get_object_with_options(
+            table_id,
+            sui_json_rpc_types::SuiObjectDataOptions::new().with_type(),
+        )
+        .await
+        .context("reading pinned price_info table object")?;
+    let data = resp
+        .data
+        .ok_or_else(|| anyhow!("pinned price_info table {table_id} missing"))?;
+    finish_table(table_id, data.type_.as_ref().map(|t| t.to_string()))
+}
+
 /// Resolve the `b"price_info"` table hung off the Pyth state object.
 pub async fn resolve_price_info_table(
     client: &SuiClient,
@@ -86,12 +118,14 @@ pub async fn resolve_price_info_table(
         .data
         .ok_or_else(|| anyhow!("pyth state {pyth_state_id} has no price_info table"))?;
     let table_id = data.object_id;
+    finish_table(table_id, data.type_.as_ref().map(|t| t.to_string()))
+}
+
+/// Shared tail: parse the table's key type off its type string.
+fn finish_table(table_id: ObjectID, type_str: Option<String>) -> Result<PriceInfoTable> {
     // Type looks like `0x2::table::Table<{pkg}::price_identifier::PriceIdentifier, 0x2::object::ID>`.
-    let type_str = data
-        .type_
-        .as_ref()
-        .map(|t| t.to_string())
-        .ok_or_else(|| anyhow!("price_info table response missing type"))?;
+    let type_str =
+        type_str.ok_or_else(|| anyhow!("price_info table response missing type"))?;
     let key = type_str
         .split('<')
         .nth(1)

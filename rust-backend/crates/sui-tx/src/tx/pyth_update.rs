@@ -44,6 +44,11 @@ pub struct PythHandles {
     /// 1 on mainnet/testnet today). Split from gas per
     /// `update_single_price_feed`.
     pub update_fee_mist: u64,
+    /// The state's `b"price_info"` feed→PriceInfoObject table, pinned in
+    /// config for RPC providers whose dynamic-field index is broken
+    /// (publicnode). `None` → resolve via the dynamic field. The id
+    /// never changes for a given Pyth deployment.
+    pub price_info_table_id: Option<ObjectID>,
 }
 
 /// Accumulator-update magic: `"PNAU"`.
