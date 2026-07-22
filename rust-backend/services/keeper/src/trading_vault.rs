@@ -1291,8 +1291,16 @@ pub async fn build_ctx(
     oracle: oracle_client::OracleClient,
     vol_window_days: u32,
 ) -> Result<Option<TradingVaultCtx>> {
-    let Some(tv) = snapshot.trading_vault() else { return Ok(None) };
-    let Some(op) = snapshot.oracle_pyth() else { return Ok(None) };
+    // Absent records mean token-info served a partial snapshot (boot
+    // race in a same-wave deploy) — every env publishes the family since
+    // SO-292, so this is a loud boot failure, not a silent pass-disable:
+    // crashing lets the supervisor retry against a warmed token-info.
+    let tv = snapshot
+        .trading_vault()
+        .context("token-info snapshot has no tradingVault record (partial snapshot?)")?;
+    let op = snapshot
+        .oracle_pyth()
+        .context("token-info snapshot has no oraclePyth record (partial snapshot?)")?;
     let trading_vault_pkg = tv.package().context("trading_vault package id")?;
     let oracle_pyth_pkg = op.package().context("oracle_pyth package id")?;
 

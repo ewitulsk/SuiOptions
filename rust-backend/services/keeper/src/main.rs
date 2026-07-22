@@ -105,10 +105,12 @@ async fn main() -> Result<()> {
         .fetch_blocking_until_ready(30, Duration::from_secs(2))
         .await
         .with_context(|| format!("oracle-service at {} unreachable", cli.oracle_url))?;
-    // Trading-vault pass (SO-287/290): active only where the package
-    // family is deployed. Governance ids prefer token-info's recorded
-    // block, falling back to publish-effects discovery.
-    let trading_vault_ctx = match keeper::trading_vault::build_ctx(
+    // Trading-vault pass (SO-287/290). Governance ids prefer
+    // token-info's recorded block, falling back to publish-effects
+    // discovery. A build failure is fatal (partial token-info snapshot
+    // from a same-wave deploy boot race) — crash and let the supervisor
+    // retry against a warmed token-info.
+    let trading_vault_ctx = keeper::trading_vault::build_ctx(
         &wrap.client,
         &snapshot,
         treasury_id,
@@ -121,13 +123,7 @@ async fn main() -> Result<()> {
         cfg.vault_defaults.vol_window_days,
     )
     .await
-    {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            tracing::warn!(error = %format!("{e:#}"), "trading-vault ctx build failed; pass disabled");
-            None
-        }
-    };
+    .context("building the trading-vault ctx (token-info snapshot incomplete or chain unreachable)")?;
     let indexer = IndexerClient::new(cfg.indexer_graphql_url.clone());
     info!(
         indexer = %cfg.indexer_graphql_url,
