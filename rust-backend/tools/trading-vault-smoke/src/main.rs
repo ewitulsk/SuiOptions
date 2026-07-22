@@ -900,6 +900,7 @@ fn pyth_handles() -> PythHandles {
         )
         .unwrap(),
         update_fee_mist: 1,
+        price_info_table_id: None,
     }
 }
 

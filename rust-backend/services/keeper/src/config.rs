@@ -157,6 +157,10 @@ pub struct PythKeeperConfig {
     pub pyth_package_id: String,
     pub wormhole_package_id: String,
     pub pyth_state_id: String,
+    /// The state's `b"price_info"` table id — pinned because some RPC
+    /// providers (publicnode) don't serve the dynamic-field lookup.
+    #[serde(default)]
+    pub price_info_table_id: Option<String>,
     pub wormhole_state_id: String,
 
     /// `state::get_base_update_fee` per feed, MIST. 1 on mainnet/testnet.

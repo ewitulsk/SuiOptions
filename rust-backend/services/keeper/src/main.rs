@@ -39,7 +39,7 @@ use token_info_client::TokenInfoClient;
 
 use keeper::config::{KeeperConfig, VaultDefaults};
 use keeper::discovery::{
-    resolve_price_info_table, resolve_vault, DiscoveredVault, PriceInfoTable,
+    resolve_price_info_table_from, resolve_vault, DiscoveredVault, PriceInfoTable,
 };
 use keeper::planner::{plan, Action, BucketMeta, PlanInput};
 use keeper::state::{discover_open_auctions, fetch_vault_view, VaultView};
@@ -89,6 +89,12 @@ async fn main() -> Result<()> {
         pyth_state_id: parse_id(&cfg.pyth.pyth_state_id, "pyth_state_id")?,
         wormhole_state_id: parse_id(&cfg.pyth.wormhole_state_id, "wormhole_state_id")?,
         update_fee_mist: cfg.pyth.update_fee_mist,
+        price_info_table_id: cfg
+            .pyth
+            .price_info_table_id
+            .as_deref()
+            .map(|s| parse_id(s, "price_info_table_id"))
+            .transpose()?,
     };
 
     let http = reqwest::Client::builder()
@@ -242,7 +248,7 @@ async fn discover_new_vaults(
         }
         // Lazily resolve the Pyth state's feed → PriceInfoObject table.
         if price_table.is_none() {
-            match resolve_price_info_table(&wrap.client, pyth_handles.pyth_state_id).await {
+            match resolve_price_info_table_from(&wrap.client, pyth_handles).await {
                 Ok(t) => *price_table = Some(t),
                 Err(e) => {
                     warn!(error = %format!("{e:#}"), "pyth price_info table resolution failed; retrying next tick");
