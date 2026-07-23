@@ -490,16 +490,21 @@ async fn vol_entry(
     entries_table: ObjectID,
     canonical_type: &str,
 ) -> Result<Option<(u64, u64)>> {
-    use sui_types::dynamic_field::DynamicFieldName;
+    // Derived-field read (no dynamic-field index API — publicnode
+    // doesn't serve it). `TypeName` BCS == its `name` string.
     let name = canonical_type.trim_start_matches("0x");
+    let key_bytes = bcs::to_bytes(&name.to_string()).context("bcs of TypeName")?;
+    let field_id = sui_types::dynamic_field::derive_dynamic_field_id(
+        entries_table,
+        &TypeTag::from_str("0x1::type_name::TypeName").expect("static type tag"),
+        &key_bytes,
+    )
+    .context("deriving VolBook entry field id")?;
     let resp = client
         .read_api()
-        .get_dynamic_field_object(
-            entries_table,
-            DynamicFieldName {
-                type_: TypeTag::from_str("0x1::type_name::TypeName").expect("static type tag"),
-                value: serde_json::json!({ "name": name }),
-            },
+        .get_object_with_options(
+            field_id,
+            sui_json_rpc_types::SuiObjectDataOptions::new(),
         )
         .await
         .context("reading VolBook entry")?;
