@@ -86,6 +86,37 @@ export let OPTIONS_ADAPTER_PACKAGE_ID: string | undefined;
 export let EQUITY_ORACLE_PACKAGE_ID: string | undefined;
 export let EQUITY_ORACLE_PUBLISH_DIGEST: string | undefined;
 
+// DeepBook-Margin computed equity oracle (SO-299 phase C): vaults pinning
+// `dbm_oracle::DbmOracle` record their external-account equity via
+// `record`/`record_no_debt` instead of the keeper-attested EquityBook.
+export let DBM_ORACLE_PACKAGE_ID: string | undefined;
+
+// ── DeepBook-Margin / Pyth pinned testnet ids (SO-299 phase C) ──────────────
+// Third-party deployment ids the DBM equity-leg discovery reads. Not served
+// by token-info (they aren't our deployments); both staging and prod run on
+// Sui testnet, so only the testnet slot is populated.
+
+/** Canonical shared `MarginRegistry` of the DeepBook-Margin testnet
+ * deployment — outer object of the margin_managers / pool_registry tables
+ * the appraisal composer walks to find a vault account's MarginManager. */
+export const DBM_MARGIN_REGISTRY_IDS: Partial<Record<SuiEnvironment, string>> = {
+  testnet: "0x48d7640dfae2c6e9ceeada197a7a1643984b5a24c55a0c6c023dac77e0339f75",
+};
+
+/** DeepBook-Margin ORIGINAL publish id. Dynamic-field key STRUCT types
+ * (`margin_registry::ConfigKey<oracle::PythConfig>`) resolve against the
+ * original package, while entry calls target the upgraded one. */
+export const DBM_ORIGINAL_PACKAGE_IDS: Partial<Record<SuiEnvironment, string>> = {
+  testnet: "0xb8620c24c9ea1a4a41e79613d2b3d1d93648d1bb6f6b789a7c8f261c94110e4b",
+};
+
+/** The Pyth state's `price_info` `Table<PriceIdentifier, ID>` id (feed id →
+ * `PriceInfoObject`), pinned so DBM feed resolution can derive per-feed
+ * dynamic-field ids directly. Never re-created for a deployment. */
+export const PYTH_PRICE_INFO_TABLE_IDS: Partial<Record<SuiEnvironment, string>> = {
+  testnet: "0xcb858b77d8068c6c8c0d8a4ddfba95053268e4a31f8ecc49adccc4ec1570d3a7",
+};
+
 /** Shared governance objects created by the trading-vault family's inits,
  * recorded at deploy time (SO-292). Absent on older deployments — consumers
  * fall back to publish-digest discovery where they can. */
@@ -186,6 +217,7 @@ type PackageInfoDto = {
   deepbookAdapter?: { packageId: string } | null;
   optionsAdapter?: { packageId: string } | null;
   equityOracle?: { packageId: string; publishDigest: string } | null;
+  dbmOracle?: { packageId: string } | null;
   tradingVaultObjects?: {
     vaultProtocolConfigId: string;
     integrationRegistryId: string;
@@ -234,6 +266,7 @@ export async function initConfig(): Promise<void> {
   OPTIONS_ADAPTER_PACKAGE_ID = info.optionsAdapter?.packageId;
   EQUITY_ORACLE_PACKAGE_ID = info.equityOracle?.packageId;
   EQUITY_ORACLE_PUBLISH_DIGEST = info.equityOracle?.publishDigest;
+  DBM_ORACLE_PACKAGE_ID = info.dbmOracle?.packageId;
   TRADING_VAULT_OBJECTS = info.tradingVaultObjects ?? undefined;
 
   const db = info.deepbook;
