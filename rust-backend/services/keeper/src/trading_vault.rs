@@ -1402,6 +1402,20 @@ pub async fn build_ctx(
                 ObjectID::from_hex_literal(s)
                     .with_context(|| format!("[external.dbm.{k}] bad {field} {s:?}"))
             };
+            let base_canonical = protocol_types::asset::canonicalize_move_type(&v.base_type);
+            let quote_canonical = protocol_types::asset::canonicalize_move_type(&v.quote_type);
+            // Venue assets aren't catalog tokens: register their feeds so
+            // the composer can mint their attestation legs.
+            feeds.insert(
+                base_canonical.clone(),
+                PriceFeedId::from_hex(&v.base_feed_id)
+                    .map_err(|e| anyhow!("[external.dbm.{k}] bad base_feed_id: {e}"))?,
+            );
+            feeds.insert(
+                quote_canonical.clone(),
+                PriceFeedId::from_hex(&v.quote_feed_id)
+                    .map_err(|e| anyhow!("[external.dbm.{k}] bad quote_feed_id: {e}"))?,
+            );
             dbm.insert(
                 vault,
                 DbmLegInfo {
@@ -1410,8 +1424,8 @@ pub async fn build_ctx(
                     deepbook_pool_id: id("deepbook_pool_id", &v.deepbook_pool_id)?,
                     base_margin_pool_id: id("base_margin_pool_id", &v.base_margin_pool_id)?,
                     quote_margin_pool_id: id("quote_margin_pool_id", &v.quote_margin_pool_id)?,
-                    base_type: protocol_types::asset::canonicalize_move_type(&v.base_type),
-                    quote_type: protocol_types::asset::canonicalize_move_type(&v.quote_type),
+                    base_type: base_canonical,
+                    quote_type: quote_canonical,
                 },
             );
         }
