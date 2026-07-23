@@ -12,6 +12,7 @@ name = "keeper"
 path = "src/main.rs"
 
 [dependencies]
+bcs = { workspace = true }
 protocol-types = { workspace = true }
 runtime-config = { workspace = true }
 observability  = { workspace = true }

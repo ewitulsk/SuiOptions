@@ -146,14 +146,21 @@ pub async fn price_info_object_for(
     table: &PriceInfoTable,
     feed: PriceFeedId,
 ) -> Result<ObjectID> {
+    // Derive the field id client-side and fetch it as a plain object:
+    // some RPC providers (publicnode) don't serve the dynamic-field
+    // index at all. `PriceIdentifier` BCS == its single `bytes` vector.
+    let key_bytes = bcs::to_bytes(&feed.0.to_vec()).context("bcs of feed id")?;
+    let field_id = sui_types::dynamic_field::derive_dynamic_field_id(
+        table.table_id,
+        &table.identifier_type,
+        &key_bytes,
+    )
+    .context("deriving price info field id")?;
     let resp = client
         .read_api()
-        .get_dynamic_field_object(
-            table.table_id,
-            DynamicFieldName {
-                type_: table.identifier_type.clone(),
-                value: json!({ "bytes": feed.0.to_vec() }),
-            },
+        .get_object_with_options(
+            field_id,
+            sui_json_rpc_types::SuiObjectDataOptions::new().with_content(),
         )
         .await
         .with_context(|| format!("looking up price info object for feed {feed}"))?;
