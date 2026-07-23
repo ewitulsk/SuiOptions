@@ -130,6 +130,10 @@ pub struct DbmVaultConfig {
     pub quote_margin_pool_id: String,
     pub base_type: String,
     pub quote_type: String,
+    /// Pyth feed ids for base/quote: venue assets live outside the token
+    /// catalog, so their attestation legs need explicit feeds.
+    pub base_feed_id: String,
+    pub quote_feed_id: String,
 }
 
 impl Default for ExternalConfig {
@@ -369,6 +373,8 @@ mod tests {
             quote_margin_pool_id = "0x14"
             base_type = "0x2::sui::SUI"
             quote_type = "0xa::dbusdc::DBUSDC"
+            base_feed_id = "0x50c67b3fd225db8912a424dd4baed60ffdde625ed2feaaf283724f9608fea266"
+            quote_feed_id = "0x41f3625971ca2ed2263e78573fe5ce23e13d2558ed3f2e47ab0f84fb9e7ae722"
             "#,
         )
         .unwrap();
