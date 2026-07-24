@@ -149,6 +149,8 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::TvSessionSettled(_) => "TvSessionSettled",
         ChainEvent::TvPositionStored(_) => "TvPositionStored",
         ChainEvent::TvPositionRemoved(_) => "TvPositionRemoved",
+        ChainEvent::TvPositionAppraised(_) => "TvPositionAppraised",
+        ChainEvent::TvVaultAppraised(_) => "TvVaultAppraised",
         ChainEvent::TvAdapterAllowed(_) => "TvAdapterAllowed",
         ChainEvent::TvAdapterDisallowed(_) => "TvAdapterDisallowed",
         ChainEvent::TvOracleAllowed(_) => "TvOracleAllowed",
@@ -625,6 +627,9 @@ pub struct TradingVaultRow {
     /// Latest keeper-posted account equity (EquityPosted).
     pub latest_external_equity: Option<i64>,
     pub external_equity_updated_at_ms: Option<i64>,
+    /// NAV from the latest consumed appraisal (TvVaultAppraised, SO-304).
+    pub latest_nav: Option<BigDecimal>,
+    pub nav_updated_at_ms: Option<i64>,
 }
 
 impl TradingVaultRow {
@@ -670,6 +675,8 @@ impl TradingVaultRow {
                 external_equity_updated_at_ms: self
                     .external_equity_updated_at_ms
                     .map(|v| v as u64),
+                latest_nav: self.latest_nav.as_ref().map(bigdecimal_to_u128).transpose()?,
+                nav_updated_at_ms: self.nav_updated_at_ms.map(|v| v as u64),
             },
         ))
     }
@@ -687,6 +694,9 @@ pub struct TradingVaultPositionRow {
     pub stored_at_ms: i64,
     pub removed_at_ms: Option<i64>,
     pub updated_at_seq: i64,
+    /// Latest appraisal mark, deposit-asset units (TvPositionAppraised).
+    pub last_value: Option<i64>,
+    pub last_appraised_at_ms: Option<i64>,
 }
 
 impl TradingVaultPositionRow {
@@ -704,6 +714,8 @@ impl TradingVaultPositionRow {
                 active: self.active,
                 stored_at_ms: self.stored_at_ms as u64,
                 removed_at_ms: self.removed_at_ms.map(|v| v as u64),
+                last_value: self.last_value.map(|v| v as u64),
+                last_appraised_at_ms: self.last_appraised_at_ms.map(|v| v as u64),
             },
         ))
     }

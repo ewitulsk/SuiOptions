@@ -52,6 +52,11 @@ export type TradingVault = {
   /** Ms since epoch, or null before the first equity mark. Ships as a decimal
    * string on the wire; normalized to a number in the mapper. */
   externalEquityUpdatedAtMs: number | null;
+  /** u128 decimal string, deposit-asset smallest units: NAV from the latest
+   * consumed appraisal (SO-304); null before the first appraisal. */
+  latestNavRaw: string | null;
+  /** Ms since epoch, or null before the first appraisal. */
+  navUpdatedAtMs: number | null;
 };
 
 /** One custodied position row from the detail endpoint. */
@@ -61,6 +66,11 @@ export type TradingVaultPosition = {
   active: boolean;
   storedAtMs: number;
   removedAtMs: number | null;
+  /** u64 decimal string, deposit-asset smallest units: the latest appraisal
+   * mark (SO-304); null until the position is first appraised. */
+  lastValueRaw: string | null;
+  /** Ms since epoch, or null until the first appraisal. */
+  lastAppraisedAtMs: number | null;
 };
 
 export type TradingVaultDetail = TradingVault & {
@@ -95,6 +105,9 @@ type TradingVaultWire = {
   latest_external_equity: string | null;
   /** Ms since epoch, decimal string. */
   external_equity_updated_at_ms: string | null;
+  /** u128 decimal string; absent before the first consumed appraisal. */
+  latest_nav_raw: string | null;
+  nav_updated_at_ms: number | null;
 };
 
 type TradingVaultPositionWire = {
@@ -103,6 +116,9 @@ type TradingVaultPositionWire = {
   active: boolean;
   stored_at_ms: number;
   removed_at_ms: number | null;
+  /** u64 decimal string; absent until the position is first appraised. */
+  last_value_raw: string | null;
+  last_appraised_at_ms: number | null;
 };
 
 function mapVault(w: TradingVaultWire): TradingVault {
@@ -130,6 +146,8 @@ function mapVault(w: TradingVaultWire): TradingVault {
     latestExternalEquity: w.latest_external_equity ?? null,
     externalEquityUpdatedAtMs:
       w.external_equity_updated_at_ms == null ? null : Number(w.external_equity_updated_at_ms),
+    latestNavRaw: w.latest_nav_raw ?? null,
+    navUpdatedAtMs: w.nav_updated_at_ms ?? null,
   };
 }
 
@@ -159,6 +177,8 @@ export async function fetchTradingVault(vaultId: string): Promise<TradingVaultDe
       active: p.active,
       storedAtMs: p.stored_at_ms,
       removedAtMs: p.removed_at_ms ?? null,
+      lastValueRaw: p.last_value_raw ?? null,
+      lastAppraisedAtMs: p.last_appraised_at_ms ?? null,
     })),
   };
 }

@@ -1136,6 +1136,29 @@ pub struct TvPositionRemoved {
     pub position_id: ObjectId,
 }
 
+/// `trading_vault::events::PositionAppraised` (SO-304) — one custodied
+/// position's mark (deposit-asset units) recorded into a consumed
+/// appraisal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvPositionAppraised {
+    pub vault_id: ObjectId,
+    pub adapter: AssetType,
+    pub position_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub value: u64,
+}
+
+/// `trading_vault::events::VaultAppraised` (SO-304) — a complete
+/// appraisal was consumed; `total_value` is the validated NAV.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvVaultAppraised {
+    pub vault_id: ObjectId,
+    #[serde(with = "u128_string")]
+    pub total_value: u128,
+    #[serde(with = "u64_string")]
+    pub position_total: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TvAdapterAllowed {
     pub adapter: AssetType,
@@ -1482,6 +1505,8 @@ pub enum ChainEvent {
     TvSessionSettled(TvSessionSettled),
     TvPositionStored(TvPositionStored),
     TvPositionRemoved(TvPositionRemoved),
+    TvPositionAppraised(TvPositionAppraised),
+    TvVaultAppraised(TvVaultAppraised),
     TvAdapterAllowed(TvAdapterAllowed),
     TvAdapterDisallowed(TvAdapterDisallowed),
     TvOracleAllowed(TvOracleAllowed),

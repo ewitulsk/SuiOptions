@@ -196,6 +196,8 @@ diesel::table! {
         external_exposure   -> Int8,
         latest_external_equity        -> Nullable<Int8>,
         external_equity_updated_at_ms -> Nullable<Int8>,
+        latest_nav          -> Nullable<Numeric>,
+        nav_updated_at_ms   -> Nullable<Int8>,
     }
 }
 
@@ -208,6 +210,8 @@ diesel::table! {
         stored_at_ms   -> Int8,
         removed_at_ms  -> Nullable<Int8>,
         updated_at_seq -> Int8,
+        last_value           -> Nullable<Int8>,
+        last_appraised_at_ms -> Nullable<Int8>,
     }
 }
 

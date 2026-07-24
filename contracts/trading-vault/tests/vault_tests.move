@@ -6,8 +6,11 @@ use sui::clock::Clock;
 use sui::coin::{Self, Coin};
 use sui::test_scenario as ts;
 
+use sui::event;
+
 use options_core::treasury::{Self, Treasury};
 
+use trading_vault::events;
 use trading_vault::registry::{Self, IntegrationRegistry, OracleRegistry};
 use trading_vault::test_helpers as h;
 use trading_vault::vault::{Self, CuratorCap, TradingVault};
@@ -502,6 +505,152 @@ fun forced_session_cannot_take() {
     let ireg = ts::take_shared<IntegrationRegistry>(&sc);
     let mut s = vault::begin_force_session(&v, &ireg, h::test_adapter(), &clock);
     let _funds = vault::take<h::USDC>(&mut v, &mut s, 1);
+    abort 0
+}
+
+// ══════════════════ appraisal events + crank (SO-304) ══════════════════
+
+#[test]
+fun appraisal_emits_position_and_vault_events() {
+    let mut sc = ts::begin(h::admin_addr());
+    let clock = h::init_protocol(&mut sc);
+    h::new_default_vault(&mut sc);
+    h::simple_deposit(&mut sc, h::alice_addr(), 1_000_000, &clock);
+
+    // Curator custodies a position via the test adapter.
+    ts::next_tx(&mut sc, h::curator_addr());
+    let mut v = ts::take_shared<TradingVault>(&sc);
+    let ireg = ts::take_shared<IntegrationRegistry>(&sc);
+    let cap = ts::take_from_sender<CuratorCap>(&sc);
+    let p = h::new_position(&mut sc);
+    let pid = object::id(&p);
+    let mut s = vault::begin_session(&v, &cap, &ireg, h::test_adapter());
+    vault::put_position(&mut v, &mut s, p);
+    vault::end_session(&v, s);
+    ts::return_to_sender(&sc, cap);
+    ts::return_shared(ireg);
+    ts::return_shared(v);
+
+    // A deposit through a complete appraisal emits both events.
+    ts::next_tx(&mut sc, h::bob_addr());
+    let mut v = ts::take_shared<TradingVault>(&sc);
+    let vault_id = object::id(&v);
+    let cfg = h::take_protocol_config(&sc);
+    let mut appraisal = vault::begin_appraisal<h::USDC>(&v);
+    vault::record_position_value(&v, &mut appraisal, h::test_adapter(), pid, 500_000);
+    vault::deposit<h::USDC>(
+        &mut v,
+        &cfg,
+        appraisal,
+        coin::from_balance(h::mint<h::USDC>(300_000), sc.ctx()),
+        &clock,
+        sc.ctx(),
+    );
+
+    let pos_events = event::events_by_type<events::PositionAppraised>();
+    assert!(pos_events.length() == 1);
+    let (ev_vault, ev_adapter, ev_pos, ev_value) =
+        events::position_appraised_fields(&pos_events[0]);
+    assert!(ev_vault == vault_id);
+    assert!(ev_adapter == std::type_name::with_defining_ids<h::TestAdapter>());
+    assert!(ev_pos == pid);
+    assert!(ev_value == 500_000);
+
+    let nav_events = event::events_by_type<events::VaultAppraised>();
+    assert!(nav_events.length() == 1);
+    let (ev_vault, ev_total, ev_positions) = events::vault_appraised_fields(&nav_events[0]);
+    assert!(ev_vault == vault_id);
+    assert!(ev_total == 1_500_000); // 1M free + 500k position mark
+    assert!(ev_positions == 1);
+
+    ts::return_shared(cfg);
+    ts::return_shared(v);
+    clock.destroy_for_testing();
+    sc.end();
+}
+
+#[test]
+fun crank_appraisal_is_permissionless_and_emits() {
+    let mut sc = ts::begin(h::admin_addr());
+    let clock = h::init_protocol(&mut sc);
+    h::new_default_vault(&mut sc);
+    h::simple_deposit(&mut sc, h::alice_addr(), 1_000_000, &clock);
+
+    ts::next_tx(&mut sc, h::curator_addr());
+    let mut v = ts::take_shared<TradingVault>(&sc);
+    let ireg = ts::take_shared<IntegrationRegistry>(&sc);
+    let cap = ts::take_from_sender<CuratorCap>(&sc);
+    let p = h::new_position(&mut sc);
+    let pid = object::id(&p);
+    let mut s = vault::begin_session(&v, &cap, &ireg, h::test_adapter());
+    vault::put_position(&mut v, &mut s, p);
+    vault::end_session(&v, s);
+    ts::return_to_sender(&sc, cap);
+    ts::return_shared(ireg);
+    ts::return_shared(v);
+
+    // A stranger cranks a full appraisal; nothing moves, marks emit.
+    ts::next_tx(&mut sc, h::bob_addr());
+    let v = ts::take_shared<TradingVault>(&sc);
+    let mut appraisal = vault::begin_appraisal<h::USDC>(&v);
+    vault::record_position_value(&v, &mut appraisal, h::test_adapter(), pid, 750_000);
+    vault::crank_appraisal<h::USDC>(&v, appraisal);
+
+    assert!(event::events_by_type<events::PositionAppraised>().length() == 1);
+    let nav_events = event::events_by_type<events::VaultAppraised>();
+    assert!(nav_events.length() == 1);
+    let (_, ev_total, ev_positions) = events::vault_appraised_fields(&nav_events[0]);
+    assert!(ev_total == 1_750_000);
+    assert!(ev_positions == 1);
+    assert!(vault::total_shares(&v) == 1_000_000);
+    assert!(vault::free_balance_of<h::USDC>(&v) == 1_000_000);
+    ts::return_shared(v);
+
+    clock.destroy_for_testing();
+    sc.end();
+}
+
+#[test]
+#[expected_failure(abort_code = 82, location = trading_vault::vault)]
+fun crank_appraisal_rejects_incomplete_appraisal() {
+    let mut sc = ts::begin(h::admin_addr());
+    let clock = h::init_protocol(&mut sc);
+    h::new_default_vault(&mut sc);
+    h::simple_deposit(&mut sc, h::alice_addr(), 1_000_000, &clock);
+
+    ts::next_tx(&mut sc, h::curator_addr());
+    let mut v = ts::take_shared<TradingVault>(&sc);
+    let ireg = ts::take_shared<IntegrationRegistry>(&sc);
+    let cap = ts::take_from_sender<CuratorCap>(&sc);
+    let p = h::new_position(&mut sc);
+    let mut s = vault::begin_session(&v, &cap, &ireg, h::test_adapter());
+    vault::put_position(&mut v, &mut s, p);
+    vault::end_session(&v, s);
+
+    // The position was never appraised — crank must abort like consume.
+    let appraisal = vault::begin_appraisal<h::USDC>(&v);
+    vault::crank_appraisal<h::USDC>(&v, appraisal);
+    abort 0
+}
+
+#[test]
+#[expected_failure(abort_code = 83, location = trading_vault::vault)]
+fun crank_appraisal_rejects_skewed_snapshot() {
+    let mut sc = ts::begin(h::admin_addr());
+    let clock = h::init_protocol(&mut sc);
+    h::new_default_vault(&mut sc);
+    h::simple_deposit(&mut sc, h::alice_addr(), 1_000_000, &clock);
+
+    // Same-tx session between begin and crank invalidates the snapshot.
+    ts::next_tx(&mut sc, h::curator_addr());
+    let mut v = ts::take_shared<TradingVault>(&sc);
+    let ireg = ts::take_shared<IntegrationRegistry>(&sc);
+    let cap = ts::take_from_sender<CuratorCap>(&sc);
+    let appraisal = vault::begin_appraisal<h::USDC>(&v);
+    let mut s = vault::begin_session(&v, &cap, &ireg, h::test_adapter());
+    vault::put<h::USDC>(&mut v, &mut s, h::mint<h::USDC>(1));
+    vault::end_session(&v, s);
+    vault::crank_appraisal<h::USDC>(&v, appraisal);
     abort 0
 }
 

@@ -451,6 +451,10 @@ pub struct TradingVaultGql {
     /// Latest keeper-posted account equity (EquityPosted).
     pub latest_external_equity: Option<String>,
     pub external_equity_updated_at_ms: Option<String>,
+    /// NAV from the latest consumed appraisal (deposit-asset units,
+    /// decimal string; SO-304).
+    pub latest_nav_raw: Option<String>,
+    pub nav_updated_at_ms: Option<String>,
 }
 
 impl From<TradingVaultRow> for TradingVaultGql {
@@ -480,6 +484,8 @@ impl From<TradingVaultRow> for TradingVaultGql {
             external_equity_updated_at_ms: v
                 .external_equity_updated_at_ms
                 .map(|t| t.to_string()),
+            latest_nav_raw: v.latest_nav.map(|n| n.to_string()),
+            nav_updated_at_ms: v.nav_updated_at_ms.map(|t| t.to_string()),
         }
     }
 }
@@ -494,6 +500,10 @@ pub struct TradingVaultPositionGql {
     pub active: bool,
     pub stored_at_ms: String,
     pub removed_at_ms: Option<String>,
+    /// Latest appraisal mark (deposit-asset units, decimal string;
+    /// SO-304). Null until the position is first appraised.
+    pub last_value_raw: Option<String>,
+    pub last_appraised_at_ms: Option<String>,
 }
 
 impl From<TradingVaultPositionRow> for TradingVaultPositionGql {
@@ -505,6 +515,8 @@ impl From<TradingVaultPositionRow> for TradingVaultPositionGql {
             active: p.active,
             stored_at_ms: p.stored_at_ms.to_string(),
             removed_at_ms: p.removed_at_ms.map(|v| v.to_string()),
+            last_value_raw: p.last_value.map(|v| v.to_string()),
+            last_appraised_at_ms: p.last_appraised_at_ms.map(|v| v.to_string()),
         }
     }
 }

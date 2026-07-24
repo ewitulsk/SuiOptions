@@ -128,6 +128,21 @@ pub async fn build_fulfill_withdrawals(
     Ok(())
 }
 
+/// `vault::crank_appraisal<T>(vault, appraisal)` — permissionless mark
+/// refresh (SO-304): validates and discards the appraisal so the
+/// PositionAppraised / VaultAppraised events carry fresh marks with no
+/// deposit/fulfillment attached.
+pub async fn build_crank_appraisal(
+    client: &SuiClient,
+    pt: &mut ProgrammableTransactionBuilder,
+    refs: &TradingVaultRefs<'_>,
+    appraisal: Argument,
+) -> Result<()> {
+    let vault = pt.obj(shared_object_arg(client, refs.vault_id, false).await?)?;
+    vault_call(pt, refs.package, "crank_appraisal", refs.deposit_tag()?, vec![vault, appraisal]);
+    Ok(())
+}
+
 /// `vault::enqueue_closed_stake(vault, owner, clock)` — permissionless
 /// closed-vault distribution.
 pub async fn build_enqueue_closed_stake(

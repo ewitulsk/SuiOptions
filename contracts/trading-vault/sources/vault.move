@@ -842,6 +842,7 @@ public fun record_position_value<W: drop>(
     assert!(!a.appraised_positions.contains(&position_id), errors::already_appraised());
     a.appraised_positions.insert(position_id);
     a.total_value = a.total_value + (value as u128);
+    events::emit_position_appraised(a.vault_id, *tag, position_id, value);
 }
 
 /// Completeness + staleness gate, returns NAV. `T` is the deposit asset
@@ -866,7 +867,22 @@ fun consume_appraisal<T>(vault: &TradingVault, a: Appraisal): u128 {
     assert!(position_total == vault.position_count, errors::appraisal_mismatch());
     assert!(types_snapshot == vault.asset_types, errors::appraisal_mismatch());
     assert!(deposit_balance_snapshot == free_balance_value<T>(vault), errors::appraisal_mismatch());
+    events::emit_vault_appraised(vault_id, total_value, position_total);
     total_value
+}
+
+/// Permissionless mark refresh: run the SAME validation as every other
+/// consume and discard the NAV — the only effect is the
+/// `PositionAppraised` / `VaultAppraised` events carrying fresh marks.
+/// Safe for anyone to call: it takes the vault immutably, so it can
+/// neither move value nor skew a snapshot; a stale or skewed appraisal
+/// aborts exactly as it would at deposit/fulfillment.
+public fun crank_appraisal<T>(vault: &TradingVault, appraisal: Appraisal) {
+    assert!(
+        type_name::with_defining_ids<T>() == vault.config.deposit_asset,
+        errors::deposit_asset_mismatch(),
+    );
+    let _ = consume_appraisal<T>(vault, appraisal);
 }
 
 fun assert_attestation_fresh(cfg: &VaultProtocolConfig, att: &PriceAttestation, clock: &Clock) {
