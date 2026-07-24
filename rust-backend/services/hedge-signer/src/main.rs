@@ -2,15 +2,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use tracing::info;
 
 use hedge_signer::audit::AuditLog;
-use hedge_signer::frost::{Ceremonies, ShareStore};
+use hedge_signer::chain::{nonzero_balances, RpcVaultResolver, VaultLookup, VaultResolver};
+use hedge_signer::frost::{group_sui_address, Ceremonies, ShareStore};
 use hedge_signer::policy::VaultPolicy;
 use hedge_signer::state::FrostState;
-use hedge_signer::{router, AppState, Cli, Config};
+use hedge_signer::{router, AppState, Cli, Command, Config};
+use sui_sdk::SuiClient;
 use sui_tx::SuiClientWrapper;
 use token_info_client::TokenInfoClient;
 
@@ -44,6 +46,16 @@ async fn main() -> Result<()> {
         .package()
         .context("trading_vault package id from token-info")?;
 
+    // FROST share store: missing file → empty (no keygen run yet); a
+    // present-but-corrupt file is fatal — never boot blind to shares.
+    let share_store = ShareStore::open(&cfg.frost_shares_path)
+        .with_context(|| format!("opening frost shares {}", cfg.frost_shares_path.display()))?;
+    let chain = Arc::new(RpcVaultResolver::new(sui.client.clone(), trading_vault_pkg));
+
+    if let Some(Command::PruneShare { vault_id }) = &cli.command {
+        return prune_share(&share_store, chain.as_ref(), &sui.client, vault_id).await;
+    }
+
     let mut vaults: HashMap<String, VaultPolicy> = HashMap::new();
     for vc in &cfg.vaults {
         let policy = VaultPolicy::from_config(vc, trading_vault_pkg)
@@ -58,11 +70,6 @@ async fn main() -> Result<()> {
         AuditLog::open(&cfg.audit_log_path)
             .with_context(|| format!("opening audit log {}", cfg.audit_log_path.display()))?,
     );
-
-    // FROST share store: missing file → empty (no keygen run yet); a
-    // present-but-corrupt file is fatal — never boot blind to shares.
-    let share_store = ShareStore::open(&cfg.frost_shares_path)
-        .with_context(|| format!("opening frost shares {}", cfg.frost_shares_path.display()))?;
 
     info!(
         environment = %cfg.environment,
@@ -79,6 +86,7 @@ async fn main() -> Result<()> {
         vaults: vaults.clone(),
         audit: audit.clone(),
         ceremonies: Ceremonies::new(share_store),
+        chain,
     });
     let state = Arc::new(AppState { sui, vaults, audit });
     let proxy = Arc::new(hedge_signer::bluefin_proxy::BluefinProxy::new(
@@ -86,4 +94,52 @@ async fn main() -> Result<()> {
     ));
 
     router::serve(cfg.bind_addr, state, frost_state, proxy, &cfg.allowed_origins).await
+}
+
+/// `hedge-signer prune-share <vault_id>` — drop an orphaned FROST share.
+///
+/// Losing a share is unrecoverable, so this refuses on ANY sign of life:
+/// the parent address being the vault's registered external account, or
+/// holding coins. There is no --force; if both checks pass the share is
+/// worthless and the vault can keygen again.
+async fn prune_share(
+    store: &ShareStore,
+    chain: &dyn VaultResolver,
+    client: &SuiClient,
+    vault_id: &str,
+) -> Result<()> {
+    let parent = store
+        .get(vault_id, |share| {
+            group_sui_address(&share.public_key_package)
+        })
+        .ok_or_else(|| anyhow!("vault {vault_id} has no FROST share"))?
+        .context("deriving the stored share's parent address")?;
+
+    match chain
+        .resolve(vault_id)
+        .await
+        .with_context(|| format!("resolving vault {vault_id} on chain"))?
+    {
+        VaultLookup::NotAVault(why) => bail!("refusing to prune: {why}"),
+        VaultLookup::Vault {
+            external: Some(account),
+        } if account == parent => bail!(
+            "refusing to prune: {parent} is vault {vault_id}'s registered external account; \
+             deregister it on chain first"
+        ),
+        VaultLookup::Vault { .. } => {}
+    }
+
+    let balances = nonzero_balances(client, parent).await?;
+    if !balances.is_empty() {
+        bail!(
+            "refusing to prune: parent address {parent} still holds {}; \
+             sweep it before pruning",
+            balances.join(", ")
+        );
+    }
+
+    store.remove(vault_id)?;
+    info!(vault = %vault_id, parent = %parent, "pruned orphaned FROST share");
+    Ok(())
 }

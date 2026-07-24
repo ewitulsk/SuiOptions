@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::extract::{Json, Path, State};
@@ -18,6 +19,7 @@ use rand::rngs::OsRng;
 use serde_json::json;
 
 use hedge_signer::audit::AuditLog;
+use hedge_signer::chain::{VaultLookup, VaultResolver};
 use hedge_signer::config::VaultConfig;
 use hedge_signer::frost::{curator_id, service_id, Ceremonies, ShareStore};
 use hedge_signer::frost_handlers::{self, KeygenRound1Req, KeygenRound2Req, SignRound1Req, SignRound2Req};
@@ -37,6 +39,21 @@ fn b64d(s: &str) -> Vec<u8> {
     base64::engine::general_purpose::STANDARD.decode(s).unwrap()
 }
 
+/// Stands in for the Sui RPC behind the keygen gate.
+struct FakeChain(Result<VaultLookup, String>);
+
+#[async_trait::async_trait]
+impl VaultResolver for FakeChain {
+    async fn resolve(&self, _vault_id: &str) -> anyhow::Result<VaultLookup> {
+        self.0.clone().map_err(|e| anyhow::anyhow!(e))
+    }
+}
+
+/// The happy path: a live shared vault with no external account yet.
+fn live_vault() -> Arc<dyn VaultResolver> {
+    Arc::new(FakeChain(Ok(VaultLookup::Vault { external: None })))
+}
+
 struct TestEnv {
     state: Arc<FrostState>,
     audit_path: PathBuf,
@@ -51,6 +68,10 @@ impl Drop for TestEnv {
 }
 
 fn test_env(name: &str) -> TestEnv {
+    test_env_with_chain(name, live_vault())
+}
+
+fn test_env_with_chain(name: &str, chain: Arc<dyn VaultResolver>) -> TestEnv {
     let dir = std::env::temp_dir();
     let audit_path = dir.join(format!("hedge-frost-audit-{}-{name}.jsonl", std::process::id()));
     let shares_path = dir.join(format!("hedge-frost-shares-{}-{name}.toml", std::process::id()));
@@ -81,6 +102,7 @@ fn test_env(name: &str) -> TestEnv {
         vaults,
         audit: Arc::new(AuditLog::open(&audit_path).unwrap()),
         ceremonies: Ceremonies::new(ShareStore::open(&shares_path).unwrap()),
+        chain,
     });
     TestEnv {
         state,
@@ -166,7 +188,8 @@ async fn keygen_then_two_round_sign_verifies_as_plain_ed25519() {
     assert_eq!(pk.group_public_key_hex, group_pk_hex);
     assert_eq!(pk.sui_address, parent);
 
-    // Re-keygen must be refused: the share already exists.
+    // Re-keygen must be refused: the share already exists. The 409 reports
+    // the parent it is holding.
     let (_, again_r1) = dkg::part1(curator_id(), 2, 2, OsRng).unwrap();
     let err = frost_handlers::keygen_round1(
         State(state.clone()),
@@ -177,7 +200,19 @@ async fn keygen_then_two_round_sign_verifies_as_plain_ed25519() {
     )
     .await
     .expect_err("re-keygen must be refused");
-    assert_eq!(err.0, StatusCode::CONFLICT);
+    assert_eq!(err.status(), StatusCode::CONFLICT);
+    match err {
+        frost_handlers::KeygenError::Conflict(body) => {
+            assert_eq!(body.parent_address, parent);
+            assert_eq!(body.group_public_key_hex, group_pk_hex);
+            assert!(
+                body.error.contains("already has a FROST share"),
+                "{}",
+                body.error
+            );
+        }
+        other => panic!("expected a conflict body, got {other:?}"),
+    }
 
     // Signing round 1: a withdraw payload for the parent account.
     let payload = withdraw_payload(&parent);
@@ -358,4 +393,79 @@ async fn tampered_signing_package_message_is_refused() {
     .expect_err("message swap must be refused");
     assert_eq!(err.0, StatusCode::FORBIDDEN);
     assert!(err.1.contains("not the policy-approved digest"), "{}", err.1);
+}
+
+// ----------------------------------------------------- keygen on-chain gate
+
+/// Curator round 1 against the service, whatever the outcome.
+async fn try_keygen_round1(
+    state: &Arc<FrostState>,
+    vault_id: &str,
+) -> Result<(), frost_handlers::KeygenError> {
+    let (_, r1) = dkg::part1(curator_id(), 2, 2, OsRng).unwrap();
+    frost_handlers::keygen_round1(
+        State(state.clone()),
+        Json(KeygenRound1Req {
+            vault_id: vault_id.to_string(),
+            curator_round1_b64: b64(&r1.serialize().unwrap()),
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
+#[tokio::test]
+async fn keygen_needs_no_config_entry_for_the_vault() {
+    // A vault with no [[vaults]] block still keygens: the parent address is
+    // inert until an admin registers it on chain.
+    let env = test_env("unregistered");
+    let unknown = "0x00000000000000000000000000000000000000000000000000000000000000f0";
+    assert!(!env.state.vaults.contains_key(unknown));
+    try_keygen_round1(&env.state, unknown)
+        .await
+        .expect("keygen must be open to any live vault");
+}
+
+#[tokio::test]
+async fn keygen_is_refused_when_the_id_is_not_a_vault() {
+    let env = test_env_with_chain(
+        "notavault",
+        Arc::new(FakeChain(Ok(VaultLookup::NotAVault(
+            "object 0xaa does not exist on chain".to_string(),
+        )))),
+    );
+    let err = try_keygen_round1(&env.state, VAULT_ID)
+        .await
+        .expect_err("a non-vault id must be refused");
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn keygen_is_refused_when_an_external_account_is_already_registered() {
+    let registered = sui_types::base_types::SuiAddress::from_str(
+        "0x00000000000000000000000000000000000000000000000000000000000000ee",
+    )
+    .unwrap();
+    let env = test_env_with_chain(
+        "registered",
+        Arc::new(FakeChain(Ok(VaultLookup::Vault {
+            external: Some(registered),
+        }))),
+    );
+    let err = try_keygen_round1(&env.state, VAULT_ID)
+        .await
+        .expect_err("a vault with an external account must be refused");
+    assert_eq!(err.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn keygen_fails_closed_when_the_rpc_is_unreachable() {
+    let env = test_env_with_chain(
+        "rpcdown",
+        Arc::new(FakeChain(Err("connection refused".to_string()))),
+    );
+    let err = try_keygen_round1(&env.state, VAULT_ID)
+        .await
+        .expect_err("an unvalidatable vault must not keygen");
+    assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
 }

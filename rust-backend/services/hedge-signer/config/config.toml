@@ -29,6 +29,8 @@ frost_shares_path = "services/hedge-signer/config/frost-shares.toml"
 
 # One [[vaults]] block per trading vault whose external account this service
 # co-signs for. Empty by default — the service boots and refuses every /sign.
+# Gates SIGNING only: /frost/keygen is permissionless (any live vault with no
+# on-chain external account may run a DKG).
 #
 # [[vaults]]
 # # TradingVault shared-object id (also the sweep destination address).

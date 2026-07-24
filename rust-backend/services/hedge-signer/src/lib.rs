@@ -27,7 +27,9 @@
 //!   the service signature over it.
 //! - `GET /frost/pubkey/:vault_id` — the vault's group ed25519 key + parent
 //!   Sui address.
-//! - `POST /frost/keygen/round1|round2` — per-vault DKG (curator ↔ service).
+//! - `POST /frost/keygen/round1|round2` — per-vault DKG (curator ↔ service),
+//!   open to any live vault that has no external account registered yet
+//!   ([`chain`]); the per-vault config gates SIGNING only.
 //! - `POST /frost/sign/round1|round2` — payload-policy-gated two-round
 //!   FROST signing.
 //! - `/bluefin/{auth|data|trade}/*` — allowlisted Bluefin REST relay for the
@@ -36,6 +38,7 @@
 
 pub mod audit;
 pub mod bluefin_proxy;
+pub mod chain;
 pub mod config;
 pub mod frost;
 pub mod frost_handlers;
@@ -49,7 +52,7 @@ pub use state::AppState;
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -57,7 +60,12 @@ use clap::Parser;
     about = "Policy-gated co-signer for trading-vault external accounts (2-of-2 multisig member)."
 )]
 pub struct Cli {
-    #[arg(short, long, default_value = "services/hedge-signer/config/config.toml")]
+    #[arg(
+        short,
+        long,
+        global = true,
+        default_value = "services/hedge-signer/config/config.toml"
+    )]
     pub config: PathBuf,
 
     /// Secrets TOML holding the service's `[sui]` signing key. No env-var
@@ -65,9 +73,26 @@ pub struct Cli {
     #[arg(
         short = 's',
         long,
+        global = true,
         default_value = "services/hedge-signer/config/secrets.toml"
     )]
     pub secrets: PathBuf,
+
+    /// No subcommand runs the service.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Delete a vault's stored FROST share so the vault can run keygen
+    /// again. Deliberately conservative and un-forceable: refuses unless
+    /// the parent address is provably orphaned — not registered as the
+    /// vault's on-chain external account, and holding no coin balances.
+    PruneShare {
+        /// TradingVault shared-object id.
+        vault_id: String,
+    },
 }
 
 cli_spec::define_program! {
