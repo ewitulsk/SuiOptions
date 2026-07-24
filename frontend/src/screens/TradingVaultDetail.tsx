@@ -171,7 +171,7 @@ function VaultBody({ vault }: { vault: TradingVaultDetailDto }) {
             loading={ppsHistoryQ.isLoading}
             symbol={symbol}
           />
-          <PositionsCard vault={vault} />
+          <PositionsCard vault={vault} symbol={symbol} decimals={token?.decimals ?? null} />
           <ExternalAccountCard vault={vault} symbol={symbol} decimals={token?.decimals ?? null} />
           {isCurator && (
             <CuratorPanel vault={vault} symbol={symbol} decimals={token?.decimals ?? null} />
@@ -693,7 +693,41 @@ function PastPositions({ positions }: { positions: TradingVaultPosition[] }) {
   );
 }
 
-function PositionsCard({ vault }: { vault: TradingVaultDetailDto }) {
+/** Latest per-position appraisal mark (SO-304): value in deposit-asset
+ * units + a subtle "as of" line. "—" until the position is first appraised. */
+function PositionValue({
+  p,
+  symbol,
+  decimals,
+}: {
+  p: TradingVaultPosition;
+  symbol: string;
+  decimals: number | null;
+}) {
+  if (p.lastValueRaw == null) return <span>—</span>;
+  const value =
+    decimals != null
+      ? `${formatPrice(Number(p.lastValueRaw) / 10 ** decimals, { grouping: true })} ${symbol}`
+      : p.lastValueRaw;
+  return (
+    <span>
+      <span style={{ display: "block" }}>{value}</span>
+      {p.lastAppraisedAtMs != null && (
+        <span className="vault-bids__sub">as of {fmtDateTime(p.lastAppraisedAtMs)}</span>
+      )}
+    </span>
+  );
+}
+
+function PositionsCard({
+  vault,
+  symbol,
+  decimals,
+}: {
+  vault: TradingVaultDetailDto;
+  symbol: string;
+  decimals: number | null;
+}) {
   const holdingsQ = useVaultHoldings(vault);
   const holdings = holdingsQ.data ?? null;
   const active = vault.positions.filter((p) => p.active);
@@ -713,18 +747,20 @@ function PositionsCard({ vault }: { vault: TradingVaultDetailDto }) {
               <div className="vault-table__scroll">
                 <div
                   className="vault-table__head"
-                  style={{ gridTemplateColumns: "2.4fr 1fr" }}
+                  style={{ gridTemplateColumns: "2.4fr 1fr 1fr" }}
                 >
                   <span>Position</span>
+                  <span>Value</span>
                   <span>Stored</span>
                 </div>
                 {active.map((p) => (
                   <div
                     className="vault-table__row"
-                    style={{ gridTemplateColumns: "2.4fr 1fr" }}
+                    style={{ gridTemplateColumns: "2.4fr 1fr 1fr" }}
                     key={p.positionId}
                   >
                     <HoldingSummary p={p} holding={holdings?.get(p.positionId)} />
+                    <PositionValue p={p} symbol={symbol} decimals={decimals} />
                     <span>{fmtDateTime(p.storedAtMs)}</span>
                   </div>
                 ))}

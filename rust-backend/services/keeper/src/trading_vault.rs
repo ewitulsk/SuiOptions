@@ -1516,7 +1516,31 @@ pub async fn build_ctx(
             );
         }
     }
-    let equity_source: Box<dyn VenueEquitySource> = if external.equity_posts.is_empty() {
+    let equity_source: Box<dyn VenueEquitySource> = if let Some(b) = &external.bluefin {
+        // SO-305: the Bluefin reader wins when configured; `[external.
+        // equity_posts]` stays an operator/testing source for the other case.
+        let mut accounts = BTreeMap::new();
+        for (k, v) in &b.accounts {
+            let vault = ObjectID::from_hex_literal(k)
+                .with_context(|| format!("[external.bluefin.accounts] bad vault id {k:?}"))?;
+            let account = SuiAddress::from_str(&v.account).map_err(|e| {
+                anyhow!("[external.bluefin.accounts.{k}] bad account {:?}: {e}", v.account)
+            })?;
+            accounts.insert(
+                vault,
+                crate::venue_equity::BluefinVenueAccount {
+                    account,
+                    asset_decimals: v.asset_decimals,
+                },
+            );
+        }
+        Box::new(crate::venue_equity::Bluefin::spawn(
+            b.base_url.clone(),
+            accounts,
+            std::time::Duration::from_millis(b.poll_interval_ms),
+            std::time::Duration::from_millis(b.max_age_ms),
+        ))
+    } else if external.equity_posts.is_empty() {
         Box::new(crate::venue_equity::Disabled)
     } else {
         let mut targets = BTreeMap::new();
