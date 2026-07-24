@@ -35,6 +35,11 @@ toml = { workspace = true }
 
 sui-types = { workspace = true }
 shared-crypto = { workspace = true }
+# On-chain vault validation behind the FROST keygen gate (chain.rs).
+sui-sdk = { workspace = true }
+sui-json-rpc-types = { workspace = true }
+move-core-types = { workspace = true }
+async-trait = { workspace = true }
 
 # FROST 2-of-2 threshold-ed25519 substrate (Bluefin parent account).
 frost-ed25519 = { workspace = true }

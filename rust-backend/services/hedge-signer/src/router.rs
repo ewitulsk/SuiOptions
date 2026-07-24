@@ -45,7 +45,7 @@ pub async fn serve(
 }
 
 /// The FROST threshold-signing surface (keygen + two-round signing +
-/// group-pubkey lookup), on its own state — no Sui RPC client needed.
+/// group-pubkey lookup), on its own state — no signing key needed.
 pub fn frost_router(state: Arc<FrostState>) -> Router {
     Router::new()
         .route("/frost/pubkey/:vault_id", get(frost_handlers::pubkey))

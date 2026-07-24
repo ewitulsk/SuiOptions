@@ -22,14 +22,20 @@
 //! ```
 //!
 //! Round-2 packages must travel a confidential, authenticated channel
-//! (nginx TLS in every deployed env). Keygen endpoints are otherwise
-//! unauthenticated, like the rest of this service's surface — the group
-//! address only becomes load-bearing once ops registers it as the vault's
-//! hedge address on-chain, and that registration must verify the curator
-//! really holds the counterpart share (out-of-band signing check). A vault
-//! that already has a share refuses re-keygen: rotating a Bluefin parent
-//! key is impossible (doc 03 §3b key-loss posture), so silently
-//! regenerating one would orphan funds.
+//! (nginx TLS in every deployed env). Keygen is otherwise PERMISSIONLESS —
+//! any live trading vault may run a DKG, no per-vault config entry needed
+//! (only the SIGNING path is config-gated). The group address is inert
+//! until an admin registers it with
+//! `trading_vault::vault::set_external_account`, and that registration must
+//! verify the curator really holds the counterpart share (out-of-band
+//! signing check). The two gates keygen does enforce are on-chain
+//! ([`crate::chain`]): the vault id must resolve to a live shared
+//! `vault::TradingVault` of the pinned package, and it must not already
+//! have an external account registered. A vault that already has a share
+//! also refuses re-keygen: rotating a Bluefin parent key is impossible
+//! (doc 03 §3b key-loss posture), so silently regenerating one would orphan
+//! funds — the `prune-share` CLI is the only way out, and only for a share
+//! that is provably orphaned.
 //!
 //! Participant identifiers are fixed: curator = 1, service = 2.
 //!
@@ -183,6 +189,19 @@ impl ShareStore {
             bail!("vault {vault_id} already has a FROST share; refusing to overwrite");
         }
         shares.insert(vault_id.to_string(), share);
+        self.persist(&shares)
+            .with_context(|| format!("persisting frost shares {}", self.path.display()))
+    }
+
+    /// Drop a vault's share and persist. Errors if it has none. The
+    /// callers' job — not this method's — is to prove the share is orphaned
+    /// first (see the `prune-share` CLI): a share removed while its parent
+    /// account is live or funded is unrecoverable.
+    pub fn remove(&self, vault_id: &str) -> Result<()> {
+        let mut shares = self.shares.lock().unwrap();
+        if shares.remove(vault_id).is_none() {
+            bail!("vault {vault_id} has no FROST share to remove");
+        }
         self.persist(&shares)
             .with_context(|| format!("persisting frost shares {}", self.path.display()))
     }
@@ -403,5 +422,68 @@ impl Ceremonies {
         let signature_share = frost::round2::sign(&package, &session.nonces, &share)
             .map_err(|e| anyhow!("frost round2 sign: {e}"))?;
         Ok(signature_share.serialize())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A throwaway share. Trusted-dealer keygen is fine here: the store
+    /// only ever moves opaque key material around.
+    fn share() -> VaultShare {
+        let (secrets, public_key_package) =
+            frost::keys::generate_with_dealer(2, 2, frost::keys::IdentifierList::Default, OsRng)
+                .unwrap();
+        let secret = secrets.get(&service_id()).unwrap().clone();
+        VaultShare {
+            key_package: KeyPackage::try_from(secret).unwrap(),
+            public_key_package,
+        }
+    }
+
+    fn store_path(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "hedge-share-store-{}-{name}.toml",
+            std::process::id()
+        ));
+        std::fs::remove_file(&p).ok();
+        p
+    }
+
+    #[test]
+    fn remove_deletes_the_share_and_survives_a_reopen() {
+        let path = store_path("remove");
+        let store = ShareStore::open(&path).unwrap();
+        store.insert("0xaa", share()).unwrap();
+        store.insert("0xbb", share()).unwrap();
+        store.remove("0xaa").unwrap();
+        assert!(!store.contains("0xaa"));
+        assert!(store.contains("0xbb"));
+
+        let reopened = ShareStore::open(&path).unwrap();
+        assert!(!reopened.contains("0xaa"));
+        assert!(reopened.contains("0xbb"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn removing_an_absent_share_errors() {
+        let path = store_path("absent");
+        let store = ShareStore::open(&path).unwrap();
+        assert!(store.remove("0xaa").is_err());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn remove_then_insert_lets_the_vault_keygen_again() {
+        let path = store_path("recycle");
+        let store = ShareStore::open(&path).unwrap();
+        store.insert("0xaa", share()).unwrap();
+        assert!(store.insert("0xaa", share()).is_err());
+        store.remove("0xaa").unwrap();
+        store.insert("0xaa", share()).unwrap();
+        assert!(store.contains("0xaa"));
+        std::fs::remove_file(&path).ok();
     }
 }

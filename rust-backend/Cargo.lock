@@ -4062,6 +4062,7 @@ name = "hedge-signer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum 0.7.9",
  "base64 0.22.1",
  "bcs",
@@ -4072,6 +4073,7 @@ dependencies = [
  "frost-ed25519",
  "hex",
  "metrics",
+ "move-core-types",
  "observability",
  "rand 0.8.6",
  "reqwest",
@@ -4079,6 +4081,8 @@ dependencies = [
  "serde",
  "serde_json",
  "shared-crypto",
+ "sui-json-rpc-types",
+ "sui-sdk",
  "sui-tx",
  "sui-types",
  "token-info-client",

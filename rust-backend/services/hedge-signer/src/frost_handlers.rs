@@ -7,11 +7,13 @@ use std::sync::Arc;
 
 use axum::extract::{Json, Path, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
 use crate::audit::{now_ms, AuditEntry};
+use crate::chain::VaultLookup;
 use crate::frost::{group_sui_address, SERVICE_ID};
 use crate::policy::bluefin::classify_payload;
 use crate::state::FrostState;
@@ -85,33 +87,107 @@ pub struct KeygenRound1Resp {
     pub service_identifier: u16,
 }
 
+/// Body of the 409 a vault that already has a share gets back: enough for
+/// the caller to tell "someone already ran this ceremony" from "my half is
+/// lost", without another round-trip to `/frost/pubkey`.
+#[derive(Debug, Serialize)]
+pub struct KeygenConflictResp {
+    pub error: String,
+    pub parent_address: String,
+    pub group_public_key_hex: String,
+}
+
+/// `POST /frost/keygen/round1` errors. The already-has-a-share conflict
+/// answers JSON; everything else stays plain text like the other handlers.
+#[derive(Debug)]
+pub enum KeygenError {
+    Plain(StatusCode, String),
+    Conflict(KeygenConflictResp),
+}
+
+impl KeygenError {
+    pub fn status(&self) -> StatusCode {
+        match self {
+            Self::Plain(status, _) => *status,
+            Self::Conflict(_) => StatusCode::CONFLICT,
+        }
+    }
+}
+
+impl IntoResponse for KeygenError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Plain(status, msg) => (status, msg).into_response(),
+            Self::Conflict(body) => (StatusCode::CONFLICT, Json(body)).into_response(),
+        }
+    }
+}
+
 /// `POST /frost/keygen/round1` — service side of DKG round 1.
+///
+/// Open to any real vault: a fresh group address is inert until an admin
+/// registers it with `vault::set_external_account`, so the config
+/// registration that gates SIGNING is not required here. What is required
+/// is that the vault exists on chain and has no external account yet — and
+/// that we are not about to orphan a share we already hold.
 pub async fn keygen_round1(
     State(s): State<Arc<FrostState>>,
     Json(req): Json<KeygenRound1Req>,
-) -> Result<Json<KeygenRound1Resp>, ApiError> {
-    if !s.vaults.contains_key(&req.vault_id) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            format!("unknown vault {}", req.vault_id),
-        ));
-    }
-    if s.ceremonies.store.contains(&req.vault_id) {
-        return Err((
-            StatusCode::CONFLICT,
-            format!(
+) -> Result<Json<KeygenRound1Resp>, KeygenError> {
+    if let Some(existing) = s.ceremonies.store.get(&req.vault_id, |share| {
+        let pk = share.group_public_key_hex()?;
+        let addr = group_sui_address(&share.public_key_package)?;
+        anyhow::Ok((pk, addr))
+    }) {
+        let (group_public_key_hex, parent_address) = existing
+            .map_err(|e| KeygenError::Plain(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        return Err(KeygenError::Conflict(KeygenConflictResp {
+            error: format!(
                 "vault {} already has a FROST share; re-keygen would orphan its parent account",
                 req.vault_id
             ),
-        ));
+            parent_address: parent_address.to_string(),
+            group_public_key_hex,
+        }));
     }
-    let curator_round1 = b64()
-        .decode(req.curator_round1_b64.trim())
-        .map_err(|_| bad_request("curator_round1_b64 is not base64"))?;
+    // Fail closed: an RPC that will not answer is not an approval.
+    match s.chain.resolve(&req.vault_id).await {
+        Ok(VaultLookup::Vault { external: None }) => {}
+        Ok(VaultLookup::Vault {
+            external: Some(account),
+        }) => {
+            return Err(KeygenError::Plain(
+                StatusCode::CONFLICT,
+                format!(
+                    "vault {} already has external account {account} registered on chain; \
+                     a new parent address could never be registered for it",
+                    req.vault_id
+                ),
+            ))
+        }
+        Ok(VaultLookup::NotAVault(why)) => {
+            return Err(KeygenError::Plain(
+                StatusCode::BAD_REQUEST,
+                format!("refusing keygen: {why}"),
+            ))
+        }
+        Err(e) => {
+            return Err(KeygenError::Plain(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("cannot validate vault {} on chain: {e:#}", req.vault_id),
+            ))
+        }
+    }
+    let curator_round1 = b64().decode(req.curator_round1_b64.trim()).map_err(|_| {
+        KeygenError::Plain(
+            StatusCode::BAD_REQUEST,
+            "curator_round1_b64 is not base64".into(),
+        )
+    })?;
     let service_round1 = s
         .ceremonies
         .keygen_round1(&req.vault_id, &curator_round1)
-        .map_err(|e| bad_request(format!("keygen round1: {e}")))?;
+        .map_err(|e| KeygenError::Plain(StatusCode::BAD_REQUEST, format!("keygen round1: {e}")))?;
     info!(vault = %req.vault_id, "frost keygen round1 started");
     Ok(Json(KeygenRound1Resp {
         service_round1_b64: b64().encode(service_round1),
