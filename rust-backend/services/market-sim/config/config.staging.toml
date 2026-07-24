@@ -21,4 +21,4 @@ spot_notional_per_side = 100000000
 
 # Created at boot and logged on first run — pin the logged id here so
 # restarts reuse it instead of minting a new BalanceManager.
-# spot_balance_manager_id = "0x..."
+spot_balance_manager_id = "0x8eb2d599a5de9458823a550fe045938a27b2f3f1da064e197037a08b0d9a53fd"
