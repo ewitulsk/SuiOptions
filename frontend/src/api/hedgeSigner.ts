@@ -4,6 +4,18 @@
 
 import { HEDGE_SIGNER_URL } from "../config";
 
+/** A non-2xx response, carrying the status so callers can branch on it —
+ * keygen round 1 answers 409 when the service already holds a share. */
+export class HedgeSignerError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "HedgeSignerError";
+  }
+}
+
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${HEDGE_SIGNER_URL}${path}`, {
     method: "POST",
@@ -12,7 +24,10 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`hedge-signer ${path}: ${res.status} ${text || res.statusText}`);
+    throw new HedgeSignerError(
+      res.status,
+      `hedge-signer ${path}: ${res.status} ${text || res.statusText}`,
+    );
   }
   return (await res.json()) as T;
 }
