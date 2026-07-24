@@ -30,7 +30,13 @@ import {
   type TransactionArgument,
   type TransactionResult,
 } from "@mysten/sui/transactions";
-import { fromBase64, fromHex, normalizeStructTag, parseStructTag, toHex } from "@mysten/sui/utils";
+import {
+  deriveDynamicFieldID,
+  fromBase64,
+  fromHex,
+  normalizeStructTag,
+  parseStructTag,
+} from "@mysten/sui/utils";
 
 import { fetchBuckets, optionCoinType, seriesOptionType } from "../api/client";
 import { HERMES_BASE } from "../api/pyth";
@@ -233,28 +239,26 @@ const priceInfoCache = new Map<string, string>();
 
 async function resolvePriceInfoTable(
   client: SuiGrpcClient,
-  handles: PythHandles,
+  _handles: PythHandles,
 ): Promise<{ tableId: string; keyType: string }> {
   if (priceInfoTable) return priceInfoTable;
-  const nameBcs = bcs
-    .vector(bcs.u8())
-    .serialize(Array.from(new TextEncoder().encode("price_info")))
-    .toBytes();
-  const { dynamicField } = await client.core.getDynamicField({
-    parentId: handles.pythStateId,
-    name: { type: "vector<u8>", bcs: nameBcs },
-  });
-  // Value is `0x2::table::Table<{pkg}::price_identifier::PriceIdentifier,
-  // 0x2::object::ID>`: bcs = UID (32 bytes) + size. Read the key type off the
-  // table's own type string so Pyth package upgrades can't desync it.
-  const tag = parseStructTag(dynamicField.value.type);
+  // The table id is pinned per network: `price_info` hangs off the Pyth
+  // state as a dynamic OBJECT field, whose wrapped-key derivation the
+  // plain getDynamicField cannot perform (it derives a nonexistent id) —
+  // and some RPC providers serve no dynamic-field index at all. A plain
+  // object read of the pinned table gives its key type.
+  const tableId = PYTH_PRICE_INFO_TABLE_IDS[ENV];
+  if (!tableId) {
+    throw new Error(`No Pyth price_info table pinned for network "${ENV}"`);
+  }
+  const { object } = await client.core.getObject({ objectId: tableId, include: {} });
+  const tag = parseStructTag(object.type);
   const keyParam = tag.typeParams[0];
   const keyType =
     typeof keyParam === "string" ? keyParam : normalizeStructTag(keyParam);
   if (!keyType.endsWith("::price_identifier::PriceIdentifier")) {
     throw new Error(`unexpected Pyth price_info table key type: ${keyType}`);
   }
-  const tableId = `0x${toHex(dynamicField.value.bcs.slice(0, 32))}`;
   priceInfoTable = { tableId, keyType };
   return priceInfoTable;
 }
@@ -271,13 +275,20 @@ async function resolvePriceInfoObjectId(
     .vector(bcs.u8())
     .serialize(Array.from(fromHex(feedId)))
     .toBytes();
+  // Derive the Table entry's field id client-side + plain object read
+  // (same posture as tx/dbm.ts — no dynamic-field index API).
+  const fieldId = deriveDynamicFieldID(table.tableId, table.keyType, keyBcs);
   let objectId: string;
   try {
-    const { dynamicField } = await client.core.getDynamicField({
-      parentId: table.tableId,
-      name: { type: table.keyType, bcs: keyBcs },
+    const { object } = await client.core.getObject({
+      objectId: fieldId,
+      include: { json: true },
     });
-    objectId = `0x${toHex(dynamicField.value.bcs.slice(0, 32))}`;
+    const value = (object.json as { value?: unknown } | null)?.value;
+    if (typeof value !== "string") {
+      throw new Error(`unparseable price_info entry ${fieldId}`);
+    }
+    objectId = value;
   } catch (err) {
     throw new Error(
       `Pyth feed ${feedId.slice(0, 8)}… has no PriceInfoObject on this network` +
