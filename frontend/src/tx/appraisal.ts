@@ -42,6 +42,19 @@ import { fetchBuckets, optionCoinType, seriesOptionType } from "../api/client";
 import { HERMES_BASE } from "../api/pyth";
 import { tokenForCoinType, type TradingVaultDetail } from "../api/tradingVaults";
 import {
+  asRecord,
+  canon,
+  classifyVaultPositions,
+  idString,
+  shortType,
+  structFields,
+  typeNameString,
+  vecSetItems,
+  type CustodyPlan,
+  type OptionPositionPlan,
+  type RfqTicketPlan,
+} from "../api/vaultHoldings";
+import {
   DBM_MARGIN_REGISTRY_IDS,
   DBM_ORACLE_PACKAGE_ID,
   DBM_ORIGINAL_PACKAGE_IDS,
@@ -87,36 +100,9 @@ const PYTH_HANDLES: Partial<Record<string, PythHandles>> = {
 
 // ═══════════════════════════════ plan types ═══════════════════════════════
 
-export type PoolLegPlan = {
-  poolId: string;
-  /** Canonical coin types from the pool's `Pool<B, Q>` type args. */
-  baseType: string;
-  quoteType: string;
-};
-
-export type CustodyPlan = {
-  custodyId: string;
-  /** Every tracked manager asset (canonical), deposit asset included. */
-  assets: string[];
-  pools: PoolLegPlan[];
-};
-
-export type RfqTicketPlan = {
-  ticketId: string;
-  /** Canonical escrow coin type — the `E` type arg. */
-  escrowType: string;
-};
-
-export type OptionPositionPlan = {
-  positionId: string;
-  bucketId: string;
-  isPut: boolean;
-  /** Canonical `Bucket<U,S,C>` / `PutBucket<U,S,P>` type args, in order. */
-  bucketTypeArgs: [string, string, string];
-  /** VaultMm-tagged positions must appraise through `vault_mm` — the
-   * appraisal witness has to match the position's adapter tag. */
-  viaVaultMm: boolean;
-};
+// Position-classification types (`CustodyPlan`, `RfqTicketPlan`,
+// `OptionPositionPlan`, `PoolLegPlan`) live in `api/vaultHoldings.ts`,
+// shared with the vault-detail positions UI (SO-303).
 
 /** One option-coin type the vault holds (custody balance or pool leg),
  * priced via `options_oracle::attest_call/put` from its bucket. */
@@ -174,58 +160,8 @@ export type AppraisalPlan = {
   externalEquity: ExternalEquityPlan | null;
 };
 
-// ══════════════════════════ Move-JSON tolerant reads ══════════════════════════
-
-// The gRPC `json` rendering of Move values differs from JSON-RPC's (structs
-// may or may not nest under `fields`; TypeName/ID may render as bare
-// strings). These helpers accept both shapes.
-
-function asRecord(v: unknown): Record<string, unknown> | null {
-  return typeof v === "object" && v !== null && !Array.isArray(v)
-    ? (v as Record<string, unknown>)
-    : null;
-}
-
-function structFields(v: unknown): Record<string, unknown> | null {
-  const r = asRecord(v);
-  if (!r) return null;
-  return asRecord(r.fields) ?? r;
-}
-
-export function vecSetItems(v: unknown): unknown[] {
-  if (Array.isArray(v)) return v;
-  const c = structFields(v)?.contents;
-  return Array.isArray(c) ? c : [];
-}
-
-function typeNameString(v: unknown): string | null {
-  if (typeof v === "string") return v;
-  const n = structFields(v)?.name;
-  return typeof n === "string" ? n : null;
-}
-
-export function idString(v: unknown): string | null {
-  if (typeof v === "string") return v;
-  const f = structFields(v);
-  if (!f) return null;
-  for (const key of ["bytes", "id"]) {
-    const x = f[key];
-    if (typeof x === "string") return x;
-    const nested = structFields(x)?.id;
-    if (typeof nested === "string") return nested;
-  }
-  return null;
-}
-
-/** Canonicalize a Move type string (chain `TypeName`s lack the `0x`). */
-function canon(t: string): string {
-  return normalizeStructTag(t);
-}
-
-function shortType(t: string): string {
-  const parts = t.split("::");
-  return parts.length === 3 ? `${parts[0].slice(0, 8)}…::${parts[2]}` : t;
-}
+// Move-JSON tolerant read helpers (`structFields`, `idString`, …) moved to
+// `api/vaultHoldings.ts` alongside the shared position classification.
 
 // ═══════════════════════════ PriceInfoObject cache ═══════════════════════════
 
@@ -437,101 +373,11 @@ export async function planAppraisal(
     }
   }
 
-  // 2. Classify every active custodied position via its object type.
+  // 2. Classify every active custodied position via its object type (shared
+  //    with the positions UI; strict mode throws the human-readable reason).
   const active = vault.positions.filter((p) => p.active);
-  const custodies: CustodyPlan[] = [];
-  const rfqTickets: RfqTicketPlan[] = [];
-  const optionPositions: OptionPositionPlan[] = [];
-  const coinPositions: { positionId: string; coinType: string }[] = [];
-
-  if (active.length > 0) {
-    const { objects } = await client.core.getObjects({
-      objectIds: active.map((p) => p.positionId),
-      include: { json: true },
-    });
-    const bucketNeeded: { positionId: string; bucketId: string; viaVaultMm: boolean }[] = [];
-    for (let i = 0; i < active.length; i++) {
-      const obj = objects[i];
-      if (obj instanceof Error) {
-        throw new Error(`Couldn't read position ${active[i].positionId}: ${obj.message}`);
-      }
-      const type = obj.type;
-      const fields = structFields(obj.json) ?? {};
-      if (type.endsWith("::deepbook_adapter::DeepBookCustody")) {
-        const assets = vecSetItems(fields.assets)
-          .map(typeNameString)
-          .filter((t): t is string => t !== null)
-          .map(canon);
-        const poolIds = vecSetItems(fields.active_pools)
-          .map(idString)
-          .filter((id): id is string => id !== null);
-        const pools: PoolLegPlan[] = [];
-        if (poolIds.length > 0) {
-          const poolObjs = await client.core.getObjects({ objectIds: poolIds, include: {} });
-          for (let j = 0; j < poolIds.length; j++) {
-            const pool = poolObjs.objects[j];
-            if (pool instanceof Error) {
-              throw new Error(`Couldn't read DeepBook pool ${poolIds[j]}: ${pool.message}`);
-            }
-            const params = parseStructTag(pool.type).typeParams;
-            if (params.length < 2) throw new Error(`Unexpected pool type: ${pool.type}`);
-            pools.push({
-              poolId: poolIds[j],
-              baseType: normalizeStructTag(params[0]),
-              quoteType: normalizeStructTag(params[1]),
-            });
-          }
-        }
-        custodies.push({ custodyId: obj.objectId, assets, pools });
-      } else if (type.endsWith("::options_adapter::RfqTicket")) {
-        const escrow = typeNameString(fields.escrow_type);
-        if (!escrow) throw new Error(`RFQ ticket ${obj.objectId} has no escrow_type`);
-        rfqTickets.push({ ticketId: obj.objectId, escrowType: canon(escrow) });
-      } else if (type.endsWith("::position::Position") || "range_start" in fields) {
-        const bucketId = idString(fields.bucket_id);
-        if (!bucketId) throw new Error(`Option position ${obj.objectId} has no bucket_id`);
-        bucketNeeded.push({
-          positionId: obj.objectId,
-          bucketId,
-          viaVaultMm: active[i].adapter.endsWith("::vault_mm::VaultMm"),
-        });
-      } else if (type.includes("::coin::Coin<")) {
-        const inner = parseStructTag(type).typeParams[0];
-        coinPositions.push({ positionId: obj.objectId, coinType: normalizeStructTag(inner) });
-      } else {
-        throw new Error(`Unrecognized custodied position type ${shortType(type)}`);
-      }
-    }
-    if (bucketNeeded.length > 0) {
-      const bucketObjs = await client.core.getObjects({
-        objectIds: bucketNeeded.map((b) => b.bucketId),
-        include: {},
-      });
-      for (let i = 0; i < bucketNeeded.length; i++) {
-        const bucket = bucketObjs.objects[i];
-        if (bucket instanceof Error) {
-          throw new Error(`Couldn't read bucket ${bucketNeeded[i].bucketId}: ${bucket.message}`);
-        }
-        const tag = parseStructTag(bucket.type);
-        const isPut = tag.name === "PutBucket";
-        if (!isPut && tag.name !== "Bucket") {
-          throw new Error(`Unexpected bucket type: ${bucket.type}`);
-        }
-        if (tag.typeParams.length < 3) throw new Error(`Unexpected bucket type: ${bucket.type}`);
-        optionPositions.push({
-          positionId: bucketNeeded[i].positionId,
-          bucketId: bucketNeeded[i].bucketId,
-          viaVaultMm: bucketNeeded[i].viaVaultMm,
-          isPut,
-          bucketTypeArgs: [
-            normalizeStructTag(tag.typeParams[0]),
-            normalizeStructTag(tag.typeParams[1]),
-            normalizeStructTag(tag.typeParams[2]),
-          ],
-        });
-      }
-    }
-  }
+  const { custodies, rfqTickets, optionPositions, coinPositions } =
+    await classifyVaultPositions(client, active);
 
   // 3. Every non-deposit asset needing a price: free balances ∪ custody
   //    assets ∪ pool locked legs ∪ option escrow/underlying/settlement.

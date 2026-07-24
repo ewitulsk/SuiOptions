@@ -28,6 +28,7 @@ import {
   useVaultProtocolConfigId,
   type AllowlistedPool,
 } from "../api/useTradingVaults";
+import { useVaultHoldings, type VaultHolding } from "../api/vaultHoldings";
 import { useTradingVaultActions } from "../state/tradingVault";
 import { useCoinBalance } from "../api/useCoinBalance";
 import { DEEPBOOK_ADAPTER_PACKAGE_ID, TRADING_VAULT_PACKAGE_ID } from "../config";
@@ -169,7 +170,7 @@ function VaultBody({ vault }: { vault: TradingVaultDetailDto }) {
             loading={ppsHistoryQ.isLoading}
             symbol={symbol}
           />
-          <PositionsCard positions={vault.positions} />
+          <PositionsCard vault={vault} />
           <ExternalAccountCard vault={vault} symbol={symbol} decimals={token?.decimals ?? null} />
           {isCurator && (
             <CuratorPanel vault={vault} symbol={symbol} decimals={token?.decimals ?? null} />
@@ -670,15 +671,148 @@ function SpotPanel({
   );
 }
 
-function PositionsCard({ positions }: { positions: TradingVaultPosition[] }) {
+/** Short display symbol for a canonical coin type. */
+function symbolFor(coinType: string): string {
+  return tokenForCoinType(coinType)?.ticker ?? shortHex(coinType);
+}
+
+function fmtExpiry(ms: number): string {
+  return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/** Two-line "what is this position" cell: main label + muted detail. */
+function HoldingLabel({
+  main,
+  sub,
+  glyphSymbol,
+  badge,
+  title,
+}: {
+  main: React.ReactNode;
+  sub: React.ReactNode;
+  glyphSymbol?: string;
+  badge?: string;
+  title: string;
+}) {
   return (
-    <div className="vault-card">
-      <div className="vault-card__head">Positions · {positions.length}</div>
-      {positions.length === 0 ? (
-        <div className="vault-card__body vault-prose__muted">
-          The vault holds only its deposit asset — no positions are custodied.
-        </div>
-      ) : (
+    <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }} title={title}>
+      {glyphSymbol != null && (
+        <TokenLogo
+          symbol={glyphSymbol}
+          className="asset-glyph asset-glyph--sm"
+          fallback={<span className="asset-glyph asset-glyph--sm">{glyphSymbol[0] ?? "?"}</span>}
+        />
+      )}
+      <span style={{ minWidth: 0 }}>
+        <span style={{ display: "block" }}>
+          {main}
+          {badge != null && (
+            <span className="status-pill is-info" style={{ marginLeft: 6 }}>
+              {badge}
+            </span>
+          )}
+        </span>
+        <span className="vault-bids__sub">{sub}</span>
+      </span>
+    </span>
+  );
+}
+
+/**
+ * One active position, described from the classified chain objects. Until
+ * the holdings query resolves (or when a position couldn't be classified)
+ * the row falls back to the read-model adapter name.
+ */
+function HoldingSummary({
+  p,
+  holding,
+}: {
+  p: TradingVaultPosition;
+  holding: VaultHolding | undefined;
+}) {
+  if (holding == null) {
+    return <span title={p.positionId}>{adapterName(p.adapter)}</span>;
+  }
+  switch (holding.kind) {
+    case "custody": {
+      const pools = holding.pools.map(
+        (pl) => `${symbolFor(pl.baseType)}/${symbolFor(pl.quoteType)}`,
+      );
+      return (
+        <HoldingLabel
+          title={p.positionId}
+          main="DeepBook custody"
+          sub={
+            (holding.assets.length > 0
+              ? `holds ${holding.assets.map(symbolFor).join(", ")}`
+              : "no tracked assets") + (pools.length > 0 ? ` · pools ${pools.join(", ")}` : "")
+          }
+        />
+      );
+    }
+    case "rfq":
+      return (
+        <HoldingLabel
+          title={p.positionId}
+          main="RFQ ticket"
+          sub={`escrow ${symbolFor(holding.escrowType)}`}
+        />
+      );
+    case "option": {
+      const sym = holding.bucket?.assetSymbol ?? symbolFor(holding.underlying);
+      const isPut = holding.bucket?.isPut ?? holding.isPut;
+      const strike = holding.bucket?.strike ?? null;
+      return (
+        <HoldingLabel
+          title={p.positionId}
+          glyphSymbol={sym}
+          main={`${sym} · ${isPut ? "put" : "call"}${strike != null ? ` · $${formatPrice(strike)}` : ""}`}
+          badge={holding.viaVaultMm ? "via vault_mm" : undefined}
+          sub={
+            holding.bucket != null
+              ? `written · expires ${fmtExpiry(holding.bucket.expiryMs)}`
+              : "written option position"
+          }
+        />
+      );
+    }
+    case "optionCoin": {
+      const sym = holding.bucket?.assetSymbol ?? symbolFor(holding.coinType);
+      const b = holding.bucket;
+      return (
+        <HoldingLabel
+          title={p.positionId}
+          glyphSymbol={sym}
+          main={
+            b != null
+              ? `${sym} · ${b.isPut ? "put" : "call"}${b.strike != null ? ` · $${formatPrice(b.strike)}` : ""}`
+              : sym
+          }
+          sub={
+            b != null
+              ? `held option coin · expires ${fmtExpiry(b.expiryMs)}`
+              : "held option coin"
+          }
+        />
+      );
+    }
+  }
+}
+
+/** Closed positions keep the read-model rendering — the chain objects are
+ * gone, so adapter + timestamps is all there is. Collapsed by default. */
+function PastPositions({ positions }: { positions: TradingVaultPosition[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ marginTop: 8 }}>
+      <button
+        className="vault-invest__tab"
+        style={{ width: "100%" }}
+        onClick={() => setOpen((o) => !o)}
+      >
+        Past positions · {positions.length} {open ? "▾" : "▸"}
+      </button>
+      {open && (
         <div className="vault-table">
           <div className="vault-table__scroll">
             <div
@@ -697,15 +831,60 @@ function PositionsCard({ positions }: { positions: TradingVaultPosition[] }) {
                 key={p.positionId}
               >
                 <span title={p.positionId}>{adapterName(p.adapter)}</span>
-                <span className={p.active ? "is-pos" : undefined}>
-                  {p.active ? "active" : "closed"}
-                </span>
+                <span>closed</span>
                 <span>{fmtDateTime(p.storedAtMs)}</span>
                 <span>{fmtDateTime(p.removedAtMs)}</span>
               </div>
             ))}
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+function PositionsCard({ vault }: { vault: TradingVaultDetailDto }) {
+  const holdingsQ = useVaultHoldings(vault);
+  const holdings = holdingsQ.data ?? null;
+  const active = vault.positions.filter((p) => p.active);
+  const past = vault.positions.filter((p) => !p.active);
+
+  return (
+    <div className="vault-card">
+      <div className="vault-card__head">Positions · {vault.positions.length}</div>
+      {vault.positions.length === 0 ? (
+        <div className="vault-card__body vault-prose__muted">
+          The vault holds only its deposit asset — no positions are custodied.
+        </div>
+      ) : (
+        <>
+          {active.length > 0 ? (
+            <div className="vault-table">
+              <div className="vault-table__scroll">
+                <div
+                  className="vault-table__head"
+                  style={{ gridTemplateColumns: "2.4fr 1fr" }}
+                >
+                  <span>Position</span>
+                  <span>Stored</span>
+                </div>
+                {active.map((p) => (
+                  <div
+                    className="vault-table__row"
+                    style={{ gridTemplateColumns: "2.4fr 1fr" }}
+                    key={p.positionId}
+                  >
+                    <HoldingSummary p={p} holding={holdings?.get(p.positionId)} />
+                    <span>{fmtDateTime(p.storedAtMs)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="vault-card__body vault-prose__muted">No active positions.</div>
+          )}
+          {past.length > 0 && <PastPositions positions={past} />}
+        </>
       )}
     </div>
   );
