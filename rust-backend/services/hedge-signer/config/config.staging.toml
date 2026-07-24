@@ -48,9 +48,9 @@ frost_shares_path = "/app/data/frost-shares.toml"
 # margin registry; the MarginManager id is appended after the creation
 # ceremony (second config pass).
 [[vaults]]
-vault_id                = "0x70bb15b0046b8f6fd736b2cf58b178d84b8c2418925bbdd81caa5e74098d9a6d"
+vault_id                = "0xfe0aa9dd0a549540a1a8c09b5e2c793749c51111349550cfa9ddd9f26dbfdaad"
 external_account        = "0xec548755761294d67138a047e6b82d1c19181ee2e6a8bb42be46b57635abc329"
-vault_address           = "0x70bb15b0046b8f6fd736b2cf58b178d84b8c2418925bbdd81caa5e74098d9a6d"
+vault_address           = "0xfe0aa9dd0a549540a1a8c09b5e2c793749c51111349550cfa9ddd9f26dbfdaad"
 curator_pubkey_b64      = "APA0XRE2zMOQIqzLHCnp0/cILfKUqRGZlwBWGMsXYWTe"
 curator_wallet          = "0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865"
 max_borrow_amount       = 500000000000  # 500 SUI per tx
@@ -61,7 +61,7 @@ allowed_pools = [
   "0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5",  # SUI/DBUSDC pool
   "0xcdbbe6a72e639b647296788e2e4b1cac5cea4246028ba388ba1332ff9a382eea",  # SUI margin pool
   "0xf08568da93834e1ee04f09902ac7b1e78d3fdf113ab4d2106c7265e95318b14d",  # DBUSDC margin pool
-  "0x3a525f86d2dfbdea49d2638f4c62f2c71482abcecf2551592aedb8e4421d366a",  # the vault's MarginManager
+  "0xa5d76785501f9779317599434e94109fba152e0fae357d896c411bb34dffe364",  # the vault's MarginManager
   "0x1ebb295c789cc42b3b2a1606482cd1c7124076a0f5676718501fda8c7fd075a0",  # SUI/USD PriceInfoObject
   "0x9c4dd4008297ffa5e480684b8100ec21cc934405ed9a25d4e4d7b6259aad9c81",  # USDC/USD PriceInfoObject
 ]
