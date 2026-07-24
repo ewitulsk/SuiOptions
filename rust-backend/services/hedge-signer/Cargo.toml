@@ -24,6 +24,8 @@ tokio = { workspace = true }
 
 axum = { workspace = true }
 tower-http = { workspace = true }
+# Bluefin REST relay for the curator dashboard (bluefin_proxy.rs).
+reqwest = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

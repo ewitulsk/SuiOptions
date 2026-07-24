@@ -17,13 +17,15 @@
 //! - `withdraw` — allowed; Bluefin withdrawals have no destination field
 //!   (funds can only land at the parent address), so the real policy gate is
 //!   the Sui-side sweep. Amount/asset are surfaced for the audit log.
-//! - `sui_tx` — a Sui transaction from the parent address. Reuses the
-//!   existing three-tier [`classify`](super::classify) engine and accepts
-//!   ONLY the strict tier: the sweep shape where every transfer output pays
-//!   the vault. (The parent's only legitimate Sui txs are sweeps back to the
-//!   vault; deposits into Bluefin's AssetBank are pushed from the vault side
-//!   and never need the parent's signature.)
-//! - anything else — denied.
+//! - `sui_tx` — a Sui transaction from the parent address. Two shapes are
+//!   signed, everything else is denied:
+//!   1. the sweep: the existing three-tier [`classify`](super::classify)
+//!      engine at STRICT tier only — every transfer output pays the vault;
+//!   2. the venue deposit: a transaction whose single Move call is Bluefin
+//!      `exchange::deposit_to_asset_bank` against the pinned package + eds,
+//!      crediting the parent account itself (the released funds arrive at
+//!      the parent address as plain coins, so materializing the Bluefin
+//!      account needs the parent's own signature — doc 03 §2 step 2).
 //!
 //! Payload formats: mirrored from the `bluefin-pro` crate v1.13.0
 //! (`src/signature.rs` `conversion::signable` structs and the
@@ -44,7 +46,11 @@ use blake2::{Blake2b, Digest};
 use serde::Deserialize;
 use std::str::FromStr;
 use sui_types::base_types::{ObjectID, SuiAddress};
-use sui_types::transaction::{TransactionData, TransactionDataAPI, TransactionKind};
+use sui_types::transaction::{
+    Argument, CallArg, Command, ObjectArg, ProgrammableTransaction, TransactionData,
+    TransactionDataAPI, TransactionKind,
+};
+use sui_types::SUI_CLOCK_OBJECT_ID;
 
 use super::{classify, Decision, Tier, VaultPolicy};
 use sui_tx::tx::template::describe_ptb;
@@ -211,6 +217,122 @@ fn parse_u64_str(field: &str, s: &str) -> Result<u64, String> {
         .map_err(|_| format!("{field} {s:?} is not a u64"))
 }
 
+/// True when any Move call targets the vault's pinned Bluefin package.
+/// (No pin configured ⇒ nothing can "touch" it — such transactions fall
+/// through to the sweep classifier and are judged there.)
+fn touches_bluefin(p: &VaultPolicy, pt: &ProgrammableTransaction) -> bool {
+    let Some(pkg) = p.bluefin_package else {
+        return false;
+    };
+    pt.commands.iter().any(|cmd| match cmd {
+        Command::MoveCall(c) => c.package == pkg,
+        _ => false,
+    })
+}
+
+/// Validate the venue-deposit transaction shape: exactly one
+/// `exchange::deposit_to_asset_bank` against the pinned package, its
+/// `target_address` the parent itself, every shared input the pinned eds or
+/// the clock, coin plumbing only around it, and no transfers or code
+/// deployment anywhere. Returns the audit description on success.
+///
+/// Move signature (verified against the deployed package):
+/// `deposit_to_asset_bank<T>(eds: &mut ExternalDataStore, asset_symbol:
+/// String, target_address: address, amount: u64, coin: &mut Coin<T>, ctx)` —
+/// argument 2 is the credited account, checked by POSITION below.
+fn classify_bluefin_deposit(
+    p: &VaultPolicy,
+    parent: SuiAddress,
+    pt: &ProgrammableTransaction,
+) -> Result<String, String> {
+    let pkg = p
+        .bluefin_package
+        .ok_or("no bluefin package_id pinned for this vault")?;
+    let Some(eds) = p.bluefin_eds else {
+        // The deposit's mandatory shared object can't be validated without
+        // the pin — fail closed rather than sign against an unknown store.
+        return Err("no bluefin eds_id pinned for this vault; refusing deposit".into());
+    };
+
+    // Shared inputs: only the pinned eds and the clock.
+    for input in &pt.inputs {
+        if let CallArg::Object(ObjectArg::SharedObject { id, .. }) = input {
+            if *id != eds && *id != SUI_CLOCK_OBJECT_ID {
+                return Err(format!(
+                    "bluefin deposit: shared object {id} is not the pinned eds {eds}"
+                ));
+            }
+        }
+    }
+
+    let mut deposits: Vec<&sui_types::transaction::ProgrammableMoveCall> = Vec::new();
+    for cmd in &pt.commands {
+        match cmd {
+            Command::MoveCall(c) => {
+                if c.package == pkg
+                    && c.module.as_str() == "exchange"
+                    && c.function.as_str() == "deposit_to_asset_bank"
+                {
+                    deposits.push(c.as_ref());
+                } else if c.package == super::framework() && c.module.as_str() == "coin" {
+                    // 0x2::coin plumbing around the deposit is fine.
+                } else if c.package == super::move_stdlib() {
+                    // 0x1 stdlib (e.g. string construction) is fine.
+                } else {
+                    return Err(format!(
+                        "bluefin deposit: call {}::{}::{} is outside the deposit shape",
+                        c.package, c.module, c.function
+                    ));
+                }
+            }
+            Command::SplitCoins(..) | Command::MergeCoins(..) | Command::MakeMoveVec(..) => {}
+            Command::TransferObjects(..) => {
+                return Err("bluefin deposit: TransferObjects is never part of the shape".into())
+            }
+            Command::Publish(..) | Command::Upgrade(..) => {
+                return Err("publish/upgrade transactions are never signed".into())
+            }
+        }
+    }
+    let [call] = deposits.as_slice() else {
+        return Err(format!(
+            "bluefin deposit: expected exactly one deposit_to_asset_bank call, found {}",
+            deposits.len()
+        ));
+    };
+
+    // target_address (argument 2) must be a pure input equal to the parent —
+    // deposit_to_asset_bank credits ANY address, so an unchecked target is a
+    // value exit to an arbitrary Bluefin account.
+    let target = match call.arguments.get(2) {
+        Some(Argument::Input(i)) => match pt.inputs.get(*i as usize) {
+            Some(CallArg::Pure(bytes)) => bcs::from_bytes::<SuiAddress>(bytes)
+                .map_err(|_| "bluefin deposit: target_address is not a valid pure address")?,
+            _ => return Err("bluefin deposit: target_address is not a pure input".into()),
+        },
+        _ => return Err("bluefin deposit: target_address argument missing".into()),
+    };
+    if target != parent {
+        return Err(format!(
+            "bluefin deposit: target_address {target} is not the parent account {parent}"
+        ));
+    }
+
+    // amount (argument 3): surfaced for the audit log; not capped — the
+    // on-chain release budget already bounds what ever reaches the parent.
+    let amount = match call.arguments.get(3) {
+        Some(Argument::Input(i)) => match pt.inputs.get(*i as usize) {
+            Some(CallArg::Pure(bytes)) => bcs::from_bytes::<u64>(bytes).ok(),
+            _ => None,
+        },
+        _ => None,
+    };
+    let amount_str = amount.map_or_else(|| "?".to_string(), |a| a.to_string());
+    Ok(format!(
+        "bluefin deposit_to_asset_bank {amount_str} crediting parent {parent}"
+    ))
+}
+
 /// Classify one declared payload under `p` for the parent account at
 /// `parent` (the FROST group address). `Ok` carries the digest to sign;
 /// `Err` is the denial reason. Conservative throughout: any parse failure,
@@ -339,10 +461,25 @@ pub fn classify_payload(
                 return Err("sui_tx: only programmable transactions are signed".into());
             };
             let summary = describe_ptb(pt);
-            // The parent account's only legitimate Sui transactions are
-            // sweeps back to the vault — the strict tier's exact shape.
-            // Auto/emergency verdicts (margin-perimeter trading) belong to
-            // the native-multisig external account, not this parent.
+            // A transaction touching the Bluefin package is judged as a
+            // venue deposit — its verdict is final (never falls through to
+            // the sweep path, so a malformed deposit can't be laundered
+            // into another shape).
+            if touches_bluefin(p, pt) {
+                let description = classify_bluefin_deposit(p, parent, pt)?;
+                return Ok(ApprovedPayload {
+                    message: transaction_digest(payload),
+                    kind,
+                    description,
+                    is_exit: false,
+                    tx_digest: Some(tx_data.digest().to_string()),
+                });
+            }
+            // Otherwise the parent account's only legitimate Sui
+            // transactions are sweeps back to the vault — the strict tier's
+            // exact shape. Auto/emergency verdicts (margin-perimeter
+            // trading) belong to the native-multisig external account, not
+            // this parent.
             match classify(p, pt) {
                 Decision::Approve { tier: Tier::Strict } => Ok(ApprovedPayload {
                     message: transaction_digest(payload),
@@ -375,6 +512,8 @@ mod tests {
     const PARENT: &str = "0x00000000000000000000000000000000000000000000000000000000000000f0";
     const IDS: &str = "0x0000000000000000000000000000000000000000000000000000000000000101";
     const EDS: &str = "0x0000000000000000000000000000000000000000000000000000000000000102";
+    const BLUEFIN_PKG: &str =
+        "0x0000000000000000000000000000000000000000000000000000000000000103";
 
     fn policy() -> VaultPolicy {
         VaultPolicy::from_config(
@@ -392,6 +531,7 @@ mod tests {
                 bluefin: Some(BluefinVaultConfig {
                     ids_id: Some(IDS.to_string()),
                     eds_id: Some(EDS.to_string()),
+                    package_id: Some(BLUEFIN_PKG.to_string()),
                 }),
             },
             ObjectID::from_hex_literal("0x77").unwrap(),
@@ -605,6 +745,207 @@ mod tests {
         let err =
             classify_payload(&p, parent(), "sui_tx", &bcs::to_bytes(&tx).unwrap()).unwrap_err();
         assert!(err.contains("not the parent account"), "{err}");
+    }
+
+    // ------------------------------------------------ deposit_to_asset_bank
+
+    use sui_types::transaction::SharedObjectMutability;
+    use sui_types::Identifier;
+
+    /// A parent-sent deposit PTB: SplitCoins plumbing + the deposit call.
+    /// `pkg`/`eds`/`target` parameterized so each pin can be violated;
+    /// `extra_transfer` bolts a TransferObjects exit onto the shape.
+    fn deposit_tx_bytes(
+        pkg: &str,
+        eds: &str,
+        target: &str,
+        extra_transfer: Option<SuiAddress>,
+        extra_call_pkg: Option<&str>,
+    ) -> Vec<u8> {
+        let mut b = ProgrammableTransactionBuilder::new();
+        let eds_arg = b
+            .obj(sui_types::transaction::ObjectArg::SharedObject {
+                id: ObjectID::from_hex_literal(eds).unwrap(),
+                initial_shared_version: 1.into(),
+                mutability: SharedObjectMutability::Mutable,
+            })
+            .unwrap();
+        let symbol = b.pure("USDC".to_string()).unwrap();
+        let target_arg = b.pure(SuiAddress::from_str(target).unwrap()).unwrap();
+        let amount = b.pure(1_000_000u64).unwrap();
+        let coin = b.pure(7u8).unwrap(); // stand-in owned-coin arg
+        b.programmable_move_call(
+            ObjectID::from_hex_literal(pkg).unwrap(),
+            Identifier::new("exchange").unwrap(),
+            Identifier::new("deposit_to_asset_bank").unwrap(),
+            vec![],
+            vec![eds_arg, symbol, target_arg, amount, coin],
+        );
+        if let Some(addr) = extra_transfer {
+            b.transfer_arg(addr, Argument::GasCoin);
+        }
+        if let Some(extra) = extra_call_pkg {
+            b.programmable_move_call(
+                ObjectID::from_hex_literal(extra).unwrap(),
+                Identifier::new("drain").unwrap(),
+                Identifier::new("all").unwrap(),
+                vec![],
+                vec![],
+            );
+        }
+        let tx = TransactionData::new_programmable(
+            parent(),
+            vec![(
+                ObjectID::random(),
+                sui_types::base_types::SequenceNumber::from_u64(1),
+                ObjectDigest::random(),
+            )],
+            b.finish(),
+            1_000_000,
+            1_000,
+        );
+        bcs::to_bytes(&tx).unwrap()
+    }
+
+    #[test]
+    fn bluefin_deposit_crediting_parent_is_allowed() {
+        let p = policy();
+        let bytes = deposit_tx_bytes(BLUEFIN_PKG, EDS, PARENT, None, None);
+        let ok = classify_payload(&p, parent(), "sui_tx", &bytes).expect("deposit must pass");
+        assert_eq!(ok.kind, PayloadKind::SuiTx);
+        assert!(!ok.is_exit, "a venue deposit is not a value exit");
+        assert!(ok.description.contains("deposit_to_asset_bank"), "{}", ok.description);
+        assert!(ok.description.contains("1000000"), "{}", ok.description);
+        assert_eq!(ok.message, transaction_digest(&bytes));
+    }
+
+    #[test]
+    fn bluefin_deposit_crediting_foreign_target_is_denied() {
+        let p = policy();
+        let foreign = "0x00000000000000000000000000000000000000000000000000000000000000dd";
+        let err = classify_payload(
+            &p,
+            parent(),
+            "sui_tx",
+            &deposit_tx_bytes(BLUEFIN_PKG, EDS, foreign, None, None),
+        )
+        .unwrap_err();
+        assert!(err.contains("not the parent account"), "{err}");
+    }
+
+    #[test]
+    fn bluefin_deposit_with_extra_transfer_is_denied() {
+        let p = policy();
+        let attacker = SuiAddress::from_str(
+            "0x00000000000000000000000000000000000000000000000000000000000000dd",
+        )
+        .unwrap();
+        let err = classify_payload(
+            &p,
+            parent(),
+            "sui_tx",
+            &deposit_tx_bytes(BLUEFIN_PKG, EDS, PARENT, Some(attacker), None),
+        )
+        .unwrap_err();
+        assert!(err.contains("TransferObjects"), "{err}");
+    }
+
+    #[test]
+    fn bluefin_deposit_with_extra_unknown_call_is_denied() {
+        let p = policy();
+        let err = classify_payload(
+            &p,
+            parent(),
+            "sui_tx",
+            &deposit_tx_bytes(BLUEFIN_PKG, EDS, PARENT, None, Some("0xdead")),
+        )
+        .unwrap_err();
+        assert!(err.contains("outside the deposit shape"), "{err}");
+    }
+
+    #[test]
+    fn bluefin_deposit_against_foreign_eds_is_denied() {
+        let p = policy();
+        let foreign_eds =
+            "0x0000000000000000000000000000000000000000000000000000000000000999";
+        let err = classify_payload(
+            &p,
+            parent(),
+            "sui_tx",
+            &deposit_tx_bytes(BLUEFIN_PKG, foreign_eds, PARENT, None, None),
+        )
+        .unwrap_err();
+        assert!(err.contains("not the pinned eds"), "{err}");
+    }
+
+    #[test]
+    fn bluefin_deposit_without_package_pin_is_denied() {
+        // No pin ⇒ the tx never reads as "bluefin" and the sweep classifier
+        // rejects the unknown call/shared object — fail closed either way.
+        let mut p = policy();
+        p.bluefin_package = None;
+        let err = classify_payload(
+            &p,
+            parent(),
+            "sui_tx",
+            &deposit_tx_bytes(BLUEFIN_PKG, EDS, PARENT, None, None),
+        )
+        .unwrap_err();
+        assert!(err.contains("not in the allowlist"), "{err}");
+    }
+
+    #[test]
+    fn bluefin_deposit_without_eds_pin_is_denied() {
+        let mut p = policy();
+        p.bluefin_eds = None;
+        let err = classify_payload(
+            &p,
+            parent(),
+            "sui_tx",
+            &deposit_tx_bytes(BLUEFIN_PKG, EDS, PARENT, None, None),
+        )
+        .unwrap_err();
+        assert!(err.contains("no bluefin eds_id pinned"), "{err}");
+    }
+
+    #[test]
+    fn bluefin_double_deposit_is_denied() {
+        let p = policy();
+        // Two deposit calls in one tx: shape requires exactly one.
+        let mut b = ProgrammableTransactionBuilder::new();
+        for _ in 0..2 {
+            let eds_arg = b
+                .obj(sui_types::transaction::ObjectArg::SharedObject {
+                    id: ObjectID::from_hex_literal(EDS).unwrap(),
+                    initial_shared_version: 1.into(),
+                    mutability: SharedObjectMutability::Mutable,
+                })
+                .unwrap();
+            let symbol = b.pure("USDC".to_string()).unwrap();
+            let target_arg = b.pure(SuiAddress::from_str(PARENT).unwrap()).unwrap();
+            let amount = b.pure(5u64).unwrap();
+            b.programmable_move_call(
+                ObjectID::from_hex_literal(BLUEFIN_PKG).unwrap(),
+                Identifier::new("exchange").unwrap(),
+                Identifier::new("deposit_to_asset_bank").unwrap(),
+                vec![],
+                vec![eds_arg, symbol, target_arg, amount],
+            );
+        }
+        let tx = TransactionData::new_programmable(
+            parent(),
+            vec![(
+                ObjectID::random(),
+                sui_types::base_types::SequenceNumber::from_u64(1),
+                ObjectDigest::random(),
+            )],
+            b.finish(),
+            1_000_000,
+            1_000,
+        );
+        let err =
+            classify_payload(&p, parent(), "sui_tx", &bcs::to_bytes(&tx).unwrap()).unwrap_err();
+        assert!(err.contains("exactly one deposit_to_asset_bank"), "{err}");
     }
 
     #[test]

@@ -43,6 +43,28 @@ pub struct Config {
     /// The vaults whose external accounts this service co-signs for.
     #[serde(default)]
     pub vaults: Vec<VaultConfig>,
+
+    /// Bluefin REST pass-through for the curator dashboard (SO-305).
+    /// Bluefin's API only serves CORS to allowlisted origins (their own web
+    /// app), so the browser reaches it through this narrow, allowlisted
+    /// relay instead. Absent ⇒ every /bluefin/* request is refused.
+    #[serde(default)]
+    pub bluefin_proxy: Option<BluefinProxyConfig>,
+}
+
+/// Base URLs of one Bluefin Pro environment (e.g. `sui-staging` for the
+/// staging deployment). The proxy forwards ONLY allowlisted method+path
+/// pairs (see [`crate::bluefin_proxy`]) — read-only data, auth-token minting,
+/// and the order/withdraw/authorize relays whose payloads are wallet- or
+/// ceremony-signed client-side. It holds no keys and signs nothing.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BluefinProxyConfig {
+    /// e.g. `https://auth.api.sui-staging.bluefin.io`
+    pub auth_base_url: String,
+    /// e.g. `https://api.sui-staging.bluefin.io`
+    pub api_base_url: String,
+    /// e.g. `https://trade.api.sui-staging.bluefin.io`
+    pub trade_base_url: String,
 }
 
 /// Per-vault policy configuration.
@@ -93,15 +115,24 @@ pub struct VaultConfig {
 }
 
 /// Optional Bluefin object-id pins. When set, payloads naming a different
-/// store are denied; when unset the corresponding check is skipped.
+/// store are denied; when unset the corresponding check is skipped —
+/// except for the parent-address `deposit_to_asset_bank` Sui-tx shape,
+/// which requires BOTH `package_id` and `eds_id` (fail closed: an
+/// unpinnable deposit is never signed).
 #[derive(Debug, Clone, Deserialize)]
 pub struct BluefinVaultConfig {
     /// Bluefin internal data store id (`ids` field of authorize payloads).
     #[serde(default)]
     pub ids_id: Option<String>,
-    /// Bluefin external data store id (`eds` field of withdraw payloads).
+    /// Bluefin external data store id (`eds` field of withdraw payloads,
+    /// and the shared object of `deposit_to_asset_bank` transactions).
     #[serde(default)]
     pub eds_id: Option<String>,
+    /// The Bluefin Pro package id `exchange::deposit_to_asset_bank` calls
+    /// are pinned against (the CURRENT package on chains where it was
+    /// upgraded). Third-party — not in deployments.json — so pinned here.
+    #[serde(default)]
+    pub package_id: Option<String>,
 }
 
 fn default_cors() -> Vec<String> {

@@ -1,0 +1,38 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_get_keygenresult_group_public_key_hex: (a: number) => [number, number];
+export const __wbg_get_keygenresult_key_package_b64: (a: number) => [number, number];
+export const __wbg_get_keygenresult_public_key_package_b64: (a: number) => [number, number];
+export const __wbg_get_keygenresult_sui_address: (a: number) => [number, number];
+export const __wbg_keygenresult_free: (a: number, b: number) => void;
+export const __wbg_keygensession_free: (a: number, b: number) => void;
+export const __wbg_set_keygenresult_group_public_key_hex: (a: number, b: number, c: number) => void;
+export const __wbg_set_keygenresult_key_package_b64: (a: number, b: number, c: number) => void;
+export const __wbg_set_keygenresult_public_key_package_b64: (a: number, b: number, c: number) => void;
+export const __wbg_set_keygenresult_sui_address: (a: number, b: number, c: number) => void;
+export const __wbg_signround2result_free: (a: number, b: number) => void;
+export const __wbg_signsession_free: (a: number, b: number) => void;
+export const aggregate_signature: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+export const group_identity: (a: number, b: number) => [number, number, number];
+export const keygensession_finish: (a: number, b: number, c: number) => [number, number, number];
+export const keygensession_new: () => [number, number, number];
+export const keygensession_round1_package_b64: (a: number) => [number, number];
+export const keygensession_round2: (a: number, b: number, c: number) => [number, number, number, number];
+export const personal_message_digest: (a: number, b: number) => [number, number];
+export const signsession_commitments_b64: (a: number) => [number, number];
+export const signsession_new: (a: number, b: number) => [number, number, number];
+export const signsession_round2: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+export const transaction_digest: (a: number, b: number) => [number, number];
+export const __wbg_set_signround2result_signature_share_b64: (a: number, b: number, c: number) => void;
+export const __wbg_set_signround2result_signing_package_b64: (a: number, b: number, c: number) => void;
+export const __wbg_get_signround2result_signature_share_b64: (a: number) => [number, number];
+export const __wbg_get_signround2result_signing_package_b64: (a: number) => [number, number];
+export const __wbindgen_exn_store: (a: number) => void;
+export const __externref_table_alloc: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __wbindgen_start: () => void;

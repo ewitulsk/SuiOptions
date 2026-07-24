@@ -81,6 +81,9 @@ async fn main() -> Result<()> {
         ceremonies: Ceremonies::new(share_store),
     });
     let state = Arc::new(AppState { sui, vaults, audit });
+    let proxy = Arc::new(hedge_signer::bluefin_proxy::BluefinProxy::new(
+        cfg.bluefin_proxy.clone(),
+    ));
 
-    router::serve(cfg.bind_addr, state, frost_state, &cfg.allowed_origins).await
+    router::serve(cfg.bind_addr, state, frost_state, proxy, &cfg.allowed_origins).await
 }

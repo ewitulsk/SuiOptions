@@ -9,6 +9,7 @@ use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
+use crate::bluefin_proxy::{self, BluefinProxy};
 use crate::state::{AppState, FrostState};
 use crate::{frost_handlers, handlers};
 
@@ -16,10 +17,13 @@ pub async fn serve(
     addr: SocketAddr,
     state: Arc<AppState>,
     frost_state: Arc<FrostState>,
+    proxy: Arc<BluefinProxy>,
     allowed_origins: &[String],
 ) -> Result<()> {
     let cors = build_cors(allowed_origins)?;
 
+    // NOTE: `.layer(cors)` wraps every route merged BEFORE it — the /frost
+    // and /bluefin surfaces the browser dashboard calls are covered.
     let app = Router::new()
         .route("/health", get(handlers::health))
         .route("/pubkey", get(handlers::pubkey))
@@ -27,6 +31,7 @@ pub async fn serve(
         .route("/sign", post(handlers::sign))
         .with_state(state)
         .merge(frost_router(frost_state))
+        .merge(bluefin_proxy::router(proxy))
         .merge(observability::middleware::metrics_route())
         .layer(axum::middleware::from_fn(
             observability::middleware::http_obs,

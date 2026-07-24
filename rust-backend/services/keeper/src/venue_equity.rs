@@ -6,15 +6,27 @@
 //! (`equity_oracle::add_poster`) — a denied post aborts E_NOT_POSTER (1)
 //! and is classified as retry (alerting), not benign.
 //!
-//! Shipped impls are `Disabled` (no posting) and `Fixed` (a per-vault
+//! Shipped impls are `Disabled` (no posting), `Fixed` (a per-vault
 //! target map from keeper config `[external.equity_posts]` — an
-//! operator/testing source). Real venue readers (Bluefin account equity,
-//! DeepBook-Margin manager equity) are follow-ups and plug in behind the
-//! same trait.
+//! operator/testing source), and [`Bluefin`] (SO-305: polls the venue's
+//! public account endpoint for the FROST parent account's
+//! `totalAccountValueE9`; configured via `[external.bluefin]`, default
+//! off). The DeepBook-Margin manager reader is still a follow-up behind
+//! the same trait.
+//!
+//! NOTE(SO-305): `[external.bluefin]` is parsed and the source is fully
+//! implemented + tested here, but the construction site in
+//! `trading_vault.rs` (`equity_posts.is_empty() → Disabled/Fixed`) is
+//! owned by the crank work stream — selecting `Bluefin::spawn(...)` there
+//! when `external.bluefin` is set is the one-line wiring left to it.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use anyhow::{anyhow, Context, Result};
 use sui_types::base_types::{ObjectID, SuiAddress};
+use tracing::warn;
 
 /// Answers "what is this vault's external account worth right now?", in
 /// deposit-asset units. `None` ⇒ no opinion, the keeper posts nothing.
@@ -46,6 +58,140 @@ impl VenueEquitySource for Fixed {
     fn equity_for(&self, vault_id: ObjectID, _external_account: SuiAddress) -> Option<u64> {
         self.targets.get(&vault_id).copied()
     }
+}
+
+/// One vault's Bluefin identity: the FROST parent account address polled
+/// for equity, and the vault deposit asset's decimals (Bluefin reports
+/// E9 fixed-point; USDC vaults are 6).
+#[derive(Debug, Clone)]
+pub struct BluefinVenueAccount {
+    pub account: SuiAddress,
+    pub asset_decimals: u8,
+}
+
+/// Bluefin venue equity (SO-305): a background task polls
+/// `GET {base_url}/api/v1/account?accountAddress=0x…` (public, no auth;
+/// e.g. `https://api.sui-staging.bluefin.io` for the staging env) per
+/// configured vault and caches `totalAccountValueE9` scaled to
+/// deposit-asset units. `equity_for` reads the cache — never the network —
+/// so the sync trait stays non-blocking; a mark older than `max_age`
+/// yields `None` (the crank's own staleness alerting covers the gap).
+pub struct Bluefin {
+    accounts: Arc<BTreeMap<ObjectID, BluefinVenueAccount>>,
+    cache: Arc<Mutex<BTreeMap<ObjectID, (u64, Instant)>>>,
+    max_age: Duration,
+}
+
+impl Bluefin {
+    /// Start the polling task on the current tokio runtime.
+    pub fn spawn(
+        base_url: String,
+        accounts: BTreeMap<ObjectID, BluefinVenueAccount>,
+        poll_interval: Duration,
+        max_age: Duration,
+    ) -> Self {
+        let accounts = Arc::new(accounts);
+        let cache: Arc<Mutex<BTreeMap<ObjectID, (u64, Instant)>>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+        let task_accounts = accounts.clone();
+        let task_cache = cache.clone();
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let base_url = base_url.trim_end_matches('/').to_string();
+            loop {
+                for (vault, acct) in task_accounts.iter() {
+                    match fetch_account_equity(&client, &base_url, acct).await {
+                        Ok(equity) => {
+                            task_cache
+                                .lock()
+                                .unwrap()
+                                .insert(*vault, (equity, Instant::now()));
+                        }
+                        Err(e) => {
+                            // Stale marks surface through the crank's
+                            // equity_stale_alert_ms path; here we only log.
+                            warn!(vault = %vault, account = %acct.account, error = %e,
+                                "bluefin equity poll failed");
+                        }
+                    }
+                }
+                tokio::time::sleep(poll_interval).await;
+            }
+        });
+        Self {
+            accounts,
+            cache,
+            max_age,
+        }
+    }
+}
+
+impl VenueEquitySource for Bluefin {
+    fn equity_for(&self, vault_id: ObjectID, external_account: SuiAddress) -> Option<u64> {
+        // The on-chain external account must be the account we poll —
+        // a mismatch means stale config, and posting would attest the
+        // wrong book. No opinion in that case.
+        let acct = self.accounts.get(&vault_id)?;
+        if acct.account != external_account {
+            warn!(vault = %vault_id, configured = %acct.account, onchain = %external_account,
+                "bluefin equity: configured account does not match the vault's external account");
+            return None;
+        }
+        let cache = self.cache.lock().unwrap();
+        let (equity, at) = cache.get(&vault_id)?;
+        if at.elapsed() > self.max_age {
+            return None;
+        }
+        Some(*equity)
+    }
+}
+
+async fn fetch_account_equity(
+    client: &reqwest::Client,
+    base_url: &str,
+    acct: &BluefinVenueAccount,
+) -> Result<u64> {
+    let resp = client
+        .get(format!("{base_url}/api/v1/account"))
+        .query(&[("accountAddress", acct.account.to_string())])
+        .send()
+        .await
+        .context("bluefin account request")?;
+    let status = resp.status();
+    let body = resp.text().await.context("bluefin account body")?;
+    if !status.is_success() {
+        return Err(anyhow!("bluefin account HTTP {status}: {body}"));
+    }
+    equity_from_account_json(&body, acct.asset_decimals)
+}
+
+/// `totalAccountValueE9` (effective balance + unrealized PnL − pending
+/// funding, an E9 fixed-point decimal string) from Bluefin's account
+/// response, scaled to deposit-asset units. A negative venue value clamps
+/// to 0 — on-chain equity is a u64.
+pub fn equity_from_account_json(body: &str, asset_decimals: u8) -> Result<u64> {
+    let v: serde_json::Value = serde_json::from_str(body).context("bluefin account JSON")?;
+    let raw = v
+        .get("totalAccountValueE9")
+        .ok_or_else(|| anyhow!("bluefin account response missing totalAccountValueE9"))?;
+    // E9 values ship as decimal strings; tolerate a plain number too.
+    let value_e9: i128 = match raw {
+        serde_json::Value::String(s) => s
+            .parse()
+            .map_err(|_| anyhow!("totalAccountValueE9 {s:?} is not an integer"))?,
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| anyhow!("totalAccountValueE9 {n} is not an integer"))?
+            as i128,
+        other => return Err(anyhow!("totalAccountValueE9 has unexpected type: {other}")),
+    };
+    if asset_decimals > 9 {
+        return Err(anyhow!(
+            "asset_decimals {asset_decimals} > 9 is unsupported for an E9 venue value"
+        ));
+    }
+    let scaled = value_e9.max(0) / 10i128.pow(u32::from(9 - asset_decimals));
+    u64::try_from(scaled).context("scaled bluefin equity overflows u64")
 }
 
 /// One guardrail-respecting step from `previous` toward `target`: the
@@ -110,5 +256,83 @@ mod tests {
         assert_eq!(src.equity_for(vault, acct), Some(42));
         assert_eq!(src.equity_for(other, acct), None);
         assert_eq!(Disabled.equity_for(vault, acct), None);
+    }
+
+    #[test]
+    fn bluefin_equity_json_scales_e9_to_asset_decimals() {
+        // 1,234.567890123 (E9) → 1,234.567890 USDC (6dp).
+        let body = r#"{"totalAccountValueE9":"1234567890123","crossAccountValueE9":"0"}"#;
+        assert_eq!(equity_from_account_json(body, 6).unwrap(), 1_234_567_890);
+        // 9dp asset keeps every digit; a plain JSON number also parses.
+        assert_eq!(equity_from_account_json(body, 9).unwrap(), 1_234_567_890_123);
+        let body = r#"{"totalAccountValueE9":1000000000}"#;
+        assert_eq!(equity_from_account_json(body, 6).unwrap(), 1_000_000);
+        // Negative venue value clamps to 0 (on-chain equity is a u64).
+        let body = r#"{"totalAccountValueE9":"-5000000000"}"#;
+        assert_eq!(equity_from_account_json(body, 6).unwrap(), 0);
+        // Missing field / junk fail loudly.
+        assert!(equity_from_account_json(r#"{"positions":[]}"#, 6).is_err());
+        assert!(equity_from_account_json("not json", 6).is_err());
+        assert!(equity_from_account_json(r#"{"totalAccountValueE9":"1"}"#, 10).is_err());
+    }
+
+    /// End-to-end against a mock Bluefin account endpoint: the polling task
+    /// caches equity per configured vault, `equity_for` answers only the
+    /// mapped vault + matching external account.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bluefin_source_polls_and_caches() {
+        use axum::extract::Query;
+        use axum::routing::get;
+        use std::collections::HashMap;
+
+        let parent =
+            "0x00000000000000000000000000000000000000000000000000000000000000f0";
+        let expected_addr = parent.to_string();
+        let app = axum::Router::new().route(
+            "/api/v1/account",
+            get(move |Query(q): Query<HashMap<String, String>>| {
+                let expected = expected_addr.clone();
+                async move {
+                    assert_eq!(q.get("accountAddress"), Some(&expected));
+                    r#"{"totalAccountValueE9":"2500000000000","positions":[]}"#
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let vault = ObjectID::from_hex_literal("0xabc").unwrap();
+        let other_vault = ObjectID::from_hex_literal("0xdef").unwrap();
+        let account: SuiAddress = parent.parse().unwrap();
+        let src = Bluefin::spawn(
+            base_url,
+            [(
+                vault,
+                BluefinVenueAccount {
+                    account,
+                    asset_decimals: 6,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+        );
+
+        // Wait for the first poll to land.
+        let mut equity = None;
+        for _ in 0..100 {
+            equity = src.equity_for(vault, account);
+            if equity.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(equity, Some(2_500_000_000), "2,500 USDC at 6dp");
+        // Unmapped vault: no opinion.
+        assert_eq!(src.equity_for(other_vault, account), None);
+        // On-chain external account drifted from config: no opinion.
+        assert_eq!(src.equity_for(vault, SuiAddress::ZERO), None);
     }
 }

@@ -36,6 +36,7 @@ import { TokenLogo } from "../components/TokenLogo";
 import { TradingVaultPpsChart } from "../components/TradingVaultPpsChart";
 import { Toast } from "../components/Toast";
 import { formatPrice } from "../format";
+import { ExternalVenuePanel } from "./curator/ExternalVenuePanel";
 import { StateBadge, fmtDurationMs, shortHex } from "./TradingVaults";
 
 function fmtDateTime(ms: number | null | undefined): string {
@@ -327,17 +328,17 @@ function CuratorPanel({
   const actions = useTradingVaultActions();
   const cfgQ = useVaultProtocolConfigId();
   const planQ = useAppraisalPlan(vault);
-  const [tab, setTab] = useState<"hedge" | "spot">("hedge");
+  const [tab, setTab] = useState<"external" | "spot">("external");
 
   return (
     <div className="vault-card">
       <div className="vault-card__head">Curator</div>
       <div className="vault-invest__tabs">
         <button
-          className={"vault-invest__tab" + (tab === "hedge" ? " is-active" : "")}
-          onClick={() => setTab("hedge")}
+          className={"vault-invest__tab" + (tab === "external" ? " is-active" : "")}
+          onClick={() => setTab("external")}
         >
-          Hedge
+          External venue
         </button>
         <button
           className={"vault-invest__tab" + (tab === "spot" ? " is-active" : "")}
@@ -346,8 +347,8 @@ function CuratorPanel({
           Spot
         </button>
       </div>
-      {tab === "hedge" ? (
-        <HedgePanel
+      {tab === "external" ? (
+        <ExternalVenuePanel
           vault={vault}
           symbol={symbol}
           decimals={decimals}
@@ -361,161 +362,10 @@ function CuratorPanel({
       )}
       <div className="vault-card__foot vault-prose__muted">
         Curator transactions are not gas-sponsored — your wallet pays gas.
+        Venue setup and sweep run through the co-signing ceremony.
       </div>
       {actions.toast && <Toast message={actions.toast.message} variant={actions.toast.variant} />}
     </div>
-  );
-}
-
-/**
- * Release vault capital to the registered external account. The budget
- * (budgetBps × NAV) and daily release window are enforced ON-CHAIN against
- * the NAV appraised in the same transaction — the API doesn't serve the
- * limit parameters yet, so no client-side headroom preview is attempted.
- * Sweep-back has no wallet path (the sweep tx is sent BY the external
- * account itself), so it ships as an instructional recipe.
- */
-function HedgePanel({
-  vault,
-  symbol,
-  decimals,
-  actions,
-  cfgId,
-  plan,
-  planError,
-}: {
-  vault: TradingVaultDetailDto;
-  symbol: string;
-  decimals: number | null;
-  actions: ReturnType<typeof useTradingVaultActions>;
-  cfgId: string | null;
-  plan: ReturnType<typeof useAppraisalPlan>["data"] | null;
-  planError: string | null;
-}) {
-  const [amount, setAmount] = useState("");
-  const [copied, setCopied] = useState(false);
-
-  if (vault.externalAccount == null) {
-    return (
-      <div className="vault-card__body vault-prose__muted">
-        No external account is registered for this vault. Registration
-        (set_external_account) is an admin act, like allowlisting an adapter.
-      </div>
-    );
-  }
-
-  const amountNum = Number(amount) || 0;
-  const disabled =
-    !!actions.busy || amountNum <= 0 || decimals == null || plan == null || !cfgId ||
-    vault.state !== "open";
-  const title =
-    vault.state !== "open"
-      ? "The vault is no longer open"
-      : !cfgId
-        ? "Protocol config unavailable"
-        : plan == null
-          ? planError
-            ? `Release unavailable: ${planError}`
-            : "Analyzing vault holdings…"
-          : undefined;
-
-  const onRelease = () => {
-    if (decimals == null || amountNum <= 0 || plan == null || !cfgId) return;
-    actions.releaseExternal({
-      plan,
-      protocolConfigId: cfgId,
-      curatorCapId: vault.curatorCapId,
-      amountRaw: BigInt(Math.round(amountNum * 10 ** decimals)),
-    });
-    setAmount("");
-  };
-
-  // The recipe intentionally shows the full ids — it's meant to be pasted
-  // into the co-sign tooling, not read.
-  const sweepRecipe =
-    `vault::return_external<${vault.depositAsset}>\n` +
-    `  package: ${TRADING_VAULT_PACKAGE_ID ?? "<trading-vault package>"}\n` +
-    `  vault:   ${vault.vaultId}\n` +
-    `  funds:   Coin<${symbol}> paid back from the external account\n` +
-    `  sender:  ${vault.externalAccount} (MUST be the external account)`;
-
-  const onCopy = () => {
-    void navigator.clipboard.writeText(sweepRecipe).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  };
-
-  return (
-    <>
-      <div className="vault-invest__field">
-        <input
-          className="amount__input"
-          type="number"
-          min="0"
-          placeholder="0.0"
-          value={amount}
-          onChange={(e) => setAmount(e.target.value)}
-        />
-        <span className="vault-invest__unit">{symbol}</span>
-      </div>
-      <div className="vault-invest__bal">
-        budget and daily release window are enforced on-chain at release time
-      </div>
-      <button
-        className="vault-invest__cta"
-        disabled={disabled}
-        onClick={onRelease}
-        title={title}
-      >
-        {actions.busy ? `${actions.busy}…` : `Release ${symbol} to external account`}
-      </button>
-
-      <div className="vault-kv" style={{ marginTop: 12 }}>
-        <div className="vault-kv__row">
-          <span>External account</span>
-          <span title={vault.externalAccount}>{shortHex(vault.externalAccount)}</span>
-        </div>
-        <div className="vault-kv__row">
-          <span>Outstanding exposure</span>
-          <span>
-            {decimals != null
-              ? formatPrice(Number(vault.externalExposure) / 10 ** decimals, { grouping: true })
-              : vault.externalExposure}{" "}
-            {symbol}
-          </span>
-        </div>
-      </div>
-
-      <div style={{ marginTop: 12 }}>
-        <div className="vault-prose__muted" style={{ fontSize: 12, marginBottom: 6 }}>
-          Sweep-back: funds return via return_external, sent BY the external
-          account — there is no wallet path here. For the jointly-controlled
-          account the transaction runs through the hedge-signer co-sign
-          ceremony.
-        </div>
-        <pre
-          style={{
-            margin: 0,
-            padding: 8,
-            fontSize: 11,
-            lineHeight: 1.5,
-            borderRadius: 6,
-            border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))",
-            overflowX: "auto",
-          }}
-        >
-          {sweepRecipe}
-        </pre>
-        <button
-          className="vault-invest__tab"
-          style={{ marginTop: 6 }}
-          onClick={onCopy}
-        >
-          {copied ? "Copied" : "Copy recipe"}
-        </button>
-      </div>
-    </>
   );
 }
 
