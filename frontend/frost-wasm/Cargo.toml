@@ -1,0 +1,31 @@
+[package]
+name = "frost-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Browser-side FROST 2-of-2 threshold-ed25519 participant for the curator ceremony (counterpart of rust-backend/services/hedge-signer)."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Standalone crate, NOT part of the rust-backend workspace: it compiles to
+# wasm32-unknown-unknown and its build artifact is committed (see README.md),
+# so the Vercel frontend build never needs a Rust toolchain.
+[workspace]
+
+[dependencies]
+# MUST match rust-backend's pin exactly — both ceremony halves serialize
+# frost packages across HTTP and the formats must agree.
+frost-ed25519 = "=3.0.0"
+wasm-bindgen = "0.2"
+rand = "0.8"
+# frost-core 3.0.0 -> rand_core 0.6 -> getrandom 0.2: the "js" feature routes
+# OsRng to crypto.getRandomValues in the browser.
+getrandom = { version = "0.2", features = ["js"] }
+blake2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+
+[profile.release]
+opt-level = "s"
+lto = true

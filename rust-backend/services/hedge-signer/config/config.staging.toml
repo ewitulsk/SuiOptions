@@ -35,10 +35,13 @@ frost_shares_path = "/app/data/frost-shares.toml"
 # # Curator's day-to-day trading wallet: the ONLY wallet a Bluefin
 # # authorize_account payload may authorize on the FROST parent account.
 # curator_wallet = "0x..."
-# # Optional Bluefin object-id pins for the FROST payload policy.
+# # Optional Bluefin object-id pins for the FROST payload policy. package_id
+# # + eds_id are REQUIRED before a parent-address deposit_to_asset_bank tx
+# # can be co-signed (fail closed without them).
 # [vaults.bluefin]
-# ids_id = "0x..."   # internal data store (authorize payloads)
-# eds_id = "0x..."   # external data store (withdraw payloads)
+# ids_id     = "0x..."   # internal data store (authorize / order payloads)
+# eds_id     = "0x..."   # external data store (withdraw payloads + deposits)
+# package_id = "0x..."   # Bluefin Pro CURRENT package (deposit call target)
 
 # The desk's trading vault (SO-299 DBM bring-up). allowed_pools: canonical
 # testnet DeepBook registry + SUI/DBUSDC pool + both margin pools + the
@@ -62,3 +65,11 @@ allowed_pools = [
   "0x1ebb295c789cc42b3b2a1606482cd1c7124076a0f5676718501fda8c7fd075a0",  # SUI/USD PriceInfoObject
   "0x9c4dd4008297ffa5e480684b8100ec21cc934405ed9a25d4e4d7b6259aad9c81",  # USDC/USD PriceInfoObject
 ]
+
+# Bluefin REST relay for the curator dashboard (SO-305). Bluefin serves CORS
+# only to its own origins, so the browser reaches its API through this
+# narrow allowlisted pass-through (see src/bluefin_proxy.rs). Staging targets Bluefin's Sui-testnet env (sui-staging).
+[bluefin_proxy]
+auth_base_url  = "https://auth.api.sui-staging.bluefin.io"
+api_base_url   = "https://api.sui-staging.bluefin.io"
+trade_base_url = "https://trade.api.sui-staging.bluefin.io"

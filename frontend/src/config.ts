@@ -52,6 +52,15 @@ export const CHARTS_URL: string =
 export const CCTP_URL: string =
   (import.meta.env.VITE_CCTP_URL as string | undefined) ?? "http://127.0.0.1:9015";
 
+// hedge-signer public base URL (SO-305). Drives the curator dashboard's
+// FROST ceremonies (/frost/*) and the allowlisted Bluefin REST relay
+// (/bluefin/*; Bluefin CORS-blocks third-party origins, so the browser
+// never calls their API directly). Deployed builds set
+// VITE_HEDGE_SIGNER_URL to the env's public route
+// (e.g. https://<host>/<env>/hedge-signer).
+export const HEDGE_SIGNER_URL: string =
+  (import.meta.env.VITE_HEDGE_SIGNER_URL as string | undefined) ?? "http://127.0.0.1:9017";
+
 // Populated by `initConfig()`. Exported as live bindings — consumers that
 // `import { PACKAGE_ID }` see the value once initialization completes (which
 // happens before the first render).

@@ -45,3 +45,5 @@ reqwest = { workspace = true }
 vault-sim = { workspace = true }
 # Parse-validate the shipped per-env config TOMLs in unit tests.
 toml = { workspace = true }
+# Mock Bluefin account endpoint for the venue_equity::Bluefin test.
+axum = { workspace = true }

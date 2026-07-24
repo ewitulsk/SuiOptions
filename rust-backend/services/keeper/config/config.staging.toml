@@ -81,3 +81,15 @@ base_type            = "0x2::sui::SUI"
 quote_type           = "0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDC::DBUSDC"
 base_feed_id         = "0x50c67b3fd225db8912a424dd4baed60ffdde625ed2feaaf283724f9608fea266"  # SUI/USD beta
 quote_feed_id        = "0x41f3625971ca2ed2263e78573fe5ce23e13d2558ed3f2e47ab0f84fb9e7ae722"  # USDC/USD beta
+
+# Bluefin venue equity reader (SO-305): polls the venue's PUBLIC account
+# endpoint for each vault's FROST parent account and feeds the attested
+# EquityBook poster crank (venue_equity::Bluefin). Off until a staging
+# Bluefin parent account exists (curator-dashboard setup wizard).
+# [external.bluefin]
+# base_url = "https://api.sui-staging.bluefin.io"   # Bluefin's Sui-testnet env
+# poll_interval_ms = 10000   # response is server-cached ~5s
+# max_age_ms = 60000         # older mark => no opinion (stale alerting covers)
+# [external.bluefin.accounts."0x<vault_id>"]
+# account = "0x<frost_parent_address>"
+# asset_decimals = 6         # deposit-asset decimals (Bluefin values are E9)

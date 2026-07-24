@@ -105,8 +105,12 @@ pub struct VaultPolicy {
     pub curator_wallet: Option<SuiAddress>,
     /// Optional Bluefin internal-data-store pin (`ids` of authorize payloads).
     pub bluefin_ids: Option<ObjectID>,
-    /// Optional Bluefin external-data-store pin (`eds` of withdraw payloads).
+    /// Optional Bluefin external-data-store pin (`eds` of withdraw payloads
+    /// and `deposit_to_asset_bank` transactions).
     pub bluefin_eds: Option<ObjectID>,
+    /// Bluefin Pro package pin for parent-address `deposit_to_asset_bank`
+    /// transactions. `None` → every such deposit is denied.
+    pub bluefin_package: Option<ObjectID>,
 }
 
 impl VaultPolicy {
@@ -136,7 +140,7 @@ impl VaultPolicy {
                     .with_context(|| format!("curator_wallet for vault {}", cfg.vault_id))
             })
             .transpose()?;
-        let (bluefin_ids, bluefin_eds) = match &cfg.bluefin {
+        let (bluefin_ids, bluefin_eds, bluefin_package) = match &cfg.bluefin {
             Some(b) => (
                 b.ids_id
                     .as_deref()
@@ -152,8 +156,16 @@ impl VaultPolicy {
                             .with_context(|| format!("bluefin.eds_id for vault {}", cfg.vault_id))
                     })
                     .transpose()?,
+                b.package_id
+                    .as_deref()
+                    .map(|s| {
+                        ObjectID::from_hex_literal(s).with_context(|| {
+                            format!("bluefin.package_id for vault {}", cfg.vault_id)
+                        })
+                    })
+                    .transpose()?,
             ),
-            None => (None, None),
+            None => (None, None, None),
         };
         Ok(Self {
             vault_id: cfg.vault_id.clone(),
@@ -168,6 +180,7 @@ impl VaultPolicy {
             curator_wallet,
             bluefin_ids,
             bluefin_eds,
+            bluefin_package,
         })
     }
 }

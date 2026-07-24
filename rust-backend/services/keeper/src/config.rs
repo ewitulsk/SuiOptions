@@ -119,6 +119,57 @@ pub struct ExternalConfig {
     /// attested `equity_oracle::record` (the dbm-oracle package id comes
     /// from the token-info snapshot).
     pub dbm: std::collections::BTreeMap<String, DbmVaultConfig>,
+
+    /// Bluefin venue equity reader (SO-305): polls the venue's public
+    /// account endpoint for each vault's FROST parent account and feeds the
+    /// equity-poster crank through `venue_equity::Bluefin`. Absent ⇒ the
+    /// reader is off (`equity_posts` / `Disabled` behavior unchanged).
+    pub bluefin: Option<BluefinEquityConfig>,
+}
+
+/// `[external.bluefin]`: the venue environment + per-vault parent accounts.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BluefinEquityConfig {
+    /// Bluefin account-data host, e.g. `https://api.sui-staging.bluefin.io`
+    /// (their Sui-testnet env) or `https://api.sui-prod.bluefin.io`.
+    pub base_url: String,
+
+    /// Account-endpoint poll cadence. The response is server-cached ~5s;
+    /// polling faster buys nothing.
+    #[serde(default = "default_bluefin_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+
+    /// A cached mark older than this yields no opinion (the crank's
+    /// `equity_stale_alert_ms` alerting then surfaces the gap).
+    #[serde(default = "default_bluefin_max_age_ms")]
+    pub max_age_ms: u64,
+
+    /// Vault id (`"0x…"`) → the vault's Bluefin parent-account identity.
+    #[serde(default)]
+    pub accounts: std::collections::BTreeMap<String, BluefinAccountConfig>,
+}
+
+/// One `[external.bluefin.accounts."0x…"]` entry.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BluefinAccountConfig {
+    /// The FROST parent account address (must equal the vault's registered
+    /// external account, or the reader posts nothing).
+    pub account: String,
+    /// Deposit-asset decimals for scaling Bluefin's E9 values (USDC = 6).
+    #[serde(default = "default_bluefin_asset_decimals")]
+    pub asset_decimals: u8,
+}
+
+fn default_bluefin_poll_interval_ms() -> u64 {
+    10_000
+}
+
+fn default_bluefin_max_age_ms() -> u64 {
+    60_000
+}
+
+fn default_bluefin_asset_decimals() -> u8 {
+    6
 }
 
 /// One `[external.dbm."0x…"]` block: the vault's DBM account identity.
@@ -143,6 +194,7 @@ impl Default for ExternalConfig {
             equity_stale_alert_ms: default_equity_stale_alert_ms(),
             equity_posts: Default::default(),
             dbm: Default::default(),
+            bluefin: None,
         }
     }
 }
@@ -385,6 +437,46 @@ mod tests {
         assert_eq!(d.quote_margin_pool_id, "0x14");
         assert_eq!(d.base_type, "0x2::sui::SUI");
         assert_eq!(d.quote_type, "0xa::dbusdc::DBUSDC");
+    }
+
+    /// `[external.bluefin]` parses with defaults; absent ⇒ reader off.
+    #[test]
+    fn external_bluefin_block_parses() {
+        let cfg: KeeperConfig = toml::from_str(
+            r#"
+            indexer_graphql_url = "http://x/graphql"
+            [pyth]
+            pyth_package_id = "0x1"
+            wormhole_package_id = "0x1"
+            pyth_state_id = "0x1"
+            wormhole_state_id = "0x1"
+            [external.bluefin]
+            base_url = "https://api.sui-staging.bluefin.io"
+            [external.bluefin.accounts."0xabc"]
+            account = "0xf0"
+            "#,
+        )
+        .unwrap();
+        let b = cfg.external.bluefin.as_ref().unwrap();
+        assert_eq!(b.base_url, "https://api.sui-staging.bluefin.io");
+        assert_eq!(b.poll_interval_ms, 10_000);
+        assert_eq!(b.max_age_ms, 60_000);
+        let a = b.accounts.get("0xabc").unwrap();
+        assert_eq!(a.account, "0xf0");
+        assert_eq!(a.asset_decimals, 6);
+
+        let cfg: KeeperConfig = toml::from_str(
+            r#"
+            indexer_graphql_url = "http://x/graphql"
+            [pyth]
+            pyth_package_id = "0x1"
+            wormhole_package_id = "0x1"
+            pyth_state_id = "0x1"
+            wormhole_state_id = "0x1"
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.external.bluefin.is_none());
     }
 
     /// The example config (local dev) must also parse.

@@ -30,8 +30,12 @@
 //! - `POST /frost/keygen/round1|round2` — per-vault DKG (curator ↔ service).
 //! - `POST /frost/sign/round1|round2` — payload-policy-gated two-round
 //!   FROST signing.
+//! - `/bluefin/{auth|data|trade}/*` — allowlisted Bluefin REST relay for the
+//!   curator dashboard ([`bluefin_proxy`]; Bluefin CORS-blocks third-party
+//!   origins). Holds no keys, forwards only client-signed payloads.
 
 pub mod audit;
+pub mod bluefin_proxy;
 pub mod config;
 pub mod frost;
 pub mod frost_handlers;
