@@ -14,11 +14,9 @@
 //! off). The DeepBook-Margin manager reader is still a follow-up behind
 //! the same trait.
 //!
-//! NOTE(SO-305): `[external.bluefin]` is parsed and the source is fully
-//! implemented + tested here, but the construction site in
-//! `trading_vault.rs` (`equity_posts.is_empty() → Disabled/Fixed`) is
-//! owned by the crank work stream — selecting `Bluefin::spawn(...)` there
-//! when `external.bluefin` is set is the one-line wiring left to it.
+//! Construction lives in `trading_vault.rs` (`build_ctx`): `[external.
+//! bluefin]` set ⇒ `Bluefin::spawn(...)`, else `equity_posts` ⇒ `Fixed`,
+//! else `Disabled`.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
