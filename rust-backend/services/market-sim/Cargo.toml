@@ -1,0 +1,32 @@
+[package]
+name = "market-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "market-sim"
+path = "src/main.rs"
+
+[dependencies]
+protocol-types = { workspace = true }
+runtime-config = { workspace = true }
+observability  = { workspace = true }
+cli-spec       = { workspace = true }
+sui-tx         = { workspace = true }
+pyth-client    = { workspace = true }
+oracle-client  = { workspace = true }
+token-info-client = { workspace = true }
+
+sui-types = { workspace = true }
+sui-sdk = { workspace = true }
+move-core-types = { workspace = true }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

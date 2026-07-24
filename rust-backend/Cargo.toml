@@ -26,6 +26,7 @@ members = [
     "services/auth-service",
     "services/gas-station",
     "services/hedge-signer",
+    "services/market-sim",
     "services/price-charting",
     "services/cctp-relay",
     "services/balance-monitor",
