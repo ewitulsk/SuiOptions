@@ -3,7 +3,8 @@ import { normalizeStructTag, parseStructTag } from "@mysten/sui/utils";
 
 import { TRADING_VAULT_OBJECTS, TRADING_VAULT_PUBLISH_DIGEST } from "../config";
 import { useSuiGrpcClient } from "../lib/suiGrpc";
-import { idString, planAppraisal, vecSetItems, type AppraisalPlan } from "../tx/appraisal";
+import { planAppraisal, type AppraisalPlan } from "../tx/appraisal";
+import { idString, vecSetItems } from "./vaultHoldings";
 import {
   fetchTradingVault,
   fetchTradingVaultPpsHistory,
