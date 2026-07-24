@@ -58,7 +58,7 @@ TWAL = 1.0
 # starting parameters — see config.toml for the full list).
 [desk]
 enabled = true
-vault_id           = "0x70bb15b0046b8f6fd736b2cf58b178d84b8c2418925bbdd81caa5e74098d9a6d"
+vault_id           = "0xfe0aa9dd0a549540a1a8c09b5e2c793749c51111349550cfa9ddd9f26dbfdaad"
 mm_release_enabled = true
 # [desk.exits.spot_pools]     # spot pools for flash-exercise, per symbol
 # TSUI = "0x..."
@@ -87,7 +87,7 @@ base_margin_pool_id = "0xcdbbe6a72e639b647296788e2e4b1cac5cea4246028ba388ba1332f
 quote_margin_pool_id = "0xf08568da93834e1ee04f09902ac7b1e78d3fdf113ab4d2106c7265e95318b14d" # DBUSDC
 base_type           = "0x2::sui::SUI"
 quote_type          = "0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDC::DBUSDC"
-margin_manager_id   = "0x3a525f86d2dfbdea49d2638f4c62f2c71482abcecf2551592aedb8e4421d366a"
+margin_manager_id   = "0xa5d76785501f9779317599434e94109fba152e0fae357d896c411bb34dffe364"
 base_price_info_id  = "0x1ebb295c789cc42b3b2a1606482cd1c7124076a0f5676718501fda8c7fd075a0"   # SUI/USD beta PriceInfoObject
 quote_price_info_id = "0x9c4dd4008297ffa5e480684b8100ec21cc934405ed9a25d4e4d7b6259aad9c81"  # USDC/USD beta PriceInfoObject
 signer_url          = "http://hedge-signer:9017"
