@@ -99,17 +99,17 @@ export async function decryptShare(backup: ShareBackup, passphrase: string): Pro
   return new TextDecoder().decode(plaintext);
 }
 
-/** Trigger a browser download of the encrypted backup file. */
-export function downloadShareBackup(backup: ShareBackup): void {
-  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `frost-share-${backup.vaultId.slice(0, 10)}-${backup.parentAddress.slice(0, 10)}.json`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+/** Filename for the backup download. The download itself must be a real
+ * `<a download href={objectUrl}>` the curator clicks: deriving the key takes
+ * seconds, and a programmatic `a.click()` after an await has lost the
+ * browser's transient user activation, so the download is silently dropped
+ * (Safari especially). */
+export function shareBackupFilename(backup: ShareBackup): string {
+  return `frost-share-${backup.vaultId.slice(0, 10)}-${backup.parentAddress.slice(0, 10)}.json`;
+}
+
+export function shareBackupBlob(backup: ShareBackup): Blob {
+  return new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
 }
 
 export function parseShareBackup(text: string): ShareBackup {

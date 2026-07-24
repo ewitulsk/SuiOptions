@@ -1,19 +1,35 @@
-// Keygen step (SO-305): run the two-round DKG, then FORCE an encrypted
-// backup of the curator share before the ceremony can complete. Bluefin
-// accounts cannot rotate keys, so this backup is load-bearing — the UI says
-// so and blocks completion until the file is downloaded.
+// Keygen step (SO-305, fixed in SO-307): run the two-round DKG, then FORCE an
+// encrypted backup of the curator share before the ceremony can complete.
+// Bluefin accounts cannot rotate keys, so this backup is load-bearing — the UI
+// says so and blocks completion until the file is downloaded.
+//
+// Two failure modes drive the shape of this step:
+//   * The hedge-signer persists ITS half at DKG round 2, so a refresh between
+//     the ceremony and the backup used to destroy the curator half for good
+//     (and every retry then 409s). The passphrase is therefore collected
+//     BEFORE the ceremony, and the share is encrypted + cached the instant the
+//     ceremony returns — before any download UI exists.
+//   * Deriving the key takes seconds (PBKDF2, 600k iterations); a programmatic
+//     `a.click()` after that await has lost the browser's transient user
+//     activation and is silently dropped. The download is a real anchor the
+//     curator clicks.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
+import { HedgeSignerError, fetchFrostPubkey } from "../../api/hedgeSigner";
 import { runKeygenCeremony } from "../../frost/ceremony";
 import {
   cacheShare,
-  downloadShareBackup,
+  cachedShare,
+  clearCachedShare,
   encryptShare,
+  shareBackupBlob,
+  shareBackupFilename,
   type ShareBackup,
 } from "../../frost/share";
 import type { UnlockedShare } from "../../state/curatorBluefin";
 import { CeremonyStatus, useCeremony } from "./ceremonyUi";
+import { ShareUnlock } from "./ShareUnlock";
 import { curatorFieldStyle } from "./styles";
 
 type KeygenDraft = {
@@ -22,6 +38,12 @@ type KeygenDraft = {
   groupPublicKeyHex: string;
   parentAddress: string;
 };
+
+/** A ceremony already ran for this vault: either the service says so (409 on
+ * round 1) or this browser still holds the encrypted share from a run that
+ * was interrupted before the backup. Either way the curator must unlock the
+ * existing share, not start a new ceremony. */
+type ResumeState = { parentAddress: string; hasCache: boolean };
 
 export function KeygenCeremony({
   vaultId,
@@ -37,65 +59,126 @@ export function KeygenCeremony({
   const [cache, setCache] = useState(true);
   const [downloaded, setDownloaded] = useState(false);
   const [backup, setBackup] = useState<ShareBackup | null>(null);
+  const [backupUrl, setBackupUrl] = useState<string | null>(null);
+  const [encrypting, setEncrypting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [resume, setResume] = useState<ResumeState | null>(() => {
+    const cached = cachedShare(vaultId);
+    return cached ? { parentAddress: cached.parentAddress, hasCache: true } : null;
+  });
+
+  const passphraseOk = passphrase.length >= 8 && passphrase === confirm;
+
+  // The download anchor's href, minted when the encrypted backup lands.
+  useEffect(() => {
+    if (!backup) return;
+    const url = URL.createObjectURL(shareBackupBlob(backup));
+    setBackupUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [backup]);
 
   const onKeygen = async () => {
-    const outcome = await run(
-      (onProgress) => runKeygenCeremony(vaultId, onProgress),
-      "Key shares generated — back up your share now.",
-    );
-    if (outcome) {
-      setDraft({
-        keyPackageB64: outcome.keyPackageB64,
-        publicKeyPackageB64: outcome.publicKeyPackageB64,
-        groupPublicKeyHex: outcome.groupPublicKeyHex,
-        parentAddress: outcome.parentAddress,
-      });
-    }
-  };
-
-  const onBackup = async () => {
-    if (!draft) return;
     setError(null);
-    if (passphrase.length < 8) {
-      setError("Use a passphrase of at least 8 characters.");
-      return;
-    }
-    if (passphrase !== confirm) {
-      setError("Passphrases do not match.");
-      return;
-    }
+    const outcome = await run(async (onProgress) => {
+      try {
+        return await runKeygenCeremony(vaultId, onProgress);
+      } catch (e) {
+        // The service already holds a share for this vault — a second
+        // ceremony would orphan the parent account, so resume instead.
+        if (e instanceof HedgeSignerError && e.status === 409) {
+          onProgress("Existing key share found — looking up the parent account…");
+          const existing = await fetchFrostPubkey(vaultId);
+          if (!existing) throw e;
+          setResume({
+            parentAddress: existing.suiAddress,
+            hasCache: cachedShare(vaultId) !== null,
+          });
+          return null;
+        }
+        throw e;
+      }
+    }, "Key shares generated — encrypting your backup…");
+    if (!outcome) return;
+
+    setDraft(outcome);
+    setEncrypting(true);
     try {
-      const b = await encryptShare(draft.keyPackageB64, passphrase, {
+      const b = await encryptShare(outcome.keyPackageB64, passphrase, {
         vaultId,
-        parentAddress: draft.parentAddress,
-        groupPublicKeyHex: draft.groupPublicKeyHex,
-        publicKeyPackageB64: draft.publicKeyPackageB64,
+        parentAddress: outcome.parentAddress,
+        groupPublicKeyHex: outcome.groupPublicKeyHex,
+        publicKeyPackageB64: outcome.publicKeyPackageB64,
       });
-      downloadShareBackup(b);
-      if (cache) cacheShare(b);
+      // Cache unconditionally: past this point the service holds its half, so
+      // a refresh must not be able to lose ours. An opt-out is honored at
+      // "Continue to registration".
+      cacheShare(b);
       setBackup(b);
-      setDownloaded(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setEncrypting(false);
     }
   };
 
   const onFinish = () => {
     if (!draft || !downloaded) return;
+    if (!cache) clearCachedShare(vaultId);
     onComplete(
-      {
-        vaultId,
-        keyPackageB64: draft.keyPackageB64,
-        publicKeyPackageB64: draft.publicKeyPackageB64,
-        groupPublicKeyHex: draft.groupPublicKeyHex,
-        parentAddress: draft.parentAddress,
-      },
+      { vaultId, ...draft },
       draft.parentAddress,
       draft.publicKeyPackageB64,
       draft.groupPublicKeyHex,
     );
   };
+
+  if (resume && !draft) {
+    return (
+      <div className="vault-card__body">
+        <div
+          className="status-pill is-info"
+          style={{ display: "block", fontSize: 12, lineHeight: 1.5, padding: "6px 10px", marginBottom: 10 }}
+        >
+          A key ceremony has already run for this vault — the protocol signer
+          holds its half of the parent key. Unlock your existing share to
+          continue; a fresh ceremony would orphan the account below.
+        </div>
+        <div className="vault-kv" style={{ marginBottom: 10 }}>
+          <div className="vault-kv__row">
+            <span>Parent account (Sui address)</span>
+            <span title={resume.parentAddress}>{resume.parentAddress}</span>
+          </div>
+        </div>
+        <button
+          className="vault-invest__tab"
+          style={{ marginBottom: 10 }}
+          onClick={() => void navigator.clipboard.writeText(resume.parentAddress)}
+        >
+          Copy parent address
+        </button>
+        <ShareUnlock
+          vaultId={vaultId}
+          expectedParentAddress={resume.parentAddress}
+          onUnlocked={(share) =>
+            onComplete(share, share.parentAddress, share.publicKeyPackageB64, share.groupPublicKeyHex)
+          }
+        />
+        {!resume.hasCache && (
+          <div
+            className="status-pill is-danger"
+            style={{ display: "block", fontSize: 12, lineHeight: 1.5, padding: "6px 10px", marginTop: 10 }}
+          >
+            ⚠ This browser has no cached share. Load the encrypted backup file
+            you downloaded during the ceremony. If it is gone, the curator half
+            is unrecoverable and the parent account above must be abandoned: an
+            operator has to prune the signer's share
+            (<code>hedge-signer prune-share {vaultId}</code>) before a new key
+            ceremony can run.
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (!draft) {
     return (
@@ -103,11 +186,46 @@ export function KeygenCeremony({
         <div className="vault-prose__muted" style={{ fontSize: 12, marginBottom: 8 }}>
           Generate the vault's Bluefin parent key by a 2-of-2 distributed key
           ceremony with the protocol signer. Your half is created in your
-          browser and never leaves it unencrypted.
+          browser and never leaves it unencrypted. Choose its backup passphrase
+          first — the share is encrypted the moment the ceremony finishes.
         </div>
-        <button className="vault-invest__cta" disabled={busy} onClick={onKeygen}>
+        <input
+          type="password"
+          placeholder="Backup passphrase (min 8 chars)"
+          value={passphrase}
+          onChange={(e) => setPassphrase(e.target.value)}
+          style={{ ...curatorFieldStyle, marginBottom: 8 }}
+        />
+        <input
+          type="password"
+          placeholder="Confirm passphrase"
+          value={confirm}
+          onChange={(e) => setConfirm(e.target.value)}
+          style={{ ...curatorFieldStyle, marginBottom: 8 }}
+        />
+        <label style={{ fontSize: 12, display: "flex", gap: 6, alignItems: "center", marginBottom: 4 }}>
+          <input type="checkbox" checked={cache} onChange={(e) => setCache(e.target.checked)} />
+          Also cache the encrypted share in this browser (unlock per session)
+        </label>
+        <div className="vault-prose__muted" style={{ fontSize: 11, marginBottom: 8 }}>
+          The encrypted share is always cached during the ceremony so a refresh
+          can't lose it; unchecked, it is cleared once you continue to
+          registration.
+        </div>
+        <button
+          className="vault-invest__cta"
+          disabled={busy || !passphraseOk}
+          onClick={onKeygen}
+        >
           {busy ? "Running key ceremony…" : "Start key ceremony"}
         </button>
+        {(passphrase.length > 0 || confirm.length > 0) && !passphraseOk && (
+          <div className="vault-prose__muted" style={{ fontSize: 11, marginTop: 6 }}>
+            {passphrase.length < 8
+              ? "Use a passphrase of at least 8 characters."
+              : "Passphrases do not match."}
+          </div>
+        )}
         <CeremonyStatus state={state} />
       </div>
     );
@@ -138,51 +256,48 @@ export function KeygenCeremony({
         Downloading the encrypted backup is mandatory.
       </div>
 
-      {!downloaded ? (
+      {!backup || !backupUrl ? (
+        <button className="vault-invest__cta" disabled>
+          {encrypting ? "Encrypting backup…" : "Preparing backup…"}
+        </button>
+      ) : (
         <>
-          <input
-            type="password"
-            placeholder="Backup passphrase (min 8 chars)"
-            value={passphrase}
-            onChange={(e) => setPassphrase(e.target.value)}
-            style={{ ...curatorFieldStyle, marginBottom: 8 }}
-          />
-          <input
-            type="password"
-            placeholder="Confirm passphrase"
-            value={confirm}
-            onChange={(e) => setConfirm(e.target.value)}
-            style={{ ...curatorFieldStyle, marginBottom: 8 }}
-          />
-          <label style={{ fontSize: 12, display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
-            <input type="checkbox" checked={cache} onChange={(e) => setCache(e.target.checked)} />
-            Also cache the encrypted share in this browser (unlock per session)
-          </label>
-          <button className="vault-invest__cta" onClick={onBackup}>
-            Download encrypted backup
-          </button>
-          {error && (
-            <div className="status-pill is-danger" style={{ display: "block", marginTop: 8, fontSize: 12 }}>
-              ⚠ {error}
+          <a
+            className="vault-invest__cta"
+            href={backupUrl}
+            download={shareBackupFilename(backup)}
+            onClick={() => setDownloaded(true)}
+            style={{
+              display: "block",
+              boxSizing: "border-box",
+              textAlign: "center",
+              textDecoration: "none",
+              marginBottom: 8,
+            }}
+          >
+            {downloaded ? "Download again" : "Download encrypted backup"}
+          </a>
+          {downloaded ? (
+            <>
+              <div className="status-pill is-success" style={{ display: "block", fontSize: 12, marginBottom: 10 }}>
+                ✓ Backup downloaded{cache ? " and cached in this browser" : ""}. Store it somewhere safe.
+              </div>
+              <button className="vault-invest__cta" onClick={onFinish}>
+                Continue to registration
+              </button>
+            </>
+          ) : (
+            <div className="vault-prose__muted" style={{ fontSize: 12 }}>
+              Download the backup to continue. The encrypted share is already
+              saved in this browser, but a browser cache is not a backup.
             </div>
           )}
         </>
-      ) : (
-        <>
-          <div className="status-pill is-success" style={{ display: "block", fontSize: 12, marginBottom: 10 }}>
-            ✓ Backup downloaded{backup && cache ? " and cached" : ""}. Store it somewhere safe.
-          </div>
-          <button
-            className="vault-invest__tab"
-            style={{ marginBottom: 8 }}
-            onClick={() => backup && downloadShareBackup(backup)}
-          >
-            Download again
-          </button>
-          <button className="vault-invest__cta" onClick={onFinish}>
-            Continue to registration
-          </button>
-        </>
+      )}
+      {error && (
+        <div className="status-pill is-danger" style={{ display: "block", marginTop: 8, fontSize: 12 }}>
+          ⚠ {error}
+        </div>
       )}
     </div>
   );
