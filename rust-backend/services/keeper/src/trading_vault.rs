@@ -18,6 +18,10 @@
 //!      appraisal (sui_tx::tx::appraisal composer) — cash-only vaults
 //!      need no price legs, everything else gets Pyth attestations;
 //!      external-configured vaults get the mandatory equity leg.
+//!   8. When nothing needs fulfilling but the vault holds positions or
+//!      foreign assets, refresh their marks (SO-304): the same composed
+//!      appraisal finished with the permissionless `crank_appraisal`,
+//!      rate-limited per vault.
 //!
 //! Alongside the cranks, a read-only reconciliation monitor
 //! (`hedge-reconciliation` alert) compares each external account's
@@ -98,7 +102,13 @@ pub struct TradingVaultCtx {
     /// phase C): a listed vault's appraisal composes
     /// `dbm_oracle::record{,_no_debt}` instead of `equity_oracle::record`.
     pub dbm: BTreeMap<ObjectID, DbmLegInfo>,
+    /// Per-vault last mark-refresh time (crank 8, SO-304).
+    pub mark_refreshed_at: std::sync::Mutex<BTreeMap<ObjectID, u64>>,
 }
+
+/// Minimum spacing between per-vault mark-refresh cranks (SO-304): the
+/// tick loop runs much faster than fresh marks are worth their gas.
+const MARK_REFRESH_INTERVAL_MS: u64 = 300_000;
 
 /// Indexer view of a vault's external account, threaded into the tick.
 pub struct ExternalView {
@@ -363,8 +373,32 @@ async fn tick_one(
         // Re-discover: the cranks above may have changed holdings.
         let holdings = discover_holdings(client, vault_id).await?;
         fulfill(wrap, http, ctx, vault_id, &holdings, option_buckets).await?;
+    } else if !holdings.is_cash_only() && mark_refresh_due(ctx, vault_id, now_ms) {
+        // Crank 8 (SO-304): nothing to fulfill, but the vault holds
+        // positions / foreign assets — refresh their marks. Cash-only
+        // vaults have nothing to mark and are skipped. Re-discover:
+        // the cranks above may have changed holdings.
+        let holdings = discover_holdings(client, vault_id).await?;
+        if !holdings.is_cash_only() {
+            refresh_marks(wrap, http, ctx, vault_id, &holdings, option_buckets).await?;
+            ctx.mark_refreshed_at
+                .lock()
+                .expect("mark_refreshed_at poisoned")
+                .insert(vault_id, now_ms);
+        }
     }
     Ok(())
+}
+
+fn mark_refresh_due(ctx: &TradingVaultCtx, vault_id: ObjectID, now_ms: u64) -> bool {
+    let last = ctx
+        .mark_refreshed_at
+        .lock()
+        .expect("mark_refreshed_at poisoned")
+        .get(&vault_id)
+        .copied()
+        .unwrap_or(0);
+    now_ms.saturating_sub(last) >= MARK_REFRESH_INTERVAL_MS
 }
 
 fn refs_for(ctx: &TradingVaultCtx, vault_id: ObjectID) -> AppraisalRefs {
@@ -1167,25 +1201,27 @@ async fn post_external_equity(
     }
 }
 
-/// Crank 7: fulfillment with a full appraisal.
-async fn fulfill(
+/// Compose the full attestation-bearing appraisal into `pt` (Pyth legs
+/// resolved through Hermes as needed) and return its Argument. Shared by
+/// the fulfillment crank and the mark-refresh crank.
+async fn compose_full_appraisal(
     wrap: &SuiClientWrapper,
     http: &reqwest::Client,
     ctx: &TradingVaultCtx,
     vault_id: ObjectID,
     holdings: &VaultHoldings,
     option_buckets: &BTreeMap<String, OptionBucketInfo>,
-) -> Result<()> {
+    pt: &mut ProgrammableTransactionBuilder,
+) -> Result<sui_types::transaction::Argument> {
     let client = &wrap.client;
     let refs = refs_for(ctx, vault_id);
-    let mut pt = ProgrammableTransactionBuilder::new();
 
     // Option-coin types price via the options oracle; only the remaining
     // (underlying/settlement/plain) types need pyth feeds — plus the DBM
     // equity leg's base/quote for a dbm-configured vault.
     let needed = pyth_assets_needed(holdings, option_buckets, refs.dbm.as_ref());
-    let appraisal = if needed.is_empty() {
-        compose_appraisal(client, &mut pt, &refs, holdings, None, option_buckets).await?
+    if needed.is_empty() {
+        compose_appraisal(client, pt, &refs, holdings, None, option_buckets).await
     } else {
         let table = ctx
             .price_table
@@ -1220,15 +1256,30 @@ async fn fulfill(
         }
         compose_appraisal(
             client,
-            &mut pt,
+            pt,
             &refs,
             holdings,
             Some(PriceLegs { pyth: &ctx.pyth, accumulator_update: update, price_infos: &price_infos }),
             option_buckets,
         )
-        .await?
-    };
+        .await
+    }
+}
 
+/// Crank 7: fulfillment with a full appraisal.
+async fn fulfill(
+    wrap: &SuiClientWrapper,
+    http: &reqwest::Client,
+    ctx: &TradingVaultCtx,
+    vault_id: ObjectID,
+    holdings: &VaultHoldings,
+    option_buckets: &BTreeMap<String, OptionBucketInfo>,
+) -> Result<()> {
+    let client = &wrap.client;
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let appraisal =
+        compose_full_appraisal(wrap, http, ctx, vault_id, holdings, option_buckets, &mut pt)
+            .await?;
     sui_tx::tx::trading_vault::build_fulfill_withdrawals(
         client,
         &mut pt,
@@ -1245,6 +1296,41 @@ async fn fulfill(
     submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, "trading_vault::fulfill_withdrawals")
         .await?;
     info!(vault = %vault_id, "trading-vault withdrawals fulfilled");
+    Ok(())
+}
+
+/// Crank 8 (SO-304): a periodic mark refresh — the same full appraisal,
+/// finished with the permissionless `crank_appraisal` so the
+/// PositionAppraised / VaultAppraised events publish fresh marks with no
+/// deposit/fulfillment attached.
+async fn refresh_marks(
+    wrap: &SuiClientWrapper,
+    http: &reqwest::Client,
+    ctx: &TradingVaultCtx,
+    vault_id: ObjectID,
+    holdings: &VaultHoldings,
+    option_buckets: &BTreeMap<String, OptionBucketInfo>,
+) -> Result<()> {
+    let client = &wrap.client;
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let appraisal =
+        compose_full_appraisal(wrap, http, ctx, vault_id, holdings, option_buckets, &mut pt)
+            .await?;
+    sui_tx::tx::trading_vault::build_crank_appraisal(
+        client,
+        &mut pt,
+        &sui_tx::tx::trading_vault::TradingVaultRefs {
+            package: ctx.trading_vault_pkg,
+            vault_id,
+            protocol_config_id: ctx.protocol_config_id,
+            deposit_type: &holdings.deposit_type,
+        },
+        appraisal,
+    )
+    .await?;
+    submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, "trading_vault::crank_appraisal")
+        .await?;
+    info!(vault = %vault_id, "trading-vault marks refreshed");
     Ok(())
 }
 
@@ -1474,5 +1560,6 @@ pub async fn build_ctx(
         reconciliation_tolerance_bps: external.reconciliation_tolerance_bps,
         equity_stale_alert_ms: external.equity_stale_alert_ms,
         dbm,
+        mark_refreshed_at: std::sync::Mutex::new(BTreeMap::new()),
     }))
 }

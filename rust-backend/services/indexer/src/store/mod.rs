@@ -288,6 +288,9 @@ pub struct TradingVaultState {
     /// Latest keeper-posted account equity (EquityPosted).
     pub latest_external_equity: Option<u64>,
     pub external_equity_updated_at_ms: Option<u64>,
+    /// NAV from the latest consumed appraisal (TvVaultAppraised, SO-304).
+    pub latest_nav: Option<u128>,
+    pub nav_updated_at_ms: Option<u64>,
 }
 
 /// One adapter position held by a trading vault, keyed by
@@ -299,6 +302,9 @@ pub struct TradingVaultPositionState {
     pub active: bool,
     pub stored_at_ms: u64,
     pub removed_at_ms: Option<u64>,
+    /// Latest appraisal mark, deposit-asset units (TvPositionAppraised).
+    pub last_value: Option<u64>,
+    pub last_appraised_at_ms: Option<u64>,
 }
 
 /// Output of [`Store::stage_batch`]. The `indexed` events carry the assigned
@@ -697,6 +703,8 @@ fn collect_participants(
         | ChainEvent::TvSessionSettled(_)
         | ChainEvent::TvPositionStored(_)
         | ChainEvent::TvPositionRemoved(_)
+        | ChainEvent::TvPositionAppraised(_)
+        | ChainEvent::TvVaultAppraised(_)
         | ChainEvent::TvAdapterAllowed(_)
         | ChainEvent::TvAdapterDisallowed(_)
         | ChainEvent::TvOracleAllowed(_)
@@ -1017,6 +1025,13 @@ fn stage_event_into_batch(
         ChainEvent::TvPositionRemoved(p) => {
             stage_trading_vault(inner, p.vault_id, sequence, batch);
             stage_trading_vault_position(inner, p.vault_id, p.position_id, sequence, batch);
+        }
+        // Per-position marks + consumed-appraisal NAV (SO-304).
+        ChainEvent::TvPositionAppraised(a) => {
+            stage_trading_vault_position(inner, a.vault_id, a.position_id, sequence, batch);
+        }
+        ChainEvent::TvVaultAppraised(a) => {
+            stage_trading_vault(inner, a.vault_id, sequence, batch);
         }
         // External MM accounts + equity oracle (SO-299).
         ChainEvent::TvExternalAccountSet(s) => {
@@ -1391,6 +1406,8 @@ fn trading_vault_row(id: ObjectId, s: &TradingVaultState, sequence: i64) -> Trad
         external_exposure: s.external_exposure as i64,
         latest_external_equity: s.latest_external_equity.map(|v| v as i64),
         external_equity_updated_at_ms: s.external_equity_updated_at_ms.map(|v| v as i64),
+        latest_nav: s.latest_nav.map(u128_to_bigdecimal),
+        nav_updated_at_ms: s.nav_updated_at_ms.map(|v| v as i64),
     }
 }
 
@@ -1408,6 +1425,8 @@ fn trading_vault_position_row(
         stored_at_ms: s.stored_at_ms as i64,
         removed_at_ms: s.removed_at_ms.map(|v| v as i64),
         updated_at_seq: sequence,
+        last_value: s.last_value.map(|v| v as i64),
+        last_appraised_at_ms: s.last_appraised_at_ms.map(|v| v as i64),
     }
 }
 
@@ -1846,6 +1865,8 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                     external_exposure: 0,
                     latest_external_equity: None,
                     external_equity_updated_at_ms: None,
+                    latest_nav: None,
+                    nav_updated_at_ms: None,
                 },
             );
         }
@@ -1920,6 +1941,8 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                     active: true,
                     stored_at_ms: timestamp_ms,
                     removed_at_ms: None,
+                    last_value: None,
+                    last_appraised_at_ms: None,
                 },
             );
         }
@@ -1935,6 +1958,24 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
             {
                 pos.active = false;
                 pos.removed_at_ms = Some(timestamp_ms);
+            }
+        }
+        // ── per-position marks + consumed-appraisal NAV (SO-304) ─────
+        // Last-write-wins fields: replay-safe by construction.
+        ChainEvent::TvPositionAppraised(a) => {
+            if let Some(pos) = inner
+                .trading_vault_positions
+                .get_mut(&(a.vault_id, a.position_id))
+            {
+                pos.last_value = Some(a.value);
+                pos.last_appraised_at_ms = Some(timestamp_ms);
+            }
+        }
+        ChainEvent::TvVaultAppraised(a) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&a.vault_id) {
+                v.latest_nav = Some(a.total_value);
+                v.nav_updated_at_ms = Some(timestamp_ms);
+                v.updated_at_ms = timestamp_ms;
             }
         }
         // ── external MM accounts + equity oracle (SO-299) ────────────
@@ -2786,6 +2827,112 @@ mod tests {
             )
             .unwrap();
         assert!(staged.db_batch.trading_vaults.is_empty());
+        assert_eq!(staged.db_batch.events.len(), 1);
+    }
+
+    #[test]
+    fn trading_vault_appraisal_marks_are_last_write_wins() {
+        use protocol_types::events::{
+            TvPositionAppraised, TvPositionStored, TvVaultAppraised, TvVaultCreated,
+        };
+        let store = Store::default();
+        let vault = ObjectId::new([0xf0; 32]);
+        let position = ObjectId::new([0x99; 32]);
+        let adapter = AssetType::new("9b::deepbook_adapter::DeepBookAdapter");
+
+        store.ingest(
+            ChainEvent::TvVaultCreated(TvVaultCreated {
+                vault_id: vault,
+                creator: SuiAddress::new([0x01; 32]),
+                curator: SuiAddress::new([0x02; 32]),
+                curator_cap_id: ObjectId::new([0x03; 32]),
+                deposit_asset: AssetType::new("9b::tusdc::TUSDC"),
+                lockup_ms: 0,
+                curator_fee_bps: 100,
+                rotation_authority: 0,
+                max_positions: 10,
+                unwind_grace_ms: 0,
+            }),
+            1_000,
+        );
+        store.ingest(
+            ChainEvent::TvPositionStored(TvPositionStored {
+                vault_id: vault,
+                adapter: adapter.clone(),
+                position_id: position,
+            }),
+            2_000,
+        );
+
+        let position_mark = |value: u64| {
+            ChainEvent::TvPositionAppraised(TvPositionAppraised {
+                vault_id: vault,
+                adapter: adapter.clone(),
+                position_id: position,
+                value,
+            })
+        };
+        let nav_mark = |total_value: u128| {
+            ChainEvent::TvVaultAppraised(TvVaultAppraised {
+                vault_id: vault,
+                total_value,
+                position_total: 1,
+            })
+        };
+
+        // First marks land, and the batch stages the touched rows.
+        let staged = store
+            .stage_batch(
+                1,
+                3_000,
+                vec![
+                    (position_mark(1_500_000), "0xd".to_string(), 0),
+                    (nav_mark(2_500_000), "0xd".to_string(), 1),
+                ],
+            )
+            .unwrap();
+        let pos_row = staged.db_batch.trading_vault_positions.last().unwrap();
+        assert_eq!(pos_row.last_value, Some(1_500_000));
+        assert_eq!(pos_row.last_appraised_at_ms, Some(3_000));
+        let vault_row = staged.db_batch.trading_vaults.last().unwrap();
+        assert_eq!(vault_row.latest_nav, Some(u128_to_bigdecimal(2_500_000)));
+        assert_eq!(vault_row.nav_updated_at_ms, Some(3_000));
+
+        // Fresh marks overwrite (last-write-wins; a replay is a no-op).
+        let staged = store
+            .stage_batch(
+                2,
+                4_000,
+                vec![
+                    (position_mark(900_000), "0xd".to_string(), 0),
+                    (nav_mark(1_900_000), "0xd".to_string(), 1),
+                ],
+            )
+            .unwrap();
+        let pos_row = staged.db_batch.trading_vault_positions.last().unwrap();
+        assert_eq!(pos_row.last_value, Some(900_000));
+        assert_eq!(pos_row.last_appraised_at_ms, Some(4_000));
+        let vault_row = staged.db_batch.trading_vaults.last().unwrap();
+        assert_eq!(vault_row.latest_nav, Some(u128_to_bigdecimal(1_900_000)));
+
+        // A mark for an unknown position stages nothing beyond the event.
+        let staged = store
+            .stage_batch(
+                3,
+                5_000,
+                vec![(
+                    ChainEvent::TvPositionAppraised(TvPositionAppraised {
+                        vault_id: vault,
+                        adapter: adapter.clone(),
+                        position_id: ObjectId::new([0xee; 32]),
+                        value: 1,
+                    }),
+                    "0xd".to_string(),
+                    0,
+                )],
+            )
+            .unwrap();
+        assert!(staged.db_batch.trading_vault_positions.is_empty());
         assert_eq!(staged.db_batch.events.len(), 1);
     }
 

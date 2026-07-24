@@ -74,6 +74,10 @@ pub struct TradingVaultDto {
     /// Latest keeper-posted account equity, decimal string.
     pub latest_external_equity: Option<String>,
     pub external_equity_updated_at_ms: Option<String>,
+    /// NAV from the latest consumed appraisal (deposit-asset units,
+    /// decimal string; SO-304). Null before the first appraisal.
+    pub latest_nav_raw: Option<String>,
+    pub nav_updated_at_ms: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -88,6 +92,10 @@ pub struct TradingVaultPositionDto {
     pub active: bool,
     pub stored_at_ms: i64,
     pub removed_at_ms: Option<i64>,
+    /// Latest appraisal mark (deposit-asset units, decimal string;
+    /// SO-304). Null until the position is first appraised.
+    pub last_value_raw: Option<String>,
+    pub last_appraised_at_ms: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -140,6 +148,8 @@ pub async fn get_trading_vault(
                 active: p.active,
                 stored_at_ms: p.stored_at_ms as i64,
                 removed_at_ms: p.removed_at_ms.map(|v| v as i64),
+                last_value_raw: p.last_value.map(|v| v.to_string()),
+                last_appraised_at_ms: p.last_appraised_at_ms.map(|v| v as i64),
             })
             .collect(),
     }))
@@ -318,5 +328,7 @@ fn trading_vault_dto(state: &AppState, v: &TradingVault) -> TradingVaultDto {
         external_exposure: v.external_exposure.to_string(),
         latest_external_equity: v.latest_external_equity.map(|e| e.to_string()),
         external_equity_updated_at_ms: v.external_equity_updated_at_ms.map(|t| t.to_string()),
+        latest_nav_raw: v.latest_nav.map(|n| n.to_string()),
+        nav_updated_at_ms: v.nav_updated_at_ms.map(|t| t as i64),
     }
 }

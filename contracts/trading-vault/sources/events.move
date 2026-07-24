@@ -99,6 +99,24 @@ public struct PositionRemoved has copy, drop {
     position_id: ID,
 }
 
+/// One custodied position's mark (deposit-asset units) recorded into an
+/// appraisal. Only meaningful once the appraisal is CONSUMED in the same
+/// transaction — an aborted appraisal drops its events with the tx.
+public struct PositionAppraised has copy, drop {
+    vault_id: ID,
+    adapter: TypeName,
+    position_id: ID,
+    value: u64,
+}
+
+/// A complete appraisal was consumed: `total_value` is the NAV every
+/// consume path (deposit / fulfillment / release / crank) validated.
+public struct VaultAppraised has copy, drop {
+    vault_id: ID,
+    total_value: u128,
+    position_total: u64,
+}
+
 // ─────────────────────────── external account ───────────────────────────
 
 public struct ExternalAccountSet has copy, drop {
@@ -334,6 +352,29 @@ public(package) fun emit_position_stored(vault_id: ID, adapter: TypeName, positi
 
 public(package) fun emit_position_removed(vault_id: ID, adapter: TypeName, position_id: ID) {
     event::emit(PositionRemoved { vault_id, adapter, position_id });
+}
+
+public(package) fun emit_position_appraised(
+    vault_id: ID,
+    adapter: TypeName,
+    position_id: ID,
+    value: u64,
+) {
+    event::emit(PositionAppraised { vault_id, adapter, position_id, value });
+}
+
+public(package) fun emit_vault_appraised(vault_id: ID, total_value: u128, position_total: u64) {
+    event::emit(VaultAppraised { vault_id, total_value, position_total });
+}
+
+#[test_only]
+public fun position_appraised_fields(e: &PositionAppraised): (ID, TypeName, ID, u64) {
+    (e.vault_id, e.adapter, e.position_id, e.value)
+}
+
+#[test_only]
+public fun vault_appraised_fields(e: &VaultAppraised): (ID, u128, u64) {
+    (e.vault_id, e.total_value, e.position_total)
 }
 
 public(package) fun emit_external_account_set(

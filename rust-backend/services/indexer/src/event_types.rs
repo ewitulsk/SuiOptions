@@ -36,7 +36,8 @@ use protocol_types::events::{
     VaultRoundFinalized, WithdrawCompleted, WithdrawInitiated, WriteExecuted,
     TvVaultCreated, TvVaultClosing, TvVaultClosed, TvDepositsPaused, TvMmReleaseToggled,
     TvCuratorRotated, TvDeposited, TvWithdrawRequested, TvWithdrawFulfilled, TvSessionSettled,
-    TvPositionStored, TvPositionRemoved, TvAdapterAllowed, TvAdapterDisallowed, TvOracleAllowed,
+    TvPositionStored, TvPositionRemoved, TvPositionAppraised, TvVaultAppraised,
+    TvAdapterAllowed, TvAdapterDisallowed, TvOracleAllowed,
     TvOracleDisallowed, TvProtocolConfigUpdated, TvCollateralReleased, TvCustodyCreated,
     TvPoolAllowed, TvPoolDisallowed, TvRfqOpened, TvRfqSettled, TvPositionRedeemed,
     TvMmCoinExercised, TvMmOffsetClosed, TvMmCoinReleased, TvTakerSwapExecuted,
@@ -160,6 +161,9 @@ pub struct EventTypes {
     pub tv_session_settled: String,
     pub tv_position_stored: String,
     pub tv_position_removed: String,
+    // Per-position marks + consumed-appraisal NAV (SO-304).
+    pub tv_position_appraised: String,
+    pub tv_vault_appraised: String,
     pub tv_adapter_allowed: String,
     pub tv_adapter_disallowed: String,
     pub tv_oracle_allowed: String,
@@ -297,6 +301,8 @@ impl EventTypes {
             tv_session_settled: tv("SessionSettled"),
             tv_position_stored: tv("PositionStored"),
             tv_position_removed: tv("PositionRemoved"),
+            tv_position_appraised: tv("PositionAppraised"),
+            tv_vault_appraised: tv("VaultAppraised"),
             tv_adapter_allowed: tv("AdapterAllowed"),
             tv_adapter_disallowed: tv("AdapterDisallowed"),
             tv_oracle_allowed: tv("OracleAllowed"),
@@ -332,7 +338,7 @@ impl EventTypes {
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 95] {
+    pub fn all_strings(&self) -> [&str; 97] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -400,6 +406,8 @@ impl EventTypes {
             &self.tv_session_settled,
             &self.tv_position_stored,
             &self.tv_position_removed,
+            &self.tv_position_appraised,
+            &self.tv_vault_appraised,
             &self.tv_adapter_allowed,
             &self.tv_adapter_disallowed,
             &self.tv_oracle_allowed,
@@ -589,6 +597,10 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(TvPositionStored, TvPositionStored)
     } else if type_str == types.tv_position_removed {
         decode!(TvPositionRemoved, TvPositionRemoved)
+    } else if type_str == types.tv_position_appraised {
+        decode!(TvPositionAppraised, TvPositionAppraised)
+    } else if type_str == types.tv_vault_appraised {
+        decode!(TvVaultAppraised, TvVaultAppraised)
     } else if type_str == types.tv_adapter_allowed {
         decode!(TvAdapterAllowed, TvAdapterAllowed)
     } else if type_str == types.tv_adapter_disallowed {
@@ -1126,6 +1138,34 @@ mod tests {
         match dispatch(&t, &t.tv_bid_placed, &bytes).unwrap() {
             Some(ChainEvent::TvBidPlaced(decoded)) => assert_eq!(decoded, evt),
             other => panic!("expected TvBidPlaced, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_tv_appraisal_events() {
+        let t = types();
+        assert_eq!(t.tv_position_appraised, format!("{TV_PKG}::events::PositionAppraised"));
+        assert_eq!(t.tv_vault_appraised, format!("{TV_PKG}::events::VaultAppraised"));
+        let pos = TvPositionAppraised {
+            vault_id: ObjectId::new([0xf0; 32]),
+            adapter: AssetType::new("9b::deepbook_adapter::DeepBookAdapter"),
+            position_id: ObjectId::new([0x99; 32]),
+            value: 1_500_000,
+        };
+        let bytes = bcs::to_bytes(&pos).unwrap();
+        match dispatch(&t, &t.tv_position_appraised, &bytes).unwrap() {
+            Some(ChainEvent::TvPositionAppraised(decoded)) => assert_eq!(decoded, pos),
+            other => panic!("expected TvPositionAppraised, got {other:?}"),
+        }
+        let nav = TvVaultAppraised {
+            vault_id: ObjectId::new([0xf0; 32]),
+            total_value: 2_500_000_000_000,
+            position_total: 3,
+        };
+        let bytes = bcs::to_bytes(&nav).unwrap();
+        match dispatch(&t, &t.tv_vault_appraised, &bytes).unwrap() {
+            Some(ChainEvent::TvVaultAppraised(decoded)) => assert_eq!(decoded, nav),
+            other => panic!("expected TvVaultAppraised, got {other:?}"),
         }
     }
 

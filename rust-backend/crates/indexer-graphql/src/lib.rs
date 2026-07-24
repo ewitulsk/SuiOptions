@@ -206,6 +206,10 @@ pub struct TradingVault {
     /// Latest keeper-posted account equity (EquityPosted).
     pub latest_external_equity: Option<u64>,
     pub external_equity_updated_at_ms: Option<u64>,
+    /// NAV from the latest consumed appraisal (deposit-asset units,
+    /// SO-304); `None` before the first appraisal.
+    pub latest_nav: Option<u128>,
+    pub nav_updated_at_ms: Option<u64>,
 }
 
 /// One adapter position held by a trading vault (SO-282). Removed positions
@@ -218,6 +222,10 @@ pub struct TradingVaultPosition {
     pub active: bool,
     pub stored_at_ms: u64,
     pub removed_at_ms: Option<u64>,
+    /// Latest appraisal mark, deposit-asset units (SO-304); `None`
+    /// until the position is first appraised.
+    pub last_value: Option<u64>,
+    pub last_appraised_at_ms: Option<u64>,
 }
 
 /// One realized-APY point: annualized pps growth landing at a finalized
@@ -429,7 +437,7 @@ impl IndexerClient {
             state lockupMs curatorFeeBps rotationAuthority maxPositions unwindGraceMs \
             depositsPaused mmReleaseEnabled totalSharesRaw positionCount pendingWithdrawals \
             latestPpsE12Raw updatedAtMs externalAccount externalExposure latestExternalEquity \
-            externalEquityUpdatedAtMs}}";
+            externalEquityUpdatedAtMs latestNavRaw navUpdatedAtMs}}";
         let data: TradingVaultsWrap = self.gql(Q, json!({})).await?;
         data.trading_vaults
             .into_iter()
@@ -444,7 +452,7 @@ impl IndexerClient {
         vault_id: ObjectId,
     ) -> Result<Vec<TradingVaultPosition>> {
         const Q: &str = "query($id:String!){tradingVaultPositions(vaultId:$id){vaultId \
-            positionId adapter active storedAtMs removedAtMs}}";
+            positionId adapter active storedAtMs removedAtMs lastValueRaw lastAppraisedAtMs}}";
         let data: TradingVaultPositionsWrap =
             self.gql(Q, json!({ "id": vault_id.to_hex() })).await?;
         data.trading_vault_positions
@@ -969,6 +977,10 @@ struct TradingVaultJson {
     latest_external_equity: Option<String>,
     #[serde(default)]
     external_equity_updated_at_ms: Option<String>,
+    #[serde(default)]
+    latest_nav_raw: Option<String>,
+    #[serde(default)]
+    nav_updated_at_ms: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -980,6 +992,10 @@ struct TradingVaultPositionJson {
     active: bool,
     stored_at_ms: String,
     removed_at_ms: Option<String>,
+    #[serde(default)]
+    last_value_raw: Option<String>,
+    #[serde(default)]
+    last_appraised_at_ms: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1213,6 +1229,8 @@ impl TryFrom<TradingVaultJson> for TradingVault {
                 .as_deref()
                 .map(parse_u64)
                 .transpose()?,
+            latest_nav: v.latest_nav_raw.as_deref().map(parse_u128).transpose()?,
+            nav_updated_at_ms: v.nav_updated_at_ms.as_deref().map(parse_u64).transpose()?,
         })
     }
 }
@@ -1227,6 +1245,12 @@ impl TryFrom<TradingVaultPositionJson> for TradingVaultPosition {
             active: p.active,
             stored_at_ms: parse_u64(&p.stored_at_ms)?,
             removed_at_ms: p.removed_at_ms.as_deref().map(parse_u64).transpose()?,
+            last_value: p.last_value_raw.as_deref().map(parse_u64).transpose()?,
+            last_appraised_at_ms: p
+                .last_appraised_at_ms
+                .as_deref()
+                .map(parse_u64)
+                .transpose()?,
         })
     }
 }

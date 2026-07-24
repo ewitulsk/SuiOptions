@@ -425,6 +425,8 @@ impl Repo {
                         trading_vaults::latest_external_equity.eq(tv.latest_external_equity),
                         trading_vaults::external_equity_updated_at_ms
                             .eq(tv.external_equity_updated_at_ms),
+                        trading_vaults::latest_nav.eq(&tv.latest_nav),
+                        trading_vaults::nav_updated_at_ms.eq(tv.nav_updated_at_ms),
                     ))
                     .execute(conn)
                     .context("upserting trading_vaults")?;
@@ -442,6 +444,9 @@ impl Repo {
                         trading_vault_positions::active.eq(pos.active),
                         trading_vault_positions::removed_at_ms.eq(pos.removed_at_ms),
                         trading_vault_positions::updated_at_seq.eq(pos.updated_at_seq),
+                        trading_vault_positions::last_value.eq(pos.last_value),
+                        trading_vault_positions::last_appraised_at_ms
+                            .eq(pos.last_appraised_at_ms),
                     ))
                     .execute(conn)
                     .context("upserting trading_vault_positions")?;
