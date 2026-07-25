@@ -175,6 +175,7 @@ async fn main() -> Result<()> {
         previous_token_info,
         previous_deepbook,
         previous_cctp,
+        deployment_manager::trading_vault_init::registrar_pubkey_for_env(&env_key),
         cli.gas_budget,
         cli.skip_init,
     )
@@ -199,6 +200,10 @@ async fn deploy_one(
     previous_token_info: BTreeMap<String, TokenSpec>,
     previous_deepbook: Option<serde_json::Value>,
     previous_cctp: Option<CctpBridgeRecord>,
+    // Ed25519 pubkey of this env's attestation registrar (SO-308), seeded
+    // into the VaultProtocolConfig at activation. `None` leaves the attested
+    // registration path disabled.
+    registrar_pubkey: Option<&str>,
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
@@ -436,6 +441,7 @@ async fn deploy_one(
             equity_oracle_out.package_id,
             dbm_oracle_out.package_id,
             &token_info,
+            registrar_pubkey,
             gas_budget,
         )
         .await
@@ -449,6 +455,7 @@ async fn deploy_one(
             pool_allowlist_id: objects.pool_allowlist_id.to_string(),
             equity_book_id: Some(objects.equity_book_id.to_string()),
             vol_book_id: Some(objects.vol_book_id.to_string()),
+            registrar_pubkey: registrar_pubkey.map(str::to_owned),
             activation_digest,
         })
     };
