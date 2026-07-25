@@ -49,6 +49,10 @@ pub async fn serve(
 pub fn frost_router(state: Arc<FrostState>) -> Router {
     Router::new()
         .route("/frost/pubkey/:vault_id", get(frost_handlers::pubkey))
+        .route(
+            "/frost/registration/:vault_id",
+            get(frost_handlers::registration),
+        )
         .route("/frost/keygen/round1", post(frost_handlers::keygen_round1))
         .route("/frost/keygen/round2", post(frost_handlers::keygen_round2))
         .route("/frost/sign/round1", post(frost_handlers::sign_round1))

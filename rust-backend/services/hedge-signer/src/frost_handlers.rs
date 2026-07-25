@@ -10,6 +10,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use sui_types::base_types::ObjectID;
+use sui_types::crypto::{PublicKey, Signer, SuiSignature};
 use tracing::{error, info};
 
 use crate::audit::{now_ms, AuditEntry};
@@ -66,6 +68,90 @@ pub async fn pubkey(
         vault_id,
         group_public_key_hex: found.0,
         sui_address: found.1.to_string(),
+        scheme: "ed25519".to_string(),
+    }))
+}
+
+// -------------------------------------------------------- registration attest
+
+/// Domain separator of the external-account registration attestation.
+/// `trading_vault::vault::set_external_account_attested` rebuilds the same
+/// message on chain, so these bytes are part of the interface.
+pub const REGISTRATION_DOMAIN: &str = "tv_external_reg_v1";
+
+#[derive(Debug, Serialize)]
+pub struct FrostRegistrationResp {
+    pub vault_id: String,
+    /// The FROST group parent Sui address being attested.
+    pub parent_address: String,
+    /// The service key's raw ed25519 public key (32 bytes, hex, NO scheme
+    /// flag) — what the vault is seeded with as its registrar.
+    pub registrar_pubkey_hex: String,
+    /// Raw ed25519 signature over `message_hex` (64 bytes, hex). Plain
+    /// RFC 8032: no Sui intent, no blake2b prehash, no flag byte.
+    pub signature_hex: String,
+    /// `domain || vault_id(32) || parent_address(32)`, hex.
+    pub message_hex: String,
+    pub domain: String,
+    pub scheme: String,
+}
+
+/// `GET /frost/registration/:vault_id` — an attestation that this service
+/// co-holds the vault's FROST parent address.
+///
+/// Ungated, like keygen: the attestation is inert on chain unless it
+/// verifies against the vault's seeded registrar pubkey, and the service
+/// only ever attests a parent whose share it actually holds.
+pub async fn registration(
+    State(s): State<Arc<FrostState>>,
+    Path(vault_id): Path<String>,
+) -> Result<Json<FrostRegistrationResp>, ApiError> {
+    let vault_bytes = ObjectID::from_hex_literal(&vault_id)
+        .map_err(|e| bad_request(format!("vault_id {vault_id} is not an object id: {e}")))?
+        .into_bytes();
+    let parent = s
+        .ceremonies
+        .store
+        .get(&vault_id, |share| {
+            group_sui_address(&share.public_key_package)
+        })
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("vault {vault_id} has no FROST share"),
+            )
+        })?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let PublicKey::Ed25519(registrar_pk) = s.registrar.public() else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "service signing key is not ed25519; registration attestations cannot be verified \
+             on chain"
+                .to_string(),
+        ));
+    };
+
+    let mut message = Vec::with_capacity(REGISTRATION_DOMAIN.len() + 64);
+    message.extend_from_slice(REGISTRATION_DOMAIN.as_bytes());
+    message.extend_from_slice(&vault_bytes);
+    message.extend_from_slice(&parent.to_inner());
+    // `Signer::sign` on an ed25519 SuiKeyPair is plain ed25519 over these
+    // exact bytes; the flag + pubkey the Sui wrapper appends are dropped.
+    let signature = Signer::sign(s.registrar.as_ref(), &message);
+
+    info!(
+        vault = %vault_id,
+        parent = %parent,
+        "issued external-account registration attestation"
+    );
+    Ok(Json(FrostRegistrationResp {
+        vault_id,
+        parent_address: parent.to_string(),
+        registrar_pubkey_hex: hex::encode(registrar_pk.0),
+        signature_hex: hex::encode(signature.signature_bytes()),
+        message_hex: hex::encode(&message),
+        domain: REGISTRATION_DOMAIN.to_string(),
         scheme: "ed25519".to_string(),
     }))
 }

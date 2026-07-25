@@ -87,6 +87,7 @@ async fn main() -> Result<()> {
         audit: audit.clone(),
         ceremonies: Ceremonies::new(share_store),
         chain,
+        registrar: Arc::new(sui.signer.keypair.copy()),
     });
     let state = Arc::new(AppState { sui, vaults, audit });
     let proxy = Arc::new(hedge_signer::bluefin_proxy::BluefinProxy::new(

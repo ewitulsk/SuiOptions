@@ -27,6 +27,9 @@
 //!   the service signature over it.
 //! - `GET /frost/pubkey/:vault_id` — the vault's group ed25519 key + parent
 //!   Sui address.
+//! - `GET /frost/registration/:vault_id` — ed25519 attestation, signed by
+//!   the service key, that the vault's FROST parent address is co-held here
+//!   (input to `vault::set_external_account_attested`).
 //! - `POST /frost/keygen/round1|round2` — per-vault DKG (curator ↔ service),
 //!   open to any live vault that has no external account registered yet
 //!   ([`chain`]); the per-vault config gates SIGNING only.
