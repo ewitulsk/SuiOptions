@@ -53,6 +53,9 @@ export function TradingVaultPpsChart({ points, loading, symbol }: Props) {
         attributionLogo: false,
       },
       grid: { vertLines: { color: grid }, horzLines: { color: grid } },
+      // A vertical touch drag scrolls the page, not the chart's price scale —
+      // otherwise the chart traps the scroll on mobile.
+      handleScroll: { vertTouchDrag: false },
       rightPriceScale: { borderVisible: false },
       timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
     });

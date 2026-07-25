@@ -235,6 +235,7 @@ function ReleaseControl({
       <button className="vault-invest__cta" disabled={disabled} onClick={onRelease} title={title}>
         {actions.busy ? `${actions.busy}…` : `Release ${symbol} to external account`}
       </button>
+      {title && <div className="vault-card__foot vault-prose__muted">{title}</div>}
     </div>
   );
 }

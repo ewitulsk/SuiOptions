@@ -209,7 +209,7 @@ function AccountSummary({ acct }: { acct: BluefinAccount | null }) {
             <span>Size · Entry · uPnL</span>
           </div>
           {acct.positions!.map((p) => (
-            <div className="vault-kv__row" key={p.symbol + p.side}>
+            <div className="vault-kv__row vault-kv__row--wrap" key={p.symbol + p.side}>
               <span>
                 {p.symbol} {p.side}
               </span>
@@ -344,7 +344,7 @@ function OpenOrders({
       {orders.length === 0 ? (
         <div className="vault-prose__muted" style={{ fontSize: 12 }}>No open orders.</div>
       ) : (
-        <div className="vault-table">
+        <div className="vault-table vault-table--cards">
           <div className="vault-table__scroll">
             <div className="vault-table__head" style={{ gridTemplateColumns: "1fr 0.7fr 1fr 1fr 0.6fr" }}>
               <span>Market</span>
@@ -355,10 +355,10 @@ function OpenOrders({
             </div>
             {orders.map((o) => (
               <div className="vault-table__row" style={{ gridTemplateColumns: "1fr 0.7fr 1fr 1fr 0.6fr" }} key={o.orderHash}>
-                <span>{o.symbol}</span>
-                <span>{o.side}</span>
-                <span>{fmt(fromE9(o.priceE9))}</span>
-                <span>{fmt(fromE9(o.quantityE9), 4)}</span>
+                <span data-label="Market">{o.symbol}</span>
+                <span data-label="Side">{o.side}</span>
+                <span data-label="Price">{fmt(fromE9(o.priceE9))}</span>
+                <span data-label="Size">{fmt(fromE9(o.quantityE9), 4)}</span>
                 <button className="vault-invest__tab" disabled={busy} onClick={() => onCancel(o.symbol, o.orderHash)}>
                   Cancel
                 </button>
@@ -380,7 +380,7 @@ function RecentFills({ trades }: { trades: BluefinTrade[] }) {
       {trades.length === 0 ? (
         <div className="vault-prose__muted" style={{ fontSize: 12 }}>No recent fills.</div>
       ) : (
-        <div className="vault-table">
+        <div className="vault-table vault-table--cards">
           <div className="vault-table__scroll">
             <div className="vault-table__head" style={{ gridTemplateColumns: "1fr 0.7fr 1fr 1fr" }}>
               <span>Market</span>
@@ -390,10 +390,10 @@ function RecentFills({ trades }: { trades: BluefinTrade[] }) {
             </div>
             {trades.slice(0, 15).map((t, i) => (
               <div className="vault-table__row" style={{ gridTemplateColumns: "1fr 0.7fr 1fr 1fr" }} key={i}>
-                <span>{t.symbol}</span>
-                <span>{t.side ?? t.positionSide ?? "—"}</span>
-                <span>{fmt(fromE9(t.priceE9))}</span>
-                <span>{fmt(fromE9(t.quantityE9), 4)}</span>
+                <span data-label="Market">{t.symbol}</span>
+                <span data-label="Side">{t.side ?? t.positionSide ?? "—"}</span>
+                <span data-label="Price">{fmt(fromE9(t.priceE9))}</span>
+                <span data-label="Size">{fmt(fromE9(t.quantityE9), 4)}</span>
               </div>
             ))}
           </div>

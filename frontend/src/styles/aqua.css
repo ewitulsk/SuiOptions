@@ -2465,6 +2465,22 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
   display: flex; justify-content: space-between; font-size: 13px; color: var(--aqua-ink-2);
 }
 [data-theme="aqua"] .vault-kv__row span:first-child { color: var(--aqua-ink-3); }
+/* Rows whose value is several fields packed together: let the value drop to
+   its own line instead of overflowing a narrow card. */
+[data-theme="aqua"] .vault-kv__row--wrap { flex-wrap: wrap; gap: 2px 10px; }
+[data-theme="aqua"] .vault-kv__row--wrap span:last-child { min-width: 0; overflow-wrap: anywhere; }
+
+/* Tap-to-copy id chip: the short form is the button, the full value is one
+   tap away on touch (where `title=` never fires). */
+[data-theme="aqua"] .addr {
+  display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0;
+}
+[data-theme="aqua"] .addr__btn {
+  border: none; background: transparent; padding: 4px 0; margin: -4px 0;
+  color: inherit; font-size: inherit; cursor: pointer;
+  text-decoration: underline dotted; text-underline-offset: 3px;
+}
+[data-theme="aqua"] .addr__full { user-select: all; color: var(--aqua-ink-3); font-size: 11px; }
 
 [data-theme="aqua"] .vault-table { display: flex; flex-direction: column; font-size: 13px; }
 [data-theme="aqua"] .vault-table__head, [data-theme="aqua"] .vault-table__row {
@@ -2654,6 +2670,26 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
   /* .vault-table gets overflow-x above; drop the inner vertical scroller so
      a phone isn't stuck dragging one scroll container inside another. */
   [data-theme="aqua"] .vault-table__scroll { max-height: none; overflow: visible; }
+
+  /* Order/fill tables become one card per row: the column head disappears and
+     each cell prints its own label, so nothing has to be scrolled sideways to
+     be read and the Cancel button gets a full-width 44px target. The grid
+     template each row carries inline is inert once the row is a block. */
+  [data-theme="aqua"] .vault-table--cards .vault-table__head { display: none; }
+  [data-theme="aqua"] .vault-table--cards .vault-table__row {
+    display: block; min-width: 0; padding: 10px 12px; margin-bottom: 8px;
+    border: 1px solid var(--aqua-line); border-radius: 10px;
+  }
+  [data-theme="aqua"] .vault-table--cards .vault-table__row > span {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 3px 0;
+  }
+  [data-theme="aqua"] .vault-table--cards .vault-table__row > span::before {
+    content: attr(data-label);
+    color: var(--aqua-ink-3); font-size: 11px; text-transform: uppercase; letter-spacing: .03em;
+  }
+  [data-theme="aqua"] .vault-table--cards .vault-table__row > button {
+    width: 100%; min-height: 44px; margin-top: 8px;
+  }
 }
 
 @media (max-width: 480px) {

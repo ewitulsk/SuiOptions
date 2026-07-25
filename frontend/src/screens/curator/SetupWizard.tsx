@@ -21,6 +21,7 @@ import type { TradingVaultDetail } from "../../api/tradingVaults";
 import { fetchTradingVault } from "../../api/tradingVaults";
 import { fetchRegistrationAttestation } from "../../api/hedgeSigner";
 import { useVaultProtocolConfigId } from "../../api/useTradingVaults";
+import { useCopy } from "../../components/Address";
 import { buildSetExternalAccountAttestedTx } from "../../tx/tradingVault";
 import { useSubmitTransaction } from "../../tx/submit";
 import {
@@ -179,6 +180,7 @@ function RegisterStep({
   const submitTx = useSubmitTransaction();
   const cfgQ = useVaultProtocolConfigId();
   const { state, run, busy } = useCeremony();
+  const { state: copyState, copy } = useCopy();
   const [polling, setPolling] = useState(false);
   const [matched, setMatched] = useState(false);
   const [budgetBps, setBudgetBps] = useState("2000");
@@ -244,11 +246,29 @@ function RegisterStep({
         /* keep polling */
       }
     };
-    const h = setInterval(tick, 4000);
-    void tick();
+    // Don't poll a backgrounded tab — mobile browsers throttle it anyway and
+    // it drains the battery for nothing. Resume (with an immediate tick) when
+    // the tab comes back.
+    let h: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      if (h != null) clearInterval(h);
+      h = null;
+    };
+    const start = () => {
+      if (h != null) return;
+      h = setInterval(tick, 4000);
+      void tick();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") stop();
+      else start();
+    };
+    onVisibility();
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       alive = false;
-      clearInterval(h);
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [polling, vault.vaultId, parentAddress]);
 
@@ -306,8 +326,12 @@ function RegisterStep({
           {recipe}
         </pre>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          <button className="vault-invest__tab" onClick={() => void navigator.clipboard.writeText(recipe)}>
-            Copy invocation
+          <button className="vault-invest__tab" onClick={() => copy(recipe)}>
+            {copyState === "copied"
+              ? "Copied ✓"
+              : copyState === "failed"
+                ? "Copy failed — select above"
+                : "Copy invocation"}
           </button>
           <button className="vault-invest__tab" disabled={polling} onClick={() => setPolling(true)}>
             {polling ? "Waiting…" : "Poll for registration"}

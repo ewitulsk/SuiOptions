@@ -32,6 +32,7 @@ import { useVaultHoldings, type VaultHolding } from "../api/vaultHoldings";
 import { useTradingVaultActions } from "../state/tradingVault";
 import { useCoinBalance } from "../api/useCoinBalance";
 import { DEEPBOOK_ADAPTER_PACKAGE_ID, TRADING_VAULT_PACKAGE_ID } from "../config";
+import { Address } from "../components/Address";
 import { TokenLogo } from "../components/TokenLogo";
 import { TradingVaultPpsChart } from "../components/TradingVaultPpsChart";
 import { Toast } from "../components/Toast";
@@ -196,11 +197,11 @@ function TermsCard({ vault, symbol }: { vault: TradingVaultDetailDto; symbol: st
       <div className="vault-kv">
         <div className="vault-kv__row">
           <span>Curator</span>
-          <span title={vault.curator}>{shortHex(vault.curator)}</span>
+          <Address value={vault.curator} label="Curator" />
         </div>
         <div className="vault-kv__row">
           <span>Creator</span>
-          <span title={vault.creator}>{shortHex(vault.creator)}</span>
+          <Address value={vault.creator} label="Creator" />
         </div>
         <div className="vault-kv__row">
           <span>Curator fee</span>
@@ -257,7 +258,7 @@ function ExternalAccountCard({
       <div className="vault-kv">
         <div className="vault-kv__row">
           <span>Account</span>
-          <span title={vault.externalAccount}>{shortHex(vault.externalAccount)}</span>
+          <Address value={vault.externalAccount} label="External account" />
         </div>
         <div className="vault-kv__row">
           <span>Outstanding exposure</span>
@@ -508,6 +509,7 @@ function SpotPanel({
       >
         {actions.busy ? `${actions.busy}…` : `Swap ${inSym} → ${outSym}`}
       </button>
+      {title && <div className="vault-card__foot vault-prose__muted">{title}</div>}
     </>
   );
 }
@@ -993,11 +995,18 @@ function UserPanel({
             : "Request withdrawal"}
       </button>
 
-      {tab === "deposit" && appraisalBlocked && planError && (
+      {tab === "deposit" && appraisalBlocked && planError ? (
         <div className="vault-card__foot vault-prose__muted">
           Deposits are blocked until the vault's holdings can be appraised:{" "}
           {planError}. Withdrawal requests still work.
         </div>
+      ) : (
+        // Why the CTA is dead, in the open — the title attribute never fires
+        // on touch.
+        depositDisabled &&
+        depositTitle && (
+          <div className="vault-card__foot vault-prose__muted">{depositTitle}</div>
+        )
       )}
 
       {tab === "withdraw" && preview && (
