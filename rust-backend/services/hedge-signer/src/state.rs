@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use sui_tx::SuiClientWrapper;
+use sui_types::crypto::SuiKeyPair;
 
 use crate::audit::AuditLog;
 use crate::chain::VaultResolver;
@@ -35,4 +36,9 @@ pub struct FrostState {
     pub ceremonies: Ceremonies,
     /// On-chain vault validation behind the keygen gate.
     pub chain: Arc<dyn VaultResolver>,
+    /// The service's `[sui]` key (same one [`AppState::sui`] signs with),
+    /// used ONLY to attest FROST parent addresses for
+    /// `/frost/registration/:vault_id`. Must be ed25519: the Move verifier
+    /// calls `sui::ed25519::ed25519_verify` on the raw signature.
+    pub registrar: Arc<SuiKeyPair>,
 }

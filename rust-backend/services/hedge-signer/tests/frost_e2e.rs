@@ -39,6 +39,14 @@ fn b64d(s: &str) -> Vec<u8> {
     base64::engine::general_purpose::STANDARD.decode(s).unwrap()
 }
 
+/// The service's `[sui]` key, stood up deterministically: flag 0x00
+/// (ed25519) || 32 seed bytes.
+fn registrar_keypair() -> sui_types::crypto::SuiKeyPair {
+    let mut bytes = vec![0x00u8];
+    bytes.extend_from_slice(&[7u8; 32]);
+    sui_types::crypto::SuiKeyPair::from_bytes(&bytes).unwrap()
+}
+
 /// Stands in for the Sui RPC behind the keygen gate.
 struct FakeChain(Result<VaultLookup, String>);
 
@@ -103,6 +111,7 @@ fn test_env_with_chain(name: &str, chain: Arc<dyn VaultResolver>) -> TestEnv {
         audit: Arc::new(AuditLog::open(&audit_path).unwrap()),
         ceremonies: Ceremonies::new(ShareStore::open(&shares_path).unwrap()),
         chain,
+        registrar: Arc::new(registrar_keypair()),
     });
     TestEnv {
         state,
@@ -393,6 +402,78 @@ async fn tampered_signing_package_message_is_refused() {
     .expect_err("message swap must be refused");
     assert_eq!(err.0, StatusCode::FORBIDDEN);
     assert!(err.1.contains("not the policy-approved digest"), "{}", err.1);
+}
+
+// ------------------------------------------------ external-account attestation
+
+#[tokio::test]
+async fn registration_attestation_is_plain_ed25519_over_domain_vault_parent() {
+    let env = test_env("registration");
+    let state = &env.state;
+    let (_, _, _, parent) = run_keygen(state).await;
+
+    let Json(reg) = frost_handlers::registration(State(state.clone()), Path(VAULT_ID.to_string()))
+        .await
+        .expect("registration");
+    assert_eq!(reg.vault_id, VAULT_ID);
+    assert_eq!(reg.parent_address, parent);
+    assert_eq!(reg.domain, "tv_external_reg_v1");
+    assert_eq!(reg.scheme, "ed25519");
+
+    // Message layout, byte for byte.
+    let message = hex::decode(&reg.message_hex).unwrap();
+    let mut expected = b"tv_external_reg_v1".to_vec();
+    expected.extend_from_slice(
+        &sui_types::base_types::ObjectID::from_hex_literal(VAULT_ID)
+            .unwrap()
+            .into_bytes(),
+    );
+    expected.extend_from_slice(
+        &sui_types::base_types::SuiAddress::from_str(&parent)
+            .unwrap()
+            .to_inner(),
+    );
+    assert_eq!(message, expected);
+    assert_eq!(message.len(), 18 + 32 + 32);
+
+    // The signature is PURE ed25519 under the registrar pubkey: no intent,
+    // no blake2b prehash, no flag byte — exactly what
+    // `sui::ed25519::ed25519_verify` does on chain.
+    assert_eq!(reg.registrar_pubkey_hex.len(), 64);
+    assert_eq!(reg.signature_hex.len(), 128);
+    let pk_bytes: [u8; 32] = hex::decode(&reg.registrar_pubkey_hex)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let sig_bytes: [u8; 64] = hex::decode(&reg.signature_hex).unwrap().try_into().unwrap();
+    ed25519_dalek::VerifyingKey::from_bytes(&pk_bytes)
+        .unwrap()
+        .verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig_bytes))
+        .expect("attestation must be plain ed25519 under the registrar pubkey");
+
+    // …and it is the service's own key, not some other one.
+    assert_eq!(
+        reg.registrar_pubkey_hex,
+        hex::encode(registrar_keypair().public().as_ref())
+    );
+}
+
+#[tokio::test]
+async fn registration_is_404_without_a_share_and_400_when_malformed() {
+    let env = test_env("registration-errors");
+    let state = &env.state;
+
+    let err = frost_handlers::registration(State(state.clone()), Path(VAULT_ID.to_string()))
+        .await
+        .expect_err("a vault with no share cannot be attested");
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
+    assert!(err.1.contains("has no FROST share"), "{}", err.1);
+
+    let err = frost_handlers::registration(State(state.clone()), Path("not-an-id".to_string()))
+        .await
+        .expect_err("a malformed vault id must be rejected");
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    assert!(err.1.contains("not an object id"), "{}", err.1);
 }
 
 // ----------------------------------------------------- keygen on-chain gate
