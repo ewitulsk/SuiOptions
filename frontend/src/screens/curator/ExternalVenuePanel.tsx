@@ -182,8 +182,8 @@ function ReleaseControl({
   if (vault.externalAccount == null) {
     return (
       <div className="vault-card__body vault-prose__muted" id="release-control">
-        No external account is registered yet. Complete the setup wizard below;
-        registration (set_external_account) is an admin act.
+        No external account is registered yet. Complete the setup wizard below —
+        the register step submits it from your wallet.
       </div>
     );
   }

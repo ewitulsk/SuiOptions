@@ -6,11 +6,14 @@
 // single deposit-asset type arg `<T>` where the signature is generic;
 // `request_withdraw` takes none (shares is a plain u128).
 
+import { bcs } from "@mysten/sui/bcs";
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
+import { fromHex, normalizeStructTag } from "@mysten/sui/utils";
 
 import {
   DEEPBOOK_ADAPTER_PACKAGE_ID,
   ENV,
+  EQUITY_ORACLE_PACKAGE_ID,
   TRADING_VAULT_OBJECTS,
   TRADING_VAULT_PACKAGE_ID,
 } from "../config";
@@ -123,6 +126,63 @@ export function buildTradingVaultWithdrawTx(p: TradingVaultWithdrawParams): Tran
       tx.object(p.vaultId),
       tx.pure.u128(p.sharesRaw),
       tx.object(CLOCK_ID),
+    ],
+  });
+  return tx;
+}
+
+export type SetExternalAccountAttestedParams = {
+  vaultId: string;
+  /** The curator's owned `CuratorCap` object id. */
+  curatorCapId: string;
+  /** Shared `VaultProtocolConfig` object id. */
+  protocolConfigId: string;
+  /** The FROST parent address being registered as the external account. */
+  account: string;
+  budgetBps: number;
+  dailyReleaseBps: number;
+  /** Raw 64-byte ed25519 registrar signature, hex (hedge-signer). */
+  attestationHex: string;
+};
+
+/**
+ * `vault::set_external_account_attested` (SO-308) — the curator registers
+ * their own FROST parent address against a registrar attestation, instead
+ * of handing an admin a `set_external_account` invocation. Budgets are
+ * capped on-chain (2000 / 1000 bps); above that it stays an admin act.
+ *
+ * `equity_oracle` is a `TypeName` pure argument: BCS-identical to an ascii
+ * string, holding the CANONICAL type (address padded, no `0x`) — the same
+ * form `type_name::with_defining_ids` produced when the deploy allowlisted
+ * the witness.
+ *
+ * Curator ops are NOT gas-sponsored — submit wallet-paid.
+ */
+export function buildSetExternalAccountAttestedTx(
+  p: SetExternalAccountAttestedParams,
+): Transaction {
+  const pkg = requirePackage();
+  const gov = TRADING_VAULT_OBJECTS;
+  if (!gov) throw new Error("trading-vault governance objects not served by token-info");
+  if (!EQUITY_ORACLE_PACKAGE_ID) {
+    throw new Error("equity-oracle package not deployed on this network");
+  }
+  const equityOracle = normalizeStructTag(
+    `${EQUITY_ORACLE_PACKAGE_ID}::equity_oracle::EquityOracle`,
+  ).replace(/^0x/, "");
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${pkg}::vault::set_external_account_attested`,
+    arguments: [
+      tx.object(p.curatorCapId),
+      tx.object(p.vaultId),
+      tx.object(p.protocolConfigId),
+      tx.object(gov.oracleRegistryId),
+      tx.pure.address(p.account),
+      tx.pure(bcs.string().serialize(equityOracle)),
+      tx.pure.u64(p.budgetBps),
+      tx.pure.u64(p.dailyReleaseBps),
+      tx.pure(bcs.vector(bcs.u8()).serialize(fromHex(p.attestationHex))),
     ],
   });
   return tx;

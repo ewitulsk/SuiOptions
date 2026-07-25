@@ -58,6 +58,38 @@ export async function fetchFrostPubkey(vaultId: string): Promise<{
   };
 }
 
+/** The registrar's attestation over this vault's FROST parent address
+ * (SO-308): what `vault::set_external_account_attested` verifies so the
+ * curator can register the account themselves, capped, without an admin.
+ * 404 = no share for this vault yet (keygen hasn't run). */
+export async function fetchRegistrationAttestation(vaultId: string): Promise<{
+  parentAddress: string;
+  /** Raw 64-byte ed25519 signature, hex — the `attestation` argument. */
+  signatureHex: string;
+}> {
+  const res = await fetch(
+    `${HEDGE_SIGNER_URL}/frost/registration/${encodeURIComponent(vaultId)}`,
+  );
+  if (res.status === 404) {
+    throw new HedgeSignerError(
+      404,
+      "The signer holds no key share for this vault — complete the key ceremony first.",
+    );
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    throw new HedgeSignerError(
+      res.status,
+      `hedge-signer /frost/registration: ${res.status} ${text || res.statusText}`,
+    );
+  }
+  const body = (await res.json()) as {
+    parent_address: string;
+    signature_hex: string;
+  };
+  return { parentAddress: body.parent_address, signatureHex: body.signature_hex };
+}
+
 export async function keygenRound1(
   vaultId: string,
   curatorRound1B64: string,

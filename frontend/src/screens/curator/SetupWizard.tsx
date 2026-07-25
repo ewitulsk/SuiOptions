@@ -2,7 +2,8 @@
 // a vault's Bluefin parent account, from key ceremony to an authorized
 // trading wallet. Steps:
 //   a. keygen         — DKG → parent Sui address (+ mandatory share backup)
-//   b. register       — admin set_external_account (rendered CLI + polled)
+//   b. register       — curator-submitted set_external_account_attested
+//                       (SO-308), admin CLI kept as a fallback
 //   c. fund           — release_external (existing wallet flow)
 //   d. deposit        — co-signed deposit_to_asset_bank from the parent
 //   e. authorize      — co-signed login + authorize_account of the curator
@@ -18,6 +19,10 @@ import {
 } from "../../config";
 import type { TradingVaultDetail } from "../../api/tradingVaults";
 import { fetchTradingVault } from "../../api/tradingVaults";
+import { fetchRegistrationAttestation } from "../../api/hedgeSigner";
+import { useVaultProtocolConfigId } from "../../api/useTradingVaults";
+import { buildSetExternalAccountAttestedTx } from "../../tx/tradingVault";
+import { useSubmitTransaction } from "../../tx/submit";
 import {
   WIZARD_STEPS,
   useCuratorBluefin,
@@ -25,6 +30,7 @@ import {
   type WizardStep,
 } from "../../state/curatorBluefin";
 import { KeygenCeremony } from "./KeygenCeremony";
+import { CeremonyStatus, useCeremony } from "./ceremonyUi";
 import { DepositStep, AuthorizeStep } from "./SetupCeremonies";
 import { ShareUnlock } from "./ShareUnlock";
 import { curatorFieldStyle } from "./styles";
@@ -157,8 +163,10 @@ function UnlockedGate({
   );
 }
 
-/** Step b: set_external_account is AdminCap-gated, so render the exact admin
- * invocation and poll the vault until its external account is the parent. */
+/** Step b: the curator registers their own parent address with
+ * `set_external_account_attested` — the hedge-signer attests that it holds
+ * the vault's key share, the chain caps the budgets. The old AdminCap
+ * recipe stays as a fallback for budgets above the cap. */
 function RegisterStep({
   vault,
   parentAddress,
@@ -168,6 +176,9 @@ function RegisterStep({
   parentAddress: string;
   onRegistered: () => void;
 }) {
+  const submitTx = useSubmitTransaction();
+  const cfgQ = useVaultProtocolConfigId();
+  const { state, run, busy } = useCeremony();
   const [polling, setPolling] = useState(false);
   const [matched, setMatched] = useState(false);
   const [budgetBps, setBudgetBps] = useState("2000");
@@ -185,9 +196,35 @@ function RegisterStep({
     `sui client call \\\n` +
     `  --package ${pkg} \\\n` +
     `  --module vault --function set_external_account \\\n` +
-    `  --type-args '${vault.depositAsset}' \\\n` +
     `  --args <ADMIN_CAP> ${vault.vaultId} ${oracleRegistry} \\\n` +
     `         ${parentAddress} '${witnessType}' ${budgetBps} ${dailyBps}`;
+
+  const cfgId = cfgQ.data ?? null;
+  const onRegister = () =>
+    void run(async (onProgress) => {
+      onProgress("Fetching registrar attestation…");
+      const att = await fetchRegistrationAttestation(vault.vaultId);
+      if (normalizeSuiAddress(att.parentAddress) !== normalizeSuiAddress(parentAddress)) {
+        throw new Error(
+          `the signer attested ${att.parentAddress}, not this vault's parent address`,
+        );
+      }
+      if (!cfgId) throw new Error("protocol config unavailable");
+      onProgress("Submitting registration…");
+      await submitTx(
+        buildSetExternalAccountAttestedTx({
+          vaultId: vault.vaultId,
+          curatorCapId: vault.curatorCapId,
+          protocolConfigId: cfgId,
+          account: att.parentAddress,
+          budgetBps: Number(budgetBps),
+          dailyReleaseBps: Number(dailyBps),
+          attestationHex: att.signatureHex,
+        }),
+        { sponsor: false },
+      );
+      setPolling(true);
+    }, "Registration submitted — confirming on-chain…");
 
   useEffect(() => {
     if (!polling) return;
@@ -218,11 +255,11 @@ function RegisterStep({
   return (
     <div>
       <div className="vault-prose__muted" style={{ fontSize: 12, marginBottom: 8 }}>
-        Registration binds the parent address on-chain. Like allowlisting an
-        adapter, it is an admin act — hand this invocation to an AdminCap
-        holder, then poll until it lands.
+        Registration binds the parent address on-chain. The signer attests
+        that it holds this vault's key share; you submit the registration
+        yourself from the curator wallet (you pay the gas).
       </div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
         <label style={{ fontSize: 11, opacity: 0.8, flex: 1 }}>
           Budget (bps of NAV)
           <input style={curatorFieldStyle} value={budgetBps} onChange={(e) => setBudgetBps(e.target.value)} />
@@ -232,17 +269,10 @@ function RegisterStep({
           <input style={curatorFieldStyle} value={dailyBps} onChange={(e) => setDailyBps(e.target.value)} />
         </label>
       </div>
-      <pre
-        style={{
-          margin: "0 0 8px", padding: 8, fontSize: 11, lineHeight: 1.5, borderRadius: 6,
-          border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))", overflowX: "auto",
-        }}
-      >
-        {recipe}
-      </pre>
-      <button className="vault-invest__tab" style={{ marginBottom: 8 }} onClick={() => void navigator.clipboard.writeText(recipe)}>
-        Copy invocation
-      </button>
+      <div className="vault-prose__muted" style={{ fontSize: 11, marginBottom: 8 }}>
+        Self-serve registration is capped at 20% / 10% — higher limits require
+        an admin.
+      </div>
       {matched ? (
         <>
           <div className="status-pill is-success" style={{ display: "block", fontSize: 12, marginBottom: 8 }}>
@@ -253,10 +283,40 @@ function RegisterStep({
           </button>
         </>
       ) : (
-        <button className="vault-invest__cta" disabled={polling} onClick={() => setPolling(true)}>
-          {polling ? "Waiting for admin registration…" : "Poll for registration"}
+        <button
+          className="vault-invest__cta"
+          disabled={busy || polling || !cfgId}
+          onClick={onRegister}
+        >
+          {polling ? "Confirming registration…" : "Register external account"}
         </button>
       )}
+      <CeremonyStatus state={state} />
+      <details style={{ marginTop: 10 }}>
+        <summary className="vault-prose__muted" style={{ fontSize: 11, cursor: "pointer" }}>
+          Admin invocation (budgets above the cap, or when the attested path is
+          disabled on this deployment)
+        </summary>
+        <pre
+          style={{
+            margin: "8px 0", padding: 8, fontSize: 11, lineHeight: 1.5, borderRadius: 6,
+            border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))", overflowX: "auto",
+          }}
+        >
+          {recipe}
+        </pre>
+        <button className="vault-invest__tab" onClick={() => void navigator.clipboard.writeText(recipe)}>
+          Copy invocation
+        </button>
+        <button
+          className="vault-invest__tab"
+          style={{ marginLeft: 8 }}
+          disabled={polling}
+          onClick={() => setPolling(true)}
+        >
+          {polling ? "Waiting…" : "Poll for registration"}
+        </button>
+      </details>
     </div>
   );
 }

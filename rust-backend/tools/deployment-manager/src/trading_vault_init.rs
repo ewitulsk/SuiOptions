@@ -46,6 +46,23 @@ pub struct TradingVaultObjects {
     pub vol_book_id: ObjectID,
 }
 
+/// Ed25519 public key of the hedge-signer that attests self-serve
+/// external-account registrations (SO-308), per deployments.json env slot.
+/// Seeding it into the `VaultProtocolConfig` at activation is what enables
+/// the attested (curator-signed, capped) registration path; an env with no
+/// entry here deploys with the path disabled and stays admin-only.
+const REGISTRAR_PUBKEYS: &[(&str, &str)] = &[(
+    "staging",
+    "5c6c64713225f1379004908bbd4372124fd39c71a02d61cd62e614767e497c44",
+)];
+
+pub fn registrar_pubkey_for_env(env: &str) -> Option<&'static str> {
+    REGISTRAR_PUBKEYS
+        .iter()
+        .find(|(e, _)| *e == env)
+        .map(|(_, key)| *key)
+}
+
 /// Pull one publish tx's created objects and index them by
 /// `module::name`.
 async fn created_by_type(
@@ -146,6 +163,7 @@ pub async fn activate(
     equity_oracle_pkg: ObjectID,
     dbm_oracle_pkg: ObjectID,
     token_info: &BTreeMap<String, TokenSpec>,
+    registrar_pubkey: Option<&str>,
     gas_budget: u64,
 ) -> Result<String> {
     // Let the fullnode index the freshly shared registries.
@@ -239,6 +257,29 @@ pub async fn activate(
             vec![admin, feed_reg, feed_arg, dec_arg],
         );
         seeded += 1;
+    }
+
+    // Registrar pubkey (SO-308): without it the attested self-serve
+    // `set_external_account_attested` path aborts, leaving registration
+    // admin-only.
+    match registrar_pubkey {
+        Some(hex_key) => {
+            let bytes = hex::decode(hex_key.trim_start_matches("0x"))
+                .context("decoding registrar pubkey")?;
+            let cfg = pt.obj(shared_mut_arg(client, objects.vault_protocol_config_id).await?)?;
+            let key_arg = pt.pure(bytes)?;
+            pt.programmable_move_call(
+                trading_vault_pkg,
+                Identifier::new("registry")?,
+                Identifier::new("set_registrar_pubkey")?,
+                vec![],
+                vec![admin, cfg, key_arg],
+            );
+        }
+        None => tracing::info!(
+            "no registrar pubkey configured for this env — attested \
+             external-account registration stays disabled (admin-only)"
+        ),
     }
 
     let gas_price = client

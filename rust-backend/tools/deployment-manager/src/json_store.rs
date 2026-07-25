@@ -110,6 +110,11 @@ pub struct TradingVaultObjectsRecord {
     /// mark-to-market), same discipline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vol_book_id: Option<String>,
+    /// Ed25519 registrar pubkey seeded into the `VaultProtocolConfig`
+    /// (SO-308). Absent = the env deployed with attested self-serve
+    /// external-account registration disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registrar_pubkey: Option<String>,
     pub activation_digest: String,
 }
 
