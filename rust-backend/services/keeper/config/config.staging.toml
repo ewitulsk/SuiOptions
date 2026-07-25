@@ -72,7 +72,7 @@ stagger_minutes = 90
 # Trustless DBM equity legs for the desk vault's external account
 # (SO-299): the appraisal composer reads the MarginManager instead of the
 # attested EquityBook.
-[external.dbm."0xfe0aa9dd0a549540a1a8c09b5e2c793749c51111349550cfa9ddd9f26dbfdaad"]
+[external.dbm."0x138e122a28da92d03509403a314338ce491f4ad0b9d62e5cbc4a7cc112e3fceb"]
 margin_manager_id    = "0xa5d76785501f9779317599434e94109fba152e0fae357d896c411bb34dffe364"
 deepbook_pool_id     = "0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5"
 base_margin_pool_id  = "0xcdbbe6a72e639b647296788e2e4b1cac5cea4246028ba388ba1332ff9a382eea"

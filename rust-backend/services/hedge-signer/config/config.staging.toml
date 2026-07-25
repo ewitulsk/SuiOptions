@@ -49,9 +49,9 @@ frost_shares_path = "/app/data/frost-shares.toml"
 # margin registry; the MarginManager id is appended after the creation
 # ceremony (second config pass).
 [[vaults]]
-vault_id                = "0xfe0aa9dd0a549540a1a8c09b5e2c793749c51111349550cfa9ddd9f26dbfdaad"
+vault_id                = "0x138e122a28da92d03509403a314338ce491f4ad0b9d62e5cbc4a7cc112e3fceb"
 external_account        = "0xec548755761294d67138a047e6b82d1c19181ee2e6a8bb42be46b57635abc329"
-vault_address           = "0xfe0aa9dd0a549540a1a8c09b5e2c793749c51111349550cfa9ddd9f26dbfdaad"
+vault_address           = "0x138e122a28da92d03509403a314338ce491f4ad0b9d62e5cbc4a7cc112e3fceb"
 curator_pubkey_b64      = "APA0XRE2zMOQIqzLHCnp0/cILfKUqRGZlwBWGMsXYWTe"
 curator_wallet          = "0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865"
 max_borrow_amount       = 500000000000  # 500 SUI per tx
@@ -75,18 +75,9 @@ auth_base_url  = "https://auth.api.sui-staging.bluefin.io"
 api_base_url   = "https://api.sui-staging.bluefin.io"
 trade_base_url = "https://trade.api.sui-staging.bluefin.io"
 
-# Evan's curator vault. Registered here for the SIGNING policy only (keygen
-# no longer needs a config entry). external_account is the 0x0 placeholder
-# until the keygen ceremony produces the FROST parent address (second config
-# pass, same pattern as the desk's MarginManager append). No DBM trading:
-# borrows capped at 0, no allowed pools. [vaults.bluefin] ids get pinned by
-# the Bluefin staging spike before the wizard's deposit step can be
-# co-signed (fail-closed until then).
-[[vaults]]
-vault_id                = "0xa4739be9ea07ff76774ea1f66628cef4d7eef555a327b48204dc9b91a097b638"
-external_account        = "0x0000000000000000000000000000000000000000000000000000000000000000"
-vault_address           = "0xa4739be9ea07ff76774ea1f66628cef4d7eef555a327b48204dc9b91a097b638"
-curator_wallet          = "0xf4b443110e0cbed67e305e3528365a29f29790d4d204c99cf6e009dbe245b6e4"
-max_borrow_amount       = 0
-deepbook_margin_package = "0xd6a42f4df4db73d68cbeb52be66698d2fe6a9464f45ad113ca52b0c6ebd918b6"
-allowed_pools = []
+# Curator vaults (Bluefin wizard flow) need a [[vaults]] block only for the
+# SIGNING policy — keygen and external-account registration are self-serve
+# since SO-306/SO-308. Add a block (curator_wallet, borrow cap 0, no pools,
+# [vaults.bluefin] pins) when a curator vault reaches the co-signed
+# deposit/authorize steps. The pre-redeploy vault 0xa4739be9… block was
+# removed 2026-07-25: that vault died with the old package.
