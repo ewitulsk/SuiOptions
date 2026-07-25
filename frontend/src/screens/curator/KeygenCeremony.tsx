@@ -13,17 +13,26 @@
 //     `a.click()` after that await has lost the browser's transient user
 //     activation and is silently dropped. The download is a real anchor the
 //     curator clicks.
+//
+// SO-309 adds the mobile half of that gate: iOS Safari ignores `download` on a
+// blob anchor (it opens a viewer), so the anchor's click told us nothing. On a
+// touch device that can share files the save goes through `navigator.share`
+// and only a RESOLVED share counts; and on any touch device the curator must
+// additionally confirm the file landed somewhere outside this browser. Desktop
+// keeps the SO-307 anchor and its click-means-downloaded behavior.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { HedgeSignerError, fetchFrostPubkey } from "../../api/hedgeSigner";
 import { runKeygenCeremony } from "../../frost/ceremony";
+import { loadFrost } from "../../frost/frost";
 import {
   cacheShare,
   cachedShare,
   clearCachedShare,
   encryptShare,
   shareBackupBlob,
+  shareBackupFile,
   shareBackupFilename,
   type ShareBackup,
 } from "../../frost/share";
@@ -58,6 +67,9 @@ export function KeygenCeremony({
   const [confirm, setConfirm] = useState("");
   const [cache, setCache] = useState(true);
   const [downloaded, setDownloaded] = useState(false);
+  const [shared, setShared] = useState(false);
+  const [confirmedSaved, setConfirmedSaved] = useState(false);
+  const [shareNote, setShareNote] = useState<string | null>(null);
   const [backup, setBackup] = useState<ShareBackup | null>(null);
   const [backupUrl, setBackupUrl] = useState<string | null>(null);
   const [encrypting, setEncrypting] = useState(false);
@@ -66,16 +78,62 @@ export function KeygenCeremony({
     const cached = cachedShare(vaultId);
     return cached ? { parentAddress: cached.parentAddress, hasCache: true } : null;
   });
+  const [coarsePointer] = useState(() => window.matchMedia?.("(pointer: coarse)").matches ?? false);
 
   const passphraseOk = passphrase.length >= 8 && passphrase === confirm;
 
+  // Warm the wasm module while the curator is still typing a passphrase: its
+  // first load is multi-second on cellular, and today that lands mid-ceremony.
+  useEffect(() => {
+    void loadFrost();
+  }, []);
+
   // The download anchor's href, minted when the encrypted backup lands.
+  // Revoke-on-unmount is safe: `backup` lives in this component too, so an
+  // unmount loses the backup itself and the flow restarts on the resume path.
   useEffect(() => {
     if (!backup) return;
     const url = URL.createObjectURL(shareBackupBlob(backup));
     setBackupUrl(url);
     return () => URL.revokeObjectURL(url);
   }, [backup]);
+
+  // Web Share with files, on a touch device: the share sheet actually writes
+  // the file (Files/Drive/…) and its promise reports whether that happened.
+  // Gated on the pointer too, because desktop Chrome also advertises
+  // canShare({files}) and its anchor download works — SO-307 keeps that path.
+  const backupFile = useMemo(() => (backup ? shareBackupFile(backup) : null), [backup]);
+  const shareFile = useMemo(
+    () =>
+      coarsePointer &&
+      backupFile !== null &&
+      typeof navigator.share === "function" &&
+      (navigator.canShare?.({ files: [backupFile] }) ?? false),
+    [backupFile, coarsePointer],
+  );
+
+  // Touch devices attest regardless of which save path they got: a share sheet
+  // can end in a chat app, and a mobile "download" can be a preview that was
+  // never saved.
+  const needsConfirm = coarsePointer;
+  const saved = shareFile ? shared : downloaded;
+  const canContinue = saved && (!needsConfirm || confirmedSaved);
+
+  const onShare = async () => {
+    if (!backupFile) return;
+    setShareNote(null);
+    try {
+      // No await before this call: the payload is already in memory, so the
+      // user activation from this click is still live.
+      await navigator.share({ files: [backupFile], title: backupFile.name });
+      setShared(true);
+    } catch {
+      // Cancelled, or the target refused the file — the gate stays closed.
+      setShareNote(
+        "Backup not saved yet — choose a destination that stores the file (Files, Drive, …).",
+      );
+    }
+  };
 
   const onKeygen = async () => {
     setError(null);
@@ -122,7 +180,7 @@ export function KeygenCeremony({
   };
 
   const onFinish = () => {
-    if (!draft || !downloaded) return;
+    if (!draft || !canContinue) return;
     if (!cache) clearCachedShare(vaultId);
     onComplete(
       { vaultId, ...draft },
@@ -206,7 +264,9 @@ export function KeygenCeremony({
         <div className="vault-prose__muted" style={{ fontSize: 11, marginBottom: 8 }}>
           The encrypted share is always cached during the ceremony so a refresh
           can't lose it; unchecked, it is cleared once you continue to
-          registration.
+          registration. Mobile browsers (iOS especially) evict site storage
+          after about a week without a visit, so the cache is never a backup —
+          the file is.
         </div>
         <button
           className="vault-invest__cta"
@@ -252,39 +312,91 @@ export function KeygenCeremony({
       </div>
 
       {!backup || !backupUrl ? (
-        <button className="vault-invest__cta" disabled>
-          {encrypting ? "Encrypting backup…" : "Preparing backup…"}
-        </button>
+        <>
+          <button className="vault-invest__cta" disabled>
+            {encrypting ? "Encrypting backup…" : "Preparing backup…"}
+          </button>
+          {encrypting && (
+            <div
+              className="vault-prose__muted"
+              role="status"
+              style={{ fontSize: 12, marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}
+            >
+              <span
+                className="modal__spinner"
+                style={{ width: 14, height: 14, borderWidth: 2, margin: 0, flex: "none" }}
+              />
+              Deriving the encryption key — a few seconds on a phone.
+            </div>
+          )}
+        </>
       ) : (
         <>
-          <a
-            className="vault-invest__cta"
-            href={backupUrl}
-            download={shareBackupFilename(backup)}
-            onClick={() => setDownloaded(true)}
-            style={{
-              display: "block",
-              boxSizing: "border-box",
-              textAlign: "center",
-              textDecoration: "none",
-              marginBottom: 8,
-            }}
-          >
-            {downloaded ? "Download again" : "Download encrypted backup"}
-          </a>
-          {downloaded ? (
+          {shareFile ? (
+            // iOS/Android: `<a download>` on a blob URL may just open a viewer,
+            // so the click proves nothing. The share sheet's promise does.
+            <button
+              className="vault-invest__cta"
+              style={{ marginBottom: 8 }}
+              onClick={onShare}
+            >
+              {shared ? "Save backup file again…" : "Save backup file…"}
+            </button>
+          ) : (
+            <a
+              className="vault-invest__cta"
+              href={backupUrl}
+              download={shareBackupFilename(backup)}
+              onClick={() => setDownloaded(true)}
+              style={{
+                display: "block",
+                boxSizing: "border-box",
+                textAlign: "center",
+                textDecoration: "none",
+                marginBottom: 8,
+              }}
+            >
+              {downloaded ? "Download again" : "Download encrypted backup"}
+            </a>
+          )}
+          {shareNote && (
+            <div className="status-pill status-pill--note is-info" style={{ marginBottom: 8 }}>
+              {shareNote}
+            </div>
+          )}
+          {saved ? (
             <>
               <div className="status-pill status-pill--note is-success" style={{ marginBottom: 10 }}>
-                ✓ Backup downloaded{cache ? " and cached in this browser" : ""}. Store it somewhere safe.
+                ✓ Backup {shareFile ? "saved" : "downloaded"}
+                {cache ? " and cached in this browser" : ""}. Store it somewhere safe.
               </div>
-              <button className="vault-invest__cta" onClick={onFinish}>
+              {needsConfirm && (
+                <label
+                  style={{
+                    fontSize: 12,
+                    display: "flex",
+                    gap: 6,
+                    alignItems: "flex-start",
+                    marginBottom: 10,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={confirmedSaved}
+                    onChange={(e) => setConfirmedSaved(e.target.checked)}
+                  />
+                  I have verified the backup file is saved outside this browser.
+                </label>
+              )}
+              <button className="vault-invest__cta" disabled={!canContinue} onClick={onFinish}>
                 Continue to registration
               </button>
             </>
           ) : (
             <div className="vault-prose__muted" style={{ fontSize: 12 }}>
-              Download the backup to continue. The encrypted share is already
-              saved in this browser, but a browser cache is not a backup.
+              {shareFile ? "Save the backup file" : "Download the backup"} to
+              continue. The encrypted share is already saved in this browser,
+              but a browser cache is not a backup.
             </div>
           )}
         </>
