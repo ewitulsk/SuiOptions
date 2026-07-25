@@ -17,6 +17,7 @@ import {
   toE9,
   withdrawPayload,
 } from "../../api/bluefin";
+import { Address } from "../../components/Address";
 import { runSignCeremony } from "../../frost/ceremony";
 import { useSuiGrpcClient } from "../../lib/suiGrpc";
 import { buildParentSweepTxBytes, executeParentTx } from "../../tx/bluefinParent";
@@ -143,7 +144,7 @@ export function SweepBack({
       <CeremonyStatus state={state} />
       {digest && (
         <div className="vault-prose__muted" style={{ fontSize: 11, marginTop: 6 }}>
-          Sweep digest {digest.slice(0, 16)}…
+          Sweep digest <Address value={digest} label="Sweep digest" />
         </div>
       )}
     </div>

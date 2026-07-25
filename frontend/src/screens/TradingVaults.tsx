@@ -6,7 +6,7 @@
 // submit path. Renders an "unavailable" empty state on networks with no
 // trading-vault deployment.
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 
@@ -14,6 +14,7 @@ import { tradingVaultPps, tradingVaultTvl, tokenForCoinType, type TradingVault }
 import { useTradingVaults, useVaultProtocolConfigId } from "../api/useTradingVaults";
 import { useTradingVaultActions } from "../state/tradingVault";
 import { SUPPORTED_TOKENS, TRADING_VAULT_PACKAGE_ID } from "../config";
+import { Address } from "../components/Address";
 import { TokenLogo } from "../components/TokenLogo";
 import { Toast } from "../components/Toast";
 import { formatPrice } from "../format";
@@ -135,11 +136,22 @@ function TradingVaultRow({ vault, onOpen }: { vault: TradingVault; onOpen: () =>
   const symbol = token?.ticker ?? shortHex(vault.depositAsset.split("::")[0] ?? vault.depositAsset);
   const pps = tradingVaultPps(vault);
   const tvl = tradingVaultTvl(vault, token?.decimals ?? null);
+  // Tap-vs-drag guard: these rows live inside a horizontal scroller on phones,
+  // where a swipe would otherwise land as a navigation.
+  const downAt = useRef<{ x: number; y: number } | null>(null);
   return (
     <div
       className="vault-table__row"
       style={{ ...GRID, cursor: "pointer", alignItems: "center" }}
-      onClick={onOpen}
+      onPointerDown={(e) => {
+        downAt.current = { x: e.clientX, y: e.clientY };
+      }}
+      onClick={(e) => {
+        const from = downAt.current;
+        downAt.current = null;
+        if (from && Math.hypot(e.clientX - from.x, e.clientY - from.y) > 10) return;
+        onOpen();
+      }}
       role="link"
       tabIndex={0}
       onKeyDown={(e) => {
@@ -164,7 +176,9 @@ function TradingVaultRow({ vault, onOpen }: { vault: TradingVault; onOpen: () =>
       <span>{vault.pendingWithdrawals}</span>
       <span>{(vault.curatorFeeBps / 100).toFixed(2)}%</span>
       <span>{fmtDurationMs(vault.lockupMs)}</span>
-      <span title={vault.curator}>{shortHex(vault.curator)}</span>
+      <span>
+        <Address value={vault.curator} label="Curator" />
+      </span>
     </div>
   );
 }
@@ -210,6 +224,16 @@ function CreateVaultCard() {
     Number.isInteger(feeNum) && feeNum >= 0 &&
     Number.isInteger(maxPosNum) && maxPosNum > 0 &&
     Number.isFinite(unwindNum) && unwindNum >= 0;
+
+  // Why the CTA is dead, when it is — shown as helper text as well as a title,
+  // since hovering isn't a thing on touch.
+  const blockedReason = !address
+    ? "Connect a wallet to create a vault"
+    : !cfgId
+      ? cfgQ.isLoading
+        ? "Resolving protocol config…"
+        : "Protocol config not found for this deployment"
+      : undefined;
 
   const onCreate = () => {
     if (!valid || !cfgId) return;
@@ -289,18 +313,13 @@ function CreateVaultCard() {
             style={{ marginTop: 12 }}
             disabled={!!actions.busy || !valid || !address || !cfgId}
             onClick={onCreate}
-            title={
-              !address
-                ? "Connect a wallet to create a vault"
-                : !cfgId
-                  ? cfgQ.isLoading
-                    ? "Resolving protocol config…"
-                    : "Protocol config not found for this deployment"
-                  : undefined
-            }
+            title={blockedReason}
           >
             {actions.busy ? `${actions.busy}…` : "Create vault"}
           </button>
+          {blockedReason && (
+            <div className="vault-card__foot vault-prose__muted">{blockedReason}</div>
+          )}
         </>
       )}
       {actions.toast && <Toast message={actions.toast.message} variant={actions.toast.variant} />}
