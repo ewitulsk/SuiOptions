@@ -111,7 +111,7 @@ export function BluefinPanel({ parentAddress }: { parentAddress: string }) {
           {busy === "connecting" ? "Signing in…" : "Sign in to Bluefin"}
         </button>
         {error && (
-          <div className="status-pill is-danger" style={{ display: "block", marginTop: 8, fontSize: 12 }}>
+          <div className="status-pill status-pill--note is-danger" style={{ marginTop: 8 }}>
             ⚠ {error}
           </div>
         )}
@@ -122,7 +122,7 @@ export function BluefinPanel({ parentAddress }: { parentAddress: string }) {
   return (
     <div className="vault-card__body">
       {authorized === false && (
-        <div className="status-pill is-danger" style={{ display: "block", fontSize: 12, marginBottom: 10 }}>
+        <div className="status-pill status-pill--note is-danger" style={{ marginBottom: 10 }}>
           ⚠ This wallet is not an authorized trader on the parent account.
           Complete the setup wizard's authorize step first.
         </div>
@@ -149,7 +149,7 @@ export function BluefinPanel({ parentAddress }: { parentAddress: string }) {
         }}
       />
       {error && (
-        <div className="status-pill is-danger" style={{ display: "block", margin: "8px 0", fontSize: 12 }}>
+        <div className="status-pill status-pill--note is-danger" style={{ margin: "8px 0" }}>
           ⚠ {error}
         </div>
       )}

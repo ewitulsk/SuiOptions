@@ -98,7 +98,9 @@ export function ShareUnlock({
             onChange={(e) => setPassphrase(e.target.value)}
             style={{ ...curatorFieldStyle, marginBottom: 8 }}
           />
-          <div style={{ display: "flex", gap: 8 }}>
+          {/* Stacked, not side by side: .vault-invest__cta is width:100%, so a
+              flex row squeezed the secondary button off the edge on phones. */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <button
               className="vault-invest__cta"
               disabled={busy || passphrase.length === 0}
@@ -113,7 +115,7 @@ export function ShareUnlock({
         </>
       )}
       {error && (
-        <div className="status-pill is-danger" style={{ display: "block", marginTop: 8, fontSize: 12 }}>
+        <div className="status-pill status-pill--note is-danger" style={{ marginTop: 8 }}>
           ⚠ {error}
         </div>
       )}

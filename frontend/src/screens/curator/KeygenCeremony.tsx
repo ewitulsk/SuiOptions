@@ -135,10 +135,7 @@ export function KeygenCeremony({
   if (resume && !draft) {
     return (
       <div className="vault-card__body">
-        <div
-          className="status-pill is-info"
-          style={{ display: "block", fontSize: 12, lineHeight: 1.5, padding: "6px 10px", marginBottom: 10 }}
-        >
+        <div className="status-pill status-pill--note is-info" style={{ marginBottom: 10 }}>
           A key ceremony has already run for this vault — the protocol signer
           holds its half of the parent key. Unlock your existing share to
           continue; a fresh ceremony would orphan the account below.
@@ -146,7 +143,9 @@ export function KeygenCeremony({
         <div className="vault-kv" style={{ marginBottom: 10 }}>
           <div className="vault-kv__row">
             <span>Parent account (Sui address)</span>
-            <span title={resume.parentAddress}>{resume.parentAddress}</span>
+            <span className="mono-break" style={{ minWidth: 0 }} title={resume.parentAddress}>
+              {resume.parentAddress}
+            </span>
           </div>
         </div>
         <button
@@ -164,15 +163,12 @@ export function KeygenCeremony({
           }
         />
         {!resume.hasCache && (
-          <div
-            className="status-pill is-danger"
-            style={{ display: "block", fontSize: 12, lineHeight: 1.5, padding: "6px 10px", marginTop: 10 }}
-          >
+          <div className="status-pill status-pill--note is-danger" style={{ marginTop: 10 }}>
             ⚠ This browser has no cached share. Load the encrypted backup file
             you downloaded during the ceremony. If it is gone, the curator half
             is unrecoverable and the parent account above must be abandoned: an
             operator has to prune the signer's share
-            (<code>hedge-signer prune-share {vaultId}</code>) before a new key
+            (<code className="mono-break">hedge-signer prune-share {vaultId}</code>) before a new key
             ceremony can run.
           </div>
         )}
@@ -236,7 +232,9 @@ export function KeygenCeremony({
       <div className="vault-kv" style={{ marginBottom: 10 }}>
         <div className="vault-kv__row">
           <span>Parent account (Sui address)</span>
-          <span title={draft.parentAddress}>{draft.parentAddress}</span>
+          <span className="mono-break" style={{ minWidth: 0 }} title={draft.parentAddress}>
+            {draft.parentAddress}
+          </span>
         </div>
       </div>
       <button
@@ -247,10 +245,7 @@ export function KeygenCeremony({
         Copy parent address
       </button>
 
-      <div
-        className="status-pill is-danger"
-        style={{ display: "block", fontSize: 12, lineHeight: 1.5, padding: "6px 10px", marginBottom: 10 }}
-      >
+      <div className="status-pill status-pill--note is-danger" style={{ marginBottom: 10 }}>
         ⚠ Bluefin accounts cannot rotate keys. If you lose this share, the
         parent account — and any funds in it — are permanently stranded.
         Downloading the encrypted backup is mandatory.
@@ -279,7 +274,7 @@ export function KeygenCeremony({
           </a>
           {downloaded ? (
             <>
-              <div className="status-pill is-success" style={{ display: "block", fontSize: 12, marginBottom: 10 }}>
+              <div className="status-pill status-pill--note is-success" style={{ marginBottom: 10 }}>
                 ✓ Backup downloaded{cache ? " and cached in this browser" : ""}. Store it somewhere safe.
               </div>
               <button className="vault-invest__cta" onClick={onFinish}>
@@ -295,7 +290,7 @@ export function KeygenCeremony({
         </>
       )}
       {error && (
-        <div className="status-pill is-danger" style={{ display: "block", marginTop: 8, fontSize: 12 }}>
+        <div className="status-pill status-pill--note is-danger" style={{ marginTop: 8 }}>
           ⚠ {error}
         </div>
       )}

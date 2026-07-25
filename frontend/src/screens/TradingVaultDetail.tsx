@@ -37,6 +37,7 @@ import { TradingVaultPpsChart } from "../components/TradingVaultPpsChart";
 import { Toast } from "../components/Toast";
 import { formatPrice } from "../format";
 import { ExternalVenuePanel } from "./curator/ExternalVenuePanel";
+import { curatorFieldStyle } from "./curator/styles";
 import { StateBadge, fmtDurationMs, shortHex } from "./TradingVaults";
 
 function fmtDateTime(ms: number | null | undefined): string {
@@ -82,7 +83,7 @@ export function TradingVaultDetailScreen() {
 
   if (!TRADING_VAULT_PACKAGE_ID) {
     return (
-      <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
+      <div style={{ position: "relative", minHeight: "100%" }}>
         <div className="app__wrap">
           <div className="dash-empty">
             <div className="dash-empty__title">trading vaults unavailable.</div>
@@ -96,7 +97,7 @@ export function TradingVaultDetailScreen() {
   }
 
   return (
-    <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
+    <div style={{ position: "relative", minHeight: "100%" }}>
       <div className="app__wrap">
         <div className="vault-detail__bar">
           <Link className="vault-back" to="/vaults">← All vaults</Link>
@@ -290,16 +291,6 @@ function ExternalAccountCard({
 }
 
 // ── curator section (SO-299) ────────────────────────────────────────────────
-
-// Same field look as the create-vault form on the list screen.
-const curatorFieldStyle: React.CSSProperties = {
-  width: "100%",
-  padding: 6,
-  borderRadius: 6,
-  border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))",
-  background: "transparent",
-  color: "inherit",
-};
 
 function CuratorField({ label, children }: { label: string; children: React.ReactNode }) {
   return (

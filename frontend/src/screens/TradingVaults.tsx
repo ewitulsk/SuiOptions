@@ -17,6 +17,7 @@ import { SUPPORTED_TOKENS, TRADING_VAULT_PACKAGE_ID } from "../config";
 import { TokenLogo } from "../components/TokenLogo";
 import { Toast } from "../components/Toast";
 import { formatPrice } from "../format";
+import { curatorFieldStyle } from "./curator/styles";
 
 /** Abbreviate a 0x id/address for dense tables: 0x1234…cdef. */
 export function shortHex(s: string): string {
@@ -58,7 +59,7 @@ export function TradingVaults() {
 
   if (!TRADING_VAULT_PACKAGE_ID) {
     return (
-      <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
+      <div style={{ position: "relative", minHeight: "100%" }}>
         <div className="app__wrap">
           <div className="dash-empty">
             <div className="dash-empty__title">trading vaults unavailable.</div>
@@ -74,7 +75,7 @@ export function TradingVaults() {
   const vaults = vaultsQ.data ?? [];
 
   return (
-    <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
+    <div style={{ position: "relative", minHeight: "100%" }}>
       <div className="app__wrap">
         <div className="vault-browser__head">
           <span className="vault-head__badge">Trading vaults</span>
@@ -170,15 +171,6 @@ function TradingVaultRow({ vault, onOpen }: { vault: TradingVault; onOpen: () =>
 
 // ── create-vault form ───────────────────────────────────────────────────────
 
-const fieldStyle: React.CSSProperties = {
-  width: "100%",
-  padding: 6,
-  borderRadius: 6,
-  border: "1px solid var(--aqua-line, rgba(92,107,122,0.25))",
-  background: "transparent",
-  color: "inherit",
-};
-
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label style={{ fontSize: 11, opacity: 0.8, display: "block" }}>
@@ -256,7 +248,7 @@ function CreateVaultCard() {
             }}
           >
             <Field label="Deposit asset">
-              <select style={fieldStyle} value={coinType} onChange={(e) => setCoinType(e.target.value)}>
+              <select style={curatorFieldStyle} value={coinType} onChange={(e) => setCoinType(e.target.value)}>
                 {tokens.map((t) => (
                   <option key={t.coinType} value={t.coinType}>
                     {t.ticker} — {t.name}
@@ -266,30 +258,30 @@ function CreateVaultCard() {
             </Field>
             <Field label="Curator address">
               <input
-                style={fieldStyle}
+                style={curatorFieldStyle}
                 value={curator}
                 onChange={(e) => setCurator(e.target.value)}
                 placeholder={address ?? "0x…"}
               />
             </Field>
             <Field label="Lockup (days)">
-              <input style={fieldStyle} type="number" min="0" value={lockupDays} onChange={(e) => setLockupDays(e.target.value)} />
+              <input style={curatorFieldStyle} type="number" min="0" value={lockupDays} onChange={(e) => setLockupDays(e.target.value)} />
             </Field>
             <Field label="Curator fee (bps)">
-              <input style={fieldStyle} type="number" min="0" step="1" value={feeBps} onChange={(e) => setFeeBps(e.target.value)} />
+              <input style={curatorFieldStyle} type="number" min="0" step="1" value={feeBps} onChange={(e) => setFeeBps(e.target.value)} />
             </Field>
             <Field label="Rotation authority">
-              <select style={fieldStyle} value={rotation} onChange={(e) => setRotation(e.target.value)}>
+              <select style={curatorFieldStyle} value={rotation} onChange={(e) => setRotation(e.target.value)}>
                 <option value="0">Creator</option>
                 <option value="1">Curator</option>
                 <option value="2">Either</option>
               </select>
             </Field>
             <Field label="Max positions">
-              <input style={fieldStyle} type="number" min="1" step="1" value={maxPositions} onChange={(e) => setMaxPositions(e.target.value)} />
+              <input style={curatorFieldStyle} type="number" min="1" step="1" value={maxPositions} onChange={(e) => setMaxPositions(e.target.value)} />
             </Field>
             <Field label="Unwind grace (hours)">
-              <input style={fieldStyle} type="number" min="0" value={unwindHours} onChange={(e) => setUnwindHours(e.target.value)} />
+              <input style={curatorFieldStyle} type="number" min="0" value={unwindHours} onChange={(e) => setUnwindHours(e.target.value)} />
             </Field>
           </div>
           <button
