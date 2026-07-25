@@ -53,9 +53,9 @@ export function CeremonyStatus({ state }: { state: CeremonyState }) {
         : state.message;
   return (
     <div
-      className={`status-pill ${tone}`}
+      className={`status-pill status-pill--note ${tone}`}
       role="status"
-      style={{ display: "block", marginTop: 8, padding: "6px 10px", fontSize: 12, lineHeight: 1.5 }}
+      style={{ marginTop: 8 }}
     >
       {state.status === "running" && "⏳ "}
       {state.status === "error" && "⚠ "}

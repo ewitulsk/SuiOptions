@@ -105,7 +105,7 @@ export function ExternalVenuePanel({
 
       {sub === "setup" &&
         (setupComplete ? (
-          <div className="status-pill is-success" style={{ display: "block", fontSize: 12, padding: "8px 10px" }}>
+          <div className="status-pill status-pill--note is-success">
             ✓ Bluefin account is set up (parent {parentAddress?.slice(0, 10)}…). Use the Trade
             and Sweep tabs.
           </div>

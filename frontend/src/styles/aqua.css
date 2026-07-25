@@ -53,7 +53,11 @@
   min-height: 100%;
   position: relative;
   isolation: isolate;
-  overflow: hidden;
+  /* Clip, not hide: still contains the fixed gradient horizontally, but it
+     no longer makes this a scroll container — so nothing that overflows
+     downward (popovers, sticky heads, wrapped rows) gets cut off, and inner
+     scrollers own the horizontal axis on phones. */
+  overflow-x: clip;
 }
 
 [data-theme="aqua"] .app__wrap {
@@ -1383,6 +1387,36 @@
 [data-theme="aqua"] .status-pill.is-mute {
   background: rgba(var(--aqua-shadow-rgb),0.06); color: var(--aqua-ink-3);
 }
+[data-theme="aqua"] .status-pill.is-success {
+  background: rgba(34,176,122,0.12); color: var(--aqua-success);
+  box-shadow: 0 0 0 1px rgba(34,176,122,0.20);
+}
+[data-theme="aqua"] .status-pill.is-danger {
+  background: rgba(255,122,110,0.14); color: var(--aqua-coral);
+  box-shadow: 0 0 0 1px rgba(255,122,110,0.24);
+}
+/* Prose variant: the curator/ceremony flows use pills for multi-sentence
+   status, warnings and errors. Keep the tint, drop the badge typography —
+   uppercase mono at 10px with nowrap is unreadable at sentence length and
+   forces the row wider than a phone viewport. */
+[data-theme="aqua"] .status-pill--note {
+  display: block;
+  white-space: normal;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  padding: 8px 10px;
+}
+
+/* Full 0x addresses / digests: wrap anywhere rather than blowing out the
+   width of whatever row they sit in. */
+[data-theme="aqua"] .mono-break {
+  font-family: "JetBrains Mono", monospace;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
 
 [data-theme="aqua"] .pos-card__body {
   display: grid; grid-template-columns: repeat(3, 1fr);
@@ -2350,7 +2384,11 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
   position: fixed; z-index: 1001;
   top: 50%; left: 50%; transform: translate(-50%, -50%);
   width: min(480px, calc(100vw - 32px));
-  max-height: calc(100vh - 48px); overflow-y: auto;
+  /* dvh so the mobile URL bar doesn't push the modal off-screen; vh first
+     as the fallback for browsers without dynamic viewport units. */
+  max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
   background: var(--aqua-solid-surface, #fff);
   border: 1px solid var(--aqua-line);
   border-radius: 16px; padding: 22px;
@@ -2586,4 +2624,43 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
   [data-theme="aqua"] .vault-table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   [data-theme="aqua"] .vault-table__head,
   [data-theme="aqua"] .vault-table__row { min-width: 560px; }
+}
+
+/* ============================================================
+   MOBILE — vault curator/trading surfaces (SO-309). The blocks
+   above cover the composer/dashboard; these cover the vault
+   detail + curator flows, plus touch-target sizing on any
+   coarse pointer regardless of width.
+   ============================================================ */
+@media (max-width: 640px) {
+  /* The vault tab rows (Invest/Withdraw, Setup/Trade/Sweep) grow past the
+     viewport once there are three of them — scroll the strip instead of
+     squashing the labels. Same shape as .header__nav above. */
+  [data-theme="aqua"] .vault-invest__tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  [data-theme="aqua"] .vault-invest__tabs::-webkit-scrollbar { display: none; }
+  [data-theme="aqua"] .vault-invest__tabs .vault-invest__tab { flex: 0 0 auto; white-space: nowrap; }
+
+  /* .vault-table gets overflow-x above; drop the inner vertical scroller so
+     a phone isn't stuck dragging one scroll container inside another. */
+  [data-theme="aqua"] .vault-table__scroll { max-height: none; overflow: visible; }
+}
+
+@media (max-width: 480px) {
+  /* Two stat cards side by side stop fitting their numbers below ~480px. */
+  [data-theme="aqua"] .vault-stats { grid-template-columns: 1fr; }
+}
+
+/* Touch targets: 44px is the smallest reliably tappable control. */
+@media (pointer: coarse) {
+  [data-theme="aqua"] .vault-invest__tab,
+  [data-theme="aqua"] .vault-invest__cta,
+  [data-theme="aqua"] .vault-howto__trigger { min-height: 44px; }
+  [data-theme="aqua"] .vault-card__body input[type="checkbox"] { width: 20px; height: 20px; }
+  [data-theme="aqua"] .vault-card__body label:has(> input[type="checkbox"]) { padding: 6px 0; }
 }

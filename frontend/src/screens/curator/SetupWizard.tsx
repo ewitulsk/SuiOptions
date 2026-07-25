@@ -117,7 +117,7 @@ export function SetupWizard({
         </UnlockedGate>
       )}
       {step === "complete" && (
-        <div className="status-pill is-success" style={{ display: "block", fontSize: 12, padding: "8px 10px" }}>
+        <div className="status-pill status-pill--note is-success">
           ✓ Bluefin account is set up. Switch to the External venue tab to trade.
         </div>
       )}
@@ -259,12 +259,12 @@ function RegisterStep({
         that it holds this vault's key share; you submit the registration
         yourself from the curator wallet (you pay the gas).
       </div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
-        <label style={{ fontSize: 11, opacity: 0.8, flex: 1 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
+        <label style={{ fontSize: 11, opacity: 0.8, flex: "1 1 150px" }}>
           Budget (bps of NAV)
           <input style={curatorFieldStyle} value={budgetBps} onChange={(e) => setBudgetBps(e.target.value)} />
         </label>
-        <label style={{ fontSize: 11, opacity: 0.8, flex: 1 }}>
+        <label style={{ fontSize: 11, opacity: 0.8, flex: "1 1 150px" }}>
           Daily release (bps)
           <input style={curatorFieldStyle} value={dailyBps} onChange={(e) => setDailyBps(e.target.value)} />
         </label>
@@ -275,7 +275,7 @@ function RegisterStep({
       </div>
       {matched ? (
         <>
-          <div className="status-pill is-success" style={{ display: "block", fontSize: 12, marginBottom: 8 }}>
+          <div className="status-pill status-pill--note is-success" style={{ marginBottom: 8 }}>
             ✓ External account registered as the parent address.
           </div>
           <button className="vault-invest__cta" onClick={onRegistered}>
@@ -305,17 +305,14 @@ function RegisterStep({
         >
           {recipe}
         </pre>
-        <button className="vault-invest__tab" onClick={() => void navigator.clipboard.writeText(recipe)}>
-          Copy invocation
-        </button>
-        <button
-          className="vault-invest__tab"
-          style={{ marginLeft: 8 }}
-          disabled={polling}
-          onClick={() => setPolling(true)}
-        >
-          {polling ? "Waiting…" : "Poll for registration"}
-        </button>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          <button className="vault-invest__tab" onClick={() => void navigator.clipboard.writeText(recipe)}>
+            Copy invocation
+          </button>
+          <button className="vault-invest__tab" disabled={polling} onClick={() => setPolling(true)}>
+            {polling ? "Waiting…" : "Poll for registration"}
+          </button>
+        </div>
       </details>
     </div>
   );
