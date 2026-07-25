@@ -39,6 +39,11 @@ public struct VaultProtocolConfig has key {
     max_price_age_ms: u64,
     /// Blocks new deposits protocol-wide; never blocks exits.
     paused: bool,
+    /// Ed25519 pubkey of the protocol's external-account registrar
+    /// (hedge-signer). Curators use its attestations to self-register a
+    /// jointly-held external account without an AdminCap. Empty = the
+    /// attested path is disabled (fail closed until seeded).
+    registrar_pubkey: vector<u8>,
 }
 
 /// Allowlist of integration-adapter witness types.
@@ -62,6 +67,7 @@ fun init(ctx: &mut TxContext) {
         protocol_fee_bps: DEFAULT_PROTOCOL_FEE_BPS,
         max_price_age_ms: DEFAULT_MAX_PRICE_AGE_MS,
         paused: false,
+        registrar_pubkey: vector[],
     });
     transfer::share_object(IntegrationRegistry { id: object::new(ctx), allowed: vec_set::empty() });
     transfer::share_object(OracleRegistry { id: object::new(ctx), allowed: vec_set::empty() });
@@ -123,6 +129,14 @@ public fun set_paused(_: &AdminCap, cfg: &mut VaultProtocolConfig, paused: bool)
     emit_config(cfg);
 }
 
+/// Seed (or clear) the registrar pubkey that gates curator self-serve
+/// external-account registration. Empty disables the attested path.
+public fun set_registrar_pubkey(_: &AdminCap, cfg: &mut VaultProtocolConfig, pubkey: vector<u8>) {
+    assert!(pubkey.length() == 32 || pubkey.is_empty(), errors::config_invalid());
+    cfg.registrar_pubkey = pubkey;
+    events::emit_registrar_pubkey_set(cfg.registrar_pubkey);
+}
+
 fun emit_config(cfg: &VaultProtocolConfig) {
     events::emit_protocol_config_updated(
         cfg.min_curator_share_bps,
@@ -155,6 +169,8 @@ public fun protocol_fee_bps(cfg: &VaultProtocolConfig): u64 { cfg.protocol_fee_b
 public fun max_price_age_ms(cfg: &VaultProtocolConfig): u64 { cfg.max_price_age_ms }
 
 public fun is_paused(cfg: &VaultProtocolConfig): bool { cfg.paused }
+
+public fun registrar_pubkey(cfg: &VaultProtocolConfig): &vector<u8> { &cfg.registrar_pubkey }
 
 #[test_only]
 public fun init_for_testing(ctx: &mut TxContext) {
