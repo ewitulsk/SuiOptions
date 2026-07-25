@@ -61,7 +61,10 @@ function renderApp() {
         <PostHogErrorBoundary fallback={crashFallback}>
           <QueryClientProvider client={queryClient}>
             <SuiClientProvider networks={networkConfig} defaultNetwork={ENV}>
-              <WalletProvider autoConnect>
+              {/* slushWallet registers the extension-free Slush web wallet, so
+                  mobile browsers (no extension) still have something to connect
+                  to instead of an empty wallet list. */}
+              <WalletProvider autoConnect slushWallet={{ name: "Pismo Protocol" }}>
                 <BrowserRouter>
                   <App />
                 </BrowserRouter>

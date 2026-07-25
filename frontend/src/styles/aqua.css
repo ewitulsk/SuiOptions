@@ -171,6 +171,11 @@
 [data-theme="aqua"] .header__connect-caret {
   font-family: inherit; font-size: 10px; color: var(--aqua-ink-3);
 }
+/* Touch devices: 44px minimum tap target (desktop sizing untouched). */
+@media (pointer: coarse) {
+  [data-theme="aqua"] .header__connect,
+  [data-theme="aqua"] .wallet-menu__item { min-height: 44px; }
+}
 
 /* ---------- Wallet account dropdown ---------- */
 [data-theme="aqua"] .header__wallet { position: relative; }

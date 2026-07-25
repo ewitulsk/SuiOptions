@@ -63,13 +63,15 @@ function WalletMenu() {
 
   useEffect(() => {
     if (!open) return;
-    const onClick = (e: MouseEvent) => {
+    // pointerdown covers mouse + touch; mousedown alone left the menu open
+    // while scrolling on touch devices.
+    const onClick = (e: PointerEvent) => {
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
         setOpen(false);
       }
     };
-    window.addEventListener("mousedown", onClick);
-    return () => window.removeEventListener("mousedown", onClick);
+    window.addEventListener("pointerdown", onClick);
+    return () => window.removeEventListener("pointerdown", onClick);
   }, [open]);
 
   if (!account) return null;
