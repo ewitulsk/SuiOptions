@@ -39,3 +39,8 @@ public fun external_budget_exceeded(): u64 { 101 }
 public fun external_rate_limited(): u64 { 102 }
 public fun external_exposure_open(): u64 { 103 }
 public fun wrong_external_oracle(): u64 { 104 }
+// Attested (curator self-serve) external-account registration.
+public fun external_already_set(): u64 { 105 }
+public fun attested_limits_exceeded(): u64 { 106 }
+public fun attestation_disabled(): u64 { 107 }
+public fun bad_attestation(): u64 { 108 }

@@ -208,6 +208,15 @@ public struct Appraisal {
 /// Rolling window for the external-account release rate limit.
 const RELEASE_WINDOW_MS: u64 = 86_400_000;
 
+// Curator self-serve (attested) registration limits — deliberately far
+// below the admin path's, which stays uncapped: an attestation proves
+// only WHO holds the account, not that its budget was reviewed.
+const ATTESTED_MAX_BUDGET_BPS: u64 = 2_000;
+const ATTESTED_MAX_DAILY_RELEASE_BPS: u64 = 1_000;
+
+/// Domain separator for registrar attestations (18 bytes).
+const EXTERNAL_REG_DOMAIN: vector<u8> = b"tv_external_reg_v1";
+
 // ═══════════════════════════════ creation ═══════════════════════════════
 
 /// Permissionless. The creator picks the curator; the cap is transferred
@@ -955,6 +964,66 @@ public fun set_external_account(
         budget_bps,
         daily_release_bps,
     );
+}
+
+/// Curator self-serve registration of an external account, authorized by
+/// an ed25519 attestation from the protocol registrar (the hedge-signer
+/// service) that `account` is a 2-of-2 FROST parent it co-holds. This is
+/// FIRST-SET-ONLY: a replayed attestation can never re-point an already
+/// registered account, and limits are capped well below the admin path's.
+/// Re-pointing and above-cap budgets stay `set_external_account`
+/// (AdminCap) decisions.
+public fun set_external_account_attested(
+    cap: &CuratorCap,
+    vault: &mut TradingVault,
+    cfg: &VaultProtocolConfig,
+    reg: &OracleRegistry,
+    account: address,
+    equity_oracle: TypeName,
+    budget_bps: u64,
+    daily_release_bps: u64,
+    attestation: vector<u8>,
+) {
+    assert_current_cap(vault, cap);
+    assert!(vault.external.is_none(), errors::external_already_set());
+    assert!(
+        budget_bps <= ATTESTED_MAX_BUDGET_BPS
+            && daily_release_bps <= ATTESTED_MAX_DAILY_RELEASE_BPS,
+        errors::attested_limits_exceeded(),
+    );
+    assert!(registry::is_oracle_allowed(reg, &equity_oracle), errors::oracle_not_allowed());
+
+    let pubkey = registry::registrar_pubkey(cfg);
+    assert!(!pubkey.is_empty(), errors::attestation_disabled());
+    let msg = external_registration_message(object::id(vault).to_address(), account);
+    assert!(sui::ed25519::ed25519_verify(&attestation, pubkey, &msg), errors::bad_attestation());
+
+    vault.external.fill(ExternalAccount {
+        account,
+        equity_oracle,
+        budget_bps,
+        daily_release_bps,
+        exposure: 0,
+        released_in_window: 0,
+        window_start_ms: 0,
+    });
+    events::emit_external_account_set(
+        object::id(vault),
+        account,
+        equity_oracle,
+        budget_bps,
+        daily_release_bps,
+    );
+}
+
+/// The exact bytes the registrar signs: domain tag ‖ vault id ‖ account,
+/// each address as its raw 32 bytes. Public so the signer service and
+/// tests build byte-identical messages.
+public fun external_registration_message(vault_id: address, account: address): vector<u8> {
+    let mut msg = EXTERNAL_REG_DOMAIN;
+    msg.append(vault_id.to_bytes());
+    msg.append(account.to_bytes());
+    msg
 }
 
 /// Deregister the external account. Only once every released unit has

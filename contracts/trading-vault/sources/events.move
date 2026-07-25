@@ -201,6 +201,10 @@ public struct ProtocolConfigUpdated has copy, drop {
     paused: bool,
 }
 
+/// Emitted separately from `ProtocolConfigUpdated` so the existing
+/// config event's shape (and its off-chain decoder) stays untouched.
+public struct RegistrarPubkeySet has copy, drop { pubkey: vector<u8> }
+
 // ─────────────────────────────── emitters ───────────────────────────────
 
 public(package) fun emit_vault_created(
@@ -495,4 +499,8 @@ public(package) fun emit_protocol_config_updated(
         max_price_age_ms,
         paused,
     });
+}
+
+public(package) fun emit_registrar_pubkey_set(pubkey: vector<u8>) {
+    event::emit(RegistrarPubkeySet { pubkey });
 }
