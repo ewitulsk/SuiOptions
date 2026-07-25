@@ -270,7 +270,7 @@ pub async fn activate(
             let key_arg = pt.pure(bytes)?;
             pt.programmable_move_call(
                 trading_vault_pkg,
-                Identifier::new("vault")?,
+                Identifier::new("registry")?,
                 Identifier::new("set_registrar_pubkey")?,
                 vec![],
                 vec![admin, cfg, key_arg],
