@@ -3,7 +3,7 @@
 // the passphrase. The plaintext key package lives only in memory
 // (useCuratorBluefin), never on disk.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { loadFrost } from "../../frost/frost";
 import {
@@ -29,6 +29,12 @@ export function ShareUnlock({
   const [passphrase, setPassphrase] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Warm the wasm module (SO-309): unlock verifies the share against the group
+  // identity, and the first load is multi-second on cellular.
+  useEffect(() => {
+    void loadFrost();
+  }, []);
 
   const onFile = async (file: File) => {
     setError(null);
@@ -82,12 +88,21 @@ export function ShareUnlock({
           : "Load your encrypted key-share backup file to co-sign ceremonies."}
       </div>
       {!backup && (
-        <input
-          type="file"
-          accept="application/json"
-          onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
-          style={{ fontSize: 12, marginBottom: 8 }}
-        />
+        <>
+          <input
+            type="file"
+            /* Extension + MIME: the iOS Files picker greys out .json when the
+               accept list is MIME-only. */
+            accept=".json,application/json"
+            onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
+            style={{ fontSize: 12, marginBottom: 8 }}
+          />
+          <div className="vault-prose__muted" style={{ fontSize: 11, marginBottom: 8 }}>
+            Mobile browsers (iOS especially) evict site storage after about a
+            week without a visit, so the cached share may be gone — the backup
+            file is the durable copy.
+          </div>
+        </>
       )}
       {backup && (
         <>

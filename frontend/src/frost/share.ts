@@ -112,6 +112,16 @@ export function shareBackupBlob(backup: ShareBackup): Blob {
   return new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
 }
 
+/** The backup as a `File`, for `navigator.share({ files })` (SO-309). iOS
+ * Safari does not honor `<a download>` on a blob URL — it opens the JSON in a
+ * viewer — so on mobile the save goes through the share sheet instead, whose
+ * promise actually tells us whether the file was stored. */
+export function shareBackupFile(backup: ShareBackup): File {
+  return new File([JSON.stringify(backup, null, 2)], shareBackupFilename(backup), {
+    type: "application/json",
+  });
+}
+
 export function parseShareBackup(text: string): ShareBackup {
   const parsed = JSON.parse(text) as ShareBackup;
   if (parsed.kind !== "pismo-frost-curator-share" || parsed.v !== 1) {
