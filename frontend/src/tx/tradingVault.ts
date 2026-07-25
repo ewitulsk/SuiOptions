@@ -8,7 +8,7 @@
 
 import { bcs } from "@mysten/sui/bcs";
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
-import { fromHex, normalizeStructTag } from "@mysten/sui/utils";
+import { fromHex } from "@mysten/sui/utils";
 
 import {
   DEEPBOOK_ADAPTER_PACKAGE_ID,
@@ -151,10 +151,10 @@ export type SetExternalAccountAttestedParams = {
  * of handing an admin a `set_external_account` invocation. Budgets are
  * capped on-chain (2000 / 1000 bps); above that it stays an admin act.
  *
- * `equity_oracle` is a `TypeName` pure argument: BCS-identical to an ascii
- * string, holding the CANONICAL type (address padded, no `0x`) — the same
- * form `type_name::with_defining_ids` produced when the deploy allowlisted
- * the witness.
+ * `equity_oracle` is a `TypeName` — NOT an allowed pure-input struct (the
+ * runtime answers InvalidUsageOfPureArg), so it is constructed on-chain with
+ * `0x1::type_name::with_defining_ids<T>()` and passed as a result argument,
+ * the same shape the deployment-manager's allowlist PTB uses.
  *
  * Curator ops are NOT gas-sponsored — submit wallet-paid.
  */
@@ -167,10 +167,12 @@ export function buildSetExternalAccountAttestedTx(
   if (!EQUITY_ORACLE_PACKAGE_ID) {
     throw new Error("equity-oracle package not deployed on this network");
   }
-  const equityOracle = normalizeStructTag(
-    `${EQUITY_ORACLE_PACKAGE_ID}::equity_oracle::EquityOracle`,
-  ).replace(/^0x/, "");
   const tx = new Transaction();
+  const witness = tx.moveCall({
+    target: "0x1::type_name::with_defining_ids",
+    typeArguments: [`${EQUITY_ORACLE_PACKAGE_ID}::equity_oracle::EquityOracle`],
+    arguments: [],
+  });
   tx.moveCall({
     target: `${pkg}::vault::set_external_account_attested`,
     arguments: [
@@ -179,7 +181,7 @@ export function buildSetExternalAccountAttestedTx(
       tx.object(p.protocolConfigId),
       tx.object(gov.oracleRegistryId),
       tx.pure.address(p.account),
-      tx.pure(bcs.string().serialize(equityOracle)),
+      witness,
       tx.pure.u64(p.budgetBps),
       tx.pure.u64(p.dailyReleaseBps),
       tx.pure(bcs.vector(bcs.u8()).serialize(fromHex(p.attestationHex))),
