@@ -9,6 +9,8 @@ use sui::clock::Clock;
 use sui::coin::{Self, Coin};
 use sui::test_scenario::{Self as ts, Scenario};
 
+use options_core::treasury::Treasury;
+
 use trading_vault::test_helpers::{Self as th, USDC, TestOracle, RogueOracle};
 use trading_vault::registry::OracleRegistry;
 use trading_vault::vault::{Self, CuratorCap, TradingVault};
@@ -66,14 +68,19 @@ fun deposit_with_equity(
 }
 
 /// Curator releases `amount` to the external account, appraising with the
-/// equity leg at `equity`.
+/// equity leg at `equity` — attached only when exposure is live, the same
+/// gate off-chain composers apply.
 fun release(scenario: &mut Scenario, amount: u64, equity: u64, clock: &Clock) {
     ts::next_tx(scenario, th::curator_addr());
     let mut v = ts::take_shared<TradingVault>(scenario);
     let oreg = ts::take_shared<OracleRegistry>(scenario);
     let cap = ts::take_from_sender<CuratorCap>(scenario);
     let mut appraisal = vault::begin_appraisal<USDC>(&v);
-    vault::record_external_equity<TestOracle>(&v, &oreg, &mut appraisal, th::test_oracle(), equity);
+    if (vault::external_exposure(&v) > 0) {
+        vault::record_external_equity<TestOracle>(
+            &v, &oreg, &mut appraisal, th::test_oracle(), equity,
+        );
+    };
     vault::release_external<USDC>(&mut v, &cap, appraisal, amount, clock, scenario.ctx());
     ts::return_to_sender(scenario, cap);
     ts::return_shared(oreg);
@@ -150,15 +157,81 @@ fun equity_leg_prices_deposits_at_true_nav() {
 
 #[test]
 #[expected_failure(abort_code = 82, location = trading_vault::vault)] // appraisal_incomplete
-fun appraisal_without_equity_leg_aborts() {
+fun appraisal_without_equity_leg_aborts_once_funded() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
     th::new_default_vault(&mut scenario);
-    setup_external(&mut scenario);
-    // simple_deposit appraises without the equity leg → incomplete.
     th::simple_deposit(&mut scenario, th::alice_addr(), 1_000, &clock);
+    setup_external(&mut scenario);
+    release(&mut scenario, 250, 0, &clock);
+    // Exposure is live now, so simple_deposit's leg-less appraisal is
+    // incomplete — the requirement re-engages exactly when funds are out.
+    th::simple_deposit(&mut scenario, th::bob_addr(), 1_000, &clock);
     clock.destroy_for_testing();
     ts::end(scenario);
+}
+
+#[test]
+fun unfunded_external_vault_deposits_and_exits_without_equity_leg() {
+    // SO-310: registering an account must not put an equity poster on the
+    // critical path of user deposits/exits. Nothing has been released, so
+    // the account's equity is zero by construction.
+    let mut scenario = ts::begin(th::admin_addr());
+    let mut clock = th::init_protocol(&mut scenario);
+    th::new_default_vault(&mut scenario);
+    setup_external(&mut scenario);
+
+    // Deposit into a registered-but-unfunded vault: no leg, no oracle.
+    th::simple_deposit(&mut scenario, th::alice_addr(), 1_000, &clock);
+
+    ts::next_tx(&mut scenario, th::alice_addr());
+    let mut v = ts::take_shared<TradingVault>(&scenario);
+    let (shares, _, _) = vault::stake_of(&v, th::alice_addr());
+    assert!(shares == 1_000, 0);
+    clock.set_for_testing(4_000_000); // past lockup
+    vault::request_withdraw(&mut v, 1_000, &clock, scenario.ctx());
+    ts::return_shared(v);
+
+    // Permissionless fulfillment, still leg-less.
+    ts::next_tx(&mut scenario, th::bob_addr());
+    let mut v = ts::take_shared<TradingVault>(&scenario);
+    let cfg = th::take_protocol_config(&scenario);
+    let mut treasury = ts::take_shared<Treasury>(&scenario);
+    let appraisal = vault::begin_appraisal<USDC>(&v);
+    vault::fulfill_withdrawals<USDC>(&mut v, &cfg, &mut treasury, appraisal, scenario.ctx());
+    assert!(vault::pending_withdrawals(&v) == 0, 0);
+    assert!(vault::total_shares(&v) == 0, 0);
+    ts::return_shared(treasury);
+    ts::return_shared(cfg);
+    ts::return_shared(v);
+
+    ts::next_tx(&mut scenario, th::alice_addr());
+    let paid = ts::take_from_address<Coin<USDC>>(&scenario, th::alice_addr());
+    assert!(paid.value() == 1_000, 0);
+    ts::return_to_address(th::alice_addr(), paid);
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = 87, location = trading_vault::vault)] // already_appraised
+fun equity_leg_on_unfunded_vault_aborts() {
+    // The leg is not merely optional at zero exposure — it is rejected,
+    // so an attested number can never be added on top of the vault's own
+    // by-construction zero.
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    th::new_default_vault(&mut scenario);
+    th::simple_deposit(&mut scenario, th::alice_addr(), 1_000, &clock);
+    setup_external(&mut scenario);
+
+    ts::next_tx(&mut scenario, th::alice_addr());
+    let v = ts::take_shared<TradingVault>(&scenario);
+    let oreg = ts::take_shared<OracleRegistry>(&scenario);
+    let mut appraisal = vault::begin_appraisal<USDC>(&v);
+    vault::record_external_equity<TestOracle>(&v, &oreg, &mut appraisal, th::test_oracle(), 100);
+    abort 999
 }
 
 #[test]

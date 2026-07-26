@@ -135,9 +135,11 @@ public struct TradingVault has key {
 ///   • releases only ever pay the registered address (`release_external`),
 ///     curator-gated, capped at `budget_bps` of appraised NAV and
 ///     rate-limited to `daily_release_bps` of NAV per 24h window;
-///   • the account's value enters every appraisal through an equity
-///     attestation from the PINNED, allowlisted `equity_oracle` witness —
-///     an appraisal is incomplete without it;
+///   • while exposure is live, the account's value enters every
+///     appraisal through an equity attestation from the PINNED,
+///     allowlisted `equity_oracle` witness — an appraisal is incomplete
+///     without it (at zero exposure the leg is neither needed nor
+///     accepted; see `begin_appraisal`);
 ///   • returns are accepted only from the registered address itself and
 ///     reduce `exposure`.
 /// What signatures cannot prevent (adversarial trading at the venue) is
@@ -200,8 +202,10 @@ public struct Appraisal {
     /// invalidates the snapshot and aborts at consume.
     types_snapshot: VecSet<TypeName>,
     deposit_balance_snapshot: u64,
-    /// True while a configured external account still needs its equity
-    /// leg (`record_external_equity`).
+    /// True while an external account with LIVE exposure still needs its
+    /// equity leg (`record_external_equity`). False — leg neither needed
+    /// nor accepted — for vaults with no account and for accounts with
+    /// zero exposure; see `begin_appraisal`.
     external_pending: bool,
 }
 
@@ -631,14 +635,22 @@ public fun begin_session<W: drop>(
 /// Closing, or when the queue head has aged past `unwind_grace_ms`.
 /// Cannot `take` — only return value to the vault (cancel orders, sweep
 /// venue balances, redeem expired positions).
+///
+/// Deliberately NOT allowlist-gated: delisting an adapter must stop new
+/// deployment, never the exit path for value already deployed under it.
+/// A forced session can only move value INTO the vault, so running one
+/// against a delisted adapter cannot extend the protocol's exposure to
+/// it — while requiring the allowlist would let a kill switch strand the
+/// positions it was flipped to contain. `_reg` is kept in the signature
+/// so existing PTB composers are unaffected.
+#[allow(lint(unused_object_with_fields))]
 public fun begin_force_session<W: drop>(
     vault: &TradingVault,
-    reg: &IntegrationRegistry,
+    _reg: &IntegrationRegistry,
     _witness: W,
     clock: &Clock,
 ): Session {
     let adapter = type_name::with_defining_ids<W>();
-    assert!(registry::is_adapter_allowed(reg, &adapter), errors::adapter_not_allowed());
     let ready = vault.state == VaultState::Closing || {
         vault.queue_head < vault.queue_tail && {
             let head = vault.queue.borrow(vault.queue_head);
@@ -655,14 +667,16 @@ public fun begin_force_session<W: drop>(
 /// settled venue amounts). Like a force session it can never `take`
 /// balances; unlike one it has no unlock condition, so adapters must
 /// expose through it only entry points that cannot grief the strategy.
+/// Not allowlist-gated, for the same reason as `begin_force_session`: a
+/// take-less maintenance crank is how value under a delisted adapter
+/// gets back to depositors.
+#[allow(lint(unused_object_with_fields))]
 public fun begin_crank_session<W: drop>(
     vault: &TradingVault,
-    reg: &IntegrationRegistry,
+    _reg: &IntegrationRegistry,
     _witness: W,
 ): Session {
-    let adapter = type_name::with_defining_ids<W>();
-    assert!(registry::is_adapter_allowed(reg, &adapter), errors::adapter_not_allowed());
-    new_session(vault, adapter, true)
+    new_session(vault, type_name::with_defining_ids<W>(), true)
 }
 
 fun new_session(vault: &TradingVault, adapter: TypeName, forced: bool): Session {
@@ -727,6 +741,16 @@ public fun take_position<P: key + store>(
 /// address (e.g. an RFQ settlement minting to the vault). Witness-gated
 /// so junk objects can never inflate `position_count` and wedge
 /// appraisals — unclaimed transfers just sit unreceived.
+///
+/// Unlike the session kill switches this KEEPS its allowlist check: the
+/// gate here is what prevents stranding, not what causes it. An
+/// unreceived object is inert — it is not in `position_count` or
+/// `asset_types`, so it blocks nothing; whereas an ungated sweep lets
+/// anyone push an object the vault has no allowlisted appraiser for,
+/// after which every appraisal (and therefore every exit) is wedged
+/// permanently. An in-flight transfer to a since-delisted adapter is
+/// recovered by re-allowlisting it long enough to sweep — a governance
+/// act on funds that were never in custody.
 public fun receive_position<P: key + store, W: drop>(
     vault: &mut TradingVault,
     reg: &IntegrationRegistry,
@@ -787,6 +811,18 @@ fun store_position_internal<P: key + store>(vault: &mut TradingVault, adapter: T
 /// Start a NAV computation. The deposit asset values itself 1:1; every
 /// other held type needs `appraise_balance`, every custodied position
 /// needs its adapter's `appraise_*` to call `record_position_value`.
+///
+/// The external-account equity leg is required only while exposure is
+/// LIVE (`external.is_some() && exposure > 0`), not merely because an
+/// account is registered. Before any `release_external` the account's
+/// equity attributable to the vault is zero by construction — a
+/// chain-verifiable fact that needs no attestation — so demanding one
+/// would make deposits and exits depend on an equity poster being alive
+/// for a vault that has never sent a unit out. Once every released unit
+/// is back (`exposure == 0`) venue profit may still sit at the venue,
+/// uncounted: that is the codebase's standard conservative-marks posture
+/// (undercount, never overcount), and it self-heals on the next poster
+/// update after the next release.
 public fun begin_appraisal<T>(vault: &TradingVault): Appraisal {
     assert!(
         type_name::with_defining_ids<T>() == vault.config.deposit_asset,
@@ -805,7 +841,7 @@ public fun begin_appraisal<T>(vault: &TradingVault): Appraisal {
         position_total: vault.position_count,
         types_snapshot: vault.asset_types,
         deposit_balance_snapshot: deposit_balance,
-        external_pending: vault.external.is_some(),
+        external_pending: vault.external.is_some() && vault.external.borrow().exposure > 0,
     }
 }
 
@@ -1112,6 +1148,12 @@ public fun return_external<T>(vault: &mut TradingVault, funds: Coin<T>, ctx: &Tx
 /// while that witness stays allowlisted (delisting is an instant kill
 /// switch). The adapter owns how `equity` is derived — attested by a
 /// keeper under guardrails, or computed on-chain from venue state.
+///
+/// Recordable exactly once, and only into an appraisal that actually
+/// wants the leg: with zero live exposure `begin_appraisal` already
+/// values the account at its by-construction zero, so a second (or
+/// unwanted) leg aborts `already_appraised` rather than adding an
+/// attested number on top. Composers gate on `external_exposure`.
 public fun record_external_equity<W: drop>(
     vault: &TradingVault,
     reg: &OracleRegistry,

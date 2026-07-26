@@ -16,9 +16,12 @@
 ///   • staleness backstop — appraisals refuse entries older than
 ///     `max_age_ms` (on top of the vault's own attestation-age backstop).
 ///
-/// A zeroed or diverged entry is re-anchored by the admin (`seed_equity`),
-/// which bypasses the delta guardrail — registering an account and
-/// re-seeding after venue rotation are governance acts, not keeper acts.
+/// A diverged entry is re-anchored by the admin (`seed_equity`), which
+/// bypasses every guardrail — correcting a bad mark is a governance act.
+/// Creating the entry in the first place is not: `init_entry` is
+/// permissionless because the only value it can write is the zero the
+/// chain already proves, and a poster may leave that zero in one step
+/// (a bootstrap anchor is not a mark to be walked away from).
 ///
 /// The trustless sibling for readable venues (e.g. DeepBook Margin, whose
 /// `MarginManager` is a readable shared object) is a computed adapter that
@@ -49,6 +52,9 @@ const E_TOO_SOON: u64 = 3;
 const E_DELTA_TOO_LARGE: u64 = 4;
 const E_STALE: u64 = 5;
 const E_CONFIG_INVALID: u64 = 6;
+const E_ALREADY_SEEDED: u64 = 7;
+const E_FUNDED: u64 = 8;
+const E_NO_EXTERNAL: u64 = 9;
 
 /// Witness minted only by this module's record path; allowlist it in the
 /// `OracleRegistry` and pin it on the vault via `set_external_account`.
@@ -75,6 +81,14 @@ public struct EquityPosted has copy, drop {
     equity: u64,
     previous: u64,
     seeded: bool,
+}
+
+/// Permissionless zero-anchor creation (`init_entry`). A sibling of
+/// `EquityPosted` rather than a reuse of it: there is no poster or admin
+/// behind it, so it carries no attributable sender.
+public struct EquityInitialized has copy, drop {
+    vault_id: ID,
+    at_ms: u64,
 }
 
 fun init(ctx: &mut TxContext) {
@@ -146,11 +160,39 @@ public fun set_min_interval_ms(_: &AdminCap, book: &mut EquityBook, ms: u64) {
     book.min_interval_ms = ms;
 }
 
+// ══════════════════════════════ bootstrap ══════════════════════════════
+
+/// Permissionless creation of a vault's zero anchor. Registering an
+/// account used to need an admin `seed_equity` before any appraisal could
+/// complete, which put an AdminCap holder on the critical path of a
+/// curator's first release. Nothing here is trusted: the only value it
+/// can write is zero, and it may only write it for a vault whose external
+/// exposure is provably zero on chain — i.e. exactly the value the vault
+/// itself would assume. A funded vault still needs the admin to anchor
+/// its first real mark.
+public fun init_entry(vault: &TradingVault, book: &mut EquityBook, clock: &Clock) {
+    let vault_id = object::id(vault);
+    assert!(!book.entries.contains(vault_id), E_ALREADY_SEEDED);
+    // No account = nothing this book could ever value; without this the
+    // table would accept an entry for every vault that ever existed.
+    assert!(vault::has_external_account(vault), E_NO_EXTERNAL);
+    assert!(vault::external_exposure(vault) == 0, E_FUNDED);
+    let at_ms = clock.timestamp_ms();
+    book.entries.add(vault_id, EquityEntry { equity: 0, updated_at_ms: at_ms });
+    event::emit(EquityInitialized { vault_id, at_ms });
+}
+
 // ═══════════════════════════════ posting ═══════════════════════════════
 
-/// Keeper path: update a seeded entry within the guardrails. A previous
-/// value of zero cannot be moved by a poster at all (bps-of-zero is zero)
-/// — recovery from a zeroed mark goes through `seed_equity`.
+/// Keeper path: update an existing entry within the guardrails.
+///
+/// A zero previous value is a BOOTSTRAP, not a mark, so the delta band
+/// does not apply to the first move off it — bps-of-zero is zero, so a
+/// poster could otherwise never leave the anchor and every newly funded
+/// vault would need an admin `seed_equity` before its appraisals could
+/// reflect venue value. The poster allowlist and the min-update interval
+/// still bind, and once the entry is non-zero every subsequent step is
+/// delta-bounded as before.
 public fun post_equity(
     book: &mut EquityBook,
     vault_id: ID,
@@ -166,11 +208,13 @@ public fun post_equity(
     let entry = book.entries.borrow_mut(vault_id);
     assert!(now >= entry.updated_at_ms + min_interval_ms, E_TOO_SOON);
     let previous = entry.equity;
-    let delta = if (equity > previous) { equity - previous } else { previous - equity };
-    assert!(
-        (delta as u128) * BPS_DENOM <= (previous as u128) * (max_delta_bps as u128),
-        E_DELTA_TOO_LARGE,
-    );
+    if (previous > 0) {
+        let delta = if (equity > previous) { equity - previous } else { previous - equity };
+        assert!(
+            (delta as u128) * BPS_DENOM <= (previous as u128) * (max_delta_bps as u128),
+            E_DELTA_TOO_LARGE,
+        );
+    };
     entry.equity = equity;
     entry.updated_at_ms = now;
     event::emit(EquityPosted {
@@ -186,7 +230,9 @@ public fun post_equity(
 
 /// Record the vault's external-equity leg from the book. Composable into
 /// any appraisal PTB (deposits, fulfillment cranks, releases); aborts if
-/// the entry is missing or older than `max_age_ms`.
+/// the entry is missing or older than `max_age_ms`. Attach it only when
+/// `vault::external_exposure` is non-zero — an appraisal with no live
+/// exposure does not want the leg and rejects it.
 public fun record(
     vault: &TradingVault,
     book: &EquityBook,
