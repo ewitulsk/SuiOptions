@@ -49,9 +49,9 @@ frost_shares_path = "/app/data/frost-shares.toml"
 # margin registry; the MarginManager id is appended after the creation
 # ceremony (second config pass).
 [[vaults]]
-vault_id                = "0x138e122a28da92d03509403a314338ce491f4ad0b9d62e5cbc4a7cc112e3fceb"
+vault_id                = "0x8da89c40ad922ca3447af60c2214f13a93860d04df3072646020d94ccc4fae49"
 external_account        = "0xec548755761294d67138a047e6b82d1c19181ee2e6a8bb42be46b57635abc329"
-vault_address           = "0x138e122a28da92d03509403a314338ce491f4ad0b9d62e5cbc4a7cc112e3fceb"
+vault_address           = "0x8da89c40ad922ca3447af60c2214f13a93860d04df3072646020d94ccc4fae49"
 curator_pubkey_b64      = "APA0XRE2zMOQIqzLHCnp0/cILfKUqRGZlwBWGMsXYWTe"
 curator_wallet          = "0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865"
 max_borrow_amount       = 500000000000  # 500 SUI per tx
