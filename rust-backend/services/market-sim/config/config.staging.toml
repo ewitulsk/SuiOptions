@@ -15,7 +15,11 @@ enabled = true
 # (500 vendored DEEP each from the service wallet — see the SO-302 runbook).
 spot_pairs = ["TBTC/TUSDC", "TSUI/TUSDC", "TWAL/TUSDC", "TDEEP/TUSDC"]
 
-spot_interval_secs     = 60
+# Re-quote twice a day. The sim is a fill target, not a live market maker, so
+# a stable book is fine and this keeps gas burn to a trickle (each pass places
+# real orders on every pool). Order expiry tracks this interval (see sim.rs),
+# so the book stays resting the whole 12h between passes.
+spot_interval_secs     = 43200
 spot_band_bps          = 200
 spot_notional_per_side = 100000000
 
