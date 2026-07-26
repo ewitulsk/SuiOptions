@@ -168,8 +168,9 @@ public fun set_min_interval_ms(_: &AdminCap, book: &mut EquityBook, ms: u64) {
 /// curator's first release. Nothing here is trusted: the only value it
 /// can write is zero, and it may only write it for a vault whose external
 /// exposure is provably zero on chain — i.e. exactly the value the vault
-/// itself would assume. A funded vault still needs the admin to anchor
-/// its first real mark.
+/// itself would assume. Once funded, an allowlisted poster moves the
+/// entry off zero directly (`post_equity` waives the delta band for the
+/// first move off a zero anchor) — no admin `seed_equity` needed.
 public fun init_entry(vault: &TradingVault, book: &mut EquityBook, clock: &Clock) {
     let vault_id = object::id(vault);
     assert!(!book.entries.contains(vault_id), E_ALREADY_SEEDED);
