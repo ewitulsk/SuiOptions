@@ -13,7 +13,8 @@
 //!   6. Post external-account equity into the `EquityBook` (SO-299) when
 //!      a venue source has an opinion, stepping within the book's
 //!      on-chain guardrails ([`crate::venue_equity`]; the keeper wallet
-//!      must be an allowlisted poster).
+//!      must be an allowlisted poster). While an external account is still
+//!      unfunded, create its zero entry instead (SO-310, permissionless).
 //!   7. Fulfill the withdrawal queue with a FULL attestation-bearing
 //!      appraisal (sui_tx::tx::appraisal composer) — cash-only vaults
 //!      need no price legs, everything else gets Pyth attestations;
@@ -43,7 +44,7 @@ use sui_sdk::rpc_types::{
 use sui_sdk::SuiClient;
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
-use sui_types::transaction::ObjectArg;
+use sui_types::transaction::{ObjectArg, TransactionKind};
 use tracing::{debug, info, warn};
 
 use protocol_types::PriceFeedId;
@@ -364,6 +365,9 @@ async fn tick_one(
     sweep_custody_settled(wrap, ctx, vault_id, &holdings).await;
     sweep_vault_address(wrap, ctx, vault_id).await;
     force_unwind_if_starved(wrap, ctx, vault_id, &holdings, now_ms).await;
+    // BEFORE the post so a freshly registered account has its zero anchor to
+    // step off of.
+    init_external_entry(wrap, ctx, vault_id, &holdings).await;
     if let Some(ext) = external {
         // BEFORE fulfillment so its equity leg reads a fresh mark.
         post_external_equity(wrap, ctx, vault_id, ext, book_params, now_ms).await;
@@ -1152,22 +1156,13 @@ async fn post_external_equity(
             // Params were unreadable this tick (already logged in tick()).
             return Ok(());
         };
-        let Some(previous) = ext.equity else {
-            warn!(
-                vault = %vault_id,
-                target,
-                "no EquityBook entry for this vault — admin seed_equity required; skipping post"
-            );
-            return Ok(());
-        };
-        if previous == 0 && target > 0 {
-            warn!(
-                vault = %vault_id,
-                target,
-                "equity entry is zero — a poster cannot move it (bps-of-zero); admin seed_equity required"
-            );
-            return Ok(());
-        }
+        // The indexer view only knows entries that have been POSTED; a
+        // bootstrap anchor (crank 6b's `init_entry`, SO-310) is invisible to
+        // it, so a missing mark reads as the zero anchor it is. `post_equity`
+        // waives the delta band for the first move off zero — no admin
+        // `seed_equity` on the critical path. With no entry at all the post
+        // aborts E_NOT_SEEDED (2) and alerts, which is the honest signal.
+        let previous = ext.equity.unwrap_or(0);
         let updated_at = ext.equity_updated_at_ms.unwrap_or(0);
         if now_ms.saturating_sub(updated_at) < min_interval_ms {
             debug!(vault = %vault_id, "within the EquityBook min interval; next tick");
@@ -1199,6 +1194,101 @@ async fn post_external_equity(
     if let Err(e) = result {
         classify_and_log(vault_id, &e);
     }
+}
+
+/// Crank 6b (SO-310): create the vault's zero `EquityBook` entry while its
+/// external account is still unfunded. `equity_oracle::init_entry` is
+/// permissionless (the keeper pays gas) and exists exactly for this window:
+/// once the curator's first release opens exposure, appraisals REQUIRE the
+/// equity leg, and `record` on an entryless book aborts E_NOT_SEEDED until
+/// an admin `seed_equity`. Both of `init_entry`'s guards — the entry already
+/// exists, exposure already opened — are races we can lose to another
+/// cranker or to the curator's own release PTB, which prepends the same
+/// call; a lost race is benign.
+async fn init_external_entry(
+    wrap: &SuiClientWrapper,
+    ctx: &TradingVaultCtx,
+    vault_id: ObjectID,
+    holdings: &VaultHoldings,
+) {
+    if holdings.external_exposure > 0 {
+        return;
+    }
+    let (Some(pkg), Some(book_id)) = (ctx.equity_oracle_pkg, ctx.equity_book_id) else {
+        return;
+    };
+    let expected =
+        protocol_types::asset::canonicalize_move_type(&format!("{pkg}::equity_oracle::EquityOracle"));
+    if holdings.external_equity_oracle.as_deref() != Some(expected.as_str()) {
+        return;
+    }
+    let result: Result<()> = async {
+        let client = &wrap.client;
+        if equity_book_has_entry(client, wrap.signer.address, pkg, book_id, vault_id).await? {
+            return Ok(());
+        }
+        let mut pt = ProgrammableTransactionBuilder::new();
+        let vault = pt.obj(shared_object_arg(client, vault_id, false).await?)?;
+        let book = pt.obj(shared_object_arg(client, book_id, true).await?)?;
+        let clock = clock_arg(&mut pt)?;
+        pt.programmable_move_call(
+            pkg,
+            Identifier::new("equity_oracle").unwrap(),
+            Identifier::new("init_entry").unwrap(),
+            vec![],
+            vec![vault, book, clock],
+        );
+        submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, "equity_oracle::init_entry").await?;
+        info!(vault = %vault_id, "created the vault's zero EquityBook entry");
+        Ok(())
+    }
+    .await;
+    if let Err(e) = result {
+        let msg = format!("{e:#}");
+        if msg.contains("MoveAbort") {
+            debug!(vault = %vault_id, error = %msg, "init_entry lost a race; next tick");
+        } else {
+            classify_and_log(vault_id, &e);
+        }
+    }
+}
+
+/// `equity_oracle::has_entry(book, vault_id)` via devInspect — no tx, no gas.
+async fn equity_book_has_entry(
+    client: &SuiClient,
+    sender: SuiAddress,
+    pkg: ObjectID,
+    book_id: ObjectID,
+    vault_id: ObjectID,
+) -> Result<bool> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let book = pt.obj(shared_object_arg(client, book_id, false).await?)?;
+    let vid = pt.pure(vault_id)?;
+    pt.programmable_move_call(
+        pkg,
+        Identifier::new("equity_oracle").unwrap(),
+        Identifier::new("has_entry").unwrap(),
+        vec![],
+        vec![book, vid],
+    );
+    let resp = client
+        .read_api()
+        .dev_inspect_transaction_block(
+            sender,
+            TransactionKind::ProgrammableTransaction(pt.finish()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .context("devInspect equity_oracle::has_entry")?;
+    let (bytes, _ty) = resp
+        .results
+        .as_ref()
+        .and_then(|r| r.first())
+        .and_then(|r| r.return_values.first())
+        .ok_or_else(|| anyhow!("devInspect has_entry returned nothing: {:?}", resp.error))?;
+    bcs::from_bytes(bytes).context("decoding has_entry bool return")
 }
 
 /// Compose the full attestation-bearing appraisal into `pt` (Pyth legs

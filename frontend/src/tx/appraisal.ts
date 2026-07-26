@@ -118,11 +118,12 @@ export type OptionLegPlan = {
 /** A held option coin custodied as a position (vault_mm writer flow). */
 export type OptionCoinPlan = OptionLegPlan & { positionId: string };
 
-/** The external-account equity leg (SO-299): a vault with an external
- * account marks every appraisal `external_pending`, so consumption needs
- * the pinned oracle's record leg — `equity_oracle::record` from the
- * keeper-posted `EquityBook`, or the trustlessly computed
- * `dbm_oracle::record{,_no_debt}` for a DeepBook-Margin account. */
+/** The external-account equity leg (SO-299): a vault with a FUNDED external
+ * account (exposure > 0) marks every appraisal `external_pending`, so
+ * consumption needs the pinned oracle's record leg — `equity_oracle::record`
+ * from the keeper-posted `EquityBook`, or the trustlessly computed
+ * `dbm_oracle::record{,_no_debt}` for a DeepBook-Margin account. An
+ * unfunded account marks nothing and takes NO leg (SO-310). */
 export type ExternalEquityPlan =
   | {
       kind: "equityBook";
@@ -155,9 +156,14 @@ export type AppraisalPlan = {
   priceInfoByFeed: Record<string, string>;
   /** Canonical DEEP type when locked-DEEP legs can be attested, else null. */
   deepType: string | null;
-  /** Non-null when the vault has an external account — its equity leg is
-   * mandatory for a complete appraisal. */
+  /** Non-null when the vault has a funded external account — its equity leg
+   * is mandatory for a complete appraisal. */
   externalEquity: ExternalEquityPlan | null;
+  /** Non-null when the vault pins the keeper-posted `EquityOracle`, is still
+   * unfunded, and its `EquityBook` entry does not exist yet (SO-310): the
+   * first release must create it, or every later appraisal aborts
+   * E_NOT_SEEDED. See `buildReleaseExternalTx`. */
+  externalInit: { oraclePkg: string; bookId: string } | null;
 };
 
 // Move-JSON tolerant read helpers (`structFields`, `idString`, …) moved to
@@ -264,6 +270,30 @@ async function resolveEquityBookId(client: SuiGrpcClient): Promise<string> {
   throw new Error("EquityBook not found in the equity-oracle publish transaction");
 }
 
+/** Whether the book already holds this vault's entry (SO-310). The entries
+ * live in a `Table<ID, EquityEntry>`, whose per-key field id derives
+ * client-side — same posture as the Pyth price_info read above. */
+async function equityBookHasEntry(
+  client: SuiGrpcClient,
+  bookId: string,
+  vaultId: string,
+): Promise<boolean> {
+  const { object } = await client.core.getObject({ objectId: bookId, include: { json: true } });
+  const tableId = idString(structFields(object.json)?.entries);
+  if (!tableId) throw new Error("unparseable EquityBook entries table");
+  const fieldId = deriveDynamicFieldID(
+    tableId,
+    "0x2::object::ID",
+    bcs.Address.serialize(vaultId).toBytes(),
+  );
+  try {
+    await client.core.getObject({ objectId: fieldId, include: {} });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ═══════════════════════════════ planning ═══════════════════════════════
 
 function feedIdFor(coinType: string): string | null {
@@ -319,13 +349,18 @@ export async function planAppraisal(
     .map(canon);
   const freeBalanceTypes = freeTypes.filter((t) => t !== depositType);
 
-  // 1b. External account (SO-299): a configured vault marks every appraisal
-  //     `external_pending` at begin_appraisal, and consumption aborts
-  //     without the pinned oracle's `record_external_equity` leg. Plan the
-  //     pinned witness's leg — keeper-posted equity_oracle, or the computed
-  //     DeepBook-Margin leg for `dbm_oracle::DbmOracle` — and refuse with a
-  //     clear reason (mirroring the Rust composer) for any other witness.
+  // 1b. External account (SO-299): a vault with OPEN EXPOSURE marks every
+  //     appraisal `external_pending` at begin_appraisal, and consumption
+  //     aborts without the pinned oracle's `record_external_equity` leg.
+  //     Plan the pinned witness's leg — keeper-posted equity_oracle, or the
+  //     computed DeepBook-Margin leg for `dbm_oracle::DbmOracle` — and
+  //     refuse with a clear reason (mirroring the Rust composer) for any
+  //     other witness. A registered-but-unfunded account (exposure == 0,
+  //     SO-310) marks nothing, so it takes NO leg — recording equity for it
+  //     would abort. It needs its EquityBook entry created instead, before
+  //     the first release opens exposure (`externalInit`).
   let externalEquity: ExternalEquityPlan | null = null;
+  let externalInit: AppraisalPlan["externalInit"] = null;
   let dbmLeg: DbmLeg | null = null;
   const extRaw = structFields(json)?.external ?? asRecord(json)?.external;
   const ext = Array.isArray(extRaw) ? extRaw[0] : extRaw;
@@ -333,7 +368,22 @@ export async function planAppraisal(
     const witness = typeNameString(structFields(ext)?.equity_oracle);
     if (!witness) throw new Error("vault external account has no pinned equity oracle");
     const witnessCanon = canon(witness);
-    if (
+    const exposureRaw = structFields(ext)?.exposure;
+    const exposure =
+      typeof exposureRaw === "string" || typeof exposureRaw === "number"
+        ? BigInt(exposureRaw)
+        : 0n;
+    if (exposure === 0n) {
+      if (
+        EQUITY_ORACLE_PACKAGE_ID &&
+        witnessCanon === canon(`${EQUITY_ORACLE_PACKAGE_ID}::equity_oracle::EquityOracle`)
+      ) {
+        const bookId = await resolveEquityBookId(client);
+        if (!(await equityBookHasEntry(client, bookId, vault.vaultId))) {
+          externalInit = { oraclePkg: EQUITY_ORACLE_PACKAGE_ID, bookId };
+        }
+      }
+    } else if (
       DBM_ORACLE_PACKAGE_ID &&
       witnessCanon === canon(`${DBM_ORACLE_PACKAGE_ID}::dbm_oracle::DbmOracle`)
     ) {
@@ -515,6 +565,7 @@ export async function planAppraisal(
       priceInfoByFeed,
       deepType,
       externalEquity,
+      externalInit,
     };
   }
 
@@ -540,6 +591,7 @@ export async function planAppraisal(
     priceInfoByFeed: {},
     deepType,
     externalEquity,
+    externalInit,
   };
 }
 
@@ -956,6 +1008,13 @@ export type ReleaseExternalParams = {
  * a deposit piped into the curator-gated budgeted release — the chain binds
  * the external budget and daily release window against the NAV this
  * appraisal snapshots, so no client-side limit enforcement is attempted.
+ *
+ * The FIRST release also creates the vault's `EquityBook` entry (SO-310,
+ * `plan.externalInit`): `equity_oracle::init_entry` is permissionless and
+ * only legal while exposure is still zero, so it is prepended INTO this PTB
+ * — atomically before the release opens exposure. Losing the race to the
+ * keeper's own opportunistic init aborts the release (entry already exists);
+ * re-planning clears `externalInit` and the retry goes through.
  */
 export async function buildReleaseExternalTx(p: ReleaseExternalParams): Promise<Transaction> {
   const vaultPkg = requireId(TRADING_VAULT_PACKAGE_ID, "trading-vault package");
@@ -967,6 +1026,16 @@ export async function buildReleaseExternalTx(p: ReleaseExternalParams): Promise<
       : null;
 
   const tx = new Transaction();
+  if (p.plan.externalInit) {
+    tx.moveCall({
+      target: `${p.plan.externalInit.oraclePkg}::equity_oracle::init_entry`,
+      arguments: [
+        tx.object(p.plan.vaultId),
+        tx.object(p.plan.externalInit.bookId),
+        tx.object(CLOCK_ID),
+      ],
+    });
+  }
   const appraisal = composeAppraisal(tx, p.plan, {
     protocolConfigId: p.protocolConfigId,
     accumulatorUpdate,

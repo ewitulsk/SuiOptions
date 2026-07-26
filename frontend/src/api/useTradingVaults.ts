@@ -157,6 +157,9 @@ export function useAppraisalPlan(vault: TradingVaultDetail | null) {
       vault?.vaultId ?? null,
       vault?.positionCount ?? 0,
       vault?.updatedAtMs ?? 0,
+      // The external-equity leg composes only above zero exposure (SO-310),
+      // so the first release changes the plan's shape.
+      vault?.externalExposure ?? "0",
     ],
     enabled: vault !== null,
     staleTime: 60_000,

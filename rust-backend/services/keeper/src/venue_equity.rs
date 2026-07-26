@@ -196,9 +196,14 @@ pub fn equity_from_account_json(body: &str, asset_decimals: u8) -> Result<u64> {
 /// on-chain `post_equity` aborts (E_DELTA_TOO_LARGE) when
 /// `delta * 10_000 > previous * max_delta_bps`, so the step is capped at
 /// `floor(previous * max_delta_bps / 10_000)` and never overshoots the
-/// target. A `previous` of zero is immovable (bps-of-zero) — callers
-/// must skip and surface that admin `seed_equity` is required.
+/// target. A `previous` of zero is a BOOTSTRAP anchor, not a mark
+/// (SO-310): the contract waives the delta band for the first move off
+/// it — bps-of-zero would otherwise pin every newly funded vault at zero
+/// until an admin `seed_equity` — so the whole target posts in one step.
 pub fn clamp_step(previous: u64, target: u64, max_delta_bps: u64) -> u64 {
+    if previous == 0 {
+        return target;
+    }
     let max_delta = ((previous as u128) * (max_delta_bps as u128) / 10_000) as u64;
     if target > previous {
         target.min(previous.saturating_add(max_delta))
@@ -240,9 +245,13 @@ mod tests {
         }
     }
 
+    /// SO-310: the first move off a zero anchor is unbanded on-chain, so
+    /// the whole target posts at once (a clamped 0 would strand every
+    /// freshly bootstrapped vault at zero).
     #[test]
-    fn clamp_step_zero_previous_is_immovable() {
-        assert_eq!(clamp_step(0, 5_000, 2_000), 0);
+    fn clamp_step_off_a_zero_anchor_posts_the_target() {
+        assert_eq!(clamp_step(0, 5_000, 2_000), 5_000);
+        assert_eq!(clamp_step(0, 0, 2_000), 0);
     }
 
     #[test]
