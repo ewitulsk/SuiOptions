@@ -249,13 +249,23 @@ async fn spot_quote_pass(
     .map_err(|e| anyhow!("stale spot for {}/{}: {e:?}", base.symbol, quote.symbol))?;
 
     let (tick, lot, min) = derived_pool_params(base.decimals, quote.decimals);
-    let round_tick = |px: f64| -> u64 {
+    // Makers round AWAY from mid: bid down, ask up. Rounding both down let a
+    // low-priced pair (TWAL) collapse the whole band into one tick — bid ==
+    // ask, and the post-only ask "crossed" its own bid (order_info abort 5).
+    let round_down = |px: f64| -> u64 {
         let raw = (px * 1e9) as u64;
         ((raw / tick).max(1)) * tick
     };
+    let round_up = |px: f64| -> u64 {
+        let raw = (px * 1e9) as u64;
+        (raw.div_ceil(tick).max(2)) * tick
+    };
     let band = p.cfg.spot_band_bps as f64 / 10_000.0;
-    let bid_px = round_tick(mid * (1.0 - band));
-    let ask_px = round_tick(mid * (1.0 + band));
+    let bid_px = round_down(mid * (1.0 - band));
+    let mut ask_px = round_up(mid * (1.0 + band));
+    if ask_px <= bid_px {
+        ask_px = bid_px + tick;
+    }
     let qty = {
         let base_units = (p.cfg.spot_notional_per_side as f64 / mid) as u64;
         ((base_units / lot).max(1)) * lot
