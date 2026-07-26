@@ -13,6 +13,7 @@ import { useCurrentAccount } from "@mysten/dapp-kit";
 import { tradingVaultPps, tradingVaultTvl, tokenForCoinType, type TradingVault } from "../api/tradingVaults";
 import { useTradingVaults, useVaultProtocolConfigId } from "../api/useTradingVaults";
 import { useTradingVaultActions } from "../state/tradingVault";
+import { BLUEFIN_TEST_ENABLED, BLUEFIN_TEST_USDC } from "../bluefinTest";
 import { SUPPORTED_TOKENS, TRADING_VAULT_PACKAGE_ID } from "../config";
 import { Address } from "../components/Address";
 import { TokenLogo } from "../components/TokenLogo";
@@ -201,7 +202,16 @@ function CreateVaultCard() {
   const cfgQ = useVaultProtocolConfigId();
 
   const [open, setOpen] = useState(false);
-  const tokens = useMemo(() => SUPPORTED_TOKENS.filter((t) => t.enabled), []);
+  // Off mainnet/prod, Bluefin's staging margin asset is selectable even
+  // though token-info doesn't serve it — a vault must be *created* with it to
+  // fund a Bluefin account at all (SO-311).
+  const tokens = useMemo(
+    () => [
+      ...SUPPORTED_TOKENS.filter((t) => t.enabled),
+      ...(BLUEFIN_TEST_ENABLED ? [BLUEFIN_TEST_USDC] : []),
+    ],
+    [],
+  );
   const [coinType, setCoinType] = useState<string>(tokens[0]?.coinType ?? "");
   // Empty means "default to the connected wallet at submit time".
   const [curator, setCurator] = useState("");
