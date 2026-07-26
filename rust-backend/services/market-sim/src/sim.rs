@@ -338,15 +338,26 @@ async fn spot_quote_pass(
             vec![pool, bm, proof, a_client, a_type, a_self, a_px, a_qty, a_bid, a_deep, a_exp, clock],
         );
     }
-    pt.programmable_move_call(
+    submit_ptb(&wrap.client, &wrap.signer, pt, p.cfg.gas_budget, "sim::spot_quote").await?;
+    info!(pool = %pool_id, base = %base.symbol, bid_px, ask_px, qty, "[sim] spot band refreshed");
+
+    // Sweep fill proceeds separately: `withdraw_settled_amounts_permissionless`
+    // hard-aborts with ENoBalanceToSettle (7) when nothing has filled, which
+    // is every pass on a quiet book — inside the quote PTB it reverted the
+    // whole band. Best-effort here; the abort is the benign no-fills case.
+    let mut sweep = ProgrammableTransactionBuilder::new();
+    let s_pool = sweep.obj(shared_object_arg(&wrap.client, pool_id, true).await?)?;
+    let s_bm = sweep.obj(shared_object_arg(&wrap.client, bm_id, true).await?)?;
+    sweep.programmable_move_call(
         p.handles.package,
         Identifier::new("pool").unwrap(),
         Identifier::new("withdraw_settled_amounts_permissionless").unwrap(),
         tags,
-        vec![pool, bm],
+        vec![s_pool, s_bm],
     );
-    submit_ptb(&wrap.client, &wrap.signer, pt, p.cfg.gas_budget, "sim::spot_quote").await?;
-    info!(pool = %pool_id, base = %base.symbol, bid_px, ask_px, qty, "[sim] spot band refreshed");
+    if let Err(e) = submit_ptb(&wrap.client, &wrap.signer, sweep, p.cfg.gas_budget, "sim::spot_settle").await {
+        tracing::debug!(pool = %pool_id, error = %format!("{e:#}"), "[sim] settled-amount sweep skipped (benign when no fills)");
+    }
     Ok(())
 }
 
