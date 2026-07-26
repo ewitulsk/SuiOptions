@@ -4,8 +4,11 @@
 /// sources (`OracleRegistry`) are governed independently — allowlisting a
 /// price source deserves the same scrutiny as a venue, but they are
 /// different decisions. Removal from either registry is an instant kill
-/// switch for new sessions / attestations; it never strands funds already
-/// in custody.
+/// switch for new curator sessions / attestations; it never strands funds
+/// already in custody — the permissionless take-less exits
+/// (`begin_force_session`, `begin_crank_session`) are deliberately
+/// ungated, so a delisted adapter's positions can still be unwound back
+/// to depositors.
 module trading_vault::registry;
 
 use std::type_name::TypeName;

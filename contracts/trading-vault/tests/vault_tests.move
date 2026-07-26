@@ -508,6 +508,80 @@ fun forced_session_cannot_take() {
     abort 0
 }
 
+#[test]
+fun delisted_adapter_can_still_be_unwound_by_crank_and_force_sessions() {
+    // SO-310: delisting is a kill switch on new deployment, not on exits.
+    // A vault holding a position under a since-disallowed adapter must
+    // still be unwindable by anyone through the take-less sessions.
+    let mut sc = ts::begin(h::admin_addr());
+    let clock = h::init_protocol(&mut sc);
+    h::new_default_vault(&mut sc);
+    h::simple_deposit(&mut sc, h::alice_addr(), 1_000_000, &clock);
+
+    ts::next_tx(&mut sc, h::curator_addr());
+    let mut v = ts::take_shared<TradingVault>(&sc);
+    let ireg = ts::take_shared<IntegrationRegistry>(&sc);
+    let cap = ts::take_from_sender<CuratorCap>(&sc);
+    let p = h::new_position(&mut sc);
+    let pid = object::id(&p);
+    let mut s = vault::begin_session(&v, &cap, &ireg, h::test_adapter());
+    vault::put_position(&mut v, &mut s, p);
+    vault::end_session(&v, s);
+    ts::return_to_sender(&sc, cap);
+    ts::return_shared(ireg);
+    ts::return_shared(v);
+
+    // Kill switch: the adapter is delisted with the position still held.
+    ts::next_tx(&mut sc, h::admin_addr());
+    let admin_cap = h::take_admin_cap(&sc);
+    let mut ireg = ts::take_shared<IntegrationRegistry>(&sc);
+    registry::disallow_adapter(
+        &admin_cap,
+        &mut ireg,
+        std::type_name::with_defining_ids<h::TestAdapter>(),
+    );
+    assert!(
+        !registry::is_adapter_allowed(&ireg, &std::type_name::with_defining_ids<h::TestAdapter>()),
+    );
+    ts::return_shared(ireg);
+    h::return_admin_cap(&sc, admin_cap);
+
+    // Crank session (always unlocked): redeem the stranded position.
+    ts::next_tx(&mut sc, h::bob_addr());
+    let mut v = ts::take_shared<TradingVault>(&sc);
+    let ireg = ts::take_shared<IntegrationRegistry>(&sc);
+    let mut s = vault::begin_crank_session(&v, &ireg, h::test_adapter());
+    let p: h::TestPosition = vault::take_position(&mut v, &mut s, pid);
+    vault::put<h::USDC>(&mut v, &mut s, h::mint<h::USDC>(500_000)); // redemption proceeds
+    vault::end_session(&v, s);
+    h::destroy_position(p);
+    assert!(vault::position_count(&v) == 0);
+    assert!(vault::free_balance_of<h::USDC>(&v) == 1_500_000);
+    ts::return_shared(ireg);
+    ts::return_shared(v);
+
+    // Force session (unlocked by Closing) against the same delisted adapter.
+    ts::next_tx(&mut sc, h::curator_addr());
+    let mut v = ts::take_shared<TradingVault>(&sc);
+    let cap = ts::take_from_sender<CuratorCap>(&sc);
+    vault::initiate_close(&mut v, &cap);
+    ts::return_to_sender(&sc, cap);
+    ts::return_shared(v);
+
+    ts::next_tx(&mut sc, h::bob_addr());
+    let mut v = ts::take_shared<TradingVault>(&sc);
+    let ireg = ts::take_shared<IntegrationRegistry>(&sc);
+    let mut s = vault::begin_force_session(&v, &ireg, h::test_adapter(), &clock);
+    vault::put<h::USDC>(&mut v, &mut s, h::mint<h::USDC>(1));
+    vault::end_session(&v, s);
+    assert!(vault::free_balance_of<h::USDC>(&v) == 1_500_001);
+    ts::return_shared(ireg);
+    ts::return_shared(v);
+
+    clock.destroy_for_testing();
+    sc.end();
+}
+
 // ══════════════════ appraisal events + crank (SO-304) ══════════════════
 
 #[test]

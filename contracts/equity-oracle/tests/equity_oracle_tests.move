@@ -22,6 +22,13 @@ fun keeper_addr(): address { th::bob_addr() }
 /// `EquityOracle` witness (budget 50%, daily 25%), keeper allowlisted as
 /// poster, and alice funding 1000 USDC before registration.
 fun setup(scenario: &mut Scenario): Clock {
+    let clock = setup_unregistered(scenario);
+    register_external(scenario);
+    clock
+}
+
+/// Everything `setup` does except registering the external account.
+fun setup_unregistered(scenario: &mut Scenario): Clock {
     let clock = th::init_protocol(scenario);
 
     ts::next_tx(scenario, th::admin_addr());
@@ -43,7 +50,10 @@ fun setup(scenario: &mut Scenario): Clock {
 
     th::new_default_vault(scenario);
     th::simple_deposit(scenario, th::alice_addr(), 1_000, &clock);
+    clock
+}
 
+fun register_external(scenario: &mut Scenario) {
     ts::next_tx(scenario, th::admin_addr());
     let admin_cap = th::take_admin_cap(scenario);
     let mut v = ts::take_shared<TradingVault>(scenario);
@@ -60,7 +70,15 @@ fun setup(scenario: &mut Scenario): Clock {
     ts::return_shared(oreg);
     ts::return_shared(v);
     th::return_admin_cap(scenario, admin_cap);
-    clock
+}
+
+fun init_entry(scenario: &mut Scenario, clock: &Clock) {
+    ts::next_tx(scenario, th::alice_addr()); // permissionless: no cap, no poster
+    let mut book = ts::take_shared<EquityBook>(scenario);
+    let v = ts::take_shared<TradingVault>(scenario);
+    eo::init_entry(&v, &mut book, clock);
+    ts::return_shared(v);
+    ts::return_shared(book);
 }
 
 fun seed(scenario: &mut Scenario, equity: u64, clock: &Clock) {
@@ -81,6 +99,18 @@ fun post(scenario: &mut Scenario, who: address, equity: u64, clock: &Clock) {
     eo::post_equity(&mut book, object::id(&v), equity, clock, scenario.ctx());
     ts::return_shared(v);
     ts::return_shared(book);
+}
+
+/// The FIRST curator release: exposure is still zero, so the appraisal
+/// wants no equity leg and the book is not consulted at all.
+fun release_bootstrap(scenario: &mut Scenario, amount: u64, clock: &Clock) {
+    ts::next_tx(scenario, th::curator_addr());
+    let mut v = ts::take_shared<TradingVault>(scenario);
+    let cap = ts::take_from_sender<CuratorCap>(scenario);
+    let appraisal = vault::begin_appraisal<USDC>(&v);
+    vault::release_external<USDC>(&mut v, &cap, appraisal, amount, clock, scenario.ctx());
+    ts::return_to_sender(scenario, cap);
+    ts::return_shared(v);
 }
 
 /// Curator release with the equity leg recorded from the book.
@@ -105,12 +135,12 @@ fun post_within_guardrails_and_appraise() {
     let mut clock = setup(&mut scenario);
 
     seed(&mut scenario, 0, &clock);
-    release(&mut scenario, 250, &clock);
+    release_bootstrap(&mut scenario, 250, &clock);
     // The keeper marks the account at cost, then at a profit within the
     // 20% delta band after the 1-minute interval.
     clock.set_for_testing(60_000);
-    // 0 → 250 would be a bps-of-zero move: only the admin can anchor it.
-    seed(&mut scenario, 250, &clock);
+    // 0 → 250 leaves the bootstrap anchor: not delta-bounded (SO-310).
+    post(&mut scenario, keeper_addr(), 250, &clock);
     clock.set_for_testing(120_000);
     post(&mut scenario, keeper_addr(), 290, &clock);
 
@@ -234,7 +264,7 @@ fun window_reset_and_budget_track_nav_with_equity() {
     let mut scenario = ts::begin(th::admin_addr());
     let mut clock = setup(&mut scenario);
     seed(&mut scenario, 0, &clock);
-    release(&mut scenario, 250, &clock); // NAV 1000, daily cap 250
+    release_bootstrap(&mut scenario, 250, &clock); // NAV 1000, daily cap 250
 
     clock.set_for_testing(DAY_MS + 1);
     seed(&mut scenario, 400, &clock); // venue profit: NAV = 750 + 400
@@ -248,4 +278,109 @@ fun window_reset_and_budget_track_nav_with_equity() {
 
     clock.destroy_for_testing();
     ts::end(scenario);
+}
+
+// ══════════════ permissionless bootstrap (SO-310) ══════════════
+
+#[test]
+fun bootstrap_without_admin_end_to_end() {
+    // The whole lifecycle with no AdminCap after registration: anyone
+    // creates the zero anchor, the curator releases against a leg-less
+    // appraisal, and the keeper walks the entry off zero in one step.
+    let mut scenario = ts::begin(th::admin_addr());
+    let mut clock = setup(&mut scenario);
+
+    init_entry(&mut scenario, &clock);
+
+    ts::next_tx(&mut scenario, th::alice_addr());
+    let book = ts::take_shared<EquityBook>(&scenario);
+    let v = ts::take_shared<TradingVault>(&scenario);
+    assert!(eo::has_entry(&book, object::id(&v)), 0);
+    let (equity, ts_ms) = eo::entry(&book, object::id(&v));
+    assert!(equity == 0 && ts_ms == 0, 0);
+    ts::return_shared(v);
+    ts::return_shared(book);
+
+    release_bootstrap(&mut scenario, 250, &clock);
+
+    // 0 → 260 is unbounded in bps terms; the interval gate still binds.
+    clock.set_for_testing(60_000);
+    post(&mut scenario, keeper_addr(), 260, &clock);
+
+    // Now the leg is required, and reads the keeper's mark.
+    ts::next_tx(&mut scenario, th::bob_addr());
+    let v = ts::take_shared<TradingVault>(&scenario);
+    let book = ts::take_shared<EquityBook>(&scenario);
+    let oreg = ts::take_shared<OracleRegistry>(&scenario);
+    let mut appraisal = vault::begin_appraisal<USDC>(&v);
+    eo::record(&v, &book, &oreg, &mut appraisal, &clock);
+    assert!(vault::appraisal_value(&appraisal) == 1_010, 0); // 750 cash + 260
+    vault::crank_appraisal<USDC>(&v, appraisal);
+    ts::return_shared(oreg);
+    ts::return_shared(book);
+    ts::return_shared(v);
+
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = 3, location = equity_oracle::equity_oracle)] // E_TOO_SOON
+fun post_off_zero_still_respects_interval() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let mut clock = setup(&mut scenario);
+    init_entry(&mut scenario, &clock);
+    clock.set_for_testing(59_999);
+    post(&mut scenario, keeper_addr(), 260, &clock);
+    abort 999
+}
+
+#[test]
+#[expected_failure(abort_code = 1, location = equity_oracle::equity_oracle)] // E_NOT_POSTER
+fun post_off_zero_still_requires_a_poster() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let mut clock = setup(&mut scenario);
+    init_entry(&mut scenario, &clock);
+    clock.set_for_testing(60_000);
+    post(&mut scenario, th::alice_addr(), 260, &clock);
+    abort 999
+}
+
+#[test]
+#[expected_failure(abort_code = 7, location = equity_oracle::equity_oracle)] // E_ALREADY_SEEDED
+fun init_entry_twice_aborts() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = setup(&mut scenario);
+    init_entry(&mut scenario, &clock);
+    init_entry(&mut scenario, &clock);
+    abort 999
+}
+
+#[test]
+#[expected_failure(abort_code = 7, location = equity_oracle::equity_oracle)] // E_ALREADY_SEEDED
+fun init_entry_over_admin_seed_aborts() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = setup(&mut scenario);
+    seed(&mut scenario, 500, &clock);
+    init_entry(&mut scenario, &clock); // must never zero a live mark
+    abort 999
+}
+
+#[test]
+#[expected_failure(abort_code = 8, location = equity_oracle::equity_oracle)] // E_FUNDED
+fun init_entry_on_funded_vault_aborts() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = setup(&mut scenario);
+    release_bootstrap(&mut scenario, 250, &clock);
+    init_entry(&mut scenario, &clock);
+    abort 999
+}
+
+#[test]
+#[expected_failure(abort_code = 9, location = equity_oracle::equity_oracle)] // E_NO_EXTERNAL
+fun init_entry_without_external_account_aborts() {
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = setup_unregistered(&mut scenario);
+    init_entry(&mut scenario, &clock);
+    abort 999
 }
