@@ -123,10 +123,14 @@ pub struct VaultHoldings {
     /// Registered external account's address (SO-299); `None` for vaults
     /// without one.
     pub external_account: Option<String>,
-    /// Canonical type of the pinned equity-oracle witness. When set, the
-    /// appraisal REQUIRES the external-equity leg (`external_pending` —
-    /// consumption aborts 82 without it).
+    /// Canonical type of the pinned equity-oracle witness. When set AND
+    /// `external_exposure > 0`, the appraisal REQUIRES the external-equity
+    /// leg (`external_pending` — consumption aborts 82 without it).
     pub external_equity_oracle: Option<String>,
+    /// Units released to the external account and not yet returned
+    /// (SO-310). Zero on a registered-but-unfunded account, which marks NO
+    /// `external_pending` — composing the equity leg anyway aborts.
+    pub external_exposure: u64,
 }
 
 impl VaultHoldings {
@@ -181,7 +185,8 @@ pub struct OptionBucketInfo {
 /// mapped option-coin types are replaced by their bucket's underlying +
 /// settlement legs (the coin itself prices via the options oracle), held
 /// option-coin positions contribute their legs, and a DBM equity leg
-/// contributes its manager's base + quote.
+/// contributes its manager's base + quote — the last only while the leg
+/// itself composes (exposure > 0; see [`compose_appraisal`]).
 pub fn pyth_assets_needed(
     holdings: &VaultHoldings,
     option_buckets: &BTreeMap<String, OptionBucketInfo>,
@@ -207,7 +212,7 @@ pub fn pyth_assets_needed(
             }
         }
     }
-    if let Some(d) = dbm {
+    if let Some(d) = dbm.filter(|_| holdings.external_exposure > 0) {
         out.insert(d.base_type.clone());
         out.insert(d.quote_type.clone());
     }
@@ -312,22 +317,29 @@ pub async fn discover_holdings(
     // External-account registration (SO-299). The field is an
     // `Option<ExternalAccount>` — absent/null on vaults without one (and
     // on pre-SO-299 deployments, where the field itself is missing).
-    let (external_account, external_equity_oracle) = match move_field(&vault, "external") {
-        Ok(v) => {
-            let j = serde_json::to_value(v)?;
-            let account = j
-                .pointer("/fields/account")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let oracle = j
-                .pointer("/fields/equity_oracle/fields/name")
-                .or_else(|| j.pointer("/fields/equity_oracle"))
-                .and_then(Value::as_str)
-                .map(canon);
-            (account, oracle)
-        }
-        Err(_) => (None, None),
-    };
+    let (external_account, external_equity_oracle, external_exposure) =
+        match move_field(&vault, "external") {
+            Ok(v) => {
+                let j = serde_json::to_value(v)?;
+                let account = j
+                    .pointer("/fields/account")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let oracle = j
+                    .pointer("/fields/equity_oracle/fields/name")
+                    .or_else(|| j.pointer("/fields/equity_oracle"))
+                    .and_then(Value::as_str)
+                    .map(canon);
+                let exposure = j
+                    .pointer("/fields/exposure")
+                    .and_then(|e| {
+                        e.as_str().and_then(|s| s.parse().ok()).or_else(|| e.as_u64())
+                    })
+                    .unwrap_or(0);
+                (account, oracle, exposure)
+            }
+            Err(_) => (None, None, 0),
+        };
 
     // Walk the vault's dynamic fields: adapter tags (plain df, value =
     // TypeName) and positions (dof, object_type = the custody struct).
@@ -516,6 +528,7 @@ pub async fn discover_holdings(
         positions,
         external_account,
         external_equity_oracle,
+        external_exposure,
     })
 }
 
@@ -721,14 +734,23 @@ pub async fn compose_appraisal(
         vec![vault_ro],
     );
 
-    // External-account equity leg (SO-299): a configured vault marks the
-    // appraisal `external_pending` at begin_appraisal, and consumption
+    // External-account equity leg (SO-299): a FUNDED external account marks
+    // the appraisal `external_pending` at begin_appraisal, and consumption
     // aborts (82, appraisal_incomplete) without `record_external_equity`.
     // Compose the pinned oracle's leg — the trustless DBM adapter when
     // the caller supplied `refs.dbm`, else the attested EquityBook path —
     // and refuse outright (distinctive error, no silent incomplete
     // appraisal) when the pinned witness doesn't match the leg we'd build.
-    if let Some(witness) = &holdings.external_equity_oracle {
+    //
+    // A registered-but-unfunded account (exposure == 0, SO-310) marks
+    // nothing: recording equity for it aborts (already_appraised), so the
+    // leg is skipped entirely — that's how a vault's FIRST deposit composes
+    // before the EquityBook has any entry to record.
+    if let Some(witness) = holdings
+        .external_equity_oracle
+        .as_ref()
+        .filter(|_| holdings.external_exposure > 0)
+    {
         if let Some(dbm) = &refs.dbm {
             let expected = canon(&format!("{}::dbm_oracle::DbmOracle", dbm.dbm_oracle_pkg));
             if canon(witness) != expected {
@@ -979,6 +1001,7 @@ mod tests {
             positions: vec![],
             external_account: Some("0xee".into()),
             external_equity_oracle: Some("0xd0::dbm_oracle::DbmOracle".into()),
+            external_exposure: 1,
         };
         let none = pyth_assets_needed(&holdings, &BTreeMap::new(), None);
         assert!(none.is_empty());
@@ -998,5 +1021,11 @@ mod tests {
             needed.into_iter().collect::<Vec<_>>(),
             vec!["0x2::sui::SUI".to_string()]
         );
+
+        // SO-310: an unfunded external account composes no equity leg, so
+        // its base/quote need no Pyth legs either — an otherwise cash-only
+        // vault stays priceless (no price table required to appraise it).
+        let unfunded = VaultHoldings { external_exposure: 0, ..holdings };
+        assert!(pyth_assets_needed(&unfunded, &BTreeMap::new(), Some(&dbm)).is_empty());
     }
 }
