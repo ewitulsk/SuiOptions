@@ -25,4 +25,9 @@ spot_notional_per_side = 100000000
 
 # Created at boot and logged on first run — pin the logged id here so
 # restarts reuse it instead of minting a new BalanceManager.
-spot_balance_manager_id = "0x8eb2d599a5de9458823a550fe045938a27b2f3f1da064e197037a08b0d9a53fd"
+# UN-PINNED 2026-07-26: the service wallet moved to the shared staging deployer
+# key (0xab8d), but a BalanceManager's owner is fixed at creation and the old
+# BM (0x8eb2d599…) is owned by the retired sim wallet (0x178f7355) — its
+# generate_proof_as_owner would abort EInvalidOwner. Boot mints a fresh BM
+# owned by the deployer; re-pin its logged id in a follow-up pass.
+# spot_balance_manager_id = "0x8eb2d599a5de9458823a550fe045938a27b2f3f1da064e197037a08b0d9a53fd"
