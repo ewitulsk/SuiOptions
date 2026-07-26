@@ -10,6 +10,7 @@
 
 import { normalizeStructTag } from "@mysten/sui/utils";
 
+import { BLUEFIN_TEST_ENABLED, BLUEFIN_TEST_USDC, isBluefinTestUsdc } from "../bluefinTest";
 import { SUPPORTED_TOKENS, type SupportedToken } from "../config";
 
 const API_BASE_URL: string =
@@ -244,6 +245,12 @@ export async function fetchTradingVaultStake(
  * The supported-token catalog entry for a coin type, or null when the asset
  * isn't in the catalog. Coin types arrive in non-byte-equal forms (with and
  * without `0x`, padded and unpadded), so compare canonicalized on both sides.
+ *
+ * Off mainnet/prod, the Bluefin staging USDC (SO-311) resolves too: it is not
+ * in token-info's catalog, so without this a vault holding it renders with a
+ * hex symbol and unknown decimals — which disables deposits outright. On
+ * mainnet/prod the fallback is compiled out and such a vault degrades to the
+ * short type + "—" values, as any unknown asset does.
  */
 export function tokenForCoinType(coinType: string | null | undefined): SupportedToken | null {
   if (!coinType) return null;
@@ -260,7 +267,8 @@ export function tokenForCoinType(coinType: string | null | undefined): Supported
       } catch {
         return false;
       }
-    }) ?? null
+    }) ??
+    (BLUEFIN_TEST_ENABLED && isBluefinTestUsdc(canonical) ? BLUEFIN_TEST_USDC : null)
   );
 }
 

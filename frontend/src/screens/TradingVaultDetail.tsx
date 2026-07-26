@@ -37,6 +37,8 @@ import { TokenLogo } from "../components/TokenLogo";
 import { TradingVaultPpsChart } from "../components/TradingVaultPpsChart";
 import { Toast } from "../components/Toast";
 import { formatPrice } from "../format";
+import { BLUEFIN_TEST_ENABLED, isBluefinTestUsdc } from "../bluefinTest";
+import { BluefinTestFunds } from "./curator/BluefinTestFunds";
 import { ExternalVenuePanel } from "./curator/ExternalVenuePanel";
 import { curatorFieldStyle } from "./curator/styles";
 import { StateBadge, fmtDurationMs, shortHex } from "./TradingVaults";
@@ -351,6 +353,11 @@ function CuratorPanel({
         />
       ) : (
         <SpotPanel vault={vault} actions={actions} />
+      )}
+      {/* Staging-only testing affordance (SO-311) — compiled out of mainnet
+          and prod builds; see `src/bluefinTest.ts`. */}
+      {BLUEFIN_TEST_ENABLED && isBluefinTestUsdc(vault.depositAsset) && (
+        <BluefinTestFunds vault={vault} cfgId={cfgQ.data ?? null} />
       )}
       <div className="vault-card__foot vault-prose__muted">
         Curator transactions are not gas-sponsored — your wallet pays gas.
