@@ -243,16 +243,24 @@ async fn spot_quote_pass(
     .max(min);
 
     // Fund both sides: quote notional for the bid, base qty for the ask.
-    let quote_need = ((qty as u128 * ask_px as u128) / 1_000_000_000) as u64;
+    // With pay_with_deep = false the pool escrows the order PLUS the
+    // input-token fee (taker_fee × fee_penalty_multiplier, ~12.5 bps at
+    // defaults) — funding the exact amount left every ask short and aborted
+    // the whole pass with EBalanceManagerBalanceTooLow. 2% headroom covers
+    // any governed fee; the surplus stays in the BM for the next pass.
+    let with_fee_headroom = |amount: u64| -> u64 { amount + amount / 50 };
+    let quote_need =
+        with_fee_headroom(((qty as u128 * ask_px as u128) / 1_000_000_000) as u64);
+    let base_need = with_fee_headroom(qty);
     let have_q = p
         .liquidity
         .ensure_wallet_balance(&wrap.client, &wrap.signer, &quote.coin_type, quote_need)
         .await;
     let have_b = p
         .liquidity
-        .ensure_wallet_balance(&wrap.client, &wrap.signer, &base.coin_type, qty)
+        .ensure_wallet_balance(&wrap.client, &wrap.signer, &base.coin_type, base_need)
         .await;
-    if have_q < quote_need || have_b < qty {
+    if have_q < quote_need || have_b < base_need {
         return Err(anyhow!("faucet came up short for {}/{}", base.symbol, quote.symbol));
     }
     let mut pt = ProgrammableTransactionBuilder::new();
@@ -265,7 +273,7 @@ async fn spot_quote_pass(
         vec![TypeTag::from_str(&quote.coin_type)?],
         vec![bm, qcoin],
     );
-    let bcoin = gather_exact_coin(&wrap.client, &wrap.signer, &mut pt, &base.coin_type, qty).await?;
+    let bcoin = gather_exact_coin(&wrap.client, &wrap.signer, &mut pt, &base.coin_type, base_need).await?;
     pt.programmable_move_call(
         p.handles.package,
         Identifier::new("balance_manager").unwrap(),
