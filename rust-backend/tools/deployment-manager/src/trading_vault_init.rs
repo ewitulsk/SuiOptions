@@ -51,6 +51,12 @@ pub struct TradingVaultObjects {
 /// Seeding it into the `VaultProtocolConfig` at activation is what enables
 /// the attested (curator-signed, capped) registration path; an env with no
 /// entry here deploys with the path disabled and stays admin-only.
+///
+/// prod has no entry on purpose: no hedge-signer is provisioned there (no
+/// `options/prod/hedge-signer` secret exists), so the attested-registration
+/// path stays disabled on prod until the service is stood up. At that point
+/// derive the pubkey from its `[sui]` key the same way staging's was and add
+/// it here — never guess a value.
 const REGISTRAR_PUBKEYS: &[(&str, &str)] = &[(
     "staging",
     "5c6c64713225f1379004908bbd4372124fd39c71a02d61cd62e614767e497c44",
@@ -281,6 +287,28 @@ pub async fn activate(
              external-account registration stays disabled (admin-only)"
         ),
     }
+
+    // Poster allowlists (SO-310): the keeper posts external-account equity
+    // and implied vol, and both books reject unknown senders. The keeper
+    // signs with the deployer key in every env we run, so the activation
+    // sender is the poster.
+    let poster = pt.pure(signer.address)?;
+    let equity_book = pt.obj(shared_mut_arg(client, objects.equity_book_id).await?)?;
+    pt.programmable_move_call(
+        equity_oracle_pkg,
+        Identifier::new("equity_oracle")?,
+        Identifier::new("add_poster")?,
+        vec![],
+        vec![admin, equity_book, poster],
+    );
+    let vol_book = pt.obj(shared_mut_arg(client, objects.vol_book_id).await?)?;
+    pt.programmable_move_call(
+        options_adapter_pkg,
+        Identifier::new("vol_book")?,
+        Identifier::new("add_poster")?,
+        vec![],
+        vec![admin, vol_book, poster],
+    );
 
     let gas_price = client
         .read_api()
