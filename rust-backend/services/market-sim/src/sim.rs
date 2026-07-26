@@ -330,7 +330,11 @@ async fn spot_quote_pass(
         tags.clone(),
         vec![pool, bm, proof, clock],
     );
-    let expire = now_ms() + 10 * 60 * 1000;
+    // Orders are Good-Till-Time and every pass cancels + re-places, so the
+    // expiry must outlive the re-quote interval or the book empties between
+    // passes. Two intervals of headroom keeps orders resting even if one pass
+    // fails; floored at 10 min so the fast default is unchanged.
+    let expire = now_ms() + (p.cfg.spot_interval_secs * 1000 * 2).max(10 * 60 * 1000);
     for (px, is_bid) in [(bid_px, true), (ask_px, false)] {
         let a_client = pt.pure(now_ms() / 60_000)?;
         let a_type = pt.pure(3u8)?; // post-only
