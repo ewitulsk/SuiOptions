@@ -16,7 +16,7 @@ use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use sui_tx::sui_client::{Network, SuiClientWrapper};
 use sui_tx::tx::deepbook::{
@@ -107,6 +107,12 @@ pub async fn run(p: &SimParams) -> Result<()> {
     }
 
     let mut pools: Vec<SpotPool> = Vec::new();
+    // Transient failures (stale price at boot, faucet gas races) warn and
+    // retry; sustained failure means the books sit EMPTY while /health stays
+    // green — that hid a never-worked funding bug for weeks (SO-302), so it
+    // alerts per tx-alerting.md once it stops looking transient.
+    const ALERT_AFTER_CONSECUTIVE: u32 = 5;
+    let mut consecutive_failures: u32 = 0;
     loop {
         for (base, quote) in &pairs {
             let known = pools
@@ -131,8 +137,22 @@ pub async fn run(p: &SimParams) -> Result<()> {
                     }
                 },
             };
-            if let Err(e) = spot_quote_pass(p, &wrap, bm_id, pool_id, base, quote).await {
-                warn!(pool = %pool_id, error = %format!("{e:#}"), "[sim] spot quote pass failed");
+            match spot_quote_pass(p, &wrap, bm_id, pool_id, base, quote).await {
+                Ok(()) => consecutive_failures = 0,
+                Err(e) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= ALERT_AFTER_CONSECUTIVE {
+                        error!(
+                            alert_id = "tx-failed-market-sim",
+                            pool = %pool_id,
+                            consecutive_failures,
+                            error = %format!("{e:#}"),
+                            "[sim] spot quote pass failing repeatedly — books may be empty"
+                        );
+                    } else {
+                        warn!(pool = %pool_id, error = %format!("{e:#}"), "[sim] spot quote pass failed");
+                    }
+                }
             }
         }
         tokio::time::sleep(Duration::from_secs(p.cfg.spot_interval_secs)).await;
