@@ -47,7 +47,7 @@ export type PoolRef = {
 
 // `SimulateTransaction` with checks disabled is JSON-RPC devInspect's
 // replacement: no gas coin, no signature, and per-command BCS return values.
-async function devInspect(
+export async function devInspect(
   client: SuiClient,
   sender: string | null,
   build: (tx: Transaction) => void,
