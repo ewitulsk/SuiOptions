@@ -33,6 +33,48 @@ html[data-mode="dark"] .live-buckets {
 html[data-mode="dark"] .live-buckets__table th, html[data-mode="dark"] .live-buckets__table td { border-bottom-color: rgba(255, 255, 255, 0.06); }
 .live-buckets__table th { opacity: 0.6; font-weight: 600; }
 
+/* --- Debug: DeepBook order books --- */
+
+.db-markets__bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.db-markets__filter {
+  padding: 5px 10px; border-radius: 8px; border: 1px solid rgba(0, 0, 0, 0.15);
+  background: transparent; color: inherit; font-size: 12px; min-width: 240px; margin-left: auto;
+}
+html[data-mode="dark"] .db-markets__filter { border-color: rgba(255, 255, 255, 0.15); }
+.db-markets__toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; opacity: 0.75; cursor: pointer; }
+.db-markets__head, .db-markets__row {
+  display: grid;
+  grid-template-columns: minmax(200px, 2fr) 70px repeat(6, minmax(74px, 1fr));
+  gap: 8px; align-items: baseline; padding: 5px 8px; font-size: 12px;
+}
+.db-markets__head { opacity: 0.55; font-weight: 600; border-bottom: 1px solid rgba(0, 0, 0, 0.08); }
+html[data-mode="dark"] .db-markets__head { border-bottom-color: rgba(255, 255, 255, 0.08); }
+.db-markets__market { border-bottom: 1px solid rgba(0, 0, 0, 0.05); }
+html[data-mode="dark"] .db-markets__market { border-bottom-color: rgba(255, 255, 255, 0.06); }
+.db-markets__row { cursor: pointer; list-style: none; user-select: none; }
+.db-markets__row::-webkit-details-marker { display: none; }
+.db-markets__market[open] > .db-markets__row { background: rgba(0, 0, 0, 0.03); }
+html[data-mode="dark"] .db-markets__market[open] > .db-markets__row { background: rgba(255, 255, 255, 0.04); }
+.db-markets__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.db-markets__note { font-style: normal; opacity: 0.6; }
+.db-markets__flag { font-style: normal; color: #d08a00; font-weight: 600; }
+.db-markets__num { text-align: right; font-variant-numeric: tabular-nums; }
+.db-markets__bid { color: #1fbf75; }
+.db-markets__ask { color: #e15d6b; }
+.db-markets__kind { font-size: 11px; opacity: 0.8; }
+.db-markets__kind--option { color: #2f7fd0; }
+.db-markets__kind--spot { color: #1fbf75; }
+.db-markets__kind--stale { opacity: 0.45; }
+.db-markets__detail { padding: 8px 8px 14px 8px; font-size: 12px; }
+.db-markets__ladder { display: flex; gap: 32px; margin-bottom: 10px; }
+.db-markets__side { min-width: 180px; }
+.db-markets__side-head { opacity: 0.55; font-weight: 600; margin-bottom: 4px; }
+.db-markets__level { display: flex; justify-content: space-between; gap: 16px; font-variant-numeric: tabular-nums; padding: 1px 0; }
+.db-markets__level-qty { opacity: 0.7; }
+.db-markets__params { display: flex; flex-wrap: wrap; gap: 6px 24px; margin: 0; }
+.db-markets__params dt { opacity: 0.55; font-size: 11px; }
+.db-markets__params dd { margin: 0; font-variant-numeric: tabular-nums; }
+
 .composer-status {
   padding: 20px;
   text-align: center;
