@@ -46,7 +46,7 @@ on:
           - staging
           - prod
       deploy_tokens:
-        description: 'Also publish the test-tokens package (TUSDC/TBTC/TWAL/TDEEP/TSUI)'
+        description: 'Also publish the test-tokens package (TUSDC/TBTC/TWAL/TSUI)'
         required: false
         type: boolean
         default: true

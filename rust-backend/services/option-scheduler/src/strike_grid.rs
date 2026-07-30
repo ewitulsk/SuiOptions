@@ -10,9 +10,9 @@
 //! On-chain `strike: u128` is the *scaled* ratio. The real settlement
 //! smallest-units owed per underlying smallest-unit is `strike /
 //! 10^strike_scale`. Putting the divisor in a per-bucket field lets a
-//! sub-cent asset paired against a same-decimal stablecoin (e.g.
-//! TDEEP/TUSDC at $0.15 with both 6-dec) carry meaningful resolution that
-//! a plain integer ratio cannot.
+//! sub-cent asset paired against a same-decimal stablecoin (e.g. a
+//! 6-dec asset at $0.15 against 6-dec TUSDC) carry meaningful resolution
+//! that a plain integer ratio cannot.
 //!
 //! ## Auto-derived scale
 //!
@@ -27,7 +27,7 @@
 //! Worked examples:
 //! - TBTC(8)/TUSDC(6) at $77 000, 5% interval → scale=2, spot_chain=77 000,
 //!   interval=3 850.
-//! - TDEEP(6)/TUSDC(6) at $0.15, 10% interval → scale=5, spot_chain=15 000,
+//! - TMICRO(6)/TUSDC(6) at $0.15, 10% interval → scale=5, spot_chain=15 000,
 //!   interval=1 500.
 
 use anyhow::{anyhow, bail, Result};
@@ -271,8 +271,8 @@ mod tests {
     }
 
     #[test]
-    fn deep_usdc_15_cents_now_works() {
-        // TDEEP(6) / TUSDC(6) at $0.15, 10% interval. Pre-SO-55 this
+    fn sub_dollar_usdc_15_cents_now_works() {
+        // TMICRO(6) / TUSDC(6) at $0.15, 10% interval. Pre-SO-55 this
         // bailed with "spot is 0 in chain units". Post: auto-derive picks
         // scale=5 (spot_chain=15_000, interval=1_500).
         let g = build_strike_grid_for_pair(0.15, 6, 6, 2, 2, 10.0).unwrap();

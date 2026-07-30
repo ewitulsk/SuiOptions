@@ -13,7 +13,7 @@ enabled = true
 
 # Every faucet token against the settlement asset. Pools are created lazily
 # (500 vendored DEEP each from the service wallet — see the SO-302 runbook).
-spot_pairs = ["TBTC/TUSDC", "TSUI/TUSDC", "TWAL/TUSDC", "TDEEP/TUSDC"]
+spot_pairs = ["TBTC/TUSDC", "TSUI/TUSDC", "TWAL/TUSDC"]
 
 # Re-quote twice a day. The sim is a fill target, not a live market maker, so
 # a stable book is fine and this keeps gas burn to a trickle (each pass places

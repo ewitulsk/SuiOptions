@@ -355,7 +355,6 @@ const TEST_TOKEN_TABLE: &[(&str, &str, u8)] = &[
     ("TUSDC", "tusdc", 6),
     ("TBTC", "tbtc", 8),
     ("TWAL", "twal", 9),
-    ("TDEEP", "tdeep", 6),
     ("TSUI", "tsui", 9),
 ];
 

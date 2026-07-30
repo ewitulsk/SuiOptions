@@ -1,5 +1,5 @@
 // Testnet faucet (SO-93). Lets a connected wallet mint the protocol test
-// tokens (TBTC/TUSDC/TDEEP/TWAL) so testers can fund themselves to exercise
+// tokens (TBTC/TUSDC/TSUI/TWAL) so testers can fund themselves to exercise
 // the Earn flow. Testnet-only: on mainnet/devnet `TEST_TOKENS` is empty and
 // the page shows a "testnet only" notice. Mirrors `Admin.tsx`'s `run()`
 // sign+execute idiom and `dash-hero` layout.

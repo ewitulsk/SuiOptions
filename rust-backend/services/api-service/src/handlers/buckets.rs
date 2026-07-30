@@ -625,17 +625,18 @@ mod tests {
     }
 
     #[test]
-    fn strike_scale_lets_tdeep_round_trip_through_dto() {
-        // Regression for SO-55 — TDEEP/TUSDC at $0.15. Same decimals on
-        // both sides, scheduler picks strike_scale=5 → strike_raw=15_000.
+    fn strike_scale_lets_sub_dollar_round_trip_through_dto() {
+        // Regression for SO-55 — a sub-dollar asset at $0.15 against a
+        // same-decimals stablecoin (TMICRO is a 6-dec stand-in, not a real
+        // token). Scheduler picks strike_scale=5 → strike_raw=15_000.
         // The api-service formula has to consume the scale; without it
         // the displayed strike collapses by 10^5.
         let cat = TokenCatalog::from_tokens(&[
-            tok("TDEEP", "0xpkg::tdeep::TDEEP", 6),
+            tok("TMICRO", "0xpkg::tmicro::TMICRO", 6),
             tok("TUSDC", "0xpkg::tusdc::TUSDC", 6),
         ]);
         let b = Bucket {
-            asset_type: AssetType::new("0xpkg::tdeep::TDEEP"),
+            asset_type: AssetType::new("0xpkg::tmicro::TMICRO"),
             settlement_type: AssetType::new("0xpkg::tusdc::TUSDC"),
             call_type: AssetType::new("0xpkg::call_0::CALL_0"),
             strike: 15_000,

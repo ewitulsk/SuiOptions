@@ -37,7 +37,7 @@ cargo run -p deployment-manager
 | `-o, --output`      | `deployments.json`       | Output JSON path. Read-merge-write semantics; other networks preserved.  |
 | `--gas-budget`      | `500000000` (0.5 SUI)    | Gas budget in MIST per transaction (publish + init each consume one).    |
 | `--skip-init`       | off                      | Publish only; skip `treasury::create_and_share`.                         |
-| `--deploy-tokens`   | off                      | Also publish `test-tokens` (TUSDC/TBTC/TWAL/TDEEP) and record faucets.   |
+| `--deploy-tokens`   | off                      | Also publish `test-tokens` (TUSDC/TBTC/TWAL/TSUI) and record faucets.   |
 | `--test-tokens`     | `../test-tokens`         | Path to the test-tokens Move package.                                    |
 
 ### Environment
@@ -71,7 +71,6 @@ cargo run -p deployment-manager
       "deployedAt":     "2026-05-15T20:00:05+00:00",
       "tokens": {
         "TBTC":  { "coinType": "0x<pkg>::tbtc::TBTC",   "faucetId": "0x...", "decimals": 8 },
-        "TDEEP": { "coinType": "0x<pkg>::tdeep::TDEEP", "faucetId": "0x...", "decimals": 6 },
         "TUSDC": { "coinType": "0x<pkg>::tusdc::TUSDC", "faucetId": "0x...", "decimals": 6 },
         "TWAL":  { "coinType": "0x<pkg>::twal::TWAL",   "faucetId": "0x...", "decimals": 9 }
       }

@@ -1,9 +1,9 @@
 // PTB builder for the testnet faucet (SO-93).
 //
-// Each test token (TBTC/TUSDC/TDEEP/TWAL) is a shared `Faucet` with a
+// Each test token (TBTC/TUSDC/TSUI/TWAL) is a shared `Faucet` with a
 // public entry that mints straight to the caller:
 //   {module}::mint_to_sender(faucet: &mut Faucet, amount: u64, ctx)
-// (test-tokens/sources/{tbtc,tusdc,tdeep,twal}.move)
+// (test-tokens/sources/{tbtc,tusdc,tsui,twal}.move)
 
 import { Transaction } from "@mysten/sui/transactions";
 

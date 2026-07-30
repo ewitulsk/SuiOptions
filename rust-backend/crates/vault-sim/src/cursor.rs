@@ -176,10 +176,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_strike_tdeep_at_15_cents() {
-        // Mirrors bucket_tests::test_apply_strike_tdeep_at_15_cents:
-        // TDEEP/TUSDC both 6 decimals, $0.15 ⇒ ratio 0.15 = 15 × 10^-2.
-        // 1 TDEEP = 1_000_000 units → 150_000 settlement units ($0.15).
+    fn apply_strike_sub_dollar_at_15_cents() {
+        // Mirrors bucket_tests::test_apply_strike_sub_dollar_same_decimals:
+        // TMICRO/TUSDC both 6 decimals, $0.15 ⇒ ratio 0.15 = 15 × 10^-2.
+        // 1 TMICRO = 1_000_000 units → 150_000 settlement units ($0.15).
         assert_eq!(apply_strike(1_000_000, 15, 2), 150_000);
     }
 

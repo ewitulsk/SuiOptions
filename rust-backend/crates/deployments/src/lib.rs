@@ -559,11 +559,6 @@ mod tests {
             assert_eq!(spec.coin_type, t.coin_type);
             assert_eq!(spec.decimals, t.decimals);
         }
-        // TDEEP is a faucet-only token: its DEEP/USD Pyth feed is dead on
-        // hermes-beta, so it's de-listed from token_info (no market/roll) while
-        // the test coin stays in testTokens for existing balances.
-        assert!(tokens.get("TDEEP").is_ok());
-        assert!(testnet.token_spec("TDEEP").is_err());
         // DeepBook ids ride along for testnet-backed envs (SO-151).
         let db = testnet
             .package_info

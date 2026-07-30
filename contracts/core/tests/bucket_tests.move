@@ -97,16 +97,19 @@ fun test_apply_strike_round_half_up_boundaries() {
 }
 
 #[test]
-fun test_apply_strike_tdeep_at_15_cents() {
-    // TDEEP/TUSDC at $0.15, scheduler picks scale=5.
+fun test_apply_strike_sub_dollar_same_decimals() {
+    // SO-55 regression: a sub-dollar asset against a same-decimals stablecoin
+    // is the case where a plain integer ratio loses all resolution. TMICRO is
+    // a 6-decimal stand-in for that shape, not a real token.
+    // TMICRO/TUSDC at $0.15, scheduler picks scale=5.
     //   spot_chain_scaled = 0.15 × 10^5 = 15_000 (strike representing $0.15).
     //   strike_scale = 5 → divisor 100_000.
-    //   Exercise 1 TDEEP-smallest:  1 × 15_000 / 100_000 → (15000 + 50000)/100000 = 0
+    //   Exercise 1 TMICRO-smallest:  1 × 15_000 / 100_000 → (15000 + 50000)/100000 = 0
     //     (dust loss in buyer's favor; matches what round-half-up gives at 0.15)
-    //   Exercise 10 TDEEP-smallest: 10 × 15_000 / 100_000 → (150000 + 50000)/100000 = 2
+    //   Exercise 10 TMICRO-smallest: 10 × 15_000 / 100_000 → (150000 + 50000)/100000 = 2
     //     (round_half_up(1.5) = 2)
-    //   Exercise 100 TDEEP-smallest: 100 × 15_000 / 100_000 = 15  (exact)
-    //   Exercise 1_000_000 TDEEP-smallest (1 TDEEP): 150_000 settlement-smallest = $0.15. ✓
+    //   Exercise 100 TMICRO-smallest: 100 × 15_000 / 100_000 = 15  (exact)
+    //   Exercise 1_000_000 TMICRO-smallest (1 TMICRO): 150_000 settlement-smallest = $0.15. ✓
     assert!(bucket::apply_strike_for_testing(1, 15_000, 5) == 0, 0);
     assert!(bucket::apply_strike_for_testing(10, 15_000, 5) == 2, 0);
     assert!(bucket::apply_strike_for_testing(100, 15_000, 5) == 15, 0);

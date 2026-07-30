@@ -42,8 +42,9 @@ fun test_sui_usdc_sub_unit_cross() {
 }
 
 #[test]
-fun test_tdeep_15_cents_same_decimals() {
-    // DEEP $0.15, USDC $1, both 6 decimals: cross 0.15 → 0.15e12.
+fun test_sub_dollar_15_cents_same_decimals() {
+    // SO-55 shape: sub-dollar underlying $0.15, USDC $1, both 6 decimals:
+    // cross 0.15 → 0.15e12.
     let u = pyth_price(15_000_000, 8, true, 1_000, NOW_MS / 1000);
     let s = pyth_price(100_000_000, 8, true, 10_000, NOW_MS / 1000);
     let (scaled, _) = oracle::cross_from_prices_for_testing(&u, &s, 6, 6);
