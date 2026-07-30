@@ -235,7 +235,15 @@ async fn main() -> Result<()> {
     .await
     .context("setup_single_workflow")?;
 
-    observability::ops::spawn(cfg.health_addr);
+    // The indexer was already honest before SO-324: the spawn sits *after*
+    // every fallible step (store, repo, package ids, `setup_single_workflow`),
+    // so nothing served /health until startup had succeeded. The flip is
+    // immediate here for that reason — it preserves the existing behaviour
+    // rather than changing it. Only the graphql task and the ingestion select
+    // follow, and neither can fail startup.
+    let readiness = observability::ops::Readiness::new();
+    observability::ops::spawn(cfg.health_addr, &readiness);
+    readiness.ready();
 
     // GraphQL query API (SO-97). Consumers read protocol state just-in-time
     // from here; it's the indexer's only outbound query surface.

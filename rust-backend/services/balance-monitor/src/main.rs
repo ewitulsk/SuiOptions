@@ -21,7 +21,8 @@ async fn main() -> Result<()> {
     info!(cfg_path, "loading config");
     let cfg = Config::load(&cfg_path).with_context(|| format!("loading config from {cfg_path}"))?;
 
-    observability::ops::spawn(cfg.ops_addr);
+    let readiness = observability::ops::Readiness::new();
+    observability::ops::spawn(cfg.ops_addr, &readiness);
 
     // One-shot alert-pipeline test: `ALERT_TEST=1` emits the canonical test
     // alert_id so the Loki → Grafana alert rule can be verified end-to-end.
@@ -78,6 +79,13 @@ async fn main() -> Result<()> {
         interval_secs = cfg.poll_interval_secs,
         "balance-monitor starting"
     );
+
+    // Config, the RPC client and watch resolution are behind us; the poll loop
+    // below only warns. balance-monitor has no entry in `deploy.sh`'s
+    // `health_path_for`, so nothing gates on this today — it is updated
+    // because `ops::spawn` now requires the handle, and flipping it in the
+    // right place costs nothing and is correct if it is ever gated (SO-324).
+    readiness.ready();
 
     let mut tick = tokio::time::interval(Duration::from_secs(cfg.poll_interval_secs));
     loop {

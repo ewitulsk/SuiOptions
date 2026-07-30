@@ -7,7 +7,6 @@
 //!   levels to workspace crates only.
 
 pub mod config_load;
-pub mod health;
 pub mod logging;
 pub mod secrets;
 

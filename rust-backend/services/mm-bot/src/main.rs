@@ -371,7 +371,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    observability::ops::spawn(cfg.health_addr);
+    let readiness = observability::ops::Readiness::new();
+    observability::ops::spawn(cfg.health_addr, &readiness);
 
     // Collateral routing chassis: explicit config wins, else the state file
     // written by `mm-bot deploy-collateral`. Still required — the signer
@@ -680,6 +681,38 @@ async fn main() -> Result<()> {
                 .collect(),
         });
     }
+
+    // Startup is done: collateral routing, the token-info snapshot, every
+    // market's Pyth feed, the quote signer, the on-chain QuoteSigner bootstrap,
+    // `wait_for_first_prices`, and the desk/sim spawns are all behind us. This
+    // is the window mm-bot deployed green through on 2026-07-30 — /health was
+    // live at the spawn above and the process died at `wait_for_first_prices`
+    // half a second later, which the gate never saw (SO-324).
+    //
+    // DECLARED TAIL: the reconnect loop below is fallible and follows the flip.
+    // Four exit paths, all in `main`'s own body — there is no `tokio::spawn` or
+    // `async move` between here and the end of `main`, so each one kills the
+    // process after /health has gone green:
+    //
+    //   AuthVerdict::Fatal          permanently-rejected key
+    //   signer.sign(&challenge)?    auth handshake
+    //   quote.to_bcs_bytes()?       steady-state, per-RFQ
+    //   signer.sign(&bytes)?        steady-state, per-RFQ
+    //
+    // The first two are startup-shaped, and the flip deliberately does not wait
+    // for them: that would make mm-bot's deploy gate depend on the
+    // quoting-service being up, and this loop exists precisely to tolerate
+    // transient rejection right after a redeploy while the indexer catches up.
+    //
+    // The last two are not startup at all — one BCS or signing failure on a
+    // single quote exits the bot, and **no flip placement can cover them**,
+    // because they live in an unbounded steady-state loop. That is what makes
+    // this tail unavoidable rather than mis-placed. They also sit among
+    // neighbours that deliberately warn-and-reconnect instead of exiting
+    // (`ws_client::connect`, `expect_auth_challenge`), so the bare `?` there
+    // looks unintended rather than chosen. Both are pre-existing and untouched
+    // by SO-324; whether they should warn-and-continue is SO-322-shaped.
+    readiness.ready();
 
     // nonce is monotonic for the bot's lifetime — keep it across reconnects.
     let mut nonce_counter = now_ms();

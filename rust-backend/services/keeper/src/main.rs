@@ -58,7 +58,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = KeeperConfig::load(&cli.config)
         .with_context(|| format!("loading {}", cli.config.display()))?;
-    observability::ops::spawn(cfg.health_addr);
+    let readiness = observability::ops::Readiness::new();
+    observability::ops::spawn(cfg.health_addr, &readiness);
     let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
     let snapshot = TokenInfoClient::new(&cli.token_info_url)
@@ -149,6 +150,12 @@ async fn main() -> Result<()> {
     // The Pyth feed → PriceInfoObject table handle, resolved lazily on
     // the first discovery so an indexer-only outage doesn't block boot.
     let mut price_table: Option<PriceInfoTable> = None;
+
+    // Everything fallible is behind us: config, secrets, the token-info
+    // snapshot, the four package ids, the Sui client, the oracle handshake
+    // and the trading-vault ctx. Nothing below this line can fail startup, so
+    // this is where "started" becomes "ready" (SO-324).
+    readiness.ready();
 
     let tick = Duration::from_secs(cfg.tick_secs.max(1));
     info!(tick_secs = cfg.tick_secs, dry_run = cli.dry_run, "tick loop starting");
