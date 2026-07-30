@@ -10,6 +10,10 @@
 #   options/<env>/scheduler  -> {"sui_key": "suiprivkey1..."}  (deployer key,
 #                                holds AdminCap; absent if scheduler isn't
 #                                deployed in this env)
+#   options/<env>/cctp-relay -> {"sui_key": "...", "solana_key": "...",
+#                                "rpc_url": "..."}  (rpc_url is REQUIRED and
+#                                must match the relay's configured [sui]
+#                                network — see the cctp-relay block below)
 #
 # Outputs (consumed by docker-compose):
 #   /opt/options/<env>/secrets/mm-bot.toml       (read by mm-bot)
@@ -141,6 +145,7 @@ fi
 if CCTP_JSON=$(fetch cctp-relay 2>/dev/null); then
   SUI_KEY=$(echo "$CCTP_JSON" | jq -r '.sui_key')
   SOLANA_KEY=$(echo "$CCTP_JSON" | jq -r '.solana_key')
+  CCTP_RPC_URL=$(echo "$CCTP_JSON" | jq -r '.rpc_url // empty')
   if [ -z "$SUI_KEY" ] || [ "$SUI_KEY" = "null" ]; then
     echo "missing sui_key in options/$ENV/cctp-relay" >&2
     exit 1
@@ -149,16 +154,31 @@ if CCTP_JSON=$(fetch cctp-relay 2>/dev/null); then
     echo "missing solana_key in options/$ENV/cctp-relay" >&2
     exit 1
   fi
+  # The relay gets its Sui endpoint from its OWN secret, not the shared
+  # sui-rpc override: that one is scoped to the env's NETWORK (testnet),
+  # while the relay's [sui].network is config-driven and independent of it
+  # (mainnet on staging, testnet on prod). Its network is baked into the
+  # service config, which is not in the deploy bundle, so this script cannot
+  # pick the right shared endpoint — whoever populates the secret can.
+  #
+  # Required, not optional. Sui deprecated JSON-RPC on public fullnodes on
+  # 2026-07-30 and the relay's silent fallback to them took the mainnet USDC
+  # bridge down with nothing in the system to say so (SO-320). An absent
+  # cctp-relay secret still means "not deployed in this env" and stays quiet;
+  # a present secret without an endpoint is a misconfiguration, so fail here
+  # rather than at the relay's next restart.
+  if [ -z "$CCTP_RPC_URL" ] || [ "$CCTP_RPC_URL" = "REPLACE_ME" ]; then
+    echo "missing rpc_url in options/$ENV/cctp-relay — the relay must not fall back to a public Sui fullnode (SO-320)" >&2
+    exit 1
+  fi
   umask 077
-  # Both networks get the key (mirroring [solana] below) — the relay's
-  # [sui].network is config-driven and may be mainnet while the env's
-  # NETWORK is testnet. No $RPC_LINE here: the env's sui-rpc override is a
-  # testnet endpoint, which would point a mainnet relay at the wrong chain;
-  # the relay falls back to the public fullnode for its configured network.
+  # Both networks get the key (mirroring [solana] below) — the relay picks
+  # the one matching its configured network.
   cat > "$DIR/cctp-relay.toml" <<CCTPEOF
 [sui]
 testnet = "$SUI_KEY"
 mainnet = "$SUI_KEY"
+rpc_url = "$CCTP_RPC_URL"
 
 [solana]
 devnet = "$SOLANA_KEY"
