@@ -139,7 +139,11 @@ async fn main() -> Result<()> {
 ///   ready. That is the case this argument exists for.
 /// - **Failure cases** (band loop returned / errored) park *after* it, so
 ///   `ready()` here is a no-op — readiness is already true and there is no
-///   un-ready operation.
+///   un-ready operation. That is a property of the **ordering**, not of
+///   `park()`: it holds only because the `readiness.ready()` in `main`
+///   precedes `sim::run`. Move that call below `sim::run` and these two
+///   sites silently become live flips that report ready on a loop that has
+///   just errored.
 ///
 /// So a market-sim whose band loop dies does keep reporting ready. That is
 /// unchanged from before SO-324 (/health was unconditionally green at all six
