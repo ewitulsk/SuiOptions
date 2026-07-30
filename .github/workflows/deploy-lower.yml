@@ -17,6 +17,11 @@ on:
         required: false
         type: boolean
         default: false
+      only_services:
+        description: 'JSON array of services to build + roll, e.g. ["cctp-relay"]. Restricts the roll to exactly these, bypassing the affected-files filter. Does NOT advance the deployed-staging marker (partial roll). Empty = normal selection.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write   # _deploy.yml advances the `deployed-staging` marker tag
@@ -30,3 +35,4 @@ jobs:
       envs: '["staging"]'
       image_tag: ${{ inputs.image_tag || '' }}
       force_all: ${{ inputs.force_all == true }}
+      only_services: ${{ inputs.only_services || '' }}
