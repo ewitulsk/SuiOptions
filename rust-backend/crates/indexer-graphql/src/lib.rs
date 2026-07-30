@@ -251,6 +251,15 @@ pub struct VaultReceipt {
     pub settled: u64,
 }
 
+/// An indexed event plus the digest of the transaction that emitted it.
+/// `IndexedEvent` itself is the shared decode target and carries no digest,
+/// so the queries that need one return this instead.
+#[derive(Clone, Debug)]
+pub struct IndexedEventWithTx {
+    pub event: IndexedEvent,
+    pub tx_digest: String,
+}
+
 /// Checkpoint-ingestion progress (the `/progress` REST endpoint). `Serialize`
 /// so a proxying service (api-service Debug page) can re-emit it unchanged.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
@@ -599,19 +608,61 @@ impl IndexerClient {
         const Q: &str = "query($f:EventFilterInput,$limit:Int,$after:String){\
             events(filter:$f,order:SEQUENCE_DESC,limit:$limit,after:$after){\
             nodes{sequence timestampMs payload} nextCursor}}";
+        self.recent_nodes_with_payload(Q, event_types, payload_fields, max)
+            .await?
+            .into_iter()
+            .map(EventNodeJson::into_indexed_event)
+            .collect()
+    }
+
+    /// As [`Self::recent_events_with_payload`], but each event keeps the
+    /// digest of the transaction that emitted it — what a trade history needs
+    /// to point at the swap on chain (SO-313). A sibling rather than a wider
+    /// [`IndexedEvent`], which is built in the indexer's ingest hot path and
+    /// read by every other `scan_events` caller.
+    pub async fn recent_events_with_payload_and_tx(
+        &self,
+        event_types: &[&str],
+        payload_fields: serde_json::Value,
+        max: usize,
+    ) -> Result<Vec<IndexedEventWithTx>> {
+        const Q: &str = "query($f:EventFilterInput,$limit:Int,$after:String){\
+            events(filter:$f,order:SEQUENCE_DESC,limit:$limit,after:$after){\
+            nodes{sequence timestampMs txDigest payload} nextCursor}}";
+        self.recent_nodes_with_payload(Q, event_types, payload_fields, max)
+            .await?
+            .into_iter()
+            .map(|node| {
+                let tx_digest = node.tx_digest.clone().unwrap_or_default();
+                Ok(IndexedEventWithTx {
+                    event: node.into_indexed_event()?,
+                    tx_digest,
+                })
+            })
+            .collect()
+    }
+
+    /// Shared paging for the two `recent_events_with_payload*` methods: page
+    /// `SEQUENCE_DESC` from the tip up to `max`, then hand back the raw nodes
+    /// ascending. `q` decides which node fields come along.
+    async fn recent_nodes_with_payload(
+        &self,
+        q: &'static str,
+        event_types: &[&str],
+        payload_fields: serde_json::Value,
+        max: usize,
+    ) -> Result<Vec<EventNodeJson>> {
         let filter = json!({
             "eventType": event_types,
             "payloadContains": { "payload": payload_fields },
         });
         let mut cursor: Option<String> = None;
-        let mut out: Vec<IndexedEvent> = Vec::new();
+        let mut out: Vec<EventNodeJson> = Vec::new();
         while out.len() < max {
             let limit = EVENT_PAGE_LIMIT.min((max - out.len()) as i64);
             let vars = json!({ "f": filter, "limit": limit, "after": cursor });
-            let data: EventsWrap = self.gql(Q, vars).await?;
-            for node in data.events.nodes {
-                out.push(node.into_indexed_event()?);
-            }
+            let data: EventsWrap = self.gql(q, vars).await?;
+            out.extend(data.events.nodes);
             match data.events.next_cursor {
                 Some(c) => cursor = Some(c),
                 None => break,
@@ -784,6 +835,10 @@ struct EventConnectionJson {
 struct EventNodeJson {
     sequence: String,
     timestamp_ms: String,
+    /// Only selected by `recent_events_with_payload_and_tx`; absent for the
+    /// queries that don't ask for it.
+    #[serde(default)]
+    tx_digest: Option<String>,
     payload: serde_json::Value,
 }
 

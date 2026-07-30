@@ -17,6 +17,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 
+use protocol_types::asset::canonicalize_move_type;
 use protocol_types::ids::ObjectId;
 
 /// Live `Vault` view values that the indexer doesn't carry (it materialises
@@ -47,6 +48,227 @@ pub struct VaultLive {
 
 const VAULT_LIVE_QUERY: &str = "query($addr: SuiAddress!) {\
  object(address: $addr) { asMoveObject { contents { json } } } }";
+
+/// One free balance held by a `TradingVault` — a `vault::BalanceKey<T>`
+/// dynamic field whose value is the `Balance<T>` (SO-313).
+#[derive(Debug, Clone)]
+pub struct VaultBalance {
+    /// Canonical `0x…::mod::T` coin type from the key's type argument.
+    pub coin_type: String,
+    pub amount: u64,
+}
+
+/// BCS of a `BalanceKey<T>` value. The Move struct has no fields, so the
+/// compiler gives it a `dummy_field: bool` — one `false` byte, base64 `AA==`.
+/// (Verified against the live testnet vault: an empty `bcs` misses.)
+const BALANCE_KEY_BCS: &str = "AA==";
+
+/// Guard on the per-type lookup fan-out. `asset_types` is bounded by what a
+/// curator can trade into; anything past this is a malformed read, not a vault.
+const MAX_VAULT_BALANCES: usize = 64;
+
+/// The vault object's own Move type + contents, which together give the
+/// trading-vault package id (for building `BalanceKey<T>`) and `asset_types`.
+const VAULT_ASSET_TYPES_QUERY: &str = "query($addr: SuiAddress!) {\
+ object(address: $addr) { asMoveObject { contents { type { repr } json } } } }";
+
+/// Read a `TradingVault`'s free balances (SO-313).
+///
+/// The vault's `asset_types` (`VecSet<TypeName>`) is exactly the set of types
+/// with a live `BalanceKey<T>` dynamic field — `put_balance_internal` inserts
+/// on first deposit and `take_balance_internal` removes the type when the
+/// balance hits zero (`contracts/trading-vault/sources/vault.move:1265`). So
+/// reading it and then fetching those keys by name is one object read plus a
+/// batched field lookup, rather than paging every dynamic field on the vault
+/// (positions and adapter tags share that namespace). Same mechanism the
+/// appraisal composer uses to discover holdings
+/// (`frontend/src/tx/appraisal.ts:346`).
+///
+/// The deposit asset is included — it holds a `BalanceKey` like any other.
+/// `Ok(None)` if the node doesn't know the object; `Err` on transport or
+/// unexpected-shape failures.
+pub async fn fetch_vault_balances(
+    http: &reqwest::Client,
+    graphql_url: &str,
+    vault_id: &ObjectId,
+) -> Result<Option<Vec<VaultBalance>>> {
+    let body = json!({
+        "query": VAULT_ASSET_TYPES_QUERY,
+        "variables": { "addr": vault_id.to_hex() },
+    });
+    let parsed = post_graphql(http, graphql_url, &body, "vault asset-types query").await?;
+    let Some(object) = parsed.get("object").filter(|o| !o.is_null()) else {
+        return Ok(None);
+    };
+    let contents = object
+        .get("asMoveObject")
+        .and_then(|m| m.get("contents"))
+        .filter(|c| !c.is_null())
+        .ok_or_else(|| anyhow!("vault object has no contents"))?;
+    let vault_type = contents
+        .pointer("/type/repr")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("vault object has no type repr"))?;
+    let package = vault_type
+        .split_once("::")
+        .map(|(pkg, _)| pkg)
+        .ok_or_else(|| anyhow!("unparseable vault type {vault_type}"))?;
+    let json = contents
+        .get("json")
+        .filter(|j| !j.is_null())
+        .ok_or_else(|| anyhow!("vault object has no contents json"))?;
+
+    let asset_types = parse_asset_types(json)?;
+    if asset_types.len() > MAX_VAULT_BALANCES {
+        return Err(anyhow!(
+            "vault reports {} asset types, past the {MAX_VAULT_BALANCES} bound",
+            asset_types.len()
+        ));
+    }
+    if asset_types.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    fetch_balance_keys(http, graphql_url, vault_id, package, &asset_types)
+        .await
+        .map(Some)
+}
+
+/// `asset_types` is a `VecSet<TypeName>` → `{"contents": ["addr::mod::T", …]}`.
+/// The entries are chain `TypeName`s, so they arrive WITHOUT the `0x` prefix
+/// (see `.claude/move-type-normalization.md`) — canonicalize before they reach
+/// a catalog lookup or a `BalanceKey<T>` type argument.
+fn parse_asset_types(vault_json: &Value) -> Result<Vec<String>> {
+    let raw = vault_json
+        .get("asset_types")
+        .ok_or_else(|| anyhow!("vault contents has no asset_types"))?;
+    let items = raw
+        .get("contents")
+        .unwrap_or(raw)
+        .as_array()
+        .ok_or_else(|| anyhow!("asset_types is not a VecSet: {raw}"))?;
+    items
+        .iter()
+        .map(|t| {
+            // A `TypeName` renders as the bare string; tolerate the struct
+            // form (`{"name": …}`) other renderers use.
+            let s = match t {
+                Value::String(s) => s.as_str(),
+                other => other
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("unparseable asset_types entry {other}"))?,
+            };
+            Ok(canonicalize_move_type(s))
+        })
+        .collect()
+}
+
+/// Fetch one `BalanceKey<T>` per asset type in a single aliased query, so N
+/// holdings still cost one round trip.
+async fn fetch_balance_keys(
+    http: &reqwest::Client,
+    graphql_url: &str,
+    vault_id: &ObjectId,
+    package: &str,
+    asset_types: &[String],
+) -> Result<Vec<VaultBalance>> {
+    let selections: String = asset_types
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            format!(
+                " b{i}: dynamicField(name: {{ type: \"{package}::vault::BalanceKey<{t}>\", \
+                 bcs: \"{BALANCE_KEY_BCS}\" }}) {{ value {{ ... on MoveValue {{ json }} }} }}"
+            )
+        })
+        .collect();
+    let query = format!(
+        "query($addr: SuiAddress!) {{ object(address: $addr) {{ asMoveObject {{{selections} }} }} }}"
+    );
+    let body = json!({ "query": query, "variables": { "addr": vault_id.to_hex() } });
+    let parsed = post_graphql(http, graphql_url, &body, "vault balance-keys query").await?;
+    let fields = parsed
+        .pointer("/object/asMoveObject")
+        .filter(|m| !m.is_null())
+        .ok_or_else(|| anyhow!("vault object disappeared between balance reads"))?;
+    parse_balance_keys(fields, asset_types)
+}
+
+/// Read the aliased `dynamicField` results back into balances, in
+/// `asset_types` order.
+fn parse_balance_keys(fields: &Value, asset_types: &[String]) -> Result<Vec<VaultBalance>> {
+    let mut out = Vec::with_capacity(asset_types.len());
+    for (i, coin_type) in asset_types.iter().enumerate() {
+        let field = fields
+            .get(format!("b{i}"))
+            .ok_or_else(|| anyhow!("balance-keys query returned no alias b{i}"))?;
+        // A type in `asset_types` with no `BalanceKey` field shouldn't happen —
+        // the two move together on chain — but it means zero, not a read
+        // failure, so skip it rather than fail the whole read.
+        if field.is_null() {
+            continue;
+        }
+        // A field that IS present but unrenderable is a read gap: failing is
+        // better than silently under-reporting a holding, which is the bug
+        // SO-313 exists to fix.
+        let value = field
+            .pointer("/value/json")
+            .ok_or_else(|| anyhow!("BalanceKey {coin_type} has no MoveValue json"))?;
+        let amount =
+            balance_value(value).with_context(|| format!("BalanceKey {coin_type} value"))?;
+        out.push(VaultBalance {
+            coin_type: coin_type.clone(),
+            amount,
+        });
+    }
+    Ok(out)
+}
+
+/// POST a GraphQL body and return its `data`, mapping HTTP, transport and
+/// GraphQL-level errors to `Err`.
+async fn post_graphql(
+    http: &reqwest::Client,
+    graphql_url: &str,
+    body: &Value,
+    what: &'static str,
+) -> Result<Value> {
+    let resp = http
+        .post(graphql_url)
+        .json(body)
+        .send()
+        .await
+        .with_context(|| format!("{what} request"))?
+        .error_for_status()
+        .with_context(|| format!("{what} http status"))?;
+    let parsed: Value = resp
+        .json()
+        .await
+        .with_context(|| format!("decoding {what}"))?;
+    if let Some(errors) = parsed.get("errors").filter(|e| !e.is_null()) {
+        return Err(anyhow!("{what} errors: {errors}"));
+    }
+    parsed
+        .get("data")
+        .filter(|d| !d.is_null())
+        .cloned()
+        .ok_or_else(|| anyhow!("{what} missing data: {parsed}"))
+}
+
+/// `Balance<T>` renders as the bare u64 (verified against a live testnet
+/// vault); tolerate the `{"value": …}` struct form other renderers use.
+fn balance_value(v: &Value) -> Result<u64> {
+    let scalar = match v {
+        Value::Object(m) => m
+            .get("value")
+            .ok_or_else(|| anyhow!("balance object has no value field: {v}"))?,
+        other => other,
+    };
+    match scalar {
+        Value::String(s) => s.parse().with_context(|| format!("u64 {s:?}")),
+        Value::Number(n) => n.as_u64().ok_or_else(|| anyhow!("non-u64 {n}")),
+        other => Err(anyhow!("expected u64 balance, got {other}")),
+    }
+}
 
 /// Read one `Vault` object's live fields via the Sui GraphQL RPC. `Ok(None)`
 /// if the node doesn't know the object (deleted / wrong network); `Err` on
@@ -190,5 +412,89 @@ mod tests {
         let mut j = vault_json("Active");
         j["phase"] = json!("Settling");
         assert_eq!(parse_vault_live(&j).unwrap().phase, "settling");
+    }
+
+    // ── free-balance walk (SO-313) ──────────────────────────────────────
+
+    /// Unprefixed, exactly as a chain `TypeName` renders inside `asset_types`.
+    const TBTC: &str = "95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::tbtc::TBTC";
+    const TUSDC: &str =
+        "95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::tusdc::TUSDC";
+
+    /// `asset_types` as the GraphQL RPC renders it for the SO-313 repro vault:
+    /// a `VecSet` wrapper around bare, `0x`-LESS `TypeName` strings.
+    #[test]
+    fn parses_asset_types_and_canonicalizes_them() {
+        let out = parse_asset_types(&json!({
+            "asset_types": { "contents": [TUSDC, TBTC] },
+        }))
+        .unwrap();
+        assert_eq!(out, vec![format!("0x{TUSDC}"), format!("0x{TBTC}")]);
+    }
+
+    /// A framework type arrives short (`0x2::sui::SUI`); it must come out
+    /// address-padded so it compares byte-equal against the catalog and
+    /// event-sourced types (`.claude/move-type-normalization.md`).
+    #[test]
+    fn pads_short_addresses_in_asset_types() {
+        let out = parse_asset_types(&json!({ "asset_types": { "contents": ["0x2::sui::SUI"] } }))
+            .unwrap();
+        assert_eq!(
+            out[0],
+            "0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI"
+        );
+    }
+
+    #[test]
+    fn tolerates_struct_shaped_type_names() {
+        let out = parse_asset_types(&json!({
+            "asset_types": { "contents": [{ "name": TBTC }] },
+        }))
+        .unwrap();
+        assert_eq!(out, vec![format!("0x{TBTC}")]);
+    }
+
+    /// The aliased `dynamicField` results, keyed `b0…bN` in `asset_types`
+    /// order. `Balance<T>` renders as a bare decimal string.
+    #[test]
+    fn reads_aliased_balance_keys_in_order() {
+        let types = vec![format!("0x{TUSDC}"), format!("0x{TBTC}")];
+        let fields = json!({
+            "b0": { "value": { "json": "99900513529" } },
+            "b1": { "value": { "json": "153000" } },
+        });
+        let out = parse_balance_keys(&fields, &types).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].coin_type, format!("0x{TUSDC}"));
+        assert_eq!(out[0].amount, 99_900_513_529);
+        assert_eq!(out[1].coin_type, format!("0x{TBTC}"));
+        assert_eq!(out[1].amount, 153_000);
+    }
+
+    #[test]
+    fn tolerates_struct_shaped_balance() {
+        let types = vec![format!("0x{TBTC}")];
+        let fields = json!({ "b0": { "value": { "json": { "value": "153000" } } } });
+        assert_eq!(parse_balance_keys(&fields, &types).unwrap()[0].amount, 153_000);
+    }
+
+    /// A type listed with no field on chain means zero, so it drops out of the
+    /// list rather than failing the read.
+    #[test]
+    fn skips_a_missing_balance_key() {
+        let types = vec![format!("0x{TUSDC}"), format!("0x{TBTC}")];
+        let fields = json!({ "b0": null, "b1": { "value": { "json": "153000" } } });
+        let out = parse_balance_keys(&fields, &types).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].coin_type, format!("0x{TBTC}"));
+    }
+
+    /// A field that IS present but unrenderable is a read gap: under-reporting
+    /// a holding is exactly the bug SO-313 fixes, so fail loudly instead.
+    #[test]
+    fn rejects_a_present_but_unreadable_balance_key() {
+        let types = vec![format!("0x{TBTC}")];
+        assert!(parse_balance_keys(&json!({ "b0": { "value": null } }), &types).is_err());
+        assert!(parse_balance_keys(&json!({}), &types).is_err());
     }
 }

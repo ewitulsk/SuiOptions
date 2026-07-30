@@ -74,8 +74,31 @@ export type TradingVaultPosition = {
   lastAppraisedAtMs: number | null;
 };
 
+/**
+ * One free balance the vault holds outside custody (SO-313) — a
+ * `vault::BalanceKey<T>` dynamic field on the vault object. Includes the
+ * deposit asset. Distinct from a *position*, which is a custodied object the
+ * appraisal walks; a curator spot trade only ever moves free balances.
+ */
+export type TradingVaultBalance = {
+  /** Canonical `0x…::mod::T` coin type. */
+  coinType: string;
+  /** Backend symbol, falling back to the coin type when uncatalogued. */
+  symbol: string;
+  /** Null when the asset isn't in the catalog — render the raw amount then. */
+  decimals: number | null;
+  /** u64 decimal string, atomic units. */
+  amountRaw: string;
+};
+
 export type TradingVaultDetail = TradingVault & {
   positions: TradingVaultPosition[];
+  balances: TradingVaultBalance[];
+  /**
+   * The live balance read failed, so `balances` is *unknown* rather than
+   * empty. Never render an empty list as "holds nothing" while this is set.
+   */
+  balancesStale: boolean;
 };
 
 /** Wire shape of one vault row: api-service ships these two endpoints in
@@ -109,6 +132,13 @@ type TradingVaultWire = {
   /** u128 decimal string; absent before the first consumed appraisal. */
   latest_nav_raw: string | null;
   nav_updated_at_ms: number | null;
+};
+
+type TradingVaultBalanceWire = {
+  coin_type: string;
+  symbol: string;
+  decimals: number | null;
+  amount_raw: string;
 };
 
 type TradingVaultPositionWire = {
@@ -166,12 +196,24 @@ export async function fetchTradingVault(vaultId: string): Promise<TradingVaultDe
   if (!res.ok) {
     throw new Error(`GET /trading-vaults/:id failed: ${res.status} ${res.statusText}`);
   }
-  // Detail flattens the vault fields to the top level, plus positions.
+  // Detail flattens the vault fields to the top level, plus positions and
+  // free balances.
   const body = (await res.json()) as TradingVaultWire & {
     positions: TradingVaultPositionWire[];
+    // Optional so the app keeps working against an api-service that predates
+    // SO-313 — an absent field reads as "unknown", not "holds nothing".
+    balances?: TradingVaultBalanceWire[];
+    balances_stale?: boolean;
   };
   return {
     ...mapVault(body),
+    balances: (body.balances ?? []).map((b) => ({
+      coinType: b.coin_type,
+      symbol: b.symbol,
+      decimals: b.decimals ?? null,
+      amountRaw: b.amount_raw,
+    })),
+    balancesStale: body.balances == null || body.balances_stale === true,
     positions: body.positions.map((p) => ({
       positionId: p.position_id,
       adapter: p.adapter,
@@ -205,6 +247,37 @@ export async function fetchTradingVaultPpsHistory(
   }
   const body = (await res.json()) as { points: TradingVaultPpsPoint[] };
   return body.points;
+}
+
+/**
+ * One curator spot trade against an allowlisted DeepBook pool (SO-313).
+ * The event states only the direction; resolve `poolId` against the pool
+ * allowlist to name the two assets.
+ */
+export type TradingVaultTrade = {
+  /** Ms since epoch. Ships as a decimal string; normalized in the fetcher. */
+  timestampMs: number;
+  txDigest: string;
+  poolId: string;
+  /** True when the vault sold the pool's base asset for its quote asset. */
+  baseForQuote: boolean;
+  /** u64 decimal strings, atomic units of the respective assets. */
+  amountIn: string;
+  amountOut: string;
+  /** Input returned unfilled (lot rounding or a thin book). */
+  unswapped: string;
+};
+
+/** The vault's curator spot trades, newest first (SO-313). */
+export async function fetchTradingVaultTrades(vaultId: string): Promise<TradingVaultTrade[]> {
+  const res = await fetch(`${API_BASE_URL}/trading-vaults/${encodeURIComponent(vaultId)}/trades`);
+  if (!res.ok) {
+    throw new Error(`GET /trading-vaults/:id/trades failed: ${res.status} ${res.statusText}`);
+  }
+  const body = (await res.json()) as {
+    trades: (Omit<TradingVaultTrade, "timestampMs"> & { timestampMs: string | number })[];
+  };
+  return body.trades.map((t) => ({ ...t, timestampMs: Number(t.timestampMs) }));
 }
 
 /** The connected wallet's stake in one vault (SO-293). Raw integer fields
