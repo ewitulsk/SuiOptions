@@ -711,7 +711,13 @@ async fn main() -> Result<()> {
     // neighbours that deliberately warn-and-reconnect instead of exiting
     // (`ws_client::connect`, `expect_auth_challenge`), so the bare `?` there
     // looks unintended rather than chosen. Both are pre-existing and untouched
-    // by SO-324; whether they should warn-and-continue is SO-322-shaped.
+    // by SO-324; whether they should warn-and-continue is SO-328.
+    //
+    // Those last two are also *unreachable today*, and only because of a config
+    // value: `signing_scheme = "ed25519"`, whose arm of `QuoteSigner::sign` has
+    // no error path at all. The secp256k1 and secp256r1 arms do. So this is a
+    // dormant exit rather than an unlikely one, and its trigger is a scheme
+    // change rather than elapsed time — see the note at the call site.
     readiness.ready();
 
     // nonce is monotonic for the bot's lifetime — keep it across reconnects.
@@ -944,6 +950,19 @@ async fn main() -> Result<()> {
                                 valid_until_ms: now.saturating_add(cfg.quote_ttl_ms),
                                 nonce: nonce_counter,
                             };
+                            // These two `?`s exit the process — see the DECLARED
+                            // TAIL note at the readiness flip. They are
+                            // unreachable *only because of the configured
+                            // signing scheme*: `QuoteSigner::sign` has no error
+                            // path in its Ed25519 arm (quote_signer.rs), and
+                            // `to_bcs_bytes` is `bcs::to_bytes` over a struct of
+                            // primitives. Set `signing_scheme` to secp256k1 or
+                            // secp256r1 — both of which `sign_prehash(..)?` —
+                            // and this becomes a live exit on one bad quote,
+                            // mid-session, long after /health went green. Fix
+                            // before switching scheme: warn → backoff →
+                            // `continue 'reconnect`, matching the neighbours
+                            // above. Tracked in SO-328.
                             let bytes = quote.to_bcs_bytes()?;
                             let sig = signer.sign(&bytes)?;
                             if let Err(e) = ws_client::send_json(
