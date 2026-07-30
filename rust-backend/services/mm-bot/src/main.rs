@@ -43,7 +43,7 @@ use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
 use sui_tx::quote_signer::QuoteSigner;
 use sui_tx::sui_client::{Network, SuiClientWrapper};
 use sui_tx::tx::mm_collateral::balance_of as collateral_balance_of;
-use sui_tx::tx::signer::{create_and_share_signer, find_signer};
+use sui_tx::tx::signer::{create_and_share_signer, find_signer, verify_signer};
 use sui_tx::tx::test_tokens::mint_and_deposit_into_collateral;
 use sui_tx::ws_client;
 use token_info_client::{Snapshot, TokenInfoClient};
@@ -88,6 +88,18 @@ struct BotConfig {
     /// `collateral_package`.
     #[serde(default)]
     collateral_account: Option<String>,
+
+    /// This bot's existing `QuoteSigner` object id. Optional. When set it is
+    /// verified against chain state (right deployment, right owner/key) and
+    /// adopted; when absent — or when it fails verification — the bot falls
+    /// back to discovering the signer from `SignerCreated` events.
+    ///
+    /// The fallback is history-dependent and can become unservable once the
+    /// creating transaction ages out of the RPC provider (SO-325), which is
+    /// what this field exists to route around. It is a hint, never a grant:
+    /// a value that does not verify is ignored, not trusted.
+    #[serde(default)]
+    quote_signer_id: Option<String>,
 
     /// Explicit allowlist of underlyings to make markets in. Empty (the
     /// default) ⇒ derive mode: every enabled token-info token with a Pyth
@@ -1090,9 +1102,38 @@ async fn resolve_signer(
     let wrap = SuiClientWrapper::connect(secrets, cfg.network).await?;
     let package = snapshot.package()?;
 
-    // The deployment is the source of truth — no local sidecar. If this
-    // bot's Sui address already created a QuoteSigner under the current
-    // package, adopt it; otherwise bootstrap a fresh one.
+    // Chain state is the source of truth either way; the only question is how
+    // we look. A configured id is checked with a point read of the object —
+    // cheap, and immune to the archival retention that makes the event scan
+    // below fail (SO-325). It is a hint, not a grant: `verify_signer` proves
+    // the object is a QuoteSigner of THIS deployment owned by THIS bot with
+    // THIS key before we adopt it, so a stale or wrong id falls through
+    // rather than being trusted.
+    if let Some(configured) = cfg.quote_signer_id.as_deref() {
+        let signer_id =
+            ObjectID::from_hex_literal(configured).context("parsing quote_signer_id")?;
+        if verify_signer(
+            &wrap.client,
+            package,
+            signer_id,
+            wrap.signer.address,
+            signer.scheme(),
+            pubkey_bytes,
+        )
+        .await?
+        {
+            tracing::info!(%signer_id, "adopted configured quote signer (verified on chain)");
+            return Ok(signer_id);
+        }
+        tracing::warn!(
+            %signer_id,
+            "configured quote_signer_id did not verify — falling back to event discovery"
+        );
+    }
+
+    // No usable configured id. If this bot's Sui address already created a
+    // QuoteSigner under the current package, adopt it; otherwise bootstrap a
+    // fresh one.
     if let Some(signer_id) =
         find_signer(&wrap.client, package, wrap.signer.address, signer.scheme(), pubkey_bytes)
             .await?

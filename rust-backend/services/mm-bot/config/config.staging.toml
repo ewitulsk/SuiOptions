@@ -20,6 +20,18 @@ signing_scheme     = "ed25519"
 # collateral_package = "0x..."
 # collateral_account = "0x..."
 
+# --- Quote signer ------------------------------------------------------
+# This bot's existing QuoteSigner under the current deployment. Pinned
+# because discovering it from SignerCreated events no longer works: the
+# creating transaction is not servable by our RPC provider (SO-325), which
+# left mm-bot unable to boot. The id is verified against chain state at
+# startup — right package, right owner, right key — and ignored if it does
+# not match, so this is a hint rather than something the bot trusts.
+#
+# Re-pin after a core republish, or drop the line to let the bot bootstrap
+# a fresh signer.
+quote_signer_id    = "0xadae1712d2efdf7cf7d7ce16e6bff32c937395e76732aca744d9763b148797dc"
+
 # Derive mode: `underlying_symbols` left unset, so the bot makes markets in
 # every enabled token-info token with a Pyth feed and a watcher restarts
 # the bot to pick up newly-listed underlyings.
