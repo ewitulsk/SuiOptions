@@ -1,0 +1,58 @@
+name: Deploy Filter CI
+
+# Guardrail for rust-backend/deployment/affected.py, the script that picks
+# which services _deploy.yml rebuilds + rolls.
+#
+# There was no Python CI in this repo before, so nothing checked the deploy
+# filter. Its crate map was hand-maintained and had silently drifted from the
+# Cargo manifests in 23 places across 12 of 17 services (SO-315): a
+# source-only edit inside an un-watched crate skipped every service depending
+# on it, and the deploy still went green. The map is derived from the
+# manifests now, and these tests are what notice if that derivation stops
+# matching them.
+#
+# Triggered on every Cargo.toml because that is where the dependency graph
+# lives — adding a workspace-crate dep to a service must re-check coverage.
+
+on:
+  push:
+    branches: [staging, main]
+    paths:
+      - 'rust-backend/**/Cargo.toml'
+      - 'rust-backend/deployment/**'
+      - '.github/workflows/deploy-filter-ci.yml'
+  pull_request:
+    paths:
+      - 'rust-backend/**/Cargo.toml'
+      - 'rust-backend/deployment/**'
+      - '.github/workflows/deploy-filter-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  affected-filter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # tomllib is stdlib from 3.11. ubuntu-latest ships 3.12, and the
+      # runner _deploy.yml calls affected.py on is the same image, so this
+      # tests the interpreter that actually runs it in the deploy path.
+      - name: Python version
+        run: python3 --version
+
+      - name: Guardrail tests
+        run: python3 -m unittest discover -s rust-backend/deployment -v
+
+      # Belt-and-braces on the output contract the workflow depends on:
+      # `_deploy.yml` short-circuits the build matrix on a literal `[]`.
+      - name: Output contract smoke check
+        run: |
+          set -euo pipefail
+          out=$(printf '' | python3 rust-backend/deployment/affected.py)
+          test "$out" = "[]" || { echo "empty input gave '$out', want []"; exit 1; }
+          out=$(python3 rust-backend/deployment/affected.py \
+            rust-backend/crates/indexer-graphql/src/lib.rs)
+          echo "$out" | python3 -c 'import json,sys; assert "mm-bot" in json.load(sys.stdin)'
+          echo "ok: $out"

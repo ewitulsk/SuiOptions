@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""Guardrail tests for affected.py's service<->path mapping.
+
+The bug these exist to prevent (SO-315) is silent: when the deploy filter
+under-selects, the workflow still goes green and the skipped service keeps
+running an image built against an older crate. Nothing fails, so nothing
+gets noticed. These tests are the only thing that notices.
+
+Run:
+    python3 -m unittest discover -s rust-backend/deployment -v
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+import tempfile
+import tomllib
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import affected  # noqa: E402
+
+REPO_ROOT = affected.REPO_ROOT
+RUST = REPO_ROOT / "rust-backend"
+
+# Changed-file list of ec2b714, the SO-313 merge that exposed the bug:
+# `git diff --name-only ec2b714^ ec2b714`. Pinned rather than shelled out to
+# git so the test does not depend on the commit being fetched.
+SO313_CHANGED_FILES = [
+    "frontend/src/api/tradingVaults.ts",
+    "frontend/src/api/useTradingVaults.ts",
+    "frontend/src/screens/TradingVaultDetail.tsx",
+    "rust-backend/crates/indexer-graphql/src/lib.rs",
+    "rust-backend/services/api-service/src/handlers/trading_vaults.rs",
+    "rust-backend/services/api-service/src/router.rs",
+    "rust-backend/services/api-service/src/sui_rpc.rs",
+]
+
+
+def _resolve_transitively(service: str) -> set[str]:
+    """Second, deliberately independent implementation of the closure.
+
+    affected.py memoises every crate's deps up front and works a worklist;
+    this walks the graph recursively from the service manifest only. Two
+    implementations that agree is the point — a test that reuses
+    `affected.crate_globs` would only prove the function equals itself.
+    """
+    ws = tomllib.loads((RUST / "Cargo.toml").read_text())
+    crate_dir = {}
+    for name, spec in ws["workspace"]["dependencies"].items():
+        if isinstance(spec, dict) and str(spec.get("path", "")).startswith("crates/"):
+            crate_dir[name] = spec["path"].split("/", 1)[1]
+
+    def image_deps(manifest_path: Path) -> set[str]:
+        m = tomllib.loads(manifest_path.read_text())
+        sections = [m.get("dependencies", {}), m.get("build-dependencies", {})]
+        for cfg in m.get("target", {}).values():
+            sections += [cfg.get("dependencies", {}), cfg.get("build-dependencies", {})]
+        return {crate_dir[n] for s in sections for n in s if n in crate_dir}
+
+    out: set[str] = set()
+
+    def walk(crates: set[str]) -> None:
+        for c in crates - out:
+            out.add(c)
+            walk(image_deps(RUST / "crates" / c / "Cargo.toml"))
+
+    walk(image_deps(RUST / "services" / service / "Cargo.toml"))
+    return out
+
+
+class TestServiceRoster(unittest.TestCase):
+    """A new service must not be able to join the workspace un-watched."""
+
+    def test_all_services_matches_deploy_sh(self):
+        script = (RUST / "deployment" / "ec2" / "deploy.sh").read_text()
+        m = re.search(r"^ALL_SERVICES=\(([^)]*)\)", script, re.MULTILINE)
+        self.assertIsNotNone(m, "ALL_SERVICES array not found in deploy.sh")
+        self.assertEqual(affected.ALL_SERVICES, m.group(1).split())
+
+    def test_service_globs_covers_exactly_all_services(self):
+        self.assertEqual(sorted(affected.SERVICE_GLOBS), sorted(affected.ALL_SERVICES))
+
+    def test_every_service_has_a_manifest(self):
+        for svc in affected.ALL_SERVICES:
+            with self.subTest(service=svc):
+                self.assertTrue((RUST / "services" / svc / "Cargo.toml").is_file())
+
+    def test_every_service_watches_its_own_dir_and_a_dockerfile(self):
+        for svc, globs in affected.SERVICE_GLOBS.items():
+            with self.subTest(service=svc):
+                self.assertIn(f"rust-backend/services/{svc}/**", globs)
+                dockerfiles = [g for g in globs if "/Dockerfile." in g]
+                self.assertEqual(
+                    len(dockerfiles), 1, f"{svc}: expected exactly one Dockerfile glob"
+                )
+                self.assertTrue(
+                    (REPO_ROOT / dockerfiles[0]).is_file(),
+                    f"{svc}: {dockerfiles[0]} does not exist",
+                )
+
+    def test_service_globs_holds_no_hand_written_crate_globs(self):
+        """Crate coverage is derived. A literal crates/ glob here is drift."""
+        for svc, globs in affected.SERVICE_GLOBS.items():
+            with self.subTest(service=svc):
+                self.assertEqual([g for g in globs if "/crates/" in g], [])
+
+
+class TestDerivedCrateCoverage(unittest.TestCase):
+    """The half that makes it stay fixed: coverage tracks the manifests."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.derived = affected.crate_globs()
+
+    def test_matches_independent_transitive_resolution(self):
+        for svc in affected.ALL_SERVICES:
+            with self.subTest(service=svc):
+                expected = {
+                    f"rust-backend/crates/{c}/**" for c in _resolve_transitively(svc)
+                }
+                self.assertEqual(set(self.derived[svc]), expected)
+
+    def test_dev_dependencies_are_excluded(self):
+        """keeper dev-depends on vault-sim; a test-only crate must not deploy."""
+        keeper = tomllib.loads((RUST / "services" / "keeper" / "Cargo.toml").read_text())
+        self.assertIn(
+            "vault-sim",
+            keeper["dev-dependencies"],
+            "fixture drifted: keeper no longer dev-depends on vault-sim",
+        )
+        self.assertNotIn("vault-sim", keeper.get("dependencies", {}))
+        self.assertNotIn("rust-backend/crates/vault-sim/**", self.derived["keeper"])
+
+    def test_transitive_crate_is_covered(self):
+        """mm-bot never names deployments; token-info-client pulls it in."""
+        mm_bot = tomllib.loads((RUST / "services" / "mm-bot" / "Cargo.toml").read_text())
+        self.assertNotIn("deployments", mm_bot["dependencies"])
+        self.assertIn("rust-backend/crates/deployments/**", self.derived["mm-bot"])
+
+
+class TestRegressionPins(unittest.TestCase):
+    """The specific under-selections SO-315 was filed for."""
+
+    def test_so313_replay_now_includes_mm_bot(self):
+        got = affected.affected_services(SO313_CHANGED_FILES)
+        self.assertIn("mm-bot", got, "SO-315 regression: mm-bot skipped again")
+        self.assertEqual(
+            got,
+            [
+                "api-service",
+                "keeper",
+                "mm-bot",
+                "option-scheduler",
+                "price-charting",
+                "quoting-service",
+            ],
+        )
+
+    def test_indexer_graphql_reaches_mm_bot(self):
+        got = affected.affected_services(["rust-backend/crates/indexer-graphql/src/lib.rs"])
+        self.assertIn("mm-bot", got)
+
+    def test_token_info_client_reaches_every_dependent(self):
+        got = affected.affected_services(
+            ["rust-backend/crates/token-info-client/src/lib.rs"]
+        )
+        # The six that were silently skipped before SO-315.
+        for svc in (
+            "api-service",
+            "gas-station",
+            "indexer",
+            "mm-bot",
+            "option-scheduler",
+            "quoting-service",
+        ):
+            with self.subTest(service=svc):
+                self.assertIn(svc, got)
+        self.assertEqual(got, sorted(_dependents_of("token-info-client")))
+
+
+def _dependents_of(crate: str) -> set[str]:
+    return {
+        svc for svc in affected.ALL_SERVICES if crate in _resolve_transitively(svc)
+    }
+
+
+class TestOutputContract(unittest.TestCase):
+    """The workflow short-circuits on `[]`; do not change this."""
+
+    def _run(self, args, stdin=""):
+        return subprocess.run(
+            [sys.executable, str(RUST / "deployment" / "affected.py"), *args],
+            input=stdin,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_empty_input_is_empty_array_and_exit_zero(self):
+        r = self._run([])
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, "[]\n")
+
+    def test_unmatched_paths_are_empty_array_and_exit_zero(self):
+        r = self._run(["README.md", "docs/whatever.md"])
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, "[]\n")
+
+    def test_stdout_is_a_sorted_json_array(self):
+        r = self._run(["rust-backend/crates/protocol-types/src/lib.rs"])
+        self.assertEqual(r.returncode, 0)
+        parsed = json.loads(r.stdout)
+        self.assertIsInstance(parsed, list)
+        self.assertEqual(parsed, sorted(parsed))
+        self.assertTrue(set(parsed) <= set(affected.ALL_SERVICES))
+
+    def test_rebuild_all_glob_returns_every_service(self):
+        r = self._run(["rust-backend/Cargo.lock"])
+        self.assertEqual(json.loads(r.stdout), sorted(affected.ALL_SERVICES))
+
+    def test_runs_from_any_cwd(self):
+        """_deploy.yml runs it from the repo root; don't depend on that."""
+        r = subprocess.run(
+            [sys.executable, str(RUST / "deployment" / "affected.py"),
+             "rust-backend/crates/indexer-graphql/src/lib.rs"],
+            capture_output=True, text=True, cwd=tempfile.gettempdir(),
+        )
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("mm-bot", json.loads(r.stdout))
+
+
+class TestFailsClosed(unittest.TestCase):
+    """Over-deploying costs build minutes. Under-deploying is the bug."""
+
+    def test_missing_manifests_return_all_services(self):
+        with tempfile.TemporaryDirectory() as empty:
+            got = affected.affected_services(
+                ["rust-backend/crates/indexer-graphql/src/lib.rs"], root=Path(empty)
+            )
+        self.assertEqual(got, sorted(affected.ALL_SERVICES))
+
+    def test_unparseable_manifest_returns_all_services(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "rust-backend").mkdir()
+            (root / "rust-backend" / "Cargo.toml").write_text("this is not = = toml\n")
+            got = affected.affected_services(
+                ["rust-backend/crates/indexer-graphql/src/lib.rs"], root=root
+            )
+        self.assertEqual(got, sorted(affected.ALL_SERVICES))
+
+    def test_dep_on_a_nonexistent_crate_dir_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rust = root / "rust-backend"
+            (rust / "crates").mkdir(parents=True)
+            (rust / "Cargo.toml").write_text(
+                '[workspace.dependencies]\nghost = { path = "crates/ghost" }\n'
+            )
+            for svc in affected.ALL_SERVICES:
+                (rust / "services" / svc).mkdir(parents=True)
+                (rust / "services" / svc / "Cargo.toml").write_text(
+                    '[dependencies]\nghost = { workspace = true }\n'
+                )
+            got = affected.affected_services(
+                ["rust-backend/crates/ghost/src/lib.rs"], root=root
+            )
+        self.assertEqual(got, sorted(affected.ALL_SERVICES))
+
+    def test_empty_input_still_wins_over_failing_closed(self):
+        """`[]` means "nothing changed", not "we could not tell"."""
+        with tempfile.TemporaryDirectory() as empty:
+            self.assertEqual(affected.affected_services([], root=Path(empty)), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
