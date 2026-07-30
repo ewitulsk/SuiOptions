@@ -23,11 +23,6 @@
             "faucetId": "0x99ba5a4c80adb0e9354b241b7c0fbf22b2355b7371e34dc6298058078f8730f7",
             "decimals": 8
           },
-          "TDEEP": {
-            "coinType": "0x159cc8d63af67b12286a9a7868a40b274ef352960b1a3d9ea31c0169cc3efa73::tdeep::TDEEP",
-            "faucetId": "0x955936a9105a784fe51545e8abe1e05b31b9a584e6db23f00599383fe1a7bc0d",
-            "decimals": 6
-          },
           "TSUI": {
             "coinType": "0xc7b13fac3b94b3c6171ff0247b282dc4caeda51b64d2e421f62bfd17004d4e1b::tsui::TSUI",
             "faucetId": "0x0abb12c5558d4438f7d5fbf5e056dc852a7d00fa3283334979332d335b7e8f32",
@@ -58,10 +53,6 @@
         "coinType": "0x159cc8d63af67b12286a9a7868a40b274ef352960b1a3d9ea31c0169cc3efa73::tbtc::TBTC",
         "decimals": 8,
         "pythFeedId": "0xf9c0172ba10dfa4d19088d94f5bf61d3b54d5bd7483a322a982e1373ee8ea31b"
-      },
-      "TDEEP": {
-        "coinType": "0x159cc8d63af67b12286a9a7868a40b274ef352960b1a3d9ea31c0169cc3efa73::tdeep::TDEEP",
-        "decimals": 6
       },
       "TSUI": {
         "coinType": "0xc7b13fac3b94b3c6171ff0247b282dc4caeda51b64d2e421f62bfd17004d4e1b::tsui::TSUI",
@@ -102,11 +93,6 @@
             "coinType": "0x95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::tbtc::TBTC",
             "faucetId": "0x4e01b6e943ee6ffe93f7df48b9859c86ff7d86a86f41b172204f8d2d12da18c2",
             "decimals": 8
-          },
-          "TDEEP": {
-            "coinType": "0x95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::tdeep::TDEEP",
-            "faucetId": "0x5dac347b1cf85f2d872bf10fafca1abefb34320bcfba45ab2a37b22bb0daafaf",
-            "decimals": 6
           },
           "TSUI": {
             "coinType": "0x95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::tsui::TSUI",
@@ -203,10 +189,6 @@
         "coinType": "0x95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::tbtc::TBTC",
         "decimals": 8,
         "pythFeedId": "0xf9c0172ba10dfa4d19088d94f5bf61d3b54d5bd7483a322a982e1373ee8ea31b"
-      },
-      "TDEEP": {
-        "coinType": "0x95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::tdeep::TDEEP",
-        "decimals": 6
       },
       "TSUI": {
         "coinType": "0x95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::tsui::TSUI",

@@ -95,7 +95,7 @@ pub struct Cli {
     #[arg(long)]
     pub skip_init: bool,
 
-    /// Also publish the test-tokens package (TUSDC/TBTC/TWAL/TDEEP) and
+    /// Also publish the test-tokens package (TUSDC/TBTC/TWAL/TSUI) and
     /// record the faucet IDs in deployments.json. Each run publishes a
     /// fresh package and overwrites the previous testTokens block.
     #[arg(long)]

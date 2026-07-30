@@ -45,7 +45,7 @@ pub struct Cli {
     #[arg(short = 'w', long)]
     pub write_amount: u64,
 
-    /// Symbol for the underlying token (TBTC, TDEEP, TUSDC, TWAL).
+    /// Symbol for the underlying token (TBTC, TSUI, TUSDC, TWAL).
     #[arg(long, default_value = "TBTC")]
     pub underlying: String,
 

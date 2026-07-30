@@ -144,9 +144,14 @@ what is NOT done, grouped by how blocking it is. Companion docs:
 - [ ] PR #310 review + **squash-and-merge** (repo convention), close
   SO-299. Consider splitting follow-up tickets from §3 at merge time.
 - [ ] Pre-existing failures left untouched (not from this work):
-  `deployments::tests::loads_the_repo_deployments_file` (TDEEP
-  re-listed in the repo `deployments.json` — data assertion), clippy
-  doc warnings in `crates/pricing/src/lib.rs`.
+  ~~`deployments::tests::loads_the_repo_deployments_file` (TDEEP
+  re-listed in the repo `deployments.json` — data assertion)~~ —
+  **resolved by SO-317**, which strips TDEEP and deletes the two
+  assertions. Worth knowing: because `cargo test` stops at the first
+  failing binary, this one failure was truncating `cargo test
+  --workspace` after ~17 of 68 test binaries while still printing a
+  summary that read like a pass. Run it with `--no-fail-fast`.
+  Still open: clippy doc warnings in `crates/pricing/src/lib.rs`.
 - [ ] Open product decisions still pending from 00-plan: epic
   structure (one epic vs split V1/V2), venue-mix decision timing.
 

@@ -31,7 +31,7 @@ public struct Bucket<phantom Underlying, phantom Settlement, phantom Call> has k
     /// Strike ratio in scaled chain units. The real ratio (settlement
     /// smallest-units per underlying smallest-unit) is
     /// `strike / 10^strike_scale`. Using u128 + u8 lets a sub-cent asset
-    /// paired against a same-decimal stablecoin (e.g. TDEEP/TUSDC) carry
+    /// paired against a same-decimal stablecoin (both 6-dec, say) carry
     /// meaningful resolution that a plain integer ratio cannot.
     strike: u128,
     strike_scale: u8,

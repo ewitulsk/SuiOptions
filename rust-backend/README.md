@@ -316,7 +316,7 @@ cargo run --release -p exchange -- create-buckets \
 ```
 
 `--underlying` / `--settlement` accept either a symbol from
-`deployments.testTokens` (`TBTC`, `TDEEP`, `TUSDC`, `TWAL`) or a fully
+`deployments.testTokens` (`TBTC`, `TSUI`, `TUSDC`, `TWAL`) or a fully
 qualified `0x…::module::Type` string. `--expiry-ms` is a Sui clock
 timestamp.
 
@@ -567,8 +567,9 @@ interval_pct        = 5.0
 
 **Spot sources.** Two `[pairs.spot].source` variants ship today:
 
-- `static` — hardcoded `usd` value. Use for tests, dry-runs, and synthetic
-  tickers without a real-world price feed (TDEEP, TWAL).
+- `static` — hardcoded `usd` value. Use for tests, dry-runs, and any ticker
+  without a real-world price feed. Every token in `token_info` currently
+  carries a `pythFeedId`, so nothing ships on `static` today.
 - `pyth` — live cross of two USD prices pulled from Pyth Hermes at roll
   time. Feed ids resolve from `deployments.json::token_info.<sym>.
   pythFeedId` (the same source `mm-bot` uses); both the underlying and
