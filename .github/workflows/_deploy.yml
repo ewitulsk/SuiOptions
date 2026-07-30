@@ -415,10 +415,22 @@ jobs:
       - name: Advance deploy marker
         # Record the commit just deployed so the NEXT manual dispatch diffs
         # against it (not HEAD^). Only runs after the deploy step above
-        # succeeded. Skipped for image_tag rollbacks — those roll an older
-        # tag, which must not become the "last deployed" baseline.
+        # succeeded.
+        #
+        # Skipped for any PARTIAL roll, because the marker asserts "everything
+        # at this commit is deployed" and a partial roll cannot support that:
+        #   - image_tag rollbacks roll an OLDER tag, which must not become the
+        #     "last deployed" baseline.
+        #   - only_services rolls a subset. Advancing here would record the
+        #     whole commit as deployed when one service moved, so the next
+        #     normal dispatch would diff from it and silently skip every
+        #     service that never actually rolled — the same class of
+        #     invisible-skip bug SO-315 fixed in the affected-files filter.
+        # Both cases leave the marker where it is; the next full deploy
+        # advances it and trues everything up.
+        #
         # Best-effort: a marker hiccup must never fail an already-good deploy.
-        if: ${{ !inputs.image_tag }}
+        if: ${{ !inputs.image_tag && !inputs.only_services }}
         env:
           DEPLOY_ENV: ${{ matrix.env }}
         run: |
