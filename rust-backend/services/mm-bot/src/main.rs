@@ -690,14 +690,28 @@ async fn main() -> Result<()> {
     // half a second later, which the gate never saw (SO-324).
     //
     // DECLARED TAIL: the reconnect loop below is fallible and follows the flip.
-    // `AuthVerdict::Fatal` bails, so a permanently-rejected signing key can
-    // still exit after /health has gone green. That is deliberate — the flip
-    // cannot wait for a successful auth handshake without making mm-bot's
-    // deploy gate depend on the quoting-service being up, and the loop is
-    // built to tolerate transient rejection right after a redeploy while the
-    // indexer catches up. Narrowing that tail means giving mm-bot a readiness
-    // signal that distinguishes "peer not up yet" from "my key is wrong",
-    // which this ticket does not attempt.
+    // Four exit paths, all in `main`'s own body — there is no `tokio::spawn` or
+    // `async move` between here and the end of `main`, so each one kills the
+    // process after /health has gone green:
+    //
+    //   AuthVerdict::Fatal          permanently-rejected key
+    //   signer.sign(&challenge)?    auth handshake
+    //   quote.to_bcs_bytes()?       steady-state, per-RFQ
+    //   signer.sign(&bytes)?        steady-state, per-RFQ
+    //
+    // The first two are startup-shaped, and the flip deliberately does not wait
+    // for them: that would make mm-bot's deploy gate depend on the
+    // quoting-service being up, and this loop exists precisely to tolerate
+    // transient rejection right after a redeploy while the indexer catches up.
+    //
+    // The last two are not startup at all — one BCS or signing failure on a
+    // single quote exits the bot, and **no flip placement can cover them**,
+    // because they live in an unbounded steady-state loop. That is what makes
+    // this tail unavoidable rather than mis-placed. They also sit among
+    // neighbours that deliberately warn-and-reconnect instead of exiting
+    // (`ws_client::connect`, `expect_auth_challenge`), so the bare `?` there
+    // looks unintended rather than chosen. Both are pre-existing and untouched
+    // by SO-324; whether they should warn-and-continue is SO-322-shaped.
     readiness.ready();
 
     // nonce is monotonic for the bot's lifetime — keep it across reconnects.
