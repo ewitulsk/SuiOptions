@@ -131,6 +131,21 @@ async fn main() -> Result<()> {
 /// *healthy inert* state, not a startup failure. Leaving /health at 503 here
 /// would turn every legitimately-disabled sim into a deploy rollback, which is
 /// the opposite of the posture this service was given (SO-324).
+///
+/// The six call sites are two categories, and the flip only does work for one:
+///
+/// - **Gate cases** (disabled, non-testnet, no faucets, no DeepBook) park
+///   *before* the flip in `main`, so this is the only thing that makes them
+///   ready. That is the case this argument exists for.
+/// - **Failure cases** (band loop returned / errored) park *after* it, so
+///   `ready()` here is a no-op — readiness is already true and there is no
+///   un-ready operation.
+///
+/// So a market-sim whose band loop dies does keep reporting ready. That is
+/// unchanged from before SO-324 (/health was unconditionally green at all six
+/// sites) and it is not something this flip decides. Making a failed band loop
+/// visible to the gate means a *revocable* readiness plus a ruling on whether
+/// a broken sim should roll back the fleet — deliberately out of scope here.
 async fn park(reason: &str, readiness: &observability::ops::Readiness) -> Result<()> {
     warn!(reason, "[sim] parked — serving health/metrics only");
     readiness.ready();
