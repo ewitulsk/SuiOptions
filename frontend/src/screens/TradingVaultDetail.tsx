@@ -795,7 +795,19 @@ function SpotTradesCard({ vault }: { vault: TradingVaultDetailDto }) {
   const poolsQ = useAllowlistedPools(Boolean(DEEPBOOK_ADAPTER_PACKAGE_ID) && trades.length > 0);
   const pools = poolsQ.data ?? [];
 
-  // The card is noise on a vault that has never spot-traded.
+  // A failed read must not look like "never traded" — that is the same
+  // invisibility SO-313 exists to fix, one layer up.
+  if (tradesQ.isError) {
+    return (
+      <div className="vault-card">
+        <div className="vault-card__head">Spot trades</div>
+        <div className="vault-card__body vault-prose__muted">
+          Couldn't read this vault's trades just now — retrying.
+        </div>
+      </div>
+    );
+  }
+  // The card is noise on a vault that has genuinely never spot-traded.
   if (trades.length === 0) return null;
 
   return (
