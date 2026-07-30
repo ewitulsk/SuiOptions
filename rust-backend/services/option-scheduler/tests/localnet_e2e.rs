@@ -190,7 +190,15 @@ async fn localnet_roll_creates_per_bucket_coins() -> Result<()> {
         signer,
         network: Network::Devnet,
     };
-    let out = roller::submit(&wrap, package, admin_cap, &plan, None, GAS).await?;
+    // pools: None, vault_allowlist: None — this test exercises the roll PTB
+    // itself, not DeepBook pool creation or the best-effort vault allowlisting
+    // that follows it (roller.rs:253 skips that step on None).
+    //
+    // `None` is not a test-shaped stand-in: main.rs:112-121 produces it in
+    // production too, on any network without a DeepBook adapter or recorded
+    // trading-vault governance objects. So this covers a branch that really
+    // runs rather than a synthetic one.
+    let out = roller::submit(&wrap, package, admin_cap, &plan, None, None, GAS).await?;
     eprintln!("roll digest = {}, buckets = {:?}", out.digest, out.bucket_ids);
     assert_eq!(out.bucket_ids.len(), 2, "expected two buckets");
 
