@@ -25,6 +25,7 @@ import {
   useTradingVault,
   useTradingVaultPpsHistory,
   useTradingVaultStake,
+  useTradingVaultTrades,
   useVaultProtocolConfigId,
   type AllowlistedPool,
 } from "../api/useTradingVaults";
@@ -175,6 +176,8 @@ function VaultBody({ vault }: { vault: TradingVaultDetailDto }) {
             loading={ppsHistoryQ.isLoading}
             symbol={symbol}
           />
+          <HoldingsCard vault={vault} />
+          <SpotTradesCard vault={vault} />
           <PositionsCard vault={vault} symbol={symbol} decimals={token?.decimals ?? null} />
           <ExternalAccountCard vault={vault} symbol={symbol} decimals={token?.decimals ?? null} />
           {isCurator && (
@@ -719,6 +722,137 @@ function PositionValue({
   );
 }
 
+/**
+ * Display amount for a raw u64 in an asset's atomic units. Exact — holdings
+ * are the balance itself, not a price, so no significant-figure rounding and
+ * no float (a u64 balance can exceed 2^53). Falls back to the raw integer
+ * when the asset isn't in the catalog, so an uncatalogued holding still shows
+ * a real number rather than "—".
+ */
+function fmtAmount(amountRaw: string, decimals: number | null): string {
+  if (decimals == null) return amountRaw;
+  return rawToDecimalString(amountRaw, decimals);
+}
+
+/**
+ * Free balances the vault holds outside custody (SO-313). A curator spot
+ * trade moves value between these and never mints a position, so without
+ * this card the trade is invisible on the page.
+ */
+function HoldingsCard({ vault }: { vault: TradingVaultDetailDto }) {
+  // Zero-balance assets drop their on-chain field, so anything the API
+  // returns is non-zero; filter defensively anyway.
+  const held = vault.balances.filter((b) => b.amountRaw !== "0");
+
+  return (
+    <div className="vault-card">
+      <div className="vault-card__head">Holdings · {held.length}</div>
+      {vault.balancesStale ? (
+        <div className="vault-card__body vault-prose__muted">
+          Couldn't read the vault's balances just now — retrying.
+        </div>
+      ) : held.length === 0 ? (
+        <div className="vault-card__body vault-prose__muted">
+          The vault holds no free balances.
+        </div>
+      ) : (
+        <div className="vault-table">
+          <div className="vault-table__scroll">
+            <div className="vault-table__head" style={{ gridTemplateColumns: "1.4fr 1fr" }}>
+              <span>Asset</span>
+              <span>Amount</span>
+            </div>
+            {held.map((b) => (
+              <div
+                className="vault-table__row"
+                style={{ gridTemplateColumns: "1.4fr 1fr" }}
+                key={b.coinType}
+              >
+                <span title={b.coinType}>
+                  {b.symbol}
+                  {b.coinType === vault.depositAsset && (
+                    <span className="vault-bids__sub"> deposit asset</span>
+                  )}
+                </span>
+                <span>{fmtAmount(b.amountRaw, b.decimals)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Curator spot trades against allowlisted DeepBook pools (SO-313). The event
+ * carries the pool id and a direction flag only, so the pool allowlist
+ * supplies the two coin types; an unresolvable pool degrades to raw amounts.
+ */
+function SpotTradesCard({ vault }: { vault: TradingVaultDetailDto }) {
+  const tradesQ = useTradingVaultTrades(vault.vaultId);
+  const trades = tradesQ.data ?? [];
+  const poolsQ = useAllowlistedPools(Boolean(DEEPBOOK_ADAPTER_PACKAGE_ID) && trades.length > 0);
+  const pools = poolsQ.data ?? [];
+
+  // A failed read must not look like "never traded" — that is the same
+  // invisibility SO-313 exists to fix, one layer up.
+  if (tradesQ.isError) {
+    return (
+      <div className="vault-card">
+        <div className="vault-card__head">Spot trades</div>
+        <div className="vault-card__body vault-prose__muted">
+          Couldn't read this vault's trades just now — retrying.
+        </div>
+      </div>
+    );
+  }
+  // The card is noise on a vault that has genuinely never spot-traded.
+  if (trades.length === 0) return null;
+
+  return (
+    <div className="vault-card">
+      <div className="vault-card__head">Spot trades · {trades.length}</div>
+      <div className="vault-table">
+        <div className="vault-table__scroll">
+          <div className="vault-table__head" style={{ gridTemplateColumns: "1.6fr 1.6fr 1fr 1fr" }}>
+            <span>Sold</span>
+            <span>Bought</span>
+            <span>When</span>
+            <span>Tx</span>
+          </div>
+          {trades.map((t, i) => {
+            const pool = pools.find((p) => p.poolId === t.poolId) ?? null;
+            // `baseForQuote` — the vault sold the pool's base for its quote.
+            const inType = pool ? (t.baseForQuote ? pool.baseType : pool.quoteType) : null;
+            const outType = pool ? (t.baseForQuote ? pool.quoteType : pool.baseType) : null;
+            const leg = (raw: string, coinType: string | null) =>
+              coinType == null
+                ? raw
+                : `${fmtAmount(raw, tokenForCoinType(coinType)?.decimals ?? null)} ${symbolFor(coinType)}`;
+            // `unswapped` came back unfilled, so it was never actually sold.
+            const soldRaw = (BigInt(t.amountIn) - BigInt(t.unswapped)).toString();
+            return (
+              <div
+                className="vault-table__row"
+                style={{ gridTemplateColumns: "1.6fr 1.6fr 1fr 1fr" }}
+                // A single PTB can carry more than one taker swap, so the
+                // digest alone isn't unique.
+                key={`${t.txDigest}-${i}`}
+              >
+                <span title={pool ? undefined : `pool ${t.poolId}`}>{leg(soldRaw, inType)}</span>
+                <span>{leg(t.amountOut, outType)}</span>
+                <span title={fmtDateTime(t.timestampMs)}>{fmtAgo(t.timestampMs)}</span>
+                <Address value={t.txDigest} label="Transaction" />
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PositionsCard({
   vault,
   symbol,
@@ -738,7 +872,9 @@ function PositionsCard({
       <div className="vault-card__head">Positions · {vault.positions.length}</div>
       {vault.positions.length === 0 ? (
         <div className="vault-card__body vault-prose__muted">
-          The vault holds only its deposit asset — no positions are custodied.
+          No positions are custodied. Assets the vault holds outside custody —
+          including anything the curator has spot-traded into — are listed
+          under Holdings.
         </div>
       ) : (
         <>

@@ -10,9 +10,14 @@
 //!     TvDeposited / TvWithdrawFulfilled events, ascending by time
 //!   - `GET /trading-vaults/:id/stake/:address`  — one wallet's live stake
 //!     replayed from TvDeposited / TvWithdrawRequested events
+//!   - `GET /trading-vaults/:id/trades`          — curator spot trades from
+//!     TvTakerSwapExecuted events, newest first (SO-313)
 //!
-//! All reads are JIT GraphQL queries to the indexer. Balance-precise NAV
-//! needs object reads and isn't served here.
+//! All reads are JIT GraphQL queries to the indexer, except the detail
+//! endpoint's `balances[]` — free balances are stated by no event, so they
+//! come from a live Sui object read (`sui_rpc::fetch_vault_balances`) that
+//! degrades to `balances_stale` on failure. Balance-precise NAV still isn't
+//! served here.
 
 use std::sync::Arc;
 
@@ -27,6 +32,7 @@ use protocol_types::events::ChainEvent;
 use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::state::AppState;
+use crate::sui_rpc;
 
 /// pps is a 1e12-scaled deposit-asset-per-share.
 const PPS_SCALE: f64 = 1e12;
@@ -98,11 +104,34 @@ pub struct TradingVaultPositionDto {
     pub last_appraised_at_ms: Option<i64>,
 }
 
+/// One free balance the vault holds outside custody (SO-313) — a
+/// `vault::BalanceKey<T>` dynamic field. The deposit asset is included; the
+/// UI decides how to style it.
+#[derive(Serialize)]
+pub struct TradingVaultBalanceDto {
+    /// Canonical `0x…::mod::T` coin type.
+    pub coin_type: String,
+    /// Catalog symbol, falling back to the coin type when unknown.
+    pub symbol: String,
+    /// Catalog decimals; null when the asset isn't in the catalog.
+    pub decimals: Option<u8>,
+    /// Raw u64 amount in atomic units, decimal string (consistent with the
+    /// other raw integer fields in this handler).
+    pub amount_raw: String,
+}
+
 #[derive(Serialize)]
 pub struct TradingVaultDetailResponse {
     #[serde(flatten)]
     pub vault: TradingVaultDto,
     pub positions: Vec<TradingVaultPositionDto>,
+    /// Free balances read live off the vault object. Empty when the RPC read
+    /// fails — `balances_stale` says which of the two it is.
+    pub balances: Vec<TradingVaultBalanceDto>,
+    /// True when the live balance read failed and `balances` is therefore
+    /// unknown rather than genuinely empty. Callers must not render an empty
+    /// `balances` as "holds nothing" while this is set.
+    pub balances_stale: bool,
 }
 
 pub async fn list_trading_vaults(
@@ -138,8 +167,48 @@ pub async fn get_trading_vault(
         tracing::warn!(error = %e, "indexer trading_vault_positions query failed");
         StatusCode::BAD_GATEWAY
     })?;
+    // Free balances are a live object read (SO-313): no event states them, so
+    // the indexer can't. Degrade to `balances_stale` rather than a 5xx, the
+    // same way `GET /vaults/:id` degrades its live round state.
+    let balances = match sui_rpc::fetch_vault_balances(
+        &state.http,
+        &state.sui_graphql_url,
+        &id,
+    )
+    .await
+    {
+        Ok(Some(b)) => Some(b),
+        // An unknown object means the vault the indexer knows is gone from the
+        // node's view — report unknown, not "holds nothing".
+        Ok(None) => {
+            tracing::warn!(vault = %vault_id, "vault object unknown to the RPC; balances omitted");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, vault = %vault_id, "vault balance read failed");
+            None
+        }
+    };
+    let balances_stale = balances.is_none();
+    let balances = balances
+        .unwrap_or_default()
+        .into_iter()
+        .map(|b| {
+            let meta = state.catalog.lookup(&b.coin_type);
+            TradingVaultBalanceDto {
+                symbol: meta
+                    .map(|m| m.symbol.clone())
+                    .unwrap_or_else(|| b.coin_type.clone()),
+                decimals: meta.map(|m| m.decimals),
+                amount_raw: b.amount.to_string(),
+                coin_type: b.coin_type,
+            }
+        })
+        .collect();
     Ok(Json(TradingVaultDetailResponse {
         vault: trading_vault_dto(&state, &vault),
+        balances,
+        balances_stale,
         positions: positions
             .into_iter()
             .map(|p| TradingVaultPositionDto {
@@ -213,6 +282,79 @@ pub async fn get_pps_history(
         });
     }
     Ok(Json(PpsHistoryResponse { points }))
+}
+
+/// One curator spot trade — a `deepbook_adapter` taker swap of vault free
+/// balances against an allowlisted pool (SO-313).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakerSwapDto {
+    /// Event time (ms since epoch), decimal string.
+    pub timestamp_ms: String,
+    /// Digest of the transaction that executed the swap.
+    pub tx_digest: String,
+    pub pool_id: String,
+    /// True when the vault sold the pool's base asset for its quote asset.
+    /// The pool's type args say which coin types those are; the event carries
+    /// only the direction.
+    pub base_for_quote: bool,
+    /// Raw u64 amounts in the respective assets' atomic units, decimal
+    /// strings.
+    pub amount_in: String,
+    pub amount_out: String,
+    /// Input returned unfilled (lot rounding or a thin book).
+    pub unswapped: String,
+}
+
+#[derive(Serialize)]
+pub struct TakerSwapsResponse {
+    pub trades: Vec<TakerSwapDto>,
+}
+
+/// `GET /trading-vaults/:id/trades` — the vault's curator spot trades, most
+/// recent first.
+///
+/// Read from the event log rather than a materialised view: a taker swap
+/// moves value between the vault's free balances and creates no entity to
+/// materialise (`deepbook_adapter.move` never calls `vault::put_position`),
+/// so the indexer's `TvTakerSwapExecuted` view arms are correctly no-ops.
+/// Same shape as `/pps-history` above.
+pub async fn get_trades(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<String>,
+) -> Result<Json<TakerSwapsResponse>, StatusCode> {
+    let id = ObjectId::from_hex(&vault_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let events = state
+        .indexer
+        .recent_events_with_payload_and_tx(
+            &["TvTakerSwapExecuted"],
+            json!({ "vault_id": id.to_hex() }),
+            EVENT_SCAN_CAP,
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "indexer taker-swap events query failed");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    let mut trades: Vec<TakerSwapDto> = events
+        .iter()
+        .filter_map(|ev| match &ev.event.event {
+            ChainEvent::TvTakerSwapExecuted(s) => Some(TakerSwapDto {
+                timestamp_ms: ev.event.timestamp_ms.to_string(),
+                tx_digest: ev.tx_digest.clone(),
+                pool_id: s.pool_id.to_hex(),
+                base_for_quote: s.base_for_quote,
+                amount_in: s.amount_in.to_string(),
+                amount_out: s.amount_out.to_string(),
+                unswapped: s.unswapped.to_string(),
+            }),
+            _ => None,
+        })
+        .collect();
+    // The client pages ascending by sequence; a trade list reads newest-first.
+    trades.reverse();
+    Ok(Json(TakerSwapsResponse { trades }))
 }
 
 #[derive(Serialize)]

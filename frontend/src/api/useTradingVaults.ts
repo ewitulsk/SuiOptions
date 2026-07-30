@@ -9,11 +9,13 @@ import {
   fetchTradingVault,
   fetchTradingVaultPpsHistory,
   fetchTradingVaultStake,
+  fetchTradingVaultTrades,
   fetchTradingVaults,
   type TradingVault,
   type TradingVaultDetail,
   type TradingVaultPpsPoint,
   type TradingVaultStake,
+  type TradingVaultTrade,
 } from "./tradingVaults";
 
 export function useTradingVaults() {
@@ -41,6 +43,16 @@ export function useTradingVaultPpsHistory(vaultId: string | null) {
     queryKey: ["trading-vault-pps-history", vaultId],
     enabled: vaultId !== null,
     queryFn: () => fetchTradingVaultPpsHistory(vaultId as string),
+    refetchInterval: 30_000,
+  });
+}
+
+/** Curator spot trades for the detail page's recent-trades list (SO-313). */
+export function useTradingVaultTrades(vaultId: string | null) {
+  return useQuery<TradingVaultTrade[], Error>({
+    queryKey: ["trading-vault-trades", vaultId],
+    enabled: vaultId !== null,
+    queryFn: () => fetchTradingVaultTrades(vaultId as string),
     refetchInterval: 30_000,
   });
 }
