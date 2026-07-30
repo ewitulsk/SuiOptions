@@ -56,7 +56,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = SchedulerConfig::load(&cli.config)
         .with_context(|| format!("loading {}", cli.config.display()))?;
-    observability::ops::spawn(cfg.health_addr);
+    let readiness = observability::ops::Readiness::new();
+    observability::ops::spawn(cfg.health_addr, &readiness);
     let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
     // Fetch the protocol ids + supported-token catalog from token-info.
@@ -312,6 +313,13 @@ async fn main() -> Result<()> {
             "reconciler task started"
         );
     }
+
+    // Everything fallible is behind us: config, secrets, the token-info
+    // snapshot, the package ids + AdminCap, the Sui client, the deployer
+    // check, pair resolution, and the DB connect + migrations. The two boot
+    // reconciliation reads above only warn. Nothing below can fail startup, so
+    // this is where "started" becomes "ready" (SO-324).
+    readiness.ready();
 
     let tick = Duration::from_secs(cfg.tick_secs.max(1));
     let vault_interval = Duration::from_millis(cfg.vault_check_interval_ms.max(1));

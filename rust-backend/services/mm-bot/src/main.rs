@@ -371,7 +371,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    observability::ops::spawn(cfg.health_addr);
+    let readiness = observability::ops::Readiness::new();
+    observability::ops::spawn(cfg.health_addr, &readiness);
 
     // Collateral routing chassis: explicit config wins, else the state file
     // written by `mm-bot deploy-collateral`. Still required — the signer
@@ -680,6 +681,24 @@ async fn main() -> Result<()> {
                 .collect(),
         });
     }
+
+    // Startup is done: collateral routing, the token-info snapshot, every
+    // market's Pyth feed, the quote signer, the on-chain QuoteSigner bootstrap,
+    // `wait_for_first_prices`, and the desk/sim spawns are all behind us. This
+    // is the window mm-bot deployed green through on 2026-07-30 — /health was
+    // live at the spawn above and the process died at `wait_for_first_prices`
+    // half a second later, which the gate never saw (SO-324).
+    //
+    // DECLARED TAIL: the reconnect loop below is fallible and follows the flip.
+    // `AuthVerdict::Fatal` bails, so a permanently-rejected signing key can
+    // still exit after /health has gone green. That is deliberate — the flip
+    // cannot wait for a successful auth handshake without making mm-bot's
+    // deploy gate depend on the quoting-service being up, and the loop is
+    // built to tolerate transient rejection right after a redeploy while the
+    // indexer catches up. Narrowing that tail means giving mm-bot a readiness
+    // signal that distinguishes "peer not up yet" from "my key is wrong",
+    // which this ticket does not attempt.
+    readiness.ready();
 
     // nonce is monotonic for the bot's lifetime — keep it across reconnects.
     let mut nonce_counter = now_ms();

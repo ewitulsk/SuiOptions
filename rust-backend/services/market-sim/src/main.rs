@@ -29,13 +29,14 @@ async fn main() -> Result<()> {
     let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
 
-    observability::ops::spawn(cfg.health_addr);
+    let readiness = observability::ops::Readiness::new();
+    observability::ops::spawn(cfg.health_addr, &readiness);
 
     if !cfg.enabled {
-        return park("disabled by config").await;
+        return park("disabled by config", &readiness).await;
     }
     if cfg.network != Network::Testnet {
-        return park("testnet only").await;
+        return park("testnet only", &readiness).await;
     }
 
     // Token catalog + DeepBook deployment from token-info. Hard cutover: if
@@ -48,10 +49,10 @@ async fn main() -> Result<()> {
         .with_context(|| format!("fetching catalog from token-info at {}", cli.token_info_url))?;
 
     if snapshot.test_tokens().is_err() {
-        return park("token catalog has no faucets").await;
+        return park("token catalog has no faucets", &readiness).await;
     }
     let Some(db) = snapshot.deepbook() else {
-        return park("no DeepBook deployment in token-info").await;
+        return park("no DeepBook deployment in token-info", &readiness).await;
     };
     let handles = DeepBookHandles {
         package: db.package()?,
@@ -88,6 +89,12 @@ async fn main() -> Result<()> {
         max_conf_bps: cfg.max_conf_bps,
     };
 
+    // Config, secrets, the token-info snapshot and the DeepBook handles are
+    // behind us. `sim::run` below is the steady-state loop, and its failure is
+    // a park rather than an exit (see the module doc) — so nothing after this
+    // point can fail startup (SO-324).
+    readiness.ready();
+
     info!(
         environment = %cfg.environment,
         network = %cfg.network,
@@ -110,17 +117,23 @@ async fn main() -> Result<()> {
         tokens,
     };
     match sim::run(&params).await {
-        Ok(()) => park("band loop returned (no usable pairs)").await,
+        Ok(()) => park("band loop returned (no usable pairs)", &readiness).await,
         Err(e) => {
             warn!(error = %format!("{e:#}"), "[sim] band loop failed");
-            park("band loop failed — see error above").await
+            park("band loop failed — see error above", &readiness).await
         }
     }
 }
 
 /// Log why the sim is inert and idle forever with /health green.
-async fn park(reason: &str) -> Result<()> {
+///
+/// Parking flips readiness deliberately: per the module doc a failed gate is a
+/// *healthy inert* state, not a startup failure. Leaving /health at 503 here
+/// would turn every legitimately-disabled sim into a deploy rollback, which is
+/// the opposite of the posture this service was given (SO-324).
+async fn park(reason: &str, readiness: &observability::ops::Readiness) -> Result<()> {
     warn!(reason, "[sim] parked — serving health/metrics only");
+    readiness.ready();
     std::future::pending::<()>().await;
     Ok(())
 }
