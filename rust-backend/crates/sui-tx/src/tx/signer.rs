@@ -20,7 +20,8 @@ use sui_json_rpc_types::{
 use sui_sdk::SuiClient;
 use std::str::FromStr;
 
-use sui_types::base_types::{ObjectID, SuiAddress};
+use sui_types::base_types::{ObjectID, ObjectType, SuiAddress};
+use sui_types::error::SuiObjectResponseError;
 use sui_types::event::EventID;
 use sui_types::transaction::Transaction;
 use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
@@ -247,22 +248,42 @@ pub async fn verify_signer(
         .await
         .context("reading configured quote signer object")?;
 
-    // A deleted or never-existent id is a definitive answer, not an error.
+    // Only errors that positively answer "this is not an adoptable signer"
+    // become `false`. `Unknown` and `DisplayError` say nothing about whether
+    // the object exists, so they are errors — treating them as "not ours"
+    // would let a transient RPC hiccup reach the bootstrap path once the
+    // event fallback below starts returning a legitimate `Ok(None)`.
     if let Some(err) = resp.error {
-        debug!(%signer_id, ?err, "configured quote signer not readable — falling back");
-        return Ok(false);
+        return match err {
+            SuiObjectResponseError::NotExists { .. }
+            | SuiObjectResponseError::Deleted { .. } => {
+                debug!(%signer_id, ?err, "configured quote signer is gone — falling back");
+                Ok(false)
+            }
+            other => Err(anyhow!("reading configured quote signer {signer_id}: {other}")),
+        };
     }
     let Some(data) = resp.data else {
         debug!(%signer_id, "configured quote signer returned no data — falling back");
         return Ok(false);
     };
 
-    let expected_type = format!("{}::quote_signer::QuoteSigner", package.to_hex_literal());
-    let actual_type = data.type_.as_ref().map(|t| t.to_string()).unwrap_or_default();
-    if actual_type != expected_type {
+    // Compare the parsed type, not a rendered string: Move address formatting
+    // varies on leading-zero padding, and a formatting mismatch here would
+    // fail verification silently and turn this whole path into a no-op.
+    // Matches how `create_and_share_signer` identifies the object above.
+    let is_ours = match data.type_.as_ref() {
+        Some(ObjectType::Struct(t)) => {
+            t.address() == AccountAddress::from(package)
+                && t.module().as_str() == "quote_signer"
+                && t.name().as_str() == "QuoteSigner"
+        }
+        _ => false,
+    };
+    if !is_ours {
         info!(
-            %signer_id, %actual_type, %expected_type,
-            "configured quote signer belongs to a different deployment — falling back"
+            %signer_id, actual_type = ?data.type_, %package,
+            "configured quote signer is not a QuoteSigner of this deployment — falling back"
         );
         return Ok(false);
     }
