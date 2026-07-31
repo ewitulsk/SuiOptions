@@ -164,22 +164,13 @@ services:
     restart: unless-stopped
     networks: [net]
 
-  # CCTP bridge relay. Tracks Sui<->Solana USDC transfers, polls Circle's
-  # attestation API, and auto-mints on the destination chain. Public port
-  # (9015, proxied by nginx as /prod/cctp). Reads its relayer keys
-  # ([sui] + [solana]) from /run/secrets/cctp-relay.toml — required.
-  cctp-relay:
-    image: ${ECR}/options/cctp-relay:${CCTP_RELAY_TAG}
-    environment:
-      APP_ENV: prod
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_HOST: ${DB_HOST}
-      RUST_LOG: info,cctp_relay=debug
-    volumes:
-      - /opt/options/prod/secrets:/run/secrets:ro
-    restart: unless-stopped
-    networks: [net]
+  # NOTE: cctp-relay is deliberately NOT declared in prod. deploy.sh filters
+  # the requested set against `docker compose config --services`, so leaving
+  # it out is what keeps it from ever being planned or health-gated here.
+  # (Same mechanism that excludes market-sim, twitter-service and social-bot.)
+  # Re-adding it needs `options/prod/cctp-relay` in Secrets Manager first —
+  # render-secrets.sh skips an absent secret silently and the container would
+  # crash-loop on the missing /run/secrets/cctp-relay.toml.
 
   # Gas station. Sponsors user transactions by paying their gas. Public port
   # (9009, proxied by nginx). Reads the sponsor key from /run/secrets.
