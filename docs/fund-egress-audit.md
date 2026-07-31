@@ -226,6 +226,11 @@ for it, and the two environments have different custodians.
 
 ### Recommended fix
 
+> **Status as of 2026-07-31: recommendation only. Not approved, not implemented.**
+> Nothing below has been built. If you are reading this and the code exists,
+> someone acted after this date — check the history rather than assuming this
+> document tracked it.
+
 `force_settle(&AdminCap, vault, clock)` — no oracle, no position requirement.
 
 **Not permissionless.** In the wedged state `current_expiry_ms == 0`, so a
