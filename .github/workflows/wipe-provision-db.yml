@@ -9,10 +9,19 @@
 #   3. Upload deployment/ec2/wipe-provision-db.sh to S3 (deploy-bundles/).
 #   4. Over SSM on the EC2 host: stop the service → run the script → start it.
 #
-# prod is a selectable target but GATED: running it requires typing the env
-# name into `confirm` (it wipes the prod DB, so no accidental dropdown picks).
-# A real-money mainnet/production deployment is still hard-blocked here and in
-# the remote script.
+# prod is a selectable target but GATED twice. Typing the env name into
+# `confirm` catches an accidental dropdown pick; the environment must also be
+# PROVABLY testnet, checked here and again in the remote script.
+#
+# That second gate is derived rather than hardcoded:
+# rust-backend/deployment/assert_testnet.sh resolves the network from the
+# service configs and refuses anything it cannot prove is testnet.
+#
+# What used to be here compared the env name against "production" and
+# "mainnet" — two strings the `type: choice` input below cannot produce — so
+# it could never fire, and the word "network" appeared nowhere in this file.
+# The typed confirmation was the only guard that worked, and it catches a
+# mis-click, not a category error (SO-330).
 
 name: Wipe & Provision Service DB
 
