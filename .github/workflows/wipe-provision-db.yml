@@ -65,10 +65,18 @@ jobs:
           SERVICE: ${{ inputs.service }}
           CONFIRM: ${{ inputs.confirm }}
         run: |
-          if [ "$ENV" = "production" ] || [ "$ENV" = "mainnet" ]; then
-            echo "::error::REFUSING to touch a mainnet/production deployment"
-            exit 1
-          fi
+          # ── MAINNET GUARD ──
+          # This previously compared $ENV against "production"/"mainnet" —
+          # two strings the `type: choice` input above cannot produce, so the
+          # guard could never fire. It also never learned what CHAIN the env
+          # was on: the word "network" did not appear anywhere in this file.
+          #
+          # Now derived from the service configs, which are what actually
+          # change when an env becomes mainnet, and inverted to refuse unless
+          # the env is provably testnet.
+          NETWORK="$(bash rust-backend/deployment/assert_testnet.sh "$ENV")"
+          echo "resolved network for $ENV: $NETWORK"
+          echo "network=$NETWORK" >> "$GITHUB_OUTPUT"
           # prod wipes a live DB — require an explicit typed confirmation.
           if [ "$ENV" = "prod" ] && [ "$CONFIRM" != "prod" ]; then
             echo "::error::prod requires typing 'prod' into the confirm input"
@@ -128,6 +136,7 @@ jobs:
         env:
           ENV: ${{ inputs.environment }}
           COMPOSE_SVC: ${{ steps.target.outputs.compose_svc }}
+          NETWORK: ${{ steps.target.outputs.network }}
           SERVICE: ${{ inputs.service }}
           SCRIPT_KEY: ${{ steps.bundle.outputs.key }}
           MASTER_USER: ${{ steps.master.outputs.user }}
@@ -135,6 +144,7 @@ jobs:
         run: |
           jq -nc \
             --arg env "$ENV" \
+            --arg network "$NETWORK" \
             --arg svc "$COMPOSE_SVC" \
             --arg service "$SERVICE" \
             --arg script_key "$SCRIPT_KEY" \
@@ -146,7 +156,7 @@ jobs:
             {
               commands: [
                 "set -eu",
-                "if [ \"\($env)\" = \"production\" ] || [ \"\($env)\" = \"mainnet\" ]; then echo \"FATAL: refusing mainnet/production\"; exit 1; fi",
+                "if [ \"\($network)\" != \"testnet\" ]; then echo \"FATAL: refusing network '\($network)' — testnet only\"; exit 1; fi",
                 "cd /opt/options/\($env)",
                 "COMPOSE_FILE=\"docker-compose.\($env).yml\"",
 
