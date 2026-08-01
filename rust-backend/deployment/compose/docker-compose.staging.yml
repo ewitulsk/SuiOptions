@@ -265,15 +265,15 @@ services:
   # /staging/crossbar); its separate WS port (8081) is unproxied until
   # something needs it. Switchboard's oracle queues live on Solana — the
   # devnet queue backs Sui testnet feeds — so the RPCs that matter are
-  # Solana's. Public RPC defaults for now (values below are also the image
-  # defaults; stated for intent); a paid endpoint later needs threading
-  # through deploy.sh (otel-endpoint-style file or render-secrets.sh) since
-  # deploy.sh rewrites .env wholesale each deploy.
+  # Solana's. Overrides come from the optional options/<env>/crossbar
+  # secret ({"solana_devnet_rpc": ..., "solana_mainnet_rpc": ...}),
+  # rendered by render-secrets.sh and sourced into .env by deploy.sh;
+  # absent → the public RPCs below.
   crossbar:
     image: switchboardlabs/rust-crossbar:stable
     environment:
-      SOLANA_MAINNET_RPC: https://api.mainnet-beta.solana.com
-      SOLANA_DEVNET_RPC: https://api.devnet.solana.com
+      SOLANA_MAINNET_RPC: ${SOLANA_MAINNET_RPC:-https://api.mainnet-beta.solana.com}
+      SOLANA_DEVNET_RPC: ${SOLANA_DEVNET_RPC:-https://api.devnet.solana.com}
       RUST_LOG: info
     healthcheck:
       test: ["CMD", "curl", "-fsS", "--max-time", "3", "http://localhost:8080/health"]

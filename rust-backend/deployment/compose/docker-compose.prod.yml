@@ -241,8 +241,8 @@ services:
   crossbar:
     image: switchboardlabs/rust-crossbar:stable
     environment:
-      SOLANA_MAINNET_RPC: https://api.mainnet-beta.solana.com
-      SOLANA_DEVNET_RPC: https://api.devnet.solana.com
+      SOLANA_MAINNET_RPC: ${SOLANA_MAINNET_RPC:-https://api.mainnet-beta.solana.com}
+      SOLANA_DEVNET_RPC: ${SOLANA_DEVNET_RPC:-https://api.devnet.solana.com}
       RUST_LOG: info
     healthcheck:
       test: ["CMD", "curl", "-fsS", "--max-time", "3", "http://localhost:8080/health"]

@@ -301,6 +301,25 @@ if CHART_JSON=$(fetch price-charting 2>/dev/null); then
   chmod 600 "$DIR/.chart_database_url"
 fi
 
+# ---- crossbar secret -> sourced into .env by deploy.sh ---------------------
+# Solana RPC endpoints for Switchboard Crossbar (the devnet queue backs Sui
+# testnet feeds; mainnet for when we provision one). Optional — absent
+# secret or absent field → compose falls back to the public RPCs.
+# Layout: options/<env>/crossbar -> {"solana_devnet_rpc": "...",
+#                                    "solana_mainnet_rpc": "..."}
+if XBAR_JSON=$(fetch crossbar 2>/dev/null); then
+  umask 077
+  for field in solana_devnet_rpc solana_mainnet_rpc; do
+    val=$(echo "$XBAR_JSON" | jq -r --arg f "$field" '.[$f] // empty')
+    if [ -n "$val" ] && [ "$val" != "REPLACE_ME" ]; then
+      echo "$val" > "$DIR/.$field"
+      chmod 600 "$DIR/.$field"
+    else
+      rm -f "$DIR/.$field"
+    fi
+  done
+fi
+
 # ---- oracle-service secret -> rendered TOML ------------------------------
 # The single Pyth gateway (SO-254). Holds the Pyth API key, attached as a
 # Bearer header on its one Hermes SSE subscription + Benchmarks requests.
