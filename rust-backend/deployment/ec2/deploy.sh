@@ -226,6 +226,12 @@ docker compose -f "$COMPOSE_FILE" up -d "${PLANNED_CNAMES[@]}"
 # disk, since `up -d` alone won't.
 docker compose -f "$COMPOSE_FILE" up -d nginx
 
+# crossbar (Switchboard's feed utility server) is third-party like nginx —
+# pinned public image, no ECR tag, not in the rollable set. `up -d nginx`
+# above only STARTS it via depends_on; this explicit `up -d` is what
+# recreates it when its compose spec changes. Idempotent otherwise.
+docker compose -f "$COMPOSE_FILE" up -d crossbar
+
 # Health-check every planned service that has a /health endpoint. Probes
 # through nginx — no service publishes a host port anymore, so the only
 # path from the host is via the env's nginx sidecar. Verifies both that

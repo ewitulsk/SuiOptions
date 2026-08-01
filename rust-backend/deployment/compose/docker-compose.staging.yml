@@ -258,6 +258,32 @@ services:
   # the two blocks (and the nginx /staging/social-bot/ route + depends_on)
   # once options/staging/{twitter-service,social-bot} hold real credentials.
 
+  # Switchboard Crossbar — third-party utility server for Switchboard
+  # on-demand feeds (feed resolution, simulation, update bundles). Pinned
+  # public image like nginx: NOT in deploy.sh's rollable/tag set — deploy.sh
+  # just `up -d`s it every run. HTTP on 8080 (proxied by nginx as
+  # /staging/crossbar); its separate WS port (8081) is unproxied until
+  # something needs it. Switchboard's oracle queues live on Solana — the
+  # devnet queue backs Sui testnet feeds — so the RPCs that matter are
+  # Solana's. Public RPC defaults for now (values below are also the image
+  # defaults; stated for intent); a paid endpoint later needs threading
+  # through deploy.sh (otel-endpoint-style file or render-secrets.sh) since
+  # deploy.sh rewrites .env wholesale each deploy.
+  crossbar:
+    image: switchboardlabs/rust-crossbar:stable
+    environment:
+      SOLANA_MAINNET_RPC: https://api.mainnet-beta.solana.com
+      SOLANA_DEVNET_RPC: https://api.devnet.solana.com
+      RUST_LOG: info
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "3", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks: [net]
+
   # Single public entrypoint per env. Strips the /staging/{quoting,api,indexer,scheduler,mm-bot}
   # prefix before forwarding. depends_on is start-order only; nginx
   # tolerates backends being briefly unreachable on first boot.
@@ -274,7 +300,7 @@ services:
     volumes:
       - /opt/options/staging/nginx/:/etc/nginx/options/:ro
     command: ["nginx", "-c", "/etc/nginx/options/nginx.conf", "-g", "daemon off;"]
-    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, hedge-signer, market-sim, keeper]
+    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, hedge-signer, market-sim, keeper, crossbar]
     restart: unless-stopped
     networks: [net]
 
