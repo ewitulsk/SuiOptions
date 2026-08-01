@@ -83,3 +83,13 @@ endpoints:
     conditions:
       - "[STATUS] == 200"
 
+  # Crossbar answers /health with JSON ({"status":"healthy",...}), not
+  # the bare "ok" body the in-house services return.
+  - name: Crossbar (Switchboard)
+    group: staging
+    url: http://options-staging-crossbar-1:8080/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY].status == healthy"
+

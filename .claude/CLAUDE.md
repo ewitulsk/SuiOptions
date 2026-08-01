@@ -6,7 +6,6 @@ Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-s
 
 **Project rules:**
 - [move-type-normalization.md](move-type-normalization.md) — Move/coin type strings arrive in two non-byte-equal forms (chain `TypeName` without `0x` vs event type string with `0x`); always compare via `to_canonical()` / `canonicalize_move_type`.
-- [PRs.md](PRs.md) — Jira ticket + PR workflow for this repo.
 - [tx-alerting.md](tx-alerting.md) — every service tx-submission failure must `error!(alert_id = "tx-failed-…")` at the service handler; suppress benign race-losses.
 
 ## 1. Think Before Coding

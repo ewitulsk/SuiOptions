@@ -144,6 +144,16 @@ CHART_DATABASE_URL=""
 if [ -f "secrets/.chart_database_url" ]; then
   CHART_DATABASE_URL=$(cat "secrets/.chart_database_url")
 fi
+# Crossbar's Solana RPC overrides (options/<env>/crossbar, rendered by
+# render-secrets.sh). Optional — absent → compose's public-RPC defaults.
+SOLANA_DEVNET_RPC=""
+if [ -f "secrets/.solana_devnet_rpc" ]; then
+  SOLANA_DEVNET_RPC=$(cat "secrets/.solana_devnet_rpc")
+fi
+SOLANA_MAINNET_RPC=""
+if [ -f "secrets/.solana_mainnet_rpc" ]; then
+  SOLANA_MAINNET_RPC=$(cat "secrets/.solana_mainnet_rpc")
+fi
 
 # OTLP trace endpoint (SO-180). On the shared host the services reach the
 # co-located Tempo by docker DNS; the dedicated prod host gets the central
@@ -178,6 +188,12 @@ trap 'rm -f "$NEW_ENV"' EXIT
   echo "DB_HOST=$DB_HOST"
   if [ -n "$CHART_DATABASE_URL" ]; then
     echo "CHART_DATABASE_URL=$CHART_DATABASE_URL"
+  fi
+  if [ -n "$SOLANA_DEVNET_RPC" ]; then
+    echo "SOLANA_DEVNET_RPC=$SOLANA_DEVNET_RPC"
+  fi
+  if [ -n "$SOLANA_MAINNET_RPC" ]; then
+    echo "SOLANA_MAINNET_RPC=$SOLANA_MAINNET_RPC"
   fi
   echo "OTEL_ENDPOINT=$OTEL_ENDPOINT"
   for svc in "${ALL_SERVICES[@]}"; do
@@ -225,6 +241,12 @@ docker compose -f "$COMPOSE_FILE" up -d "${PLANNED_CNAMES[@]}"
 # below picks up any bind-mount nginx.conf changes the bundle dropped on
 # disk, since `up -d` alone won't.
 docker compose -f "$COMPOSE_FILE" up -d nginx
+
+# crossbar (Switchboard's feed utility server) is third-party like nginx —
+# pinned public image, no ECR tag, not in the rollable set. `up -d nginx`
+# above only STARTS it via depends_on; this explicit `up -d` is what
+# recreates it when its compose spec changes. Idempotent otherwise.
+docker compose -f "$COMPOSE_FILE" up -d crossbar
 
 # Health-check every planned service that has a /health endpoint. Probes
 # through nginx — no service publishes a host port anymore, so the only

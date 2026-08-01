@@ -236,6 +236,24 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # Switchboard Crossbar — third-party utility server for Switchboard
+  # on-demand feeds. See docker-compose.staging.yml for the full
+  # explanation; this env proxies it as /prod/crossbar.
+  crossbar:
+    image: switchboardlabs/rust-crossbar:stable
+    environment:
+      SOLANA_MAINNET_RPC: ${SOLANA_MAINNET_RPC:-https://api.mainnet-beta.solana.com}
+      SOLANA_DEVNET_RPC: ${SOLANA_DEVNET_RPC:-https://api.devnet.solana.com}
+      RUST_LOG: info
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "3", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks: [net]
+
   # Single public entrypoint per env. Strips the /prod/{quoting,api,indexer,scheduler,mm-bot}
   # prefix before forwarding. depends_on is start-order only; nginx
   # tolerates backends being briefly unreachable on first boot.
@@ -248,7 +266,7 @@ services:
     volumes:
       - /opt/options/prod/nginx/:/etc/nginx/options/:ro
     command: ["nginx", "-c", "/etc/nginx/options/nginx.conf", "-g", "daemon off;"]
-    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, hedge-signer, keeper]
+    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, hedge-signer, keeper, crossbar]
     restart: unless-stopped
     networks: [net]
 
