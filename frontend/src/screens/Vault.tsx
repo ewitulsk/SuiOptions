@@ -1,3 +1,10 @@
+// DEPRECATED (SO-332) — the covered-call vault page.
+//
+// The product is retired: `contracts/vault` is no longer published, the
+// `/vault` route now redirects to the curated vaults, and the api-service
+// endpoints this reads are unrouted. Kept in-tree, typechecking, as the
+// reference for the deposit/withdraw UX. Nothing mounts it.
+//
 // Covered-call vault page (SO vault system — PRs 137/148/168).
 //
 // Reads the api-service vault endpoints (`/vaults`, `/vaults/:id/rounds`) and

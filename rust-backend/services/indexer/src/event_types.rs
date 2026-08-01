@@ -48,8 +48,9 @@ use protocol_types::ids::{ObjectId, SuiAddress};
 
 const EVENTS_MODULE: &str = "events";
 
-/// The four published package ids the protocol's events resolve to.
-/// All required — `main.rs` fails at boot when token-info is missing one.
+/// The published package ids the protocol's events resolve to. `core`,
+/// `auction` and `rfq` are required — `main.rs` fails at boot when token-info
+/// is missing one; the rest are optional and simply don't subscribe.
 #[derive(Debug, Clone, Copy)]
 pub struct PackageIds<'a> {
     /// options_core.
@@ -58,8 +59,10 @@ pub struct PackageIds<'a> {
     pub auction: &'a str,
     /// options_rfq adapter.
     pub rfq: &'a str,
-    /// options_vault.
-    pub vault: &'a str,
+    /// options_vault. Optional since SO-332: the covered-call vault product
+    /// is deprecated and the package is no longer published, so its event
+    /// families simply don't subscribe (same posture as `trading_vault`).
+    pub vault: Option<&'a str>,
     /// trading_vault (curated vaults, SO-282). Optional: absent on
     /// deployments predating the product; its event families simply
     /// don't subscribe.
@@ -203,7 +206,13 @@ impl EventTypes {
         let core = |name: &str| format!("{}::{EVENTS_MODULE}::{name}", pkgs.core);
         let auction = |name: &str| format!("{}::{EVENTS_MODULE}::{name}", pkgs.auction);
         let rfq = |name: &str| format!("{}::{EVENTS_MODULE}::{name}", pkgs.rfq);
-        let vault = |name: &str| format!("{}::{EVENTS_MODULE}::{name}", pkgs.vault);
+        // Deprecated covered-call vault (SO-332): same "unset" placeholder the
+        // trading-vault families use — it never matches a real on-chain type,
+        // so the variants stay in `dispatch` but can never fire.
+        let vault = |name: &str| match pkgs.vault {
+            Some(pkg) => format!("{pkg}::{EVENTS_MODULE}::{name}"),
+            None => format!("unset::{EVENTS_MODULE}::{name}"),
+        };
         // Trading-vault families: an "unset" placeholder never matches a
         // real on-chain type string.
         let tv = |name: &str| match pkgs.trading_vault {
@@ -854,7 +863,7 @@ mod tests {
         "0xfb28c4cbc6865bd1c897d26aecbe1f8792d1509a20ffec692c800660cbec6982";
 
     fn pkgs() -> PackageIds<'static> {
-        PackageIds { core: PKG, auction: AUCTION_PKG, rfq: RFQ_PKG, vault: VAULT_PKG, trading_vault: Some(TV_PKG), deepbook_adapter: None, options_adapter: None, equity_oracle: Some(EQUITY_ORACLE_PKG) }
+        PackageIds { core: PKG, auction: AUCTION_PKG, rfq: RFQ_PKG, vault: Some(VAULT_PKG), trading_vault: Some(TV_PKG), deepbook_adapter: None, options_adapter: None, equity_oracle: Some(EQUITY_ORACLE_PKG) }
     }
 
     fn types() -> EventTypes {

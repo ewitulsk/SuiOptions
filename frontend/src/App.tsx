@@ -2,7 +2,6 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { Header } from "./components/Header";
 import { Composer } from "./screens/Composer";
 import { Dashboard } from "./screens/Dashboard";
-import { VaultScreen } from "./screens/Vault";
 import { TradingVaults } from "./screens/TradingVaults";
 import { TradingVaultDetailScreen } from "./screens/TradingVaultDetail";
 import { Activity } from "./screens/Activity";
@@ -23,7 +22,10 @@ export function App() {
         {/* key= forces a fresh Composer (and its useComposerState) when toggling views */}
         <Route path="/earn" element={<Composer key="writer" initialView="writer" />} />
         <Route path="/buy" element={<Composer key="trader" initialView="trader" />} />
-        <Route path="/vault" element={<VaultScreen />} />
+        {/* The covered-call vault product is deprecated (SO-332): /vault is
+            unrouted and screens/Vault.tsx is no longer mounted. Send the old
+            path to the curated vaults so bookmarks don't dead-end. */}
+        <Route path="/vault" element={<Navigate to="/vaults" replace />} />
         {/* Curated trading vaults (SO-288). */}
         <Route path="/vaults" element={<TradingVaults />} />
         <Route path="/vaults/:vaultId" element={<TradingVaultDetailScreen />} />

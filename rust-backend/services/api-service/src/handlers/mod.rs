@@ -8,4 +8,5 @@ pub mod pnl;
 pub mod positions;
 pub mod rfqs;
 pub mod trading_vaults;
+/// DEPRECATED (SO-332): covered-call vault endpoints, no longer routed.
 pub mod vaults;

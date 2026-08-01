@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn unknown_shape_is_rejected() {
         let templates =
-            protocol_templates(ObjectID::random(), ObjectID::random(), &[], false, None, None, None);
+            protocol_templates(ObjectID::random(), Some(ObjectID::random()), &[], false, None, None, None);
         let kind = movecall_kind(ObjectID::random());
         let err = validate_kind(&kind, &templates).unwrap_err();
         assert!(err.to_string().contains("no sponsored template"), "{err}");

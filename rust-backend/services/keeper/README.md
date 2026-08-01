@@ -1,5 +1,17 @@
 # vault-keeper — implementation guide
 
+> ## ⚠️ DEPRECATED (SO-332)
+>
+> This document specifies the **covered-call** vault crank, which is
+> retired along with its product. That code now lives in
+> `src/legacy_vault.rs` and runs only from the undeployed `keeper-legacy`
+> binary — see [`contracts/vault/DEPRECATED.md`](../../../contracts/vault/DEPRECATED.md).
+>
+> The deployed `keeper` binary is now the **trading-vault** liveness layer
+> (`src/trading_vault.rs`, `src/venue_equity.rs`): it settles auctions,
+> redeems expired positions, sweeps custody, posts external-account
+> equity and fulfills the withdrawal queue. Nothing below describes it.
+
 > Status: **implemented** (ticket D1). The crate in this directory
 > follows the spec below; deviations from the original sketch are noted
 > inline (planner returns one action per tick and signals

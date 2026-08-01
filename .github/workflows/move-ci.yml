@@ -35,7 +35,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [core, auction, rfq, vault, mm-collateral]
+        # `vault` (options_vault) is deprecated and no longer published
+        # (SO-332) — see contracts/vault/DEPRECATED.md. Its sources and
+        # tests stay in-tree but are not built or tested here.
+        package: [core, auction, rfq, mm-collateral]
     steps:
       - uses: actions/checkout@v4
 

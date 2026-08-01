@@ -1,3 +1,7 @@
+/// DEPRECATED (SO-332) — part of the retired covered-call vault package
+/// (`contracts/vault/DEPRECATED.md`). The live equivalent for the trading
+/// vault is `contracts/oracle-pyth`, which mirrors this math.
+///
 /// Pyth wrapper (doc 03 §2): turns two `PriceInfoObject`s into the U/S
 /// cross price in "settlement smallest-units per underlying
 /// smallest-unit", as `(price_scaled: u128, scale: u8)` — the same shape

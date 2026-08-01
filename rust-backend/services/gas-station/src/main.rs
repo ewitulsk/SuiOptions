@@ -42,12 +42,14 @@ async fn main() -> Result<()> {
         .package()
         .context("protocol package id from token-info")?;
 
-    // Vault flows live in the options_vault package (four-package split);
-    // a deployment without it can't sponsor vault PTBs, so fail at boot.
+    // Covered-call vault flows lived in the options_vault package. The product
+    // is deprecated (SO-332) and the package is no longer published, so this is
+    // optional: absent ⇒ the `vault:*` templates are simply not registered and
+    // those PTBs stop being sponsorable.
     let vault_pkg = snapshot
         .vault()
-        .context("options_vault package missing from token-info package_info")?
-        .package()
+        .map(|v| v.package())
+        .transpose()
         .context("vault package id from token-info")?;
 
     // Faucet `mint_to_sender` is testnet-only; sponsor it on any non-mainnet
@@ -142,6 +144,7 @@ async fn main() -> Result<()> {
         sponsor = %sui.signer.address,
         templates = templates.len(),
         deepbook = deepbook.is_some(),
+        legacy_vault = vault_pkg.is_some(),
         faucet_tokens = test_tokens.len(),
         threshold_mist = cfg.min_balance_threshold_mist,
         max_gas_budget_mist = cfg.max_gas_budget_mist,

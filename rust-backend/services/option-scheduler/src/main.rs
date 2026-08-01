@@ -71,12 +71,12 @@ async fn main() -> Result<()> {
         })?;
 
     let package = snapshot.package()?;
-    // Vault creation targets the options_vault package (four-package
-    // split); bucket rolls stay on core. Fail at boot if it's missing.
-    let vault_package = snapshot
-        .vault()
-        .context("options_vault package missing from token-info package_info")?
-        .package()?;
+    // Vault creation targeted the options_vault package (four-package split);
+    // bucket rolls stay on core. The covered-call vault product is deprecated
+    // (SO-332) and the package is no longer published, so this is optional:
+    // absent ⇒ the vault-ensure pass is off, exactly as an absent
+    // `[vault_template]` already leaves it.
+    let vault_package = snapshot.vault().map(|v| v.package()).transpose()?;
     let admin_cap = snapshot.admin_cap()?;
     let wrap = SuiClientWrapper::connect(&secrets, cli.network).await?;
 
@@ -187,12 +187,24 @@ async fn main() -> Result<()> {
         // auto-provisioning creates covered-CALL vaults only; a put pair rolls
         // buckets but never provisions a vault (it would otherwise race the
         // call twin's same-cadence vault).
-        if let Some(template) = pair
+        //
+        // Deprecated (SO-332): the shipped configs carry no template, so this
+        // is dead in practice. A template on a deployment whose options_vault
+        // package is gone is a config mistake — warn and skip rather than
+        // fail the whole scheduler over a retired product.
+        let template = pair
             .vault_template
             .clone()
             .or_else(|| cfg.vault_template.clone())
-            .filter(|_| pair.product_type == ProductType::Call)
-        {
+            .filter(|_| pair.product_type == ProductType::Call);
+        if template.is_some() && vault_package.is_none() {
+            warn!(
+                pair = %format!("{}/{}", pair.underlying, pair.settlement),
+                "[vault_template] configured but options_vault is not deployed \
+                 (product deprecated, SO-332) — skipping vault creation"
+            );
+        }
+        if let Some(template) = template.filter(|_| vault_package.is_some()) {
             match (u_spec.pyth_feed(), s_spec.pyth_feed()) {
                 (Ok(u_feed), Ok(s_feed)) => vault_entries.push(VaultEntry {
                     key: pair_key.clone(),
@@ -359,8 +371,10 @@ async fn main() -> Result<()> {
 
         // Vault-ensure pass, gated to `vault_check_interval_ms`. Independent of
         // the bucket-roll cadence above. `vault_entries` is non-empty only for
-        // pairs with an effective template (per-pair or global) and Pyth feeds
-        // on both legs; each entry carries its own policy.
+        // pairs with an effective template (per-pair or global), Pyth feeds on
+        // both legs, AND a deployed options_vault package; each entry carries
+        // its own policy. Deprecated (SO-332) — always empty on the shipped
+        // configs, so this whole branch is dead in practice.
         if !vault_entries.is_empty()
             && last_vault_check.is_none_or(|t| t.elapsed() >= vault_interval)
         {
@@ -372,7 +386,7 @@ async fn main() -> Result<()> {
                 &indexer,
                 &vault_entries,
                 &wrap,
-                vault_package,
+                vault_package.expect("vault_entries is empty unless options_vault is deployed"),
                 admin_cap,
                 &db_pool,
             )

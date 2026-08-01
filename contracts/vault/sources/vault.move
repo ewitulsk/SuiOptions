@@ -1,3 +1,8 @@
+/// DEPRECATED (SO-332) — this package is no longer published and nothing
+/// off-chain drives it. Kept in-tree as a reference implementation; see
+/// `contracts/vault/DEPRECATED.md` before touching anything here. The live
+/// curated-vault product is `contracts/trading-vault`.
+///
 /// Covered-call vault (docs/vault-implementation-guide/03-vault-contract.md):
 /// Ribbon-style weekly rounds over the on-chain RFQ.
 ///

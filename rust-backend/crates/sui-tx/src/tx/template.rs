@@ -273,7 +273,9 @@ fn is_benign_coin_primitive(call: &ProgrammableMoveCall) -> bool {
 ///
 /// Mirrors the builders in `frontend/src/tx/{composer,dashboard,faucet,deepbook}.ts`.
 /// `protocol` is the `options_core` package id; `vault_pkg` is the
-/// `options_vault` package id the vault flows target (four-package split).
+/// `options_vault` package id the deprecated covered-call vault flows target
+/// (SO-332) — `None` on any deployment that no longer publishes it, which
+/// simply drops the `vault:*` templates.
 /// `test_tokens` is the `(package, module)` of each faucet token (e.g.
 /// `(0xpkg, "tbtc")`), only used when `allow_faucet` is set (dev/staging).
 /// `deepbook` is DeepBook's UPGRADED package id (the one Move calls target,
@@ -310,7 +312,7 @@ pub struct PythPkgs {
 
 pub fn protocol_templates(
     protocol: ObjectID,
-    vault_pkg: ObjectID,
+    vault_pkg: Option<ObjectID>,
     test_tokens: &[(ObjectID, String)],
     allow_faucet: bool,
     deepbook: Option<ObjectID>,
@@ -381,15 +383,20 @@ pub fn protocol_templates(
     // `coinWithBalance` prelude. Every asset moved is the user's own (their
     // own coins in, receipts/shares/refunds back to them), so the sponsor only
     // risks gas — same posture as the `write`/`buy`/`exercise` wallet flows.
-    for function in [
-        "deposit",
-        "claim_shares",
-        "initiate_withdraw",
-        "complete_withdraw",
-        "instant_withdraw_pending",
-    ] {
-        let target = MoveTarget::new(vault_pkg, "vault", function);
-        templates.push(PtbTemplate::exact_only(format!("vault:{function}"), vec![target.clone()], vec![target.clone()], vec![(target, 3)]));
+    //
+    // Deprecated (SO-332): kept so a deployment still carrying the package can
+    // sponsor exits, but skipped entirely once options_vault is gone.
+    if let Some(vault_pkg) = vault_pkg {
+        for function in [
+            "deposit",
+            "claim_shares",
+            "initiate_withdraw",
+            "complete_withdraw",
+            "instant_withdraw_pending",
+        ] {
+            let target = MoveTarget::new(vault_pkg, "vault", function);
+            templates.push(PtbTemplate::exact_only(format!("vault:{function}"), vec![target.clone()], vec![target.clone()], vec![(target, 3)]));
+        }
     }
 
     // CCTP bridge burn (frontend tx/bridge.ts): a single call straight into
@@ -678,7 +685,7 @@ mod tests {
     fn templates() -> Vec<PtbTemplate> {
         protocol_templates(
             pkg(),
-            vault_pkg(),
+            Some(vault_pkg()),
             &[(pkg(), "tbtc".to_owned())],
             true,
             Some(deepbook_pkg()),
@@ -861,7 +868,7 @@ mod tests {
     #[test]
     fn faucet_rejected_when_disabled() {
         let no_faucet =
-            protocol_templates(pkg(), vault_pkg(), &[(pkg(), "tbtc".to_owned())], false, None, None, None);
+            protocol_templates(pkg(), Some(vault_pkg()), &[(pkg(), "tbtc".to_owned())], false, None, None, None);
         let pt = build(&[(target("tbtc", "mint_to_sender"), 0)], false);
         assert_eq!(match_any(&no_faucet, &pt), None);
     }
@@ -1108,7 +1115,7 @@ mod tests {
         assert_eq!(match_any(&templates(), &bad_arity), None);
 
         // No deepbook configured (devnet) → never sponsored.
-        let no_db = protocol_templates(pkg(), vault_pkg(), &[], false, None, None, None);
+        let no_db = protocol_templates(pkg(), Some(vault_pkg()), &[], false, None, None, None);
         let pt = build(
             &[(
                 MoveTarget::new(deepbook_pkg(), "pool", "create_permissionless_pool"),
@@ -1216,6 +1223,39 @@ mod tests {
         assert_eq!(match_any(&templates(), &wrong_pkg), None);
     }
 
+    /// SO-332: with the covered-call vault package undeployed, none of the
+    /// `vault:*` templates are registered and its PTBs stop being sponsorable.
+    /// The rest of the template set is untouched.
+    #[test]
+    fn deprecated_vault_templates_absent_without_package() {
+        let without =
+            protocol_templates(pkg(), None, &[(pkg(), "tbtc".to_owned())], true, Some(deepbook_pkg()), Some(cctp_tmm_pkg()), None);
+        assert!(
+            !without.iter().any(|t| t.name.starts_with("vault:")),
+            "vault templates must not be registered without options_vault"
+        );
+        let vault_deposit = build(
+            &[(MoveTarget::new(vault_pkg(), "vault", "deposit"), 3)],
+            false,
+        );
+        assert_eq!(match_any(&without, &vault_deposit), None);
+
+        // Everything else still sponsors: only the 5 vault flows drop out.
+        let with = templates();
+        assert_eq!(with.len() - without.len(), 5);
+        let write = build(
+            &[
+                (target("quote", "new_quote"), 0),
+                (target("quote", "new_signed_quote"), 0),
+                (target("bucket", "request_writer_flow"), 3),
+                (MoveTarget::new(ObjectID::random(), "mm", "release"), 1),
+                (target("bucket", "execute_writer_flow"), 3),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&without, &write), Some("write"));
+    }
+
     #[test]
     fn forged_coin_primitive_not_skipped() {
         let coin = |function: &str| MoveTarget::new(framework(), "coin", function);
@@ -1242,7 +1282,7 @@ mod tests {
         let with_eo = |equity_oracle: Option<ObjectID>| {
             protocol_templates(
                 pkg(),
-                vault_pkg(),
+                Some(vault_pkg()),
                 &[],
                 false,
                 None,
@@ -1297,7 +1337,7 @@ mod tests {
         let with_dbm = |dbm_oracle: Option<ObjectID>| {
             protocol_templates(
                 pkg(),
-                vault_pkg(),
+                Some(vault_pkg()),
                 &[],
                 false,
                 None,
@@ -1356,7 +1396,7 @@ mod tests {
         let with_pyth = |pyth: Option<PythPkgs>| {
             protocol_templates(
                 pkg(),
-                vault_pkg(),
+                Some(vault_pkg()),
                 &[],
                 false,
                 None,
