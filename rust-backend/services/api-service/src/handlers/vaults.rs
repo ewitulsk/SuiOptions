@@ -1,4 +1,11 @@
-//! Covered-call vault endpoints (vault-implementation-guide doc 05 §2):
+//! DEPRECATED (SO-332) — covered-call vault endpoints.
+//!
+//! The product is retired: `contracts/vault` is no longer published and
+//! these handlers are no longer routed (see `router.rs`). They are kept
+//! in-tree, compiling, as the reference for how the read model was shaped.
+//! The live curated-vault endpoints are `trading_vaults.rs`.
+//!
+//! Original contract (vault-implementation-guide doc 05 §2):
 //!
 //!   - `GET /vaults`                     — list with live pps / tvl / APY
 //!   - `GET /vaults/:id`                 — one vault

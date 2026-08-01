@@ -1,3 +1,7 @@
+// DEPRECATED (SO-332) — PTB builders for the retired covered-call vault.
+// `options_vault` is no longer published, so these throw on any current
+// deployment (VAULT_PACKAGE_ID is undefined). Kept for reference.
+//
 // Programmable Transaction Block builders for the covered-call vault's
 // wallet-facing user flows.
 //

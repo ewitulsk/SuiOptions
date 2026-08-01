@@ -5,9 +5,6 @@
 //! - `GET /bars?pool_id&interval&from_ms&to_ms` — carry-forward OHLC plus
 //!   the order-book midpoint line on the same grid, capped at 1000 bars
 //!   (the range is clamped, newest-first priority).
-//! - `GET /vault-apy/:vault_id` — latest predicted-APY snapshot for a vault
-//!   (folded in from derived-metric-worker); api-service composes it with the
-//!   indexer's realized series.
 //! - `GET /ws` — subscribe `{"type":"subscribe","pool_id":…,"interval":…}`;
 //!   the server pushes `{"type":"bar",…}` with the updated current bar on
 //!   every fill, and `{"type":"mid",…}` with the current bucket's midpoint
@@ -43,7 +40,8 @@ pub async fn serve(addr: SocketAddr, state: Arc<AppState>, allowed_origins: &[St
         .route("/pools", get(list_pools))
         .route("/bars", get(get_bars))
         .route("/price-at", get(get_price_at))
-        .route("/vault-apy/:vault_id", get(get_vault_apy))
+        // `/vault-apy/:vault_id` was unrouted with the covered-call vault
+        // product (SO-332); `get_vault_apy` below is kept for reference.
         .route("/ws", get(ws_upgrade))
         .with_state(state)
         .merge(observability::middleware::metrics_route())
@@ -228,9 +226,14 @@ async fn get_price_at(
     Ok(Json(PriceAtResponse { pool_id: q.pool_id, ms: q.ms, mid, close }))
 }
 
-// ---- /vault-apy/:vault_id --------------------------------------------------
+// ---- /vault-apy/:vault_id (DEPRECATED, SO-332) ------------------------------
+//
+// Unrouted with the covered-call vault product. Kept in-tree, compiling, as
+// the reference for the predicted-APY read shape; the `vault_predicted_apy` /
+// `vault_realized_apy` hypertables still hold the historical series.
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct PredictedApyPoint {
     t_ms: i64,
     apy: f64,
@@ -253,11 +256,13 @@ struct PredictedApyPoint {
 /// series is left to the indexer (api-service reads it there); the persisted
 /// realized history lives in `vault_realized_apy` for direct querying.
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct VaultApyResponse {
     vault_id: String,
     predicted: Vec<PredictedApyPoint>,
 }
 
+#[allow(dead_code)]
 async fn get_vault_apy(
     State(state): State<Arc<AppState>>,
     Path(vault_id): Path<String>,

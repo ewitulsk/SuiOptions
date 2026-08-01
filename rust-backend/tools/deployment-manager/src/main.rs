@@ -8,9 +8,12 @@
 //!   2. Publish `core` (options_core) and parse object_changes for:
 //!      package_id, AdminCap, ProtocolConfig, UpgradeCap
 //!   3. Publish `rfq` (options_rfq: deps core + auction)
-//!   4. Publish `vault` (options_vault: deps core + auction + pyth)
+//!   4. Publish the trading-vault family and its adapters/oracles
 //!   5. Call `treasury::create_and_share(&AdminCap)` and capture the Treasury ID
 //!   6. Merge into `deployments.json`, replacing only the targeted env's entry
+//!
+//! `vault` (options_vault) is deliberately absent: the covered-call vault
+//! product is deprecated (SO-332) and is no longer published.
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -250,12 +253,12 @@ async fn deploy_one(
             .with_context(|| format!("publishing options_rfq to {network}"))?;
     tracing::info!(package = %rfq_out.package_id, "options_rfq published");
 
-    let vault_out =
-        publish_dep_package(&client, &signer, &contracts_root.join("vault"), "options_vault", env, gas_budget)
-            .await
-            .with_context(|| format!("publishing options_vault to {network}"))?;
-    tracing::info!(package = %vault_out.package_id, "options_vault published");
-
+    // `vault` (options_vault) is NOT published: the covered-call vault product
+    // is deprecated (SO-332). The package still builds — see
+    // contracts/vault/DEPRECATED.md — it just never reaches chain, so fresh
+    // deployment records carry no `vault` block. Every consumer treats it as
+    // optional; do not reinstate this step without also re-enabling the
+    // product's off-chain surface.
     let trading_vault_out = publish_dep_package(
         &client,
         &signer,
@@ -328,8 +331,8 @@ async fn deploy_one(
     .with_context(|| format!("publishing dbm_oracle to {network}"))?;
     tracing::info!(package = %dbm_oracle_out.package_id, "dbm_oracle published");
 
-    let (auction, rfq, vault) =
-        (Some(record(&auction_out)), Some(record(&rfq_out)), Some(record(&vault_out)));
+    // `vault: None` — options_vault is no longer published (SO-332).
+    let (auction, rfq, vault) = (Some(record(&auction_out)), Some(record(&rfq_out)), None);
     let (trading_vault, oracle_pyth) =
         (Some(record(&trading_vault_out)), Some(record(&oracle_pyth_out)));
     let (deepbook_adapter, options_adapter) =

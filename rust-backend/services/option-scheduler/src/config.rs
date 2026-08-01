@@ -467,8 +467,7 @@ interval_pct        = 5.0
     }
 
     /// The shipped prod config must parse, and the hourly TSUI pair must carry
-    /// the vol-aware z-ladder grid plus the lowered strike/reserve overrides
-    /// that keep its ~1h options sellable.
+    /// the vol-aware z-ladder grid that keeps its ~1h options sellable.
     #[test]
     fn shipped_prod_config_parses_with_hourly_overrides() {
         let cfg = parse(include_str!("../config/config.prod.toml"));
@@ -483,9 +482,29 @@ interval_pct        = 5.0
                 assert_eq!(*vol_floor, 0.5);
             }
         }
-        let t = hourly.vault_template.as_ref().expect("hourly vault_template");
-        assert_eq!(t.min_strike_bps_over_spot, 30);
-        assert_eq!(t.min_reserve_premium_bps, 5);
+    }
+
+    /// SO-332: the covered-call vault product is deprecated, so none of the
+    /// shipped configs may carry a vault template — global or per-pair.
+    /// A template anywhere switches the vault-ensure pass back on.
+    #[test]
+    fn shipped_configs_provision_no_vaults() {
+        for (name, src) in [
+            ("config.toml", include_str!("../config/config.toml")),
+            ("config.staging.toml", include_str!("../config/config.staging.toml")),
+            ("config.prod.toml", include_str!("../config/config.prod.toml")),
+        ] {
+            let cfg = parse(src);
+            assert!(cfg.vault_template.is_none(), "{name}: global [vault_template]");
+            for p in &cfg.pairs {
+                assert!(
+                    p.vault_template.is_none(),
+                    "{name}: {}/{} carries [pairs.vault_template]",
+                    p.underlying,
+                    p.settlement
+                );
+            }
+        }
     }
 
     #[test]

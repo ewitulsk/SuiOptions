@@ -1,3 +1,6 @@
+// DEPRECATED (SO-332) — APY chart for the retired covered-call vaults.
+// Only screens/Vault.tsx rendered it, and that page is unmounted.
+//
 // APY-over-time chart for a vault.
 //
 // Two series share the panel (TradingView Lightweight Charts v5, themed from

@@ -297,17 +297,13 @@ export function Header() {
         >
           Buy
         </button>
-        <button
-          className={pathname === "/vault" ? "is-active" : ""}
-          onClick={() => navigate("/vault")}
-        >
-          Vaults
-        </button>
+        {/* The covered-call "Vaults" tab (/vault) went away with that product
+            (SO-332); the curated vaults take over the name. */}
         <button
           className={pathname.startsWith("/vaults") ? "is-active" : ""}
           onClick={() => navigate("/vaults")}
         >
-          Trading
+          Vaults
         </button>
         <button
           className={pathname === "/dashboard" ? "is-active" : ""}

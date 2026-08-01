@@ -1,3 +1,6 @@
+// DEPRECATED (SO-332) — action layer for the retired covered-call vault.
+// Only screens/Vault.tsx used it.
+//
 // Vault action layer: deposit / claim / withdraw. Screens call these handlers;
 // they own the submit, the toast, and query invalidation.
 

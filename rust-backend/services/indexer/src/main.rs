@@ -55,9 +55,9 @@ async fn main() -> Result<()> {
             format!("fetching package_id from token-info at {}", cfg.token_info_url)
         })?;
     let core_package_id = snapshot.package_info.package_id.clone();
-    // Four-package layout: the auction / options_rfq / options_vault ids are
-    // required — a deployment record missing one predates the split and can't
-    // be indexed, so fail at boot rather than silently dropping their events.
+    // Four-package layout: the auction / options_rfq ids are required — a
+    // deployment record missing one predates the split and can't be indexed,
+    // so fail at boot rather than silently dropping their events.
     let auction_package_id = snapshot
         .auction()
         .map(|p| p.package_id.clone())
@@ -66,10 +66,10 @@ async fn main() -> Result<()> {
         .rfq()
         .map(|p| p.package_id.clone())
         .ok_or_else(|| anyhow::anyhow!("token-info package_info is missing the rfq package id"))?;
-    let vault_package_id = snapshot
-        .vault()
-        .map(|p| p.package_id.clone())
-        .ok_or_else(|| anyhow::anyhow!("token-info package_info is missing the vault package id"))?;
+    // options_vault is the exception: the covered-call vault product is
+    // deprecated (SO-332) and the package is no longer published, so its
+    // absence is expected and its 17 event families just don't subscribe.
+    let vault_package_id = snapshot.vault().map(|p| p.package_id.clone());
     // DeepBook PoolCreated events resolve to the ORIGINAL package id (SO-152).
     // Absent on networks without a DeepBook deployment — ingestion of pool
     // events is simply off there.
@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
         core_package_id = %core_package_id,
         auction_package_id = %auction_package_id,
         rfq_package_id = %rfq_package_id,
-        vault_package_id = %vault_package_id,
+        vault_package_id = %vault_package_id.as_deref().unwrap_or("<deprecated, SO-332>"),
         deepbook_original = %deepbook_original.as_deref().unwrap_or("<none>"),
         trading_vault_package_id = %trading_vault_package_id.as_deref().unwrap_or("<none>"),
         token_info_url = %cfg.token_info_url,
@@ -216,7 +216,7 @@ async fn main() -> Result<()> {
             core: &core_package_id,
             auction: &auction_package_id,
             rfq: &rfq_package_id,
-            vault: &vault_package_id,
+            vault: vault_package_id.as_deref(),
             trading_vault: trading_vault_package_id.as_deref(),
             deepbook_adapter: deepbook_adapter_package_id.as_deref(),
             options_adapter: options_adapter_package_id.as_deref(),
