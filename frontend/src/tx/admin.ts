@@ -171,6 +171,10 @@ export function buildCreateTreasuryTx(adminCapId: string): Transaction {
   return tx;
 }
 
+// DEPRECATED (SO-332): the covered-call vault product is retired and the
+// Admin screen no longer renders its pause/unpause controls. These builders
+// are kept for reference and still target `options_vault`, so they throw
+// unless the deployment predates the deprecation.
 export type VaultPauseParams = {
   adminCapId: string;
   vaultId: string;

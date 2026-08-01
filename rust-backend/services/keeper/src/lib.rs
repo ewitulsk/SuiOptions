@@ -1,11 +1,16 @@
-//! Library surface for the vault-keeper binary.
+//! Library surface for the keeper binaries.
 //!
-//! The keeper is the permissionless crank-driver for the covered-call
-//! vaults (README in this directory is the build spec): every tick it
-//! reads each configured vault's chain state, decides the one action the
-//! round needs next ([`planner`]), and submits it with a Pyth price
-//! update prepended in the same PTB ([`submit`]). It holds only a gas
-//! wallet — `vault.move` validates everything that matters.
+//! The keeper is the permissionless liveness layer for the curated
+//! trading vaults ([`trading_vault`]): every tick it settles finished
+//! auctions, redeems expired positions, sweeps custody, posts external
+//! equity ([`venue_equity`]) and fulfills withdrawals. It holds only a
+//! gas wallet — the contracts validate everything that matters.
+//!
+//! The covered-call ("Ribbon-style") vault crank is deprecated (SO-332).
+//! Its modules ([`discovery`], [`planner`], [`slicing`], [`state`],
+//! [`strike`], [`submit`]) are still here and still compile, but they are
+//! driven only by [`legacy_vault`] behind the undeployed `keeper-legacy`
+//! binary. The deployed `keeper` never touches them.
 
 use std::path::PathBuf;
 
@@ -15,6 +20,9 @@ use sui_tx::sui_client::Network;
 
 pub mod config;
 pub mod discovery;
+/// DEPRECATED (SO-332): the covered-call vault crank, reachable only via the
+/// undeployed `keeper-legacy` binary. See the module docs.
+pub mod legacy_vault;
 pub mod planner;
 pub mod slicing;
 pub mod state;
@@ -26,8 +34,8 @@ pub mod venue_equity;
 #[derive(Parser, Debug)]
 #[command(
     name = "keeper",
-    about = "Permissionless covered-call vault crank: redeems positions, selects buckets, \
-             opens/settles RFQ slices, swaps proceeds, and finalizes rounds."
+    about = "Permissionless trading-vault crank: settles auctions, redeems expired positions, \
+             sweeps custody, posts external equity, and fulfills the withdrawal queue."
 )]
 pub struct Cli {
     #[arg(short, long, default_value = "services/keeper/config/config.toml")]
@@ -64,8 +72,9 @@ cli_spec::define_program! {
     id          = "keeper",
     cargo_pkg   = "keeper",
     working_dir = ".",
-    description = "Permissionless covered-call vault crank. Drives each configured vault's \
-                   weekly round: crank_redeem, select_bucket, open_rfq, settle_rfq, \
-                   swap_proceeds, finalize_round — with Pyth price updates prepended in-PTB.",
+    description = "Permissionless trading-vault crank. Per tick: settle finished RFQ auctions, \
+                   redeem expired positions, sweep DeepBook + vault_mm custody, post \
+                   external-account equity, and fulfill withdrawals with a composed \
+                   attestation-bearing appraisal.",
     cli         = crate::Cli,
 }

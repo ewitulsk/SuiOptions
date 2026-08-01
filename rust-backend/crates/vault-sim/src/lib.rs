@@ -1,6 +1,13 @@
 //! Backtesting engine for the covered-call vault
 //! (docs/vault-implementation-guide/06-vault-sim.md).
 //!
+//! The on-chain covered-call product is deprecated (SO-332,
+//! `contracts/vault/DEPRECATED.md`), but this crate is not: it is an
+//! offline research tool with no deploy surface, `tools/backtester`
+//! still drives it, and `keeper::strike` still shares its goldens. The
+//! `move_golden` test continues to pin `ledger` against
+//! `vault_tests.move` — keep the pair in sync if you touch either.
+//!
 //! Two layers, deliberately separated:
 //!
 //! - **Accounting runs in integers.** `cursor` mirrors `bucket.move`'s

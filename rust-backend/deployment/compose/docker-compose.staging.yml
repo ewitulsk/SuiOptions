@@ -233,11 +233,12 @@ services:
     restart: unless-stopped
     networks: [net]
 
-  # Permissionless covered-call vault crank (guide doc 04). Holds only a
-  # gas wallet (/run/secrets/keeper.toml, from options/staging/keeper).
-  # Vaults are auto-discovered from the indexer's vaults view — a vault
-  # created on chain is picked up on the next tick, no config change;
-  # with none on chain the keeper idles with /health up.
+  # Permissionless trading-vault crank: settles auctions, redeems expired
+  # positions, sweeps custody, posts external equity and fulfills the
+  # withdrawal queue. Holds only a gas wallet (/run/secrets/keeper.toml,
+  # from options/staging/keeper); with no trading vault on chain it idles
+  # with /health up. The covered-call crank it used to run alongside this
+  # is deprecated (SO-332) and lives in the undeployed keeper-legacy bin.
   keeper:
     image: ${ECR}/options/keeper:${KEEPER_TAG}
     environment:

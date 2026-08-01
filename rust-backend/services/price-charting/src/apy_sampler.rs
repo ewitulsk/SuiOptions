@@ -1,5 +1,10 @@
 //! Vault-APY sampler (folded in from the retired derived-metric-worker, SO).
 //!
+//! DEPRECATED (SO-332) — no longer spawned by `main.rs`. The covered-call
+//! vault product is retired, so there are no vaults to sample. Kept in-tree,
+//! compiling, alongside the `vault_{predicted,realized}_apy` hypertables that
+//! still hold the historical series.
+//!
 //! Every `tick_interval`, for each covered-call vault:
 //!   - **Predicted** (active vaults only) — Tier 1 annualizes the premium the
 //!     vault is on track to collect this round from its live RFQ auctions;

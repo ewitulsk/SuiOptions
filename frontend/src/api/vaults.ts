@@ -1,3 +1,6 @@
+// DEPRECATED (SO-332) — HTTP client for the retired covered-call vault
+// endpoints. api-service no longer routes them; kept for reference.
+//
 // HTTP client for the api-service covered-call vault endpoints.
 //
 // Authoritative response shapes live next to the handler:

@@ -13,11 +13,10 @@ use clap::Parser;
 use tracing::info;
 
 use api_service_client::ApiServiceClient;
-use indexer_graphql::IndexerClient;
 use price_charting::config::Config;
 use price_charting::db::{establish_pool, repo::Repo, run_migrations};
 use price_charting::state::AppState;
-use price_charting::{apy_sampler, mid_sampler, router, watcher, Cli};
+use price_charting::{mid_sampler, router, watcher, Cli};
 use sui_sdk::SuiClientBuilder;
 use token_info_client::TokenInfoClient;
 
@@ -82,20 +81,11 @@ async fn main() -> Result<()> {
         sample_interval: Duration::from_secs(cfg.mid_sample_interval_secs.max(2)),
     });
 
-    // Vault-APY sampler (folded in from derived-metric-worker). Reuses the
-    // token catalog snapshot already fetched above; reads vaults/rounds/RFQs
-    // and the realized series from the indexer, and spot + realized vol from
-    // oracle-service (the single Pyth gateway). The sampler degrades per-tick
-    // if the oracle is down — no boot gate, so chart serving stays up.
-    apy_sampler::spawn(apy_sampler::ApySamplerParams {
-        state: Arc::clone(&state),
-        indexer: IndexerClient::new(cfg.indexer_graphql_url.clone()),
-        oracle: oracle_client::OracleClient::new(&cfg.oracle_url),
-        snapshot,
-        tick_interval: Duration::from_secs(cfg.apy_tick_secs.max(1)),
-        pyth: cfg.pyth.clone(),
-        model: cfg.model.clone(),
-    });
+    // The vault-APY sampler is NOT spawned: it sampled covered-call vaults,
+    // and that product is deprecated (SO-332). With no vaults on chain it
+    // would poll the indexer forever for an empty list. `apy_sampler` and the
+    // `vault_{predicted,realized}_apy` hypertables stay in-tree — the tables
+    // still hold the historical series and are queryable directly.
     info!(
         environment = %cfg.environment,
         api_service = %cfg.api_service_url,

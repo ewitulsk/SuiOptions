@@ -1,3 +1,6 @@
+// DEPRECATED (SO-332) — react-query hooks over the retired covered-call
+// vault endpoints. No live screen calls these.
+//
 import { useQuery } from "@tanstack/react-query";
 
 import { VAULT_PACKAGE_ID } from "../config";

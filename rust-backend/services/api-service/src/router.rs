@@ -69,17 +69,10 @@ pub async fn serve(
             "/trading-vaults/:vault_id/trades",
             get(handlers::trading_vaults::get_trades),
         )
-        .route("/vaults", get(handlers::vaults::list_vaults))
-        .route("/vaults/:vault_id", get(handlers::vaults::get_vault))
-        .route(
-            "/vaults/:vault_id/rounds",
-            get(handlers::vaults::list_vault_rounds),
-        )
-        .route("/vaults/:vault_id/apy", get(handlers::vaults::get_vault_apy))
-        .route(
-            "/vaults/:vault_id/receipts",
-            get(handlers::vaults::list_vault_receipts),
-        )
+        // The covered-call vault endpoints (`/vaults`, `/vaults/:id`,
+        // `/vaults/:id/{rounds,apy,receipts}`) were unrouted with the product
+        // (SO-332). `handlers::vaults` is kept in-tree for reference; nothing
+        // serves it. Note `/trading-vaults` above is the live product.
         .with_state(state)
         .merge(observability::middleware::metrics_route())
         .layer(axum::middleware::from_fn(

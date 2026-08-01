@@ -1,5 +1,19 @@
 # Covered-Call Vault — Full Implementation Guide
 
+> ## ⚠️ DEPRECATED (SO-332)
+>
+> **This product is retired.** `contracts/vault` is no longer published,
+> the keeper no longer cranks it, the scheduler no longer provisions
+> vaults, and its read APIs and UI are unrouted. See
+> [`contracts/vault/DEPRECATED.md`](../../contracts/vault/DEPRECATED.md)
+> for exactly what was turned off and how to revive it.
+>
+> This guide is kept as the design record. The live curated-vault product
+> is [`docs/vault-curator-product.md`](../vault-curator-product.md)
+> (`contracts/trading-vault`). Docs 01–02 (contract modularization,
+> on-chain RFQ) and 06 (`vault-sim`) still describe live code; docs 03–05
+> and 07–08 describe the retired product.
+
 **Status**: Design / implementation guide (v1)
 **Scope**: Everything required to ship automated covered-call vaults (SUI-C, wBTC-C) on top of
 the existing options protocol — on-chain RFQ, contract modularization, the vault itself, a

@@ -16,18 +16,14 @@ import { useSubmitTransaction } from "../tx/submit";
 import { Toast } from "../components/Toast";
 import { TokenManager } from "../components/TokenManager";
 import { useBuckets } from "../api/useBuckets";
-import { useVaults } from "../api/useVaults";
 import { useAdminCap } from "../api/useAdminCap";
 import type { Bucket, Series } from "../api/client";
-import type { Vault } from "../api/vaults";
 import {
   buildCleanupBucketTx,
   buildCreateTreasuryTx,
   buildInvalidateBucketTx,
-  buildPauseDepositsTx,
   buildRevalidateBucketTx,
   buildSetFeeBpsTx,
-  buildUnpauseDepositsTx,
   buildWithdrawTx,
 } from "../tx/admin";
 import { PROTOCOL_CONFIG_ID, TREASURY_ID } from "../config";
@@ -36,18 +32,6 @@ function scaleRaw(raw: string, decimals: number | null): string {
   if (decimals === null) return raw;
   const v = Number(BigInt(raw)) / 10 ** decimals;
   return v.toLocaleString("en-US", { maximumFractionDigits: 6 });
-}
-
-/** Human cadence label from a vault's round length, e.g. weekly / hourly / 4h. */
-function cadenceLabel(roundMs: number | null): string {
-  if (!roundMs) return "—";
-  const hours = roundMs / 3_600_000;
-  if (hours === 168) return "weekly";
-  if (hours === 24) return "daily";
-  if (hours === 1) return "hourly";
-  if (hours < 1) return `${Math.round(roundMs / 60_000)}m`;
-  if (hours % 24 === 0) return `${hours / 24}d`;
-  return `${hours}h`;
 }
 
 type FlatBucket = {
@@ -61,7 +45,6 @@ export function Admin() {
   const wallet = account?.address ?? null;
   const adminCap = useAdminCap(wallet);
   const buckets = useBuckets();
-  const vaults = useVaults();
   const submitTx = useSubmitTransaction();
 
   const [toast, setToast] = useState<string | null>(null);
@@ -110,7 +93,6 @@ export function Admin() {
       await submitTx(tx);
       flash(`✓ ${ok}`);
       buckets.refetch();
-      vaults.refetch();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       flash(`failed · ${message}`);
@@ -277,103 +259,9 @@ export function Admin() {
           )}
         </section>
 
-        {/* ── Vaults ──────────────────────────────────────────────── */}
-        <section className="admin-section">
-          <div className="admin-section__head">
-            <h2 className="admin-section__title">Vaults</h2>
-            <div className="admin-section__sub">
-              every on-chain covered-call vault · pausing deposits is the hard
-              cutover signal — the keeper, mm-bot, and scheduler then ignore it
-            </div>
-          </div>
-
-          {vaults.isLoading && <div className="admin-empty">loading vaults…</div>}
-          {vaults.error && (
-            <div className="admin-empty">failed to load vaults · {vaults.error.message}</div>
-          )}
-          {!vaults.isLoading && (vaults.data?.length ?? 0) === 0 && (
-            <div className="admin-empty">no vaults on chain yet.</div>
-          )}
-
-          {(vaults.data?.length ?? 0) > 0 && (
-            <div className="admin-table">
-              <div className="admin-table__head admin-table__row">
-                <span>Vault</span>
-                <span>Cadence</span>
-                <span>Round</span>
-                <span>TVL</span>
-                <span>Status</span>
-                <span>Actions</span>
-              </div>
-              {vaults.data?.map((vault: Vault) => {
-                const key = vault.vault_id;
-                const pauseParams = {
-                  adminCapId,
-                  vaultId: vault.vault_id,
-                  underlyingCoinType: vault.underlying_coin_type,
-                  settlementCoinType: vault.settlement_coin_type,
-                  shareType: vault.share_type,
-                };
-                return (
-                  <div className="admin-table__row" key={key}>
-                    <span className="admin-cell__asset">
-                      {vault.underlying_symbol}/{vault.settlement_symbol}
-                      <code className="admin-cell__id">
-                        {vault.vault_id.slice(0, 6)}…{vault.vault_id.slice(-4)}
-                      </code>
-                    </span>
-                    <span>{cadenceLabel(vault.round_ms)}</span>
-                    <span>{vault.round}</span>
-                    <span>
-                      {vault.tvl != null
-                        ? vault.tvl.toLocaleString("en-US", { maximumFractionDigits: 4 })
-                        : scaleRaw(vault.tvl_raw ?? "0", vault.underlying_decimals)}
-                      <span className="admin-cell__dim"> {vault.underlying_symbol}</span>
-                    </span>
-                    <span>
-                      {vault.deposits_paused ? (
-                        <span className="admin-tag admin-tag--danger">paused</span>
-                      ) : (
-                        <span className="admin-tag admin-tag--ok">active</span>
-                      )}
-                    </span>
-                    <span className="admin-cell__actions">
-                      {!vault.deposits_paused ? (
-                        <button
-                          className="admin-btn admin-btn--danger"
-                          disabled={busy !== null}
-                          onClick={() =>
-                            run(
-                              `pause-${key}`,
-                              () => buildPauseDepositsTx(pauseParams),
-                              "vault paused",
-                            )
-                          }
-                        >
-                          {busy === `pause-${key}` ? "…" : "Pause"}
-                        </button>
-                      ) : (
-                        <button
-                          className="admin-btn"
-                          disabled={busy !== null}
-                          onClick={() =>
-                            run(
-                              `unpause-${key}`,
-                              () => buildUnpauseDepositsTx(pauseParams),
-                              "vault unpaused",
-                            )
-                          }
-                        >
-                          {busy === `unpause-${key}` ? "…" : "Unpause"}
-                        </button>
-                      )}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
+        {/* The covered-call Vaults panel (pause/unpause deposits) was
+            removed with that product — SO-332. The curated trading vaults
+            are managed from the curator screens, not here. */}
 
         {/* ── Protocol fee ────────────────────────────────────────── */}
         <SetFeeForm
