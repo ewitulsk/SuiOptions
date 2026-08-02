@@ -14,7 +14,7 @@ criterion here.
 
 ---
 
-## 0. The three things most likely to bite
+## 0. The two things most likely to bite
 
 Read these before anything else; the rest of the document is ordering.
 
@@ -34,21 +34,7 @@ The redeploy wipes only the **indexer** and **scheduler** DBs
 Switchboard switch silently has nothing to price. Fix is §3.4 — a manual
 `PUT` per token through the internal API.
 
-### 0.2 The frontend needs a new env var, or it silently stays on Pyth
-
-`tx/appraisal.ts` falls back to the compiled Pyth ids when it cannot fetch
-the descriptor. That fallback is deliberate (it keeps this PR non-breaking)
-but it means a missing `VITE_ORACLE_SERVICE_URL` produces **no error** —
-just a frontend that will never follow a provider switch.
-
-A scoped nginx route (`/{env}/oracle/descriptor` → `oracle-service:9013`)
-ships in this PR, and **the Vercel env var is now set** (production →
-`https://sui-options.com/prod/oracle`, preview →
-`https://sui-options.com/staging/oracle`). It takes effect on the next
-frontend deploy — see §3.5, which is now a verification step rather than a
-task.
-
-### 0.3 Our Crossbar must serve the SAME queue Sui is on — RESOLVED, but verify
+### 0.2 Our Crossbar must serve the SAME queue Sui is on — RESOLVED, but verify
 
 The queue ids are now resolved and in config (`[oracle]
 switchboard_queue_id` / `switchboard_queue_key`), read from the
@@ -204,8 +190,10 @@ you will null out `pythFeedId` and break the live provider.
 - [ ] Redeploy the frontend so the build picks it up (env vars are baked at
       build time — an existing deployment will NOT pick this up on its own).
 - [ ] Verify in the browser: a `GET …/oracle/descriptor` returning
-      `provider: "pyth"`. **No network call at all means the env var is
-      unset** and the silent Pyth fallback is in play (§0.2).
+      `provider: "pyth"`. **No network call at all means the build did not
+      pick up the env var** — `appraisal.ts` then falls back to its
+      compiled Pyth ids and will never follow a provider switch, with
+      nothing in the console to say so.
 
 ### 3.6 nginx
 
@@ -236,7 +224,7 @@ one-way.
 ### 5.1 Blockers to clear first
 
 1. **Confirm our Crossbar serves Sui testnet's queue.** This is the one
-   that matters (§0.3). From the host:
+   that matters (§0.2). From the host:
 
    ```
    curl -s "http://crossbar:8080/v2/update/4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812" \
@@ -306,5 +294,5 @@ pause.
 | Phase 2a (Pyth pro endpoint auth) is unverified | `Authorization: Bearer` was already correct and the endpoint is config-driven; needs a live keyed-vs-unkeyed check, which was explicitly deprioritized |
 | No CI runs `cargo test` | Pre-existing. `deploy_build.rs` is a local gate as a result — run it by hand (§1) |
 | Descriptor exposes only `/oracle/descriptor` | Minimal surface; `/prices` and `/ws` stay internal. Widen if the browser needs them |
-| Frontend falls back to compiled Pyth ids | Keeps this PR non-breaking, at the cost of failing silently (§0.2) |
+| Frontend falls back to compiled Pyth ids | Keeps this PR non-breaking, at the cost of failing silently if `VITE_ORACLE_SERVICE_URL` is missing — verify per §3.5 |
 | `oracle-service` not in nginx `depends_on` | Start-order only; nginx tolerates unreachable backends |
