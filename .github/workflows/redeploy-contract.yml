@@ -68,7 +68,7 @@ on:
         type: string
         default: ''
       rebuild_manager:
-        description: 'Force-rebuild the deployment-manager binary (ignore the cached one)'
+        description: 'Force-rebuild the deployment-manager binary (escape hatch; the cache is fingerprinted and invalidates itself)'
         required: false
         type: boolean
         default: false
@@ -172,31 +172,82 @@ jobs:
           env: ${{ inputs.environment }}
 
       # ── 3. Fetch the prebuilt deployment-manager binary ──────────
-      # The binary lives as a fixed GitHub prerelease asset
-      # (tag: deployment-manager-bin, asset: deploy-linux-x64). Normal
-      # runs just download + run it — NO Rust toolchain, NO cargo, NO
-      # apt build-deps. A compile happens only when the rebuild_manager
-      # flag is set, or on the very first run when no asset exists yet;
-      # the fresh binary is then re-uploaded for next time.
+      # The binary is cached as an asset on a fixed GitHub prerelease
+      # (tag: deployment-manager-bin). Normal runs just download + run it —
+      # NO Rust toolchain, NO cargo, NO apt build-deps. A compile happens
+      # only on a cache miss (or the rebuild_manager escape hatch); the
+      # fresh binary is then uploaded for next time.
+      #
+      # The asset name is CONTENT-ADDRESSED by a fingerprint of the sources
+      # the binary is compiled from, so a cache hit provably means "built
+      # from exactly this code" and a source change misses automatically.
+      #
+      # This used to be a single fixed name, `--clobber`-ed on every
+      # rebuild — a cache with no key. SO-337 migrated the backend off
+      # JSON-RPC, but the asset still held a pre-migration `deploy`, so this
+      # workflow downloaded it and ran it against fullnodes that had already
+      # switched JSON-RPC off. It died in `building Sui client` with
+      # MethodNotFound while the source in the very same checkout was
+      # already correct (run 30772017011). `rebuild_manager` existed the
+      # whole time — but a cache whose only invalidation is a human
+      # remembering to tick a box is not a cache, it is a trap. Hence a
+      # fingerprint rather than a flag.
+      - name: Fingerprint the deployment-manager build inputs
+        id: fp
+        run: |
+          # The `deploy` binary's build closure, conservatively:
+          #   tools/deployment-manager  the crate itself
+          #   crates/                   every workspace-local dependency
+          #                             (protocol-types, runtime-config,
+          #                             cli-spec, sui-tx, deployments,
+          #                             move-publish) plus their own path
+          #                             deps, which never leave crates/
+          #   Cargo.toml, Cargo.lock    workspace members + the pinned
+          #                             external versions, incl. the
+          #                             sui-move-build rev that decides
+          #                             whether a publish compiles
+          #
+          # Deliberately OUT of the closure:
+          #   services/     nothing under it links into `deploy`, and it is
+          #                 where nearly all churn happens — including it
+          #                 would force a ~15min rebuild on every redeploy
+          #   contracts/    move-publish compiles Move at RUN time from the
+          #                 checkout, so it is never baked into the binary
+          #
+          # git object ids, so this is exact and needs no toolchain. Adding
+          # a new path dep under crates/ is covered automatically; a dep on
+          # a NEW top-level directory would need adding here — the build
+          # would then be stale-cacheable again, so keep this list in
+          # lockstep with deployment-manager's path deps.
+          FP=$(git rev-parse \
+                 "HEAD:rust-backend/tools/deployment-manager" \
+                 "HEAD:rust-backend/crates" \
+                 "HEAD:rust-backend/Cargo.toml" \
+                 "HEAD:rust-backend/Cargo.lock" \
+               | sha256sum | cut -c1-16)
+          echo "asset=deploy-linux-x64-$FP" >> "$GITHUB_OUTPUT"
+          echo "deployment-manager build fingerprint: $FP"
+
       - name: Fetch prebuilt deployment-manager binary
         id: dm
         env:
           GH_TOKEN: ${{ github.token }}
           REBUILD: ${{ inputs.rebuild_manager }}
+          ASSET: ${{ steps.fp.outputs.asset }}
         run: |
           mkdir -p rust-backend/target/release
           if [ "$REBUILD" = "true" ]; then
             echo "rebuild=true" >> "$GITHUB_OUTPUT"
             echo "rebuild_manager flag set — compiling a fresh binary."
           elif gh release download deployment-manager-bin \
-                 --pattern deploy-linux-x64 \
+                 --pattern "$ASSET" \
                  --output rust-backend/target/release/deploy 2>/dev/null; then
             chmod +x rust-backend/target/release/deploy
             echo "rebuild=false" >> "$GITHUB_OUTPUT"
-            echo "Using prebuilt binary from release deployment-manager-bin."
+            echo "Cache hit: $ASSET — built from this commit's sources."
           else
             echo "rebuild=true" >> "$GITHUB_OUTPUT"
-            echo "No prebuilt binary found — bootstrapping by compiling one."
+            echo "Cache miss for $ASSET — compiling."
           fi
 
       # ── 4. Build the deployment manager (only when rebuilding) ───
@@ -221,19 +272,36 @@ jobs:
         run: cargo build --release -p deployment-manager
 
       # ── 5. Publish the freshly built binary for next time ────────
+      # Uploaded under the fingerprinted name, so it is only ever reused by
+      # a commit whose deployment-manager sources hash the same.
       - name: Upload deployment-manager binary
         if: steps.dm.outputs.rebuild == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ steps.fp.outputs.asset }}
         run: |
           gh release view deployment-manager-bin >/dev/null 2>&1 || \
             gh release create deployment-manager-bin \
               --prerelease \
               --title "deployment-manager binary" \
-              --notes "Prebuilt linux x86_64 deployment-manager binary, auto-updated by the redeploy-contract workflow. Not a real release."
-          cp rust-backend/target/release/deploy /tmp/deploy-linux-x64
-          gh release upload deployment-manager-bin /tmp/deploy-linux-x64 --clobber
-          echo "Uploaded fresh binary to release deployment-manager-bin."
+              --notes "Prebuilt linux x86_64 deployment-manager binaries, auto-updated by the redeploy-contract workflow. Asset names are deploy-linux-x64-<fingerprint of the build closure>. Not a real release."
+          cp rust-backend/target/release/deploy "/tmp/$ASSET"
+          gh release upload deployment-manager-bin "/tmp/$ASSET" --clobber
+          echo "Uploaded $ASSET."
+
+          # One asset per distinct build closure means the release grows
+          # without bound. Keep the 10 newest and drop the rest — this also
+          # retires the old unfingerprinted deploy-linux-x64. Deleting an
+          # asset a concurrent run was about to fetch only costs that run a
+          # rebuild, so best-effort is fine.
+          gh api \
+            repos/${{ github.repository }}/releases/tags/deployment-manager-bin \
+            --jq '.assets | sort_by(.created_at) | reverse | .[10:] | .[].name' \
+            | while read -r old; do
+                [ -n "$old" ] || continue
+                echo "pruning stale cached binary: $old"
+                gh release delete-asset deployment-manager-bin "$old" --yes || true
+              done
 
       # ── 6. Fetch deployer key from Secrets Manager ───────────────
       - name: Write secrets file
