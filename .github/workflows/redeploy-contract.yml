@@ -172,31 +172,58 @@ jobs:
           env: ${{ inputs.environment }}
 
       # ── 3. Fetch the prebuilt deployment-manager binary ──────────
-      # The binary lives as a fixed GitHub prerelease asset
-      # (tag: deployment-manager-bin, asset: deploy-linux-x64). Normal
-      # runs just download + run it — NO Rust toolchain, NO cargo, NO
-      # apt build-deps. A compile happens only when the rebuild_manager
-      # flag is set, or on the very first run when no asset exists yet;
-      # the fresh binary is then re-uploaded for next time.
+      # The binary lives as a GitHub prerelease asset (tag:
+      # deployment-manager-bin) named for the source it was built from:
+      #
+      #     deploy-linux-x64-<tree>    <tree> = git rev-parse HEAD:rust-backend
+      #
+      # Normal runs just download + run it — NO Rust toolchain, NO cargo, NO
+      # apt build-deps. A compile happens when no asset matches the current
+      # source tree, or when the rebuild_manager flag forces it; the fresh
+      # binary is then uploaded under its own key for next time.
+      #
+      # The key is the point. This step used to store one unversioned
+      # `deploy-linux-x64`, so a source change could not invalidate it: the
+      # SO-336/SO-337 gRPC migration shipped on 2026-08-02, this workflow kept
+      # running a binary built on 2026-07-26, and the publish step died
+      # dialling the JSON-RPC endpoint Sui had already switched off. A week of
+      # deploy-tooling changes had been silently discarded. A cache that
+      # cannot tell whether it is stale is not a cache.
+      #
+      # It hashes the whole rust-backend tree rather than the manager's
+      # dependency closure. A hand-maintained list of what the binary links
+      # drifts out of sync with the Cargo manifests — see the map in
+      # deployment/affected.py for the same failure in the other direction.
+      # Over-rebuilding costs a few minutes; under-rebuilding deploys code
+      # that is not the code in the commit.
+      - name: Resolve deployment-manager source key
+        id: dmkey
+        run: |
+          key="$(git rev-parse HEAD:rust-backend)"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "asset=deploy-linux-x64-$key" >> "$GITHUB_OUTPUT"
+          echo "rust-backend source tree: $key"
+
       - name: Fetch prebuilt deployment-manager binary
         id: dm
         env:
           GH_TOKEN: ${{ github.token }}
           REBUILD: ${{ inputs.rebuild_manager }}
+          ASSET: ${{ steps.dmkey.outputs.asset }}
         run: |
           mkdir -p rust-backend/target/release
           if [ "$REBUILD" = "true" ]; then
             echo "rebuild=true" >> "$GITHUB_OUTPUT"
             echo "rebuild_manager flag set — compiling a fresh binary."
           elif gh release download deployment-manager-bin \
-                 --pattern deploy-linux-x64 \
+                 --pattern "$ASSET" \
                  --output rust-backend/target/release/deploy 2>/dev/null; then
             chmod +x rust-backend/target/release/deploy
             echo "rebuild=false" >> "$GITHUB_OUTPUT"
-            echo "Using prebuilt binary from release deployment-manager-bin."
+            echo "Using cached $ASSET — built from this exact rust-backend tree."
           else
             echo "rebuild=true" >> "$GITHUB_OUTPUT"
-            echo "No prebuilt binary found — bootstrapping by compiling one."
+            echo "No cached binary for $ASSET — compiling from this commit."
           fi
 
       # ── 4. Build the deployment manager (only when rebuilding) ───
@@ -221,19 +248,40 @@ jobs:
         run: cargo build --release -p deployment-manager
 
       # ── 5. Publish the freshly built binary for next time ────────
+      # Uploaded under its source key, so the next run for this tree hits the
+      # cache and any other tree misses it. Old keys are pruned to bound the
+      # release: each binary is ~48 MB.
       - name: Upload deployment-manager binary
         if: steps.dm.outputs.rebuild == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ steps.dmkey.outputs.asset }}
         run: |
           gh release view deployment-manager-bin >/dev/null 2>&1 || \
             gh release create deployment-manager-bin \
               --prerelease \
               --title "deployment-manager binary" \
-              --notes "Prebuilt linux x86_64 deployment-manager binary, auto-updated by the redeploy-contract workflow. Not a real release."
-          cp rust-backend/target/release/deploy /tmp/deploy-linux-x64
-          gh release upload deployment-manager-bin /tmp/deploy-linux-x64 --clobber
-          echo "Uploaded fresh binary to release deployment-manager-bin."
+              --notes "Prebuilt linux x86_64 deployment-manager binaries, auto-updated by the redeploy-contract workflow. Each asset is named deploy-linux-x64-<rust-backend tree hash>. Not a real release."
+          cp rust-backend/target/release/deploy "/tmp/$ASSET"
+          gh release upload deployment-manager-bin "/tmp/$ASSET" --clobber
+          echo "Uploaded $ASSET."
+
+          # The pre-SO-356 unversioned asset has no provable source and must
+          # never be served again. Drop it on first sight; the guard makes
+          # this a no-op once it is gone.
+          gh release delete-asset deployment-manager-bin deploy-linux-x64 --yes 2>/dev/null \
+            && echo "Deleted the legacy unkeyed deploy-linux-x64 asset." || true
+
+          # Keep the newest 5 keyed binaries.
+          gh release view deployment-manager-bin --json assets --jq '
+            .assets
+            | map(select(.name | startswith("deploy-linux-x64-")))
+            | sort_by(.createdAt) | reverse | .[5:] | .[].name' \
+          | while read -r stale; do
+              [ -n "$stale" ] || continue
+              gh release delete-asset deployment-manager-bin "$stale" --yes
+              echo "Pruned $stale."
+            done
 
       # ── 6. Fetch deployer key from Secrets Manager ───────────────
       - name: Write secrets file
