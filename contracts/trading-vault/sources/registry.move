@@ -12,6 +12,7 @@
 module trading_vault::registry;
 
 use std::type_name::TypeName;
+use sui::table::{Self, Table};
 use sui::vec_set::{Self, VecSet};
 
 use options_core::admin::AdminCap;
@@ -55,10 +56,24 @@ public struct IntegrationRegistry has key {
     allowed: VecSet<TypeName>,
 }
 
-/// Allowlist of oracle-adapter witness types.
+/// Allowlist of oracle-adapter witness types, plus optional per-asset
+/// pins.
+///
+/// `allowed` answers "may this adapter attest at all". `pins` narrows
+/// it: an asset present in `pins` may ONLY be priced by the named
+/// adapter, even though others are allowlisted. Absent ⇒ any allowlisted
+/// adapter may price it (the pre-SO-335 behaviour, and still the
+/// default).
+///
+/// Pins exist so that running two providers in parallel is *safe* rather
+/// than merely possible: without them, allowlisting a second adapter
+/// grants it authority over every asset in the book. They also make
+/// migration incremental — pin SUI to the new provider, leave BTC on the
+/// old one, compare, then move the rest.
 public struct OracleRegistry has key {
     id: UID,
     allowed: VecSet<TypeName>,
+    pins: Table<TypeName, TypeName>,
 }
 
 fun init(ctx: &mut TxContext) {
@@ -73,7 +88,11 @@ fun init(ctx: &mut TxContext) {
         registrar_pubkey: vector[],
     });
     transfer::share_object(IntegrationRegistry { id: object::new(ctx), allowed: vec_set::empty() });
-    transfer::share_object(OracleRegistry { id: object::new(ctx), allowed: vec_set::empty() });
+    transfer::share_object(OracleRegistry {
+        id: object::new(ctx),
+        allowed: vec_set::empty(),
+        pins: table::new(ctx),
+    });
 }
 
 // ═══════════════════════════════ admin ═══════════════════════════════
@@ -96,6 +115,31 @@ public fun allow_oracle(_: &AdminCap, reg: &mut OracleRegistry, oracle: TypeName
 public fun disallow_oracle(_: &AdminCap, reg: &mut OracleRegistry, oracle: TypeName) {
     reg.allowed.remove(&oracle);
     events::emit_oracle_disallowed(oracle);
+}
+
+/// Pin `asset` to exactly one oracle adapter. The adapter must already
+/// be allowlisted — pinning to an adapter that cannot attest would make
+/// the asset unpriceable, which strands appraisals for every vault
+/// holding it.
+public fun pin_oracle(
+    _: &AdminCap,
+    reg: &mut OracleRegistry,
+    asset: TypeName,
+    oracle: TypeName,
+) {
+    assert!(reg.allowed.contains(&oracle), errors::oracle_not_allowed());
+    if (reg.pins.contains(asset)) {
+        *reg.pins.borrow_mut(asset) = oracle;
+    } else {
+        reg.pins.add(asset, oracle);
+    };
+    events::emit_oracle_pinned(asset, oracle);
+}
+
+/// Drop `asset`'s pin, returning it to "any allowlisted adapter".
+public fun unpin_oracle(_: &AdminCap, reg: &mut OracleRegistry, asset: TypeName) {
+    reg.pins.remove(asset);
+    events::emit_oracle_unpinned(asset);
 }
 
 public fun set_min_curator_share_bps(_: &AdminCap, cfg: &mut VaultProtocolConfig, bps: u64) {
@@ -159,6 +203,27 @@ public fun is_adapter_allowed(reg: &IntegrationRegistry, adapter: &TypeName): bo
 
 public fun is_oracle_allowed(reg: &OracleRegistry, oracle: &TypeName): bool {
     reg.allowed.contains(oracle)
+}
+
+/// Is `oracle` permitted to price `asset`? Allowlisted AND, when the
+/// asset carries a pin, equal to it.
+public fun is_oracle_allowed_for(
+    reg: &OracleRegistry,
+    oracle: &TypeName,
+    asset: &TypeName,
+): bool {
+    if (!reg.allowed.contains(oracle)) return false;
+    if (!reg.pins.contains(*asset)) return true;
+    reg.pins.borrow(*asset) == oracle
+}
+
+public fun has_oracle_pin(reg: &OracleRegistry, asset: &TypeName): bool {
+    reg.pins.contains(*asset)
+}
+
+/// Aborts when `asset` is unpinned — pair with [`has_oracle_pin`].
+public fun oracle_pin(reg: &OracleRegistry, asset: &TypeName): TypeName {
+    *reg.pins.borrow(*asset)
 }
 
 public fun min_curator_share_bps(cfg: &VaultProtocolConfig): u64 { cfg.min_curator_share_bps }

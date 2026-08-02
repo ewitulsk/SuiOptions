@@ -38,7 +38,7 @@ jobs:
         # `vault` (options_vault) is deprecated and no longer published
         # (SO-332) — see contracts/vault/DEPRECATED.md. Its sources and
         # tests stay in-tree but are not built or tested here.
-        package: [core, auction, rfq, mm-collateral]
+        package: [core, auction, rfq, mm-collateral, trading-vault, oracle-pyth, oracle-switchboard]
     steps:
       - uses: actions/checkout@v4
 

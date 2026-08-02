@@ -192,6 +192,12 @@ public struct OracleAllowed has copy, drop { oracle: TypeName }
 
 public struct OracleDisallowed has copy, drop { oracle: TypeName }
 
+/// An asset was pinned to a single oracle adapter, or unpinned back to
+/// "any allowlisted" (SO-335).
+public struct OraclePinned has copy, drop { asset: TypeName, oracle: TypeName }
+
+public struct OracleUnpinned has copy, drop { asset: TypeName }
+
 public struct ProtocolConfigUpdated has copy, drop {
     min_curator_share_bps: u64,
     enforce_curator_share: bool,
@@ -481,6 +487,14 @@ public(package) fun emit_oracle_allowed(oracle: TypeName) {
 
 public(package) fun emit_oracle_disallowed(oracle: TypeName) {
     event::emit(OracleDisallowed { oracle });
+}
+
+public(package) fun emit_oracle_pinned(asset: TypeName, oracle: TypeName) {
+    event::emit(OraclePinned { asset, oracle });
+}
+
+public(package) fun emit_oracle_unpinned(asset: TypeName) {
+    event::emit(OracleUnpinned { asset });
 }
 
 public(package) fun emit_protocol_config_updated(
