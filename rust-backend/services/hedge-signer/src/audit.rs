@@ -26,7 +26,7 @@ pub struct AuditEntry {
     pub tx_digest: String,
     /// `"approved"` | `"denied"`.
     pub decision: String,
-    /// Approval tier (`auto` / `strict` / `emergency`); absent on denial.
+    /// Approval tier (`strict`, or `frost:<kind>`); absent on denial.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
     /// Denial reason; absent on approval.

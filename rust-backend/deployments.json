@@ -166,12 +166,6 @@
         "publishDigest": "Giz5NS6NQNL1uZCM6HDR2PNsjbPDSA1jQL6ZkLHNjEFE",
         "deployedAt": "2026-07-26T01:23:56.863925889+00:00"
       },
-      "dbmOracle": {
-        "packageId": "0x524148d02da05bf3e97f361569c84e08dfe21a3533b0fcc71139b28cc5d1ed85",
-        "upgradeCapId": "0xeb2cc56970fa67f37671d47fadfcbbda3bb72b93c83eed0af0d8a8674bfeee5e",
-        "publishDigest": "8YcmamVZy4NQ5Lz227ehKRMFeq7naD4aqhrnARt2dE7a",
-        "deployedAt": "2026-07-26T01:23:56.863927673+00:00"
-      },
       "tradingVaultObjects": {
         "vaultProtocolConfigId": "0x2f8a3b0e68e49412b46684722c61838f3cdd5e7745a4e3036d4cb9b590d0cfb4",
         "integrationRegistryId": "0xdee80c31a055d5cba9471667792623aba37b648cb2f809e8d66fc8c01736a8d5",

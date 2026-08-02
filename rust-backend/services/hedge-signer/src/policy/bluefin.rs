@@ -19,8 +19,8 @@
 //!   the Sui-side sweep. Amount/asset are surfaced for the audit log.
 //! - `sui_tx` — a Sui transaction from the parent address. Two shapes are
 //!   signed, everything else is denied:
-//!   1. the sweep: the existing three-tier [`classify`](super::classify)
-//!      engine at STRICT tier only — every transfer output pays the vault;
+//!   1. the sweep: the [`classify`](super::classify) engine — every
+//!      transfer output pays the vault;
 //!   2. the venue deposit: a transaction whose single Move call is Bluefin
 //!      `exchange::deposit_to_asset_bank` against the pinned package + eds,
 //!      crediting the parent account itself (the released funds arrive at
@@ -476,10 +476,7 @@ pub fn classify_payload(
                 });
             }
             // Otherwise the parent account's only legitimate Sui
-            // transactions are sweeps back to the vault — the strict tier's
-            // exact shape. Auto/emergency verdicts (margin-perimeter
-            // trading) belong to the native-multisig external account, not
-            // this parent.
+            // transactions are sweeps back to the vault.
             match classify(p, pt) {
                 Decision::Approve { tier: Tier::Strict } => Ok(ApprovedPayload {
                     message: transaction_digest(payload),
@@ -488,10 +485,6 @@ pub fn classify_payload(
                     is_exit: true,
                     tx_digest: Some(tx_data.digest().to_string()),
                 }),
-                Decision::Approve { tier } => Err(format!(
-                    "sui_tx classified {tier}, but only the strict sweep shape \
-                     (every output pays the vault) is signed for the parent account"
-                )),
                 Decision::Deny { reason } => Err(reason),
             }
         }
@@ -524,9 +517,7 @@ mod tests {
                         .to_string(),
                 vault_address: VAULT_ID.to_string(),
                 curator_pubkey_b64: None,
-                max_borrow_amount: 1_000_000,
-                allowed_pools: vec![],
-                deepbook_margin_package: "0xdb".to_string(),
+                allowed_shared: vec![],
                 curator_wallet: Some(CURATOR.to_string()),
                 bluefin: Some(BluefinVaultConfig {
                     ids_id: Some(IDS.to_string()),

@@ -1,7 +1,9 @@
 # Hedge-venue exploration: DeepBook Margin vs Bluefin Pro
 
-Status: exploratory findings + recommendation, 2026-07-20. No integration
-work started. Companion to `00-plan.md` (the V1/V2 vol-desk reset), which
+Status: exploratory findings, 2026-07-20. **Recommendation superseded by
+SO-334 (2026-08-02): DeepBook Margin is removed; Bluefin Pro is the sole
+planned hedge venue — see `06-dbm-removal.md`.** The venue findings below
+stand as the record of why. Companion to `00-plan.md` (the V1/V2 vol-desk reset), which
 needs programmatic SHORT exposure on the underlying to delta-hedge a
 long-call book, live funding/borrow-cost inputs for bid pricing, a NAV
 story for the hedge leg, and eventually a curator dashboard placing
@@ -24,12 +26,13 @@ spot + hedge trades for a curated trading vault.
 | SDKs | Official TS SDK (`@mysten/deepbook-v3` margin contracts, PTB builders); Move source public | Rust (`bluefin-pro` 1.13), TS (`@bluefin-exchange/pro-sdk` 2.x), Python in-repo; OpenAPI |
 | Fees | Standard DeepBookV3 pool fees + borrow interest; liquidation ≈ 5% (2% liquidator + 3% pool) | Maker 0.005% / taker 0.035% (SUI taker 0.1%) + per-trade gas fee; hourly funding |
 
-**Recommendation:** build the `HedgeVenue` trait with BOTH behind it.
-DeepBook Margin first (same PTB/wallet stack we already run, testnet
-works today, atomic exercise+hedge, zero basis risk) as the testnet and
-early-mainnet venue; Bluefin Pro as the scale venue once funding
-economics and liquidity dominate (its funding income is a real V1
-revenue line that margin-borrow can never provide). Neither venue lets
+**Recommendation (SUPERSEDED — see `06-dbm-removal.md`):** the original
+call was to run BOTH behind the `HedgeVenue` trait, DeepBook Margin
+first. SO-334 reversed it: DBM hedges one base asset per MarginManager
+and has no BTC pair, so it could never cover this book; its carry is
+always a cost where Bluefin's funding is a revenue line; and its
+every-trade co-signing ceremony makes service liveness a margin-safety
+dependency. Bluefin Pro is now the only planned venue. Neither venue lets
 the vault custody the hedge at the Move level — that invariant becomes a
 dedicated hedge-key + on-chain reconciliation story either way (details
 below), which should be decided once, venue-independently.
@@ -191,16 +194,13 @@ raising with both teams, not worth blocking on.
   wallet-signs-PTB stack via the official TS SDK; Bluefin needs their
   TS SDK + login flow against the hedge account.
 
-## Suggested sequencing (when this work is scheduled)
+## Sequencing (post-SO-334)
 
-1. `HedgeVenue` trait + `paper` impl (from `00-plan.md`) — unblocks all
-   V1 logic on staging with no external dependency.
-2. DeepBook Margin impl (testnet first): hedge key ops, borrow/sell/
-   repay PTBs, risk-ratio monitor, on-chain NAV read into appraisal.
-3. Curator dashboard: vault spot trading (existing adapter) + DBM hedge
-   panel (TS SDK), gated to the curator wallet.
-4. Bluefin Pro impl (mainnet-scale option): `bluefin-pro` Rust SDK,
-   authorized-wallet setup, funding feed into bid pricing, staging
-   paper-trading against their testnet env.
-5. Decide venue mix empirically: run both behind the trait, compare
-   realized hedge cost (borrow APR vs funding ± basis) per week.
+1. `HedgeVenue` trait + `paper` impl — DONE; the only venue the desk can
+   execute against today.
+2. Bluefin Phase-0 asks + a staging account (docs 03 §Phase 0) — the
+   human-in-the-loop blocker.
+3. `HedgeVenue::bluefin`: `bluefin-pro` Rust SDK, authorized-wallet
+   trading, funding feed into the bid's hedge-cost term.
+4. Curator dashboard: vault spot trading (existing adapter) + the
+   Bluefin hedge panel, gated to the curator wallet.

@@ -167,7 +167,6 @@ pub async fn activate(
     deepbook_adapter_pkg: ObjectID,
     options_adapter_pkg: ObjectID,
     equity_oracle_pkg: ObjectID,
-    dbm_oracle_pkg: ObjectID,
     token_info: &BTreeMap<String, TokenSpec>,
     registrar_pubkey: Option<&str>,
     gas_budget: u64,
@@ -224,14 +223,12 @@ pub async fn activate(
         );
     }
     // Oracle witnesses: Pyth for catalog assets, the options intrinsic
-    // oracle for per-bucket option coins (SO-297), and the two
-    // external-account equity oracles (SO-299) — keeper-attested and
-    // DeepBook-Margin computed.
+    // oracle for per-bucket option coins (SO-297), and the keeper-attested
+    // external-account equity oracle (SO-299).
     for witness in [
         format!("{oracle_pyth_pkg}::oracle_pyth::PythOracle"),
         format!("{options_adapter_pkg}::options_oracle::OptionsOracle"),
         format!("{equity_oracle_pkg}::equity_oracle::EquityOracle"),
-        format!("{dbm_oracle_pkg}::dbm_oracle::DbmOracle"),
     ] {
         let t = type_name_call(&mut pt, &witness)?;
         pt.programmable_move_call(

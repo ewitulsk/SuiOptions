@@ -230,10 +230,6 @@ pub struct PackageInfo {
     /// (SO-299).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equity_oracle: Option<SubPackageInfo>,
-    /// DeepBook-Margin computed equity oracle (SO-299). Emits no events;
-    /// the keeper needs its package id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dbm_oracle: Option<SubPackageInfo>,
     /// Trading-vault governance objects + activation digest (SO-292).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trading_vault_objects: Option<TradingVaultObjectsInfo>,
@@ -463,7 +459,6 @@ mod tests {
                 deepbook_adapter: None,
                 options_adapter: None,
                 equity_oracle: None,
-                dbm_oracle: None,
                 trading_vault_objects: None,
             },
             token_info: BTreeMap::new(),

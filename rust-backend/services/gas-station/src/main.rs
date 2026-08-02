@@ -107,11 +107,6 @@ async fn main() -> Result<()> {
                 .map(|p| p.package())
                 .transpose()
                 .context("equity_oracle package id")?,
-            dbm_oracle: snapshot
-                .dbm_oracle()
-                .map(|p| p.package())
-                .transpose()
-                .context("dbm_oracle package id")?,
             pyth: cfg
                 .pyth
                 .as_ref()

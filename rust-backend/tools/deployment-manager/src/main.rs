@@ -319,18 +319,6 @@ async fn deploy_one(
     .with_context(|| format!("publishing equity_oracle to {network}"))?;
     tracing::info!(package = %equity_oracle_out.package_id, "equity_oracle published");
 
-    let dbm_oracle_out = publish_dep_package(
-        &client,
-        &signer,
-        &contracts_root.join("dbm-oracle"),
-        "dbm_oracle",
-        env,
-        gas_budget,
-    )
-    .await
-    .with_context(|| format!("publishing dbm_oracle to {network}"))?;
-    tracing::info!(package = %dbm_oracle_out.package_id, "dbm_oracle published");
-
     // `vault: None` — options_vault is no longer published (SO-332).
     let (auction, rfq, vault) = (Some(record(&auction_out)), Some(record(&rfq_out)), None);
     let (trading_vault, oracle_pyth) =
@@ -442,7 +430,6 @@ async fn deploy_one(
             deepbook_adapter_out.package_id,
             options_adapter_out.package_id,
             equity_oracle_out.package_id,
-            dbm_oracle_out.package_id,
             &token_info,
             registrar_pubkey,
             gas_budget,
@@ -485,7 +472,6 @@ async fn deploy_one(
             deepbook_adapter,
             options_adapter,
             equity_oracle: Some(record(&equity_oracle_out)),
-            dbm_oracle: Some(record(&dbm_oracle_out)),
             trading_vault_objects,
             cctp_bridge: previous_cctp,
         },

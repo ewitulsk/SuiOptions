@@ -1,6 +1,8 @@
 # mm-bot V2 protocol prerequisites — implemented (local, tested)
 
-Status: **IMPLEMENTED locally, 2026-07-20; not yet deployed.** This
+Status: **IMPLEMENTED locally, 2026-07-20; not yet deployed.**
+**§3 (`contracts/dbm-oracle`) was removed by SO-334 — see
+`06-dbm-removal.md`. Kept below as the record of what it did.** This
 records what was built and the decisions made, in the style of
 `docs/vault-curator-product.md`. Covers `00-plan.md` Phase 5 (contracts)
 and the shared contract phase (§3a) of `03-bluefin-integration-plan.md` /

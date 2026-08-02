@@ -1,6 +1,6 @@
 /// Equity oracle for trading-vault external accounts
-/// (docs/mm-bot-v2/03-bluefin-integration-plan.md §3a,
-/// 04-deepbook-margin-integration-plan.md §3a — venue-neutral by design):
+/// (docs/mm-bot-v2/03-bluefin-integration-plan.md §3a — venue-neutral by
+/// design):
 /// keeper-posted account equity, consumed by vault appraisals through
 /// `vault::record_external_equity` with this package's allowlisted
 /// `EquityOracle` witness.
@@ -23,11 +23,10 @@
 /// chain already proves, and a poster may leave that zero in one step
 /// (a bootstrap anchor is not a mark to be walked away from).
 ///
-/// The trustless sibling for readable venues (e.g. DeepBook Margin, whose
-/// `MarginManager` is a readable shared object) is a computed adapter that
-/// derives equity from venue state + Pyth legs inside the appraisal PTB
-/// itself; it plugs into the same `record_external_equity` surface with
-/// its own witness and needs none of these guardrails.
+/// A venue whose account state is readable on-chain could instead be served
+/// by a computed adapter deriving equity inside the appraisal PTB itself —
+/// same `record_external_equity` surface, its own witness, none of these
+/// guardrails needed. No such venue is integrated today (SO-334).
 module equity_oracle::equity_oracle;
 
 use sui::clock::Clock;

@@ -259,7 +259,8 @@ objects for staging and prod.
 - **`vault_dead()`** (`trading-vault/sources/vault.move`) — the guard was read;
   the state space that reaches it was not. There may be a stranding case behind
   it on a row otherwise cleared.
-- **The oracle adapters** — `equity-oracle`, `dbm-oracle`, `oracle-pyth`. The
+- **The oracle adapters** — `equity-oracle`, `oracle-pyth` (and `dbm-oracle`,
+  since removed by SO-334). The
   attestation *consumer* was audited, not the producers, and they are upstream of
   both vaults.
 - **Circle's on-chain CCTP Move contracts.** The CCTP row's conclusion that the

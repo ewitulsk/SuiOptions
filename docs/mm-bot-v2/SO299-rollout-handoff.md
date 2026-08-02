@@ -1,5 +1,10 @@
 # SO-299 deferred-work rollout — session handoff (2026-07-21 → 07-23)
 
+> **Historical record.** Every DeepBook-Margin item below (dbm-oracle,
+> `HedgeVenue::deepbook_margin`, the native-multisig ceremony, the DBM
+> deposit legs) was removed by SO-334 — see `06-dbm-removal.md`. The
+> incidents in §3 are still worth not re-learning.
+
 Context document for continuing this work in a fresh session. Everything
 below happened in one continuous effort: implement ALL eleven
 "designed-for but deferred" items from `TODO.md` §3, deploy the whole

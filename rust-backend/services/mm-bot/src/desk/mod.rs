@@ -10,7 +10,6 @@
 
 pub mod auctions;
 pub mod book;
-pub mod dbm;
 pub mod exits;
 pub mod hedge;
 pub mod limits;
@@ -550,57 +549,19 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
     let mut primary_venues: Vec<Arc<dyn hedge::HedgeVenue>> = Vec::new();
     for m in &p.markets {
         for (vi, spec) in venue_specs.iter().enumerate() {
-            let venue: Arc<dyn hedge::HedgeVenue> = match &spec.dbm {
-                Some(dcfg) => {
-                    // A DBM venue hedges its manager's BASE asset only.
-                    let market_type =
-                        protocol_types::asset::canonicalize_move_type(&m.coin_type);
-                    if market_type != dcfg.base_type {
-                        if vi == 0 {
-                            return Err(anyhow!(
-                                "primary [[desk.hedge.venues]] deepbook_margin venue {} \
-                                 hedges {} but market {} trades {market_type} — list a \
-                                 covering venue first",
-                                spec.name,
-                                dcfg.base_type,
-                                m.symbol
-                            ));
-                        }
-                        continue;
-                    }
-                    let venue_wrap =
-                        sui_tx::sui_client::SuiClientWrapper::connect(&p.secrets, p.network)
-                            .await?;
-                    Arc::new(
-                        dbm::DeepbookMarginVenue::connect(
-                            spec.name.clone(),
-                            dcfg.clone(),
-                            vault_id.to_hex_literal(),
-                            venue_wrap,
-                        )
-                        .await
-                        .with_context(|| {
-                            format!("connecting deepbook_margin venue {}", spec.name)
-                        })?,
-                    )
-                }
-                None => {
-                    // The "paper"-named venue keeps the legacy per-symbol
-                    // state filename so existing state survives the
-                    // multi-venue change.
-                    let file = if spec.name == "paper" {
-                        format!("paper-hedge-{}.json", m.symbol.to_lowercase())
-                    } else {
-                        format!("paper-hedge-{}-{}.json", spec.name, m.symbol.to_lowercase())
-                    };
-                    Arc::new(hedge::PaperVenue::load_named(
-                        spec.name.clone(),
-                        std::path::PathBuf::from(&p.cfg.state_dir).join(file),
-                        spec.slippage_bps,
-                        spec.funding_rate_annual,
-                    ))
-                }
+            // The "paper"-named venue keeps the legacy per-symbol state
+            // filename so existing state survives the multi-venue change.
+            let file = if spec.name == "paper" {
+                format!("paper-hedge-{}.json", m.symbol.to_lowercase())
+            } else {
+                format!("paper-hedge-{}-{}.json", spec.name, m.symbol.to_lowercase())
             };
+            let venue: Arc<dyn hedge::HedgeVenue> = Arc::new(hedge::PaperVenue::load_named(
+                spec.name.clone(),
+                std::path::PathBuf::from(&p.cfg.state_dir).join(file),
+                spec.slippage_bps,
+                spec.funding_rate_annual,
+            ));
             if vi == 0 {
                 primary_venues.push(Arc::clone(&venue));
             }

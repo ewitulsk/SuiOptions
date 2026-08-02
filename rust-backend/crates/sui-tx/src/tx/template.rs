@@ -294,9 +294,6 @@ pub struct TradingVaultPkgs {
     /// equity-oracle package (SO-299): deposits on external-configured
     /// vaults carry an extra `equity_oracle::record` appraisal leg.
     pub equity_oracle: Option<ObjectID>,
-    /// dbm-oracle package (SO-299 phase C): DbmOracle-pinned vaults carry
-    /// a `dbm_oracle::record_no_debt`/`record` appraisal leg instead.
-    pub dbm_oracle: Option<ObjectID>,
     /// Pyth + Wormhole (latest upgraded) package ids: enables the Pyth
     /// price-update prefix legs on attestation-bearing deposits. `None`
     /// leaves those deposits unsponsorable.
@@ -547,20 +544,6 @@ pub fn protocol_templates(
         if let Some(rec) = &equity_record {
             appraisal_allowed.push(TargetMatcher::Exact(rec.clone()));
         }
-        // DbmOracle-pinned vaults (SO-299 phase C) record the same equity
-        // slot through `dbm_oracle::record_no_debt<Base, Quote>` /
-        // `record<Base, Quote, DebtAsset>` — arities pinned per function.
-        let dbm_records = tvp.dbm_oracle.map(|d| {
-            [
-                (MoveTarget::new(d, "dbm_oracle", "record_no_debt"), 2),
-                (MoveTarget::new(d, "dbm_oracle", "record"), 3),
-            ]
-        });
-        if let Some(recs) = &dbm_records {
-            for (t, _) in recs {
-                appraisal_allowed.push(TargetMatcher::Exact(t.clone()));
-            }
-        }
         // Attestation-bearing deposits prepend the Pyth price-update
         // legs (wormhole verify → authenticated infos → per-feed update
         // → potato destroy) and wrap attestations in `0x1::option`
@@ -587,9 +570,6 @@ pub fn protocol_templates(
         let mut deposit_arities = vec![(begin.clone(), 1), (deposit.clone(), 1)];
         if let Some(rec) = equity_record {
             deposit_arities.push((rec, 0));
-        }
-        if let Some(recs) = dbm_records {
-            deposit_arities.extend(recs);
         }
         // Pin the prefix-leg arities: the four Pyth calls take 0 type
         // args except the potato destroy (`<PriceInfo>`); the option
@@ -1293,7 +1273,6 @@ mod tests {
                     deepbook_adapter: None,
                     options_adapter: None,
                     equity_oracle,
-                    dbm_oracle: None,
                     pyth: None,
                 }),
             )
@@ -1330,64 +1309,6 @@ mod tests {
     }
 
     #[test]
-    fn trading_vault_deposit_with_dbm_record_leg() {
-        let tv_pkg = ObjectID::from_hex_literal("0x71ad").unwrap();
-        let op_pkg = ObjectID::from_hex_literal("0x0217").unwrap();
-        let dbm_pkg = ObjectID::from_hex_literal("0xdb01").unwrap();
-        let with_dbm = |dbm_oracle: Option<ObjectID>| {
-            protocol_templates(
-                pkg(),
-                Some(vault_pkg()),
-                &[],
-                false,
-                None,
-                None,
-                Some(TradingVaultPkgs {
-                    trading_vault: tv_pkg,
-                    oracle_pyth: op_pkg,
-                    deepbook_adapter: None,
-                    options_adapter: None,
-                    equity_oracle: None,
-                    dbm_oracle,
-                    pyth: None,
-                }),
-            )
-        };
-        // A deposit on a DbmOracle-pinned vault, debt-free: attest →
-        // begin_appraisal → option wraps → record_no_debt<B, Q> → deposit.
-        let calls = [
-            (MoveTarget::new(op_pkg, "oracle_pyth", "attest"), 2),
-            (MoveTarget::new(tv_pkg, "vault", "begin_appraisal"), 1),
-            (MoveTarget::new(stdlib(), "option", "some"), 1),
-            (MoveTarget::new(stdlib(), "option", "none"), 1),
-            (MoveTarget::new(dbm_pkg, "dbm_oracle", "record_no_debt"), 2),
-            (MoveTarget::new(tv_pkg, "vault", "deposit"), 1),
-        ];
-        let pt = build(&calls, true);
-        assert_eq!(match_any(&with_dbm(Some(dbm_pkg)), &pt), Some("trading_vault:deposit"));
-
-        // The debt flavor: record<B, Q, DebtAsset> (3 type args).
-        let mut with_debt = calls.clone();
-        with_debt[4] = (MoveTarget::new(dbm_pkg, "dbm_oracle", "record"), 3);
-        assert_eq!(
-            match_any(&with_dbm(Some(dbm_pkg)), &build(&with_debt, true)),
-            Some("trading_vault:deposit")
-        );
-
-        // Without the dbm-oracle package configured, the record leg is a
-        // foreign call and the PTB is refused.
-        assert_eq!(match_any(&with_dbm(None), &pt), None);
-
-        // Forged type arities are refused for both flavors.
-        let mut forged = calls.clone();
-        forged[4].1 = 3;
-        assert_eq!(match_any(&with_dbm(Some(dbm_pkg)), &build(&forged, true)), None);
-        let mut forged_debt = with_debt.clone();
-        forged_debt[4].1 = 2;
-        assert_eq!(match_any(&with_dbm(Some(dbm_pkg)), &build(&forged_debt, true)), None);
-    }
-
-    #[test]
     fn trading_vault_deposit_with_pyth_prefix() {
         let tv_pkg = ObjectID::from_hex_literal("0x71ad").unwrap();
         let op_pkg = ObjectID::from_hex_literal("0x0217").unwrap();
@@ -1407,7 +1328,6 @@ mod tests {
                     deepbook_adapter: None,
                     options_adapter: None,
                     equity_oracle: None,
-                    dbm_oracle: None,
                     pyth,
                 }),
             )
