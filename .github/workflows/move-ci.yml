@@ -38,7 +38,17 @@ jobs:
         # `vault` (options_vault) is deprecated and no longer published
         # (SO-332) — see contracts/vault/DEPRECATED.md. Its sources and
         # tests stay in-tree but are not built or tested here.
-        package: [core, auction, rfq, mm-collateral, trading-vault, oracle-pyth, oracle-switchboard]
+        #
+        # trading-vault and oracle-switchboard are NOT here yet (SO-335).
+        # Both fail under the pinned 1.71.1 CLI with
+        # UNEXPECTED_VERIFIER_ERROR (2017) in `sui::rangeproofs` — a
+        # framework module that verifier rejects — while passing on a
+        # 1.75.x CLI. Bumping SUI_VERSION to make them pass would break the
+        # lockstep rule above, so the open question is the other one: does
+        # the DEPLOY compiler (sui-move-build @ framework/mainnet
+        # 2f5992f1) accept them? Answer that before the SO-335 redeploy,
+        # then add both packages here.
+        package: [core, auction, rfq, mm-collateral, oracle-pyth]
     steps:
       - uses: actions/checkout@v4
 

@@ -252,7 +252,36 @@ the no-redeploy property. Do not regress that.
 | 2b | `oracle-pyth` → `sui-pro-compatible-contract-*` | **done** — API is source-compatible; all 6 adapter tests pass on the new rev |
 | 1a | `switchboard_feed_id` in catalog + `OracleProvider` type | **done** — token-info migration 000002, `feed_for(provider)` |
 | — | deployment-manager publishes + activates both adapters | **done** — both witnesses allowlisted, both feed registries seeded |
-| — | `move-ci` covers trading-vault / oracle-pyth / oracle-switchboard | **done** (they were never in the matrix) |
+| — | `move-ci` covers oracle-pyth | **done** (it was never in the matrix) |
+| — | `move-ci` covers trading-vault / oracle-switchboard | **blocked** — see the toolchain finding below |
+
+### ⚠️ Toolchain finding: the pinned CLI rejects both packages
+
+Adding `trading-vault` and `oracle-switchboard` to the Move CI matrix
+surfaced this: both fail under the pinned `mainnet-1.71.1` CLI with
+`UNEXPECTED_VERIFIER_ERROR (2017)` in `sui::rangeproofs`, while passing
+cleanly on a 1.75.x CLI. `oracle-pyth` and the four original packages pass
+on both.
+
+`move-ci.yml` pins that version on purpose: *"Keep SUI_VERSION in lockstep
+with [`sui-move-build` @ framework/mainnet 2f5992f1] — a newer CLI can
+accept code the deploy compiler rejects."* So bumping the pin to make CI
+green would defeat the check rather than pass it.
+
+**The question to answer before the SO-335 redeploy is therefore not a CI
+question:** does the *deploy* compiler — `sui-move-build`, which
+`deployment-manager` actually publishes with — accept
+`oracle-switchboard`? Two possibilities:
+
+- It does (CLI 1.71.1 and crate rev 2f5992f1 have drifted apart). Then the
+  fix is to re-align the pin, and both packages join the matrix.
+- It does not. Then **`oracle-switchboard` cannot be published as-is**, and
+  the Switchboard dep's framework requirement has to be reconciled with
+  ours before any of this can go on chain.
+
+Note that `trading-vault` fails too, and it is already deployed — which
+points at the first case, but that is an inference, not a test. Run the
+publish against a localnet or devnet before assuming it.
 | 2a | `pyth-client` pro endpoint + `accessToken` | **partial** — `Authorization: Bearer` was already correct; the endpoint stays config-driven. Needs a live keyed-vs-unkeyed check |
 | 1b | Re-key `oracle-client`/`oracle-service` by coin type | **not started** |
 | 1c | `sui-tx::tx::oracle` `OracleAdapter` trait; `appraisal.rs` off `oracle_pyth` | **not started** |
