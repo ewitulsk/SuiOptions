@@ -7132,11 +7132,13 @@ dependencies = [
  "cli-spec",
  "observability",
  "oracle-client",
+ "protocol-types",
  "pyth-client",
  "reqwest",
  "runtime-config",
  "serde",
  "serde_json",
+ "sui-types",
  "token-info-client",
  "tokio",
  "tracing",
@@ -11278,6 +11280,20 @@ dependencies = [
  "move-vm-config",
  "sui-protocol-config",
  "sui-types",
+]
+
+[[package]]
+name = "switchboard-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "protocol-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sui-types",
+ "tracing",
 ]
 
 [[package]]

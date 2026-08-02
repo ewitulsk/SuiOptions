@@ -106,6 +106,27 @@ pub enum WsMessage {
 
 // ---- client ----------------------------------------------------------------
 
+/// On-chain identity of the live provider's adapter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdapterIds {
+    pub adapter_package_id: String,
+    pub feed_registry_id: String,
+    pub oracle_registry_id: String,
+}
+
+/// `GET /oracle/descriptor` — the published form of the oracle switch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OracleDescriptor {
+    pub provider: protocol_types::OracleProvider,
+    pub adapter_module: String,
+    /// Absent when the live provider's adapter is not deployed here.
+    #[serde(default)]
+    pub adapter: Option<AdapterIds>,
+    /// canonical coin type → feed key under the live provider.
+    #[serde(default)]
+    pub feeds: std::collections::BTreeMap<String, String>,
+}
+
 /// Async client over oracle-service's internal REST + WS API.
 #[derive(Debug, Clone)]
 pub struct OracleClient {
@@ -132,6 +153,38 @@ impl OracleClient {
     }
 
     /// One feed's latest cached price. Errors (404) if never observed.
+    /// The live oracle provider and its on-chain adapter identity
+    /// (SO-335). This is the single read that tells a PTB composer which
+    /// provider's price legs to build.
+    pub async fn descriptor(&self) -> Result<OracleDescriptor> {
+        let url = format!("{}/oracle/descriptor", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("GET {url}"))?;
+        resp.json().await.context("decoding /oracle/descriptor")
+    }
+
+    /// Spot for a coin type, without the caller ever naming a provider's
+    /// feed key. Prefer this over [`OracleClient::price`] in new code —
+    /// it is what makes a consumer survive a provider switch untouched.
+    pub async fn price_for_asset(&self, coin_type: &str) -> Result<PricePoint> {
+        let url = format!("{}/prices/by-asset/{}", self.base_url, coin_type);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("GET {url}"))?;
+        resp.json().await.context("decoding /prices/by-asset")
+    }
+
     pub async fn price(&self, feed: PriceFeedId) -> Result<PricePoint> {
         self.get_json::<PricePoint>(
             &format!("/prices/{}", feed.to_hex()),
