@@ -29,3 +29,17 @@ token_info_url = "http://token-info:9005"
 [pyth]
 pyth_package_id     = "0xabf837e98c26087cba0883c0a7a28326b1fa3c5e1e2c5abdb486f9e8f594c837"
 wormhole_package_id = "0xf47329f4344f3bf0f8e436e2f7b485466cff300f12a166563995d3888c296a94"
+
+# Switchboard's own `on_demand` package (SO-335), needed to allowlist the
+# quote-submit prefix (`quote_submit_result_action::run_N`) on
+# attestation-bearing deposits. Our `oracle_switchboard` adapter id comes
+# from token-info; only Switchboard's own package does not, because it is
+# a third-party deployment we do not publish.
+#
+# Verified 2026-08-02: this is `published-at` on the switchboard-xyz/sui
+# `testnet` branch — the exact rev contracts/oracle-switchboard links —
+# and the object resolves on chain as a package. NOT the 0x28005599… that
+# Move.testnet.toml on `main` and the docs quote: that is the SIXTH
+# publish; this is the eighth.
+[switchboard]
+package_id = "0x0ea79f9c3fa1e3f701885a00bf26f92a297223165f26529767d2f7d1e3c4ac1e"

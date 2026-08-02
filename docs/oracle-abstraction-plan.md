@@ -267,25 +267,84 @@ the no-redeploy property. Do not regress that.
 plane (feed discovery, `/prices/by-asset`), the descriptor, the Rust PTB
 composer and the deployed browser bundle. Nothing else redeploys.
 
+### Verified Switchboard ids (2026-08-02)
+
+Every value below was checked, not copied from docs — the docs disagree
+with themselves on the package id, and two of the four feed hashes they
+quote are not the ones you get from the authoritative feed list.
+
+**`on_demand` package** — `published-at` on the branch our
+`contracts/oracle-switchboard/Move.toml` actually links, confirmed to
+resolve on chain as a `package`:
+
+| Network | Package id | Note |
+|---|---|---|
+| testnet (`rev = "testnet"`) | `0x0ea79f9c3fa1e3f701885a00bf26f92a297223165f26529767d2f7d1e3c4ac1e` | 8th publish |
+| mainnet (`rev = "mainnet"`) | `0xa81086572822d67a1559942f23481de9a60c7709c08defafbb1ca8dffc44e210` | 4th publish |
+
+> `Move.testnet.toml` on `main`, the GitHub README and the docs all quote
+> `0x28005599…` for testnet. That is the **sixth** publish — stale. Both
+> ids exist on chain, so a wrong pick fails at link time rather than
+> loudly. Take the id from the branch you pin, never from prose.
+
+**Feed hashes** — from `GET /stream/surge_feeds` on Crossbar (18,066
+feeds, symbol → per-source hash). We use the **WEIGHTED** variant
+throughout: volume-weighted across venues rather than a single exchange,
+which is the right default for pricing a book. Cross-validation: the BTC
+and SUI hashes in Switchboard's own Sui docs are exactly these WEIGHTED
+variants, which confirms the lookup method.
+
+| Token | Pair | WEIGHTED feed hash |
+|---|---|---|
+| TBTC | BTC/USD | `0x4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812` |
+| TSUI | SUI/USD | `0x7ceef94f404e660925ea4b33353ff303effaf901f224bdee50df3a714c1299e9` |
+| TUSDC | USDC/USD | `0x883ea8295f70ae506e894679d124196bb07064ea530cefd835b58c33a5ab6549` |
+| TWAL | WAL/USD | `0x580de69fa5310460bead69dc3fd0c05988dea014d0e7c98aae22b67e7958fd9b` |
+
+Seeded into `deployments.json` for both envs; the deploy-time activation
+copies them into `SwitchboardFeedRegistry`.
+
+> **A feed hash is not a Pyth feed id.** It is the *content hash of a job
+> definition* — `GET /fetch/{hash}` returns the job graph that produced
+> it. The canonical list above is convenience; a bespoke feed (different
+> sources, different aggregation) is created with `POST /v2/store` and
+> yields its own hash. Nothing about a hash is issued or blessed by
+> Switchboard, which is a meaningfully different trust model from Pyth's
+> and worth understanding before adding assets.
+
+### The Crossbar quote endpoint, pinned from a live call
+
+`switchboard-client` calls `GET /v2/update/{feedHashes}`. The decoder was
+built against a captured live response rather than docs, which corrected
+two things a docs-only reading gets wrong:
+
+- **Signatures are base64**, not hex.
+- **`oraclePubkey` is a Switchboard key, not a Sui object id.** `run_N`
+  takes `&Oracle` *objects*, so pubkeys must be resolved through
+  `GET /oracles/sui` (`{oracle_id, oracle_key}` pairs). An unmapped
+  signer is a hard error — dropping one would silently shrink the
+  consensus set the on-chain verifier checks.
+
+The `Queue` object is **not** in the response; supply it from config.
+
 ### What remains before it can actually be flipped
 
 These are deployment/ops, not code:
 
-1. **Seed `switchboardFeedId` in the catalog.** Every token needs a
-   Switchboard feed hash, or `oracle-service` refuses to boot on
-   `provider = "switchboard"` (deliberately — a half-seeded catalog would
-   silently leave assets unpriceable).
-2. **Redeploy the contracts.** `OracleRegistry` gained a field and
+1. **Redeploy the contracts.** `OracleRegistry` gained a field and
    `oracle-pyth` moved to a different on-chain Pyth package, so this is a
-   redeploy, not an upgrade. It publishes and allowlists both adapters.
-3. **Point Crossbar at a paid Solana devnet RPC** and set
-   `[oracle] crossbar_url`.
-4. **Set `[switchboard] package_id`** in gas-station config so
-   Switchboard deposits sponsor.
-5. **Verify the Crossbar response shape.** `switchboard-client` decodes
-   defensively against a shape not pinned in public docs; the first live
-   call is what confirms it.
-6. Run `cargo test -p deployment-manager --test deploy_build` before the
+   redeploy, not an upgrade. It publishes and allowlists both adapters and
+   seeds both feed registries.
+2. **Point Crossbar at a paid Solana devnet RPC.** `[oracle] crossbar_url`
+   already targets the in-compose instance; the RPC behind it is still the
+   public default (SO-333).
+3. **Supply the Switchboard `Queue` object id** for the network — read it
+   from the Switchboard `State` object (testnet
+   `0x2086fdde07a8f4726a3fc72d6ef1021343a781d42de6541ca412cf50b4339ad6`)
+   and wire it where the payload is assembled.
+4. **First live Crossbar call** through our own instance, to confirm it
+   behaves like the public one this decoder was pinned against.
+5. Run `cargo test -p deployment-manager --test deploy_build` before the
    redeploy — see below for why that, and not a CLI version, is the gate.
 
 ### Toolchain finding — RESOLVED: the pin was measuring the wrong thing

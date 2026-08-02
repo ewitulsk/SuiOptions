@@ -25,4 +25,4 @@ benchmarks_url = "https://benchmarks.pyth.network"
 # See docs/oracle-abstraction-plan.md 4.
 [oracle]
 provider = "pyth"
-# crossbar_url = "http://crossbar:8080"   # required when provider = "switchboard"
+crossbar_url = "http://crossbar:8080"
