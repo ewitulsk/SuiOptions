@@ -19,12 +19,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use shared_crypto::intent::Intent;
-use sui_json_rpc_types::{
-    ObjectChange, SuiObjectDataOptions, SuiTransactionBlockResponse,
-    SuiTransactionBlockResponseOptions,
-};
 use sui_move_build::BuildConfig;
-use sui_sdk::{SuiClient, SuiClientBuilder};
+use sui_tx::chain::{created_objects, published_package, ChainClient};
 use sui_types::base_types::{ObjectID, ObjectType, SuiAddress};
 use sui_types::crypto::{get_key_pair, AccountKeyPair, SuiKeyPair};
 use sui_types::transaction::Transaction;
@@ -57,13 +53,10 @@ async fn fund(faucet: &str, addr: SuiAddress) -> Result<()> {
     Ok(())
 }
 
-async fn wait_for_gas(client: &SuiClient, addr: SuiAddress) -> Result<()> {
+async fn wait_for_gas(client: &ChainClient, addr: SuiAddress) -> Result<()> {
     for _ in 0..30 {
-        let coins = client
-            .coin_read_api()
-            .get_coins(addr, None, None, Some(1))
-            .await?;
-        if !coins.data.is_empty() {
+        let coins = client.coins(addr, &sui_tx::chain::sui_coin_type()).await?;
+        if !coins.is_empty() {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -73,7 +66,7 @@ async fn wait_for_gas(client: &SuiClient, addr: SuiAddress) -> Result<()> {
 
 /// Compile + publish `contracts/`, returning (package_id, admin_cap_id).
 async fn publish_protocol(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     dir: &std::path::Path,
 ) -> Result<(ObjectID, ObjectID)> {
@@ -83,62 +76,19 @@ async fn publish_protocol(
     let modules = compiled.get_package_bytes(false);
     let deps = compiled.get_dependency_storage_package_ids();
 
-    let tx_data = client
-        .transaction_builder()
-        .publish(signer.address, modules, deps, None, GAS)
-        .await
-        .context("building protocol publish tx")?;
-    let sig =
-        Transaction::signature_from_signer(tx_data.clone(), Intent::sui_transaction(), &signer.keypair);
-    let tx = Transaction::from_data(tx_data, vec![sig]);
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
-    let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
-        .await
-        .context("submitting protocol publish")?;
-    assert_ok(&resp)?;
+    let mut pt = sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder::new();
+    let cap = pt.publish_upgradeable(modules, deps);
+    pt.transfer_arg(signer.address, cap);
+    let resp = sui_tx::tx::submit_ptb(client, signer, pt, GAS, "protocol publish").await?;
 
-    let changes = resp
-        .object_changes
-        .as_ref()
-        .ok_or_else(|| anyhow!("publish missing object_changes"))?;
-    let mut package = None;
-    let mut admin_cap = None;
-    for c in changes {
-        match c {
-            ObjectChange::Published { package_id, .. } => package = Some(*package_id),
-            ObjectChange::Created {
-                object_id,
-                object_type,
-                ..
-            } if object_type.module.as_str() == "admin"
-                && object_type.name.as_str() == "AdminCap" =>
-            {
-                admin_cap = Some(*object_id)
-            }
-            _ => {}
-        }
-    }
+    let admin_cap = created_objects(&resp).into_iter().find_map(|c| {
+        let tag = sui_types::parse_sui_struct_tag(&c.object_type).ok()?;
+        (tag.module.as_str() == "admin" && tag.name.as_str() == "AdminCap").then_some(c.object_id)
+    });
     Ok((
-        package.ok_or_else(|| anyhow!("no package id"))?,
+        published_package(&resp).ok_or_else(|| anyhow!("no package id"))?,
         admin_cap.ok_or_else(|| anyhow!("no admin cap"))?,
     ))
-}
-
-fn assert_ok(resp: &SuiTransactionBlockResponse) -> Result<()> {
-    use sui_json_rpc_types::SuiTransactionBlockEffectsAPI;
-    let e = resp.effects.as_ref().ok_or_else(|| anyhow!("no effects"))?;
-    if e.status().is_err() {
-        return Err(anyhow!("tx failed: {:?}", e.status()));
-    }
-    Ok(())
 }
 
 #[tokio::test]
@@ -154,7 +104,7 @@ async fn localnet_roll_creates_per_bucket_coins() -> Result<()> {
         keypair: SuiKeyPair::Ed25519(kp),
         address,
     };
-    let client = SuiClientBuilder::default().build(&rpc).await?;
+    let client = ChainClient::new(&rpc)?;
     for _ in 0..3 {
         fund(&faucet, address).await?;
     }
@@ -187,6 +137,7 @@ async fn localnet_roll_creates_per_bucket_coins() -> Result<()> {
 
     let wrap = SuiClientWrapper {
         client,
+        events: sui_tx::events::EventClient::new(Network::Devnet.graphql_url()),
         signer,
         network: Network::Devnet,
     };
@@ -206,28 +157,17 @@ async fn localnet_roll_creates_per_bucket_coins() -> Result<()> {
     // the third (the option coin) must be distinct per bucket.
     let mut call_types = Vec::new();
     for bid in &out.bucket_ids {
-        let obj = wrap
-            .client
-            .read_api()
-            .get_object_with_options(*bid, SuiObjectDataOptions::new().with_type())
-            .await?;
-        let ot = obj
-            .data
-            .ok_or_else(|| anyhow!("bucket {bid} not found"))?
-            .object_type()?;
-        match ot {
-            ObjectType::Struct(mot) => {
-                let params = mot.type_params();
-                assert_eq!(params.len(), 3, "Bucket should have 3 type params");
-                let call = params[2].to_canonical_string(true);
-                assert!(
-                    call.contains("::call_"),
-                    "3rd type param should be a generated call coin, got {call}"
-                );
-                call_types.push(call);
-            }
-            other => panic!("bucket object not a struct: {other}"),
-        }
+        let obj = wrap.client.get_object(*bid).await?;
+        let tag = obj
+            .struct_tag()
+            .ok_or_else(|| anyhow!("bucket {bid} has no struct type"))?;
+        assert_eq!(tag.type_params.len(), 3, "Bucket should have 3 type params");
+        let call = tag.type_params[2].to_canonical_string(true);
+        assert!(
+            call.contains("::call_"),
+            "3rd type param should be a generated call coin, got {call}"
+        );
+        call_types.push(call);
     }
     call_types.sort();
     call_types.dedup();

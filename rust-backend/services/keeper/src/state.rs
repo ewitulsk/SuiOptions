@@ -12,8 +12,8 @@ use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::StructTag;
 use serde_json::Value;
-use sui_json_rpc_types::{EventFilter, SuiObjectDataOptions, SuiParsedData};
-use sui_sdk::SuiClient;
+use sui_tx::chain::ChainClient;
+use sui_tx::events::EventClient;
 use sui_types::base_types::ObjectID;
 use tracing::warn;
 
@@ -171,7 +171,13 @@ pub fn parse_vault_view(fields: &Value) -> Result<VaultView> {
     let phase = field(fields, "phase")?;
     let variant = match phase {
         Value::String(s) => Some(s.as_str()),
-        Value::Object(m) => m.get("variant").and_then(|v| v.as_str()),
+        // gRPC/GraphQL render enums as `{"@variant": name, …}`; the older
+        // JSON-RPC content used a bare `variant` key (and often dropped it
+        // entirely — see the round-0 fallback below). Accept both.
+        Value::Object(m) => m
+            .get("@variant")
+            .or_else(|| m.get("variant"))
+            .and_then(|v| v.as_str()),
         other => return Err(anyhow!("unrecognized phase encoding {other}")),
     };
     // When the variant is unreadable (the lossy `{}` form), fall back to
@@ -253,22 +259,21 @@ pub fn parse_swap_rfq_view(swap_id: ObjectID, fields: &Value) -> Result<SwapRfqV
 
 /// Read one object's parsed-JSON field map; `Ok(None)` if it no longer
 /// exists (settled auctions are deleted on-chain).
-async fn fetch_fields(client: &SuiClient, id: ObjectID) -> Result<Option<Value>> {
-    let resp = client
-        .read_api()
-        .get_object_with_options(id, SuiObjectDataOptions::new().with_content())
+async fn fetch_fields(client: &ChainClient, id: ObjectID) -> Result<Option<Value>> {
+    let Some((_, json)) = client
+        .try_get_object_json(id)
         .await
-        .with_context(|| format!("reading object {id}"))?;
-    let Some(data) = resp.data else {
+        .with_context(|| format!("reading object {id}"))?
+    else {
         return Ok(None);
     };
-    match data.content {
-        Some(SuiParsedData::MoveObject(obj)) => Ok(Some(obj.fields.to_json_value())),
-        other => Err(anyhow!("object {id} has unexpected content: {other:?}")),
+    match json {
+        Some(fields) => Ok(Some(fields)),
+        None => Err(anyhow!("object {id} has no readable Move content")),
     }
 }
 
-pub async fn fetch_vault_view(client: &SuiClient, vault_id: ObjectID) -> Result<VaultView> {
+pub async fn fetch_vault_view(client: &ChainClient, vault_id: ObjectID) -> Result<VaultView> {
     let fields = fetch_fields(client, vault_id)
         .await?
         .ok_or_else(|| anyhow!("vault {vault_id} not found on chain"))?;
@@ -319,19 +324,21 @@ pub enum AuctionKind {
 /// vault_id`, classify by escrow leg, then read each object — still
 /// existing ⇒ still open. Restart- and race-safe by construction.
 pub async fn discover_open_auctions(
-    client: &SuiClient,
+    client: &ChainClient,
+    events: &EventClient,
     auction_package: ObjectID,
     vault_id: ObjectID,
     underlying_type: &str,
     settlement_type: &str,
     cutoff_ms: u64,
 ) -> Result<(Vec<RfqView>, Vec<SwapRfqView>)> {
-    let filter = EventFilter::MoveEventType(StructTag {
+    let event_type = StructTag {
         address: auction_package.into(),
         module: Identifier::new("events").unwrap(),
         name: Identifier::new("AuctionCreated").unwrap(),
         type_params: vec![],
-    });
+    }
+    .to_canonical_string(/* with_prefix */ true);
 
     let underlying = protocol_types::asset::canonicalize_move_type(underlying_type);
     let settlement = protocol_types::asset::canonicalize_move_type(settlement_type);
@@ -339,9 +346,8 @@ pub async fn discover_open_auctions(
     let mut candidates: Vec<(ObjectID, AuctionKind)> = Vec::new();
     let mut cursor = None;
     'pages: loop {
-        let page = client
-            .event_api()
-            .query_events(filter.clone(), cursor, Some(100), true /* descending */)
+        let page = events
+            .query_by_type(&event_type, cursor.as_deref(), 100, true /* descending */)
             .await
             .context("querying AuctionCreated events")?;
         for ev in &page.data {
@@ -396,7 +402,7 @@ mod tests {
     fn vault_json(phase: &str, bucket: Option<&str>) -> Value {
         json!({
             "round": "3",
-            "phase": { "variant": phase, "fields": {} },
+            "phase": { "@variant": phase },
             "current_bucket": bucket,
             "current_expiry_ms": "1700000000000",
             "selling_ends_ms": "1699990000000",

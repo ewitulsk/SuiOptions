@@ -1,101 +1,85 @@
 //! Admin-cap-gated PTBs: `new_call_option`, `set_fee_bps`, `withdraw_treasury`.
 //!
-//! All three are simple Move calls — no coin manipulation — so they go
-//! through the high-level `client.transaction_builder().move_call(...)`
-//! builder. The same builder auto-selects a gas coin and computes the
-//! reference gas price.
+//! All three are simple Move calls — no coin manipulation. They used to go
+//! through the JSON-RPC `transaction_builder().move_call(..)` helper, which
+//! resolved object args and pure args from JSON. That builder only exists on
+//! the retired JSON-RPC client, so the calls are now assembled explicitly:
+//! `ChainClient::object_arg` does the shared-vs-owned resolution the old
+//! builder did, and pure args are BCS-encoded directly.
 
 use anyhow::{Context, Result};
-use shared_crypto::intent::Intent;
 use std::str::FromStr;
-use sui_json::SuiJsonValue;
-use sui_json_rpc_types::{
-    SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
-    SuiTransactionBlockResponseOptions, SuiTypeTag,
-};
-use sui_sdk::SuiClient;
 use sui_types::base_types::{ObjectID, SuiAddress};
-use sui_types::transaction::Transaction;
-use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
-use sui_types::TypeTag;
-use tracing::{debug, info};
+use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
+use sui_types::transaction::Argument;
+use sui_types::{Identifier, TypeTag};
+use tracing::info;
 
+use crate::chain::{ChainClient, ExecutedTransaction};
 use crate::sui_client::Signer;
+use super::submit_ptb;
+
+/// One argument to an admin Move call: either an on-chain object (resolved
+/// by reading its owner) or a pure BCS value.
+pub enum CallArg {
+    /// Object id + whether the call takes it by `&mut`.
+    Object(ObjectID, bool),
+    Pure(Vec<u8>),
+}
 
 /// Build, sign, submit, and wait for the on-chain effects of a Move call.
 async fn execute_move_call(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     package: ObjectID,
     module: &'static str,
     function: &'static str,
     type_args: Vec<&str>,
-    args: Vec<SuiJsonValue>,
+    args: Vec<CallArg>,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(%package, module, function, gas_budget, "submitting move call");
-    let type_args: Vec<SuiTypeTag> = type_args
+    let type_arguments: Vec<TypeTag> = type_args
         .into_iter()
-        .map(|s| {
-            TypeTag::from_str(s)
-                .with_context(|| format!("parsing type tag {s}"))
-                .map(SuiTypeTag::from)
-        })
+        .map(|s| TypeTag::from_str(s).with_context(|| format!("parsing type tag {s}")))
         .collect::<Result<_>>()?;
-    let tx_data = client
-        .transaction_builder()
-        .move_call(
-            signer.address,
-            package,
-            module,
-            function,
-            type_args,
-            args,
-            None,
-            gas_budget,
-            None,
-        )
-        .await
-        .with_context(|| format!("building {module}::{function} tx"))?;
-    let sig = Transaction::signature_from_signer(
-        tx_data.clone(),
-        Intent::sui_transaction(),
-        &signer.keypair,
-    );
-    let tx = Transaction::from_data(tx_data, vec![sig]);
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
-    let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
-        .await
-        .with_context(|| format!("submitting {module}::{function} tx"))?;
-    let effects = resp
-        .effects
-        .as_ref()
-        .context("response missing effects")?;
-    if effects.status().is_err() {
-        anyhow::bail!("{module}::{function} reverted: {:?}", effects.status());
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let mut arguments: Vec<Argument> = Vec::with_capacity(args.len());
+    for arg in args {
+        let a = match arg {
+            CallArg::Object(id, mutable) => {
+                let oa = client
+                    .object_arg(id, mutable)
+                    .await
+                    .with_context(|| format!("resolving object arg {id}"))?;
+                pt.obj(oa)?
+            }
+            CallArg::Pure(bytes) => pt.pure_bytes(bytes, /* force_separate */ false),
+        };
+        arguments.push(a);
     }
-    debug!(digest = %resp.digest, module, function, "move call succeeded");
-    Ok(resp)
+    pt.programmable_move_call(
+        package,
+        Identifier::new(module)?,
+        Identifier::new(function)?,
+        type_arguments,
+        arguments,
+    );
+
+    submit_ptb(client, signer, pt, gas_budget, &format!("{module}::{function}")).await
 }
 
 /// Calls `admin::set_fee_bps(&AdminCap, &mut ProtocolConfig, new_bps)`.
 pub async fn set_fee_bps(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     package: ObjectID,
     admin_cap: ObjectID,
     protocol_config: ObjectID,
     new_bps: u64,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     execute_move_call(
         client,
         signer,
@@ -104,9 +88,9 @@ pub async fn set_fee_bps(
         "set_fee_bps",
         vec![],
         vec![
-            SuiJsonValue::from_object_id(admin_cap),
-            SuiJsonValue::from_object_id(protocol_config),
-            SuiJsonValue::new(serde_json::Value::String(new_bps.to_string()))?,
+            CallArg::Object(admin_cap, false),
+            CallArg::Object(protocol_config, true),
+            CallArg::Pure(bcs::to_bytes(&new_bps)?),
         ],
         gas_budget,
     )
@@ -116,7 +100,7 @@ pub async fn set_fee_bps(
 /// Calls `treasury::withdraw<T>(&AdminCap, &mut Treasury, amount, recipient,
 /// ctx)`.
 pub async fn withdraw_treasury(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     package: ObjectID,
     admin_cap: ObjectID,
@@ -125,7 +109,7 @@ pub async fn withdraw_treasury(
     amount: u64,
     recipient: SuiAddress,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     execute_move_call(
         client,
         signer,
@@ -134,10 +118,10 @@ pub async fn withdraw_treasury(
         "withdraw",
         vec![asset_type],
         vec![
-            SuiJsonValue::from_object_id(admin_cap),
-            SuiJsonValue::from_object_id(treasury),
-            SuiJsonValue::new(serde_json::Value::String(amount.to_string()))?,
-            SuiJsonValue::new(serde_json::Value::String(recipient.to_string()))?,
+            CallArg::Object(admin_cap, false),
+            CallArg::Object(treasury, true),
+            CallArg::Pure(bcs::to_bytes(&amount)?),
+            CallArg::Pure(bcs::to_bytes(&recipient)?),
         ],
         gas_budget,
     )

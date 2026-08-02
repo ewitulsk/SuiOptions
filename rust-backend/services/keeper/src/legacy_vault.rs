@@ -304,6 +304,7 @@ async fn tick_vault(
     let (auctions, swap_auctions) = if view.open_rfqs > 0 || view.open_swap_rfqs > 0 {
         discover_open_auctions(
             &wrap.client,
+            &wrap.events,
             ids.auction_package,
             meta.vault_id,
             &meta.underlying_type,

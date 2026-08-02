@@ -37,7 +37,6 @@ use anyhow::Result;
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
 use serde::Deserialize;
-use sui_sdk::rpc_types::SuiObjectDataOptions;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use tracing::{info, warn};
@@ -165,13 +164,14 @@ async fn is_call_bucket(
     let Ok(oid) = ObjectID::from_hex_literal(&bucket_id.to_hex()) else { return false };
     let is_call = wrap
         .client
-        .read_api()
-        .get_object_with_options(oid, SuiObjectDataOptions::new().with_type())
+        .get_object(oid)
         .await
         .ok()
-        .and_then(|r| r.data)
-        .and_then(|d| d.type_)
-        .map(|t| t.to_string().contains("::bucket::Bucket<"))
+        .and_then(|o| o.struct_tag())
+        .map(|t| {
+            t.to_canonical_string(/* with_prefix */ true)
+                .contains("::bucket::Bucket<")
+        })
         .unwrap_or(false);
     cache.insert(bucket_id.clone(), is_call);
     is_call
@@ -323,47 +323,39 @@ async fn create_call_auction(
 /// from the old sim).
 async fn redeem_pass(p: &SimParams, wrap: &SuiClientWrapper) -> Result<()> {
     let position_type = format!("{}::position::Position", p.core_package);
-    let filter = sui_sdk::rpc_types::SuiObjectResponseQuery::new(
-        Some(sui_sdk::rpc_types::SuiObjectDataFilter::StructType(
-            sui_types::parse_sui_struct_tag(&position_type)?,
-        )),
-        Some(SuiObjectDataOptions::new().with_content().with_type()),
-    );
-    let page = wrap
+    let positions = wrap
         .client
-        .read_api()
-        .get_owned_objects(wrap.signer.address, Some(filter), None, Some(25))
+        .owned_objects_of_type(
+            wrap.signer.address,
+            sui_types::parse_sui_struct_tag(&position_type)?,
+            25,
+        )
         .await?;
     let now = now_ms();
-    for obj in page.data {
-        let Some(d) = obj.data else { continue };
-        let Some(content) = d.content else { continue };
-        let json = serde_json::to_value(&content).unwrap_or_default();
-        let Some(bucket_hex) = json.pointer("/fields/bucket_id").and_then(|v| v.as_str()) else {
+    for obj in positions {
+        // The owned-object listing carries BCS only; one read per position
+        // gets the JSON rendering the bucket link is read from.
+        let Ok((_, Some(json))) = wrap.client.get_object_json(obj.id()).await else {
+            continue;
+        };
+        let Some(bucket_hex) = json.pointer("/bucket_id").and_then(|v| v.as_str()) else {
             continue;
         };
         let Ok(bucket_oid) = ObjectID::from_hex_literal(bucket_hex) else { continue };
         // Only call buckets: puts are never self-written by the sim.
-        let bucket = wrap
-            .client
-            .read_api()
-            .get_object_with_options(
-                bucket_oid,
-                SuiObjectDataOptions::new().with_type().with_content(),
-            )
-            .await
-            .ok()
-            .and_then(|r| r.data);
-        let Some(bd) = bucket else { continue };
-        let ty = bd.type_.map(|t| t.to_string()).unwrap_or_default();
+        let Ok((bucket_obj, bucket_json)) = wrap.client.get_object_json(bucket_oid).await else {
+            continue;
+        };
+        let ty = bucket_obj
+            .struct_tag()
+            .map(|t| t.to_canonical_string(/* with_prefix */ true))
+            .unwrap_or_default();
         if !ty.contains("::bucket::Bucket<") {
             continue;
         }
-        let expiry = bd
-            .content
-            .and_then(|c| serde_json::to_value(&c).ok())
+        let expiry = bucket_json
             .and_then(|j| {
-                j.pointer("/fields/expiry_ms")
+                j.pointer("/expiry_ms")
                     .and_then(|v| v.as_str().map(String::from))
             })
             .and_then(|s| s.parse::<u64>().ok())
@@ -385,7 +377,7 @@ async fn redeem_pass(p: &SimParams, wrap: &SuiClientWrapper) -> Result<()> {
         };
         let mut pt = ProgrammableTransactionBuilder::new();
         let bucket_arg = pt.obj(shared_object_arg(&wrap.client, bucket_oid, true).await?)?;
-        let pos = pt.obj(sui_tx::tx::owned_object_arg(&wrap.client, d.object_id).await?)?;
+        let pos = pt.obj(sui_tx::tx::owned_object_arg(&wrap.client, obj.id()).await?)?;
         let clock = clock_arg(&mut pt)?;
         let out = pt.programmable_move_call(
             p.core_package,
@@ -403,8 +395,8 @@ async fn redeem_pass(p: &SimParams, wrap: &SuiClientWrapper) -> Result<()> {
             sender,
         ));
         match submit_ptb(&wrap.client, &wrap.signer, pt, p.cfg.gas_budget, "sim::redeem").await {
-            Ok(_) => info!(position = %d.object_id, "[sim] redeemed expired position"),
-            Err(e) => warn!(position = %d.object_id, error = %format!("{e:#}"), "[sim] redeem failed"),
+            Ok(_) => info!(position = %obj.id(), "[sim] redeemed expired position"),
+            Err(e) => warn!(position = %obj.id(), error = %format!("{e:#}"), "[sim] redeem failed"),
         }
     }
     Ok(())

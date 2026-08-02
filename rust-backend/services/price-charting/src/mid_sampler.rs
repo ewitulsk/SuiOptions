@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use sui_sdk::SuiClient;
+use sui_tx::chain::ChainClient;
 use sui_types::base_types::{ObjectID, SuiAddress};
 use tracing::{debug, warn};
 
@@ -22,7 +22,7 @@ use crate::state::{AppState, MidMsg, PoolMeta};
 
 pub struct MidSamplerParams {
     pub state: Arc<AppState>,
-    pub sui: SuiClient,
+    pub sui: ChainClient,
     /// DeepBook CURRENT (upgraded) package id — dev-inspect calls target it.
     pub deepbook_package: ObjectID,
     pub sample_interval: Duration,

@@ -20,8 +20,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
-use sui_json_rpc_types::{ObjectChange, SuiObjectDataOptions, SuiTransactionBlockResponseOptions};
-use sui_sdk::{SuiClient, SuiClientBuilder};
+use sui_tx::chain::{created_objects, ChainClient};
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::crypto::SuiKeyPair;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
@@ -106,7 +105,7 @@ struct Ids {
     deposit_faucet: ObjectID,
 }
 
-async fn resolve_ids(client: &SuiClient, cli: &Cli) -> Result<Ids> {
+async fn resolve_ids(client: &ChainClient, cli: &Cli) -> Result<Ids> {
     let deps = deployments::Deployments::load(&cli.deployments)
         .context("loading deployments.json")?;
     let net = deps.for_env(&cli.env)?;
@@ -176,35 +175,14 @@ async fn resolve_ids(client: &SuiClient, cli: &Cli) -> Result<Ids> {
     })
 }
 
-async fn created_map(client: &SuiClient, digest: &str) -> Result<BTreeMap<String, ObjectID>> {
-    use sui_json_rpc_types::SuiTransactionBlockEffectsAPI;
-    let resp = client
-        .read_api()
-        .get_transaction_with_options(
-            digest.parse()?,
-            SuiTransactionBlockResponseOptions::new().with_effects(),
-        )
-        .await?;
-    let ids: Vec<ObjectID> = resp
-        .effects
-        .as_ref()
-        .map(|e| e.created().iter().map(|c| c.reference.object_id).collect())
-        .unwrap_or_default();
-    let objs = client
-        .read_api()
-        .multi_get_object_with_options(ids, SuiObjectDataOptions::new().with_type())
-        .await?;
+async fn created_map(client: &ChainClient, digest: &str) -> Result<BTreeMap<String, ObjectID>> {
+    let resp = client.get_transaction(&digest.parse()?).await?;
+    let ids: Vec<ObjectID> = created_objects(&resp).iter().map(|c| c.object_id).collect();
+    let objs = client.multi_get_objects(&ids).await?;
     let mut out = BTreeMap::new();
     for o in objs {
-        if let Some(d) = o.data {
-            if let Some(t) = d.type_ {
-                let full = t.to_string();
-                if let Some((_, tail)) = full.rsplit_once("::").and_then(|(head, name)| {
-                    head.rsplit_once("::").map(|(_, module)| ((), format!("{module}::{name}")))
-                }) {
-                    out.insert(tail, d.object_id);
-                }
-            }
+        if let Some(t) = o.struct_tag() {
+            out.insert(format!("{}::{}", t.module, t.name), o.id());
         }
     }
     Ok(out)
@@ -287,7 +265,7 @@ impl Step {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info,sui_tx=warn").init();
     let cli = Cli::parse();
-    let client = SuiClientBuilder::default().build(&cli.rpc).await?;
+    let client = ChainClient::new(&cli.rpc)?;
     let signer = load_signer(&cli.address)?;
     let ids = resolve_ids(&client, &cli).await?;
     println!("trading-vault smoke — signer {}, env {}", signer.address, cli.env);
@@ -312,13 +290,12 @@ async fn main() -> Result<()> {
     );
     let resp = submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::create_vault").await?;
     let (mut vault_id, mut cap_id) = (None, None);
-    for c in resp.object_changes.iter().flatten() {
-        if let ObjectChange::Created { object_id, object_type, .. } = c {
-            match object_type.name.as_str() {
-                "TradingVault" => vault_id = Some(*object_id),
-                "CuratorCap" => cap_id = Some(*object_id),
-                _ => {}
-            }
+    for c in created_objects(&resp) {
+        let Ok(tag) = sui_types::parse_sui_struct_tag(&c.object_type) else { continue };
+        match tag.name.as_str() {
+            "TradingVault" => vault_id = Some(c.object_id),
+            "CuratorCap" => cap_id = Some(c.object_id),
+            _ => {}
         }
     }
     let vault_id = vault_id.ok_or_else(|| anyhow!("vault not created"))?;
@@ -399,17 +376,11 @@ async fn main() -> Result<()> {
             vec![vault_arg, cap, ireg],
         );
         let resp = submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::init_custody").await?;
-        let custody_id = resp
-            .object_changes
-            .iter()
-            .flatten()
-            .find_map(|c| match c {
-                ObjectChange::Created { object_id, object_type, .. }
-                    if object_type.name.as_str() == "DeepBookCustody" =>
-                {
-                    Some(*object_id)
-                }
-                _ => None,
+        let custody_id = created_objects(&resp)
+            .into_iter()
+            .find_map(|c| {
+                let tag = sui_types::parse_sui_struct_tag(&c.object_type).ok()?;
+                (tag.name.as_str() == "DeepBookCustody").then_some(c.object_id)
             })
             .ok_or_else(|| anyhow!("custody not created"))?;
 
@@ -439,18 +410,10 @@ async fn main() -> Result<()> {
 
         // Pick an allowlisted pool quoted in the deposit asset.
         let step = Step("place resting bid through wrapped BM");
-        let allow = client
-            .read_api()
-            .get_object_with_options(
-                ids.pool_allowlist_id,
-                SuiObjectDataOptions::new().with_content(),
-            )
-            .await?;
-        let allow_json = serde_json::to_value(
-            allow.data.and_then(|d| d.content).ok_or_else(|| anyhow!("allowlist unreadable"))?,
-        )?;
+        let (_, allow_json) = client.get_object_json(ids.pool_allowlist_id).await?;
+        let allow_json = allow_json.ok_or_else(|| anyhow!("allowlist unreadable"))?;
         let pool_ids: Vec<String> = allow_json
-            .pointer("/fields/allowed/fields/contents")
+            .pointer("/allowed/contents")
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|e| e.as_str().map(String::from)).collect())
             .unwrap_or_default();
@@ -466,12 +429,10 @@ async fn main() -> Result<()> {
         for pid_str in &pool_ids {
             let pid = ObjectID::from_hex_literal(pid_str)?;
             let t = client
-                .read_api()
-                .get_object_with_options(pid, SuiObjectDataOptions::new().with_type())
+                .get_object(pid)
                 .await?
-                .data
-                .and_then(|d| d.type_)
-                .map(|t| t.to_string())
+                .struct_tag()
+                .map(|t| t.to_canonical_string(/* with_prefix */ true))
                 .unwrap_or_default();
             if let Some((_, inner)) = t.split_once('<') {
                 let inner = inner.trim_end_matches('>');
@@ -914,27 +875,33 @@ struct PriceInfoTable {
     identifier_type: move_core_types::language_storage::TypeTag,
 }
 
-async fn resolve_price_info_table(client: &SuiClient, pyth_state_id: ObjectID) -> Result<PriceInfoTable> {
-    use sui_types::dynamic_field::DynamicFieldName;
-    let resp = client
-        .read_api()
-        .get_dynamic_field_object(
-            pyth_state_id,
-            DynamicFieldName {
-                type_: TypeTag::from_str("vector<u8>").expect("static type tag"),
-                value: serde_json::json!("price_info"),
-            },
-        )
+async fn resolve_price_info_table(client: &ChainClient, pyth_state_id: ObjectID) -> Result<PriceInfoTable> {
+    // Derive the field id client-side — some providers don't serve a
+    // dynamic-field index (same approach as keeper/src/discovery.rs).
+    let key_bytes = bcs::to_bytes(b"price_info".to_vec().as_slice())
+        .context("bcs of the price_info field name")?;
+    let field_id = sui_types::dynamic_field::derive_dynamic_field_id(
+        pyth_state_id,
+        &TypeTag::from_str("vector<u8>").expect("static type tag"),
+        &key_bytes,
+    )
+    .context("deriving pyth price_info field id")?;
+    let (_, field_json) = client
+        .get_object_json(field_id)
         .await
         .context("reading pyth state price_info dynamic field")?;
-    let data = resp
-        .data
-        .ok_or_else(|| anyhow!("pyth state {pyth_state_id} has no price_info table"))?;
-    let table_id = data.object_id;
-    let type_str = data
-        .type_
+    let table_id: ObjectID = field_json
         .as_ref()
-        .map(|t| t.to_string())
+        .and_then(|j| j.pointer("/value/id").or_else(|| j.pointer("/value")))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("pyth state {pyth_state_id} has no price_info table"))?
+        .parse()
+        .context("parsing price_info table id")?;
+    let type_str = client
+        .get_object(table_id)
+        .await?
+        .struct_tag()
+        .map(|t| t.to_canonical_string(/* with_prefix */ true))
         .ok_or_else(|| anyhow!("price_info table response missing type"))?;
     let key = type_str
         .split('<')
@@ -947,30 +914,23 @@ async fn resolve_price_info_table(client: &SuiClient, pyth_state_id: ObjectID) -
 }
 
 async fn price_info_object_for(
-    client: &SuiClient,
+    client: &ChainClient,
     table: &PriceInfoTable,
     feed: protocol_types::PriceFeedId,
 ) -> Result<ObjectID> {
-    use sui_types::dynamic_field::DynamicFieldName;
-    let resp = client
-        .read_api()
-        .get_dynamic_field_object(
-            table.table_id,
-            DynamicFieldName {
-                type_: table.identifier_type.clone(),
-                value: serde_json::json!({ "bytes": feed.0.to_vec() }),
-            },
-        )
+    let key_bytes = bcs::to_bytes(&feed.0.to_vec()).context("bcs of feed id")?;
+    let field_id = sui_types::dynamic_field::derive_dynamic_field_id(
+        table.table_id,
+        &table.identifier_type,
+        &key_bytes,
+    )
+    .context("deriving price info field id")?;
+    let fields = client
+        .try_get_object_json(field_id)
         .await
-        .with_context(|| format!("looking up price info object for feed {feed}"))?;
-    let data = resp
-        .data
+        .with_context(|| format!("looking up price info object for feed {feed}"))?
+        .and_then(|(_, json)| json)
         .ok_or_else(|| anyhow!("feed {feed} has no PriceInfoObject on this network"))?;
-    let content = data.content.ok_or_else(|| anyhow!("price info field missing content"))?;
-    let fields = match content {
-        sui_json_rpc_types::SuiParsedData::MoveObject(obj) => obj.fields.to_json_value(),
-        other => bail!("price info field: unexpected content {other:?}"),
-    };
     let id = fields
         .get("value")
         .and_then(|v| v.as_str())
@@ -981,7 +941,7 @@ async fn price_info_object_for(
 /// Compose the appraisal with real Pyth legs (when any are needed) and the
 /// option-coin bucket map — the full production shape.
 async fn compose_with_legs(
-    client: &SuiClient,
+    client: &ChainClient,
     http: &reqwest::Client,
     pt: &mut ProgrammableTransactionBuilder,
     refs: &AppraisalRefs,
@@ -1037,7 +997,7 @@ async fn compose_with_legs(
 
 /// Dev-inspect `adapter::custody_balance<T>` for the wrapped manager.
 async fn custody_coin_balance(
-    client: &SuiClient,
+    client: &ChainClient,
     sender: SuiAddress,
     trading_vault_pkg: ObjectID,
     adapter_pkg: ObjectID,
@@ -1066,38 +1026,18 @@ async fn custody_coin_balance(
         vec![custody],
     );
     let res = client
-        .read_api()
-        .dev_inspect_transaction_block(
-            sender,
-            TransactionKind::ProgrammableTransaction(pt.finish()),
-            None,
-            None,
-            None,
-        )
+        .dev_inspect_ptb(sender, pt)
         .await
         .context("dev-inspecting custody_balance")?;
-    if let Some(err) = res.error {
-        bail!("custody_balance dev-inspect failed: {err}");
-    }
-    let results = res.results.unwrap_or_default();
-    let (bytes, _) = results
-        .last()
-        .and_then(|r| r.return_values.first())
-        .ok_or_else(|| anyhow!("custody_balance returned nothing"))?;
-    Ok(u64::from_le_bytes(bytes.as_slice().try_into().context("u64 return")?))
+    sui_tx::chain::decode_return_value::<u64>(&res, 0).context("decoding custody_balance")
 }
 
 /// The vault's `total_shares` (this smoke's wallet is the sole staker).
-async fn read_total_shares(client: &SuiClient, vault_id: ObjectID) -> Result<u128> {
-    let resp = client
-        .read_api()
-        .get_object_with_options(vault_id, SuiObjectDataOptions::new().with_content())
-        .await?;
-    let json = serde_json::to_value(
-        resp.data.and_then(|d| d.content).ok_or_else(|| anyhow!("vault unreadable"))?,
-    )?;
+async fn read_total_shares(client: &ChainClient, vault_id: ObjectID) -> Result<u128> {
+    let (_, json) = client.get_object_json(vault_id).await?;
+    let json = json.ok_or_else(|| anyhow!("vault unreadable"))?;
     let raw = json
-        .pointer("/fields/total_shares")
+        .pointer("/total_shares")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("vault has no total_shares field"))?;
     raw.parse().context("parsing total_shares")

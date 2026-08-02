@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use sui_sdk::SuiClient;
+use sui_tx::chain::ChainClient;
 use sui_types::base_types::ObjectID;
 
 use protocol_types::asset::canonicalize_move_type;
@@ -37,7 +37,7 @@ pub trait LiquiditySource: Send + Sync {
     /// now-available wallet balance.
     async fn ensure_wallet_balance(
         &self,
-        client: &SuiClient,
+        client: &ChainClient,
         signer: &Signer,
         coin_type: &str,
         target: u64,
@@ -50,7 +50,7 @@ pub trait LiquiditySource: Send + Sync {
     /// faucet impl overrides this. Returns whether a deposit happened.
     async fn ensure_account_balance(
         &self,
-        _client: &SuiClient,
+        _client: &ChainClient,
         _signer: &Signer,
         _account_id: ObjectID,
         _coin_type: &str,
@@ -99,12 +99,14 @@ impl FaucetLiquiditySource {
 
 /// Current wallet balance of `coin_type`, clamped to `u64`. `0` on RPC error
 /// (the caller's downstream sizing already tolerates an under-read).
-async fn wallet_balance(client: &SuiClient, signer: &Signer, coin_type: &str) -> u64 {
+async fn wallet_balance(client: &ChainClient, signer: &Signer, coin_type: &str) -> u64 {
+    let Ok(tag) = sui_types::parse_sui_struct_tag(coin_type) else {
+        return 0;
+    };
     client
-        .coin_read_api()
-        .get_balance(signer.address, Some(coin_type.to_string()))
+        .balance(signer.address, &tag)
         .await
-        .map(|bal| bal.total_balance.min(u64::MAX as u128) as u64)
+        .map(|bal| bal.min(u64::MAX as u128) as u64)
         .unwrap_or(0)
 }
 
@@ -112,7 +114,7 @@ async fn wallet_balance(client: &SuiClient, signer: &Signer, coin_type: &str) ->
 impl LiquiditySource for FaucetLiquiditySource {
     async fn ensure_wallet_balance(
         &self,
-        client: &SuiClient,
+        client: &ChainClient,
         signer: &Signer,
         coin_type: &str,
         target: u64,
@@ -141,7 +143,7 @@ impl LiquiditySource for FaucetLiquiditySource {
         };
         match mint_to_sender(client, signer, tokens_pkg, &module, faucet_id, shortfall, self.gas_budget).await {
             Ok(resp) => {
-                tracing::info!(coin_type, shortfall, digest = %resp.digest, "liquidity: minted wallet top-up");
+                tracing::info!(coin_type, shortfall, digest = %sui_tx::tx::tx_digest(&resp), "liquidity: minted wallet top-up");
                 wallet_balance(client, signer, coin_type).await
             }
             // A wedged faucet must not kill the quote cycle: log and proceed
@@ -155,7 +157,7 @@ impl LiquiditySource for FaucetLiquiditySource {
 
     async fn ensure_account_balance(
         &self,
-        client: &SuiClient,
+        client: &ChainClient,
         signer: &Signer,
         account_id: ObjectID,
         coin_type: &str,
@@ -193,7 +195,7 @@ impl LiquiditySource for FaucetLiquiditySource {
         .await
         {
             Ok(resp) => {
-                tracing::info!(coin_type, amount, digest = %resp.digest, "liquidity: minted account top-up");
+                tracing::info!(coin_type, amount, digest = %sui_tx::tx::tx_digest(&resp), "liquidity: minted account top-up");
                 true
             }
             Err(e) => {

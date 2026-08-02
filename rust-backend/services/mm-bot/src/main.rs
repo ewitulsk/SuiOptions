@@ -1187,7 +1187,7 @@ async fn resolve_signer(
     // QuoteSigner under the current package, adopt it; otherwise bootstrap a
     // fresh one.
     if let Some(signer_id) =
-        find_signer(&wrap.client, package, wrap.signer.address, signer.scheme(), pubkey_bytes)
+        find_signer(&wrap.events, package, wrap.signer.address, signer.scheme(), pubkey_bytes)
             .await?
     {
         tracing::info!(%signer_id, "adopted existing on-chain quote signer for this deployment");
@@ -1226,7 +1226,7 @@ async fn resolve_signer(
     )
     .await?;
     tracing::info!(
-        digest = %fund_resp.digest,
+        digest = %sui_tx::tx::tx_digest(&fund_resp),
         amount = cfg.bootstrap_settlement_amount,
         symbol = %cfg.settlement_symbol,
         "collateral account funded (settlement)"
@@ -1250,7 +1250,7 @@ async fn resolve_signer(
         )
         .await?;
         tracing::info!(
-            digest = %fund_resp.digest,
+            digest = %sui_tx::tx::tx_digest(&fund_resp),
             amount = cfg.bootstrap_underlying_amount,
             symbol = %sym,
             "collateral account funded (underlying)"

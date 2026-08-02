@@ -23,7 +23,6 @@ token-info-client = { workspace = true }
 option-scheduler = { path = "../../services/option-scheduler" }
 
 sui-types = { workspace = true }
-sui-json-rpc-types = { workspace = true }
 
 tokio = { workspace = true }
 

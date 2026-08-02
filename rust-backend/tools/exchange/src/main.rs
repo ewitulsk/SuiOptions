@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
                 cli.gas_budget,
             )
             .await?;
-            println!("✓ mint {amount} {token} digest: {}", resp.digest);
+            println!("✓ mint {amount} {token} digest: {}", sui_tx::tx::tx_digest(&resp));
         }
         Command::FundAccount {
             account,
@@ -172,7 +172,7 @@ async fn main() -> Result<()> {
             .await?;
             println!(
                 "✓ fund-account {account} {amount} {token} digest: {}",
-                resp.digest
+                sui_tx::tx::tx_digest(&resp)
             );
         }
         Command::SetFee { bps } => {
@@ -186,7 +186,7 @@ async fn main() -> Result<()> {
                 cli.gas_budget,
             )
             .await?;
-            println!("✓ set-fee {bps} bps digest: {}", resp.digest);
+            println!("✓ set-fee {bps} bps digest: {}", sui_tx::tx::tx_digest(&resp));
         }
         Command::WithdrawTreasury {
             token,
@@ -207,7 +207,7 @@ async fn main() -> Result<()> {
                 cli.gas_budget,
             )
             .await?;
-            println!("✓ withdraw-treasury digest: {}", resp.digest);
+            println!("✓ withdraw-treasury digest: {}", sui_tx::tx::tx_digest(&resp));
         }
         Command::Info => {
             let protocol_id_bytes = snapshot.protocol_id_bytes()?;

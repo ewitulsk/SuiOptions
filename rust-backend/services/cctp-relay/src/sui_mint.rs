@@ -6,7 +6,7 @@
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use sui_sdk::SuiClient;
+use sui_tx::chain::ChainClient;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{Argument, Command, ProgrammableMoveCall};
@@ -18,7 +18,7 @@ use sui_tx::tx::{shared_object_arg, submit_ptb};
 use crate::config::SuiConfig;
 
 pub struct SuiMinter {
-    pub client: SuiClient,
+    pub client: ChainClient,
     pub signer: Signer,
     pub cfg: SuiConfig,
 }
@@ -126,22 +126,17 @@ impl SuiMinter {
             "cctp-receive",
         )
         .await?;
-        Ok(resp.digest.to_string())
+        Ok(sui_tx::tx::tx_digest(&resp).to_string())
     }
 
     /// On-chain timestamp of a Sui tx (ms since epoch), if finalized.
     pub async fn tx_timestamp_ms(&self, digest: &str) -> Result<Option<u64>> {
-        use sui_json_rpc_types::SuiTransactionBlockResponseOptions;
         use sui_types::digests::TransactionDigest;
         let digest = TransactionDigest::from_str(digest).context("bad tx digest")?;
-        let resp = self
-            .client
-            .read_api()
-            .get_transaction_with_options(digest, SuiTransactionBlockResponseOptions::new())
-            .await;
-        match resp {
-            Ok(r) => Ok(r.timestamp_ms),
-            Err(_) => Ok(None),
+        // Not-yet-indexed is a `None`, not an error — the caller polls.
+        match self.client.try_get_transaction(&digest).await {
+            Ok(Some(tx)) => Ok(tx.timestamp_ms()),
+            Ok(None) | Err(_) => Ok(None),
         }
     }
 }

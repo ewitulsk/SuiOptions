@@ -23,12 +23,12 @@ use std::collections::BTreeMap;
 
 use anyhow::{anyhow, Result};
 use move_core_types::identifier::Identifier;
-use sui_sdk::SuiClient;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::Argument;
 
 use crate::tx::{clock_arg, shared_object_arg};
+use crate::chain::ChainClient;
 
 /// Largest `run_N` arity the Switchboard package exposes.
 pub const MAX_ORACLES: usize = 6;
@@ -129,7 +129,7 @@ pub struct SwitchboardLegs<'a> {
 /// Emit the quote-submit call, returning the `Quotes` value every
 /// `attest` in this PTB will read from.
 pub async fn prepare(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     legs: &SwitchboardLegs<'_>,
 ) -> Result<Argument> {

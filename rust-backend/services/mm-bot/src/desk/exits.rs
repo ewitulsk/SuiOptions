@@ -290,13 +290,15 @@ async fn tick(p: &ExitsParams, wrap: &SuiClientWrapper) -> Result<()> {
             }
             _ => None,
         };
-        let wallet_cash = wrap
-            .client
-            .coin_read_api()
-            .get_balance(wrap.signer.address, Some(p.settlement_coin_type.clone()))
-            .await
-            .map(|b| u64::try_from(b.total_balance).unwrap_or(u64::MAX))
-            .unwrap_or(0);
+        let wallet_cash = match sui_types::parse_sui_struct_tag(&p.settlement_coin_type) {
+            Ok(tag) => wrap
+                .client
+                .balance(wrap.signer.address, &tag)
+                .await
+                .map(|b| u64::try_from(b).unwrap_or(u64::MAX))
+                .unwrap_or(0),
+            Err(_) => 0,
+        };
         let cost_wallet = strike_cost(h.amount_wallet, h.strike, h.strike_scale);
         let action = decide_exit(
             &p.cfg,
@@ -437,7 +439,7 @@ async fn offset_close(
         position = %w.position_id.to_hex(),
         coin_position = %cp.position_id.to_hex(),
         amount,
-        digest = %resp.digest,
+        digest = %sui_tx::tx::tx_digest(&resp),
         "offset-closed written position against held coins (collateral → vault)"
     );
     Ok(())
@@ -501,7 +503,7 @@ async fn vault_resell(
         amount,
         min_out,
         released_positions = h.coin_positions.len(),
-        digest = %resp.digest,
+        digest = %sui_tx::tx::tx_digest(&resp),
         "resold vault-held option coins into pool bid (proceeds stay in vault)"
     );
     Ok(())
@@ -578,7 +580,7 @@ async fn vault_exercise(
         amount = total,
         positions = batch.len(),
         cost = free_settlement - budget,
-        digest = %resp.digest,
+        digest = %sui_tx::tx::tx_digest(&resp),
         "exercised vault-custody coins with vault cash (underlying → vault balances)"
     );
     Ok(())
@@ -612,7 +614,7 @@ async fn resell(p: &ExitsParams, wrap: &SuiClientWrapper, h: &Holding, bid_per_u
         bucket = %h.bucket_id.to_hex(),
         amount = h.amount_wallet,
         min_out,
-        digest = %resp.digest,
+        digest = %sui_tx::tx::tx_digest(&resp),
         "resold option coins into pool bid (proceeds → vault)"
     );
     Ok(())
@@ -660,7 +662,7 @@ async fn exercise_cash(p: &ExitsParams, wrap: &SuiClientWrapper, h: &Holding, am
         bucket = %h.bucket_id.to_hex(),
         amount,
         cost,
-        digest = %resp.digest,
+        digest = %sui_tx::tx::tx_digest(&resp),
         "exercised with wallet cash (underlying → vault)"
     );
     Ok(())
@@ -707,7 +709,7 @@ async fn flash_exercise(p: &ExitsParams, wrap: &SuiClientWrapper, h: &Holding, _
             bucket = %h.bucket_id.to_hex(),
             slice,
             cost,
-            digest = %resp.digest,
+            digest = %sui_tx::tx::tx_digest(&resp),
             "flash-exercised (net proceeds → vault)"
         );
         remaining -= slice;

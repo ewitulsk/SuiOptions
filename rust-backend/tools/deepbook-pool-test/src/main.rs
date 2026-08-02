@@ -26,11 +26,7 @@ use clap::{Parser, Subcommand};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
 use shared_crypto::intent::Intent;
-use sui_json_rpc_types::{
-    ObjectChange, SuiObjectDataOptions, SuiTransactionBlockEffectsAPI,
-    SuiTransactionBlockResponse, SuiTransactionBlockResponseOptions,
-};
-use sui_sdk::SuiClient;
+use sui_tx::chain::{created_objects, ChainClient, ExecutedTransaction};
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{
@@ -150,7 +146,7 @@ async fn main() -> Result<()> {
 }
 
 /// Print readiness; returns true if the wallet can pay the creation fee.
-async fn status(client: &SuiClient, addr: SuiAddress) -> Result<bool> {
+async fn status(client: &ChainClient, addr: SuiAddress) -> Result<bool> {
     let sui = balance(client, addr, SUI_TYPE).await?;
     let deep = balance(client, addr, DEEP_TYPE).await?;
     let tbtc = balance(client, addr, TBTC_TYPE).await?;
@@ -176,17 +172,17 @@ async fn status(client: &SuiClient, addr: SuiAddress) -> Result<bool> {
 }
 
 /// Total balance of `coin_type` held by `addr`, in smallest units.
-async fn balance(client: &SuiClient, addr: SuiAddress, coin_type: &str) -> Result<u128> {
-    let b = client
-        .coin_read_api()
-        .get_balance(addr, Some(coin_type.to_string()))
+async fn balance(client: &ChainClient, addr: SuiAddress, coin_type: &str) -> Result<u128> {
+    let tag = sui_types::parse_sui_struct_tag(coin_type)
+        .map_err(|e| anyhow!("parsing coin type {coin_type}: {e}"))?;
+    client
+        .balance(addr, &tag)
         .await
-        .with_context(|| format!("reading {coin_type} balance"))?;
-    Ok(b.total_balance)
+        .with_context(|| format!("reading {coin_type} balance"))
 }
 
 /// Create the pool, then read it back to confirm.
-async fn create_and_verify(client: &SuiClient, signer: &Signer) -> Result<()> {
+async fn create_and_verify(client: &ChainClient, signer: &Signer) -> Result<()> {
     let deep = balance(client, signer.address, DEEP_TYPE).await?;
     if deep < POOL_CREATION_FEE as u128 {
         bail!(
@@ -199,11 +195,10 @@ async fn create_and_verify(client: &SuiClient, signer: &Signer) -> Result<()> {
 
     println!("creating Pool<TBTC, TUSDC> (tick={TICK_SIZE} lot={LOT_SIZE} min={MIN_SIZE})...");
     let resp = create_pool(client, signer).await?;
-    let digest = resp.digest;
-    let pool_id = resp
-        .object_changes
-        .as_ref()
-        .and_then(|changes| changes.iter().find_map(pool_id_of))
+    let digest = sui_tx::tx::tx_digest(&resp);
+    let pool_id = created_objects(&resp)
+        .into_iter()
+        .find_map(|c| pool_id_of(&c))
         .ok_or_else(|| anyhow!("tx succeeded but no Pool object found in object changes"))?;
 
     println!("\n✅ pool created");
@@ -218,7 +213,7 @@ async fn create_and_verify(client: &SuiClient, signer: &Signer) -> Result<()> {
 /// Loop: swap testnet SUI for DEEP until we hold `target` DEEP units.
 /// Rate-adaptive — probes with 1 SUI, then sizes the next swap from the
 /// observed DEEP-per-MIST rate. Best-effort: testnet DEEP/SUI depth is thin.
-async fn acquire_deep(client: &SuiClient, signer: &Signer, target: u128) -> Result<()> {
+async fn acquire_deep(client: &ChainClient, signer: &Signer, target: u128) -> Result<()> {
     let addr = signer.address;
     let mut rate: Option<f64> = None; // DEEP units per MIST of SUI
 
@@ -269,7 +264,7 @@ async fn acquire_deep(client: &SuiClient, signer: &Signer, target: u128) -> Resu
 
 /// One SUI->DEEP swap through the whitelisted DEEP/SUI pool.
 /// `swap_exact_quote_for_base<DEEP, SUI>(pool, sui_in, zero_deep, 0, clock)`.
-async fn swap_sui_for_deep(client: &SuiClient, signer: &Signer, sui_in: u64) -> Result<()> {
+async fn swap_sui_for_deep(client: &ChainClient, signer: &Signer, sui_in: u64) -> Result<()> {
     let mut pt = ProgrammableTransactionBuilder::new();
 
     let pool = pt.obj(shared_object_arg(client, oid(DEEP_SUI_POOL)?, true).await?)?;
@@ -320,24 +315,24 @@ async fn swap_sui_for_deep(client: &SuiClient, signer: &Signer, sui_in: u64) -> 
 }
 
 /// Build + submit the create_permissionless_pool<TBTC, TUSDC> PTB.
-async fn create_pool(client: &SuiClient, signer: &Signer) -> Result<SuiTransactionBlockResponse> {
+async fn create_pool(client: &ChainClient, signer: &Signer) -> Result<ExecutedTransaction> {
     let mut pt = ProgrammableTransactionBuilder::new();
 
     let registry = pt.obj(shared_object_arg(client, oid(REGISTRY_ID)?, true).await?)?;
 
     // Gather DEEP coins as owned inputs; merge into one, split out exactly 500.
+    let deep_tag = sui_types::parse_sui_struct_tag(DEEP_TYPE)
+        .map_err(|e| anyhow!("parsing DEEP type: {e}"))?;
     let deep_coins = client
-        .coin_read_api()
-        .get_coins(signer.address, Some(DEEP_TYPE.to_string()), None, Some(50))
+        .coins(signer.address, &deep_tag)
         .await
-        .context("listing DEEP coins")?
-        .data;
+        .context("listing DEEP coins")?;
     if deep_coins.is_empty() {
         bail!("no DEEP coins owned");
     }
     let mut deep_args = Vec::with_capacity(deep_coins.len());
     for c in &deep_coins {
-        deep_args.push(pt.obj(ObjectArg::ImmOrOwnedObject(c.object_ref()))?);
+        deep_args.push(pt.obj(ObjectArg::ImmOrOwnedObject(c.object_ref))?);
     }
     let primary = deep_args[0];
     if deep_args.len() > 1 {
@@ -367,22 +362,14 @@ async fn create_pool(client: &SuiClient, signer: &Signer) -> Result<SuiTransacti
 }
 
 /// Read back a pool object and print its type + key fields.
-async fn verify_pool(client: &SuiClient, pool_id: ObjectID) -> Result<()> {
-    let resp = client
-        .read_api()
-        .get_object_with_options(
-            pool_id,
-            SuiObjectDataOptions::new().with_type().with_content(),
-        )
+async fn verify_pool(client: &ChainClient, pool_id: ObjectID) -> Result<()> {
+    let object = client
+        .get_object(pool_id)
         .await
         .context("reading pool object")?;
-    let data = resp
-        .data
-        .ok_or_else(|| anyhow!("pool object {pool_id} not found"))?;
-    let ty = data
-        .type_
-        .as_ref()
-        .map(|t| t.to_string())
+    let ty = object
+        .struct_tag()
+        .map(|t| t.to_canonical_string(/* with_prefix */ true))
         .unwrap_or_default();
     if !ty.contains("::pool::Pool<") {
         bail!("object {pool_id} is not a DeepBook Pool (type: {ty})");
@@ -394,24 +381,22 @@ async fn verify_pool(client: &SuiClient, pool_id: ObjectID) -> Result<()> {
 
 /// Gas-select (all SUI coins), dry-run, then sign + submit. Bails on revert.
 async fn sign_submit(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     pt: ProgrammableTransactionBuilder,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     let programmable = pt.finish();
 
     let sui_coins = client
-        .coin_read_api()
-        .get_coins(signer.address, None, None, Some(50))
+        .coins(signer.address, &sui_tx::chain::sui_coin_type())
         .await
-        .context("listing gas coins")?
-        .data;
+        .context("listing gas coins")?;
     if sui_coins.is_empty() {
         bail!("no SUI coins to pay gas for {}", signer.address);
     }
-    let gas_refs: Vec<_> = sui_coins.iter().map(|c| c.object_ref()).collect();
-    let gas_price = client.read_api().get_reference_gas_price().await?;
+    let gas_refs: Vec<_> = sui_coins.iter().map(|c| c.object_ref).collect();
+    let gas_price = client.reference_gas_price().await?;
 
     let tx_data = TransactionData::new_programmable(
         signer.address,
@@ -422,13 +407,13 @@ async fn sign_submit(
     );
 
     // Dry-run first so bad assumptions fail without spending.
-    let dry = client
-        .read_api()
-        .dry_run_transaction_block(tx_data.clone())
-        .await
-        .context("dry-run")?;
-    if dry.effects.status().is_err() {
-        bail!("dry-run reverted: {:?}", dry.effects.status());
+    let dry = client.dry_run(&tx_data).await.context("dry-run")?;
+    {
+        use sui_types::effects::TransactionEffectsAPI;
+        let status = dry.transaction.effects.status();
+        if status.is_err() {
+            bail!("dry-run reverted: {status:?}");
+        }
     }
 
     let sig = Transaction::signature_from_signer(
@@ -437,38 +422,16 @@ async fn sign_submit(
         &signer.keypair,
     );
     let tx = Transaction::from_data(tx_data, vec![sig]);
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
-    let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
-        .await
-        .context("submitting tx")?;
-    let effects = resp.effects.as_ref().context("response missing effects")?;
-    if effects.status().is_err() {
-        bail!("tx reverted: {:?}", effects.status());
-    }
+    let resp = client.execute(&tx).await.context("submitting tx")?;
+    sui_tx::tx::assert_success(&resp, "tx")?;
     Ok(resp)
 }
 
 /// Pull the created DeepBook `Pool<...>` object id out of an object change.
-fn pool_id_of(c: &ObjectChange) -> Option<ObjectID> {
-    if let ObjectChange::Created {
-        object_type,
-        object_id,
-        ..
-    } = c
-    {
-        if object_type.to_string().contains("::pool::Pool<") {
-            return Some(*object_id);
-        }
-    }
-    None
+fn pool_id_of(c: &sui_tx::chain::ChangedObject) -> Option<ObjectID> {
+    c.object_type
+        .contains("::pool::Pool<")
+        .then_some(c.object_id)
 }
 
 /// `Argument::Result(i)` -> `Argument::NestedResult(i, j)`, for indexing

@@ -8,10 +8,12 @@ This is not a future problem for us:
 > for every JSON-RPC method.** Mainnet and devnet public fullnodes still
 > answer, but testnet — the network our staging *and* prod run against — is
 > already dark. Anything still speaking JSON-RPC to the public testnet
-> fullnode is broken today; the Rust services only keep working where the
-> `[sui] rpc_url` secrets override points at a third-party provider that
-> still serves JSON-RPC (see `secrets.example.toml`). That is a stay of
-> execution, not a fix.
+> fullnode is broken today.
+>
+> **Resolved as of SO-336**: the whole workspace speaks gRPC/GraphQL and no
+> longer depends on a third-party JSON-RPC provider. The sections below are
+> kept as the porting reference — the rendering and pagination differences
+> still bite anyone touching a chain read.
 
 The replacements:
 
@@ -44,7 +46,7 @@ replay an old cursor against the new APIs.
 
 ## Inventory and status
 
-### ✅ Migrated (this change)
+### ✅ Migrated (phase 1–2, PR #283): frontend, api-service, CI checkpoint
 
 **Frontend (`frontend/`)** — all chain traffic now goes through
 `src/lib/suiGrpc.ts` (per-network `SuiGrpcClient` from `@mysten/sui/grpc`,
@@ -82,46 +84,96 @@ service that was hand-rolling JSON-RPC over reqwest:
 lookup: raw `curl` `sui_getTransactionBlock` → GraphQL
 `transaction(digest:) { effects { checkpoint { sequenceNumber } } }`.
 
-### ⏳ Remaining (phase 3): `sui-tx` and the Rust services
+### ✅ Migrated (phase 3, SO-336): `sui-tx` and the Rust backend
 
-Everything below still uses the JSON-RPC `sui_sdk::SuiClient` (pinned git
-`framework/mainnet`) and **only works while the third-party `rpc_url`
-override holds**:
+JSON-RPC is now **completely gone from the workspace** — no `sui-sdk`
+client, no `read_api()`/`coin_read_api()`/`event_api()`/`quorum_driver_api()`,
+no `dev_inspect_transaction_block`/`dry_run_transaction_block` anywhere. The
+`sui-sdk` dependency was dropped from every crate that only used it for the
+JSON-RPC client.
 
-| Surface | JSON-RPC usage | Replacement |
-|---|---|---|
-| `crates/sui-tx` (`tx/*.rs`) — the wrapper every service funnels through | `read_api().get_object_with_options`, `coin_read_api()`, `get_reference_gas_price`, `dev_inspect_transaction_block`, `dry_run_transaction_block`, `quorum_driver_api().execute_transaction_block`, `event_api().query_events` | gRPC `LedgerService.GetObject` / `StateService.ListOwnedObjects` / `LedgerService.GetEpoch` (RGP) / `TransactionExecutionService.SimulateTransaction` / `….ExecuteTransaction`; events via GraphQL or checkpoint ingestion |
-| `services/price-charting` (`watcher.rs`) | `query_events` poll loop | GraphQL `events` poll, or reuse the indexer's checkpoint stream |
-| `services/balance-monitor` | `coin_read_api().get_balance` | gRPC `StateService.GetBalance` |
-| `services/cctp-relay` | `get_transaction_with_options` | gRPC `LedgerService.GetTransaction` |
-| `services/keeper` | `get_dynamic_field_object` (only user), `get_object_with_options`, `query_events`, plus a **hardcoded** `https://fullnode.testnet.sui.io:443` in `discovery.rs` | derive the dynamic-field id locally + `GetObject`; kill the hardcoded URL when touched |
-| `services/option-scheduler`, `services/mm-bot`, `services/gas-station` | via `SuiClientWrapper` + assorted reads | falls out of the `sui-tx` migration |
-| `services/indexer` | already checkpoint-ingestion (`sui-data-ingestion-core` — **not** affected by the deactivation); only the boot/tip poll uses `get_latest_checkpoint_sequence_number` | gRPC `LedgerService.GetServiceInfo` (returns checkpoint height) or GraphQL `checkpoint { sequenceNumber }` |
-| `tools/deployment-manager`, `tools/{trader,writer,exchange}`, `tools/deepbook-pool-test`, `crates/move-publish` | publish/execute via `quorum_driver_api`, misc reads | gRPC `ExecuteTransaction` + reads as above |
-| `session-tokens/demo-frontend` | `SuiJsonRpcClient`: `getBalance`, `getCoins`, `signAndExecuteTransaction` | apply the same recipe as `frontend/` (`suiGrpc.ts` pattern); low priority — demo only |
+**The seam** — two new modules in `crates/sui-tx`:
 
-**Recommended path for the Rust backend:** the pinned sui monorepo rev
-already contains the `sui-rpc-api`/`sui-rpc` crates (they're in
-`Cargo.lock` as transitive deps), so the gRPC client can be added *at the
-same pin* — no version bump required:
+- `chain.rs`: `ChainClient`, a gRPC client over `sui_rpc_api::client::Client`.
+  Objects (`get_object`, `get_object_json`, `try_get_*`, `multi_get_objects`),
+  object args (`shared_object_arg`, `owned_object_arg`, `object_arg`), coins
+  and balances, dynamic fields, `dev_inspect`/`dev_inspect_ptb`/`dry_run`
+  (all `SimulateTransaction`), `execute`, `get_transaction`, checkpoint and
+  gas-price reads, plus `created_objects`/`published_package`/
+  `decode_return_value` helpers for reading effects.
+- `events.rs`: `EventClient`, a GraphQL reader. **gRPC has no events query** —
+  this is the one JSON-RPC capability the new API does not replace, so every
+  `query_events` call site went here.
 
-```toml
-# rust-backend/Cargo.toml [workspace.dependencies]
-sui-rpc-api = { git = "https://github.com/mystenlabs/sui", package = "sui-rpc-api", branch = "framework/mainnet" }
-```
+`SuiClientWrapper` now holds `client: ChainClient` + `events: EventClient`.
+Changing that field's type is what made the migration exhaustive: the
+compiler enumerated every call site.
 
-Migrate `SuiClientWrapper` internals method-by-method (it's the choke point —
-services keep their call sites), starting with reads, then
-simulate/dry-run, then execution. `sui-types` stays; the gRPC proto types
-convert to/from `sui-types` at the same rev. Alternatively adopt the
-standalone [sui-rust-sdk](https://github.com/MystenLabs/sui-rust-sdk)
-(`sui-transaction-builder` + gRPC client), but that swaps the whole type
-system and is a much bigger diff.
+`sui-rpc-api` and `sui-rpc` were added at the **existing** `framework/mainnet`
+pin (they were already transitive deps in `Cargo.lock`), so the proto types
+convert to/from `sui-types` for free — no version bump and no type-system
+swap. `tonic 0.14` is pinned in `[workspace.dependencies]` to match the one
+those crates build their `Status` on.
 
-**Interim mitigation (until phase 3 lands):** keep `[sui] rpc_url` in every
-deployed service's secrets pointed at a provider that still serves testnet
-JSON-RPC, and treat any `tx-failed-…` / RPC-connect alert from a service as
-a possible provider shutdown.
+Migrated surfaces: `crates/sui-tx` (all PTB builders), `crates/move-publish`,
+`tools/deployment-manager`, `tools/{trader,writer,exchange,deepbook-pool-test,trading-vault-smoke}`,
+and services `keeper`, `mm-bot`, `option-scheduler`, `market-sim`,
+`price-charting`, `cctp-relay`, `balance-monitor`, `hedge-signer`, `indexer`
+(boot + `/progress` tip poll only — ingestion was always checkpoint-based).
+
+**Publishing** no longer uses the JSON-RPC `transaction_builder().publish(..)`
+helper (it does not exist on the gRPC client). Publishes are assembled
+explicitly: `pt.publish_upgradeable(modules, deps)` + `transfer_arg(sender, cap)`,
+and the resulting package/UpgradeCap are read off `changed_objects`.
+Simple admin Move calls that used `transaction_builder().move_call(..)` with
+`SuiJsonValue` args are likewise explicit PTBs now; `ChainClient::object_arg`
+does the shared-vs-owned resolution that builder did internally.
+
+**Dev-inspect** builds a gas-less `TransactionData` and calls
+`SimulateTransaction` with checks disabled — verified live that a simulation
+with an empty gas payment returns real decoded values.
+
+### Config changes (operator-visible)
+
+- `[sui] rpc_url` → **`[sui] grpc_url`** + **`[sui] graphql_url`**.
+  `Secrets::resolve_rpc_url` → `resolve_grpc_url` / `resolve_graphql_url`.
+  The old `rpc_url` key is still *parsed* (so an un-migrated secrets file
+  loads instead of crash-looping a service) but nothing reads it, and the
+  binaries log a warning when it is present.
+- `options/<env>/sui-rpc` should now hold `{"grpc_url": …, "graphql_url": …}`.
+  `render-secrets.sh` reads those keys.
+- `options/<env>/cctp-relay` takes `grpc_url` (falls back to `rpc_url` for a
+  smooth cutover). Still **required** — SO-320's no-public-fallback rule is
+  unchanged.
+- indexer / price-charting configs: `rpc_url` → `grpc_url` (accepted as a
+  serde alias) plus `graphql_url` for price-charting's event watcher.
+- `deploy --rpc` → `--grpc` (`--rpc` kept as a clap alias). It now falls back
+  to the secrets file's `grpc_url` before the public default — the gap that
+  broke the redeploy workflow.
+
+**The public endpoints now work.** Under JSON-RPC the public default was
+dead, so a missing override meant a broken service and the fleet depended on
+a third-party provider. On gRPC/GraphQL the public fullnodes serve us, so an
+absent `sui-rpc` secret is a normal configuration rather than an outage
+waiting to happen. The overrides remain for rate limits and latency.
+
+### Behaviour changes worth knowing
+
+- **Move enum variants are readable again.** JSON-RPC's parsed content
+  dropped the variant name, rendering `vault::Phase` as `{}`; the keeper
+  carried a round-0 structural fallback to survive it. gRPC renders
+  `{"@variant": "Settling"}`, so the phase is now read directly. The
+  fallback is kept for old encodings.
+- **price-charting's persisted event cursor changed format.** GraphQL cursors
+  are opaque strings, not `(tx_digest, event_seq)` — and per the warning
+  above, old cursors are not replayable. `watch_cursor` rows written before
+  this change are detected (`cursor_ev != -1`) and dropped, and the watcher
+  re-initialises from the stream tip. No migration needed.
+- **Dynamic-field reads derive the field id client-side** wherever they can
+  (Pyth `price_info`, the vault withdrawal queue), which is what the keeper
+  already did to work around providers that don't serve a dynamic-field
+  index.
+
 
 ## Gotchas carried over from the official guide
 

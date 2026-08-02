@@ -24,7 +24,6 @@ indexer-graphql = { workspace = true }
 
 # Sui SDK (used to parse the rolled tx response and pull ObjectChanges).
 sui-types = { workspace = true }
-sui-json-rpc-types = { workspace = true }
 # Compile the per-roll option-coin package in-process before publishing.
 sui-move-build = { workspace = true }
 
@@ -56,5 +55,4 @@ r2d2 = { workspace = true }
 move-core-types = { workspace = true }
 # Localnet E2E (tests/localnet_e2e.rs, #[ignore]): publish the protocol,
 # drive a real roll, read buckets back.
-sui-sdk = { workspace = true }
 shared-crypto = { workspace = true }

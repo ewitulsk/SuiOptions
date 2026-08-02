@@ -1,0 +1,570 @@
+//! gRPC chain access.
+//!
+//! Sui deactivated JSON-RPC on public fullnodes (see
+//! `docs/sui-json-rpc-migration.md`), so every read and write in this
+//! workspace goes through `sui_rpc_api::Client` (gRPC) instead of
+//! `sui_sdk::SuiClient`. The proto types convert to/from `sui-types` at the
+//! same git pin, so call sites keep the `sui-types` vocabulary they already
+//! use — `Object`, `ObjectRef`, `TransactionData`, `TransactionEffects`.
+//!
+//! One deliberate gap: gRPC has no events query. Event reads live in
+//! [`crate::events`] and go over GraphQL.
+//!
+//! `sui_rpc_api::Client` takes `&mut self` on most reads but is cheap to
+//! clone (it is a `tonic` channel handle), so every method here takes
+//! `&self` and clones internally. That keeps `ChainClient` usable behind a
+//! shared reference, which is how every service holds it.
+
+use anyhow::{anyhow, Context, Result};
+use move_core_types::language_storage::StructTag;
+use sui_rpc_api::client::SimulateTransactionResponse;
+use sui_rpc_api::Client;
+use sui_types::base_types::{ObjectID, ObjectRef, SuiAddress};
+use sui_types::digests::TransactionDigest;
+use sui_types::object::{Object, Owner};
+use sui_types::transaction::{
+    ObjectArg, SharedObjectMutability, Transaction, TransactionData,
+};
+
+pub use sui_rpc_api::client::ExecutedTransaction;
+
+/// Gas envelope for dev-inspect simulations. Checks are disabled so these
+/// are never charged or validated — they only have to be well-formed.
+const DEV_INSPECT_GAS_BUDGET: u64 = 50_000_000_000;
+const DEV_INSPECT_GAS_PRICE: u64 = 1000;
+
+/// A gRPC chain client bound to one endpoint.
+#[derive(Clone)]
+pub struct ChainClient {
+    inner: Client,
+    /// Host only (never the full URL — an operator override can carry a
+    /// token in the path).
+    host: String,
+}
+
+impl ChainClient {
+    pub fn new(url: &str) -> Result<Self> {
+        let inner = Client::new(url.to_owned())
+            .map_err(|e| anyhow!("building gRPC client for {}: {e}", redact(url)))?;
+        Ok(Self {
+            inner,
+            host: redact(url),
+        })
+    }
+
+    /// Host of the endpoint, safe to log.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Escape hatch for the few call sites that need a raw proto request
+    /// (dynamic-field listing, coin metadata).
+    pub fn raw(&self) -> Client {
+        self.inner.clone()
+    }
+
+    // ---- object reads -------------------------------------------------
+
+    pub async fn get_object(&self, id: ObjectID) -> Result<Object> {
+        self.inner
+            .clone()
+            .get_object(id)
+            .await
+            .with_context(|| format!("gRPC GetObject {id}"))
+    }
+
+    /// `Ok(None)` when the object does not exist (or was wrapped/deleted),
+    /// mirroring the old `SuiObjectResponse.data == None` branch. Other
+    /// transport errors still propagate.
+    pub async fn try_get_object(&self, id: ObjectID) -> Result<Option<Object>> {
+        match self.inner.clone().get_object(id).await {
+            Ok(o) => Ok(Some(o)),
+            Err(s) if s.code() == tonic::Code::NotFound => Ok(None),
+            Err(s) => Err(anyhow!("gRPC GetObject {id}: {s}")),
+        }
+    }
+
+    /// Object plus its JSON rendering — the replacement for
+    /// `SuiObjectDataOptions::with_content()`. Field names match the Move
+    /// struct; enums render as `{"@variant": "..."}`.
+    pub async fn get_object_json(
+        &self,
+        id: ObjectID,
+    ) -> Result<(Object, Option<serde_json::Value>)> {
+        self.inner
+            .clone()
+            .get_object_with_json(id)
+            .await
+            .with_context(|| format!("gRPC GetObject(+json) {id}"))
+    }
+
+    /// [`ChainClient::get_object_json`] with the `Ok(None)`-on-absent shape
+    /// of [`ChainClient::try_get_object`].
+    pub async fn try_get_object_json(
+        &self,
+        id: ObjectID,
+    ) -> Result<Option<(Object, Option<serde_json::Value>)>> {
+        match self.inner.clone().get_object_with_json(id).await {
+            Ok(v) => Ok(Some(v)),
+            Err(s) if s.code() == tonic::Code::NotFound => Ok(None),
+            Err(s) => Err(anyhow!("gRPC GetObject(+json) {id}: {s}")),
+        }
+    }
+
+    pub async fn multi_get_objects(&self, ids: &[ObjectID]) -> Result<Vec<Object>> {
+        self.inner
+            .batch_get_objects(ids)
+            .await
+            .with_context(|| format!("gRPC BatchGetObjects ({} ids)", ids.len()))
+    }
+
+    // ---- object args --------------------------------------------------
+
+    /// Build a `SharedObject` `ObjectArg` from a current chain read.
+    pub async fn shared_object_arg(&self, id: ObjectID, mutable: bool) -> Result<ObjectArg> {
+        let obj = self.get_object(id).await?;
+        match obj.owner() {
+            Owner::Shared {
+                initial_shared_version,
+            } => Ok(ObjectArg::SharedObject {
+                id,
+                initial_shared_version: *initial_shared_version,
+                mutability: if mutable {
+                    SharedObjectMutability::Mutable
+                } else {
+                    SharedObjectMutability::Immutable
+                },
+            }),
+            other => Err(anyhow!("object {id} is not shared: {other:?}")),
+        }
+    }
+
+    /// Build an owned-object `ObjectArg` (e.g. an AdminCap held by the
+    /// deployer).
+    pub async fn owned_object_arg(&self, id: ObjectID) -> Result<ObjectArg> {
+        let obj = self.get_object(id).await?;
+        Ok(ObjectArg::ImmOrOwnedObject(obj.compute_object_reference()))
+    }
+
+    /// Resolve an object id to the right `ObjectArg` by reading its owner —
+    /// shared objects become `SharedObject`, everything else
+    /// `ImmOrOwnedObject`. This is what the retired JSON-RPC
+    /// `transaction_builder().move_call(..)` did internally, and it lets
+    /// callers pass a bare id without knowing the ownership up front.
+    pub async fn object_arg(&self, id: ObjectID, mutable: bool) -> Result<ObjectArg> {
+        let obj = self.get_object(id).await?;
+        match obj.owner() {
+            Owner::Shared {
+                initial_shared_version,
+            } => Ok(ObjectArg::SharedObject {
+                id,
+                initial_shared_version: *initial_shared_version,
+                mutability: if mutable {
+                    SharedObjectMutability::Mutable
+                } else {
+                    SharedObjectMutability::Immutable
+                },
+            }),
+            _ => Ok(ObjectArg::ImmOrOwnedObject(obj.compute_object_reference())),
+        }
+    }
+
+    // ---- dynamic fields -----------------------------------------------
+
+    /// Every dynamic field (and dynamic *object* field) under `parent`,
+    /// paged to exhaustion. Replaces `read_api().get_dynamic_fields(..)`.
+    pub async fn dynamic_fields(&self, parent: ObjectID) -> Result<Vec<DynamicFieldEntry>> {
+        let mut out = Vec::new();
+        let mut token: Option<bytes::Bytes> = None;
+        loop {
+            let page = self
+                .inner
+                .get_dynamic_fields(parent, Some(100), token.clone())
+                .await
+                .map_err(|s| anyhow!("gRPC ListDynamicFields {parent}: {s}"))?;
+            for df in &page.dynamic_fields {
+                let Some(field_id) = df.field_id.as_ref().and_then(|s| s.parse().ok()) else {
+                    continue;
+                };
+                // The field object is a `0x2::dynamic_field::Field<K, V>`;
+                // its first type parameter is the NAME type, which is what
+                // callers match on to tell one key struct from another.
+                let name_type = df
+                    .field_object
+                    .as_ref()
+                    .and_then(|o| o.object_type.as_deref())
+                    .and_then(|t| sui_types::parse_sui_struct_tag(t).ok())
+                    .and_then(|t| t.type_params.first().cloned())
+                    .map(|t| t.to_canonical_string(/* with_prefix */ true));
+                out.push(DynamicFieldEntry {
+                    field_id,
+                    name_type,
+                    value_type: df.value_type.clone(),
+                    child_id: df.child_id.as_ref().and_then(|s| s.parse().ok()),
+                });
+            }
+            match page.next_page_token {
+                Some(t) if !t.is_empty() => token = Some(t),
+                _ => break,
+            }
+        }
+        Ok(out)
+    }
+
+    // ---- coins --------------------------------------------------------
+
+    /// Objects owned by `owner`, up to `limit`. Replaces
+    /// `read_api().get_owned_objects(..)` with no type filter.
+    pub async fn owned_objects(&self, owner: SuiAddress, limit: u32) -> Result<Vec<Object>> {
+        let page = self
+            .inner
+            .get_owned_objects(owner, None, Some(limit), None)
+            .await
+            .map_err(|s| anyhow!("gRPC ListOwnedObjects for {owner}: {s}"))?;
+        Ok(page.items)
+    }
+
+    /// Objects of exactly `object_type` owned by `owner`, up to `limit`.
+    /// Replaces `get_owned_objects` with a `StructType` filter.
+    pub async fn owned_objects_of_type(
+        &self,
+        owner: SuiAddress,
+        object_type: StructTag,
+        limit: u32,
+    ) -> Result<Vec<Object>> {
+        let page = self
+            .inner
+            .get_owned_objects(owner, Some(object_type), Some(limit), None)
+            .await
+            .map_err(|s| anyhow!("gRPC ListOwnedObjects for {owner}: {s}"))?;
+        Ok(page.items)
+    }
+
+    /// Coins of `coin_type` owned by `owner`, largest balance first.
+    /// Replaces `coin_read_api().get_coins(..)`.
+    pub async fn coins(&self, owner: SuiAddress, coin_type: &StructTag) -> Result<Vec<CoinRef>> {
+        let coin_struct = coin_wrapper(coin_type);
+        let page = self
+            .inner
+            .get_owned_objects(owner, Some(coin_struct), Some(200), None)
+            .await
+            .map_err(|s| anyhow!("gRPC ListOwnedObjects (coins) for {owner}: {s}"))?;
+
+        let mut coins: Vec<CoinRef> = page
+            .items
+            .iter()
+            .filter_map(|o| {
+                let c = o.as_coin_maybe()?;
+                Some(CoinRef {
+                    object_ref: o.compute_object_reference(),
+                    balance: c.value(),
+                })
+            })
+            .collect();
+        coins.sort_unstable_by(|a, b| b.balance.cmp(&a.balance));
+        Ok(coins)
+    }
+
+    /// The single largest SUI coin owned by `addr` — the gas coin every
+    /// `submit_ptb`-style path picks.
+    pub async fn gas_coin(&self, owner: SuiAddress) -> Result<ObjectRef> {
+        let coins = self.coins(owner, &sui_coin_type()).await?;
+        coins
+            .first()
+            .map(|c| c.object_ref)
+            .ok_or_else(|| anyhow!("no SUI coins to pay gas for {owner}"))
+    }
+
+    /// Total balance of `coin_type`. Replaces
+    /// `coin_read_api().get_balance(..)`.
+    pub async fn balance(&self, owner: SuiAddress, coin_type: &StructTag) -> Result<u128> {
+        let b = self
+            .inner
+            .get_balance(owner, coin_type)
+            .await
+            .map_err(|s| anyhow!("gRPC GetBalance for {owner}: {s}"))?;
+        Ok(b.balance() as u128)
+    }
+
+    /// Every coin type `owner` holds, with its total balance. Replaces
+    /// `coin_read_api().get_all_balances(..)`.
+    pub async fn all_balances(&self, owner: SuiAddress) -> Result<Vec<(String, u128)>> {
+        use futures::TryStreamExt;
+        let stream = self.inner.list_balances(owner);
+        futures::pin_mut!(stream);
+        let mut out = Vec::new();
+        while let Some(b) = stream
+            .try_next()
+            .await
+            .map_err(|s| anyhow!("gRPC ListBalances for {owner}: {s}"))?
+        {
+            out.push((b.coin_type().to_owned(), b.balance() as u128));
+        }
+        Ok(out)
+    }
+
+    // ---- gas / epoch --------------------------------------------------
+
+    pub async fn reference_gas_price(&self) -> Result<u64> {
+        self.inner
+            .get_reference_gas_price()
+            .await
+            .map_err(|s| anyhow!("gRPC GetEpoch (reference gas price): {s}"))
+    }
+
+    pub async fn latest_checkpoint(&self) -> Result<u64> {
+        let cp = self
+            .inner
+            .clone()
+            .get_latest_checkpoint()
+            .await
+            .map_err(|s| anyhow!("gRPC GetCheckpoint (latest): {s}"))?;
+        Ok(*cp.sequence_number())
+    }
+
+    pub async fn chain_identifier(&self) -> Result<String> {
+        let id = self
+            .inner
+            .get_chain_identifier()
+            .await
+            .map_err(|s| anyhow!("gRPC GetServiceInfo (chain id): {s}"))?;
+        Ok(id.to_string())
+    }
+
+    // ---- simulate / execute -------------------------------------------
+
+    /// Simulate with checks DISABLED — the `dev_inspect_transaction_block`
+    /// replacement, used to read Move return values without paying gas or
+    /// owning the objects.
+    pub async fn dev_inspect(&self, tx: &TransactionData) -> Result<SimulateTransactionResponse> {
+        self.inner
+            .simulate_transaction(tx, false, false)
+            .await
+            .map_err(|s| anyhow!("gRPC SimulateTransaction (dev-inspect): {s}"))
+    }
+
+    /// Dev-inspect a PTB: build a gas-less `TransactionData` for `sender`
+    /// and simulate it with checks disabled. This is the direct replacement
+    /// for `dev_inspect_transaction_block(sender, kind, ..)` — no gas coin,
+    /// no signature, no ownership requirement.
+    pub async fn dev_inspect_ptb(
+        &self,
+        sender: SuiAddress,
+        pt: sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder,
+    ) -> Result<SimulateTransactionResponse> {
+        // Checks are disabled, so the gas payment is never validated or
+        // charged; an empty payment keeps this read free of coin lookups.
+        let tx = TransactionData::new_programmable(
+            sender,
+            vec![],
+            pt.finish(),
+            DEV_INSPECT_GAS_BUDGET,
+            DEV_INSPECT_GAS_PRICE,
+        );
+        self.dev_inspect(&tx).await
+    }
+
+    /// Simulate with checks ENABLED — the `dry_run_transaction_block`
+    /// replacement: a real feasibility check against current state.
+    pub async fn dry_run(&self, tx: &TransactionData) -> Result<SimulateTransactionResponse> {
+        self.inner
+            .simulate_transaction(tx, true, false)
+            .await
+            .map_err(|s| anyhow!("gRPC SimulateTransaction (dry-run): {s}"))
+    }
+
+    /// Submit a signed transaction and wait for finality.
+    pub async fn execute(&self, tx: &Transaction) -> Result<ExecutedTransaction> {
+        self.inner
+            .clone()
+            .execute_transaction(tx)
+            .await
+            .map_err(|s| anyhow!("gRPC ExecuteTransaction: {s}"))
+    }
+
+    pub async fn get_transaction(&self, digest: &TransactionDigest) -> Result<ExecutedTransaction> {
+        self.inner
+            .clone()
+            .get_transaction(digest)
+            .await
+            .map_err(|s| anyhow!("gRPC GetTransaction {digest}: {s}"))
+    }
+
+    /// `Ok(None)` while the node has not yet indexed the digest — the
+    /// polling shape the cctp-relay and the deploy checkpoint lookup want.
+    pub async fn try_get_transaction(
+        &self,
+        digest: &TransactionDigest,
+    ) -> Result<Option<ExecutedTransaction>> {
+        match self.inner.clone().get_transaction(digest).await {
+            Ok(t) => Ok(Some(t)),
+            Err(s) if s.code() == tonic::Code::NotFound => Ok(None),
+            Err(s) => Err(anyhow!("gRPC GetTransaction {digest}: {s}")),
+        }
+    }
+}
+
+/// BCS bytes of the `n`-th return value of the LAST command in a simulated
+/// transaction — the `results.last().return_values.first()` shape every
+/// dev-inspect call site used.
+///
+/// The simulation's own execution status is checked first, so a Move abort
+/// surfaces as an error here rather than as "no values returned".
+pub fn return_value_bytes(
+    resp: &SimulateTransactionResponse,
+    n: usize,
+) -> Result<&[u8]> {
+    use sui_types::effects::TransactionEffectsAPI;
+    let status = resp.transaction.effects.status();
+    if status.is_err() {
+        return Err(anyhow!("simulation reverted: {status:?}"));
+    }
+    let last = resp
+        .command_outputs
+        .last()
+        .ok_or_else(|| anyhow!("simulation returned no command results"))?;
+    let out = last
+        .return_values
+        .get(n)
+        .ok_or_else(|| anyhow!("simulation command has no return value at index {n}"))?;
+    let bcs = out
+        .value
+        .as_ref()
+        .ok_or_else(|| anyhow!("simulation return value {n} carries no BCS payload"))?;
+    Ok(&bcs.value())
+}
+
+/// Decode the `n`-th return value of the last simulated command as `T`.
+pub fn decode_return_value<T: serde::de::DeserializeOwned>(
+    resp: &SimulateTransactionResponse,
+    n: usize,
+) -> Result<T> {
+    let bytes = return_value_bytes(resp, n)?;
+    bcs::from_bytes::<T>(bytes).context("decoding simulated return value")
+}
+
+/// One dynamic field under a parent object.
+#[derive(Debug, Clone)]
+pub struct DynamicFieldEntry {
+    /// The `Field<K, V>` object itself. Read it with
+    /// [`ChainClient::get_object_json`] to get `{ "name": K, "value": V }`.
+    pub field_id: ObjectID,
+    /// Canonical type string of the field's NAME (`K`), when the node
+    /// returned the field object.
+    pub name_type: Option<String>,
+    /// Type of the field's value — or, for a dynamic OBJECT field, the type
+    /// of the child object.
+    pub value_type: Option<String>,
+    /// Set only for dynamic object fields: the child object's id.
+    pub child_id: Option<ObjectID>,
+}
+
+impl DynamicFieldEntry {
+    /// Does this field's name type end with `suffix`
+    /// (e.g. `"::vault::PositionKey"`)?
+    pub fn name_type_ends_with(&self, suffix: &str) -> bool {
+        self.name_type.as_deref().is_some_and(|t| t.ends_with(suffix))
+    }
+}
+
+/// An object touched by a transaction, in the shape the old
+/// `ObjectChange::Created` carried. `object_type` is the canonical type
+/// string as the node rendered it (`0x2::coin::TreasuryCap<0x..::call::CALL>`).
+#[derive(Debug, Clone)]
+pub struct ChangedObject {
+    pub object_id: ObjectID,
+    pub object_type: String,
+    pub version: u64,
+    pub digest: String,
+}
+
+/// Objects *created* by a transaction — the `ObjectChange::Created` subset
+/// of the old `object_changes`.
+pub fn created_objects(resp: &ExecutedTransaction) -> Vec<ChangedObject> {
+    use sui_rpc::proto::sui::rpc::v2::changed_object::{IdOperation, OutputObjectState};
+    resp.changed_objects
+        .iter()
+        .filter(|o| {
+            matches!(o.output_state(), OutputObjectState::ObjectWrite)
+                && matches!(o.id_operation(), IdOperation::Created)
+        })
+        .filter_map(|o| {
+            Some(ChangedObject {
+                object_id: o.object_id().parse().ok()?,
+                object_type: o.object_type().to_owned(),
+                version: o.output_version(),
+                digest: o.output_digest().to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Package id published by a transaction, if any.
+pub fn published_package(resp: &ExecutedTransaction) -> Option<ObjectID> {
+    resp.get_new_package_obj().map(|r| r.0)
+}
+
+/// An owned coin: what the gas selector and the coin-splitting builders
+/// need out of a coin read.
+#[derive(Debug, Clone, Copy)]
+pub struct CoinRef {
+    pub object_ref: ObjectRef,
+    pub balance: u64,
+}
+
+impl CoinRef {
+    pub fn object_id(&self) -> ObjectID {
+        self.object_ref.0
+    }
+}
+
+/// `0x2::sui::SUI`.
+pub fn sui_coin_type() -> StructTag {
+    StructTag {
+        address: sui_types::SUI_FRAMEWORK_ADDRESS,
+        module: move_core_types::ident_str!("sui").to_owned(),
+        name: move_core_types::ident_str!("SUI").to_owned(),
+        type_params: vec![],
+    }
+}
+
+/// Wrap `T` into `0x2::coin::Coin<T>` — `ListOwnedObjects` filters on the
+/// object's own type, not the coin's type parameter.
+fn coin_wrapper(inner: &StructTag) -> StructTag {
+    StructTag {
+        address: sui_types::SUI_FRAMEWORK_ADDRESS,
+        module: move_core_types::ident_str!("coin").to_owned(),
+        name: move_core_types::ident_str!("Coin").to_owned(),
+        type_params: vec![sui_types::TypeTag::Struct(Box::new(inner.clone()))],
+    }
+}
+
+/// Strip everything but scheme+host so an operator override carrying a
+/// token in its path never reaches a log line.
+fn redact(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .and_then(|s| s.split('/').next())
+        .unwrap_or(url)
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coin_wrapper_builds_the_object_type_not_the_type_param() {
+        let t = coin_wrapper(&sui_coin_type());
+        assert_eq!(
+            t.to_canonical_string(true),
+            "0x0000000000000000000000000000000000000000000000000000000000000002::coin::Coin<0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI>"
+        );
+    }
+
+    #[test]
+    fn redact_keeps_host_only() {
+        assert_eq!(redact("https://example.com/secret-token/sui"), "example.com");
+        assert_eq!(redact("https://fullnode.testnet.sui.io:443"), "fullnode.testnet.sui.io:443");
+    }
+}

@@ -81,9 +81,12 @@ pub struct Config {
     /// oracle-service base URL — the apy sampler's source for spot + realized vol.
     #[serde(default = "default_oracle_url")]
     pub oracle_url: String,
-    /// Explicit fullnode override; defaults from `network`.
+    /// Explicit gRPC fullnode override; defaults from `network`.
+    #[serde(default, alias = "rpc_url")]
+    pub grpc_url: Option<String>,
+    /// Explicit GraphQL override (event reads); defaults from `network`.
     #[serde(default)]
-    pub rpc_url: Option<String>,
+    pub graphql_url: Option<String>,
 
     #[serde(default = "default_discovery_interval_secs")]
     pub discovery_interval_secs: u64,
@@ -182,15 +185,26 @@ impl Config {
         runtime_config::config_load::load_toml(path)
     }
 
-    pub fn resolve_rpc_url(&self) -> Result<String> {
-        if let Some(u) = &self.rpc_url {
+    fn network(&self) -> Result<sui_tx::Network> {
+        match self.network.to_ascii_lowercase().as_str() {
+            "mainnet" => Ok(sui_tx::Network::Mainnet),
+            "testnet" => Ok(sui_tx::Network::Testnet),
+            "devnet" => Ok(sui_tx::Network::Devnet),
+            other => anyhow::bail!("unknown network {other}"),
+        }
+    }
+
+    pub fn resolve_grpc_url(&self) -> Result<String> {
+        if let Some(u) = &self.grpc_url {
             return Ok(u.clone());
         }
-        match self.network.to_ascii_lowercase().as_str() {
-            "mainnet" => Ok(sui_sdk::SUI_MAINNET_URL.to_string()),
-            "testnet" => Ok(sui_sdk::SUI_TESTNET_URL.to_string()),
-            "devnet" => Ok(sui_sdk::SUI_DEVNET_URL.to_string()),
-            other => anyhow::bail!("unknown network {other} and no rpc_url set"),
+        Ok(self.network()?.grpc_url().to_string())
+    }
+
+    pub fn resolve_graphql_url(&self) -> Result<String> {
+        if let Some(u) = &self.graphql_url {
+            return Ok(u.clone());
         }
+        Ok(self.network()?.graphql_url().to_string())
     }
 }

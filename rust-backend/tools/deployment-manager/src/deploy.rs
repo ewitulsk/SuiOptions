@@ -1,16 +1,12 @@
 use anyhow::{anyhow, Context, Result};
-use move_publish::{assert_success, finish_pubfile, stash_pubfile};
-use shared_crypto::intent::Intent;
+use move_publish::{finish_pubfile, stash_pubfile};
 use std::path::Path;
 use std::time::Duration;
-use sui_json_rpc_types::{
-    ObjectChange, SuiTransactionBlockResponse, SuiTransactionBlockResponseOptions,
-};
 use sui_move_build::BuildConfig;
-use sui_sdk::SuiClient;
+use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
+use sui_types::Identifier;
+use sui_tx::chain::{created_objects, published_package, ChainClient, ExecutedTransaction};
 use sui_types::base_types::ObjectID;
-use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
-use sui_types::transaction::Transaction;
 use sui_types::SUI_FRAMEWORK_ADDRESS;
 
 pub use move_publish::DepPublishOutcome;
@@ -32,7 +28,7 @@ pub struct PublishOutcome {
 /// success so downstream packages (options_rfq, options_vault) compile
 /// against it.
 pub async fn publish_package(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     contracts_path: &Path,
     env_name: &str,
@@ -52,7 +48,7 @@ pub async fn publish_package(
 }
 
 async fn publish_package_inner(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     contracts_path: &Path,
     gas_budget: u64,
@@ -68,35 +64,8 @@ async fn publish_package_inner(
     let deps = compiled.get_dependency_storage_package_ids();
     tracing::info!(modules = modules.len(), deps = deps.len(), "compiled");
 
-    let tx_data = client
-        .transaction_builder()
-        .publish(signer.address, modules, deps, None, gas_budget)
-        .await
-        .context("building publish tx")?;
-
-    let signature = Transaction::signature_from_signer(
-        tx_data.clone(),
-        Intent::sui_transaction(),
-        &signer.keypair,
-    );
-    let tx = Transaction::from_data(tx_data, vec![signature]);
-
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
-
     tracing::info!("submitting publish tx");
-    let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
-        .await
-        .context("submitting publish tx")?;
-
-    assert_success(&resp)?;
+    let resp = submit_publish(client, signer, modules, deps, gas_budget, "publish").await?;
     extract_publish_outcome(&resp)
 }
 
@@ -112,7 +81,7 @@ pub struct CctpOutcome {
 /// matches `network` so the resolver links Circle's published testnet or
 /// mainnet packages (cctp-contracts/Move.toml [dep-replacements]).
 pub async fn publish_cctp_package(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     cctp_path: &Path,
     network: crate::network::Network,
@@ -132,103 +101,71 @@ pub async fn publish_cctp_package(
     let deps = compiled.get_dependency_storage_package_ids();
     tracing::info!(modules = modules.len(), deps = deps.len(), "compiled cctp_bridge");
 
-    let tx_data = client
-        .transaction_builder()
-        .publish(signer.address, modules, deps, None, gas_budget)
-        .await
-        .context("building cctp publish tx")?;
-    let signature = Transaction::signature_from_signer(
-        tx_data.clone(),
-        Intent::sui_transaction(),
-        &signer.keypair,
-    );
-    let tx = Transaction::from_data(tx_data, vec![signature]);
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
-    let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
-        .await
-        .context("submitting cctp publish tx")?;
-    assert_success(&resp)?;
+    let resp = submit_publish(client, signer, modules, deps, gas_budget, "cctp publish").await?;
 
-    let changes = resp
-        .object_changes
-        .as_ref()
-        .ok_or_else(|| anyhow!("cctp publish response missing object_changes"))?;
-    let mut package_id: Option<ObjectID> = None;
-    let mut upgrade_cap_id: Option<ObjectID> = None;
-    for change in changes {
-        match change {
-            ObjectChange::Published { package_id: pid, .. } => package_id = Some(*pid),
-            ObjectChange::Created { object_id, object_type, .. } => {
-                if object_type.address == SUI_FRAMEWORK_ADDRESS
-                    && object_type.module.as_str() == "package"
-                    && object_type.name.as_str() == "UpgradeCap"
-                {
-                    upgrade_cap_id = Some(*object_id);
-                }
-            }
-            _ => {}
-        }
-    }
+    let upgrade_cap_id = created_objects(&resp).into_iter().find_map(|c| {
+        let tag = sui_types::parse_sui_struct_tag(&c.object_type).ok()?;
+        (tag.address == SUI_FRAMEWORK_ADDRESS
+            && tag.module.as_str() == "package"
+            && tag.name.as_str() == "UpgradeCap")
+            .then_some(c.object_id)
+    });
     Ok(CctpOutcome {
-        package_id: package_id.ok_or_else(|| anyhow!("cctp publish created no package"))?,
+        package_id: published_package(&resp)
+            .ok_or_else(|| anyhow!("cctp publish created no package"))?,
         upgrade_cap_id: upgrade_cap_id
             .ok_or_else(|| anyhow!("cctp publish created no UpgradeCap"))?,
-        digest: resp.digest.to_string(),
+        digest: sui_tx::tx::tx_digest(&resp).to_string(),
     })
 }
 
-fn extract_publish_outcome(resp: &SuiTransactionBlockResponse) -> Result<PublishOutcome> {
-    let digest = resp.digest.to_string();
-    let changes = resp
-        .object_changes
-        .as_ref()
-        .ok_or_else(|| anyhow!("publish response missing object_changes"))?;
+/// Compile-free half of a publish: build the Publish PTB, pay gas, submit,
+/// and assert success. Shared by the protocol and cctp publish paths.
+async fn submit_publish(
+    client: &ChainClient,
+    signer: &Signer,
+    modules: Vec<Vec<u8>>,
+    deps: Vec<ObjectID>,
+    gas_budget: u64,
+    label: &str,
+) -> Result<ExecutedTransaction> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let cap = pt.publish_upgradeable(modules, deps);
+    pt.transfer_arg(signer.address, cap);
+    sui_tx::tx::submit_ptb(client, signer, pt, gas_budget, label).await
+}
 
-    let mut package_id: Option<ObjectID> = None;
+fn extract_publish_outcome(resp: &ExecutedTransaction) -> Result<PublishOutcome> {
+    let digest = sui_tx::tx::tx_digest(resp).to_string();
+
     let mut admin_cap_id: Option<ObjectID> = None;
     let mut protocol_config_id: Option<ObjectID> = None;
     let mut upgrade_cap_id: Option<ObjectID> = None;
 
-    for change in changes {
-        match change {
-            ObjectChange::Published { package_id: pid, .. } => {
-                package_id = Some(*pid);
-            }
-            ObjectChange::Created {
-                object_id,
-                object_type,
-                ..
-            } => {
-                // 0x2::package::UpgradeCap is created for every publish.
-                if object_type.address == SUI_FRAMEWORK_ADDRESS
-                    && object_type.module.as_str() == "package"
-                    && object_type.name.as_str() == "UpgradeCap"
-                {
-                    upgrade_cap_id = Some(*object_id);
-                    continue;
-                }
-                // Match by module + struct name; the address is the freshly
-                // published package, which we may not have captured yet.
-                match (object_type.module.as_str(), object_type.name.as_str()) {
-                    ("admin", "AdminCap") => admin_cap_id = Some(*object_id),
-                    ("admin", "ProtocolConfig") => protocol_config_id = Some(*object_id),
-                    _ => {}
-                }
-            }
+    for change in created_objects(resp) {
+        let Ok(tag) = sui_types::parse_sui_struct_tag(&change.object_type) else {
+            continue;
+        };
+        // 0x2::package::UpgradeCap is created for every publish.
+        if tag.address == SUI_FRAMEWORK_ADDRESS
+            && tag.module.as_str() == "package"
+            && tag.name.as_str() == "UpgradeCap"
+        {
+            upgrade_cap_id = Some(change.object_id);
+            continue;
+        }
+        // Match by module + struct name; the address is the freshly
+        // published package, which we may not have captured yet.
+        match (tag.module.as_str(), tag.name.as_str()) {
+            ("admin", "AdminCap") => admin_cap_id = Some(change.object_id),
+            ("admin", "ProtocolConfig") => protocol_config_id = Some(change.object_id),
             _ => {}
         }
     }
 
     Ok(PublishOutcome {
-        package_id: package_id.ok_or_else(|| anyhow!("no Published object_change in response"))?,
+        package_id: published_package(resp)
+            .ok_or_else(|| anyhow!("no published package in publish effects"))?,
         admin_cap_id: admin_cap_id
             .ok_or_else(|| anyhow!("AdminCap not found in object_changes"))?,
         protocol_config_id: protocol_config_id
@@ -248,7 +185,7 @@ pub struct InitOutcome {
 /// (it always creates a new Treasury), so callers must avoid double-running
 /// this against the same deployment if they want a single canonical treasury.
 pub async fn create_and_share_treasury(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     package_id: ObjectID,
     admin_cap_id: ObjectID,
@@ -258,66 +195,33 @@ pub async fn create_and_share_treasury(
     // the high-level builder tries to fetch its current version/digest.
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let admin_cap_arg = sui_json::SuiJsonValue::from_object_id(admin_cap_id);
-
-    let tx_data = client
-        .transaction_builder()
-        .move_call(
-            signer.address,
-            package_id,
-            "treasury",
-            "create_and_share",
-            vec![],
-            vec![admin_cap_arg],
-            None,
-            gas_budget,
-            None,
-        )
-        .await
-        .context("building treasury::create_and_share tx")?;
-
-    let signature = Transaction::signature_from_signer(
-        tx_data.clone(),
-        Intent::sui_transaction(),
-        &signer.keypair,
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let admin_cap_arg = pt.obj(client.owned_object_arg(admin_cap_id).await?)?;
+    pt.programmable_move_call(
+        package_id,
+        Identifier::new("treasury")?,
+        Identifier::new("create_and_share")?,
+        vec![],
+        vec![admin_cap_arg],
     );
-    let tx = Transaction::from_data(tx_data, vec![signature]);
-
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
 
     tracing::info!("submitting treasury init tx");
-    let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
-        .await
-        .context("submitting treasury init tx")?;
+    let resp = sui_tx::tx::submit_ptb(
+        client,
+        signer,
+        pt,
+        gas_budget,
+        "treasury::create_and_share",
+    )
+    .await?;
 
-    assert_success(&resp)?;
-    let digest = resp.digest.to_string();
-    let changes = resp
-        .object_changes
-        .as_ref()
-        .ok_or_else(|| anyhow!("init response missing object_changes"))?;
-
-    let treasury_id = changes
-        .iter()
-        .find_map(|c| match c {
-            ObjectChange::Created {
-                object_id,
-                object_type,
-                ..
-            } if object_type.module.as_str() == "treasury"
-                && object_type.name.as_str() == "Treasury" =>
-            {
-                Some(*object_id)
-            }
-            _ => None,
+    let digest = sui_tx::tx::tx_digest(&resp).to_string();
+    let treasury_id = created_objects(&resp)
+        .into_iter()
+        .find_map(|c| {
+            let tag = sui_types::parse_sui_struct_tag(&c.object_type).ok()?;
+            (tag.module.as_str() == "treasury" && tag.name.as_str() == "Treasury")
+                .then_some(c.object_id)
         })
         .ok_or_else(|| anyhow!("Treasury object not found in init response"))?;
 
@@ -329,7 +233,7 @@ pub async fn create_and_share_treasury(
 /// downstream packages compile against the fresh id. Thin wrapper over the
 /// shared [`move_publish`] crate (also used by mm-bot's deploy-collateral).
 pub async fn publish_dep_package(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     path: &Path,
     label: &str,
@@ -377,7 +281,7 @@ pub struct TestTokensOutcome {
 /// fixed `TEST_TOKEN_TABLE`. Re-publishing produces a fresh package each
 /// time — callers are responsible for overwriting the JSON entry.
 pub async fn publish_test_tokens(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     tokens_path: &Path,
     gas_budget: u64,
@@ -391,67 +295,31 @@ pub async fn publish_test_tokens(
     let modules = compiled.get_package_bytes(false);
     let deps = compiled.get_dependency_storage_package_ids();
 
-    let tx_data = client
-        .transaction_builder()
-        .publish(signer.address, modules, deps, None, gas_budget)
-        .await
-        .context("building test-tokens publish tx")?;
-    let signature = Transaction::signature_from_signer(
-        tx_data.clone(),
-        Intent::sui_transaction(),
-        &signer.keypair,
-    );
-    let tx = Transaction::from_data(tx_data, vec![signature]);
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
-
     tracing::info!("submitting test-tokens publish tx");
-    let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
-        .await
-        .context("submitting test-tokens publish tx")?;
-    assert_success(&resp)?;
+    let resp =
+        submit_publish(client, signer, modules, deps, gas_budget, "test-tokens publish").await?;
 
-    let digest = resp.digest.to_string();
-    let changes = resp
-        .object_changes
-        .as_ref()
-        .ok_or_else(|| anyhow!("test-tokens publish response missing object_changes"))?;
+    let digest = sui_tx::tx::tx_digest(&resp).to_string();
+    let package_id = published_package(&resp);
 
-    let mut package_id: Option<ObjectID> = None;
     let mut upgrade_cap_id: Option<ObjectID> = None;
     // Map module name (e.g. "tusdc") -> Faucet object id.
     let mut faucets: std::collections::HashMap<String, ObjectID> =
         std::collections::HashMap::new();
 
-    for change in changes {
-        match change {
-            ObjectChange::Published { package_id: pid, .. } => {
-                package_id = Some(*pid);
-            }
-            ObjectChange::Created {
-                object_id,
-                object_type,
-                ..
-            } => {
-                if object_type.address == SUI_FRAMEWORK_ADDRESS
-                    && object_type.module.as_str() == "package"
-                    && object_type.name.as_str() == "UpgradeCap"
-                {
-                    upgrade_cap_id = Some(*object_id);
-                    continue;
-                }
-                if object_type.name.as_str() == "Faucet" {
-                    faucets.insert(object_type.module.as_str().to_owned(), *object_id);
-                }
-            }
-            _ => {}
+    for change in created_objects(&resp) {
+        let Ok(tag) = sui_types::parse_sui_struct_tag(&change.object_type) else {
+            continue;
+        };
+        if tag.address == SUI_FRAMEWORK_ADDRESS
+            && tag.module.as_str() == "package"
+            && tag.name.as_str() == "UpgradeCap"
+        {
+            upgrade_cap_id = Some(change.object_id);
+            continue;
+        }
+        if tag.name.as_str() == "Faucet" {
+            faucets.insert(tag.module.as_str().to_owned(), change.object_id);
         }
     }
 

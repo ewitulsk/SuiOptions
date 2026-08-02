@@ -11,7 +11,7 @@
 #                                holds AdminCap; absent if scheduler isn't
 #                                deployed in this env)
 #   options/<env>/cctp-relay -> {"sui_key": "...", "solana_key": "...",
-#                                "rpc_url": "..."}  (rpc_url is REQUIRED and
+#                                "grpc_url": "..."} (grpc_url is REQUIRED and
 #                                must match the relay's configured [sui]
 #                                network — see the cctp-relay block below)
 #
@@ -61,30 +61,44 @@ EOF
   fi
 }
 
-# ---- shared Sui JSON-RPC endpoint (SO-270) -------------------------------
-# One secret per env (options/<env>/sui-rpc -> {"rpc_url": "..."}). Injected
-# into the [sui] block of the keyed service tomls below and rendered as a
-# standalone toml for the keyless services (indexer / price-charting /
-# balance-monitor). Absent or REPLACE_ME → RPC_URL stays empty and every
-# service falls back to the public Sui endpoint (resolve_rpc_url degrades
-# gracefully — never a hard fail).
-RPC_URL=""
+# ---- shared Sui chain endpoints (SO-270, gRPC since SO-336) --------------
+# One secret per env: options/<env>/sui-rpc -> {"grpc_url": "...",
+# "graphql_url": "..."}. Injected into the [sui] block of the keyed service
+# tomls below and rendered as a standalone toml for the keyless services
+# (indexer / price-charting / balance-monitor).
+#
+# JSON-RPC is deactivated on Sui fullnodes, so the legacy `rpc_url` key is
+# ignored (the binaries warn if it is still present). Unlike the JSON-RPC
+# era, the PUBLIC defaults now work — an absent secret is a normal
+# configuration, not a broken one, so this stays a soft fallback.
+GRPC_URL=""
+GRAPHQL_URL=""
 if RPC_JSON=$(fetch sui-rpc 2>/dev/null); then
-  RPC_URL=$(echo "$RPC_JSON" | jq -r '.rpc_url // empty')
-  if [ "$RPC_URL" = "REPLACE_ME" ]; then
-    RPC_URL=""
+  GRPC_URL=$(echo "$RPC_JSON" | jq -r '.grpc_url // empty')
+  GRAPHQL_URL=$(echo "$RPC_JSON" | jq -r '.graphql_url // empty')
+  [ "$GRPC_URL" = "REPLACE_ME" ] && GRPC_URL=""
+  [ "$GRAPHQL_URL" = "REPLACE_ME" ] && GRAPHQL_URL=""
+fi
+# Pre-build the TOML lines so they can be dropped verbatim into the [sui]
+# block of each heredoc. Built with escaped quotes here rather than via
+# `${VAR:+…}` inline — inside a heredoc that form strips the inner quotes and
+# yields invalid TOML. Empty when unset → an inert blank line.
+RPC_LINE=""
+if [ -n "$GRPC_URL" ]; then
+  RPC_LINE="grpc_url = \"$GRPC_URL\""
+fi
+if [ -n "$GRAPHQL_URL" ]; then
+  if [ -n "$RPC_LINE" ]; then
+    RPC_LINE="$RPC_LINE
+graphql_url = \"$GRAPHQL_URL\""
+  else
+    RPC_LINE="graphql_url = \"$GRAPHQL_URL\""
   fi
 fi
-# Pre-build the TOML line so it can be dropped verbatim into the [sui] block of
-# each heredoc. Built with escaped quotes here rather than via `${RPC_URL:+…}`
-# inline — inside a heredoc that form strips the inner quotes and yields
-# invalid TOML. Empty when unset → an inert blank line in the rendered file.
-RPC_LINE=""
-if [ -n "$RPC_URL" ]; then
-  RPC_LINE="rpc_url = \"$RPC_URL\""
+if [ -n "$RPC_LINE" ]; then
   echo "render-secrets: sui-rpc override present"
 else
-  echo "render-secrets: no sui-rpc override — services use public RPC"
+  echo "render-secrets: no sui-rpc override — services use the public endpoints"
 fi
 
 # ---- indexer secret -> exported as DB_PASSWORD for compose -----------------
@@ -145,7 +159,9 @@ fi
 if CCTP_JSON=$(fetch cctp-relay 2>/dev/null); then
   SUI_KEY=$(echo "$CCTP_JSON" | jq -r '.sui_key')
   SOLANA_KEY=$(echo "$CCTP_JSON" | jq -r '.solana_key')
-  CCTP_RPC_URL=$(echo "$CCTP_JSON" | jq -r '.rpc_url // empty')
+  # `grpc_url` is the current key; `rpc_url` is accepted as a fallback so an
+  # un-migrated secret still renders (its value must now be a gRPC endpoint).
+  CCTP_RPC_URL=$(echo "$CCTP_JSON" | jq -r '.grpc_url // .rpc_url // empty')
   if [ -z "$SUI_KEY" ] || [ "$SUI_KEY" = "null" ]; then
     echo "missing sui_key in options/$ENV/cctp-relay" >&2
     exit 1
@@ -168,7 +184,7 @@ if CCTP_JSON=$(fetch cctp-relay 2>/dev/null); then
   # a present secret without an endpoint is a misconfiguration, so fail here
   # rather than at the relay's next restart.
   if [ -z "$CCTP_RPC_URL" ] || [ "$CCTP_RPC_URL" = "REPLACE_ME" ]; then
-    echo "missing rpc_url in options/$ENV/cctp-relay — the relay must not fall back to a public Sui fullnode (SO-320)" >&2
+    echo "missing grpc_url in options/$ENV/cctp-relay — the relay must not fall back to a public Sui fullnode (SO-320)" >&2
     exit 1
   fi
   umask 077
@@ -178,7 +194,7 @@ if CCTP_JSON=$(fetch cctp-relay 2>/dev/null); then
 [sui]
 testnet = "$SUI_KEY"
 mainnet = "$SUI_KEY"
-rpc_url = "$CCTP_RPC_URL"
+grpc_url = "$CCTP_RPC_URL"
 
 [solana]
 devnet = "$SOLANA_KEY"
@@ -379,17 +395,18 @@ discord_public_key   = "$DISCORD_KEY"
 EOF
 fi
 
-# ---- keyless services -> standalone [sui] rpc_url toml --------------------
+# ---- keyless services -> standalone [sui] endpoint toml -------------------
 # indexer / price-charting / balance-monitor hold no signing key but still
-# build a SuiClient. They read only `[sui] rpc_url` from these files (mounted
-# at /run/secrets/<svc>.toml). Rendered only when the override is present —
-# absent file → those services fall back to their config / public RPC.
-if [ -n "$RPC_URL" ]; then
+# build a chain client. They read only the `[sui]` endpoint keys from these
+# files (mounted at /run/secrets/<svc>.toml). Rendered only when an override
+# is present — absent file → those services fall back to their config / the
+# public endpoints.
+if [ -n "$RPC_LINE" ]; then
   umask 077
   for svc in indexer price-charting balance-monitor; do
     cat > "$DIR/$svc.toml" <<EOF
 [sui]
-rpc_url = "$RPC_URL"
+$RPC_LINE
 EOF
   done
 fi

@@ -19,12 +19,13 @@ use anyhow::{anyhow, bail, Context, Result};
 
 pub mod collateral;
 use shared_crypto::intent::Intent;
-use sui_json_rpc_types::{
-    ObjectChange, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
-    SuiTransactionBlockResponseOptions,
-};
+
 use sui_move_build::BuildConfig;
-use sui_sdk::SuiClient;
+use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
+use sui_types::transaction::TransactionData;
+use sui_tx::chain::{
+    created_objects as tx_created_objects, published_package, ChainClient, ExecutedTransaction,
+};
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::crypto::SuiKeyPair;
 use sui_types::transaction::Transaction;
@@ -61,7 +62,7 @@ pub fn stash_pubfile(path: &Path) -> Result<PubfileStash> {
 /// Write the fresh id into the package's `Published.toml` (preserving other
 /// environments' sections), or restore the stashed original on failure.
 pub async fn finish_pubfile(
-    client: &SuiClient,
+    client: &ChainClient,
     path: &Path,
     stash: PubfileStash,
     env_name: &str,
@@ -72,8 +73,7 @@ pub async fn finish_pubfile(
         Some(package_id) => {
             let pkg = package_id.to_hex_uncompressed();
             let chain_id = client
-                .read_api()
-                .get_chain_identifier()
+                .chain_identifier()
                 .await
                 .context("fetching chain identifier for Published.toml")?;
             std::fs::write(
@@ -102,7 +102,7 @@ pub async fn finish_pubfile(
 /// Compile + publish one Move package and stamp its `Published.toml` so
 /// downstream packages compile against the fresh id. `label` is for logs.
 pub async fn publish_dep_package(
-    client: &SuiClient,
+    client: &ChainClient,
     keypair: &SuiKeyPair,
     sender: SuiAddress,
     path: &Path,
@@ -118,7 +118,7 @@ pub async fn publish_dep_package(
 }
 
 async fn publish_dep_inner(
-    client: &SuiClient,
+    client: &ChainClient,
     keypair: &SuiKeyPair,
     sender: SuiAddress,
     path: &Path,
@@ -132,67 +132,63 @@ async fn publish_dep_inner(
     let modules = compiled.get_package_bytes(false);
     let deps = compiled.get_dependency_storage_package_ids();
 
-    let tx_data = client
-        .transaction_builder()
-        .publish(sender, modules, deps, None, gas_budget)
+    // The retired JSON-RPC builder's `.publish(..)` wrapped the modules in a
+    // Publish command and transferred the UpgradeCap to the sender.
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let cap = pt.publish_upgradeable(modules, deps);
+    pt.transfer_arg(sender, cap);
+
+    let gas_coin = client
+        .gas_coin(sender)
         .await
-        .with_context(|| format!("building {label} publish tx"))?;
+        .with_context(|| format!("selecting a gas coin for the {label} publish"))?;
+    let gas_price = client
+        .reference_gas_price()
+        .await
+        .context("fetching reference gas price")?;
+    let tx_data = TransactionData::new_programmable(
+        sender,
+        vec![gas_coin],
+        pt.finish(),
+        gas_budget,
+        gas_price,
+    );
     let signature =
         Transaction::signature_from_signer(tx_data.clone(), Intent::sui_transaction(), keypair);
     let tx = Transaction::from_data(tx_data, vec![signature]);
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
 
     tracing::info!(package = label, "submitting publish tx");
     let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
+        .execute(&tx)
         .await
         .with_context(|| format!("submitting {label} publish tx"))?;
     assert_success(&resp)?;
 
-    let digest = resp.digest.to_string();
-    let changes = resp
-        .object_changes
-        .as_ref()
-        .ok_or_else(|| anyhow!("{label} publish response missing object_changes"))?;
+    let digest = sui_tx::tx::tx_digest(&resp).to_string();
 
-    let mut package_id: Option<ObjectID> = None;
     let mut upgrade_cap_id: Option<ObjectID> = None;
     let mut created_objects = Vec::new();
-    for change in changes {
-        match change {
-            ObjectChange::Published { package_id: pid, .. } => package_id = Some(*pid),
-            ObjectChange::Created {
-                object_id,
-                object_type,
-                ..
-            } => {
-                if object_type.address == SUI_FRAMEWORK_ADDRESS
-                    && object_type.module.as_str() == "package"
-                    && object_type.name.as_str() == "UpgradeCap"
-                {
-                    upgrade_cap_id = Some(*object_id);
-                } else {
-                    created_objects.push((
-                        object_type.module.as_str().to_owned(),
-                        object_type.name.as_str().to_owned(),
-                        *object_id,
-                    ));
-                }
-            }
-            _ => {}
+    for change in tx_created_objects(&resp) {
+        let Ok(tag) = sui_types::parse_sui_struct_tag(&change.object_type) else {
+            continue;
+        };
+        if tag.address == SUI_FRAMEWORK_ADDRESS
+            && tag.module.as_str() == "package"
+            && tag.name.as_str() == "UpgradeCap"
+        {
+            upgrade_cap_id = Some(change.object_id);
+        } else {
+            created_objects.push((
+                tag.module.as_str().to_owned(),
+                tag.name.as_str().to_owned(),
+                change.object_id,
+            ));
         }
     }
 
     Ok(DepPublishOutcome {
-        package_id: package_id
-            .ok_or_else(|| anyhow!("{label} publish: no Published change"))?,
+        package_id: published_package(&resp)
+            .ok_or_else(|| anyhow!("{label} publish: no published package in effects"))?,
         upgrade_cap_id: upgrade_cap_id
             .ok_or_else(|| anyhow!("{label} publish: no UpgradeCap created"))?,
         digest,
@@ -241,15 +237,8 @@ pub fn pubfile_for_published(
     out.join("\n") + "\n"
 }
 
-pub fn assert_success(resp: &SuiTransactionBlockResponse) -> Result<()> {
-    let effects = resp
-        .effects
-        .as_ref()
-        .ok_or_else(|| anyhow!("response missing effects"))?;
-    if effects.status().is_err() {
-        bail!("tx failed: {:?}", effects.status());
-    }
-    Ok(())
+pub fn assert_success(resp: &ExecutedTransaction) -> Result<()> {
+    sui_tx::tx::assert_success(resp, "publish")
 }
 
 #[cfg(test)]

@@ -19,13 +19,12 @@ use anyhow::{anyhow, bail, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
 use serde_json::Value;
-use sui_sdk::rpc_types::{SuiMoveStruct, SuiMoveValue, SuiObjectDataOptions};
-use sui_sdk::SuiClient;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::Argument;
 
 use crate::tx::{clock_arg, shared_object_arg};
+use crate::chain::ChainClient;
 
 /// Package + shared-object identity the composer calls against.
 #[derive(Debug, Clone)]
@@ -195,27 +194,28 @@ fn canon(s: &str) -> String {
     protocol_types::asset::canonicalize_move_type(s)
 }
 
-fn move_field<'a>(s: &'a SuiMoveStruct, name: &str) -> Result<&'a SuiMoveValue> {
-    match s {
-        SuiMoveStruct::WithFields(m) | SuiMoveStruct::WithTypes { fields: m, .. } => m
-            .get(name)
-            .ok_or_else(|| anyhow!("object missing field {name}")),
-        _ => bail!("unexpected move struct shape"),
-    }
+/// One field off a Move object's JSON rendering.
+///
+/// The gRPC/GraphQL `json` rendering nests struct fields DIRECTLY — there is
+/// no `fields` wrapper the way JSON-RPC's `SuiMoveStruct` had (conventions
+/// documented and golden-tested in `api-service/src/sui_rpc.rs`). Every
+/// pointer path in this module is written against that rendering.
+fn move_field<'a>(s: &'a Value, name: &str) -> Result<&'a Value> {
+    s.get(name)
+        .ok_or_else(|| anyhow!("object missing field {name}"))
 }
 
 /// A `VecSet<TypeName>` field → canonical type strings.
-fn type_name_set(v: &SuiMoveValue) -> Result<Vec<String>> {
-    let json = serde_json::to_value(v)?;
-    let contents = json
-        .pointer("/fields/contents")
+fn type_name_set(v: &Value) -> Result<Vec<String>> {
+    let contents = v
+        .pointer("/contents")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
     let mut out = Vec::new();
     for entry in contents {
         let name = entry
-            .pointer("/fields/name")
+            .pointer("/name")
             .and_then(Value::as_str)
             .or_else(|| entry.as_str())
             .ok_or_else(|| anyhow!("unparseable TypeName entry: {entry}"))?;
@@ -225,10 +225,9 @@ fn type_name_set(v: &SuiMoveValue) -> Result<Vec<String>> {
 }
 
 /// A `VecSet<ID>` field → object ids.
-fn id_set(v: &SuiMoveValue) -> Result<Vec<ObjectID>> {
-    let json = serde_json::to_value(v)?;
-    let contents = json
-        .pointer("/fields/contents")
+fn id_set(v: &Value) -> Result<Vec<ObjectID>> {
+    let contents = v
+        .pointer("/contents")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
@@ -241,44 +240,37 @@ fn id_set(v: &SuiMoveValue) -> Result<Vec<ObjectID>> {
         .collect()
 }
 
-async fn object_fields(client: &SuiClient, id: ObjectID) -> Result<SuiMoveStruct> {
-    let resp = client
-        .read_api()
-        .get_object_with_options(id, SuiObjectDataOptions::new().with_content().with_type())
+async fn object_fields(client: &ChainClient, id: ObjectID) -> Result<Value> {
+    let (_, json) = client
+        .get_object_json(id)
         .await
         .with_context(|| format!("fetching object {id}"))?;
-    let data = resp.data.ok_or_else(|| anyhow!("object {id} missing"))?;
-    match data.content {
-        Some(sui_sdk::rpc_types::SuiParsedData::MoveObject(obj)) => Ok(obj.fields),
-        _ => bail!("object {id} has no parsed move content"),
-    }
+    json.ok_or_else(|| anyhow!("object {id} has no parsed move content"))
 }
 
-async fn object_type(client: &SuiClient, id: ObjectID) -> Result<String> {
-    let resp = client
-        .read_api()
-        .get_object_with_options(id, SuiObjectDataOptions::new().with_type())
+async fn object_type(client: &ChainClient, id: ObjectID) -> Result<String> {
+    let obj = client
+        .get_object(id)
         .await
         .with_context(|| format!("fetching object {id} type"))?;
-    Ok(resp
-        .data
-        .and_then(|d| d.type_)
+    Ok(obj
+        .struct_tag()
         .ok_or_else(|| anyhow!("object {id} missing type"))?
-        .to_string())
+        .to_canonical_string(/* with_prefix */ true))
 }
 
 /// Chain-only holdings discovery. `bucket_for_call_type` answers which
 /// bucket a held option coin belongs to (indexer-supplied; pass an empty
 /// map when the vault can't hold vault_mm option coins).
 pub async fn discover_holdings(
-    client: &SuiClient,
+    client: &ChainClient,
     vault_id: ObjectID,
 ) -> Result<VaultHoldings> {
     let vault = object_fields(client, vault_id).await?;
-    let config_json = serde_json::to_value(move_field(&vault, "config")?)?;
+    let config_json = move_field(&vault, "config")?.clone();
     let deposit_type = canon(
         config_json
-            .pointer("/fields/deposit_asset/fields/name")
+            .pointer("/deposit_asset/name")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("vault config missing deposit_asset"))?,
     );
@@ -293,16 +285,16 @@ pub async fn discover_holdings(
             Ok(v) => {
                 let j = serde_json::to_value(v)?;
                 let account = j
-                    .pointer("/fields/account")
+                    .pointer("/account")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
                 let oracle = j
-                    .pointer("/fields/equity_oracle/fields/name")
-                    .or_else(|| j.pointer("/fields/equity_oracle"))
+                    .pointer("/equity_oracle/name")
+                    .or_else(|| j.pointer("/equity_oracle"))
                     .and_then(Value::as_str)
                     .map(canon);
                 let exposure = j
-                    .pointer("/fields/exposure")
+                    .pointer("/exposure")
                     .and_then(|e| {
                         e.as_str().and_then(|s| s.parse().ok()).or_else(|| e.as_u64())
                     })
@@ -316,61 +308,36 @@ pub async fn discover_holdings(
     // TypeName) and positions (dof, object_type = the custody struct).
     let mut tags: BTreeMap<ObjectID, String> = BTreeMap::new();
     let mut position_ids: Vec<ObjectID> = Vec::new();
-    let mut cursor = None;
-    loop {
-        let page = client
-            .read_api()
-            .get_dynamic_fields(vault_id, cursor, None)
-            .await
-            .context("listing vault dynamic fields")?;
-        for entry in &page.data {
-            let name_type = entry.name.type_.to_string();
-            if name_type.ends_with("::vault::PositionTagKey") {
-                let pos_id = entry
-                    .name
-                    .value
-                    .pointer("/id")
-                    .and_then(Value::as_str)
-                    .and_then(|s| ObjectID::from_hex_literal(s).ok())
-                    .ok_or_else(|| anyhow!("unparseable PositionTagKey name"))?;
-                // Read the tag value (a TypeName).
-                let tag_obj = client
-                    .read_api()
-                    .get_dynamic_field_object(vault_id, entry.name.clone())
-                    .await
-                    .context("reading position tag")?;
-                let tag = tag_obj
-                    .data
-                    .and_then(|d| d.content)
-                    .and_then(|c| match c {
-                        sui_sdk::rpc_types::SuiParsedData::MoveObject(o) => {
-                            serde_json::to_value(o.fields).ok()
-                        }
-                        _ => None,
-                    })
-                    .and_then(|j| {
-                        j.pointer("/value/fields/name")
-                            .or(j.pointer("/fields/value/fields/name"))
-                            .and_then(Value::as_str)
-                            .map(canon)
-                    })
-                    .ok_or_else(|| anyhow!("unparseable adapter tag for {pos_id}"))?;
-                tags.insert(pos_id, tag);
-            } else if name_type.ends_with("::vault::PositionKey") {
-                let pos_id = entry
-                    .name
-                    .value
-                    .pointer("/id")
-                    .and_then(Value::as_str)
-                    .and_then(|s| ObjectID::from_hex_literal(s).ok())
-                    .ok_or_else(|| anyhow!("unparseable PositionKey name"))?;
-                position_ids.push(pos_id);
-            }
+    // gRPC lists the `Field<K, V>` objects; one read of each field object
+    // yields both its name (the key struct) and its value.
+    let entries = client
+        .dynamic_fields(vault_id)
+        .await
+        .context("listing vault dynamic fields")?;
+    for entry in &entries {
+        let is_tag = entry.name_type_ends_with("::vault::PositionTagKey");
+        let is_pos = entry.name_type_ends_with("::vault::PositionKey");
+        if !is_tag && !is_pos {
+            continue;
         }
-        if page.has_next_page {
-            cursor = page.next_cursor;
+        let field = object_fields(client, entry.field_id)
+            .await
+            .with_context(|| format!("reading vault dynamic field {}", entry.field_id))?;
+        // Both key structs wrap the position id as their sole field.
+        let pos_id = field
+            .pointer("/name/id")
+            .and_then(Value::as_str)
+            .and_then(|s| ObjectID::from_hex_literal(s).ok())
+            .ok_or_else(|| anyhow!("unparseable position key name for {}", entry.field_id))?;
+        if is_tag {
+            let tag = field
+                .pointer("/value/name")
+                .and_then(Value::as_str)
+                .map(canon)
+                .ok_or_else(|| anyhow!("unparseable adapter tag for {pos_id}"))?;
+            tags.insert(pos_id, tag);
         } else {
-            break;
+            position_ids.push(pos_id);
         }
     }
 
@@ -402,20 +369,20 @@ pub async fn discover_holdings(
             positions.push(PositionInfo::DeepBookCustody { id: pos_id, assets, pools });
         } else if ty.ends_with("::options_adapter::RfqTicket") {
             let fields = object_fields(client, pos_id).await?;
-            let escrow_json = serde_json::to_value(move_field(&fields, "escrow_type")?)?;
+            let escrow_json = move_field(&fields, "escrow_type")?.clone();
             let escrow_type = canon(
                 escrow_json
-                    .pointer("/fields/name")
+                    .pointer("/name")
                     .and_then(Value::as_str)
                     .ok_or_else(|| anyhow!("ticket missing escrow_type"))?,
             );
             let id_field = |name: &str| -> Result<ObjectID> {
-                let j = serde_json::to_value(move_field(&fields, name)?)?;
+                let j = move_field(&fields, name)?.clone();
                 j.as_str()
                     .and_then(|s| ObjectID::from_hex_literal(s).ok())
                     .ok_or_else(|| anyhow!("ticket missing {name}"))
             };
-            let is_put = serde_json::to_value(move_field(&fields, "is_put")?)?
+            let is_put = move_field(&fields, "is_put")?.clone()
                 .as_bool()
                 .unwrap_or(false);
             positions.push(PositionInfo::RfqTicket {
@@ -428,22 +395,22 @@ pub async fn discover_holdings(
         } else if ty.ends_with("::options_adapter::BidTicket") {
             let fields = object_fields(client, pos_id).await?;
             let type_field = |name: &str| -> Result<String> {
-                let j = serde_json::to_value(move_field(&fields, name)?)?;
+                let j = move_field(&fields, name)?.clone();
                 Ok(canon(
-                    j.pointer("/fields/name")
+                    j.pointer("/name")
                         .and_then(Value::as_str)
                         .ok_or_else(|| anyhow!("bid ticket missing {name}"))?,
                 ))
             };
             let u64_field = |name: &str| -> Result<u64> {
-                let j = serde_json::to_value(move_field(&fields, name)?)?;
+                let j = move_field(&fields, name)?.clone();
                 j.as_str()
                     .and_then(|s| s.parse().ok())
                     .or_else(|| j.as_u64())
                     .ok_or_else(|| anyhow!("bid ticket missing {name}"))
             };
             let auction_id = {
-                let j = serde_json::to_value(move_field(&fields, "auction_id")?)?;
+                let j = move_field(&fields, "auction_id")?.clone();
                 j.as_str()
                     .and_then(|s| ObjectID::from_hex_literal(s).ok())
                     .ok_or_else(|| anyhow!("bid ticket missing auction_id"))?
@@ -458,7 +425,7 @@ pub async fn discover_holdings(
             });
         } else if ty.ends_with("::position::Position") {
             let fields = object_fields(client, pos_id).await?;
-            let bucket_json = serde_json::to_value(move_field(&fields, "bucket_id")?)?;
+            let bucket_json = move_field(&fields, "bucket_id")?.clone();
             let bucket_id = bucket_json
                 .as_str()
                 .and_then(|s| ObjectID::from_hex_literal(s).ok())
@@ -535,7 +502,7 @@ fn split_type_args(inner: &str) -> Vec<String> {
 /// appends `deposit` / `fulfill_withdrawals` with it.
 #[allow(clippy::too_many_arguments)]
 pub async fn compose_appraisal(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     refs: &AppraisalRefs,
     holdings: &VaultHoldings,

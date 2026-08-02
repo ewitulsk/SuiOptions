@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
-use sui_sdk::SuiClient;
+use sui_tx::chain::ChainClient;
 use sui_types::base_types::SuiAddress;
 use sui_types::crypto::SuiKeyPair;
 
@@ -57,7 +57,7 @@ pub fn store(path: &Path, dep: &CollateralDeployment) -> Result<()> {
 /// and the state file. Signs with `keypair` — the created `CollateralAccount`
 /// is owned by `sender`, so this MUST be the key the bot serves with.
 pub async fn deploy(
-    client: &SuiClient,
+    client: &ChainClient,
     keypair: &SuiKeyPair,
     sender: SuiAddress,
     contracts: &Path,

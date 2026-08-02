@@ -17,17 +17,11 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
-use shared_crypto::intent::Intent;
-use sui_json_rpc_types::{
-    ObjectChange, SuiTransactionBlockResponseOptions,
-};
-use sui_sdk::SuiClient;
+use sui_tx::chain::{created_objects, ChainClient};
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
-use sui_types::transaction::{ObjectArg, Transaction, TransactionData};
-use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
+use sui_types::transaction::ObjectArg;
 
-use move_publish::assert_success;
 use protocol_types::OracleProvider;
 
 use crate::json_store::TokenSpec;
@@ -78,39 +72,27 @@ pub fn registrar_pubkey_for_env(env: &str) -> Option<&'static str> {
 /// Pull one publish tx's created objects and index them by
 /// `module::name`.
 async fn created_by_type(
-    client: &SuiClient,
+    client: &ChainClient,
     digest: &str,
 ) -> Result<BTreeMap<String, ObjectID>> {
     let digest = digest
         .parse()
         .with_context(|| format!("parsing publish digest {digest}"))?;
     let resp = client
-        .read_api()
-        .get_transaction_with_options(
-            digest,
-            SuiTransactionBlockResponseOptions::new().with_object_changes(),
-        )
+        .get_transaction(&digest)
         .await
         .context("fetching publish tx for object resolution")?;
     let mut out = BTreeMap::new();
-    for change in resp.object_changes.unwrap_or_default() {
-        if let ObjectChange::Created {
-            object_id,
-            object_type,
-            ..
-        } = change
-        {
-            out.insert(
-                format!("{}::{}", object_type.module, object_type.name),
-                object_id,
-            );
+    for change in created_objects(&resp) {
+        if let Ok(tag) = sui_types::parse_sui_struct_tag(&change.object_type) {
+            out.insert(format!("{}::{}", tag.module, tag.name), change.object_id);
         }
     }
     Ok(out)
 }
 
 pub async fn resolve_objects(
-    client: &SuiClient,
+    client: &ChainClient,
     trading_vault_digest: &str,
     oracle_pyth_digest: &str,
     oracle_switchboard_digest: &str,
@@ -144,33 +126,14 @@ pub async fn resolve_objects(
     })
 }
 
-async fn shared_mut_arg(client: &SuiClient, id: ObjectID) -> Result<ObjectArg> {
-    let obj = client
-        .read_api()
-        .get_object_with_options(
-            id,
-            sui_json_rpc_types::SuiObjectDataOptions::new().with_owner(),
-        )
-        .await?
-        .data
-        .ok_or_else(|| anyhow!("shared object {id} missing"))?;
-    let initial_shared_version = match obj.owner {
-        Some(sui_types::object::Owner::Shared {
-            initial_shared_version,
-        }) => initial_shared_version,
-        other => return Err(anyhow!("object {id} is not shared: {other:?}")),
-    };
-    Ok(ObjectArg::SharedObject {
-        id,
-        initial_shared_version,
-        mutability: sui_types::transaction::SharedObjectMutability::Mutable,
-    })
+async fn shared_mut_arg(client: &ChainClient, id: ObjectID) -> Result<ObjectArg> {
+    client.shared_object_arg(id, /* mutable */ true).await
 }
 
 /// One PTB: witness allowlisting + feed seeding. Returns the digest.
 #[allow(clippy::too_many_arguments)]
 pub async fn activate(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     objects: &TradingVaultObjects,
     admin_cap_id: ObjectID,
@@ -189,21 +152,12 @@ pub async fn activate(
 
     let mut pt = ProgrammableTransactionBuilder::new();
 
-    let admin_ref = client
-        .read_api()
-        .get_object_with_options(
-            admin_cap_id,
-            sui_json_rpc_types::SuiObjectDataOptions::new(),
-        )
-        .await
-        .context("fetching AdminCap")?
-        .data
-        .ok_or_else(|| anyhow!("AdminCap object missing"))?;
-    let admin = pt.obj(ObjectArg::ImmOrOwnedObject((
-        admin_ref.object_id,
-        admin_ref.version,
-        admin_ref.digest,
-    )))?;
+    let admin = pt.obj(
+        client
+            .owned_object_arg(admin_cap_id)
+            .await
+            .context("fetching AdminCap")?,
+    )?;
 
     let ireg = pt.obj(shared_mut_arg(client, objects.integration_registry_id).await?)?;
     let oreg = pt.obj(shared_mut_arg(client, objects.oracle_registry_id).await?)?;
@@ -351,49 +305,12 @@ pub async fn activate(
         vec![admin, vol_book, poster],
     );
 
-    let gas_price = client
-        .read_api()
-        .get_reference_gas_price()
-        .await
-        .context("fetching gas price")?;
-    let coins = client
-        .coin_read_api()
-        .get_coins(signer.address, None, None, None)
-        .await
-        .context("fetching gas coins")?;
-    let gas = coins
-        .data
-        .iter()
-        .max_by_key(|c| c.balance)
-        .ok_or_else(|| anyhow!("no gas coins for activation tx"))?;
-
-    let tx_data = TransactionData::new_programmable(
-        signer.address,
-        vec![gas.object_ref()],
-        pt.finish(),
-        gas_budget,
-        gas_price,
-    );
-    let signature = Transaction::signature_from_signer(
-        tx_data.clone(),
-        Intent::sui_transaction(),
-        &signer.keypair,
-    );
-    let tx = Transaction::from_data(tx_data, vec![signature]);
     tracing::info!(
         pyth_feeds = seeded,
         switchboard_feeds = sb_seeded,
         "submitting trading-vault activation tx"
     );
-    let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            SuiTransactionBlockResponseOptions::new().with_effects(),
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
-        .await
-        .context("submitting activation tx")?;
-    assert_success(&resp)?;
-    Ok(resp.digest.to_string())
+    let resp =
+        sui_tx::tx::submit_ptb(client, signer, pt, gas_budget, "trading-vault activation").await?;
+    Ok(sui_tx::tx::tx_digest(&resp).to_string())
 }

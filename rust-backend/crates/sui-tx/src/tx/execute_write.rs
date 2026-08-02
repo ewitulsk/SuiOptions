@@ -26,23 +26,17 @@ use std::str::FromStr;
 use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
-use shared_crypto::intent::Intent;
-use sui_json_rpc_types::{
-    SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
-    SuiTransactionBlockResponseOptions,
-};
-use sui_sdk::SuiClient;
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{
-    Argument, ObjectArg, SharedObjectMutability, Transaction, TransactionData,
+    Argument, ObjectArg, SharedObjectMutability,
 };
-use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
 use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION};
 use tracing::{debug, info};
 
 use crate::sui_client::Signer;
 use crate::tx::shared_object_arg;
+use crate::chain::{ChainClient, ExecutedTransaction};
 
 /// The quote fields the MM signed over plus the routing objects the PTB
 /// resolves from them. Shared by both flows (and both products).
@@ -167,7 +161,7 @@ pub(crate) struct FlowPrelude<'a> {
 /// registered shared-object arguments (the bucket input is shared with the
 /// later execute call).
 pub(crate) async fn build_request_and_release(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     p: FlowPrelude<'_>,
     bucket: Argument,
@@ -262,10 +256,10 @@ fn clock_arg(pt: &mut ProgrammableTransactionBuilder) -> Result<Argument> {
 
 /// Build + sign + submit the writer-flow PTB.
 pub async fn execute_writer_flow(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     p: &ExecuteWriteParams<'_>,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(
         %p.package,
         %p.bucket_id,
@@ -362,10 +356,10 @@ pub async fn execute_writer_flow(
 /// `signer_token_recipient`; the trader receives the `CallOption` coin via
 /// `call_token_recipient`.
 pub async fn execute_trader_flow(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     p: &ExecuteTraderParams<'_>,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(
         %p.package,
         %p.bucket_id,
@@ -456,63 +450,12 @@ pub async fn execute_trader_flow(
 /// Gas-select, sign, submit, and assert success for an execute-flow PTB.
 /// Shared by both the writer and trader flows.
 async fn submit_execute_write(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     pt: ProgrammableTransactionBuilder,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
-    let programmable = pt.finish();
-
-    // Gas selection.
-    let gas_coin = client
-        .coin_read_api()
-        .get_coins(signer.address, None, None, Some(5))
-        .await
-        .context("listing gas coins")?
-        .data
-        .into_iter()
-        .max_by_key(|c| c.balance)
-        .ok_or_else(|| anyhow!("no SUI coins to pay gas for {}", signer.address))?;
-
-    let gas_price = client
-        .read_api()
-        .get_reference_gas_price()
-        .await
-        .context("fetching reference gas price")?;
-
-    let tx_data = TransactionData::new_programmable(
-        signer.address,
-        vec![gas_coin.object_ref()],
-        programmable,
-        gas_budget,
-        gas_price,
-    );
-
-    let sig = Transaction::signature_from_signer(
-        tx_data.clone(),
-        Intent::sui_transaction(),
-        &signer.keypair,
-    );
-    let tx = Transaction::from_data(tx_data, vec![sig]);
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
-    let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
-        .await
-        .context("submitting execute_write tx")?;
-    let effects = resp
-        .effects
-        .as_ref()
-        .context("response missing effects")?;
-    if effects.status().is_err() {
-        anyhow::bail!("execute_write reverted: {:?}", effects.status());
-    }
-    debug!(digest = %resp.digest, "execute_write succeeded");
+) -> Result<ExecutedTransaction> {
+    let resp = super::submit_ptb(client, signer, pt, gas_budget, "execute_write").await?;
+    debug!(digest = %super::tx_digest(&resp), "execute_write succeeded");
     Ok(resp)
 }

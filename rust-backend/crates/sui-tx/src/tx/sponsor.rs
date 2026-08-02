@@ -10,8 +10,6 @@
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use shared_crypto::intent::Intent;
-use sui_json_rpc_types::{SuiExecutionStatus, SuiTransactionBlockEffectsAPI};
-use sui_sdk::SuiClient;
 use sui_types::base_types::{ObjectRef, SuiAddress};
 use sui_types::crypto::EncodeDecodeBase64;
 use sui_types::transaction::{Command, GasData, Transaction, TransactionData, TransactionKind};
@@ -19,6 +17,7 @@ use tracing::info;
 
 use crate::sui_client::Signer;
 use crate::tx::template::{describe_ptb, match_any, PtbTemplate};
+use crate::chain::ChainClient;
 
 /// Budget-sizing knobs (from gas-station config).
 pub struct BudgetPolicy {
@@ -80,7 +79,7 @@ fn validate_kind(kind: &TransactionKind, templates: &[PtbTemplate]) -> Result<()
 /// client-supplied budget — the budget is derived from a dry run so the gas
 /// wallet can't be made to over-commit.
 pub async fn sponsor_transaction(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     templates: &[PtbTemplate],
     policy: &BudgetPolicy,
@@ -94,20 +93,18 @@ pub async fn sponsor_transaction(
     let sponsor = signer.address;
 
     // Sponsor gas coins, largest-first, enough to cover the dry-run budget.
-    let mut coins = client
-        .coin_read_api()
-        .get_coins(sponsor, None, None, Some(50))
+    // `ChainClient::coins` already sorts by balance descending.
+    let coins = client
+        .coins(sponsor, &crate::chain::sui_coin_type())
         .await
-        .context("listing sponsor gas coins")?
-        .data;
+        .context("listing sponsor gas coins")?;
     if coins.is_empty() {
         bail!("gas station wallet {sponsor} has no SUI coins");
     }
-    coins.sort_by(|a, b| b.balance.cmp(&a.balance));
     let mut payment: Vec<ObjectRef> = Vec::new();
     let mut available: u64 = 0;
     for c in &coins {
-        payment.push(c.object_ref());
+        payment.push(c.object_ref);
         available = available.saturating_add(c.balance);
         if available >= policy.max_gas_budget {
             break;
@@ -115,8 +112,7 @@ pub async fn sponsor_transaction(
     }
 
     let gas_price = client
-        .read_api()
-        .get_reference_gas_price()
+        .reference_gas_price()
         .await
         .context("fetching reference gas price")?;
 
@@ -140,16 +136,21 @@ pub async fn sponsor_transaction(
         },
     );
     let dry = client
-        .read_api()
-        .dry_run_transaction_block(probe)
+        .dry_run(&probe)
         .await
         .context("dry-running sponsored transaction")?;
-    if let SuiExecutionStatus::Failure { error } = dry.effects.status() {
-        bail!("transaction would fail on chain: {error}");
+    let dry_effects = &dry.transaction.effects;
+    {
+        use sui_types::effects::TransactionEffectsAPI;
+        let status = dry_effects.status();
+        if status.is_err() {
+            bail!("transaction would fail on chain: {status:?}");
+        }
     }
 
     // Budget = (computation + storage) + buffer, clamped to [min, max].
-    let summary = dry.effects.gas_cost_summary();
+    use sui_types::effects::TransactionEffectsAPI;
+    let summary = dry_effects.gas_cost_summary();
     let used = summary
         .computation_cost
         .saturating_add(summary.storage_cost);
@@ -186,13 +187,11 @@ pub async fn sponsor_transaction(
 }
 
 /// Total SUI balance (MIST) of the gas station wallet.
-pub async fn sponsor_balance(client: &SuiClient, sponsor: SuiAddress) -> Result<u128> {
-    let bal = client
-        .coin_read_api()
-        .get_balance(sponsor, None)
+pub async fn sponsor_balance(client: &ChainClient, sponsor: SuiAddress) -> Result<u128> {
+    client
+        .balance(sponsor, &crate::chain::sui_coin_type())
         .await
-        .context("fetching sponsor balance")?;
-    Ok(bal.total_balance)
+        .context("fetching sponsor balance")
 }
 
 #[cfg(test)]

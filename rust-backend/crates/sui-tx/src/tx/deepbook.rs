@@ -17,23 +17,19 @@ use anyhow::{anyhow, bail, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
 use shared_crypto::intent::Intent;
-use sui_json_rpc_types::{
-    EventFilter, ObjectChange, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
-    SuiTransactionBlockResponseOptions,
-};
-use sui_sdk::SuiClient;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{
-    Argument, ObjectArg, Transaction, TransactionData, TransactionKind,
+    Argument, ObjectArg, Transaction, TransactionData,
 };
-use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
 use sui_types::SUI_CLOCK_OBJECT_ID;
 
 use tracing::{debug, info};
 
 use crate::sui_client::Signer;
 use crate::tx::shared_object_arg;
+use crate::chain::{created_objects, decode_return_value, ChainClient, ExecutedTransaction};
+use crate::events::EventClient;
 
 /// DeepBook order-type / self-matching constants (deployed v3 values; an
 /// unexpected drift aborts at dry-run, never on-chain).
@@ -74,7 +70,7 @@ pub struct QuotePlan {
 /// `BalanceManagerEvent`s (emitted by `register_balance_manager`, which our
 /// creation flow always calls). Returns the newest match.
 pub async fn find_balance_manager(
-    client: &SuiClient,
+    events: &EventClient,
     handles: &DeepBookHandles,
     owner: sui_types::base_types::SuiAddress,
 ) -> Result<Option<ObjectID>> {
@@ -82,14 +78,9 @@ pub async fn find_balance_manager(
         "{}::balance_manager::BalanceManagerEvent",
         handles.original_package
     );
-    let filter = EventFilter::MoveEventType(
-        event_type
-            .parse()
-            .with_context(|| format!("parsing event type {event_type}"))?,
-    );
-    let page = client
-        .event_api()
-        .query_events(filter, None, Some(50), true /* descending */)
+    // gRPC has no events query — this one read goes over GraphQL.
+    let page = events
+        .query_by_type(&event_type, None, 50, true /* descending */)
         .await
         .context("querying BalanceManagerEvent")?;
     let owner_hex = owner.to_string();
@@ -110,7 +101,7 @@ pub async fn find_balance_manager(
 /// the shared object's id. One-time per bot; rediscovery afterwards goes
 /// through [`find_balance_manager`].
 pub async fn create_balance_manager(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     handles: &DeepBookHandles,
     gas_budget: u64,
@@ -151,18 +142,10 @@ pub async fn create_balance_manager(
 
     let resp = submit(client, signer, pt, gas_budget).await?;
     let bm_suffix = "::balance_manager::BalanceManager";
-    let created = resp
-        .object_changes
-        .unwrap_or_default()
+    let created = created_objects(&resp)
         .into_iter()
-        .find_map(|c| match c {
-            sui_json_rpc_types::ObjectChange::Created {
-                object_id,
-                object_type,
-                ..
-            } if object_type.to_string().ends_with(bm_suffix) => Some(object_id),
-            _ => None,
-        })
+        .find(|c| c.object_type.ends_with(bm_suffix))
+        .map(|c| c.object_id)
         .ok_or_else(|| anyhow!("create tx succeeded but no BalanceManager in object changes"))?;
     info!(balance_manager = %created, "BalanceManager created + registered + shared");
     Ok(created)
@@ -191,7 +174,7 @@ pub fn derived_pool_params(base_decimals: u8, quote_decimals: u8) -> (u64, u64, 
 /// `EPoolAlreadyExists` if a pool for this pair already exists.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_pool(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     handles: &DeepBookHandles,
     deep_coin_type: &str,
@@ -225,9 +208,9 @@ pub async fn create_pool(
 
     info!(base = %base_coin_type, quote = %quote_coin_type, tick, lot, min, "creating DeepBook pool");
     let resp = submit(client, signer, pt, gas_budget).await?;
-    let pool = pool_id_from_changes(resp.object_changes.as_deref().unwrap_or(&[]))
+    let pool = pool_id_from_changes(&resp)
         .ok_or_else(|| anyhow!("create_permissionless_pool succeeded but no Pool in object changes"))?;
-    info!(pool = %pool, digest = %resp.digest, "DeepBook pool created");
+    info!(pool = %pool, digest = %super::tx_digest(&resp), "DeepBook pool created");
     Ok(pool)
 }
 
@@ -235,7 +218,7 @@ pub async fn create_pool(
 /// `deepbook_adapter::allow_pool` calls, AdminCap-gated. Used by the
 /// option-scheduler after each roll so the allowlist never goes stale.
 pub async fn allow_pools_for_vault(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     adapter_pkg: ObjectID,
     admin_cap: ObjectID,
@@ -261,23 +244,17 @@ pub async fn allow_pools_for_vault(
 }
 
 /// Pull the created `pool::Pool<_, _>` object id out of a tx's ObjectChanges.
-fn pool_id_from_changes(changes: &[ObjectChange]) -> Option<ObjectID> {
-    changes.iter().find_map(|c| match c {
-        ObjectChange::Created {
-            object_id,
-            object_type,
-            ..
-        } if object_type.module.as_str() == "pool" && object_type.name.as_str() == "Pool" => {
-            Some(*object_id)
-        }
-        _ => None,
+fn pool_id_from_changes(resp: &ExecutedTransaction) -> Option<ObjectID> {
+    created_objects(resp).into_iter().find_map(|c| {
+        let tag = sui_types::parse_sui_struct_tag(&c.object_type).ok()?;
+        (tag.module.as_str() == "pool" && tag.name.as_str() == "Pool").then_some(c.object_id)
     })
 }
 
 /// Read `balance_manager::balance<T>(&BM)` via dev-inspect (no gas, no
 /// signature). Returns 0 for an asset the BM has never held.
 pub async fn bm_balance(
-    client: &SuiClient,
+    client: &ChainClient,
     sender: sui_types::base_types::SuiAddress,
     handles: &DeepBookHandles,
     bm_id: ObjectID,
@@ -295,25 +272,10 @@ pub async fn bm_balance(
         vec![bm],
     );
     let res = client
-        .read_api()
-        .dev_inspect_transaction_block(
-            sender,
-            TransactionKind::ProgrammableTransaction(pt.finish()),
-            None,
-            None,
-            None,
-        )
+        .dev_inspect_ptb(sender, pt)
         .await
         .context("dev-inspecting balance_manager::balance")?;
-    if let Some(err) = res.error {
-        bail!("balance dev-inspect failed: {err}");
-    }
-    let results = res.results.unwrap_or_default();
-    let (bytes, _) = results
-        .last()
-        .and_then(|r| r.return_values.first())
-        .ok_or_else(|| anyhow!("balance dev-inspect returned no values"))?;
-    bcs::from_bytes::<u64>(bytes).context("decoding balance u64")
+    decode_return_value::<u64>(&res, 0).context("decoding balance u64")
 }
 
 /// Best bid/ask of one pool, in DeepBook raw price units. `None` on an
@@ -328,7 +290,7 @@ pub struct TopOfBook {
 /// Uses `pool::get_level2_ticks_from_mid(pool, 1, clock)` rather than
 /// `pool::mid_price`, which aborts when either side is empty.
 pub async fn top_of_book(
-    client: &SuiClient,
+    client: &ChainClient,
     sender: sui_types::base_types::SuiAddress,
     deepbook_package: ObjectID,
     pool_id: ObjectID,
@@ -352,32 +314,22 @@ pub async fn top_of_book(
         vec![pool, ticks, clock],
     );
     let res = client
-        .read_api()
-        .dev_inspect_transaction_block(
-            sender,
-            TransactionKind::ProgrammableTransaction(pt.finish()),
-            None,
-            None,
-            None,
-        )
+        .dev_inspect_ptb(sender, pt)
         .await
         .context("dev-inspecting pool::get_level2_ticks_from_mid")?;
-    if let Some(err) = res.error {
-        bail!("level2 dev-inspect failed: {err}");
-    }
     // Returns four vectors: bid prices, bid quantities, ask prices, ask
     // quantities — best-first, so element 0 is the top of each side.
-    let results = res.results.unwrap_or_default();
-    let values = &results
+    let values = res
+        .command_outputs
         .last()
-        .ok_or_else(|| anyhow!("level2 dev-inspect returned no results"))?
-        .return_values;
-    if values.len() < 4 {
-        bail!("level2 dev-inspect returned {} values, expected 4", values.len());
+        .map(|r| r.return_values.len())
+        .unwrap_or(0);
+    if values < 4 {
+        bail!("level2 dev-inspect returned {values} values, expected 4");
     }
     let first_of = |i: usize| -> Result<Option<u64>> {
         let prices: Vec<u64> =
-            bcs::from_bytes(&values[i].0).context("decoding level2 price vector")?;
+            decode_return_value(&res, i).context("decoding level2 price vector")?;
         Ok(prices.first().copied())
     };
     Ok(TopOfBook {
@@ -392,7 +344,7 @@ pub async fn top_of_book(
 /// orders standing (they self-expire via `expire_timestamp_ms`).
 #[allow(clippy::too_many_arguments)]
 pub async fn refresh_pool_quotes(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     handles: &DeepBookHandles,
     pool_id: ObjectID,
@@ -403,7 +355,7 @@ pub async fn refresh_pool_quotes(
     deposits: &[(String, u64)],
     plan: QuotePlan,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     let base_tag = TypeTag::from_str(base_coin_type)
         .with_context(|| format!("parsing base type {base_coin_type}"))?;
     let quote_tag = TypeTag::from_str(quote_coin_type)
@@ -525,7 +477,7 @@ pub struct PoolRefresh {
 /// empty plan is therefore a cancel-only entry. Every submit is dry-run gated;
 /// returns one response per chunk.
 pub async fn refresh_pools_batched(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     handles: &DeepBookHandles,
     bm_id: ObjectID,
@@ -533,7 +485,7 @@ pub async fn refresh_pools_batched(
     refreshes: &[PoolRefresh],
     max_pools_per_tx: usize,
     gas_budget: u64,
-) -> Result<Vec<SuiTransactionBlockResponse>> {
+) -> Result<Vec<ExecutedTransaction>> {
     if refreshes.is_empty() {
         return Ok(Vec::new());
     }
@@ -647,7 +599,7 @@ pub async fn refresh_pools_batched(
 
 /// Cancel everything the BM has resting on `pool` (shutdown / pool-exit path).
 pub async fn cancel_all_on_pool(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     handles: &DeepBookHandles,
     pool_id: ObjectID,
@@ -655,7 +607,7 @@ pub async fn cancel_all_on_pool(
     quote_coin_type: &str,
     bm_id: ObjectID,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     let base_tag = TypeTag::from_str(base_coin_type)?;
     let quote_tag = TypeTag::from_str(quote_coin_type)?;
     let mut pt = ProgrammableTransactionBuilder::new();
@@ -684,23 +636,23 @@ pub async fn cancel_all_on_pool(
 /// Gather an exact-amount Coin<T> argument from the signer's wallet
 /// (merging as needed). Public for the mm-bot simulator's funding PTBs.
 pub async fn gather_exact_coin(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     pt: &mut ProgrammableTransactionBuilder,
     coin_type: &str,
     amount: u64,
 ) -> Result<Argument> {
+    let tag = sui_types::parse_sui_struct_tag(coin_type)
+        .map_err(|e| anyhow!("parsing coin type {coin_type}: {e}"))?;
     let coins = client
-        .coin_read_api()
-        .get_coins(signer.address, Some(coin_type.to_string()), None, Some(50))
+        .coins(signer.address, &tag)
         .await
-        .with_context(|| format!("listing {coin_type} coins"))?
-        .data;
+        .with_context(|| format!("listing {coin_type} coins"))?;
     let total: u128 = coins.iter().map(|c| c.balance as u128).sum();
     if total < amount as u128 {
         bail!("wallet holds {total} of {coin_type}, need {amount}");
     }
-    let mut refs = coins.into_iter().map(|c| c.object_ref());
+    let mut refs = coins.into_iter().map(|c| c.object_ref);
     let first = refs.next().ok_or_else(|| anyhow!("no {coin_type} coins"))?;
     let primary = pt.obj(ObjectArg::ImmOrOwnedObject(first))?;
     let rest: Vec<Argument> = refs
@@ -722,39 +674,33 @@ pub async fn gather_exact_coin(
 
 /// Dry-run gate + sign + execute. Mirrors `test_tokens::submit`.
 async fn submit(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     pt: ProgrammableTransactionBuilder,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     submit_programmable(client, signer, pt.finish(), gas_budget).await
 }
 
 /// Same as [`submit`] for an already-finished PTB (callers that dev-inspect
 /// the transaction first need the `ProgrammableTransaction` twice).
 async fn submit_programmable(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     programmable: sui_types::transaction::ProgrammableTransaction,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     let gas_coin = client
-        .coin_read_api()
-        .get_coins(signer.address, None, None, Some(5))
+        .gas_coin(signer.address)
         .await
-        .context("listing gas coins")?
-        .data
-        .into_iter()
-        .max_by_key(|c| c.balance)
-        .ok_or_else(|| anyhow!("no SUI coins to pay gas for {}", signer.address))?;
+        .context("selecting a gas coin")?;
     let gas_price = client
-        .read_api()
-        .get_reference_gas_price()
+        .reference_gas_price()
         .await
         .context("fetching reference gas price")?;
     let tx_data = TransactionData::new_programmable(
         signer.address,
-        vec![gas_coin.object_ref()],
+        vec![gas_coin],
         programmable,
         gas_budget,
         gas_price,
@@ -763,12 +709,15 @@ async fn submit_programmable(
     // Dry-run first so a bad assumption (book moved, POST-only would cross,
     // wrong constant) costs nothing and is loudly attributable.
     let dry = client
-        .read_api()
-        .dry_run_transaction_block(tx_data.clone())
+        .dry_run(&tx_data)
         .await
         .context("dry-running deepbook tx")?;
-    if dry.effects.status().is_err() {
-        bail!("deepbook tx dry-run reverted: {:?}", dry.effects.status());
+    {
+        use sui_types::effects::TransactionEffectsAPI;
+        let status = dry.transaction.effects.status();
+        if status.is_err() {
+            bail!("deepbook tx dry-run reverted: {status:?}");
+        }
     }
 
     let sig = Transaction::signature_from_signer(
@@ -777,23 +726,12 @@ async fn submit_programmable(
         &signer.keypair,
     );
     let tx = Transaction::from_data(tx_data, vec![sig]);
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
     let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
+        .execute(&tx)
         .await
         .context("submitting deepbook tx")?;
-    let effects = resp.effects.as_ref().context("response missing effects")?;
-    if effects.status().is_err() {
-        bail!("deepbook tx reverted: {:?}", effects.status());
-    }
-    debug!(digest = %resp.digest, "deepbook tx succeeded");
+    super::assert_success(&resp, "deepbook tx")?;
+    debug!(digest = %super::tx_digest(&resp), "deepbook tx succeeded");
     Ok(resp)
 }
 
@@ -828,7 +766,7 @@ fn nested(arg: Argument, i: u16) -> Argument {
 /// dry-run (nothing is spent).
 #[allow(clippy::too_many_arguments)]
 pub async fn swap_base_for_quote(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     deepbook_package: ObjectID,
     pool_id: ObjectID,
@@ -839,7 +777,7 @@ pub async fn swap_base_for_quote(
     min_quote_out: u64,
     recipient: sui_types::base_types::SuiAddress,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     let mut pt = ProgrammableTransactionBuilder::new();
     let base = gather_exact_coin(client, signer, &mut pt, base_coin_type, amount).await?;
     let deep_zero = zero_coin(&mut pt, deep_coin_type)
@@ -903,10 +841,10 @@ pub struct FlashExerciseCallParams<'a> {
 /// call returns an error (nothing signed, no gas spent) when net ≤ 0 —
 /// callers ladder big sizes and simply retry later.
 pub async fn flash_exercise_call(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     p: &FlashExerciseCallParams<'_>,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     let pool_tags = vec![
         TypeTag::from_str(p.underlying_type)?,
         TypeTag::from_str(p.settlement_type)?,
@@ -983,19 +921,23 @@ pub async fn flash_exercise_call(
     // Pre-simulate: nothing is signed if the net is ≤ 0 (the swap's
     // min_quote_out aborts) or any other assumption broke.
     let programmable = pt.finish();
+    let inspect_tx = TransactionData::new_programmable(
+        signer.address,
+        vec![],
+        programmable.clone(),
+        p.gas_budget,
+        client.reference_gas_price().await?,
+    );
     let inspect = client
-        .read_api()
-        .dev_inspect_transaction_block(
-            signer.address,
-            TransactionKind::ProgrammableTransaction(programmable.clone()),
-            None,
-            None,
-            None,
-        )
+        .dev_inspect(&inspect_tx)
         .await
         .context("dev-inspecting flash-exercise")?;
-    if let Some(err) = inspect.error {
-        bail!("flash-exercise pre-simulation failed (likely net ≤ 0): {err}");
+    {
+        use sui_types::effects::TransactionEffectsAPI;
+        let status = inspect.transaction.effects.status();
+        if status.is_err() {
+            bail!("flash-exercise pre-simulation failed (likely net <= 0): {status:?}");
+        }
     }
     submit_programmable(client, signer, programmable, p.gas_budget).await
 }

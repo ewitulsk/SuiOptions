@@ -33,7 +33,6 @@ use anyhow::{anyhow, Context, Result};
 use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::Value;
-use sui_json_rpc_types::{ObjectChange, SuiObjectDataOptions, SuiParsedData};
 use sui_types::base_types::{ObjectID, SuiAddress};
 
 use api_service_client::{ApiServiceClient, OpenRfq};
@@ -231,22 +230,19 @@ pub fn parse_auction_view(fields: &Value) -> Result<AuctionView> {
 }
 
 pub(crate) async fn fetch_auction_view(
-    client: &sui_sdk::SuiClient,
+    client: &sui_tx::chain::ChainClient,
     rfq_id: ObjectID,
 ) -> Result<Option<AuctionView>> {
-    let resp = client
-        .read_api()
-        .get_object_with_options(rfq_id, SuiObjectDataOptions::new().with_content())
+    let Some((_, json)) = client
+        .try_get_object_json(rfq_id)
         .await
-        .with_context(|| format!("reading auction {rfq_id}"))?;
-    let Some(data) = resp.data else {
+        .with_context(|| format!("reading auction {rfq_id}"))?
+    else {
         return Ok(None); // settled mid-poll: the object is deleted
     };
-    match data.content {
-        Some(SuiParsedData::MoveObject(obj)) => {
-            Ok(Some(parse_auction_view(&obj.fields.to_json_value())?))
-        }
-        other => Err(anyhow!("auction {rfq_id} has unexpected content: {other:?}")),
+    match json {
+        Some(fields) => Ok(Some(parse_auction_view(&fields)?)),
+        None => Err(anyhow!("auction {rfq_id} has no readable Move content")),
     }
 }
 
@@ -584,20 +580,12 @@ async fn place_bid(
     let resp =
         submit_ptb(&wrap.client, &wrap.signer, pt, p.cfg.gas_budget, "desk auction bid").await?;
     let suffix = "::options_adapter::BidTicket";
-    let ticket_id = resp
-        .object_changes
-        .unwrap_or_default()
+    let ticket_id = sui_tx::chain::created_objects(&resp)
         .into_iter()
-        .find_map(|c| match c {
-            ObjectChange::Created { object_id, object_type, .. }
-                if object_type.to_string().ends_with(suffix) =>
-            {
-                Some(object_id)
-            }
-            _ => None,
-        })
+        .find(|c| c.object_type.ends_with(suffix))
+        .map(|c| c.object_id)
         .ok_or_else(|| anyhow!("bid_on_auction succeeded but no BidTicket in object changes"))?;
-    Ok((resp.digest.to_string(), ticket_id))
+    Ok((sui_tx::tx::tx_digest(&resp).to_string(), ticket_id))
 }
 
 pub(crate) fn sui_object_id(id: &protocol_types::ids::ObjectId) -> Result<ObjectID> {

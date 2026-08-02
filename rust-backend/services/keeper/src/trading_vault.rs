@@ -37,11 +37,7 @@ use std::collections::BTreeMap;
 use anyhow::{anyhow, Context, Result};
 use indexer_graphql::IndexerClient;
 use serde_json::Value;
-use sui_sdk::rpc_types::{
-    ObjectChange, SuiObjectDataFilter, SuiObjectDataOptions, SuiObjectResponseQuery,
-    SuiTransactionBlockResponseOptions,
-};
-use sui_sdk::SuiClient;
+use sui_tx::chain::{created_objects, ChainClient};
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{ObjectArg, TransactionKind};
@@ -125,52 +121,39 @@ pub struct GovernanceObjects {
 }
 
 async fn created_of_types(
-    client: &SuiClient,
+    client: &ChainClient,
     publish_digest: &str,
     wanted: &[&str],
 ) -> Result<BTreeMap<String, ObjectID>> {
     let digest = publish_digest.parse().context("parsing publish digest")?;
     let resp = client
-        .read_api()
-        .get_transaction_with_options(
-            digest,
-            SuiTransactionBlockResponseOptions::new()
-                .with_object_changes()
-                .with_effects(),
-        )
+        .get_transaction(&digest)
         .await
         .context("fetching publish tx")?;
     let mut out = BTreeMap::new();
-    // Prefer objectChanges; pruned nodes may only serve effects.
-    if let Some(changes) = resp.object_changes {
-        for change in changes {
-            if let ObjectChange::Created { object_id, object_type, .. } = change {
-                let key = format!("{}::{}", object_type.module, object_type.name);
-                if wanted.iter().any(|w| key == *w) {
-                    out.insert(key, object_id);
-                }
+    // The changed-objects list carries the type inline; only when a pruned
+    // node omits it do we fall back to reading each created object.
+    let created = created_objects(&resp);
+    for change in &created {
+        if let Ok(tag) = sui_types::parse_sui_struct_tag(&change.object_type) {
+            let key = format!("{}::{}", tag.module, tag.name);
+            if wanted.iter().any(|w| key == *w) {
+                out.insert(key, change.object_id);
             }
         }
     }
     if out.len() < wanted.len() {
-        if let Some(effects) = resp.effects {
-            use sui_sdk::rpc_types::SuiTransactionBlockEffectsAPI;
-            let ids: Vec<ObjectID> =
-                effects.created().iter().map(|c| c.reference.object_id).collect();
-            let objs = client
-                .read_api()
-                .multi_get_object_with_options(ids, SuiObjectDataOptions::new().with_type())
-                .await
-                .context("resolving created objects")?;
-            for o in objs {
-                if let Some(data) = o.data {
-                    if let Some(t) = data.type_ {
-                        let full = t.to_string();
-                        for w in wanted {
-                            if full.ends_with(&format!("::{w}")) {
-                                out.insert((*w).to_string(), data.object_id);
-                            }
-                        }
+        let ids: Vec<ObjectID> = created.iter().map(|c| c.object_id).collect();
+        let objs = client
+            .multi_get_objects(&ids)
+            .await
+            .context("resolving created objects")?;
+        for o in objs {
+            if let Some(t) = o.struct_tag() {
+                let full = t.to_canonical_string(/* with_prefix */ true);
+                for w in wanted {
+                    if full.ends_with(&format!("::{w}")) {
+                        out.insert((*w).to_string(), o.id());
                     }
                 }
             }
@@ -182,7 +165,7 @@ async fn created_of_types(
 /// Fallback discovery for deployments whose token-info predates the
 /// `trading_vault_objects` block.
 pub async fn discover_governance(
-    client: &SuiClient,
+    client: &ChainClient,
     trading_vault_digest: &str,
     oracle_pyth_digest: &str,
 ) -> Result<GovernanceObjects> {
@@ -499,12 +482,12 @@ async fn post_vols(wrap: &SuiClientWrapper, ctx: &TradingVaultCtx, now_ms: u64) 
 
 /// The VolBook's poster guardrails + entries table id:
 /// (min_interval_ms, max_delta_bps, entries table).
-async fn vol_book_meta(client: &SuiClient, book_id: ObjectID) -> Result<(u64, u64, ObjectID)> {
-    let min_interval = as_u64(&json_field(client, book_id, "/fields/min_interval_ms").await?)
+async fn vol_book_meta(client: &ChainClient, book_id: ObjectID) -> Result<(u64, u64, ObjectID)> {
+    let min_interval = as_u64(&json_field(client, book_id, "/min_interval_ms").await?)
         .ok_or_else(|| anyhow!("VolBook min_interval_ms unreadable"))?;
-    let max_delta = as_u64(&json_field(client, book_id, "/fields/max_delta_bps").await?)
+    let max_delta = as_u64(&json_field(client, book_id, "/max_delta_bps").await?)
         .ok_or_else(|| anyhow!("VolBook max_delta_bps unreadable"))?;
-    let table = json_field(client, book_id, "/fields/entries/fields/id/id").await?;
+    let table = json_field(client, book_id, "/entries/id").await?;
     let table_id = table
         .as_str()
         .and_then(|s| ObjectID::from_hex_literal(s).ok())
@@ -517,7 +500,7 @@ async fn vol_book_meta(client: &SuiClient, book_id: ObjectID) -> Result<(u64, u6
 /// `0x1::type_name::TypeName`, whose `name` is the canonical type
 /// WITHOUT the `0x` prefix.
 async fn vol_entry(
-    client: &SuiClient,
+    client: &ChainClient,
     entries_table: ObjectID,
     canonical_type: &str,
 ) -> Result<Option<(u64, u64)>> {
@@ -531,36 +514,31 @@ async fn vol_entry(
         &key_bytes,
     )
     .context("deriving VolBook entry field id")?;
-    let resp = client
-        .read_api()
-        .get_object_with_options(
-            field_id,
-            sui_json_rpc_types::SuiObjectDataOptions::new(),
-        )
+    let Some((_, json)) = client
+        .try_get_object_json(field_id)
         .await
-        .context("reading VolBook entry")?;
-    let Some(data) = resp.data else {
+        .context("reading VolBook entry")?
+    else {
         return Ok(None);
     };
-    let vol = as_u64(&json_field(client, data.object_id, "/fields/value/fields/vol_bps").await?)
-        .ok_or_else(|| anyhow!("VolBook entry vol_bps unreadable"))?;
-    let at =
-        as_u64(&json_field(client, data.object_id, "/fields/value/fields/updated_at_ms").await?)
-            .ok_or_else(|| anyhow!("VolBook entry updated_at_ms unreadable"))?;
-    Ok(Some((vol, at)))
+    let json = json.ok_or_else(|| anyhow!("VolBook entry has no readable content"))?;
+    let pick = |ptr: &str| -> Result<u64> {
+        as_u64(
+            json.pointer(ptr)
+                .ok_or_else(|| anyhow!("VolBook entry missing {ptr}"))?,
+        )
+        .ok_or_else(|| anyhow!("VolBook entry {ptr} unreadable"))
+    };
+    Ok(Some((pick("/value/vol_bps")?, pick("/value/updated_at_ms")?)))
 }
 
-async fn json_field(client: &SuiClient, id: ObjectID, pointer: &str) -> Result<Value> {
-    let resp = client
-        .read_api()
-        .get_object_with_options(id, SuiObjectDataOptions::new().with_content())
-        .await?;
-    let content = resp
-        .data
-        .and_then(|d| d.content)
-        .ok_or_else(|| anyhow!("object {id} missing content"))?;
-    let json = serde_json::to_value(content)?;
-    json.pointer(pointer)
+/// One field off an object's JSON rendering. `pointer` is written against
+/// the gRPC/GraphQL rendering, which nests struct fields directly (no
+/// `fields` wrapper — see docs/sui-json-rpc-migration.md).
+async fn json_field(client: &ChainClient, id: ObjectID, pointer: &str) -> Result<Value> {
+    let (_, json) = client.get_object_json(id).await?;
+    json.ok_or_else(|| anyhow!("object {id} missing content"))?
+        .pointer(pointer)
         .cloned()
         .ok_or_else(|| anyhow!("object {id} missing {pointer}"))
 }
@@ -586,13 +564,13 @@ async fn settle_due_tickets(
         let result: Result<()> = async {
             let client = &wrap.client;
             let deadline = as_u64(
-                &json_field(client, *auction_id, "/fields/deadline_ms").await?,
+                &json_field(client, *auction_id, "/deadline_ms").await?,
             )
             .ok_or_else(|| anyhow!("auction missing deadline"))?;
             let bucket_ty = object_type_of(client, *bucket_id).await?;
-            let expiry = as_u64(&json_field(client, *bucket_id, "/fields/expiry_ms").await?)
+            let expiry = as_u64(&json_field(client, *bucket_id, "/expiry_ms").await?)
                 .unwrap_or(u64::MAX);
-            let invalidated = json_field(client, *bucket_id, "/fields/invalidated")
+            let invalidated = json_field(client, *bucket_id, "/invalidated")
                 .await
                 .ok()
                 .and_then(|v| v.as_bool())
@@ -671,44 +649,27 @@ async fn crank_bid_tickets(
         let result: Result<()> = async {
             let client = &wrap.client;
             let owner = SuiAddress::from(*id);
-            let page = client
-                .read_api()
-                .get_owned_objects(
-                    owner,
-                    Some(SuiObjectResponseQuery::new(
-                        None,
-                        Some(SuiObjectDataOptions::new().with_type().with_content()),
-                    )),
-                    None,
-                    Some(20),
-                )
+            let objects = client
+                .owned_objects(owner, 20)
                 .await
                 .context("listing bid-ticket-address objects")?;
             // The auction's payout, if it landed: the win (pinned type,
             // at least the pinned amount) or the refund (exact escrow).
             let mut won = None;
             let mut refunded = None;
-            for obj in &page.data {
-                let Some(d) = obj.data.as_ref() else { continue };
-                let Some(t) = d.type_.as_ref().map(|t| t.to_string()) else { continue };
-                let Some(inner) = t
-                    .strip_prefix("0x2::coin::Coin<")
-                    .or_else(|| t.split_once("::coin::Coin<").map(|(_, r)| r))
-                else {
-                    continue;
-                };
-                let coin_type =
-                    protocol_types::asset::canonicalize_move_type(inner.trim_end_matches('>'));
-                let balance = d
-                    .content
-                    .as_ref()
-                    .and_then(|c| serde_json::to_value(c).ok())
-                    .and_then(|j| j.pointer("/fields/balance").and_then(as_u64_ref))
-                    .unwrap_or(0);
+            for obj in &objects {
+                // Only coins carry a payout; the type parameter is the asset.
+                let Some(coin) = obj.as_coin_maybe() else { continue };
+                let Some(tag) = obj.struct_tag() else { continue };
+                let Some(inner) = tag.type_params.first() else { continue };
+                let coin_type = protocol_types::asset::canonicalize_move_type(
+                    &inner.to_canonical_string(/* with_prefix */ true),
+                );
+                let balance = coin.value();
                 if coin_type == *win_type && balance >= *win_amount {
-                    won = Some((d.object_id, d.version, d.digest));
+                    won = Some(obj.compute_object_reference());
                 } else if coin_type == *escrow_type && balance == *escrow_amount {
-                    refunded = Some((d.object_id, d.version, d.digest));
+                    refunded = Some(obj.compute_object_reference());
                 }
             }
             if won.is_none() && refunded.is_none() {
@@ -790,7 +751,7 @@ async fn redeem_expired_positions(
         };
         let result: Result<()> = async {
             let client = &wrap.client;
-            let expiry = as_u64(&json_field(client, *bucket_id, "/fields/expiry_ms").await?)
+            let expiry = as_u64(&json_field(client, *bucket_id, "/expiry_ms").await?)
                 .unwrap_or(u64::MAX);
             if now_ms < expiry {
                 return Ok(());
@@ -878,39 +839,10 @@ async fn sweep_vault_address(wrap: &SuiClientWrapper, ctx: &TradingVaultCtx, vau
     let result: Result<()> = async {
         let client = &wrap.client;
         let owner = SuiAddress::from(vault_id);
-        let page = client
-            .read_api()
-            .get_owned_objects(
-                owner,
-                Some(SuiObjectResponseQuery::new(
-                    Some(SuiObjectDataFilter::MatchAny(vec![])),
-                    Some(SuiObjectDataOptions::new().with_type()),
-                )),
-                None,
-                Some(20),
-            )
-            .await;
-        // MatchAny(vec![]) semantics differ across node versions; fall
-        // back to no filter on error.
-        let data = match page {
-            Ok(p) => p.data,
-            Err(_) => {
-                client
-                    .read_api()
-                    .get_owned_objects(
-                        owner,
-                        Some(SuiObjectResponseQuery::new(
-                            None,
-                            Some(SuiObjectDataOptions::new().with_type()),
-                        )),
-                        None,
-                        Some(20),
-                    )
-                    .await
-                    .context("listing vault-address objects")?
-                    .data
-            }
-        };
+        let data = client
+            .owned_objects(owner, 20)
+            .await
+            .context("listing vault-address objects")?;
         if data.is_empty() {
             return Ok(());
         }
@@ -920,9 +852,9 @@ async fn sweep_vault_address(wrap: &SuiClientWrapper, ctx: &TradingVaultCtx, vau
         let ireg = pt.obj(shared_object_arg(client, ctx.integration_registry_id, false).await?)?;
         let mut count = 0usize;
         for obj in &data {
-            let Some(d) = obj.data.as_ref() else { continue };
-            let Some(t) = d.type_.as_ref().map(|t| t.to_string()) else { continue };
-            let receiving = pt.obj(ObjectArg::Receiving((d.object_id, d.version, d.digest)))?;
+            let Some(tag) = obj.struct_tag() else { continue };
+            let t = tag.to_canonical_string(/* with_prefix */ true);
+            let receiving = pt.obj(ObjectArg::Receiving(obj.compute_object_reference()))?;
             if t == position_type {
                 pt.programmable_move_call(
                     ctx.trading_vault_pkg,
@@ -995,33 +927,30 @@ async fn force_unwind_if_starved(
             return Ok(());
         }
         let grace = as_u64(
-            &json_field(client, vault_id, "/fields/config/fields/unwind_grace_ms").await?,
+            &json_field(client, vault_id, "/config/unwind_grace_ms").await?,
         )
         .unwrap_or(u64::MAX);
-        let queue_table = json_field(client, vault_id, "/fields/queue/fields/id/id")
+        let queue_table = json_field(client, vault_id, "/queue/id")
             .await?
             .as_str()
             .and_then(|s| ObjectID::from_hex_literal(s).ok())
             .ok_or_else(|| anyhow!("vault queue table id unreadable"))?;
-        let entry = client
-            .read_api()
-            .get_dynamic_field_object(
-                queue_table,
-                sui_types::dynamic_field::DynamicFieldName {
-                    type_: TypeTag::U64,
-                    value: serde_json::json!(head.to_string()),
-                },
-            )
+        // Derive the field id rather than asking for a dynamic-field index
+        // (some providers don't serve one) — same trick as the Pyth
+        // price_info lookup in `discovery.rs`.
+        let key_bytes = bcs::to_bytes(&head).context("bcs of queue head index")?;
+        let field_id = sui_types::dynamic_field::derive_dynamic_field_id(
+            queue_table,
+            &TypeTag::U64,
+            &key_bytes,
+        )
+        .context("deriving queue head field id")?;
+        let requested_at = client
+            .try_get_object_json(field_id)
             .await
-            .context("reading queue head")?;
-        let requested_at = entry
-            .data
-            .and_then(|d| d.content)
-            .and_then(|c| serde_json::to_value(c).ok())
-            .and_then(|j| {
-                j.pointer("/fields/value/fields/requested_at_ms")
-                    .and_then(as_u64_ref)
-            })
+            .context("reading queue head")?
+            .and_then(|(_, json)| json)
+            .and_then(|j| j.pointer("/value/requested_at_ms").and_then(as_u64_ref))
             .ok_or_else(|| anyhow!("queue head missing requested_at_ms"))?;
         if now_ms.saturating_sub(requested_at) <= grace {
             return Ok(());
@@ -1076,10 +1005,10 @@ fn as_u64_ref(v: &Value) -> Option<u64> {
 }
 
 /// The EquityBook's poster guardrails: (min_interval_ms, max_delta_bps).
-async fn equity_book_params(client: &SuiClient, book_id: ObjectID) -> Result<(u64, u64)> {
-    let min_interval = as_u64(&json_field(client, book_id, "/fields/min_interval_ms").await?)
+async fn equity_book_params(client: &ChainClient, book_id: ObjectID) -> Result<(u64, u64)> {
+    let min_interval = as_u64(&json_field(client, book_id, "/min_interval_ms").await?)
         .ok_or_else(|| anyhow!("EquityBook min_interval_ms unreadable"))?;
-    let max_delta = as_u64(&json_field(client, book_id, "/fields/max_delta_bps").await?)
+    let max_delta = as_u64(&json_field(client, book_id, "/max_delta_bps").await?)
         .ok_or_else(|| anyhow!("EquityBook max_delta_bps unreadable"))?;
     Ok((min_interval, max_delta))
 }
@@ -1248,7 +1177,7 @@ async fn init_external_entry(
 
 /// `equity_oracle::has_entry(book, vault_id)` via devInspect — no tx, no gas.
 async fn equity_book_has_entry(
-    client: &SuiClient,
+    client: &ChainClient,
     sender: SuiAddress,
     pkg: ObjectID,
     book_id: ObjectID,
@@ -1265,23 +1194,10 @@ async fn equity_book_has_entry(
         vec![book, vid],
     );
     let resp = client
-        .read_api()
-        .dev_inspect_transaction_block(
-            sender,
-            TransactionKind::ProgrammableTransaction(pt.finish()),
-            None,
-            None,
-            None,
-        )
+        .dev_inspect_ptb(sender, pt)
         .await
         .context("devInspect equity_oracle::has_entry")?;
-    let (bytes, _ty) = resp
-        .results
-        .as_ref()
-        .and_then(|r| r.first())
-        .and_then(|r| r.return_values.first())
-        .ok_or_else(|| anyhow!("devInspect has_entry returned nothing: {:?}", resp.error))?;
-    bcs::from_bytes(bytes).context("decoding has_entry bool return")
+    sui_tx::chain::decode_return_value(&resp, 0).context("decoding has_entry bool return")
 }
 
 /// Compose the full attestation-bearing appraisal into `pt` (Pyth legs
@@ -1422,14 +1338,12 @@ async fn refresh_marks(
     Ok(())
 }
 
-async fn object_type_of(client: &SuiClient, id: ObjectID) -> Result<String> {
-    let resp = client
-        .read_api()
-        .get_object_with_options(id, SuiObjectDataOptions::new().with_type())
-        .await?;
-    resp.data
-        .and_then(|d| d.type_)
-        .map(|t| t.to_string())
+async fn object_type_of(client: &ChainClient, id: ObjectID) -> Result<String> {
+    client
+        .get_object(id)
+        .await?
+        .struct_tag()
+        .map(|t| t.to_canonical_string(/* with_prefix */ true))
         .ok_or_else(|| anyhow!("object {id} missing type"))
 }
 
@@ -1459,7 +1373,7 @@ fn bucket_type_args(bucket_ty: &str) -> Result<Vec<TypeTag>> {
 /// the recorded governance block) + keeper config.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_ctx(
-    client: &SuiClient,
+    client: &ChainClient,
     snapshot: &token_info_client::Snapshot,
     treasury_id: ObjectID,
     core_protocol_config_id: ObjectID,

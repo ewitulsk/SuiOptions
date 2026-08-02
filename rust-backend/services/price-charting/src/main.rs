@@ -17,7 +17,8 @@ use price_charting::config::Config;
 use price_charting::db::{establish_pool, repo::Repo, run_migrations};
 use price_charting::state::AppState;
 use price_charting::{mid_sampler, router, watcher, Cli};
-use sui_sdk::SuiClientBuilder;
+use sui_tx::chain::ChainClient;
+use sui_tx::events::EventClient;
 use token_info_client::TokenInfoClient;
 
 #[tokio::main]
@@ -49,25 +50,30 @@ async fn main() -> Result<()> {
     let repo = Repo::new(Arc::clone(&pool));
     info!(pool_size = cfg.db_pool_size, "charts DB ready (migrations applied)");
 
-    // Prefer the shared `[sui] rpc_url` override from the optional secrets file
-    // (rendered by render-secrets.sh) over the config / public default. The
-    // watcher's poll loop is a heavy RPC consumer, so this is the main reason
-    // price-charting carries a secrets mount. Optional: a missing/unreadable
-    // file degrades to cfg.resolve_rpc_url().
-    let rpc = match load_rpc_override(cli.secrets.as_deref()) {
+    // Prefer the shared `[sui] grpc_url`/`graphql_url` overrides from the
+    // optional secrets file (rendered by render-secrets.sh) over the config /
+    // public defaults. The watcher's poll loop is a heavy RPC consumer, so
+    // this is the main reason price-charting carries a secrets mount.
+    // Optional: a missing/unreadable file degrades to the config values.
+    let overrides = load_endpoint_overrides(cli.secrets.as_deref());
+    let grpc = match overrides.as_ref().and_then(|s| s.0.clone()) {
         Some(u) => u,
-        None => cfg.resolve_rpc_url()?,
+        None => cfg.resolve_grpc_url()?,
     };
-    info!(rpc = %redact_rpc(&rpc), "resolved Sui JSON-RPC endpoint");
-    let sui = SuiClientBuilder::default()
-        .build(&rpc)
-        .await
-        .with_context(|| format!("connecting to {}", redact_rpc(&rpc)))?;
+    let graphql = match overrides.as_ref().and_then(|s| s.1.clone()) {
+        Some(u) => u,
+        None => cfg.resolve_graphql_url()?,
+    };
+    info!(rpc = %redact_rpc(&grpc), "resolved Sui gRPC endpoint");
+    let sui = ChainClient::new(&grpc)
+        .with_context(|| format!("connecting to {}", redact_rpc(&grpc)))?;
+    let events = EventClient::new(&graphql);
 
     let state = Arc::new(AppState::new(repo));
     watcher::spawn(watcher::WatcherParams {
         state: Arc::clone(&state),
         sui: sui.clone(),
+        events,
         api: ApiServiceClient::new(&cfg.api_service_url),
         deepbook_original_package: original_package,
         discovery_interval: Duration::from_secs(cfg.discovery_interval_secs.max(5)),
@@ -89,7 +95,7 @@ async fn main() -> Result<()> {
     info!(
         environment = %cfg.environment,
         api_service = %cfg.api_service_url,
-        rpc = %redact_rpc(&rpc),
+        rpc = %redact_rpc(&grpc),
         ttl_hours = cfg.ttl_hours,
         mid_sample_interval_secs = cfg.mid_sample_interval_secs,
         "watcher + mid sampler running"
@@ -98,15 +104,19 @@ async fn main() -> Result<()> {
     router::serve(cfg.bind_addr, state, &cfg.allowed_origins).await
 }
 
-/// Read `[sui] rpc_url` from the optional secrets file. Returns `None` (with a
-/// warning) when the path is unset or the file is missing/unparseable, so the
-/// caller falls back to the config / public RPC rather than crash-looping.
-fn load_rpc_override(path: Option<&std::path::Path>) -> Option<String> {
+/// Read `[sui] grpc_url` / `graphql_url` from the optional secrets file.
+/// Returns `None` (with a warning) when the path is unset or the file is
+/// missing/unparseable, so the caller falls back to the config / public
+/// endpoints rather than crash-looping.
+#[allow(clippy::type_complexity)]
+fn load_endpoint_overrides(
+    path: Option<&std::path::Path>,
+) -> Option<(Option<String>, Option<String>)> {
     let path = path?;
     match runtime_config::Secrets::load(path) {
-        Ok(s) => s.sui.rpc_url,
+        Ok(s) => Some((s.sui.grpc_url, s.sui.graphql_url)),
         Err(e) => {
-            tracing::warn!(error = %e, path = %path.display(), "secrets file unreadable; using config/public RPC");
+            tracing::warn!(error = %e, path = %path.display(), "secrets file unreadable; using config/public endpoints");
             None
         }
     }

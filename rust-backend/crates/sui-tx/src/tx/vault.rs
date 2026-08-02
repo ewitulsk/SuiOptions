@@ -11,8 +11,6 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
-use sui_json_rpc_types::SuiTransactionBlockResponse;
-use sui_sdk::SuiClient;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{Argument, Command};
@@ -20,6 +18,7 @@ use tracing::info;
 
 use crate::sui_client::Signer;
 use crate::tx::{clock_arg, owned_object_arg, shared_object_arg, submit_ptb};
+use crate::chain::{ChainClient, ExecutedTransaction};
 
 /// Identity of one vault: its object id and the (U, S, VShare) triple its
 /// generic calls are instantiated with.
@@ -86,13 +85,13 @@ fn transfer_to_sender(
 /// `vault::deposit`: split `amount` out of an owned underlying coin and
 /// queue it; the `DepositReceipt` transfers to the signer.
 pub async fn deposit(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
     funding_coin: ObjectID,
     amount: u64,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(vault = %refs.vault_id, amount, "building vault::deposit PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
     let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
@@ -106,12 +105,12 @@ pub async fn deposit(
 
 /// `vault::claim_shares`: burn a deposit receipt for share coins.
 pub async fn claim_shares(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
     receipt: ObjectID,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(vault = %refs.vault_id, %receipt, "building vault::claim_shares PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
     let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
@@ -124,13 +123,13 @@ pub async fn claim_shares(
 /// `vault::initiate_withdraw`: escrow share coins; the `WithdrawReceipt`
 /// transfers to the signer.
 pub async fn initiate_withdraw(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
     share_coin: ObjectID,
     shares: u64,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(vault = %refs.vault_id, shares, "building vault::initiate_withdraw PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
     let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
@@ -150,12 +149,12 @@ pub async fn initiate_withdraw(
 
 /// `vault::complete_withdraw`: pay out a finalized withdrawal.
 pub async fn complete_withdraw(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
     receipt: ObjectID,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(vault = %refs.vault_id, %receipt, "building vault::complete_withdraw PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
     let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
@@ -174,12 +173,12 @@ pub async fn complete_withdraw(
 /// `vault::instant_withdraw_pending`: cancel a queued deposit whose round
 /// hasn't started.
 pub async fn instant_withdraw_pending(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
     receipt: ObjectID,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(vault = %refs.vault_id, %receipt, "building vault::instant_withdraw_pending PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
     let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
@@ -206,7 +205,7 @@ pub struct PriceInfoRefs {
 impl PriceInfoRefs {
     async fn args(
         &self,
-        client: &SuiClient,
+        client: &ChainClient,
         pt: &mut ProgrammableTransactionBuilder,
     ) -> Result<(Argument, Argument)> {
         let u = pt.obj(shared_object_arg(client, self.underlying_info, false).await?)?;
@@ -218,13 +217,13 @@ impl PriceInfoRefs {
 /// `vault::crank_redeem`: redeem the next FIFO position (flips the phase
 /// at expiry).
 pub async fn crank_redeem(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
     bucket_id: ObjectID,
     call_type: &str,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(vault = %refs.vault_id, %bucket_id, "building vault::crank_redeem PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
     let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
@@ -244,7 +243,7 @@ pub async fn crank_redeem(
 /// keeper prepends a Pyth price update first (`tx::pyth_update`); the
 /// shared-object inputs dedup.
 pub async fn build_finalize_round(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     refs: &VaultRefs<'_>,
     treasury_id: ObjectID,
@@ -266,13 +265,13 @@ pub async fn build_finalize_round(
 
 /// `vault::finalize_round`: lock pps, charge fees, process queues.
 pub async fn finalize_round(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
     treasury_id: ObjectID,
     prices: &PriceInfoRefs,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(vault = %refs.vault_id, "building vault::finalize_round PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
     build_finalize_round(client, &mut pt, refs, treasury_id, prices).await?;
@@ -281,7 +280,7 @@ pub async fn finalize_round(
 
 /// Add the `vault::select_bucket` call to an in-progress PTB.
 pub async fn build_select_bucket(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     refs: &VaultRefs<'_>,
     bucket_id: ObjectID,
@@ -304,14 +303,14 @@ pub async fn build_select_bucket(
 
 /// `vault::select_bucket`: pick the round's bucket (Pyth-banded).
 pub async fn select_bucket(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
     bucket_id: ObjectID,
     call_type: &str,
     prices: &PriceInfoRefs,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(vault = %refs.vault_id, %bucket_id, "building vault::select_bucket PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
     build_select_bucket(client, &mut pt, refs, bucket_id, call_type, prices).await?;
@@ -320,7 +319,7 @@ pub async fn select_bucket(
 
 /// Add the `vault::open_rfq` call to an in-progress PTB.
 pub async fn build_open_rfq(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     refs: &VaultRefs<'_>,
     bucket_id: ObjectID,
@@ -346,7 +345,7 @@ pub async fn build_open_rfq(
 /// `vault::open_rfq`: escrow a slice into a coupled auction.
 #[allow(clippy::too_many_arguments)]
 pub async fn open_rfq(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
     bucket_id: ObjectID,
@@ -354,7 +353,7 @@ pub async fn open_rfq(
     slice_amount: u64,
     prices: &PriceInfoRefs,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(vault = %refs.vault_id, slice_amount, "building vault::open_rfq PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
     build_open_rfq(client, &mut pt, refs, bucket_id, call_type, slice_amount, prices).await?;
@@ -364,7 +363,7 @@ pub async fn open_rfq(
 /// `vault::settle_rfq`: resolve a coupled auction in place.
 #[allow(clippy::too_many_arguments)]
 pub async fn settle_rfq(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
     rfq_id: ObjectID,
@@ -373,7 +372,7 @@ pub async fn settle_rfq(
     protocol_config_id: ObjectID,
     treasury_id: ObjectID,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(vault = %refs.vault_id, %rfq_id, "building vault::settle_rfq PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
     let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
@@ -395,14 +394,14 @@ pub async fn settle_rfq(
 /// `vault::settle_rfq_expired`: recover a coupled auction whose bucket
 /// died mid-auction.
 pub async fn settle_rfq_expired(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
     rfq_id: ObjectID,
     bucket_id: ObjectID,
     call_type: &str,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(vault = %refs.vault_id, %rfq_id, "building vault::settle_rfq_expired PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
     let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
@@ -423,7 +422,7 @@ pub async fn settle_rfq_expired(
 /// Pyth update). Escrows up to `amount_s` of the vault's settlement
 /// proceeds into a coupled swap auction; MMs then bid underlying for it.
 pub async fn build_open_swap_rfq(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     refs: &VaultRefs<'_>,
     amount_s: u64,
@@ -445,13 +444,13 @@ pub async fn build_open_swap_rfq(
 
 /// `vault::open_swap_rfq`: open a proceeds-swap auction.
 pub async fn open_swap_rfq(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
     amount_s: u64,
     prices: &PriceInfoRefs,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(vault = %refs.vault_id, amount_s, "building vault::open_swap_rfq PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
     build_open_swap_rfq(client, &mut pt, refs, amount_s, prices).await?;
@@ -462,7 +461,7 @@ pub async fn open_swap_rfq(
 /// swap auction: the winning bid is re-checked against the fresh Pyth
 /// cross prepended to the same PTB.
 pub async fn build_settle_swap_rfq(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     refs: &VaultRefs<'_>,
     swap_rfq_id: ObjectID,
@@ -484,13 +483,13 @@ pub async fn build_settle_swap_rfq(
 
 /// `vault::settle_swap_rfq`: resolve a proceeds-swap auction.
 pub async fn settle_swap_rfq(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     refs: &VaultRefs<'_>,
     swap_rfq_id: ObjectID,
     prices: &PriceInfoRefs,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(vault = %refs.vault_id, %swap_rfq_id, "building vault::settle_swap_rfq PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
     build_settle_swap_rfq(client, &mut pt, refs, swap_rfq_id, prices).await?;

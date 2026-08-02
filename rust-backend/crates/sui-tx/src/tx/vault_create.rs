@@ -16,8 +16,6 @@ use std::str::FromStr;
 use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
-use sui_json_rpc_types::ObjectChange;
-use sui_sdk::SuiClient;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::Argument;
@@ -25,6 +23,7 @@ use tracing::info;
 
 use crate::sui_client::Signer;
 use crate::tx::{owned_object_arg, submit_ptb};
+use crate::chain::{created_objects, ChainClient, ChangedObject};
 
 /// Plain `VaultConfig` fields, in `vault::new_config` argument order. The
 /// per-asset oracle pins (`*_feed_id`, `*_decimals`) come from token-info; the
@@ -75,7 +74,7 @@ pub struct VaultCreation {
 /// Build and submit `vault::new_config` + `vault::create_vault<U, S, VShare>`
 /// in one PTB, returning the created vault id.
 pub async fn create_vault(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     package: ObjectID,
     admin_cap: ObjectID,
@@ -152,25 +151,19 @@ pub async fn create_vault(
     );
 
     let resp = submit_ptb(client, signer, pt, gas_budget, "vault::create_vault").await?;
-    let vault_id = extract_vault_id(resp.object_changes.as_deref().unwrap_or(&[]))
+    let vault_id = extract_vault_id(&created_objects(&resp))
         .ok_or_else(|| anyhow!("create_vault succeeded but no Vault object in ObjectChanges"))?;
     Ok(VaultCreation {
-        digest: resp.digest.to_string(),
+        digest: super::tx_digest(&resp).to_string(),
         vault_id,
     })
 }
 
-/// Pull the created `vault::Vault` ObjectID out of a tx's ObjectChanges.
-fn extract_vault_id(changes: &[ObjectChange]) -> Option<ObjectID> {
-    changes.iter().find_map(|c| match c {
-        ObjectChange::Created {
-            object_id,
-            object_type,
-            ..
-        } if object_type.module.as_str() == "vault" && object_type.name.as_str() == "Vault" => {
-            Some(*object_id)
-        }
-        _ => None,
+/// Pull the created `vault::Vault` ObjectID out of a tx's created objects.
+fn extract_vault_id(changes: &[ChangedObject]) -> Option<ObjectID> {
+    changes.iter().find_map(|c| {
+        let tag = sui_types::parse_sui_struct_tag(&c.object_type).ok()?;
+        (tag.module.as_str() == "vault" && tag.name.as_str() == "Vault").then_some(c.object_id)
     })
 }
 
@@ -180,24 +173,19 @@ mod tests {
 
     use move_core_types::account_address::AccountAddress;
     use move_core_types::language_storage::StructTag;
-    use sui_types::base_types::{ObjectDigest, SequenceNumber, SuiAddress};
-    use sui_types::object::Owner;
 
-    fn created(id: ObjectID, module: &str, name: &str) -> ObjectChange {
-        ObjectChange::Created {
-            sender: SuiAddress::ZERO,
-            owner: Owner::Shared {
-                initial_shared_version: SequenceNumber::from_u64(1),
-            },
+    fn created(id: ObjectID, module: &str, name: &str) -> ChangedObject {
+        ChangedObject {
+            object_id: id,
             object_type: StructTag {
                 address: AccountAddress::from_hex_literal("0xabc").unwrap(),
                 module: Identifier::new(module).unwrap(),
                 name: Identifier::new(name).unwrap(),
                 type_params: vec![],
-            },
-            object_id: id,
-            version: SequenceNumber::from_u64(1),
-            digest: ObjectDigest::random(),
+            }
+            .to_canonical_string(/* with_prefix */ true),
+            version: 1,
+            digest: String::new(),
         }
     }
 

@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use bigdecimal::BigDecimal;
 use chrono::{TimeZone, Utc};
-use sui_sdk::rpc_types::EventFilter;
-use sui_sdk::SuiClient;
+use sui_tx::chain::ChainClient;
+use sui_tx::events::EventClient;
 use sui_types::event::EventID;
 use tracing::{debug, info, warn};
 
@@ -35,7 +35,9 @@ use crate::state::{AppState, PoolMeta, TradeMsg};
 
 pub struct WatcherParams {
     pub state: Arc<AppState>,
-    pub sui: SuiClient,
+    pub sui: ChainClient,
+    /// GraphQL event reads (gRPC has no events query).
+    pub events: EventClient,
     pub api: ApiServiceClient,
     /// DeepBook ORIGINAL package id (event types resolve here).
     pub deepbook_original_package: String,
@@ -52,13 +54,10 @@ pub fn spawn(p: WatcherParams) {
 
 async fn run(p: WatcherParams) {
     let event_type = format!("{}::order_info::OrderFilled", p.deepbook_original_package);
-    let filter = match event_type.parse() {
-        Ok(tag) => EventFilter::MoveEventType(tag),
-        Err(e) => {
-            tracing::error!(error = %e, event_type, "bad OrderFilled type; watcher exiting");
-            return;
-        }
-    };
+    if let Err(e) = sui_types::parse_sui_struct_tag(&event_type) {
+        tracing::error!(error = %e, event_type, "bad OrderFilled type; watcher exiting");
+        return;
+    }
 
     let mut cursor = load_or_init_cursor(&p).await;
     let mut last_discovery = Instant::now() - p.discovery_interval;
@@ -76,7 +75,7 @@ async fn run(p: WatcherParams) {
             last_discovery = Instant::now();
         }
 
-        match ingest_once(&p, &filter, cursor.clone()).await {
+        match ingest_once(&p, &event_type, cursor.clone()).await {
             Ok(next) => cursor = next,
             Err(e) => warn!(error = %format!("{e:#}"), "fill ingestion failed; retrying next tick"),
         }
@@ -120,35 +119,45 @@ async fn refresh_watched(p: &WatcherParams) -> Result<()> {
     Ok(())
 }
 
+/// Marker stored in `watch_cursor.cursor_ev` to say "cursor_tx holds an
+/// opaque GraphQL cursor", distinguishing it from the pre-migration rows
+/// that held a `(tx_digest, event_seq)` pair. JSON-RPC's `EventID` cursor
+/// has no GraphQL equivalent, so a legacy row cannot be resumed from — it
+/// is dropped and the watcher re-initialises from the stream tip (the same
+/// self-heal operators already trigger by clearing the row).
+const GRAPHQL_CURSOR_MARKER: i64 = -1;
+
 /// Resume from the persisted cursor, else start tailing from the stream tip.
-async fn load_or_init_cursor(p: &WatcherParams) -> Option<EventID> {
+async fn load_or_init_cursor(p: &WatcherParams) -> Option<String> {
     let repo = p.state.repo.clone();
     let persisted = tokio::task::spawn_blocking(move || repo.load_cursor())
         .await
         .ok()
         .and_then(|r| r.ok())
         .flatten();
-    if let Some((tx, ev)) = persisted {
-        match sui_types::digests::TransactionDigest::from_str(&tx) {
-            Ok(digest) => {
-                info!(cursor_tx = %tx, cursor_ev = ev, "resuming from persisted cursor");
-                return Some(EventID { tx_digest: digest, event_seq: ev as u64 });
-            }
-            Err(e) => warn!(error = %e, cursor_tx = %tx, "bad persisted cursor; reinitializing"),
+    match persisted {
+        Some((cursor, GRAPHQL_CURSOR_MARKER)) => {
+            info!(%cursor, "resuming from persisted cursor");
+            return Some(cursor);
         }
+        Some((cursor_tx, cursor_ev)) => {
+            warn!(
+                %cursor_tx, cursor_ev,
+                "persisted cursor predates the GraphQL event API; reinitializing from tip"
+            );
+        }
+        None => {}
     }
     // Tip-init: newest OrderFilled (any pool) becomes the starting cursor.
     let event_type = format!("{}::order_info::OrderFilled", p.deepbook_original_package);
-    let filter = event_type
-        .parse()
-        .ok()
-        .map(EventFilter::MoveEventType);
-    if let Some(f) = filter {
-        if let Ok(page) = p.sui.event_api().query_events(f, None, Some(1), true).await {
-            if let Some(ev) = page.data.first() {
-                info!(cursor_tx = %ev.id.tx_digest, "no cursor; tailing from stream tip");
-                return Some(ev.id);
-            }
+    if let Ok(page) = p
+        .events
+        .query_by_type(&event_type, None, 1, /* descending */ true)
+        .await
+    {
+        if page.next_cursor.is_some() {
+            info!("no cursor; tailing from stream tip");
+            return page.next_cursor;
         }
     }
     info!("no cursor and no prior OrderFilled events; tailing from genesis");
@@ -157,14 +166,13 @@ async fn load_or_init_cursor(p: &WatcherParams) -> Option<EventID> {
 
 async fn ingest_once(
     p: &WatcherParams,
-    filter: &EventFilter,
-    mut cursor: Option<EventID>,
-) -> Result<Option<EventID>> {
+    event_type: &str,
+    mut cursor: Option<String>,
+) -> Result<Option<String>> {
     loop {
         let page = p
-            .sui
-            .event_api()
-            .query_events(filter.clone(), cursor, Some(100), false)
+            .events
+            .query_by_type(event_type, cursor.as_deref(), 100, /* ascending */ false)
             .await
             .context("querying OrderFilled events")?;
         if page.data.is_empty() {
@@ -197,8 +205,8 @@ async fn ingest_once(
                     quote_qty: BigDecimal::from(parsed.quote_quantity),
                     base_decimals: meta.base_decimals as i16,
                     taker_is_bid: parsed.taker_is_bid,
-                    tx_digest: ev.id.tx_digest.to_string(),
-                    event_index: ev.id.event_seq as i64,
+                    tx_digest: ev.tx_digest.to_string(),
+                    event_index: ev.event_seq as i64,
                 });
                 msgs.push(TradeMsg {
                     pool_id: parsed.pool_id,
@@ -211,13 +219,16 @@ async fn ingest_once(
             }
         }
 
-        let next_cursor = page
-            .next_cursor
-            .or_else(|| page.data.last().map(|e| e.id))
-            .expect("non-empty page has a cursor");
+        let Some(next_cursor) = page.next_cursor.clone() else {
+            // A non-empty page with no cursor cannot be advanced past;
+            // stop here and retry from the same place next tick rather
+            // than silently re-ingesting.
+            warn!("event page carried no cursor; holding position");
+            return Ok(cursor);
+        };
         let repo = p.state.repo.clone();
         let batch = rows.clone();
-        let cur = (next_cursor.tx_digest.to_string(), next_cursor.event_seq as i64);
+        let cur = (next_cursor.clone(), GRAPHQL_CURSOR_MARKER);
         let inserted =
             tokio::task::spawn_blocking(move || repo.insert_trades(&batch, cur)).await??;
         if inserted > 0 {

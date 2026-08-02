@@ -130,17 +130,22 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Sui Rust crates. Pinned to the framework/mainnet branch — same code path
 # the production Sui mainnet validators run. Every binary in the workspace
 # resolves to a single ABI by going through this list.
-sui-sdk = { git = "https://github.com/mystenlabs/sui", package = "sui-sdk", branch = "framework/mainnet" }
 sui-types = { git = "https://github.com/mystenlabs/sui", package = "sui-types", branch = "framework/mainnet" }
 sui-keys = { git = "https://github.com/mystenlabs/sui", package = "sui-keys", branch = "framework/mainnet" }
 sui-move-build = { git = "https://github.com/mystenlabs/sui", package = "sui-move-build", branch = "framework/mainnet" }
 sui-json = { git = "https://github.com/mystenlabs/sui", package = "sui-json", branch = "framework/mainnet" }
-sui-json-rpc-types = { git = "https://github.com/mystenlabs/sui", package = "sui-json-rpc-types", branch = "framework/mainnet" }
 sui-transaction-builder = { git = "https://github.com/mystenlabs/sui", package = "sui-transaction-builder", branch = "framework/mainnet" }
 sui-data-ingestion-core = { git = "https://github.com/mystenlabs/sui", package = "sui-data-ingestion-core", branch = "framework/mainnet" }
 shared-crypto = { git = "https://github.com/mystenlabs/sui", package = "shared-crypto", branch = "framework/mainnet" }
 sui-package-alt = { git = "https://github.com/mystenlabs/sui", package = "sui-package-alt", branch = "framework/mainnet" }
 move-core-types = { git = "https://github.com/mystenlabs/sui", package = "move-core-types", branch = "framework/mainnet" }
+# gRPC chain access (replaces the deactivated JSON-RPC). Same pin as the
+# crates above, so the proto types convert to/from `sui-types` for free.
+sui-rpc-api = { git = "https://github.com/mystenlabs/sui", package = "sui-rpc-api", branch = "framework/mainnet" }
+sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", package = "sui-rpc", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09" }
+# Must match the tonic that sui-rpc/sui-rpc-api build their Status on, or
+# the error types stop unifying.
+tonic = { version = "0.14", default-features = false, features = ["channel", "codegen"] }
 
 clap = { version = "4", features = ["derive", "env"] }
 chrono = { version = "0.4", features = ["serde"] }

@@ -14,32 +14,26 @@
 
 use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
-use shared_crypto::intent::Intent;
-use sui_json_rpc_types::{
-    SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
-    SuiTransactionBlockResponseOptions,
-};
-use sui_sdk::SuiClient;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
-use sui_types::transaction::{Argument, Transaction, TransactionData};
-use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
+use sui_types::transaction::Argument;
 use tracing::{debug, info};
 
 use crate::sui_client::Signer;
 use crate::tx::shared_object_arg;
+use crate::chain::{ChainClient, ExecutedTransaction};
 
 /// Standalone `mint_to_sender` PTB. Single command, single tx. Used by the
 /// exchange CLI's `mint` subcommand.
 pub async fn mint_to_sender(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     tokens_package: ObjectID,
     module: &str,
     faucet_id: ObjectID,
     amount: u64,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(%tokens_package, module, amount, "minting tokens to sender");
     let mut pt = ProgrammableTransactionBuilder::new();
     let faucet = pt.obj(shared_object_arg(client, faucet_id, true).await?)?;
@@ -61,7 +55,7 @@ pub async fn mint_to_sender(
 /// Returns the [`SuiTransactionBlockResponse`] so the caller can log digest
 /// / object changes.
 pub async fn mint_and_deposit_into_collateral(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     tokens_package: ObjectID,
     module: &str,
@@ -71,7 +65,7 @@ pub async fn mint_and_deposit_into_collateral(
     collateral_package: ObjectID,
     amount: u64,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(%tokens_package, module, %collateral_account_id, amount, "minting and depositing into collateral account");
     use move_core_types::language_storage::TypeTag;
     use std::str::FromStr;
@@ -105,56 +99,13 @@ pub async fn mint_and_deposit_into_collateral(
 }
 
 async fn submit(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     pt: ProgrammableTransactionBuilder,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
-    let programmable = pt.finish();
-    let gas_coin = client
-        .coin_read_api()
-        .get_coins(signer.address, None, None, Some(5))
-        .await
-        .context("listing gas coins")?
-        .data
-        .into_iter()
-        .max_by_key(|c| c.balance)
-        .ok_or_else(|| anyhow!("no SUI coins to pay gas for {}", signer.address))?;
-    let gas_price = client
-        .read_api()
-        .get_reference_gas_price()
-        .await
-        .context("fetching reference gas price")?;
-    let tx_data = TransactionData::new_programmable(
-        signer.address,
-        vec![gas_coin.object_ref()],
-        programmable,
-        gas_budget,
-        gas_price,
-    );
-    let sig = Transaction::signature_from_signer(
-        tx_data.clone(),
-        Intent::sui_transaction(),
-        &signer.keypair,
-    );
-    let tx = Transaction::from_data(tx_data, vec![sig]);
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
-    let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
-        .await
-        .context("submitting tx")?;
-    let effects = resp.effects.as_ref().context("response missing effects")?;
-    if effects.status().is_err() {
-        anyhow::bail!("tx reverted: {:?}", effects.status());
-    }
-    debug!(digest = %resp.digest, "test token tx succeeded");
+) -> Result<ExecutedTransaction> {
+    let resp = super::submit_ptb(client, signer, pt, gas_budget, "test token tx").await?;
+    debug!(digest = %super::tx_digest(&resp), "test token tx succeeded");
     // `Argument` is unused at this scope but keeps the borrow checker
     // honest about move semantics in earlier builds; explicitly drop.
     let _ = std::marker::PhantomData::<Argument>;

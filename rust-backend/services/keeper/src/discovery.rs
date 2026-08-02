@@ -25,7 +25,7 @@ use anyhow::{anyhow, Context, Result};
 use move_core_types::language_storage::TypeTag;
 use serde_json::json;
 use std::str::FromStr;
-use sui_sdk::SuiClient;
+use sui_tx::chain::ChainClient;
 use sui_types::base_types::ObjectID;
 use sui_types::dynamic_field::DynamicFieldName;
 
@@ -70,7 +70,7 @@ pub struct PriceInfoTable {
 /// when configured (a plain object read — survives RPC providers whose
 /// dynamic-field index is broken), else the state's dynamic field.
 pub async fn resolve_price_info_table_from(
-    client: &SuiClient,
+    client: &ChainClient,
     handles: &sui_tx::tx::pyth_update::PythHandles,
 ) -> Result<PriceInfoTable> {
     match handles.price_info_table_id {
@@ -81,44 +81,56 @@ pub async fn resolve_price_info_table_from(
 
 /// Pinned path: read the table object directly and parse its key type.
 async fn resolve_price_info_table_pinned(
-    client: &SuiClient,
+    client: &ChainClient,
     table_id: ObjectID,
 ) -> Result<PriceInfoTable> {
-    let resp = client
-        .read_api()
-        .get_object_with_options(
-            table_id,
-            sui_json_rpc_types::SuiObjectDataOptions::new().with_type(),
-        )
+    let object = client
+        .get_object(table_id)
         .await
         .context("reading pinned price_info table object")?;
-    let data = resp
-        .data
-        .ok_or_else(|| anyhow!("pinned price_info table {table_id} missing"))?;
-    finish_table(table_id, data.type_.as_ref().map(|t| t.to_string()))
+    finish_table(
+        table_id,
+        object.struct_tag().map(|t| t.to_canonical_string(true)),
+    )
 }
 
 /// Resolve the `b"price_info"` table hung off the Pyth state object.
 pub async fn resolve_price_info_table(
-    client: &SuiClient,
+    client: &ChainClient,
     pyth_state_id: ObjectID,
 ) -> Result<PriceInfoTable> {
-    let resp = client
-        .read_api()
-        .get_dynamic_field_object(
-            pyth_state_id,
-            DynamicFieldName {
-                type_: TypeTag::from_str("vector<u8>").expect("static type tag"),
-                value: json!("price_info"),
-            },
-        )
+    // Derive the field id client-side rather than asking for a
+    // dynamic-field index — same reason as `price_info_object_for` below:
+    // some providers don't serve the index at all.
+    let key_bytes = bcs::to_bytes(b"price_info".to_vec().as_slice())
+        .context("bcs of the price_info field name")?;
+    let field_id = sui_types::dynamic_field::derive_dynamic_field_id(
+        pyth_state_id,
+        &TypeTag::from_str("vector<u8>").expect("static type tag"),
+        &key_bytes,
+    )
+    .context("deriving pyth price_info field id")?;
+    let (_, json) = client
+        .get_object_json(field_id)
         .await
         .context("reading pyth state price_info dynamic field")?;
-    let data = resp
-        .data
-        .ok_or_else(|| anyhow!("pyth state {pyth_state_id} has no price_info table"))?;
-    let table_id = data.object_id;
-    finish_table(table_id, data.type_.as_ref().map(|t| t.to_string()))
+    // `Field<vector<u8>, Table<..>>` — the table id is the field's value.
+    let table_id: ObjectID = json
+        .as_ref()
+        .and_then(|j| j.pointer("/value/id"))
+        .or_else(|| json.as_ref().and_then(|j| j.pointer("/value")))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("pyth state {pyth_state_id} has no price_info table"))?
+        .parse()
+        .context("parsing price_info table id")?;
+    let table = client
+        .get_object(table_id)
+        .await
+        .context("reading pyth price_info table object")?;
+    finish_table(
+        table_id,
+        table.struct_tag().map(|t| t.to_canonical_string(true)),
+    )
 }
 
 /// Shared tail: parse the table's key type off its type string.
@@ -142,7 +154,7 @@ fn finish_table(table_id: ObjectID, type_str: Option<String>) -> Result<PriceInf
 
 /// Feed id → shared `PriceInfoObject` id, via the table.
 pub async fn price_info_object_for(
-    client: &SuiClient,
+    client: &ChainClient,
     table: &PriceInfoTable,
     feed: PriceFeedId,
 ) -> Result<ObjectID> {
@@ -156,29 +168,17 @@ pub async fn price_info_object_for(
         &key_bytes,
     )
     .context("deriving price info field id")?;
-    let resp = client
-        .read_api()
-        .get_object_with_options(
-            field_id,
-            sui_json_rpc_types::SuiObjectDataOptions::new().with_content(),
-        )
+    let fields = client
+        .try_get_object_json(field_id)
         .await
-        .with_context(|| format!("looking up price info object for feed {feed}"))?;
-    let data = resp.data.ok_or_else(|| {
-        anyhow!(
-            "feed {feed} has no PriceInfoObject on this network — \
-             was the vault configured with the right (beta vs stable) feed set?"
-        )
-    })?;
-    // The field object is `Field<PriceIdentifier, ID>`; its parsed JSON
-    // `value` is the PriceInfoObject id string.
-    let content = data
-        .content
-        .ok_or_else(|| anyhow!("price info field for {feed} missing content"))?;
-    let fields = match content {
-        sui_json_rpc_types::SuiParsedData::MoveObject(obj) => obj.fields.to_json_value(),
-        other => return Err(anyhow!("price info field for {feed}: unexpected content {other:?}")),
-    };
+        .with_context(|| format!("looking up price info object for feed {feed}"))?
+        .and_then(|(_, json)| json)
+        .ok_or_else(|| {
+            anyhow!(
+                "feed {feed} has no PriceInfoObject on this network — \
+                 was the vault configured with the right (beta vs stable) feed set?"
+            )
+        })?;
     let id = fields
         .get("value")
         .and_then(|v| v.as_str())
@@ -191,7 +191,7 @@ pub async fn price_info_object_for(
 /// [`DiscoveredVault`]: read the vault object (pinned feeds, decimals),
 /// then map both feeds to their `PriceInfoObject`s.
 pub async fn resolve_vault(
-    client: &SuiClient,
+    client: &ChainClient,
     row: &indexer_graphql::Vault,
     table: &PriceInfoTable,
 ) -> Result<DiscoveredVault> {
@@ -246,10 +246,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "hits the live Sui testnet fullnode"]
     async fn resolves_sui_beta_feed_on_testnet() {
-        let client = sui_sdk::SuiClientBuilder::default()
-            .build("https://fullnode.testnet.sui.io:443")
-            .await
-            .unwrap();
+        let client = ChainClient::new(sui_tx::Network::Testnet.grpc_url()).unwrap();
         let pyth_state: ObjectID =
             "0x243759059f4c3111179da5878c12f68d612c21a8d54d85edc86164bb18be1c7c"
                 .parse()

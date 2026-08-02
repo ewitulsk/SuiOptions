@@ -33,13 +33,19 @@ futures = { workspace = true }
 futures-util = { workspace = true }
 
 # Sui SDK.
-sui-sdk = { workspace = true }
 sui-types = { workspace = true }
 sui-keys = { workspace = true }
 sui-json = { workspace = true }
-sui-json-rpc-types = { workspace = true }
 sui-transaction-builder = { workspace = true }
 shared-crypto = { workspace = true }
 move-core-types = { workspace = true }
 
 tracing = { workspace = true }
+
+# gRPC + GraphQL chain access (JSON-RPC is deactivated on Sui fullnodes).
+sui-rpc-api = { workspace = true }
+sui-rpc = { workspace = true }
+tonic = { workspace = true }
+bytes = "1"
+reqwest = { workspace = true }
+chrono = { workspace = true }

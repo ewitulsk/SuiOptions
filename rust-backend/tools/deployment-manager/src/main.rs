@@ -17,7 +17,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use sui_sdk::SuiClientBuilder;
+use sui_tx::chain::ChainClient;
 
 use deployment_manager::deploy::{
     create_and_share_treasury, publish_cctp_package, publish_dep_package, publish_package,
@@ -28,7 +28,7 @@ use deployment_manager::json_store::{
     TestTokenRecord, TestTokensRecord, TokenSpec, TradingVaultObjectsRecord,
 };
 use deployment_manager::network::Network;
-use deployment_manager::signer::Signer;
+use deployment_manager::signer::load_signer;
 use deployment_manager::Cli;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -62,10 +62,14 @@ async fn main() -> Result<()> {
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
 
     let network = cli.network;
-    let rpc_url = cli
-        .rpc
+    // Endpoint precedence: --grpc flag, then the operator's shared override
+    // from the secrets file (the same `[sui] grpc_url` every service reads),
+    // then the public default. The old JSON-RPC path silently fell back to a
+    // deactivated public fullnode and failed at the first read.
+    let grpc_url = cli
+        .grpc
         .clone()
-        .unwrap_or_else(|| network.rpc_url().to_owned());
+        .unwrap_or_else(|| secrets.resolve_grpc_url(network.grpc_url()));
     let env_key = cli.env.to_ascii_lowercase();
 
     let mut store = Deployments::load_or_default(&output_path)?;
@@ -82,11 +86,9 @@ async fn main() -> Result<()> {
             .cloned()
             .with_context(|| format!("env {env_key} not found in deployments.json — deploy the protocol first"))?;
 
-        let signer = Signer::from_secrets(&secrets, network).context("loading signer")?;
-        let client = SuiClientBuilder::default()
-            .build(&rpc_url)
-            .await
-            .with_context(|| format!("building Sui client for {network}"))?;
+        let signer = load_signer(&secrets, network).context("loading signer")?;
+        let client = ChainClient::new(&grpc_url)
+            .with_context(|| format!("building chain client for {network}"))?;
         let outcome = publish_cctp_package(&client, &signer, &cctp_path, network, cli.gas_budget)
             .await
             .with_context(|| format!("publishing cctp_bridge to {network}"))?;
@@ -116,11 +118,9 @@ async fn main() -> Result<()> {
                 cli.mm_collateral_contracts.display()
             )
         })?;
-        let signer = Signer::from_secrets(&secrets, network).context("loading signer")?;
-        let client = SuiClientBuilder::default()
-            .build(&rpc_url)
-            .await
-            .with_context(|| format!("building Sui client for {network}"))?;
+        let signer = load_signer(&secrets, network).context("loading signer")?;
+        let client = ChainClient::new(&grpc_url)
+            .with_context(|| format!("building chain client for {network}"))?;
         let dep = move_publish::collateral::deploy(
             &client,
             &signer.keypair,
@@ -170,7 +170,7 @@ async fn main() -> Result<()> {
         .and_then(|d| d.package_info.cctp_bridge.clone());
     let record = deploy_one(
         network,
-        &rpc_url,
+        &grpc_url,
         &secrets,
         &contracts_path,
         test_tokens_path.as_deref(),
@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
 
 async fn deploy_one(
     network: Network,
-    rpc_url: &str,
+    grpc_url: &str,
     secrets: &runtime_config::Secrets,
     contracts_root: &std::path::Path,
     test_tokens_path: Option<&std::path::Path>,
@@ -210,15 +210,15 @@ async fn deploy_one(
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
-    tracing::info!(network = %network, rpc = %rpc_url, "starting deployment");
-
-    let signer = Signer::from_secrets(secrets, network).context("loading signer")?;
-    tracing::info!(deployer = %signer.address, "signer loaded");
-
-    let client = SuiClientBuilder::default()
-        .build(rpc_url)
-        .await
-        .with_context(|| format!("building Sui client for {network}"))?;
+    let signer = load_signer(secrets, network).context("loading signer")?;
+    let client = ChainClient::new(grpc_url)
+        .with_context(|| format!("building chain client for {network}"))?;
+    tracing::info!(
+        network = %network,
+        grpc_host = client.host(),
+        deployer = %signer.address,
+        "starting deployment"
+    );
 
     let env = network.as_str();
     let record = |o: &deployment_manager::deploy::DepPublishOutcome| PackageRecord {
