@@ -58,6 +58,19 @@ pub struct Config {
     /// deposits unsponsorable.
     #[serde(default)]
     pub pyth: Option<PythConfig>,
+
+    /// Switchboard's own `on_demand` package (SO-335), needed to
+    /// allowlist the quote-submit prefix on attestation-bearing
+    /// deposits. Our adapter's id comes from token-info; only
+    /// Switchboard's does not, because it is a third-party deployment we
+    /// do not publish. Unset leaves Switchboard deposits unsponsorable.
+    #[serde(default)]
+    pub switchboard: Option<SwitchboardConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SwitchboardConfig {
+    pub package_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

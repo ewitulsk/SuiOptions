@@ -107,6 +107,17 @@ async fn main() -> Result<()> {
                 .map(|p| p.package())
                 .transpose()
                 .context("equity_oracle package id")?,
+            // Both providers' shapes are registered when their packages
+            // exist (SO-335), so a provider switch needs no gas-station
+            // redeploy — the allowlist already covers the other path.
+            switchboard: match (snapshot.oracle_switchboard(), cfg.switchboard.as_ref()) {
+                (Some(adapter), Some(sb)) => Some(sui_tx::tx::template::SwitchboardPkgs {
+                    adapter: adapter.package().context("oracle_switchboard package id")?,
+                    switchboard: ObjectID::from_hex_literal(&sb.package_id)
+                        .context("bad [switchboard] package_id")?,
+                }),
+                _ => None,
+            },
             pyth: cfg
                 .pyth
                 .as_ref()

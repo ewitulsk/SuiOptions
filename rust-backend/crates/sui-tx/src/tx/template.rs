@@ -298,6 +298,24 @@ pub struct TradingVaultPkgs {
     /// price-update prefix legs on attestation-bearing deposits. `None`
     /// leaves those deposits unsponsorable.
     pub pyth: Option<PythPkgs>,
+    /// Switchboard adapter + `on_demand` package ids (SO-335).
+    ///
+    /// Registered ALONGSIDE Pyth, never instead of it: the template set
+    /// is a static allowlist evaluated per PTB, so covering both
+    /// providers costs nothing and means a provider switch needs no
+    /// gas-station redeploy. `None` only where the adapter is not
+    /// deployed.
+    pub switchboard: Option<SwitchboardPkgs>,
+}
+
+/// Our Switchboard adapter plus Switchboard's own package.
+#[derive(Debug, Clone, Copy)]
+pub struct SwitchboardPkgs {
+    /// `oracle_switchboard` (ours) — exposes `attest`.
+    pub adapter: ObjectID,
+    /// Switchboard's `on_demand` package — exposes the quote-submit
+    /// action that produces the in-PTB `Quotes` bundle.
+    pub switchboard: ObjectID,
 }
 
 /// The on-chain Pyth deployment the price-update prefix calls target.
@@ -306,6 +324,11 @@ pub struct PythPkgs {
     pub pyth: ObjectID,
     pub wormhole: ObjectID,
 }
+
+/// `run_1` … `run_6` — every arity Switchboard's quote-submit action
+/// exposes. All are allowlisted because the oracle count is a runtime
+/// property of the bundle Crossbar returns.
+const SWITCHBOARD_MAX_ORACLES: usize = 6;
 
 pub fn protocol_templates(
     protocol: ObjectID,
@@ -549,6 +572,25 @@ pub fn protocol_templates(
         // → potato destroy) and wrap attestations in `0x1::option`
         // calls. All value-neutral: the sponsor risks gas plus the
         // 1-MIST-per-feed update fee split from it.
+        // Switchboard's equivalents, allowlisted at the same time
+        // (SO-335). Its prefix is a single `run_N` producing the quote
+        // bundle every `attest` reads from — no shared-object refresh and
+        // no update fee, so the sponsor's exposure is strictly smaller
+        // than the Pyth path's.
+        if let Some(sb) = tvp.switchboard {
+            appraisal_allowed.push(TargetMatcher::Exact(MoveTarget::new(
+                sb.adapter,
+                "oracle_switchboard",
+                "attest",
+            )));
+            for n in 1..=SWITCHBOARD_MAX_ORACLES {
+                appraisal_allowed.push(TargetMatcher::Exact(MoveTarget::new(
+                    sb.switchboard,
+                    "quote_submit_result_action",
+                    &format!("run_{n}"),
+                )));
+            }
+        }
         let mut pyth_legs = Vec::new();
         if let Some(pp) = tvp.pyth {
             pyth_legs.push(MoveTarget::new(pp.wormhole, "vaa", "parse_and_verify"));
@@ -580,6 +622,20 @@ pub fn protocol_templates(
         }
         for t in option_wraps {
             deposit_arities.push((t, 1));
+        }
+        // Switchboard: `attest<Asset, Quote>` takes 2 type args like the
+        // Pyth one; `run_N` takes none.
+        if let Some(sb) = tvp.switchboard {
+            deposit_arities.push((
+                MoveTarget::new(sb.adapter, "oracle_switchboard", "attest"),
+                2,
+            ));
+            for n in 1..=SWITCHBOARD_MAX_ORACLES {
+                deposit_arities.push((
+                    MoveTarget::new(sb.switchboard, "quote_submit_result_action", &format!("run_{n}")),
+                    0,
+                ));
+            }
         }
         templates.push(PtbTemplate {
             name: "trading_vault:deposit".to_owned(),
@@ -1274,6 +1330,7 @@ mod tests {
                     options_adapter: None,
                     equity_oracle,
                     pyth: None,
+                    switchboard: None,
                 }),
             )
         };
@@ -1308,6 +1365,92 @@ mod tests {
         assert_eq!(match_any(&with_eo(Some(eo_pkg)), &plain), Some("trading_vault:deposit"));
     }
 
+    /// SO-335: both providers' deposit shapes sponsor from ONE template
+    /// set. This is what makes the oracle switch a config change rather
+    /// than a gas-station redeploy — if it regresses, deposits silently
+    /// stop being sponsored the moment the provider flips.
+    #[test]
+    fn both_providers_deposit_shapes_sponsor_simultaneously() {
+        let tv_pkg = ObjectID::from_hex_literal("0x7").unwrap();
+        let op_pkg = ObjectID::from_hex_literal("0x8").unwrap();
+        let sb_adapter = ObjectID::from_hex_literal("0x9").unwrap();
+        let sb_pkg = ObjectID::from_hex_literal("0xa").unwrap();
+        let pyth_pkg = ObjectID::from_hex_literal("0x5b1f").unwrap();
+        let wh_pkg = ObjectID::from_hex_literal("0xf473").unwrap();
+        let tvt = |module: &str, function: &str| MoveTarget::new(tv_pkg, module, function);
+
+        let templates = protocol_templates(
+            pkg(),
+            Some(vault_pkg()),
+            &[],
+            false,
+            None,
+            None,
+            Some(TradingVaultPkgs {
+                trading_vault: tv_pkg,
+                oracle_pyth: op_pkg,
+                deepbook_adapter: None,
+                options_adapter: None,
+                equity_oracle: None,
+                pyth: Some(PythPkgs { pyth: pyth_pkg, wormhole: wh_pkg }),
+                switchboard: Some(SwitchboardPkgs {
+                    adapter: sb_adapter,
+                    switchboard: sb_pkg,
+                }),
+            }),
+        );
+
+        // Pyth path: 4-call refresh prefix, then attest.
+        let pyth_deposit = build(
+            &[
+                (MoveTarget::new(wh_pkg, "vaa", "parse_and_verify"), 0),
+                (
+                    MoveTarget::new(pyth_pkg, "pyth", "create_authenticated_price_infos_using_accumulator"),
+                    0,
+                ),
+                (MoveTarget::new(pyth_pkg, "pyth", "update_single_price_feed"), 0),
+                (MoveTarget::new(pyth_pkg, "hot_potato_vector", "destroy"), 1),
+                (MoveTarget::new(op_pkg, "oracle_pyth", "attest"), 2),
+                (tvt("vault", "begin_appraisal"), 1),
+                (tvt("vault", "deposit"), 1),
+            ],
+            false,
+        );
+        assert_eq!(
+            match_any(&templates, &pyth_deposit),
+            Some("trading_vault:deposit")
+        );
+
+        // Switchboard path: ONE run_N producing the bundle, then attest.
+        let sb_deposit = build(
+            &[
+                (MoveTarget::new(sb_pkg, "quote_submit_result_action", "run_3"), 0),
+                (MoveTarget::new(sb_adapter, "oracle_switchboard", "attest"), 2),
+                (tvt("vault", "begin_appraisal"), 1),
+                (tvt("vault", "deposit"), 1),
+            ],
+            false,
+        );
+        assert_eq!(
+            match_any(&templates, &sb_deposit),
+            Some("trading_vault:deposit"),
+            "switchboard deposits must sponsor from the same template set"
+        );
+
+        // A forged arity on the switchboard attest is still refused —
+        // covering both providers must not loosen either.
+        let forged = build(
+            &[
+                (MoveTarget::new(sb_pkg, "quote_submit_result_action", "run_3"), 0),
+                (MoveTarget::new(sb_adapter, "oracle_switchboard", "attest"), 3),
+                (tvt("vault", "begin_appraisal"), 1),
+                (tvt("vault", "deposit"), 1),
+            ],
+            false,
+        );
+        assert_eq!(match_any(&templates, &forged), None);
+    }
+
     #[test]
     fn trading_vault_deposit_with_pyth_prefix() {
         let tv_pkg = ObjectID::from_hex_literal("0x71ad").unwrap();
@@ -1329,6 +1472,7 @@ mod tests {
                     options_adapter: None,
                     equity_oracle: None,
                     pyth,
+                    switchboard: None,
                 }),
             )
         };

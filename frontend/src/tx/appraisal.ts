@@ -39,6 +39,7 @@ import {
 } from "@mysten/sui/utils";
 
 import { fetchBuckets, optionCoinType, seriesOptionType } from "../api/client";
+import type { OracleDescriptor } from "../api/oracleDescriptor";
 import { HERMES_BASE } from "../api/pyth";
 import { tokenForCoinType, type TradingVaultDetail } from "../api/tradingVaults";
 import {
@@ -630,6 +631,13 @@ export function composeAppraisal(
   tx: Transaction,
   plan: AppraisalPlan,
   ctx: ComposeContext,
+  /**
+   * The live oracle descriptor (SO-335). Supplied, the attest legs
+   * target whichever adapter oracle-service says is live; omitted, they
+   * fall back to the compiled Pyth ids. Optional so existing callers
+   * keep working — new ones should pass it.
+   */
+  oracle?: OracleDescriptor,
 ): TransactionResult {
   const vaultPkg = requireId(TRADING_VAULT_PACKAGE_ID, "trading-vault package");
   const vault = tx.object(plan.vaultId);
@@ -664,7 +672,15 @@ export function composeAppraisal(
   // 2. Pyth update prefix + 3. one attestation per asset.
   const attestations = new Map<string, TransactionResult>();
   if (plan.attestTypes.length > 0) {
-    const oraclePkg = requireId(ORACLE_PYTH_PACKAGE_ID, "oracle-pyth package");
+    // SO-335: the adapter is whatever oracle-service says is live, not a
+    // constant baked into this bundle. `oracle` is passed in by the
+    // caller (from `useOracleDescriptor`); falling back to the compiled
+    // Pyth ids keeps older callers working during the migration.
+    const adapter = oracle?.adapter;
+    const oraclePkg = adapter
+      ? adapter.adapter_package_id
+      : requireId(ORACLE_PYTH_PACKAGE_ID, "oracle-pyth package");
+    const attestModule = oracle?.adapter_module ?? "oracle_pyth";
     const gov = TRADING_VAULT_OBJECTS;
     if (!gov) throw new Error("trading-vault governance objects unavailable");
     const handles = PYTH_HANDLES[ENV];
@@ -710,15 +726,15 @@ export function composeAppraisal(
     // Attestations: `attest<Asset, Dep>` crosses the asset feed with the
     // deposit feed. `PriceAttestation` is `copy, drop`, so one result per
     // asset is reused across every leg below.
-    const feedReg = tx.object(gov.pythFeedRegistryId);
-    const oracleReg = tx.object(gov.oracleRegistryId);
+    const feedReg = tx.object(adapter ? adapter.feed_registry_id : gov.pythFeedRegistryId);
+    const oracleReg = tx.object(adapter ? adapter.oracle_registry_id : gov.oracleRegistryId);
     const depositInfo = tx.object(plan.priceInfoByFeed[plan.feedIdByType[plan.depositType]]);
     for (const asset of plan.attestTypes) {
       const info = tx.object(plan.priceInfoByFeed[plan.feedIdByType[asset]]);
       attestations.set(
         asset,
         tx.moveCall({
-          target: `${oraclePkg}::oracle_pyth::attest`,
+          target: `${oraclePkg}::${attestModule}::attest`,
           typeArguments: [asset, plan.depositType],
           arguments: [feedReg, oracleReg, info, depositInfo, clock],
         }),
