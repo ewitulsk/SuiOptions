@@ -56,6 +56,19 @@ pub struct OracleConfig {
     /// Pyth-only deployment.
     #[serde(default)]
     pub crossbar_url: Option<String>,
+
+    /// The Sui `Queue` OBJECT `run_N` validates signing oracles against,
+    /// read from the Switchboard `State` object for this network.
+    #[serde(default)]
+    pub switchboard_queue_id: Option<String>,
+
+    /// That queue's 32-byte `queue_key`. Crossbar reports the queue its
+    /// signatures were produced under; comparing the two catches a
+    /// cross-queue bundle off chain instead of as an opaque `run_N`
+    /// abort. The public Crossbar answers for a DIFFERENT queue than Sui
+    /// testnet's, so this is a live failure mode, not a theoretical one.
+    #[serde(default)]
+    pub switchboard_queue_key: Option<String>,
 }
 
 fn default_hermes() -> String {

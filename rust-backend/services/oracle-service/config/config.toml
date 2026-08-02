@@ -22,3 +22,15 @@ benchmarks_url = "https://benchmarks.pyth.network"
 [oracle]
 provider = "pyth"
 crossbar_url = "http://127.0.0.1:8080"
+# Switchboard oracle queue for this network (testnet), read from the
+# Switchboard `State` object on chain. `run_N` validates every signing
+# oracle against this Queue OBJECT, and the client refuses a bundle whose
+# reported queue key differs — a cross-queue bundle otherwise aborts
+# inside run_N with nothing useful in the error.
+#
+# NOTE: the PUBLIC crossbar.switchboard.xyz answers for a different queue
+# (86807068…). Our own crossbar must be pointed at the RPC backing THIS
+# queue, or every quote is rejected.
+switchboard_queue_id  = "0xe645d8979dac2fb901fb7c7b0ef3c9fad5dfaaf7ae2b0ce38a0b5ec63b819a99"
+switchboard_queue_key = "0xc9477bfb5ff1012859f336cf98725680e7705ba2abece17188cfb28ca66ca5b0"
+

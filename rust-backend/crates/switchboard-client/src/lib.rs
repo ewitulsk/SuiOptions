@@ -71,6 +71,39 @@ pub struct QuoteBundle {
     pub timestamp_seconds: u64,
     /// Sui `Oracle` OBJECT ids, resolved from the response's pubkeys.
     pub oracle_ids: Vec<ObjectID>,
+    /// The queue these signatures were produced under, as reported by
+    /// Crossbar (`queue_pubkey`, 32 bytes hex, no `0x`).
+    ///
+    /// Carried so callers can check it against the Sui `Queue` they are
+    /// about to submit to — see [`QuoteBundle::require_queue`].
+    pub queue_key: String,
+}
+
+impl QuoteBundle {
+    /// Refuse a bundle signed under a different queue than the one we
+    /// will submit against.
+    ///
+    /// This is not theoretical. Switchboard runs one queue per
+    /// network-ish domain, and `run_N` validates every oracle against
+    /// the `&Queue` object passed in, so a cross-queue bundle aborts on
+    /// chain with nothing useful in the error. Observed concretely:
+    /// the PUBLIC `crossbar.switchboard.xyz` answers for queue
+    /// `86807068…` while Sui testnet's on-chain oracle queue is
+    /// `c9477bfb…`. Catching it here turns a confusing revert into a
+    /// clear off-chain message.
+    pub fn require_queue(&self, expected_queue_key: &str) -> Result<()> {
+        let want = strip0x(expected_queue_key).to_ascii_lowercase();
+        if self.queue_key == want {
+            return Ok(());
+        }
+        Err(anyhow!(
+            "crossbar signed these quotes under queue {} but this network's \
+             Switchboard queue is {want} — the on-chain run_N would reject \
+             every signature. Point crossbar at the RPC backing this \
+             network's queue.",
+            self.queue_key
+        ))
+    }
 }
 
 // ── wire types (mirror the live response above) ──────────────────────
@@ -89,6 +122,9 @@ struct FeedResponse {
     feed_hash: String,
     #[serde(default = "one")]
     min_oracle_samples: u8,
+    /// 32-byte hex. Same for every feed in a bundle (one queue signs it).
+    #[serde(default)]
+    queue_pubkey: Option<String>,
 }
 
 fn one() -> u8 {
@@ -215,6 +251,19 @@ impl UpdateResponse {
             ));
         }
 
+        // Every feed response in a bundle carries the same queue; take
+        // the first and refuse a bundle that reports none, since an
+        // unverifiable queue is exactly what `require_queue` exists for.
+        let queue_key = self
+            .oracle_responses
+            .iter()
+            .flat_map(|o| o.feed_responses.iter())
+            .find_map(|fr| fr.queue_pubkey.as_deref())
+            .map(|q| strip0x(q).to_ascii_lowercase())
+            .ok_or_else(|| {
+                anyhow!("crossbar response carries no queue_pubkey — cannot verify the queue")
+            })?;
+
         Ok(QuoteBundle {
             feed_ids,
             values,
@@ -224,6 +273,7 @@ impl UpdateResponse {
             slot: self.slot,
             timestamp_seconds: self.timestamp,
             oracle_ids,
+            queue_key,
         })
     }
 }
@@ -366,7 +416,7 @@ mod tests {
          "ethAddress":"2d385803c1af442704d50ecb6e600700d86cc747",
          "signature":"NMbdWaCa6wkqdp+qyYb87/S8KriXz74rfcKanmqZOA8xr3H3yzFqsLav+HIPCx+xK+TaR6Ng2aKpxJmtQEg5cg==",
          "recoveryId":1,
-         "feedResponses":[{"feed_hash":"4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812","min_oracle_samples":1}]}
+         "feedResponses":[{"feed_hash":"4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812","min_oracle_samples":1,"queue_pubkey":"86807068432f186a147cf0b13a30067d386204ea9d6c8b04743ac2ef010b0752"}]}
       ],
       "timestamp": 1785700471,
       "slot": 42,
@@ -442,12 +492,59 @@ mod tests {
             resp.oracle_responses.push(OracleResponse {
                 oracle_pubkey: key.clone(),
                 signature: sig.clone(),
-                feed_responses: vec![],
+                feed_responses: vec![FeedResponse {
+                    feed_hash: "4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812"
+                        .into(),
+                    min_oracle_samples: 1,
+                    queue_pubkey: Some(
+                        "86807068432f186a147cf0b13a30067d386204ea9d6c8b04743ac2ef010b0752".into(),
+                    ),
+                }],
             });
             map.insert(key, ObjectID::ZERO);
         }
         let err = resp.into_bundle(&map).unwrap_err().to_string();
         assert!(err.contains("run_1..run_6"), "{err}");
+    }
+
+    /// The queue mismatch this guard exists for is REAL: the public
+    /// crossbar answers for queue 8680… while Sui testnet's on-chain
+    /// oracle queue is c9477bfb…. Submitting across them aborts inside
+    /// run_N with nothing useful in the error.
+    #[test]
+    fn a_cross_queue_bundle_is_refused_with_both_queues_named() {
+        let resp: UpdateResponse = serde_json::from_str(LIVE_SAMPLE).unwrap();
+        let b = resp.into_bundle(&oracle_map()).unwrap();
+        assert_eq!(
+            b.queue_key,
+            "86807068432f186a147cf0b13a30067d386204ea9d6c8b04743ac2ef010b0752"
+        );
+
+        // Sui testnet's real oracle queue key.
+        let err = b
+            .require_queue("0xc9477bfb5ff1012859f336cf98725680e7705ba2abece17188cfb28ca66ca5b0")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("86807068"), "{err}");
+        assert!(err.contains("c9477bfb"), "{err}");
+
+        // Matching queue passes, with or without the 0x and in any case.
+        b.require_queue("0x86807068432F186A147CF0B13A30067D386204EA9D6C8B04743AC2EF010B0752")
+            .unwrap();
+    }
+
+    #[test]
+    fn a_bundle_with_no_queue_is_refused() {
+        // An unverifiable queue is precisely the case require_queue
+        // exists for, so defaulting it would defeat the guard.
+        let mut resp: UpdateResponse = serde_json::from_str(LIVE_SAMPLE).unwrap();
+        for o in &mut resp.oracle_responses {
+            for fr in &mut o.feed_responses {
+                fr.queue_pubkey = None;
+            }
+        }
+        let err = resp.into_bundle(&oracle_map()).unwrap_err().to_string();
+        assert!(err.contains("no queue_pubkey"), "{err}");
     }
 
     #[test]
