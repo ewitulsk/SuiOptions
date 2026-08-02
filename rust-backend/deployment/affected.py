@@ -58,7 +58,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh — `test_affected.py`
 # asserts the two match.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "dakota-service", "twitter-service", "social-bot"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -119,6 +119,13 @@ SERVICE_GLOBS: dict[str, list[str]] = {
     "cctp-relay": [
         "rust-backend/services/cctp-relay/**",
         "rust-backend/Dockerfile.cctp-relay",
+    ],
+    # Staging-only service. It still appears here so a source change rebuilds
+    # its image; what keeps it out of prod is its absence from
+    # docker-compose.prod.yml, which deploy.sh filters against.
+    "dakota-service": [
+        "rust-backend/services/dakota-service/**",
+        "rust-backend/Dockerfile.dakota-service",
     ],
     "gas-station": [
         "rust-backend/services/gas-station/**",

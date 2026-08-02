@@ -1,0 +1,42 @@
+# dakota-service — local dev.
+#
+# Points at the Dakota SANDBOX. Requires a local Postgres and a secrets file:
+#   createdb dakota_dev
+#   cp services/dakota-service/config/secrets.example.toml \
+#      services/dakota-service/config/secrets.toml   # then fill in the api key
+#
+# auth-service must also be running (`cargo run -p auth-service`) — this
+# service verifies tokens and mints invites over its internal port.
+
+environment = "dev"
+bind_addr   = "127.0.0.1:9019"
+
+database_url = "postgresql://postgres:postgres@127.0.0.1:5432/dakota_dev"
+db_pool_size = 4
+
+allowed_origins = ["http://localhost:5174", "http://127.0.0.1:5174"]
+
+[dakota]
+base_url = "https://api.platform.sandbox.dakota.xyz"
+
+# SANDBOX webhook signing key. The production key differs.
+webhook_public_key = "7a2f771f3a7ac9ae2a95066df35dc0261d7ce354214736cc232d70b3c66f8a5f"
+
+# Dakota cannot reach localhost. To exercise webhooks locally, put ngrok in
+# front and set this to the forwarded URL, then POST /admin/webhooks/register.
+# webhook_url = "https://<your-ngrok>.ngrok.app/webhooks/dakota"
+
+max_amount_minor = 200
+
+allowed_networks = [
+  "ethereum-sepolia",
+  "base-sepolia",
+  "arbitrum-sepolia",
+  "optimism-sepolia",
+  "polygon-amoy",
+  "solana-devnet",
+]
+
+[auth]
+internal_url    = "http://127.0.0.1:9008"
+invite_ttl_secs = 604800

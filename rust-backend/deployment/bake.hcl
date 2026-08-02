@@ -99,6 +99,16 @@ target "cctp-relay" {
   cache-to   = [{ type = "gha", mode = "max", scope = "cctp-relay" }]
 }
 
+# Built for every environment, deployed only to staging: the image is harmless
+# to publish, and docker-compose.prod.yml simply never references it.
+target "dakota-service" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.dakota-service"
+  tags       = ["${ECR}/options/dakota-service:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "dakota-service" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "dakota-service" }]
+}
+
 target "gas-station" {
   inherits   = ["_common"]
   dockerfile = "Dockerfile.gas-station"
@@ -164,5 +174,5 @@ target "market-sim" {
 }
 
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "dakota-service", "twitter-service", "social-bot"]
 }

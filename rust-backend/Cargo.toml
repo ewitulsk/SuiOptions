@@ -30,6 +30,7 @@ members = [
     "services/market-sim",
     "services/price-charting",
     "services/cctp-relay",
+    "services/dakota-service",
     "services/balance-monitor",
     "services/oracle-service",
     "services/twitter-service",
@@ -104,6 +105,13 @@ base64 = "0.22"
 # the PHC string it emits embeds its own params, so a later parameter bump
 # still verifies hashes written today.
 argon2 = "0.5"
+
+# dakota-service: ECDSA P-256 (ES256) signing of Dakota wallet intents, and
+# RFC 8785 JCS canonicalization of the intent JSON before hashing. Dakota
+# verifies over the transmitted form, so any deviation is a silent signature
+# mismatch — both crates are load-bearing.
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
+serde_jcs = "0.1"
 
 thiserror = "1"
 anyhow = "1"

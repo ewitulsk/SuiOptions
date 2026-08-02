@@ -171,6 +171,29 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # Dakota stablecoin on/off-ramp integration. Backs the admin, partner-business
+  # and individual dashboards: hosted-redirect onboarding, onramp/offramp/swap
+  # accounts and a PII-free activity ledger. Public port (9019, proxied by nginx
+  # as /staging/dakota — the webhook receiver needs to be internet-reachable).
+  #
+  # STAGING ONLY, and deliberately absent from docker-compose.prod.yml: it talks
+  # to Dakota's SANDBOX, and deploy.sh filters the requested set against the
+  # env's compose file, so omitting it there is what keeps it from ever being
+  # planned into prod. Reads `dakota.api_key` from
+  # /run/secrets/dakota-service.toml — required, the service exits without it.
+  dakota-service:
+    image: ${ECR}/options/dakota-service:${DAKOTA_SERVICE_TAG}
+    environment:
+      APP_ENV: staging
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      RUST_LOG: info,dakota_service=debug
+    volumes:
+      - /opt/options/staging/secrets:/run/secrets:ro
+    restart: unless-stopped
+    networks: [net]
+
   # Gas station. Sponsors user transactions by paying their gas. Public port
   # (9009, proxied by nginx). Reads the sponsor key from /run/secrets.
   gas-station:

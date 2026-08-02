@@ -1,0 +1,27 @@
+# Multi-stage build for dakota-service. Mirrors Dockerfile.cctp-relay — see
+# the platform note in Dockerfile.indexer (no $BUILDPLATFORM pinning).
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev clang cmake protobuf-compiler git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+RUN cargo build --release -p dakota-service
+
+FROM debian:bookworm-slim
+# libpq5: Postgres runtime lib for the diesel connection.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 libpq5 curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /src/target/release/dakota-service /usr/local/bin/dakota-service
+COPY services/dakota-service/config/ /app/config/
+
+# staging only — there is deliberately no config.prod.toml, and the service is
+# not declared in docker-compose.prod.yml.
+ENV APP_ENV=staging
+# --secrets carries `dakota.api_key`, rendered to
+# /run/secrets/dakota-service.toml by render-secrets.sh and bind-mounted by
+# compose. REQUIRED at runtime — every Dakota call needs the key.
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/dakota-service --config /app/config/config.${APP_ENV}.toml --secrets /run/secrets/dakota-service.toml"]

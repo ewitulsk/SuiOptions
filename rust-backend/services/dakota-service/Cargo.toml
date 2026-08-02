@@ -1,0 +1,59 @@
+[package]
+name = "dakota-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "dakota-service"
+path = "src/main.rs"
+
+[dependencies]
+runtime-config = { workspace = true }
+observability  = { workspace = true, features = ["axum"] }
+cli-spec       = { workspace = true }
+auth-client    = { workspace = true }
+
+config = { version = "0.14", features = ["toml"] }
+clap = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+tokio = { workspace = true }
+
+axum = { workspace = true }
+tower-http = { workspace = true }
+reqwest = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+metrics = { workspace = true }
+
+diesel = { workspace = true }
+diesel_migrations = { workspace = true }
+r2d2 = { workspace = true }
+bigdecimal = { workspace = true }
+
+# Webhook authenticity: Dakota signs deliveries with Ed25519, not HMAC.
+ed25519-dalek = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+
+# Wallet intents: RFC 8785 JCS canonicalization -> SHA-256 -> ECDSA P-256 DER.
+p256 = { workspace = true }
+serde_jcs = { workspace = true }
+
+[dev-dependencies]
+# Live sandbox tests: throwaway P-256 keys and a tokio runtime.
+rand = { workspace = true }
+tokio = { workspace = true }
