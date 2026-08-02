@@ -25,20 +25,17 @@ use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::Argument;
 
-use crate::tx::pyth_update::{prepend_price_update, PythHandles};
 use crate::tx::{clock_arg, shared_object_arg};
 
 /// Package + shared-object identity the composer calls against.
 #[derive(Debug, Clone)]
 pub struct AppraisalRefs {
     pub trading_vault_pkg: ObjectID,
-    pub oracle_pyth_pkg: ObjectID,
     pub deepbook_adapter_pkg: Option<ObjectID>,
     pub options_adapter_pkg: Option<ObjectID>,
     pub vault_id: ObjectID,
     pub protocol_config_id: ObjectID,
     pub oracle_registry_id: ObjectID,
-    pub pyth_feed_registry_id: ObjectID,
     /// equity-oracle package (SO-299), for the external-account equity
     /// leg. `None` where the package isn't deployed.
     pub equity_oracle_pkg: Option<ObjectID>,
@@ -166,7 +163,7 @@ pub struct OptionBucketInfo {
 /// mapped option-coin types are replaced by their bucket's underlying +
 /// settlement legs (the coin itself prices via the options oracle), and
 /// held option-coin positions contribute their legs.
-pub fn pyth_assets_needed(
+pub fn price_assets_needed(
     holdings: &VaultHoldings,
     option_buckets: &BTreeMap<String, OptionBucketInfo>,
 ) -> BTreeSet<String> {
@@ -534,15 +531,6 @@ fn split_type_args(inner: &str) -> Vec<String> {
     out
 }
 
-/// Everything price-shaped the caller resolved up front.
-pub struct PriceLegs<'a> {
-    pub pyth: &'a PythHandles,
-    /// One Hermes accumulator update covering every feed below.
-    pub accumulator_update: &'a [u8],
-    /// canonical coin type → its shared PriceInfoObject.
-    pub price_infos: &'a BTreeMap<String, ObjectID>,
-}
-
 /// Emit the full appraisal and return its Argument. The caller then
 /// appends `deposit` / `fulfill_withdrawals` with it.
 #[allow(clippy::too_many_arguments)]
@@ -551,7 +539,7 @@ pub async fn compose_appraisal(
     pt: &mut ProgrammableTransactionBuilder,
     refs: &AppraisalRefs,
     holdings: &VaultHoldings,
-    legs: Option<PriceLegs<'_>>,
+    legs: Option<crate::tx::oracle::OracleLegs<'_>>,
     option_buckets: &BTreeMap<String, OptionBucketInfo>,
 ) -> Result<Argument> {
     let deposit_tag = TypeTag::from_str(&holdings.deposit_type)
@@ -567,14 +555,11 @@ pub async fn compose_appraisal(
     // nonzero (e.g. a pool's call-coin base with zero locked passes; a
     // real unpriceable inventory correctly wedges the appraisal).
     let needed = holdings.assets_needing_attestation();
-    let pyth_needed = pyth_assets_needed(holdings, option_buckets);
+    let priced_needed: Vec<String> =
+        price_assets_needed(holdings, option_buckets).into_iter().collect();
     let mut attestations: BTreeMap<String, Argument> = BTreeMap::new();
     let attestable: Vec<String> = match &legs {
-        Some(l) => pyth_needed
-            .iter()
-            .filter(|t| l.price_infos.contains_key(*t))
-            .cloned()
-            .collect(),
+        Some(l) => l.attestable(&priced_needed),
         None => Vec::new(),
     };
     // Hard requirement only where an amount is KNOWN nonzero client-side:
@@ -588,36 +573,22 @@ pub async fn compose_appraisal(
     }
     if !attestable.is_empty() {
         let legs = legs.as_ref().expect("attestable implies legs");
-        let deposit_info_id = *legs
-            .price_infos
-            .get(&holdings.deposit_type)
-            .ok_or_else(|| anyhow!("no PriceInfoObject for the deposit asset"))?;
-        let mut update_ids = vec![deposit_info_id];
-        for t in &attestable {
-            let info = legs.price_infos[t];
-            if !update_ids.contains(&info) {
-                update_ids.push(info);
-            }
-        }
-        prepend_price_update(client, pt, legs.pyth, legs.accumulator_update, &update_ids)
-            .await
-            .context("building pyth update prefix")?;
-
-        let feed_reg = pt.obj(shared_object_arg(client, refs.pyth_feed_registry_id, false).await?)?;
-        let oracle_reg = pt.obj(shared_object_arg(client, refs.oracle_registry_id, false).await?)?;
-        let deposit_info = pt.obj(shared_object_arg(client, deposit_info_id, false).await?)?;
-        for asset in &attestable {
-            let asset_info = pt.obj(shared_object_arg(client, legs.price_infos[asset], false).await?)?;
-            let asset_tag = TypeTag::from_str(asset).context("parsing asset type")?;
-            let att = pt.programmable_move_call(
-                refs.oracle_pyth_pkg,
-                Identifier::new("oracle_pyth").unwrap(),
-                Identifier::new("attest").unwrap(),
-                vec![asset_tag, deposit_tag.clone()],
-                vec![feed_reg, oracle_reg, asset_info, deposit_info, clock],
-            );
-            attestations.insert(asset.clone(), att);
-        }
+        // Provider-agnostic: the legs value decides which prefix is
+        // emitted and which adapter's `attest` runs (SO-335). Nothing
+        // below this point knows or cares which oracle priced the book.
+        attestations = crate::tx::oracle::emit_price_legs(
+            client,
+            pt,
+            legs,
+            &crate::tx::oracle::OracleRefs {
+                oracle_registry_id: refs.oracle_registry_id,
+            },
+            &attestable,
+            &holdings.deposit_type,
+            clock,
+        )
+        .await
+        .with_context(|| format!("building {} price legs", legs.provider()))?;
     }
 
     let attestation_type = TypeTag::from_str(&format!(
@@ -920,9 +891,9 @@ mod tests {
             external_equity_oracle: Some("0xe0::equity_oracle::EquityOracle".into()),
             external_exposure: 1,
         };
-        assert!(pyth_assets_needed(&holdings, &BTreeMap::new()).is_empty());
+        assert!(price_assets_needed(&holdings, &BTreeMap::new()).is_empty());
 
         let unfunded = VaultHoldings { external_exposure: 0, ..holdings };
-        assert!(pyth_assets_needed(&unfunded, &BTreeMap::new()).is_empty());
+        assert!(price_assets_needed(&unfunded, &BTreeMap::new()).is_empty());
     }
 }

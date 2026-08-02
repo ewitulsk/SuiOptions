@@ -28,8 +28,7 @@ use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 
 use sui_tx::sui_client::Signer;
 use sui_tx::tx::appraisal::{
-    compose_appraisal, discover_holdings, pyth_assets_needed, AppraisalRefs, OptionBucketInfo,
-    PriceLegs,
+    compose_appraisal, discover_holdings, price_assets_needed, AppraisalRefs, OptionBucketInfo,
 };
 use sui_tx::tx::pyth_update::PythHandles;
 use sui_tx::tx::deepbook::derived_pool_params;
@@ -331,13 +330,11 @@ async fn main() -> Result<()> {
     let step = Step("deposit (cash-only appraisal)");
     let refs = AppraisalRefs {
         trading_vault_pkg: ids.trading_vault_pkg,
-        oracle_pyth_pkg: ids.oracle_pyth_pkg,
         deepbook_adapter_pkg: Some(ids.deepbook_adapter_pkg),
         options_adapter_pkg: Some(ids.options_adapter_pkg),
         vault_id,
         protocol_config_id: ids.protocol_config_id,
         oracle_registry_id: ids.oracle_registry_id,
-        pyth_feed_registry_id: ids.pyth_feed_registry_id,
         // SO-299: the smoke vault has no external account.
         equity_oracle_pkg: None,
         equity_book_id: None,
@@ -689,6 +686,8 @@ async fn main() -> Result<()> {
             &holdings,
             &option_map,
             &feeds_by_type,
+            ids.oracle_pyth_pkg,
+            ids.pyth_feed_registry_id,
         )
         .await?;
         let faucet = pt.obj(shared_object_arg(&client, ids.deposit_faucet, true).await?)?;
@@ -748,6 +747,8 @@ async fn main() -> Result<()> {
             &holdings,
             &option_map,
             &feeds_by_type,
+            ids.oracle_pyth_pkg,
+            ids.pyth_feed_registry_id,
         )
         .await?;
         let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
@@ -838,6 +839,8 @@ async fn main() -> Result<()> {
         &holdings,
         &option_map,
         &feeds_by_type,
+        ids.oracle_pyth_pkg,
+        ids.pyth_feed_registry_id,
     )
     .await?;
     let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
@@ -985,15 +988,20 @@ async fn compose_with_legs(
     holdings: &sui_tx::tx::appraisal::VaultHoldings,
     option_map: &BTreeMap<String, OptionBucketInfo>,
     feeds_by_type: &BTreeMap<String, protocol_types::PriceFeedId>,
+    // The adapter identity moved onto the legs (SO-335) so a provider
+    // switch cannot leave one caller pairing Pyth's registry with a
+    // different adapter's `attest`.
+    oracle_pyth_pkg: ObjectID,
+    pyth_feed_registry_id: ObjectID,
 ) -> Result<sui_types::transaction::Argument> {
-    let needed = pyth_assets_needed(holdings, option_map);
+    let needed = price_assets_needed(holdings, option_map);
     if needed.is_empty() {
         return compose_appraisal(client, pt, refs, holdings, None, option_map).await;
     }
     let handles = pyth_handles();
     let table = resolve_price_info_table(client, handles.pyth_state_id).await?;
     let mut feeds = Vec::new();
-    let mut price_infos = BTreeMap::new();
+    let mut price_infos: BTreeMap<String, ObjectID> = BTreeMap::new();
     let mut all: Vec<String> = needed.iter().cloned().collect();
     all.push(holdings.deposit_type.clone());
     for t in &all {
@@ -1015,7 +1023,13 @@ async fn compose_with_legs(
         pt,
         refs,
         holdings,
-        Some(PriceLegs { pyth: &handles, accumulator_update: update, price_infos: &price_infos }),
+        Some(sui_tx::tx::oracle::OracleLegs::Pyth(sui_tx::tx::oracle::PythLegs {
+            adapter_pkg: oracle_pyth_pkg,
+            feed_registry_id: pyth_feed_registry_id,
+            handles: &handles,
+            accumulator_update: update,
+            price_infos: &price_infos,
+        })),
         option_map,
     )
     .await

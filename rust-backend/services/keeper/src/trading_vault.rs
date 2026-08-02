@@ -50,8 +50,8 @@ use tracing::{debug, info, warn};
 use protocol_types::PriceFeedId;
 use sui_tx::sui_client::SuiClientWrapper;
 use sui_tx::tx::appraisal::{
-    compose_appraisal, discover_holdings, pyth_assets_needed, AppraisalRefs,
-    OptionBucketInfo, PositionInfo, PriceLegs, VaultHoldings,
+    compose_appraisal, discover_holdings, price_assets_needed, AppraisalRefs,
+    OptionBucketInfo, PositionInfo, VaultHoldings,
 };
 use sui_tx::tx::pyth_update::PythHandles;
 use sui_tx::tx::{clock_arg, shared_object_arg, submit_ptb};
@@ -404,13 +404,11 @@ fn mark_refresh_due(ctx: &TradingVaultCtx, vault_id: ObjectID, now_ms: u64) -> b
 fn refs_for(ctx: &TradingVaultCtx, vault_id: ObjectID) -> AppraisalRefs {
     AppraisalRefs {
         trading_vault_pkg: ctx.trading_vault_pkg,
-        oracle_pyth_pkg: ctx.oracle_pyth_pkg,
         deepbook_adapter_pkg: ctx.deepbook_adapter_pkg,
         options_adapter_pkg: ctx.options_adapter_pkg,
         vault_id,
         protocol_config_id: ctx.protocol_config_id,
         oracle_registry_id: ctx.oracle_registry_id,
-        pyth_feed_registry_id: ctx.pyth_feed_registry_id,
         equity_oracle_pkg: ctx.equity_oracle_pkg,
         equity_book_id: ctx.equity_book_id,
         vol_book_id: ctx.vol_book_id,
@@ -1303,7 +1301,7 @@ async fn compose_full_appraisal(
 
     // Option-coin types price via the options oracle; only the remaining
     // (underlying/settlement/plain) types need pyth feeds.
-    let needed = pyth_assets_needed(holdings, option_buckets);
+    let needed = price_assets_needed(holdings, option_buckets);
     if needed.is_empty() {
         compose_appraisal(client, pt, &refs, holdings, None, option_buckets).await
     } else {
@@ -1315,7 +1313,7 @@ async fn compose_full_appraisal(
         // passes `none` for the rest and the chain aborts only if an
         // unpriced component is actually nonzero.
         let mut feeds = Vec::new();
-        let mut price_infos = BTreeMap::new();
+        let mut price_infos: BTreeMap<String, ObjectID> = BTreeMap::new();
         let mut all_types: Vec<String> = needed.iter().cloned().collect();
         all_types.push(holdings.deposit_type.clone());
         for t in &all_types {
@@ -1343,7 +1341,13 @@ async fn compose_full_appraisal(
             pt,
             &refs,
             holdings,
-            Some(PriceLegs { pyth: &ctx.pyth, accumulator_update: update, price_infos: &price_infos }),
+            Some(sui_tx::tx::oracle::OracleLegs::Pyth(sui_tx::tx::oracle::PythLegs {
+                adapter_pkg: ctx.oracle_pyth_pkg,
+                feed_registry_id: ctx.pyth_feed_registry_id,
+                handles: &ctx.pyth,
+                accumulator_update: update,
+                price_infos: &price_infos,
+            })),
             option_buckets,
         )
         .await
