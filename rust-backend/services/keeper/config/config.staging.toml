@@ -55,33 +55,6 @@ vol_window_days = 30
 slices = 4
 stagger_minutes = 90
 
-# Trustless DeepBook-Margin equity legs (SO-299 phase C): one block per
-# vault whose pinned external-equity witness is dbm_oracle::DbmOracle.
-# The appraisal then composes dbm_oracle::record{,_no_debt} against the
-# vault's MarginManager instead of the attested equity_oracle::record.
-# Live testnet ids from docs/mm-bot-v2/04 Phase 0 findings; the manager
-# id is minted by the multisig at hedge bring-up.
-# [external.dbm."0x<vault_id>"]
-# margin_manager_id    = "0x..."
-# deepbook_pool_id     = "0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5"  # SUI/DBUSDC
-# base_margin_pool_id  = "0xcdbbe6a72e639b647296788e2e4b1cac5cea4246028ba388ba1332ff9a382eea"  # SUI
-# quote_margin_pool_id = "0xf08568da93834e1ee04f09902ac7b1e78d3fdf113ab4d2106c7265e95318b14d"  # DBUSDC
-# base_type            = "0x2::sui::SUI"
-# quote_type           = "0x..."   # DBUSDC coin type
-
-# Trustless DBM equity legs for the desk vault's external account
-# (SO-299): the appraisal composer reads the MarginManager instead of the
-# attested EquityBook.
-[external.dbm."0x8da89c40ad922ca3447af60c2214f13a93860d04df3072646020d94ccc4fae49"]
-margin_manager_id    = "0xa5d76785501f9779317599434e94109fba152e0fae357d896c411bb34dffe364"
-deepbook_pool_id     = "0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5"
-base_margin_pool_id  = "0xcdbbe6a72e639b647296788e2e4b1cac5cea4246028ba388ba1332ff9a382eea"
-quote_margin_pool_id = "0xf08568da93834e1ee04f09902ac7b1e78d3fdf113ab4d2106c7265e95318b14d"
-base_type            = "0x2::sui::SUI"
-quote_type           = "0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDC::DBUSDC"
-base_feed_id         = "0x50c67b3fd225db8912a424dd4baed60ffdde625ed2feaaf283724f9608fea266"  # SUI/USD beta
-quote_feed_id        = "0x41f3625971ca2ed2263e78573fe5ce23e13d2558ed3f2e47ab0f84fb9e7ae722"  # USDC/USD beta
-
 # Bluefin venue equity reader (SO-305): polls the venue's PUBLIC account
 # endpoint for each vault's FROST parent account and feeds the attested
 # EquityBook poster crank (venue_equity::Bluefin). Off until a staging

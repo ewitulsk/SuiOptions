@@ -54,9 +54,7 @@ pub struct VaultPolicyResp {
     pub vault_address: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub curator_pubkey_b64: Option<String>,
-    pub max_borrow_amount: u64,
-    pub allowed_pools: Vec<String>,
-    pub deepbook_margin_package: String,
+    pub allowed_shared: Vec<String>,
     pub trading_vault_package: String,
 }
 
@@ -75,9 +73,11 @@ pub async fn policy(State(s): State<Arc<AppState>>) -> Json<PolicyResp> {
             external_account: p.external_account.to_string(),
             vault_address: p.vault_address.to_string(),
             curator_pubkey_b64: p.curator_pubkey_b64.clone(),
-            max_borrow_amount: p.max_borrow_amount,
-            allowed_pools: p.allowed_pools.iter().map(|o| o.to_hex_literal()).collect(),
-            deepbook_margin_package: p.deepbook_margin_package.to_hex_literal(),
+            allowed_shared: p
+                .allowed_shared_list
+                .iter()
+                .map(|o| o.to_hex_literal())
+                .collect(),
             trading_vault_package: p.trading_vault_package.to_hex_literal(),
         })
         .collect();

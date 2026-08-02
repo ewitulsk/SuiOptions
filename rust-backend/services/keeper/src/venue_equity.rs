@@ -11,8 +11,7 @@
 //! operator/testing source), and [`Bluefin`] (SO-305: polls the venue's
 //! public account endpoint for the FROST parent account's
 //! `totalAccountValueE9`; configured via `[external.bluefin]`, default
-//! off). The DeepBook-Margin manager reader is still a follow-up behind
-//! the same trait.
+//! off).
 //!
 //! Construction lives in `trading_vault.rs` (`build_ctx`): `[external.
 //! bluefin]` set ⇒ `Bluefin::spawn(...)`, else `equity_posts` ⇒ `Fixed`,

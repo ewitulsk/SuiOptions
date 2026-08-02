@@ -3,8 +3,10 @@
 Status as of 2026-07-20, after PR #310 (5 commits: contracts,
 indexer/api, keeper, hedge-signer, mm-bot V2 desk). Everything below is
 what is NOT done, grouped by how blocking it is. Companion docs:
-`00-plan.md` (strategy spec), `03-…`/`04-…` (venue custody plans),
-`05-implemented-protocol-prerequisites.md` (what IS done + decisions).
+`00-plan.md` (strategy spec), `03-…` (Bluefin custody plan),
+`05-implemented-protocol-prerequisites.md` (what IS done + decisions),
+`06-dbm-removal.md` (SO-334: what the DeepBook-Margin teardown removed and
+what it costs).
 
 ---
 
@@ -13,13 +15,10 @@ what is NOT done, grouped by how blocking it is. Companion docs:
 - [ ] **Contract republish + activation.** options-core changed struct
   layouts, so the whole tree redeploys (publish order
   auction → core → rfq → vault → trading-vault → oracle-pyth →
-  deepbook-adapter → options-adapter → **equity-oracle** → dbm-oracle
-  when wanted). Then: allowlist `EquityOracle` (and `DbmOracle`) on the
-  `OracleRegistry`, record ids in `deployments.json`, restart
-  token-info. Note: deployment-manager **carries** the
-  `equityOracle`/`dbmOracle` blocks forward but does not **publish**
-  them yet — adding the publish + activation step to deployment-manager
-  is itself a TODO (see §3.1).
+  deepbook-adapter → options-adapter → **equity-oracle**). Then:
+  allowlist `EquityOracle` on the `OracleRegistry`, record ids in
+  `deployments.json`, restart token-info. deployment-manager publishes
+  and activates the whole set (§3.1, done).
 - [ ] **Post-redeploy ritual** (existing conventions): `mm-bot
   deploy-collateral` + config id updates, scheduler
   pool-allowlist checks, indexer resubscribes automatically via
@@ -96,46 +95,39 @@ what is NOT done, grouped by how blocking it is. Companion docs:
 
 ## 3. Designed-for but deferred (follow-up tickets)
 
-1. [ ] **deployment-manager publish step for equity-oracle/dbm-oracle**
-   (+ activation PTB: witness allowlisting, `equity_oracle_objects`
-   record with the EquityBook id — today the keeper discovers it from
-   publish effects).
-2. [ ] **Real venue equity readers** for the keeper's poster crank
-   (`VenueEquitySource`): Bluefin REST (`GET /account` cross-checked
-   vs on-chain IDS) and/or DBM on-chain read. Ships with
-   `Disabled`/`Fixed` only. (For DBM the trustless path is the
-   dbm-oracle in-PTB leg — the keeper composer currently supports only
-   the `EquityOracle` witness; composing the DBM legs
-   (manager/pool/margin-pool refs + pyth atts) is part of this item.)
-3. [ ] **`HedgeVenue` real impls** (`desk/hedge.rs`): `deepbook_margin`
-   first (borrow/sell/repay PTBs routed through hedge-signer, borrow-APR
-   feed into the bid's hedge-cost term, risk-ratio monitor with
-   emergency top-up fast-track), then `bluefin` (`bluefin-pro` SDK,
-   authorized-wallet trading, funding feed). Only `paper` exists.
-4. [ ] **FROST/Bluefin substrate for hedge-signer**: threshold-ed25519
-   keygen + two-round ceremonies + Bluefin payload policy
-   (login/authorize/withdraw). V1 is native-multisig/DBM posture only.
-   Blocked on the Phase-0 asks to Bluefin (docs 03 §Phase 0).
-5. [ ] **DBM Phase-0 spikes** (docs 04): testnet margin-pair reality
-   check, multisig UX round-trip timing, gas posture for the multisig
-   address.
-6. [ ] **options-adapter spread-position gap**: `appraise_*_position`
+1. [x] **deployment-manager publish step for equity-oracle** — DONE.
+   (The dbm-oracle half is gone with SO-334.)
+2. [x] **Real venue equity readers** for the keeper's poster crank
+   (`VenueEquitySource`): Bluefin REST reader landed with SO-305. The
+   trustless DBM in-PTB leg was removed by SO-334 — the attested
+   `EquityOracle` witness is the only equity path.
+3. [ ] **`HedgeVenue` real impl** (`desk/hedge.rs`): `bluefin`
+   (`bluefin-pro` SDK, authorized-wallet trading, funding feed into the
+   bid's hedge-cost term, margin-headroom monitor). Only `paper` exists,
+   and since SO-334 it is the only kind `venue_specs()` accepts —
+   **the desk has no executable hedge until this lands.**
+4. [ ] **Bluefin substrate wiring for hedge-signer**: the FROST
+   threshold-ed25519 keygen, two-round ceremonies and payload policy
+   (login/authorize/withdraw/sui_tx) are BUILT and deployed but unused —
+   no Bluefin account exists. Blocked on the Phase-0 asks to Bluefin
+   (docs 03 §Phase 0), which need a human email.
+5. [ ] **options-adapter spread-position gap**: `appraise_*_position`
    assumes pool-backed ranges; a custodied SPREAD position would
    misappraise. Gate or extend before the vault ever writes spreads.
-7. [ ] **Put-side spread compression** (contracts): needs
+6. [ ] **Put-side spread compression** (contracts): needs
    assignment-funded unwind fused into exercise; deliberately out of
    scope (calls-only per 00-plan).
-8. [ ] **Premium mark-to-market** for option marks
+7. [ ] **Premium mark-to-market** for option marks
    (`options_oracle::attest_*` internal upgrade; needs a
    vol-attestation design). Intrinsic-only today.
-9. [ ] **Frontend**: vault external-account display (API fields exist:
+8. [ ] **Frontend**: vault external-account display (API fields exist:
    `external_account`, `external_exposure`, `latest_external_equity`),
    curator dashboard hedge panel (release/sweep flows driving the
    hedge-signer ceremony, positions/risk view), spot-trading tab.
-10. [ ] **Pyth-leg gas-station templates** so attestation-bearing
+9. [ ] **Pyth-leg gas-station templates** so attestation-bearing
     deposits are sponsorable (pre-existing follow-up; equity-record leg
     IS now allowed, pyth legs still aren't).
-11. [ ] **Sim/desk soak on staging** vs the vault-sim reference before
+10. [ ] **Sim/desk soak on staging** vs the vault-sim reference before
     real-money parameters (00-plan sequencing: paper-hedged staging soak
     gates the real perps venue; venue mix decided empirically after).
 
@@ -152,12 +144,12 @@ what is NOT done, grouped by how blocking it is. Companion docs:
   --workspace` after ~17 of 68 test binaries while still printing a
   summary that read like a pass. Run it with `--no-fail-fast`.
   Still open: clippy doc warnings in `crates/pricing/src/lib.rs`.
-- [ ] Open product decisions still pending from 00-plan: epic
-  structure (one epic vs split V1/V2), venue-mix decision timing.
+- [ ] Open product decision still pending from 00-plan: epic structure
+  (one epic vs split V1/V2). The venue-mix question is closed — SO-334
+  removed DeepBook Margin, leaving Bluefin as the sole planned venue.
 
 ---
 
 **Shortest path to "V1 desk live on staging (paper-hedged)"**:
-§1 republish → provision vault → hedge-signer ceremony (can trail; the
-paper venue needs no external account) → flip `[desk]` on. No venue
-integrations required.
+§1 republish → provision vault → flip `[desk]` on. No venue integrations
+and no external account required — the paper venue needs neither.

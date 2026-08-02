@@ -203,7 +203,8 @@ stress gates.
 ### Open decisions
 
 1. Vault-custody architecture (recommended) vs bot-own-wallet — pending.
-2. Perps venue — under exploration (`01-perps-venues.md`).
+2. Perps venue — **Bluefin Pro**, sole venue (`01-perps-venues.md`;
+   DeepBook Margin removed by SO-334, see `06-dbm-removal.md`).
 3. Sim harness stays as test counterparty; option-coin DeepBook pools
    stay as V2's secondary/resale channel — recommended, pending.
 4. Epic structure: one epic ~12 tickets vs split V1/V2 epics — pending.

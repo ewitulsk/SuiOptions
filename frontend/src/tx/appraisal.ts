@@ -55,9 +55,6 @@ import {
   type RfqTicketPlan,
 } from "../api/vaultHoldings";
 import {
-  DBM_MARGIN_REGISTRY_IDS,
-  DBM_ORACLE_PACKAGE_ID,
-  DBM_ORIGINAL_PACKAGE_IDS,
   DEEP_COIN_TYPE,
   DEEPBOOK_ADAPTER_PACKAGE_ID,
   ENV,
@@ -69,7 +66,6 @@ import {
   TRADING_VAULT_OBJECTS,
   TRADING_VAULT_PACKAGE_ID,
 } from "../config";
-import { resolveDbmLeg, type DbmLeg } from "./dbm";
 
 const CLOCK_ID = "0x6";
 
@@ -120,19 +116,16 @@ export type OptionCoinPlan = OptionLegPlan & { positionId: string };
 
 /** The external-account equity leg (SO-299): a vault with a FUNDED external
  * account (exposure > 0) marks every appraisal `external_pending`, so
- * consumption needs the pinned oracle's record leg — `equity_oracle::record`
- * from the keeper-posted `EquityBook`, or the trustlessly computed
- * `dbm_oracle::record{,_no_debt}` for a DeepBook-Margin account. An
- * unfunded account marks nothing and takes NO leg (SO-310). */
-export type ExternalEquityPlan =
-  | {
-      kind: "equityBook";
-      /** equity-oracle package id (the pinned witness's package). */
-      oraclePkg: string;
-      /** Shared `EquityBook` object id. */
-      bookId: string;
-    }
-  | ({ kind: "dbm" } & DbmLeg);
+ * consumption needs the pinned oracle's `equity_oracle::record` leg from the
+ * keeper-posted `EquityBook`. An unfunded account marks nothing and takes NO
+ * leg (SO-310). */
+export type ExternalEquityPlan = {
+  kind: "equityBook";
+  /** equity-oracle package id (the pinned witness's package). */
+  oraclePkg: string;
+  /** Shared `EquityBook` object id. */
+  bookId: string;
+};
 
 export type AppraisalPlan = {
   vaultId: string;
@@ -218,7 +211,7 @@ async function resolvePriceInfoObjectId(
     .serialize(Array.from(fromHex(feedId)))
     .toBytes();
   // Derive the Table entry's field id client-side + plain object read
-  // (same posture as tx/dbm.ts — no dynamic-field index API).
+  // (no dynamic-field index API on the configured RPC).
   const fieldId = deriveDynamicFieldID(table.tableId, table.keyType, keyBcs);
   let objectId: string;
   try {
@@ -352,16 +345,14 @@ export async function planAppraisal(
   // 1b. External account (SO-299): a vault with OPEN EXPOSURE marks every
   //     appraisal `external_pending` at begin_appraisal, and consumption
   //     aborts without the pinned oracle's `record_external_equity` leg.
-  //     Plan the pinned witness's leg — keeper-posted equity_oracle, or the
-  //     computed DeepBook-Margin leg for `dbm_oracle::DbmOracle` — and
-  //     refuse with a clear reason (mirroring the Rust composer) for any
-  //     other witness. A registered-but-unfunded account (exposure == 0,
+  //     Plan the keeper-posted equity_oracle leg and refuse with a clear
+  //     reason (mirroring the Rust composer) for any other witness. A
+  //     registered-but-unfunded account (exposure == 0,
   //     SO-310) marks nothing, so it takes NO leg — recording equity for it
   //     would abort. It needs its EquityBook entry created instead, before
   //     the first release opens exposure (`externalInit`).
   let externalEquity: ExternalEquityPlan | null = null;
   let externalInit: AppraisalPlan["externalInit"] = null;
-  let dbmLeg: DbmLeg | null = null;
   const extRaw = structFields(json)?.external ?? asRecord(json)?.external;
   const ext = Array.isArray(extRaw) ? extRaw[0] : extRaw;
   if (ext != null) {
@@ -383,32 +374,6 @@ export async function planAppraisal(
           externalInit = { oraclePkg: EQUITY_ORACLE_PACKAGE_ID, bookId };
         }
       }
-    } else if (
-      DBM_ORACLE_PACKAGE_ID &&
-      witnessCanon === canon(`${DBM_ORACLE_PACKAGE_ID}::dbm_oracle::DbmOracle`)
-    ) {
-      const account = idString(structFields(ext)?.account);
-      if (!account) throw new Error("vault external account has no address");
-      const marginRegistryId = DBM_MARGIN_REGISTRY_IDS[ENV];
-      const originalPkg = DBM_ORIGINAL_PACKAGE_IDS[ENV];
-      const pythPriceInfoTableId = PYTH_PRICE_INFO_TABLE_IDS[ENV];
-      const pythPkg = PYTH_HANDLES[ENV]?.pythPackage;
-      if (!marginRegistryId || !originalPkg || !pythPriceInfoTableId || !pythPkg) {
-        throw new Error(`No DeepBook-Margin deployment pinned for network "${ENV}"`);
-      }
-      dbmLeg = await resolveDbmLeg(
-        client,
-        {
-          oraclePkg: DBM_ORACLE_PACKAGE_ID,
-          marginRegistryId,
-          originalPkg,
-          pythPriceInfoTableId,
-          pythPkg,
-        },
-        vault.vaultId,
-        account,
-      );
-      externalEquity = { kind: "dbm", ...dbmLeg };
     } else if (
       EQUITY_ORACLE_PACKAGE_ID &&
       witnessCanon === canon(`${EQUITY_ORACLE_PACKAGE_ID}::equity_oracle::EquityOracle`)
@@ -489,17 +454,7 @@ export async function planAppraisal(
     }
   }
 
-  // DBM equity leg (SO-299 phase C): the manager's base/quote price into
-  // the deposit asset through ordinary attest legs. Added AFTER the
-  // option-coin swap (mirroring Rust `pyth_assets_needed`) so the catalog
-  // can't reroute them; their feeds come from DeepBook-Margin's own
-  // PythConfig when the token catalog doesn't serve one.
-  if (dbmLeg) {
-    if (dbmLeg.baseType !== depositType) needed.add(dbmLeg.baseType);
-    if (dbmLeg.quoteType !== depositType) needed.add(dbmLeg.quoteType);
-  }
-  const feedFor = (t: string): string | null =>
-    feedIdFor(t) ?? dbmLeg?.feedIdByType[t] ?? null;
+  const feedFor = (t: string): string | null => feedIdFor(t);
 
   // Optimistic legs (mirrors the Rust composer): types with no served feed —
   // e.g. option coins tracked by a custody from placing orders — get an
@@ -548,8 +503,7 @@ export async function planAppraisal(
     }
     const priceInfoByFeed: Record<string, string> = {};
     for (const feed of new Set(Object.values(feedIdByType))) {
-      priceInfoByFeed[feed] =
-        dbmLeg?.priceInfoByFeed[feed] ?? (await resolvePriceInfoObjectId(client, handles, feed));
+      priceInfoByFeed[feed] = await resolvePriceInfoObjectId(client, handles, feed);
     }
     return {
       vaultId: vault.vaultId,
@@ -689,11 +643,10 @@ export function composeAppraisal(
     arguments: [vault],
   });
 
-  // 1b. External-account equity leg (SO-299), keeper-attested flavor:
-  // mandatory whenever the vault has an external account. The chain gates
-  // the EquityBook entry's age. (The computed DBM flavor composes below —
-  // its Option legs reference the attest results.)
-  if (plan.externalEquity?.kind === "equityBook") {
+  // 1b. External-account equity leg (SO-299): mandatory whenever the vault
+  // has a FUNDED external account. The chain gates the EquityBook entry's
+  // age.
+  if (plan.externalEquity) {
     const gov = TRADING_VAULT_OBJECTS;
     if (!gov) throw new Error("trading-vault governance objects unavailable");
     tx.moveCall({
@@ -793,34 +746,6 @@ export function composeAppraisal(
    * for the deposit asset (adapters self-value it 1:1) or unpriced DEEP. */
   const optAtt = (asset: string): TransactionArgument =>
     asset === plan.depositType || !attestations.has(asset) ? noneAtt() : someAtt(asset);
-
-  // 1b'. External-account equity leg, computed DBM flavor (SO-299 phase C):
-  // equity derives on-chain from the account's MarginManager. `record` vs
-  // `record_no_debt` was chosen at plan time from the manager's borrowed
-  // shares; the borrowed side's MarginPool rides along as DebtAsset.
-  // Mirrors the Rust composer's `refs.dbm` block.
-  if (plan.externalEquity?.kind === "dbm") {
-    const d = plan.externalEquity;
-    const gov = TRADING_VAULT_OBJECTS;
-    if (!gov) throw new Error("trading-vault governance objects unavailable");
-    const args: TransactionArgument[] = [
-      vault,
-      tx.object(gov.oracleRegistryId),
-      cfg,
-      appraisal,
-      tx.object(d.managerId),
-      tx.object(d.poolId),
-    ];
-    if (d.debt) args.push(tx.object(d.debt.marginPoolId));
-    args.push(optAtt(d.baseType), optAtt(d.quoteType), clock);
-    tx.moveCall({
-      target: `${d.oraclePkg}::dbm_oracle::${d.debt ? "record" : "record_no_debt"}`,
-      typeArguments: d.debt
-        ? [d.baseType, d.quoteType, d.debt.asset]
-        : [d.baseType, d.quoteType],
-      arguments: args,
-    });
-  }
 
   // 3b. Option-coin attestations: intrinsic via the options oracle, fed by
   // the Pyth legs above (`none` for deposit-asset legs or once expired; a

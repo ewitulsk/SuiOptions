@@ -2,8 +2,8 @@
 //! fills at oracle spot, real accounting persisted to disk), and the
 //! band rebalancer (00-plan V1 §3 — bands not clocks).
 //!
-//! Real venues (DeepBook margin, Bluefin) are follow-ups behind the same
-//! trait; nothing else in the desk knows which venue is wired.
+//! Real venues (Bluefin) are follow-ups behind the same trait; nothing
+//! else in the desk knows which venue is wired.
 
 use std::path::PathBuf;
 
@@ -72,43 +72,18 @@ impl Default for HedgeConfig {
     }
 }
 
-/// One `[[desk.hedge.venues]]` entry. `kind = "paper"` (simulated) or
-/// `kind = "deepbook_margin"` (the shared MarginManager, doc 04 §3c);
-/// Bluefin is a follow-up behind the same seam.
+/// One `[[desk.hedge.venues]]` entry. `kind = "paper"` (simulated) is the
+/// only kind today; Bluefin is a follow-up behind the same seam.
 #[derive(Clone, Debug, Deserialize)]
 pub struct HedgeVenueToml {
     pub kind: String,
     /// Gauge/alert label + state-file key. Defaults to "paper" for the
-    /// first entry, "paper{n}" after ("dbm"/"dbm{n}" for deepbook_margin).
+    /// first entry, "paper{n}" after.
     pub name: Option<String>,
     /// Defaults to `paper_slippage_bps`.
     pub slippage_bps: Option<f64>,
-    /// Defaults to `paper_funding_rate_annual`. deepbook_margin venues
-    /// ignore it — their carry is the live borrow APR.
+    /// Defaults to `paper_funding_rate_annual`.
     pub funding_rate_annual: Option<f64>,
-
-    // ── deepbook_margin venue (all required for that kind; ignored by
-    //    paper so legacy configs keep parsing) ──────────────────────────
-    /// The shared `MarginManager` (owner = the 2-of-2 multisig).
-    pub margin_manager_id: Option<String>,
-    /// The manager's DeepBook spot pool (base/quote).
-    pub deepbook_pool_id: Option<String>,
-    pub base_margin_pool_id: Option<String>,
-    pub quote_margin_pool_id: Option<String>,
-    /// LATEST deepbook_margin package (call target).
-    pub margin_package: Option<String>,
-    pub margin_registry_id: Option<String>,
-    pub base_type: Option<String>,
-    pub quote_type: Option<String>,
-    /// Pyth `PriceInfoObject`s for base/quote — DBM entry calls
-    /// (borrow/deposit/order placement, risk ratio) take them by ref.
-    pub base_price_info_id: Option<String>,
-    pub quote_price_info_id: Option<String>,
-    /// hedge-signer base URL + the 2-of-2 multisig address. Optional:
-    /// without BOTH, the venue is read-only (position/funding/headroom)
-    /// and `adjust_to`/`top_up` return a clear error.
-    pub signer_url: Option<String>,
-    pub multisig_address: Option<String>,
 }
 
 /// A resolved venue to instantiate (per underlying market).
@@ -117,8 +92,6 @@ pub struct VenueSpec {
     pub name: String,
     pub slippage_bps: f64,
     pub funding_rate_annual: f64,
-    /// `Some` for kind = "deepbook_margin" (parsed chain identity).
-    pub dbm: Option<super::dbm::DbmVenueConfig>,
 }
 
 impl HedgeConfig {
@@ -132,23 +105,16 @@ impl HedgeConfig {
                 name: "paper".into(),
                 slippage_bps: self.paper_slippage_bps,
                 funding_rate_annual: self.paper_funding_rate_annual,
-                dbm: None,
             }]);
         }
         let mut out = Vec::with_capacity(self.venues.len());
         for (i, v) in self.venues.iter().enumerate() {
-            let (default_name, dbm) = match v.kind.as_str() {
-                "paper" => (
-                    if i == 0 { "paper".into() } else { format!("paper{}", i + 1) },
-                    None,
-                ),
-                "deepbook_margin" => (
-                    if i == 0 { "dbm".into() } else { format!("dbm{}", i + 1) },
-                    Some(super::dbm::DbmVenueConfig::from_toml(v)?),
-                ),
+            let default_name: String = match v.kind.as_str() {
+                "paper" => {
+                    if i == 0 { "paper".into() } else { format!("paper{}", i + 1) }
+                }
                 other => bail!(
-                    "[[desk.hedge.venues]] kind {other:?} not supported \
-                     (only \"paper\" and \"deepbook_margin\")"
+                    "[[desk.hedge.venues]] kind {other:?} not supported (only \"paper\")"
                 ),
             };
             let name = v.name.clone().unwrap_or(default_name);
@@ -161,7 +127,6 @@ impl HedgeConfig {
                 funding_rate_annual: v
                     .funding_rate_annual
                     .unwrap_or(self.paper_funding_rate_annual),
-                dbm,
             });
         }
         Ok(out)
@@ -407,7 +372,6 @@ mod tests {
                 name: "paper".into(),
                 slippage_bps: 3.0,
                 funding_rate_annual: 0.1,
-                dbm: None,
             }]
         );
     }
@@ -429,75 +393,12 @@ mod tests {
         assert_eq!(specs.len(), 2);
         // First entry inherits the legacy knobs and the "paper" name (and
         // with it the legacy state-file path).
-        assert_eq!(specs[0], VenueSpec { name: "paper".into(), slippage_bps: 3.0, funding_rate_annual: 0.0, dbm: None });
-        assert_eq!(specs[1], VenueSpec { name: "paper-b".into(), slippage_bps: 7.0, funding_rate_annual: -0.2, dbm: None });
+        assert_eq!(specs[0], VenueSpec { name: "paper".into(), slippage_bps: 3.0, funding_rate_annual: 0.0 });
+        assert_eq!(specs[1], VenueSpec { name: "paper-b".into(), slippage_bps: 7.0, funding_rate_annual: -0.2 });
 
         let bad: HedgeConfig =
             toml::from_str("[[venues]]\nkind = \"bluefin\"\n").unwrap();
         assert!(bad.venue_specs().is_err());
-    }
-
-    #[test]
-    fn deepbook_margin_venue_parses_alongside_paper() {
-        let cfg: HedgeConfig = toml::from_str(
-            "[[venues]]\n\
-             kind = \"paper\"\n\
-             [[venues]]\n\
-             kind = \"deepbook_margin\"\n\
-             margin_manager_id = \"0x11\"\n\
-             deepbook_pool_id = \"0x12\"\n\
-             base_margin_pool_id = \"0x13\"\n\
-             quote_margin_pool_id = \"0x14\"\n\
-             margin_package = \"0x15\"\n\
-             margin_registry_id = \"0x16\"\n\
-             base_type = \"0x2::sui::SUI\"\n\
-             quote_type = \"0xa::dbusdc::DBUSDC\"\n\
-             base_price_info_id = \"0x17\"\n\
-             quote_price_info_id = \"0x18\"\n\
-             signer_url = \"http://hedge-signer:9010\"\n\
-             multisig_address = \"0x00000000000000000000000000000000000000000000000000000000000000ee\"\n",
-        )
-        .unwrap();
-        let specs = cfg.venue_specs().unwrap();
-        assert_eq!(specs.len(), 2);
-        assert_eq!(specs[0].name, "paper");
-        assert!(specs[0].dbm.is_none());
-        assert_eq!(specs[1].name, "dbm2");
-        let dbm = specs[1].dbm.as_ref().unwrap();
-        assert_eq!(dbm.margin_manager_id.to_hex_literal(), "0x11");
-        assert_eq!(dbm.margin_package.to_hex_literal(), "0x15");
-        // Types come out canonicalized.
-        assert!(dbm.base_type.ends_with("::sui::SUI"));
-        assert_eq!(dbm.signer_url.as_deref(), Some("http://hedge-signer:9010"));
-        assert!(dbm.multisig_address.is_some());
-
-        // A deepbook_margin entry missing chain ids is a config error.
-        let bad: HedgeConfig = toml::from_str(
-            "[[venues]]\nkind = \"deepbook_margin\"\nmargin_manager_id = \"0x11\"\n",
-        )
-        .unwrap();
-        assert!(bad.venue_specs().is_err());
-
-        // Without signer_url/multisig the venue still parses (read-only).
-        let ro: HedgeConfig = toml::from_str(
-            "[[venues]]\n\
-             kind = \"deepbook_margin\"\n\
-             margin_manager_id = \"0x11\"\n\
-             deepbook_pool_id = \"0x12\"\n\
-             base_margin_pool_id = \"0x13\"\n\
-             quote_margin_pool_id = \"0x14\"\n\
-             margin_package = \"0x15\"\n\
-             margin_registry_id = \"0x16\"\n\
-             base_type = \"0x2::sui::SUI\"\n\
-             quote_type = \"0xa::dbusdc::DBUSDC\"\n\
-             base_price_info_id = \"0x17\"\n\
-             quote_price_info_id = \"0x18\"\n",
-        )
-        .unwrap();
-        let specs = ro.venue_specs().unwrap();
-        assert_eq!(specs[0].name, "dbm");
-        let dbm = specs[0].dbm.as_ref().unwrap();
-        assert!(dbm.signer_url.is_none() && dbm.multisig_address.is_none());
     }
 
     #[tokio::test]

@@ -92,9 +92,7 @@ fn test_env_with_chain(name: &str, chain: Arc<dyn VaultResolver>) -> TestEnv {
             .to_string(),
         vault_address: VAULT_ID.to_string(),
         curator_pubkey_b64: None,
-        max_borrow_amount: 1_000_000,
-        allowed_pools: vec![],
-        deepbook_margin_package: "0xdb".to_string(),
+        allowed_shared: vec![],
         curator_wallet: Some(CURATOR_WALLET.to_string()),
         bluefin: None,
     };

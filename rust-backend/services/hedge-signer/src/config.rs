@@ -70,16 +70,16 @@ pub struct BluefinProxyConfig {
 /// Per-vault policy configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct VaultConfig {
-    /// TradingVault shared-object id. Also the strict-tier sweep target
-    /// address (`vault_address` = this id as an address).
+    /// TradingVault shared-object id. Also the sweep target address
+    /// (`vault_address` = this id as an address).
     pub vault_id: String,
 
-    /// The external account address (the 2-of-2 multisig). Every signed tx
-    /// must have this as its sender.
+    /// The parent/external account address. Every signed tx must have this
+    /// as its sender.
     pub external_account: String,
 
-    /// Address every strict-tier `TransferObjects` must pay. Equals
-    /// `vault_id` interpreted as an address.
+    /// Address every `TransferObjects` must pay. Equals `vault_id`
+    /// interpreted as an address.
     pub vault_address: String,
 
     /// Curator's multisig member public key (base64, flag-prefixed).
@@ -88,20 +88,11 @@ pub struct VaultConfig {
     #[serde(default)]
     pub curator_pubkey_b64: Option<String>,
 
-    /// Per-tx cap on the pure u64 amount of `borrow_base` / `borrow_quote`.
-    pub max_borrow_amount: u64,
-
-    /// Shared-object allowlist for the auto tier: the DeepBook pools the
-    /// account may trade, PLUS the margin registry / margin pools / the
-    /// account's own MarginManager — any shared object its perimeter txs
-    /// legitimately touch. The clock (0x6) and the vault object itself are
-    /// allowed implicitly. Unknown shared objects → deny.
+    /// Shared-object allowlist: any shared object the account's sweep
+    /// transactions legitimately touch. The clock (0x6) and the vault
+    /// object itself are allowed implicitly. Unknown shared objects → deny.
     #[serde(default)]
-    pub allowed_pools: Vec<String>,
-
-    /// The canonical `deepbook_margin` package id. Third-party — NOT in
-    /// deployments.json — so it is pinned here per vault.
-    pub deepbook_margin_package: String,
+    pub allowed_shared: Vec<String>,
 
     /// The curator's day-to-day trading wallet. The ONLY wallet a Bluefin
     /// `authorize_account` payload may authorize on the vault's parent

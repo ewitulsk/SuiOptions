@@ -342,7 +342,6 @@ async fn main() -> Result<()> {
         equity_oracle_pkg: None,
         equity_book_id: None,
         vol_book_id: ids.vol_book_id,
-        dbm: None,
     };
     let http = reqwest::Client::new();
     let (pool_buckets, option_map) = match fetch_bucket_catalog(&cli.indexer_graphql).await {
@@ -987,7 +986,7 @@ async fn compose_with_legs(
     option_map: &BTreeMap<String, OptionBucketInfo>,
     feeds_by_type: &BTreeMap<String, protocol_types::PriceFeedId>,
 ) -> Result<sui_types::transaction::Argument> {
-    let needed = pyth_assets_needed(holdings, option_map, refs.dbm.as_ref());
+    let needed = pyth_assets_needed(holdings, option_map);
     if needed.is_empty() {
         return compose_appraisal(client, pt, refs, holdings, None, option_map).await;
     }

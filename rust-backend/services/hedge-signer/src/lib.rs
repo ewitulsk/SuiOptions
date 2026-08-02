@@ -1,15 +1,13 @@
 //! hedge-signer.
 //!
 //! Protocol-side co-signer for a trading vault's EXTERNAL ACCOUNT — the
-//! jointly-controlled address that holds venue capital (docs/mm-bot-v2 03/04
-//! §3b). V1 targets the DeepBook Margin posture: the external account is a
-//! native Sui 2-of-2 multisig (curator key + this service's key), so every
+//! jointly-controlled address that holds venue capital (docs/mm-bot-v2
+//! 03 §3b). Its key is jointly held (curator + this service), so every
 //! account transaction needs both signatures. This service contributes its
 //! signature ONLY when the transaction passes the policy engine
-//! ([`policy`]): auto-approve for trading inside the margin perimeter,
-//! strict for anything that moves value out (sweeps must pay the vault),
-//! emergency fast-track for margin top-ups. Every decision is appended to
-//! an audit log ([`audit`]).
+//! ([`policy`]), which approves exactly one Sui-transaction shape: the
+//! sweep back to the vault. Every decision is appended to an audit log
+//! ([`audit`]).
 //!
 //! The Bluefin/FROST substrate is the sibling signing path ([`frost`] +
 //! [`policy::bluefin`]): each vault's Bluefin parent account key is a

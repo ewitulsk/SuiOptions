@@ -73,13 +73,10 @@ pub struct PackageInfo {
     pub deepbook_adapter: Option<PackageRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options_adapter: Option<PackageRecord>,
-    /// External-account equity oracle adapters (SO-299): the keeper-posted
-    /// EquityBook package and the DeepBook-Margin computed sibling.
-    /// Carried forward on redeploys until publish support lands.
+    /// Keeper-posted EquityBook package backing external-account equity
+    /// (SO-299).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equity_oracle: Option<PackageRecord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dbm_oracle: Option<PackageRecord>,
     /// Shared governance objects + activation digest for the
     /// trading-vault family (SO-292): written by the post-publish
     /// activation step so services read ids from token-info instead of
