@@ -35,11 +35,15 @@ pub struct Cli {
     #[arg(short, long, value_enum)]
     pub network: Network,
 
-    /// Override the JSON-RPC URL used to publish. Defaults to the network's
-    /// public fullnode (picked by `--network`). Pass a private/dedicated RPC
-    /// here when the public endpoint is rate-limiting or timing out.
-    #[arg(long)]
-    pub rpc: Option<String>,
+    /// Override the gRPC endpoint used to publish. Defaults to the shared
+    /// `[sui] grpc_url` from the secrets file, else the network's public
+    /// fullnode (picked by `--network`). Pass a private/dedicated endpoint
+    /// here when the public one is rate-limiting or timing out.
+    ///
+    /// `--rpc` is accepted as a deprecated alias so existing CI invocations
+    /// keep working; JSON-RPC itself is gone (docs/sui-json-rpc-migration.md).
+    #[arg(long, alias = "rpc")]
+    pub grpc: Option<String>,
 
     /// Path to the contracts tree root containing the four Move packages
     /// (`core/`, `auction/`, `rfq/`, `vault/`), published in dependency

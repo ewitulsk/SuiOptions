@@ -11,8 +11,7 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use move_core_types::language_storage::StructTag;
-use sui_json_rpc_types::{SuiMoveStruct, SuiMoveValue, SuiObjectDataOptions, SuiParsedData};
-use sui_sdk::SuiClient;
+use sui_tx::chain::ChainClient;
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::object::Owner;
 
@@ -46,16 +45,16 @@ pub fn is_trading_vault_type(ty: &StructTag, package: ObjectID) -> bool {
         && ty.name.as_str() == VAULT_STRUCT
 }
 
-/// [`VaultResolver`] over `sui_getObject`.
+/// [`VaultResolver`] over a gRPC object read.
 pub struct RpcVaultResolver {
-    client: SuiClient,
+    client: ChainClient,
     /// The trading_vault package the service pins (from token-info). A
     /// vault published by an older package version is not this deployment's.
     trading_vault_package: ObjectID,
 }
 
 impl RpcVaultResolver {
-    pub fn new(client: SuiClient, trading_vault_package: ObjectID) -> Self {
+    pub fn new(client: ChainClient, trading_vault_package: ObjectID) -> Self {
         Self {
             client,
             trading_vault_package,
@@ -74,86 +73,75 @@ impl VaultResolver for RpcVaultResolver {
                 )))
             }
         };
-        let resp = self
+        let Some((object, json)) = self
             .client
-            .read_api()
-            .get_object_with_options(
-                id,
-                SuiObjectDataOptions::new()
-                    .with_type()
-                    .with_content()
-                    .with_owner(),
-            )
+            .try_get_object_json(id)
             .await
-            .with_context(|| format!("sui_getObject {id}"))?;
-        let Some(data) = resp.data else {
+            .with_context(|| format!("GetObject {id}"))?
+        else {
             return Ok(VaultLookup::NotAVault(format!(
                 "object {id} does not exist on chain"
             )));
         };
-        if !matches!(data.owner, Some(Owner::Shared { .. })) {
+        if !matches!(object.owner(), Owner::Shared { .. }) {
             return Ok(VaultLookup::NotAVault(format!(
                 "object {id} is not a shared object"
             )));
         }
-        let Some(SuiParsedData::MoveObject(obj)) = data.content else {
+        let Some(ty) = object.struct_tag() else {
+            return Ok(VaultLookup::NotAVault(format!(
+                "object {id} has no readable Move type"
+            )));
+        };
+        if !is_trading_vault_type(&ty, self.trading_vault_package) {
+            return Ok(VaultLookup::NotAVault(format!(
+                "object {id} is {ty}, not {}::{VAULT_MODULE}::{VAULT_STRUCT}",
+                self.trading_vault_package
+            )));
+        }
+        let Some(fields) = json else {
             return Ok(VaultLookup::NotAVault(format!(
                 "object {id} has no readable Move content"
             )));
         };
-        if !is_trading_vault_type(&obj.type_, self.trading_vault_package) {
-            return Ok(VaultLookup::NotAVault(format!(
-                "object {id} is {}, not {}::{VAULT_MODULE}::{VAULT_STRUCT}",
-                obj.type_, self.trading_vault_package
-            )));
-        }
         Ok(VaultLookup::Vault {
-            external: external_account(&obj.fields)?,
+            external: external_account(&fields)?,
         })
     }
 }
 
 /// Read `vault.external.account`. `Ok(None)` — no external account
 /// registered yet. An unreadable field is an error, not a `None`.
-fn external_account(fields: &SuiMoveStruct) -> Result<Option<SuiAddress>> {
-    let Some(value) = fields.field_value("external") else {
+fn external_account(fields: &serde_json::Value) -> Result<Option<SuiAddress>> {
+    let Some(value) = fields.get("external") else {
         return Err(anyhow!("vault has no readable `external` field"));
     };
     // A Move `Option<ExternalAccount>` renders as the inner struct or as
-    // null; `SuiMoveValue` is untagged, so a set option decodes straight to
-    // `Struct` while an unset one decodes to `Option(None)`. Accept both.
-    let inner = match value {
-        SuiMoveValue::Option(opt) => match *opt {
-            None => return Ok(None),
-            Some(v) => v,
-        },
-        v => v,
-    };
-    match inner {
-        SuiMoveValue::Struct(ext) => match ext.field_value("account") {
-            Some(SuiMoveValue::Address(a)) => Ok(Some(a)),
-            other => Err(anyhow!(
-                "vault.external.account is not an address: {other:?}"
-            )),
-        },
-        other => Err(anyhow!(
-            "vault.external is not an ExternalAccount: {other:?}"
+    // null in the gRPC/GraphQL JSON rendering.
+    if value.is_null() {
+        return Ok(None);
+    }
+    match value.get("account").and_then(serde_json::Value::as_str) {
+        Some(a) => <SuiAddress as std::str::FromStr>::from_str(a)
+            .map(Some)
+            .map_err(|e| anyhow!("vault.external.account is not an address: {e}")),
+        None => Err(anyhow!(
+            "vault.external is not an ExternalAccount: {value}"
         )),
     }
 }
 
 /// Coin types `addr` still holds a non-zero balance of, formatted for an
 /// operator message. Empty ⇒ the address is drained.
-pub async fn nonzero_balances(client: &SuiClient, addr: SuiAddress) -> Result<Vec<String>> {
+pub async fn nonzero_balances(client: &ChainClient, addr: SuiAddress) -> Result<Vec<String>> {
     let balances = client
-        .coin_read_api()
-        .get_all_balances(addr)
+        .all_balances(addr)
         .await
-        .with_context(|| format!("suix_getAllBalances {addr}"))?;
+        .with_context(|| format!("listing balances for {addr}"))?;
     Ok(balances
         .into_iter()
-        .filter(|b| b.total_balance > 0)
-        .map(|b| format!("{} ({})", b.coin_type, b.total_balance))
+        .filter(|(_, total)| *total > 0)
+        .map(|(coin_type, total)| format!("{coin_type} ({total})"))
         .collect())
 }
 
@@ -200,8 +188,10 @@ mod tests {
         ));
     }
 
-    fn fields(json: serde_json::Value) -> SuiMoveStruct {
-        serde_json::from_value(json).unwrap()
+    /// A Move object's fields exactly as the gRPC/GraphQL `json` rendering
+    /// gives them: struct fields nested directly, `Option` as null-or-inner.
+    fn fields(json: serde_json::Value) -> serde_json::Value {
+        json
     }
 
     #[test]

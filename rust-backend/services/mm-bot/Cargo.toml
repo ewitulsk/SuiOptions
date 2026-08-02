@@ -28,8 +28,6 @@ move-publish   = { workspace = true }
 # Sui SDK (used directly for derive token recipient from secret key).
 sui-types = { workspace = true }
 # Live RfqAuction object reads for the on-chain bidder (C2).
-sui-sdk = { workspace = true }
-sui-json-rpc-types = { workspace = true }
 # StructTag for the swap-auction event filter (onchain_swap discovery).
 move-core-types = { workspace = true }
 # Async / WS

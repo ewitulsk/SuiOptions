@@ -17,20 +17,14 @@ use std::str::FromStr;
 use anyhow::{anyhow, bail, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
-use shared_crypto::intent::Intent;
-use sui_json_rpc_types::{
-    ObjectChange, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
-    SuiTransactionBlockResponseOptions,
-};
-use sui_sdk::SuiClient;
-use sui_types::base_types::{ObjectID, ObjectRef};
+use sui_types::base_types::{ObjectDigest, ObjectID, ObjectRef, SequenceNumber};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
-use sui_types::transaction::{Argument, Command, ObjectArg, Transaction, TransactionData};
-use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
+use sui_types::transaction::{Argument, Command, ObjectArg};
 use tracing::{debug, info};
 
 use crate::sui_client::Signer;
-use crate::tx::{owned_object_arg, shared_object_arg};
+use crate::tx::{owned_object_arg, shared_object_arg, submit_ptb};
+use crate::chain::{created_objects, published_package, ChainClient, ExecutedTransaction};
 
 /// A `TreasuryCap<Call>` harvested from a publish, paired with the Call type
 /// it mints. `call_type` is the fully-qualified type string
@@ -53,81 +47,56 @@ pub struct CoinPackagePublish {
 /// Publish a compiled coin package (raw module bytes + dependency ids) and
 /// harvest every `TreasuryCap<_>` its module inits created.
 pub async fn publish_coin_package(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     modules: Vec<Vec<u8>>,
     deps: Vec<ObjectID>,
     gas_budget: u64,
 ) -> Result<CoinPackagePublish> {
     info!(modules = modules.len(), deps = deps.len(), "publishing coin package");
-    let tx_data = client
-        .transaction_builder()
-        .publish(signer.address, modules, deps, None, gas_budget)
-        .await
-        .context("building coin-package publish tx")?;
-    let sig = Transaction::signature_from_signer(
-        tx_data.clone(),
-        Intent::sui_transaction(),
-        &signer.keypair,
-    );
-    let tx = Transaction::from_data(tx_data, vec![sig]);
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
-    let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
-        .await
-        .context("submitting coin-package publish tx")?;
-    assert_success(&resp, "coin-package publish")?;
+    // The retired JSON-RPC builder's `.publish(..)` wrapped the module
+    // bytes in a Publish command and transferred the resulting UpgradeCap
+    // to the sender; do that explicitly.
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let upgrade_cap = pt.publish_upgradeable(modules, deps);
+    pt.transfer_arg(signer.address, upgrade_cap);
+    let resp = submit_ptb(client, signer, pt, gas_budget, "coin-package publish").await?;
     parse_publish(&resp)
 }
 
-fn parse_publish(resp: &SuiTransactionBlockResponse) -> Result<CoinPackagePublish> {
-    let digest = resp.digest.to_string();
-    let changes = resp
-        .object_changes
-        .as_ref()
-        .ok_or_else(|| anyhow!("coin-package publish: response missing object_changes"))?;
+fn parse_publish(resp: &ExecutedTransaction) -> Result<CoinPackagePublish> {
+    let digest = super::tx_digest(resp).to_string();
 
-    let mut package_id: Option<ObjectID> = None;
     let mut caps: Vec<HarvestedCap> = Vec::new();
-
-    for change in changes {
-        match change {
-            ObjectChange::Published { package_id: pid, .. } => package_id = Some(*pid),
-            ObjectChange::Created {
-                object_id,
-                object_type,
-                version,
-                digest: obj_digest,
-                ..
-            } => {
-                // TreasuryCap<Call> — 0x2::coin::TreasuryCap with the Call
-                // type as its sole type parameter.
-                if object_type.module.as_str() == "coin"
-                    && object_type.name.as_str() == "TreasuryCap"
-                {
-                    let call_tag = object_type
-                        .type_params
-                        .first()
-                        .ok_or_else(|| anyhow!("TreasuryCap with no type param"))?;
-                    caps.push(HarvestedCap {
-                        call_type: call_tag.to_canonical_string(/* with_prefix */ true),
-                        cap_ref: (*object_id, *version, *obj_digest),
-                    });
-                }
-            }
-            _ => {}
+    for change in created_objects(resp) {
+        // TreasuryCap<Call> — 0x2::coin::TreasuryCap with the Call type as
+        // its sole type parameter. The node hands the type back as a
+        // canonical string, so parse it to reach the type parameter.
+        let tag = match sui_types::parse_sui_struct_tag(&change.object_type) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if tag.module.as_str() != "coin" || tag.name.as_str() != "TreasuryCap" {
+            continue;
         }
+        let call_tag = tag
+            .type_params
+            .first()
+            .ok_or_else(|| anyhow!("TreasuryCap with no type param"))?;
+        let obj_digest = ObjectDigest::from_str(&change.digest)
+            .map_err(|e| anyhow!("parsing digest for {}: {e}", change.object_id))?;
+        caps.push(HarvestedCap {
+            call_type: call_tag.to_canonical_string(/* with_prefix */ true),
+            cap_ref: (
+                change.object_id,
+                SequenceNumber::from_u64(change.version),
+                obj_digest,
+            ),
+        });
     }
 
-    let package_id =
-        package_id.ok_or_else(|| anyhow!("coin-package publish: no Published change"))?;
+    let package_id = published_package(resp)
+        .ok_or_else(|| anyhow!("coin-package publish: no published package in effects"))?;
     if caps.is_empty() {
         return Err(anyhow!("coin-package publish: no TreasuryCap objects created"));
     }
@@ -174,14 +143,14 @@ pub struct PoolCreation {
 /// `pool::create_permissionless_pool<Call, S>` for each bucket — buckets and
 /// pools are created atomically (SO-173).
 pub async fn create_buckets_and_pools(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     package: ObjectID,
     admin_cap: ObjectID,
     specs: &[CreateBucketSpec],
     pools: Option<&PoolCreation>,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     create_buckets_impl(
         client, signer, package, admin_cap, specs, pools, gas_budget, "bucket", "create_bucket",
     )
@@ -193,14 +162,14 @@ pub async fn create_buckets_and_pools(
 /// of [`CreateBucketSpec`] holds the put coin type). Pools, if requested, are
 /// `Pool<Put, Settlement>` — identical grid logic.
 pub async fn create_put_buckets_and_pools(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     package: ObjectID,
     admin_cap: ObjectID,
     specs: &[CreateBucketSpec],
     pools: Option<&PoolCreation>,
     gas_budget: u64,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     create_buckets_impl(
         client, signer, package, admin_cap, specs, pools, gas_budget, "put_bucket",
         "create_put_bucket",
@@ -210,7 +179,7 @@ pub async fn create_put_buckets_and_pools(
 
 #[allow(clippy::too_many_arguments)]
 async fn create_buckets_impl(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     package: ObjectID,
     admin_cap: ObjectID,
@@ -219,7 +188,7 @@ async fn create_buckets_impl(
     gas_budget: u64,
     bucket_module_name: &str,
     create_fn_name: &str,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     if specs.is_empty() {
         return Err(anyhow!("create_buckets called with no specs"));
     }
@@ -292,50 +261,8 @@ async fn create_buckets_impl(
         }
     }
 
-    let programmable = pt.finish();
-
-    let gas_coin = client
-        .coin_read_api()
-        .get_coins(signer.address, None, None, Some(10))
-        .await
-        .context("listing gas coins")?
-        .data
-        .into_iter()
-        .max_by_key(|c| c.balance)
-        .ok_or_else(|| anyhow!("no SUI coins to pay gas for {}", signer.address))?;
-    let gas_price = client
-        .read_api()
-        .get_reference_gas_price()
-        .await
-        .context("fetching reference gas price")?;
-
-    let tx_data = TransactionData::new_programmable(
-        signer.address,
-        vec![gas_coin.object_ref()],
-        programmable,
-        gas_budget,
-        gas_price,
-    );
-    let sig = Transaction::signature_from_signer(
-        tx_data.clone(),
-        Intent::sui_transaction(),
-        &signer.keypair,
-    );
-    let tx = Transaction::from_data(tx_data, vec![sig]);
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
-    let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
-        .await
-        .context("submitting create_buckets tx")?;
-    assert_success(&resp, "create_buckets")?;
-    debug!(digest = %resp.digest, "create_buckets succeeded");
+    let resp = submit_ptb(client, signer, pt, gas_budget, "create_buckets").await?;
+    debug!(digest = %super::tx_digest(&resp), "create_buckets succeeded");
     Ok(resp)
 }
 
@@ -343,25 +270,25 @@ async fn create_buckets_impl(
 /// each — one per pool-creation call in the same PTB. Returns the per-pool coin
 /// Arguments (the `NestedResult`s of the SplitCoins command).
 async fn split_deep_fees(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     pt: &mut ProgrammableTransactionBuilder,
     deep_coin_type: &str,
     fee: u64,
     count: usize,
 ) -> Result<Vec<Argument>> {
+    let deep_tag = sui_types::parse_sui_struct_tag(deep_coin_type)
+        .map_err(|e| anyhow!("parsing DEEP coin type {deep_coin_type}: {e}"))?;
     let coins = client
-        .coin_read_api()
-        .get_coins(signer.address, Some(deep_coin_type.to_string()), None, Some(50))
+        .coins(signer.address, &deep_tag)
         .await
-        .with_context(|| format!("listing {deep_coin_type} coins"))?
-        .data;
+        .with_context(|| format!("listing {deep_coin_type} coins"))?;
     let total: u128 = coins.iter().map(|c| c.balance as u128).sum();
     let need = fee as u128 * count as u128;
     if total < need {
         bail!("wallet holds {total} of {deep_coin_type}, need {need} for {count} pool fees");
     }
-    let mut refs = coins.into_iter().map(|c| c.object_ref());
+    let mut refs = coins.into_iter().map(|c| c.object_ref);
     let first = refs.next().ok_or_else(|| anyhow!("no {deep_coin_type} coins"))?;
     let primary = pt.obj(ObjectArg::ImmOrOwnedObject(first))?;
     let rest: Vec<Argument> = refs
@@ -380,13 +307,3 @@ async fn split_deep_fees(
     Ok((0..count as u16).map(|j| Argument::NestedResult(base, j)).collect())
 }
 
-fn assert_success(resp: &SuiTransactionBlockResponse, what: &str) -> Result<()> {
-    let effects = resp
-        .effects
-        .as_ref()
-        .ok_or_else(|| anyhow!("{what}: response missing effects"))?;
-    if effects.status().is_err() {
-        return Err(anyhow!("{what} reverted: {:?}", effects.status()));
-    }
-    Ok(())
-}

@@ -11,22 +11,14 @@ use anyhow::{anyhow, Context, Result};
 use move_core_types::account_address::AccountAddress;
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::StructTag;
-use shared_crypto::intent::Intent;
-use sui_json::SuiJsonValue;
-use sui_json_rpc_types::{
-    EventFilter, ObjectChange, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
-    SuiTransactionBlockResponseOptions,
-};
-use sui_sdk::SuiClient;
 use std::str::FromStr;
 
-use sui_types::base_types::{ObjectID, ObjectType, SuiAddress};
-use sui_types::error::SuiObjectResponseError;
-use sui_types::event::EventID;
-use sui_types::transaction::Transaction;
-use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
+use sui_types::base_types::{ObjectID, SuiAddress};
+use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use tracing::{debug, info};
 
+use crate::chain::{created_objects, ChainClient};
+use crate::events::EventClient;
 use crate::sui_client::Signer;
 
 pub struct SignerCreated {
@@ -37,7 +29,7 @@ pub struct SignerCreated {
 /// Calls `quote_signer::create_and_share_signer(scheme, pubkey, ctx)` and
 /// returns the shared QuoteSigner's object id.
 pub async fn create_and_share_signer(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     package: ObjectID,
     signing_scheme: protocol_types::SigningScheme,
@@ -45,83 +37,41 @@ pub async fn create_and_share_signer(
     gas_budget: u64,
 ) -> Result<SignerCreated> {
     info!(%package, scheme = ?signing_scheme, pubkey_len = signing_pubkey.len(), "creating on-chain quote signer");
-    // `vector<u8>` rides as a JSON array of decimal-string-encoded bytes.
-    let pubkey_array: Vec<serde_json::Value> = signing_pubkey
-        .iter()
-        .map(|b| serde_json::Value::Number((*b as u64).into()))
-        .collect();
-    let scheme_arg = SuiJsonValue::new(serde_json::Value::Number(
-        (signing_scheme.as_u8() as u64).into(),
-    ))?;
 
-    let tx_data = client
-        .transaction_builder()
-        .move_call(
-            signer.address,
-            package,
-            "quote_signer",
-            "create_and_share_signer",
-            vec![],
-            vec![scheme_arg, SuiJsonValue::new(serde_json::Value::Array(pubkey_array))?],
-            None,
-            gas_budget,
-            None,
-        )
-        .await
-        .context("building create_and_share_signer tx")?;
-    let sig = Transaction::signature_from_signer(
-        tx_data.clone(),
-        Intent::sui_transaction(),
-        &signer.keypair,
+    // Both args are pure: a u8 scheme discriminant and the pubkey bytes.
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let scheme_arg = pt.pure(&signing_scheme.as_u8())?;
+    let pubkey_arg = pt.pure(&signing_pubkey.to_vec())?;
+    pt.programmable_move_call(
+        package,
+        Identifier::new("quote_signer").unwrap(),
+        Identifier::new("create_and_share_signer").unwrap(),
+        vec![],
+        vec![scheme_arg, pubkey_arg],
     );
-    let tx = Transaction::from_data(tx_data, vec![sig]);
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
-    let resp: SuiTransactionBlockResponse = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
-        .await
-        .context("submitting create_and_share_signer tx")?;
 
-    let effects = resp
-        .effects
-        .as_ref()
-        .context("response missing effects")?;
-    if effects.status().is_err() {
-        anyhow::bail!("create_and_share_signer reverted: {:?}", effects.status());
-    }
+    let resp = super::submit_ptb(
+        client,
+        signer,
+        pt,
+        gas_budget,
+        "create_and_share_signer",
+    )
+    .await?;
 
-    // Pull out the QuoteSigner object id from object_changes.
-    let changes = resp
-        .object_changes
-        .as_ref()
-        .context("response missing object_changes")?;
-    let signer_id = changes
-        .iter()
-        .find_map(|c| match c {
-            ObjectChange::Created {
-                object_id,
-                object_type,
-                ..
-            } if object_type.module.as_str() == "quote_signer"
-                && object_type.name.as_str() == "QuoteSigner" =>
-            {
-                Some(*object_id)
-            }
-            _ => None,
+    // Pull out the QuoteSigner object id from the created objects.
+    let signer_id = created_objects(&resp)
+        .into_iter()
+        .find_map(|c| {
+            let tag = sui_types::parse_sui_struct_tag(&c.object_type).ok()?;
+            (tag.module.as_str() == "quote_signer" && tag.name.as_str() == "QuoteSigner")
+                .then_some(c.object_id)
         })
         .ok_or_else(|| anyhow!("QuoteSigner object not found in response"))?;
 
-    debug!(%signer_id, digest = %resp.digest, "quote signer created on-chain");
-    Ok(SignerCreated {
-        signer_id,
-        digest: resp.digest.to_string(),
-    })
+    let digest = super::tx_digest(&resp).to_string();
+    debug!(%signer_id, %digest, "quote signer created on-chain");
+    Ok(SignerCreated { signer_id, digest })
 }
 
 /// Find this bot's QuoteSigner on the *current* `package`, if one already
@@ -139,7 +89,7 @@ pub async fn create_and_share_signer(
 ///
 /// Returns `None` when no matching signer has been created under `package`.
 pub async fn find_signer(
-    client: &SuiClient,
+    events: &EventClient,
     package: ObjectID,
     owner: SuiAddress,
     signing_scheme: protocol_types::SigningScheme,
@@ -151,16 +101,15 @@ pub async fn find_signer(
         name: Identifier::new("SignerCreated").unwrap(),
         type_params: vec![],
     };
-    let filter = EventFilter::MoveEventType(event_type);
+    let event_type = event_type.to_canonical_string(/* with_prefix */ true);
 
-    let mut cursor: Option<EventID> = None;
+    let mut cursor: Option<String> = None;
     loop {
         // Descending (newest first) so a re-bootstrapped owner surfaces its
         // latest signer first. `SignerCreated` is emitted once per signer
         // (key rotation emits `SigningKeyRotated`), so matches are unique.
-        let page = client
-            .event_api()
-            .query_events(filter.clone(), cursor, Some(50), true)
+        let page = events
+            .query_by_type(&event_type, cursor.as_deref(), 50, true)
             .await
             .context("querying SignerCreated events")?;
 
@@ -230,41 +179,23 @@ pub async fn find_signer(
 /// tell" must not be read as "no signer exists", because that would bootstrap
 /// a duplicate alongside a live one.
 pub async fn verify_signer(
-    client: &SuiClient,
+    client: &ChainClient,
     package: ObjectID,
     signer_id: ObjectID,
     owner: SuiAddress,
     signing_scheme: protocol_types::SigningScheme,
     signing_pubkey: &[u8],
 ) -> Result<bool> {
-    let resp = client
-        .read_api()
-        .get_object_with_options(
-            signer_id,
-            sui_json_rpc_types::SuiObjectDataOptions::new()
-                .with_type()
-                .with_content(),
-        )
+    // A NotFound (absent or deleted object) positively answers "this is not
+    // an adoptable signer" and becomes `false`. Every other transport error
+    // stays an `Err`: "I could not tell" must not be read as "no signer
+    // exists", because that would bootstrap a duplicate alongside a live one.
+    let Some((object, json)) = client
+        .try_get_object_json(signer_id)
         .await
-        .context("reading configured quote signer object")?;
-
-    // Only errors that positively answer "this is not an adoptable signer"
-    // become `false`. `Unknown` and `DisplayError` say nothing about whether
-    // the object exists, so they are errors — treating them as "not ours"
-    // would let a transient RPC hiccup reach the bootstrap path once the
-    // event fallback below starts returning a legitimate `Ok(None)`.
-    if let Some(err) = resp.error {
-        return match err {
-            SuiObjectResponseError::NotExists { .. }
-            | SuiObjectResponseError::Deleted { .. } => {
-                debug!(%signer_id, ?err, "configured quote signer is gone — falling back");
-                Ok(false)
-            }
-            other => Err(anyhow!("reading configured quote signer {signer_id}: {other}")),
-        };
-    }
-    let Some(data) = resp.data else {
-        debug!(%signer_id, "configured quote signer returned no data — falling back");
+        .context("reading configured quote signer object")?
+    else {
+        debug!(%signer_id, "configured quote signer is gone — falling back");
         return Ok(false);
     };
 
@@ -272,26 +203,21 @@ pub async fn verify_signer(
     // varies on leading-zero padding, and a formatting mismatch here would
     // fail verification silently and turn this whole path into a no-op.
     // Matches how `create_and_share_signer` identifies the object above.
-    let is_ours = match data.type_.as_ref() {
-        Some(ObjectType::Struct(t)) => {
-            t.address() == AccountAddress::from(package)
-                && t.module().as_str() == "quote_signer"
-                && t.name().as_str() == "QuoteSigner"
-        }
-        _ => false,
-    };
+    let struct_tag = object.struct_tag();
+    let is_ours = struct_tag.as_ref().is_some_and(|t| {
+        t.address == AccountAddress::from(package)
+            && t.module.as_str() == "quote_signer"
+            && t.name.as_str() == "QuoteSigner"
+    });
     if !is_ours {
         info!(
-            %signer_id, actual_type = ?data.type_, %package,
+            %signer_id, actual_type = ?struct_tag, %package,
             "configured quote signer is not a QuoteSigner of this deployment — falling back"
         );
         return Ok(false);
     }
 
-    let Some(fields) = data.content.as_ref().and_then(|c| match c {
-        sui_json_rpc_types::SuiParsedData::MoveObject(o) => Some(o.fields.clone().to_json_value()),
-        _ => None,
-    }) else {
+    let Some(fields) = json else {
         debug!(%signer_id, "configured quote signer has no parsed fields — falling back");
         return Ok(false);
     };

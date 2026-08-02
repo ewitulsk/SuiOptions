@@ -25,8 +25,6 @@ token-info-client = { workspace = true }
 indexer-graphql = { workspace = true }
 
 sui-types = { workspace = true }
-sui-json-rpc-types = { workspace = true }
-sui-sdk = { workspace = true }
 # Event-filter StructTags for RfqCreated discovery.
 move-core-types = { workspace = true }
 

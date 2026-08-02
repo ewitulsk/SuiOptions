@@ -12,7 +12,7 @@ use hedge_signer::frost::{group_sui_address, Ceremonies, ShareStore};
 use hedge_signer::policy::VaultPolicy;
 use hedge_signer::state::FrostState;
 use hedge_signer::{router, AppState, Cli, Command, Config};
-use sui_sdk::SuiClient;
+use sui_tx::chain::ChainClient;
 use sui_tx::SuiClientWrapper;
 use token_info_client::TokenInfoClient;
 
@@ -106,7 +106,7 @@ async fn main() -> Result<()> {
 async fn prune_share(
     store: &ShareStore,
     chain: &dyn VaultResolver,
-    client: &SuiClient,
+    client: &ChainClient,
     vault_id: &str,
 ) -> Result<()> {
     let parent = store

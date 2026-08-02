@@ -13,11 +13,13 @@ pub enum Network {
 impl Network {
     pub const ALL: [Network; 3] = [Network::Mainnet, Network::Testnet, Network::Devnet];
 
-    pub fn rpc_url(self) -> &'static str {
+    /// Public gRPC endpoint for this network. JSON-RPC is deactivated on
+    /// Sui fullnodes; gRPC is served on the same host/port.
+    pub fn grpc_url(self) -> &'static str {
         match self {
-            Self::Mainnet => sui_sdk::SUI_MAINNET_URL,
-            Self::Testnet => sui_sdk::SUI_TESTNET_URL,
-            Self::Devnet => sui_sdk::SUI_DEVNET_URL,
+            Self::Mainnet => sui_tx::Network::Mainnet.grpc_url(),
+            Self::Testnet => sui_tx::Network::Testnet.grpc_url(),
+            Self::Devnet => sui_tx::Network::Devnet.grpc_url(),
         }
     }
 

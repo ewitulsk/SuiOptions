@@ -13,7 +13,7 @@
 //! reaches `submit`.
 
 use anyhow::{Context, Result};
-use sui_json_rpc_types::ObjectChange;
+use sui_tx::chain::{created_objects, ChangedObject, ExecutedTransaction};
 use sui_move_build::BuildConfig;
 use sui_types::base_types::ObjectID;
 use tracing::{debug, info, warn};
@@ -236,8 +236,8 @@ pub async fn submit(
     }
     .context("creating buckets")?;
 
-    let digest = resp.digest.to_string();
-    let bucket_ids = extract_bucket_ids(resp.object_changes.as_deref().unwrap_or(&[]));
+    let digest = sui_tx::tx::tx_digest(&resp).to_string();
+    let bucket_ids = extract_bucket_ids(&resp);
     if bucket_ids.is_empty() {
         warn!(
             digest,
@@ -251,7 +251,7 @@ pub async fn submit(
     // effort: a failure here never fails the roll (the admin PTB can be
     // re-run by hand), it just alerts.
     if let Some(va) = vault_allowlist {
-        let pool_ids = extract_pool_ids(resp.object_changes.as_deref().unwrap_or(&[]));
+        let pool_ids = extract_pool_ids(&resp);
         if !pool_ids.is_empty() {
             if let Err(e) = allowlist_pools(wrap, va, &pool_ids, gas_budget).await {
                 tracing::error!(
@@ -268,17 +268,21 @@ pub async fn submit(
     Ok(RollOutcome { digest, bucket_ids })
 }
 
-pub(crate) fn extract_pool_ids(changes: &[ObjectChange]) -> Vec<ObjectID> {
+pub(crate) fn extract_pool_ids(resp: &ExecutedTransaction) -> Vec<ObjectID> {
+    created_of(&created_objects(resp), "pool", "Pool")
+}
+
+/// Ids of `changes` whose type is `<pkg>::<module>::<name>`, in order.
+///
+/// `changes` is already the CREATED subset — `created_objects` does that
+/// filtering, so a mutated Bucket from a later `execute_write` can never
+/// reach here and be mistaken for a freshly-rolled one.
+fn created_of(changes: &[ChangedObject], module: &str, name: &str) -> Vec<ObjectID> {
     changes
         .iter()
-        .filter_map(|c| match c {
-            ObjectChange::Created { object_id, object_type, .. }
-                if object_type.module.as_str() == "pool"
-                    && object_type.name.as_str() == "Pool" =>
-            {
-                Some(*object_id)
-            }
-            _ => None,
+        .filter_map(|c| {
+            let tag = sui_types::parse_sui_struct_tag(&c.object_type).ok()?;
+            (tag.module.as_str() == module && tag.name.as_str() == name).then_some(c.object_id)
         })
         .collect()
 }
@@ -348,23 +352,9 @@ fn pair_caps_to_strikes(
 /// order they appear. The chain emits one Created per strike for a
 /// successful `new_call_option`, so the result lines up with the strike
 /// grid the planner submitted.
-pub(crate) fn extract_bucket_ids(changes: &[ObjectChange]) -> Vec<ObjectID> {
+pub(crate) fn extract_bucket_ids(resp: &ExecutedTransaction) -> Vec<ObjectID> {
     debug!("extracting bucket ids from object changes");
-    changes
-        .iter()
-        .filter_map(|c| match c {
-            ObjectChange::Created {
-                object_id,
-                object_type,
-                ..
-            } if object_type.module.as_str() == "bucket"
-                && object_type.name.as_str() == "Bucket" =>
-            {
-                Some(*object_id)
-            }
-            _ => None,
-        })
-        .collect()
+    created_of(&created_objects(resp), "bucket", "Bucket")
 }
 
 #[cfg(test)]
@@ -392,34 +382,18 @@ mod tests {
         }
     }
 
-    fn created(id: ObjectID, module: &str, name: &str) -> ObjectChange {
-        ObjectChange::Created {
-            sender: SuiAddress::ZERO,
-            owner: Owner::Shared {
-                initial_shared_version: SequenceNumber::from_u64(1),
-            },
-            object_type: struct_tag(module, name),
+    fn created(id: ObjectID, module: &str, name: &str) -> ChangedObject {
+        ChangedObject {
             object_id: id,
-            version: SequenceNumber::from_u64(1),
-            digest: ObjectDigest::random(),
-        }
-    }
-
-    fn mutated(id: ObjectID, module: &str, name: &str) -> ObjectChange {
-        ObjectChange::Mutated {
-            sender: SuiAddress::ZERO,
-            owner: Owner::AddressOwner(SuiAddress::ZERO),
-            object_type: struct_tag(module, name),
-            object_id: id,
-            version: SequenceNumber::from_u64(2),
-            previous_version: SequenceNumber::from_u64(1),
-            digest: ObjectDigest::random(),
+            object_type: struct_tag(module, name).to_canonical_string(/* with_prefix */ true),
+            version: 1,
+            digest: String::new(),
         }
     }
 
     #[test]
     fn empty_input_returns_empty() {
-        assert!(extract_bucket_ids(&[]).is_empty());
+        assert!(created_of(&[], "bucket", "Bucket").is_empty());
     }
 
     #[test]
@@ -440,16 +414,17 @@ mod tests {
             created(cap, "coin", "TreasuryCap"),
             created(b3, "bucket", "Bucket"),
         ];
-        assert_eq!(extract_bucket_ids(&changes), vec![b1, b2, b3]);
+        assert_eq!(created_of(&changes, "bucket", "Bucket"), vec![b1, b2, b3]);
     }
 
     #[test]
-    fn ignores_mutated_buckets() {
-        // A subsequent execute_write mutates an existing Bucket; the
-        // roller must never confuse that for a freshly-rolled one.
-        let b = ObjectID::random();
-        let changes = vec![mutated(b, "bucket", "Bucket")];
-        assert!(extract_bucket_ids(&changes).is_empty());
+    fn ignores_other_types() {
+        // Only the requested module::name is picked up. (Created-vs-mutated
+        // filtering happens upstream in `created_objects`, which is what
+        // feeds this function.)
+        let cap = ObjectID::random();
+        let changes = vec![created(cap, "coin", "TreasuryCap")];
+        assert!(created_of(&changes, "bucket", "Bucket").is_empty());
     }
 
     #[test]
@@ -464,7 +439,7 @@ mod tests {
             created(ObjectID::random(), "BUCKET", "Bucket"), // case-sensitive
             created(ObjectID::random(), "bucket", "bucket"), // case-sensitive
         ];
-        assert!(extract_bucket_ids(&changes).is_empty());
+        assert!(created_of(&changes, "bucket", "Bucket").is_empty());
     }
 
     #[test]
@@ -475,9 +450,8 @@ mod tests {
             created(ObjectID::random(), "coin", "TreasuryCap"),
             created(bucket_id, "bucket", "Bucket"),
             created(ObjectID::random(), "bucket", "Position"),
-            mutated(ObjectID::random(), "bucket", "Bucket"),
         ];
-        assert_eq!(extract_bucket_ids(&changes), vec![bucket_id]);
+        assert_eq!(created_of(&changes, "bucket", "Bucket"), vec![bucket_id]);
     }
 
     // ── ErrorClass tests ────────────────────────────────────────────

@@ -41,12 +41,12 @@ use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
 use protocol_types::OracleProvider;
-use sui_sdk::SuiClient;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::Argument;
 
 use crate::tx::shared_object_arg;
+use crate::chain::ChainClient;
 
 pub use pyth::PythLegs;
 pub use switchboard::{SwitchboardLegs, SwitchboardQuotePayload};
@@ -118,7 +118,7 @@ pub struct OracleRefs {
 /// because the caller has to decide between "pass none" and "refuse" and
 /// that decision does not belong here.
 pub async fn emit_price_legs(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     legs: &OracleLegs<'_>,
     refs: &OracleRefs,

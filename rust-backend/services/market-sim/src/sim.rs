@@ -167,28 +167,25 @@ async fn ensure_spot_pool(
     base: &SimToken,
     quote: &SimToken,
 ) -> Result<Option<ObjectID>> {
-    use sui_sdk::rpc_types::EventFilter;
     let event_type = format!(
         "{}::pool::PoolCreated<{}, {}>",
         p.handles.original_package, base.coin_type, quote.coin_type
     );
-    if let Ok(tag) = sui_types::parse_sui_struct_tag(&event_type) {
-        if let Ok(page) = wrap
-            .client
-            .event_api()
-            .query_events(EventFilter::MoveEventType(tag), None, Some(1), true)
-            .await
-        {
-            if let Some(ev) = page.data.first() {
-                if let Some(id) = ev
-                    .parsed_json
-                    .pointer("/pool_id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| ObjectID::from_hex_literal(s).ok())
-                {
-                    info!(pool = %id, base = %base.symbol, quote = %quote.symbol, "[sim] found existing spot pool");
-                    return Ok(Some(id));
-                }
+    // gRPC has no events query; this discovery read goes over GraphQL.
+    if let Ok(page) = wrap
+        .events
+        .query_by_type(&event_type, None, 1, /* descending */ true)
+        .await
+    {
+        if let Some(ev) = page.data.first() {
+            if let Some(id) = ev
+                .parsed_json
+                .pointer("/pool_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| ObjectID::from_hex_literal(s).ok())
+            {
+                info!(pool = %id, base = %base.symbol, quote = %quote.symbol, "[sim] found existing spot pool");
+                return Ok(Some(id));
             }
         }
     }

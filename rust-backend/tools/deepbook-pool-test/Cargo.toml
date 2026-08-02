@@ -12,9 +12,7 @@ path = "src/main.rs"
 sui-tx         = { workspace = true }
 runtime-config = { workspace = true }
 
-sui-sdk            = { workspace = true }
 sui-types          = { workspace = true }
-sui-json-rpc-types = { workspace = true }
 move-core-types    = { workspace = true }
 shared-crypto      = { workspace = true }
 

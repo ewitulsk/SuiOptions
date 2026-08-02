@@ -22,7 +22,6 @@ oracle-client  = { workspace = true }
 token-info-client = { workspace = true }
 
 sui-types = { workspace = true }
-sui-sdk = { workspace = true }
 move-core-types = { workspace = true }
 
 tokio = { workspace = true }

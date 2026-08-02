@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use sui_sdk::SuiClient;
+use sui_tx::chain::ChainClient;
 
 use protocol_types::asset::canonicalize_move_type;
 use sui_tx::sui_client::Signer;
@@ -41,7 +41,7 @@ impl FaucetMinter {
     /// Returns the now-available wallet balance.
     pub async fn ensure_wallet_balance(
         &self,
-        client: &SuiClient,
+        client: &ChainClient,
         signer: &Signer,
         coin_type: &str,
         target: u64,
@@ -70,7 +70,7 @@ impl FaucetMinter {
         };
         match mint_to_sender(client, signer, tokens_pkg, &module, faucet_id, shortfall, self.gas_budget).await {
             Ok(resp) => {
-                tracing::info!(coin_type, shortfall, digest = %resp.digest, "liquidity: minted wallet top-up");
+                tracing::info!(coin_type, shortfall, digest = %sui_tx::tx::tx_digest(&resp), "liquidity: minted wallet top-up");
                 wallet_balance(client, signer, coin_type).await
             }
             // A wedged faucet must not kill the banding cycle: log and proceed
@@ -85,11 +85,13 @@ impl FaucetMinter {
 
 /// Current wallet balance of `coin_type`, clamped to `u64`. `0` on RPC error
 /// (the caller's downstream sizing already tolerates an under-read).
-pub async fn wallet_balance(client: &SuiClient, signer: &Signer, coin_type: &str) -> u64 {
+pub async fn wallet_balance(client: &ChainClient, signer: &Signer, coin_type: &str) -> u64 {
+    let Ok(tag) = sui_types::parse_sui_struct_tag(coin_type) else {
+        return 0;
+    };
     client
-        .coin_read_api()
-        .get_balance(signer.address, Some(coin_type.to_string()))
+        .balance(signer.address, &tag)
         .await
-        .map(|bal| bal.total_balance.min(u64::MAX as u128) as u64)
+        .map(|bal| bal.min(u64::MAX as u128) as u64)
         .unwrap_or(0)
 }

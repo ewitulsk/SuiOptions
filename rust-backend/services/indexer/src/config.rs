@@ -29,11 +29,13 @@ pub struct Config {
     ///   `https://checkpoints.mainnet.sui.io`
     pub remote_store_url: String,
 
-    /// JSON-RPC endpoint for the same network. Used only to discover the
-    /// latest checkpoint when `start_checkpoint` is unset. If omitted it
-    /// is derived from `network` (mainnet/testnet/devnet default URLs).
-    #[serde(default)]
-    pub rpc_url: Option<String>,
+    /// gRPC endpoint for the same network. Used only to discover the
+    /// latest checkpoint when `start_checkpoint` is unset, and for the
+    /// `/progress` tip poll. If omitted it is derived from `network`.
+    /// `rpc_url` is accepted as a deprecated alias so an un-migrated config
+    /// keeps loading.
+    #[serde(default, alias = "rpc_url")]
+    pub grpc_url: Option<String>,
 
     /// Checkpoint sequence number to start ingesting from. `0` is genesis;
     /// any non-zero value resumes from that checkpoint. **Unset** means
@@ -83,20 +85,25 @@ impl Config {
         config_load::load_toml(path)
     }
 
-    /// JSON-RPC URL to query for the latest checkpoint. Returns the
-    /// explicit `rpc_url` if set, else the public Sui endpoint for
+    /// gRPC endpoint to query for the latest checkpoint. Returns the
+    /// explicit `grpc_url` if set, else the public Sui endpoint for
     /// `network`.
-    pub fn resolve_rpc_url(&self) -> Result<String> {
-        if let Some(u) = &self.rpc_url {
+    ///
+    /// This is ONLY used for the boot tip and the `/progress` tip poll —
+    /// checkpoint ingestion runs off `remote_store_url` through
+    /// `sui-data-ingestion-core` and was never affected by the JSON-RPC
+    /// deactivation.
+    pub fn resolve_grpc_url(&self) -> Result<String> {
+        if let Some(u) = &self.grpc_url {
             return Ok(u.clone());
         }
         Ok(match self.network.to_ascii_lowercase().as_str() {
-            "mainnet" => sui_sdk::SUI_MAINNET_URL.to_string(),
-            "testnet" => sui_sdk::SUI_TESTNET_URL.to_string(),
-            "devnet" => sui_sdk::SUI_DEVNET_URL.to_string(),
+            "mainnet" => sui_tx::Network::Mainnet.grpc_url().to_string(),
+            "testnet" => sui_tx::Network::Testnet.grpc_url().to_string(),
+            "devnet" => sui_tx::Network::Devnet.grpc_url().to_string(),
             other => {
                 return Err(anyhow::anyhow!(
-                    "no default RPC for network {other}; set `rpc_url` explicitly"
+                    "no default endpoint for network {other}; set `grpc_url` explicitly"
                 ));
             }
         })
@@ -166,7 +173,7 @@ database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
     }
 
     #[test]
-    fn rpc_url_defaults_per_network() {
+    fn grpc_url_defaults_per_network() {
         let p = write_tmp(
             "rpc_default",
             r#"
@@ -178,7 +185,7 @@ database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
 "#,
         );
         let cfg = Config::load(&p).unwrap();
-        assert!(cfg.resolve_rpc_url().unwrap().contains("testnet"));
+        assert!(cfg.resolve_grpc_url().unwrap().contains("testnet"));
         std::fs::remove_file(&p).ok();
     }
 
@@ -221,21 +228,21 @@ expose_playground = true
     }
 
     #[test]
-    fn rpc_url_explicit_overrides_default() {
+    fn grpc_url_explicit_overrides_default() {
         let p = write_tmp(
             "rpc_explicit",
             r#"
 network = "testnet"
 token_info_url = "http://127.0.0.1:9005"
 remote_store_url = "https://checkpoints.testnet.sui.io"
-rpc_url = "https://my-private-fullnode.example.com:443"
+grpc_url = "https://my-private-fullnode.example.com:443"
 concurrency = 5
 database_url = "postgresql://postgres:postgres@localhost:7654/indexer"
 "#,
         );
         let cfg = Config::load(&p).unwrap();
         assert_eq!(
-            cfg.resolve_rpc_url().unwrap(),
+            cfg.resolve_grpc_url().unwrap(),
             "https://my-private-fullnode.example.com:443"
         );
         std::fs::remove_file(&p).ok();

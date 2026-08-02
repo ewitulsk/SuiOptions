@@ -24,12 +24,12 @@
 use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::{StructTag, TypeTag};
-use sui_sdk::SuiClient;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{Argument, Command};
 
 use crate::tx::{clock_arg, shared_object_arg};
+use crate::chain::ChainClient;
 
 /// On-chain handles for the Pyth + Wormhole deployments on the target
 /// network. Package ids are the *latest* (upgraded) packages the entry
@@ -105,7 +105,7 @@ pub fn extract_vaa_from_accumulator(update: &[u8]) -> Result<Vec<u8>> {
 /// `binary.data` entry covering every feed in `price_info_objects`) to
 /// `pt`. Call this *before* adding the oracle-gated crank.
 pub async fn prepend_price_update(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     handles: &PythHandles,
     accumulator_update: &[u8],

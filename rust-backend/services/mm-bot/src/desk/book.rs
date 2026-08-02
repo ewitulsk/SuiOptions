@@ -46,7 +46,6 @@ use move_core_types::language_storage::TypeTag;
 use protocol_types::events::{ChainEvent, IndexedEvent};
 use protocol_types::ids::{ObjectId, SuiAddress};
 use serde::{Deserialize, Serialize};
-use sui_json_rpc_types::{SuiObjectDataOptions, SuiParsedData};
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::TransactionKind;
@@ -434,13 +433,15 @@ pub async fn fetch_holdings(
         let vault_held = free_balance_of(wrap, trading_vault_package, vault_id, &b.call_coin_type)
             .await
             .unwrap_or(0);
-        let wallet_held = wrap
-            .client
-            .coin_read_api()
-            .get_balance(wrap.signer.address, Some(b.call_coin_type.clone()))
-            .await
-            .map(|bal| u64::try_from(bal.total_balance).unwrap_or(u64::MAX))
-            .unwrap_or(0);
+        let wallet_held = match sui_types::parse_sui_struct_tag(&b.call_coin_type) {
+            Ok(tag) => wrap
+                .client
+                .balance(wrap.signer.address, &tag)
+                .await
+                .map(|bal| u64::try_from(bal).unwrap_or(u64::MAX))
+                .unwrap_or(0),
+            Err(_) => 0,
+        };
         let positions = coin_positions
             .remove(&protocol_types::asset::canonicalize_move_type(&b.call_coin_type))
             .unwrap_or_default();
@@ -491,43 +492,32 @@ async fn fetch_coin_positions(
     let mut out: HashMap<String, Vec<CoinPosition>> = HashMap::new();
     for pos in positions.iter().filter(|p| p.active) {
         let pos_id = ObjectID::new(*pos.position_id.as_bytes());
-        let resp = wrap
+        let Some((object, _)) = wrap
             .client
-            .read_api()
-            .get_object_with_options(
-                pos_id,
-                SuiObjectDataOptions::new().with_type().with_content(),
-            )
+            .try_get_object_json(pos_id)
             .await
-            .with_context(|| format!("reading vault position {pos_id}"))?;
-        let Some(data) = resp.data else {
+            .with_context(|| format!("reading vault position {pos_id}"))?
+        else {
             continue; // removed since the indexer view was written
         };
-        let ty = data.type_.as_ref().map(|t| t.to_string()).unwrap_or_default();
         // `0x2::coin::Coin<T>` custody positions only; everything else
         // (written Positions, custody objects, tickets) is not a coin.
-        let Some(inner) = ty
-            .strip_prefix("0x2::coin::Coin<")
-            .and_then(|rest| rest.strip_suffix('>'))
+        let Some(coin) = object.as_coin_maybe() else {
+            continue;
+        };
+        let Some(inner) = object
+            .struct_tag()
+            .and_then(|t| t.type_params.first().cloned())
         else {
             continue;
         };
-        let fields = match data.content {
-            Some(SuiParsedData::MoveObject(obj)) => obj.fields.to_json_value(),
-            _ => continue,
-        };
-        let amount = fields
-            .get("balance")
-            .and_then(|v| match v {
-                serde_json::Value::Number(n) => n.as_u64(),
-                serde_json::Value::String(s) => s.parse().ok(),
-                _ => None,
-            })
-            .unwrap_or(0);
+        let amount = coin.value();
         if amount == 0 {
             continue;
         }
-        out.entry(protocol_types::asset::canonicalize_move_type(inner))
+        out.entry(protocol_types::asset::canonicalize_move_type(
+            &inner.to_canonical_string(/* with_prefix */ true),
+        ))
             .or_default()
             .push(CoinPosition { position_id: pos.position_id, amount });
     }
@@ -554,29 +544,26 @@ pub async fn fetch_written(
     let mut written = Vec::new();
     for pos in positions.iter().filter(|p| p.active) {
         let pos_id = ObjectID::new(*pos.position_id.as_bytes());
-        let resp = wrap
+        let Some((object, json)) = wrap
             .client
-            .read_api()
-            .get_object_with_options(
-                pos_id,
-                SuiObjectDataOptions::new().with_type().with_content(),
-            )
+            .try_get_object_json(pos_id)
             .await
-            .with_context(|| format!("reading vault position {pos_id}"))?;
-        let Some(data) = resp.data else {
+            .with_context(|| format!("reading vault position {pos_id}"))?
+        else {
             continue; // removed since the indexer view was written
         };
-        let ty = data.type_.as_ref().map(|t| t.to_string()).unwrap_or_default();
+        let ty = object
+            .struct_tag()
+            .map(|t| t.to_canonical_string(/* with_prefix */ true))
+            .unwrap_or_default();
         // discover_holdings' classification: only `::position::Position`
         // objects are written option inventory (RfqTickets, DeepBook
         // custody and held coins are not).
         if !ty.ends_with("::position::Position") {
             continue;
         }
-        let fields = match data.content {
-            Some(SuiParsedData::MoveObject(obj)) => obj.fields.to_json_value(),
-            other => return Err(anyhow!("position {pos_id} has unexpected content: {other:?}")),
-        };
+        let fields =
+            json.ok_or_else(|| anyhow!("position {pos_id} has no readable Move content"))?;
         let bucket_id = fields
             .get("bucket_id")
             .and_then(serde_json::Value::as_str)
@@ -646,25 +633,10 @@ pub async fn free_balance_of(
     );
     let res = wrap
         .client
-        .read_api()
-        .dev_inspect_transaction_block(
-            wrap.signer.address,
-            TransactionKind::ProgrammableTransaction(pt.finish()),
-            None,
-            None,
-            None,
-        )
+        .dev_inspect_ptb(wrap.signer.address, pt)
         .await
         .context("dev-inspecting free_balance_of")?;
-    if let Some(err) = res.error {
-        return Err(anyhow!("free_balance_of dev-inspect failed: {err}"));
-    }
-    let results = res.results.unwrap_or_default();
-    let (bytes, _) = results
-        .last()
-        .and_then(|r| r.return_values.first())
-        .ok_or_else(|| anyhow!("free_balance_of returned no values"))?;
-    bcs::from_bytes::<u64>(bytes).context("decoding free balance")
+    sui_tx::chain::decode_return_value::<u64>(&res, 0).context("decoding free balance")
 }
 
 // ── fill detection → spread-line attribution ───────────────────────────

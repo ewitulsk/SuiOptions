@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use sui_sdk::{SuiClient, SuiClientBuilder};
+use sui_tx::chain::ChainClient;
 use sui_types::base_types::SuiAddress;
 use sui_types::crypto::SuiKeyPair;
 use tracing::{error, info, warn};
@@ -33,25 +33,22 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Prefer the shared `[sui] rpc_url` override from the optional secrets file
-    // (rendered by render-secrets.sh) over the public network default. The
-    // per-watch secrets files (resolved below) are a separate concern.
+    // Prefer the shared `[sui] grpc_url` override from the optional secrets
+    // file (rendered by render-secrets.sh) over the public network default.
+    // The per-watch secrets files (resolved below) are a separate concern.
     // Optional: a missing/unreadable file degrades to the public endpoint.
-    let rpc_url = match cli.secrets.as_deref() {
+    let grpc_url = match cli.secrets.as_deref() {
         Some(path) => match runtime_config::Secrets::load(path) {
-            Ok(s) => s.resolve_rpc_url(cfg.network.rpc_url()),
+            Ok(s) => s.resolve_grpc_url(cfg.network.grpc_url()),
             Err(e) => {
-                warn!(error = %e, path = %path.display(), "secrets file unreadable; using public RPC");
-                cfg.network.rpc_url().to_string()
+                warn!(error = %e, path = %path.display(), "secrets file unreadable; using public endpoint");
+                cfg.network.grpc_url().to_string()
             }
         },
-        None => cfg.network.rpc_url().to_string(),
+        None => cfg.network.grpc_url().to_string(),
     };
-    info!(rpc = %redact_rpc(&rpc_url), "resolved Sui JSON-RPC endpoint");
-    let sui = SuiClientBuilder::default()
-        .build(&rpc_url)
-        .await
-        .context("connecting Sui client")?;
+    info!(rpc = %redact_rpc(&grpc_url), "resolved Sui gRPC endpoint");
+    let sui = ChainClient::new(&grpc_url).context("connecting Sui client")?;
 
     // Resolve each watch to an address. Watches whose secrets file is absent
     // are skipped with a warning — that's how a service opts out of an env
@@ -117,8 +114,8 @@ fn resolve_address(w: &Watch, cfg: &Config) -> Result<SuiAddress> {
     Ok(SuiAddress::from(&kp.public()))
 }
 
-async fn poll_wallet(sui: &SuiClient, watch: &Watch, addr: SuiAddress) {
-    let balance = match sui.coin_read_api().get_balance(addr, None).await {
+async fn poll_wallet(sui: &ChainClient, watch: &Watch, addr: SuiAddress) {
+    let total = match sui.balance(addr, &sui_tx::chain::sui_coin_type()).await {
         Ok(b) => b,
         Err(e) => {
             warn!(service = %watch.name, address = %addr, error = %e, "balance poll failed");
@@ -128,7 +125,7 @@ async fn poll_wallet(sui: &SuiClient, watch: &Watch, addr: SuiAddress) {
         }
     };
 
-    let sui_balance = balance.total_balance as f64 / MIST_PER_SUI;
+    let sui_balance = total as f64 / MIST_PER_SUI;
     let addr_str = addr.to_string();
     metrics::gauge!(
         "sui_balance_sui",

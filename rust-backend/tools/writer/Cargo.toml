@@ -19,8 +19,6 @@ sui-tx         = { workspace = true }
 token-info-client = { workspace = true }
 
 sui-types = { workspace = true }
-sui-sdk = { workspace = true }
-sui-json-rpc-types = { workspace = true }
 
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }

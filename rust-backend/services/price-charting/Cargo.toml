@@ -16,7 +16,6 @@ indexer-graphql = { workspace = true }
 oracle-client = { workspace = true }
 pricing = { workspace = true }
 
-sui-sdk = { workspace = true }
 sui-types = { workspace = true }
 sui-tx = { workspace = true }
 

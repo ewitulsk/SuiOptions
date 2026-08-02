@@ -22,7 +22,7 @@ token-info-client = { workspace = true }
 # Sui checkpoint ingestion framework. Pinned at workspace level so the
 # indexer and deployment-manager share one resolved ABI.
 sui-data-ingestion-core = { workspace = true }
-sui-sdk = { workspace = true }
+sui-tx = { workspace = true }
 sui-types = { workspace = true }
 
 tokio = { workspace = true }

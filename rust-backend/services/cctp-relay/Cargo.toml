@@ -9,9 +9,7 @@ runtime-config = { workspace = true }
 observability = { workspace = true, features = ["axum"] }
 cli-spec = { workspace = true }
 
-sui-sdk = { workspace = true }
 sui-types = { workspace = true }
-sui-json-rpc-types = { workspace = true }
 sui-tx = { workspace = true }
 
 clap = { workspace = true }

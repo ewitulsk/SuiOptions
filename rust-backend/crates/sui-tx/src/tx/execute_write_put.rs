@@ -16,8 +16,6 @@ use std::str::FromStr;
 use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
-use sui_json_rpc_types::SuiTransactionBlockResponse;
-use sui_sdk::SuiClient;
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{ObjectArg, SharedObjectMutability};
@@ -27,6 +25,7 @@ use tracing::info;
 use crate::sui_client::Signer;
 use crate::tx::execute_write::{build_request_and_release, FlowPrelude, QuoteRouting};
 use crate::tx::{shared_object_arg, submit_ptb};
+use crate::chain::{ChainClient, ExecutedTransaction};
 
 /// Inputs for the put writer-flow PTB: the executor (retail put writer) posts
 /// cash collateral; the signer MM buys the put.
@@ -115,10 +114,10 @@ fn clock_arg(pt: &mut ProgrammableTransactionBuilder) -> Result<sui_types::trans
 
 /// Build + sign + submit the put writer-flow PTB.
 pub async fn execute_put_writer_flow(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     p: &ExecutePutWriterParams<'_>,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(
         %p.package, %p.bucket_id,
         write_amount = p.write_amount, premium = p.premium,
@@ -198,10 +197,10 @@ pub async fn execute_put_writer_flow(
 
 /// Build + sign + submit the put trader-flow PTB.
 pub async fn execute_put_trader_flow(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     p: &ExecutePutTraderParams<'_>,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(
         %p.package, %p.bucket_id,
         write_amount = p.write_amount, premium = p.premium, nonce = p.nonce,

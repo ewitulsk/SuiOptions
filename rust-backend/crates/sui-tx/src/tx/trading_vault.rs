@@ -16,12 +16,12 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
-use sui_sdk::SuiClient;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::Argument;
 
 use crate::tx::{clock_arg, shared_object_arg};
+use crate::chain::ChainClient;
 
 /// Identity of one trading vault and the shared protocol objects its
 /// calls need.
@@ -62,7 +62,7 @@ fn vault_call(
 /// to thread into `build_deposit` / `build_fulfill_withdrawals` (with
 /// any attestation legs in between).
 pub async fn build_begin_appraisal(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     refs: &TradingVaultRefs<'_>,
 ) -> Result<Argument> {
@@ -72,7 +72,7 @@ pub async fn build_begin_appraisal(
 
 /// `vault::deposit<T>(vault, cfg, appraisal, coin, clock)`.
 pub async fn build_deposit(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     refs: &TradingVaultRefs<'_>,
     appraisal: Argument,
@@ -93,7 +93,7 @@ pub async fn build_deposit(
 
 /// `vault::request_withdraw(vault, shares, clock)` — no appraisal.
 pub async fn build_request_withdraw(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     refs: &TradingVaultRefs<'_>,
     shares: u128,
@@ -109,7 +109,7 @@ pub async fn build_request_withdraw(
 /// the keeper crank tail; prepend `build_begin_appraisal` (+ attestation
 /// legs when the vault holds more than cash).
 pub async fn build_fulfill_withdrawals(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     refs: &TradingVaultRefs<'_>,
     treasury_id: ObjectID,
@@ -133,7 +133,7 @@ pub async fn build_fulfill_withdrawals(
 /// PositionAppraised / VaultAppraised events carry fresh marks with no
 /// deposit/fulfillment attached.
 pub async fn build_crank_appraisal(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     refs: &TradingVaultRefs<'_>,
     appraisal: Argument,
@@ -146,7 +146,7 @@ pub async fn build_crank_appraisal(
 /// `vault::enqueue_closed_stake(vault, owner, clock)` — permissionless
 /// closed-vault distribution.
 pub async fn build_enqueue_closed_stake(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     refs: &TradingVaultRefs<'_>,
     owner: sui_types::base_types::SuiAddress,

@@ -21,7 +21,7 @@ use crate::{DOMAIN_SOLANA, DOMAIN_SUI};
 pub struct WatcherParams {
     pub state: Arc<AppState>,
     pub iris: IrisClient,
-    pub sui: sui_sdk::SuiClient,
+    pub sui: sui_tx::chain::ChainClient,
     pub solana: SolanaRpc,
     pub poll_interval: Duration,
 }
@@ -128,18 +128,12 @@ async fn process_row(p: &WatcherParams, row: &TransferRow) -> Result<()> {
 /// On-chain timestamp (ms) of the burn tx, when available.
 async fn burn_timestamp_ms(p: &WatcherParams, row: &TransferRow) -> Result<Option<u64>> {
     if row.origin_chain == chain::SUI {
-        use sui_json_rpc_types::SuiTransactionBlockResponseOptions;
         use sui_types::digests::TransactionDigest;
         let digest = TransactionDigest::from_str(&row.origin_tx_hash)
             .map_err(|e| anyhow::anyhow!("bad sui tx digest: {e}"))?;
-        match p
-            .sui
-            .read_api()
-            .get_transaction_with_options(digest, SuiTransactionBlockResponseOptions::new())
-            .await
-        {
-            Ok(r) => Ok(r.timestamp_ms),
-            Err(_) => Ok(None), // not indexed yet
+        match p.sui.try_get_transaction(&digest).await {
+            Ok(Some(tx)) => Ok(tx.timestamp_ms()),
+            Ok(None) | Err(_) => Ok(None), // not indexed yet
         }
     } else {
         Ok(p.solana

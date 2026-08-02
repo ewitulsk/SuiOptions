@@ -11,8 +11,6 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
-use sui_json_rpc_types::SuiTransactionBlockResponse;
-use sui_sdk::SuiClient;
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::Command;
@@ -20,6 +18,7 @@ use tracing::info;
 
 use crate::sui_client::Signer;
 use crate::tx::{clock_arg, owned_object_arg, shared_object_arg, submit_ptb};
+use crate::chain::{ChainClient, ExecutedTransaction};
 
 /// The (Escrow, Bid) type pair every auction call is generic over.
 pub struct AuctionTypes<'a> {
@@ -56,10 +55,10 @@ pub struct AuctionBidParams<'a> {
 
 /// `auction::bid`: split `amount` out of `funding_coin` and escrow it.
 pub async fn bid(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     p: &AuctionBidParams<'_>,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(auction = %p.auction_id, amount = p.amount, "building auction::bid PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
 
@@ -92,10 +91,10 @@ pub struct AuctionSettleParams<'a> {
 /// shared object). Callable by anyone; coupled auctions settle through
 /// their venue (`vault::settle_rfq`, `options_rfq::settle_call`, …).
 pub async fn settle(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     p: &AuctionSettleParams<'_>,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     info!(auction = %p.auction_id, "building auction::settle PTB");
     let mut pt = ProgrammableTransactionBuilder::new();
 

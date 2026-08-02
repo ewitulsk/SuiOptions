@@ -32,60 +32,29 @@ pub mod trading_vault;
 pub mod vault;
 pub mod vault_create;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use shared_crypto::intent::Intent;
-use sui_json_rpc_types::{
-    SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
-    SuiTransactionBlockResponseOptions,
-};
 use sui_types::base_types::ObjectID;
-use sui_types::object::Owner;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{
     Argument, ObjectArg, SharedObjectMutability, Transaction, TransactionData,
 };
-use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
 use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION};
 use tracing::{debug, trace};
 
-use sui_sdk::SuiClient;
-use sui_json_rpc_types::SuiObjectDataOptions;
-
+use crate::chain::{ChainClient, ExecutedTransaction};
 use crate::sui_client::Signer;
 
 /// Build a `SharedObject` `ObjectArg` from a current chain read. Needed by
 /// PTBs that mutate shared objects (Bucket, ProtocolConfig, Treasury,
 /// Account, Clock).
 pub async fn shared_object_arg(
-    client: &SuiClient,
+    client: &ChainClient,
     id: ObjectID,
     mutable: bool,
 ) -> Result<ObjectArg> {
     trace!(%id, mutable, "fetching shared object arg");
-    let resp = client
-        .read_api()
-        .get_object_with_options(id, SuiObjectDataOptions::new().with_owner())
-        .await?;
-    let data = resp
-        .data
-        .ok_or_else(|| anyhow!("object {id} not found on chain"))?;
-    let owner = data
-        .owner
-        .ok_or_else(|| anyhow!("object {id} has no owner field"))?;
-    match owner {
-        Owner::Shared {
-            initial_shared_version,
-        } => Ok(ObjectArg::SharedObject {
-            id,
-            initial_shared_version,
-            mutability: if mutable {
-                SharedObjectMutability::Mutable
-            } else {
-                SharedObjectMutability::Immutable
-            },
-        }),
-        other => Err(anyhow!("object {id} is not shared: {:?}", other)),
-    }
+    client.shared_object_arg(id, mutable).await
 }
 
 /// Immutable Clock argument, shared by every deadline-aware builder.
@@ -102,72 +71,82 @@ pub fn clock_arg(pt: &mut ProgrammableTransactionBuilder) -> Result<Argument> {
 /// price update before the crank call); the older modules keep their
 /// local copies.
 pub async fn submit_ptb(
-    client: &SuiClient,
+    client: &ChainClient,
     signer: &Signer,
     pt: ProgrammableTransactionBuilder,
     gas_budget: u64,
     label: &str,
-) -> Result<SuiTransactionBlockResponse> {
+) -> Result<ExecutedTransaction> {
     let programmable = pt.finish();
 
     let gas_coin = client
-        .coin_read_api()
-        .get_coins(signer.address, None, None, Some(10))
+        .gas_coin(signer.address)
         .await
-        .context("listing gas coins")?
-        .data
-        .into_iter()
-        .max_by_key(|c| c.balance)
-        .ok_or_else(|| anyhow!("no SUI coins to pay gas for {}", signer.address))?;
+        .context("selecting a gas coin")?;
     let gas_price = client
-        .read_api()
-        .get_reference_gas_price()
+        .reference_gas_price()
         .await
         .context("fetching reference gas price")?;
 
     let tx_data = TransactionData::new_programmable(
         signer.address,
-        vec![gas_coin.object_ref()],
+        vec![gas_coin],
         programmable,
         gas_budget,
         gas_price,
     );
+    submit_tx_data(client, signer, tx_data, label).await
+}
+
+/// Sign, submit, and assert success for a fully-formed `TransactionData`.
+/// Split out of [`submit_ptb`] so callers that build their own gas payment
+/// (sponsored txs, coin-specific gas) share the signing and status check.
+pub async fn submit_tx_data(
+    client: &ChainClient,
+    signer: &Signer,
+    tx_data: TransactionData,
+    label: &str,
+) -> Result<ExecutedTransaction> {
     let sig = Transaction::signature_from_signer(
         tx_data.clone(),
         Intent::sui_transaction(),
         &signer.keypair,
     );
     let tx = Transaction::from_data(tx_data, vec![sig]);
-    let opts = SuiTransactionBlockResponseOptions::new()
-        .with_effects()
-        .with_object_changes();
     let resp = client
-        .quorum_driver_api()
-        .execute_transaction_block(
-            tx,
-            opts,
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
-        )
+        .execute(&tx)
         .await
         .with_context(|| format!("submitting {label} tx"))?;
-    let effects = resp.effects.as_ref().context("response missing effects")?;
-    if effects.status().is_err() {
-        anyhow::bail!("{label} reverted: {:?}", effects.status());
-    }
-    debug!(digest = %resp.digest, label, "tx succeeded");
+    assert_success(&resp, label)?;
+    debug!(digest = %tx_digest(&resp), label, "tx succeeded");
     Ok(resp)
 }
 
+/// Bail with the Move abort / execution status when a transaction reverted.
+/// `clever_error` carries the decoded `#[error]` constant when the package
+/// ships one, so surface it — it is the difference between "abort 31" and a
+/// named reason.
+pub fn assert_success(resp: &ExecutedTransaction, label: &str) -> Result<()> {
+    use sui_types::effects::TransactionEffectsAPI;
+    let status = resp.effects.status();
+    if status.is_err() {
+        match &resp.clever_error {
+            Some(ce) => anyhow::bail!("{label} reverted: {status:?} ({ce:?})"),
+            None => anyhow::bail!("{label} reverted: {status:?}"),
+        }
+    }
+    Ok(())
+}
+
+/// Digest of an executed transaction — the `resp.digest` of the old
+/// JSON-RPC response.
+pub fn tx_digest(resp: &ExecutedTransaction) -> sui_types::digests::TransactionDigest {
+    use sui_types::effects::TransactionEffectsAPI;
+    *resp.effects.transaction_digest()
+}
+
 /// Build an owned-object `ObjectArg` (e.g. an AdminCap held by the deployer).
-pub async fn owned_object_arg(client: &SuiClient, id: ObjectID) -> Result<ObjectArg> {
+pub async fn owned_object_arg(client: &ChainClient, id: ObjectID) -> Result<ObjectArg> {
     debug!(%id, "fetching owned object arg");
-    let resp = client
-        .read_api()
-        .get_object_with_options(
-            id,
-            SuiObjectDataOptions::new().with_owner().with_bcs(),
-        )
-        .await?;
-    let data = resp.data.ok_or_else(|| anyhow!("object {id} not found"))?;
-    Ok(ObjectArg::ImmOrOwnedObject(data.object_ref()))
+    client.owned_object_arg(id).await
 }

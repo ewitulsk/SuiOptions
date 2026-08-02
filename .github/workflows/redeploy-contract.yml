@@ -9,7 +9,7 @@
 # Steps (in order):
 #   1. Build + run the deployment-manager → publishes the Move package
 #      on-chain and writes the new IDs to deployments.json.
-#   2. Query Sui RPC to resolve the deployment checkpoint.
+#   2. Query the Sui GraphQL RPC to resolve the deployment checkpoint.
 #   3. Update the indexer config's start_checkpoint to checkpoint − 1.
 #   4. Stop the indexer + option-scheduler on EC2 and wipe + provision the
 #      indexer_<env> AND scheduler_<env> databases via the shared
@@ -62,8 +62,8 @@ on:
         required: false
         type: boolean
         default: true
-      rpc_url:
-        description: 'JSON-RPC URL for publish + checkpoint resolution (blank = network default public fullnode)'
+      grpc_url:
+        description: 'gRPC URL for the publish (blank = the shared options/<env>/sui-rpc secret, else the public fullnode)'
         required: false
         type: string
         default: ''
@@ -253,9 +253,29 @@ jobs:
             exit 1
           fi
 
+          # Carry the shared chain endpoints through so the deployment
+          # manager resolves them exactly like every deployed service does
+          # (render-secrets.sh convention). Absent secret → the binary falls
+          # back to the public gRPC endpoint, which works.
+          GRPC_FROM_SECRET=""
+          if RPC_JSON=$(aws secretsmanager get-secret-value \
+                --secret-id "options/$ENV/sui-rpc" \
+                --query SecretString --output text 2>/dev/null); then
+            GRPC_FROM_SECRET=$(echo "$RPC_JSON" | jq -r '.grpc_url // empty')
+            [ "$GRPC_FROM_SECRET" = "REPLACE_ME" ] && GRPC_FROM_SECRET=""
+          fi
+
+          # Shell vars don't survive across steps — export for the
+          # mm_collateral step below.
+          echo "GRPC_FROM_SECRET=$GRPC_FROM_SECRET" >> "$GITHUB_ENV"
+
           mkdir -p /tmp/deploy-secrets
-          printf '[sui]\n%s = "%s"\n' "$NETWORK" "$SUI_KEY" \
-            > /tmp/deploy-secrets/secrets.toml
+          {
+            printf '[sui]\n%s = "%s"\n' "$NETWORK" "$SUI_KEY"
+            if [ -n "$GRPC_FROM_SECRET" ]; then
+              printf 'grpc_url = "%s"\n' "$GRPC_FROM_SECRET"
+            fi
+          } > /tmp/deploy-secrets/secrets.toml
 
       # ── 7. Run deployment manager ────────────────────────────────
       - name: Deploy contract on-chain
@@ -263,7 +283,7 @@ jobs:
         env:
           NETWORK: ${{ steps.net.outputs.network }}
           ENV: ${{ inputs.environment }}
-          RPC_URL: ${{ inputs.rpc_url }}
+          GRPC_URL: ${{ inputs.grpc_url }}
         run: |
           ARGS=(
             --env        "$ENV"
@@ -278,8 +298,8 @@ jobs:
           if [ "${{ inputs.deploy_tokens }}" = "true" ]; then
             ARGS+=(--deploy-tokens)
           fi
-          if [ -n "$RPC_URL" ]; then
-            ARGS+=(--rpc "$RPC_URL")
+          if [ -n "$GRPC_URL" ]; then
+            ARGS+=(--grpc "$GRPC_URL")
           fi
           ./target/release/deploy "${ARGS[@]}"
 
@@ -298,7 +318,7 @@ jobs:
         env:
           ENV: ${{ inputs.environment }}
           NETWORK: ${{ steps.net.outputs.network }}
-          RPC_URL: ${{ inputs.rpc_url }}
+          GRPC_URL: ${{ inputs.grpc_url }}
         run: |
           if ! MM_JSON=$(aws secretsmanager get-secret-value \
                 --secret-id "options/$ENV/mm-bot" \
@@ -311,8 +331,12 @@ jobs:
             echo "::error::options/$ENV/mm-bot exists but has no sui_key"
             exit 1
           fi
-          printf '[sui]\n%s = "%s"\n' "$NETWORK" "$MM_KEY" \
-            > /tmp/deploy-secrets/mm-secrets.toml
+          {
+            printf '[sui]\n%s = "%s"\n' "$NETWORK" "$MM_KEY"
+            if [ -n "$GRPC_FROM_SECRET" ]; then
+              printf 'grpc_url = "%s"\n' "$GRPC_FROM_SECRET"
+            fi
+          } > /tmp/deploy-secrets/mm-secrets.toml
 
           ARGS=(
             --env        "$ENV"
@@ -320,8 +344,8 @@ jobs:
             --secrets    /tmp/deploy-secrets/mm-secrets.toml
             --deploy-mm-collateral
           )
-          if [ -n "$RPC_URL" ]; then
-            ARGS+=(--rpc "$RPC_URL")
+          if [ -n "$GRPC_URL" ]; then
+            ARGS+=(--grpc "$GRPC_URL")
           fi
           ./target/release/deploy "${ARGS[@]}"
 
@@ -331,15 +355,16 @@ jobs:
         env:
           NETWORK: ${{ steps.net.outputs.network }}
           ENV: ${{ inputs.environment }}
-          RPC_URL: ${{ inputs.rpc_url }}
+          GRPC_URL: ${{ inputs.grpc_url }}
         run: |
-          # deployments.json is keyed by env now; the network only picks the RPC.
+          # deployments.json is keyed by env now; the network only picks the
+          # endpoint.
           DIGEST=$(jq -r ".[\"$ENV\"].package_info.publishDigest" \
             rust-backend/deployments.json)
 
           # The lookup goes through the Sui GraphQL RPC (JSON-RPC is
-          # deactivated on public testnet fullnodes — see
-          # docs/sui-json-rpc-migration.md). A custom RPC_URL still overrides
+          # deactivated on Sui fullnodes — see
+          # docs/sui-json-rpc-migration.md). A custom grpc_url still overrides
           # the *publish* step above, but this read always uses the public
           # GraphQL endpoint for the network.
           case "$NETWORK" in

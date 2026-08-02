@@ -3,20 +3,19 @@
 //! docs/audit-restructure/04-collateral-abstraction-plan.md §4). Core holds
 //! no MM funds, so balance checks target the MM's own package.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
 use std::str::FromStr;
-use sui_sdk::SuiClient;
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
-use sui_types::transaction::TransactionKind;
+use crate::chain::{return_value_bytes, ChainClient};
 
 /// Read `mm_collateral::balance_of<T>(account)` via devInspect — no tx is
 /// submitted and no gas is spent. Returns 0 when the CollateralAccount holds
 /// no balance of `T` (the Move view returns 0 for a missing dynamic field).
 pub async fn balance_of(
-    client: &SuiClient,
+    client: &ChainClient,
     sender: SuiAddress,
     collateral_package: ObjectID,
     account_id: ObjectID,
@@ -35,24 +34,12 @@ pub async fn balance_of(
     );
 
     let resp = client
-        .read_api()
-        .dev_inspect_transaction_block(
-            sender,
-            TransactionKind::ProgrammableTransaction(pt.finish()),
-            None,
-            None,
-            None,
-        )
+        .dev_inspect_ptb(sender, pt)
         .await
         .context("devInspect mm_collateral::balance_of")?;
 
-    let results = resp
-        .results
-        .ok_or_else(|| anyhow!("devInspect balance_of returned no results: {:?}", resp.error))?;
-    let (bytes, _ty) = results
-        .first()
-        .and_then(|r| r.return_values.first())
-        .ok_or_else(|| anyhow!("devInspect balance_of: missing return value"))?;
+    let bytes = return_value_bytes(&resp, 0)
+        .context("devInspect balance_of: missing return value")?;
     let value: u64 = bcs::from_bytes(bytes).context("decoding balance_of u64 return")?;
     Ok(value)
 }

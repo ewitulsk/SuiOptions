@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use sui_data_ingestion_core::setup_single_workflow;
-use sui_sdk::SuiClientBuilder;
+use sui_tx::chain::ChainClient;
 use token_info_client::TokenInfoClient;
 use tracing::{error, info, warn};
 
@@ -32,16 +32,16 @@ async fn main() -> Result<()> {
     let cfg = Config::load(&cfg_path)
         .with_context(|| format!("loading config from {cfg_path}"))?;
 
-    // Resolve the JSON-RPC endpoint: prefer the shared `[sui] rpc_url`
+    // Resolve the gRPC endpoint: prefer the shared `[sui] grpc_url`
     // override from the optional secrets file (rendered by render-secrets.sh)
     // over the config / public default. Optional by design — a missing or
-    // unreadable secrets file degrades to cfg.resolve_rpc_url() so the indexer
+    // unreadable secrets file degrades to cfg.resolve_grpc_url() so the indexer
     // never crash-loops when the secret isn't rendered.
-    let rpc_url = match load_rpc_override(cli.secrets.as_deref()) {
+    let grpc_url = match load_grpc_override(cli.secrets.as_deref()) {
         Some(u) => u,
-        None => cfg.resolve_rpc_url()?,
+        None => cfg.resolve_grpc_url()?,
     };
-    info!(rpc = %redact_rpc(&rpc_url), "resolved Sui JSON-RPC endpoint");
+    info!(rpc = %redact_rpc(&grpc_url), "resolved Sui gRPC endpoint");
 
     // Resolve the deployed package id from the token-info service so a
     // redeploy doesn't need an indexer config edit. Hard cutover: if
@@ -157,13 +157,10 @@ async fn main() -> Result<()> {
             }
             None => {
                 info!("no start_checkpoint pinned; querying tip");
-                let client = SuiClientBuilder::default()
-                    .build(&rpc_url)
-                    .await
-                    .with_context(|| format!("connecting to {}", redact_rpc(&rpc_url)))?;
+                let client = ChainClient::new(&grpc_url)
+                    .with_context(|| format!("connecting to {}", redact_rpc(&grpc_url)))?;
                 let latest = client
-                    .read_api()
-                    .get_latest_checkpoint_sequence_number()
+                    .latest_checkpoint()
                     .await
                     .context("querying latest checkpoint")?;
                 info!(start_checkpoint = latest, "tailing from current tip");
@@ -184,7 +181,7 @@ async fn main() -> Result<()> {
     // live 100% target. Best-effort — if no RPC resolves, /progress just omits
     // the tip (frontend shows current/rate without a percentage).
     {
-        let tip_rpc = rpc_url.clone();
+        let tip_rpc = grpc_url.clone();
         let tip_state = Arc::clone(&progress_state);
         tokio::spawn(async move {
             let mut client = None;
@@ -192,10 +189,10 @@ async fn main() -> Result<()> {
             loop {
                 ticker.tick().await;
                 if client.is_none() {
-                    client = SuiClientBuilder::default().build(&tip_rpc).await.ok();
+                    client = ChainClient::new(&tip_rpc).ok();
                 }
                 let Some(c) = client.as_ref() else { continue };
-                match c.read_api().get_latest_checkpoint_sequence_number().await {
+                match c.latest_checkpoint().await {
                     Ok(tip) => tip_state.set_tip(tip),
                     Err(e) => {
                         warn!(error = %e, "tip poll failed; will reconnect");
@@ -291,13 +288,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Read `[sui] rpc_url` from the optional secrets file. Returns `None` (with a
+/// Read `[sui] grpc_url` from the optional secrets file. Returns `None` (with a
 /// warning) when the path is unset or the file is missing/unparseable, so the
 /// caller falls back to the config / public RPC rather than crash-looping.
-fn load_rpc_override(path: Option<&std::path::Path>) -> Option<String> {
+fn load_grpc_override(path: Option<&std::path::Path>) -> Option<String> {
     let path = path?;
     match runtime_config::Secrets::load(path) {
-        Ok(s) => s.sui.rpc_url,
+        Ok(s) => s.sui.grpc_url,
         Err(e) => {
             warn!(error = %e, path = %path.display(), "secrets file unreadable; using config/public RPC");
             None

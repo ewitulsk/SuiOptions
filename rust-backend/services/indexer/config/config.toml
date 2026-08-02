@@ -32,4 +32,4 @@ start_checkpoint = 343702757
 # Optional JSON-RPC override for the latest-checkpoint lookup. Defaults to
 # Sui's public fullnode for `network` (mainnet/testnet/devnet). Only used
 # when `start_checkpoint` is unset.
-# rpc_url = "https://your-fullnode.example.com:443"
+# grpc_url = "https://your-fullnode.example.com:443"

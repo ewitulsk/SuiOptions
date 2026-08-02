@@ -17,11 +17,14 @@
 //! devnet  = "suiprivkey1..."
 //! # Optional shared fallback used when the per-network slot is unset.
 //! default = "suiprivkey1..."
-//! # Optional JSON-RPC endpoint override. When set, every binary that builds
-//! # a SuiClient through `resolve_rpc_url` uses this instead of the public
-//! # network default — lets us point the fleet at a rate-limit-lifted RPC
+//! # Optional gRPC endpoint override. When set, every binary that builds a
+//! # ChainClient through `resolve_grpc_url` uses this instead of the public
+//! # network default — lets us point the fleet at a rate-limit-lifted
 //! # provider. Absent → public endpoint.
-//! rpc_url = "https://1rpc.io/<token>/sui"
+//! grpc_url = "https://sui-testnet.example:443"
+//! # Optional GraphQL endpoint override, used for event reads (gRPC has no
+//! # events query). Absent → public endpoint.
+//! graphql_url = "https://graphql.testnet.sui.io/graphql"
 //!
 //! [mm_bot]
 //! # 32-byte secret used to sign Quotes. Interpretation depends on the
@@ -75,9 +78,19 @@ pub struct SuiSecrets {
     pub devnet: Option<String>,
     /// Used when the per-network slot is unset.
     pub default: Option<String>,
-    /// Optional JSON-RPC endpoint override shared by every binary. When set,
-    /// `Secrets::resolve_rpc_url` returns this instead of the public network
-    /// default. Absent → public endpoint.
+    /// Optional gRPC endpoint override shared by every binary. When set,
+    /// `Secrets::resolve_grpc_url` returns this instead of the public
+    /// network default. Absent → public endpoint.
+    pub grpc_url: Option<String>,
+    /// Optional GraphQL endpoint override (event reads). When set,
+    /// `Secrets::resolve_graphql_url` returns this instead of the public
+    /// network default. Absent → public endpoint.
+    pub graphql_url: Option<String>,
+    /// Deprecated: the JSON-RPC endpoint override. JSON-RPC is deactivated
+    /// on Sui fullnodes (see `docs/sui-json-rpc-migration.md`); this field
+    /// is still parsed so an un-migrated secrets file loads instead of
+    /// crashing the binary, but nothing reads it. Remove it from rendered
+    /// secrets once the fleet is on `grpc_url`/`graphql_url`.
     pub rpc_url: Option<String>,
 }
 
@@ -124,9 +137,17 @@ impl Secrets {
             has_quote_key = result.mm_bot.quote_key.is_some(),
             has_jwt_secret = result.auth.jwt_secret.is_some(),
             has_pyth_api_key = result.pyth.api_key.is_some(),
-            has_rpc_url = result.sui.rpc_url.is_some(),
+            has_grpc_url = result.sui.grpc_url.is_some(),
+            has_graphql_url = result.sui.graphql_url.is_some(),
             "secrets loaded"
         );
+        if result.sui.rpc_url.is_some() {
+            tracing::warn!(
+                "secrets carry a deprecated [sui] rpc_url — JSON-RPC is deactivated \
+                 on Sui fullnodes and this value is ignored; set grpc_url/graphql_url \
+                 instead (docs/sui-json-rpc-migration.md)"
+            );
+        }
         Ok(result)
     }
 
@@ -193,14 +214,25 @@ impl Secrets {
         self.pyth.api_key.as_deref()
     }
 
-    /// JSON-RPC endpoint to build a SuiClient against: the operator-provided
-    /// `sui.rpc_url` override if set, else `fallback` (the caller's public
-    /// default for its network, e.g. `Network::rpc_url()`). Never errors — a
-    /// missing override degrades to the public endpoint so a mis-rendered or
-    /// absent secret can't crash-loop a service.
-    pub fn resolve_rpc_url(&self, fallback: &str) -> String {
+    /// gRPC endpoint to build a `ChainClient` against: the operator-provided
+    /// `sui.grpc_url` override if set, else `fallback` (the caller's public
+    /// default for its network, e.g. `Network::grpc_url()`). Never errors —
+    /// a missing override degrades to the public endpoint so a mis-rendered
+    /// or absent secret can't crash-loop a service. Unlike the JSON-RPC era
+    /// the public default actually works, so this is a real fallback rather
+    /// than a broken one.
+    pub fn resolve_grpc_url(&self, fallback: &str) -> String {
         self.sui
-            .rpc_url
+            .grpc_url
+            .clone()
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
+    /// GraphQL endpoint for event reads. Same override-else-fallback shape
+    /// as [`Secrets::resolve_grpc_url`].
+    pub fn resolve_graphql_url(&self, fallback: &str) -> String {
+        self.sui
+            .graphql_url
             .clone()
             .unwrap_or_else(|| fallback.to_string())
     }
@@ -276,25 +308,56 @@ testnet = "suiprivkey1testnet"
     }
 
     #[test]
-    fn resolve_rpc_url_prefers_override_else_fallback() {
+    fn resolve_grpc_url_prefers_override_else_fallback() {
         let with = write_tmp(
-            "rpc_set",
-            "[sui]\ntestnet = \"k\"\nrpc_url = \"https://private.example/sui\"\n",
+            "grpc_set",
+            "[sui]\ntestnet = \"k\"\ngrpc_url = \"https://private.example:443\"\n",
         );
         let s = Secrets::load(&with).unwrap();
         assert_eq!(
-            s.resolve_rpc_url("https://fallback.example"),
-            "https://private.example/sui"
+            s.resolve_grpc_url("https://fallback.example"),
+            "https://private.example:443"
         );
         std::fs::remove_file(&with).ok();
 
-        let without = write_tmp("rpc_unset", "[sui]\ntestnet = \"k\"\n");
+        let without = write_tmp("grpc_unset", "[sui]\ntestnet = \"k\"\n");
         let s = Secrets::load(&without).unwrap();
         assert_eq!(
-            s.resolve_rpc_url("https://fallback.example"),
+            s.resolve_grpc_url("https://fallback.example"),
             "https://fallback.example"
         );
         std::fs::remove_file(&without).ok();
+    }
+
+    #[test]
+    fn resolve_graphql_url_prefers_override_else_fallback() {
+        let with = write_tmp(
+            "gql_set",
+            "[sui]\ntestnet = \"k\"\ngraphql_url = \"https://private.example/graphql\"\n",
+        );
+        let s = Secrets::load(&with).unwrap();
+        assert_eq!(
+            s.resolve_graphql_url("https://fallback.example"),
+            "https://private.example/graphql"
+        );
+        std::fs::remove_file(&with).ok();
+    }
+
+    /// A secrets file still carrying the deprecated JSON-RPC override must
+    /// keep loading — operators' rendered files lag the code.
+    #[test]
+    fn deprecated_rpc_url_still_parses() {
+        let p = write_tmp(
+            "rpc_legacy",
+            "[sui]\ntestnet = \"k\"\nrpc_url = \"https://old.example/sui\"\n",
+        );
+        let s = Secrets::load(&p).unwrap();
+        assert_eq!(s.sui.rpc_url.as_deref(), Some("https://old.example/sui"));
+        assert_eq!(
+            s.resolve_grpc_url("https://fallback.example"),
+            "https://fallback.example"
+        );
+        std::fs::remove_file(&p).ok();
     }
 
     #[test]

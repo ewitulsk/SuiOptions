@@ -13,13 +13,13 @@
 use std::collections::BTreeMap;
 
 use anyhow::{anyhow, Context, Result};
-use sui_sdk::SuiClient;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::Argument;
 
 use crate::tx::pyth_update::{prepend_price_update, PythHandles};
 use crate::tx::shared_object_arg;
+use crate::chain::ChainClient;
 
 /// What the Pyth provider needs to emit legs for one PTB.
 #[derive(Debug, Clone)]
@@ -60,7 +60,7 @@ impl Prepared {
 /// fail the adapter's staleness check on assets that are themselves
 /// fresh.
 pub async fn prepare(
-    client: &SuiClient,
+    client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     legs: &PythLegs<'_>,
     assets: &[String],
