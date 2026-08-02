@@ -185,15 +185,50 @@ jobs:
           REBUILD: ${{ inputs.rebuild_manager }}
         run: |
           mkdir -p rust-backend/target/release
+
+          # Content hash of everything that goes into the binary. The cached
+          # asset is keyed on this: without it the release asset is stale
+          # FOREVER until someone remembers `rebuild_manager: true`, which is
+          # exactly how a fixed deployment-manager shipped a broken publish
+          # (SO-337). Over-invalidating only costs a rebuild; under-
+          # invalidating silently runs the wrong code.
+          # `ls-tree` reads the checked-out COMMIT, so this is independent of
+          # index/worktree state (unlike `ls-files`, which an out-of-sync
+          # index can quietly fool).
+          SRC_HASH=$(git ls-tree -r HEAD -- \
+            rust-backend/Cargo.toml \
+            rust-backend/Cargo.lock \
+            rust-backend/crates \
+            rust-backend/tools/deployment-manager \
+            | git hash-object --stdin)
+          echo "src_hash=$SRC_HASH" >> "$GITHUB_OUTPUT"
+          echo "deployment-manager source hash: $SRC_HASH"
+
           if [ "$REBUILD" = "true" ]; then
             echo "rebuild=true" >> "$GITHUB_OUTPUT"
             echo "rebuild_manager flag set — compiling a fresh binary."
+            exit 0
+          fi
+
+          CACHED_HASH=""
+          gh release download deployment-manager-bin \
+            --pattern deploy-linux-x64.srchash \
+            --output /tmp/cached.srchash 2>/dev/null \
+            && CACHED_HASH=$(cat /tmp/cached.srchash)
+
+          if [ "$CACHED_HASH" != "$SRC_HASH" ]; then
+            echo "rebuild=true" >> "$GITHUB_OUTPUT"
+            if [ -z "$CACHED_HASH" ]; then
+              echo "No source hash recorded alongside the cached binary — rebuilding."
+            else
+              echo "Cached binary was built from $CACHED_HASH, sources are now $SRC_HASH — rebuilding."
+            fi
           elif gh release download deployment-manager-bin \
                  --pattern deploy-linux-x64 \
                  --output rust-backend/target/release/deploy 2>/dev/null; then
             chmod +x rust-backend/target/release/deploy
             echo "rebuild=false" >> "$GITHUB_OUTPUT"
-            echo "Using prebuilt binary from release deployment-manager-bin."
+            echo "Using prebuilt binary (source hash matches)."
           else
             echo "rebuild=true" >> "$GITHUB_OUTPUT"
             echo "No prebuilt binary found — bootstrapping by compiling one."
@@ -225,6 +260,7 @@ jobs:
         if: steps.dm.outputs.rebuild == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          SRC_HASH: ${{ steps.dm.outputs.src_hash }}
         run: |
           gh release view deployment-manager-bin >/dev/null 2>&1 || \
             gh release create deployment-manager-bin \
@@ -232,8 +268,14 @@ jobs:
               --title "deployment-manager binary" \
               --notes "Prebuilt linux x86_64 deployment-manager binary, auto-updated by the redeploy-contract workflow. Not a real release."
           cp rust-backend/target/release/deploy /tmp/deploy-linux-x64
+          # Record the source hash NEXT TO the binary so the fetch step can
+          # tell whether it is still current. Upload it after the binary: if
+          # the binary upload fails, no hash is recorded and the next run
+          # rebuilds rather than trusting a mismatched pair.
+          printf '%s' "$SRC_HASH" > /tmp/deploy-linux-x64.srchash
           gh release upload deployment-manager-bin /tmp/deploy-linux-x64 --clobber
-          echo "Uploaded fresh binary to release deployment-manager-bin."
+          gh release upload deployment-manager-bin /tmp/deploy-linux-x64.srchash --clobber
+          echo "Uploaded fresh binary (source hash $SRC_HASH)."
 
       # ── 6. Fetch deployer key from Secrets Manager ───────────────
       - name: Write secrets file
