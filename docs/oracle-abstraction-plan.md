@@ -257,6 +257,8 @@ the no-redeploy property. Do not regress that.
 | 1e | gas-station registers both providers' PTB shapes | **done** — both deposit shapes sponsor from one template set |
 | 3b | `crates/switchboard-client` over Crossbar | **done** — 6 tests |
 | — | deployment-manager publishes + activates both adapters | **done** — both witnesses allowlisted, both feed registries seeded |
+| — | `move-ci` covers all ten publishable packages | **done** — was four; the CLI pin that blocked it is resolved below |
+| — | Deploy-compiler build gate (`deploy_build.rs`) | **done** — replaces the CLI-version proxy |
 | 2a | `pyth-client` pro endpoint + `accessToken` | **partial** — `Authorization: Bearer` was already correct and the endpoint is config-driven; needs a live keyed-vs-unkeyed check |
 | 4–5 | Soak, flip, `disallow_oracle` | ops, post-merge |
 
@@ -283,7 +285,51 @@ These are deployment/ops, not code:
 5. **Verify the Crossbar response shape.** `switchboard-client` decodes
    defensively against a shape not pinned in public docs; the first live
    call is what confirms it.
-6. **Resolve the toolchain finding below** before the redeploy.
+6. Run `cargo test -p deployment-manager --test deploy_build` before the
+   redeploy — see below for why that, and not a CLI version, is the gate.
+
+### Toolchain finding — RESOLVED: the pin was measuring the wrong thing
+
+Adding `trading-vault` and `oracle-switchboard` to the Move CI matrix made
+both fail under the pinned `mainnet-1.71.1` CLI with
+`UNEXPECTED_VERIFIER_ERROR (2017)` in `sui::rangeproofs`, while passing on
+1.75.x. The open question was whether the *deploy* compiler
+(`sui-move-build` @ `framework/mainnet` rev `2f5992f1`, pinned by
+`Cargo.lock`) would reject them too — which would have meant
+`oracle-switchboard` could not be published at all.
+
+**It does not.** Probed directly: the deploy compiler builds all ten
+publishable packages, `oracle-switchboard` and `trading-vault` included.
+
+Two things were wrong with the old arrangement:
+
+1. **Publishing never invokes the CLI.** `deploy.rs::publish_package_inner`
+   calls `BuildConfig::build` from the pinned crate. Matching the CLI's
+   version was a proxy for that crate's behaviour, never the thing itself.
+2. **The failure was in `sui move test`, not build.** It is a VM/framework
+   issue at *test* runtime, and the deploy path runs no Move tests — so the
+   proxy failed in a direction that carried no deploy meaning at all.
+
+The proxy is replaced by asking the deploy compiler directly:
+
+```text
+cargo test -p deployment-manager --test deploy_build
+```
+
+`tools/deployment-manager/tests/deploy_build.rs` builds every publishable
+package with the exact pinned crate, and a companion test asserts the list
+has not drifted from what `main.rs` publishes. That answers "will a
+redeploy compile?" precisely rather than by version coincidence.
+
+`SUI_VERSION` in `move-ci.yml` is therefore now just "a CLI new enough to
+build and test the packages" (bumped to `mainnet-1.75.2`), carries no
+deploy meaning, and can be bumped freely. All ten packages are back in the
+matrix.
+
+> **Gap this exposed, out of scope here:** no CI workflow runs `cargo
+> test` at all, so `deploy_build.rs` — like the rest of the Rust
+> workspace — is a local gate only. Adding a Rust CI job means building
+> the whole Sui dependency tree; worth deciding on its own merits.
 
 ---
 
