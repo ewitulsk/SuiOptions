@@ -493,6 +493,7 @@ mod tests {
             logo_uri: None,
             decimals,
             pyth_feed_id: None,
+            switchboard_feed_id: None,
             enabled: true,
         }
     }

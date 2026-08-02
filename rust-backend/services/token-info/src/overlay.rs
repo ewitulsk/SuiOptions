@@ -38,6 +38,7 @@ pub fn build(
             let spec = dep.token_info.get(&symbol.to_ascii_uppercase());
             let decimals = spec.map(|s| s.decimals).unwrap_or(t.decimals);
             let pyth_feed_id = spec.and_then(|s| s.pyth_feed_id.clone());
+            let switchboard_feed_id = spec.and_then(|s| s.switchboard_feed_id.clone());
             // The `config` crate lowercases all TOML keys, so `[seed_meta.TBTC]`
             // arrives as `tbtc`. Look up case-insensitively (lowercase first).
             let meta = seed_meta
@@ -53,6 +54,7 @@ pub fn build(
                 logo_uri: meta.and_then(|m| m.logo_uri.clone()),
                 decimals,
                 pyth_feed_id,
+                switchboard_feed_id,
                 enabled: true,
             }
         })

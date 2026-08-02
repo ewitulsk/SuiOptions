@@ -123,6 +123,8 @@ pub struct UpsertTokenReq {
     pub decimals: u8,
     #[serde(default)]
     pub pyth_feed_id: Option<String>,
+    #[serde(default)]
+    pub switchboard_feed_id: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -140,6 +142,7 @@ impl UpsertTokenReq {
             logo_uri: self.logo_uri,
             decimals: self.decimals as i16,
             pyth_feed_id: self.pyth_feed_id,
+            switchboard_feed_id: self.switchboard_feed_id,
             enabled: self.enabled,
         }
     }

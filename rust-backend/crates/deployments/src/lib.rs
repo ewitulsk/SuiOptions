@@ -304,6 +304,12 @@ pub struct TokenSpec {
     /// with a clear message if it's missing for a configured symbol.
     #[serde(default)]
     pub pyth_feed_id: Option<String>,
+    /// Switchboard feed hash, same 32-byte hex shape (SO-335). Both
+    /// providers' keys are carried at once: the adapters run in parallel
+    /// and the live provider is a runtime switch, so a record that only
+    /// had one would pin the deployment to one provider.
+    #[serde(default)]
+    pub switchboard_feed_id: Option<String>,
 }
 
 impl TokenSpec {
@@ -313,6 +319,28 @@ impl TokenSpec {
             .pyth_feed_id
             .as_deref()
             .ok_or_else(|| anyhow!("token has no pythFeedId in deployments.json"))?;
+        protocol_types::PriceFeedId::from_hex(raw)
+    }
+
+    /// Raw feed key for `provider`, if the catalog carries one.
+    pub fn feed_for(&self, provider: protocol_types::OracleProvider) -> Option<&str> {
+        match provider {
+            protocol_types::OracleProvider::Pyth => self.pyth_feed_id.as_deref(),
+            protocol_types::OracleProvider::Switchboard => self.switchboard_feed_id.as_deref(),
+        }
+    }
+
+    /// Typed 32-byte feed key for `provider`. Both providers identify a
+    /// feed by 32 bytes of hex, so `PriceFeedId` is the shared carrier —
+    /// the bytes mean different things to different issuers, which is
+    /// exactly why the provider has to be named at the call site.
+    pub fn feed_id_for(
+        &self,
+        provider: protocol_types::OracleProvider,
+    ) -> Result<protocol_types::PriceFeedId> {
+        let raw = self.feed_for(provider).ok_or_else(|| {
+            anyhow!("token has no {provider} feed id in the catalog")
+        })?;
         protocol_types::PriceFeedId::from_hex(raw)
     }
 }

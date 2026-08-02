@@ -47,8 +47,23 @@ pub struct SupportedToken {
     pub decimals: u8,
     #[serde(default)]
     pub pyth_feed_id: Option<String>,
+    /// Switchboard feed hash (SO-335). Both provider keys are carried at
+    /// once because the two adapters run in parallel and the live
+    /// provider is a runtime switch, not a deploy-time one.
+    #[serde(default)]
+    pub switchboard_feed_id: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl SupportedToken {
+    /// This token's feed key for `provider`, if the catalog has one.
+    pub fn feed_for(&self, provider: protocol_types::OracleProvider) -> Option<&str> {
+        match provider {
+            protocol_types::OracleProvider::Pyth => self.pyth_feed_id.as_deref(),
+            protocol_types::OracleProvider::Switchboard => self.switchboard_feed_id.as_deref(),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -355,8 +370,24 @@ mod tests {
             logo_uri: None,
             decimals: 8,
             pyth_feed_id: pyth.map(|s| s.into()),
+            switchboard_feed_id: None,
             enabled: true,
         }
+    }
+
+    #[test]
+    fn feed_for_selects_by_provider() {
+        use protocol_types::OracleProvider;
+        let mut t = tok("TBTC", "0x1::tbtc::TBTC", Some("0xaa"));
+        assert_eq!(t.feed_for(OracleProvider::Pyth), Some("0xaa"));
+        // Absent rather than falling back to the other provider's key —
+        // silently pricing off the wrong issuer's feed is the failure
+        // mode this whole split exists to prevent.
+        assert_eq!(t.feed_for(OracleProvider::Switchboard), None);
+
+        t.switchboard_feed_id = Some("0xbb".into());
+        assert_eq!(t.feed_for(OracleProvider::Switchboard), Some("0xbb"));
+        assert_eq!(t.feed_for(OracleProvider::Pyth), Some("0xaa"));
     }
 
     fn snap() -> Snapshot {
