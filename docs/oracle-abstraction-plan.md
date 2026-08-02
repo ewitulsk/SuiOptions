@@ -251,55 +251,39 @@ the no-redeploy property. Do not regress that.
 | 3.5 | Per-asset oracle pins in `OracleRegistry` | **done** — 8 tests |
 | 2b | `oracle-pyth` → `sui-pro-compatible-contract-*` | **done** — API is source-compatible; all 6 adapter tests pass on the new rev |
 | 1a | `switchboard_feed_id` in catalog + `OracleProvider` type | **done** — token-info migration 000002, `feed_for(provider)` |
+| 1b | Data plane follows the provider | **done** — oracle-service discovers feeds via `feed_for(provider)`; `GET /prices/by-asset/:coin_type` keys spot by asset so consumers never touch a provider feed key |
+| 1c | `sui-tx::tx::oracle` seam; `appraisal.rs` off `oracle_pyth` | **done** — `emit_price_legs` + `OracleLegs`, 8 tests |
+| 1d | `/oracle/descriptor`; frontend reads it | **done** — `oracle-client::descriptor()`, `frontend/src/api/oracleDescriptor.ts` |
+| 1e | gas-station registers both providers' PTB shapes | **done** — both deposit shapes sponsor from one template set |
+| 3b | `crates/switchboard-client` over Crossbar | **done** — 6 tests |
 | — | deployment-manager publishes + activates both adapters | **done** — both witnesses allowlisted, both feed registries seeded |
-| — | `move-ci` covers oracle-pyth | **done** (it was never in the matrix) |
-| — | `move-ci` covers trading-vault / oracle-switchboard | **blocked** — see the toolchain finding below |
-
-### ⚠️ Toolchain finding: the pinned CLI rejects both packages
-
-Adding `trading-vault` and `oracle-switchboard` to the Move CI matrix
-surfaced this: both fail under the pinned `mainnet-1.71.1` CLI with
-`UNEXPECTED_VERIFIER_ERROR (2017)` in `sui::rangeproofs`, while passing
-cleanly on a 1.75.x CLI. `oracle-pyth` and the four original packages pass
-on both.
-
-`move-ci.yml` pins that version on purpose: *"Keep SUI_VERSION in lockstep
-with [`sui-move-build` @ framework/mainnet 2f5992f1] — a newer CLI can
-accept code the deploy compiler rejects."* So bumping the pin to make CI
-green would defeat the check rather than pass it.
-
-**The question to answer before the SO-335 redeploy is therefore not a CI
-question:** does the *deploy* compiler — `sui-move-build`, which
-`deployment-manager` actually publishes with — accept
-`oracle-switchboard`? Two possibilities:
-
-- It does (CLI 1.71.1 and crate rev 2f5992f1 have drifted apart). Then the
-  fix is to re-align the pin, and both packages join the matrix.
-- It does not. Then **`oracle-switchboard` cannot be published as-is**, and
-  the Switchboard dep's framework requirement has to be reconciled with
-  ours before any of this can go on chain.
-
-Note that `trading-vault` fails too, and it is already deployed — which
-points at the first case, but that is an inference, not a test. Run the
-publish against a localnet or devnet before assuming it.
-| 2a | `pyth-client` pro endpoint + `accessToken` | **partial** — `Authorization: Bearer` was already correct; the endpoint stays config-driven. Needs a live keyed-vs-unkeyed check |
-| 1b | Re-key `oracle-client`/`oracle-service` by coin type | **not started** |
-| 1c | `sui-tx::tx::oracle` `OracleAdapter` trait; `appraisal.rs` off `oracle_pyth` | **not started** |
-| 1d | `/oracle/descriptor` + `/oracle/legs`; frontend reads them | **not started** |
-| 1e | gas-station registers both providers' PTB shapes | **not started** |
-| 3b | `crates/switchboard-client` over Crossbar | **not started** |
+| 2a | `pyth-client` pro endpoint + `accessToken` | **partial** — `Authorization: Bearer` was already correct and the endpoint is config-driven; needs a live keyed-vs-unkeyed check |
 | 4–5 | Soak, flip, `disallow_oracle` | ops, post-merge |
 
-**What this means today:** Switchboard is real, tested, published by the
-deploy pipeline and allowlistable — but nothing *composes* a Switchboard
-attestation yet, because the PTB composers (`appraisal.rs`,
-`frontend/src/tx/appraisal.ts`) still name `oracle_pyth` directly. The
-remaining 1b–1e + 3b work is what turns "both adapters exist on chain"
-into "one config field picks between them".
+**The switch, end to end, is now implemented.** Flipping
+`[oracle] provider` in oracle-service and restarting it moves the data
+plane (feed discovery, `/prices/by-asset`), the descriptor, the Rust PTB
+composer and the deployed browser bundle. Nothing else redeploys.
 
-Until then the live provider is still Pyth, which is the correct default:
-`OracleProvider::default()` is Pyth precisely so a deployment that says
-nothing keeps behaving as it did.
+### What remains before it can actually be flipped
+
+These are deployment/ops, not code:
+
+1. **Seed `switchboardFeedId` in the catalog.** Every token needs a
+   Switchboard feed hash, or `oracle-service` refuses to boot on
+   `provider = "switchboard"` (deliberately — a half-seeded catalog would
+   silently leave assets unpriceable).
+2. **Redeploy the contracts.** `OracleRegistry` gained a field and
+   `oracle-pyth` moved to a different on-chain Pyth package, so this is a
+   redeploy, not an upgrade. It publishes and allowlists both adapters.
+3. **Point Crossbar at a paid Solana devnet RPC** and set
+   `[oracle] crossbar_url`.
+4. **Set `[switchboard] package_id`** in gas-station config so
+   Switchboard deposits sponsor.
+5. **Verify the Crossbar response shape.** `switchboard-client` decodes
+   defensively against a shape not pinned in public docs; the first live
+   call is what confirms it.
+6. **Resolve the toolchain finding below** before the redeploy.
 
 ---
 
