@@ -11,7 +11,12 @@ const base = AUTH_URL.replace(/\/$/, "");
 
 export type TokenResp = {
   token: string;
-  address: string;
+  /** Only wallet-opened sessions carry an address, which is all this client
+   *  opens. Password sessions (the Dakota dashboard) leave it unset. */
+  address?: string;
+  user_id: string;
+  role: string;
+  scope?: string;
   expires_in: number;
 };
 
@@ -88,12 +93,26 @@ export function jwtExp(token: string): number {
   }
 }
 
-/** `0x…` subject (admin address) from a JWT, or null. */
+/** `0x…` wallet address from a JWT, or null.
+ *
+ *  Reads the `address` claim. `sub` used to hold the address but now holds the
+ *  account uuid — an account can be reached by wallet OR password, so the
+ *  address is one identity among several rather than the subject itself. */
 export function jwtSubject(token: string): string | null {
+  return jwtClaims(token)?.address ?? null;
+}
+
+/** Role from a JWT (`admin` | `business` | `individual`), or null. */
+export function jwtRole(token: string): string | null {
+  return jwtClaims(token)?.role ?? null;
+}
+
+type Claims = { sub?: string; role?: string; scope?: string; address?: string; exp?: number };
+
+function jwtClaims(token: string): Claims | null {
   try {
     const payload = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
-    const json = JSON.parse(atob(payload)) as { sub?: string };
-    return json.sub ?? null;
+    return JSON.parse(atob(payload)) as Claims;
   } catch {
     return null;
   }

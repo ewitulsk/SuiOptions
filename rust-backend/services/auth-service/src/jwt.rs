@@ -17,11 +17,25 @@ type HmacSha256 = Hmac<Sha256>;
 const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-/// Admin token claims.
+/// Token claims.
+///
+/// `sub` is the account uuid, not a wallet address. An account may hold several
+/// login methods, so an address is one identity among many rather than the
+/// identity itself. `address` still carries the Sui address when the session
+/// was opened by wallet signature, because callers display it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
-    /// Subject: the admin Sui address, `0x`-prefixed.
+    /// Subject: the account uuid, hyphenated.
     pub sub: String,
+    /// `admin` | `business` | `individual`.
+    pub role: String,
+    /// Opaque authorization scope — dakota-service reads it as a Dakota
+    /// customer id. Absent for admins, who are unscoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Sui address, present only for wallet-opened sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
     /// Client IP the token was issued to. Refresh is gated on this matching.
     pub ip: String,
     /// Issued-at, unix seconds.
@@ -96,7 +110,10 @@ mod tests {
 
     fn claims(exp: u64) -> Claims {
         Claims {
-            sub: "0xabc".into(),
+            sub: "3f1a…".into(),
+            role: "admin".into(),
+            scope: None,
+            address: Some("0xabc".into()),
             ip: "1.2.3.4".into(),
             iat: now_secs(),
             exp,
@@ -107,8 +124,23 @@ mod tests {
     fn sign_then_verify() {
         let t = sign(&claims(now_secs() + 100), "secret").unwrap();
         let c = verify(&t, "secret", true).unwrap();
-        assert_eq!(c.sub, "0xabc");
+        assert_eq!(c.sub, "3f1a…");
         assert_eq!(c.ip, "1.2.3.4");
+        assert_eq!(c.role, "admin");
+        assert_eq!(c.address.as_deref(), Some("0xabc"));
+    }
+
+    #[test]
+    fn scoped_claims_round_trip() {
+        let mut c = claims(now_secs() + 100);
+        c.role = "business".into();
+        c.scope = Some("3HNCB4vp2zWMwdfoY33qKK11iOJ".into());
+        c.address = None;
+        let decoded = verify(&sign(&c, "secret").unwrap(), "secret", true).unwrap();
+        assert_eq!(decoded.role, "business");
+        assert_eq!(decoded.scope.as_deref(), Some("3HNCB4vp2zWMwdfoY33qKK11iOJ"));
+        // Omitted rather than serialized as null, so the token stays compact.
+        assert!(decoded.address.is_none());
     }
 
     #[test]

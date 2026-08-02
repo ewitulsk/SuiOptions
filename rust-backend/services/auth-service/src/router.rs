@@ -1,14 +1,17 @@
 //! Two axum routers on two ports.
 //!
-//! - [`serve_public`] — `/challenge`, `/login`, `/refresh`, proxied by nginx.
-//! - [`serve_internal`] — `/verify`, bound on a separate port nginx never
-//!   proxies. Other services reach it container-to-container via `auth-client`.
+//! - [`serve_public`] — login, registration and self-service, proxied by nginx.
+//! - [`serve_internal`] — `/verify` and `/invites`, bound on a separate port
+//!   nginx never proxies. Other services reach it container-to-container via
+//!   `auth-client`. Minting an invite is unauthenticated, so keeping that port
+//!   off the proxy IS the access control: anything that can reach it can mint
+//!   an admin invite.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
@@ -20,9 +23,19 @@ pub fn public_router(state: Arc<AppState>, allowed_origins: &[String]) -> Result
     let cors = build_cors(allowed_origins)?;
     Ok(Router::new()
         .route("/health", get(handlers::health))
-        .route("/challenge", get(handlers::challenge))
-        .route("/login", post(handlers::login))
-        .route("/refresh", post(handlers::refresh))
+        // Session.
+        .route("/challenge", get(handlers::session::challenge))
+        .route("/login", post(handlers::session::login))
+        .route("/login/password", post(handlers::session::login_password))
+        .route("/refresh", post(handlers::session::refresh))
+        // Account lifecycle. `/me` and `/identities` authenticate inside the
+        // handler rather than behind a route layer, since they need the account
+        // row anyway and a layer would just fetch it twice.
+        .route("/register", post(handlers::account::register))
+        .route("/invites/preview", get(handlers::account::preview_invite))
+        .route("/me", get(handlers::account::me))
+        .route("/identities", post(handlers::account::add_identity))
+        .route("/identities/:id", delete(handlers::account::remove_identity))
         .with_state(state)
         .layer(axum::middleware::from_fn(
             observability::middleware::http_obs,
@@ -32,8 +45,9 @@ pub fn public_router(state: Arc<AppState>, allowed_origins: &[String]) -> Result
 
 pub fn internal_router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/health", get(handlers::health))
-        .route("/verify", post(handlers::verify))
+        .route("/health", get(handlers::internal::ready))
+        .route("/verify", post(handlers::internal::verify))
+        .route("/invites", post(handlers::internal::create_invite))
         .with_state(state)
         .merge(observability::middleware::metrics_route())
         .layer(axum::middleware::from_fn(

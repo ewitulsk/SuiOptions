@@ -40,9 +40,12 @@ pub fn public_router(
             "/tokens/:coin_type",
             put(tokens::update_token).delete(tokens::delete_token),
         )
+        // `require_admin`, not `require_auth`: auth-service now issues tokens
+        // to business and individual accounts too, so a merely-valid token
+        // stopped being proof of an operator.
         .route_layer(axum::middleware::from_fn_with_state(
             auth,
-            auth_client::require_auth,
+            auth_client::require_admin,
         ));
 
     let reads = Router::new()

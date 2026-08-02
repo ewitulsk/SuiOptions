@@ -1,22 +1,32 @@
 # auth-service config (local dev).
 #
-# Issues admin JWTs after a Sui signature challenge-response and exposes an
-# internal verify route. The JWT secret comes from the secrets TOML
-# (`--secrets`, default services/auth-service/config/secrets.toml); copy
-# secrets.example.toml to secrets.toml and fill in `auth.jwt_secret`.
+# Password or Sui-wallet login, linkable per account; issues JWTs carrying a
+# role and scope, and exposes an internal verify + invite-minting route. The
+# JWT secret comes from the secrets TOML (`--secrets`, default
+# services/auth-service/config/secrets.toml); copy secrets.example.toml to
+# secrets.toml and fill in `auth.jwt_secret`.
+#
+# Local Postgres is required — the service will not boot without it:
+#   createdb auth_dev
 
 environment        = "dev"
 
 public_bind_addr   = "127.0.0.1:9007"
 internal_bind_addr = "127.0.0.1:9008"
 
-allowed_origins    = ["http://localhost:5173", "http://127.0.0.1:5173"]
+# 5173 is the protocol frontend; 5174 is where the Dakota dashboard's vite
+# lands when 5173 is already taken.
+allowed_origins    = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5174", "http://127.0.0.1:5174"]
 
-# Wallets allowed to obtain an admin JWT. Case/padding-insensitive. The seed
-# entry is the protocol deployer (AdminCap holder) from deployments.json —
-# replace / extend with the real admin wallet addresses.
+database_url = "postgresql://postgres:postgres@127.0.0.1:5432/auth_dev"
+db_pool_size = 4
+
+# Wallets auto-provisioned with the `admin` role on first login — the only
+# account-creation path that skips an invite. Case/padding-insensitive. The
+# seed entry is the protocol deployer (AdminCap holder) from deployments.json.
 admin_addresses    = ["0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865"]
 
 token_ttl_secs     = 3600
 refresh_max_secs   = 86400
 challenge_ttl_secs = 300
+invite_ttl_secs    = 604800
