@@ -220,6 +220,11 @@ pub struct PackageInfo {
     /// Pyth oracle adapter for the trading vault.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_pyth: Option<SubPackageInfo>,
+    /// Switchboard oracle adapter (SO-335). Sibling of `oracle_pyth`:
+    /// both are published and allowlisted, and which one is live is a
+    /// runtime config field, not a property of the deployment record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_switchboard: Option<SubPackageInfo>,
     /// DeepBook spot-trading adapter for the trading vault (SO-284).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deepbook_adapter: Option<SubPackageInfo>,
@@ -244,6 +249,10 @@ pub struct TradingVaultObjectsInfo {
     pub integration_registry_id: String,
     pub oracle_registry_id: String,
     pub pyth_feed_registry_id: String,
+    /// Shared `SwitchboardFeedRegistry` (SO-335). Absent on records
+    /// written before the Switchboard adapter existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switchboard_feed_registry_id: Option<String>,
     pub pool_allowlist_id: String,
     /// Shared `EquityBook` created by the equity-oracle publish (SO-299).
     /// Absent on records written before the equity-oracle publish step.
@@ -269,6 +278,13 @@ impl TradingVaultObjectsInfo {
     }
     pub fn pyth_feed_registry(&self) -> Result<ObjectID> {
         ObjectID::from_str(&self.pyth_feed_registry_id).context("parsing pythFeedRegistryId")
+    }
+
+    pub fn switchboard_feed_registry(&self) -> Result<Option<ObjectID>> {
+        self.switchboard_feed_registry_id
+            .as_deref()
+            .map(|s| ObjectID::from_str(s).context("parsing switchboardFeedRegistryId"))
+            .transpose()
     }
     pub fn pool_allowlist(&self) -> Result<ObjectID> {
         ObjectID::from_str(&self.pool_allowlist_id).context("parsing poolAllowlistId")
@@ -484,6 +500,7 @@ mod tests {
                 vault: None,
                 trading_vault: None,
                 oracle_pyth: None,
+                oracle_switchboard: None,
                 deepbook_adapter: None,
                 options_adapter: None,
                 equity_oracle: None,

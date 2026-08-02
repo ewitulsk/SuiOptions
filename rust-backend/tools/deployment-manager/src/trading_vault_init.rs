@@ -28,6 +28,7 @@ use sui_types::transaction::{ObjectArg, Transaction, TransactionData};
 use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
 
 use move_publish::assert_success;
+use protocol_types::OracleProvider;
 
 use crate::json_store::TokenSpec;
 use crate::signer::Signer;
@@ -41,6 +42,11 @@ pub struct TradingVaultObjects {
     pub integration_registry_id: ObjectID,
     pub oracle_registry_id: ObjectID,
     pub pyth_feed_registry_id: ObjectID,
+    /// SO-335. Sibling of `pyth_feed_registry_id`: the two providers'
+    /// feed tables are separate objects and are seeded independently, so
+    /// a deployment can carry both catalogs and switch between them
+    /// without a republish.
+    pub switchboard_feed_registry_id: ObjectID,
     pub pool_allowlist_id: ObjectID,
     pub equity_book_id: ObjectID,
     pub vol_book_id: ObjectID,
@@ -107,12 +113,14 @@ pub async fn resolve_objects(
     client: &SuiClient,
     trading_vault_digest: &str,
     oracle_pyth_digest: &str,
+    oracle_switchboard_digest: &str,
     deepbook_adapter_digest: &str,
     options_adapter_digest: &str,
     equity_oracle_digest: &str,
 ) -> Result<TradingVaultObjects> {
     let tv = created_by_type(client, trading_vault_digest).await?;
     let op = created_by_type(client, oracle_pyth_digest).await?;
+    let osw = created_by_type(client, oracle_switchboard_digest).await?;
     let dba = created_by_type(client, deepbook_adapter_digest).await?;
     let oa = created_by_type(client, options_adapter_digest).await?;
     let eo = created_by_type(client, equity_oracle_digest).await?;
@@ -126,6 +134,10 @@ pub async fn resolve_objects(
         integration_registry_id: pick(&tv, "registry::IntegrationRegistry")?,
         oracle_registry_id: pick(&tv, "registry::OracleRegistry")?,
         pyth_feed_registry_id: pick(&op, "oracle_pyth::PythFeedRegistry")?,
+        switchboard_feed_registry_id: pick(
+            &osw,
+            "oracle_switchboard::SwitchboardFeedRegistry",
+        )?,
         pool_allowlist_id: pick(&dba, "deepbook_adapter::PoolAllowlist")?,
         equity_book_id: pick(&eo, "equity_oracle::EquityBook")?,
         vol_book_id: pick(&oa, "vol_book::VolBook")?,
@@ -164,6 +176,7 @@ pub async fn activate(
     admin_cap_id: ObjectID,
     trading_vault_pkg: ObjectID,
     oracle_pyth_pkg: ObjectID,
+    oracle_switchboard_pkg: ObjectID,
     deepbook_adapter_pkg: ObjectID,
     options_adapter_pkg: ObjectID,
     equity_oracle_pkg: ObjectID,
@@ -195,6 +208,8 @@ pub async fn activate(
     let ireg = pt.obj(shared_mut_arg(client, objects.integration_registry_id).await?)?;
     let oreg = pt.obj(shared_mut_arg(client, objects.oracle_registry_id).await?)?;
     let feed_reg = pt.obj(shared_mut_arg(client, objects.pyth_feed_registry_id).await?)?;
+    let sb_feed_reg =
+        pt.obj(shared_mut_arg(client, objects.switchboard_feed_registry_id).await?)?;
 
     let type_name_call = |pt: &mut ProgrammableTransactionBuilder, ty: &str| -> Result<_> {
         let tag = TypeTag::from_str(ty).with_context(|| format!("parsing witness type {ty}"))?;
@@ -225,8 +240,15 @@ pub async fn activate(
     // Oracle witnesses: Pyth for catalog assets, the options intrinsic
     // oracle for per-bucket option coins (SO-297), and the keeper-attested
     // external-account equity oracle (SO-299).
+    //
+    // BOTH price providers are allowlisted at deploy time (SO-335). That
+    // is deliberate: the live provider is a runtime config field, and a
+    // switch must not require an on-chain ceremony. Narrowing which
+    // adapter may price which asset is `registry::pin_oracle`, and
+    // retiring one is `disallow_oracle` — both post-deploy decisions.
     for witness in [
         format!("{oracle_pyth_pkg}::oracle_pyth::PythOracle"),
+        format!("{oracle_switchboard_pkg}::oracle_switchboard::SwitchboardOracle"),
         format!("{options_adapter_pkg}::options_oracle::OptionsOracle"),
         format!("{equity_oracle_pkg}::equity_oracle::EquityOracle"),
     ] {
@@ -240,26 +262,48 @@ pub async fn activate(
         );
     }
 
-    // Feed seeding from the token catalog (skip feed-less tokens).
+    // Feed seeding from the token catalog, per provider (skip tokens with
+    // no feed for that provider — a token may legitimately be covered by
+    // one issuer and not the other, and a synthetic test token by
+    // neither). Seeding both is what lets the provider switch be a config
+    // change rather than a ceremony.
     let mut seeded = 0usize;
+    let mut sb_seeded = 0usize;
     for (symbol, spec) in token_info {
-        let Some(feed) = spec.pyth_feed_id.as_deref() else {
-            continue;
-        };
-        let bytes = hex::decode(feed.trim_start_matches("0x"))
-            .with_context(|| format!("decoding feed id for {symbol}"))?;
-        let coin_type = TypeTag::from_str(&spec.coin_type)
-            .with_context(|| format!("parsing coin type for {symbol}"))?;
-        let feed_arg = pt.pure(bytes)?;
-        let dec_arg = pt.pure(spec.decimals)?;
-        pt.programmable_move_call(
-            oracle_pyth_pkg,
-            Identifier::new("oracle_pyth")?,
-            Identifier::new("set_feed")?,
-            vec![coin_type],
-            vec![admin, feed_reg, feed_arg, dec_arg],
-        );
-        seeded += 1;
+        for (provider, pkg, module, reg_arg, count) in [
+            (
+                OracleProvider::Pyth,
+                oracle_pyth_pkg,
+                "oracle_pyth",
+                feed_reg,
+                &mut seeded,
+            ),
+            (
+                OracleProvider::Switchboard,
+                oracle_switchboard_pkg,
+                "oracle_switchboard",
+                sb_feed_reg,
+                &mut sb_seeded,
+            ),
+        ] {
+            let Some(feed) = spec.feed_for(provider) else {
+                continue;
+            };
+            let bytes = hex::decode(feed.trim_start_matches("0x"))
+                .with_context(|| format!("decoding {provider} feed id for {symbol}"))?;
+            let coin_type = TypeTag::from_str(&spec.coin_type)
+                .with_context(|| format!("parsing coin type for {symbol}"))?;
+            let feed_arg = pt.pure(bytes)?;
+            let dec_arg = pt.pure(spec.decimals)?;
+            pt.programmable_move_call(
+                pkg,
+                Identifier::new(module)?,
+                Identifier::new("set_feed")?,
+                vec![coin_type],
+                vec![admin, reg_arg, feed_arg, dec_arg],
+            );
+            *count += 1;
+        }
     }
 
     // Registrar pubkey (SO-308): without it the attested self-serve
@@ -336,7 +380,11 @@ pub async fn activate(
         &signer.keypair,
     );
     let tx = Transaction::from_data(tx_data, vec![signature]);
-    tracing::info!(feeds = seeded, "submitting trading-vault activation tx");
+    tracing::info!(
+        pyth_feeds = seeded,
+        switchboard_feeds = sb_seeded,
+        "submitting trading-vault activation tx"
+    );
     let resp = client
         .quorum_driver_api()
         .execute_transaction_block(

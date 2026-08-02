@@ -162,6 +162,11 @@ impl Snapshot {
         self.package_info.oracle_pyth.as_ref()
     }
 
+    /// Switchboard oracle adapter package (SO-335).
+    pub fn oracle_switchboard(&self) -> Option<&SubPackageInfo> {
+        self.package_info.oracle_switchboard.as_ref()
+    }
+
     /// DeepBook spot adapter for the trading vault (SO-284).
     pub fn deepbook_adapter(&self) -> Option<&SubPackageInfo> {
         self.package_info.deepbook_adapter.as_ref()
@@ -411,6 +416,7 @@ mod tests {
                 vault: None,
                 trading_vault: None,
                 oracle_pyth: None,
+                oracle_switchboard: None,
                 deepbook_adapter: None,
                 options_adapter: None,
                 equity_oracle: None,
