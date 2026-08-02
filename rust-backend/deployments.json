@@ -52,22 +52,26 @@
       "TBTC": {
         "coinType": "0x159cc8d63af67b12286a9a7868a40b274ef352960b1a3d9ea31c0169cc3efa73::tbtc::TBTC",
         "decimals": 8,
-        "pythFeedId": "0xf9c0172ba10dfa4d19088d94f5bf61d3b54d5bd7483a322a982e1373ee8ea31b"
+        "pythFeedId": "0xf9c0172ba10dfa4d19088d94f5bf61d3b54d5bd7483a322a982e1373ee8ea31b",
+        "switchboardFeedId": "0x4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812"
       },
       "TSUI": {
         "coinType": "0xc7b13fac3b94b3c6171ff0247b282dc4caeda51b64d2e421f62bfd17004d4e1b::tsui::TSUI",
         "decimals": 9,
-        "pythFeedId": "0x50c67b3fd225db8912a424dd4baed60ffdde625ed2feaaf283724f9608fea266"
+        "pythFeedId": "0x50c67b3fd225db8912a424dd4baed60ffdde625ed2feaaf283724f9608fea266",
+        "switchboardFeedId": "0x7ceef94f404e660925ea4b33353ff303effaf901f224bdee50df3a714c1299e9"
       },
       "TUSDC": {
         "coinType": "0x159cc8d63af67b12286a9a7868a40b274ef352960b1a3d9ea31c0169cc3efa73::tusdc::TUSDC",
         "decimals": 6,
-        "pythFeedId": "0x41f3625971ca2ed2263e78573fe5ce23e13d2558ed3f2e47ab0f84fb9e7ae722"
+        "pythFeedId": "0x41f3625971ca2ed2263e78573fe5ce23e13d2558ed3f2e47ab0f84fb9e7ae722",
+        "switchboardFeedId": "0x883ea8295f70ae506e894679d124196bb07064ea530cefd835b58c33a5ab6549"
       },
       "TWAL": {
         "coinType": "0x159cc8d63af67b12286a9a7868a40b274ef352960b1a3d9ea31c0169cc3efa73::twal::TWAL",
         "decimals": 9,
-        "pythFeedId": "0xa6ba0195b5364be116059e401fb71484ed3400d4d9bfbdf46bd11eab4f9b7cea"
+        "pythFeedId": "0xa6ba0195b5364be116059e401fb71484ed3400d4d9bfbdf46bd11eab4f9b7cea",
+        "switchboardFeedId": "0x580de69fa5310460bead69dc3fd0c05988dea014d0e7c98aae22b67e7958fd9b"
       }
     }
   },
@@ -182,22 +186,26 @@
       "TBTC": {
         "coinType": "0x95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::tbtc::TBTC",
         "decimals": 8,
-        "pythFeedId": "0xf9c0172ba10dfa4d19088d94f5bf61d3b54d5bd7483a322a982e1373ee8ea31b"
+        "pythFeedId": "0xf9c0172ba10dfa4d19088d94f5bf61d3b54d5bd7483a322a982e1373ee8ea31b",
+        "switchboardFeedId": "0x4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812"
       },
       "TSUI": {
         "coinType": "0x95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::tsui::TSUI",
         "decimals": 9,
-        "pythFeedId": "0x50c67b3fd225db8912a424dd4baed60ffdde625ed2feaaf283724f9608fea266"
+        "pythFeedId": "0x50c67b3fd225db8912a424dd4baed60ffdde625ed2feaaf283724f9608fea266",
+        "switchboardFeedId": "0x7ceef94f404e660925ea4b33353ff303effaf901f224bdee50df3a714c1299e9"
       },
       "TUSDC": {
         "coinType": "0x95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::tusdc::TUSDC",
         "decimals": 6,
-        "pythFeedId": "0x41f3625971ca2ed2263e78573fe5ce23e13d2558ed3f2e47ab0f84fb9e7ae722"
+        "pythFeedId": "0x41f3625971ca2ed2263e78573fe5ce23e13d2558ed3f2e47ab0f84fb9e7ae722",
+        "switchboardFeedId": "0x883ea8295f70ae506e894679d124196bb07064ea530cefd835b58c33a5ab6549"
       },
       "TWAL": {
         "coinType": "0x95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::twal::TWAL",
         "decimals": 9,
-        "pythFeedId": "0xa6ba0195b5364be116059e401fb71484ed3400d4d9bfbdf46bd11eab4f9b7cea"
+        "pythFeedId": "0xa6ba0195b5364be116059e401fb71484ed3400d4d9bfbdf46bd11eab4f9b7cea",
+        "switchboardFeedId": "0x580de69fa5310460bead69dc3fd0c05988dea014d0e7c98aae22b67e7958fd9b"
       }
     }
   }

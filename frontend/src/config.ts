@@ -44,6 +44,16 @@ export const GAS_STATION_URL: string =
 export const CHARTS_URL: string =
   (import.meta.env.VITE_CHARTS_URL as string | undefined) ?? "http://127.0.0.1:9011";
 
+// oracle-service public base URL (SO-335). Serves `GET /oracle/descriptor`
+// — the live oracle provider plus its on-chain adapter ids — which
+// `tx/appraisal.ts` reads instead of hardcoding an adapter package. That
+// is what lets a provider switch (a backend config field) take effect in
+// an ALREADY-DEPLOYED frontend, with no rebuild.
+//
+// Deployed builds set VITE_ORACLE_SERVICE_URL to the env's public route.
+export const ORACLE_SERVICE_URL: string =
+  (import.meta.env.VITE_ORACLE_SERVICE_URL as string | undefined) ?? "http://127.0.0.1:9013";
+
 // cctp-relay public base URL. Tracks CCTP bridge transfers, auto-relays the
 // destination-chain mint, and serves the CCTP constants (`GET /config`, see
 // api/cctpConfig.ts) — those are NOT derived from ENV here, because the bridge

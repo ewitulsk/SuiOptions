@@ -5,3 +5,32 @@ bind_addr      = "0.0.0.0:9013"
 token_info_url = "http://127.0.0.1:9005"
 hermes_url     = "https://hermes.pyth.network"
 benchmarks_url = "https://benchmarks.pyth.network"
+
+# ── The oracle switch (SO-335) ──────────────────────────────────────────
+# `provider` is the ONE field that moves the whole stack between oracle
+# providers. oracle-service subscribes to that provider's feeds and
+# publishes it on /oracle/descriptor, which is where both PTB composers
+# (backend sui-tx, browser tx/appraisal.ts) learn which adapter to build
+# legs for. No other service redeploys to switch.
+#
+# Both adapters are published and allowlisted on chain at deploy time, so
+# flipping this and restarting oracle-service is the entire switch.
+# RETIRING a provider is a separate, later step and the order is not
+# reversible: allow -> verify -> disallow. Never disallow the last
+# allowlisted adapter — that is a freeze on withdrawals, not a pause.
+# See docs/oracle-abstraction-plan.md 4.
+[oracle]
+provider = "pyth"
+crossbar_url = "http://127.0.0.1:8080"
+# Switchboard oracle queue for this network (testnet), read from the
+# Switchboard `State` object on chain. `run_N` validates every signing
+# oracle against this Queue OBJECT, and the client refuses a bundle whose
+# reported queue key differs — a cross-queue bundle otherwise aborts
+# inside run_N with nothing useful in the error.
+#
+# NOTE: the PUBLIC crossbar.switchboard.xyz answers for a different queue
+# (86807068…). Our own crossbar must be pointed at the RPC backing THIS
+# queue, or every quote is rejected.
+switchboard_queue_id  = "0xe645d8979dac2fb901fb7c7b0ef3c9fad5dfaaf7ae2b0ce38a0b5ec63b819a99"
+switchboard_queue_key = "0xc9477bfb5ff1012859f336cf98725680e7705ba2abece17188cfb28ca66ca5b0"
+

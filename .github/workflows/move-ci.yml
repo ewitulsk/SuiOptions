@@ -1,14 +1,37 @@
 name: Move CI
 
-# Build + unit-test the four options-protocol Move packages on every change
-# to the contracts. There was no Move CI before, so latent compile/test
-# breaks (e.g. a missing type annotation, a test out of sync with a
-# signature change) merged undetected — this catches them.
+# Build + unit-test every options-protocol Move package on every change to
+# the contracts. There was no Move CI before, so latent compile/test breaks
+# (e.g. a missing type annotation, a test out of sync with a signature
+# change) merged undetected — this catches them.
 #
-# The sui CLI is pinned to 1.71.1, the SAME framework the Rust workspace pins
-# (`sui-move-build` @ branch framework/mainnet, rev 2f5992f1), which is what
-# actually compiles the package at publish time. Keep SUI_VERSION in lockstep
-# with that rev — a newer CLI can accept code the deploy compiler rejects.
+# ## SUI_VERSION is NOT a deploy-compatibility guard (SO-335)
+#
+# It used to be pinned to 1.71.1 to match `sui-move-build` @
+# framework/mainnet rev 2f5992f1 — the Rust crate that actually compiles
+# packages at publish time — on the reasoning that a newer CLI might accept
+# code the deploy compiler rejects.
+#
+# That proxy was both weaker and wrong. Publishing never invokes this CLI;
+# it calls `BuildConfig::build` from that crate. And the proxy produced a
+# false positive: `trading-vault` and `oracle-switchboard` failed the
+# 1.71.1 CLI's `sui move test` step with UNEXPECTED_VERIFIER_ERROR (2017)
+# in `sui::rangeproofs` — a VM/framework issue at TEST runtime — while
+# building perfectly under the deploy compiler, which never runs Move
+# tests at all.
+#
+# The proxy is now replaced by asking the deploy compiler directly:
+#
+#     rust-backend/tools/deployment-manager/tests/deploy_build.rs
+#     cargo test -p deployment-manager --test deploy_build
+#
+# That builds every publishable package with the exact pinned crate, so it
+# answers "will a redeploy compile?" precisely rather than by version
+# coincidence. Run it before a redeploy.
+#
+# SUI_VERSION here therefore only needs to be a CLI new enough to BUILD and
+# TEST the packages. Bump it freely when a package needs a newer framework;
+# it carries no deploy meaning.
 
 on:
   push:
@@ -25,7 +48,7 @@ permissions:
   contents: read
 
 env:
-  SUI_VERSION: mainnet-1.71.1
+  SUI_VERSION: mainnet-1.75.2
   # Authenticated release downloads (suiup + the Move git deps) dodge anon rate limits.
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -35,10 +58,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `vault` (options_vault) is deprecated and no longer published
-        # (SO-332) — see contracts/vault/DEPRECATED.md. Its sources and
-        # tests stay in-tree but are not built or tested here.
-        package: [core, auction, rfq, mm-collateral]
+        # Every package `deployment-manager` publishes. `vault`
+        # (options_vault) is absent because it is deprecated and no longer
+        # published (SO-332) — see contracts/vault/DEPRECATED.md; its
+        # sources and tests stay in-tree but are not built here.
+        package:
+          - core
+          - auction
+          - rfq
+          - mm-collateral
+          - trading-vault
+          - oracle-pyth
+          - oracle-switchboard
+          - equity-oracle
+          - options-adapter
+          - deepbook-adapter
     steps:
       - uses: actions/checkout@v4
 

@@ -18,6 +18,29 @@ pub struct AppState {
     /// Feeds discovered from the token-info catalog at boot (what `/prices`
     /// enumerates and the SSE subscription covers).
     pub feeds: Vec<PriceFeedId>,
+    /// The live oracle provider (SO-335) — served on
+    /// `/oracle/descriptor` so PTB composers build the right price legs.
+    pub provider: protocol_types::OracleProvider,
+    /// Canonical coin type → that asset's feed under the LIVE provider.
+    /// Lets consumers ask for a price by asset and never handle a
+    /// provider-specific feed key themselves.
+    pub feed_by_asset: std::collections::BTreeMap<String, PriceFeedId>,
+    /// Adapter package + feed registry the composers need, mirrored from
+    /// token-info. `None` until the live provider's adapter is deployed.
+    pub adapter: Option<crate::state::AdapterIds>,
     /// Whether the upstream Hermes stream is currently healthy.
     pub upstream_healthy: Arc<AtomicBool>,
+}
+
+/// On-chain identity of the live provider's adapter, as served on
+/// `/oracle/descriptor`. Mirrored from token-info at boot so composers
+/// have exactly one place to read it from.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct AdapterIds {
+    /// Our adapter package (`oracle_pyth` / `oracle_switchboard`).
+    pub adapter_package_id: sui_types::base_types::ObjectID,
+    /// That adapter's shared feed registry.
+    pub feed_registry_id: sui_types::base_types::ObjectID,
+    /// `trading_vault::registry::OracleRegistry`.
+    pub oracle_registry_id: sui_types::base_types::ObjectID,
 }

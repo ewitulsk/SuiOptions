@@ -283,6 +283,24 @@ async fn deploy_one(
     .with_context(|| format!("publishing oracle_pyth to {network}"))?;
     tracing::info!(package = %oracle_pyth_out.package_id, "oracle_pyth published");
 
+    // Both price adapters are published every deploy (SO-335). Publishing
+    // only the "live" one would make a provider switch a redeploy, which
+    // is exactly what the abstraction exists to avoid.
+    let oracle_switchboard_out = publish_dep_package(
+        &client,
+        &signer,
+        &contracts_root.join("oracle-switchboard"),
+        "oracle_switchboard",
+        env,
+        gas_budget,
+    )
+    .await
+    .with_context(|| format!("publishing oracle_switchboard to {network}"))?;
+    tracing::info!(
+        package = %oracle_switchboard_out.package_id,
+        "oracle_switchboard published"
+    );
+
     let deepbook_adapter_out = publish_dep_package(
         &client,
         &signer,
@@ -323,6 +341,7 @@ async fn deploy_one(
     let (auction, rfq, vault) = (Some(record(&auction_out)), Some(record(&rfq_out)), None);
     let (trading_vault, oracle_pyth) =
         (Some(record(&trading_vault_out)), Some(record(&oracle_pyth_out)));
+    let oracle_switchboard = Some(record(&oracle_switchboard_out));
     let (deepbook_adapter, options_adapter) =
         (Some(record(&deepbook_adapter_out)), Some(record(&options_adapter_out)));
 
@@ -390,13 +409,17 @@ async fn deploy_one(
     let token_info = if let Some(tt) = test_tokens.as_ref() {
         let mut out = previous_token_info;
         for (sym, rec) in &tt.tokens {
+            // Carry BOTH providers' feed keys forward: a redeploy must not
+            // silently drop one and pin the env to a single provider.
             let pyth = out.get(sym).and_then(|s| s.pyth_feed_id.clone());
+            let switchboard = out.get(sym).and_then(|s| s.switchboard_feed_id.clone());
             out.insert(
                 sym.clone(),
                 TokenSpec {
                     coin_type: rec.coin_type.clone(),
                     decimals: rec.decimals,
                     pyth_feed_id: pyth,
+                    switchboard_feed_id: switchboard,
                 },
             );
         }
@@ -406,7 +429,7 @@ async fn deploy_one(
     };
 
     // Activate the trading-vault family (SO-292): allowlist witnesses,
-    // seed Pyth feeds from the catalog, and record the governance object
+    // seed each provider's feeds from the catalog, and record the governance object
     // ids so services stop re-deriving them from publish digests. Pools
     // are allowlisted per roll by the option-scheduler, not here.
     let trading_vault_objects = {
@@ -414,6 +437,7 @@ async fn deploy_one(
             &client,
             &trading_vault_out.digest,
             &oracle_pyth_out.digest,
+            &oracle_switchboard_out.digest,
             &deepbook_adapter_out.digest,
             &options_adapter_out.digest,
             &equity_oracle_out.digest,
@@ -427,6 +451,7 @@ async fn deploy_one(
             publish.admin_cap_id,
             trading_vault_out.package_id,
             oracle_pyth_out.package_id,
+            oracle_switchboard_out.package_id,
             deepbook_adapter_out.package_id,
             options_adapter_out.package_id,
             equity_oracle_out.package_id,
@@ -442,6 +467,9 @@ async fn deploy_one(
             integration_registry_id: objects.integration_registry_id.to_string(),
             oracle_registry_id: objects.oracle_registry_id.to_string(),
             pyth_feed_registry_id: objects.pyth_feed_registry_id.to_string(),
+            switchboard_feed_registry_id: Some(
+                objects.switchboard_feed_registry_id.to_string(),
+            ),
             pool_allowlist_id: objects.pool_allowlist_id.to_string(),
             equity_book_id: Some(objects.equity_book_id.to_string()),
             vol_book_id: Some(objects.vol_book_id.to_string()),
@@ -469,6 +497,7 @@ async fn deploy_one(
             vault,
             trading_vault,
             oracle_pyth,
+            oracle_switchboard,
             deepbook_adapter,
             options_adapter,
             equity_oracle: Some(record(&equity_oracle_out)),

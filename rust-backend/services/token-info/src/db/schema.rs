@@ -9,6 +9,7 @@ diesel::table! {
         logo_uri     -> Nullable<Text>,
         decimals     -> Int2,
         pyth_feed_id -> Nullable<Text>,
+        switchboard_feed_id -> Nullable<Text>,
         enabled      -> Bool,
         created_at   -> Timestamptz,
         updated_at   -> Timestamptz,

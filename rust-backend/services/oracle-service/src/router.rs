@@ -25,6 +25,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/prices", get(get_prices))
         .route("/snapshot", get(get_prices))
         .route("/prices/:feed", get(get_price))
+        .route("/prices/by-asset/:coin_type", get(get_price_by_asset))
+        .route("/oracle/descriptor", get(get_oracle_descriptor))
         .route("/vol/realized", get(get_realized_vol))
         .route("/ws", get(ws_handler))
         .with_state(state)
@@ -34,6 +36,60 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// `GET /oracle/descriptor` — **the switch, published.**
+///
+/// One place names the live provider and its on-chain identity. Both PTB
+/// composers (Rust `sui_tx::tx::oracle`, browser `tx/appraisal.ts`) read
+/// this instead of hardcoding an adapter, which is what lets the provider
+/// change without redeploying either of them.
+///
+/// `feeds` is coin type → that asset's feed key under the live provider,
+/// so a caller never has to know which catalog column to read.
+#[derive(serde::Serialize)]
+pub struct OracleDescriptor {
+    pub provider: protocol_types::OracleProvider,
+    /// The Move module `attest` lives in for this provider.
+    pub adapter_module: &'static str,
+    /// `None` when the live provider's adapter is not deployed on this
+    /// network — the data plane still works, PTB composition does not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<crate::state::AdapterIds>,
+    pub feeds: std::collections::BTreeMap<String, String>,
+}
+
+async fn get_oracle_descriptor(State(state): State<Arc<AppState>>) -> Json<OracleDescriptor> {
+    Json(OracleDescriptor {
+        provider: state.provider,
+        adapter_module: state.provider.adapter_module(),
+        adapter: state.adapter,
+        feeds: state
+            .feed_by_asset
+            .iter()
+            .map(|(asset, feed)| (asset.clone(), feed.to_hex()))
+            .collect(),
+    })
+}
+
+/// `GET /prices/by-asset/:coin_type` — spot keyed by ASSET, not by a
+/// provider-specific feed id.
+///
+/// This is the data-plane half of the switch: a consumer asks for "the
+/// price of this coin type" and never learns which provider answered, so
+/// flipping providers needs no consumer change.
+async fn get_price_by_asset(
+    State(state): State<Arc<AppState>>,
+    Path(coin_type): Path<String>,
+) -> Result<Json<PricePoint>, StatusCode> {
+    let canonical = protocol_types::asset::canonicalize_move_type(&coin_type);
+    let feed = state
+        .feed_by_asset
+        .get(&canonical)
+        .copied()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let cp = state.price_cache.peek(feed).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(point(feed, &cp, now_ms())))
 }
 
 fn now_ms() -> i64 {

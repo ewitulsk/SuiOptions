@@ -28,7 +28,10 @@ public struct PriceAttestation has copy, drop {
     timestamp_ms: u64,
 }
 
-/// The only mint path, witness-gated on the oracle allowlist.
+/// The only mint path, witness-gated on the oracle allowlist and — when
+/// the asset carries one — on its per-asset oracle pin (SO-335). The two
+/// checks abort distinctly so an operator can tell "this adapter is
+/// delisted" from "this adapter is fine, just not for this asset".
 public fun attest<W: drop>(
     _witness: W,
     reg: &OracleRegistry,
@@ -39,6 +42,10 @@ public fun attest<W: drop>(
 ): PriceAttestation {
     let oracle = type_name::with_defining_ids<W>();
     assert!(registry::is_oracle_allowed(reg, &oracle), errors::oracle_not_allowed());
+    assert!(
+        registry::is_oracle_allowed_for(reg, &oracle, &asset),
+        errors::oracle_not_pinned_for_asset(),
+    );
     assert!(price > 0, errors::price_invalid());
     PriceAttestation { oracle, asset, quote_asset, price, timestamp_ms }
 }

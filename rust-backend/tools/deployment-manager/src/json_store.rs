@@ -69,6 +69,9 @@ pub struct PackageInfo {
     pub trading_vault: Option<PackageRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_pyth: Option<PackageRecord>,
+    /// Switchboard oracle adapter (SO-335).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_switchboard: Option<PackageRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deepbook_adapter: Option<PackageRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,6 +99,8 @@ pub struct TradingVaultObjectsRecord {
     pub integration_registry_id: String,
     pub oracle_registry_id: String,
     pub pyth_feed_registry_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switchboard_feed_registry_id: Option<String>,
     pub pool_allowlist_id: String,
     /// Shared `EquityBook` created by the equity-oracle publish (SO-299),
     /// so the keeper reads it from token-info instead of publish effects.
@@ -169,6 +174,22 @@ pub struct TokenSpec {
     /// test tokens) still appear in the catalog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pyth_feed_id: Option<String>,
+    /// Switchboard feed hash (SO-335), same shape and same optionality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switchboard_feed_id: Option<String>,
+}
+
+impl TokenSpec {
+    /// Raw feed key for `provider`, if this token has one. Mirrors
+    /// `deployments::TokenSpec::feed_for` — the two structs are separate
+    /// because the writer (this tool) and the reader (`deployments`)
+    /// evolve independently, but their feed semantics must not diverge.
+    pub fn feed_for(&self, provider: protocol_types::OracleProvider) -> Option<&str> {
+        match provider {
+            protocol_types::OracleProvider::Pyth => self.pyth_feed_id.as_deref(),
+            protocol_types::OracleProvider::Switchboard => self.switchboard_feed_id.as_deref(),
+        }
+    }
 }
 
 /// On-disk shape: `{ "dev": {...}, "prod": {...}, "staging": {...} }`,

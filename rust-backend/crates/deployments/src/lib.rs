@@ -220,6 +220,11 @@ pub struct PackageInfo {
     /// Pyth oracle adapter for the trading vault.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_pyth: Option<SubPackageInfo>,
+    /// Switchboard oracle adapter (SO-335). Sibling of `oracle_pyth`:
+    /// both are published and allowlisted, and which one is live is a
+    /// runtime config field, not a property of the deployment record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_switchboard: Option<SubPackageInfo>,
     /// DeepBook spot-trading adapter for the trading vault (SO-284).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deepbook_adapter: Option<SubPackageInfo>,
@@ -244,6 +249,10 @@ pub struct TradingVaultObjectsInfo {
     pub integration_registry_id: String,
     pub oracle_registry_id: String,
     pub pyth_feed_registry_id: String,
+    /// Shared `SwitchboardFeedRegistry` (SO-335). Absent on records
+    /// written before the Switchboard adapter existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switchboard_feed_registry_id: Option<String>,
     pub pool_allowlist_id: String,
     /// Shared `EquityBook` created by the equity-oracle publish (SO-299).
     /// Absent on records written before the equity-oracle publish step.
@@ -269,6 +278,13 @@ impl TradingVaultObjectsInfo {
     }
     pub fn pyth_feed_registry(&self) -> Result<ObjectID> {
         ObjectID::from_str(&self.pyth_feed_registry_id).context("parsing pythFeedRegistryId")
+    }
+
+    pub fn switchboard_feed_registry(&self) -> Result<Option<ObjectID>> {
+        self.switchboard_feed_registry_id
+            .as_deref()
+            .map(|s| ObjectID::from_str(s).context("parsing switchboardFeedRegistryId"))
+            .transpose()
     }
     pub fn pool_allowlist(&self) -> Result<ObjectID> {
         ObjectID::from_str(&self.pool_allowlist_id).context("parsing poolAllowlistId")
@@ -304,6 +320,12 @@ pub struct TokenSpec {
     /// with a clear message if it's missing for a configured symbol.
     #[serde(default)]
     pub pyth_feed_id: Option<String>,
+    /// Switchboard feed hash, same 32-byte hex shape (SO-335). Both
+    /// providers' keys are carried at once: the adapters run in parallel
+    /// and the live provider is a runtime switch, so a record that only
+    /// had one would pin the deployment to one provider.
+    #[serde(default)]
+    pub switchboard_feed_id: Option<String>,
 }
 
 impl TokenSpec {
@@ -313,6 +335,28 @@ impl TokenSpec {
             .pyth_feed_id
             .as_deref()
             .ok_or_else(|| anyhow!("token has no pythFeedId in deployments.json"))?;
+        protocol_types::PriceFeedId::from_hex(raw)
+    }
+
+    /// Raw feed key for `provider`, if the catalog carries one.
+    pub fn feed_for(&self, provider: protocol_types::OracleProvider) -> Option<&str> {
+        match provider {
+            protocol_types::OracleProvider::Pyth => self.pyth_feed_id.as_deref(),
+            protocol_types::OracleProvider::Switchboard => self.switchboard_feed_id.as_deref(),
+        }
+    }
+
+    /// Typed 32-byte feed key for `provider`. Both providers identify a
+    /// feed by 32 bytes of hex, so `PriceFeedId` is the shared carrier —
+    /// the bytes mean different things to different issuers, which is
+    /// exactly why the provider has to be named at the call site.
+    pub fn feed_id_for(
+        &self,
+        provider: protocol_types::OracleProvider,
+    ) -> Result<protocol_types::PriceFeedId> {
+        let raw = self.feed_for(provider).ok_or_else(|| {
+            anyhow!("token has no {provider} feed id in the catalog")
+        })?;
         protocol_types::PriceFeedId::from_hex(raw)
     }
 }
@@ -456,6 +500,7 @@ mod tests {
                 vault: None,
                 trading_vault: None,
                 oracle_pyth: None,
+                oracle_switchboard: None,
                 deepbook_adapter: None,
                 options_adapter: None,
                 equity_oracle: None,

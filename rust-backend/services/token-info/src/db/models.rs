@@ -18,6 +18,7 @@ pub struct TokenRow {
     pub logo_uri: Option<String>,
     pub decimals: i16,
     pub pyth_feed_id: Option<String>,
+    pub switchboard_feed_id: Option<String>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -33,6 +34,7 @@ impl TokenRow {
             logo_uri: self.logo_uri,
             decimals: self.decimals.max(0) as u8,
             pyth_feed_id: self.pyth_feed_id,
+            switchboard_feed_id: self.switchboard_feed_id,
             enabled: self.enabled,
         }
     }
@@ -50,5 +52,6 @@ pub struct UpsertToken {
     pub logo_uri: Option<String>,
     pub decimals: i16,
     pub pyth_feed_id: Option<String>,
+    pub switchboard_feed_id: Option<String>,
     pub enabled: bool,
 }

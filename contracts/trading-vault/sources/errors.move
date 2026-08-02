@@ -44,3 +44,8 @@ public fun external_already_set(): u64 { 105 }
 public fun attested_limits_exceeded(): u64 { 106 }
 public fun attestation_disabled(): u64 { 107 }
 public fun bad_attestation(): u64 { 108 }
+
+/// The asset has an oracle PIN and the attesting witness is not it
+/// (SO-335). Distinct from `oracle_not_allowed`: the adapter is
+/// allowlisted protocol-wide, just not for this asset.
+public fun oracle_not_pinned_for_asset(): u64 { 109 }

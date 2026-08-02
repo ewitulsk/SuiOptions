@@ -15,9 +15,11 @@ path = "src/main.rs"
 observability     = { workspace = true, features = ["axum"] }
 runtime-config    = { workspace = true }
 cli-spec          = { workspace = true }
+protocol-types  = { workspace = true }
 pyth-client       = { workspace = true }
 oracle-client     = { workspace = true }
 token-info-client = { workspace = true }
+sui-types         = { workspace = true }
 
 clap = { workspace = true }
 tokio = { workspace = true }

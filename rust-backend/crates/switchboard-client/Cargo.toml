@@ -1,0 +1,17 @@
+[package]
+name = "switchboard-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+protocol-types = { workspace = true }
+sui-types = { workspace = true }
+
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
