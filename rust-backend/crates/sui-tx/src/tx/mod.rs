@@ -66,10 +66,46 @@ pub fn clock_arg(pt: &mut ProgrammableTransactionBuilder) -> Result<Argument> {
     })?)
 }
 
+/// Attempts (including the first) `submit_ptb` makes when the gas coin
+/// reference it built with turns out to be stale. Waits between attempts are
+/// 300ms / 900ms / 2.7s — the observed read lag is sub-second, so this is
+/// several times the window that actually needs covering.
+const GAS_REF_ATTEMPTS: u32 = 4;
+
+/// Did the node reject this transaction because the gas coin reference was
+/// not the current version?
+///
+/// This is a *rejection*, not a revert: validators refuse to admit the
+/// transaction at all, so nothing executed and rebuilding with a fresh gas
+/// reference is safe — the new reference yields a different digest, so the
+/// resubmission cannot double-apply the effects of the original.
+///
+/// The staleness is normal under gRPC. `ExecuteTransaction` returns once
+/// validators finalize, but the fullnode's *read* view can still be a version
+/// behind, so a transaction built moments after another one from the same
+/// address selects the pre-tx gas reference. JSON-RPC's
+/// `WaitForLocalExecution` used to hide this, which is why it only appeared
+/// after the gRPC migration (SO-337): mm-bot's bootstrap creates its quote
+/// signer and then immediately funds its collateral account, and the second
+/// transaction was rejected on every boot (SO-343).
+fn is_stale_gas_rejection(err: &anyhow::Error) -> bool {
+    // Matched on the message because the gRPC status is flattened into an
+    // anyhow chain by ChainClient::execute. Both phrasings come from the same
+    // validator rejection; either alone is sufficient.
+    let msg = format!("{err:#}");
+    msg.contains("is unavailable for consumption")
+        || msg.contains("needs to be rebuilt because object")
+}
+
 /// Gas-select, sign, submit, and assert success for a finished PTB. Shared
 /// by the rfq / vault builders (and the keeper, which prepends a Pyth
 /// price update before the crank call); the older modules keep their
 /// local copies.
+///
+/// Re-reads the gas coin and resubmits when the node rejects the transaction
+/// for a stale gas reference — see [`is_stale_gas_rejection`]. Only that one
+/// rejection is retried; Move aborts and transport errors propagate on the
+/// first failure, since those may have executed.
 pub async fn submit_ptb(
     client: &ChainClient,
     signer: &Signer,
@@ -79,23 +115,42 @@ pub async fn submit_ptb(
 ) -> Result<ExecutedTransaction> {
     let programmable = pt.finish();
 
-    let gas_coin = client
-        .gas_coin(signer.address)
-        .await
-        .context("selecting a gas coin")?;
-    let gas_price = client
-        .reference_gas_price()
-        .await
-        .context("fetching reference gas price")?;
+    for attempt in 1..=GAS_REF_ATTEMPTS {
+        // Re-read per attempt: a stale reference is exactly what we are
+        // recovering from, so reusing the previous read would spin forever.
+        let gas_coin = client
+            .gas_coin(signer.address)
+            .await
+            .context("selecting a gas coin")?;
+        let gas_price = client
+            .reference_gas_price()
+            .await
+            .context("fetching reference gas price")?;
 
-    let tx_data = TransactionData::new_programmable(
-        signer.address,
-        vec![gas_coin],
-        programmable,
-        gas_budget,
-        gas_price,
-    );
-    submit_tx_data(client, signer, tx_data, label).await
+        let tx_data = TransactionData::new_programmable(
+            signer.address,
+            vec![gas_coin],
+            programmable.clone(),
+            gas_budget,
+            gas_price,
+        );
+        match submit_tx_data(client, signer, tx_data, label).await {
+            Ok(resp) => return Ok(resp),
+            Err(e) if attempt < GAS_REF_ATTEMPTS && is_stale_gas_rejection(&e) => {
+                let backoff =
+                    std::time::Duration::from_millis(300 * 3u64.pow(attempt - 1));
+                debug!(
+                    label,
+                    attempt,
+                    backoff_ms = backoff.as_millis() as u64,
+                    "gas reference stale; re-reading and resubmitting"
+                );
+                tokio::time::sleep(backoff).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("loop returns on the final attempt")
 }
 
 /// Sign, submit, and assert success for a fully-formed `TransactionData`.
@@ -149,4 +204,66 @@ pub fn tx_digest(resp: &ExecutedTransaction) -> sui_types::digests::TransactionD
 pub async fn owned_object_arg(client: &ChainClient, id: ObjectID) -> Result<ObjectArg> {
     debug!(%id, "fetching owned object arg");
     client.owned_object_arg(id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_stale_gas_rejection;
+
+    /// Verbatim from the rejection that crash-looped mm-bot's bootstrap on
+    /// staging (SO-343), truncated after the validator-key list.
+    const STALE_GAS: &str = "gRPC ExecuteTransaction: code: 'Client specified an \
+invalid argument', message: \"Transaction is rejected as invalid by more than 1/3 \
+of validators by stake (non-retriable). Non-retriable errors: [Transaction needs \
+to be rebuilt because object 0x49f13ae28ff9bc7e4e4fb8b9a2562465e115f5064b009574ee\
+562a6d6225fa87 version 0x396fa533 (68vbhwP1HMbRT145vLywNH65645gcDA2PVnQVDcVEpVj) \
+is unavailable for consumption, current version: 0x396fa534 { k#80000033.. } with \
+3578 stake].\"";
+
+    #[test]
+    fn classifies_the_stale_gas_rejection() {
+        assert!(is_stale_gas_rejection(&anyhow::anyhow!("{STALE_GAS}")));
+    }
+
+    #[test]
+    fn classifies_through_a_context_chain() {
+        // submit_tx_data wraps the gRPC error in `submitting {label} tx`, so
+        // the marker is only visible with the `{:#}` (full-chain) formatting
+        // the classifier uses.
+        let err = anyhow::anyhow!("{STALE_GAS}");
+        let wrapped = err.context("submitting test token tx");
+        assert!(is_stale_gas_rejection(&wrapped));
+    }
+
+    /// A Move abort must never be retried — it executed and reverted.
+    #[test]
+    fn does_not_classify_a_move_abort() {
+        let err = anyhow::anyhow!(
+            "execute_write reverted: Failure {{ error: MoveAbort(MoveLocation \
+{{ module: ModuleId {{ address: 0x5040, name: Identifier(\"mm_collateral\") }}, \
+function: 3, instruction: 21 }}, 31) }}"
+        );
+        assert!(!is_stale_gas_rejection(&err));
+    }
+
+    /// Transport failures may have executed; they must propagate, not retry.
+    #[test]
+    fn does_not_classify_a_transport_error() {
+        let err = anyhow::anyhow!(
+            "gRPC ExecuteTransaction: status: Unavailable, message: \"error trying \
+to connect: tcp connect error: Connection refused (os error 111)\""
+        );
+        assert!(!is_stale_gas_rejection(&err));
+    }
+
+    /// Insufficient gas is a real, terminal condition — retrying just burns
+    /// the attempt budget and hides the cause.
+    #[test]
+    fn does_not_classify_insufficient_gas() {
+        let err = anyhow::anyhow!(
+            "gRPC ExecuteTransaction: code: 'Client specified an invalid argument', \
+message: \"Balance of gas object 10 is lower than the needed amount: 1000000\""
+        );
+        assert!(!is_stale_gas_rejection(&err));
+    }
 }
