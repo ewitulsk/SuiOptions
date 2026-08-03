@@ -1,0 +1,75 @@
+name: Workflow Lint
+
+# Lint the workflows themselves. There was no workflow CI in this repo, so a
+# `run:` block only ever got parsed the first time someone dispatched the job
+# — in production, mid-deploy.
+#
+# SO-342 is the case that motivated this. The mainnet guard added in SO-330
+# put apostrophes around an interpolated value inside a jq program that is
+# itself wrapped in shell single quotes:
+#
+#     ... echo \"FATAL: refusing network '\($network)' — testnet only\" ...
+#
+# The apostrophes closed the shell quote early, bash hit a bare `)`, and
+# `Redeploy Contract`'s "Reset databases on EC2" step died with a syntax
+# error — after the contract had already published on-chain, and before the
+# commit + rollout jobs it gates. actionlint runs shellcheck over every
+# `run:` block, so it flags exactly this class of break at PR time.
+#
+# Both tools are pinned: they gain checks between releases, and an unpinned
+# upgrade would fail unrelated PRs on rules that were not in effect when they
+# were written. shellcheck is pinned for the same reason and not taken from
+# the runner image — that version moves when GitHub rebuilds ubuntu-latest,
+# which would retroactively redden PRs that touch nothing. Pinning it also
+# means `shellcheck --version` locally matches CI, so a clean local run is
+# actually evidence. Bump both deliberately.
+
+on:
+  push:
+    branches: [staging, main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+
+permissions:
+  contents: read
+
+env:
+  ACTIONLINT_VERSION: 1.7.7
+  SHELLCHECK_VERSION: 0.11.0
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # actionlint shells out to shellcheck for `run:` blocks and silently
+      # skips that analysis if it is missing — which would make this job pass
+      # while checking far less than it looks. Install the pinned build ahead
+      # of the runner's own, and print the version so the log records which
+      # ruleset produced the result.
+      - name: Install shellcheck ${{ env.SHELLCHECK_VERSION }}
+        run: |
+          curl -sSfL \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            -o /tmp/shellcheck.tar.xz
+          tar xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install "/tmp/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Install actionlint ${{ env.ACTIONLINT_VERSION }}
+        run: |
+          curl -sSfL \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            -o /tmp/actionlint.tgz
+          tar xzf /tmp/actionlint.tgz -C /tmp actionlint
+          sudo install /tmp/actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - name: Lint workflows
+        run: actionlint -color
