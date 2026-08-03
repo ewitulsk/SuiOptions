@@ -165,7 +165,9 @@ jobs:
             {
               commands: [
                 "set -eu",
-                "if [ \"\($network)\" != \"testnet\" ]; then echo \"FATAL: refusing network '\($network)' — testnet only\"; exit 1; fi",
+                "# Bracketed, not apostrophised: an apostrophe here closes the",
+                "# shell single quote that wraps this whole jq program (SO-342).",
+                "if [ \"\($network)\" != \"testnet\" ]; then echo \"FATAL: refusing network [\($network)] — testnet only\"; exit 1; fi",
                 "cd /opt/options/\($env)",
                 "COMPOSE_FILE=\"docker-compose.\($env).yml\"",
 

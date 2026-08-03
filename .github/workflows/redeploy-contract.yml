@@ -269,6 +269,9 @@ jobs:
           # The pre-SO-356 unversioned asset has no provable source and must
           # never be served again. Drop it on first sight; the guard makes
           # this a no-op once it is gone.
+          # SC2015: not an if-then-else — the `|| true` is the no-op guard for
+          # the delete, and the echo it also catches cannot fail.
+          # shellcheck disable=SC2015
           gh release delete-asset deployment-manager-bin deploy-linux-x64 --yes 2>/dev/null \
             && echo "Deleted the legacy unkeyed deploy-linux-x64 asset." || true
 
@@ -544,7 +547,11 @@ jobs:
                 "# Inverted: proceed only on a proven testnet. The previous",
                 "# form refused mainnet and proceeded on anything else,",
                 "# including an empty or unset value.",
-                "if [ \"\($network)\" != \"testnet\" ]; then echo \"FATAL: refusing network '\($network)' — testnet only\"; exit 1; fi",
+                "# The network is bracketed, not apostrophised: an apostrophe",
+                "# here closes the shell single quote that wraps this whole jq",
+                "# program, and bash then dies on the now-bare paren before the",
+                "# step makes a single AWS call (SO-342).",
+                "if [ \"\($network)\" != \"testnet\" ]; then echo \"FATAL: refusing network [\($network)] — testnet only\"; exit 1; fi",
 
                 "cd /opt/options/\($env)",
                 "COMPOSE_FILE=\"docker-compose.\($env).yml\"",

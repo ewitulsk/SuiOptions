@@ -45,6 +45,9 @@ jobs:
 
       - id: tag
         run: |
+          # SC2016: the backticked `null` below is a JMESPath literal and the
+          # jq program is a jq program — neither is meant to expand in shell.
+          # shellcheck disable=SC2016
           # Newest tagged image in options/indexer, by push timestamp.
           # Now that images carry env tags (staging, prod,
           # staging_<sha>, …) alongside the bare SHA, we must filter for the
