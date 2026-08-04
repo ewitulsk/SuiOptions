@@ -11281,10 +11281,13 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "hex",
+ "k256 0.13.4",
  "protocol-types",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "sha3 0.10.9",
  "sui-types",
  "tracing",
 ]
