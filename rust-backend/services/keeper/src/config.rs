@@ -41,6 +41,9 @@ fn default_health_addr() -> SocketAddr {
 fn default_tick_secs() -> u64 {
     15
 }
+fn default_mark_refresh_interval_ms() -> u64 {
+    300_000
+}
 fn default_hermes_url() -> String {
     "https://hermes.pyth.network".into()
 }
@@ -76,6 +79,13 @@ pub struct KeeperConfig {
 
     #[serde(default = "default_tick_secs")]
     pub tick_secs: u64,
+
+    /// Minimum spacing between per-vault mark-refresh appraisals (crank
+    /// 8). Every mark is a paid on-chain tx per vault, so this is the
+    /// main gas-vs-freshness knob: 5 min default; staging runs slower
+    /// (SO-346 — appraisal spam drained the shared wallet).
+    #[serde(default = "default_mark_refresh_interval_ms")]
+    pub mark_refresh_interval_ms: u64,
 
     /// Indexer GraphQL endpoint — vault discovery (`vaults` view),
     /// bucket candidates for strike selection, and the call type of the

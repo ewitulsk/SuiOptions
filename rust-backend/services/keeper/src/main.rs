@@ -99,6 +99,7 @@ async fn main() -> Result<()> {
         &cfg.external,
         oracle.clone(),
         cfg.vault_defaults.vol_window_days,
+        cfg.mark_refresh_interval_ms,
     )
     .await
     .context("building the trading-vault ctx (token-info snapshot incomplete or chain unreachable)")?;

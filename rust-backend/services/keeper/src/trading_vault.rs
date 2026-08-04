@@ -102,11 +102,22 @@ pub struct TradingVaultCtx {
     pub equity_stale_alert_ms: u64,
     /// Per-vault last mark-refresh time (crank 8, SO-304).
     pub mark_refreshed_at: std::sync::Mutex<BTreeMap<ObjectID, u64>>,
+    /// Minimum spacing between per-vault mark-refresh cranks (SO-304):
+    /// the tick loop runs much faster than fresh marks are worth their
+    /// gas. Config `mark_refresh_interval_ms` — the main gas knob.
+    pub mark_refresh_interval_ms: u64,
+    /// Per-vault crank backoff (SO-346): consecutive non-benign failure
+    /// count + earliest next attempt. Without it a persistently failing
+    /// vault retries at FULL TICK RATE, and one bad night multiplied a
+    /// per-vault failure into hundreds of paid reverts.
+    pub crank_backoff: std::sync::Mutex<BTreeMap<ObjectID, (u32, u64)>>,
 }
 
-/// Minimum spacing between per-vault mark-refresh cranks (SO-304): the
-/// tick loop runs much faster than fresh marks are worth their gas.
-const MARK_REFRESH_INTERVAL_MS: u64 = 300_000;
+/// Backoff schedule for non-benign crank failures: tick-rate on the
+/// first failure, doubling to a 10-minute cap. Benign races (settle
+/// lost, appraisal raced) never back off — they resolve next tick.
+const CRANK_BACKOFF_BASE_MS: u64 = 15_000;
+const CRANK_BACKOFF_CAP_MS: u64 = 600_000;
 
 /// Indexer view of a vault's external account, threaded into the tick.
 pub struct ExternalView {
@@ -274,7 +285,19 @@ pub async fn tick(wrap: &SuiClientWrapper, http: &reqwest::Client, indexer: &Ind
         if let Some(ext) = &external {
             monitor_external(ctx, vault_id, ext, now_ms);
         }
-        if let Err(e) = tick_one(
+        // Per-vault backoff (SO-346): a vault whose cranks keep failing
+        // for a real (non-benign) reason waits out its window instead of
+        // retrying — and paying — at full tick rate.
+        {
+            let backoff = ctx.crank_backoff.lock().expect("crank_backoff poisoned");
+            if let Some((fails, until)) = backoff.get(&vault_id) {
+                if now_ms < *until {
+                    debug!(vault = %vault_id, fails, wait_ms = *until - now_ms, "crank backoff; skipping this tick");
+                    continue;
+                }
+            }
+        }
+        match tick_one(
             wrap,
             http,
             ctx,
@@ -286,12 +309,29 @@ pub async fn tick(wrap: &SuiClientWrapper, http: &reqwest::Client, indexer: &Ind
         )
         .await
         {
-            classify_and_log(vault_id, &e);
+            Ok(()) => {
+                ctx.crank_backoff.lock().expect("crank_backoff poisoned").remove(&vault_id);
+            }
+            Err(e) => {
+                let benign = classify_and_log(vault_id, &e);
+                if !benign {
+                    let mut backoff =
+                        ctx.crank_backoff.lock().expect("crank_backoff poisoned");
+                    let fails = backoff.get(&vault_id).map(|(f, _)| f + 1).unwrap_or(1);
+                    let delay = CRANK_BACKOFF_BASE_MS
+                        .saturating_mul(1u64 << fails.min(16))
+                        .min(CRANK_BACKOFF_CAP_MS);
+                    backoff.insert(vault_id, (fails, now_ms + delay));
+                }
+            }
         }
     }
 }
 
-fn classify_and_log(vault_id: ObjectID, e: &anyhow::Error) {
+/// Log a crank failure at the right severity; returns whether it was a
+/// benign race (which must NOT feed the backoff — races resolve on the
+/// very next tick).
+fn classify_and_log(vault_id: ObjectID, e: &anyhow::Error) -> bool {
     let msg = format!("{e:#}");
     // Known benign shapes: appraisal raced a session (83), incomplete
     // because holdings changed under us (82), insufficient free balance
@@ -314,14 +354,16 @@ fn classify_and_log(vault_id: ObjectID, e: &anyhow::Error) {
         || msg.contains("not available for consumption");
     if benign.iter().any(|b| msg.contains(b)) || equity_race || vol_race || bid_ticket_race {
         debug!(vault = %vault_id, error = %msg, "trading-vault crank lost a race; next tick");
+        true
     } else {
         tracing::error!(
             alert_id = "tx-failed-keeper",
             vault = %vault_id,
             class = "retry",
             error = %msg,
-            "trading-vault crank failed; retrying next tick"
+            "trading-vault crank failed; backing off"
         );
+        false
     }
 }
 
@@ -386,7 +428,7 @@ fn mark_refresh_due(ctx: &TradingVaultCtx, vault_id: ObjectID, now_ms: u64) -> b
         .get(&vault_id)
         .copied()
         .unwrap_or(0);
-    now_ms.saturating_sub(last) >= MARK_REFRESH_INTERVAL_MS
+    now_ms.saturating_sub(last) >= ctx.mark_refresh_interval_ms
 }
 
 fn refs_for(ctx: &TradingVaultCtx, vault_id: ObjectID) -> AppraisalRefs {
@@ -1552,6 +1594,7 @@ pub async fn build_ctx(
     external: &crate::config::ExternalConfig,
     oracle: oracle_client::OracleClient,
     vol_window_days: u32,
+    mark_refresh_interval_ms: u64,
 ) -> Result<Option<TradingVaultCtx>> {
     // Absent records mean token-info served a partial snapshot (boot
     // race in a same-wave deploy) — every env publishes the family since
@@ -1710,6 +1753,8 @@ pub async fn build_ctx(
         reconciliation_tolerance_bps: external.reconciliation_tolerance_bps,
         equity_stale_alert_ms: external.equity_stale_alert_ms,
         mark_refreshed_at: std::sync::Mutex::new(BTreeMap::new()),
+        mark_refresh_interval_ms,
+        crank_backoff: std::sync::Mutex::new(BTreeMap::new()),
     }))
 }
 
