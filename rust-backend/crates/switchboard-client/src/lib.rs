@@ -187,7 +187,7 @@ impl UpdateResponse {
     /// [`CrossbarClient::sui_oracles`]). An unmapped signer is a hard
     /// error: dropping it would silently change the consensus set the
     /// on-chain verifier checks.
-    fn into_bundle(self, oracle_objects: &BTreeMap<String, ObjectID>) -> Result<QuoteBundle> {
+    fn into_bundle(self, oracle_objects: &BTreeMap<String, OracleInfo>) -> Result<QuoteBundle> {
         if self.median_responses.is_empty() {
             return Err(anyhow!("crossbar returned no median responses"));
         }
@@ -281,22 +281,18 @@ impl UpdateResponse {
             // r || s || v — the shape `secp256k1_ecrecover` takes on chain.
             // v is re-derived against ethAddress when possible; the
             // reported id is only the first candidate (see OracleResponse).
-            let v = resolve_recovery_id(
-                &prehash,
-                &sig,
-                o.recovery_id,
-                o.eth_address.as_deref(),
-            )?;
-            sig.push(v);
-            signatures.push(sig);
             let key = strip0x(&o.oracle_pubkey).to_ascii_lowercase();
-            let id = oracle_objects.get(&key).ok_or_else(|| {
+            let info = oracle_objects.get(&key).ok_or_else(|| {
                 anyhow!(
-                    "oracle {key} signed the bundle but has no Sui object in /oracles/sui — \
-                     cannot build the on-chain call"
+                    "oracle {key} signed the bundle but is not in the queue's on-chain \
+                     registered-oracle map — cannot build the on-chain call"
                 )
             })?;
-            oracle_ids.push(*id);
+            let v = resolve_recovery_id(&prehash, &sig, o.recovery_id, &info.secp_key)
+                .with_context(|| format!("oracle {key} (object {})", info.object_id))?;
+            sig.push(v);
+            signatures.push(sig);
+            oracle_ids.push(info.object_id);
         }
 
         if oracle_ids.len() > MAX_ORACLES {
@@ -334,53 +330,57 @@ impl UpdateResponse {
     }
 }
 
-/// Pick the recovery id that actually recovers the signer (SO-346).
+/// Pick the recovery id whose recovered signer matches the oracle's
+/// ON-CHAIN attested secp key — the exact comparison `run_N` makes
+/// (SO-346).
 ///
-/// Crossbar's reported `recoveryId` is unreliable — a wrong v does not
-/// error on chain, it recovers a DIFFERENT key which fails queue
-/// membership silently and empties the bundle. When the response carries
-/// `ethAddress`, try the reported id first and its complement second,
-/// keeping whichever recovers a key whose keccak160 matches. Without an
-/// `ethAddress` the reported id passes through untouched.
+/// Two live failure modes this kills:
+/// - crossbar's reported `recoveryId` is sometimes wrong; the wrong v
+///   recovers a different key and the oracle is silently dropped;
+/// - crossbar rotates across signers whose Sui objects hold ZERO or
+///   stale `secp256k1_key`s (most of the testnet queue, observed
+///   2026-08-04) — those bundles can never verify on chain, so refusing
+///   them client-side lets the caller retry for an attested signer.
 fn resolve_recovery_id(
     prehash: &[u8; 32],
     rs: &[u8],
     reported: u8,
-    eth_address: Option<&str>,
+    onchain_secp: &[u8],
 ) -> Result<u8> {
-    // Ethereum-style 27/28 spellings normalize to parity.
-    let base = if reported >= 27 { reported - 27 } else { reported } & 1;
-    let Some(addr_hex) = eth_address else {
-        return Ok(base);
-    };
-    let want = hex::decode(strip0x(addr_hex)).context("decoding ethAddress")?;
-    if want.len() != 20 {
-        return Err(anyhow!("ethAddress is {} bytes; expected 20", want.len()));
+    if onchain_secp.is_empty() || onchain_secp.iter().all(|b| *b == 0) {
+        return Err(anyhow!(
+            "signing oracle's on-chain secp256k1_key is absent/zero — its attestation \
+             never landed on this network; retry for a different signer"
+        ));
     }
     use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
-    use sha3::Digest;
+    // Ethereum-style 27/28 spellings normalize to parity.
+    let base = if reported >= 27 { reported - 27 } else { reported } & 1;
     let sig = Signature::from_slice(rs).context("parsing r||s signature")?;
     for cand in [base, 1 - base] {
         let Ok(rid) = RecoveryId::try_from(cand) else { continue };
         let Ok(vk) = VerifyingKey::recover_from_prehash(prehash, &sig, rid) else {
             continue;
         };
+        // On chain: check_subvec(decompressed_pubkey, secp_key, 1) — the
+        // attested key is compared against the uncompressed key from
+        // offset 1 (past the 0x04 prefix).
         let uncompressed = vk.to_encoded_point(false);
-        let hash = sha3::Keccak256::digest(&uncompressed.as_bytes()[1..]);
-        if hash[12..] == want[..] {
+        let body = &uncompressed.as_bytes()[1..];
+        if body.len() >= onchain_secp.len() && &body[..onchain_secp.len()] == onchain_secp {
             if cand != base {
                 tracing::warn!(
                     reported,
                     used = cand,
-                    "crossbar recoveryId was wrong; corrected against ethAddress"
+                    "crossbar recoveryId was wrong; corrected against the on-chain key"
                 );
             }
             return Ok(cand);
         }
     }
     Err(anyhow!(
-        "neither recovery id recovers a key matching ethAddress {addr_hex} — \
-         signature does not verify against this bundle's consensus message"
+        "signature does not recover the oracle's on-chain secp key under either \
+         recovery id — stale attestation or wrong signer; retry for a different signer"
     ))
 }
 
@@ -483,11 +483,12 @@ impl CrossbarClient {
 
     /// Fetch a signed consensus payload for `feed_hashes`.
     ///
-    /// `oracle_objects` comes from [`CrossbarClient::sui_oracles`].
+    /// `oracle_objects` comes from [`oracles_from_queue`] — the chain map
+    /// carrying each oracle's attested secp key.
     pub async fn fetch_quotes(
         &self,
         feed_hashes: &[String],
-        oracle_objects: &BTreeMap<String, ObjectID>,
+        oracle_objects: &BTreeMap<String, OracleInfo>,
     ) -> Result<QuoteBundle> {
         validate_request(feed_hashes)?;
         let joined = feed_hashes
@@ -540,10 +541,24 @@ impl CrossbarClient {
 /// 2026-07), and `?network=devnet` lists Sui DEVNET objects — ids that
 /// do not exist on testnet. The chain is authoritative anyway: `run_N`
 /// validates signing oracles against this exact table.
+/// One registered oracle: its Sui object and the secp256k1 signing key
+/// the object currently attests. `run_N` recovers each signature and
+/// compares against THIS key — a signer whose object holds a zero/stale
+/// key is silently dropped on chain, so the client must check it too.
+/// Observed live (2026-08-04): most of the testnet queue's 37 oracles
+/// carry all-zero keys; only properly-attested signers verify.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OracleInfo {
+    pub object_id: ObjectID,
+    /// The object's `secp256k1_key` bytes (X‖Y or X-prefix form; compared
+    /// against the recovered key's uncompressed bytes from offset 1).
+    pub secp_key: Vec<u8>,
+}
+
 pub async fn oracles_from_queue(
     sui_rpc_url: &str,
     queue_id: ObjectID,
-) -> Result<BTreeMap<String, ObjectID>> {
+) -> Result<BTreeMap<String, OracleInfo>> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
@@ -608,7 +623,7 @@ pub async fn oracles_from_queue(
     }
 
     // Batch-read the entries.
-    let mut out = BTreeMap::new();
+    let mut by_key: BTreeMap<String, ObjectID> = BTreeMap::new();
     for chunk in field_ids.chunks(50) {
         let objs = rpc(
             "sui_multiGetObjects",
@@ -620,7 +635,28 @@ pub async fn oracles_from_queue(
                 continue;
             };
             let (key, id) = parse_existing_oracle(fields)?;
-            out.insert(key, id);
+            by_key.insert(key, id);
+        }
+    }
+
+    // Batch-read the oracle OBJECTS for their attested secp keys.
+    let mut out = BTreeMap::new();
+    let entries: Vec<(String, ObjectID)> = by_key.into_iter().collect();
+    for chunk in entries.chunks(50) {
+        let ids: Vec<String> = chunk.iter().map(|(_, id)| id.to_hex_literal()).collect();
+        let objs = rpc(
+            "sui_multiGetObjects",
+            serde_json::json!([ids, {"showContent": true}]),
+        )
+        .await?;
+        let arr = objs.as_array().cloned().unwrap_or_default();
+        for ((key, id), obj) in chunk.iter().zip(arr) {
+            let secp_key: Vec<u8> = obj
+                .pointer("/data/content/fields/secp256k1_key")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|b| b.as_u64().map(|n| n as u8)).collect())
+                .unwrap_or_default();
+            out.insert(key.clone(), OracleInfo { object_id: *id, secp_key });
         }
     }
     Ok(out)
@@ -738,14 +774,24 @@ mod tests {
       "slot": 481090766
 }"#;
 
-    fn oracle_map() -> BTreeMap<String, ObjectID> {
+    fn oracle_map() -> BTreeMap<String, OracleInfo> {
         let mut m = BTreeMap::new();
         m.insert(
             "58fce533fc20e246d3a7d5df9388ac69314af93d580047fb9137cd80ba58e641".into(),
-            ObjectID::from_hex_literal(
-                "0xcbe815280222f191e7b9ebeeb4e19db039967bd70e753bdf8fadc361603ee751",
-            )
-            .unwrap(),
+            OracleInfo {
+                object_id: ObjectID::from_hex_literal(
+                    "0xcbe815280222f191e7b9ebeeb4e19db039967bd70e753bdf8fadc361603ee751",
+                )
+                .unwrap(),
+                // The fixture signer's uncompressed key body (X||Y),
+                // recovered from the captured signature itself — the
+                // shape the on-chain object attests.
+                secp_key: hex::decode(
+                    "ac447e686cc28f6e9186d7760417194a756d5af2d22d65a42d73c968b616d598\
+                     d7443751f1e7355dd77c9d3da7f405085708b9187aa1a9651d3f869e6907b5cf",
+                )
+                .unwrap(),
+            },
         );
         m
     }
@@ -779,7 +825,7 @@ mod tests {
         // on-chain verifier checks against.
         let resp: UpdateResponse = serde_json::from_str(LIVE_SAMPLE).unwrap();
         let err = resp.into_bundle(&BTreeMap::new()).unwrap_err().to_string();
-        assert!(err.contains("no Sui object"), "{err}");
+        assert!(err.contains("registered-oracle map"), "{err}");
     }
 
     #[test]
@@ -822,7 +868,19 @@ mod tests {
                     ),
                 }],
             });
-            map.insert(key, ObjectID::ZERO);
+            // Same real secp key everywhere: the cloned signatures must
+            // pass signer verification so the ARITY check is what trips.
+            map.insert(
+                key,
+                OracleInfo {
+                    object_id: ObjectID::ZERO,
+                    secp_key: hex::decode(
+                        "ac447e686cc28f6e9186d7760417194a756d5af2d22d65a42d73c968b616d598\
+                         d7443751f1e7355dd77c9d3da7f405085708b9187aa1a9651d3f869e6907b5cf",
+                    )
+                    .unwrap(),
+                },
+            );
         }
         let err = resp.into_bundle(&map).unwrap_err().to_string();
         assert!(err.contains("run_1..run_6"), "{err}");
