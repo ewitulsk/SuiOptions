@@ -814,22 +814,46 @@ async fn sweep_custody_settled(
         }
         let result: Result<()> = async {
             let client = &wrap.client;
-            let mut pt = ProgrammableTransactionBuilder::new();
-            let vault = pt.obj(shared_object_arg(client, vault_id, true).await?)?;
-            let ireg = pt.obj(shared_object_arg(client, ctx.integration_registry_id, false).await?)?;
-            for (pool_id, base, quote) in pools {
-                let custody = pt.pure(id)?;
-                let pool = pt.obj(shared_object_arg(client, *pool_id, true).await?)?;
-                pt.programmable_move_call(
-                    dba,
-                    Identifier::new("deepbook_adapter").unwrap(),
-                    Identifier::new("crank_withdraw_settled").unwrap(),
-                    vec![TypeTag::from_str(base)?, TypeTag::from_str(quote)?],
-                    vec![vault, ireg, custody, pool],
-                );
+            let build = || async {
+                let mut pt = ProgrammableTransactionBuilder::new();
+                let vault = pt.obj(shared_object_arg(client, vault_id, true).await?)?;
+                let ireg =
+                    pt.obj(shared_object_arg(client, ctx.integration_registry_id, false).await?)?;
+                for (pool_id, base, quote) in pools {
+                    let custody = pt.pure(id)?;
+                    let pool = pt.obj(shared_object_arg(client, *pool_id, true).await?)?;
+                    pt.programmable_move_call(
+                        dba,
+                        Identifier::new("deepbook_adapter").unwrap(),
+                        Identifier::new("crank_withdraw_settled").unwrap(),
+                        vec![TypeTag::from_str(base)?, TypeTag::from_str(quote)?],
+                        vec![vault, ireg, custody, pool],
+                    );
+                }
+                Ok::<_, anyhow::Error>(pt)
+            };
+            // Preflight with a FREE dev-inspect: a custody whose orders
+            // are still resting reverts this crank on-chain every tick,
+            // and paying gas for a guaranteed revert 4×/min per vault
+            // drained the shared wallet overnight (2026-08-04). Only
+            // submit what would actually execute.
+            let probe = client.dev_inspect_ptb(wrap.signer.address, build().await?).await?;
+            {
+                use sui_types::effects::TransactionEffectsAPI;
+                let status = probe.transaction.effects.status();
+                if status.is_err() {
+                    debug!(vault = %vault_id, status = ?status, "settle crank would revert; skipping");
+                    return Ok(());
+                }
             }
-            submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, "deepbook_adapter::crank_settle")
-                .await?;
+            submit_ptb(
+                client,
+                &wrap.signer,
+                build().await?,
+                ctx.gas_budget,
+                "deepbook_adapter::crank_settle",
+            )
+            .await?;
             Ok(())
         }
         .await;
