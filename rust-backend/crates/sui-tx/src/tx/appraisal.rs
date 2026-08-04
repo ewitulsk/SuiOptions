@@ -205,6 +205,19 @@ fn move_field<'a>(s: &'a Value, name: &str) -> Result<&'a Value> {
         .ok_or_else(|| anyhow!("object missing field {name}"))
 }
 
+/// A `TypeName`-valued JSON node → the type string.
+///
+/// The gRPC json rendering collapses `TypeName` to the BARE string
+/// (golden-tested in `api-service/src/sui_rpc.rs`); the struct-shaped
+/// `{"name": …}` form is tolerated for renderings that don't. Reading
+/// only the struct shape is exactly the SO-337 regression that broke
+/// `discover_holdings` on every vault ("vault config missing
+/// deposit_asset") — use this helper for every TypeName field.
+fn type_name_str(v: &Value) -> Option<&str> {
+    v.as_str()
+        .or_else(|| v.pointer("/name").and_then(Value::as_str))
+}
+
 /// A `VecSet<TypeName>` field → canonical type strings.
 fn type_name_set(v: &Value) -> Result<Vec<String>> {
     let contents = v
@@ -270,8 +283,8 @@ pub async fn discover_holdings(
     let config_json = move_field(&vault, "config")?.clone();
     let deposit_type = canon(
         config_json
-            .pointer("/deposit_asset/name")
-            .and_then(Value::as_str)
+            .get("deposit_asset")
+            .and_then(type_name_str)
             .ok_or_else(|| anyhow!("vault config missing deposit_asset"))?,
     );
     let mut free_assets = type_name_set(move_field(&vault, "asset_types")?)?;
@@ -331,8 +344,8 @@ pub async fn discover_holdings(
             .ok_or_else(|| anyhow!("unparseable position key name for {}", entry.field_id))?;
         if is_tag {
             let tag = field
-                .pointer("/value/name")
-                .and_then(Value::as_str)
+                .pointer("/value")
+                .and_then(type_name_str)
                 .map(canon)
                 .ok_or_else(|| anyhow!("unparseable adapter tag for {pos_id}"))?;
             tags.insert(pos_id, tag);
@@ -371,9 +384,7 @@ pub async fn discover_holdings(
             let fields = object_fields(client, pos_id).await?;
             let escrow_json = move_field(&fields, "escrow_type")?.clone();
             let escrow_type = canon(
-                escrow_json
-                    .pointer("/name")
-                    .and_then(Value::as_str)
+                type_name_str(&escrow_json)
                     .ok_or_else(|| anyhow!("ticket missing escrow_type"))?,
             );
             let id_field = |name: &str| -> Result<ObjectID> {
@@ -397,8 +408,7 @@ pub async fn discover_holdings(
             let type_field = |name: &str| -> Result<String> {
                 let j = move_field(&fields, name)?.clone();
                 Ok(canon(
-                    j.pointer("/name")
-                        .and_then(Value::as_str)
+                    type_name_str(&j)
                         .ok_or_else(|| anyhow!("bid ticket missing {name}"))?,
                 ))
             };
@@ -844,6 +854,18 @@ pub async fn compose_appraisal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn type_name_reads_both_renderings() {
+        // gRPC json: bare string (the live shape that broke
+        // discover_holdings when only the struct form was read).
+        let bare = serde_json::json!("f81e::tusdc::TUSDC");
+        assert_eq!(type_name_str(&bare), Some("f81e::tusdc::TUSDC"));
+        // Struct-shaped fallback.
+        let wrapped = serde_json::json!({"name": "f81e::tusdc::TUSDC"});
+        assert_eq!(type_name_str(&wrapped), Some("f81e::tusdc::TUSDC"));
+        assert_eq!(type_name_str(&serde_json::json!({"other": 1})), None);
+    }
 
     #[test]
     fn external_account_contributes_no_pyth_legs() {
