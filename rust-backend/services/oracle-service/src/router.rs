@@ -139,31 +139,49 @@ async fn get_oracle_legs(
             switchboard_package_id,
         } => {
             let hashes: Vec<String> = feeds.iter().map(|f| f.to_hex()).collect();
+            // Crossbar rotates signers per request, and on this network
+            // MOST registered oracles carry zero/stale on-chain secp
+            // keys (their quotes can never verify — observed live,
+            // SO-346). Each retry is a fresh draw, so keep pulling until
+            // crossbar picks an attested signer; the map is re-resolved
+            // once mid-way in case the failure is genuine key turnover.
             let bundle = {
-                let map = oracles.read().await.clone();
-                match crossbar.fetch_quotes(&hashes, &map).await {
-                    Ok(b) => b,
-                    Err(first) => {
-                        // Oracle validity is 7 days: a signer registered
-                        // after boot is expected turnover, not an outage.
-                        // Re-resolve the on-chain map once and retry
-                        // before failing the request.
-                        tracing::warn!(
-                            error = %format!("{first:#}"),
-                            "quote fetch failed; re-resolving the oracle map and retrying once"
-                        );
-                        let fresh =
-                            switchboard_client::oracles_from_queue(sui_rpc_url, *queue_id)
-                                .await
-                                .map_err(|e| {
-                                    (StatusCode::BAD_GATEWAY, format!("oracle map refresh: {e:#}"))
-                                })?;
-                        *oracles.write().await = fresh.clone();
-                        crossbar.fetch_quotes(&hashes, &fresh).await.map_err(|e| {
-                            (StatusCode::BAD_GATEWAY, format!("crossbar quotes: {e:#}"))
-                        })?
+                const DRAWS: usize = 6;
+                let mut map = oracles.read().await.clone();
+                let mut last: Option<anyhow::Error> = None;
+                let mut won = None;
+                for attempt in 1..=DRAWS {
+                    match crossbar.fetch_quotes(&hashes, &map).await {
+                        Ok(b) => {
+                            won = Some(b);
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::warn!(attempt, error = %format!("{e:#}"), "quote draw failed; retrying");
+                            last = Some(e);
+                            if attempt == DRAWS / 2 {
+                                match switchboard_client::oracles_from_queue(sui_rpc_url, *queue_id)
+                                    .await
+                                {
+                                    Ok(fresh) => {
+                                        *oracles.write().await = fresh.clone();
+                                        map = fresh;
+                                    }
+                                    Err(e) => tracing::warn!(error = %format!("{e:#}"), "oracle map refresh failed"),
+                                }
+                            }
+                        }
                     }
                 }
+                won.ok_or_else(|| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!(
+                            "crossbar quotes: no attested signer in {DRAWS} draws: {:#}",
+                            last.unwrap()
+                        ),
+                    )
+                })?
             };
             bundle
                 .require_queue(queue_key)

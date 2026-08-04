@@ -60,8 +60,8 @@ pub enum LegsBackend {
     /// wedge legs until a restart.
     Switchboard {
         crossbar: switchboard_client::CrossbarClient,
-        /// `oracle_key` (lowercase hex) → Sui `Oracle` object id.
-        oracles: tokio::sync::RwLock<std::collections::BTreeMap<String, sui_types::base_types::ObjectID>>,
+        /// `oracle_key` (lowercase hex) → object id + attested secp key.
+        oracles: tokio::sync::RwLock<std::collections::BTreeMap<String, switchboard_client::OracleInfo>>,
         /// Sui JSON-RPC the map is (re-)resolved against.
         sui_rpc_url: String,
         queue_id: sui_types::base_types::ObjectID,
