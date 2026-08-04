@@ -2,7 +2,7 @@
 //!
 //! Structurally simpler than Pyth. There is no per-feed shared object to
 //! refresh: one call to
-//! `switchboard::quote_submit_result_action::run_{N}` validates N
+//! `switchboard::quote_submit_action::run_{N}` validates N
 //! oracles' signatures and returns a `Quotes` bundle as an in-PTB value,
 //! and every `oracle_switchboard::attest` reads its own feed out of that
 //! one bundle.
@@ -30,11 +30,18 @@ use sui_types::transaction::Argument;
 use crate::tx::{clock_arg, shared_object_arg};
 use crate::chain::ChainClient;
 
+// The module name is `quote_submit_action` ON CHAIN (testnet 8th publish
+// `0x0ea79f9c…`, checked via sui_getNormalizedMoveModule: run_1..run_6,
+// identical signatures, returns `quote::Quotes`). The git checkout our
+// adapter builds against has since RENAMED it `quote_submit_result_action`
+// — target what is published, not what the branch head says, or every
+// prefix call is FunctionNotFound (observed live, SO-346).
+
 /// Largest `run_N` arity the Switchboard package exposes.
 pub const MAX_ORACLES: usize = 6;
 
 /// One Crossbar-sourced quote bundle, in the exact shape
-/// `quote_submit_result_action::run_N` takes.
+/// `quote_submit_action::run_N` takes.
 ///
 /// The vectors are parallel and per-feed; `signatures` and `oracle_ids`
 /// are per-oracle. `run_N` is selected by `oracle_ids.len()`.
@@ -162,7 +169,7 @@ pub async fn prepare(
 
     Ok(pt.programmable_move_call(
         legs.switchboard_pkg,
-        Identifier::new("quote_submit_result_action").unwrap(),
+        Identifier::new("quote_submit_action").unwrap(),
         Identifier::new(p.run_function()?).unwrap(),
         vec![],
         args,

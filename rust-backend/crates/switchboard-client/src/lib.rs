@@ -52,13 +52,13 @@ use serde::Deserialize;
 use sui_types::base_types::ObjectID;
 use tracing::debug;
 
-/// Largest `run_N` arity `switchboard::quote_submit_result_action`
+/// Largest `run_N` arity `switchboard::quote_submit_action`
 /// exposes. More signatures than that cannot be submitted on chain.
 pub const MAX_ORACLES: usize = 6;
 
 /// Signed oracle data for one or more feeds, ready for on-chain submit.
 ///
-/// Field-for-field what `quote_submit_result_action::run_N` consumes;
+/// Field-for-field what `quote_submit_action::run_N` consumes;
 /// `sui_tx::tx::oracle::switchboard` lays it straight into the PTB.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuoteBundle {

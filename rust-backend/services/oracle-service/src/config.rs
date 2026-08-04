@@ -89,7 +89,7 @@ pub struct OracleConfig {
     pub switchboard_queue_key: Option<String>,
 
     /// Switchboard's own `on_demand` package id (the package exposing
-    /// `quote_submit_result_action::run_N`) — NOT our adapter. Served to
+    /// `quote_submit_action::run_N`) — NOT our adapter. Served to
     /// PTB composers via `GET /oracle/legs` so nothing else pins it.
     /// Take it from the `published-at` of the branch our
     /// `contracts/oracle-switchboard/Move.toml` links, never from docs
