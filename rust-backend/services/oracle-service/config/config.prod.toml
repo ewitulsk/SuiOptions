@@ -26,6 +26,11 @@ benchmarks_url = "https://benchmarks.pyth.network"
 [oracle]
 provider = "pyth"
 crossbar_url = "http://crossbar:8080"
+# Required alongside a switchboard flip: quote requests must be signed
+# under this network's queue (Solana devnet backs Sui testnet), and the
+# registered-oracle map is resolved from chain via this Sui RPC.
+crossbar_network = "devnet"
+sui_rpc_url = "https://sui-testnet-rpc.publicnode.com"
 # Switchboard oracle queue for this network (testnet), read from the
 # Switchboard `State` object on chain. `run_N` validates every signing
 # oracle against this Queue OBJECT, and the client refuses a bundle whose

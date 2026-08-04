@@ -300,17 +300,35 @@ fn validate_request(feed_hashes: &[String]) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct CrossbarClient {
     base_url: String,
+    /// `network` query value appended to quote requests (SO-346).
+    ///
+    /// Crossbar's Solana anchoring is per-cluster and the DEFAULT is
+    /// mainnet: an unparameterized `/v2/update` returns bundles signed
+    /// under the MAINNET queue (`86807068…`), which Sui testnet's
+    /// on-chain queue (`c9477bfb…`) rejects wholesale. Verified live:
+    /// `?network=devnet` flips the signing set to the testnet queue.
+    /// `None` keeps the instance default (mainnet).
+    network: Option<String>,
     http: reqwest::Client,
 }
 
 impl CrossbarClient {
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, network: Option<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
+            network,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(15))
                 .build()
                 .expect("building crossbar http client"),
+        }
+    }
+
+    /// `?network=…` suffix for quote-shaping endpoints, empty when unset.
+    fn network_query(&self) -> String {
+        match &self.network {
+            Some(n) => format!("?network={n}"),
+            None => String::new(),
         }
     }
 
@@ -331,8 +349,12 @@ impl CrossbarClient {
     /// `GET /oracles/sui` — the Switchboard-pubkey → Sui-object mapping
     /// the quote payload needs. Cheap and slow-changing; resolve once at
     /// boot rather than per quote.
+    /// CAUTION (SO-346): with `network=devnet` the public instance lists
+    /// Sui DEVNET object ids, which do not exist on testnet. For Sui
+    /// testnet use [`oracles_from_queue`] instead — the chain is
+    /// authoritative and always names objects that actually exist.
     pub async fn sui_oracles(&self) -> Result<BTreeMap<String, ObjectID>> {
-        let url = format!("{}/oracles/sui", self.base_url);
+        let url = format!("{}/oracles/sui{}", self.base_url, self.network_query());
         let rows: Vec<SuiOracle> = self
             .http
             .get(&url)
@@ -367,7 +389,7 @@ impl CrossbarClient {
             .map(|h| strip0x(h).to_string())
             .collect::<Vec<_>>()
             .join(",");
-        let url = format!("{}/v2/update/{joined}", self.base_url);
+        let url = format!("{}/v2/update/{joined}{}", self.base_url, self.network_query());
         debug!(%url, feeds = feed_hashes.len(), "fetching switchboard consensus payload");
         let resp: UpdateResponse = self
             .http
@@ -401,9 +423,160 @@ impl CrossbarClient {
     }
 }
 
+// ── on-chain oracle map (SO-346) ─────────────────────────────────────
+
+/// Resolve `oracle_key (lowercase hex) → Sui Oracle OBJECT id` from the
+/// chain itself: the Switchboard `Queue`'s `existing_oracles` table.
+///
+/// Crossbar's own `GET /oracles/sui` cannot serve Sui TESTNET: its
+/// per-chain refresh routines are hardwired to the public Sui fullnodes
+/// (no env override, and the testnet one has been unusable since
+/// 2026-07), and `?network=devnet` lists Sui DEVNET objects — ids that
+/// do not exist on testnet. The chain is authoritative anyway: `run_N`
+/// validates signing oracles against this exact table.
+pub async fn oracles_from_queue(
+    sui_rpc_url: &str,
+    queue_id: ObjectID,
+) -> Result<BTreeMap<String, ObjectID>> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .expect("building sui rpc http client");
+    let rpc = |method: &'static str, params: serde_json::Value| {
+        let http = http.clone();
+        let url = sui_rpc_url.to_string();
+        async move {
+            let resp: serde_json::Value = http
+                .post(&url)
+                .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
+                .send()
+                .await
+                .with_context(|| format!("POST {url} {method}"))?
+                .error_for_status()
+                .with_context(|| format!("POST {url} {method}"))?
+                .json()
+                .await
+                .with_context(|| format!("decoding {method} response"))?;
+            if let Some(err) = resp.get("error") {
+                return Err(anyhow!("{method} RPC error: {err}"));
+            }
+            resp.get("result")
+                .cloned()
+                .ok_or_else(|| anyhow!("{method} response has no result"))
+        }
+    };
+
+    // Queue object → its existing_oracles table id.
+    let queue = rpc(
+        "sui_getObject",
+        serde_json::json!([queue_id.to_hex_literal(), {"showContent": true}]),
+    )
+    .await?;
+    let table_id = queue
+        .pointer("/data/content/fields/existing_oracles/fields/id/id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("queue {queue_id} has no existing_oracles table"))?
+        .to_string();
+
+    // Paginate the table's dynamic fields.
+    let mut field_ids: Vec<String> = Vec::new();
+    let mut cursor = serde_json::Value::Null;
+    loop {
+        let page = rpc(
+            "suix_getDynamicFields",
+            serde_json::json!([table_id, cursor, 50]),
+        )
+        .await?;
+        for row in page.pointer("/data").and_then(|v| v.as_array()).into_iter().flatten() {
+            if let Some(id) = row.get("objectId").and_then(|v| v.as_str()) {
+                field_ids.push(id.to_string());
+            }
+        }
+        if !page.pointer("/hasNextPage").and_then(|v| v.as_bool()).unwrap_or(false) {
+            break;
+        }
+        cursor = page.pointer("/nextCursor").cloned().unwrap_or(serde_json::Value::Null);
+    }
+    if field_ids.is_empty() {
+        return Err(anyhow!("queue {queue_id} existing_oracles table is empty"));
+    }
+
+    // Batch-read the entries.
+    let mut out = BTreeMap::new();
+    for chunk in field_ids.chunks(50) {
+        let objs = rpc(
+            "sui_multiGetObjects",
+            serde_json::json!([chunk, {"showContent": true}]),
+        )
+        .await?;
+        for obj in objs.as_array().into_iter().flatten() {
+            let Some(fields) = obj.pointer("/data/content/fields") else {
+                continue;
+            };
+            let (key, id) = parse_existing_oracle(fields)?;
+            out.insert(key, id);
+        }
+    }
+    Ok(out)
+}
+
+/// One `existing_oracles` dynamic-field entry → (oracle_key hex, object id).
+fn parse_existing_oracle(fields: &serde_json::Value) -> Result<(String, ObjectID)> {
+    let key_bytes: Vec<u8> = fields
+        .pointer("/name")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("existing_oracles entry has no byte-vector name"))?
+        .iter()
+        .map(|b| {
+            b.as_u64()
+                .and_then(|n| u8::try_from(n).ok())
+                .ok_or_else(|| anyhow!("oracle key byte out of range"))
+        })
+        .collect::<Result<_>>()?;
+    let oracle_id = fields
+        .pointer("/value/fields/oracle_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("existing_oracles entry has no oracle_id"))?;
+    Ok((
+        hex::encode(key_bytes),
+        ObjectID::from_hex_literal(oracle_id)
+            .with_context(|| format!("parsing oracle_id {oracle_id:?}"))?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_oracle_entry_parses() {
+        // Shape captured live from the testnet queue's existing_oracles
+        // table (sui_getObject on a dynamic-field entry, 2026-08-04).
+        let fields: serde_json::Value = serde_json::json!({
+            "name": [0x3f, 0x90, 0xb0, 0xe2],
+            "value": {"fields": {
+                "oracle_id": "0x6f196ceeabed0a60cb1f9675b0f1ef055092e8af674c9ce7a4516057b4aa5338",
+                "oracle_key": [0x3f, 0x90, 0xb0, 0xe2]
+            }}
+        });
+        let (key, id) = parse_existing_oracle(&fields).unwrap();
+        assert_eq!(key, "3f90b0e2");
+        assert_eq!(
+            id,
+            ObjectID::from_hex_literal(
+                "0x6f196ceeabed0a60cb1f9675b0f1ef055092e8af674c9ce7a4516057b4aa5338"
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn network_query_shapes_the_update_url() {
+        let none = CrossbarClient::new("http://x", None);
+        assert_eq!(none.network_query(), "");
+        let dev = CrossbarClient::new("http://x/", Some("devnet".into()));
+        assert_eq!(dev.network_query(), "?network=devnet");
+    }
 
     /// Trimmed from a real `GET /v2/update/{btc}` response against
     /// crossbar.switchboard.xyz — the shape this decoder must survive.

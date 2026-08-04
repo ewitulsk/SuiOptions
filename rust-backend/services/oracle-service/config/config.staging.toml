@@ -24,8 +24,22 @@ benchmarks_url = "https://benchmarks.pyth.network"
 # allowlisted adapter — that is a freeze on withdrawals, not a pause.
 # See docs/oracle-abstraction-plan.md 4.
 [oracle]
-provider = "pyth"
-crossbar_url = "http://crossbar:8080"
+provider = "switchboard"
+# INTERIM (SO-346): the PUBLIC crossbar, not the in-compose one. Our own
+# instance cannot serve Sui testnet quotes — its per-chain oracle refresh
+# routines are hardwired to the public Sui fullnodes (no env override)
+# and fail to parse their responses, so its oracle cache stays empty and
+# /v2/update answers "No oracles available". Repoint at
+# http://crossbar:8080 when upstream fixes land.
+#
+# crossbar_network=devnet is REQUIRED with the public instance: its
+# default signing set is the Solana-mainnet queue (86807068…), which Sui
+# testnet's queue rejects. Verified live: ?network=devnet signs under
+# c9477bfb… (this network's queue).
+crossbar_url = "https://crossbar.switchboard.xyz"
+crossbar_network = "devnet"
+# Sui JSON-RPC for resolving the queue's registered-oracle map on chain.
+sui_rpc_url = "https://sui-testnet-rpc.publicnode.com"
 # Switchboard oracle queue for this network (testnet), read from the
 # Switchboard `State` object on chain. `run_N` validates every signing
 # oracle against this Queue OBJECT, and the client refuses a bundle whose

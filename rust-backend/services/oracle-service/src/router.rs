@@ -66,7 +66,7 @@ async fn get_oracle_descriptor(State(state): State<Arc<AppState>>) -> Json<Oracl
         adapter_module: state.provider.adapter_module(),
         adapter: state.adapter,
         feeds: state
-            .feed_by_asset
+            .descriptor_feeds
             .iter()
             .map(|(asset, feed)| (asset.clone(), feed.to_hex()))
             .collect(),
@@ -101,7 +101,7 @@ async fn get_oracle_legs(
     if assets.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "no assets requested".into()));
     }
-    let (coverage, feeds) = resolve_feeds(&state.feed_by_asset, &assets);
+    let (coverage, feeds) = resolve_feeds(&state.descriptor_feeds, &assets);
     if feeds.is_empty() {
         return Err((
             StatusCode::NOT_FOUND,
@@ -133,15 +133,38 @@ async fn get_oracle_legs(
         crate::state::LegsBackend::Switchboard {
             crossbar,
             oracles,
+            sui_rpc_url,
             queue_id,
             queue_key,
             switchboard_package_id,
         } => {
             let hashes: Vec<String> = feeds.iter().map(|f| f.to_hex()).collect();
-            let bundle = crossbar
-                .fetch_quotes(&hashes, oracles)
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("crossbar quotes: {e:#}")))?;
+            let bundle = {
+                let map = oracles.read().await.clone();
+                match crossbar.fetch_quotes(&hashes, &map).await {
+                    Ok(b) => b,
+                    Err(first) => {
+                        // Oracle validity is 7 days: a signer registered
+                        // after boot is expected turnover, not an outage.
+                        // Re-resolve the on-chain map once and retry
+                        // before failing the request.
+                        tracing::warn!(
+                            error = %format!("{first:#}"),
+                            "quote fetch failed; re-resolving the oracle map and retrying once"
+                        );
+                        let fresh =
+                            switchboard_client::oracles_from_queue(sui_rpc_url, *queue_id)
+                                .await
+                                .map_err(|e| {
+                                    (StatusCode::BAD_GATEWAY, format!("oracle map refresh: {e:#}"))
+                                })?;
+                        *oracles.write().await = fresh.clone();
+                        crossbar.fetch_quotes(&hashes, &fresh).await.map_err(|e| {
+                            (StatusCode::BAD_GATEWAY, format!("crossbar quotes: {e:#}"))
+                        })?
+                    }
+                }
+            };
             bundle
                 .require_queue(queue_key)
                 .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
