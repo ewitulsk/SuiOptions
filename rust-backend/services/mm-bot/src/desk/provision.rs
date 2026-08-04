@@ -125,6 +125,9 @@ pub async fn resolve(p: ResolveParams<'_>) -> Result<ResolvedVault> {
         })?;
         info!(vault = %vault_id.to_hex_literal(), creator = %view.creator, "adopting pinned vault");
         let cap = verify(&p, &view, me).await?;
+        // A pin can point at a vault we created and failed to finish, so
+        // the resume applies here too — it self-gates on creator == self.
+        resume_seed(&p, &view, me).await?;
         return Ok(ResolvedVault { vault_id, curator_cap: cap, provisioned: false });
     }
 
@@ -142,6 +145,7 @@ pub async fn resolve(p: ResolveParams<'_>) -> Result<ResolvedVault> {
         let vault_id = ObjectID::new(*view.vault_id.as_bytes());
         info!(vault = %vault_id.to_hex_literal(), "adopting self-created vault");
         let cap = verify(&p, &view, me).await?;
+        resume_seed(&p, &view, me).await?;
         return Ok(ResolvedVault { vault_id, curator_cap: cap, provisioned: false });
     }
 
@@ -210,32 +214,7 @@ async fn provision(p: &ResolveParams<'_>, me: SuiAddress) -> Result<ResolvedVaul
 
     // Seed. An unseeded vault is NAV 0, and NAV 0 declines every RFQ, so
     // on testnet provisioning is not finished until this lands.
-    if let Some(seed) = p.testnet_seed {
-        let refs = TradingVaultRefs {
-            package: p.trading_vault_package,
-            vault_id: created.vault_id,
-            protocol_config_id: p.vault_protocol_config,
-            deposit_type: p.settlement_coin_type,
-        };
-        let resp = sui_tx::tx::test_tokens::mint_and_deposit_into_vault(
-            &p.wrap.client,
-            &p.wrap.signer,
-            seed.tokens_package,
-            &seed.module,
-            seed.faucet_id,
-            &refs,
-            seed.amount,
-            p.cfg.gas_budget,
-        )
-        .await
-        .context("minting and depositing the testnet vault seed")?;
-        info!(
-            vault = %created.vault_id.to_hex_literal(),
-            amount = seed.amount,
-            digest = %sui_tx::tx::tx_digest(&resp),
-            "seeded the new vault from the testnet faucet"
-        );
-    } else {
+    if !seed(p, created.vault_id).await? {
         warn!(
             vault = %created.vault_id.to_hex_literal(),
             "vault provisioned unseeded — NAV is 0 and every RFQ will decline until it is funded"
@@ -247,6 +226,65 @@ async fn provision(p: &ResolveParams<'_>, me: SuiAddress) -> Result<ResolvedVaul
         curator_cap: Some(created.curator_cap_id),
         provisioned: true,
     })
+}
+
+/// Mint and deposit the `[testnet]` seed. `Ok(false)` when no seed is
+/// configured — the caller decides whether that is worth a warning.
+async fn seed(p: &ResolveParams<'_>, vault_id: ObjectID) -> Result<bool> {
+    let Some(seed) = p.testnet_seed else {
+        return Ok(false);
+    };
+    let refs = TradingVaultRefs {
+        package: p.trading_vault_package,
+        vault_id,
+        protocol_config_id: p.vault_protocol_config,
+        deposit_type: p.settlement_coin_type,
+    };
+    let resp = sui_tx::tx::test_tokens::mint_and_deposit_into_vault(
+        &p.wrap.client,
+        &p.wrap.signer,
+        seed.tokens_package,
+        &seed.module,
+        seed.faucet_id,
+        &refs,
+        seed.amount,
+        p.cfg.gas_budget,
+    )
+    .await
+    .context("minting and depositing the testnet vault seed")?;
+    info!(
+        vault = %vault_id.to_hex_literal(),
+        amount = seed.amount,
+        digest = %sui_tx::tx::tx_digest(&resp),
+        "seeded the vault from the testnet faucet"
+    );
+    Ok(true)
+}
+
+/// Finish a provision that died between `create_vault` and its seed.
+///
+/// Creating, enabling the release gate and seeding are three transactions,
+/// so a crash in the middle leaves a real vault holding nothing — and the
+/// adopt path would otherwise take it and never fund it, which is exactly
+/// what happened on the first staging rollout.
+///
+/// Narrow on purpose. Only a vault THIS WALLET created, holding NO shares,
+/// with a `[testnet]` seed configured. A vault someone else made is never
+/// funded from our faucet, and one that already has depositors is never
+/// topped up — this finishes an interrupted setup, it is not a balance
+/// top-up loop.
+async fn resume_seed(p: &ResolveParams<'_>, view: &TradingVault, me: SuiAddress) -> Result<()> {
+    let me = protocol_types::ids::SuiAddress::new(me.to_inner());
+    if !should_resume_seed(view, me, p.testnet_seed.is_some()) {
+        return Ok(());
+    }
+    let vault_id = ObjectID::new(*view.vault_id.as_bytes());
+    info!(
+        vault = %vault_id.to_hex_literal(),
+        "adopted vault holds no shares — finishing its interrupted provision"
+    );
+    seed(p, vault_id).await?;
+    Ok(())
 }
 
 /// Check a candidate against chain state and return the CuratorCap if this
@@ -329,6 +367,15 @@ async fn verify(
     }
 
     Ok(cap)
+}
+
+/// The gate on [`resume_seed`], split out so it is directly testable.
+fn should_resume_seed(
+    view: &TradingVault,
+    me: protocol_types::ids::SuiAddress,
+    has_seed: bool,
+) -> bool {
+    has_seed && view.creator == me && view.total_shares == 0
 }
 
 /// Every open vault this wallet created. `creator` is the tx sender at
@@ -473,5 +520,36 @@ mod tests {
     #[test]
     fn pick_of_nothing_is_none() {
         assert!(pick(Vec::new()).is_none());
+    }
+
+    // ── resume-seed gating ─────────────────────────────────────────────
+    // The first staging rollout died between create and seed, and the
+    // adopt path then took a vault that held nothing and never funded it.
+
+    #[test]
+    fn resumes_an_interrupted_self_created_provision() {
+        let me = addr(1);
+        assert!(should_resume_seed(&vault(1, 1, "open"), me, true));
+    }
+
+    #[test]
+    fn never_seeds_a_vault_someone_else_created() {
+        let me = addr(1);
+        let theirs = vault(1, 2, "open");
+        assert!(!should_resume_seed(&theirs, me, true), "our faucet must not fund a stranger's vault");
+    }
+
+    #[test]
+    fn never_tops_up_a_vault_that_already_has_shares() {
+        let me = addr(1);
+        let mut funded = vault(1, 1, "open");
+        funded.total_shares = 1;
+        assert!(!should_resume_seed(&funded, me, true), "this finishes a setup, it is not a top-up loop");
+    }
+
+    #[test]
+    fn no_seed_configured_means_no_mint() {
+        let me = addr(1);
+        assert!(!should_resume_seed(&vault(1, 1, "open"), me, false));
     }
 }
