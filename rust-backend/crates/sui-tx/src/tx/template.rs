@@ -586,7 +586,7 @@ pub fn protocol_templates(
             for n in 1..=SWITCHBOARD_MAX_ORACLES {
                 appraisal_allowed.push(TargetMatcher::Exact(MoveTarget::new(
                     sb.switchboard,
-                    "quote_submit_result_action",
+                    "quote_submit_action",
                     &format!("run_{n}"),
                 )));
             }
@@ -632,7 +632,7 @@ pub fn protocol_templates(
             ));
             for n in 1..=SWITCHBOARD_MAX_ORACLES {
                 deposit_arities.push((
-                    MoveTarget::new(sb.switchboard, "quote_submit_result_action", &format!("run_{n}")),
+                    MoveTarget::new(sb.switchboard, "quote_submit_action", &format!("run_{n}")),
                     0,
                 ));
             }
@@ -1424,7 +1424,7 @@ mod tests {
         // Switchboard path: ONE run_N producing the bundle, then attest.
         let sb_deposit = build(
             &[
-                (MoveTarget::new(sb_pkg, "quote_submit_result_action", "run_3"), 0),
+                (MoveTarget::new(sb_pkg, "quote_submit_action", "run_3"), 0),
                 (MoveTarget::new(sb_adapter, "oracle_switchboard", "attest"), 2),
                 (tvt("vault", "begin_appraisal"), 1),
                 (tvt("vault", "deposit"), 1),
@@ -1441,7 +1441,7 @@ mod tests {
         // covering both providers must not loosen either.
         let forged = build(
             &[
-                (MoveTarget::new(sb_pkg, "quote_submit_result_action", "run_3"), 0),
+                (MoveTarget::new(sb_pkg, "quote_submit_action", "run_3"), 0),
                 (MoveTarget::new(sb_adapter, "oracle_switchboard", "attest"), 3),
                 (tvt("vault", "begin_appraisal"), 1),
                 (tvt("vault", "deposit"), 1),
