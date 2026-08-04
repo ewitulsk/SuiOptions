@@ -393,16 +393,24 @@ async fn self_created(indexer: &IndexerClient, me: SuiAddress) -> Result<Vec<Tra
 }
 
 /// Deterministic choice when several self-created vaults exist, so a
-/// restart lands on the same one. Lowest id wins; the rest are logged.
+/// restart lands on the same one. LARGEST stake wins — on a shared
+/// wallet the desk's working vault competes with e2e-smoke husks whose
+/// creator is the same address, and adopting a husk by id order latched
+/// the NAV kill switch live (2026-08-04: $1M desk vault lost to a
+/// 1-TUSDC smoke vault with a lower id). Lowest id is the tie-break.
 fn pick(mut vaults: Vec<TradingVault>) -> Option<TradingVault> {
-    vaults.sort_by_key(|v| v.vault_id.to_hex());
+    vaults.sort_by(|a, b| {
+        b.total_shares
+            .cmp(&a.total_shares)
+            .then_with(|| a.vault_id.to_hex().cmp(&b.vault_id.to_hex()))
+    });
     if vaults.len() > 1 {
         let others: Vec<String> =
             vaults[1..].iter().map(|v| format!("0x{}", v.vault_id.to_hex())).collect();
         warn!(
             adopted = %format!("0x{}", vaults[0].vault_id.to_hex()),
             ignored = ?others,
-            "several self-created trading vaults — adopting the lowest id"
+            "several self-created trading vaults — adopting the largest stake"
         );
     }
     vaults.into_iter().next()
@@ -507,12 +515,25 @@ mod tests {
         assert_eq!(mine[0].vault_id, oid(1));
     }
 
+    fn staked(id: u8, shares: u128) -> TradingVault {
+        let mut v = vault(id, 1, "open");
+        v.total_shares = shares;
+        v
+    }
+
     /// Deterministic so a restart re-adopts the same vault instead of
-    /// ping-ponging (or provisioning another).
+    /// ping-ponging (or provisioning another). Largest stake wins — the
+    /// working vault must beat same-wallet smoke husks — and id order
+    /// only breaks ties.
     #[test]
-    fn pick_is_lowest_id_and_stable() {
-        let chosen = pick(vec![vault(3, 1, "open"), vault(1, 1, "open"), vault(2, 1, "open")]);
-        assert_eq!(chosen.unwrap().vault_id, oid(1));
+    fn pick_prefers_the_largest_stake_then_lowest_id() {
+        // The $1M desk vault (high id) beats 1-token husks (low ids).
+        let chosen =
+            pick(vec![staked(1, 1_000_000), staked(3, 1_000_000_000_000), staked(2, 500_000)]);
+        assert_eq!(chosen.unwrap().vault_id, oid(3));
+        // Equal stakes: lowest id, insertion-order independent.
+        let tied = pick(vec![vault(3, 1, "open"), vault(1, 1, "open"), vault(2, 1, "open")]);
+        assert_eq!(tied.unwrap().vault_id, oid(1));
         let reordered = pick(vec![vault(2, 1, "open"), vault(3, 1, "open"), vault(1, 1, "open")]);
         assert_eq!(reordered.unwrap().vault_id, oid(1));
     }
