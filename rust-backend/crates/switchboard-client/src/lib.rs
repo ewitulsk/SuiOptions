@@ -135,8 +135,14 @@ fn one() -> u8 {
 struct OracleResponse {
     #[serde(rename = "oraclePubkey")]
     oracle_pubkey: String,
-    /// base64.
+    /// base64, 64 bytes (r || s). The recovery byte rides SEPARATELY.
     signature: String,
+    /// On-chain verification is `ecdsa_k1::secp256k1_ecrecover`, whose
+    /// signature argument is 65 bytes (r || s || v) — dropping this byte
+    /// makes every quote abort inside the native with code 1 (observed
+    /// live before it was appended).
+    #[serde(rename = "recoveryId", default)]
+    recovery_id: u8,
     #[serde(rename = "feedResponses", default)]
     feed_responses: Vec<FeedResponse>,
 }
@@ -228,11 +234,18 @@ impl UpdateResponse {
         let mut signatures = Vec::with_capacity(self.oracle_responses.len());
         let mut oracle_ids = Vec::with_capacity(self.oracle_responses.len());
         for o in &self.oracle_responses {
-            signatures.push(
-                base64::engine::general_purpose::STANDARD
-                    .decode(o.signature.trim())
-                    .context("decoding base64 oracle signature")?,
-            );
+            let mut sig = base64::engine::general_purpose::STANDARD
+                .decode(o.signature.trim())
+                .context("decoding base64 oracle signature")?;
+            if sig.len() != 64 {
+                return Err(anyhow!(
+                    "oracle signature is {} bytes; expected 64 (r||s) plus a separate recoveryId",
+                    sig.len()
+                ));
+            }
+            // r || s || v — the shape `secp256k1_ecrecover` takes on chain.
+            sig.push(o.recovery_id);
+            signatures.push(sig);
             let key = strip0x(&o.oracle_pubkey).to_ascii_lowercase();
             let id = oracle_objects.get(&key).ok_or_else(|| {
                 anyhow!(
@@ -622,8 +635,12 @@ mod tests {
         assert_eq!(b.slot, 42);
         assert_eq!(b.timestamp_seconds, 1_785_700_471);
         // base64, not hex — decoding it as hex would silently yield junk.
+        // 65 bytes: r || s (64, from `signature`) plus the separate
+        // `recoveryId` byte appended — the exact shape
+        // `secp256k1_ecrecover` takes on chain.
         assert_eq!(b.signatures.len(), 1);
-        assert_eq!(b.signatures[0].len(), 64);
+        assert_eq!(b.signatures[0].len(), 65);
+        assert_eq!(b.signatures[0][64], 1);
         assert_eq!(b.oracle_ids.len(), 1);
     }
 
@@ -665,6 +682,7 @@ mod tests {
             resp.oracle_responses.push(OracleResponse {
                 oracle_pubkey: key.clone(),
                 signature: sig.clone(),
+                recovery_id: 1,
                 feed_responses: vec![FeedResponse {
                     feed_hash: "4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812"
                         .into(),
