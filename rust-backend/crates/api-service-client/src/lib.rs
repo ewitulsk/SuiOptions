@@ -260,12 +260,16 @@ impl ApiServiceClient {
         Ok(out)
     }
 
-    /// Vault ids with deposits paused on-chain, fresh from `GET /vaults`.
-    /// The mm-bot treats a paused vault as decommissioned (hard cutover)
-    /// and skips its RFQ and swap auctions.
+    /// Vault ids with deposits paused on-chain, fresh from
+    /// `GET /trading-vaults`. The mm-bot treats a paused vault as
+    /// decommissioned (hard cutover) and skips its RFQ and swap auctions.
+    ///
+    /// This used to read the legacy `GET /vaults`, which SO-332 removed
+    /// with the covered-call product — the poll then 404'd every tick and
+    /// took the desk's whole auction bidder down with it.
     pub async fn paused_vault_ids(&self) -> Result<HashSet<ObjectId>> {
-        let url = format!("{}/vaults", self.base_url);
-        let wire: VaultsWire = observability::client::instrumented("api-service", "GET /vaults", |h| {
+        let url = format!("{}/trading-vaults", self.base_url);
+        let wire: VaultsWire = observability::client::instrumented("api-service", "GET /trading-vaults", |h| {
             self.http.get(&url).headers(h).send()
         })
         .await
