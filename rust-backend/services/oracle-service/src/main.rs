@@ -119,6 +119,21 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Off-chain payload source for `GET /oracle/legs` (SO-346). Pyth
+    // reuses the authenticated Hermes client; Switchboard requires the
+    // full Crossbar config — a switchboard deployment without it cannot
+    // build price legs, so that is a loud boot failure, not a silent
+    // degrade (the "works until you flip" trap this seam exists to kill).
+    let legs = match provider {
+        protocol_types::OracleProvider::Pyth => oracle_service::state::LegsBackend::Pyth {
+            http: http.clone(),
+            hermes_url: cfg.hermes_url.clone(),
+        },
+        protocol_types::OracleProvider::Switchboard => {
+            switchboard_legs_backend(&cfg.oracle).await?
+        }
+    };
+
     let state = Arc::new(AppState {
         price_cache,
         benchmark_vol,
@@ -127,6 +142,7 @@ async fn main() -> Result<()> {
         provider,
         feed_by_asset,
         adapter,
+        legs,
         upstream_healthy,
     });
 
@@ -138,6 +154,59 @@ async fn main() -> Result<()> {
         .await
         .context("serving oracle-service")?;
     Ok(())
+}
+
+/// Build the Switchboard legs backend: require the full Crossbar config,
+/// wait (bounded) for Crossbar itself — it boots in the same compose wave
+/// — then resolve the oracle-pubkey → Sui-object map once.
+async fn switchboard_legs_backend(
+    oracle: &oracle_service::config::OracleConfig,
+) -> Result<oracle_service::state::LegsBackend> {
+    let require = |v: &Option<String>, k: &str| -> Result<String> {
+        v.clone()
+            .ok_or_else(|| anyhow::anyhow!("provider=switchboard requires [oracle] {k}"))
+    };
+    let crossbar_url = require(&oracle.crossbar_url, "crossbar_url")?;
+    let queue_key = require(&oracle.switchboard_queue_key, "switchboard_queue_key")?;
+    let switchboard_package_id =
+        require(&oracle.switchboard_package_id, "switchboard_package_id")?;
+    let queue_id = require(&oracle.switchboard_queue_id, "switchboard_queue_id")?
+        .parse::<sui_types::base_types::ObjectID>()
+        .context("parsing [oracle] switchboard_queue_id")?;
+
+    let crossbar = switchboard_client::CrossbarClient::new(&crossbar_url);
+    let mut last_err = None;
+    for attempt in 1..=30u32 {
+        match crossbar.health().await {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                warn!(%crossbar_url, attempt, error = %format!("{e:#}"), "crossbar not ready; retrying");
+                last_err = Some(e);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        return Err(e.context(format!("crossbar at {crossbar_url} unreachable")));
+    }
+    let oracles = crossbar
+        .sui_oracles()
+        .await
+        .context("resolving /oracles/sui")?;
+    if oracles.is_empty() {
+        anyhow::bail!("crossbar reports no Sui oracles — cannot map quote signers to objects");
+    }
+    info!(oracles = oracles.len(), "switchboard legs backend ready");
+    Ok(oracle_service::state::LegsBackend::Switchboard {
+        crossbar,
+        oracles,
+        queue_id,
+        queue_key,
+        switchboard_package_id,
+    })
 }
 
 /// Resolve the live provider's on-chain adapter identity from token-info.

@@ -33,4 +33,8 @@ crossbar_url = "http://127.0.0.1:8080"
 # queue, or every quote is rejected.
 switchboard_queue_id  = "0xe645d8979dac2fb901fb7c7b0ef3c9fad5dfaaf7ae2b0ce38a0b5ec63b819a99"
 switchboard_queue_key = "0xc9477bfb5ff1012859f336cf98725680e7705ba2abece17188cfb28ca66ca5b0"
+# Switchboard's own `on_demand` package (exposes run_N). Testnet, taken
+# from the published-at of the Move.toml branch we link -- the 8th
+# publish; the id the docs quote (0x28005599...) is the stale 6th.
+switchboard_package_id = "0x0ea79f9c3fa1e3f701885a00bf26f92a297223165f26529767d2f7d1e3c4ac1e"
 

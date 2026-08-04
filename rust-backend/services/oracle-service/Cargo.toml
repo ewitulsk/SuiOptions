@@ -18,12 +18,15 @@ cli-spec          = { workspace = true }
 protocol-types  = { workspace = true }
 pyth-client       = { workspace = true }
 oracle-client     = { workspace = true }
+switchboard-client = { workspace = true }
 token-info-client = { workspace = true }
 sui-types         = { workspace = true }
 
 clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

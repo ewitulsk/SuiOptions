@@ -27,6 +27,8 @@ indexer-graphql = { workspace = true }
 sui-types = { workspace = true }
 # Event-filter StructTags for RfqCreated discovery.
 move-core-types = { workspace = true }
+# Descriptor feed hashes → the 32-byte form Switchboard legs carry.
+hex = { workspace = true }
 
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -45,3 +47,5 @@ vault-sim = { workspace = true }
 toml = { workspace = true }
 # Mock Bluefin account endpoint for the venue_equity::Bluefin test.
 axum = { workspace = true }
+# Re-encode fixture signatures for the switchboard_payload test.
+base64 = { workspace = true }

@@ -260,12 +260,23 @@ the no-redeploy property. Do not regress that.
 | — | `move-ci` covers all ten publishable packages | **done** — was four; the CLI pin that blocked it is resolved below |
 | — | Deploy-compiler build gate (`deploy_build.rs`) | **done** — replaces the CLI-version proxy |
 | 2a | `pyth-client` pro endpoint + `accessToken` | **partial** — `Authorization: Bearer` was already correct and the endpoint is config-driven; needs a live keyed-vs-unkeyed check |
+| — | `GET /oracle/legs` + keeper/smoke follow the descriptor | **done** — SO-346: oracle-service wires `CrossbarClient` at boot (health probe, `/oracles/sui` map, required queue + `on_demand` config) and serves the live provider's off-chain payload; `keeper::trading_vault::compose_full_appraisal` and `trading-vault-smoke --oracle-url` branch on a TTL-cached descriptor |
 | 4–5 | Soak, flip, `disallow_oracle` | ops, post-merge |
 
-**The switch, end to end, is now implemented.** Flipping
+**The backend switch, end to end, is now implemented.** Flipping
 `[oracle] provider` in oracle-service and restarting it moves the data
-plane (feed discovery, `/prices/by-asset`), the descriptor, the Rust PTB
-composer and the deployed browser bundle. Nothing else redeploys.
+plane (feed discovery, `/prices/by-asset`), the descriptor, and — since
+SO-346 — the keeper's appraisal composer, which re-reads the descriptor
+at runtime (30s TTL) and builds the live provider's legs via
+`/oracle/legs`. Nothing else redeploys.
+
+> **Browser caveat.** `frontend/tx/appraisal.ts` follows the descriptor
+> for the adapter identity (`attest` target + registries) but still
+> composes only Pyth's *prefix* (Hermes accumulator → wormhole →
+> `PriceInfoObject`s). Under a live Switchboard flip, browser appraisals
+> that need price legs would break; the follow-up is consuming the same
+> `GET /oracle/legs` (its wire keeps u128 values as strings for exactly
+> this consumer) and laying `run_N` + `attest(&Quotes)`.
 
 ### Verified Switchboard ids (2026-08-02)
 
@@ -338,10 +349,10 @@ These are deployment/ops, not code:
 2. **Point Crossbar at a paid Solana devnet RPC.** `[oracle] crossbar_url`
    already targets the in-compose instance; the RPC behind it is still the
    public default (SO-333).
-3. **Supply the Switchboard `Queue` object id** for the network — read it
-   from the Switchboard `State` object (testnet
-   `0x2086fdde07a8f4726a3fc72d6ef1021343a781d42de6541ca412cf50b4339ad6`)
-   and wire it where the payload is assembled.
+3. ~~Supply the Switchboard `Queue` object id and wire it where the
+   payload is assembled.~~ Done (SO-346): the queue id/key and the
+   `on_demand` package id live in oracle-service's `[oracle]` config and
+   reach composers through `GET /oracle/legs`.
 4. **First live Crossbar call** through our own instance, to confirm it
    behaves like the public one this decoder was pinned against.
 5. Run `cargo test -p deployment-manager --test deploy_build` before the

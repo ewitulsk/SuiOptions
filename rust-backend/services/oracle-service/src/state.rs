@@ -28,8 +28,33 @@ pub struct AppState {
     /// Adapter package + feed registry the composers need, mirrored from
     /// token-info. `None` until the live provider's adapter is deployed.
     pub adapter: Option<crate::state::AdapterIds>,
+    /// Off-chain payload source for `GET /oracle/legs` (SO-346).
+    pub legs: LegsBackend,
     /// Whether the upstream Hermes stream is currently healthy.
     pub upstream_healthy: Arc<AtomicBool>,
+}
+
+/// The live provider's off-chain payload source, backing
+/// `GET /oracle/legs` (SO-346). Fixed at boot alongside `provider` — a
+/// switch is an oracle-service restart, same as the descriptor.
+pub enum LegsBackend {
+    /// Hermes accumulator updates, fetched with the same authenticated
+    /// client as the SSE data plane.
+    Pyth {
+        http: reqwest::Client,
+        hermes_url: String,
+    },
+    /// Signed Crossbar consensus payloads. The oracle map is resolved
+    /// once at boot (`GET /oracles/sui` is cheap and slow-changing).
+    Switchboard {
+        crossbar: switchboard_client::CrossbarClient,
+        /// `oracle_key` (lowercase hex) → Sui `Oracle` object id.
+        oracles: std::collections::BTreeMap<String, sui_types::base_types::ObjectID>,
+        queue_id: sui_types::base_types::ObjectID,
+        queue_key: String,
+        /// Switchboard's `on_demand` package id, from config.
+        switchboard_package_id: String,
+    },
 }
 
 /// On-chain identity of the live provider's adapter, as served on

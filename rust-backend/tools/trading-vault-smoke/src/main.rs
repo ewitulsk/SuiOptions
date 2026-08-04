@@ -63,6 +63,18 @@ struct Cli {
     /// the vault is left OPEN (the live MM-vault state) instead of drained.
     #[arg(long, default_value_t = false)]
     fill_bid: bool,
+    /// oracle-service base URL (SO-346). When set, price legs follow the
+    /// live `/oracle/descriptor` provider — required to smoke a
+    /// Switchboard-flipped deployment. Absent, the compiled Pyth path
+    /// runs as before.
+    #[arg(long)]
+    oracle_url: Option<String>,
+}
+
+/// The live oracle switch, resolved once from `--oracle-url` (SO-346).
+struct LiveOracle {
+    client: oracle_client::OracleClient,
+    descriptor: oracle_client::OracleDescriptor,
 }
 
 fn load_signer(address: &str) -> Result<Signer> {
@@ -268,6 +280,19 @@ async fn main() -> Result<()> {
     let client = ChainClient::new(&cli.rpc)?;
     let signer = load_signer(&cli.address)?;
     let ids = resolve_ids(&client, &cli).await?;
+    let live = match &cli.oracle_url {
+        Some(url) => {
+            let oc = oracle_client::OracleClient::new(url);
+            let descriptor = oc.descriptor().await.context("fetching /oracle/descriptor")?;
+            println!(
+                "  live oracle provider: {} (adapter {})",
+                descriptor.provider,
+                if descriptor.adapter.is_some() { "deployed" } else { "MISSING" },
+            );
+            Some(LiveOracle { client: oc, descriptor })
+        }
+        None => None,
+    };
     println!("trading-vault smoke — signer {}, env {}", signer.address, cli.env);
 
     // ── 1. create vault (deposit asset TUSDC, self as curator, no lockup)
@@ -649,6 +674,7 @@ async fn main() -> Result<()> {
             &feeds_by_type,
             ids.oracle_pyth_pkg,
             ids.pyth_feed_registry_id,
+            live.as_ref(),
         )
         .await?;
         let faucet = pt.obj(shared_object_arg(&client, ids.deposit_faucet, true).await?)?;
@@ -710,6 +736,7 @@ async fn main() -> Result<()> {
             &feeds_by_type,
             ids.oracle_pyth_pkg,
             ids.pyth_feed_registry_id,
+            live.as_ref(),
         )
         .await?;
         let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
@@ -802,6 +829,7 @@ async fn main() -> Result<()> {
         &feeds_by_type,
         ids.oracle_pyth_pkg,
         ids.pyth_feed_registry_id,
+        live.as_ref(),
     )
     .await?;
     let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
@@ -953,10 +981,19 @@ async fn compose_with_legs(
     // different adapter's `attest`.
     oracle_pyth_pkg: ObjectID,
     pyth_feed_registry_id: ObjectID,
+    live: Option<&LiveOracle>,
 ) -> Result<sui_types::transaction::Argument> {
     let needed = price_assets_needed(holdings, option_map);
     if needed.is_empty() {
         return compose_appraisal(client, pt, refs, holdings, None, option_map).await;
+    }
+    // SO-346: with a live descriptor saying Switchboard, build that
+    // provider's legs; otherwise (no --oracle-url, or provider=pyth) the
+    // compiled Pyth path below runs unchanged.
+    if let Some(l) = live {
+        if l.descriptor.provider == protocol_types::OracleProvider::Switchboard {
+            return compose_switchboard(client, pt, refs, holdings, &needed, option_map, l).await;
+        }
     }
     let handles = pyth_handles();
     let table = resolve_price_info_table(client, handles.pyth_state_id).await?;
@@ -990,6 +1027,95 @@ async fn compose_with_legs(
             accumulator_update: update,
             price_infos: &price_infos,
         })),
+        option_map,
+    )
+    .await
+}
+
+/// Switchboard variant of `compose_with_legs` (SO-346): coverage from
+/// the live descriptor, signed payload from oracle-service
+/// `/oracle/legs`. Mirrors the keeper's arm in
+/// `keeper::trading_vault::compose_full_appraisal`.
+async fn compose_switchboard(
+    client: &ChainClient,
+    pt: &mut ProgrammableTransactionBuilder,
+    refs: &AppraisalRefs,
+    holdings: &sui_tx::tx::appraisal::VaultHoldings,
+    needed: &std::collections::BTreeSet<String>,
+    option_map: &BTreeMap<String, OptionBucketInfo>,
+    live: &LiveOracle,
+) -> Result<sui_types::transaction::Argument> {
+    let d = &live.descriptor;
+    let adapter = d
+        .adapter
+        .as_ref()
+        .ok_or_else(|| anyhow!("live provider {} has no adapter deployed", d.provider))?;
+    let adapter_pkg = ObjectID::from_hex_literal(&adapter.adapter_package_id)
+        .context("parsing descriptor adapter package id")?;
+    let feed_registry_id = ObjectID::from_hex_literal(&adapter.feed_registry_id)
+        .context("parsing descriptor feed registry id")?;
+
+    // Same none-leg posture as the Pyth path; the deposit asset's feed
+    // rides along because `attest<Asset, Dep>` crosses inside one bundle.
+    let mut all: Vec<String> = needed.iter().cloned().collect();
+    all.push(holdings.deposit_type.clone());
+    let mut request: Vec<String> = Vec::new();
+    let mut feed_hashes: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for t in &all {
+        let Some(hash) = d.feeds.get(t) else {
+            eprintln!("    (no switchboard feed for {t}; passing none leg)");
+            continue;
+        };
+        let bytes = hex::decode(hash.trim().trim_start_matches("0x"))
+            .with_context(|| format!("descriptor feed hash for {t} is not hex"))?;
+        if bytes.len() != 32 {
+            bail!("descriptor feed hash for {t} is {} bytes; expected 32", bytes.len());
+        }
+        feed_hashes.insert(t.clone(), bytes);
+        request.push(t.clone());
+    }
+    if request.is_empty() {
+        bail!("no switchboard feed hash for any priced asset (deposit {})", holdings.deposit_type);
+    }
+    let legs = live.client.legs(&request).await.context("fetching /oracle/legs")?;
+    let oracle_client::OracleLegsResponse::Switchboard(sw) = legs else {
+        bail!("/oracle/legs answered for a different provider than the descriptor");
+    };
+    let q = &sw.quote;
+    let payload = sui_tx::tx::oracle::SwitchboardQuotePayload {
+        feed_ids: q.feed_id_bytes()?,
+        values: q.values_u128()?,
+        values_neg: q.values_neg.clone(),
+        min_oracle_samples: q.min_oracle_samples.clone(),
+        signatures: q.signature_bytes()?,
+        slot: q.slot,
+        timestamp_seconds: q.timestamp_seconds,
+        oracle_ids: q
+            .oracle_ids
+            .iter()
+            .map(|o| {
+                ObjectID::from_hex_literal(o)
+                    .with_context(|| format!("parsing oracle object id {o:?}"))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        queue_id: ObjectID::from_hex_literal(&sw.queue_id).context("parsing queue object id")?,
+    };
+    let switchboard_pkg = ObjectID::from_hex_literal(&sw.switchboard_package_id)
+        .context("parsing on_demand package id")?;
+    compose_appraisal(
+        client,
+        pt,
+        refs,
+        holdings,
+        Some(sui_tx::tx::oracle::OracleLegs::Switchboard(
+            sui_tx::tx::oracle::SwitchboardLegs {
+                adapter_pkg,
+                feed_registry_id,
+                switchboard_pkg,
+                payload: &payload,
+                feed_hashes: &feed_hashes,
+            },
+        )),
         option_map,
     )
     .await
