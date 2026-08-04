@@ -218,12 +218,30 @@ impl ChainClient {
                 // The field object is a `0x2::dynamic_field::Field<K, V>`;
                 // its first type parameter is the NAME type, which is what
                 // callers match on to tell one key struct from another.
+                //
+                // Dynamic OBJECT fields wrap the caller's key as
+                // `0x2::dynamic_object_field::Wrapper<K>` — unwrap it, or
+                // every dof key silently matches nothing and dof-backed
+                // state (vault positions!) looks empty. Observed live:
+                // appraisals composed 0 of 1 positions and aborted with
+                // code 82 at consume_appraisal.
                 let name_type = df
                     .field_object
                     .as_ref()
                     .and_then(|o| o.object_type.as_deref())
                     .and_then(|t| sui_types::parse_sui_struct_tag(t).ok())
                     .and_then(|t| t.type_params.first().cloned())
+                    .map(|t| match t {
+                        move_core_types::language_storage::TypeTag::Struct(ref s)
+                            if s.address == move_core_types::account_address::AccountAddress::TWO
+                                && s.module.as_str() == "dynamic_object_field"
+                                && s.name.as_str() == "Wrapper"
+                                && s.type_params.len() == 1 =>
+                        {
+                            s.type_params[0].clone()
+                        }
+                        other => other,
+                    })
                     .map(|t| t.to_canonical_string(/* with_prefix */ true));
                 out.push(DynamicFieldEntry {
                     field_id,
