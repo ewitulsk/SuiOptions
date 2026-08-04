@@ -127,6 +127,105 @@ pub struct OracleDescriptor {
     pub feeds: std::collections::BTreeMap<String, String>,
 }
 
+/// `GET /oracle/legs` — the live provider's off-chain payload for one
+/// PTB's price legs (SO-346).
+///
+/// The descriptor says WHICH provider is live; this says WHAT to lay
+/// into the transaction: the Hermes accumulator update under Pyth, the
+/// signed Crossbar quote bundle under Switchboard. A composer that reads
+/// both never names a provider itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "lowercase")]
+pub enum OracleLegsResponse {
+    Pyth(PythLegsPayload),
+    Switchboard(SwitchboardLegsPayload),
+}
+
+/// Pyth's off-chain half: one accumulator update covering every
+/// requested feed. The caller still resolves the on-chain
+/// `PriceInfoObject`s — those are chain state, not oracle data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PythLegsPayload {
+    /// Hermes accumulator update, base64.
+    pub accumulator_update_b64: String,
+    /// canonical coin type → Pyth feed id (hex) covered by the update.
+    /// Requested assets with no feed under the live provider are simply
+    /// absent (the caller passes `none` legs for them).
+    pub feeds: std::collections::BTreeMap<String, String>,
+}
+
+/// Switchboard's off-chain half: everything `run_N` + `attest` need
+/// beyond chain-resolved object references.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchboardLegsPayload {
+    /// Switchboard's own `on_demand` package id (theirs, not our adapter).
+    pub switchboard_package_id: String,
+    /// The Sui `Queue` object `run_N` validates signing oracles against.
+    pub queue_id: String,
+    /// canonical coin type → 32-byte feed hash (hex) covered by `quote`.
+    pub feed_hashes: std::collections::BTreeMap<String, String>,
+    pub quote: SwitchboardQuoteWire,
+}
+
+/// One signed Crossbar consensus payload, JSON-safe: byte vectors are
+/// hex/base64 and the 18-decimal values are decimal STRINGS — they sit
+/// far past 2^53, so a JSON number would silently lose precision in any
+/// JS consumer (the browser composer is a planned reader of this).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchboardQuoteWire {
+    /// 32-byte feed hashes, hex, parallel with `values` / `values_neg` /
+    /// `min_oracle_samples`.
+    pub feed_ids: Vec<String>,
+    /// 18-decimal fixed-point magnitudes as decimal strings (u128 range).
+    pub values: Vec<String>,
+    pub values_neg: Vec<bool>,
+    pub min_oracle_samples: Vec<u8>,
+    /// Per-oracle signatures, base64, parallel with `oracle_ids`.
+    pub signatures_b64: Vec<String>,
+    pub slot: u64,
+    pub timestamp_seconds: u64,
+    /// Sui `Oracle` object ids, in signature order.
+    pub oracle_ids: Vec<String>,
+}
+
+impl SwitchboardQuoteWire {
+    /// Decode `feed_ids` to raw 32-byte vectors.
+    pub fn feed_id_bytes(&self) -> Result<Vec<Vec<u8>>> {
+        self.feed_ids
+            .iter()
+            .map(|h| {
+                let bytes = hex::decode(h.trim().trim_start_matches("0x"))
+                    .with_context(|| format!("feed id {h:?} is not hex"))?;
+                if bytes.len() != 32 {
+                    return Err(anyhow!("feed id {h:?} is {} bytes; expected 32", bytes.len()));
+                }
+                Ok(bytes)
+            })
+            .collect()
+    }
+
+    /// Parse `values` back to u128 magnitudes.
+    pub fn values_u128(&self) -> Result<Vec<u128>> {
+        self.values
+            .iter()
+            .map(|v| v.parse::<u128>().with_context(|| format!("parsing quote value {v:?}")))
+            .collect()
+    }
+
+    /// Decode `signatures_b64` to raw bytes.
+    pub fn signature_bytes(&self) -> Result<Vec<Vec<u8>>> {
+        use base64::Engine;
+        self.signatures_b64
+            .iter()
+            .map(|s| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(s.trim())
+                    .context("decoding base64 quote signature")
+            })
+            .collect()
+    }
+}
+
 /// Async client over oracle-service's internal REST + WS API.
 #[derive(Debug, Clone)]
 pub struct OracleClient {
@@ -167,6 +266,21 @@ impl OracleClient {
             .error_for_status()
             .with_context(|| format!("GET {url}"))?;
         resp.json().await.context("decoding /oracle/descriptor")
+    }
+
+    /// The live provider's off-chain payload for `assets`' price legs
+    /// (SO-346). `assets` are canonical coin types; ones without a feed
+    /// under the live provider are absent from the response's coverage
+    /// map rather than an error (the caller passes `none` legs).
+    pub async fn legs(&self, assets: &[String]) -> Result<OracleLegsResponse> {
+        if assets.is_empty() {
+            return Err(anyhow!("legs() called with no assets"));
+        }
+        self.get_json::<OracleLegsResponse>(
+            &format!("/oracle/legs?assets={}", assets.join(",")),
+            "GET /oracle/legs",
+        )
+        .await
     }
 
     /// Spot for a coin type, without the caller ever naming a provider's
@@ -402,6 +516,70 @@ mod tests {
     fn ws_url_derivation() {
         assert_eq!(http_to_ws("http://oracle-service:9013"), "ws://oracle-service:9013/ws");
         assert_eq!(http_to_ws("https://x.com/prod/oracle/"), "wss://x.com/prod/oracle/ws");
+    }
+
+    #[test]
+    fn legs_response_roundtrips_both_providers() {
+        // The tag is the config/descriptor spelling, so the two halves of
+        // the switch can never disagree on naming.
+        let sw = OracleLegsResponse::Switchboard(SwitchboardLegsPayload {
+            switchboard_package_id: "0xea".into(),
+            queue_id: "0xe6".into(),
+            feed_hashes: [("0x1::a::A".to_string(), "ab".repeat(32))].into(),
+            quote: SwitchboardQuoteWire {
+                feed_ids: vec!["ab".repeat(32)],
+                values: vec!["63456010000000000000000".into()],
+                values_neg: vec![false],
+                min_oracle_samples: vec![1],
+                signatures_b64: vec!["NMbd".into()],
+                slot: 42,
+                timestamp_seconds: 1_785_700_471,
+                oracle_ids: vec!["0x11".into()],
+            },
+        });
+        let j = serde_json::to_string(&sw).unwrap();
+        assert!(j.contains("\"provider\":\"switchboard\""), "{j}");
+        let back: OracleLegsResponse = serde_json::from_str(&j).unwrap();
+        assert!(matches!(back, OracleLegsResponse::Switchboard(_)));
+
+        let py = OracleLegsResponse::Pyth(PythLegsPayload {
+            accumulator_update_b64: "UE5BVQ==".into(),
+            feeds: Default::default(),
+        });
+        let j = serde_json::to_string(&py).unwrap();
+        assert!(j.contains("\"provider\":\"pyth\""), "{j}");
+    }
+
+    #[test]
+    fn quote_wire_decodes_to_submit_shapes() {
+        let wire = SwitchboardQuoteWire {
+            feed_ids: vec!["ab".repeat(32), format!("0x{}", "cd".repeat(32))],
+            values: vec!["63456010000000000000000".into(), "1".into()],
+            values_neg: vec![false, false],
+            min_oracle_samples: vec![1, 1],
+            signatures_b64: vec![base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                [7u8; 64],
+            )],
+            slot: 1,
+            timestamp_seconds: 2,
+            oracle_ids: vec!["0x11".into()],
+        };
+        let feeds = wire.feed_id_bytes().unwrap();
+        assert_eq!(feeds.len(), 2);
+        assert_eq!(feeds[0], vec![0xab; 32]);
+        assert_eq!(feeds[1], vec![0xcd; 32]); // 0x prefix tolerated
+        assert_eq!(
+            wire.values_u128().unwrap(),
+            vec![63_456_010_000_000_000_000_000u128, 1]
+        );
+        assert_eq!(wire.signature_bytes().unwrap(), vec![vec![7u8; 64]]);
+
+        // A truncated hash is an error, not a silently short vector —
+        // run_N would abort on chain with nothing useful.
+        let mut bad = wire.clone();
+        bad.feed_ids = vec!["abcd".into()];
+        assert!(bad.feed_id_bytes().unwrap_err().to_string().contains("expected 32"));
     }
 
     #[test]

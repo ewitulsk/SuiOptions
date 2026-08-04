@@ -51,11 +51,29 @@ pub struct OracleConfig {
     #[serde(default)]
     pub provider: protocol_types::OracleProvider,
 
-    /// Self-hosted Crossbar base URL, used when `provider = "switchboard"`
-    /// to resolve feeds and fetch signed quote bundles. Unset on a
-    /// Pyth-only deployment.
+    /// Crossbar base URL, used when `provider = "switchboard"` to fetch
+    /// signed quote bundles. Unset on a Pyth-only deployment.
+    ///
+    /// Interim (SO-346): points at the PUBLIC instance. Our in-compose
+    /// crossbar cannot serve Sui testnet — its per-chain oracle refresh
+    /// routines are hardwired to the public Sui fullnodes (no env
+    /// override) and fail to parse their responses, so its oracle cache
+    /// stays empty and `/v2/update` 404s. Repoint here when upstream
+    /// fixes land.
     #[serde(default)]
     pub crossbar_url: Option<String>,
+
+    /// `network` query for Crossbar quote requests. Crossbar's signing
+    /// set is per SOLANA cluster and defaults to mainnet; Sui testnet's
+    /// queue is backed by Solana DEVNET, so this must be "devnet" there
+    /// or every bundle is signed under the wrong queue.
+    #[serde(default)]
+    pub crossbar_network: Option<String>,
+
+    /// Sui JSON-RPC used to resolve the queue's registered-oracle map
+    /// (`Queue.existing_oracles` on chain). Required for switchboard.
+    #[serde(default)]
+    pub sui_rpc_url: Option<String>,
 
     /// The Sui `Queue` OBJECT `run_N` validates signing oracles against,
     /// read from the Switchboard `State` object for this network.
@@ -69,6 +87,15 @@ pub struct OracleConfig {
     /// testnet's, so this is a live failure mode, not a theoretical one.
     #[serde(default)]
     pub switchboard_queue_key: Option<String>,
+
+    /// Switchboard's own `on_demand` package id (the package exposing
+    /// `quote_submit_result_action::run_N`) — NOT our adapter. Served to
+    /// PTB composers via `GET /oracle/legs` so nothing else pins it.
+    /// Take it from the `published-at` of the branch our
+    /// `contracts/oracle-switchboard/Move.toml` links, never from docs
+    /// prose (see docs/oracle-abstraction-plan.md §2.5).
+    #[serde(default)]
+    pub switchboard_package_id: Option<String>,
 }
 
 fn default_hermes() -> String {

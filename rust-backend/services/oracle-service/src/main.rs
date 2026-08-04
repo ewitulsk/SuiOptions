@@ -39,41 +39,55 @@ async fn main() -> Result<()> {
         runtime_config::Secrets::default()
     };
 
-    // Discover the feeds to subscribe to from the token-info catalog: every
-    // token that carries a Pyth feed id (deduped — multiple tokens can't, but
-    // be defensive).
+    // Discover the feeds to subscribe to from the token-info catalog.
     let snapshot = TokenInfoClient::new(&cfg.token_info_url)
         .fetch_blocking_until_ready(30, Duration::from_secs(2))
         .await
         .with_context(|| format!("fetching catalog from token-info at {}", cfg.token_info_url))?;
-    // Feed discovery follows the CONFIGURED PROVIDER (SO-335): the same
-    // catalog carries both providers' keys, and this is where the switch
-    // takes effect for the data plane.
+    // Two feed maps, deliberately split (SO-346):
+    // - The SSE DATA PLANE always subscribes with the PYTH ids — Hermes
+    //   is the only live streaming source, and WS consumers (mm-bot's
+    //   per-RFQ hot path) key their caches by these ids. Flipping the
+    //   provider must not starve quoting.
+    // - The DESCRIPTOR (and /oracle/legs) follow the CONFIGURED PROVIDER
+    //   (SO-335): that is the switch's real job — which adapter's price
+    //   legs PTB composers build.
     let provider = cfg.oracle.provider;
     let mut seen: HashSet<PriceFeedId> = HashSet::new();
     let mut feeds: Vec<PriceFeedId> = Vec::new();
     let mut feed_by_asset: BTreeMap<String, PriceFeedId> = BTreeMap::new();
+    let mut descriptor_feeds: BTreeMap<String, PriceFeedId> = BTreeMap::new();
     for token in &snapshot.tokens {
-        let Some(raw) = token.feed_for(provider) else {
-            continue;
-        };
-        let Ok(feed) = PriceFeedId::from_hex(raw) else {
-            warn!(
-                ticker = %token.ticker,
-                %provider,
-                "catalog feed key is not 32-byte hex; skipping"
-            );
-            continue;
-        };
-        if seen.insert(feed) {
-            feeds.push(feed);
+        let asset = protocol_types::asset::canonicalize_move_type(&token.coin_type);
+        if let Some(raw) = token.pyth_feed_id.as_deref() {
+            if let Ok(feed) = PriceFeedId::from_hex(raw) {
+                if seen.insert(feed) {
+                    feeds.push(feed);
+                }
+                feed_by_asset.insert(asset.clone(), feed);
+            } else {
+                warn!(ticker = %token.ticker, "catalog pyth feed id is not 32-byte hex; skipping");
+            }
         }
-        feed_by_asset.insert(
-            protocol_types::asset::canonicalize_move_type(&token.coin_type),
-            feed,
-        );
+        if let Some(raw) = token.feed_for(provider) {
+            match PriceFeedId::from_hex(raw) {
+                Ok(feed) => {
+                    descriptor_feeds.insert(asset, feed);
+                }
+                Err(_) => warn!(
+                    ticker = %token.ticker,
+                    %provider,
+                    "catalog feed key is not 32-byte hex; skipping"
+                ),
+            }
+        }
     }
     if feeds.is_empty() {
+        anyhow::bail!(
+            "token-info catalog has no tokens with a pyth feed id —              the data plane has nothing to subscribe to"
+        );
+    }
+    if descriptor_feeds.is_empty() {
         anyhow::bail!(
             "token-info catalog has no tokens with a {provider} feed key —              the catalog must be seeded for a provider before it can go live"
         );
@@ -119,6 +133,21 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Off-chain payload source for `GET /oracle/legs` (SO-346). Pyth
+    // reuses the authenticated Hermes client; Switchboard requires the
+    // full Crossbar config — a switchboard deployment without it cannot
+    // build price legs, so that is a loud boot failure, not a silent
+    // degrade (the "works until you flip" trap this seam exists to kill).
+    let legs = match provider {
+        protocol_types::OracleProvider::Pyth => oracle_service::state::LegsBackend::Pyth {
+            http: http.clone(),
+            hermes_url: cfg.hermes_url.clone(),
+        },
+        protocol_types::OracleProvider::Switchboard => {
+            switchboard_legs_backend(&cfg.oracle).await?
+        }
+    };
+
     let state = Arc::new(AppState {
         price_cache,
         benchmark_vol,
@@ -126,7 +155,9 @@ async fn main() -> Result<()> {
         feeds,
         provider,
         feed_by_asset,
+        descriptor_feeds,
         adapter,
+        legs,
         upstream_healthy,
     });
 
@@ -138,6 +169,60 @@ async fn main() -> Result<()> {
         .await
         .context("serving oracle-service")?;
     Ok(())
+}
+
+/// Build the Switchboard legs backend: require the full Crossbar config,
+/// wait (bounded) for Crossbar itself — it boots in the same compose wave
+/// — then resolve the oracle-pubkey → Sui-object map once.
+async fn switchboard_legs_backend(
+    oracle: &oracle_service::config::OracleConfig,
+) -> Result<oracle_service::state::LegsBackend> {
+    let require = |v: &Option<String>, k: &str| -> Result<String> {
+        v.clone()
+            .ok_or_else(|| anyhow::anyhow!("provider=switchboard requires [oracle] {k}"))
+    };
+    let crossbar_url = require(&oracle.crossbar_url, "crossbar_url")?;
+    let queue_key = require(&oracle.switchboard_queue_key, "switchboard_queue_key")?;
+    let switchboard_package_id =
+        require(&oracle.switchboard_package_id, "switchboard_package_id")?;
+    let sui_rpc_url = require(&oracle.sui_rpc_url, "sui_rpc_url")?;
+    let queue_id = require(&oracle.switchboard_queue_id, "switchboard_queue_id")?
+        .parse::<sui_types::base_types::ObjectID>()
+        .context("parsing [oracle] switchboard_queue_id")?;
+
+    let crossbar =
+        switchboard_client::CrossbarClient::new(&crossbar_url, oracle.crossbar_network.clone());
+    let mut last_err = None;
+    for attempt in 1..=30u32 {
+        match crossbar.health().await {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                warn!(%crossbar_url, attempt, error = %format!("{e:#}"), "crossbar not ready; retrying");
+                last_err = Some(e);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        return Err(e.context(format!("crossbar at {crossbar_url} unreachable")));
+    }
+    // The signer map comes from the CHAIN, not crossbar — see
+    // switchboard_client::oracles_from_queue for why.
+    let oracles = switchboard_client::oracles_from_queue(&sui_rpc_url, queue_id)
+        .await
+        .context("resolving the queue's registered oracles from chain")?;
+    info!(oracles = oracles.len(), "switchboard legs backend ready");
+    Ok(oracle_service::state::LegsBackend::Switchboard {
+        crossbar,
+        oracles: tokio::sync::RwLock::new(oracles),
+        sui_rpc_url,
+        queue_id,
+        queue_key,
+        switchboard_package_id,
+    })
 }
 
 /// Resolve the live provider's on-chain adapter identity from token-info.

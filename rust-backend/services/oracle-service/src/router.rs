@@ -27,6 +27,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/prices/:feed", get(get_price))
         .route("/prices/by-asset/:coin_type", get(get_price_by_asset))
         .route("/oracle/descriptor", get(get_oracle_descriptor))
+        .route("/oracle/legs", get(get_oracle_legs))
         .route("/vol/realized", get(get_realized_vol))
         .route("/ws", get(ws_handler))
         .with_state(state)
@@ -65,11 +66,157 @@ async fn get_oracle_descriptor(State(state): State<Arc<AppState>>) -> Json<Oracl
         adapter_module: state.provider.adapter_module(),
         adapter: state.adapter,
         feeds: state
-            .feed_by_asset
+            .descriptor_feeds
             .iter()
             .map(|(asset, feed)| (asset.clone(), feed.to_hex()))
             .collect(),
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct LegsQuery {
+    /// Comma-separated canonical coin types.
+    assets: String,
+}
+
+/// `GET /oracle/legs?assets=…` — the live provider's off-chain payload
+/// for one PTB's price legs (SO-346).
+///
+/// The descriptor names the provider; this hands a composer the actual
+/// oracle data: a Hermes accumulator update under Pyth, a signed
+/// Crossbar quote bundle (plus queue + `on_demand` ids) under
+/// Switchboard. Assets with no feed under the live provider are absent
+/// from the response's coverage map — the caller's `none`-leg posture,
+/// not an error here.
+async fn get_oracle_legs(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<LegsQuery>,
+) -> Result<Json<oracle_client::OracleLegsResponse>, (StatusCode, String)> {
+    let assets: Vec<String> = q
+        .assets
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| protocol_types::asset::canonicalize_move_type(s.trim()))
+        .collect();
+    if assets.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "no assets requested".into()));
+    }
+    let (coverage, feeds) = resolve_feeds(&state.descriptor_feeds, &assets);
+    if feeds.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no {} feed for any requested asset", state.provider),
+        ));
+    }
+
+    match &state.legs {
+        crate::state::LegsBackend::Pyth { http, hermes_url } => {
+            let (payloads, _) = pyth_client::latest_with_update_data(http, hermes_url, &feeds)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("hermes update: {e:#}")))?;
+            let update = payloads.first().ok_or((
+                StatusCode::BAD_GATEWAY,
+                "hermes returned no update payloads".to_string(),
+            ))?;
+            if payloads.len() > 1 {
+                tracing::warn!(payloads = payloads.len(), "hermes returned multiple payloads; serving the first");
+            }
+            use base64::Engine;
+            Ok(Json(oracle_client::OracleLegsResponse::Pyth(
+                oracle_client::PythLegsPayload {
+                    accumulator_update_b64: base64::engine::general_purpose::STANDARD
+                        .encode(update),
+                    feeds: coverage,
+                },
+            )))
+        }
+        crate::state::LegsBackend::Switchboard {
+            crossbar,
+            oracles,
+            sui_rpc_url,
+            queue_id,
+            queue_key,
+            switchboard_package_id,
+        } => {
+            let hashes: Vec<String> = feeds.iter().map(|f| f.to_hex()).collect();
+            let bundle = {
+                let map = oracles.read().await.clone();
+                match crossbar.fetch_quotes(&hashes, &map).await {
+                    Ok(b) => b,
+                    Err(first) => {
+                        // Oracle validity is 7 days: a signer registered
+                        // after boot is expected turnover, not an outage.
+                        // Re-resolve the on-chain map once and retry
+                        // before failing the request.
+                        tracing::warn!(
+                            error = %format!("{first:#}"),
+                            "quote fetch failed; re-resolving the oracle map and retrying once"
+                        );
+                        let fresh =
+                            switchboard_client::oracles_from_queue(sui_rpc_url, *queue_id)
+                                .await
+                                .map_err(|e| {
+                                    (StatusCode::BAD_GATEWAY, format!("oracle map refresh: {e:#}"))
+                                })?;
+                        *oracles.write().await = fresh.clone();
+                        crossbar.fetch_quotes(&hashes, &fresh).await.map_err(|e| {
+                            (StatusCode::BAD_GATEWAY, format!("crossbar quotes: {e:#}"))
+                        })?
+                    }
+                }
+            };
+            bundle
+                .require_queue(queue_key)
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+            Ok(Json(oracle_client::OracleLegsResponse::Switchboard(
+                oracle_client::SwitchboardLegsPayload {
+                    switchboard_package_id: switchboard_package_id.clone(),
+                    queue_id: queue_id.to_hex_literal(),
+                    feed_hashes: coverage,
+                    quote: quote_wire(&bundle),
+                },
+            )))
+        }
+    }
+}
+
+/// Coverage map (asset → feed key hex) + deduped feed list for the
+/// requested assets, skipping ones the live provider has no feed for.
+fn resolve_feeds(
+    feed_by_asset: &std::collections::BTreeMap<String, PriceFeedId>,
+    assets: &[String],
+) -> (std::collections::BTreeMap<String, String>, Vec<PriceFeedId>) {
+    let mut coverage = std::collections::BTreeMap::new();
+    let mut feeds: Vec<PriceFeedId> = Vec::new();
+    for a in assets {
+        let Some(feed) = feed_by_asset.get(a) else {
+            continue;
+        };
+        coverage.insert(a.clone(), feed.to_hex());
+        if !feeds.contains(feed) {
+            feeds.push(*feed);
+        }
+    }
+    (coverage, feeds)
+}
+
+/// [`switchboard_client::QuoteBundle`] → the JSON-safe wire form.
+fn quote_wire(bundle: &switchboard_client::QuoteBundle) -> oracle_client::SwitchboardQuoteWire {
+    use base64::Engine;
+    oracle_client::SwitchboardQuoteWire {
+        feed_ids: bundle.feed_ids.iter().map(hex::encode).collect(),
+        values: bundle.values.iter().map(|v| v.to_string()).collect(),
+        values_neg: bundle.values_neg.clone(),
+        min_oracle_samples: bundle.min_oracle_samples.clone(),
+        signatures_b64: bundle
+            .signatures
+            .iter()
+            .map(|s| base64::engine::general_purpose::STANDARD.encode(s))
+            .collect(),
+        slot: bundle.slot,
+        timestamp_seconds: bundle.timestamp_seconds,
+        oracle_ids: bundle.oracle_ids.iter().map(|o| o.to_hex_literal()).collect(),
+    }
 }
 
 /// `GET /prices/by-asset/:coin_type` — spot keyed by ASSET, not by a
@@ -182,6 +329,57 @@ async fn get_realized_vol(
         .collect();
 
     Ok(Json(RealizedVolResponse { results }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sui_types::base_types::ObjectID;
+
+    #[test]
+    fn resolve_feeds_skips_uncovered_and_dedupes() {
+        let feed = PriceFeedId::from_hex(&"ab".repeat(32)).unwrap();
+        let map: std::collections::BTreeMap<String, PriceFeedId> = [
+            ("0x1::a::A".to_string(), feed),
+            ("0x1::b::B".to_string(), feed), // same feed, two assets
+        ]
+        .into();
+        let (coverage, feeds) = resolve_feeds(
+            &map,
+            &[
+                "0x1::a::A".to_string(),
+                "0x1::b::B".to_string(),
+                "0x1::c::C".to_string(), // no feed → none-leg, not an error
+            ],
+        );
+        assert_eq!(coverage.len(), 2);
+        assert_eq!(feeds, vec![feed]);
+        assert!(!coverage.contains_key("0x1::c::C"));
+    }
+
+    #[test]
+    fn quote_wire_is_lossless() {
+        let bundle = switchboard_client::QuoteBundle {
+            feed_ids: vec![vec![0xab; 32]],
+            values: vec![63_456_010_000_000_000_000_000u128],
+            values_neg: vec![false],
+            min_oracle_samples: vec![1],
+            signatures: vec![vec![7u8; 64]],
+            slot: 42,
+            timestamp_seconds: 1_785_700_471,
+            oracle_ids: vec![ObjectID::from_hex_literal("0x11").unwrap()],
+            queue_key: "c9".repeat(32),
+        };
+        let wire = quote_wire(&bundle);
+        assert_eq!(wire.feed_id_bytes().unwrap(), bundle.feed_ids);
+        assert_eq!(wire.values_u128().unwrap(), bundle.values);
+        assert_eq!(wire.signature_bytes().unwrap(), bundle.signatures);
+        assert_eq!(wire.oracle_ids, vec!["0x11"]);
+        // u128 values must be strings on the wire — JS consumers cannot
+        // hold 1e22 in a JSON number.
+        let json = serde_json::to_value(&wire).unwrap();
+        assert!(json["values"][0].is_string());
+    }
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {

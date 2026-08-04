@@ -15,21 +15,60 @@ pub struct AppState {
     /// Fanout hub: the drain loop publishes price/status frames; each `/ws`
     /// connection subscribes a receiver.
     pub fanout: broadcast::Sender<WsMessage>,
-    /// Feeds discovered from the token-info catalog at boot (what `/prices`
-    /// enumerates and the SSE subscription covers).
+    /// Feeds the SSE data plane subscribes to (what `/prices` enumerates).
+    ///
+    /// ALWAYS the Pyth set, regardless of the live provider (SO-346):
+    /// spot/vol streaming is off-chain market data with exactly one live
+    /// streaming source (Hermes), and every WS consumer (mm-bot's hot
+    /// path) keys its cache by these ids. The provider switch governs
+    /// ON-CHAIN attestation — the descriptor and `/oracle/legs` — not
+    /// where the ticker feed comes from.
     pub feeds: Vec<PriceFeedId>,
     /// The live oracle provider (SO-335) — served on
     /// `/oracle/descriptor` so PTB composers build the right price legs.
     pub provider: protocol_types::OracleProvider,
-    /// Canonical coin type → that asset's feed under the LIVE provider.
-    /// Lets consumers ask for a price by asset and never handle a
-    /// provider-specific feed key themselves.
+    /// Canonical coin type → PYTH feed, for the data plane
+    /// (`/prices/by-asset`). See `feeds` for why this stays Pyth-keyed.
     pub feed_by_asset: std::collections::BTreeMap<String, PriceFeedId>,
+    /// Canonical coin type → the LIVE provider's feed key, for the
+    /// descriptor and `/oracle/legs`. Identical to `feed_by_asset` when
+    /// the provider is Pyth.
+    pub descriptor_feeds: std::collections::BTreeMap<String, PriceFeedId>,
     /// Adapter package + feed registry the composers need, mirrored from
     /// token-info. `None` until the live provider's adapter is deployed.
     pub adapter: Option<crate::state::AdapterIds>,
+    /// Off-chain payload source for `GET /oracle/legs` (SO-346).
+    pub legs: LegsBackend,
     /// Whether the upstream Hermes stream is currently healthy.
     pub upstream_healthy: Arc<AtomicBool>,
+}
+
+/// The live provider's off-chain payload source, backing
+/// `GET /oracle/legs` (SO-346). Fixed at boot alongside `provider` — a
+/// switch is an oracle-service restart, same as the descriptor.
+pub enum LegsBackend {
+    /// Hermes accumulator updates, fetched with the same authenticated
+    /// client as the SSE data plane.
+    Pyth {
+        http: reqwest::Client,
+        hermes_url: String,
+    },
+    /// Signed Crossbar consensus payloads. The oracle map comes from the
+    /// CHAIN (the queue's `existing_oracles` table, SO-346) — resolved at
+    /// boot and re-resolved on a quote failure, because oracle validity
+    /// is 7 days and a signer registered after boot would otherwise
+    /// wedge legs until a restart.
+    Switchboard {
+        crossbar: switchboard_client::CrossbarClient,
+        /// `oracle_key` (lowercase hex) → Sui `Oracle` object id.
+        oracles: tokio::sync::RwLock<std::collections::BTreeMap<String, sui_types::base_types::ObjectID>>,
+        /// Sui JSON-RPC the map is (re-)resolved against.
+        sui_rpc_url: String,
+        queue_id: sui_types::base_types::ObjectID,
+        queue_key: String,
+        /// Switchboard's `on_demand` package id, from config.
+        switchboard_package_id: String,
+    },
 }
 
 /// On-chain identity of the live provider's adapter, as served on
