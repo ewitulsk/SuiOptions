@@ -37,7 +37,8 @@ use shared_crypto::intent::Intent;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{
-    Argument, ObjectArg, SharedObjectMutability, Transaction, TransactionData,
+    Argument, ObjectArg, ProgrammableTransaction, SharedObjectMutability, Transaction,
+    TransactionData,
 };
 use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION};
 use tracing::{debug, trace};
@@ -88,7 +89,11 @@ const GAS_REF_ATTEMPTS: u32 = 4;
 /// after the gRPC migration (SO-337): mm-bot's bootstrap creates its quote
 /// signer and then immediately funds its collateral account, and the second
 /// transaction was rejected on every boot (SO-343).
-fn is_stale_gas_rejection(err: &anyhow::Error) -> bool {
+///
+/// Public because callers that own durable state past the retry budget need
+/// the same answer: the option-scheduler classifies a submit failure to decide
+/// whether its claimed roll slot can be released (SO-344).
+pub fn is_stale_gas_rejection(err: &anyhow::Error) -> bool {
     // Matched on the message because the gRPC status is flattened into an
     // anyhow chain by ChainClient::execute. Both phrasings come from the same
     // validator rejection; either alone is sufficient.
@@ -106,6 +111,12 @@ fn is_stale_gas_rejection(err: &anyhow::Error) -> bool {
 /// for a stale gas reference — see [`is_stale_gas_rejection`]. Only that one
 /// rejection is retried; Move aborts and transport errors propagate on the
 /// first failure, since those may have executed.
+///
+/// Takes an already-finished PTB, so only the *gas* reference is refreshed
+/// between attempts. If the transaction also consumes an owned object the
+/// sender mutates elsewhere — an AdminCap, a TreasuryCap — that input's
+/// reference is baked in and every retry fails identically; use
+/// [`submit_ptb_rebuilding`] instead.
 pub async fn submit_ptb(
     client: &ChainClient,
     signer: &Signer,
@@ -114,10 +125,40 @@ pub async fn submit_ptb(
     label: &str,
 ) -> Result<ExecutedTransaction> {
     let programmable = pt.finish();
+    submit_ptb_rebuilding(client, signer, gas_budget, label, || {
+        let programmable = programmable.clone();
+        async move { Ok(programmable) }
+    })
+    .await
+}
 
+/// [`submit_ptb`] for transactions whose *inputs* can also go stale.
+///
+/// `build` is called once per attempt and must re-read every object reference
+/// it embeds, so a retry picks up the current version of the AdminCap (or any
+/// other owned input) as well as the gas coin. Rebuilding is what makes the
+/// retry meaningful: re-selecting gas alone leaves the stale input in place,
+/// which is how the option-scheduler's post-roll `allow_pool` call failed on
+/// all four attempts — the roll's own `create_buckets` had just bumped the
+/// AdminCap it was still referencing (SO-344).
+///
+/// Same safety argument as [`is_stale_gas_rejection`]: this is a rejection, so
+/// nothing executed, and a rebuilt transaction has a fresh digest.
+pub async fn submit_ptb_rebuilding<F, Fut>(
+    client: &ChainClient,
+    signer: &Signer,
+    gas_budget: u64,
+    label: &str,
+    build: F,
+) -> Result<ExecutedTransaction>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<ProgrammableTransaction>>,
+{
     for attempt in 1..=GAS_REF_ATTEMPTS {
         // Re-read per attempt: a stale reference is exactly what we are
         // recovering from, so reusing the previous read would spin forever.
+        let programmable = build().await.context("building the transaction")?;
         let gas_coin = client
             .gas_coin(signer.address)
             .await
@@ -130,7 +171,7 @@ pub async fn submit_ptb(
         let tx_data = TransactionData::new_programmable(
             signer.address,
             vec![gas_coin],
-            programmable.clone(),
+            programmable,
             gas_budget,
             gas_price,
         );
@@ -143,7 +184,7 @@ pub async fn submit_ptb(
                     label,
                     attempt,
                     backoff_ms = backoff.as_millis() as u64,
-                    "gas reference stale; re-reading and resubmitting"
+                    "object reference stale; rebuilding and resubmitting"
                 );
                 tokio::time::sleep(backoff).await;
             }

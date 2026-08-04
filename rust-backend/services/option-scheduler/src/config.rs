@@ -109,6 +109,18 @@ pub struct SchedulerConfig {
     #[serde(default = "default_reconciler_interval_secs")]
     pub reconciler_interval_secs: u64,
 
+    /// How long an ambiguous submit may sit unresolved before the reconciler
+    /// falls back to the indexer's checkpoint cursor instead of its sequence
+    /// margin, in milliseconds. Default 30 minutes.
+    ///
+    /// `reconciler_safety_margin` counts *events*, so on a quiet chain it can
+    /// take weeks to clear — which is how a failed roll stranded staging for
+    /// nine days (SO-344). Past this grace period the reconciler asks the
+    /// indexer whether it has caught up to the chain tip instead, which
+    /// terminates whether or not events are flowing.
+    #[serde(default = "default_reconciler_grace_ms")]
+    pub reconciler_grace_ms: u64,
+
     /// How often the vault-ensure pass runs, in milliseconds. Default 1 hour.
     /// Each pass checks every configured pair and creates a vault for any that
     /// lacks one (SO vault auto-provisioning).
@@ -318,6 +330,10 @@ fn default_reconciler_safety_margin() -> u64 {
 
 fn default_reconciler_interval_secs() -> u64 {
     30
+}
+
+fn default_reconciler_grace_ms() -> u64 {
+    30 * 60 * 1_000 // 30 minutes
 }
 
 fn default_max_publish_lag_ms() -> u64 {

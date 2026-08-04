@@ -226,20 +226,32 @@ pub async fn allow_pools_for_vault(
     pool_ids: &[ObjectID],
     gas_budget: u64,
 ) -> Result<()> {
-    let mut pt = ProgrammableTransactionBuilder::new();
-    let admin = pt.obj(crate::tx::owned_object_arg(client, admin_cap).await?)?;
-    let list = pt.obj(shared_object_arg(client, allowlist_id, true).await?)?;
-    for pool_id in pool_ids {
-        let arg = pt.pure(pool_id)?;
-        pt.programmable_move_call(
-            adapter_pkg,
-            Identifier::new("deepbook_adapter").unwrap(),
-            Identifier::new("allow_pool").unwrap(),
-            vec![],
-            vec![admin, list, arg],
-        );
-    }
-    crate::tx::submit_ptb(client, signer, pt, gas_budget, "deepbook_adapter::allow_pool").await?;
+    // Rebuilt per attempt: this runs immediately after the roll's own
+    // AdminCap-gated `create_buckets`, so the cap's reference is routinely a
+    // version behind and only a rebuild picks up the current one (SO-344).
+    crate::tx::submit_ptb_rebuilding(
+        client,
+        signer,
+        gas_budget,
+        "deepbook_adapter::allow_pool",
+        || async {
+            let mut pt = ProgrammableTransactionBuilder::new();
+            let admin = pt.obj(crate::tx::owned_object_arg(client, admin_cap).await?)?;
+            let list = pt.obj(shared_object_arg(client, allowlist_id, true).await?)?;
+            for pool_id in pool_ids {
+                let arg = pt.pure(pool_id)?;
+                pt.programmable_move_call(
+                    adapter_pkg,
+                    Identifier::new("deepbook_adapter").unwrap(),
+                    Identifier::new("allow_pool").unwrap(),
+                    vec![],
+                    vec![admin, list, arg],
+                );
+            }
+            Ok(pt.finish())
+        },
+    )
+    .await?;
     Ok(())
 }
 

@@ -306,12 +306,15 @@ async fn main() -> Result<()> {
         let pair_keys = pair_keys.clone();
         let indexer = indexer.clone();
         let safety_margin = cfg.reconciler_safety_margin;
+        let grace_ms = cfg.reconciler_grace_ms;
         let interval = Duration::from_secs(cfg.reconciler_interval_secs.max(1));
         tokio::spawn(async move {
             loop {
                 metrics::counter!("scheduler_runs_total", "job" => "reconcile").increment(1);
                 let started = std::time::Instant::now();
-                if let Err(e) = run_reconciler(&pool, &indexer, &pair_keys, safety_margin).await {
+                if let Err(e) =
+                    run_reconciler(&pool, &indexer, &pair_keys, safety_margin, grace_ms).await
+                {
                     warn!(error = %e, "reconciler tick errored");
                 }
                 metrics::histogram!("scheduler_job_duration_seconds", "job" => "reconcile")
@@ -322,6 +325,7 @@ async fn main() -> Result<()> {
         info!(
             interval_secs = cfg.reconciler_interval_secs,
             safety_margin,
+            grace_ms,
             "reconciler task started"
         );
     }
@@ -854,31 +858,76 @@ async fn tick_once(
 /// Phase 4 (reconcile): any row still `needs_reconciliation` once the indexer
 /// head has provably caught up past the submit anchor had no bucket land —
 /// clear it.
+///
+/// "Caught up" has two tests. The fast one is the sequence margin: the indexer
+/// head has advanced `safety_margin` events past the anchor stamped at submit.
+/// That is cheap but counts *events*, so it never fires on a quiet chain — a
+/// freshly-redeployed staging emits a handful of events a day, and the margin
+/// of 100 kept five phantom rows alive for nine days while their claimed slots
+/// suppressed every subsequent roll (SO-344).
+///
+/// So past `grace_ms` a second test applies: ask the indexer whether it has
+/// ingested up to the chain tip. That terminates on an idle chain, and it is
+/// the stronger claim — a caught-up indexer with no bucket at the expiry means
+/// no bucket exists. The grace period is what keeps it safe: a transaction
+/// still in flight when we gave up on it finalizes within seconds, long before
+/// the window elapses, and `confirm_landed_rolls` above would have flipped the
+/// row to `confirmed` on any tick since.
 async fn run_reconciler(
     pool: &db::DbPool,
     indexer: &IndexerClient,
     pair_keys: &[PairKey],
     safety_margin: u64,
+    grace_ms: u64,
 ) -> Result<()> {
     confirm_landed_rolls(pool, indexer, pair_keys).await?;
     supersede_invalidated_families(pool, indexer, pair_keys).await?;
 
     let rows = db::needs_reconciliation_rows(pool)?;
+    metrics::gauge!("scheduler_rolls_needs_reconciliation").set(rows.len() as f64);
     if rows.is_empty() {
         return Ok(());
     }
     let current_seq = indexer.head_sequence().await?;
+    let now = now_ms();
     for row in rows {
         let anchor = row.submit_anchor_seq.unwrap_or(0) as u64;
+        let stale_ms = now.saturating_sub(row.updated_at.timestamp_millis().max(0) as u64);
         if current_seq <= anchor + safety_margin {
-            debug!(
+            // Sequence margin unmet. Fall back to the checkpoint cursor once
+            // the row has waited out the grace period.
+            if stale_ms < grace_ms {
+                debug!(
+                    id = row.id,
+                    current_seq,
+                    anchor,
+                    safety_margin,
+                    stale_ms,
+                    "reconciler: indexer hasn't caught up yet"
+                );
+                continue;
+            }
+            let caught_up = match indexer.progress().await {
+                Ok(p) => p.caught_up,
+                Err(e) => {
+                    warn!(id = row.id, error = %e, "reconciler: indexer progress read failed");
+                    continue;
+                }
+            };
+            if !caught_up {
+                debug!(
+                    id = row.id,
+                    stale_ms,
+                    "reconciler: past grace but indexer is still behind the chain tip"
+                );
+                continue;
+            }
+            info!(
                 id = row.id,
-                current_seq,
-                anchor,
-                safety_margin,
-                "reconciler: indexer hasn't caught up yet"
+                stale_ms,
+                grace_ms,
+                "reconciler: sequence margin unmet but indexer is at the chain tip"
             );
-            continue;
         }
         // Indexer has caught up. confirm_landed_rolls above already flipped
         // any row whose bucket exists to 'confirmed', so a row still in

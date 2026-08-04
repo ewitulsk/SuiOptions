@@ -29,6 +29,7 @@ use parking_lot::RwLock;
 use serde::Deserialize;
 use sui_types::base_types::ObjectID;
 
+use protocol_types::asset::canonicalize_move_type;
 use protocol_types::ids::{ObjectId as PtObjectId, SuiAddress as PtSuiAddress};
 use protocol_types::messages::{
     AuthResponsePayload, BulkViewMmPremium, BulkViewQuotePayload, MmHelloPayload, MmQuotePayload,
@@ -167,6 +168,50 @@ struct BotConfig {
     /// auctions as a retail stand-in + redeems expired positions.
     #[serde(default)]
     sim: mm_bot::sim::SimConfig,
+
+    /// `[testnet]` — faucet behaviour that only exists on testnet.
+    #[serde(default)]
+    testnet: TestnetConfig,
+}
+
+/// `[testnet]` — test-token faucet behaviour. Rejected at load on any
+/// other network (see [`BotConfig::validate`]): naming the section
+/// `[testnet]` documents the intent, it does not enforce it, and a config
+/// copied to prod must fail loudly rather than quietly skip the seed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct TestnetConfig {
+    /// Mint and deposit `mint_and_deposit_amount` of the settlement asset
+    /// into the trading vault the desk provisions, the first time it
+    /// creates one (SO-345). Never fires when adopting an existing vault.
+    ///
+    /// A vault created without a seed is NAV 0, and NAV 0 hard-declines
+    /// every RFQ — so on testnet this is what makes a fresh vault
+    /// tradeable without a human funding step.
+    mint_and_deposit_liquidity: bool,
+    /// Raw units of the vault's deposit asset. Default 1e12 = $1M at
+    /// TUSDC's 6 decimals.
+    mint_and_deposit_amount: u64,
+}
+
+impl Default for TestnetConfig {
+    fn default() -> Self {
+        Self { mint_and_deposit_liquidity: false, mint_and_deposit_amount: 1_000_000_000_000 }
+    }
+}
+
+impl BotConfig {
+    /// Cross-field checks serde cannot express.
+    fn validate(&self) -> Result<()> {
+        if self.testnet.mint_and_deposit_liquidity && self.network != Network::Testnet {
+            return Err(anyhow!(
+                "[testnet].mint_and_deposit_liquidity = true on network = {} — faucet minting \
+                 exists only on testnet. Remove the section from this config.",
+                self.network
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Vol + staleness knobs for the live price cache fed from oracle-service.
@@ -582,9 +627,43 @@ async fn main() -> Result<()> {
         };
         // Shared governance objects the curator-session calls reference
         // (recorded by the deploy-time activation step, SO-292).
-        let (integration_registry, pool_allowlist) = match snapshot.trading_vault_objects() {
+        let tv_objects = snapshot.trading_vault_objects();
+        let (integration_registry, pool_allowlist) = match tv_objects {
             Some(o) => (Some(o.integration_registry()?), Some(o.pool_allowlist()?)),
             None => (None, None),
+        };
+        let vault_protocol_config = tv_objects
+            .context("trading_vault_objects missing from token-info (required by [desk])")?
+            .vault_protocol_config()?;
+
+        // `[testnet]` seed for a vault the desk provisions for itself. The
+        // faucet lookup is the second, independent gate: token-info only
+        // carries testTokens on dev/staging, so there is nothing to
+        // resolve off testnet even if the config check were bypassed.
+        let testnet_seed = if cfg.testnet.mint_and_deposit_liquidity {
+            let token = snapshot
+                .maybe_test_tokens()
+                .and_then(|tt| {
+                    tt.tokens.values().find(|t| {
+                        canonicalize_move_type(&t.coin_type)
+                            == canonicalize_move_type(&settlement_coin_type)
+                    })
+                })
+                .with_context(|| {
+                    format!(
+                        "[testnet].mint_and_deposit_liquidity = true but token-info has no \
+                         faucet for the settlement asset {settlement_coin_type}"
+                    )
+                })?;
+            let (tokens_package, module) = token.module_path()?;
+            Some(mm_bot::desk::provision::TestnetSeed {
+                tokens_package,
+                module,
+                faucet_id: token.faucet()?,
+                amount: cfg.testnet.mint_and_deposit_amount,
+            })
+        } else {
+            None
         };
         let (deepbook, deep_coin_type) = match snapshot.deepbook() {
             Some(db) => (
@@ -625,6 +704,8 @@ async fn main() -> Result<()> {
             quote_ttl_ms: cfg.quote_ttl_ms,
             core_package: snapshot.package()?,
             trading_vault_package,
+            vault_protocol_config,
+            testnet_seed,
             options_adapter_package,
             deepbook_adapter_package,
             integration_registry,
@@ -633,8 +714,9 @@ async fn main() -> Result<()> {
             deep_coin_type,
         })
         .await?;
-        let vault_id = ObjectID::from_hex_literal(cfg.desk.vault_id.trim())
-            .map_err(|e| anyhow!("bad [desk].vault_id: {e}"))?;
+        // The resolved vault, which is not `cfg.desk.vault_id` when the
+        // desk adopted a self-created vault or provisioned a fresh one.
+        let vault_id = d.vault_id;
         vault_routing = Some(VaultRouting {
             collateral_source: pt_object_id_from_sui(vault_id),
             release_package: PtSuiAddress::new(
@@ -1117,6 +1199,7 @@ fn load_config(path: &Path) -> Result<BotConfig> {
     let cfg: BotConfig = settings
         .try_deserialize()
         .with_context(|| format!("parsing {}", path.display()))?;
+    cfg.validate().with_context(|| format!("validating {}", path.display()))?;
     tracing::debug!(
         network = %cfg.network,
         underlyings = ?cfg.underlying_symbols,
@@ -1429,11 +1512,14 @@ mod config_tests {
     fn shipped_configs_parse_with_desk_defaults() {
         for name in ["config.toml", "config.staging.toml", "config.prod.toml"] {
             let cfg = parse(name);
-            // An enabled desk must be fully wired to its provisioned
-            // vault (staging is live per SO-299); envs without one ship
-            // disabled.
+            // An enabled desk must have SOME route to a vault: a pinned
+            // id, or permission to provision its own (SO-345). Neither is
+            // a desk that boots only to decline every RFQ.
             if cfg.desk.enabled {
-                assert!(!cfg.desk.vault_id.is_empty(), "{name}: enabled desk needs vault_id");
+                assert!(
+                    !cfg.desk.vault_id.trim().is_empty() || cfg.desk.provision.enabled,
+                    "{name}: enabled desk needs vault_id or [desk.provision].enabled"
+                );
                 assert!(cfg.desk.mm_release_enabled, "{name}: enabled desk needs mm release");
             }
             // Defaults are the 00-plan starting parameters.
@@ -1488,4 +1574,75 @@ fn spawn_vol_sampler(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(src: &str) -> BotConfig {
+        toml::from_str(src).expect("config parses")
+    }
+
+    /// Naming the section `[testnet]` documents intent; only this check
+    /// enforces it. A staging config copied to prod must fail loudly
+    /// rather than quietly skip the seed and leave a NAV-0 vault.
+    #[test]
+    fn testnet_seed_is_rejected_off_testnet() {
+        let cfg = parse(
+            "network = \"mainnet\"\n\
+             quoting_url = \"ws://q\"\n\
+             roles = [\"trader_mm\"]\n\
+             [testnet]\n\
+             mint_and_deposit_liquidity = true\n",
+        );
+        let err = cfg.validate().expect_err("must reject faucet minting off testnet");
+        assert!(format!("{err:#}").contains("only on testnet"), "{err:#}");
+    }
+
+    #[test]
+    fn testnet_seed_is_allowed_on_testnet() {
+        let cfg = parse(
+            "network = \"testnet\"\n\
+             quoting_url = \"ws://q\"\n\
+             roles = [\"trader_mm\"]\n\
+             [testnet]\n\
+             mint_and_deposit_liquidity = true\n",
+        );
+        cfg.validate().expect("testnet may mint");
+        assert_eq!(cfg.testnet.mint_and_deposit_amount, 1_000_000_000_000);
+    }
+
+    /// Absent section ⇒ no minting anywhere, on any network.
+    #[test]
+    fn testnet_section_defaults_off() {
+        let cfg = parse(
+            "network = \"mainnet\"\n\
+             quoting_url = \"ws://q\"\n\
+             roles = [\"trader_mm\"]\n",
+        );
+        assert!(!cfg.testnet.mint_and_deposit_liquidity);
+        cfg.validate().expect("no section, no minting");
+    }
+
+    /// Staging drives the desk off self-provisioning, not a pinned id:
+    /// a pin goes stale on every contract redeploy.
+    #[test]
+    fn shipped_staging_config_self_provisions_and_seeds() {
+        let cfg = parse(include_str!("../config/config.staging.toml"));
+        cfg.validate().expect("shipped staging config validates");
+        assert!(cfg.desk.vault_id.trim().is_empty(), "staging must not pin a vault id");
+        assert!(cfg.desk.provision.enabled, "staging provisions its own vault");
+        assert!(cfg.testnet.mint_and_deposit_liquidity, "staging seeds the vault it creates");
+    }
+
+    /// Prod must never carry the faucet section, and must not silently
+    /// conjure a vault that would custody real deposits.
+    #[test]
+    fn shipped_prod_config_neither_mints_nor_self_provisions() {
+        let cfg = parse(include_str!("../config/config.prod.toml"));
+        cfg.validate().expect("shipped prod config validates");
+        assert!(!cfg.testnet.mint_and_deposit_liquidity);
+        assert!(!cfg.desk.provision.enabled);
+    }
 }
