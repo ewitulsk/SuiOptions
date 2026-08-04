@@ -924,9 +924,13 @@ async fn force_unwind_if_starved(
     let Some(dba) = ctx.deepbook_adapter_pkg else { return };
     let result: Result<()> = async {
         let client = &wrap.client;
-        let head = as_u64(&json_field(client, vault_id, "/fields/queue_head").await?)
+        // Direct pointers: the gRPC rendering has no `fields` wrapper
+        // (docs/sui-json-rpc-migration.md) — these two were the last
+        // JSON-RPC-shaped stragglers and failed every crank on a vault
+        // with pending withdrawals.
+        let head = as_u64(&json_field(client, vault_id, "/queue_head").await?)
             .unwrap_or(0);
-        let tail = as_u64(&json_field(client, vault_id, "/fields/queue_tail").await?)
+        let tail = as_u64(&json_field(client, vault_id, "/queue_tail").await?)
             .unwrap_or(0);
         if head >= tail {
             return Ok(());
