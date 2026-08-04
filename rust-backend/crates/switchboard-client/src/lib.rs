@@ -141,8 +141,20 @@ struct OracleResponse {
     /// signature argument is 65 bytes (r || s || v) — dropping this byte
     /// makes every quote abort inside the native with code 1 (observed
     /// live before it was appended).
+    ///
+    /// CAUTION: the reported value is unreliable. Observed live: every
+    /// bundle crossbar reported with recoveryId 1 failed on-chain
+    /// recovery (the wrong v recovers a DIFFERENT key, the oracle is
+    /// silently skipped, and `Quotes` comes out empty — surfacing as
+    /// E_FEED_MISSING_FROM_BUNDLE downstream). The id is therefore
+    /// RE-DERIVED against `ethAddress` before submit; this field is only
+    /// the first candidate tried.
     #[serde(rename = "recoveryId", default)]
     recovery_id: u8,
+    /// keccak160 of the signer's uncompressed secp key — lets the client
+    /// verify which recovery id is actually correct.
+    #[serde(rename = "ethAddress", default)]
+    eth_address: Option<String>,
     #[serde(rename = "feedResponses", default)]
     feed_responses: Vec<FeedResponse>,
 }
@@ -221,7 +233,7 @@ impl UpdateResponse {
                 *e = (*e).max(fr.min_oracle_samples);
             }
         }
-        let min_oracle_samples = self
+        let min_oracle_samples: Vec<u8> = self
             .median_responses
             .iter()
             .map(|m| {
@@ -230,6 +242,29 @@ impl UpdateResponse {
                     .unwrap_or(&1)
             })
             .collect();
+
+        // The exact preimage `run_N` verifies: slot ‖ timestamp ‖ per-feed
+        // (feed_id(32) ‖ value as i128 two's-complement LE ‖ min_samples).
+        // Layout confirmed against the PUBLISHED module's disassembly.
+        // The ecrecover native is called with hash id 1 = SHA256 (0 is
+        // keccak in sui::ecdsa_k1 — easy to get backwards).
+        let prehash = {
+            use sha2::Digest;
+            let mut m = Vec::new();
+            m.extend_from_slice(&self.slot.to_le_bytes());
+            m.extend_from_slice(&self.timestamp.to_le_bytes());
+            for i in 0..feed_ids.len() {
+                m.extend_from_slice(&feed_ids[i]);
+                let signed: i128 =
+                    if values_neg[i] { -(values[i] as i128) } else { values[i] as i128 };
+                m.extend_from_slice(&signed.to_le_bytes());
+                m.push(min_oracle_samples[i]);
+            }
+            let out = sha2::Sha256::digest(&m);
+            let mut h = [0u8; 32];
+            h.copy_from_slice(&out);
+            h
+        };
 
         let mut signatures = Vec::with_capacity(self.oracle_responses.len());
         let mut oracle_ids = Vec::with_capacity(self.oracle_responses.len());
@@ -244,7 +279,15 @@ impl UpdateResponse {
                 ));
             }
             // r || s || v — the shape `secp256k1_ecrecover` takes on chain.
-            sig.push(o.recovery_id);
+            // v is re-derived against ethAddress when possible; the
+            // reported id is only the first candidate (see OracleResponse).
+            let v = resolve_recovery_id(
+                &prehash,
+                &sig,
+                o.recovery_id,
+                o.eth_address.as_deref(),
+            )?;
+            sig.push(v);
             signatures.push(sig);
             let key = strip0x(&o.oracle_pubkey).to_ascii_lowercase();
             let id = oracle_objects.get(&key).ok_or_else(|| {
@@ -289,6 +332,56 @@ impl UpdateResponse {
             queue_key,
         })
     }
+}
+
+/// Pick the recovery id that actually recovers the signer (SO-346).
+///
+/// Crossbar's reported `recoveryId` is unreliable — a wrong v does not
+/// error on chain, it recovers a DIFFERENT key which fails queue
+/// membership silently and empties the bundle. When the response carries
+/// `ethAddress`, try the reported id first and its complement second,
+/// keeping whichever recovers a key whose keccak160 matches. Without an
+/// `ethAddress` the reported id passes through untouched.
+fn resolve_recovery_id(
+    prehash: &[u8; 32],
+    rs: &[u8],
+    reported: u8,
+    eth_address: Option<&str>,
+) -> Result<u8> {
+    // Ethereum-style 27/28 spellings normalize to parity.
+    let base = if reported >= 27 { reported - 27 } else { reported } & 1;
+    let Some(addr_hex) = eth_address else {
+        return Ok(base);
+    };
+    let want = hex::decode(strip0x(addr_hex)).context("decoding ethAddress")?;
+    if want.len() != 20 {
+        return Err(anyhow!("ethAddress is {} bytes; expected 20", want.len()));
+    }
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+    use sha3::Digest;
+    let sig = Signature::from_slice(rs).context("parsing r||s signature")?;
+    for cand in [base, 1 - base] {
+        let Ok(rid) = RecoveryId::try_from(cand) else { continue };
+        let Ok(vk) = VerifyingKey::recover_from_prehash(prehash, &sig, rid) else {
+            continue;
+        };
+        let uncompressed = vk.to_encoded_point(false);
+        let hash = sha3::Keccak256::digest(&uncompressed.as_bytes()[1..]);
+        if hash[12..] == want[..] {
+            if cand != base {
+                tracing::warn!(
+                    reported,
+                    used = cand,
+                    "crossbar recoveryId was wrong; corrected against ethAddress"
+                );
+            }
+            return Ok(cand);
+        }
+    }
+    Err(anyhow!(
+        "neither recovery id recovers a key matching ethAddress {addr_hex} — \
+         signature does not verify against this bundle's consensus message"
+    ))
 }
 
 /// Guard clauses for [`CrossbarClient::fetch_quotes`], split out so they
@@ -595,24 +688,60 @@ mod tests {
     /// crossbar.switchboard.xyz — the shape this decoder must survive.
     const LIVE_SAMPLE: &str = r#"{
       "medianResponses": [
-        {"value":"63456010000000000000000","feedHash":"4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812","numOracles":1}
+            {
+                  "value": "63859140000000000000000",
+                  "feedHash": "4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812",
+                  "numOracles": 1
+            }
       ],
       "oracleResponses": [
-        {"oraclePubkey":"405a6ee0581e9bb6037232cfc7318590752f05f769821aa7c18bcd2edf291e89",
-         "ethAddress":"2d385803c1af442704d50ecb6e600700d86cc747",
-         "signature":"NMbdWaCa6wkqdp+qyYb87/S8KriXz74rfcKanmqZOA8xr3H3yzFqsLav+HIPCx+xK+TaR6Ng2aKpxJmtQEg5cg==",
-         "recoveryId":1,
-         "feedResponses":[{"feed_hash":"4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812","min_oracle_samples":1,"queue_pubkey":"86807068432f186a147cf0b13a30067d386204ea9d6c8b04743ac2ef010b0752"}]}
+            {
+                  "oraclePubkey": "58fce533fc20e246d3a7d5df9388ac69314af93d580047fb9137cd80ba58e641",
+                  "ethAddress": "3a1d30312334330d0cb3468d1b712cfbcd68a7d6",
+                  "signature": "d87u02ydLQNQKl3qkFRrychs8MLpcMiqw+M6hhH9bY5ttqbNpiV8MX0CgAPsg9B+qMteEF/GLCg4D4KrVZHBZA==",
+                  "recoveryId": 0,
+                  "feedResponses": [
+                        {
+                              "failure_error": "",
+                              "feed_hash": "4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812",
+                              "min_oracle_samples": 1,
+                              "msg": "icjSnHLuVmXE/5srlSlCJS42LkSHkia+oxIfix/Jbl0=",
+                              "oracle_pubkey": "58fce533fc20e246d3a7d5df9388ac69314af93d580047fb9137cd80ba58e641",
+                              "oracle_signing_pubkey": "ac447e686cc28f6e9186d7760417194a756d5af2d22d65a42d73c968b616d598d7443751f1e7355dd77c9d3da7f405085708b9187aa1a9651d3f869e6907b5cf",
+                              "queue_pubkey": "c9477bfb5ff1012859f336cf98725680e7705ba2abece17188cfb28ca66ca5b0",
+                              "receipts": [
+                                    {
+                                          "children": [
+                                                {
+                                                      "children": [],
+                                                      "error": null,
+                                                      "task_name": "SwitchboardSurgeTask",
+                                                      "task_output": "63859.14000000"
+                                                }
+                                          ],
+                                          "error": null,
+                                          "task_name": "",
+                                          "task_output": "63859.14000000"
+                                    }
+                              ],
+                              "recent_hash": "HCZ5eK6xJ8Z7MzPEkcjKpYSh7o8N9S489jKWuc2skbCh",
+                              "recent_successes_if_failed": [],
+                              "recovery_id": 1,
+                              "signature": "S6W4oS59zFY5DBK5gkc2h+JMe7HSfB6a+fKdTBEPRfYDyiqtEb8WiV59ncdSLXj0a1icZ88ZmPodqWhfSGW5Qg==",
+                              "success_value": "63859140000000000000000",
+                              "timestamp": 1785824407
+                        }
+                  ]
+            }
       ],
-      "timestamp": 1785700471,
-      "slot": 42,
-      "recentHash": "7jJdiQF3MgcUJKmTw4dFWD5gp8PFQ3JrL624njAuzyif"
-    }"#;
+      "timestamp": 1785824405,
+      "slot": 481090766
+}"#;
 
     fn oracle_map() -> BTreeMap<String, ObjectID> {
         let mut m = BTreeMap::new();
         m.insert(
-            "405a6ee0581e9bb6037232cfc7318590752f05f769821aa7c18bcd2edf291e89".into(),
+            "58fce533fc20e246d3a7d5df9388ac69314af93d580047fb9137cd80ba58e641".into(),
             ObjectID::from_hex_literal(
                 "0xcbe815280222f191e7b9ebeeb4e19db039967bd70e753bdf8fadc361603ee751",
             )
@@ -629,18 +758,18 @@ mod tests {
         assert_eq!(b.feed_ids.len(), 1);
         assert_eq!(b.feed_ids[0].len(), 32);
         // $63,456.01 at 18 decimals.
-        assert_eq!(b.values, vec![63_456_010_000_000_000_000_000u128]);
+        assert_eq!(b.values, vec![63_859_140_000_000_000_000_000u128]);
         assert_eq!(b.values_neg, vec![false]);
         assert_eq!(b.min_oracle_samples, vec![1]);
-        assert_eq!(b.slot, 42);
-        assert_eq!(b.timestamp_seconds, 1_785_700_471);
+        assert_eq!(b.slot, 481090766);
+        assert_eq!(b.timestamp_seconds, 1785824405);
         // base64, not hex — decoding it as hex would silently yield junk.
         // 65 bytes: r || s (64, from `signature`) plus the separate
         // `recoveryId` byte appended — the exact shape
         // `secp256k1_ecrecover` takes on chain.
         assert_eq!(b.signatures.len(), 1);
         assert_eq!(b.signatures[0].len(), 65);
-        assert_eq!(b.signatures[0][64], 1);
+        assert_eq!(b.signatures[0][64], 0);
         assert_eq!(b.oracle_ids.len(), 1);
     }
 
@@ -683,6 +812,7 @@ mod tests {
                 oracle_pubkey: key.clone(),
                 signature: sig.clone(),
                 recovery_id: 1,
+                eth_address: None,
                 feed_responses: vec![FeedResponse {
                     feed_hash: "4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812"
                         .into(),
@@ -704,23 +834,24 @@ mod tests {
     /// run_N with nothing useful in the error.
     #[test]
     fn a_cross_queue_bundle_is_refused_with_both_queues_named() {
+        // The fixture (network=devnet) signs under Sui TESTNET's queue.
         let resp: UpdateResponse = serde_json::from_str(LIVE_SAMPLE).unwrap();
         let b = resp.into_bundle(&oracle_map()).unwrap();
         assert_eq!(
             b.queue_key,
-            "86807068432f186a147cf0b13a30067d386204ea9d6c8b04743ac2ef010b0752"
+            "c9477bfb5ff1012859f336cf98725680e7705ba2abece17188cfb28ca66ca5b0"
         );
 
-        // Sui testnet's real oracle queue key.
+        // The public default (Solana-mainnet) queue must be refused.
         let err = b
-            .require_queue("0xc9477bfb5ff1012859f336cf98725680e7705ba2abece17188cfb28ca66ca5b0")
+            .require_queue("0x86807068432f186a147cf0b13a30067d386204ea9d6c8b04743ac2ef010b0752")
             .unwrap_err()
             .to_string();
         assert!(err.contains("86807068"), "{err}");
         assert!(err.contains("c9477bfb"), "{err}");
 
         // Matching queue passes, with or without the 0x and in any case.
-        b.require_queue("0x86807068432F186A147CF0B13A30067D386204EA9D6C8B04743AC2EF010B0752")
+        b.require_queue("0xC9477BFB5FF1012859F336CF98725680E7705BA2ABECE17188CFB28CA66CA5B0")
             .unwrap();
     }
 
