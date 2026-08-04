@@ -15,6 +15,9 @@
 indexer_graphql_url = "http://indexer:9002/graphql"
 
 tick_secs   = 15
+# Per-vault mark-refresh spacing — every mark is a paid tx per vault, and
+# testnet gas is scarce (SO-346). 30 min here vs the 5 min default.
+mark_refresh_interval_ms = 1800000
 health_addr = "0.0.0.0:8086"
 
 [pyth]
