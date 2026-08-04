@@ -4,9 +4,9 @@
 //! Standing product decision (doc 05): the bot trades ONLY as the trading
 //! vault's curator — quotes route collateral from the vault
 //! (`release_module = "vault_mm"`, outputs to the vault address), auction
-//! winnings land in the vault, exits pay the vault. `spawn_desk` refuses
-//! to start without `[desk].vault_id` and the operator's
-//! `mm_release_enabled` attestation.
+//! winnings land in the vault, exits pay the vault. `spawn_desk` resolves
+//! that vault through [`provision`] — adopting a pinned or self-created
+//! one, or creating it — and refuses to start without a usable vault.
 
 pub mod auctions;
 pub mod book;
@@ -15,6 +15,7 @@ pub mod hedge;
 pub mod limits;
 pub mod model;
 pub mod monitors;
+pub mod provision;
 pub mod quote;
 
 use std::collections::HashMap;
@@ -73,6 +74,8 @@ pub struct DeskConfig {
     pub auctions: auctions::AuctionsConfig,
     pub exits: exits::ExitsConfig,
     pub monitors: monitors::MonitorsConfig,
+    /// `[desk.provision]` — create a vault when there is none to adopt.
+    pub provision: provision::ProvisionConfig,
 }
 
 impl Default for DeskConfig {
@@ -94,6 +97,7 @@ impl Default for DeskConfig {
             auctions: auctions::AuctionsConfig::default(),
             exits: exits::ExitsConfig::default(),
             monitors: monitors::MonitorsConfig::default(),
+            provision: provision::ProvisionConfig::default(),
         }
     }
 }
@@ -294,6 +298,11 @@ impl DeskShared {
 
 pub struct Desk {
     pub cfg: DeskConfig,
+    /// The vault actually resolved at boot — the pinned one, a
+    /// self-created one, or one this boot provisioned. Callers route
+    /// collateral through this, NOT through `cfg.vault_id`, which is
+    /// empty whenever the desk provisioned its own.
+    pub vault_id: ObjectID,
     pub shared: Arc<DeskShared>,
     pub book: Arc<RwLock<Book>>,
     pub models: Arc<Vec<MarketModel>>,
@@ -404,6 +413,12 @@ pub struct DeskParams {
     pub quote_ttl_ms: u64,
     pub core_package: ObjectID,
     pub trading_vault_package: ObjectID,
+    /// Shared `VaultProtocolConfig` (token-info `trading_vault_objects`).
+    /// Needed to create a vault and to deposit into one.
+    pub vault_protocol_config: ObjectID,
+    /// `[testnet]` faucet seed for a vault this bot provisions. `Some`
+    /// only on testnet with `mint_and_deposit_liquidity = true`.
+    pub testnet_seed: Option<provision::TestnetSeed>,
     /// options_adapter package — vault-funded auction bids disabled
     /// when absent.
     pub options_adapter_package: Option<ObjectID>,
@@ -436,19 +451,29 @@ pub struct CuratorRefs {
 /// refresher, hedge rebalancers, auction bidder, exits and monitors.
 /// Returns the handle the WS serve loop prices through.
 pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
-    if p.cfg.vault_id.trim().is_empty() {
-        return Err(anyhow!(
-            "[desk] enabled without vault_id — the desk trades only as a vault curator"
-        ));
-    }
-    if !p.cfg.mm_release_enabled {
-        return Err(anyhow!(
-            "[desk] enabled without mm_release_enabled = true — flip the vault's vault_mm \
-             release on (curator toggle) and attest it in config"
-        ));
-    }
-    let vault_id = ObjectID::from_hex_literal(p.cfg.vault_id.trim())
-        .map_err(|e| anyhow!("bad [desk].vault_id {}: {e}", p.cfg.vault_id))?;
+    // Reconstruct the book from vault custody.
+    let wrap = sui_tx::sui_client::SuiClientWrapper::connect(&p.secrets, p.network).await?;
+    let indexer = indexer_graphql::IndexerClient::new(p.indexer_url.clone());
+    let api = api_service_client::ApiServiceClient::new(&p.api_url);
+
+    // Adopt a pinned / self-created vault, or provision one. Chain state
+    // decides usability — a vault the config merely claims is fine still
+    // fails here rather than degrading into a desk that declines
+    // everything (SO-345).
+    let resolved = provision::resolve(provision::ResolveParams {
+        wrap: &wrap,
+        indexer: &indexer,
+        cfg: &p.cfg.provision,
+        pinned_vault_id: p.cfg.vault_id.trim(),
+        allow_mm_release_toggle: p.cfg.mm_release_enabled,
+        trading_vault_package: p.trading_vault_package,
+        vault_protocol_config: p.vault_protocol_config,
+        settlement_coin_type: &p.settlement_coin_type,
+        testnet_seed: p.testnet_seed.as_ref(),
+    })
+    .await
+    .inspect_err(provision::report_unusable)?;
+    let vault_id = resolved.vault_id;
     let vault_address = SuiAddress::from_bytes(vault_id.into_bytes())
         .map_err(|e| anyhow!("vault id → address: {e}"))?;
 
@@ -474,10 +499,6 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
     let market_feeds: Vec<(PriceFeedId, u8)> =
         p.markets.iter().map(|m| (m.feed, m.decimals)).collect();
 
-    // Reconstruct the book from vault custody.
-    let wrap = sui_tx::sui_client::SuiClientWrapper::connect(&p.secrets, p.network).await?;
-    let indexer = indexer_graphql::IndexerClient::new(p.indexer_url.clone());
-    let api = api_service_client::ApiServiceClient::new(&p.api_url);
     let book = book::reconstruct(book::ReconstructParams {
         wrap: &wrap,
         indexer: &indexer,
@@ -492,23 +513,11 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
     let book = Arc::new(RwLock::new(book));
 
     // Curator refs for vault-funded flows (bids escrowed from vault
-    // balances, vault-custody exits). The CuratorCap id comes from the
-    // indexer's trading_vaults view (written at TvVaultCreated /
-    // TvCuratorRotated); the registry from token-info. Missing either
-    // disables those flows with a warning — wallet-side exits and WS
-    // quoting still run.
-    let curator_cap = indexer
-        .trading_vaults()
-        .await
-        .ok()
-        .and_then(|vaults| {
-            let hex = vault_id.to_hex_literal();
-            vaults
-                .iter()
-                .find(|v| v.vault_id.to_hex() == hex || format!("0x{}", v.vault_id.to_hex()) == hex)
-                .map(|v| ObjectID::new(*v.curator_cap_id.as_bytes()))
-        });
-    let curator_refs = match (curator_cap, p.integration_registry) {
+    // balances, vault-custody exits). `resolve` already proved this wallet
+    // owns the cap with a chain read; the registry comes from token-info.
+    // Missing either disables those flows with a warning — wallet-side
+    // exits and WS quoting still run.
+    let curator_refs = match (resolved.curator_cap, p.integration_registry) {
         (Some(curator_cap), Some(integration_registry)) => Some(CuratorRefs {
             trading_vault_package: p.trading_vault_package,
             vault_id,
@@ -705,6 +714,8 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
 
     tracing::info!(
         vault = %vault_id,
+        provisioned = resolved.provisioned,
+        curator_cap = resolved.curator_cap.is_some(),
         markets = p.markets.len(),
         hedge_venues = venue_specs.len(),
         v2 = p.cfg.v2.enabled,
@@ -716,6 +727,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         limits: p.cfg.limits,
         quote_ttl_ms: p.quote_ttl_ms,
         cfg: p.cfg,
+        vault_id,
         shared,
         book,
         models,

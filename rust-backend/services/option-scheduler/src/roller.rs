@@ -108,6 +108,14 @@ pub enum ErrorClass {
 /// Inspect an `anyhow::Error` from `submit` and decide whether the tx
 /// definitely never reached consensus or might have.
 pub fn classify_error(err: &anyhow::Error) -> ErrorClass {
+    // Validators refuse to admit a transaction built on a stale gas
+    // reference, so nothing executed. `submit_ptb` already retries this with
+    // a fresh reference; reaching here means the retry budget ran out, and
+    // the slot must be released so the next tick can re-roll rather than
+    // parking a family that provably never landed (SO-344).
+    if sui_tx::tx::is_stale_gas_rejection(err) {
+        return ErrorClass::DefinitelyNotSent;
+    }
     let msg = format!("{err:#}").to_lowercase();
     // Build/sign/preflight errors — the tx was never transmitted.
     let definitely_not_sent = [
@@ -490,5 +498,21 @@ mod tests {
     fn classify_unknown_error_as_ambiguous() {
         let err = anyhow::anyhow!("something completely unexpected happened");
         assert_eq!(classify_error(&err), ErrorClass::Ambiguous);
+    }
+
+    // Verbatim from the rejection that stranded staging: parking this as
+    // ambiguous held the roll slot, and the held slot suppressed every
+    // later tick for nine days (SO-344).
+    #[test]
+    fn classify_stale_gas_rejection_as_definitely_not_sent() {
+        let err = anyhow::anyhow!(
+            "creating buckets: submitting create_buckets tx: gRPC ExecuteTransaction: \
+             code: 'Client specified an invalid argument', message: \"Transaction is rejected \
+             as invalid by more than 1/3 of validators by stake (non-retriable). \
+             Non-retriable errors: [Transaction needs to be rebuilt because object \
+             0x49f13ae2 version 0x396fa526 is unavailable for consumption, \
+             current version: 0x396fa527]\""
+        );
+        assert_eq!(classify_error(&err), ErrorClass::DefinitelyNotSent);
     }
 }

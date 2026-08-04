@@ -78,20 +78,46 @@ TWAL = 1.0
 # VAULT-ONLY MAKER: the bot trades exclusively as the trading vault's
 # curator. Quotes release collateral from the vault (`vault_mm`); all
 # outputs (positions, option coins, exit proceeds) land at the vault
-# address. The desk refuses to boot without vault_id and the
-# mm_release_enabled attestation (curator must have toggled the vault's
-# vault_mm release path ON).
+# address. The desk refuses to boot without a vault it can actually use —
+# every claim below is re-checked against chain state at startup.
+#
+# Vault resolution (SO-345):
+#   vault_id set    -> adopt it, whatever its provenance (operator intent).
+#   vault_id unset  -> adopt a vault THIS WALLET created, else provision
+#                      one when [desk.provision].enabled = true.
+# A CuratorCap someone else transferred here is never adopted on its own:
+# create_vault is permissionless and names its curator freely, so holding
+# a cap proves nothing. Only `creator` (the tx sender) does.
 #
 # All [desk.*] knobs default to the 00-plan starting parameters — only
 # the vault wiring is required.
 [desk]
 enabled            = false
-# vault_id           = "0x..."   # the TradingVault this desk curates
-# mm_release_enabled = true      # attestation: vault_mm toggled on-chain
+# vault_id           = "0x..."   # pin to adopt a vault made by someone else
+# mm_release_enabled = true      # consent to flip vault_mm ON when chain says off
 # expected_holding_years = 0.0575  # ~21d — hedge-cost horizon in the bid
 # pnl_jsonl_path = "services/mm-bot/state/desk-pnl.jsonl"
 # state_dir      = "services/mm-bot/state"
 # refresh_secs   = 60
+# Self-provisioning. Off by default: on prod a vault custodies real
+# depositor funds, so provision it deliberately and pin the id.
+# [desk.provision]
+# enabled            = false
+# lockup_ms          = 0          # depositor lockup
+# curator_fee_bps    = 0
+# rotation_authority = 2          # 0 creator / 1 curator / 2 either
+# max_positions      = 64
+# unwind_grace_ms    = 86_400_000
+# gas_budget         = 200_000_000
+#
+# Testnet-only faucet behaviour. Seeds a vault the desk PROVISIONS (never
+# one it adopts) so it has NAV to quote against — an unseeded vault is
+# NAV 0 and hard-declines every RFQ. Setting this on a non-testnet
+# network is a hard config error, not a silent skip.
+# [testnet]
+# mint_and_deposit_liquidity = false
+# mint_and_deposit_amount    = 1_000_000_000_000  # $1M at 6 decimals
+#
 # Per-underlying staking yield (BAW carry; drives early exercise):
 # [desk.carry_yields]
 # TSUI = 0.025

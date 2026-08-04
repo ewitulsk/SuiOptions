@@ -98,6 +98,54 @@ pub async fn mint_and_deposit_into_collateral(
     submit(client, signer, pt, gas_budget).await
 }
 
+/// Mint + deposit into a curated trading vault in one PTB — the testnet
+/// seed for a vault the MM bot just created for itself (SO-345).
+///
+/// `vault::deposit` consumes an `Appraisal` that must cover every held
+/// asset and position. Doing this at creation time is what keeps it to one
+/// PTB: a brand-new vault holds nothing, so `begin_appraisal` is complete
+/// on the spot with no attestation legs. Seed before setting an external
+/// account, or the appraisal stops being trivial.
+///
+/// Testnet only by construction: there are no faucets on mainnet.
+pub async fn mint_and_deposit_into_vault(
+    client: &ChainClient,
+    signer: &Signer,
+    tokens_package: ObjectID,
+    module: &str,
+    faucet_id: ObjectID,
+    refs: &crate::tx::trading_vault::TradingVaultRefs<'_>,
+    amount: u64,
+    gas_budget: u64,
+) -> Result<ExecutedTransaction> {
+    info!(
+        %tokens_package,
+        module,
+        vault = %refs.vault_id,
+        amount,
+        "minting and depositing into trading vault"
+    );
+    let mut pt = ProgrammableTransactionBuilder::new();
+
+    // Mint -> Coin<T>
+    let faucet = pt.obj(shared_object_arg(client, faucet_id, true).await?)?;
+    let amount_arg = pt.pure(&amount)?;
+    let coin = pt.programmable_move_call(
+        tokens_package,
+        Identifier::new(module).map_err(|e| anyhow!("module name {module}: {e}"))?,
+        Identifier::new("mint").unwrap(),
+        vec![],
+        vec![faucet, amount_arg],
+    );
+
+    // begin_appraisal -> deposit. Both take the vault as a shared input;
+    // the builder unions the mutability, so the mutable deposit leg wins.
+    let appraisal = crate::tx::trading_vault::build_begin_appraisal(client, &mut pt, refs).await?;
+    crate::tx::trading_vault::build_deposit(client, &mut pt, refs, appraisal, coin).await?;
+
+    submit(client, signer, pt, gas_budget).await
+}
+
 async fn submit(
     client: &ChainClient,
     signer: &Signer,
