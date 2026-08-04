@@ -84,6 +84,35 @@ impl ChainClient {
         }
     }
 
+    /// Block until `id` is readable, or give up after `attempts`.
+    ///
+    /// `ExecuteTransaction` returns on validator finality, but the
+    /// fullnode's read view lags it — so an object this address just
+    /// created can still 404 on `GetObject`. Any follow-up transaction
+    /// that references it has to build an `ObjectArg` from a read, and
+    /// that read is what fails. Retrying the *submission* cannot help:
+    /// the failure happens while building, before anything is signed.
+    ///
+    /// Same lag as the stale gas reference in
+    /// [`crate::tx::is_stale_gas_rejection`], observed from the other
+    /// side — there a read was too old, here it is too early.
+    pub async fn await_object(&self, id: ObjectID, attempts: u32) -> Result<Object> {
+        let mut delay = std::time::Duration::from_millis(300);
+        for attempt in 1..=attempts {
+            if let Some(obj) = self.try_get_object(id).await? {
+                return Ok(obj);
+            }
+            if attempt < attempts {
+                tracing::debug!(%id, attempt, "object not visible to the fullnode yet; waiting");
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+        }
+        Err(anyhow!(
+            "object {id} still not visible to the fullnode after {attempts} attempts"
+        ))
+    }
+
     /// Object plus its JSON rendering — the replacement for
     /// `SuiObjectDataOptions::with_content()`. Field names match the Move
     /// struct; enums render as `{"@variant": "..."}`.

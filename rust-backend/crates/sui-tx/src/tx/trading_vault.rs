@@ -229,6 +229,16 @@ pub async fn create_vault(
         .ok_or_else(|| anyhow!("create_vault succeeded but no TradingVault in ObjectChanges"))?;
     let curator_cap_id = find("CuratorCap")
         .ok_or_else(|| anyhow!("create_vault succeeded but no CuratorCap in ObjectChanges"))?;
+
+    // Do not hand back ids the fullnode cannot serve yet. Callers build
+    // their next PTB from a read of these two, and that read 404s until
+    // the read view catches up with the write we just made.
+    client.await_object(vault_id, 6).await.context("waiting for the new vault to be readable")?;
+    client
+        .await_object(curator_cap_id, 6)
+        .await
+        .context("waiting for the new CuratorCap to be readable")?;
+
     Ok(VaultCreation {
         digest: super::tx_digest(&resp).to_string(),
         vault_id,
