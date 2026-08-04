@@ -72,6 +72,11 @@ on:
         required: false
         type: boolean
         default: false
+      gas_budget:
+        description: 'Per-publish gas budget in MIST. Also the minimum balance the gas coin must hold before EACH package publish — lower it when the deployer runs lean (max observed real cost is ~0.27 SUI gross).'
+        required: false
+        type: string
+        default: '2000000000'
       build_strategy:
         description: 'How to source service images for the rollout'
         required: false
@@ -335,16 +340,20 @@ jobs:
           NETWORK: ${{ steps.net.outputs.network }}
           ENV: ${{ inputs.environment }}
           GRPC_URL: ${{ inputs.grpc_url }}
+          GAS_BUDGET: ${{ inputs.gas_budget }}
         run: |
           ARGS=(
             --env        "$ENV"
             --network    "$NETWORK"
             --output     deployments.json
             --secrets    /tmp/deploy-secrets/secrets.toml
-            # The main package (19 modules + Pyth/Wormhole deps) costs more
-            # than the deployment-manager's 0.5 SUI default to publish — that
-            # ceiling caused InsufficientGas on the publish tx. Bump to 2 SUI.
-            --gas-budget 2000000000
+            # Ceiling per publish tx. The gas coin must hold at least this
+            # much before EVERY package publish, so an oversized budget
+            # fails a half-funded deployer even when actual costs fit
+            # (observed 2026-08-04: 2 SUI budget vs 0.27 SUI max real
+            # gross — the run died with plenty of gas for the work).
+            # Dispatch input; default stays the historical 2 SUI.
+            --gas-budget "$GAS_BUDGET"
           )
           if [ "${{ inputs.deploy_tokens }}" = "true" ]; then
             ARGS+=(--deploy-tokens)
