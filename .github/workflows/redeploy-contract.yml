@@ -603,15 +603,23 @@ jobs:
             --query Command.CommandId --output text)
           echo "SSM command: $CMD_ID"
 
-          # Wait for completion.
-          aws ssm wait command-executed \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" || true
-
-          STATUS=$(aws ssm get-command-invocation \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" \
-            --query Status --output text)
+          # Wait for completion. `aws ssm wait` gives up after ~100s and
+          # the two-database wipe-provision can legitimately run longer
+          # (observed 2026-08-04: the waiter expired on InProgress and
+          # failed the run; the command reached Success seconds later).
+          # Poll to a real deadline instead — 10 min, comfortably above
+          # the command's own 300s execution timeout.
+          STATUS=InProgress
+          for _ in $(seq 1 120); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --query Status --output text)
+            case "$STATUS" in
+              Pending|InProgress|Delayed) sleep 5 ;;
+              *) break ;;
+            esac
+          done
           echo "SSM status: $STATUS"
 
           # Print stdout.
