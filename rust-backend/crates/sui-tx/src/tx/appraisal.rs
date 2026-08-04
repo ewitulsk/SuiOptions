@@ -336,9 +336,13 @@ pub async fn discover_holdings(
         let field = object_fields(client, entry.field_id)
             .await
             .with_context(|| format!("reading vault dynamic field {}", entry.field_id))?;
-        // Both key structs wrap the position id as their sole field.
+        // Both key structs wrap the position id as their sole field. For
+        // a dynamic OBJECT field the key sits one level deeper — inside
+        // `dynamic_object_field::Wrapper { name: K }` — so tolerate both
+        // nestings (positions are dofs, adapter tags are plain dfs).
         let pos_id = field
             .pointer("/name/id")
+            .or_else(|| field.pointer("/name/name/id"))
             .and_then(Value::as_str)
             .and_then(|s| ObjectID::from_hex_literal(s).ok())
             .ok_or_else(|| anyhow!("unparseable position key name for {}", entry.field_id))?;
