@@ -21,16 +21,17 @@ signing_scheme     = "ed25519"
 # collateral_account = "0x..."
 
 # --- Quote signer ------------------------------------------------------
-# This bot's existing QuoteSigner under the current deployment. Pinned
-# because discovering it from SignerCreated events no longer works: the
-# creating transaction is not servable by our RPC provider (SO-325), which
-# left mm-bot unable to boot. The id is verified against chain state at
-# startup — right package, right owner, right key — and ignored if it does
-# not match, so this is a hint rather than something the bot trusts.
+# Manual override only. The redeploy ceremony creates the QuoteSigner and
+# records it as quoteSignerId in deployments.json, which the bot reads via
+# token-info — no re-pinning needed after a republish. Any id (here or in
+# deployments.json) is verified against chain state at startup — right
+# package, right owner, right key — and ignored if it does not match.
 #
-# Re-pin after a core republish, or drop the line to let the bot bootstrap
-# a fresh signer.
-quote_signer_id    = "0xadae1712d2efdf7cf7d7ce16e6bff32c937395e76732aca744d9763b148797dc"
+# This pin covers the 2026-08-04 deployment, whose signer was bootstrapped
+# by the bot itself (before the ceremony recorded ids); the SO-325 archival
+# gap makes event re-discovery unreliable, hence the pin. Safe to drop
+# after the next contract redeploy.
+quote_signer_id    = "0x05e12bb47a76cd3ab4c83690da778f53769d10dd7ad63981969aaeff57708ad4"
 
 # Derive mode: `underlying_symbols` left unset, so the bot makes markets in
 # every enabled token-info token with a Pyth feed and a watcher restarts

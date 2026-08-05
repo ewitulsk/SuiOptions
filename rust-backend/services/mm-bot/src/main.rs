@@ -90,15 +90,17 @@ struct BotConfig {
     #[serde(default)]
     collateral_account: Option<String>,
 
-    /// This bot's existing `QuoteSigner` object id. Optional. When set it is
-    /// verified against chain state (right deployment, right owner/key) and
-    /// adopted; when absent — or when it fails verification — the bot falls
-    /// back to discovering the signer from `SignerCreated` events.
+    /// Manual override for this bot's `QuoteSigner` object id. Optional —
+    /// the normal source is the `quoteSignerId` the redeploy ceremony
+    /// records in deployments.json (served through token-info), so this
+    /// only needs setting to pin a signer the ceremony didn't create.
     ///
-    /// The fallback is history-dependent and can become unservable once the
-    /// creating transaction ages out of the RPC provider (SO-325), which is
-    /// what this field exists to route around. It is a hint, never a grant:
-    /// a value that does not verify is ignored, not trusted.
+    /// Resolution order: this override, then the deployments.json record,
+    /// then `SignerCreated` event discovery (history-dependent and
+    /// unservable once the creating tx ages out of the provider — SO-325),
+    /// then bootstrapping a fresh signer. Every id is a hint, never a
+    /// grant: it is verified against chain state (right deployment, right
+    /// owner/key) and ignored if it does not match.
     #[serde(default)]
     quote_signer_id: Option<String>,
 
@@ -1266,7 +1268,32 @@ async fn resolve_signer(
         );
     }
 
-    // No usable configured id. If this bot's Sui address already created a
+    // Same point-read verification for the id the redeploy ceremony recorded
+    // in deployments.json (served through token-info). This is the normal
+    // path after a republish: the ceremony creates the signer and records it,
+    // so the bot never needs the event scan below. Absent on records written
+    // before the ceremony learned to do this.
+    if let Some(signer_id) = snapshot.quote_signer()? {
+        if verify_signer(
+            &wrap.client,
+            package,
+            signer_id,
+            wrap.signer.address,
+            signer.scheme(),
+            pubkey_bytes,
+        )
+        .await?
+        {
+            tracing::info!(%signer_id, "adopted quote signer recorded in deployments.json (verified on chain)");
+            return Ok(signer_id);
+        }
+        tracing::warn!(
+            %signer_id,
+            "deployments.json quoteSignerId did not verify — falling back to event discovery"
+        );
+    }
+
+    // No usable recorded id. If this bot's Sui address already created a
     // QuoteSigner under the current package, adopt it; otherwise bootstrap a
     // fresh one.
     if let Some(signer_id) =

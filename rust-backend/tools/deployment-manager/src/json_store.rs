@@ -90,6 +90,12 @@ pub struct PackageInfo {
     /// protocol-only redeploys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cctp_bridge: Option<CctpBridgeRecord>,
+    /// mm-bot's shared `QuoteSigner` object for this deployment, created
+    /// by `--deploy-mm-collateral` right after the core republish. Reset
+    /// to None on every fresh protocol publish — the object's Move type
+    /// is package-bound, so a signer never survives a republish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_signer_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

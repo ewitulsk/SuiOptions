@@ -189,6 +189,18 @@ impl Snapshot {
         self.package_info.trading_vault_objects.as_ref()
     }
 
+    /// mm-bot's `QuoteSigner` object for this deployment, recorded by the
+    /// redeploy ceremony's mm-collateral pass. `None` on records written
+    /// before that step; consumers verify it against chain state before
+    /// adopting it (it is a hint, not a grant).
+    pub fn quote_signer(&self) -> Result<Option<ObjectID>> {
+        self.package_info
+            .quote_signer_id
+            .as_deref()
+            .map(|s| ObjectID::from_str_checked(s, "quote_signer_id"))
+            .transpose()
+    }
+
     // --- faucet accessors (testTokens passthrough) -------------------------
     //
     // Faucets are a testnet-only deploy artifact served from `/package-info`.
@@ -421,6 +433,7 @@ mod tests {
                 options_adapter: None,
                 equity_oracle: None,
                 trading_vault_objects: None,
+                quote_signer_id: None,
             },
             tokens: vec![
                 tok(
