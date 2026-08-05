@@ -238,6 +238,11 @@ pub struct PackageInfo {
     /// Trading-vault governance objects + activation digest (SO-292).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trading_vault_objects: Option<TradingVaultObjectsInfo>,
+    /// mm-bot's shared `QuoteSigner` object for this deployment, recorded
+    /// by the redeploy ceremony's mm-collateral pass. Absent on records
+    /// written before that step; mm-bot falls back to event discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_signer_id: Option<String>,
 }
 
 /// Shared governance objects the trading-vault family's inits create,
@@ -505,6 +510,7 @@ mod tests {
                 options_adapter: None,
                 equity_oracle: None,
                 trading_vault_objects: None,
+                quote_signer_id: None,
             },
             token_info: BTreeMap::new(),
         };

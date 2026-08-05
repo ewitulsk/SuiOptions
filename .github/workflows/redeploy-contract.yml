@@ -373,7 +373,13 @@ jobs:
       # committed below and rides the deploy bundle onto the host
       # (/opt/options/<env>/mm-bot), so it stays fresh under ALL build
       # strategies — no image rebuild assumed.
-      - name: Publish mm_collateral
+      #
+      # The same pass also creates the deployment's QuoteSigner (owner = the
+      # MM-BOT key's address) and records quoteSignerId in deployments.json,
+      # so mm-bot adopts it via token-info instead of bootstrapping at boot —
+      # which needs gas at an unpredictable moment and once wedged the whole
+      # deploy (SO-346 gas famine).
+      - name: Publish mm_collateral + QuoteSigner
         working-directory: rust-backend
         env:
           ENV: ${{ inputs.environment }}
@@ -391,11 +397,20 @@ jobs:
             echo "::error::options/$ENV/mm-bot exists but has no sui_key"
             exit 1
           fi
+          # quote_key derives the pubkey registered on the fresh QuoteSigner;
+          # render-secrets.sh already hard-requires it on the host, so its
+          # absence here is a broken secret, not an optional feature.
+          MM_QUOTE_KEY=$(echo "$MM_JSON" | jq -r '.quote_key')
+          if [ -z "$MM_QUOTE_KEY" ] || [ "$MM_QUOTE_KEY" = "null" ]; then
+            echo "::error::options/$ENV/mm-bot exists but has no quote_key"
+            exit 1
+          fi
           {
             printf '[sui]\n%s = "%s"\n' "$NETWORK" "$MM_KEY"
             if [ -n "$GRPC_FROM_SECRET" ]; then
               printf 'grpc_url = "%s"\n' "$GRPC_FROM_SECRET"
             fi
+            printf '[mm_bot]\nquote_key = "%s"\n' "$MM_QUOTE_KEY"
           } > /tmp/deploy-secrets/mm-secrets.toml
 
           ARGS=(

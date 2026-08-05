@@ -107,10 +107,13 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // --deploy-mm-collateral publishes ONLY the mm_collateral template and
-    // writes mm-bot's state file — no deployments.json involvement (the ids
-    // are one MM's private routing, not protocol infrastructure; they reach
-    // the bot via the committed state file riding the deploy bundle).
+    // --deploy-mm-collateral publishes the mm_collateral template and writes
+    // mm-bot's state file (the collateral ids are one MM's private routing —
+    // they reach the bot via the committed state file riding the deploy
+    // bundle, not deployments.json). It then creates the deployment's
+    // QuoteSigner and records THAT id in deployments.json: the signer id is
+    // protocol-facing (quote verification), and this is the only pass signed
+    // by the MM-BOT key, which must own the signer.
     if cli.deploy_mm_collateral {
         let mm_path = cli.mm_collateral_contracts.canonicalize().with_context(|| {
             format!(
@@ -144,6 +147,49 @@ async fn main() -> Result<()> {
             account = %dep.account_id,
             env = %env_key,
             "mm_collateral recorded"
+        );
+
+        // The core republish that preceded this pass also invalidated the
+        // previous deployment's QuoteSigner (its Move type is bound to the
+        // old package id). This is the only ceremony step signing with the
+        // MM-BOT key — and the signer's on-chain `owner` is the tx sender —
+        // so create the fresh one here and record it in deployments.json
+        // for token-info to serve. mm-bot verifies the id against chain
+        // state before adopting it, exactly as it does a config-pinned id.
+        let mut record = store.envs.get(&env_key).cloned().with_context(|| {
+            format!("env {env_key} not found in deployments.json — deploy the protocol first")
+        })?;
+        let core_package = sui_types::base_types::ObjectID::from_hex_literal(
+            &record.package_info.package_id,
+        )
+        .context("parsing core package_id from deployments.json")?;
+        // Every env's mm-bot config uses the default ed25519 scheme; the
+        // key's flag byte is validated against it in from_secret_str.
+        let quote = sui_tx::quote_signer::QuoteSigner::from_secret_str(
+            secrets.mm_quote_key().context(
+                "mm-secrets file has no [mm_bot] quote_key — required to create the QuoteSigner",
+            )?,
+            protocol_types::SigningScheme::Ed25519,
+        )
+        .context("loading mm quote key")?;
+        let created = sui_tx::tx::signer::create_and_share_signer(
+            &client,
+            &signer,
+            core_package,
+            quote.scheme(),
+            &quote.public_bytes(),
+            cli.gas_budget,
+        )
+        .await
+        .context("creating on-chain QuoteSigner")?;
+        record.package_info.quote_signer_id = Some(created.signer_id.to_string());
+        store.upsert(&env_key, record);
+        store.save(&output_path)?;
+        tracing::info!(
+            signer_id = %created.signer_id,
+            digest = %created.digest,
+            env = %env_key,
+            "quoteSignerId recorded"
         );
         return Ok(());
     }
@@ -503,6 +549,10 @@ async fn deploy_one(
             equity_oracle: Some(record(&equity_oracle_out)),
             trading_vault_objects,
             cctp_bridge: previous_cctp,
+            // Deliberately not carried forward: a republish invalidates the
+            // previous deployment's QuoteSigner (package-bound type). The
+            // --deploy-mm-collateral pass fills it in.
+            quote_signer_id: None,
         },
         token_info,
     })
