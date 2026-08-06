@@ -1,0 +1,425 @@
+/* Desk dashboard styles. Reuses the aqua design tokens (copied from
+   frontend/src/styles/aqua.css :root blocks) with a compact set of
+   dashboard-specific components. */
+
+:root {
+  --aqua-surface-rgb: 255, 255, 255;
+  --aqua-shadow-rgb: 11, 37, 69;
+  --aqua-tint-rgb: 238, 248, 255;
+  --aqua-bg-top: #dcefff;
+  --aqua-bg-mid: #eef8ff;
+  --aqua-bg-bot: #f8fcfe;
+  --aqua-bg-radial-1: #c7e6ff;
+  --aqua-bg-radial-2: #fdf6e3;
+  --aqua-ink-1: #0b2545;
+  --aqua-ink-2: #1b3a60;
+  --aqua-ink-3: #5a7894;
+  --aqua-ink-4: #95aac2;
+  --aqua-line: rgba(var(--aqua-shadow-rgb), 0.1);
+  --aqua-line-2: rgba(var(--aqua-shadow-rgb), 0.05);
+  --aqua-glass: rgba(var(--aqua-surface-rgb), 0.55);
+  --aqua-glass-2: rgba(var(--aqua-surface-rgb), 0.72);
+  --aqua-glass-3: rgba(var(--aqua-surface-rgb), 0.88);
+  --aqua-solid-surface: #ffffff;
+  --aqua-sui: #4da2ff;
+  --aqua-sui-deep: #2872d1;
+  --aqua-sui-glow: rgba(77, 162, 255, 0.35);
+  --aqua-teal-deep: #0e5e6f;
+  --aqua-teal: #1e8694;
+  --aqua-aqua-pale: #bfe6ee;
+  --aqua-coral: #ff7a6e;
+  --aqua-success: #22b07a;
+  --aqua-warn: #d9930d;
+}
+
+html[data-mode="dark"] {
+  --aqua-surface-rgb: 26, 46, 72;
+  --aqua-shadow-rgb: 0, 0, 0;
+  --aqua-tint-rgb: 18, 34, 56;
+  --aqua-bg-top: #07131f;
+  --aqua-bg-mid: #0b1b2e;
+  --aqua-bg-bot: #0e2336;
+  --aqua-bg-radial-1: #123254;
+  --aqua-bg-radial-2: #2b2410;
+  --aqua-ink-1: #eaf2fb;
+  --aqua-ink-2: #b8c9dd;
+  --aqua-ink-3: #7c92ac;
+  --aqua-ink-4: #54688a;
+  --aqua-line: rgba(var(--aqua-surface-rgb), 0.18);
+  --aqua-line-2: rgba(var(--aqua-surface-rgb), 0.1);
+  --aqua-glass: rgba(var(--aqua-surface-rgb), 0.35);
+  --aqua-glass-2: rgba(var(--aqua-surface-rgb), 0.5);
+  --aqua-glass-3: rgba(var(--aqua-surface-rgb), 0.65);
+  --aqua-solid-surface: #142339;
+  --aqua-aqua-pale: #1a3850;
+  --aqua-coral: #ff8b7f;
+  --aqua-success: #3fcb91;
+  --aqua-warn: #eab24a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Sora", system-ui, sans-serif;
+  color: var(--aqua-ink-1);
+  background:
+    radial-gradient(1000px 500px at 85% -10%, var(--aqua-bg-radial-1), transparent 60%),
+    radial-gradient(800px 420px at -10% 15%, var(--aqua-bg-radial-2), transparent 55%),
+    linear-gradient(180deg, var(--aqua-bg-top), var(--aqua-bg-mid) 45%, var(--aqua-bg-bot));
+  background-attachment: fixed;
+}
+
+.mono,
+.dash-table td.num,
+.dash-tile__value {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── layout ─────────────────────────────────────────────────────────── */
+
+.dash-shell {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 0 20px 64px;
+}
+
+.dash-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 18px 0;
+}
+
+.dash-header__title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  margin-right: 4px;
+}
+
+.dash-header__title span {
+  color: var(--aqua-sui);
+}
+
+.dash-nav {
+  display: flex;
+  gap: 4px;
+  background: var(--aqua-glass);
+  border: 1px solid var(--aqua-line);
+  border-radius: 999px;
+  padding: 4px;
+}
+
+.dash-nav a {
+  padding: 6px 14px;
+  border-radius: 999px;
+  text-decoration: none;
+  color: var(--aqua-ink-3);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dash-nav a.active {
+  background: var(--aqua-glass-3);
+  color: var(--aqua-ink-1);
+  box-shadow: 0 1px 4px rgba(var(--aqua-shadow-rgb), 0.12);
+}
+
+.dash-header__spacer {
+  flex: 1;
+}
+
+.dash-select,
+.dash-btn {
+  font: inherit;
+  font-size: 13px;
+  color: var(--aqua-ink-2);
+  background: var(--aqua-glass-2);
+  border: 1px solid var(--aqua-line);
+  border-radius: 10px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+/* ── cards / sections ───────────────────────────────────────────────── */
+
+.dash-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(12, 1fr);
+}
+
+.dash-card {
+  grid-column: span 12;
+  background: var(--aqua-glass-2);
+  border: 1px solid var(--aqua-line);
+  border-radius: 16px;
+  padding: 16px 18px;
+  backdrop-filter: blur(10px);
+}
+
+.dash-card--half {
+  grid-column: span 6;
+}
+
+.dash-card--third {
+  grid-column: span 4;
+}
+
+@media (max-width: 900px) {
+  .dash-card--half,
+  .dash-card--third {
+    grid-column: span 12;
+  }
+}
+
+.dash-card__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.dash-card__sub {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--aqua-ink-3);
+}
+
+.dash-note {
+  font-size: 12px;
+  color: var(--aqua-ink-3);
+  margin-top: 10px;
+  line-height: 1.5;
+}
+
+/* ── tiles ──────────────────────────────────────────────────────────── */
+
+.dash-tiles {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+}
+
+.dash-tile {
+  background: var(--aqua-glass);
+  border: 1px solid var(--aqua-line-2);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.dash-tile__label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--aqua-ink-3);
+  margin-bottom: 4px;
+}
+
+.dash-tile__value {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.dash-tile__hint {
+  font-size: 11px;
+  color: var(--aqua-ink-4);
+  margin-top: 3px;
+}
+
+/* ── pills / badges ─────────────────────────────────────────────────── */
+
+.dash-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 3px 10px;
+  border: 1px solid var(--aqua-line);
+  background: var(--aqua-glass-2);
+  color: var(--aqua-ink-2);
+  white-space: nowrap;
+}
+
+.dash-pill::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--aqua-ink-4);
+}
+
+.dash-pill--ok::before {
+  background: var(--aqua-success);
+}
+
+.dash-pill--warn::before {
+  background: var(--aqua-warn);
+}
+
+.dash-pill--bad::before {
+  background: var(--aqua-coral);
+}
+
+.dash-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-radius: 6px;
+  padding: 2px 6px;
+  background: var(--aqua-aqua-pale);
+  color: var(--aqua-teal-deep);
+}
+
+html[data-mode="dark"] .dash-badge {
+  color: #9cdde4;
+}
+
+.dash-badge--sim {
+  background: rgba(217, 147, 13, 0.15);
+  color: var(--aqua-warn);
+}
+
+/* ── meters ─────────────────────────────────────────────────────────── */
+
+.dash-meter {
+  margin-bottom: 12px;
+}
+
+.dash-meter__row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--aqua-ink-3);
+  margin-bottom: 4px;
+}
+
+.dash-meter__row b {
+  color: var(--aqua-ink-1);
+  font-family: "JetBrains Mono", monospace;
+}
+
+.dash-meter__track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--aqua-aqua-pale);
+  overflow: hidden;
+  position: relative;
+}
+
+.dash-meter__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--aqua-sui);
+  transition: width 0.4s ease;
+}
+
+.dash-meter__fill--warn {
+  background: var(--aqua-warn);
+}
+
+.dash-meter__fill--bad {
+  background: var(--aqua-coral);
+}
+
+/* ── tables ─────────────────────────────────────────────────────────── */
+
+.dash-table-wrap {
+  overflow-x: auto;
+}
+
+.dash-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.dash-table th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--aqua-ink-3);
+  font-weight: 600;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--aqua-line);
+  white-space: nowrap;
+}
+
+.dash-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--aqua-line-2);
+  white-space: nowrap;
+}
+
+.dash-table td.num,
+.dash-table th.num {
+  text-align: right;
+}
+
+.dash-table tr.expandable {
+  cursor: pointer;
+}
+
+.dash-table tr.expandable:hover td {
+  background: var(--aqua-glass);
+}
+
+.dash-table .subrow td {
+  background: var(--aqua-glass);
+  font-size: 12px;
+  color: var(--aqua-ink-2);
+}
+
+.pos {
+  color: var(--aqua-success);
+}
+
+.neg {
+  color: var(--aqua-coral);
+}
+
+.muted {
+  color: var(--aqua-ink-4);
+}
+
+/* ── states ─────────────────────────────────────────────────────────── */
+
+.dash-empty {
+  padding: 22px;
+  text-align: center;
+  color: var(--aqua-ink-3);
+  font-size: 13px;
+}
+
+.dash-error {
+  border-color: rgba(255, 122, 110, 0.5);
+}
+
+.dash-banner {
+  grid-column: span 12;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 122, 110, 0.5);
+  background: rgba(255, 122, 110, 0.08);
+  padding: 14px 18px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.dash-banner--info {
+  border-color: var(--aqua-line);
+  background: var(--aqua-glass);
+  color: var(--aqua-ink-2);
+}
