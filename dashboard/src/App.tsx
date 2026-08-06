@@ -3,15 +3,19 @@ import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { setEnv, useDashEnv, type DashEnv } from "./config";
 import { toggleMode, useThemeMode } from "./theme";
 import { Exposures } from "./screens/Exposures";
+import { History } from "./screens/History";
 import { Overview } from "./screens/Overview";
 import { Positions } from "./screens/Positions";
 import { VaultScreen } from "./screens/VaultScreen";
+import { Venues } from "./screens/Venues";
 
 const NAV = [
   { to: "/overview", label: "Overview" },
   { to: "/exposures", label: "Exposures" },
   { to: "/positions", label: "Positions" },
+  { to: "/venues", label: "Venues" },
   { to: "/vault", label: "Vault" },
+  { to: "/history", label: "History" },
 ];
 
 export default function App() {
@@ -50,7 +54,9 @@ export default function App() {
         <Route path="/overview" element={<Overview />} />
         <Route path="/exposures" element={<Exposures />} />
         <Route path="/positions" element={<Positions />} />
+        <Route path="/venues" element={<Venues />} />
         <Route path="/vault" element={<VaultScreen />} />
+        <Route path="/history" element={<History />} />
         <Route path="*" element={<Navigate to="/overview" replace />} />
       </Routes>
     </div>
