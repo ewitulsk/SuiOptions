@@ -12,8 +12,13 @@
 //! Every other service reads through `oracle-client` instead of talking to Pyth
 //! directly, so the one external connection and the Pyth API key live here. The
 //! keeper keeps a separate direct Hermes path only for the on-chain VAA.
+//!
+//! Since SO-353 the live-price SOURCE follows `[oracle] provider`: Hermes SSE
+//! on pyth, a crossbar `/v2/simulate` poller on switchboard (`data_plane`) —
+//! same cache, same fanout, same pyth-id keys either way.
 
 pub mod config;
+pub mod data_plane;
 pub mod fanout;
 pub mod router;
 pub mod state;

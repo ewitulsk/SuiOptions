@@ -44,11 +44,13 @@ async fn main() -> Result<()> {
         .fetch_blocking_until_ready(30, Duration::from_secs(2))
         .await
         .with_context(|| format!("fetching catalog from token-info at {}", cfg.token_info_url))?;
-    // Two feed maps, deliberately split (SO-346):
-    // - The SSE DATA PLANE always subscribes with the PYTH ids — Hermes
-    //   is the only live streaming source, and WS consumers (mm-bot's
-    //   per-RFQ hot path) key their caches by these ids. Flipping the
-    //   provider must not starve quoting.
+    // Two feed maps, deliberately split (SO-346, reworked in SO-353):
+    // - The DATA PLANE always PUBLISHES under the PYTH ids — WS consumers
+    //   (mm-bot's per-RFQ hot path) key their caches by these ids, so the
+    //   ids are cache keys, not a Pyth dependency. The SOURCE follows the
+    //   provider: Hermes SSE on pyth, our crossbar's /v2/simulate poller
+    //   on switchboard (hermes-beta went dark 2026-08-04 and starved
+    //   quoting for 41h — see data_plane.rs).
     // - The DESCRIPTOR (and /oracle/legs) follow the CONFIGURED PROVIDER
     //   (SO-335): that is the switch's real job — which adapter's price
     //   legs PTB composers build.
@@ -57,14 +59,19 @@ async fn main() -> Result<()> {
     let mut feeds: Vec<PriceFeedId> = Vec::new();
     let mut feed_by_asset: BTreeMap<String, PriceFeedId> = BTreeMap::new();
     let mut descriptor_feeds: BTreeMap<String, PriceFeedId> = BTreeMap::new();
+    // switchboard hash → the pyth id the data plane publishes under
+    // (SO-353; see data_plane.rs for why the pyth id stays the key).
+    let mut data_plane_alias: BTreeMap<String, PriceFeedId> = BTreeMap::new();
     for token in &snapshot.tokens {
         let asset = protocol_types::asset::canonicalize_move_type(&token.coin_type);
+        let mut pyth_feed = None;
         if let Some(raw) = token.pyth_feed_id.as_deref() {
             if let Ok(feed) = PriceFeedId::from_hex(raw) {
                 if seen.insert(feed) {
                     feeds.push(feed);
                 }
                 feed_by_asset.insert(asset.clone(), feed);
+                pyth_feed = Some(feed);
             } else {
                 warn!(ticker = %token.ticker, "catalog pyth feed id is not 32-byte hex; skipping");
             }
@@ -79,6 +86,24 @@ async fn main() -> Result<()> {
                     %provider,
                     "catalog feed key is not 32-byte hex; skipping"
                 ),
+            }
+        }
+        if provider == protocol_types::OracleProvider::Switchboard {
+            match (pyth_feed, token.switchboard_feed_id.as_deref()) {
+                (Some(feed), Some(raw)) => {
+                    let h = raw.trim();
+                    let h = h
+                        .strip_prefix("0x")
+                        .or_else(|| h.strip_prefix("0X"))
+                        .unwrap_or(h)
+                        .to_ascii_lowercase();
+                    data_plane_alias.insert(h, feed);
+                }
+                (Some(_), None) => warn!(
+                    ticker = %token.ticker,
+                    "no switchboard feed hash — the data plane cannot price this token and its consumers will see it stale"
+                ),
+                _ => {}
             }
         }
     }
@@ -112,14 +137,49 @@ async fn main() -> Result<()> {
     let (fanout_tx, _) = broadcast::channel(FANOUT_DEPTH);
     let upstream_healthy = Arc::new(AtomicBool::new(false));
 
-    // The single external Pyth SSE subscription → drain loop → cache + fanout.
-    let rx = pyth_client::spawn_subscriber(http.clone(), cfg.hermes_url.clone(), feeds.clone());
+    // One upstream → drain loop → cache + fanout. The source follows the
+    // provider (SO-353); everything downstream of the channel is shared.
+    let rx = match provider {
+        protocol_types::OracleProvider::Pyth => {
+            pyth_client::spawn_subscriber(http.clone(), cfg.hermes_url.clone(), feeds.clone())
+        }
+        protocol_types::OracleProvider::Switchboard => {
+            // Data plane and signed-quote path may point at different
+            // crossbar instances — see `data_plane_crossbar_url` docs.
+            let crossbar_url = cfg
+                .oracle
+                .data_plane_crossbar_url
+                .clone()
+                .or_else(|| cfg.oracle.crossbar_url.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "provider=switchboard requires [oracle] data_plane_crossbar_url \
+                         (or crossbar_url)"
+                    )
+                })?;
+            if data_plane_alias.is_empty() {
+                anyhow::bail!(
+                    "provider=switchboard but no catalog token carries BOTH a pyth feed id \
+                     (the cache key) and a switchboard feed hash — the data plane would \
+                     serve nothing"
+                );
+            }
+            oracle_service::data_plane::spawn_crossbar_poller(
+                switchboard_client::CrossbarClient::new(&crossbar_url, None),
+                data_plane_alias,
+                feeds.len(),
+            )
+        }
+    };
     tokio::spawn(fanout::run(
         rx,
         price_cache.clone(),
         fanout_tx.clone(),
         upstream_healthy.clone(),
     ));
+    // Delivery watchdog (SO-354): pages when the fanout goes quiet,
+    // whichever upstream is live.
+    fanout::spawn_stale_watchdog(fanout_tx.subscribe());
 
     // Adapter identity for the LIVE provider only. Absent is not fatal:
     // the data plane (spot, vol) still serves, and only the descriptor —

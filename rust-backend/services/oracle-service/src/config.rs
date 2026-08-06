@@ -51,17 +51,27 @@ pub struct OracleConfig {
     #[serde(default)]
     pub provider: protocol_types::OracleProvider,
 
-    /// Crossbar base URL, used when `provider = "switchboard"` to fetch
-    /// signed quote bundles. Unset on a Pyth-only deployment.
+    /// Crossbar base URL for SIGNED quote bundles (`/v2/update`), used
+    /// when `provider = "switchboard"`. Unset on a Pyth-only deployment.
     ///
-    /// Interim (SO-346): points at the PUBLIC instance. Our in-compose
-    /// crossbar cannot serve Sui testnet — its per-chain oracle refresh
-    /// routines are hardwired to the public Sui fullnodes (no env
-    /// override) and fail to parse their responses, so its oracle cache
-    /// stays empty and `/v2/update` 404s. Repoint here when upstream
-    /// fixes land.
+    /// Still the PUBLIC instance (SO-346): our in-compose crossbar
+    /// cannot serve Sui-testnet signed quotes — its Sui oracle-cache
+    /// refresh ignores the `SUI_*_RPC` env overrides (verified SO-352:
+    /// the routine still hits the hardcoded, deprecated public fullnode)
+    /// so its cache stays empty and `/v2/update` 404s.
     #[serde(default)]
     pub crossbar_url: Option<String>,
+
+    /// Crossbar base URL for the UNSIGNED price data plane
+    /// (`/v2/simulate`, SO-353). Defaults to `crossbar_url` when unset.
+    ///
+    /// Split from `crossbar_url` because the two paths currently need
+    /// different instances: simulate reads crossbar's own Surge stream
+    /// (no Sui oracle cache), so our in-compose instance serves it fine —
+    /// and polling every 1.5s would hit the public instance's rate
+    /// limits.
+    #[serde(default)]
+    pub data_plane_crossbar_url: Option<String>,
 
     /// `network` query for Crossbar quote requests. Crossbar's signing
     /// set is per SOLANA cluster and defaults to mainnet; Sui testnet's

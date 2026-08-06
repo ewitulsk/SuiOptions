@@ -176,6 +176,78 @@ pub struct SuiOracle {
     pub oracle_key: String,
 }
 
+/// One simulated feed value from `GET /v2/simulate` (SO-353).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimulatedPrice {
+    /// Lowercase hex, no `0x`.
+    pub feed_hash: String,
+    /// Median of the feed's job results, in natural units (USD etc.).
+    pub value: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SimulateResponse {
+    #[serde(default)]
+    feeds: Vec<SimulatedFeed>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SimulatedFeed {
+    #[serde(rename = "feedHash")]
+    feed_hash: String,
+    /// `Option` because a failed feed carries an explicit `null` (which
+    /// `#[serde(default)]` alone would reject).
+    #[serde(default)]
+    results: Option<Vec<SimValue>>,
+}
+
+impl SimulatedFeed {
+    fn median_value(&self) -> Option<f64> {
+        median(
+            self.results
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(SimValue::as_f64),
+        )
+    }
+}
+
+/// Simulate results arrive as decimal strings today, but crossbar's Sui
+/// shapes are unpinned (see `fetch_quotes`) — accept numbers too.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SimValue {
+    Str(String),
+    Num(f64),
+}
+
+impl SimValue {
+    fn as_f64(&self) -> Option<f64> {
+        let v = match self {
+            SimValue::Str(s) => s.trim().parse::<f64>().ok()?,
+            SimValue::Num(n) => *n,
+        };
+        v.is_finite().then_some(v)
+    }
+}
+
+/// Median of an f64 stream; `None` when empty. Even count averages the
+/// two middles.
+fn median(values: impl Iterator<Item = f64>) -> Option<f64> {
+    let mut v: Vec<f64> = values.collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).expect("finite values"));
+    let mid = v.len() / 2;
+    Some(if v.len() % 2 == 1 {
+        v[mid]
+    } else {
+        (v[mid - 1] + v[mid]) / 2.0
+    })
+}
+
 fn strip0x(s: &str) -> &str {
     s.trim().trim_start_matches("0x").trim_start_matches("0X")
 }
@@ -512,6 +584,56 @@ impl CrossbarClient {
         resp.into_bundle(oracle_objects)
     }
 
+    /// `GET /v2/simulate/{hashes}` — UNSIGNED price reads for the data
+    /// plane (SO-353).
+    ///
+    /// Unlike `/v2/update` this needs no signing oracles (it reads
+    /// crossbar's own live Surge exchange stream), so it keeps serving
+    /// when the oracle cache is empty. Response shape captured live
+    /// 2026-08-06:
+    ///
+    /// ```json
+    /// {"feeds":[{"feedHash":"4cd1…","feedName":"Surge Stream BTC/USD, WEIGHTED",
+    ///            "results":["64488.9"],"receipts":null,"network":"mainnet"}],
+    ///  "totalFeeds":1,"successfulFeeds":1,"failedFeeds":0}
+    /// ```
+    ///
+    /// `results` holds one value per job run; string-or-number is decoded
+    /// defensively like the rest of crossbar's unpinned shapes. A feed
+    /// with no parseable results is skipped, not an error — its staleness
+    /// is the consumer's signal, and one bad feed must not blank the rest.
+    pub async fn simulate(&self, feed_hashes: &[String]) -> Result<Vec<SimulatedPrice>> {
+        validate_request(feed_hashes)?;
+        let joined = feed_hashes
+            .iter()
+            .map(|h| strip0x(h).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let url = format!("{}/v2/simulate/{joined}", self.base_url);
+        let resp: SimulateResponse = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("GET {url}"))?
+            .json()
+            .await
+            .context("decoding crossbar /v2/simulate payload")?;
+        Ok(resp
+            .feeds
+            .into_iter()
+            .filter_map(|f| {
+                let value = f.median_value()?;
+                Some(SimulatedPrice {
+                    feed_hash: strip0x(&f.feed_hash).to_ascii_lowercase(),
+                    value,
+                })
+            })
+            .collect())
+    }
+
     /// Enforce "every asset we intend to price actually has a feed"
     /// before spending a round trip.
     pub fn require_feeds<'a>(
@@ -718,6 +840,69 @@ mod tests {
         assert_eq!(none.network_query(), "");
         let dev = CrossbarClient::new("http://x/", Some("devnet".into()));
         assert_eq!(dev.network_query(), "?network=devnet");
+    }
+
+    /// Captured live from our staging crossbar (`GET /v2/simulate/{4 hashes}`,
+    /// 2026-08-06) — one feed trimmed to keep the fixture small.
+    #[test]
+    fn simulate_response_parses_live_shape() {
+        let body = r#"{
+            "feeds": [
+                {"feedHash":"4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812",
+                 "feedName":"Surge Stream BTC/USD, WEIGHTED",
+                 "results":["64477.6"],"receipts":null,"network":"mainnet"},
+                {"feedHash":"0x580de69fa5310460bead69dc3fd0c05988dea014d0e7c98aae22b67e7958fd9b",
+                 "feedName":"Surge Stream WAL/USD, WEIGHTED",
+                 "results":["0.02538"],"receipts":null,"network":"mainnet"}
+            ],
+            "totalFeeds": 2, "successfulFeeds": 2, "failedFeeds": 0
+        }"#;
+        let resp: SimulateResponse = serde_json::from_str(body).unwrap();
+        let prices: Vec<SimulatedPrice> = resp
+            .feeds
+            .into_iter()
+            .filter_map(|f| {
+                let value = f.median_value()?;
+                Some(SimulatedPrice {
+                    feed_hash: strip0x(&f.feed_hash).to_ascii_lowercase(),
+                    value,
+                })
+            })
+            .collect();
+        assert_eq!(prices.len(), 2);
+        assert!((prices[0].value - 64_477.6).abs() < 1e-9);
+        // 0x prefix normalized away so cache keys compare byte-equal.
+        assert_eq!(
+            prices[1].feed_hash,
+            "580de69fa5310460bead69dc3fd0c05988dea014d0e7c98aae22b67e7958fd9b"
+        );
+    }
+
+    /// A failed feed (null results) is skipped, not an error; numeric
+    /// results are accepted alongside strings.
+    #[test]
+    fn simulate_skips_failed_feeds_and_accepts_numbers() {
+        let body = r#"{
+            "feeds": [
+                {"feedHash":"aa","results":null},
+                {"feedHash":"bb","results":["not-a-number"]},
+                {"feedHash":"cc","results":[1.5, "2.5", 3.5]}
+            ]
+        }"#;
+        let resp: SimulateResponse = serde_json::from_str(body).unwrap();
+        let prices: Vec<(String, f64)> = resp
+            .feeds
+            .into_iter()
+            .filter_map(|f| f.median_value().map(|v| (f.feed_hash.clone(), v)))
+            .collect();
+        assert_eq!(prices, vec![("cc".to_string(), 2.5)]);
+    }
+
+    #[test]
+    fn median_averages_even_counts() {
+        assert_eq!(median([].into_iter()), None);
+        assert_eq!(median([3.0, 1.0].into_iter()), Some(2.0));
+        assert_eq!(median([3.0, 1.0, 2.0].into_iter()), Some(2.0));
     }
 
     /// Trimmed from a real `GET /v2/update/{btc}` response against
