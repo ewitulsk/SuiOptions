@@ -40,7 +40,6 @@ import {
 
 import { fetchBuckets, optionCoinType, seriesOptionType } from "../api/client";
 import type { OracleDescriptor } from "../api/oracleDescriptor";
-import { HERMES_BASE } from "../api/pyth";
 import { tokenForCoinType, type TradingVaultDetail } from "../api/tradingVaults";
 import {
   asRecord,
@@ -551,6 +550,14 @@ export async function planAppraisal(
 }
 
 // ═══════════════════════════ Hermes accumulator ═══════════════════════════
+
+// The PYTH-provider attest path only. Display prices no longer touch
+// Hermes (SO-355: oracle-service is the frontend's only price source);
+// this direct fetch remains solely because the trading-vault appraisal
+// composer still builds Pyth attest legs. On a switchboard deployment it
+// is inert — and hermes-beta stopped publishing 2026-08-04, so the Pyth
+// path is dead until the composer learns Switchboard legs (follow-up).
+const HERMES_BASE = "https://hermes-beta.pyth.network";
 
 /**
  * One Hermes accumulator update covering every feed in the plan, fetched at
