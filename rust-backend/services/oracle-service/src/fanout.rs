@@ -5,7 +5,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oracle_client::WsMessage;
 use pyth_client::{CachedPrice, PriceCache, StreamEvent};
@@ -73,4 +73,52 @@ pub async fn run(
         }
     }
     warn!("pyth SSE stream ended; fanout drain loop exiting");
+}
+
+/// Alert when the data plane goes quiet (SO-354).
+///
+/// The hermes-beta outage proved connection health is not delivery
+/// health: the SSE session stayed "healthy" while publishing nothing for
+/// 41 hours and no alert fired. This watchdog watches the fanout itself —
+/// the one point every upstream (Pyth SSE, crossbar poller) flows
+/// through — and raises a tagged error once deliveries stop, which the
+/// alert-id Grafana rule turns into a page with no extra infra.
+///
+/// Also exports `price_data_plane_age_seconds` for dashboards.
+pub fn spawn_stale_watchdog(mut rx: broadcast::Receiver<WsMessage>) {
+    /// Quiet time before the first alert. Well past any poll cadence or
+    /// SSE reconnect, far under the 5s/10s consumer gates' worth caring
+    /// about — by the time this fires, quoting has already stopped.
+    const STALE_ALERT_AFTER: Duration = Duration::from_secs(60);
+    /// Re-fire cadence while the outage persists (keeps the Grafana
+    /// count-over-time rule firing without log spam).
+    const REFIRE_EVERY: Duration = Duration::from_secs(60);
+
+    tokio::spawn(async move {
+        // Boot counts as fresh: a service that never receives a first
+        // price still alerts one threshold later.
+        let mut last_price = Instant::now();
+        let mut last_fire: Option<Instant> = None;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(15), rx.recv()).await {
+                Ok(Ok(WsMessage::Price { .. })) => last_price = Instant::now(),
+                Ok(Ok(WsMessage::Status { .. })) => {}
+                // Lagged means prices are flowing faster than we read —
+                // that IS delivery.
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => last_price = Instant::now(),
+                Ok(Err(broadcast::error::RecvError::Closed)) => return,
+                Err(_timeout) => {}
+            }
+            let age = last_price.elapsed();
+            metrics::gauge!("price_data_plane_age_seconds").set(age.as_secs_f64());
+            if age >= STALE_ALERT_AFTER && last_fire.is_none_or(|t| t.elapsed() >= REFIRE_EVERY) {
+                last_fire = Some(Instant::now());
+                tracing::error!(
+                    alert_id = "price-data-plane-stale",
+                    age_secs = age.as_secs(),
+                    "no price updates reaching the fanout — every consumer's staleness gate is (or will be) rejecting quotes"
+                );
+            }
+        }
+    });
 }

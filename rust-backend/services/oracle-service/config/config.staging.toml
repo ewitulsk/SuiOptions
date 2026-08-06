@@ -25,18 +25,22 @@ benchmarks_url = "https://benchmarks.pyth.network"
 # See docs/oracle-abstraction-plan.md 4.
 [oracle]
 provider = "switchboard"
-# INTERIM (SO-346): the PUBLIC crossbar, not the in-compose one. Our own
-# instance cannot serve Sui testnet quotes — its per-chain oracle refresh
-# routines are hardwired to the public Sui fullnodes (no env override)
-# and fail to parse their responses, so its oracle cache stays empty and
-# /v2/update answers "No oracles available". Repoint at
-# http://crossbar:8080 when upstream fixes land.
+# SIGNED quotes (/v2/update): the PUBLIC crossbar, still. Our in-compose
+# instance cannot serve Sui-testnet signed quotes — its Sui oracle-cache
+# refresh ignores the SUI_*_RPC env overrides (verified SO-352: it keeps
+# hitting the hardcoded, deprecated public fullnode) so its cache stays
+# empty and /v2/update 404s.
 #
 # crossbar_network=devnet is REQUIRED with the public instance: its
 # default signing set is the Solana-mainnet queue (86807068…), which Sui
 # testnet's queue rejects. Verified live: ?network=devnet signs under
 # c9477bfb… (this network's queue).
 crossbar_url = "https://crossbar.switchboard.xyz"
+# UNSIGNED price data plane (/v2/simulate, SO-353): our in-compose
+# crossbar. Simulate reads its live Surge exchange stream and needs no
+# Sui oracle cache; a 1.5s poll would hit the public instance's rate
+# limits.
+data_plane_crossbar_url = "http://crossbar:8080"
 crossbar_network = "devnet"
 # Sui JSON-RPC for resolving the queue's registered-oracle map on chain.
 sui_rpc_url = "https://sui-testnet-rpc.publicnode.com"

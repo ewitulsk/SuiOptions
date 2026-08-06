@@ -7118,6 +7118,7 @@ dependencies = [
  "clap",
  "cli-spec",
  "hex",
+ "metrics",
  "observability",
  "oracle-client",
  "protocol-types",
