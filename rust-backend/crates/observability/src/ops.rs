@@ -76,7 +76,10 @@ impl Readiness {
         }
     }
 
-    fn is_ready(&self) -> bool {
+    /// Whether [`Readiness::ready`] has been called. Public so services
+    /// that serve `/health` through their own axum router (mm-bot's desk
+    /// state server) can report the same 503-until-ready semantics.
+    pub fn is_ready(&self) -> bool {
         self.0.load(Ordering::SeqCst)
     }
 }

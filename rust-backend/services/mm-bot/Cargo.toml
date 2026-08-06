@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 protocol-types = { workspace = true }
 runtime-config = { workspace = true }
-observability  = { workspace = true }
+observability  = { workspace = true, features = ["axum"] }
 cli-spec       = { workspace = true }
 sui-tx         = { workspace = true }
 pyth-client    = { workspace = true }
@@ -55,3 +55,7 @@ metrics = { workspace = true }
 # Pyth wiring
 reqwest = { workspace = true }
 parking_lot = { workspace = true }
+
+# Desk state API (SO-348): /health + /metrics + /desk/state.
+axum = { workspace = true }
+tower-http = { workspace = true }

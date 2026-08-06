@@ -33,7 +33,8 @@ pub trait HedgeVenue: Send + Sync {
 }
 
 /// `[desk.hedge]` knobs. Defaults are the 00-plan V1 parameters.
-#[derive(Clone, Debug, Deserialize)]
+/// `Serialize` so `/desk/state` can echo the effective config (SO-348).
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct HedgeConfig {
     /// Rebalance band, % of NAV of net delta notional. 00-plan: 1.5.
@@ -74,7 +75,7 @@ impl Default for HedgeConfig {
 
 /// One `[[desk.hedge.venues]]` entry. `kind = "paper"` (simulated) is the
 /// only kind today; Bluefin is a follow-up behind the same seam.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct HedgeVenueToml {
     pub kind: String,
     /// Gauge/alert label + state-file key. Defaults to "paper" for the

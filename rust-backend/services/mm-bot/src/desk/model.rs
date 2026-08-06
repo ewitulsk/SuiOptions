@@ -119,6 +119,21 @@ impl MarketModel {
         self.surface().atm(t_years)
     }
 
+    /// Current annualized realized vol of the (short, long) windows —
+    /// `None` while a window is still cold. `/desk/state` reads these.
+    pub fn window_vols(&self) -> (Option<f64>, Option<f64>) {
+        (
+            self.vol_buf.read().current_annualized(),
+            self.vol_buf_long.read().current_annualized(),
+        )
+    }
+
+    /// Whether the surface is quoting off the config fallback vol
+    /// (windows cold).
+    pub fn surface_is_fallback(&self) -> bool {
+        self.surface().is_fallback()
+    }
+
     fn inputs(&self, spot: f64, strike: f64, t_years: f64, sigma: f64) -> AmericanInputs {
         AmericanInputs {
             spot,

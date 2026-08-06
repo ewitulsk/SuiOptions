@@ -418,8 +418,20 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Ops server (SO-348): /health + /metrics as before, plus the
+    // read-only /desk/state snapshot. The desk slot fills after
+    // `spawn_desk` below; /health stays live from here so the deploy
+    // gate's window is unchanged.
     let readiness = observability::ops::Readiness::new();
-    observability::ops::spawn(cfg.health_addr, &readiness);
+    let desk_slot: Arc<std::sync::OnceLock<Arc<mm_bot::desk::Desk>>> =
+        Arc::new(std::sync::OnceLock::new());
+    mm_bot::server::spawn(mm_bot::server::ServerParams {
+        addr: cfg.health_addr,
+        readiness: readiness.clone(),
+        network: cfg.network.as_str().to_string(),
+        desk_enabled: cfg.desk.enabled,
+        desk: Arc::clone(&desk_slot),
+    });
 
     // Collateral routing chassis: explicit config wins, else the state file
     // written by `mm-bot deploy-collateral`. Still required — the signer
@@ -727,6 +739,7 @@ async fn main() -> Result<()> {
             release_module: "vault_mm".to_string(),
             signer_token_recipient: PtSuiAddress::new(*pt_object_id_from_sui(vault_id).as_bytes()),
         });
+        let _ = desk_slot.set(Arc::clone(&d));
         desk = Some(d);
     } else {
         tracing::warn!("[desk] disabled — the bot serves health/auth only and declines every RFQ");

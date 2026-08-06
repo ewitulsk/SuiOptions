@@ -17,6 +17,7 @@ pub mod model;
 pub mod monitors;
 pub mod provision;
 pub mod quote;
+pub mod state;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,7 +26,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use parking_lot::RwLock;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sui_types::base_types::{ObjectID, SuiAddress};
 
 use protocol_types::sides::Side;
@@ -102,8 +103,9 @@ impl Default for DeskConfig {
     }
 }
 
-/// `[desk.surface]` — vol-surface shaping (00-plan Phase 1).
-#[derive(Debug, Clone, Copy, Deserialize)]
+/// `[desk.surface]` — vol-surface shaping (00-plan Phase 1). `Serialize`
+/// so `/desk/state` can echo the effective config (SO-348).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SurfaceTomlConfig {
     /// Risk premium over realized vol, absolute vol.
@@ -157,7 +159,7 @@ impl From<SurfaceTomlConfig> for SurfaceConfig {
 /// `[desk.v1]` — the V1 bid discipline (00-plan V1 starting parameters).
 /// Vol points are annualized decimals (0.05 = 5 vol pts), matching
 /// `pricing::desk`.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(default)]
 pub struct V1Config {
     /// Bid at fair − this much vol. 00-plan: 4–6 vol pts → 0.05.
@@ -203,7 +205,7 @@ impl From<V1Config> for V1BidParams {
 
 /// `[desk.v2]` — the two-sided maker (00-plan V2 starting parameters).
 /// Disabled by default; trader-flow RFQs decline while off.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(default)]
 pub struct V2Config {
     pub enabled: bool,
@@ -264,6 +266,37 @@ impl From<V2Config> for V2Params {
 
 // ── shared runtime state ───────────────────────────────────────────────
 
+/// Per-bucket mark snapshot written by the book refresher: model fair,
+/// the sigma/spot it was computed at, and per-unit greeks. Read by the
+/// `/desk/state` endpoint (SO-348) so serving a snapshot never re-prices.
+#[derive(Clone, Copy, Debug)]
+pub struct MarkSnapshot {
+    pub mark_per_unit: f64,
+    pub sigma: f64,
+    pub spot: f64,
+    pub greeks: model::Greeks,
+    pub at_ms: u64,
+}
+
+/// Per-symbol spot written each refresher tick.
+#[derive(Clone, Copy, Debug)]
+pub struct SpotSnapshot {
+    pub spot: f64,
+    pub at_ms: u64,
+}
+
+/// Last nightly-stress result (written by `monitors::stress_tick`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StressSnapshot {
+    pub at_ms: u64,
+    pub gap_down_60: f64,
+    pub gap_up_80: f64,
+    pub flat_6mo: f64,
+    pub funding_minus_50: f64,
+    pub worst_drawdown: f64,
+    pub blocked: bool,
+}
+
 /// State the desk's tasks share (the book refresher writes; quoting,
 /// auctions and monitors read).
 pub struct DeskShared {
@@ -278,6 +311,13 @@ pub struct DeskShared {
     pub stress_blocked: AtomicBool,
     pub expected_holding_years: f64,
     pub slippage_bps: f64,
+    /// Per-bucket marks + per-unit greeks from the last refresher tick
+    /// (`/desk/state` reads; the refresher writes).
+    pub marks: RwLock<HashMap<protocol_types::ids::ObjectId, MarkSnapshot>>,
+    /// Per-symbol spot from the last refresher tick.
+    pub spots: RwLock<HashMap<String, SpotSnapshot>>,
+    /// Last stress-suite result (per-scenario drawdowns + the gate).
+    pub stress: RwLock<Option<StressSnapshot>>,
 }
 
 impl DeskShared {
@@ -310,6 +350,22 @@ pub struct Desk {
     /// underlying). `Arc` rather than `Box` because rebalancers and
     /// monitors share the instances.
     pub hedge_venues: Vec<Arc<dyn hedge::HedgeVenue>>,
+    /// The same instances with their underlying symbol (the monitors'
+    /// roster shape) — `/desk/state` reads positions/funding/margin
+    /// through this (SO-348).
+    pub venue_roster: Vec<monitors::MonitorVenue>,
+    /// Whether this boot created the vault (vs adopting one).
+    pub provisioned: bool,
+    /// Curator refs when resolved; `None` = vault-funded bids and
+    /// vault-custody exits are disabled (the silent-degradation signal
+    /// `/desk/state` surfaces).
+    pub curator_refs: Option<CuratorRefs>,
+    pub booted_at_ms: u64,
+    /// Static per-market metadata for `/desk/state` (aligned with
+    /// `models`).
+    pub market_meta: Vec<state::MarketMeta>,
+    pub settlement_coin_type: String,
+    pub settlement_decimals: u8,
     v1: V1BidParams,
     v2: Option<V2Params>,
     limits: LimitsConfig,
@@ -550,6 +606,9 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         stress_blocked: AtomicBool::new(false),
         expected_holding_years: p.cfg.expected_holding_years,
         slippage_bps: primary_spec.slippage_bps,
+        marks: RwLock::new(HashMap::new()),
+        spots: RwLock::new(HashMap::new()),
+        stress: RwLock::new(None),
     });
 
     let mut hedge_venues: Vec<Arc<dyn hedge::HedgeVenue>> = Vec::new();
@@ -692,6 +751,12 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         pool_allowlist: p.pool_allowlist,
     });
 
+    // `/desk/state` reads the same roster the monitors watch.
+    let venue_roster: Vec<monitors::MonitorVenue> = monitor_venues
+        .iter()
+        .map(|v| monitors::MonitorVenue { symbol: v.symbol.clone(), venue: Arc::clone(&v.venue) })
+        .collect();
+
     // Monitors + nightly stress over the WHOLE venue roster: summed
     // shorts per underlying for the delta band, min margin headroom
     // (alerts name the venue), notional-weighted funding into pricing.
@@ -721,6 +786,16 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         v2 = p.cfg.v2.enabled,
         "desk started (vault-only maker)"
     );
+    let market_meta = p
+        .markets
+        .iter()
+        .map(|m| state::MarketMeta {
+            symbol: m.symbol.clone(),
+            coin_type: m.coin_type.clone(),
+            decimals: m.decimals,
+            fallback_vol: m.fallback_vol,
+        })
+        .collect();
     Ok(Arc::new(Desk {
         v1: p.cfg.v1.into(),
         v2: p.cfg.v2.enabled.then(|| p.cfg.v2.into()),
@@ -732,6 +807,13 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         book,
         models,
         hedge_venues,
+        venue_roster,
+        provisioned: resolved.provisioned,
+        curator_refs,
+        booted_at_ms: auctions::now_ms(),
+        market_meta,
+        settlement_coin_type: p.settlement_coin_type.clone(),
+        settlement_decimals: p.settlement_decimals,
     }))
 }
 
@@ -818,13 +900,38 @@ fn spawn_book_refresher(p: RefresherParams) {
                 }
             };
 
+            // Fresh spot per model (holdings/written marks + `/desk/state`
+            // share the same per-tick observation).
+            let spot_by_model: Vec<Option<f64>> = (0..p.models.len())
+                .map(|mi| {
+                    let (feed, decimals) = p.market_feeds[mi];
+                    compute_spot_from_cache(
+                        &p.price_cache,
+                        feed,
+                        p.settlement_feed,
+                        decimals,
+                        p.settlement_decimals,
+                        p.staleness,
+                    )
+                    .ok()
+                })
+                .collect();
+            {
+                let mut spots = p.shared.spots.write();
+                for (mi, m) in p.models.iter().enumerate() {
+                    if let Some(spot) = spot_by_model[mi] {
+                        spots.insert(m.symbol.clone(), SpotSnapshot { spot, at_ms: now });
+                    }
+                }
+            }
+
             // Marks + greeks per holding/written line.
             let (holdings, written) = {
                 let b = p.book.read();
                 (b.holdings.clone(), b.written.clone())
             };
             let mut exposure = BookExposure::default();
-            let mut per_unit: HashMap<protocol_types::ids::ObjectId, model::Greeks> = HashMap::new();
+            let mut marks: HashMap<protocol_types::ids::ObjectId, MarkSnapshot> = HashMap::new();
             let mut delta_by_coin: HashMap<String, f64> = HashMap::new();
             let mut deployed = 0.0f64;
             for h in &holdings {
@@ -832,15 +939,7 @@ fn spawn_book_refresher(p: RefresherParams) {
                 else {
                     continue;
                 };
-                let (feed, decimals) = p.market_feeds[mi];
-                let Ok(spot) = compute_spot_from_cache(
-                    &p.price_cache,
-                    feed,
-                    p.settlement_feed,
-                    decimals,
-                    p.settlement_decimals,
-                    p.staleness,
-                ) else {
+                let Some(spot) = spot_by_model[mi] else {
                     continue;
                 };
                 let t = h.expiry_ms.saturating_sub(now) as f64 / 1000.0 / 86_400.0 / 365.0;
@@ -848,7 +947,10 @@ fn spawn_book_refresher(p: RefresherParams) {
                 let (sigma, _) = p.models[mi].sigma(spot, k, t);
                 let mark = p.models[mi].fair_per_unit(h.is_put, spot, k, t, sigma);
                 let g = p.models[mi].greeks_per_unit(h.is_put, spot, k, t, sigma);
-                per_unit.insert(h.bucket_id.clone(), g);
+                marks.insert(
+                    h.bucket_id.clone(),
+                    MarkSnapshot { mark_per_unit: mark, sigma, spot, greeks: g, at_ms: now },
+                );
                 let amt = h.amount() as f64;
                 deployed += mark * amt;
                 exposure.net_vega_per_volpt += g.vega * amt / 100.0;
@@ -860,32 +962,28 @@ fn spawn_book_refresher(p: RefresherParams) {
             // Written lines subtract their full greeks so quoting sees
             // TRUE nets (net vega = held − written, same for delta/
             // gamma/theta). A written bucket with no held coin still
-            // needs per-unit greeks computed here.
+            // needs per-unit marks computed here.
             for w in &written {
                 let Some(mi) = p.models.iter().position(|m| m.coin_type == w.asset_coin_type)
                 else {
                     continue;
                 };
-                let g = match per_unit.get(&w.bucket_id).copied() {
-                    Some(g) => g,
+                let g = match marks.get(&w.bucket_id) {
+                    Some(m) => m.greeks,
                     None => {
-                        let (feed, decimals) = p.market_feeds[mi];
-                        let Ok(spot) = compute_spot_from_cache(
-                            &p.price_cache,
-                            feed,
-                            p.settlement_feed,
-                            decimals,
-                            p.settlement_decimals,
-                            p.staleness,
-                        ) else {
+                        let Some(spot) = spot_by_model[mi] else {
                             continue;
                         };
                         let t =
                             w.expiry_ms.saturating_sub(now) as f64 / 1000.0 / 86_400.0 / 365.0;
                         let k = w.strike_scaled();
                         let (sigma, _) = p.models[mi].sigma(spot, k, t);
+                        let mark = p.models[mi].fair_per_unit(w.is_put, spot, k, t, sigma);
                         let g = p.models[mi].greeks_per_unit(w.is_put, spot, k, t, sigma);
-                        per_unit.insert(w.bucket_id, g);
+                        marks.insert(
+                            w.bucket_id,
+                            MarkSnapshot { mark_per_unit: mark, sigma, spot, greeks: g, at_ms: now },
+                        );
                         g
                     }
                 };
@@ -894,6 +992,7 @@ fn spawn_book_refresher(p: RefresherParams) {
                 exposure.theta_cost_per_day -= (-g.theta * amt).max(0.0);
                 *delta_by_coin.entry(w.asset_coin_type.clone()).or_default() -= g.delta * amt;
             }
+            *p.shared.marks.write() = marks;
 
             // Theta accrual → P&L attribution.
             let dt_days = now.saturating_sub(last_theta_accrual) as f64 / 86_400_000.0;
