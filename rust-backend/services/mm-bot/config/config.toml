@@ -122,6 +122,18 @@ enabled            = false
 # [desk.carry_yields]
 # TSUI = 0.025
 
+# Desk time-series history on TimescaleDB (SO-349): the recorder samples
+# the /desk/state snapshot into desk_* hypertables and mirrors the P&L
+# JSONL ledger; /desk/history serves range queries. The URL is a secret —
+# deployed via the DESK_DATABASE_URL env var (compose maps it from the
+# price-charting Tiger Data secret); the TOML field is for local dev
+# (e.g. `docker run -p 5432:5432 timescale/timescaledb:latest-pg16`).
+# Neither set ⇒ history disabled; the bot trades regardless.
+# [desk.history]
+# database_url = "postgres://postgres:password@127.0.0.1:5432/tsdb"
+# db_pool_size = 2
+# sample_secs  = 60
+
 # [desk.surface]              # vol surface shaping
 # risk_premium = 0.05         # +5 vol pts over realized
 # skew = 0.0

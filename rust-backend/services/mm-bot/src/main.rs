@@ -425,12 +425,27 @@ async fn main() -> Result<()> {
     let readiness = observability::ops::Readiness::new();
     let desk_slot: Arc<std::sync::OnceLock<Arc<mm_bot::desk::Desk>>> =
         Arc::new(std::sync::OnceLock::new());
+    // TimescaleDB history (SO-349): configured via [desk.history] or the
+    // DESK_DATABASE_URL env var. The pool is lazy — a down DB never
+    // gates startup or trading.
+    let history = if cfg.desk.enabled {
+        match cfg.desk.history.effective_database_url() {
+            Some(url) => Some(mm_bot::desk::history::History::connect(&cfg.desk.history, &url)),
+            None => {
+                tracing::info!("desk history disabled (no [desk.history].database_url / DESK_DATABASE_URL)");
+                None
+            }
+        }
+    } else {
+        None
+    };
     mm_bot::server::spawn(mm_bot::server::ServerParams {
         addr: cfg.health_addr,
         readiness: readiness.clone(),
         network: cfg.network.as_str().to_string(),
         desk_enabled: cfg.desk.enabled,
         desk: Arc::clone(&desk_slot),
+        history: history.clone(),
     });
 
     // Collateral routing chassis: explicit config wins, else the state file
@@ -740,6 +755,13 @@ async fn main() -> Result<()> {
             signer_token_recipient: PtSuiAddress::new(*pt_object_id_from_sui(vault_id).as_bytes()),
         });
         let _ = desk_slot.set(Arc::clone(&d));
+        if let Some(history) = history.clone() {
+            mm_bot::desk::history::spawn_recorder(
+                history,
+                Arc::clone(&d),
+                cfg.network.as_str().to_string(),
+            );
+        }
         desk = Some(d);
     } else {
         tracing::warn!("[desk] disabled — the bot serves health/auth only and declines every RFQ");

@@ -12,6 +12,7 @@ pub mod auctions;
 pub mod book;
 pub mod exits;
 pub mod hedge;
+pub mod history;
 pub mod limits;
 pub mod model;
 pub mod monitors;
@@ -77,6 +78,8 @@ pub struct DeskConfig {
     pub monitors: monitors::MonitorsConfig,
     /// `[desk.provision]` — create a vault when there is none to adopt.
     pub provision: provision::ProvisionConfig,
+    /// `[desk.history]` — TimescaleDB time-series recorder (SO-349).
+    pub history: history::HistoryConfig,
 }
 
 impl Default for DeskConfig {
@@ -99,6 +102,7 @@ impl Default for DeskConfig {
             exits: exits::ExitsConfig::default(),
             monitors: monitors::MonitorsConfig::default(),
             provision: provision::ProvisionConfig::default(),
+            history: history::HistoryConfig::default(),
         }
     }
 }

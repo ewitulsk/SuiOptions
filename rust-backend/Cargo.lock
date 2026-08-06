@@ -5661,6 +5661,8 @@ dependencies = [
  "clap",
  "cli-spec",
  "config",
+ "diesel",
+ "diesel_migrations",
  "ed25519-dalek",
  "futures",
  "futures-util",

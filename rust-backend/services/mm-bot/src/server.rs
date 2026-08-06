@@ -22,7 +22,7 @@ use axum::{Json, Router};
 use observability::ops::Readiness;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::desk::{state, Desk};
+use crate::desk::{history, state, Desk};
 
 pub struct ServerParams {
     pub addr: SocketAddr,
@@ -32,6 +32,9 @@ pub struct ServerParams {
     /// Filled by `main` once `spawn_desk` returns; empty while booting
     /// (or forever, when the desk is disabled).
     pub desk: Arc<OnceLock<Arc<Desk>>>,
+    /// TimescaleDB history handle (SO-349); `None` when no database is
+    /// configured.
+    pub history: Option<Arc<history::History>>,
 }
 
 struct ServerState {
@@ -39,6 +42,7 @@ struct ServerState {
     network: String,
     desk_enabled: bool,
     desk: Arc<OnceLock<Arc<Desk>>>,
+    history: Option<Arc<history::History>>,
 }
 
 /// Spawn the ops server as a background task (same contract as
@@ -65,10 +69,12 @@ fn app(p: ServerParams) -> Router {
         network: p.network,
         desk_enabled: p.desk_enabled,
         desk: p.desk,
+        history: p.history,
     });
     Router::new()
         .route("/health", get(health))
         .route("/desk/state", get(desk_state))
+        .route("/desk/history", get(desk_history))
         .with_state(state)
         .merge(observability::middleware::metrics_route())
         .layer(axum::middleware::from_fn(
@@ -98,6 +104,46 @@ struct StateEnvelope {
     /// `None` flattens to nothing (the disabled shape is `{"enabled": false}`).
     #[serde(flatten)]
     state: Option<state::DeskStateDto>,
+}
+
+/// Range queries over the TimescaleDB history (SO-349).
+async fn desk_history(
+    State(s): State<Arc<ServerState>>,
+    axum::extract::Query(q): axum::extract::Query<history::HistoryQuery>,
+) -> Response {
+    if !s.desk_enabled {
+        return Json(StateEnvelope { enabled: false, state: None }).into_response();
+    }
+    let Some(history) = s.history.clone() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "enabled": true, "error": "history not configured" })),
+        )
+            .into_response();
+    };
+    if !history.is_ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "enabled": true, "error": "history db not ready" })),
+        )
+            .into_response();
+    }
+    match tokio::task::spawn_blocking(move || history.query(&q)).await {
+        Ok(Ok(resp)) => Json(resp).into_response(),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %format!("{e:#}"), "desk history query failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("{e:#}") })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 async fn desk_state(State(s): State<Arc<ServerState>>) -> Response {
@@ -131,6 +177,7 @@ mod tests {
             network: "testnet".into(),
             desk_enabled,
             desk: Arc::new(OnceLock::new()),
+            history: None,
         });
         tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
@@ -170,5 +217,19 @@ mod tests {
         assert_eq!(r.status(), 503);
         let v: serde_json::Value = r.json().await.unwrap();
         assert_eq!(v["enabled"], true);
+    }
+
+    #[tokio::test]
+    async fn desk_history_404s_without_a_configured_db() {
+        let (addr, _readiness) = spawn_test_server(true).await;
+        let client = reqwest::Client::new();
+        let r = client
+            .get(format!("http://{addr}/desk/history?series=snapshots"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"], "history not configured");
     }
 }
