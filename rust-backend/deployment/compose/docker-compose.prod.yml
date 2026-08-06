@@ -244,6 +244,10 @@ services:
     environment:
       SOLANA_MAINNET_RPC: ${SOLANA_MAINNET_RPC:-https://api.mainnet-beta.solana.com}
       SOLANA_DEVNET_RPC: ${SOLANA_DEVNET_RPC:-https://api.devnet.solana.com}
+      SOLANA_MAINNET_RPC_URL: ${SOLANA_MAINNET_RPC:-https://api.mainnet-beta.solana.com}
+      SOLANA_DEVNET_RPC_URL: ${SOLANA_DEVNET_RPC:-https://api.devnet.solana.com}
+      SUI_TESTNET_RPC: ${SUI_TESTNET_RPC:-https://sui-testnet-rpc.publicnode.com}
+      SUI_MAINNET_RPC: ${SUI_MAINNET_RPC:-https://sui-rpc.publicnode.com}
       RUST_LOG: info
     healthcheck:
       test: ["CMD", "curl", "-fsS", "--max-time", "3", "http://localhost:8080/health"]

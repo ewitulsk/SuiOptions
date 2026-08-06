@@ -318,14 +318,17 @@ if CHART_JSON=$(fetch price-charting 2>/dev/null); then
 fi
 
 # ---- crossbar secret -> sourced into .env by deploy.sh ---------------------
-# Solana RPC endpoints for Switchboard Crossbar (the devnet queue backs Sui
-# testnet feeds; mainnet for when we provision one). Optional — absent
-# secret or absent field → compose falls back to the public RPCs.
+# RPC endpoints for Switchboard Crossbar: Solana (the devnet queue backs Sui
+# testnet feeds; mainnet for when we provision one) and Sui (Queue-object
+# reads for its oracle cache, SO-352). Optional — absent secret or absent
+# field → compose falls back to the public RPCs.
 # Layout: options/<env>/crossbar -> {"solana_devnet_rpc": "...",
-#                                    "solana_mainnet_rpc": "..."}
+#                                    "solana_mainnet_rpc": "...",
+#                                    "sui_testnet_rpc": "...",
+#                                    "sui_mainnet_rpc": "..."}
 if XBAR_JSON=$(fetch crossbar 2>/dev/null); then
   umask 077
-  for field in solana_devnet_rpc solana_mainnet_rpc; do
+  for field in solana_devnet_rpc solana_mainnet_rpc sui_testnet_rpc sui_mainnet_rpc; do
     val=$(echo "$XBAR_JSON" | jq -r --arg f "$field" '.[$f] // empty')
     if [ -n "$val" ] && [ "$val" != "REPLACE_ME" ]; then
       echo "$val" > "$DIR/.$field"

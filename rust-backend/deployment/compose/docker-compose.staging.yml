@@ -267,14 +267,29 @@ services:
   # something needs it. Switchboard's oracle queues live on Solana — the
   # devnet queue backs Sui testnet feeds — so the RPCs that matter are
   # Solana's. Overrides come from the optional options/<env>/crossbar
-  # secret ({"solana_devnet_rpc": ..., "solana_mainnet_rpc": ...}),
-  # rendered by render-secrets.sh and sourced into .env by deploy.sh;
-  # absent → the public RPCs below.
+  # secret ({"solana_devnet_rpc": ..., "solana_mainnet_rpc": ...,
+  # "sui_testnet_rpc": ..., "sui_mainnet_rpc": ...}), rendered by
+  # render-secrets.sh and sourced into .env by deploy.sh; absent → the
+  # public RPCs below.
+  #
+  # SUI_*_RPC (SO-352): crossbar ALSO reads the Switchboard Queue object
+  # over Sui JSON-RPC to build its oracle cache; without it /v2/update
+  # 404s ("No oracles available in cache"). Its baked-in default fullnode
+  # (fullnode.testnet.sui.io) rejects all JSON-RPC since the 2026-07
+  # deprecation, so default to publicnode like the rest of the stack.
+  # Object reads are current-state, so publicnode's history pruning is
+  # harmless here. The SOLANA_*_RPC_URL duplicates exist because the
+  # binary carries both spellings and it is unverified which one each
+  # internal client reads.
   crossbar:
     image: switchboardlabs/rust-crossbar:stable
     environment:
       SOLANA_MAINNET_RPC: ${SOLANA_MAINNET_RPC:-https://api.mainnet-beta.solana.com}
       SOLANA_DEVNET_RPC: ${SOLANA_DEVNET_RPC:-https://api.devnet.solana.com}
+      SOLANA_MAINNET_RPC_URL: ${SOLANA_MAINNET_RPC:-https://api.mainnet-beta.solana.com}
+      SOLANA_DEVNET_RPC_URL: ${SOLANA_DEVNET_RPC:-https://api.devnet.solana.com}
+      SUI_TESTNET_RPC: ${SUI_TESTNET_RPC:-https://sui-testnet-rpc.publicnode.com}
+      SUI_MAINNET_RPC: ${SUI_MAINNET_RPC:-https://sui-rpc.publicnode.com}
       RUST_LOG: info
     healthcheck:
       test: ["CMD", "curl", "-fsS", "--max-time", "3", "http://localhost:8080/health"]
