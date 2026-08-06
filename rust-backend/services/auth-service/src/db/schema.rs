@@ -17,6 +17,8 @@ diesel::table! {
         kind -> Text,
         identifier -> Text,
         secret_hash -> Nullable<Text>,
+        metadata -> Nullable<Jsonb>,
+        verified_at -> Nullable<Timestamptz>,
         created_at -> Timestamptz,
         last_used_at -> Nullable<Timestamptz>,
     }

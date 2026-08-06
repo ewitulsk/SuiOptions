@@ -11,9 +11,15 @@
 //! proving you are that account — today `password` (username + Argon2id) and
 //! `sui_wallet` (address + signed challenge). Because they hang off a shared
 //! account, a wallet user can add a password and a password user can add a
-//! wallet, and either then signs them in. A new method is a new `kind` value
-//! plus a branch in the two `match`es in [`handlers::account`]; nothing else
-//! moves.
+//! wallet, and either then signs them in.
+//!
+//! Adding a method touches four things: an [`db::models::IdentityKind`]
+//! variant, an [`handlers::account::AuthMethod`] variant, an arm in
+//! `resolve_method`, and a login route of its own in [`handlers::session`].
+//! Registration and identity-linking both go through `resolve_method`, so they
+//! need no further changes; sign-in does, because each method is proved
+//! differently. Nothing outside this service moves — tokens carry the account
+//! uuid, so callers never learn how the session was opened.
 //!
 //! Accounts are created by redeeming an **invite**, minted over the internal
 //! port by whichever service knows the caller ought to exist. The lone

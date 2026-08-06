@@ -27,12 +27,24 @@ CREATE TABLE identities (
     id          UUID PRIMARY KEY,
     user_id     UUID        NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     -- 'password' | 'sui_wallet'. The extension point: a future 'passkey' or
-    -- 'oauth:google' is a new value here and nothing else.
+    -- 'oauth:google' is a new value here, and on the Rust side an IdentityKind
+    -- variant, an AuthMethod variant, and a login route.
     kind        TEXT        NOT NULL,
     -- Username for 'password', normalized 0x-address for 'sui_wallet'.
     identifier  TEXT        NOT NULL,
     -- Argon2id PHC string for 'password'; NULL for signature-proved methods.
     secret_hash TEXT,
+    -- Per-method state that does not fit one hash column: a passkey's
+    -- credential id and signature counter, an OAuth issuer and subject.
+    -- Unused by the two methods that exist today, and reserved for the next
+    -- one — adding it now is free while this table is empty. Same rule as
+    -- `identifier`: no PII in here either.
+    metadata    JSONB,
+    -- When the identifier was proved to belong to the account holder. NULL
+    -- means unproved. Both current methods prove themselves at registration
+    -- (a signature, or a username that asserts nothing), so nothing sets this
+    -- yet; a method with an out-of-band confirmation step would.
+    verified_at TIMESTAMPTZ,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_used_at TIMESTAMPTZ,
 

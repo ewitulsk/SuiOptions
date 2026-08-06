@@ -50,8 +50,11 @@ impl Role {
 
 // ------------------------------------------------------------------ identity
 
-/// Login method discriminator. New methods are added here and in
-/// [`IdentityKind::parse`]; nothing else in the service needs to change.
+/// Login method discriminator. Adding one means a variant here (plus its
+/// [`IdentityKind::as_str`] / [`IdentityKind::parse`] arms), a matching
+/// `AuthMethod` variant and `resolve_method` arm in `handlers::account`, and
+/// a login route of its own in `handlers::session` — registration and linking
+/// come for free, sign-in does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdentityKind {
@@ -108,6 +111,11 @@ pub struct Identity {
     pub kind: String,
     pub identifier: String,
     pub secret_hash: Option<String>,
+    /// Per-method state a single hash column can't hold. Read-only for now:
+    /// nothing writes it, and it is deliberately absent from `NewIdentity` and
+    /// from the `/me` response — the first method that needs it adds both.
+    pub metadata: Option<serde_json::Value>,
+    pub verified_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
 }
