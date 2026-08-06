@@ -154,6 +154,14 @@ SOLANA_MAINNET_RPC=""
 if [ -f "secrets/.solana_mainnet_rpc" ]; then
   SOLANA_MAINNET_RPC=$(cat "secrets/.solana_mainnet_rpc")
 fi
+SUI_TESTNET_RPC=""
+if [ -f "secrets/.sui_testnet_rpc" ]; then
+  SUI_TESTNET_RPC=$(cat "secrets/.sui_testnet_rpc")
+fi
+SUI_MAINNET_RPC=""
+if [ -f "secrets/.sui_mainnet_rpc" ]; then
+  SUI_MAINNET_RPC=$(cat "secrets/.sui_mainnet_rpc")
+fi
 
 # OTLP trace endpoint (SO-180). On the shared host the services reach the
 # co-located Tempo by docker DNS; the dedicated prod host gets the central
@@ -194,6 +202,12 @@ trap 'rm -f "$NEW_ENV"' EXIT
   fi
   if [ -n "$SOLANA_MAINNET_RPC" ]; then
     echo "SOLANA_MAINNET_RPC=$SOLANA_MAINNET_RPC"
+  fi
+  if [ -n "$SUI_TESTNET_RPC" ]; then
+    echo "SUI_TESTNET_RPC=$SUI_TESTNET_RPC"
+  fi
+  if [ -n "$SUI_MAINNET_RPC" ]; then
+    echo "SUI_MAINNET_RPC=$SUI_MAINNET_RPC"
   fi
   echo "OTEL_ENDPOINT=$OTEL_ENDPOINT"
   for svc in "${ALL_SERVICES[@]}"; do
