@@ -41,6 +41,9 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ("auth", "PUT", "/auth/token/refresh"),
     // Data host: public market/contract info and account reads.
     ("data", "GET", "/v1/exchange/info"),
+    // Public per-market funding history (desk dashboard venue panel,
+    // SO-351). Path verified against the live sui-staging data host.
+    ("data", "GET", "/v1/exchange/fundingRateHistory"),
     ("data", "GET", "/api/v1/account"),
     ("data", "GET", "/api/v1/account/trades"),
     ("data", "GET", "/api/v1/account/transactions"),
@@ -173,6 +176,7 @@ mod tests {
     fn allowlist_admits_the_dashboard_surface() {
         assert!(allowed("auth", "POST", "/auth/v2/token"));
         assert!(allowed("data", "GET", "/api/v1/account"));
+        assert!(allowed("data", "GET", "/v1/exchange/fundingRateHistory"));
         assert!(allowed("trade", "POST", "/api/v1/trade/orders"));
         assert!(allowed("trade", "PUT", "/api/v1/trade/orders/cancel"));
         assert!(allowed("trade", "POST", "/api/v1/trade/withdraw"));
