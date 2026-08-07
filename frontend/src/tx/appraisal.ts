@@ -32,14 +32,14 @@ import {
 } from "@mysten/sui/transactions";
 import {
   deriveDynamicFieldID,
-  fromBase64,
   fromHex,
   normalizeStructTag,
   parseStructTag,
 } from "@mysten/sui/utils";
 
 import { fetchBuckets, optionCoinType, seriesOptionType } from "../api/client";
-import type { OracleDescriptor } from "../api/oracleDescriptor";
+import { fetchOracleDescriptor, type OracleDescriptor } from "../api/oracleDescriptor";
+import { fetchOracleLegs, type OracleLegsPayload } from "../api/oracleLegs";
 import { tokenForCoinType, type TradingVaultDetail } from "../api/tradingVaults";
 import {
   asRecord,
@@ -61,7 +61,6 @@ import {
   EQUITY_ORACLE_PACKAGE_ID,
   EQUITY_ORACLE_PUBLISH_DIGEST,
   OPTIONS_ADAPTER_PACKAGE_ID,
-  ORACLE_PYTH_PACKAGE_ID,
   PYTH_PRICE_INFO_TABLE_IDS,
   TRADING_VAULT_OBJECTS,
   TRADING_VAULT_PACKAGE_ID,
@@ -142,10 +141,14 @@ export type AppraisalPlan = {
   optionCoins: OptionCoinPlan[];
   /** Non-deposit assets needing one `attest` each (canonical). */
   attestTypes: string[];
-  /** Canonical coin type → Pyth feed id (lower-case hex, no 0x). Includes the
-   * deposit asset whenever any attestation is needed (it's the quote leg). */
+  /** The live oracle descriptor the plan was built against (SO-356).
+   * Compose + submit follow it — never a compiled provider. */
+  oracle: OracleDescriptor;
+  /** Canonical coin type → the live provider's feed key (lower-case hex,
+   * no 0x). Includes the deposit asset whenever any attestation is needed
+   * (it's the quote leg). */
   feedIdByType: Record<string, string>;
-  /** Feed id → shared `PriceInfoObject` id. */
+  /** Feed id → shared `PriceInfoObject` id. Pyth provider only. */
   priceInfoByFeed: Record<string, string>;
   /** Canonical DEEP type when locked-DEEP legs can be attested, else null. */
   deepType: string | null;
@@ -289,8 +292,10 @@ async function equityBookHasEntry(
 
 // ═══════════════════════════════ planning ═══════════════════════════════
 
-function feedIdFor(coinType: string): string | null {
-  const feed = tokenForCoinType(coinType)?.pythFeedId ?? null;
+/** The live provider's feed key for a coin type, from the descriptor —
+ * NOT the catalog's compiled ids (SO-356: no compiled-provider fallback). */
+function feedIdFor(oracle: OracleDescriptor, coinType: string): string | null {
+  const feed = oracle.feeds[canon(coinType)] ?? null;
   if (!feed) return null;
   return (feed.startsWith("0x") ? feed.slice(2) : feed).toLowerCase();
 }
@@ -327,6 +332,10 @@ export async function planAppraisal(
   if (!TRADING_VAULT_PACKAGE_ID) {
     throw new Error("No trading-vault deployment on this network");
   }
+  // The live provider is whatever oracle-service says it is — required,
+  // no compiled fallback (SO-356). Unreachable descriptor ⇒ the plan
+  // fails with the reason instead of composing a doomed PTB.
+  const oracle = await fetchOracleDescriptor();
   const depositType = canon(vault.depositAsset);
 
   // 1. The vault object's `asset_types` VecSet<TypeName> — every type with a
@@ -417,7 +426,7 @@ export async function planAppraisal(
   // Locked DEEP in active pools: attestable only when DEEP has a served
   // feed. Without one the leg gets `none` — fine while locked DEEP is zero.
   let deepType: string | null = null;
-  if (anyPools && deepCanon && deepCanon !== depositType && feedIdFor(deepCanon)) {
+  if (anyPools && deepCanon && deepCanon !== depositType && feedIdFor(oracle, deepCanon)) {
     deepType = deepCanon;
     needed.add(deepCanon);
   }
@@ -454,7 +463,7 @@ export async function planAppraisal(
     }
   }
 
-  const feedFor = (t: string): string | null => feedIdFor(t);
+  const feedFor = (t: string): string | null => feedIdFor(oracle, t);
 
   // Optimistic legs (mirrors the Rust composer): types with no served feed —
   // e.g. option coins tracked by a custody from placing orders — get an
@@ -467,24 +476,26 @@ export async function planAppraisal(
     if (feedFor(t)) attestTypes.push(t);
     else if (freeBalanceTypes.includes(t)) {
       const token = tokenForCoinType(t);
-      throw new Error(`No Pyth feed for held asset ${token?.ticker ?? shortType(t)}`);
+      throw new Error(
+        `No ${oracle.provider} feed for held asset ${token?.ticker ?? shortType(t)}`,
+      );
     }
     // else: feedless custody/pool/option leg — composed as `option::none`.
   }
 
-  // 4. Feed ids + PriceInfoObjects (deposit feed included — `attest` crosses
-  //    the asset feed with the deposit feed).
+  // 4. Feed keys under the live provider (deposit feed included — `attest`
+  //    crosses the asset feed with the deposit feed). Pyth additionally
+  //    needs each feed's shared `PriceInfoObject`; Switchboard resolves
+  //    feeds on-chain through its registry, so no per-feed objects.
   const feedIdByType: Record<string, string> = {};
   if (attestTypes.length > 0) {
-    if (!ORACLE_PYTH_PACKAGE_ID) {
-      throw new Error("oracle-pyth package not deployed on this network");
+    if (!oracle.adapter) {
+      throw new Error(
+        `live oracle provider ${oracle.provider} has no adapter deployed on this network`,
+      );
     }
     if (!TRADING_VAULT_OBJECTS) {
       throw new Error("trading-vault governance objects not served by token-info");
-    }
-    const handles = PYTH_HANDLES[ENV];
-    if (!handles) {
-      throw new Error(`No Pyth deployment configured for network "${ENV}"`);
     }
     if (custodies.length > 0 && !DEEPBOOK_ADAPTER_PACKAGE_ID) {
       throw new Error("deepbook-adapter package not deployed on this network");
@@ -497,13 +508,21 @@ export async function planAppraisal(
       if (!feed) {
         // Only reachable for the deposit asset — attestTypes are pre-filtered.
         const token = tokenForCoinType(t);
-        throw new Error(`No Pyth feed for deposit asset ${token?.ticker ?? shortType(t)}`);
+        throw new Error(
+          `No ${oracle.provider} feed for deposit asset ${token?.ticker ?? shortType(t)}`,
+        );
       }
       feedIdByType[t] = feed;
     }
     const priceInfoByFeed: Record<string, string> = {};
-    for (const feed of new Set(Object.values(feedIdByType))) {
-      priceInfoByFeed[feed] = await resolvePriceInfoObjectId(client, handles, feed);
+    if (oracle.provider === "pyth") {
+      const handles = PYTH_HANDLES[ENV];
+      if (!handles) {
+        throw new Error(`No Pyth deployment configured for network "${ENV}"`);
+      }
+      for (const feed of new Set(Object.values(feedIdByType))) {
+        priceInfoByFeed[feed] = await resolvePriceInfoObjectId(client, handles, feed);
+      }
     }
     return {
       vaultId: vault.vaultId,
@@ -515,6 +534,7 @@ export async function planAppraisal(
       optionLegs,
       optionCoins,
       attestTypes,
+      oracle,
       feedIdByType,
       priceInfoByFeed,
       deepType,
@@ -541,6 +561,7 @@ export async function planAppraisal(
     optionLegs,
     optionCoins,
     attestTypes,
+    oracle,
     feedIdByType,
     priceInfoByFeed: {},
     deepType,
@@ -549,35 +570,27 @@ export async function planAppraisal(
   };
 }
 
-// ═══════════════════════════ Hermes accumulator ═══════════════════════════
-
-// The PYTH-provider attest path only. Display prices no longer touch
-// Hermes (SO-355: oracle-service is the frontend's only price source);
-// this direct fetch remains solely because the trading-vault appraisal
-// composer still builds Pyth attest legs. On a switchboard deployment it
-// is inert — and hermes-beta stopped publishing 2026-08-04, so the Pyth
-// path is dead until the composer learns Switchboard legs (follow-up).
-const HERMES_BASE = "https://hermes-beta.pyth.network";
+// ═══════════════════════════ oracle legs ═══════════════════════════
 
 /**
- * One Hermes accumulator update covering every feed in the plan, fetched at
- * submit time so the on-chain staleness gates see fresh publish times.
+ * The live provider's signed payload for the plan's attest legs, fetched
+ * from oracle-service at submit time so the on-chain staleness gates see
+ * fresh timestamps (SO-356 — the frontend never talks to an oracle
+ * network directly). `null` when the plan needs no attestations.
+ *
+ * The response provider must match the plan's: a provider switch between
+ * planning and submit would pair one provider's payload with the other's
+ * adapter calls, so it errors and the caller re-plans.
  */
-export async function fetchHermesAccumulatorUpdate(feedIds: string[]): Promise<Uint8Array> {
-  const qs = feedIds.map((id) => `ids[]=0x${id}`).join("&");
-  const res = await fetch(`${HERMES_BASE}/v2/updates/price/latest?${qs}&encoding=base64`);
-  if (!res.ok) {
-    throw new Error(`Hermes price update failed: ${res.status} ${res.statusText}`);
+async function fetchLegsForPlan(plan: AppraisalPlan): Promise<OracleLegsPayload | null> {
+  if (plan.attestTypes.length === 0) return null;
+  const legs = await fetchOracleLegs([...new Set([...plan.attestTypes, plan.depositType])]);
+  if (legs.provider !== plan.oracle.provider) {
+    throw new Error(
+      `oracle provider switched (planned ${plan.oracle.provider}, serving ${legs.provider}) — retry the deposit`,
+    );
   }
-  const body = (await res.json()) as { binary?: { data?: string[] } };
-  const data = body.binary?.data;
-  if (!data || data.length === 0) throw new Error("Hermes returned no update data");
-  if (data.length > 1) {
-    // Hermes packs all requested feeds into one accumulator blob today; a
-    // multi-chunk response would need one update prefix per chunk.
-    throw new Error(`Hermes returned ${data.length} update chunks; expected 1`);
-  }
-  return fromBase64(data[0]);
+  return legs;
 }
 
 /** Accumulator-update magic: `"PNAU"`. */
@@ -620,8 +633,9 @@ export function extractVaaFromAccumulator(update: Uint8Array): Uint8Array {
 export type ComposeContext = {
   /** Shared `VaultProtocolConfig` object id. */
   protocolConfigId: string;
-  /** Hermes accumulator update; required iff `plan.attestTypes` is non-empty. */
-  accumulatorUpdate: Uint8Array | null;
+  /** The live provider's signed payload from oracle-service; required iff
+   * `plan.attestTypes` is non-empty. */
+  legs: OracleLegsPayload | null;
 };
 
 function requireId(id: string | undefined, what: string): string {
@@ -630,21 +644,125 @@ function requireId(id: string | undefined, what: string): string {
 }
 
 /**
+ * `quote_submit_action::run_N` — the Switchboard price-leg prefix,
+ * mirroring the Rust composer (`sui-tx/src/tx/oracle/switchboard.rs`):
+ * pure vectors first, then the `Oracle` objects in signature order, the
+ * `Queue`, and the clock. Returns the `Quotes` bundle every `attest` in
+ * the PTB reads its feeds out of. Both targets are allowlisted in the
+ * gas-station appraisal templates (run_1..run_6, SO-335).
+ */
+function composeSwitchboardQuotes(
+  tx: Transaction,
+  legs: Extract<OracleLegsPayload, { provider: "switchboard" }>,
+  clock: TransactionArgument,
+): TransactionResult {
+  const q = legs.quote;
+  const n = q.oracleIds.length;
+  if (n < 1 || n > 6) {
+    throw new Error(`switchboard quote carries ${n} oracles; the package exposes run_1..run_6`);
+  }
+  return tx.moveCall({
+    target: `${legs.switchboardPackageId}::quote_submit_action::run_${n}`,
+    arguments: [
+      tx.pure(bcs.vector(bcs.vector(bcs.u8())).serialize(q.feedIds.map((b) => Array.from(b)))),
+      tx.pure(bcs.vector(bcs.u128()).serialize(q.values)),
+      tx.pure(bcs.vector(bcs.bool()).serialize(q.valuesNeg)),
+      tx.pure(bcs.vector(bcs.u8()).serialize(q.minOracleSamples)),
+      tx.pure(bcs.vector(bcs.vector(bcs.u8())).serialize(q.signatures.map((b) => Array.from(b)))),
+      tx.pure.u64(q.slot),
+      tx.pure.u64(q.timestampSeconds),
+      ...q.oracleIds.map((id) => tx.object(id)),
+      tx.object(legs.queueId),
+      clock,
+    ],
+  });
+}
+
+/**
+ * The Pyth price-leg prefix + per-asset attestations: wormhole-verify the
+ * accumulator's VAA, refresh every feed's `PriceInfoObject`, then
+ * `attest<Asset, Dep>` crossing each asset feed with the deposit feed.
+ * `PriceAttestation` is `copy, drop`, so one result per asset is reused
+ * across every leg downstream.
+ */
+function composePythAttestations(
+  tx: Transaction,
+  plan: AppraisalPlan,
+  accumulatorUpdate: Uint8Array,
+  ctx: {
+    attestTarget: string;
+    feedReg: TransactionArgument;
+    oracleReg: TransactionArgument;
+    clock: TransactionArgument;
+    attestations: Map<string, TransactionResult>;
+  },
+): void {
+  const handles = PYTH_HANDLES[ENV];
+  if (!handles) throw new Error(`No Pyth deployment configured for network "${ENV}"`);
+
+  const vaa = extractVaaFromAccumulator(accumulatorUpdate);
+  const wormholeState = tx.object(handles.wormholeStateId);
+  const pythState = tx.object(handles.pythStateId);
+  const verifiedVaa = tx.moveCall({
+    target: `${handles.wormholePackage}::vaa::parse_and_verify`,
+    arguments: [
+      wormholeState,
+      tx.pure(bcs.vector(bcs.u8()).serialize(Array.from(vaa))),
+      ctx.clock,
+    ],
+  });
+  let potato = tx.moveCall({
+    target: `${handles.pythPackage}::pyth::create_authenticated_price_infos_using_accumulator`,
+    arguments: [
+      pythState,
+      tx.pure(bcs.vector(bcs.u8()).serialize(Array.from(accumulatorUpdate))),
+      verifiedVaa,
+      ctx.clock,
+    ],
+  });
+  const feeds = [...new Set(Object.values(plan.feedIdByType))];
+  for (const feed of feeds) {
+    const info = plan.priceInfoByFeed[feed];
+    if (!info) throw new Error(`no PriceInfoObject resolved for feed ${feed}`);
+    const [fee] = tx.splitCoins(tx.gas, [tx.pure.u64(handles.updateFeeMist)]);
+    potato = tx.moveCall({
+      target: `${handles.pythPackage}::pyth::update_single_price_feed`,
+      arguments: [pythState, potato, tx.object(info), fee, ctx.clock],
+    });
+  }
+  tx.moveCall({
+    target: `${handles.pythPackage}::hot_potato_vector::destroy`,
+    typeArguments: [`${handles.pythPackage}::price_info::PriceInfo`],
+    arguments: [potato],
+  });
+
+  const depositInfo = tx.object(plan.priceInfoByFeed[plan.feedIdByType[plan.depositType]]);
+  for (const asset of plan.attestTypes) {
+    const info = tx.object(plan.priceInfoByFeed[plan.feedIdByType[asset]]);
+    ctx.attestations.set(
+      asset,
+      tx.moveCall({
+        target: ctx.attestTarget,
+        typeArguments: [asset, plan.depositType],
+        arguments: [ctx.feedReg, ctx.oracleReg, info, depositInfo, ctx.clock],
+      }),
+    );
+  }
+}
+
+/**
  * Emit the full appraisal-leg sequence into `tx` and return the `Appraisal`
  * argument for `vault::deposit`. Synchronous — all discovery lives in
- * `planAppraisal`, all network fetches in `fetchHermesAccumulatorUpdate`.
+ * `planAppraisal`, all network fetches in `fetchLegsForPlan`.
+ *
+ * The attest legs target whichever adapter the plan's descriptor says is
+ * live (SO-335); there is deliberately NO compiled-provider fallback
+ * (SO-356) — a missing descriptor fails the plan, never re-routes it.
  */
 export function composeAppraisal(
   tx: Transaction,
   plan: AppraisalPlan,
   ctx: ComposeContext,
-  /**
-   * The live oracle descriptor (SO-335). Supplied, the attest legs
-   * target whichever adapter oracle-service says is live; omitted, they
-   * fall back to the compiled Pyth ids. Optional so existing callers
-   * keep working — new ones should pass it.
-   */
-  oracle?: OracleDescriptor,
 ): TransactionResult {
   const vaultPkg = requireId(TRADING_VAULT_PACKAGE_ID, "trading-vault package");
   const vault = tx.object(plan.vaultId);
@@ -676,76 +794,52 @@ export function composeAppraisal(
     });
   }
 
-  // 2. Pyth update prefix + 3. one attestation per asset.
+  // 2. The live provider's price-leg prefix + 3. one attestation per asset.
   const attestations = new Map<string, TransactionResult>();
   if (plan.attestTypes.length > 0) {
-    // SO-335: the adapter is whatever oracle-service says is live, not a
-    // constant baked into this bundle. `oracle` is passed in by the
-    // caller (from `useOracleDescriptor`); falling back to the compiled
-    // Pyth ids keeps older callers working during the migration.
-    const adapter = oracle?.adapter;
-    const oraclePkg = adapter
-      ? adapter.adapter_package_id
-      : requireId(ORACLE_PYTH_PACKAGE_ID, "oracle-pyth package");
-    const attestModule = oracle?.adapter_module ?? "oracle_pyth";
-    const gov = TRADING_VAULT_OBJECTS;
-    if (!gov) throw new Error("trading-vault governance objects unavailable");
-    const handles = PYTH_HANDLES[ENV];
-    if (!handles) throw new Error(`No Pyth deployment configured for network "${ENV}"`);
-    if (!ctx.accumulatorUpdate) throw new Error("missing Hermes accumulator update");
-
-    const vaa = extractVaaFromAccumulator(ctx.accumulatorUpdate);
-    const wormholeState = tx.object(handles.wormholeStateId);
-    const pythState = tx.object(handles.pythStateId);
-    const verifiedVaa = tx.moveCall({
-      target: `${handles.wormholePackage}::vaa::parse_and_verify`,
-      arguments: [
-        wormholeState,
-        tx.pure(bcs.vector(bcs.u8()).serialize(Array.from(vaa))),
-        clock,
-      ],
-    });
-    let potato = tx.moveCall({
-      target: `${handles.pythPackage}::pyth::create_authenticated_price_infos_using_accumulator`,
-      arguments: [
-        pythState,
-        tx.pure(bcs.vector(bcs.u8()).serialize(Array.from(ctx.accumulatorUpdate))),
-        verifiedVaa,
-        clock,
-      ],
-    });
-    const feeds = [...new Set(Object.values(plan.feedIdByType))];
-    for (const feed of feeds) {
-      const info = plan.priceInfoByFeed[feed];
-      if (!info) throw new Error(`no PriceInfoObject resolved for feed ${feed}`);
-      const [fee] = tx.splitCoins(tx.gas, [tx.pure.u64(handles.updateFeeMist)]);
-      potato = tx.moveCall({
-        target: `${handles.pythPackage}::pyth::update_single_price_feed`,
-        arguments: [pythState, potato, tx.object(info), fee, clock],
-      });
-    }
-    tx.moveCall({
-      target: `${handles.pythPackage}::hot_potato_vector::destroy`,
-      typeArguments: [`${handles.pythPackage}::price_info::PriceInfo`],
-      arguments: [potato],
-    });
-
-    // Attestations: `attest<Asset, Dep>` crosses the asset feed with the
-    // deposit feed. `PriceAttestation` is `copy, drop`, so one result per
-    // asset is reused across every leg below.
-    const feedReg = tx.object(adapter ? adapter.feed_registry_id : gov.pythFeedRegistryId);
-    const oracleReg = tx.object(adapter ? adapter.oracle_registry_id : gov.oracleRegistryId);
-    const depositInfo = tx.object(plan.priceInfoByFeed[plan.feedIdByType[plan.depositType]]);
-    for (const asset of plan.attestTypes) {
-      const info = tx.object(plan.priceInfoByFeed[plan.feedIdByType[asset]]);
-      attestations.set(
-        asset,
-        tx.moveCall({
-          target: `${oraclePkg}::${attestModule}::attest`,
-          typeArguments: [asset, plan.depositType],
-          arguments: [feedReg, oracleReg, info, depositInfo, clock],
-        }),
+    // SO-335/SO-356: the adapter is whatever oracle-service said at plan
+    // time — required, never a compiled constant.
+    const oracle = plan.oracle;
+    const adapter = oracle.adapter;
+    if (!adapter) {
+      throw new Error(
+        `live oracle provider ${oracle.provider} has no adapter deployed on this network`,
       );
+    }
+    const legs = ctx.legs;
+    if (!legs) throw new Error("missing oracle legs payload");
+    if (legs.provider !== oracle.provider) {
+      throw new Error(
+        `legs payload is ${legs.provider} but the plan targets ${oracle.provider} — re-plan and retry`,
+      );
+    }
+    const feedReg = tx.object(adapter.feed_registry_id);
+    const oracleReg = tx.object(adapter.oracle_registry_id);
+    const attestTarget = `${adapter.adapter_package_id}::${oracle.adapter_module}::attest`;
+
+    if (legs.provider === "switchboard") {
+      // One `run_N` yields the whole `Quotes` bundle; every attest reads
+      // its own feed out of it (mirrors the Rust composer — N assets cost
+      // one prefix command, no shared-object refreshes, no update fee).
+      const quotes = composeSwitchboardQuotes(tx, legs, clock);
+      for (const asset of plan.attestTypes) {
+        attestations.set(
+          asset,
+          tx.moveCall({
+            target: attestTarget,
+            typeArguments: [asset, plan.depositType],
+            arguments: [feedReg, oracleReg, quotes, clock],
+          }),
+        );
+      }
+    } else {
+      composePythAttestations(tx, plan, legs.accumulatorUpdate, {
+        attestTarget,
+        feedReg,
+        oracleReg,
+        clock,
+        attestations,
+      });
     }
   }
 
@@ -912,17 +1006,12 @@ export type AppraisedDepositParams = {
  */
 export async function buildAppraisedDepositTx(p: AppraisedDepositParams): Promise<Transaction> {
   const vaultPkg = requireId(TRADING_VAULT_PACKAGE_ID, "trading-vault package");
-  const accumulatorUpdate =
-    p.plan.attestTypes.length > 0
-      ? await fetchHermesAccumulatorUpdate([
-          ...new Set(Object.values(p.plan.feedIdByType)),
-        ])
-      : null;
+  const legs = await fetchLegsForPlan(p.plan);
 
   const tx = new Transaction();
   const appraisal = composeAppraisal(tx, p.plan, {
     protocolConfigId: p.protocolConfigId,
-    accumulatorUpdate,
+    legs,
   });
   const funds = tx.add(coinWithBalance({ balance: p.amountRaw, type: p.plan.depositType }));
   tx.moveCall({
@@ -966,12 +1055,7 @@ export type ReleaseExternalParams = {
  */
 export async function buildReleaseExternalTx(p: ReleaseExternalParams): Promise<Transaction> {
   const vaultPkg = requireId(TRADING_VAULT_PACKAGE_ID, "trading-vault package");
-  const accumulatorUpdate =
-    p.plan.attestTypes.length > 0
-      ? await fetchHermesAccumulatorUpdate([
-          ...new Set(Object.values(p.plan.feedIdByType)),
-        ])
-      : null;
+  const legs = await fetchLegsForPlan(p.plan);
 
   const tx = new Transaction();
   if (p.plan.externalInit) {
@@ -986,7 +1070,7 @@ export async function buildReleaseExternalTx(p: ReleaseExternalParams): Promise<
   }
   const appraisal = composeAppraisal(tx, p.plan, {
     protocolConfigId: p.protocolConfigId,
-    accumulatorUpdate,
+    legs,
   });
   tx.moveCall({
     target: `${vaultPkg}::vault::release_external`,

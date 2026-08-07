@@ -32,6 +32,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 metrics = { workspace = true }
+tower-http = { workspace = true }
 
 # axum with the `ws` feature for the internal fanout endpoint (the workspace
 # default omits `ws`; this mirrors price-charting's explicit dep).

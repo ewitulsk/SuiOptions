@@ -41,6 +41,14 @@ pub struct Config {
     /// Benchmarks base URL for realized-vol daily closes.
     #[serde(default = "default_benchmarks")]
     pub benchmarks_url: String,
+
+    /// CORS allow-list for the browser-facing routes (descriptor, prices,
+    /// legs — all read-only). `["*"]` permits any origin, mirroring
+    /// token-info (SO-357). Without this layer every cross-origin fetch
+    /// was CORS-blocked, which is what silently forced the frontend's
+    /// compiled-Pyth fallback.
+    #[serde(default = "default_cors")]
+    pub allowed_origins: Vec<String>,
 }
 
 /// `[oracle]` — the provider switch plus its per-provider endpoints.
@@ -114,6 +122,10 @@ fn default_hermes() -> String {
 
 fn default_benchmarks() -> String {
     "https://benchmarks.pyth.network".into()
+}
+
+fn default_cors() -> Vec<String> {
+    vec!["*".to_string()]
 }
 
 impl Config {

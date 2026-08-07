@@ -225,7 +225,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("binding {}", cfg.bind_addr))?;
     info!(addr = %cfg.bind_addr, "oracle-service listening");
-    axum::serve(listener, router(state))
+    axum::serve(listener, router(state, &cfg.allowed_origins)?)
         .await
         .context("serving oracle-service")?;
     Ok(())

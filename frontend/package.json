@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build && node scripts/posthog-sourcemaps.mjs",
+    "build": "node scripts/no-pyth-network.mjs && tsc -b && vite build && node scripts/posthog-sourcemaps.mjs",
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit"
   },
