@@ -104,6 +104,10 @@ services:
       API_URL: http://api-service:9003
       # The desk reconstructs its book from the indexer (SO-299).
       INDEXER_GRAPHQL_URL: http://indexer:9002/graphql
+      # Desk history (SO-349) rides the same Tiger Data TimescaleDB as
+      # price-charting (options/staging/price-charting secret → deploy.sh
+      # .env). Empty (secret absent) ⇒ history disabled, bot unaffected.
+      DESK_DATABASE_URL: ${CHART_DATABASE_URL:-}
       RUST_LOG: info,mm_bot=debug
     volumes:
       - /opt/options/staging/secrets:/run/secrets:ro

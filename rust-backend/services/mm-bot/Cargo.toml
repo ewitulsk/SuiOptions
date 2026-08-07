@@ -59,3 +59,7 @@ parking_lot = { workspace = true }
 # Desk state API (SO-348): /health + /metrics + /desk/state.
 axum = { workspace = true }
 tower-http = { workspace = true }
+
+# Desk history on TimescaleDB (SO-349).
+diesel = { workspace = true }
+diesel_migrations = { workspace = true }
