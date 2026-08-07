@@ -13,8 +13,9 @@ COPY . .
 RUN cargo build --release -p mm-bot
 
 FROM debian:bookworm-slim
+# libpq5: Postgres runtime lib for the desk-history diesel connection (SO-349).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 curl && rm -rf /var/lib/apt/lists/*
+    ca-certificates libssl3 libpq5 curl && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /src/target/release/mm-bot /usr/local/bin/mm-bot
 COPY services/mm-bot/config/ /app/config/
