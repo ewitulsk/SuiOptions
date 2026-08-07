@@ -58,7 +58,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh — `test_affected.py`
 # asserts the two match.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -91,6 +91,10 @@ SERVICE_GLOBS: dict[str, list[str]] = {
     "quoting-service": [
         "rust-backend/services/quoting-service/**",
         "rust-backend/Dockerfile.quoting",
+    ],
+    "orderbook": [
+        "rust-backend/services/orderbook/**",
+        "rust-backend/Dockerfile.orderbook",
     ],
     "mm-bot": [
         "rust-backend/services/mm-bot/**",

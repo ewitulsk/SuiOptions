@@ -27,6 +27,12 @@ target "_common" {
   platforms = ["linux/amd64"]
 }
 
+target "orderbook" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.orderbook"
+  tags       = ["${ECR}/options/orderbook:${IMAGE_TAG}"]
+}
+
 target "indexer" {
   inherits   = ["_common"]
   dockerfile = "Dockerfile.indexer"
@@ -164,5 +170,5 @@ target "market-sim" {
 }
 
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook"]
 }

@@ -159,7 +159,7 @@ jobs:
             # twitter-service + social-bot are temporarily out of the rollable
             # set (PR #280 strip), and price-charting until its Tiger Data
             # tsdb is resumed — see the docker-compose.staging.yml notes.
-            services='["indexer","quoting-service","mm-bot","option-scheduler","api-service","token-info","auth-service","gas-station","hedge-signer","market-sim","balance-monitor","keeper","oracle-service","cctp-relay"]'
+            services='["indexer","quoting-service","mm-bot","option-scheduler","api-service","token-info","auth-service","gas-station","hedge-signer","market-sim","balance-monitor","keeper","oracle-service","cctp-relay","orderbook"]'
             echo "force_all or image_tag override → rolling all services"
           else
             services=$(printf '%s\n' "$CHANGED_FILES" \

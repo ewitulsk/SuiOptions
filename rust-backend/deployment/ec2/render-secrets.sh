@@ -303,6 +303,34 @@ else
   echo "WARNING: options/$ENV/keeper secret not found — keeper will fail its health check if deployed" >&2
 fi
 
+# ---- orderbook secret -> rendered TOML -------------------------------------
+# Relayer gas wallet for matched-mode settlement (exchange
+# settlement::match_orders). Plain wallet, NOT the deployer key and NOT an
+# AdminCap holder — the Move package validates every fill against maker
+# signatures, so this key can only pay gas and claim crossing prices within
+# signed limits. OPTIONAL by design: an absent secret renders no file and
+# the service degrades to open-orderbook mode (serves signed orders, no
+# matched settlement) rather than crash-looping.
+# Layout: options/<env>/orderbook -> {"sui_key": "suiprivkey1..."}
+if ORDERBOOK_JSON=$(fetch orderbook 2>/dev/null); then
+  OB_SUI_KEY=$(echo "$ORDERBOOK_JSON" | jq -r '.sui_key // empty')
+  umask 077
+  if [ -n "$OB_SUI_KEY" ] && [ "$OB_SUI_KEY" != "REPLACE_ME" ]; then
+    cat > "$DIR/orderbook.toml" <<EOF
+[sui]
+$NETWORK = "$OB_SUI_KEY"
+$RPC_LINE
+EOF
+  else
+    cat > "$DIR/orderbook.toml" <<EOF
+[sui]
+$RPC_LINE
+EOF
+  fi
+else
+  echo "render-secrets: no orderbook secret — service runs open-orderbook mode"
+fi
+
 # ---- price-charting secret -> sourced into .env by deploy.sh -------------
 # Tiger Data TimescaleDB connection URL. Absent in envs without the
 # service — silently skipped like mm-bot.
