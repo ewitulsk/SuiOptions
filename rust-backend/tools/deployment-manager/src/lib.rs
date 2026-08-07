@@ -67,6 +67,20 @@ pub struct Cli {
     #[arg(long)]
     pub deploy_cctp: bool,
 
+    /// Publish ONLY the hybrid-exchange settlement package
+    /// (contracts/exchange/) and record it under the env's `exchange`
+    /// block. Skips the protocol publish entirely; the env must already
+    /// exist in deployments.json.
+    ///
+    /// Deliberately NOT part of the default protocol publish: a republish
+    /// creates a new package while existing market registries stay bound to
+    /// the old one (registry object IDs are the order-signature domain),
+    /// so exchange publishes are explicit, rare ceremonies. Market
+    /// registries are created afterwards via the exchange AdminCap and
+    /// recorded under `exchange.markets`.
+    #[arg(long)]
+    pub deploy_exchange: bool,
+
     /// Path to the cctp-contracts Move package.
     #[arg(long, default_value = "../cctp-contracts")]
     pub cctp_contracts: PathBuf,
