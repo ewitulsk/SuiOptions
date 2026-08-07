@@ -1,10 +1,12 @@
 //! axum router: REST snapshot + realized-vol endpoints and the `/ws` fanout.
-//! Internal port only — never nginx-proxied.
+//! Everything here is read-only; the browser-facing subset (descriptor,
+//! prices, legs) is nginx-proxied under exact paths and needs CORS.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -15,12 +17,14 @@ use oracle_client::{PricePoint, PricesResponse, RealizedVolPoint, RealizedVolRes
 use pyth_client::{benchmark_feed_id, PriceFeedId};
 use serde::Deserialize;
 use tokio::sync::broadcast;
+use tower_http::cors::{Any, CorsLayer};
 use tracing::debug;
 
 use crate::state::AppState;
 
-pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+pub fn router(state: Arc<AppState>, allowed_origins: &[String]) -> Result<Router> {
+    let cors = build_cors(allowed_origins)?;
+    Ok(Router::new()
         .route("/health", get(health))
         .route("/prices", get(get_prices))
         .route("/snapshot", get(get_prices))
@@ -33,6 +37,27 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
         .merge(observability::middleware::metrics_route())
         .layer(axum::middleware::from_fn(observability::middleware::http_obs))
+        .layer(cors))
+}
+
+/// Mirrors token-info's `build_cors` (SO-357): `"*"` anywhere in the list
+/// short-circuits to a fully permissive layer; otherwise the exact
+/// origins. All routes are read-only, so no credentials are involved.
+fn build_cors(allowed_origins: &[String]) -> Result<CorsLayer> {
+    if allowed_origins.iter().any(|o| o == "*") {
+        return Ok(CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any));
+    }
+    let mut origins = Vec::with_capacity(allowed_origins.len());
+    for o in allowed_origins {
+        origins.push(o.parse()?);
+    }
+    Ok(CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods(Any)
+        .allow_headers(Any))
 }
 
 async fn health() -> &'static str {
