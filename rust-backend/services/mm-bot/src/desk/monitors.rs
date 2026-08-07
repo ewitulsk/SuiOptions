@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use pyth_client::{PriceCache, PriceFeedId};
 
@@ -42,8 +42,9 @@ use super::limits::LimitsConfig;
 use super::model::MarketModel;
 use super::DeskShared;
 
-/// `[desk.monitors]` knobs.
-#[derive(Debug, Clone, Copy, Deserialize)]
+/// `[desk.monitors]` knobs. `Serialize` so `/desk/state` can echo the
+/// effective config (SO-348).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MonitorsConfig {
     pub interval_secs: u64,
@@ -383,12 +384,15 @@ async fn monitor_tick(p: &MonitorsParams, bleed_samples: &mut Vec<(u64, f64, f64
 async fn stress_tick(p: &MonitorsParams) {
     let holdings = p.book.read().holdings.clone();
     let nav = p.shared.exposure.read().nav;
+    let now = super::auctions::now_ms();
     if nav <= 0.0 || holdings.is_empty() {
         p.shared.stress_blocked.store(false, Ordering::Relaxed);
+        *p.shared.stress.write() =
+            Some(super::StressSnapshot { at_ms: now, ..Default::default() });
         return;
     }
-    let now = super::auctions::now_ms();
     let mut worst_drawdown: f64 = 0.0;
+    let mut gap_drawdowns = [0.0f64; 2];
 
     let spots = spots_by_symbol(p);
     let readings = read_all_venues(p, &spots).await;
@@ -423,6 +427,7 @@ async fn stress_tick(p: &MonitorsParams) {
         pnl += -hedge_notional * gap;
         let drawdown = (-pnl / nav).max(0.0);
         worst_drawdown = worst_drawdown.max(drawdown);
+        gap_drawdowns[usize::from(gap > 0.0)] = drawdown;
         metrics::gauge!("mm_desk_stress_drawdown", "scenario" => if gap < 0.0 { "gap_down_60" } else { "gap_up_80" })
             .set(drawdown);
     }
@@ -446,6 +451,15 @@ async fn stress_tick(p: &MonitorsParams) {
 
     let blocked = worst_drawdown > p.cfg.stress_max_drawdown;
     p.shared.stress_blocked.store(blocked, Ordering::Relaxed);
+    *p.shared.stress.write() = Some(super::StressSnapshot {
+        at_ms: now,
+        gap_down_60: gap_drawdowns[0],
+        gap_up_80: gap_drawdowns[1],
+        flat_6mo,
+        funding_minus_50: funding_hit,
+        worst_drawdown,
+        blocked,
+    });
     metrics::gauge!("mm_desk_stress_worst_drawdown").set(worst_drawdown);
     if blocked {
         tracing::warn!(

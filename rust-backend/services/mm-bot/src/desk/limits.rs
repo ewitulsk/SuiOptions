@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// `[desk.limits]` — defaults are the 00-plan V1 starting parameters.
-#[derive(Clone, Copy, Debug, Deserialize)]
+/// `Serialize` so `/desk/state` can echo the effective limits (SO-348).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LimitsConfig {
     /// Soft premium budget, fraction of NAV (inventory penalty ramps

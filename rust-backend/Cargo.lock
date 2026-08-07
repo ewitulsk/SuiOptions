@@ -5655,6 +5655,7 @@ dependencies = [
  "anyhow",
  "api-service-client",
  "async-trait",
+ "axum 0.7.9",
  "bcs",
  "chrono",
  "clap",
@@ -5683,6 +5684,7 @@ dependencies = [
  "token-info-client",
  "tokio",
  "toml 0.8.23",
+ "tower-http 0.6.10",
  "tracing",
  "tracing-subscriber",
 ]

@@ -12,6 +12,7 @@ pub mod collateral;
 pub mod desk;
 pub mod liquidity;
 pub mod pricing;
+pub mod server;
 pub mod sim;
 
 /// Move abort code emitted when a bid is outbid between read and submit

@@ -130,7 +130,7 @@ impl Written {
 }
 
 /// A premium reservation held while a signed quote is outstanding.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Reservation {
     pub amount: u64,
     pub expires_ms: u64,
@@ -249,6 +249,14 @@ impl Book {
 
     pub fn release_reservation(&mut self, id: u64) {
         self.reservations.remove(&id);
+    }
+
+    /// Snapshot of the live reservations (`/desk/state`), soonest-expiry
+    /// first.
+    pub fn reservations_snapshot(&self) -> Vec<Reservation> {
+        let mut out: Vec<Reservation> = self.reservations.values().cloned().collect();
+        out.sort_by_key(|r| r.expires_ms);
+        out
     }
 
     pub fn expire_reservations(&mut self, now_ms: u64) {
