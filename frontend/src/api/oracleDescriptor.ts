@@ -50,7 +50,10 @@ export async function fetchOracleDescriptor(): Promise<OracleDescriptor> {
       "VITE_ORACLE_SERVICE_URL is not set — cannot resolve the live oracle provider",
     );
   }
-  const res = await fetch(`${base}/oracle/descriptor`);
+  // Base-relative PUBLIC shape (SO-359): ORACLE_SERVICE_URL already ends
+  // in the oracle prefix (…/staging/oracle deployed, :9013 locally), so
+  // no `/oracle/` nesting here — that produced …/oracle/oracle/… 404s.
+  const res = await fetch(`${base}/descriptor`);
   if (!res.ok) {
     throw new Error(`oracle descriptor fetch failed: ${res.status} ${res.statusText}`);
   }
