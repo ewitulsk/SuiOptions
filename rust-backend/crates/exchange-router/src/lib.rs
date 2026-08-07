@@ -13,7 +13,7 @@
 //! `taker_token_filled` headroom and abort the route), and each plan emits
 //! at most one fill leg per digest per hop.
 
-use orderbook_core::{Digest, ObjectId, TypeTagStr};
+use exchange_types::{Digest, ObjectId, TypeTagStr};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

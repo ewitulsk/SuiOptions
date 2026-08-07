@@ -1,13 +1,13 @@
 [package]
-name = "orderbook-router"
+name = "exchange-router"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "orderbook_router"
+path = "src/lib.rs"
 
 [dependencies]
-orderbook-core.workspace = true
-serde.workspace = true
-thiserror.workspace = true
+exchange-types = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

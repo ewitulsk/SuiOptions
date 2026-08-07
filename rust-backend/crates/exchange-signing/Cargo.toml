@@ -1,23 +1,24 @@
 [package]
-name = "orderbook-signing"
+name = "exchange-signing"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "orderbook_signing"
+path = "src/lib.rs"
 
 [dependencies]
-orderbook-core.workspace = true
-bcs.workspace = true
-blake2.workspace = true
-sha2.workspace = true
-ed25519-dalek.workspace = true
-k256.workspace = true
-hex.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
+exchange-types = { workspace = true }
+bcs = { workspace = true }
+blake2 = { workspace = true }
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+# Same pin style as protocol-types (which also verifies secp256k1).
+k256 = { version = "0.13", features = ["ecdsa"] }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-rand.workspace = true
+rand = { workspace = true }

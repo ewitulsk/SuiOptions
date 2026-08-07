@@ -8,8 +8,8 @@
 
 use crate::keys::{Ed25519Keypair, Secp256k1Keypair};
 use crate::{order_digest, personal_message_signing_digest};
-use orderbook_core::order::SignatureScheme;
-use orderbook_core::{Order, SuiAddress};
+use exchange_types::order::SignatureScheme;
+use exchange_types::{Order, SuiAddress};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]

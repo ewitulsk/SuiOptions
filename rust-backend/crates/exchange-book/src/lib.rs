@@ -11,7 +11,7 @@
 //! truth is taker-token units and chain_sync translates authoritative
 //! FillEvents back into `apply_external_fill` calls.
 
-use orderbook_core::{Digest, Market, Order, Side, SuiAddress};
+use exchange_types::{Digest, Market, Order, Side, SuiAddress};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 

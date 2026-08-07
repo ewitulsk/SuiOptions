@@ -1,5 +1,5 @@
 use super::*;
-use orderbook_core::SuiAddress;
+use exchange_types::SuiAddress;
 
 fn digest(n: u8) -> Digest {
     let mut d = [0u8; 32];

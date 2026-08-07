@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Field order is consensus-critical: BCS encoding depends on it. Never
 /// reorder or insert fields without bumping the Move `DOMAIN_VERSION` and the
-/// conformance fixtures in `orderbook-signing`.
+/// conformance fixtures in `exchange-signing`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Order {

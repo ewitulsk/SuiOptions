@@ -4,8 +4,8 @@
 use crate::{blake2b256, personal_message_signing_digest, TRANSACTION_DATA_INTENT};
 use ed25519_dalek::Signer as _;
 use k256::ecdsa::signature::hazmat::PrehashSigner as _;
-use orderbook_core::order::SignatureScheme;
-use orderbook_core::SuiAddress;
+use exchange_types::order::SignatureScheme;
+use exchange_types::SuiAddress;
 use sha2::{Digest as _, Sha256};
 
 pub struct Ed25519Keypair {

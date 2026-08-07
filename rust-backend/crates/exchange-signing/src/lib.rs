@@ -17,8 +17,8 @@ use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest as _};
 use ed25519_dalek::Verifier as _;
 use k256::ecdsa::signature::hazmat::PrehashVerifier as _;
-use orderbook_core::order::SignatureScheme;
-use orderbook_core::{Digest, ObjectId, Order, SuiAddress};
+use exchange_types::order::SignatureScheme;
+use exchange_types::{Digest, ObjectId, Order, SuiAddress};
 use sha2::Sha256;
 
 pub mod fixtures;

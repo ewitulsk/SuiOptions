@@ -2,7 +2,7 @@
 //! constants to paste into contracts/exchange/tests/conformance_tests.move.
 
 fn main() {
-    let vectors = orderbook_signing::fixtures::generate();
+    let vectors = exchange_signing::fixtures::generate();
     let json = serde_json::to_string_pretty(&vectors).unwrap();
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/conformance.json");
     std::fs::write(path, &json).unwrap();

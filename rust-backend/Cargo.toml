@@ -17,6 +17,10 @@ members = [
     "crates/switchboard-client",
     "crates/vault-sim",
     "crates/observability",
+    "crates/exchange-types",
+    "crates/exchange-signing",
+    "crates/exchange-book",
+    "crates/exchange-router",
     "services/indexer",
     "services/keeper",
     "services/quoting-service",
@@ -69,6 +73,13 @@ auth-client    = { path = "crates/auth-client" }
 switchboard-client = { path = "crates/switchboard-client" }
 vault-sim      = { path = "crates/vault-sim" }
 observability  = { path = "crates/observability" }
+# Hybrid exchange (SO: contracts/exchange + services/orderbook). The four
+# shared crates carry no Sui-SDK deps: types/signing are the consensus-
+# critical mirror of the Move package, book/router are pure engines.
+exchange-types   = { path = "crates/exchange-types" }
+exchange-signing = { path = "crates/exchange-signing" }
+exchange-book    = { path = "crates/exchange-book" }
+exchange-router  = { path = "crates/exchange-router" }
 
 # Pinned to match sui-keys's exact requirement on the framework/mainnet branch.
 tokio = { version = "=1.49.0", features = ["full"] }

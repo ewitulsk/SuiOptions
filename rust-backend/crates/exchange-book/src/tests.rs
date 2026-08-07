@@ -1,5 +1,5 @@
 use super::*;
-use orderbook_core::{Market, Order, SuiAddress};
+use exchange_types::{Market, Order, SuiAddress};
 
 fn market() -> Market {
     Market {

@@ -3,8 +3,8 @@
 //! hard-coded in the Move test suite; if this file's assertions change, the
 //! Move side must change with it (and vice versa) — that is a consensus break.
 
-use orderbook_signing::fixtures::{generate, FixtureVector};
-use orderbook_signing::{order_digest, personal_message_signing_digest, verify_signature};
+use exchange_signing::fixtures::{generate, FixtureVector};
+use exchange_signing::{order_digest, personal_message_signing_digest, verify_signature};
 
 fn load_checked_in() -> Vec<FixtureVector> {
     let raw = include_str!("../fixtures/conformance.json");
