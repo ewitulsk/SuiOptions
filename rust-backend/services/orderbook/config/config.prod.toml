@@ -1,0 +1,13 @@
+# Orderbook service config — prod env (Sui mainnet).
+
+network      = "mainnet"
+env          = "prod"
+deployments  = "/app/deployments.json"
+
+database_url = "postgresql://orderbook_prod:${DB_PASSWORD}@${DB_HOST}:5432/orderbook_prod"
+db_pool_size = 16
+
+bind         = "0.0.0.0:9014"
+
+# gas budget per match_orders settlement, in MIST
+gas_budget   = 50000000

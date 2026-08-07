@@ -243,6 +243,9 @@ pub struct PackageInfo {
     /// written before that step; mm-bot falls back to event discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote_signer_id: Option<String>,
+    /// Hybrid-exchange settlement package (via `--deploy-exchange`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exchange: Option<ExchangeInfo>,
 }
 
 /// Shared governance objects the trading-vault family's inits create,
@@ -369,6 +372,52 @@ impl TokenSpec {
 /// Per-network deployment record. `package_info` carries everything
 /// derived from publishing Move packages; `token_info` is the off-chain
 /// pricing catalog.
+/// Hybrid-exchange settlement package (published via `--deploy-exchange`)
+/// plus its market registries. `markets` is keyed by human symbol; the
+/// registry object id is the order-signature domain, so services MUST read
+/// it from here rather than hand-maintained config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExchangeInfo {
+    pub package_id: String,
+    pub upgrade_cap_id: String,
+    pub admin_cap_id: String,
+    pub publish_digest: String,
+    pub deployed_at: String,
+    pub network: String,
+    #[serde(default)]
+    pub markets: BTreeMap<String, ExchangeMarketInfo>,
+}
+
+impl ExchangeInfo {
+    pub fn package(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.package_id).context("parsing exchange package_id")
+    }
+    pub fn admin_cap(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.admin_cap_id).context("parsing exchange admin_cap_id")
+    }
+}
+
+/// One exchange market: the shared SettlementRegistry id plus the config it
+/// was created with (mirrored off-chain by the orderbook service).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExchangeMarketInfo {
+    pub registry_id: String,
+    pub base: String,
+    pub quote: String,
+    pub tick_size: u64,
+    pub min_size: u64,
+    pub lot_size: u64,
+    pub fee_bps: u64,
+}
+
+impl ExchangeMarketInfo {
+    pub fn registry(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.registry_id).context("parsing exchange registry_id")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkDeployment {
     pub package_info: PackageInfo,
@@ -382,6 +431,12 @@ impl NetworkDeployment {
     }
     pub fn admin_cap(&self) -> Result<ObjectID> {
         ObjectID::from_str(&self.package_info.admin_cap_id).context("parsing admin_cap_id")
+    }
+    pub fn exchange(&self) -> Result<&ExchangeInfo> {
+        self.package_info
+            .exchange
+            .as_ref()
+            .ok_or_else(|| anyhow!("no exchange block in deployments.json — run --deploy-exchange"))
     }
     pub fn protocol_config(&self) -> Result<ObjectID> {
         ObjectID::from_str(&self.package_info.protocol_config_id)
@@ -511,6 +566,7 @@ mod tests {
                 equity_oracle: None,
                 trading_vault_objects: None,
                 quote_signer_id: None,
+                exchange: None,
             },
             token_info: BTreeMap::new(),
         };

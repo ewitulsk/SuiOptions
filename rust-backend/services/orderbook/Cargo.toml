@@ -1,0 +1,47 @@
+[package]
+name = "orderbook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "orderbook"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+exchange-types = { workspace = true }
+exchange-signing = { workspace = true }
+exchange-book = { workspace = true }
+exchange-router = { workspace = true }
+sui-tx = { workspace = true }
+deployments = { workspace = true }
+runtime-config = { workspace = true }
+observability = { workspace = true }
+
+sui-types = { workspace = true }
+move-core-types = { workspace = true }
+
+axum = { workspace = true, features = ["ws"] }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+
+diesel = { workspace = true }
+diesel_migrations = { workspace = true }
+
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+metrics = { workspace = true }
