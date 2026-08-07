@@ -32,6 +32,12 @@ pub fn router(state: Arc<AppState>, allowed_origins: &[String]) -> Result<Router
         .route("/prices/by-asset/:coin_type", get(get_price_by_asset))
         .route("/oracle/descriptor", get(get_oracle_descriptor))
         .route("/oracle/legs", get(get_oracle_legs))
+        // Root aliases (SO-359): nginx exposes these WITHOUT the
+        // `/oracle` nesting (`/{env}/oracle/descriptor` → here), so
+        // browser clients compose base-relative paths — serving the same
+        // shape locally keeps dev and deployed URLs identical.
+        .route("/descriptor", get(get_oracle_descriptor))
+        .route("/legs", get(get_oracle_legs))
         .route("/vol/realized", get(get_realized_vol))
         .route("/ws", get(ws_handler))
         .with_state(state)

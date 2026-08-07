@@ -76,7 +76,8 @@ export async function fetchOracleLegs(assets: string[]): Promise<OracleLegsPaylo
     throw new Error("VITE_ORACLE_SERVICE_URL is not set — cannot fetch oracle legs");
   }
   const qs = encodeURIComponent(assets.join(","));
-  const res = await fetch(`${base}/oracle/legs?assets=${qs}`);
+  // Base-relative PUBLIC shape (SO-359) — see oracleDescriptor.ts.
+  const res = await fetch(`${base}/legs?assets=${qs}`);
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(
