@@ -1,0 +1,20 @@
+# Move build artifacts
+contracts/**/build/
+*.mvcov
+.coverage_map.mvcov
+.trace
+
+# Cargo build artefacts — Cargo.lock IS committed (workspace produces the
+# orderbook-service binary).
+orderbook/target/
+
+# Local service config
+markets.json
+.env
+.env.*
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp

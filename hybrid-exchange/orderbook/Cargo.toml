@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/signing",
+    "crates/book",
+    "crates/router",
+    "crates/store",
+    "crates/suirpc",
+    "crates/chain_sync",
+    "crates/settlement",
+    "crates/api",
+    "crates/ops",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+orderbook-core = { path = "crates/core" }
+orderbook-signing = { path = "crates/signing" }
+orderbook-book = { path = "crates/book" }
+orderbook-router = { path = "crates/router" }
+orderbook-store = { path = "crates/store" }
+orderbook-suirpc = { path = "crates/suirpc" }
+orderbook-chain-sync = { path = "crates/chain_sync" }
+orderbook-settlement = { path = "crates/settlement" }
+orderbook-ops = { path = "crates/ops" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bcs = "0.1"
+hex = "0.4"
+base64 = "0.22"
+
+blake2 = "0.10"
+sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+k256 = { version = "0.13", features = ["ecdsa"] }
+rand = "0.8"
+
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls", "chrono", "macros", "migrate"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.17", default-features = false, features = ["http-listener"] }
+
+dashmap = "6"
+parking_lot = "0.12"
+clap = { version = "4", features = ["derive", "env"] }
