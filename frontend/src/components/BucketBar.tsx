@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useOracleDescriptor } from "../api/oracleDescriptor";
 import { usePythPrice } from "../api/usePythPrice";
 import { formatPrice } from "../format";
 import { TokenLogo } from "./TokenLogo";
@@ -27,6 +28,11 @@ export function BucketBar({
 }: Props) {
   const live = usePythPrice(symbol);
   const priceLabel = live ? `$${formatPrice(live.price, { grouping: true })}` : "—";
+  // Prices flow through oracle-service, so the tick names whatever
+  // provider its descriptor says is live (SO-358) — plain "spot live"
+  // until the descriptor loads.
+  const { data: descriptor } = useOracleDescriptor();
+  const spotTick = descriptor ? `spot live · ${descriptor.provider}` : "spot live";
 
   const assetLabel = selectedAsset ?? "—";
   const expiryLabel =
@@ -123,7 +129,7 @@ export function BucketBar({
       <div className="bbar__price">
         <div>
           <div className="bbar__price-val">{priceLabel}</div>
-          <div className="bbar__price-tick">{live ? "spot live · pyth" : "connecting…"}</div>
+          <div className="bbar__price-tick">{live ? spotTick : "connecting…"}</div>
         </div>
       </div>
     </div>
