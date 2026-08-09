@@ -82,10 +82,13 @@ export function TradingVaultPpsChart({ points, loading, symbol }: Props) {
   useEffect(() => {
     const line = seriesRef.current;
     if (!line) return;
+    // Below two points the empty-state overlay is showing — plot nothing, or
+    // a dead one-point line (and its axis price tag) draws through the text.
+    const usable = points.length < 2 ? [] : points;
     // Strictly increasing unique times: collapse same-second samples (keep
     // the latest) and sort ascending, as the chart library requires.
     const bySecond = new Map<number, number>();
-    for (const p of [...points].sort((a, b) => Number(a.timestampMs) - Number(b.timestampMs))) {
+    for (const p of [...usable].sort((a, b) => Number(a.timestampMs) - Number(b.timestampMs))) {
       bySecond.set(Math.floor(Number(p.timestampMs) / 1000), Number(p.ppsE12) / PPS_E12);
     }
     line.setData(
