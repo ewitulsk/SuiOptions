@@ -31,7 +31,6 @@ public struct CALL has drop {}
 public struct TestOracle has drop {}
 
 const ADMIN: address = @0xA1;
-const CREATOR: address = @0xB2;
 const CURATOR: address = @0xC3;
 const ALICE: address = @0xD4;
 const MM: address = @0xE5;
@@ -75,9 +74,9 @@ fun setup(sc: &mut Scenario): Clock {
     ts::return_to_sender(sc, admin_cap);
 
     // UND-denominated vault, Alice seeds 1_000_000.
-    ts::next_tx(sc, CREATOR);
+    ts::next_tx(sc, CURATOR);
     let cfg = ts::take_shared<VaultProtocolConfig>(sc);
-    vault::create_vault<UND>(&cfg, CURATOR, 0, 1_000, 2, 8, 3_600_000, sc.ctx());
+    vault::create_vault<UND>(&cfg, 0, 1_000, 3_600_000, sc.ctx());
     ts::return_shared(cfg);
 
     ts::next_tx(sc, ADMIN);
@@ -258,9 +257,9 @@ fun setup_bid(sc: &mut Scenario): Clock {
     ts::return_shared(ireg);
     ts::return_to_sender(sc, admin_cap);
 
-    ts::next_tx(sc, CREATOR);
+    ts::next_tx(sc, CURATOR);
     let cfg = ts::take_shared<VaultProtocolConfig>(sc);
-    vault::create_vault<QUOTE>(&cfg, CURATOR, 0, 1_000, 2, 8, 3_600_000, sc.ctx());
+    vault::create_vault<QUOTE>(&cfg, 0, 1_000, 3_600_000, sc.ctx());
     ts::return_shared(cfg);
 
     ts::next_tx(sc, ADMIN);
@@ -684,10 +683,10 @@ fun bid_ticket_wins_coupled_rfq_end_to_end() {
     let rfq_ticket_id = open_rfq(&mut sc, &clock);
 
     // Bidder vault: QUOTE-denominated, curated by CURATOR2.
-    ts::next_tx(&mut sc, CREATOR);
+    ts::next_tx(&mut sc, CURATOR2);
     let cfg = ts::take_shared<VaultProtocolConfig>(&sc);
     let bidder_vault_id =
-        vault::create_vault<QUOTE>(&cfg, CURATOR2, 0, 1_000, 2, 8, 3_600_000, sc.ctx());
+        vault::create_vault<QUOTE>(&cfg, 0, 1_000, 3_600_000, sc.ctx());
     ts::return_shared(cfg);
     ts::next_tx(&mut sc, ALICE);
     {
