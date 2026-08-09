@@ -43,6 +43,7 @@ members = [
     "tools/mm-quote",
     "tools/deepbook-pool-test",
     "tools/trading-vault-smoke",
+    "tools/trading-vault-close",
     "tools/backtester",
     "tests",
 ]

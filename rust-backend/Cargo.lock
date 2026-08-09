@@ -12187,6 +12187,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "trading-vault-close"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "deployments",
+ "move-core-types",
+ "protocol-types",
+ "reqwest",
+ "serde_json",
+ "sui-tx",
+ "sui-types",
+ "tokio",
+]
+
+[[package]]
 name = "trading-vault-smoke"
 version = "0.1.0"
 dependencies = [
