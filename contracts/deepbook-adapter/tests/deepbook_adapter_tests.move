@@ -24,7 +24,6 @@ public struct USDC has drop {}
 public struct BASE has drop {}
 
 const ADMIN: address = @0xA1;
-const CREATOR: address = @0xB2;
 const CURATOR: address = @0xC3;
 const ALICE: address = @0xD4;
 
@@ -46,9 +45,9 @@ fun setup(sc: &mut Scenario): Clock {
     ts::return_to_sender(sc, admin_cap);
 
     // Vault + genesis deposit + custody.
-    ts::next_tx(sc, CREATOR);
+    ts::next_tx(sc, CURATOR);
     let cfg = ts::take_shared<VaultProtocolConfig>(sc);
-    vault::create_vault<USDC>(&cfg, CURATOR, 0, 1_000, 2, 8, 3_600_000, sc.ctx());
+    vault::create_vault<USDC>(&cfg, 0, 1_000, 3_600_000, sc.ctx());
     ts::return_shared(cfg);
 
     ts::next_tx(sc, ADMIN);
