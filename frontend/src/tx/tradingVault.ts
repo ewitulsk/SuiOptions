@@ -34,18 +34,15 @@ export type CreateTradingVaultParams = {
   protocolConfigId: string;
   /** The vault's deposit-asset coin type — the `T` type arg. */
   depositCoinType: string;
-  curator: string;
   lockupMs: number;
   curatorFeeBps: number;
-  /** 0 = creator, 1 = curator, 2 = either. */
-  rotationAuthority: number;
-  maxPositions: number;
   unwindGraceMs: number;
 };
 
 /**
- * `vault::create_vault<T>` — permissionless vault creation. The `CuratorCap`
- * is transferred to the curator inside the call; the vault is shared.
+ * `vault::create_vault<T>` — permissionless vault creation. The creator is
+ * the initial curator: the `CuratorCap` is transferred to the sender inside
+ * the call; the vault is shared.
  */
 export function buildCreateTradingVaultTx(p: CreateTradingVaultParams): Transaction {
   const pkg = requirePackage();
@@ -55,11 +52,8 @@ export function buildCreateTradingVaultTx(p: CreateTradingVaultParams): Transact
     typeArguments: [p.depositCoinType],
     arguments: [
       tx.object(p.protocolConfigId),
-      tx.pure.address(p.curator),
       tx.pure.u64(p.lockupMs),
       tx.pure.u64(p.curatorFeeBps),
-      tx.pure.u8(p.rotationAuthority),
-      tx.pure.u64(p.maxPositions),
       tx.pure.u64(p.unwindGraceMs),
     ],
   });

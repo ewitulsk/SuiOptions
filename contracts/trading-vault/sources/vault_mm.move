@@ -171,8 +171,7 @@ public fun redeem_put_position<U, S, P>(
 /// Curator exercises `amount` of a custodied call coin, paying
 /// `required_settlement` from vault free balances; the freed underlying
 /// returns to free balances and the remainder (if any) stays in custody
-/// under the same position id (net-zero position count, so
-/// `max_positions` can never bind here).
+/// under the same position id (net-zero position count).
 ///
 /// Cap-gated by design — NOT exposed as a crank: exercising is
 /// discretionary (it trades time value for intrinsic and spends vault

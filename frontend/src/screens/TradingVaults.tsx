@@ -273,26 +273,18 @@ function CreateVaultCard() {
     [],
   );
   const [coinType, setCoinType] = useState<string>(tokens[0]?.coinType ?? "");
-  // Empty means "default to the connected wallet at submit time".
-  const [curator, setCurator] = useState("");
   const [lockupDays, setLockupDays] = useState("7");
   const [feeBps, setFeeBps] = useState("1000");
-  const [rotation, setRotation] = useState("0");
-  const [maxPositions, setMaxPositions] = useState("16");
   const [unwindHours, setUnwindHours] = useState("48");
 
   const cfgId = cfgQ.data ?? null;
-  const curatorAddr = curator.trim() || address || "";
   const lockupNum = Number(lockupDays);
   const feeNum = Number(feeBps);
-  const maxPosNum = Number(maxPositions);
   const unwindNum = Number(unwindHours);
   const valid =
     !!coinType &&
-    !!curatorAddr &&
     Number.isFinite(lockupNum) && lockupNum >= 0 &&
     Number.isInteger(feeNum) && feeNum >= 0 &&
-    Number.isInteger(maxPosNum) && maxPosNum > 0 &&
     Number.isFinite(unwindNum) && unwindNum >= 0;
 
   // Why the CTA is dead, when it is — shown as helper text as well as a title,
@@ -310,11 +302,8 @@ function CreateVaultCard() {
     actions.createVault({
       protocolConfigId: cfgId,
       depositCoinType: coinType,
-      curator: curatorAddr,
       lockupMs: Math.round(lockupNum * 86_400_000),
       curatorFeeBps: feeNum,
-      rotationAuthority: Number(rotation),
-      maxPositions: maxPosNum,
       unwindGraceMs: Math.round(unwindNum * 3_600_000),
     });
   };
@@ -350,33 +339,19 @@ function CreateVaultCard() {
                 ))}
               </select>
             </Field>
-            <Field label="Curator address">
-              <input
-                style={curatorFieldStyle}
-                value={curator}
-                onChange={(e) => setCurator(e.target.value)}
-                placeholder={address ?? "0x…"}
-              />
-            </Field>
             <Field label="Lockup (days)">
               <input style={curatorFieldStyle} type="number" min="0" value={lockupDays} onChange={(e) => setLockupDays(e.target.value)} />
             </Field>
             <Field label="Curator fee (bps)">
               <input style={curatorFieldStyle} type="number" min="0" step="1" value={feeBps} onChange={(e) => setFeeBps(e.target.value)} />
             </Field>
-            <Field label="Rotation authority">
-              <select style={curatorFieldStyle} value={rotation} onChange={(e) => setRotation(e.target.value)}>
-                <option value="0">Creator</option>
-                <option value="1">Curator</option>
-                <option value="2">Either</option>
-              </select>
-            </Field>
-            <Field label="Max positions">
-              <input style={curatorFieldStyle} type="number" min="1" step="1" value={maxPositions} onChange={(e) => setMaxPositions(e.target.value)} />
-            </Field>
             <Field label="Unwind grace (hours)">
               <input style={curatorFieldStyle} type="number" min="0" value={unwindHours} onChange={(e) => setUnwindHours(e.target.value)} />
             </Field>
+          </div>
+          <div className="vault-prose__muted" style={{ marginTop: 8 }}>
+            Your connected wallet becomes the curator. The role is a transferable cap you can
+            hand off later.
           </div>
           <button
             className="vault-invest__cta"

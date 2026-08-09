@@ -20,7 +20,6 @@ public fun price_stale(): u64 { 84 }
 public fun price_asset_mismatch(): u64 { 85 }
 public fun position_missing(): u64 { 86 }
 public fun already_appraised(): u64 { 87 }
-public fun too_many_positions(): u64 { 88 }
 public fun not_authorized(): u64 { 89 }
 public fun config_invalid(): u64 { 90 }
 public fun forced_session_take(): u64 { 91 }

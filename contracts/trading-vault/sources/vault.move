@@ -1,5 +1,5 @@
 /// Curated trading vault (docs/trading-vault/01-contract-design.md):
-/// permissionless creation, creator-picked curator, single per-vault
+/// permissionless creation, creator starts as curator, single per-vault
 /// deposit asset, allowlisted-adapter sessions for deployment.
 ///
 /// Principles:
@@ -47,11 +47,6 @@ use trading_vault::registry::{Self, IntegrationRegistry, OracleRegistry, VaultPr
 
 const BPS_DENOM: u128 = 10_000;
 
-// Rotation authority (who may reassign the curator role).
-const ROTATE_CREATOR: u8 = 0;
-const ROTATE_CURATOR: u8 = 1;
-const ROTATE_EITHER: u8 = 2;
-
 public enum VaultState has copy, drop, store {
     Open,
     /// Unwind only: no deposits, sessions still run so the curator (or,
@@ -83,9 +78,6 @@ public struct VaultConfig has copy, drop, store {
     deposit_asset: TypeName,
     lockup_ms: u64,
     curator_fee_bps: u64,
-    rotation_authority: u8,
-    /// Bounds the appraisal PTB; sessions cannot custody more.
-    max_positions: u64,
     /// Queue-head age after which permissionless force-unwind sessions
     /// unlock.
     unwind_grace_ms: u64,
@@ -223,23 +215,20 @@ const EXTERNAL_REG_DOMAIN: vector<u8> = b"tv_external_reg_v1";
 
 // ═══════════════════════════════ creation ═══════════════════════════════
 
-/// Permissionless. The creator picks the curator; the cap is transferred
-/// to them. No seed deposit is required: with no donation path into the
-/// vault, NAV cannot be inflated ahead of the first depositor, so the
-/// classic share-inflation attack has no lever.
+/// Permissionless. The creator IS the initial curator: the cap is
+/// transferred to the sender, who can hand the role on by transferring
+/// the cap or via `rotate_curator_by_curator`. No seed deposit is
+/// required: with no donation path into the vault, NAV cannot be
+/// inflated ahead of the first depositor, so the classic share-inflation
+/// attack has no lever.
 public fun create_vault<T>(
     cfg: &VaultProtocolConfig,
-    curator: address,
     lockup_ms: u64,
     curator_fee_bps: u64,
-    rotation_authority: u8,
-    max_positions: u64,
     unwind_grace_ms: u64,
     ctx: &mut TxContext,
 ): ID {
     assert!(curator_fee_bps <= registry::max_curator_fee_bps(cfg), errors::fee_too_high());
-    assert!(rotation_authority <= ROTATE_EITHER, errors::config_invalid());
-    assert!(max_positions > 0, errors::config_invalid());
 
     let mut vault = TradingVault {
         id: object::new(ctx),
@@ -250,8 +239,6 @@ public fun create_vault<T>(
             deposit_asset: type_name::with_defining_ids<T>(),
             lockup_ms,
             curator_fee_bps,
-            rotation_authority,
-            max_positions,
             unwind_grace_ms,
             deposits_paused: false,
             mm_release_enabled: false,
@@ -273,16 +260,13 @@ public fun create_vault<T>(
     events::emit_vault_created(
         vault_id,
         vault.creator,
-        curator,
         cap_id,
         vault.config.deposit_asset,
         lockup_ms,
         curator_fee_bps,
-        rotation_authority,
-        max_positions,
         unwind_grace_ms,
     );
-    transfer::public_transfer(cap, curator);
+    transfer::public_transfer(cap, ctx.sender());
     transfer::share_object(vault);
     vault_id
 }
@@ -798,7 +782,6 @@ public fun end_session(vault: &TradingVault, s: Session) {
 }
 
 fun store_position_internal<P: key + store>(vault: &mut TradingVault, adapter: TypeName, p: P) {
-    assert!(vault.position_count < vault.config.max_positions, errors::too_many_positions());
     let position_id = object::id(&p);
     df::add(&mut vault.id, PositionTagKey { id: position_id }, adapter);
     dof::add(&mut vault.id, PositionKey { id: position_id }, p);
@@ -1206,17 +1189,6 @@ public fun finalize_close(vault: &mut TradingVault) {
     events::emit_vault_closed(object::id(vault));
 }
 
-public fun rotate_curator_by_creator(
-    vault: &mut TradingVault,
-    recipient: address,
-    ctx: &mut TxContext,
-) {
-    assert!(ctx.sender() == vault.creator, errors::not_authorized());
-    let auth = vault.config.rotation_authority;
-    assert!(auth == ROTATE_CREATOR || auth == ROTATE_EITHER, errors::not_authorized());
-    rotate_internal(vault, recipient, ctx);
-}
-
 public fun rotate_curator_by_curator(
     vault: &mut TradingVault,
     cap: &CuratorCap,
@@ -1224,8 +1196,6 @@ public fun rotate_curator_by_curator(
     ctx: &mut TxContext,
 ) {
     assert_current_cap(vault, cap);
-    let auth = vault.config.rotation_authority;
-    assert!(auth == ROTATE_CURATOR || auth == ROTATE_EITHER, errors::not_authorized());
     rotate_internal(vault, recipient, ctx);
 }
 
@@ -1347,8 +1317,6 @@ public fun creator(vault: &TradingVault): address { vault.creator }
 public fun lockup_ms(vault: &TradingVault): u64 { vault.config.lockup_ms }
 
 public fun curator_fee_bps(vault: &TradingVault): u64 { vault.config.curator_fee_bps }
-
-public fun max_positions(vault: &TradingVault): u64 { vault.config.max_positions }
 
 public fun unwind_grace_ms(vault: &TradingVault): u64 { vault.config.unwind_grace_ms }
 

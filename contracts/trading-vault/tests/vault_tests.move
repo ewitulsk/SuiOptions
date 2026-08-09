@@ -796,10 +796,12 @@ fun rotation_moves_the_role_not_the_stake() {
     ts::return_shared(cfg);
     ts::return_shared(v);
 
-    // Creator rotates the role to Bob.
-    ts::next_tx(&mut sc, h::creator_addr());
+    // Curator rotates the role to Bob.
+    ts::next_tx(&mut sc, h::curator_addr());
     let mut v = ts::take_shared<TradingVault>(&sc);
-    vault::rotate_curator_by_creator(&mut v, h::bob_addr(), sc.ctx());
+    let cap = ts::take_from_sender<CuratorCap>(&sc);
+    vault::rotate_curator_by_curator(&mut v, &cap, h::bob_addr(), sc.ctx());
+    ts::return_to_sender(&sc, cap);
     assert!(vault::curator_cap_id(&v) != old_cap_id);
     // The old cap's stake is intact, keyed by the old cap id.
     let (old_shares, _, _) = vault::curator_stake_of(&v, old_cap_id);
@@ -847,9 +849,11 @@ fun old_cap_cannot_open_sessions() {
     let _clock = h::init_protocol(&mut sc);
     h::new_default_vault(&mut sc);
 
-    ts::next_tx(&mut sc, h::creator_addr());
+    ts::next_tx(&mut sc, h::curator_addr());
     let mut v = ts::take_shared<TradingVault>(&sc);
-    vault::rotate_curator_by_creator(&mut v, h::bob_addr(), sc.ctx());
+    let cap = ts::take_from_sender<CuratorCap>(&sc);
+    vault::rotate_curator_by_curator(&mut v, &cap, h::bob_addr(), sc.ctx());
+    ts::return_to_sender(&sc, cap);
     ts::return_shared(v);
 
     ts::next_tx(&mut sc, h::curator_addr());

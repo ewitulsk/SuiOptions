@@ -105,8 +105,6 @@ enabled            = false
 # enabled            = false
 # lockup_ms          = 0          # depositor lockup
 # curator_fee_bps    = 0
-# rotation_authority = 2          # 0 creator / 1 curator / 2 either
-# max_positions      = 64
 # unwind_grace_ms    = 86_400_000
 # gas_budget         = 200_000_000
 #

@@ -181,8 +181,6 @@ diesel::table! {
         state               -> Text,
         lockup_ms           -> Int8,
         curator_fee_bps     -> Int8,
-        rotation_authority  -> Int2,
-        max_positions       -> Int8,
         unwind_grace_ms     -> Int8,
         deposits_paused     -> Bool,
         mm_release_enabled  -> Bool,

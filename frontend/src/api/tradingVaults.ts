@@ -30,9 +30,6 @@ export type TradingVault = {
   state: "open" | "closing" | "closed";
   lockupMs: number;
   curatorFeeBps: number;
-  /** 0 = creator, 1 = curator, 2 = either. */
-  rotationAuthority: number;
-  maxPositions: number;
   unwindGraceMs: number;
   depositsPaused: boolean;
   mmReleaseEnabled: boolean;
@@ -112,8 +109,6 @@ type TradingVaultWire = {
   state: "open" | "closing" | "closed";
   lockup_ms: number;
   curator_fee_bps: number;
-  rotation_authority: number;
-  max_positions: number;
   unwind_grace_ms: number;
   deposits_paused: boolean;
   mm_release_enabled: boolean;
@@ -162,8 +157,6 @@ function mapVault(w: TradingVaultWire): TradingVault {
     state: w.state,
     lockupMs: w.lockup_ms,
     curatorFeeBps: w.curator_fee_bps,
-    rotationAuthority: w.rotation_authority,
-    maxPositions: w.max_positions,
     unwindGraceMs: w.unwind_grace_ms,
     depositsPaused: w.deposits_paused,
     mmReleaseEnabled: w.mm_release_enabled,

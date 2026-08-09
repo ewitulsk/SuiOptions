@@ -295,23 +295,20 @@ async fn main() -> Result<()> {
     };
     println!("trading-vault smoke — signer {}, env {}", signer.address, cli.env);
 
-    // ── 1. create vault (deposit asset TUSDC, self as curator, no lockup)
+    // ── 1. create vault (deposit asset TUSDC, creator == curator, no lockup)
     let step = Step("create_vault");
     let mut pt = ProgrammableTransactionBuilder::new();
     let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
-    let curator = pt.pure(signer.address)?;
     let a0 = pt.pure(0u64)?; // lockup
     let a1 = pt.pure(1_000u64)?; // curator fee bps
-    let a2 = pt.pure(2u8)?; // ROTATE_EITHER
-    let a3 = pt.pure(8u64)?; // max positions
-    let a4 = pt.pure(3_600_000u64)?; // unwind grace
+    let a2 = pt.pure(3_600_000u64)?; // unwind grace
     let deposit_tag = TypeTag::from_str(&ids.deposit_coin_type)?;
     pt.programmable_move_call(
         ids.trading_vault_pkg,
         Identifier::new("vault").unwrap(),
         Identifier::new("create_vault").unwrap(),
         vec![deposit_tag.clone()],
-        vec![cfg, curator, a0, a1, a2, a3, a4],
+        vec![cfg, a0, a1, a2],
     );
     let resp = submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::create_vault").await?;
     let (mut vault_id, mut cap_id) = (None, None);

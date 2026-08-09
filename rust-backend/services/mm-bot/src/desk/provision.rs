@@ -9,12 +9,11 @@
 //!
 //! ## Why holding a CuratorCap proves nothing
 //!
-//! `trading_vault::create_vault` is permissionless and takes `curator` as
-//! a plain argument, so anyone can mint a cap naming this wallet curator
-//! and transfer it here for free. "Do I hold a cap?" is therefore not a
-//! safe adoption test — a hostile vault could hand the desk a book with a
-//! junk deposit asset, a punitive curator fee, or depositors who are the
-//! attacker.
+//! `trading_vault::create_vault` is permissionless and the `CuratorCap`
+//! is freely transferable, so anyone can create a vault and send its cap
+//! here for free. "Do I hold a cap?" is therefore not a safe adoption
+//! test — a hostile vault could hand the desk a book with a junk deposit
+//! asset, a punitive curator fee, or depositors who are the attacker.
 //!
 //! `creator` is `ctx.sender()` at creation, immutable, and indexed. So:
 //!
@@ -50,10 +49,6 @@ pub struct ProvisionConfig {
     /// Depositor lockup. 0 = withdraw any time (subject to the queue).
     pub lockup_ms: u64,
     pub curator_fee_bps: u64,
-    /// 0 = creator rotates the curator, 1 = curator, 2 = either. The bot
-    /// is both, so this only matters after a hand-off.
-    pub rotation_authority: u8,
-    pub max_positions: u64,
     pub unwind_grace_ms: u64,
     pub gas_budget: u64,
 }
@@ -64,8 +59,6 @@ impl Default for ProvisionConfig {
             enabled: false,
             lockup_ms: 0,
             curator_fee_bps: 0,
-            rotation_authority: 2,
-            max_positions: 64,
             unwind_grace_ms: 24 * 60 * 60 * 1_000,
             gas_budget: 200_000_000,
         }
@@ -167,11 +160,11 @@ pub async fn resolve(p: ResolveParams<'_>) -> Result<ResolvedVault> {
         ));
     }
 
-    provision(&p, me).await
+    provision(&p).await
 }
 
 /// Create, enable the release gate, and (testnet) seed a fresh vault.
-async fn provision(p: &ResolveParams<'_>, me: SuiAddress) -> Result<ResolvedVault> {
+async fn provision(p: &ResolveParams<'_>) -> Result<ResolvedVault> {
     let created = trading_vault::create_vault(
         &p.wrap.client,
         &p.wrap.signer,
@@ -179,11 +172,8 @@ async fn provision(p: &ResolveParams<'_>, me: SuiAddress) -> Result<ResolvedVaul
         p.vault_protocol_config,
         p.settlement_coin_type,
         &CreateVaultSpec {
-            curator: me,
             lockup_ms: p.cfg.lockup_ms,
             curator_fee_bps: p.cfg.curator_fee_bps,
-            rotation_authority: p.cfg.rotation_authority,
-            max_positions: p.cfg.max_positions,
             unwind_grace_ms: p.cfg.unwind_grace_ms,
         },
         p.cfg.gas_budget,
@@ -475,8 +465,6 @@ mod tests {
             state: state.to_owned(),
             lockup_ms: 0,
             curator_fee_bps: 0,
-            rotation_authority: 2,
-            max_positions: 64,
             unwind_grace_ms: 0,
             deposits_paused: false,
             mm_release_enabled: true,

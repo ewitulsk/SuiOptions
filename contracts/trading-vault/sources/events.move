@@ -9,13 +9,10 @@ use sui::vec_map::VecMap;
 public struct VaultCreated has copy, drop {
     vault_id: ID,
     creator: address,
-    curator: address,
     curator_cap_id: ID,
     deposit_asset: TypeName,
     lockup_ms: u64,
     curator_fee_bps: u64,
-    rotation_authority: u8,
-    max_positions: u64,
     unwind_grace_ms: u64,
 }
 
@@ -216,25 +213,19 @@ public struct RegistrarPubkeySet has copy, drop { pubkey: vector<u8> }
 public(package) fun emit_vault_created(
     vault_id: ID,
     creator: address,
-    curator: address,
     curator_cap_id: ID,
     deposit_asset: TypeName,
     lockup_ms: u64,
     curator_fee_bps: u64,
-    rotation_authority: u8,
-    max_positions: u64,
     unwind_grace_ms: u64,
 ) {
     event::emit(VaultCreated {
         vault_id,
         creator,
-        curator,
         curator_cap_id,
         deposit_asset,
         lockup_ms,
         curator_fee_bps,
-        rotation_authority,
-        max_positions,
         unwind_grace_ms,
     });
 }

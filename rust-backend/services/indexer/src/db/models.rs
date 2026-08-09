@@ -609,8 +609,6 @@ pub struct TradingVaultRow {
     pub state: String,
     pub lockup_ms: i64,
     pub curator_fee_bps: i64,
-    pub rotation_authority: i16,
-    pub max_positions: i64,
     pub unwind_grace_ms: i64,
     pub deposits_paused: bool,
     pub mm_release_enabled: bool,
@@ -650,13 +648,6 @@ impl TradingVaultRow {
                 state: self.state,
                 lockup_ms: self.lockup_ms as u64,
                 curator_fee_bps: self.curator_fee_bps as u64,
-                rotation_authority: u8::try_from(self.rotation_authority).map_err(|_| {
-                    anyhow::anyhow!(
-                        "rotation_authority out of u8 range: {}",
-                        self.rotation_authority
-                    )
-                })?,
-                max_positions: self.max_positions as u64,
                 unwind_grace_ms: self.unwind_grace_ms as u64,
                 deposits_paused: self.deposits_paused,
                 mm_release_enabled: self.mm_release_enabled,
