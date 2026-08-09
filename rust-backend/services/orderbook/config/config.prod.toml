@@ -1,6 +1,6 @@
-# Orderbook service config — prod env (Sui mainnet).
+# Orderbook service config — prod env (Sui testnet; prod is a distinct testnet env).
 
-network      = "mainnet"
+network      = "testnet"
 env          = "prod"
 deployments  = "/app/deployments.json"
 
