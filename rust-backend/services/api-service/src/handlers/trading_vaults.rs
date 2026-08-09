@@ -233,7 +233,7 @@ pub struct PpsPointDto {
     pub timestamp_ms: String,
     /// 1e12-scaled deposit-asset-per-share, decimal string.
     pub pps_e12: String,
-    /// `deposit` | `fulfillment`.
+    /// `deposit` | `fulfillment` | `appraisal`.
     pub source: String,
 }
 
@@ -245,16 +245,20 @@ pub struct PpsHistoryResponse {
 /// `GET /trading-vaults/:id/pps-history` — observed pps points, ascending by
 /// time. Each TvDeposited implies pps = amount/shares; each
 /// TvWithdrawFulfilled implies pps = value/shares (zero-share / zero-value
-/// events carry no price and are skipped).
+/// events carry no price and are skipped). Each TvVaultAppraised implies
+/// pps = total_value/supply, where supply is replayed from the
+/// `total_shares` snapshots on the deposit/fulfillment events — without
+/// these the curve has one point per flow and a vault that only trades
+/// (the desk) never charts at all.
 pub async fn get_pps_history(
     State(state): State<Arc<AppState>>,
     Path(vault_id): Path<String>,
 ) -> Result<Json<PpsHistoryResponse>, StatusCode> {
     let id = ObjectId::from_hex(&vault_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let events = state
+    let mut events = state
         .indexer
         .recent_events_with_payload(
-            &["TvDeposited", "TvWithdrawFulfilled"],
+            &["TvDeposited", "TvWithdrawFulfilled", "TvVaultAppraised"],
             json!({ "vault_id": id.to_hex() }),
             EVENT_SCAN_CAP,
         )
@@ -263,15 +267,37 @@ pub async fn get_pps_history(
             tracing::warn!(error = %e, "indexer trading-vault events query failed");
             StatusCode::BAD_GATEWAY
         })?;
+    Ok(Json(PpsHistoryResponse { points: pps_points(events) }))
+}
+
+fn pps_points(mut events: Vec<protocol_types::events::IndexedEvent>) -> Vec<PpsPointDto> {
+    // The scan serves newest-first; both the supply replay and the response
+    // contract need chain order.
+    events.sort_by_key(|e| e.sequence);
 
     let mut points = Vec::new();
+    let mut supply: u128 = 0;
     for ev in &events {
         let (pps_e12, source) = match &ev.event {
-            ChainEvent::TvDeposited(d) if d.shares != 0 => {
+            ChainEvent::TvDeposited(d) => {
+                supply = d.total_shares;
+                if d.shares == 0 {
+                    continue;
+                }
                 (d.amount as u128 * PPS_E12 / d.shares, "deposit")
             }
-            ChainEvent::TvWithdrawFulfilled(f) if f.shares != 0 && f.value != 0 => {
+            ChainEvent::TvWithdrawFulfilled(f) => {
+                supply = f.total_shares;
+                if f.shares == 0 || f.value == 0 {
+                    continue;
+                }
                 (f.value as u128 * PPS_E12 / f.shares, "fulfillment")
+            }
+            // An appraisal consumed by a deposit/fulfillment is emitted
+            // before that event's mint/burn, so the pre-event supply is the
+            // right divisor for its NAV.
+            ChainEvent::TvVaultAppraised(a) if supply != 0 => {
+                (a.total_value * PPS_E12 / supply, "appraisal")
             }
             _ => continue,
         };
@@ -281,7 +307,7 @@ pub async fn get_pps_history(
             source: source.to_string(),
         });
     }
-    Ok(Json(PpsHistoryResponse { points }))
+    points
 }
 
 /// One curator spot trade — a `deepbook_adapter` taker swap of vault free
@@ -472,5 +498,82 @@ fn trading_vault_dto(state: &AppState, v: &TradingVault) -> TradingVaultDto {
         external_equity_updated_at_ms: v.external_equity_updated_at_ms.map(|t| t.to_string()),
         latest_nav_raw: v.latest_nav.map(|n| n.to_string()),
         nav_updated_at_ms: v.nav_updated_at_ms.map(|t| t as i64),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol_types::events::{
+        IndexedEvent, TvDeposited, TvVaultAppraised, TvWithdrawFulfilled,
+    };
+
+    fn oid(n: u8) -> ObjectId {
+        ObjectId::from_hex(&format!("0x{:064x}", n)).unwrap()
+    }
+
+    fn ev(sequence: u64, event: ChainEvent) -> IndexedEvent {
+        IndexedEvent { sequence, timestamp_ms: 1_000 + sequence, event }
+    }
+
+    /// Newest-first input (the scan's order) must come back as an ascending
+    /// curve, with appraisals priced against the replayed share supply.
+    #[test]
+    fn pps_points_replays_supply_across_event_kinds() {
+        let vault_id = oid(1);
+        let depositor = SuiAddress::from_hex(&format!("0x{:064x}", 2)).unwrap();
+        let deposit = ChainEvent::TvDeposited(TvDeposited {
+            vault_id,
+            depositor,
+            curator_cap: None,
+            amount: 1_000_000,
+            shares: 1_000_000,
+            total_shares: 1_000_000,
+            locked_until_ms: 0,
+        });
+        // NAV grew 2% with no flows: pps only observable via the appraisal.
+        let appraised = ChainEvent::TvVaultAppraised(TvVaultAppraised {
+            vault_id,
+            total_value: 1_020_000,
+            position_total: 0,
+        });
+        let fulfilled = ChainEvent::TvWithdrawFulfilled(TvWithdrawFulfilled {
+            vault_id,
+            seq: 0,
+            recipient: depositor,
+            shares: 500_000,
+            value: 510_000,
+            basis: 500_000,
+            profit: 10_000,
+            gross_fee: 0,
+            protocol_cut: 0,
+            curator_net: 0,
+            curator_shares_minted: 0,
+            payout: 510_000,
+            total_shares: 500_000,
+        });
+        // Pre-supply appraisal (sequence 0) carries no price and is dropped.
+        let orphan = ChainEvent::TvVaultAppraised(TvVaultAppraised {
+            vault_id,
+            total_value: 999,
+            position_total: 0,
+        });
+
+        let newest_first =
+            vec![ev(3, fulfilled), ev(2, appraised), ev(1, deposit), ev(0, orphan)];
+        let points = pps_points(newest_first);
+
+        let got: Vec<(&str, &str)> =
+            points.iter().map(|p| (p.source.as_str(), p.pps_e12.as_str())).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("deposit", "1000000000000"),
+                ("appraisal", "1020000000000"),
+                ("fulfillment", "1020000000000"),
+            ],
+        );
+        let times: Vec<&str> = points.iter().map(|p| p.timestamp_ms.as_str()).collect();
+        assert_eq!(times, vec!["1001", "1002", "1003"]);
     }
 }
