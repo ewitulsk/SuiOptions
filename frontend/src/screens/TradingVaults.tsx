@@ -55,9 +55,20 @@ const GRID: React.CSSProperties = {
   gridTemplateColumns: "1.3fr 0.8fr 1fr 1.1fr 0.9fr 0.7fr 0.8fr 1fr",
 };
 
+const VAULT_STATES = ["open", "closing", "closed"] as const;
+type VaultState = TradingVault["state"];
+
 export function TradingVaults() {
   const vaultsQ = useTradingVaults();
   const navigate = useNavigate();
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  // Closed vaults are hidden by default — dozens of dead smoke/test vaults
+  // would otherwise bury the live ones.
+  const [stateFilter, setStateFilter] = useState<Record<VaultState, boolean>>({
+    open: true,
+    closing: true,
+    closed: false,
+  });
 
   if (!TRADING_VAULT_PACKAGE_ID) {
     return (
@@ -75,6 +86,7 @@ export function TradingVaults() {
   }
 
   const vaults = vaultsQ.data ?? [];
+  const visible = vaults.filter((v) => stateFilter[v.state] ?? true);
 
   return (
     <div style={{ position: "relative", minHeight: "100%" }}>
@@ -103,26 +115,74 @@ export function TradingVaults() {
 
         {vaults.length > 0 && (
           <div className="vault-card">
-            <div className="vault-card__head">All vaults</div>
-            <div className="vault-table">
-              <div className="vault-table__head" style={GRID}>
-                <span>Asset</span>
-                <span>State</span>
-                <span>Share price</span>
-                <span>TVL</span>
-                <span>Pending w/d</span>
-                <span>Fee</span>
-                <span>Lockup</span>
-                <span>Curator</span>
-              </div>
-              {vaults.map((v) => (
-                <TradingVaultRow
-                  key={v.vaultId}
-                  vault={v}
-                  onOpen={() => navigate(`/vaults/${v.vaultId}`)}
-                />
-              ))}
+            <div className="vault-card__head">
+              All vaults
+              <button
+                className="vault-howto__trigger"
+                style={{ marginLeft: "auto" }}
+                onClick={() => setFiltersOpen((o) => !o)}
+                aria-expanded={filtersOpen}
+              >
+                {filtersOpen ? "Hide filters" : "Filters"}
+              </button>
             </div>
+            {filtersOpen && (
+              <div
+                style={{ display: "flex", gap: 8, alignItems: "center", margin: "10px 0" }}
+                role="group"
+                aria-label="Filter vaults by state"
+              >
+                <span className="vault-prose__muted" style={{ fontSize: 11 }}>
+                  State:
+                </span>
+                {VAULT_STATES.map((s) => {
+                  const on = stateFilter[s];
+                  const count = vaults.filter((v) => v.state === s).length;
+                  return (
+                    <button
+                      key={s}
+                      className="vault-head__badge"
+                      style={{
+                        cursor: "pointer",
+                        textTransform: "capitalize",
+                        opacity: on ? 1 : 0.4,
+                        borderColor: "currentcolor",
+                        color: on ? undefined : "var(--aqua-ink-3)",
+                      }}
+                      aria-pressed={on}
+                      onClick={() => setStateFilter((f) => ({ ...f, [s]: !f[s] }))}
+                    >
+                      {s} ({count})
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {visible.length === 0 ? (
+              <div className="vault-note">
+                All {vaults.length} vaults are hidden by the current filters.
+              </div>
+            ) : (
+              <div className="vault-table">
+                <div className="vault-table__head" style={GRID}>
+                  <span>Asset</span>
+                  <span>State</span>
+                  <span>Share price</span>
+                  <span>TVL</span>
+                  <span>Pending w/d</span>
+                  <span>Fee</span>
+                  <span>Lockup</span>
+                  <span>Curator</span>
+                </div>
+                {visible.map((v) => (
+                  <TradingVaultRow
+                    key={v.vaultId}
+                    vault={v}
+                    onOpen={() => navigate(`/vaults/${v.vaultId}`)}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
 
