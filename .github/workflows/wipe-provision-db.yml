@@ -36,6 +36,7 @@ on:
           - indexer
           - scheduler
           - token-info
+          - orderbook
       environment:
         description: 'Target environment'
         required: true
@@ -95,6 +96,7 @@ jobs:
             indexer)         echo "compose_svc=indexer"               >> "$GITHUB_OUTPUT" ;;
             scheduler)       echo "compose_svc=option-scheduler"      >> "$GITHUB_OUTPUT" ;;
             token-info)      echo "compose_svc=token-info"            >> "$GITHUB_OUTPUT" ;;
+            orderbook)       echo "compose_svc=orderbook"             >> "$GITHUB_OUTPUT" ;;
             *)
               echo "::error::Invalid service '$SERVICE'"
               exit 1

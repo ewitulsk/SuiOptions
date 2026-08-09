@@ -285,6 +285,7 @@ health_path_for() {
     market-sim)       echo "/$ENV/market-sim/health" ;;
     keeper)           echo "/$ENV/keeper/health" ;;
     social-bot)       echo "/$ENV/social-bot/health" ;;
+    orderbook)        echo "/$ENV/orderbook/health" ;;
     *) return 1 ;;
   esac
 }

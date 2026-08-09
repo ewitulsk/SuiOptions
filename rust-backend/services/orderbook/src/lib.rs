@@ -25,6 +25,7 @@ pub use config::{Cli, Config};
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/health", get(health))
         .route("/v1/markets", get(handlers::markets))
         .route("/v1/markets/:market/book", get(handlers::book))
         .route("/v1/markets/:market/trades", get(handlers::trades))
@@ -38,4 +39,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/ws", get(ws::ws_handler))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state)
+}
+
+async fn health() -> &'static str {
+    "ok"
 }
