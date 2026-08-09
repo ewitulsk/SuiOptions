@@ -16,7 +16,7 @@ use std::str::FromStr;
 use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
-use sui_types::base_types::{ObjectID, SuiAddress};
+use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::Argument;
 use tracing::info;
@@ -163,18 +163,12 @@ pub async fn build_enqueue_closed_stake(
 // ── curator provisioning (SO-345) ──────────────────────────────────────
 
 /// `vault::create_vault<T>`'s config arguments. Order matters — it mirrors
-/// the Move parameter list.
+/// the Move parameter list. The `CuratorCap` always lands with the tx
+/// sender: the creator IS the initial curator.
 #[derive(Debug, Clone, Copy)]
 pub struct CreateVaultSpec {
-    /// Who receives the `CuratorCap`. `create_vault` is permissionless and
-    /// this is a free parameter, so a cap naming you curator proves nothing
-    /// about who made the vault — only `creator` (the tx sender) does.
-    pub curator: SuiAddress,
     pub lockup_ms: u64,
     pub curator_fee_bps: u64,
-    /// 0 = creator rotates, 1 = curator rotates, 2 = either.
-    pub rotation_authority: u8,
-    pub max_positions: u64,
     pub unwind_grace_ms: u64,
 }
 
@@ -200,7 +194,7 @@ pub async fn create_vault(
     spec: &CreateVaultSpec,
     gas_budget: u64,
 ) -> Result<VaultCreation> {
-    info!(%package, deposit_type, curator = %spec.curator, "building create_vault PTB");
+    info!(%package, deposit_type, "building create_vault PTB");
     let deposit_tag = TypeTag::from_str(deposit_type)
         .with_context(|| format!("parsing deposit type {deposit_type}"))?;
 
@@ -208,11 +202,8 @@ pub async fn create_vault(
     let cfg = pt.obj(shared_object_arg(client, protocol_config_id, false).await?)?;
     let args = vec![
         cfg,
-        pt.pure(&spec.curator)?,
         pt.pure(&spec.lockup_ms)?,
         pt.pure(&spec.curator_fee_bps)?,
-        pt.pure(&spec.rotation_authority)?,
-        pt.pure(&spec.max_positions)?,
         pt.pure(&spec.unwind_grace_ms)?,
     ];
     vault_call(&mut pt, package, "create_vault", vec![deposit_tag], args);

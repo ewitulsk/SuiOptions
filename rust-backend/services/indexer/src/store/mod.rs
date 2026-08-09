@@ -270,8 +270,6 @@ pub struct TradingVaultState {
     pub state: String,
     pub lockup_ms: u64,
     pub curator_fee_bps: u64,
-    pub rotation_authority: u8,
-    pub max_positions: u64,
     pub unwind_grace_ms: u64,
     pub deposits_paused: bool,
     pub mm_release_enabled: bool,
@@ -672,7 +670,7 @@ fn collect_participants(
         // ── curated trading vaults (SO-282) ──────────────────────────
         ChainEvent::TvVaultCreated(v) => {
             push(v.creator.to_hex(), "creator");
-            push(v.curator.to_hex(), "curator");
+            push(v.creator.to_hex(), "curator");
         }
         ChainEvent::TvDeposited(d) => push(d.depositor.to_hex(), "depositor"),
         ChainEvent::TvWithdrawRequested(w) => push(w.recipient.to_hex(), "withdrawer"),
@@ -1391,8 +1389,6 @@ fn trading_vault_row(id: ObjectId, s: &TradingVaultState, sequence: i64) -> Trad
         state: s.state.clone(),
         lockup_ms: s.lockup_ms as i64,
         curator_fee_bps: s.curator_fee_bps as i64,
-        rotation_authority: s.rotation_authority as i16,
-        max_positions: s.max_positions as i64,
         unwind_grace_ms: s.unwind_grace_ms as i64,
         deposits_paused: s.deposits_paused,
         mm_release_enabled: s.mm_release_enabled,
@@ -1846,13 +1842,12 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                 TradingVaultState {
                     deposit_asset: v.deposit_asset.clone(),
                     creator: v.creator,
-                    curator: v.curator,
+                    // The creator IS the initial curator; rotations update this.
+                    curator: v.creator,
                     curator_cap_id: v.curator_cap_id,
                     state: "open".to_string(),
                     lockup_ms: v.lockup_ms,
                     curator_fee_bps: v.curator_fee_bps,
-                    rotation_authority: v.rotation_authority,
-                    max_positions: v.max_positions,
                     unwind_grace_ms: v.unwind_grace_ms,
                     deposits_paused: false,
                     mm_release_enabled: false,
@@ -2734,13 +2729,10 @@ mod tests {
             ChainEvent::TvVaultCreated(TvVaultCreated {
                 vault_id: vault,
                 creator: SuiAddress::new([0x01; 32]),
-                curator: SuiAddress::new([0x02; 32]),
                 curator_cap_id: ObjectId::new([0x03; 32]),
                 deposit_asset: AssetType::new("9b::tusdc::TUSDC"),
                 lockup_ms: 0,
                 curator_fee_bps: 100,
-                rotation_authority: 0,
-                max_positions: 10,
                 unwind_grace_ms: 0,
             }),
             1_000,
@@ -2844,13 +2836,10 @@ mod tests {
             ChainEvent::TvVaultCreated(TvVaultCreated {
                 vault_id: vault,
                 creator: SuiAddress::new([0x01; 32]),
-                curator: SuiAddress::new([0x02; 32]),
                 curator_cap_id: ObjectId::new([0x03; 32]),
                 deposit_asset: AssetType::new("9b::tusdc::TUSDC"),
                 lockup_ms: 0,
                 curator_fee_bps: 100,
-                rotation_authority: 0,
-                max_positions: 10,
                 unwind_grace_ms: 0,
             }),
             1_000,

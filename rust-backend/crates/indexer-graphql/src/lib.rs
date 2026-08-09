@@ -188,8 +188,6 @@ pub struct TradingVault {
     pub state: String,
     pub lockup_ms: u64,
     pub curator_fee_bps: u64,
-    pub rotation_authority: u8,
-    pub max_positions: u64,
     pub unwind_grace_ms: u64,
     pub deposits_paused: bool,
     pub mm_release_enabled: bool,
@@ -443,7 +441,7 @@ impl IndexerClient {
     /// All curated trading vaults.
     pub async fn trading_vaults(&self) -> Result<Vec<TradingVault>> {
         const Q: &str = "query{tradingVaults{vaultId depositAsset creator curator curatorCapId \
-            state lockupMs curatorFeeBps rotationAuthority maxPositions unwindGraceMs \
+            state lockupMs curatorFeeBps unwindGraceMs \
             depositsPaused mmReleaseEnabled totalSharesRaw positionCount pendingWithdrawals \
             latestPpsE12Raw updatedAtMs externalAccount externalExposure latestExternalEquity \
             externalEquityUpdatedAtMs latestNavRaw navUpdatedAtMs}}";
@@ -1015,8 +1013,6 @@ struct TradingVaultJson {
     state: String,
     lockup_ms: String,
     curator_fee_bps: String,
-    rotation_authority: i32,
-    max_positions: String,
     unwind_grace_ms: String,
     deposits_paused: bool,
     mm_release_enabled: bool,
@@ -1262,8 +1258,6 @@ impl TryFrom<TradingVaultJson> for TradingVault {
             state: v.state,
             lockup_ms: parse_u64(&v.lockup_ms)?,
             curator_fee_bps: parse_u64(&v.curator_fee_bps)?,
-            rotation_authority: parse_u8(v.rotation_authority)?,
-            max_positions: parse_u64(&v.max_positions)?,
             unwind_grace_ms: parse_u64(&v.unwind_grace_ms)?,
             deposits_paused: v.deposits_paused,
             mm_release_enabled: v.mm_release_enabled,

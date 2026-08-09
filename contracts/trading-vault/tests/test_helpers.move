@@ -34,7 +34,6 @@ public struct TestPosition has key, store {
 }
 
 public fun admin_addr(): address { @0xA1 }
-public fun creator_addr(): address { @0xB2 }
 public fun curator_addr(): address { @0xC3 }
 public fun alice_addr(): address { @0xD4 }
 public fun bob_addr(): address { @0xE5 }
@@ -79,18 +78,15 @@ public fun init_protocol(scenario: &mut Scenario): Clock {
     clock::create_for_testing(scenario.ctx())
 }
 
-/// Create a USDC vault as creator with curator = curator_addr. Defaults:
-/// 1000 bps curator fee, ROTATE_EITHER, 8 positions, 1h lockup, 1h grace.
+/// Create a USDC vault as curator_addr (creator == initial curator).
+/// Defaults: 1000 bps curator fee, 1h lockup, 1h grace.
 public fun new_default_vault(scenario: &mut Scenario): ID {
-    ts::next_tx(scenario, creator_addr());
+    ts::next_tx(scenario, curator_addr());
     let cfg = take_protocol_config(scenario);
     let id = vault::create_vault<USDC>(
         &cfg,
-        curator_addr(),
         3_600_000, // lockup
         1_000, // curator fee bps
-        2, // ROTATE_EITHER
-        8, // max positions
         3_600_000, // unwind grace
         scenario.ctx(),
     );

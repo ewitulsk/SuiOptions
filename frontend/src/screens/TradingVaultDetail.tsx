@@ -194,8 +194,6 @@ function VaultBody({ vault }: { vault: TradingVaultDetailDto }) {
 }
 
 function TermsCard({ vault, symbol }: { vault: TradingVaultDetailDto; symbol: string }) {
-  const rotation =
-    vault.rotationAuthority === 0 ? "Creator" : vault.rotationAuthority === 1 ? "Curator" : "Either";
   return (
     <div className="vault-card">
       <div className="vault-card__head">Terms</div>
@@ -215,14 +213,6 @@ function TermsCard({ vault, symbol }: { vault: TradingVaultDetailDto; symbol: st
         <div className="vault-kv__row">
           <span>Lockup</span>
           <span>{fmtDurationMs(vault.lockupMs)}</span>
-        </div>
-        <div className="vault-kv__row">
-          <span>Rotation authority</span>
-          <span>{rotation}</span>
-        </div>
-        <div className="vault-kv__row">
-          <span>Max positions</span>
-          <span>{vault.maxPositions}</span>
         </div>
         <div className="vault-kv__row">
           <span>Unwind grace</span>

@@ -1007,16 +1007,12 @@ pub struct TvTypeAmountMap {
 pub struct TvVaultCreated {
     pub vault_id: ObjectId,
     pub creator: SuiAddress,
-    pub curator: SuiAddress,
     pub curator_cap_id: ObjectId,
     pub deposit_asset: AssetType,
     #[serde(with = "u64_string")]
     pub lockup_ms: u64,
     #[serde(with = "u64_string")]
     pub curator_fee_bps: u64,
-    pub rotation_authority: u8,
-    #[serde(with = "u64_string")]
-    pub max_positions: u64,
     #[serde(with = "u64_string")]
     pub unwind_grace_ms: u64,
 }
