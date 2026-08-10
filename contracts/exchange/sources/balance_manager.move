@@ -2,9 +2,22 @@
 ///
 /// Depositing grants spendable capacity to the settlement package, revocable
 /// by withdrawal at any time. Self-custodial: only the owner can withdraw,
-/// withdrawal is permissionless and instant (and deliberately independent of
-/// any registry pause state), and settlement can debit only against a valid
-/// maker signature (`debit`/`credit` are `public(package)`).
+/// withdrawal is instant (and deliberately independent of any registry
+/// pause state), and settlement can debit only against a valid maker
+/// signature (`debit`/`credit` are `public(package)`).
+///
+/// Deposits are restricted to the owner, approved signers, or the
+/// `OwnerCap` holder (SO-370): a third-party deposit into someone else's
+/// manager would be a donation lever into any vault whose NAV includes
+/// the manager's balances — value must never enter appraised custody
+/// from a non-shareholder. Fill credits are exempt (they move value at
+/// the maker's own signed price).
+///
+/// Ownership comes in two flavors: address-owned (`new`, sender-checked
+/// owner ops — wallets, bots) and cap-owned (`new_with_owner_cap` —
+/// object owners like the trading vault, whose ID-as-address can never
+/// be a transaction sender). Both keep `owner: address` as the order-
+/// attribution identity settlement validates against.
 ///
 /// No order locking: escrow is a shared pot, over-committed makers fail late
 /// and the orderbook service prunes them (§5.4, §5.7).
@@ -26,6 +39,8 @@ const EInsufficientEscrow: u64 = 2;
 const ETooManySigners: u64 = 3;
 const EAlreadyApproved: u64 = 4;
 const ENotApproved: u64 = 5;
+const EDepositRestricted: u64 = 6;
+const EWrongCap: u64 = 7;
 
 /// Bound on delegated signers (§4.4).
 const MAX_APPROVED_SIGNERS: u64 = 16;
@@ -38,6 +53,15 @@ public struct BalanceManager has key {
     /// time, so removing a signer instantly voids that key's outstanding
     /// orders. Funds live as dynamic fields: TypeName -> Balance<T>.
     approved_signers: VecSet<address>,
+}
+
+/// Owner authority for a cap-owned manager: withdraw and signer
+/// management authorize against this object instead of the sender, so a
+/// shared object (the trading vault) can custody the authority while the
+/// manager itself stays shared for fills.
+public struct OwnerCap has key, store {
+    id: UID,
+    bm_id: ID,
 }
 
 // === Events (§4.8) ===
@@ -82,10 +106,41 @@ public fun new(ctx: &mut TxContext): ID {
     id
 }
 
+/// Create and share a cap-owned manager. `owner` is the attribution
+/// identity orders name as maker (for an object owner, its ID-as-
+/// address); the returned `OwnerCap` is the withdraw/signer authority.
+public fun new_with_owner_cap(owner: address, ctx: &mut TxContext): (ID, OwnerCap) {
+    let bm = BalanceManager {
+        id: object::new(ctx),
+        owner,
+        approved_signers: vec_set::empty(),
+    };
+    let id = object::id(&bm);
+    let cap = OwnerCap { id: object::new(ctx), bm_id: id };
+    transfer::share_object(bm);
+    (id, cap)
+}
+
 // === Funds ===
 
-/// Anyone may deposit into any manager.
-public fun deposit<T>(bm: &mut BalanceManager, c: Coin<T>) {
+/// Owner or approved signers only (see the module doc: third-party
+/// deposits are a donation lever into vault NAV). Cap holders use
+/// `deposit_with_cap`.
+public fun deposit<T>(bm: &mut BalanceManager, c: Coin<T>, ctx: &TxContext) {
+    let sender = ctx.sender();
+    assert!(
+        sender == bm.owner || bm.approved_signers.contains(&sender),
+        EDepositRestricted,
+    );
+    deposit_internal(bm, c);
+}
+
+public fun deposit_with_cap<T>(bm: &mut BalanceManager, cap: &OwnerCap, c: Coin<T>) {
+    assert!(cap.bm_id == object::id(bm), EWrongCap);
+    deposit_internal(bm, c);
+}
+
+fun deposit_internal<T>(bm: &mut BalanceManager, c: Coin<T>) {
     let amount = c.value();
     let key = type_name::with_original_ids<T>();
     if (df::exists(&bm.id, key)) {
@@ -105,6 +160,21 @@ public fun deposit<T>(bm: &mut BalanceManager, c: Coin<T>) {
 /// Owner-only, instant, no lockup — and independent of any pause state.
 public fun withdraw<T>(bm: &mut BalanceManager, amount: u64, ctx: &mut TxContext): Coin<T> {
     assert!(ctx.sender() == bm.owner, ENotOwner);
+    withdraw_internal<T>(bm, amount, ctx)
+}
+
+/// Cap-authorized withdraw for cap-owned managers.
+public fun withdraw_with_cap<T>(
+    bm: &mut BalanceManager,
+    cap: &OwnerCap,
+    amount: u64,
+    ctx: &mut TxContext,
+): Coin<T> {
+    assert!(cap.bm_id == object::id(bm), EWrongCap);
+    withdraw_internal<T>(bm, amount, ctx)
+}
+
+fun withdraw_internal<T>(bm: &mut BalanceManager, amount: u64, ctx: &mut TxContext): Coin<T> {
     let out = debit<T>(bm, amount);
     event::emit(WithdrawEvent {
         manager: object::id(bm),
@@ -142,6 +212,15 @@ public(package) fun credit<T>(bm: &mut BalanceManager, b: Balance<T>) {
 
 public fun add_signer(bm: &mut BalanceManager, signer: address, ctx: &TxContext) {
     assert!(ctx.sender() == bm.owner, ENotOwner);
+    add_signer_internal(bm, signer);
+}
+
+public fun add_signer_with_cap(bm: &mut BalanceManager, cap: &OwnerCap, signer: address) {
+    assert!(cap.bm_id == object::id(bm), EWrongCap);
+    add_signer_internal(bm, signer);
+}
+
+fun add_signer_internal(bm: &mut BalanceManager, signer: address) {
     assert!(!bm.approved_signers.contains(&signer), EAlreadyApproved);
     assert!(bm.approved_signers.length() < MAX_APPROVED_SIGNERS, ETooManySigners);
     bm.approved_signers.insert(signer);
@@ -152,6 +231,15 @@ public fun add_signer(bm: &mut BalanceManager, signer: address, ctx: &TxContext)
 /// a free per-key bulk cancel for compromised-key response.
 public fun remove_signer(bm: &mut BalanceManager, signer: address, ctx: &TxContext) {
     assert!(ctx.sender() == bm.owner, ENotOwner);
+    remove_signer_internal(bm, signer);
+}
+
+public fun remove_signer_with_cap(bm: &mut BalanceManager, cap: &OwnerCap, signer: address) {
+    assert!(cap.bm_id == object::id(bm), EWrongCap);
+    remove_signer_internal(bm, signer);
+}
+
+fun remove_signer_internal(bm: &mut BalanceManager, signer: address) {
     assert!(bm.approved_signers.contains(&signer), ENotApproved);
     bm.approved_signers.remove(&signer);
     event::emit(SignerRemovedEvent { manager: object::id(bm), owner: bm.owner, signer });
@@ -164,6 +252,8 @@ public fun owner(bm: &BalanceManager): address { bm.owner }
 public fun is_approved_signer(bm: &BalanceManager, signer: address): bool {
     bm.approved_signers.contains(&signer)
 }
+
+public fun cap_bm_id(cap: &OwnerCap): ID { cap.bm_id }
 
 public fun balance_of<T>(bm: &BalanceManager): u64 {
     let key = type_name::with_original_ids<T>();

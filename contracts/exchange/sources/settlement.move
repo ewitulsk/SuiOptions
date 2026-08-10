@@ -166,6 +166,24 @@ public fun cancel_up_to<Base, Quote>(
     event::emit(SaltWatermarkEvent { registry: object::id(reg), maker, min_valid_salt });
 }
 
+/// Signer-authorized watermark cancel for managers whose owner can never
+/// be a transaction sender (cap-owned managers, e.g. a trading vault's):
+/// any approved signer on the manager may void the OWNER's orders. Only
+/// ever a cancel — a hostile signer can deny its own quotes, nothing
+/// more.
+public fun cancel_up_to_for_manager<Base, Quote>(
+    reg: &mut SettlementRegistry<Base, Quote>,
+    bm: &BalanceManager,
+    min_valid_salt: u64,
+    ctx: &TxContext,
+) {
+    assert!(bm.is_approved_signer(ctx.sender()), ENotMaker);
+    let maker = bm.owner();
+    assert!(min_valid_salt >= registry::watermark(reg, maker), EWatermarkRegression);
+    registry::raise_watermark(reg, maker, min_valid_salt);
+    event::emit(SaltWatermarkEvent { registry: object::id(reg), maker, min_valid_salt });
+}
+
 // === Route composition (§4.6 multi-hop) ===
 
 /// The single strict min-out guard at the end of a multi-branch route: every
