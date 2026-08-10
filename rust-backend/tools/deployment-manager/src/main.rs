@@ -557,15 +557,13 @@ async fn deploy_one(
     // are allowlisted per roll by the option-scheduler, not here.
     let trading_vault_objects = {
         let objects = deployment_manager::trading_vault_init::resolve_objects(
-            &client,
-            &trading_vault_out.digest,
-            &oracle_pyth_out.digest,
-            &oracle_switchboard_out.digest,
-            &deepbook_adapter_out.digest,
-            &options_adapter_out.digest,
-            &equity_oracle_out.digest,
+            &trading_vault_out.created_objects,
+            &oracle_pyth_out.created_objects,
+            &oracle_switchboard_out.created_objects,
+            &deepbook_adapter_out.created_objects,
+            &options_adapter_out.created_objects,
+            &equity_oracle_out.created_objects,
         )
-        .await
         .context("resolving trading-vault governance objects")?;
         let activation_digest = deployment_manager::trading_vault_init::activate(
             &client,
