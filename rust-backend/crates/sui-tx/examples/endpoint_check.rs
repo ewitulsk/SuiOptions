@@ -49,10 +49,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ts: u64 = decode_return_value(&sim, 0)?;
     println!("dev-inspect   : ok (clock = {ts})");
 
+    // Address-balance gas needs both of these: the expiration binds to the
+    // chain id, and is only valid for the current epoch and the next.
+    println!("epoch         : {}", c.current_epoch().await?);
+
     if let Some(addr) = addr {
         let coins = c.coins(addr, &sui_coin_type()).await?;
+        let total = c.balance(addr, &sui_coin_type()).await?;
+        let in_address = c.address_balance(addr, &sui_coin_type()).await?;
         println!("owned SUI     : {} coins", coins.len());
-        println!("balance       : {} MIST", c.balance(addr, &sui_coin_type()).await?);
+        println!("balance       : {total} MIST");
+        // A node that serves address balances reports the split; one that
+        // doesn't leaves the field unset, which reads as zero here. Funds
+        // sitting in the address balance are spendable as gas but invisible to
+        // a Coin<SUI> read — that asymmetry is what `gas_payment` exists for.
+        println!("  in coins    : {} MIST", total - in_address as u128);
+        println!("  address bal : {in_address} MIST");
+        match c.gas_payment(addr, 50_000_000).await {
+            Ok(p) => println!("gas for 0.05  : {p:?}"),
+            Err(e) => println!("gas for 0.05  : unaffordable ({e})"),
+        }
     } else {
         println!("owned SUI     : skipped (pass an address to exercise it)");
     }

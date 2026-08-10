@@ -69,9 +69,17 @@ impl SubmitCtx<'_> {
         let mut pt = ProgrammableTransactionBuilder::new();
         let infos = [self.underlying_price_info, self.settlement_price_info];
         for payload in &payloads {
-            prepend_price_update(&self.wrap.client, &mut pt, self.pyth, payload, &infos)
-                .await
-                .context("building pyth update prefix")?;
+            prepend_price_update(
+                &self.wrap.client,
+                self.wrap.signer.address,
+                self.gas_budget,
+                &mut pt,
+                self.pyth,
+                payload,
+                &infos,
+            )
+            .await
+            .context("building pyth update prefix")?;
         }
         if payloads.is_empty() {
             return Err(anyhow!("hermes returned no update payloads"));

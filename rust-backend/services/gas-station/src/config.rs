@@ -41,6 +41,13 @@ pub struct Config {
     #[serde(default = "default_buffer_bps")]
     pub gas_budget_buffer_bps: u64,
 
+    /// How much SUI (MIST) to keep in sponsor *coin objects*, refilled from
+    /// the wallet's address balance — where faucet drips and transfers land,
+    /// and which a sponsored transaction cannot name as gas payment. Default
+    /// 10 SUI, i.e. twenty transactions at the budget cap.
+    #[serde(default = "default_gas_coin_target")]
+    pub gas_coin_target_mist: u64,
+
     /// token-info public base URL. The protocol package it reports (plus, on
     /// dev/staging, the test-token packages) seeds the sponsored-PTB templates
     /// built at boot.
@@ -90,6 +97,10 @@ fn default_min_budget() -> u64 {
 }
 fn default_buffer_bps() -> u64 {
     2_500
+}
+
+fn default_gas_coin_target() -> u64 {
+    10_000_000_000
 }
 
 impl Config {

@@ -44,6 +44,7 @@ Everything else (transient/retry, fatal, gas, dry-run revert) gets the alert.
 
 `tx-failed-keeper`, `tx-failed-option-scheduler`,
 `tx-failed-option-scheduler-vault`, `tx-failed-mm-bot-rfq`,
-`tx-failed-mm-bot-swap`, `tx-failed-mm-bot-deepbook`.
+`tx-failed-mm-bot-swap`, `tx-failed-mm-bot-deepbook`,
+`tx-failed-gas-station-topup`.
 
 When adding a new submission path, add a new `tx-failed-<service>` id here.

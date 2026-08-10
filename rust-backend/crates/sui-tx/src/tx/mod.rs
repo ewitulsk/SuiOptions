@@ -20,6 +20,7 @@ pub mod coin_pkg;
 pub mod deepbook;
 pub mod execute_write;
 pub mod execute_write_put;
+pub mod funding;
 pub mod mm_collateral;
 pub mod oracle;
 pub mod pyth_update;
@@ -32,18 +33,18 @@ pub mod trading_vault;
 pub mod vault;
 pub mod vault_create;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use shared_crypto::intent::Intent;
-use sui_types::base_types::ObjectID;
+use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{
-    Argument, ObjectArg, ProgrammableTransaction, SharedObjectMutability, Transaction,
+    Argument, Command, ObjectArg, ProgrammableTransaction, SharedObjectMutability, Transaction,
     TransactionData,
 };
 use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION};
 use tracing::{debug, trace};
 
-use crate::chain::{ChainClient, ExecutedTransaction};
+use crate::chain::{ChainClient, ExecutedTransaction, GasPayment};
 use crate::sui_client::Signer;
 
 /// Build a `SharedObject` `ObjectArg` from a current chain read. Needed by
@@ -65,6 +66,65 @@ pub fn clock_arg(pt: &mut ProgrammableTransactionBuilder) -> Result<Argument> {
         initial_shared_version: SUI_CLOCK_OBJECT_SHARED_VERSION,
         mutability: SharedObjectMutability::Immutable,
     })?)
+}
+
+/// Build `TransactionData` that pays for itself out of whatever `sender`
+/// actually holds — coin objects when it has them, otherwise its address
+/// balance.
+///
+/// Address-balance gas is not just a different payment list. There is no gas
+/// object, so the version bump of a gas coin no longer makes each transaction
+/// unique, and the protocol replaces it with a `ValidDuring` expiration: this
+/// epoch and the next, bound to this chain, carrying a nonce. We mint a fresh
+/// nonce per build, which is also what makes a rebuild-and-retry produce a
+/// distinct transaction.
+///
+/// The same absence forbids `Argument::GasCoin` — there is no gas coin to
+/// borrow, split or merge. We check for it here rather than letting the
+/// validator reject the transaction, because the error it returns names
+/// neither the command nor the reason.
+pub async fn gas_tx_data(
+    client: &ChainClient,
+    sender: SuiAddress,
+    programmable: ProgrammableTransaction,
+    gas_budget: u64,
+) -> Result<TransactionData> {
+    let payment = client.gas_payment(sender, gas_budget).await?;
+    let gas_price = client
+        .reference_gas_price()
+        .await
+        .context("fetching reference gas price")?;
+
+    match payment {
+        GasPayment::Coins(coins) => Ok(TransactionData::new_programmable(
+            sender,
+            coins,
+            programmable,
+            gas_budget,
+            gas_price,
+        )),
+        GasPayment::AddressBalance => {
+            if programmable.commands.iter().any(Command::is_gas_coin_used) {
+                bail!(
+                    "this PTB borrows Argument::GasCoin, which needs a gas coin object, but \
+                     {sender} holds its SUI as an address balance — fund the coin argument with \
+                     sui_tx::tx::funding instead"
+                );
+            }
+            let (chain, epoch) = tokio::try_join!(client.chain_id(), client.current_epoch())
+                .context("reading chain id / epoch for an address-balance gas payment")?;
+            debug!(%sender, gas_budget, "paying gas from the address balance");
+            Ok(TransactionData::new_programmable_with_address_balance_gas(
+                sender,
+                programmable,
+                gas_budget,
+                gas_price,
+                chain,
+                epoch,
+                rand::random(),
+            ))
+        }
+    }
 }
 
 /// Attempts (including the first) `submit_ptb` makes when the gas coin
@@ -159,22 +219,7 @@ where
         // Re-read per attempt: a stale reference is exactly what we are
         // recovering from, so reusing the previous read would spin forever.
         let programmable = build().await.context("building the transaction")?;
-        let gas_coin = client
-            .gas_coin(signer.address)
-            .await
-            .context("selecting a gas coin")?;
-        let gas_price = client
-            .reference_gas_price()
-            .await
-            .context("fetching reference gas price")?;
-
-        let tx_data = TransactionData::new_programmable(
-            signer.address,
-            vec![gas_coin],
-            programmable,
-            gas_budget,
-            gas_price,
-        );
+        let tx_data = gas_tx_data(client, signer.address, programmable, gas_budget).await?;
         match submit_tx_data(client, signer, tx_data, label).await {
             Ok(resp) => return Ok(resp),
             Err(e) if attempt < GAS_REF_ATTEMPTS && is_stale_gas_rejection(&e) => {

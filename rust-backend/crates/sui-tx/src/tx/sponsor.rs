@@ -186,12 +186,71 @@ pub async fn sponsor_transaction(
     })
 }
 
-/// Total SUI balance (MIST) of the gas station wallet.
+/// Total SUI balance (MIST) of the gas station wallet — coin objects *and*
+/// address balance, since [`top_up_gas_coins`] can turn the latter into the
+/// former.
 pub async fn sponsor_balance(client: &ChainClient, sponsor: SuiAddress) -> Result<u128> {
     client
         .balance(sponsor, &crate::chain::sui_coin_type())
         .await
         .context("fetching sponsor balance")
+}
+
+/// Move address balance into a coin object so the sponsor can keep sponsoring.
+///
+/// Unlike every other submission in this workspace, sponsorship cannot spend an
+/// address balance directly: `GasData.payment` must name the sponsor's coins,
+/// and the *user's* wallet signs those exact bytes. A sponsor topped up by
+/// faucet or transfer therefore ends up rich and unable to sponsor anything —
+/// [`sponsor_transaction`] bails with "has no SUI coins".
+///
+/// So we materialise one. The redeem transaction itself is free of the problem
+/// it fixes: it pays its own gas from the address balance
+/// ([`crate::tx::gas_tx_data`]), which is why this can bootstrap a sponsor that
+/// owns nothing at all.
+///
+/// Returns the digest when it topped up, `None` when there was nothing to do:
+/// coins already cover `target`, or the address balance has nothing to spare
+/// beyond `gas_budget` (kept back so the redeem can pay for itself).
+pub async fn top_up_gas_coins(
+    client: &ChainClient,
+    signer: &Signer,
+    target: u64,
+    gas_budget: u64,
+) -> Result<Option<String>> {
+    let sui = crate::chain::sui_coin_type();
+    let coins = client
+        .coins(signer.address, &sui)
+        .await
+        .context("listing sponsor gas coins")?;
+    let in_coins = coins
+        .iter()
+        .map(|c| c.balance)
+        .fold(0u64, |a, b| a.saturating_add(b));
+    if in_coins >= target {
+        return Ok(None);
+    }
+
+    let available = client
+        .address_balance(signer.address, &sui)
+        .await
+        .context("reading the sponsor's address balance")?;
+    let amount = available
+        .saturating_sub(gas_budget)
+        .min(target.saturating_sub(in_coins));
+    if amount == 0 {
+        return Ok(None);
+    }
+
+    let pt = crate::tx::funding::redeem_to_coin(signer.address, &sui, amount)?;
+    let tx_data = crate::tx::gas_tx_data(client, signer.address, pt, gas_budget).await?;
+    let resp = crate::tx::submit_tx_data(client, signer, tx_data, "sponsor gas top-up").await?;
+    let digest = crate::tx::tx_digest(&resp).to_string();
+    info!(
+        sponsor = %signer.address, amount, in_coins, available, %digest,
+        "moved address balance into a sponsor gas coin"
+    );
+    Ok(Some(digest))
 }
 
 #[cfg(test)]

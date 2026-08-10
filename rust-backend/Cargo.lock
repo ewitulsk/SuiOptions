@@ -11190,6 +11190,7 @@ dependencies = [
  "move-core-types",
  "p256",
  "protocol-types",
+ "rand 0.8.6",
  "reqwest",
  "runtime-config",
  "serde",

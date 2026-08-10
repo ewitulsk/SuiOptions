@@ -672,6 +672,8 @@ async fn main() -> Result<()> {
             ids.oracle_pyth_pkg,
             ids.pyth_feed_registry_id,
             live.as_ref(),
+            signer.address,
+            cli.gas_budget,
         )
         .await?;
         let faucet = pt.obj(shared_object_arg(&client, ids.deposit_faucet, true).await?)?;
@@ -734,6 +736,8 @@ async fn main() -> Result<()> {
             ids.oracle_pyth_pkg,
             ids.pyth_feed_registry_id,
             live.as_ref(),
+            signer.address,
+            cli.gas_budget,
         )
         .await?;
         let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
@@ -827,6 +831,8 @@ async fn main() -> Result<()> {
         ids.oracle_pyth_pkg,
         ids.pyth_feed_registry_id,
         live.as_ref(),
+        signer.address,
+        cli.gas_budget,
     )
     .await?;
     let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
@@ -979,6 +985,9 @@ async fn compose_with_legs(
     oracle_pyth_pkg: ObjectID,
     pyth_feed_registry_id: ObjectID,
     live: Option<&LiveOracle>,
+    // The Pyth update fee is funded to match how `sender` pays gas.
+    sender: sui_types::base_types::SuiAddress,
+    gas_budget: u64,
 ) -> Result<sui_types::transaction::Argument> {
     let needed = price_assets_needed(holdings, option_map);
     if needed.is_empty() {
@@ -1023,6 +1032,8 @@ async fn compose_with_legs(
             handles: &handles,
             accumulator_update: update,
             price_infos: &price_infos,
+            sender,
+            gas_budget,
         })),
         option_map,
     )

@@ -168,5 +168,42 @@ async fn main() -> Result<()> {
         min_balance_threshold_mist: cfg.min_balance_threshold_mist,
     });
 
+    tokio::spawn(keep_gas_coins_stocked(state.clone(), cfg.gas_coin_target_mist));
+
     router::serve(cfg.bind_addr, state, &cfg.allowed_origins).await
+}
+
+/// How often the sponsor's coin objects are topped up from its address
+/// balance. Slow on purpose: it only has to catch a transfer or faucet drip
+/// before the coins run out, and each pass costs two reads.
+const TOP_UP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Keep the sponsor holding coin *objects*, which is the only thing it can
+/// attach to a sponsored transaction — see
+/// [`sui_tx::tx::sponsor::top_up_gas_coins`]. Funding the station now means
+/// sending it SUI by any means, coins or not.
+async fn keep_gas_coins_stocked(state: Arc<AppState>, target: u64) {
+    let mut ticker = tokio::time::interval(TOP_UP_INTERVAL);
+    loop {
+        ticker.tick().await;
+        match sui_tx::tx::sponsor::top_up_gas_coins(
+            &state.sui.client,
+            &state.sui.signer,
+            target,
+            state.policy.max_gas_budget,
+        )
+        .await
+        {
+            Ok(Some(digest)) => info!(%digest, target, "sponsor gas coins topped up"),
+            Ok(None) => {}
+            // The station is not down — it sponsors fine while coins last —
+            // but left alone it will strand SUI it cannot spend.
+            Err(e) => tracing::error!(
+                alert_id = "tx-failed-gas-station-topup",
+                error = %format!("{e:#}"),
+                sponsor = %state.sui.signer.address,
+                "topping the sponsor's gas coins up from its address balance failed"
+            ),
+        }
+    }
 }

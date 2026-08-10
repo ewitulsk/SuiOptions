@@ -20,7 +20,7 @@ use move_core_types::language_storage::StructTag;
 use sui_rpc_api::client::SimulateTransactionResponse;
 use sui_rpc_api::Client;
 use sui_types::base_types::{ObjectID, ObjectRef, SuiAddress};
-use sui_types::digests::TransactionDigest;
+use sui_types::digests::{ChainIdentifier, TransactionDigest};
 use sui_types::object::{Object, Owner};
 use sui_types::transaction::{
     ObjectArg, SharedObjectMutability, Transaction, TransactionData,
@@ -312,18 +312,20 @@ impl ChainClient {
         Ok(coins)
     }
 
-    /// The single largest SUI coin owned by `addr` — the gas coin every
-    /// `submit_ptb`-style path picks.
-    pub async fn gas_coin(&self, owner: SuiAddress) -> Result<ObjectRef> {
+    /// How `owner` can pay a `gas_budget`, given what it actually holds.
+    ///
+    /// See [`plan_gas`] for the rules. This is the only gas selector in the
+    /// workspace — every submission path goes through
+    /// [`crate::tx::gas_tx_data`], which calls this.
+    pub async fn gas_payment(&self, owner: SuiAddress, gas_budget: u64) -> Result<GasPayment> {
         let coins = self.coins(owner, &sui_coin_type()).await?;
-        coins
-            .first()
-            .map(|c| c.object_ref)
-            .ok_or_else(|| anyhow!("no SUI coins to pay gas for {owner}"))
+        let address_balance = self.address_balance(owner, &sui_coin_type()).await?;
+        plan_gas(&coins, address_balance, gas_budget)
+            .with_context(|| format!("selecting gas payment for {owner}"))
     }
 
-    /// Total balance of `coin_type`. Replaces
-    /// `coin_read_api().get_balance(..)`.
+    /// Total spendable balance of `coin_type` — coin objects *and* the
+    /// address balance. Replaces `coin_read_api().get_balance(..)`.
     pub async fn balance(&self, owner: SuiAddress, coin_type: &StructTag) -> Result<u128> {
         let b = self
             .inner
@@ -331,6 +333,25 @@ impl ChainClient {
             .await
             .map_err(|s| anyhow!("gRPC GetBalance for {owner}: {s}"))?;
         Ok(b.balance() as u128)
+    }
+
+    /// The `coin_type` funds held as an *address balance* (the accumulator),
+    /// as opposed to `Coin<T>` objects.
+    ///
+    /// This is where faucet drips and plain transfers land now, and it is not
+    /// reachable as a transaction input without a
+    /// `sui::funds_accumulator::Withdrawal` (see [`crate::tx::funding`]) or,
+    /// for gas, an empty gas payment (see [`crate::tx::gas_tx_data`]).
+    ///
+    /// Nodes that predate address balances leave the field unset, which reads
+    /// as zero — exactly the right answer there.
+    pub async fn address_balance(&self, owner: SuiAddress, coin_type: &StructTag) -> Result<u64> {
+        let b = self
+            .inner
+            .get_balance(owner, coin_type)
+            .await
+            .map_err(|s| anyhow!("gRPC GetBalance for {owner}: {s}"))?;
+        Ok(b.address_balance_opt().unwrap_or(0))
     }
 
     /// Every coin type `owner` holds, with its total balance. Replaces
@@ -370,12 +391,25 @@ impl ChainClient {
     }
 
     pub async fn chain_identifier(&self) -> Result<String> {
-        let id = self
-            .inner
+        Ok(self.chain_id().await?.to_string())
+    }
+
+    /// The chain identifier as the SDK type. Address-balance gas payments are
+    /// bound to it (`TransactionExpiration::ValidDuring`) so a transaction
+    /// signed for one network cannot be replayed on another.
+    pub async fn chain_id(&self) -> Result<ChainIdentifier> {
+        self.inner
             .get_chain_identifier()
             .await
-            .map_err(|s| anyhow!("gRPC GetServiceInfo (chain id): {s}"))?;
-        Ok(id.to_string())
+            .map_err(|s| anyhow!("gRPC GetServiceInfo (chain id): {s}"))
+    }
+
+    /// Current epoch — the other half of a `ValidDuring` expiration.
+    pub async fn current_epoch(&self) -> Result<u64> {
+        self.inner
+            .get_current_epoch()
+            .await
+            .map_err(|s| anyhow!("gRPC GetEpoch (current epoch): {s}"))
     }
 
     // ---- simulate / execute -------------------------------------------
@@ -551,6 +585,57 @@ pub fn published_package(resp: &ExecutedTransaction) -> Option<ObjectID> {
     resp.get_new_package_obj().map(|r| r.0)
 }
 
+/// Protocol cap on how many objects one transaction may name as gas payment
+/// (`max_gas_payment_objects`). Selecting more is a rejection, not a bigger
+/// budget.
+const MAX_GAS_PAYMENT_OBJECTS: usize = 256;
+
+/// Where a transaction's gas comes from.
+///
+/// A wallet's SUI lives in two places now: `Coin<SUI>` objects, and the
+/// *address balance* an accumulator holds for it. Faucet drips and plain
+/// transfers land in the latter, which no `Coin<SUI>` read can see — a wallet
+/// can hold 10 SUI and own no coin at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GasPayment {
+    /// Coin objects, largest-first, together covering the budget.
+    Coins(Vec<ObjectRef>),
+    /// The sender's address balance, spent through an empty gas payment. Costs
+    /// a `ValidDuring` expiration (see [`crate::tx::gas_tx_data`]) and forbids
+    /// `Argument::GasCoin`, since there is no gas *object* to borrow.
+    AddressBalance,
+}
+
+/// Pick a gas payment out of what a wallet holds.
+///
+/// Coin objects win whenever they cover the budget: they need no expiration
+/// nonce, they keep `Argument::GasCoin` usable, and they are the only thing
+/// mainnet accepts today (address balances are a non-mainnet protocol feature
+/// at our pin). Only when the coins fall short do we spend the address
+/// balance.
+///
+/// `coins` must be balance-descending, as [`ChainClient::coins`] returns them,
+/// so the fewest possible objects are named.
+fn plan_gas(coins: &[CoinRef], address_balance: u64, gas_budget: u64) -> Result<GasPayment> {
+    let mut payment = Vec::new();
+    let mut covered: u64 = 0;
+    for c in coins.iter().take(MAX_GAS_PAYMENT_OBJECTS) {
+        payment.push(c.object_ref);
+        covered = covered.saturating_add(c.balance);
+        if covered >= gas_budget {
+            return Ok(GasPayment::Coins(payment));
+        }
+    }
+    if address_balance >= gas_budget {
+        return Ok(GasPayment::AddressBalance);
+    }
+    Err(anyhow!(
+        "insufficient SUI for a gas budget of {gas_budget} MIST: \
+         {covered} MIST across {} coin object(s) and {address_balance} MIST of address balance",
+        payment.len()
+    ))
+}
+
 /// An owned coin: what the gas selector and the coin-splitting builders
 /// need out of a coin read.
 #[derive(Debug, Clone, Copy)]
@@ -607,6 +692,69 @@ mod tests {
             t.to_canonical_string(true),
             "0x0000000000000000000000000000000000000000000000000000000000000002::coin::Coin<0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI>"
         );
+    }
+
+    fn coin(balance: u64) -> CoinRef {
+        CoinRef {
+            object_ref: (
+                ObjectID::random(),
+                sui_types::base_types::SequenceNumber::from_u64(1),
+                sui_types::digests::ObjectDigest::random(),
+            ),
+            balance,
+        }
+    }
+
+    #[test]
+    fn coins_are_preferred_and_only_as_many_as_needed() {
+        let coins = [coin(300), coin(200), coin(100)];
+        let payment = plan_gas(&coins, 10_000, 400).unwrap();
+        // Address balance covers it on its own, but coins keep GasCoin usable
+        // and work on mainnet — and the third coin isn't needed.
+        assert_eq!(
+            payment,
+            GasPayment::Coins(vec![coins[0].object_ref, coins[1].object_ref])
+        );
+    }
+
+    /// The regression this whole path exists for: faucet SUI arrives as an
+    /// address balance, so the wallet is rich and owns no coin object.
+    #[test]
+    fn address_balance_pays_when_there_are_no_coins() {
+        assert_eq!(
+            plan_gas(&[], 1_000_000, 50_000).unwrap(),
+            GasPayment::AddressBalance
+        );
+    }
+
+    /// The other half: dust coins that individually can't cover the budget.
+    /// The old selector took the single largest coin and gave up here.
+    #[test]
+    fn dust_coins_are_summed_before_falling_back() {
+        let coins = [coin(30), coin(30), coin(30)];
+        assert_eq!(
+            plan_gas(&coins, 0, 90).unwrap(),
+            GasPayment::Coins(coins.iter().map(|c| c.object_ref).collect())
+        );
+        // ...and when even all of them fall short, the address balance does it.
+        assert_eq!(
+            plan_gas(&coins, 500, 200).unwrap(),
+            GasPayment::AddressBalance
+        );
+    }
+
+    #[test]
+    fn short_everywhere_reports_both_sides() {
+        let err = plan_gas(&[coin(10)], 5, 100).unwrap_err().to_string();
+        assert!(err.contains("10 MIST across 1 coin"), "{err}");
+        assert!(err.contains("5 MIST of address balance"), "{err}");
+    }
+
+    /// Coins and address balance don't combine: a transaction pays from one or
+    /// the other, so "they add up to enough" is not enough.
+    #[test]
+    fn coins_and_address_balance_do_not_combine() {
+        assert!(plan_gas(&[coin(60)], 60, 100).is_err());
     }
 
     #[test]

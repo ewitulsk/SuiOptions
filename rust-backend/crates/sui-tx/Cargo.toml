@@ -20,6 +20,7 @@ sha2 = { workspace = true }
 base64 = "0.22"
 
 clap = { workspace = true }
+rand = { workspace = true }
 
 # Crypto for QuoteSigner.
 ed25519-dalek = { workspace = true }
