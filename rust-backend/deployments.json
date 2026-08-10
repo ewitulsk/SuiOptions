@@ -182,6 +182,43 @@
         "registrarPubkey": "5c6c64713225f1379004908bbd4372124fd39c71a02d61cd62e614767e497c44",
         "activationDigest": "21bwy6Qt2b4TpnWzANWBPmG1trobnQNUmmNrXhgBGsz4"
       },
+      "exchange": {
+        "packageId": "0x0677e3798e07b8f967436fa32af16e9b2ddc1c07782dc13bb3d25ed0a5bcf979",
+        "upgradeCapId": "0x6abc27a37cc21114377937276434dbe9187dc3d786fc84f0cb65b3641a77f4b0",
+        "adminCapId": "0x40f650f13c96d3c46b3b903bc81dfdab45169aa42c55c87fd1c407daf873de1d",
+        "publishDigest": "CqQjnaKuNJNa6t9NjXdimTjDVJAU2dMQsept9xafxywy",
+        "deployedAt": "2026-08-10T04:21:27.962361+00:00",
+        "network": "testnet",
+        "markets": {
+          "TBTC/TUSDC": {
+            "registryId": "0x0575bab40b3ae22ca4abb42dc6a25713ffe99a6bf13d231c0bc618068dd8fbd4",
+            "base": "0xf7e5ed1be0a17c99ac6de1915d33b68d3dbaed2f34ce90cb84e22bc57f2d7998::tbtc::TBTC",
+            "quote": "0xf7e5ed1be0a17c99ac6de1915d33b68d3dbaed2f34ce90cb84e22bc57f2d7998::tusdc::TUSDC",
+            "tickSize": 1000,
+            "minSize": 100000,
+            "lotSize": 100000000,
+            "feeBps": 10
+          },
+          "TSUI/TUSDC": {
+            "registryId": "0x241d656e1b8e18350a3498194b71882541430480c63099380d7731909cdd3ddd",
+            "base": "0xf7e5ed1be0a17c99ac6de1915d33b68d3dbaed2f34ce90cb84e22bc57f2d7998::tsui::TSUI",
+            "quote": "0xf7e5ed1be0a17c99ac6de1915d33b68d3dbaed2f34ce90cb84e22bc57f2d7998::tusdc::TUSDC",
+            "tickSize": 1000,
+            "minSize": 1000000,
+            "lotSize": 1000000000,
+            "feeBps": 10
+          },
+          "TWAL/TUSDC": {
+            "registryId": "0xab7f4d1d0a12c62b629e1b4f936a272e86e7feb267a734cec77ec7fb4bf387b8",
+            "base": "0xf7e5ed1be0a17c99ac6de1915d33b68d3dbaed2f34ce90cb84e22bc57f2d7998::twal::TWAL",
+            "quote": "0xf7e5ed1be0a17c99ac6de1915d33b68d3dbaed2f34ce90cb84e22bc57f2d7998::tusdc::TUSDC",
+            "tickSize": 1000,
+            "minSize": 1000000,
+            "lotSize": 1000000000,
+            "feeBps": 10
+          }
+        }
+      },
       "quoteSignerId": "0x22e4b1a3c59c5ba57a9fdbd938607a01f63761a16e35fd2c0bc049414099c685"
     },
     "token_info": {
