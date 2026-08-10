@@ -57,6 +57,14 @@ target "mm-bot" {
   cache-to   = [{ type = "gha", mode = "max", scope = "mm-bot" }]
 }
 
+target "staging-mm-bot" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.staging-mm-bot"
+  tags       = ["${ECR}/options/staging-mm-bot:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "staging-mm-bot" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "staging-mm-bot" }]
+}
+
 target "option-scheduler" {
   inherits   = ["_common"]
   dockerfile = "Dockerfile.scheduler"
@@ -170,5 +178,5 @@ target "market-sim" {
 }
 
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook"]
+  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook", "staging-mm-bot"]
 }

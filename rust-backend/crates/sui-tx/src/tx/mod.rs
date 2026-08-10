@@ -18,6 +18,7 @@ pub mod admin;
 pub mod auction;
 pub mod coin_pkg;
 pub mod deepbook;
+pub mod exchange;
 pub mod execute_write;
 pub mod execute_write_put;
 pub mod funding;

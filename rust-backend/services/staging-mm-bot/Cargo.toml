@@ -1,0 +1,48 @@
+[package]
+name = "staging-mm-bot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "staging-mm-bot"
+path = "src/main.rs"
+
+[dependencies]
+protocol-types = { workspace = true }
+runtime-config = { workspace = true }
+observability  = { workspace = true, features = ["axum"] }
+cli-spec       = { workspace = true }
+sui-tx         = { workspace = true }
+pyth-client    = { workspace = true }
+oracle-client  = { workspace = true }
+token-info-client = { workspace = true }
+exchange-types   = { workspace = true }
+exchange-signing = { workspace = true }
+
+sui-types = { workspace = true }
+
+tokio = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+base64 = { workspace = true }
+
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+metrics = { workspace = true }
+
+reqwest = { workspace = true }
+
+axum = { workspace = true }
+tower-http = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Round-trip test: ladder amounts must pass the book's own tick math.
+exchange-book = { workspace = true }

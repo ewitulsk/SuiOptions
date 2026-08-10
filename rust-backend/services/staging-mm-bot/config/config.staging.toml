@@ -1,0 +1,45 @@
+# staging-mm-bot — staging deployment. In-compose service URLs come from
+# the environment (ORDERBOOK_URL / TOKEN_INFO_URL / ORACLE_URL); this file
+# holds the trading knobs.
+
+health_addr = "0.0.0.0:8085"
+
+network = "testnet"
+
+# Pin after first boot (the log prints the created BalanceManager id).
+# balance_manager_id = "0x..."
+
+max_fee_bps = 50
+
+[funding]
+enabled = true
+check_interval_secs = 60
+
+[funding.targets]
+TUSDC = 1_000_000_000_000 # $1M at 6 decimals
+TBTC = 1_000_000_000      # 10 TBTC at 8 decimals
+TSUI = 100_000_000_000_000 # 100k TSUI at 9 decimals
+TWAL = 100_000_000_000_000 # 100k TWAL at 9 decimals
+
+[quoting]
+ttl_secs = 90
+refresh_secs = 5
+requote_drift_bps = 5
+escrow_utilization = 0.8
+
+[[quoting.levels]]
+bps = 10
+lots = 1
+
+[[quoting.levels]]
+bps = 25
+lots = 2
+
+[[quoting.levels]]
+bps = 50
+lots = 4
+
+[pyth]
+max_price_age_ms = 5_000
+max_publish_lag_ms = 10_000
+max_conf_bps = 0

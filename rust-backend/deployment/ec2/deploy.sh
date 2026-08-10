@@ -50,7 +50,7 @@ COMPOSE_FILE="docker-compose.${ENV}.yml"
 # Canonical service set + their .env tag-variable names + the compose
 # service name (mostly identical to the cargo crate name, except
 # quoting-service is referenced as `quoting` in compose).
-ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station hedge-signer market-sim price-charting balance-monitor keeper oracle-service cctp-relay twitter-service social-bot orderbook)
+ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station hedge-signer market-sim price-charting balance-monitor keeper oracle-service cctp-relay twitter-service social-bot orderbook staging-mm-bot)
 
 tag_var_for() {
   case "$1" in
@@ -72,6 +72,7 @@ tag_var_for() {
     twitter-service)  echo TWITTER_SERVICE_TAG ;;
     social-bot)       echo SOCIAL_BOT_TAG ;;
     orderbook)        echo ORDERBOOK_TAG ;;
+    staging-mm-bot)   echo STAGING_MM_BOT_TAG ;;
     *) return 1 ;;
   esac
 }
@@ -95,6 +96,7 @@ compose_name_for() {
     twitter-service)  echo twitter-service ;;
     social-bot)       echo social-bot ;;
     orderbook)        echo orderbook ;;
+    staging-mm-bot)   echo staging-mm-bot ;;
     *) return 1 ;;
   esac
 }
@@ -287,6 +289,7 @@ health_path_for() {
     keeper)           echo "/$ENV/keeper/health" ;;
     social-bot)       echo "/$ENV/social-bot/health" ;;
     orderbook)        echo "/$ENV/orderbook/health" ;;
+    staging-mm-bot)   echo "/$ENV/staging-mm-bot/health" ;;
     *) return 1 ;;
   esac
 }
@@ -305,6 +308,10 @@ health_attempts_for() {
     # a near-miss on every contract redeploy (it rolled back the whole stack
     # on 2026-07-15). Same window as the scheduler.
     mm-bot)           echo 150 ;;  # ~5 min
+    # staging-mm-bot's first boot creates its BalanceManager and runs the
+    # initial faucet mint+deposit sweep (several finalized txs) before
+    # /health goes green.
+    staging-mm-bot)   echo 150 ;;  # ~5 min
     *)                echo 30 ;;   # ~60s
   esac
 }

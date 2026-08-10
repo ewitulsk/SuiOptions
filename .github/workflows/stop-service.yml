@@ -37,6 +37,7 @@ on:
           - keeper
           - oracle-service
           - orderbook
+          - staging-mm-bot
           - nginx
 
 permissions:

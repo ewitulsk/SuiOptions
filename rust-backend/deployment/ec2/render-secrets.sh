@@ -134,6 +134,24 @@ quote_key = "$QUOTE_KEY"
 EOF
 fi
 
+# ---- staging-mm-bot secret -> rendered TOML ------------------------------
+# One key does everything (BalanceManager owner, order signing, gas); no
+# quote key. Staging-only: the secret simply doesn't exist in prod, so the
+# render is skipped there.
+if SMB_JSON=$(fetch staging-mm-bot 2>/dev/null); then
+  SUI_KEY=$(echo "$SMB_JSON" | jq -r '.sui_key')
+  if [ -z "$SUI_KEY" ] || [ "$SUI_KEY" = "null" ]; then
+    echo "missing sui_key in options/$ENV/staging-mm-bot" >&2
+    exit 1
+  fi
+  umask 077
+  cat > "$DIR/staging-mm-bot.toml" <<EOF
+[sui]
+$NETWORK = "$SUI_KEY"
+$RPC_LINE
+EOF
+fi
+
 # ---- option-scheduler secret -> rendered TOML ----------------------------
 # The scheduler signs with the deployer key (AdminCap holder). One Sui
 # key per env; no quote key (scheduler doesn't sign quotes).
