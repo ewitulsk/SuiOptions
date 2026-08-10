@@ -2,8 +2,9 @@ import { useMemo, useState } from "react";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 
 import { OrderbookApiError } from "../api/orderbook";
-import { EXCHANGE_PACKAGE_ID, explorerTxUrl } from "../config";
+import { explorerTxUrl } from "../config";
 import { formatUnits, parseUnits, toBigint, typeName } from "../format";
+import { useExchangeInfo } from "../hooks/useExchangeInfo";
 import { marketsById, tokenUniverse, useMarkets } from "../hooks/useMarkets";
 import { useCoinMetadataMap } from "../hooks/useCoinMetadata";
 import { useWalletBalances } from "../hooks/useCoinBalance";
@@ -20,6 +21,8 @@ const SLIPPAGE_PRESETS = [
 export function SwapScreen() {
   const account = useCurrentAccount();
   const submit = useSubmitTransaction();
+  const exchangeQuery = useExchangeInfo();
+  const packageId = exchangeQuery.data?.packageId;
   const marketsQuery = useMarkets();
   const markets = marketsQuery.data ?? [];
   const tokens = useMemo(() => tokenUniverse(markets), [markets]);
@@ -75,7 +78,7 @@ export function SwapScreen() {
 
   const canSwap =
     !!account &&
-    !!EXCHANGE_PACKAGE_ID &&
+    !!packageId &&
     !!quote &&
     expectedOut !== null &&
     expectedOut > 0n &&
@@ -92,7 +95,7 @@ export function SwapScreen() {
   }
 
   async function onSwap() {
-    if (!quote || !from || !to || !account || !EXCHANGE_PACKAGE_ID || minOut === null) return;
+    if (!quote || !from || !to || !account || !packageId || minOut === null) return;
     setBusy(true);
     setResult(null);
     try {
@@ -101,7 +104,7 @@ export function SwapScreen() {
         fromType: from,
         toType: to,
         minOut,
-        packageId: EXCHANGE_PACKAGE_ID,
+        packageId,
       });
       const digest = await submit(tx);
       setResult({ ok: true, message: "Swap submitted", digest });
@@ -137,9 +140,9 @@ export function SwapScreen() {
     <div className="card">
       <h1>Swap</h1>
 
-      {!EXCHANGE_PACKAGE_ID && (
+      {!packageId && !exchangeQuery.isLoading && (
         <div className="banner warn">
-          VITE_EXCHANGE_PACKAGE_ID is not set — quotes work, but swaps can't be executed.
+          token-info reports no exchange deployment — quotes work, but swaps can't be executed.
         </div>
       )}
 

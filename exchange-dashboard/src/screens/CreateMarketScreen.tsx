@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 
-import { EXCHANGE_PACKAGE_ID, explorerObjectUrl, explorerTxUrl } from "../config";
+import { explorerObjectUrl, explorerTxUrl } from "../config";
 import { canonicalizeType, shortId } from "../format";
 import { useAdminCap } from "../hooks/useAdminCap";
+import { useExchangeInfo } from "../hooks/useExchangeInfo";
 import { useCoinMetadataMap } from "../hooks/useCoinMetadata";
 import { useSuiGrpcClient } from "../lib/suiGrpc";
 import { buildCreateMarketTx, resolveRegistryId } from "../tx/createMarket";
@@ -28,7 +29,9 @@ export function CreateMarketScreen() {
   const account = useCurrentAccount();
   const client = useSuiGrpcClient();
   const submit = useSubmitTransaction();
-  const adminCapQuery = useAdminCap();
+  const exchangeQuery = useExchangeInfo();
+  const packageId = exchangeQuery.data?.packageId;
+  const adminCapQuery = useAdminCap(packageId);
   const adminCapId = adminCapQuery.data ?? null;
 
   const [symbol, setSymbol] = useState("");
@@ -76,7 +79,7 @@ export function CreateMarketScreen() {
   const complete =
     !!symbol && !!baseCanon && !!quoteCanon && !!tick && !!min && !!lot && fee !== null;
   const valid = complete && Object.values(fieldErrors).every((e) => !e);
-  const canSubmit = valid && !!account && !!adminCapId && !!EXCHANGE_PACKAGE_ID && !busy;
+  const canSubmit = valid && !!account && !!adminCapId && !!packageId && !busy;
 
   async function onCreate() {
     if (!canSubmit || !baseCanon || !quoteCanon) return;
@@ -85,7 +88,7 @@ export function CreateMarketScreen() {
     setCreated(null);
     try {
       const tx = buildCreateMarketTx({
-        packageId: EXCHANGE_PACKAGE_ID!,
+        packageId: packageId!,
         adminCapId: adminCapId!,
         base: baseCanon,
         quote: quoteCanon,
@@ -138,9 +141,11 @@ export function CreateMarketScreen() {
     <div className="card wide">
       <h1>Create Market</h1>
 
-      {!EXCHANGE_PACKAGE_ID ? (
+      {!packageId ? (
         <div className="banner warn">
-          VITE_EXCHANGE_PACKAGE_ID is not set — no exchange deployment configured.
+          {exchangeQuery.isLoading
+            ? "Loading the exchange deployment from token-info…"
+            : "token-info reports no exchange deployment configured."}
         </div>
       ) : !account ? (
         <div className="banner info">Connect the wallet that holds the exchange AdminCap.</div>

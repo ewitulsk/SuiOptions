@@ -1,0 +1,30 @@
+import { useQuery } from "@tanstack/react-query";
+
+import { TOKEN_INFO_URL } from "../config";
+
+/** The `exchange` block subset of token-info's `/package-info`. */
+export interface ExchangeInfo {
+  packageId: string;
+  adminCapId: string;
+}
+
+/**
+ * The current exchange deployment, from token-info. Fetched at runtime —
+ * never baked into the build — because the package (and every market
+ * registry) is republished on each contract redeploy. `null` = the env has
+ * no exchange block; screens show their writes-disabled hint.
+ */
+export function useExchangeInfo() {
+  return useQuery<ExchangeInfo | null>({
+    queryKey: ["tokenInfo", "exchange"],
+    queryFn: async () => {
+      const res = await fetch(`${TOKEN_INFO_URL}/package-info`);
+      if (!res.ok) throw new Error(`token-info /package-info: HTTP ${res.status}`);
+      const body = await res.json();
+      const ex = body?.exchange;
+      return ex ? { packageId: ex.packageId, adminCapId: ex.adminCapId } : null;
+    },
+    staleTime: Infinity,
+    retry: 1,
+  });
+}

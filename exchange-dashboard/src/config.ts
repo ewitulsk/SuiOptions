@@ -1,6 +1,7 @@
-// All config is env vars with local-dev defaults — unlike frontend/ there is
-// no token-info boot fetch: the exchange block isn't served by token-info, so
-// the package id arrives via VITE_EXCHANGE_PACKAGE_ID (see .env.example).
+// All config is env vars with local-dev defaults, one var per backend route
+// (same posture as frontend/src/config.ts). On-chain ids are NOT env config:
+// the exchange package id rotates on every contract redeploy, so it is
+// fetched at runtime from token-info — see hooks/useExchangeInfo.ts.
 
 export type SuiEnv = "testnet" | "mainnet" | "devnet";
 
@@ -9,9 +10,11 @@ export const ENV = (import.meta.env.VITE_ENVIRONMENT ?? "testnet") as SuiEnv;
 export const ORDERBOOK_URL: string =
   import.meta.env.VITE_ORDERBOOK_URL ?? "http://127.0.0.1:9014";
 
-/** contracts/exchange package id; undefined = writes disabled, screens show a hint. */
-export const EXCHANGE_PACKAGE_ID: string | undefined =
-  import.meta.env.VITE_EXCHANGE_PACKAGE_ID || undefined;
+// token-info public base URL. Local dev hits the service directly; deployed
+// builds set VITE_TOKEN_INFO_URL to the env's public route
+// (e.g. https://<host>/<env>/token-info).
+export const TOKEN_INFO_URL: string =
+  import.meta.env.VITE_TOKEN_INFO_URL ?? "http://127.0.0.1:9005";
 
 const DEFAULT_EXPLORERS: Record<SuiEnv, string> = {
   testnet: "https://testnet.suivision.xyz",
