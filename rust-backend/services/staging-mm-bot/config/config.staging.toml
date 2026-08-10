@@ -6,9 +6,6 @@ health_addr = "0.0.0.0:8085"
 
 network = "testnet"
 
-# Pin after first boot (the log prints the created BalanceManager id).
-# balance_manager_id = "0x..."
-
 max_fee_bps = 50
 
 [funding]

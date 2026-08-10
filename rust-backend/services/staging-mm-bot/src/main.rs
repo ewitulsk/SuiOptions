@@ -50,12 +50,6 @@ struct BotConfig {
     /// than testnet is rejected at load.
     network: Network,
 
-    /// Adopt this BalanceManager instead of creating one. Verified against
-    /// chain state (right type, owned by our key) — a hint, never a grant.
-    /// After first boot, pin the id the log prints here.
-    #[serde(default)]
-    balance_manager_id: Option<String>,
-
     /// Per-order signed fee ceiling. Chain caps at 50; market default is 10.
     #[serde(default = "default_max_fee_bps")]
     max_fee_bps: u64,
@@ -273,13 +267,15 @@ async fn main() -> Result<()> {
     feeds.dedup();
     wait_for_first_prices(&cache, &feeds, Duration::from_secs(30)).await?;
 
-    // BalanceManager: adopt the configured id after verification, else
-    // create one. The id must be pinned in config after first boot so
-    // restarts keep the same escrow.
-    let manager_oid = resolve_balance_manager(&wrap, &cfg, exchange_package, cli.gas_budget).await?;
+    // BalanceManager: rediscover the one this wallet already created under
+    // the CURRENT exchange package, else create one. Zero config: a
+    // contract redeploy changes the package (and therefore the manager
+    // type), so discovery scopes itself to the live deployment and a fresh
+    // manager appears on the first boot after each redeploy.
+    let manager_oid = resolve_balance_manager(&wrap, exchange_package, cli.gas_budget).await?;
     let manager = ExAddress::parse(&manager_oid.to_string())
         .map_err(|e| anyhow!("manager id hex: {e}"))?;
-    tracing::info!(manager = %manager_oid, "BalanceManager ready — pin as balance_manager_id in config");
+    tracing::info!(manager = %manager_oid, "BalanceManager ready");
 
     let staleness = Staleness {
         max_price_age: Duration::from_millis(cfg.pyth.max_price_age_ms),
@@ -386,42 +382,90 @@ async fn wait_for_first_prices(
 
 // -- BalanceManager provisioning -----------------------------------------
 
+/// Rediscover this wallet's BalanceManager under the current exchange
+/// package, or create one.
+///
+/// `balance_manager::new` emits nothing, but the bot's funding pass
+/// deposits immediately after creating, so the manager reappears through
+/// its `DepositEvent`s (`owner` = manager owner). The event type is scoped
+/// to the live package, which is what makes this survive contract
+/// redeployments with zero config: a new package means no events, and a
+/// fresh manager is created for it. A discovered id is verified on-chain
+/// (type + owner) before adoption — worst case (pruned event history, bad
+/// candidate) we create a new manager; the old one stays owner-withdrawable.
 async fn resolve_balance_manager(
     wrap: &SuiClientWrapper,
-    cfg: &BotConfig,
     exchange_package: ObjectID,
     gas_budget: u64,
 ) -> Result<ObjectID> {
-    if let Some(raw) = &cfg.balance_manager_id {
-        let id = ObjectID::from_str(raw).context("parsing balance_manager_id")?;
-        let (obj, json) = wrap
-            .client
-            .get_object_json(id)
+    let event_type = format!("{exchange_package}::balance_manager::DepositEvent");
+    let our_address = wrap.signer.address.to_string().to_lowercase();
+    let mut cursor: Option<String> = None;
+    // Newest first; 10 pages of 50 is far deeper than the funding cadence
+    // needs — the latest top-up is never more than an hour old in steady
+    // state.
+    for _ in 0..10 {
+        let page = match wrap
+            .events
+            .query_by_type(&event_type, cursor.as_deref(), 50, true)
             .await
-            .with_context(|| format!("reading pinned BalanceManager {id}"))?;
-        let type_ok = obj
-            .type_()
-            .map(|t| t.to_string().ends_with("::balance_manager::BalanceManager"))
-            .unwrap_or(false);
-        if !type_ok {
-            bail!("pinned balance_manager_id {id} is not a BalanceManager");
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "DepositEvent query failed; creating a manager");
+                break;
+            }
+        };
+        for ev in &page.data {
+            let owner = ev.parsed_json.get("owner").and_then(|v| v.as_str());
+            if owner.map(str::to_lowercase).as_deref() != Some(our_address.as_str()) {
+                continue;
+            }
+            let Some(raw) = ev.parsed_json.get("manager").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Ok(id) = ObjectID::from_str(raw) else { continue };
+            match verify_manager(wrap, id).await {
+                Ok(()) => {
+                    tracing::info!(manager = %id, "adopted existing BalanceManager");
+                    return Ok(id);
+                }
+                Err(e) => {
+                    tracing::warn!(manager = %id, error = %format!("{e:#}"), "candidate manager rejected");
+                }
+            }
         }
-        let owner = json
-            .as_ref()
-            .and_then(|j| j.get("owner"))
-            .and_then(|o| o.as_str())
-            .map(str::to_owned)
-            .ok_or_else(|| anyhow!("BalanceManager {id} JSON missing owner"))?;
-        if owner != wrap.signer.address.to_string() {
-            bail!(
-                "pinned BalanceManager {id} is owned by {owner}, not our wallet {}",
-                wrap.signer.address
-            );
+        if !page.has_next_page || page.next_cursor.is_none() {
+            break;
         }
-        return Ok(id);
+        cursor = page.next_cursor;
     }
     exchange_tx::create_balance_manager(&wrap.client, &wrap.signer, exchange_package, gas_budget)
         .await
+}
+
+async fn verify_manager(wrap: &SuiClientWrapper, id: ObjectID) -> Result<()> {
+    let (obj, json) = wrap
+        .client
+        .get_object_json(id)
+        .await
+        .with_context(|| format!("reading BalanceManager {id}"))?;
+    let type_ok = obj
+        .type_()
+        .map(|t| t.to_string().ends_with("::balance_manager::BalanceManager"))
+        .unwrap_or(false);
+    if !type_ok {
+        bail!("{id} is not a BalanceManager");
+    }
+    let owner = json
+        .as_ref()
+        .and_then(|j| j.get("owner"))
+        .and_then(|o| o.as_str())
+        .ok_or_else(|| anyhow!("BalanceManager {id} JSON missing owner"))?;
+    if owner.to_lowercase() != wrap.signer.address.to_string().to_lowercase() {
+        bail!("owned by {owner}, not our wallet {}", wrap.signer.address);
+    }
+    Ok(())
 }
 
 // -- Funding -------------------------------------------------------------

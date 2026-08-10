@@ -9,10 +9,9 @@ health_addr = "0.0.0.0:8085"
 
 network = "testnet"
 
-# Adopt an existing BalanceManager instead of creating one. Leave unset on
-# first boot; the log prints the created id — pin it here so restarts keep
-# the same escrow. Verified on-chain (type + owner) before use.
-# balance_manager_id = "0x..."
+# The BalanceManager is auto-discovered at boot (newest DepositEvent under
+# the live exchange package owned by this wallet) or created when absent —
+# nothing to configure, including across contract redeployments.
 
 # Per-order signed fee ceiling in bps. The chain caps fees at 50 and the
 # market default is 10; signing 50 accepts any admin-set fee up to the cap.
