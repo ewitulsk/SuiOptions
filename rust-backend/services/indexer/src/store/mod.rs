@@ -254,14 +254,24 @@ pub type ReceiptKey = (ObjectId, String, u64, String);
 pub const RECEIPT_DEPOSIT: &str = "deposit";
 pub const RECEIPT_WITHDRAW: &str = "withdraw";
 
+/// Mirror of the Move-side `SHARE_OFFSET` constant in
+/// `contracts/trading-vault/sources/vault.move` (SO-370): a genesis deposit
+/// of V accounting units mints V × 1e6 shares. Event-derived share prices
+/// (`value / shares`) must be rescaled by this factor so genesis pps still
+/// stores as 1e12.
+pub const SHARE_OFFSET: u128 = 1_000_000;
+
 /// One curated trading vault's headline state (SO-282), assembled from its
 /// event stream. Balance-precise fields (NAV, per-asset holdings) need
 /// object reads and aren't modeled; what's here is exactly what the events
-/// state. `latest_pps_e12` is an *observed* deposit-asset-per-share price
-/// (1e12-scaled) inferred from the latest deposit or withdraw-fulfil.
+/// state. `latest_pps_e12` is an *observed* accounting-asset-per-share price
+/// (1e12-scaled, `SHARE_OFFSET`-adjusted) inferred from the latest deposit
+/// or withdraw-fulfil.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TradingVaultState {
-    pub deposit_asset: AssetType,
+    /// The vault's unit of account (SO-370: deposits may arrive in any
+    /// allowlisted asset).
+    pub accounting_asset: AssetType,
     pub creator: SuiAddress,
     /// Current curator wallet; updated to `recipient` on TvCuratorRotated.
     pub curator: SuiAddress,
@@ -300,7 +310,7 @@ pub struct TradingVaultPositionState {
     pub active: bool,
     pub stored_at_ms: u64,
     pub removed_at_ms: Option<u64>,
-    /// Latest appraisal mark, deposit-asset units (TvPositionAppraised).
+    /// Latest appraisal mark, accounting-asset units (TvPositionAppraised).
     pub last_value: Option<u64>,
     pub last_appraised_at_ms: Option<u64>,
 }
@@ -694,6 +704,11 @@ fn collect_participants(
         ChainEvent::VolPosted(p) => push(p.poster.to_hex(), "poster"),
         // The remaining trading-vault events carry no wallet addresses.
         ChainEvent::TvExternalAccountCleared(_)
+        | ChainEvent::TvDepositAssetAdded(_)
+        | ChainEvent::TvDepositAssetRemoved(_)
+        | ChainEvent::TvHaircutsSet(_)
+        | ChainEvent::TvPayoutAssetAmended(_)
+        | ChainEvent::TvExchangeCustodyCreated(_)
         | ChainEvent::TvVaultClosing(_)
         | ChainEvent::TvVaultClosed(_)
         | ChainEvent::TvDepositsPaused(_)
@@ -1048,8 +1063,14 @@ fn stage_event_into_batch(
             stage_trading_vault(inner, p.vault_id, sequence, batch);
         }
         // Non-mutating trading-vault events: served from the generic event
-        // feed only.
+        // feed only (SO-370: the deposit-asset allowlist, haircuts, and
+        // per-request payout assets aren't materialised).
         ChainEvent::TvSessionSettled(_)
+        | ChainEvent::TvDepositAssetAdded(_)
+        | ChainEvent::TvDepositAssetRemoved(_)
+        | ChainEvent::TvHaircutsSet(_)
+        | ChainEvent::TvPayoutAssetAmended(_)
+        | ChainEvent::TvExchangeCustodyCreated(_)
         | ChainEvent::TvAdapterAllowed(_)
         | ChainEvent::TvAdapterDisallowed(_)
         | ChainEvent::TvOracleAllowed(_)
@@ -1382,7 +1403,7 @@ fn vault_round_row(
 fn trading_vault_row(id: ObjectId, s: &TradingVaultState, sequence: i64) -> TradingVaultRow {
     TradingVaultRow {
         vault_id: id.to_hex(),
-        deposit_asset: s.deposit_asset.as_str().to_string(),
+        accounting_asset: s.accounting_asset.as_str().to_string(),
         creator: s.creator.to_hex(),
         curator: s.curator.to_hex(),
         curator_cap_id: s.curator_cap_id.to_hex(),
@@ -1840,7 +1861,7 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
             inner.trading_vaults.insert(
                 v.vault_id,
                 TradingVaultState {
-                    deposit_asset: v.deposit_asset.clone(),
+                    accounting_asset: v.accounting_asset.clone(),
                     creator: v.creator,
                     // The creator IS the initial curator; rotations update this.
                     curator: v.creator,
@@ -1899,10 +1920,16 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
         ChainEvent::TvDeposited(d) => {
             if let Some(v) = inner.trading_vaults.get_mut(&d.vault_id) {
                 v.total_shares = d.total_shares;
-                // Observed deposit-asset-per-share price of this deposit.
+                // Observed accounting-asset-per-share price of this deposit:
+                // value (not amount — the deposit may be a non-accounting
+                // asset) over the SHARE_OFFSET-scaled shares it minted.
                 if d.shares > 0 {
-                    v.latest_pps_e12 =
-                        Some((d.amount as u128).saturating_mul(1_000_000_000_000) / d.shares);
+                    v.latest_pps_e12 = Some(
+                        (d.value as u128)
+                            .saturating_mul(1_000_000_000_000)
+                            .saturating_mul(SHARE_OFFSET)
+                            / d.shares,
+                    );
                 }
                 v.updated_at_ms = timestamp_ms;
             }
@@ -1918,8 +1945,12 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                 v.total_shares = w.total_shares;
                 v.pending_withdrawals = v.pending_withdrawals.saturating_sub(1);
                 if w.value > 0 && w.shares > 0 {
-                    v.latest_pps_e12 =
-                        Some((w.value as u128).saturating_mul(1_000_000_000_000) / w.shares);
+                    v.latest_pps_e12 = Some(
+                        (w.value as u128)
+                            .saturating_mul(1_000_000_000_000)
+                            .saturating_mul(SHARE_OFFSET)
+                            / w.shares,
+                    );
                 }
                 v.updated_at_ms = timestamp_ms;
             }
@@ -2009,8 +2040,14 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
             }
         }
         // Log-only trading-vault events: no materialised view — consumers
-        // read them from the generic event feed.
+        // read them from the generic event feed (SO-370's allowlist /
+        // haircut / payout-amend events included).
         ChainEvent::TvSessionSettled(_)
+        | ChainEvent::TvDepositAssetAdded(_)
+        | ChainEvent::TvDepositAssetRemoved(_)
+        | ChainEvent::TvHaircutsSet(_)
+        | ChainEvent::TvPayoutAssetAmended(_)
+        | ChainEvent::TvExchangeCustodyCreated(_)
         | ChainEvent::TvAdapterAllowed(_)
         | ChainEvent::TvAdapterDisallowed(_)
         | ChainEvent::TvOracleAllowed(_)
@@ -2730,7 +2767,7 @@ mod tests {
                 vault_id: vault,
                 creator: SuiAddress::new([0x01; 32]),
                 curator_cap_id: ObjectId::new([0x03; 32]),
-                deposit_asset: AssetType::new("9b::tusdc::TUSDC"),
+                accounting_asset: AssetType::new("9b::tusdc::TUSDC"),
                 lockup_ms: 0,
                 curator_fee_bps: 100,
                 unwind_grace_ms: 0,
@@ -2822,6 +2859,87 @@ mod tests {
         assert_eq!(staged.db_batch.events.len(), 1);
     }
 
+    /// SO-370: observed pps comes from `value` (accounting units, not the
+    /// deposited `amount`) over SHARE_OFFSET-scaled shares, so a genesis
+    /// deposit still stores pps = 1e12.
+    #[test]
+    fn trading_vault_pps_uses_value_and_share_offset() {
+        use protocol_types::events::{TvDeposited, TvVaultCreated, TvWithdrawFulfilled};
+        let store = Store::default();
+        let vault = ObjectId::new([0xf0; 32]);
+        let depositor = SuiAddress::new([0x07; 32]);
+        let tusdc = AssetType::new("9b::tusdc::TUSDC");
+
+        let mut checkpoint = 0u64;
+        let mut stage = |ev: ChainEvent, ts: u64| {
+            checkpoint += 1;
+            let staged = store
+                .stage_batch(checkpoint, ts, vec![(ev, "0xd".to_string(), 0)])
+                .unwrap();
+            staged.db_batch.trading_vaults.into_iter().next().unwrap()
+        };
+
+        stage(
+            ChainEvent::TvVaultCreated(TvVaultCreated {
+                vault_id: vault,
+                creator: SuiAddress::new([0x01; 32]),
+                curator_cap_id: ObjectId::new([0x03; 32]),
+                accounting_asset: tusdc.clone(),
+                lockup_ms: 0,
+                curator_fee_bps: 100,
+                unwind_grace_ms: 0,
+            }),
+            1_000,
+        );
+        // A TBTC deposit valued at 1_000_000 accounting units minting
+        // offset-scaled shares: pps = value × 1e12 × 1e6 / shares = 1e12.
+        let row = stage(
+            ChainEvent::TvDeposited(TvDeposited {
+                vault_id: vault,
+                depositor,
+                curator_cap: None,
+                asset: AssetType::new("9b::tbtc::TBTC"),
+                amount: 5,
+                value: 1_000_000,
+                shares: 1_000_000 * SHARE_OFFSET,
+                total_shares: 1_000_000 * SHARE_OFFSET,
+                locked_until_ms: 0,
+            }),
+            2_000,
+        );
+        assert_eq!(
+            row.latest_pps_e12,
+            Some(u128_to_bigdecimal(1_000_000_000_000))
+        );
+        // A fulfilment at a 2% gain: pps = 510_000 × 1e18 / 5e11 = 1.02e12.
+        let row = stage(
+            ChainEvent::TvWithdrawFulfilled(TvWithdrawFulfilled {
+                vault_id: vault,
+                seq: 0,
+                recipient: depositor,
+                shares: 500_000 * SHARE_OFFSET,
+                value: 510_000,
+                basis: 500_000,
+                profit: 10_000,
+                gross_fee: 0,
+                protocol_cut: 0,
+                curator_net: 0,
+                curator_shares_minted: 0,
+                payout: 510_000,
+                payout_asset: tusdc,
+                payout_units: 510_000,
+                price: 1_000_000_000_000,
+                total_shares: 500_000 * SHARE_OFFSET,
+            }),
+            3_000,
+        );
+        assert_eq!(
+            row.latest_pps_e12,
+            Some(u128_to_bigdecimal(1_020_000_000_000))
+        );
+        assert_eq!(row.total_shares, u128_to_bigdecimal(500_000 * SHARE_OFFSET));
+    }
+
     #[test]
     fn trading_vault_appraisal_marks_are_last_write_wins() {
         use protocol_types::events::{
@@ -2837,7 +2955,7 @@ mod tests {
                 vault_id: vault,
                 creator: SuiAddress::new([0x01; 32]),
                 curator_cap_id: ObjectId::new([0x03; 32]),
-                deposit_asset: AssetType::new("9b::tusdc::TUSDC"),
+                accounting_asset: AssetType::new("9b::tusdc::TUSDC"),
                 lockup_ms: 0,
                 curator_fee_bps: 100,
                 unwind_grace_ms: 0,

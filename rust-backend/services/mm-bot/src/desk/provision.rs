@@ -293,7 +293,7 @@ async fn verify(
         return Err(anyhow!("vault {} has deposits paused", vault_id.to_hex_literal()));
     }
     let want = canonicalize_move_type(p.settlement_coin_type);
-    let got = canonicalize_move_type(&view.deposit_asset.to_string());
+    let got = canonicalize_move_type(&view.accounting_asset.to_string());
     if want != got {
         return Err(anyhow!(
             "vault {} is denominated in {got}, but the desk settles in {want}",
@@ -458,7 +458,7 @@ mod tests {
     fn vault(id: u8, creator: u8, state: &str) -> TradingVault {
         TradingVault {
             vault_id: oid(id),
-            deposit_asset: protocol_types::asset::AssetType::new("0x2::tusdc::TUSDC"),
+            accounting_asset: protocol_types::asset::AssetType::new("0x2::tusdc::TUSDC"),
             creator: addr(creator),
             curator: addr(9),
             curator_cap_id: oid(100 + id),

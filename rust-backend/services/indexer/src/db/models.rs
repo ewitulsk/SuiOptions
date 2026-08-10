@@ -146,6 +146,10 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::TvDeposited(_) => "TvDeposited",
         ChainEvent::TvWithdrawRequested(_) => "TvWithdrawRequested",
         ChainEvent::TvWithdrawFulfilled(_) => "TvWithdrawFulfilled",
+        ChainEvent::TvDepositAssetAdded(_) => "TvDepositAssetAdded",
+        ChainEvent::TvDepositAssetRemoved(_) => "TvDepositAssetRemoved",
+        ChainEvent::TvHaircutsSet(_) => "TvHaircutsSet",
+        ChainEvent::TvPayoutAssetAmended(_) => "TvPayoutAssetAmended",
         ChainEvent::TvSessionSettled(_) => "TvSessionSettled",
         ChainEvent::TvPositionStored(_) => "TvPositionStored",
         ChainEvent::TvPositionRemoved(_) => "TvPositionRemoved",
@@ -158,6 +162,7 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::TvProtocolConfigUpdated(_) => "TvProtocolConfigUpdated",
         ChainEvent::TvCollateralReleased(_) => "TvCollateralReleased",
         ChainEvent::TvCustodyCreated(_) => "TvCustodyCreated",
+        ChainEvent::TvExchangeCustodyCreated(_) => "TvExchangeCustodyCreated",
         ChainEvent::TvPoolAllowed(_) => "TvPoolAllowed",
         ChainEvent::TvPoolDisallowed(_) => "TvPoolDisallowed",
         ChainEvent::TvRfqOpened(_) => "TvRfqOpened",
@@ -600,7 +605,9 @@ impl VaultReceiptRow {
 #[diesel(primary_key(vault_id))]
 pub struct TradingVaultRow {
     pub vault_id: String,
-    pub deposit_asset: String,
+    /// The vault's unit of account (renamed from deposit_asset in SO-370:
+    /// deposits may arrive in any allowlisted asset).
+    pub accounting_asset: String,
     pub creator: String,
     /// Current curator wallet (updated on TvCuratorRotated).
     pub curator: String,
@@ -637,7 +644,7 @@ impl TradingVaultRow {
         Ok((
             id,
             TradingVaultState {
-                deposit_asset: AssetType::new(self.deposit_asset),
+                accounting_asset: AssetType::new(self.accounting_asset),
                 creator: SuiAddress::from_hex(&self.creator)
                     .map_err(|e| anyhow::anyhow!("trading vault creator {}: {e}", self.creator))?,
                 curator: SuiAddress::from_hex(&self.curator)
@@ -685,7 +692,7 @@ pub struct TradingVaultPositionRow {
     pub stored_at_ms: i64,
     pub removed_at_ms: Option<i64>,
     pub updated_at_seq: i64,
-    /// Latest appraisal mark, deposit-asset units (TvPositionAppraised).
+    /// Latest appraisal mark, accounting-asset units (TvPositionAppraised).
     pub last_value: Option<i64>,
     pub last_appraised_at_ms: Option<i64>,
 }
