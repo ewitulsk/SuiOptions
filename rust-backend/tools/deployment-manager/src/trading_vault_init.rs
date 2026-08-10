@@ -17,7 +17,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
-use sui_tx::chain::{created_objects, ChainClient};
+use sui_tx::chain::ChainClient;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::ObjectArg;
@@ -69,43 +69,33 @@ pub fn registrar_pubkey_for_env(env: &str) -> Option<&'static str> {
         .map(|(_, key)| *key)
 }
 
-/// Pull one publish tx's created objects and index them by
-/// `module::name`.
-async fn created_by_type(
-    client: &ChainClient,
-    digest: &str,
-) -> Result<BTreeMap<String, ObjectID>> {
-    let digest = digest
-        .parse()
-        .with_context(|| format!("parsing publish digest {digest}"))?;
-    let resp = client
-        .get_transaction(&digest)
-        .await
-        .context("fetching publish tx for object resolution")?;
-    let mut out = BTreeMap::new();
-    for change in created_objects(&resp) {
-        if let Ok(tag) = sui_types::parse_sui_struct_tag(&change.object_type) {
-            out.insert(format!("{}::{}", tag.module, tag.name), change.object_id);
-        }
-    }
-    Ok(out)
+/// Index one publish outcome's init-created objects by `module::name`.
+///
+/// Sourced from the publish RESPONSE (`DepPublishOutcome::created_objects`),
+/// never a follow-up `GetTransaction`: the load-balanced public gRPC
+/// endpoint serves tx lookups from nodes that can lag the executing node by
+/// 30s+ (two consecutive redeploys died on exactly that, 2026-08-10), while
+/// the response is authoritative and already in hand.
+fn index_created(objs: &[(String, String, ObjectID)]) -> BTreeMap<String, ObjectID> {
+    objs.iter()
+        .map(|(module, name, id)| (format!("{module}::{name}"), *id))
+        .collect()
 }
 
-pub async fn resolve_objects(
-    client: &ChainClient,
-    trading_vault_digest: &str,
-    oracle_pyth_digest: &str,
-    oracle_switchboard_digest: &str,
-    deepbook_adapter_digest: &str,
-    options_adapter_digest: &str,
-    equity_oracle_digest: &str,
+pub fn resolve_objects(
+    trading_vault: &[(String, String, ObjectID)],
+    oracle_pyth: &[(String, String, ObjectID)],
+    oracle_switchboard: &[(String, String, ObjectID)],
+    deepbook_adapter: &[(String, String, ObjectID)],
+    options_adapter: &[(String, String, ObjectID)],
+    equity_oracle: &[(String, String, ObjectID)],
 ) -> Result<TradingVaultObjects> {
-    let tv = created_by_type(client, trading_vault_digest).await?;
-    let op = created_by_type(client, oracle_pyth_digest).await?;
-    let osw = created_by_type(client, oracle_switchboard_digest).await?;
-    let dba = created_by_type(client, deepbook_adapter_digest).await?;
-    let oa = created_by_type(client, options_adapter_digest).await?;
-    let eo = created_by_type(client, equity_oracle_digest).await?;
+    let tv = index_created(trading_vault);
+    let op = index_created(oracle_pyth);
+    let osw = index_created(oracle_switchboard);
+    let dba = index_created(deepbook_adapter);
+    let oa = index_created(options_adapter);
+    let eo = index_created(equity_oracle);
     let pick = |map: &BTreeMap<String, ObjectID>, key: &str| {
         map.get(key)
             .copied()
