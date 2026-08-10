@@ -179,7 +179,9 @@ impl EventIngestor {
             db,
             package,
             poll_interval: Duration::from_millis(500),
-            page_size: 100,
+            // The GraphQL events query caps page size at 50 (observed live:
+            // "Page size is too large: 100 > 50" — every poll failed).
+            page_size: 50,
             tx,
         }
     }
