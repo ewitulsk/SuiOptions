@@ -1328,6 +1328,7 @@ mod tests {
                     oracle_pyth: op_pkg,
                     deepbook_adapter: None,
                     options_adapter: None,
+                    exchange_adapter: None,
                     equity_oracle,
                     pyth: None,
                     switchboard: None,
@@ -1391,6 +1392,7 @@ mod tests {
                 oracle_pyth: op_pkg,
                 deepbook_adapter: None,
                 options_adapter: None,
+                exchange_adapter: None,
                 equity_oracle: None,
                 pyth: Some(PythPkgs { pyth: pyth_pkg, wormhole: wh_pkg }),
                 switchboard: Some(SwitchboardPkgs {
@@ -1470,6 +1472,7 @@ mod tests {
                     oracle_pyth: op_pkg,
                     deepbook_adapter: None,
                     options_adapter: None,
+                    exchange_adapter: None,
                     equity_oracle: None,
                     pyth,
                     switchboard: None,

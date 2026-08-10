@@ -431,6 +431,7 @@ mod tests {
                 oracle_switchboard: None,
                 deepbook_adapter: None,
                 options_adapter: None,
+                exchange_adapter: None,
                 equity_oracle: None,
                 trading_vault_objects: None,
                 quote_signer_id: None,

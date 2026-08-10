@@ -540,60 +540,16 @@ async fn deploy_one(
         previous_token_info
     };
 
-    // Activate the trading-vault family (SO-292): allowlist witnesses,
-    // seed each provider's feeds from the catalog, and record the governance object
-    // ids so services stop re-deriving them from publish digests. Pools
-    // are allowlisted per roll by the option-scheduler, not here.
-    let trading_vault_objects = {
-        let objects = deployment_manager::trading_vault_init::resolve_objects(
-            &trading_vault_out.created_objects,
-            &oracle_pyth_out.created_objects,
-            &oracle_switchboard_out.created_objects,
-            &deepbook_adapter_out.created_objects,
-            &options_adapter_out.created_objects,
-            &equity_oracle_out.created_objects,
-        )
-        .context("resolving trading-vault governance objects")?;
-        let activation_digest = deployment_manager::trading_vault_init::activate(
-            &client,
-            &signer,
-            &objects,
-            publish.admin_cap_id,
-            trading_vault_out.package_id,
-            oracle_pyth_out.package_id,
-            oracle_switchboard_out.package_id,
-            deepbook_adapter_out.package_id,
-            options_adapter_out.package_id,
-            equity_oracle_out.package_id,
-            &token_info,
-            registrar_pubkey,
-            gas_budget,
-        )
-        .await
-        .context("activating trading-vault registries")?;
-        tracing::info!(digest = %activation_digest, "trading-vault registries activated");
-        Some(TradingVaultObjectsRecord {
-            vault_protocol_config_id: objects.vault_protocol_config_id.to_string(),
-            integration_registry_id: objects.integration_registry_id.to_string(),
-            oracle_registry_id: objects.oracle_registry_id.to_string(),
-            pyth_feed_registry_id: objects.pyth_feed_registry_id.to_string(),
-            switchboard_feed_registry_id: Some(
-                objects.switchboard_feed_registry_id.to_string(),
-            ),
-            pool_allowlist_id: objects.pool_allowlist_id.to_string(),
-            equity_book_id: Some(objects.equity_book_id.to_string()),
-            vol_book_id: Some(objects.vol_book_id.to_string()),
-            registrar_pubkey: registrar_pubkey.map(str::to_owned),
-            activation_digest,
-        })
-    };
-
     // The exchange lives in the same redeploy cycle as the protocol: a
     // testnet redeploy invalidates open orders by definition, so the
     // settlement package republishes fresh every run and its markets are
     // recreated against the current token catalog. (The orderbook DB is
     // wiped by the redeploy workflow alongside indexer/scheduler, and its
     // whitelist sync disables the previous deployment's market rows.)
+    //
+    // Published BEFORE the trading-vault activation because the
+    // exchange-adapter (SO-370) links against it and its witness joins
+    // the activation PTB's integration allowlist.
     let exchange = {
         let out = publish_dep_package(
             &client,
@@ -634,6 +590,69 @@ async fn deploy_one(
         Some(ex)
     };
 
+    // Vault-curator maker adapter for the hybrid exchange (SO-370);
+    // republishes with the exchange it links against.
+    let exchange_adapter_out = publish_dep_package(
+        &client,
+        &signer,
+        &contracts_root.join("exchange-adapter"),
+        "exchange_adapter",
+        env,
+        gas_budget,
+    )
+    .await
+    .with_context(|| format!("publishing exchange_adapter to {network}"))?;
+    tracing::info!(package = %exchange_adapter_out.package_id, "exchange_adapter published");
+
+    // Activate the trading-vault family (SO-292): allowlist witnesses,
+    // seed each provider's feeds from the catalog, and record the governance object
+    // ids so services stop re-deriving them from publish digests. Pools
+    // are allowlisted per roll by the option-scheduler, not here.
+    let trading_vault_objects = {
+        let objects = deployment_manager::trading_vault_init::resolve_objects(
+            &trading_vault_out.created_objects,
+            &oracle_pyth_out.created_objects,
+            &oracle_switchboard_out.created_objects,
+            &deepbook_adapter_out.created_objects,
+            &options_adapter_out.created_objects,
+            &equity_oracle_out.created_objects,
+        )
+        .context("resolving trading-vault governance objects")?;
+        let activation_digest = deployment_manager::trading_vault_init::activate(
+            &client,
+            &signer,
+            &objects,
+            publish.admin_cap_id,
+            trading_vault_out.package_id,
+            oracle_pyth_out.package_id,
+            oracle_switchboard_out.package_id,
+            deepbook_adapter_out.package_id,
+            options_adapter_out.package_id,
+            exchange_adapter_out.package_id,
+            equity_oracle_out.package_id,
+            &token_info,
+            registrar_pubkey,
+            gas_budget,
+        )
+        .await
+        .context("activating trading-vault registries")?;
+        tracing::info!(digest = %activation_digest, "trading-vault registries activated");
+        Some(TradingVaultObjectsRecord {
+            vault_protocol_config_id: objects.vault_protocol_config_id.to_string(),
+            integration_registry_id: objects.integration_registry_id.to_string(),
+            oracle_registry_id: objects.oracle_registry_id.to_string(),
+            pyth_feed_registry_id: objects.pyth_feed_registry_id.to_string(),
+            switchboard_feed_registry_id: Some(
+                objects.switchboard_feed_registry_id.to_string(),
+            ),
+            pool_allowlist_id: objects.pool_allowlist_id.to_string(),
+            equity_book_id: Some(objects.equity_book_id.to_string()),
+            vol_book_id: Some(objects.vol_book_id.to_string()),
+            registrar_pubkey: registrar_pubkey.map(str::to_owned),
+            activation_digest,
+        })
+    };
+
     Ok(NetworkDeployment {
         package_info: PackageInfo {
             package_id: publish.package_id.to_string(),
@@ -656,6 +675,7 @@ async fn deploy_one(
             oracle_switchboard,
             deepbook_adapter,
             options_adapter,
+            exchange_adapter: Some(record(&exchange_adapter_out)),
             equity_oracle: Some(record(&equity_oracle_out)),
             trading_vault_objects,
             cctp_bridge: previous_cctp,

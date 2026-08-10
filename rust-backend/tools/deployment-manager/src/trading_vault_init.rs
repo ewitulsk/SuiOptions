@@ -132,6 +132,7 @@ pub async fn activate(
     oracle_switchboard_pkg: ObjectID,
     deepbook_adapter_pkg: ObjectID,
     options_adapter_pkg: ObjectID,
+    exchange_adapter_pkg: ObjectID,
     equity_oracle_pkg: ObjectID,
     token_info: &BTreeMap<String, TokenSpec>,
     registrar_pubkey: Option<&str>,
@@ -170,6 +171,7 @@ pub async fn activate(
     for witness in [
         format!("{deepbook_adapter_pkg}::deepbook_adapter::DeepBookAdapter"),
         format!("{options_adapter_pkg}::options_adapter::OptionsAdapter"),
+        format!("{exchange_adapter_pkg}::exchange_adapter::ExchangeAdapter"),
         format!("{trading_vault_pkg}::vault_mm::VaultMm"),
     ] {
         let t = type_name_call(&mut pt, &witness)?;

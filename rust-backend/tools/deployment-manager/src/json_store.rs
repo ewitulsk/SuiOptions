@@ -76,6 +76,9 @@ pub struct PackageInfo {
     pub deepbook_adapter: Option<PackageRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options_adapter: Option<PackageRecord>,
+    /// Hybrid-exchange maker adapter for the trading vault (SO-370).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exchange_adapter: Option<PackageRecord>,
     /// Keeper-posted EquityBook package backing external-account equity
     /// (SO-299).
     #[serde(default, skip_serializing_if = "Option::is_none")]
