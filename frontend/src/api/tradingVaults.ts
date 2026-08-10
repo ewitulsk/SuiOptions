@@ -19,11 +19,20 @@ const API_BASE_URL: string =
 /** Price-per-share fixed-point scale (`latestPpsE12Raw` is pps × 1e12). */
 export const PPS_E12 = 1e12;
 
+/**
+ * Virtual-offset share scale (SO-370): genesis mints `value × 1e6` shares
+ * against one virtual asset unit, so raw shares are 1e6× the accounting
+ * asset's raw units at pps 1. Display shares and pps rescale by this.
+ */
+export const SHARE_OFFSET = 1e6;
+
 /** One curated trading vault. Mirrors the api-service trading-vault DTO. */
 export type TradingVault = {
   vaultId: string;
-  /** Canonical `0x…` coin type of the vault's single deposit asset. */
-  depositAsset: string;
+  /** Canonical `0x…` coin type of the vault's ACCOUNTING asset (SO-370:
+   * `config.accounting_asset` — the unit of account; deposits/payouts may
+   * be any asset on the vault's `deposit_assets` allowlist). */
+  accountingAsset: string;
   creator: string;
   curator: string;
   curatorCapId: string;
@@ -150,7 +159,8 @@ type TradingVaultPositionWire = {
 function mapVault(w: TradingVaultWire): TradingVault {
   return {
     vaultId: w.vault_id,
-    depositAsset: w.deposit_coin_type,
+    // Wire name predates the SO-370 accounting-asset rename.
+    accountingAsset: w.deposit_coin_type,
     creator: w.creator,
     curator: w.curator,
     curatorCapId: w.curator_cap_id,
@@ -338,18 +348,21 @@ export function tokenForCoinType(coinType: string | null | undefined): Supported
   );
 }
 
-/** Share price in deposit-asset units per share, or null pre-appraisal. */
+/** Displayed share price in accounting-asset units per share, or null
+ * pre-appraisal. Raw pps (value/shares) carries the SO-370 virtual offset —
+ * shares are 1e6× the accounting raw units — so display = raw × 1e6. */
 export function tradingVaultPps(v: TradingVault): number | null {
   if (v.latestPpsE12Raw == null) return null;
-  return Number(v.latestPpsE12Raw) / PPS_E12;
+  return (Number(v.latestPpsE12Raw) * SHARE_OFFSET) / PPS_E12;
 }
 
 /**
- * TVL estimate in display units of the deposit asset:
- * totalShares × pps / 10^decimals. Null when pps or decimals are unknown.
+ * TVL estimate in display units of the accounting asset:
+ * totalShares × raw pps / 10^decimals (the SHARE_OFFSET in the displayed
+ * pps cancels against the offset carried by raw shares).
  */
 export function tradingVaultTvl(v: TradingVault, decimals: number | null): number | null {
   const pps = tradingVaultPps(v);
   if (pps == null || decimals == null) return null;
-  return (Number(v.totalSharesRaw) * pps) / 10 ** decimals;
+  return (Number(v.totalSharesRaw) * pps) / (SHARE_OFFSET * 10 ** decimals);
 }
