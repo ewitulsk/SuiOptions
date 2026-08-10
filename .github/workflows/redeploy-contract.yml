@@ -581,8 +581,8 @@ jobs:
                 "COMPOSE_FILE=\"docker-compose.\($env).yml\"",
 
                 "# ── 1. Stop the services whose DBs we wipe ──",
-                "docker compose -f \"$COMPOSE_FILE\" stop indexer option-scheduler || true",
-                "echo \"indexer + option-scheduler stopped\"",
+                "docker compose -f \"$COMPOSE_FILE\" stop indexer option-scheduler orderbook || true",
+                "echo \"indexer + option-scheduler + orderbook stopped\"",
 
                 "# ── 2. Download updated files + provisioning script from S3 ──",
                 "aws s3 cp \"s3://\($bucket)/\($bundle_key)\" /tmp/redeploy-bundle.tgz --region \($region)",
@@ -601,7 +601,9 @@ jobs:
                 "# Vault-APY rows now live in the price-charting Timescale DB keyed by the",
                 "# new vault ids; old-vault rows simply orphan (harmless), so there is no",
                 "# APY DB to wipe here anymore (folded out of derived-metric-worker).",
-                "for svc in indexer scheduler; do DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/redeploy/wipe-provision-db.sh \($env | @sh) \"$svc\"; done",
+                "# orderbook included: the exchange package republishes every",
+                "# redeploy, so resting orders/fills reference dead registries.",
+                "for svc in indexer scheduler orderbook; do DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/redeploy/wipe-provision-db.sh \($env | @sh) \"$svc\"; done",
 
                 "# The mm-bot needs no reset — it resolves its Account from",
                 "# chain state for the current package on boot, bootstrapping a",
@@ -681,7 +683,7 @@ jobs:
           # and no longer published (SO-332), so its Published.toml is stale
           # by design and must not be re-stamped.
           git add contracts/core/Published.toml contracts/auction/Published.toml \
-                  contracts/rfq/Published.toml
+                  contracts/rfq/Published.toml contracts/exchange/Published.toml
           # mm-bot collateral routing for the fresh core (absent when this
           # env has no mm-bot). Ships to the host in the deploy bundle.
           git add rust-backend/services/mm-bot/config/collateral.*.toml || true

@@ -108,11 +108,9 @@ async fn main() -> Result<()> {
     }
 
     // --deploy-exchange publishes ONLY the hybrid-exchange settlement
-    // package and records it on the existing env entry — no protocol
-    // republish. Kept out of the default pipeline on purpose: a republish
-    // creates a NEW package while existing market registries (the
-    // order-signature domain) stay bound to the old one, so this is an
-    // explicit, rare ceremony.
+    // package (+ fresh markets) and records it on the existing env entry —
+    // no protocol republish. The default pipeline also republishes the
+    // exchange on every redeploy; this flag is for exchange-only iteration.
     if cli.deploy_exchange {
         let exchange_path = contracts_path.join("exchange");
         let mut record = store
@@ -278,10 +276,6 @@ async fn main() -> Result<()> {
         .envs
         .get(&env_key)
         .and_then(|d| d.package_info.deepbook.clone());
-    let previous_exchange = store
-        .envs
-        .get(&env_key)
-        .and_then(|d| d.package_info.exchange.clone());
     let previous_cctp = store
         .envs
         .get(&env_key)
@@ -296,7 +290,6 @@ async fn main() -> Result<()> {
         previous_token_info,
         previous_deepbook,
         previous_cctp,
-        previous_exchange,
         deployment_manager::trading_vault_init::registrar_pubkey_for_env(&env_key),
         cli.gas_budget,
         cli.skip_init,
@@ -322,10 +315,6 @@ async fn deploy_one(
     previous_token_info: BTreeMap<String, TokenSpec>,
     previous_deepbook: Option<serde_json::Value>,
     previous_cctp: Option<CctpBridgeRecord>,
-    // Exchange package record from the previous deploy: always carried
-    // forward — the protocol pipeline never republishes it (see
-    // --deploy-exchange).
-    previous_exchange: Option<ExchangeRecord>,
     // Ed25519 pubkey of this env's attestation registrar (SO-308), seeded
     // into the VaultProtocolConfig at activation. `None` leaves the attested
     // registration path disabled.
@@ -599,24 +588,50 @@ async fn deploy_one(
         })
     };
 
-    // Reconcile the exchange market list against the (possibly republished)
-    // token catalog: recreate markets whose token types went stale, drop
-    // markets whose tokens left the catalog. The exchange package itself is
-    // never republished here (see --deploy-exchange).
-    let exchange = match previous_exchange {
-        Some(mut ex) => {
-            deployment_manager::exchange_markets::create_markets(
-                &client,
-                &signer,
-                &mut ex,
-                &token_info,
-                gas_budget,
-            )
-            .await
-            .context("reconciling exchange markets")?;
-            Some(ex)
-        }
-        None => None,
+    // The exchange lives in the same redeploy cycle as the protocol: a
+    // testnet redeploy invalidates open orders by definition, so the
+    // settlement package republishes fresh every run and its markets are
+    // recreated against the current token catalog. (The orderbook DB is
+    // wiped by the redeploy workflow alongside indexer/scheduler, and its
+    // whitelist sync disables the previous deployment's market rows.)
+    let exchange = {
+        let out = publish_dep_package(
+            &client,
+            &signer,
+            &contracts_root.join("exchange"),
+            "exchange",
+            env,
+            gas_budget,
+        )
+        .await
+        .with_context(|| format!("publishing exchange to {network}"))?;
+        // exchange::admin's init transfers an AdminCap to the deployer.
+        let admin_cap_id = out
+            .created_objects
+            .iter()
+            .find(|(module, name, _)| module == "admin" && name == "AdminCap")
+            .map(|(_, _, id)| *id)
+            .context("exchange publish created no admin::AdminCap")?;
+        tracing::info!(package = %out.package_id, admin_cap = %admin_cap_id, "exchange published");
+        let mut ex = ExchangeRecord {
+            package_id: out.package_id.to_string(),
+            upgrade_cap_id: out.upgrade_cap_id.to_string(),
+            admin_cap_id: admin_cap_id.to_string(),
+            publish_digest: out.digest,
+            deployed_at: chrono::Utc::now().to_rfc3339(),
+            network: network.as_str().to_owned(),
+            markets: std::collections::BTreeMap::new(),
+        };
+        deployment_manager::exchange_markets::create_markets(
+            &client,
+            &signer,
+            &mut ex,
+            &token_info,
+            gas_budget,
+        )
+        .await
+        .context("creating exchange markets")?;
+        Some(ex)
     };
 
     Ok(NetworkDeployment {
