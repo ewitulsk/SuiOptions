@@ -178,7 +178,9 @@ async fn ingest_once(
     loop {
         let page = p
             .events
-            .query_by_type(event_type, cursor.as_deref(), 100, /* ascending */ false)
+            // 50 = the GraphQL events-query page cap (orderbook sync hit
+            // "Page size is too large: 100 > 50" live).
+            .query_by_type(event_type, cursor.as_deref(), 50, /* ascending */ false)
             .await
             .context("querying OrderFilled events")?;
         if page.data.is_empty() {

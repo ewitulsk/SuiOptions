@@ -218,7 +218,8 @@ async fn ingest_once(p: &ExchangeWatcherParams, s: &mut Stream) -> Result<Option
     loop {
         let page = p
             .events
-            .query_by_type(&s.event_type, cursor.as_deref(), 100, /* ascending */ false)
+            // 50 = the GraphQL events-query page cap (see watcher.rs).
+            .query_by_type(&s.event_type, cursor.as_deref(), 50, /* ascending */ false)
             .await
             .context("querying FillEvents")?;
         if page.data.is_empty() {
