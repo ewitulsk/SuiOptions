@@ -291,6 +291,10 @@ pub struct TradingVaultPkgs {
     pub oracle_pyth: ObjectID,
     pub deepbook_adapter: Option<ObjectID>,
     pub options_adapter: Option<ObjectID>,
+    /// exchange-adapter package (SO-370): vaults with hybrid-exchange
+    /// custodies carry its `begin/value/finalize_custody_appraisal` legs
+    /// in their deposit appraisals, same shape as the DeepBook adapter's.
+    pub exchange_adapter: Option<ObjectID>,
     /// equity-oracle package (SO-299): deposits on external-configured
     /// vaults carry an extra `equity_oracle::record` appraisal leg.
     pub equity_oracle: Option<ObjectID>,
@@ -552,6 +556,11 @@ pub fn protocol_templates(
                 appraisal_allowed.push(TargetMatcher::Exact(MoveTarget::new(dba, "deepbook_adapter", f)));
             }
         }
+        if let Some(xa) = tvp.exchange_adapter {
+            for f in ["begin_custody_appraisal", "value_asset", "finalize_custody_appraisal"] {
+                appraisal_allowed.push(TargetMatcher::Exact(MoveTarget::new(xa, "exchange_adapter", f)));
+            }
+        }
         if let Some(oa) = tvp.options_adapter {
             for f in ["appraise_rfq_ticket", "appraise_call_position", "appraise_put_position"] {
                 appraisal_allowed.push(TargetMatcher::Exact(MoveTarget::new(oa, "options_adapter", f)));
@@ -650,16 +659,20 @@ pub fn protocol_templates(
             vec![create.clone()],
             vec![(create, 1)],
         ));
-        for (name, function) in [
-            ("trading_vault:request_withdraw", "request_withdraw"),
-            ("trading_vault:enqueue_closed_stake", "enqueue_closed_stake"),
+        // request_withdraw<P> and amend_payout_asset<P> carry the payout
+        // asset as their single type argument (SO-370);
+        // enqueue_closed_stake stays type-free.
+        for (name, function, arity) in [
+            ("trading_vault:request_withdraw", "request_withdraw", 1),
+            ("trading_vault:amend_payout_asset", "amend_payout_asset", 1),
+            ("trading_vault:enqueue_closed_stake", "enqueue_closed_stake", 0),
         ] {
             let target = tvt("vault", function);
             templates.push(PtbTemplate::exact_only(
                 name.to_owned(),
                 vec![target.clone()],
                 vec![target.clone()],
-                vec![(target, 0)],
+                vec![(target, arity)],
             ));
         }
     }
@@ -1509,6 +1522,69 @@ mod tests {
         let mut forged = calls.clone();
         forged[4].1 = 2;
         assert_eq!(match_any(&with_pyth(Some(handles)), &build(&forged, true)), None);
+    }
+
+    /// SO-370 shapes: request_withdraw/amend carry the payout type arg,
+    /// non-accounting deposits wrap their attestation in `option::some`,
+    /// and exchange-custody appraisal legs sponsor inside a deposit.
+    #[test]
+    fn trading_vault_so370_shapes() {
+        let tv_pkg = ObjectID::from_hex_literal("0x71ad").unwrap();
+        let op_pkg = ObjectID::from_hex_literal("0x0217").unwrap();
+        let xa_pkg = ObjectID::from_hex_literal("0xe8c1").unwrap();
+        let templates = protocol_templates(
+            pkg(),
+            None,
+            &[],
+            false,
+            None,
+            None,
+            Some(TradingVaultPkgs {
+                trading_vault: tv_pkg,
+                oracle_pyth: op_pkg,
+                deepbook_adapter: None,
+                options_adapter: None,
+                exchange_adapter: Some(xa_pkg),
+                equity_oracle: None,
+                pyth: None,
+                switchboard: None,
+            }),
+        );
+        // request_withdraw<P> — one type arg; the pre-SO-370 type-free
+        // shape is no longer sponsored.
+        let rw = build(&[(MoveTarget::new(tv_pkg, "vault", "request_withdraw"), 1)], false);
+        assert_eq!(match_any(&templates, &rw), Some("trading_vault:request_withdraw"));
+        let rw_old = build(&[(MoveTarget::new(tv_pkg, "vault", "request_withdraw"), 0)], false);
+        assert_eq!(match_any(&templates, &rw_old), None);
+        // amend_payout_asset<P>: single anchored call.
+        let amend = build(&[(MoveTarget::new(tv_pkg, "vault", "amend_payout_asset"), 1)], false);
+        assert_eq!(match_any(&templates, &amend), Some("trading_vault:amend_payout_asset"));
+        // Non-accounting deposit: attest → begin_appraisal → option::some
+        // wrapping the SAME attest result → deposit.
+        let dep = build(
+            &[
+                (MoveTarget::new(op_pkg, "oracle_pyth", "attest"), 2),
+                (MoveTarget::new(tv_pkg, "vault", "begin_appraisal"), 1),
+                (MoveTarget::new(stdlib(), "option", "some"), 1),
+                (MoveTarget::new(tv_pkg, "vault", "deposit"), 1),
+            ],
+            true,
+        );
+        assert_eq!(match_any(&templates, &dep), Some("trading_vault:deposit"));
+        // Exchange-custody appraisal legs ride inside the deposit.
+        let dep_x = build(
+            &[
+                (MoveTarget::new(op_pkg, "oracle_pyth", "attest"), 2),
+                (MoveTarget::new(tv_pkg, "vault", "begin_appraisal"), 1),
+                (MoveTarget::new(xa_pkg, "exchange_adapter", "begin_custody_appraisal"), 0),
+                (MoveTarget::new(xa_pkg, "exchange_adapter", "value_asset"), 1),
+                (MoveTarget::new(xa_pkg, "exchange_adapter", "finalize_custody_appraisal"), 0),
+                (MoveTarget::new(stdlib(), "option", "none"), 1),
+                (MoveTarget::new(tv_pkg, "vault", "deposit"), 1),
+            ],
+            true,
+        );
+        assert_eq!(match_any(&templates, &dep_x), Some("trading_vault:deposit"));
     }
 
     #[test]

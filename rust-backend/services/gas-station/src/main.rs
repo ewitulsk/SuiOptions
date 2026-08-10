@@ -102,6 +102,11 @@ async fn main() -> Result<()> {
                 .map(|p| p.package())
                 .transpose()
                 .context("options_adapter package id")?,
+            exchange_adapter: snapshot
+                .exchange_adapter()
+                .map(|p| p.package())
+                .transpose()
+                .context("exchange_adapter package id")?,
             equity_oracle: snapshot
                 .equity_oracle()
                 .map(|p| p.package())

@@ -281,11 +281,14 @@ pub async fn discover_holdings(
 ) -> Result<VaultHoldings> {
     let vault = object_fields(client, vault_id).await?;
     let config_json = move_field(&vault, "config")?.clone();
+    // SO-370 renamed the config field deposit_asset → accounting_asset;
+    // tolerate the old name so a stale rendering doesn't wedge discovery.
     let deposit_type = canon(
         config_json
-            .get("deposit_asset")
+            .get("accounting_asset")
+            .or_else(|| config_json.get("deposit_asset"))
             .and_then(type_name_str)
-            .ok_or_else(|| anyhow!("vault config missing deposit_asset"))?,
+            .ok_or_else(|| anyhow!("vault config missing accounting_asset"))?,
     );
     let mut free_assets = type_name_set(move_field(&vault, "asset_types")?)?;
     free_assets.retain(|t| *t != deposit_type);
@@ -512,8 +515,18 @@ fn split_type_args(inner: &str) -> Vec<String> {
     out
 }
 
-/// Emit the full appraisal and return its Argument. The caller then
-/// appends `deposit` / `fulfill_withdrawals` with it.
+/// Emit the full appraisal and return its Argument plus the per-asset
+/// `PriceAttestation` arguments (SO-370: attestations are `copy`, so a
+/// non-accounting deposit's option — and `begin_fulfillment`'s atts
+/// vector — reuse the SAME attest results the appraisal legs consumed;
+/// mirrors the TS composer's `{ appraisal, attestations }`). The caller
+/// then appends `deposit` / `fulfill_withdrawals` / the fulfillment
+/// potato with them.
+///
+/// `extra_attest` names assets that MUST get an attest leg beyond what
+/// the holdings need — e.g. a non-accounting deposit's asset when the
+/// vault doesn't hold it yet. Unlike optimistic holdings legs these
+/// hard-error when the provider can't price them.
 #[allow(clippy::too_many_arguments)]
 pub async fn compose_appraisal(
     client: &ChainClient,
@@ -522,7 +535,8 @@ pub async fn compose_appraisal(
     holdings: &VaultHoldings,
     legs: Option<crate::tx::oracle::OracleLegs<'_>>,
     option_buckets: &BTreeMap<String, OptionBucketInfo>,
-) -> Result<Argument> {
+    extra_attest: &[String],
+) -> Result<(Argument, BTreeMap<String, Argument>)> {
     let deposit_tag = TypeTag::from_str(&holdings.deposit_type)
         .context("parsing deposit type")?;
     let vault_ro = pt.obj(shared_object_arg(client, refs.vault_id, false).await?)?;
@@ -536,19 +550,34 @@ pub async fn compose_appraisal(
     // nonzero (e.g. a pool's call-coin base with zero locked passes; a
     // real unpriceable inventory correctly wedges the appraisal).
     let needed = holdings.assets_needing_attestation();
-    let priced_needed: Vec<String> =
+    let mut priced_needed: Vec<String> =
         price_assets_needed(holdings, option_buckets).into_iter().collect();
+    for extra in extra_attest {
+        let extra = canon(extra);
+        if extra != holdings.deposit_type && !priced_needed.contains(&extra) {
+            priced_needed.push(extra);
+        }
+    }
     let mut attestations: BTreeMap<String, Argument> = BTreeMap::new();
     let attestable: Vec<String> = match &legs {
         Some(l) => l.attestable(&priced_needed),
         None => Vec::new(),
     };
     // Hard requirement only where an amount is KNOWN nonzero client-side:
-    // non-deposit free balances (their Balance dfs are pruned at zero).
+    // non-deposit free balances (their Balance dfs are pruned at zero)
+    // and the caller's explicit extras (a deposit's own asset).
     for asset in &holdings.free_assets {
         if !attestable.contains(asset) && !option_buckets.contains_key(asset) {
             return Err(anyhow!(
                 "free balance {asset} needs a price attestation but no feed/leg is available"
+            ));
+        }
+    }
+    for extra in extra_attest {
+        let extra = canon(extra);
+        if extra != holdings.deposit_type && !attestable.contains(&extra) {
+            return Err(anyhow!(
+                "requested attestation for {extra} but no feed/leg is available"
             ));
         }
     }
@@ -852,7 +881,7 @@ pub async fn compose_appraisal(
             }
         }
     }
-    Ok(appraisal)
+    Ok((appraisal, attestations))
 }
 
 #[cfg(test)]

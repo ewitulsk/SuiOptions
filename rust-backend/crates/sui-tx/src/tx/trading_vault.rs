@@ -33,7 +33,10 @@ pub struct TradingVaultRefs<'a> {
     pub vault_id: ObjectID,
     /// Shared `VaultProtocolConfig`.
     pub protocol_config_id: ObjectID,
-    /// The vault's deposit asset type (canonical `0x…::mod::TYPE`).
+    /// The vault's ACCOUNTING asset type (canonical `0x…::mod::TYPE`) —
+    /// the unit of account (SO-370 renamed the Move field; deposits may
+    /// be any allowlisted asset, but these builders' begin_appraisal /
+    /// fulfill anchors always take the accounting asset).
     pub deposit_type: &'a str,
 }
 
@@ -41,6 +44,13 @@ impl TradingVaultRefs<'_> {
     fn deposit_tag(&self) -> Result<Vec<TypeTag>> {
         Ok(vec![TypeTag::from_str(self.deposit_type)
             .with_context(|| format!("parsing deposit type {}", self.deposit_type))?])
+    }
+
+    /// `{package}::price::PriceAttestation` — the option/vector element
+    /// type every attestation-bearing call names.
+    fn attestation_tag(&self) -> Result<TypeTag> {
+        TypeTag::from_str(&format!("{}::price::PriceAttestation", self.package))
+            .context("attestation type tag")
     }
 }
 
@@ -60,6 +70,21 @@ fn vault_call(
     )
 }
 
+/// `0x1::option::none<PriceAttestation>()` — the accounting-asset
+/// deposit's empty attestation slot.
+fn none_attestation(
+    pt: &mut ProgrammableTransactionBuilder,
+    refs: &TradingVaultRefs<'_>,
+) -> Result<Argument> {
+    Ok(pt.programmable_move_call(
+        ObjectID::from_hex_literal("0x1").unwrap(),
+        Identifier::new("option").unwrap(),
+        Identifier::new("none").unwrap(),
+        vec![refs.attestation_tag()?],
+        vec![],
+    ))
+}
+
 /// `vault::begin_appraisal<T>(&vault)` — returns the Appraisal argument
 /// to thread into `build_deposit` / `build_fulfill_withdrawals` (with
 /// any attestation legs in between).
@@ -72,7 +97,11 @@ pub async fn build_begin_appraisal(
     Ok(vault_call(pt, refs.package, "begin_appraisal", refs.deposit_tag()?, vec![vault]))
 }
 
-/// `vault::deposit<T>(vault, cfg, appraisal, coin, clock)`.
+/// `vault::deposit<T>(vault, cfg, appraisal, coin, att, clock)` for the
+/// ACCOUNTING asset only: the attestation option is `none` (SO-370).
+/// Attestation-bearing (non-accounting) deposits are composed through
+/// the appraisal composer, which returns the attest result the option
+/// wraps.
 pub async fn build_deposit(
     client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
@@ -82,34 +111,59 @@ pub async fn build_deposit(
 ) -> Result<()> {
     let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
     let cfg = pt.obj(shared_object_arg(client, refs.protocol_config_id, false).await?)?;
+    let att = none_attestation(pt, refs)?;
     let clock = clock_arg(pt)?;
     vault_call(
         pt,
         refs.package,
         "deposit",
         refs.deposit_tag()?,
-        vec![vault, cfg, appraisal, funds, clock],
+        vec![vault, cfg, appraisal, funds, att, clock],
     );
     Ok(())
 }
 
-/// `vault::request_withdraw(vault, shares, clock)` — no appraisal.
+/// `vault::request_withdraw<P>(vault, shares, clock)` — no appraisal.
+/// `payout_type` is the allowlisted asset the recipient wants to be paid
+/// in (SO-370); the accounting asset is always legal.
 pub async fn build_request_withdraw(
     client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
     refs: &TradingVaultRefs<'_>,
+    payout_type: &str,
     shares: u128,
 ) -> Result<()> {
     let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
     let shares = pt.pure(&shares)?;
     let clock = clock_arg(pt)?;
-    vault_call(pt, refs.package, "request_withdraw", vec![], vec![vault, shares, clock]);
+    let payout = TypeTag::from_str(payout_type)
+        .with_context(|| format!("parsing payout type {payout_type}"))?;
+    vault_call(pt, refs.package, "request_withdraw", vec![payout], vec![vault, shares, clock]);
     Ok(())
 }
 
-/// `vault::fulfill_withdrawals<T>(vault, cfg, treasury, appraisal)` —
-/// the keeper crank tail; prepend `build_begin_appraisal` (+ attestation
-/// legs when the vault holds more than cash).
+/// `vault::amend_payout_asset<P>(vault, seq)` — the recipient re-points a
+/// pending request's payout asset (SO-370's unwedge lever).
+pub async fn build_amend_payout_asset(
+    client: &ChainClient,
+    pt: &mut ProgrammableTransactionBuilder,
+    refs: &TradingVaultRefs<'_>,
+    payout_type: &str,
+    seq: u64,
+) -> Result<()> {
+    let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
+    let seq = pt.pure(&seq)?;
+    let payout = TypeTag::from_str(payout_type)
+        .with_context(|| format!("parsing payout type {payout_type}"))?;
+    vault_call(pt, refs.package, "amend_payout_asset", vec![payout], vec![vault, seq]);
+    Ok(())
+}
+
+/// `vault::fulfill_withdrawals<T>(vault, cfg, treasury, appraisal, clock)`
+/// — the keeper crank tail for ACCOUNTING-payable heads (requested in the
+/// accounting asset, or aged past the grace fallback); prepend
+/// `build_begin_appraisal` (+ attestation legs when the vault holds more
+/// than cash). Mixed-asset runs go through [`build_fulfill_mixed`].
 pub async fn build_fulfill_withdrawals(
     client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
@@ -120,20 +174,74 @@ pub async fn build_fulfill_withdrawals(
     let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
     let cfg = pt.obj(shared_object_arg(client, refs.protocol_config_id, false).await?)?;
     let treasury = pt.obj(shared_object_arg(client, treasury_id, true).await?)?;
+    let clock = clock_arg(pt)?;
     vault_call(
         pt,
         refs.package,
         "fulfill_withdrawals",
         refs.deposit_tag()?,
-        vec![vault, cfg, treasury, appraisal],
+        vec![vault, cfg, treasury, appraisal, clock],
     );
     Ok(())
 }
 
-/// `vault::crank_appraisal<T>(vault, appraisal)` — permissionless mark
+/// The fulfillment-potato chain for a mixed-asset queue run (SO-370):
+///
+///   begin_fulfillment(vault, cfg, appraisal, atts, clock)
+///   fulfill_next<P>(vault, cfg, treasury, &mut f, clock) × plan
+///   end_fulfillment(vault, f)
+///
+/// `atts` are `PriceAttestation` arguments — one per distinct
+/// NON-accounting payout asset the run will pay, each quoting into the
+/// accounting asset (reuse the appraisal composer's attest results;
+/// attestations are `copy`). `plan` is the FIFO-ordered
+/// `(payout_coin_type, count)` chain; `fulfill_next` returning false is a
+/// NO-OP (wrong asset / unfundable head), so a speculative chain is safe.
+pub async fn build_fulfill_mixed(
+    client: &ChainClient,
+    pt: &mut ProgrammableTransactionBuilder,
+    refs: &TradingVaultRefs<'_>,
+    treasury_id: ObjectID,
+    appraisal: Argument,
+    atts: Vec<Argument>,
+    plan: &[(String, usize)],
+) -> Result<()> {
+    let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
+    let cfg = pt.obj(shared_object_arg(client, refs.protocol_config_id, false).await?)?;
+    let treasury = pt.obj(shared_object_arg(client, treasury_id, true).await?)?;
+    let clock = clock_arg(pt)?;
+    let atts_vec = pt.command(sui_types::transaction::Command::MakeMoveVec(
+        Some(refs.attestation_tag()?.into()),
+        atts,
+    ));
+    let f = vault_call(
+        pt,
+        refs.package,
+        "begin_fulfillment",
+        vec![],
+        vec![vault, cfg, appraisal, atts_vec, clock],
+    );
+    for (payout_type, count) in plan {
+        let payout = TypeTag::from_str(payout_type)
+            .with_context(|| format!("parsing payout type {payout_type}"))?;
+        for _ in 0..*count {
+            vault_call(
+                pt,
+                refs.package,
+                "fulfill_next",
+                vec![payout.clone()],
+                vec![vault, cfg, treasury, f, clock],
+            );
+        }
+    }
+    vault_call(pt, refs.package, "end_fulfillment", vec![], vec![vault, f]);
+    Ok(())
+}
+
+/// `vault::crank_appraisal(vault, appraisal)` — permissionless mark
 /// refresh (SO-304): validates and discards the appraisal so the
 /// PositionAppraised / VaultAppraised events carry fresh marks with no
-/// deposit/fulfillment attached.
+/// deposit/fulfillment attached. Type-free since SO-370.
 pub async fn build_crank_appraisal(
     client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
@@ -141,7 +249,7 @@ pub async fn build_crank_appraisal(
     appraisal: Argument,
 ) -> Result<()> {
     let vault = pt.obj(shared_object_arg(client, refs.vault_id, false).await?)?;
-    vault_call(pt, refs.package, "crank_appraisal", refs.deposit_tag()?, vec![vault, appraisal]);
+    vault_call(pt, refs.package, "crank_appraisal", vec![], vec![vault, appraisal]);
     Ok(())
 }
 

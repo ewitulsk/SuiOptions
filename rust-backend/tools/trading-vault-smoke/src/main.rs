@@ -53,6 +53,10 @@ struct Cli {
     /// Skip the DeepBook leg (vault-core-only smoke).
     #[arg(long, default_value_t = false)]
     skip_deepbook: bool,
+    /// Skip the multi-asset leg (SO-370: TBTC allowlist + attested
+    /// deposit + amended payout + fulfillment potato).
+    #[arg(long, default_value_t = false)]
+    skip_multi_asset: bool,
     /// Stop after create/deposit/custody-fund and leave the vault live
     /// (for pointing a vault-mode mm-bot at it). Prints the ids to keep.
     #[arg(long, default_value_t = false)]
@@ -358,8 +362,8 @@ async fn main() -> Result<()> {
     }
     let mut pt = ProgrammableTransactionBuilder::new();
     let holdings = discover_holdings(&client, vault_id).await?;
-    let appraisal =
-        compose_appraisal(&client, &mut pt, &refs, &holdings, None, &BTreeMap::new()).await?;
+    let (appraisal, _) =
+        compose_appraisal(&client, &mut pt, &refs, &holdings, None, &BTreeMap::new(), &[]).await?;
     let faucet = pt.obj(shared_object_arg(&client, ids.deposit_faucet, true).await?)?;
     let amount = pt.pure(cli.deposit_amount)?;
     let coin = pt.programmable_move_call(
@@ -371,13 +375,14 @@ async fn main() -> Result<()> {
     );
     let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
     let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
+    let att = opt_attestation(&mut pt, ids.trading_vault_pkg, None)?;
     let clock = clock_arg(&mut pt)?;
     pt.programmable_move_call(
         ids.trading_vault_pkg,
         Identifier::new("vault").unwrap(),
         Identifier::new("deposit").unwrap(),
         vec![deposit_tag.clone()],
-        vec![vault_arg, cfg, appraisal, coin, clock],
+        vec![vault_arg, cfg, appraisal, coin, att, clock],
     );
     submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::deposit").await?;
     step.ok();
@@ -661,7 +666,7 @@ async fn main() -> Result<()> {
         let step = Step("deposit with live custody (composed appraisal)");
         let holdings = discover_holdings(&client, vault_id).await?;
         let mut pt = ProgrammableTransactionBuilder::new();
-        let appraisal = compose_with_legs(
+        let (appraisal, _) = compose_with_legs(
             &client,
             &http,
             &mut pt,
@@ -674,6 +679,7 @@ async fn main() -> Result<()> {
             live.as_ref(),
             signer.address,
             cli.gas_budget,
+            &[],
         )
         .await?;
         let faucet = pt.obj(shared_object_arg(&client, ids.deposit_faucet, true).await?)?;
@@ -687,13 +693,14 @@ async fn main() -> Result<()> {
         );
         let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
         let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
+        let att = opt_attestation(&mut pt, ids.trading_vault_pkg, None)?;
         let clock = clock_arg(&mut pt)?;
         pt.programmable_move_call(
             ids.trading_vault_pkg,
             Identifier::new("vault").unwrap(),
             Identifier::new("deposit").unwrap(),
             vec![deposit_tag.clone()],
-            vec![vault_arg, cfg, appraisal, coin, clock],
+            vec![vault_arg, cfg, appraisal, coin, att, clock],
         );
         submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::deposit_with_custody").await?;
         step.ok();
@@ -718,14 +725,14 @@ async fn main() -> Result<()> {
             ids.trading_vault_pkg,
             Identifier::new("vault").unwrap(),
             Identifier::new("request_withdraw").unwrap(),
-            vec![],
+            vec![deposit_tag.clone()],
             vec![vault_arg, shares, clock],
         );
         submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::request_withdraw_half").await?;
 
         let holdings = discover_holdings(&client, vault_id).await?;
         let mut pt = ProgrammableTransactionBuilder::new();
-        let appraisal = compose_with_legs(
+        let (appraisal, _) = compose_with_legs(
             &client,
             &http,
             &mut pt,
@@ -738,17 +745,19 @@ async fn main() -> Result<()> {
             live.as_ref(),
             signer.address,
             cli.gas_budget,
+            &[],
         )
         .await?;
         let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
         let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
         let treasury = pt.obj(shared_object_arg(&client, ids.treasury_id, true).await?)?;
+        let clock = clock_arg(&mut pt)?;
         pt.programmable_move_call(
             ids.trading_vault_pkg,
             Identifier::new("vault").unwrap(),
             Identifier::new("fulfill_withdrawals").unwrap(),
             vec![deposit_tag.clone()],
-            vec![vault_arg, cfg, treasury, appraisal],
+            vec![vault_arg, cfg, treasury, appraisal, clock],
         );
         submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::fulfill_half").await?;
         let after = read_total_shares(&client, vault_id).await?;
@@ -813,14 +822,14 @@ async fn main() -> Result<()> {
         ids.trading_vault_pkg,
         Identifier::new("vault").unwrap(),
         Identifier::new("request_withdraw").unwrap(),
-        vec![],
+        vec![deposit_tag.clone()],
         vec![vault_arg, shares, clock],
     );
     submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::request_withdraw").await?;
 
     let holdings = discover_holdings(&client, vault_id).await?;
     let mut pt = ProgrammableTransactionBuilder::new();
-    let appraisal = compose_with_legs(
+    let (appraisal, _) = compose_with_legs(
         &client,
         &http,
         &mut pt,
@@ -833,17 +842,19 @@ async fn main() -> Result<()> {
         live.as_ref(),
         signer.address,
         cli.gas_budget,
+        &[],
     )
     .await?;
     let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
     let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
     let treasury = pt.obj(shared_object_arg(&client, ids.treasury_id, true).await?)?;
+    let clock = clock_arg(&mut pt)?;
     pt.programmable_move_call(
         ids.trading_vault_pkg,
         Identifier::new("vault").unwrap(),
         Identifier::new("fulfill_withdrawals").unwrap(),
         vec![deposit_tag.clone()],
-        vec![vault_arg, cfg, treasury, appraisal],
+        vec![vault_arg, cfg, treasury, appraisal, clock],
     );
     submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::fulfill").await?;
     step.ok();
@@ -866,6 +877,192 @@ async fn main() -> Result<()> {
         bail!("vault still holds assets/positions after full exit: {holdings:?}");
     }
     step.ok();
+
+    // ── 8. multi-asset leg (SO-370): curator allowlists TBTC, a depositor
+    // deposits it with the attestation-bearing composer, requests payout in
+    // TUSDC then amends to TBTC, and the fulfillment potato pays it out.
+    if !cli.skip_multi_asset {
+        let step = Step("multi-asset: allowlist TBTC + attested deposit");
+        let tt = net_top
+            .package_info
+            .test_tokens
+            .as_ref()
+            .ok_or_else(|| anyhow!("no testTokens record"))?;
+        let tbtc = tt.tokens.get("TBTC").ok_or_else(|| anyhow!("no TBTC test token"))?;
+        let tbtc_type = protocol_types::asset::canonicalize_move_type(&tbtc.coin_type);
+        let tbtc_tag = TypeTag::from_str(&tbtc_type)?;
+        let tbtc_faucet = tbtc.faucet()?;
+        let tv_refs = sui_tx::tx::trading_vault::TradingVaultRefs {
+            package: ids.trading_vault_pkg,
+            vault_id,
+            protocol_config_id: ids.protocol_config_id,
+            deposit_type: &ids.deposit_coin_type,
+        };
+
+        // Curator allowlists TBTC for deposits and payout requests.
+        let mut pt = ProgrammableTransactionBuilder::new();
+        let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
+        let cap = pt.obj(sui_tx::tx::owned_object_arg(&client, cap_id).await?)?;
+        let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
+        pt.programmable_move_call(
+            ids.trading_vault_pkg,
+            Identifier::new("vault").unwrap(),
+            Identifier::new("add_deposit_asset").unwrap(),
+            vec![tbtc_tag.clone()],
+            vec![vault_arg, cap, cfg],
+        );
+        submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::add_deposit_asset").await?;
+
+        // Attested TBTC deposit: the deposit's `option::some` reuses the
+        // SAME attest result the composer emitted (attestations are copy).
+        let holdings = discover_holdings(&client, vault_id).await?;
+        let mut pt = ProgrammableTransactionBuilder::new();
+        let (appraisal, attestations) = compose_with_legs(
+            &client,
+            &http,
+            &mut pt,
+            &refs,
+            &holdings,
+            &option_map,
+            &feeds_by_type,
+            ids.oracle_pyth_pkg,
+            ids.pyth_feed_registry_id,
+            live.as_ref(),
+            signer.address,
+            cli.gas_budget,
+            std::slice::from_ref(&tbtc_type),
+        )
+        .await?;
+        let tbtc_att = *attestations
+            .get(&tbtc_type)
+            .ok_or_else(|| anyhow!("no TBTC attestation composed — feed missing?"))?;
+        let faucet = pt.obj(shared_object_arg(&client, tbtc_faucet, true).await?)?;
+        let amount = pt.pure(cli.deposit_amount)?;
+        let coin = pt.programmable_move_call(
+            ids.tokens_pkg,
+            Identifier::new("tbtc").unwrap(),
+            Identifier::new("mint").unwrap(),
+            vec![],
+            vec![faucet, amount],
+        );
+        let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
+        let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
+        let att = opt_attestation(&mut pt, ids.trading_vault_pkg, Some(tbtc_att))?;
+        let clock = clock_arg(&mut pt)?;
+        pt.programmable_move_call(
+            ids.trading_vault_pkg,
+            Identifier::new("vault").unwrap(),
+            Identifier::new("deposit").unwrap(),
+            vec![tbtc_tag.clone()],
+            vec![vault_arg, cfg, appraisal, coin, att, clock],
+        );
+        submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::deposit_tbtc").await?;
+        let deposited =
+            vault_free_balance(&client, signer.address, ids.trading_vault_pkg, vault_id, &tbtc_type)
+                .await?;
+        if deposited != cli.deposit_amount {
+            bail!("vault TBTC balance {deposited} != deposited {}", cli.deposit_amount);
+        }
+        step.ok();
+
+        // Request payout in the accounting asset, then exercise the
+        // recipient-only amend over to TBTC.
+        let step = Step("multi-asset: request (TUSDC) + amend payout to TBTC");
+        let shares = read_total_shares(&client, vault_id).await?;
+        if shares == 0 {
+            bail!("no shares after the TBTC deposit");
+        }
+        let mut pt = ProgrammableTransactionBuilder::new();
+        sui_tx::tx::trading_vault::build_request_withdraw(
+            &client,
+            &mut pt,
+            &tv_refs,
+            &ids.deposit_coin_type,
+            shares,
+        )
+        .await?;
+        submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::request_withdraw_tbtc").await?;
+        let seq = {
+            let (_, json) = client.get_object_json(vault_id).await?;
+            let json = json.ok_or_else(|| anyhow!("vault unreadable"))?;
+            json.pointer("/queue_tail")
+                .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()))
+                .ok_or_else(|| anyhow!("vault has no queue_tail field"))?
+                .checked_sub(1)
+                .ok_or_else(|| anyhow!("queue_tail is 0 after a request"))?
+        };
+        let mut pt = ProgrammableTransactionBuilder::new();
+        sui_tx::tx::trading_vault::build_amend_payout_asset(
+            &client,
+            &mut pt,
+            &tv_refs,
+            &tbtc_type,
+            seq,
+        )
+        .await?;
+        submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::amend_payout_asset").await?;
+        step.ok();
+
+        // The fulfillment potato: the appraisal's TBTC attest (mandatory —
+        // it's now a free balance) doubles as the batch price.
+        let step = Step("multi-asset: fulfillment potato pays TBTC");
+        let holdings = discover_holdings(&client, vault_id).await?;
+        let mut pt = ProgrammableTransactionBuilder::new();
+        let (appraisal, attestations) = compose_with_legs(
+            &client,
+            &http,
+            &mut pt,
+            &refs,
+            &holdings,
+            &option_map,
+            &feeds_by_type,
+            ids.oracle_pyth_pkg,
+            ids.pyth_feed_registry_id,
+            live.as_ref(),
+            signer.address,
+            cli.gas_budget,
+            &[],
+        )
+        .await?;
+        let tbtc_att = *attestations
+            .get(&tbtc_type)
+            .ok_or_else(|| anyhow!("no TBTC attestation composed for the fulfillment"))?;
+        sui_tx::tx::trading_vault::build_fulfill_mixed(
+            &client,
+            &mut pt,
+            &tv_refs,
+            ids.treasury_id,
+            appraisal,
+            vec![tbtc_att],
+            &[(tbtc_type.clone(), 1)],
+        )
+        .await?;
+        submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::fulfill_mixed").await?;
+
+        // Queue drained and (almost) all TBTC paid out: only floor-division
+        // dust — bounded by price drift between deposit and fulfillment —
+        // may remain in the vault's free balance.
+        let (_, json) = client.get_object_json(vault_id).await?;
+        let json = json.ok_or_else(|| anyhow!("vault unreadable"))?;
+        let q = |ptr: &str| {
+            json.pointer(ptr)
+                .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()))
+        };
+        if q("/queue_head") != q("/queue_tail") {
+            bail!("withdrawal queue not drained by the fulfillment potato");
+        }
+        let residual =
+            vault_free_balance(&client, signer.address, ids.trading_vault_pkg, vault_id, &tbtc_type)
+                .await?;
+        if residual * 50 > cli.deposit_amount {
+            bail!(
+                "vault kept {residual} TBTC of {} deposited — payout did not happen?",
+                cli.deposit_amount
+            );
+        }
+        step.ok();
+        println!("    TBTC round-tripped (residual dust {residual})");
+    }
 
     println!("\nSMOKE PASSED — vault {vault_id} exercised end to end");
     Ok(())
@@ -969,8 +1166,35 @@ async fn price_info_object_for(
     id.parse().with_context(|| format!("parsing PriceInfoObject id {id:?}"))
 }
 
+/// `Option<PriceAttestation>` for `vault::deposit`'s att slot: `some`
+/// wrapping a composed attest result (non-accounting deposits, SO-370),
+/// `none` for the accounting asset.
+fn opt_attestation(
+    pt: &mut ProgrammableTransactionBuilder,
+    trading_vault_pkg: ObjectID,
+    att: Option<sui_types::transaction::Argument>,
+) -> Result<sui_types::transaction::Argument> {
+    let attestation_type =
+        TypeTag::from_str(&format!("{trading_vault_pkg}::price::PriceAttestation"))?;
+    let (function, args) = match att {
+        Some(a) => ("some", vec![a]),
+        None => ("none", vec![]),
+    };
+    Ok(pt.programmable_move_call(
+        ObjectID::from_hex_literal("0x1").unwrap(),
+        Identifier::new("option").unwrap(),
+        Identifier::new(function).unwrap(),
+        vec![attestation_type],
+        args,
+    ))
+}
+
 /// Compose the appraisal with real Pyth legs (when any are needed) and the
-/// option-coin bucket map — the full production shape.
+/// option-coin bucket map — the full production shape. `extras` are
+/// assets to attest beyond what the holdings need (SO-370: a
+/// non-accounting deposit's own asset); returns the appraisal plus the
+/// per-asset attestations.
+#[allow(clippy::too_many_arguments)]
 async fn compose_with_legs(
     client: &ChainClient,
     http: &reqwest::Client,
@@ -988,17 +1212,22 @@ async fn compose_with_legs(
     // The Pyth update fee is funded to match how `sender` pays gas.
     sender: sui_types::base_types::SuiAddress,
     gas_budget: u64,
-) -> Result<sui_types::transaction::Argument> {
+    extras: &[String],
+) -> Result<(
+    sui_types::transaction::Argument,
+    BTreeMap<String, sui_types::transaction::Argument>,
+)> {
     let needed = price_assets_needed(holdings, option_map);
-    if needed.is_empty() {
-        return compose_appraisal(client, pt, refs, holdings, None, option_map).await;
+    if needed.is_empty() && extras.is_empty() {
+        return compose_appraisal(client, pt, refs, holdings, None, option_map, &[]).await;
     }
     // SO-346: with a live descriptor saying Switchboard, build that
     // provider's legs; otherwise (no --oracle-url, or provider=pyth) the
     // compiled Pyth path below runs unchanged.
     if let Some(l) = live {
         if l.descriptor.provider == protocol_types::OracleProvider::Switchboard {
-            return compose_switchboard(client, pt, refs, holdings, &needed, option_map, l).await;
+            return compose_switchboard(client, pt, refs, holdings, &needed, option_map, l, extras)
+                .await;
         }
     }
     let handles = pyth_handles();
@@ -1006,6 +1235,7 @@ async fn compose_with_legs(
     let mut feeds = Vec::new();
     let mut price_infos: BTreeMap<String, ObjectID> = BTreeMap::new();
     let mut all: Vec<String> = needed.iter().cloned().collect();
+    all.extend(extras.iter().cloned());
     all.push(holdings.deposit_type.clone());
     for t in &all {
         let Some(feed) = feeds_by_type.get(t) else {
@@ -1036,6 +1266,7 @@ async fn compose_with_legs(
             gas_budget,
         })),
         option_map,
+        extras,
     )
     .await
 }
@@ -1044,6 +1275,7 @@ async fn compose_with_legs(
 /// the live descriptor, signed payload from oracle-service
 /// `/oracle/legs`. Mirrors the keeper's arm in
 /// `keeper::trading_vault::compose_full_appraisal`.
+#[allow(clippy::too_many_arguments)]
 async fn compose_switchboard(
     client: &ChainClient,
     pt: &mut ProgrammableTransactionBuilder,
@@ -1052,7 +1284,11 @@ async fn compose_switchboard(
     needed: &std::collections::BTreeSet<String>,
     option_map: &BTreeMap<String, OptionBucketInfo>,
     live: &LiveOracle,
-) -> Result<sui_types::transaction::Argument> {
+    extras: &[String],
+) -> Result<(
+    sui_types::transaction::Argument,
+    BTreeMap<String, sui_types::transaction::Argument>,
+)> {
     let d = &live.descriptor;
     let adapter = d
         .adapter
@@ -1066,6 +1302,7 @@ async fn compose_switchboard(
     // Same none-leg posture as the Pyth path; the deposit asset's feed
     // rides along because `attest<Asset, Dep>` crosses inside one bundle.
     let mut all: Vec<String> = needed.iter().cloned().collect();
+    all.extend(extras.iter().cloned());
     all.push(holdings.deposit_type.clone());
     let mut request: Vec<String> = Vec::new();
     let mut feed_hashes: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -1125,6 +1362,7 @@ async fn compose_switchboard(
             },
         )),
         option_map,
+        extras,
     )
     .await
 }
@@ -1164,6 +1402,31 @@ async fn custody_coin_balance(
         .await
         .context("dev-inspecting custody_balance")?;
     sui_tx::chain::decode_return_value::<u64>(&res, 0).context("decoding custody_balance")
+}
+
+/// Dev-inspect `vault::free_balance_of<T>` — the vault's free balance in
+/// `coin_type` smallest units (0 when the balance df was pruned).
+async fn vault_free_balance(
+    client: &ChainClient,
+    sender: SuiAddress,
+    trading_vault_pkg: ObjectID,
+    vault_id: ObjectID,
+    coin_type: &str,
+) -> Result<u64> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let vault = pt.obj(shared_object_arg(client, vault_id, false).await?)?;
+    pt.programmable_move_call(
+        trading_vault_pkg,
+        Identifier::new("vault").unwrap(),
+        Identifier::new("free_balance_of").unwrap(),
+        vec![TypeTag::from_str(coin_type)?],
+        vec![vault],
+    );
+    let res = client
+        .dev_inspect_ptb(sender, pt)
+        .await
+        .context("dev-inspecting free_balance_of")?;
+    sui_tx::chain::decode_return_value::<u64>(&res, 0).context("decoding free_balance_of")
 }
 
 /// The vault's `total_shares` (this smoke's wallet is the sole staker).

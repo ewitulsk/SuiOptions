@@ -19,6 +19,9 @@
 //!      appraisal (sui_tx::tx::appraisal composer) — cash-only vaults
 //!      need no price legs, everything else gets Pyth attestations;
 //!      external-configured vaults get the mandatory equity leg.
+//!      Accounting-payable heads use `fulfill_withdrawals`; heads
+//!      requesting a non-accounting payout go through the fulfillment
+//!      potato with per-payout-asset attestations (SO-370).
 //!   8. When nothing needs fulfilling but the vault holds positions or
 //!      foreign assets, refresh their marks (SO-304): the same composed
 //!      appraisal finished with the permissionless `crank_appraisal`,
@@ -1305,10 +1308,13 @@ async fn live_descriptor(ctx: &TradingVaultCtx) -> Result<oracle_client::OracleD
 }
 
 /// Compose the full attestation-bearing appraisal into `pt` and return
-/// its Argument. Shared by the fulfillment crank and the mark-refresh
-/// crank. The price legs follow the LIVE provider from
-/// `/oracle/descriptor` (SO-346): Pyth legs resolve through Hermes +
-/// `PriceInfoObject`s, Switchboard legs through `/oracle/legs`.
+/// its Argument plus the per-asset attestation arguments (SO-370: the
+/// mixed-asset fulfillment potato reuses them for `begin_fulfillment`'s
+/// atts vector — `PriceAttestation` is `copy`). Shared by the
+/// fulfillment crank and the mark-refresh crank. The price legs follow
+/// the LIVE provider from `/oracle/descriptor` (SO-346): Pyth legs
+/// resolve through Hermes + `PriceInfoObject`s, Switchboard legs through
+/// `/oracle/legs`.
 async fn compose_full_appraisal(
     wrap: &SuiClientWrapper,
     http: &reqwest::Client,
@@ -1317,7 +1323,8 @@ async fn compose_full_appraisal(
     holdings: &VaultHoldings,
     option_buckets: &BTreeMap<String, OptionBucketInfo>,
     pt: &mut ProgrammableTransactionBuilder,
-) -> Result<sui_types::transaction::Argument> {
+) -> Result<(sui_types::transaction::Argument, BTreeMap<String, sui_types::transaction::Argument>)>
+{
     let client = &wrap.client;
     let refs = refs_for(ctx, vault_id);
 
@@ -1325,7 +1332,7 @@ async fn compose_full_appraisal(
     // (underlying/settlement/plain) types need provider feeds.
     let needed = price_assets_needed(holdings, option_buckets);
     if needed.is_empty() {
-        return compose_appraisal(client, pt, &refs, holdings, None, option_buckets).await;
+        return compose_appraisal(client, pt, &refs, holdings, None, option_buckets, &[]).await;
     }
     let descriptor = live_descriptor(ctx).await?;
     match descriptor.provider {
@@ -1376,6 +1383,7 @@ async fn compose_full_appraisal(
                     gas_budget: ctx.gas_budget,
                 })),
                 option_buckets,
+                &[],
             )
             .await
         }
@@ -1450,6 +1458,7 @@ async fn compose_full_appraisal(
                     },
                 )),
                 option_buckets,
+                &[],
             )
             .await
         }
@@ -1483,7 +1492,68 @@ fn switchboard_payload(
     })
 }
 
-/// Crank 7: fulfillment with a full appraisal.
+/// Max queue requests chained into one mixed fulfillment PTB (SO-370):
+/// bounds the per-tick PTB size; longer runs drain over successive ticks.
+const MAX_MIXED_RUN: usize = 25;
+
+/// The pending queue run from the head, straight off the queue table's
+/// dynamic fields (derived field ids, same trick as
+/// `force_unwind_if_starved`): per request, the canonical payout asset
+/// and `requested_at_ms`.
+async fn queue_run(
+    client: &ChainClient,
+    vault_id: ObjectID,
+    max: usize,
+) -> Result<Vec<(String, u64)>> {
+    let head = as_u64(&json_field(client, vault_id, "/queue_head").await?).unwrap_or(0);
+    let tail = as_u64(&json_field(client, vault_id, "/queue_tail").await?).unwrap_or(0);
+    if head >= tail {
+        return Ok(Vec::new());
+    }
+    let queue_table = json_field(client, vault_id, "/queue/id")
+        .await?
+        .as_str()
+        .and_then(|s| ObjectID::from_hex_literal(s).ok())
+        .ok_or_else(|| anyhow!("vault queue table id unreadable"))?;
+    let mut out = Vec::new();
+    for seq in head..tail.min(head + max as u64) {
+        let key_bytes = bcs::to_bytes(&seq).context("bcs of queue seq")?;
+        let field_id = sui_types::dynamic_field::derive_dynamic_field_id(
+            queue_table,
+            &TypeTag::U64,
+            &key_bytes,
+        )
+        .context("deriving queue entry field id")?;
+        let json = client
+            .try_get_object_json(field_id)
+            .await
+            .with_context(|| format!("reading queue entry {seq}"))?
+            .and_then(|(_, json)| json)
+            .ok_or_else(|| anyhow!("queue entry {seq} unreadable"))?;
+        // TypeName renders as a bare string in the gRPC json (struct
+        // shape tolerated for renderings that don't collapse it).
+        let payout = json
+            .pointer("/value/payout_asset")
+            .and_then(|v| v.as_str().or_else(|| v.pointer("/name").and_then(Value::as_str)))
+            .map(protocol_types::asset::canonicalize_move_type)
+            .ok_or_else(|| anyhow!("queue entry {seq} missing payout_asset"))?;
+        let requested_at = json
+            .pointer("/value/requested_at_ms")
+            .and_then(as_u64_ref)
+            .ok_or_else(|| anyhow!("queue entry {seq} missing requested_at_ms"))?;
+        out.push((payout, requested_at));
+    }
+    Ok(out)
+}
+
+/// Crank 7: fulfillment with a full appraisal. Accounting-payable heads
+/// (requested in the accounting asset, or aged past the grace fallback)
+/// keep the on-chain batch crank `fulfill_withdrawals<Accounting>`; a
+/// head requesting a NON-accounting payout goes through the fulfillment
+/// potato (SO-370) with one attestation per distinct non-accounting
+/// payout asset in the reachable run. `fulfill_next` returning false is
+/// a no-op, not an abort — an unfundable/wedged head is benign, never an
+/// alert.
 async fn fulfill(
     wrap: &SuiClientWrapper,
     http: &reqwest::Client,
@@ -1493,26 +1563,114 @@ async fn fulfill(
     option_buckets: &BTreeMap<String, OptionBucketInfo>,
 ) -> Result<()> {
     let client = &wrap.client;
+    let refs = sui_tx::tx::trading_vault::TradingVaultRefs {
+        package: ctx.trading_vault_pkg,
+        vault_id,
+        protocol_config_id: ctx.protocol_config_id,
+        deposit_type: &holdings.deposit_type,
+    };
+    let accounting = &holdings.deposit_type;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let run = queue_run(client, vault_id, MAX_MIXED_RUN).await?;
+    let Some((head_payout, head_requested_at)) = run.first() else {
+        return Ok(()); // raced: someone drained the queue since discovery
+    };
+    let grace = as_u64(&json_field(client, vault_id, "/config/unwind_grace_ms").await?)
+        .unwrap_or(u64::MAX);
+    let aged = |requested_at: u64| now_ms > requested_at.saturating_add(grace);
+
+    if head_payout == accounting || aged(*head_requested_at) {
+        // Accounting-payable head: the on-chain batch crank drains every
+        // consecutive accounting-payable head (grace-aged ones included).
+        let mut pt = ProgrammableTransactionBuilder::new();
+        let (appraisal, _) =
+            compose_full_appraisal(wrap, http, ctx, vault_id, holdings, option_buckets, &mut pt)
+                .await?;
+        sui_tx::tx::trading_vault::build_fulfill_withdrawals(
+            client,
+            &mut pt,
+            &refs,
+            ctx.treasury_id,
+            appraisal,
+        )
+        .await?;
+        submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, "trading_vault::fulfill_withdrawals")
+            .await?;
+        info!(vault = %vault_id, "trading-vault withdrawals fulfilled");
+        return Ok(());
+    }
+
+    // Mixed path: plan the FIFO chain of payable requests. A request is
+    // payable in its asset only when the vault holds it as a free
+    // balance — which also guarantees the composed appraisal attested it
+    // (free balances hard-require feeds). An unheld payout stops the run
+    // there: chaining past it could never pay it (fulfill_next is
+    // all-or-nothing per head), and a grace-aged unheld head falls to the
+    // accounting branch above on a later tick.
+    let mut plan: Vec<(String, usize)> = Vec::new();
+    let mut non_accounting: std::collections::BTreeSet<String> = Default::default();
+    for (payout, requested_at) in &run {
+        let p = if payout == accounting
+            || (aged(*requested_at) && !holdings.free_assets.contains(payout))
+        {
+            accounting.clone()
+        } else if holdings.free_assets.contains(payout) {
+            payout.clone()
+        } else {
+            break;
+        };
+        if p != *accounting {
+            non_accounting.insert(p.clone());
+        }
+        match plan.last_mut() {
+            Some((ty, count)) if *ty == p => *count += 1,
+            _ => plan.push((p, 1)),
+        }
+    }
+    if plan.is_empty() {
+        // Head wants an asset the vault doesn't hold and isn't aged yet:
+        // nothing fundable — benign, the requester can amend or the grace
+        // fallback unwedges it.
+        debug!(
+            vault = %vault_id,
+            payout = %head_payout,
+            "queue head requests an unheld payout asset; nothing fundable this tick"
+        );
+        return Ok(());
+    }
     let mut pt = ProgrammableTransactionBuilder::new();
-    let appraisal =
+    let (appraisal, attestations) =
         compose_full_appraisal(wrap, http, ctx, vault_id, holdings, option_buckets, &mut pt)
             .await?;
-    sui_tx::tx::trading_vault::build_fulfill_withdrawals(
+    let atts = non_accounting
+        .iter()
+        .map(|t| {
+            attestations
+                .get(t)
+                .copied()
+                .ok_or_else(|| anyhow!("no attestation composed for payout asset {t}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    sui_tx::tx::trading_vault::build_fulfill_mixed(
         client,
         &mut pt,
-        &sui_tx::tx::trading_vault::TradingVaultRefs {
-            package: ctx.trading_vault_pkg,
-            vault_id,
-            protocol_config_id: ctx.protocol_config_id,
-            deposit_type: &holdings.deposit_type,
-        },
+        &refs,
         ctx.treasury_id,
         appraisal,
+        atts,
+        &plan,
     )
     .await?;
-    submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, "trading_vault::fulfill_withdrawals")
-        .await?;
-    info!(vault = %vault_id, "trading-vault withdrawals fulfilled");
+    submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, "trading_vault::fulfill_mixed").await?;
+    info!(
+        vault = %vault_id,
+        requests = plan.iter().map(|(_, n)| n).sum::<usize>(),
+        payout_assets = ?non_accounting,
+        "mixed-asset withdrawal crank submitted"
+    );
     Ok(())
 }
 
@@ -1530,7 +1688,7 @@ async fn refresh_marks(
 ) -> Result<()> {
     let client = &wrap.client;
     let mut pt = ProgrammableTransactionBuilder::new();
-    let appraisal =
+    let (appraisal, _) =
         compose_full_appraisal(wrap, http, ctx, vault_id, holdings, option_buckets, &mut pt)
             .await?;
     sui_tx::tx::trading_vault::build_crank_appraisal(
