@@ -11,6 +11,8 @@ diesel::table! {
         min_size        -> Int8,
         lot_size        -> Int8,
         current_fee_bps -> Int8,
+        enabled         -> Bool,
+        listed_at       -> Timestamptz,
     }
 }
 

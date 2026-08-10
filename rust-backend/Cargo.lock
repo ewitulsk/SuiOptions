@@ -7813,6 +7813,7 @@ dependencies = [
  "cli-spec",
  "diesel",
  "diesel_migrations",
+ "exchange-types",
  "futures",
  "indexer-graphql",
  "metrics",

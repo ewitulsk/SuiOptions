@@ -32,6 +32,10 @@ impl Default for IntakeConfig {
 }
 
 pub struct AppState {
+    /// Exchange package id, served on `/v1/markets` so chart/analytics
+    /// consumers can build the `settlement::FillEvent` event filter without
+    /// reading deployments themselves.
+    pub exchange_package: String,
     pub markets: Vec<Market>,
     /// Per-market books, keyed by registry ID. A `Mutex<Book>` per market is
     /// the v1 stand-in for the single-writer task; contention stays

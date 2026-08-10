@@ -148,7 +148,7 @@ async fn main() -> Result<()> {
             "exchange published"
         );
 
-        record.package_info.exchange = Some(ExchangeRecord {
+        let mut exchange = ExchangeRecord {
             package_id: outcome.package_id.to_string(),
             upgrade_cap_id: outcome.upgrade_cap_id.to_string(),
             admin_cap_id: admin_cap_id.to_string(),
@@ -156,7 +156,19 @@ async fn main() -> Result<()> {
             deployed_at: chrono::Utc::now().to_rfc3339(),
             network: network.as_str().to_owned(),
             markets: std::collections::BTreeMap::new(),
-        });
+        };
+        // A fresh package has no markets yet: list every token × TUSDC now
+        // so the publish ceremony ends with a tradeable exchange.
+        deployment_manager::exchange_markets::create_markets(
+            &client,
+            &signer,
+            &mut exchange,
+            &record.token_info,
+            cli.gas_budget,
+        )
+        .await
+        .context("creating exchange markets")?;
+        record.package_info.exchange = Some(exchange);
         store.upsert(&env_key, record);
         store.save(&output_path)?;
         tracing::info!(path = %output_path.display(), env = %env_key, "exchange recorded");
@@ -589,6 +601,26 @@ async fn deploy_one(
         })
     };
 
+    // Reconcile the exchange market list against the (possibly republished)
+    // token catalog: recreate markets whose token types went stale, drop
+    // markets whose tokens left the catalog. The exchange package itself is
+    // never republished here (see --deploy-exchange).
+    let exchange = match previous_exchange {
+        Some(mut ex) => {
+            deployment_manager::exchange_markets::create_markets(
+                &client,
+                &signer,
+                &mut ex,
+                &token_info,
+                gas_budget,
+            )
+            .await
+            .context("reconciling exchange markets")?;
+            Some(ex)
+        }
+        None => None,
+    };
+
     Ok(NetworkDeployment {
         package_info: PackageInfo {
             package_id: publish.package_id.to_string(),
@@ -614,7 +646,7 @@ async fn deploy_one(
             equity_oracle: Some(record(&equity_oracle_out)),
             trading_vault_objects,
             cctp_bridge: previous_cctp,
-            exchange: previous_exchange,
+            exchange,
             // Deliberately not carried forward: a republish invalidates the
             // previous deployment's QuoteSigner (package-bound type). The
             // --deploy-mm-collateral pass fills it in.

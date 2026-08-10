@@ -53,20 +53,45 @@ async fn main() -> Result<()> {
     run_migrations(&pool)?;
     let db = Db::new(pool);
 
-    let (exchange_info, markets) = cfg.load_markets()?;
+    let (exchange_info, deployed_markets) = cfg.load_markets()?;
     info!(
         package = %exchange_info.package_id,
-        markets = markets.len(),
+        markets = deployed_markets.len(),
         "loaded exchange deployment"
     );
-    if markets.is_empty() {
+    if deployed_markets.is_empty() {
         warn!("no markets in deployments.json exchange block — nothing to serve");
     }
+
+    // Whitelist sync: mirror the deployments set into exchange_markets
+    // (new rows land enabled), disable rows whose registry left the record,
+    // then serve only what the DB says is enabled — an operator delists a
+    // market by flipping its `enabled` off, and that survives restarts.
+    for m in &deployed_markets {
+        db.upsert_market(m).await?;
+    }
+    let current_ids: Vec<String> =
+        deployed_markets.iter().map(|m| m.registry_id.to_hex()).collect();
+    let stale = db.disable_markets_absent_from(current_ids).await?;
+    if stale > 0 {
+        info!(disabled = stale, "disabled market rows absent from the deployments record");
+    }
+    let enabled: std::collections::HashSet<String> =
+        db.enabled_market_ids().await?.into_iter().collect();
+    let markets: Vec<_> = deployed_markets
+        .into_iter()
+        .filter(|m| {
+            let listed = enabled.contains(&m.registry_id.to_hex());
+            if !listed {
+                warn!(market = %m.symbol, registry = %m.registry_id, "market delisted in DB; not serving");
+            }
+            listed
+        })
+        .collect();
 
     // Books, rebuilt from OPEN orders (write-ahead guarantee, §5.4).
     let books: DashMap<SuiAddress, Arc<Mutex<Book>>> = DashMap::new();
     for m in &markets {
-        db.upsert_market(m).await?;
         let mut book = Book::new(m.clone());
         for stored in db.open_orders(&m.registry_id).await? {
             if stored.signed.order.expiry_ms <= now_ms() {
@@ -87,6 +112,7 @@ async fn main() -> Result<()> {
     let (ws_tx, _) = broadcast::channel::<WsMsg>(8192);
 
     let state = Arc::new(AppState {
+        exchange_package: exchange_info.package_id.clone(),
         markets: markets.clone(),
         books,
         db: db.clone(),

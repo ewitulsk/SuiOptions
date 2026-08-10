@@ -71,6 +71,7 @@ fn b64(s: &str) -> Result<Vec<u8>, ApiError> {
 pub async fn markets(State(state): State<Arc<AppState>>) -> ApiResult {
     Ok(Json(json!({
         "serverTimeMs": now_ms(),
+        "packageId": state.exchange_package,
         "markets": state.markets,
     })))
 }

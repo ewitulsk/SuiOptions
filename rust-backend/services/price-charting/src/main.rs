@@ -80,6 +80,17 @@ async fn main() -> Result<()> {
         poll_interval: Duration::from_millis(cfg.poll_interval_ms.max(500)),
         ttl_hours: cfg.ttl_hours,
     });
+    // Hybrid-exchange fills chart alongside DeepBook pools: markets come
+    // from the orderbook's DB-backed whitelist (`/v1/markets`), fills from
+    // the exchange package's FillEvent stream (cursor row 2).
+    price_charting::exchange_watcher::spawn(price_charting::exchange_watcher::ExchangeWatcherParams {
+        state: Arc::clone(&state),
+        events: EventClient::new(&graphql),
+        orderbook_url: cfg.orderbook_url.clone(),
+        token_info_url: cfg.token_info_url.clone(),
+        discovery_interval: Duration::from_secs(cfg.discovery_interval_secs.max(5)),
+        poll_interval: Duration::from_millis(cfg.poll_interval_ms.max(500)),
+    });
     mid_sampler::spawn(mid_sampler::MidSamplerParams {
         state: Arc::clone(&state),
         sui,

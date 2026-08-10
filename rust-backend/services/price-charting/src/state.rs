@@ -44,6 +44,11 @@ pub struct AppState {
     /// pool_id → metadata for every pool currently in the tradeable set.
     /// Written by the watcher's discovery pass, read by ingestion + API.
     pub watched: RwLock<HashMap<String, PoolMeta>>,
+    /// registry_id → metadata for every whitelisted hybrid-exchange market
+    /// (discovered from the orderbook service). Kept separate from
+    /// `watched`: the DeepBook discovery pass replaces that map wholesale,
+    /// and the mid sampler dev-inspects every entry as a DeepBook pool.
+    pub watched_exchange: RwLock<HashMap<String, PoolMeta>>,
     /// Live fill fan-out for the WS layer.
     pub trades_tx: broadcast::Sender<TradeMsg>,
     /// Live midpoint fan-out for the WS layer.
@@ -57,6 +62,7 @@ impl AppState {
         Self {
             repo,
             watched: RwLock::new(HashMap::new()),
+            watched_exchange: RwLock::new(HashMap::new()),
             trades_tx,
             mids_tx,
         }

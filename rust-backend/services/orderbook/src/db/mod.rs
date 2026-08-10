@@ -100,6 +100,17 @@ impl Db {
         blocking!(self, |r| r.upsert_market(&m))
     }
 
+    pub async fn disable_markets_absent_from(
+        &self,
+        current_ids: Vec<String>,
+    ) -> Result<usize, StoreError> {
+        blocking!(self, |r| r.disable_markets_absent_from(&current_ids))
+    }
+
+    pub async fn enabled_market_ids(&self) -> Result<Vec<String>, StoreError> {
+        blocking!(self, |r| r.enabled_market_ids())
+    }
+
     pub async fn insert_order(
         &self,
         digest: &Digest,

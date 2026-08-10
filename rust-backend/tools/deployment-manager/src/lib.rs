@@ -5,6 +5,7 @@
 //! `main.rs`.
 
 pub mod deploy;
+pub mod exchange_markets;
 pub mod json_store;
 pub mod network;
 pub mod signer;

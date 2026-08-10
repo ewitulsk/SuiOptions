@@ -31,6 +31,9 @@ fn default_apy_tick_secs() -> u64 {
 fn default_oracle_url() -> String {
     "http://oracle-service:9013".into()
 }
+fn default_orderbook_url() -> String {
+    "http://orderbook:9014".into()
+}
 fn default_vol_window_days() -> u32 {
     30
 }
@@ -73,6 +76,11 @@ pub struct Config {
 
     /// Discovery source for tradeable buckets/pools.
     pub api_service_url: String,
+    /// Orderbook service base URL — `/v1/markets` is the hybrid-exchange
+    /// market whitelist (plus the package id for the FillEvent filter).
+    /// Unreachable is non-fatal: exchange charting just stays empty.
+    #[serde(default = "default_orderbook_url")]
+    pub orderbook_url: String,
     /// DeepBook ids (original package id for the OrderFilled filter).
     pub token_info_url: String,
     /// Indexer GraphQL endpoint — the apy sampler lists vaults / rounds /

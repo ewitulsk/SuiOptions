@@ -24,7 +24,12 @@ happen only inside the Move package).
 `config/config.{staging,prod}.toml` (+ `${VAR}` env expansion). Markets and
 the exchange package id are read from `deployments.json`'s `exchange` block
 — never from hand-maintained config, because market registry IDs are the
-order-signature domain. The rendered `/run/secrets/orderbook.toml` carries
+order-signature domain. The `exchange_markets` table is the serving
+whitelist: boot mirrors the deployments set into it (new rows enabled,
+rows absent from the record disabled — never deleted), and only enabled
+rows are served/matched. Delisting a market without a redeploy is
+`UPDATE exchange_markets SET enabled = false WHERE registry_id = …` plus a
+restart; the boot upsert never touches the flag. The rendered `/run/secrets/orderbook.toml` carries
 the relayer key and Sui endpoint overrides; both are optional — without a
 key the service runs open-orderbook mode (serves signed fill tickets, no
 matched settlement).

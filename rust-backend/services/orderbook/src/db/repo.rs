@@ -122,6 +122,33 @@ impl Repo {
         Ok(())
     }
 
+    /// Whitelist sync: disable every market row whose registry is no longer
+    /// in the deployments record (stale after a redeploy). Never deletes —
+    /// fills and orders reference the ids. Returns how many were flipped.
+    pub fn disable_markets_absent_from(
+        &self,
+        current_ids: &[String],
+    ) -> Result<usize, StoreError> {
+        let n = diesel::update(
+            exchange_markets::table
+                .filter(exchange_markets::enabled.eq(true))
+                .filter(exchange_markets::registry_id.ne_all(current_ids)),
+        )
+        .set(exchange_markets::enabled.eq(false))
+        .execute(&mut self.conn()?)?;
+        Ok(n)
+    }
+
+    /// Registry ids of whitelisted markets. Serving/intake is restricted to
+    /// these; an operator delists by flipping `enabled` off (the boot upsert
+    /// never touches the column, so the toggle survives restarts).
+    pub fn enabled_market_ids(&self) -> Result<Vec<String>, StoreError> {
+        Ok(exchange_markets::table
+            .filter(exchange_markets::enabled.eq(true))
+            .select(exchange_markets::registry_id)
+            .load(&mut self.conn()?)?)
+    }
+
     // === Orders ===
 
     pub fn insert_order(

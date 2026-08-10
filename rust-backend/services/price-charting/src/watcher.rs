@@ -83,7 +83,10 @@ async fn run(p: WatcherParams) {
         // Hourly TTL sweep for pools that left the tradeable set.
         if last_evict.elapsed() >= Duration::from_secs(3_600) {
             last_evict = Instant::now();
-            let keep: Vec<String> = p.state.watched.read().keys().cloned().collect();
+            // Exchange markets are watched by the exchange watcher but share
+            // pool_trades — keep them out of the TTL sweep too.
+            let mut keep: Vec<String> = p.state.watched.read().keys().cloned().collect();
+            keep.extend(p.state.watched_exchange.read().keys().cloned());
             let repo = p.state.repo.clone();
             let ttl = p.ttl_hours;
             match tokio::task::spawn_blocking(move || repo.evict_stale(&keep, ttl)).await {
@@ -125,12 +128,15 @@ async fn refresh_watched(p: &WatcherParams) -> Result<()> {
 /// has no GraphQL equivalent, so a legacy row cannot be resumed from — it
 /// is dropped and the watcher re-initialises from the stream tip (the same
 /// self-heal operators already trigger by clearing the row).
-const GRAPHQL_CURSOR_MARKER: i64 = -1;
+pub(crate) const GRAPHQL_CURSOR_MARKER: i64 = -1;
+
+/// This watcher's `watch_cursor` row. The exchange watcher owns row 2.
+const DEEPBOOK_CURSOR_ID: i16 = 1;
 
 /// Resume from the persisted cursor, else start tailing from the stream tip.
 async fn load_or_init_cursor(p: &WatcherParams) -> Option<String> {
     let repo = p.state.repo.clone();
-    let persisted = tokio::task::spawn_blocking(move || repo.load_cursor())
+    let persisted = tokio::task::spawn_blocking(move || repo.load_cursor(DEEPBOOK_CURSOR_ID))
         .await
         .ok()
         .and_then(|r| r.ok())
@@ -230,7 +236,8 @@ async fn ingest_once(
         let batch = rows.clone();
         let cur = (next_cursor.clone(), GRAPHQL_CURSOR_MARKER);
         let inserted =
-            tokio::task::spawn_blocking(move || repo.insert_trades(&batch, cur)).await??;
+            tokio::task::spawn_blocking(move || repo.insert_trades(&batch, cur, DEEPBOOK_CURSOR_ID))
+                .await??;
         if inserted > 0 {
             debug!(inserted, "ingested fills");
         }
