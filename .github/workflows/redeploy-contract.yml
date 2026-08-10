@@ -690,6 +690,14 @@ jobs:
             -m "Network: ${{ steps.net.outputs.network }}" \
             -m "Deployment checkpoint: ${{ steps.checkpoint.outputs.checkpoint }}" \
             -m "Indexer start_checkpoint: ${{ steps.checkpoint.outputs.start_checkpoint }}"
+          # The branch may have moved during the ~15-minute publish (run
+          # 31353090511 lost a whole successful deploy to a mid-run merge:
+          # the push was rejected and deployments.json only existed in this
+          # workspace). Rebase our single commit onto the current tip —
+          # none of the files this step commits are edited by normal PRs,
+          # so conflicts are not expected; if one ever happens, failing
+          # here is still correct.
+          git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)"
           git push
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
