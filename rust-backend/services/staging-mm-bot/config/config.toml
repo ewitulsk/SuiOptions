@@ -1,0 +1,61 @@
+# staging-mm-bot reference config (local dev). Every knob documented here;
+# config.staging.toml only overrides what differs.
+#
+# The bot free-mints from the test-token faucets, so `network` MUST be
+# testnet — any other value is rejected at load.
+
+# HTTP ops bind address (/health, /metrics).
+health_addr = "0.0.0.0:8085"
+
+network = "testnet"
+
+# The BalanceManager is auto-discovered at boot (newest DepositEvent under
+# the live exchange package owned by this wallet) or created when absent —
+# nothing to configure, including across contract redeployments.
+
+# Per-order signed fee ceiling in bps. The chain caps fees at 50 and the
+# market default is 10; signing 50 accepts any admin-set fee up to the cap.
+max_fee_bps = 50
+
+[funding]
+enabled = true
+check_interval_secs = 60
+
+# Escrow float targets in RAW units per ticker. Mirrored escrow below half
+# the target triggers a top-up back to target. Tokens not listed are never
+# minted.
+[funding.targets]
+TUSDC = 1_000_000_000_000 # $1M at 6 decimals
+TBTC = 1_000_000_000      # 10 TBTC at 8 decimals
+TSUI = 100_000_000_000_000 # 100k TSUI at 9 decimals
+TWAL = 100_000_000_000_000 # 100k TWAL at 9 decimals
+
+[quoting]
+# Order lifetime (intake floor 30s; loader floor 60s) and refresh cadence.
+ttl_secs = 90
+refresh_secs = 5
+# Requote when mid drifts this many bps from the quoted mid.
+requote_drift_bps = 5
+# Fraction of mirrored escrow the ladder may commit per token.
+escrow_utilization = 0.8
+
+# Ladder levels, inner first: half-spread from mid in bps, size in lots
+# (1 lot = one whole base token).
+[[quoting.levels]]
+bps = 10
+lots = 1
+
+[[quoting.levels]]
+bps = 25
+lots = 2
+
+[[quoting.levels]]
+bps = 50
+lots = 4
+
+[pyth]
+# Staleness gates on the oracle-service WS cache: pause quoting rather than
+# track a dead price.
+max_price_age_ms = 5_000
+max_publish_lag_ms = 10_000
+max_conf_bps = 0

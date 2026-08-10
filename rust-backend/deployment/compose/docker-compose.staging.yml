@@ -137,6 +137,24 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # Staging-only maker bot for the hybrid exchange (SO-368): free-mints
+  # test tokens into its BalanceManager escrow and quotes oracle-tracking
+  # ladders on every orderbook market. Deliberately absent from prod.
+  staging-mm-bot:
+    image: ${ECR}/options/staging-mm-bot:${STAGING_MM_BOT_TAG}
+    environment:
+      APP_ENV: staging
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      ORDERBOOK_URL: http://orderbook:9014
+      TOKEN_INFO_URL: http://token-info:9005
+      ORACLE_URL: http://oracle-service:9013
+      RUST_LOG: info,staging_mm_bot=debug
+    volumes:
+      - /opt/options/staging/secrets:/run/secrets:ro
+    depends_on: [orderbook, token-info, oracle-service]
+    restart: unless-stopped
+    networks: [net]
+
   option-scheduler:
     image: ${ECR}/options/option-scheduler:${SCHEDULER_TAG}
     environment:

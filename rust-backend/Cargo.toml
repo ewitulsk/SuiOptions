@@ -39,6 +39,7 @@ members = [
     "services/twitter-service",
     "services/social-bot",
     "services/orderbook",
+    "services/staging-mm-bot",
     "tools/deployment-manager",
     "tools/exchange",
     "tools/writer",

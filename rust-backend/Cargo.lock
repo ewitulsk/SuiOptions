@@ -10079,6 +10079,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "staging-mm-bot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "clap",
+ "cli-spec",
+ "exchange-book",
+ "exchange-signing",
+ "exchange-types",
+ "metrics",
+ "observability",
+ "oracle-client",
+ "protocol-types",
+ "pyth-client",
+ "reqwest",
+ "runtime-config",
+ "serde",
+ "serde_json",
+ "sui-tx",
+ "sui-types",
+ "thiserror 1.0.69",
+ "token-info-client",
+ "tokio",
+ "toml 0.8.23",
+ "tower-http 0.6.10",
+ "tracing",
+]
+
+[[package]]
 name = "starlark"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
