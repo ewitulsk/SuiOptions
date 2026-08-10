@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{anyhow, Context, Result};
-use sui_types::base_types::ObjectID;
+use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::Argument;
 
@@ -35,6 +35,11 @@ pub struct PythLegs<'a> {
     pub accumulator_update: &'a [u8],
     /// coin type → that feed's shared `PriceInfoObject`.
     pub price_infos: &'a BTreeMap<String, ObjectID>,
+    /// Who signs (and pays for) the transaction, and with what budget. The
+    /// per-feed update fee is funded to match how that wallet pays gas — see
+    /// `pyth_update::prepend_price_update`.
+    pub sender: SuiAddress,
+    pub gas_budget: u64,
 }
 
 /// Object arguments produced by the prefix, ready for `attest`.
@@ -84,6 +89,8 @@ pub async fn prepare(
 
     prepend_price_update(
         client,
+        legs.sender,
+        legs.gas_budget,
         pt,
         legs.handles,
         legs.accumulator_update,

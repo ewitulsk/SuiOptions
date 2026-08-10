@@ -15,14 +15,13 @@
 
 use std::path::Path;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 pub mod collateral;
 use shared_crypto::intent::Intent;
 
 use sui_move_build::BuildConfig;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
-use sui_types::transaction::TransactionData;
 use sui_tx::chain::{
     created_objects as tx_created_objects, published_package, ChainClient, ExecutedTransaction,
 };
@@ -138,21 +137,9 @@ async fn publish_dep_inner(
     let cap = pt.publish_upgradeable(modules, deps);
     pt.transfer_arg(sender, cap);
 
-    let gas_coin = client
-        .gas_coin(sender)
+    let tx_data = sui_tx::tx::gas_tx_data(client, sender, pt.finish(), gas_budget)
         .await
-        .with_context(|| format!("selecting a gas coin for the {label} publish"))?;
-    let gas_price = client
-        .reference_gas_price()
-        .await
-        .context("fetching reference gas price")?;
-    let tx_data = TransactionData::new_programmable(
-        sender,
-        vec![gas_coin],
-        pt.finish(),
-        gas_budget,
-        gas_price,
-    );
+        .with_context(|| format!("building the {label} publish tx"))?;
     let signature =
         Transaction::signature_from_signer(tx_data.clone(), Intent::sui_transaction(), keypair);
     let tx = Transaction::from_data(tx_data, vec![signature]);

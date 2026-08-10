@@ -20,7 +20,7 @@ use shared_crypto::intent::Intent;
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{
-    Argument, ObjectArg, Transaction, TransactionData,
+    Argument, Transaction, TransactionData,
 };
 use sui_types::SUI_CLOCK_OBJECT_ID;
 
@@ -643,10 +643,9 @@ pub async fn cancel_all_on_pool(
     submit(client, signer, pt, gas_budget).await
 }
 
-/// Gather wallet coins of `coin_type`, merge into one, split off `amount`.
-/// Returns the exact-amount coin argument.
-/// Gather an exact-amount Coin<T> argument from the signer's wallet
-/// (merging as needed). Public for the mm-bot simulator's funding PTBs.
+/// Gather an exact-amount Coin<T> argument from the signer's wallet — coin
+/// objects, address balance, or both (see [`crate::tx::funding`]). Public for
+/// the mm-bot simulator's funding PTBs.
 pub async fn gather_exact_coin(
     client: &ChainClient,
     signer: &Signer,
@@ -656,32 +655,7 @@ pub async fn gather_exact_coin(
 ) -> Result<Argument> {
     let tag = sui_types::parse_sui_struct_tag(coin_type)
         .map_err(|e| anyhow!("parsing coin type {coin_type}: {e}"))?;
-    let coins = client
-        .coins(signer.address, &tag)
-        .await
-        .with_context(|| format!("listing {coin_type} coins"))?;
-    let total: u128 = coins.iter().map(|c| c.balance as u128).sum();
-    if total < amount as u128 {
-        bail!("wallet holds {total} of {coin_type}, need {amount}");
-    }
-    let mut refs = coins.into_iter().map(|c| c.object_ref);
-    let first = refs.next().ok_or_else(|| anyhow!("no {coin_type} coins"))?;
-    let primary = pt.obj(ObjectArg::ImmOrOwnedObject(first))?;
-    let rest: Vec<Argument> = refs
-        .map(|r| pt.obj(ObjectArg::ImmOrOwnedObject(r)))
-        .collect::<Result<_, _>>()?;
-    if !rest.is_empty() {
-        pt.command(sui_types::transaction::Command::MergeCoins(primary, rest));
-    }
-    let amt = pt.pure(&amount)?;
-    let split = pt.command(sui_types::transaction::Command::SplitCoins(
-        primary,
-        vec![amt],
-    ));
-    Ok(match split {
-        Argument::Result(i) => Argument::NestedResult(i, 0),
-        other => other,
-    })
+    crate::tx::funding::exact_coin(client, signer.address, pt, &tag, amount).await
 }
 
 /// Dry-run gate + sign + execute. Mirrors `test_tokens::submit`.
@@ -702,21 +676,8 @@ async fn submit_programmable(
     programmable: sui_types::transaction::ProgrammableTransaction,
     gas_budget: u64,
 ) -> Result<ExecutedTransaction> {
-    let gas_coin = client
-        .gas_coin(signer.address)
-        .await
-        .context("selecting a gas coin")?;
-    let gas_price = client
-        .reference_gas_price()
-        .await
-        .context("fetching reference gas price")?;
-    let tx_data = TransactionData::new_programmable(
-        signer.address,
-        vec![gas_coin],
-        programmable,
-        gas_budget,
-        gas_price,
-    );
+    let tx_data =
+        crate::tx::gas_tx_data(client, signer.address, programmable, gas_budget).await?;
 
     // Dry-run first so a bad assumption (book moved, POST-only would cross,
     // wrong constant) costs nothing and is loudly attributable.

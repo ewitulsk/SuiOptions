@@ -24,12 +24,12 @@
 use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::{StructTag, TypeTag};
-use sui_types::base_types::ObjectID;
+use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{Argument, Command};
 
 use crate::tx::{clock_arg, shared_object_arg};
-use crate::chain::ChainClient;
+use crate::chain::{sui_coin_type, ChainClient, GasPayment};
 
 /// On-chain handles for the Pyth + Wormhole deployments on the target
 /// network. Package ids are the *latest* (upgraded) packages the entry
@@ -104,8 +104,14 @@ pub fn extract_vaa_from_accumulator(update: &[u8]) -> Result<Vec<u8>> {
 /// Append the price-update calls for `accumulator_update` (one Hermes
 /// `binary.data` entry covering every feed in `price_info_objects`) to
 /// `pt`. Call this *before* adding the oracle-gated crank.
+///
+/// `gas_budget` is the budget the finished transaction will be submitted with:
+/// the update fee's funding source follows the gas payment's (see
+/// [`update_fees`]).
 pub async fn prepend_price_update(
     client: &ChainClient,
+    sender: SuiAddress,
+    gas_budget: u64,
     pt: &mut ProgrammableTransactionBuilder,
     handles: &PythHandles,
     accumulator_update: &[u8],
@@ -140,10 +146,22 @@ pub async fn prepend_price_update(
         vec![pyth_state, message_arg, verified_vaa, clock],
     );
 
+    let mut fees = update_fees(
+        client,
+        sender,
+        gas_budget,
+        pt,
+        handles.update_fee_mist,
+        price_info_objects.len(),
+    )
+    .await?
+    .into_iter();
+
     for info_id in price_info_objects {
         let info = pt.obj(shared_object_arg(client, *info_id, true).await?)?;
-        let fee_amount = pt.pure(&handles.update_fee_mist)?;
-        let fee = pt.command(Command::SplitCoins(Argument::GasCoin, vec![fee_amount]));
+        let fee = fees
+            .next()
+            .ok_or_else(|| anyhow!("ran out of update-fee coins"))?;
         potato = pt.programmable_move_call(
             handles.pyth_package,
             Identifier::new("pyth").unwrap(),
@@ -167,6 +185,50 @@ pub async fn prepend_price_update(
         vec![potato],
     );
     Ok(())
+}
+
+/// One `Coin<SUI>` of `fee` MIST per feed being updated.
+///
+/// Historically these were split straight off `Argument::GasCoin`, which needs
+/// no chain read and cannot collide with the gas payment. That is still the
+/// right answer whenever the wallet pays gas with a coin object — but a wallet
+/// holding only an address balance has no gas *object* to split, and the
+/// protocol rejects `Argument::GasCoin` outright on those transactions. There
+/// we withdraw the fee from the address balance instead.
+///
+/// Asking [`ChainClient::gas_payment`] is what keeps the two in step: this is
+/// the same question, against the same wallet, answered by the same rule the
+/// submission will use. Guessing it locally — "are there any coins?" — is
+/// wrong for a wallet whose coins exist but are too small to cover the budget.
+///
+/// Note we never fund the fee from an arbitrary coin object: the one gas
+/// selection picks cannot also be a transaction input, and choosing around it
+/// would fork the rule again.
+async fn update_fees(
+    client: &ChainClient,
+    sender: SuiAddress,
+    gas_budget: u64,
+    pt: &mut ProgrammableTransactionBuilder,
+    fee: u64,
+    count: usize,
+) -> Result<Vec<Argument>> {
+    match client.gas_payment(sender, gas_budget).await? {
+        GasPayment::Coins(_) => {
+            let fee_amount = pt.pure(&fee)?;
+            Ok((0..count)
+                .map(|_| pt.command(Command::SplitCoins(Argument::GasCoin, vec![fee_amount])))
+                .map(|split| match split {
+                    Argument::Result(i) => Argument::NestedResult(i, 0),
+                    other => other,
+                })
+                .collect())
+        }
+        GasPayment::AddressBalance => {
+            crate::tx::funding::exact_coins(client, sender, pt, &sui_coin_type(), fee, count)
+                .await
+                .context("withdrawing the pyth update fee from the address balance")
+        }
+    }
 }
 
 #[cfg(test)]

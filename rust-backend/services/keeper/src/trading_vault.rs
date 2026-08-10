@@ -1372,6 +1372,8 @@ async fn compose_full_appraisal(
                     handles: &ctx.pyth,
                     accumulator_update: update,
                     price_infos: &price_infos,
+                    sender: wrap.signer.address,
+                    gas_budget: ctx.gas_budget,
                 })),
                 option_buckets,
             )

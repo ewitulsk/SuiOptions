@@ -30,7 +30,7 @@ use sui_tx::chain::{created_objects, ChainClient, ExecutedTransaction};
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::{
-    Argument, Command, ObjectArg, SharedObjectMutability, Transaction, TransactionData,
+    Argument, Command, ObjectArg, SharedObjectMutability, Transaction,
 };
 use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
 use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION, SUI_FRAMEWORK_PACKAGE_ID};
@@ -320,27 +320,17 @@ async fn create_pool(client: &ChainClient, signer: &Signer) -> Result<ExecutedTr
 
     let registry = pt.obj(shared_object_arg(client, oid(REGISTRY_ID)?, true).await?)?;
 
-    // Gather DEEP coins as owned inputs; merge into one, split out exactly 500.
+    // The DEEP fee, from coin objects or the wallet's DEEP address balance.
     let deep_tag = sui_types::parse_sui_struct_tag(DEEP_TYPE)
         .map_err(|e| anyhow!("parsing DEEP type: {e}"))?;
-    let deep_coins = client
-        .coins(signer.address, &deep_tag)
-        .await
-        .context("listing DEEP coins")?;
-    if deep_coins.is_empty() {
-        bail!("no DEEP coins owned");
-    }
-    let mut deep_args = Vec::with_capacity(deep_coins.len());
-    for c in &deep_coins {
-        deep_args.push(pt.obj(ObjectArg::ImmOrOwnedObject(c.object_ref))?);
-    }
-    let primary = deep_args[0];
-    if deep_args.len() > 1 {
-        pt.command(Command::MergeCoins(primary, deep_args[1..].to_vec()));
-    }
-    let fee_amt = pt.pure(POOL_CREATION_FEE)?;
-    let split = pt.command(Command::SplitCoins(primary, vec![fee_amt]));
-    let fee_coin = nested(split, 0)?;
+    let fee_coin = sui_tx::tx::funding::exact_coin(
+        client,
+        signer.address,
+        &mut pt,
+        &deep_tag,
+        POOL_CREATION_FEE,
+    )
+    .await?;
 
     let tick = pt.pure(TICK_SIZE)?;
     let lot = pt.pure(LOT_SIZE)?;
@@ -379,32 +369,14 @@ async fn verify_pool(client: &ChainClient, pool_id: ObjectID) -> Result<()> {
     Ok(())
 }
 
-/// Gas-select (all SUI coins), dry-run, then sign + submit. Bails on revert.
+/// Gas-select, dry-run, then sign + submit. Bails on revert.
 async fn sign_submit(
     client: &ChainClient,
     signer: &Signer,
     pt: ProgrammableTransactionBuilder,
     gas_budget: u64,
 ) -> Result<ExecutedTransaction> {
-    let programmable = pt.finish();
-
-    let sui_coins = client
-        .coins(signer.address, &sui_tx::chain::sui_coin_type())
-        .await
-        .context("listing gas coins")?;
-    if sui_coins.is_empty() {
-        bail!("no SUI coins to pay gas for {}", signer.address);
-    }
-    let gas_refs: Vec<_> = sui_coins.iter().map(|c| c.object_ref).collect();
-    let gas_price = client.reference_gas_price().await?;
-
-    let tx_data = TransactionData::new_programmable(
-        signer.address,
-        gas_refs,
-        programmable,
-        gas_budget,
-        gas_price,
-    );
+    let tx_data = sui_tx::tx::gas_tx_data(client, signer.address, pt.finish(), gas_budget).await?;
 
     // Dry-run first so bad assumptions fail without spending.
     let dry = client.dry_run(&tx_data).await.context("dry-run")?;

@@ -14,12 +14,12 @@
 
 use std::str::FromStr;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
 use sui_types::base_types::{ObjectDigest, ObjectID, ObjectRef, SequenceNumber};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
-use sui_types::transaction::{Argument, Command, ObjectArg};
+use sui_types::transaction::{Argument, ObjectArg};
 use tracing::{debug, info};
 
 use crate::sui_client::Signer;
@@ -266,9 +266,9 @@ async fn create_buckets_impl(
     Ok(resp)
 }
 
-/// Merge the signer's DEEP coins and split off `count` coins of exactly `fee`
-/// each — one per pool-creation call in the same PTB. Returns the per-pool coin
-/// Arguments (the `NestedResult`s of the SplitCoins command).
+/// Split off `count` DEEP coins of exactly `fee` each — one per pool-creation
+/// call in the same PTB — from the signer's coin objects, its DEEP address
+/// balance, or both.
 async fn split_deep_fees(
     client: &ChainClient,
     signer: &Signer,
@@ -279,31 +279,8 @@ async fn split_deep_fees(
 ) -> Result<Vec<Argument>> {
     let deep_tag = sui_types::parse_sui_struct_tag(deep_coin_type)
         .map_err(|e| anyhow!("parsing DEEP coin type {deep_coin_type}: {e}"))?;
-    let coins = client
-        .coins(signer.address, &deep_tag)
+    crate::tx::funding::exact_coins(client, signer.address, pt, &deep_tag, fee, count)
         .await
-        .with_context(|| format!("listing {deep_coin_type} coins"))?;
-    let total: u128 = coins.iter().map(|c| c.balance as u128).sum();
-    let need = fee as u128 * count as u128;
-    if total < need {
-        bail!("wallet holds {total} of {deep_coin_type}, need {need} for {count} pool fees");
-    }
-    let mut refs = coins.into_iter().map(|c| c.object_ref);
-    let first = refs.next().ok_or_else(|| anyhow!("no {deep_coin_type} coins"))?;
-    let primary = pt.obj(ObjectArg::ImmOrOwnedObject(first))?;
-    let rest: Vec<Argument> = refs
-        .map(|r| pt.obj(ObjectArg::ImmOrOwnedObject(r)))
-        .collect::<Result<_, _>>()?;
-    if !rest.is_empty() {
-        pt.command(Command::MergeCoins(primary, rest));
-    }
-    // One amount Argument reused `count` times (pure inputs aren't consumed).
-    let amt = pt.pure(&fee)?;
-    let split = pt.command(Command::SplitCoins(primary, vec![amt; count]));
-    let base = match split {
-        Argument::Result(i) => i,
-        other => bail!("SplitCoins returned unexpected argument {other:?}"),
-    };
-    Ok((0..count as u16).map(|j| Argument::NestedResult(base, j)).collect())
+        .with_context(|| format!("funding {count} × {fee} of {deep_coin_type} for pool fees"))
 }
 

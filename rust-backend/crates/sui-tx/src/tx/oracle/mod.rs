@@ -201,6 +201,8 @@ mod tests {
             handles,
             accumulator_update: update,
             price_infos: infos,
+            sender: sui_types::base_types::SuiAddress::ZERO,
+            gas_budget: 0,
         })
     }
 
