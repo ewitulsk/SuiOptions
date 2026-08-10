@@ -1,6 +1,7 @@
 /// Curated trading vault (docs/trading-vault/01-contract-design.md):
-/// permissionless creation, creator starts as curator, single per-vault
-/// deposit asset, allowlisted-adapter sessions for deployment.
+/// permissionless creation, creator starts as curator, per-vault
+/// accounting asset with an allowlist of deposit/payout assets
+/// (SO-370), allowlisted-adapter sessions for deployment.
 ///
 /// Principles:
 /// 1. **Curator trades, never withdraws** — no vault function returns
@@ -18,11 +19,25 @@
 ///    `Appraisal` hot potato, complete-and-same-transaction by
 ///    construction.
 ///
-/// Accounting: u128 shares; NAV in deposit-asset smallest-units; value =
-/// shares × nav / total_shares with u256 intermediates and floor
-/// division (dust favors remaining depositors). The curator's fee is
-/// minted as shares at the same ratio, which keeps price-per-share
-/// invariant for everyone else (see the fulfillment math below).
+/// Accounting: u128 shares; NAV in accounting-asset smallest-units.
+/// Share math carries an OpenZeppelin-style virtual offset
+/// (`SHARE_OFFSET` virtual shares against 1 virtual asset unit):
+///   shares = value × (S + O) / (nav + 1)
+///   value  = shares × (nav + 1) / (S + O)
+/// with u256 intermediates and floor division (dust favors remaining
+/// depositors). The offset makes donation-driven share inflation
+/// unprofitable — a donor's NAV bump accrues overwhelmingly to shares
+/// nobody owns. The curator's fee is minted as shares at the same batch
+/// ratio, which keeps price-per-share invariant for everyone else (see
+/// the fulfillment math below).
+///
+/// Multi-asset deposits/withdrawals (SO-370, dHEDGE/GLP model): the
+/// `deposit_assets` allowlist names the coin types users may move in and
+/// out. Non-accounting deposits are valued into the accounting asset by
+/// a fresh `PriceAttestation` at entry; withdrawal requests name a
+/// payout asset and are converted at fulfillment-batch prices. All
+/// internal accounting (NAV, cost basis, fees, external budgets) stays
+/// in accounting-asset units.
 module trading_vault::vault;
 
 use std::type_name::{Self, TypeName};
@@ -46,6 +61,13 @@ use trading_vault::price::{Self, PriceAttestation};
 use trading_vault::registry::{Self, IntegrationRegistry, OracleRegistry, VaultProtocolConfig};
 
 const BPS_DENOM: u128 = 10_000;
+
+/// Virtual shares standing against 1 virtual accounting-asset unit in
+/// every share↔value conversion (OZ ERC-4626 decimals-offset pattern).
+const SHARE_OFFSET: u128 = 1_000_000;
+
+/// Hard cap on the curator-set entry/exit haircuts.
+const MAX_HAIRCUT_BPS: u64 = 500;
 
 public enum VaultState has copy, drop, store {
     Open,
@@ -75,12 +97,24 @@ public struct Stake has store {
 }
 
 public struct VaultConfig has copy, drop, store {
-    deposit_asset: TypeName,
+    /// Unit of account: NAV, cost basis, fees and external budgets are
+    /// denominated in this asset's smallest units. Fixed at creation.
+    accounting_asset: TypeName,
+    /// Assets users may deposit and request payouts in. Always contains
+    /// `accounting_asset`; curator-managed, capped by
+    /// `VaultProtocolConfig.max_deposit_assets`.
+    deposit_assets: VecSet<TypeName>,
     lockup_ms: u64,
     curator_fee_bps: u64,
     /// Queue-head age after which permissionless force-unwind sessions
     /// unlock.
     unwind_grace_ms: u64,
+    /// Oracle-arb dampers on non-accounting flows: deposits credit
+    /// `value × (1 − entry)/10⁴`; payouts convert at a price inflated by
+    /// `exit` bps (fewer units out). Both default 0; capped at
+    /// `MAX_HAIRCUT_BPS`.
+    entry_haircut_bps: u64,
+    exit_haircut_bps: u64,
     deposits_paused: bool,
     /// Opt-in for the `vault_mm` release path: signed quotes from the
     /// curator's bot may draw vault collateral. Off by default.
@@ -92,6 +126,10 @@ public struct WithdrawRequest has store {
     recipient: address,
     shares: u128,
     basis: u64,
+    /// Asset the recipient asked to be paid in (∈ `deposit_assets` at
+    /// request time). After `unwind_grace_ms` the crank may pay the
+    /// accounting asset instead — the queue-liveness backstop.
+    payout_asset: TypeName,
     requested_at_ms: u64,
 }
 
@@ -108,6 +146,11 @@ public struct TradingVault has key {
     /// completeness check walks this set.
     asset_types: VecSet<TypeName>,
     position_count: u64,
+    /// Bumped by every free-balance mutation (`put_balance_internal` /
+    /// `take_balance_internal`). Appraisals snapshot it at begin and
+    /// abort at consume if it moved — a type-free, strictly stronger
+    /// replacement for re-reading the accounting balance.
+    mutation_seq: u64,
     // FIFO withdrawal queue: `queue[head..tail)`.
     queue: Table<u64, WithdrawRequest>,
     queue_head: u64,
@@ -193,7 +236,7 @@ public struct Appraisal {
     /// Anything changing mid-PTB (a session between begin and consume)
     /// invalidates the snapshot and aborts at consume.
     types_snapshot: VecSet<TypeName>,
-    deposit_balance_snapshot: u64,
+    mutation_seq_snapshot: u64,
     /// True while an external account with LIVE exposure still needs its
     /// equity leg (`record_external_equity`). False — leg neither needed
     /// nor accepted — for vaults with no account and for accounts with
@@ -230,16 +273,22 @@ public fun create_vault<T>(
 ): ID {
     assert!(curator_fee_bps <= registry::max_curator_fee_bps(cfg), errors::fee_too_high());
 
+    let accounting = type_name::with_defining_ids<T>();
+    let mut deposit_assets = vec_set::empty();
+    deposit_assets.insert(accounting);
     let mut vault = TradingVault {
         id: object::new(ctx),
         creator: ctx.sender(),
         curator_cap_id: object::id_from_address(@0x0), // set below
         state: VaultState::Open,
         config: VaultConfig {
-            deposit_asset: type_name::with_defining_ids<T>(),
+            accounting_asset: accounting,
+            deposit_assets,
             lockup_ms,
             curator_fee_bps,
             unwind_grace_ms,
+            entry_haircut_bps: 0,
+            exit_haircut_bps: 0,
             deposits_paused: false,
             mm_release_enabled: false,
         },
@@ -247,6 +296,7 @@ public fun create_vault<T>(
         stakes: table::new(ctx),
         asset_types: vec_set::empty(),
         position_count: 0,
+        mutation_seq: 0,
         queue: table::new(ctx),
         queue_head: 0,
         queue_tail: 0,
@@ -261,7 +311,7 @@ public fun create_vault<T>(
         vault_id,
         vault.creator,
         cap_id,
-        vault.config.deposit_asset,
+        vault.config.accounting_asset,
         lockup_ms,
         curator_fee_bps,
         unwind_grace_ms,
@@ -274,17 +324,21 @@ public fun create_vault<T>(
 // ══════════════════════════ deposits and stakes ══════════════════════════
 
 /// Deposit into an address-keyed stake. Requires a complete appraisal so
-/// shares are minted at true NAV.
+/// shares are minted at true NAV. `T` must be on the vault's
+/// `deposit_assets` allowlist; non-accounting deposits carry a fresh
+/// `PriceAttestation` (asset `T` → accounting asset) that values them,
+/// accounting-asset deposits pass `none`.
 public fun deposit<T>(
     vault: &mut TradingVault,
     cfg: &VaultProtocolConfig,
     appraisal: Appraisal,
     funds: Coin<T>,
+    att: Option<PriceAttestation>,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
     let key = StakeKey::Addr(ctx.sender());
-    deposit_internal<T>(vault, cfg, appraisal, funds, key, option::none(), clock, ctx);
+    deposit_internal<T>(vault, cfg, appraisal, funds, att, key, option::none(), clock, ctx);
 }
 
 /// Deposit into the curator's cap-keyed stake (their floor stake).
@@ -294,6 +348,7 @@ public fun deposit_as_curator<T>(
     cap: &CuratorCap,
     appraisal: Appraisal,
     funds: Coin<T>,
+    att: Option<PriceAttestation>,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
@@ -304,6 +359,7 @@ public fun deposit_as_curator<T>(
         cfg,
         appraisal,
         funds,
+        att,
         StakeKey::Cap(cap_id),
         option::some(cap_id),
         clock,
@@ -316,6 +372,7 @@ fun deposit_internal<T>(
     cfg: &VaultProtocolConfig,
     appraisal: Appraisal,
     funds: Coin<T>,
+    att: Option<PriceAttestation>,
     key: StakeKey,
     cap_for_event: Option<ID>,
     clock: &Clock,
@@ -324,22 +381,39 @@ fun deposit_internal<T>(
     assert!(!registry::is_paused(cfg), errors::protocol_paused());
     assert!(vault.state == VaultState::Open, errors::vault_not_open());
     assert!(!vault.config.deposits_paused, errors::deposits_paused());
-    assert!(
-        type_name::with_defining_ids<T>() == vault.config.deposit_asset,
-        errors::deposit_asset_mismatch(),
-    );
+    let t = type_name::with_defining_ids<T>();
+    assert!(vault.config.deposit_assets.contains(&t), errors::asset_not_allowed());
     let amount = funds.value();
     assert!(amount > 0, core_errors::zero_amount());
 
-    let nav = consume_appraisal<T>(vault, appraisal);
-    let shares = if (vault.total_shares == 0) {
-        amount as u128
+    // Value the deposit in accounting-asset units. The attestation is
+    // validated exactly like an appraisal leg (asset/quote pinning +
+    // freshness); the entry haircut is the conservative-marks damper on
+    // oracle error.
+    let value = if (t == vault.config.accounting_asset) {
+        assert!(att.is_none(), errors::price_asset_mismatch());
+        att.destroy_none();
+        amount
     } else {
-        // A wiped vault (shares outstanding, nothing left) can no longer
-        // price deposits; it can only be closed out.
-        assert!(nav > 0, errors::vault_dead());
-        mul_div(amount as u128, vault.total_shares, nav)
+        assert!(att.is_some(), errors::attestation_missing());
+        let a = att.destroy_some();
+        assert!(price::asset(&a) == t, errors::price_asset_mismatch());
+        assert!(
+            price::quote_asset(&a) == vault.config.accounting_asset,
+            errors::price_asset_mismatch(),
+        );
+        assert_attestation_fresh(cfg, &a, clock);
+        let gross = mul_div(amount as u128, price::price(&a), price::price_scale());
+        let net = gross * (BPS_DENOM - (vault.config.entry_haircut_bps as u128)) / BPS_DENOM;
+        assert!(net > 0, core_errors::zero_amount());
+        net as u64
     };
+
+    let nav = consume_appraisal(vault, appraisal);
+    // A wiped vault (shares outstanding, nothing left) can no longer
+    // price deposits; it can only be closed out.
+    assert!(vault.total_shares == 0 || nav > 0, errors::vault_dead());
+    let shares = mul_div(value as u128, vault.total_shares + SHARE_OFFSET, nav + 1);
     assert!(shares > 0, core_errors::zero_amount());
 
     put_balance_internal<T>(vault, funds.into_balance());
@@ -349,41 +423,98 @@ fun deposit_internal<T>(
     if (vault.stakes.contains(key)) {
         let stake = vault.stakes.borrow_mut(key);
         stake.shares = stake.shares + shares;
-        stake.cost_basis = stake.cost_basis + amount;
+        stake.cost_basis = stake.cost_basis + value;
         stake.locked_until_ms = locked_until_ms;
     } else {
-        vault.stakes.add(key, Stake { shares, cost_basis: amount, locked_until_ms });
+        vault.stakes.add(key, Stake { shares, cost_basis: value, locked_until_ms });
     };
 
     events::emit_deposited(
         object::id(vault),
         ctx.sender(),
         cap_for_event,
+        t,
         amount,
+        value,
         shares,
         vault.total_shares,
         locked_until_ms,
     );
 }
 
+// ═══════════════════════ deposit-asset allowlist ═══════════════════════
+
+/// Curator-gated: allow `T` for deposits and payout requests. Capped by
+/// the protocol's `max_deposit_assets` — every allowlisted asset the
+/// vault holds is a mandatory appraisal leg on every deposit and
+/// fulfillment, so the list must stay small. Depositability is
+/// oracle-coverage self-gating: an asset no allowlisted oracle can price
+/// into the accounting asset cannot mint the attestation its deposit
+/// requires.
+public fun add_deposit_asset<T>(
+    vault: &mut TradingVault,
+    cap: &CuratorCap,
+    cfg: &VaultProtocolConfig,
+) {
+    assert_current_cap(vault, cap);
+    let t = type_name::with_defining_ids<T>();
+    assert!(!vault.config.deposit_assets.contains(&t), errors::config_invalid());
+    assert!(
+        vault.config.deposit_assets.length() < registry::max_deposit_assets(cfg),
+        errors::config_invalid(),
+    );
+    vault.config.deposit_assets.insert(t);
+    events::emit_deposit_asset_added(object::id(vault), t);
+}
+
+/// Curator-gated: stop accepting `T`. Never the accounting asset; held
+/// balances and pending requests in `T` are unaffected (pending payout
+/// requests still settle in `T` — delisting gates new requests, not
+/// exits).
+public fun remove_deposit_asset<T>(vault: &mut TradingVault, cap: &CuratorCap) {
+    assert_current_cap(vault, cap);
+    let t = type_name::with_defining_ids<T>();
+    assert!(t != vault.config.accounting_asset, errors::config_invalid());
+    assert!(vault.config.deposit_assets.contains(&t), errors::config_invalid());
+    vault.config.deposit_assets.remove(&t);
+    events::emit_deposit_asset_removed(object::id(vault), t);
+}
+
+/// Curator-gated oracle-arb dampers on non-accounting deposits/payouts.
+public fun set_haircuts(
+    vault: &mut TradingVault,
+    cap: &CuratorCap,
+    entry_bps: u64,
+    exit_bps: u64,
+) {
+    assert_current_cap(vault, cap);
+    assert!(entry_bps <= MAX_HAIRCUT_BPS && exit_bps <= MAX_HAIRCUT_BPS, errors::config_invalid());
+    vault.config.entry_haircut_bps = entry_bps;
+    vault.config.exit_haircut_bps = exit_bps;
+    events::emit_haircuts_set(object::id(vault), entry_bps, exit_bps);
+}
+
 // ═══════════════════════════ withdrawal queue ═══════════════════════════
 
-/// Queue a withdrawal from the sender's stake. Crystallization (value,
-/// profit, fees) happens at fulfillment, so queued shares keep earning
-/// the vault's P&L until paid.
-public fun request_withdraw(
+/// Queue a withdrawal from the sender's stake, payable in `P` (any
+/// allowlisted asset). Crystallization (value, profit, fees) happens at
+/// fulfillment, so queued shares keep earning the vault's P&L until
+/// paid.
+public fun request_withdraw<P>(
     vault: &mut TradingVault,
     shares: u128,
     clock: &Clock,
     ctx: &TxContext,
 ) {
     let sender = ctx.sender();
+    let payout = assert_payout_asset<P>(vault);
     request_internal(
         vault,
         StakeKey::Addr(sender),
         option::none(),
         shares,
         sender,
+        payout,
         true,
         clock,
     );
@@ -393,7 +524,7 @@ public fun request_withdraw(
 /// current curator's and the floor is enforced, the request must leave
 /// the curator at or above `min_curator_share_bps` of total shares.
 /// Rotated-out caps are pure claim tickets: no floor, but normal lockup.
-public fun request_withdraw_as_curator(
+public fun request_withdraw_as_curator<P>(
     vault: &mut TradingVault,
     cfg: &VaultProtocolConfig,
     cap: &CuratorCap,
@@ -402,6 +533,7 @@ public fun request_withdraw_as_curator(
     clock: &Clock,
 ) {
     assert!(cap.vault_id == object::id(vault), errors::wrong_vault());
+    let payout = assert_payout_asset<P>(vault);
     let cap_id = object::id(cap);
     let key = StakeKey::Cap(cap_id);
     if (
@@ -419,7 +551,7 @@ public fun request_withdraw_as_curator(
             errors::curator_floor(),
         );
     };
-    request_internal(vault, key, option::some(cap_id), shares, recipient, true, clock);
+    request_internal(vault, key, option::some(cap_id), shares, recipient, payout, true, clock);
 }
 
 /// Permissionless once the vault is Closed: anyone may push a remaining
@@ -435,7 +567,32 @@ public fun enqueue_closed_stake(
         assert!(vault.stakes.contains(key), errors::stake_missing());
         vault.stakes.borrow(key).shares
     };
-    request_internal(vault, key, option::none(), shares, owner, false, clock);
+    // Enqueued on the owner's behalf — they never chose a payout asset,
+    // so the accounting asset is the only defensible default.
+    let payout = vault.config.accounting_asset;
+    request_internal(vault, key, option::none(), shares, owner, payout, false, clock);
+}
+
+/// Re-point a pending request's payout asset (recipient-only). The
+/// unwedge lever when the vault cannot source the originally requested
+/// asset: the requester amends to the accounting asset (always
+/// allowlisted) or any other allowlisted asset.
+public fun amend_payout_asset<P>(vault: &mut TradingVault, seq: u64, ctx: &TxContext) {
+    assert!(
+        vault.queue_head <= seq && seq < vault.queue_tail && vault.queue.contains(seq),
+        errors::request_missing(),
+    );
+    let payout = assert_payout_asset<P>(vault);
+    let req = vault.queue.borrow_mut(seq);
+    assert!(req.recipient == ctx.sender(), errors::not_authorized());
+    req.payout_asset = payout;
+    events::emit_payout_asset_amended(object::id(vault), seq, payout);
+}
+
+fun assert_payout_asset<P>(vault: &TradingVault): TypeName {
+    let p = type_name::with_defining_ids<P>();
+    assert!(vault.config.deposit_assets.contains(&p), errors::asset_not_allowed());
+    p
 }
 
 fun request_internal(
@@ -444,6 +601,7 @@ fun request_internal(
     cap_for_event: Option<ID>,
     shares: u128,
     recipient: address,
+    payout_asset: TypeName,
     check_lockup: bool,
     clock: &Clock,
 ) {
@@ -473,7 +631,10 @@ fun request_internal(
     };
 
     let seq = vault.queue_tail;
-    vault.queue.add(seq, WithdrawRequest { key, recipient, shares, basis: basis_out, requested_at_ms: now });
+    vault.queue.add(
+        seq,
+        WithdrawRequest { key, recipient, shares, basis: basis_out, payout_asset, requested_at_ms: now },
+    );
     vault.queue_tail = seq + 1;
     events::emit_withdraw_requested(
         object::id(vault),
@@ -482,119 +643,224 @@ fun request_internal(
         cap_for_event,
         shares,
         basis_out,
+        payout_asset,
         now,
     );
 }
 
-/// Permissionless crank: fulfill queued requests FIFO while the free
-/// deposit-asset balance covers them, crystallizing at this appraisal's
-/// NAV.
+/// Fulfillment hot potato: one appraisal's NAV ratio plus the batch's
+/// asset prices, spent across typed `fulfill_next<P>` calls so a single
+/// crank transaction can pay a FIFO run of heterogeneous payout assets.
+/// No abilities — `end_fulfillment` must close it in-transaction.
+public struct Fulfillment {
+    vault_id: ID,
+    ratio_nav: u128,
+    ratio_shares: u128,
+    /// Payout-asset → accounting-asset price (PRICE_SCALE fixed point),
+    /// locked for the whole batch. The accounting asset itself is
+    /// implicit at exactly PRICE_SCALE.
+    prices: VecMap<TypeName, u128>,
+}
+
+/// Open a fulfillment batch: consumes a complete appraisal, locks the
+/// crystallization ratio, and validates one attestation per payout
+/// asset the batch will touch (each must quote into the accounting
+/// asset and be fresh).
+public fun begin_fulfillment(
+    vault: &TradingVault,
+    cfg: &VaultProtocolConfig,
+    appraisal: Appraisal,
+    atts: vector<PriceAttestation>,
+    clock: &Clock,
+): Fulfillment {
+    let nav = consume_appraisal(vault, appraisal);
+    assert!(vault.total_shares > 0 || vault.queue_head == vault.queue_tail, errors::vault_dead());
+
+    let mut prices = vec_map::empty();
+    let mut i = 0;
+    while (i < atts.length()) {
+        let a = atts[i];
+        assert!(
+            price::quote_asset(&a) == vault.config.accounting_asset,
+            errors::price_asset_mismatch(),
+        );
+        assert_attestation_fresh(cfg, &a, clock);
+        prices.insert(price::asset(&a), price::price(&a));
+        i = i + 1;
+    };
+
+    Fulfillment {
+        vault_id: object::id(vault),
+        ratio_nav: nav,
+        ratio_shares: vault.total_shares,
+        prices,
+    }
+}
+
+/// Permissionless crank: fulfill the queue head if it is payable in `P`,
+/// crystallizing at the batch ratio.
 ///
-/// Per request (all floor division):
-///   value        = shares × nav / total_shares
+/// Per request (all floor division, at the offset-adjusted ratio):
+///   value        = shares × (nav + 1) / (total_shares + OFFSET)
 ///   profit       = max(0, value − basis)
 ///   gross_fee    = profit × curator_fee_bps / 10⁴
 ///   protocol_cut = gross_fee × protocol_fee_bps / 10⁴   (Morpho-style)
 ///   curator_net  = gross_fee − protocol_cut
-///   payout       = value − gross_fee                    (cash out)
-/// The curator's net is minted back as shares at the SAME nav/shares
-/// ratio (m = curator_net × total_shares / nav), which leaves
-/// price-per-share unchanged for every remaining depositor; using the
-/// ratio fixed at appraisal time for the whole batch keeps the math
-/// consistent across sequential requests.
+///   payout       = value − gross_fee                    (accounting units)
+/// The payout and the protocol cut convert to `P` units at the batch
+/// price (exit haircut inflates the price ⇒ fewer units out) and pay
+/// all-or-nothing from the free `P` balance. The curator's net is minted
+/// back as shares at the SAME ratio (m = net × (S + O) / (nav + 1)),
+/// which leaves price-per-share unchanged for every remaining depositor.
+///
+/// Returns false — a no-op, so speculative PTB chains stay safe — when
+/// the queue is empty, the head is not payable in `P` (wrong asset and
+/// no grace fallback), or the free `P` balance cannot fund it. The
+/// grace fallback: once the head has aged past `unwind_grace_ms`, it
+/// may be paid in the ACCOUNTING asset regardless of its requested
+/// payout — the queue-liveness backstop behind an absent requester.
+public fun fulfill_next<P>(
+    vault: &mut TradingVault,
+    cfg: &VaultProtocolConfig,
+    treasury: &mut Treasury,
+    f: &mut Fulfillment,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): bool {
+    assert!(f.vault_id == object::id(vault), errors::wrong_vault());
+    if (vault.queue_head == vault.queue_tail) {
+        return false
+    };
+    let p = type_name::with_defining_ids<P>();
+    let is_accounting = p == vault.config.accounting_asset;
+    let seq = vault.queue_head;
+
+    let (value, payout_n, gross_fee, protocol_cut) = {
+        let req = vault.queue.borrow(seq);
+        let payable = req.payout_asset == p
+            || (
+                is_accounting
+                    && clock.timestamp_ms() > req.requested_at_ms + vault.config.unwind_grace_ms
+            );
+        if (!payable) {
+            return false
+        };
+        let value = (mul_div(req.shares, f.ratio_nav + 1, f.ratio_shares + SHARE_OFFSET)) as u64;
+        let profit = if (value > req.basis) { value - req.basis } else { 0 };
+        let gross_fee =
+            ((profit as u128) * (vault.config.curator_fee_bps as u128) / BPS_DENOM) as u64;
+        let protocol_cut =
+            ((gross_fee as u128) * (registry::protocol_fee_bps(cfg) as u128) / BPS_DENOM) as u64;
+        (value, value - gross_fee, gross_fee, protocol_cut)
+    };
+
+    // Convert accounting-unit obligations into `P` units at the batch
+    // price. The exit haircut inflates the effective price so the
+    // recipient receives slightly fewer units — the mirror of the entry
+    // damper, floor dust favoring the vault throughout.
+    let (payout_units, cut_units, price_used) = if (is_accounting) {
+        (payout_n, protocol_cut, price::price_scale())
+    } else {
+        assert!(f.prices.contains(&p), errors::attestation_missing());
+        let base = *f.prices.get(&p);
+        let eff = base * (BPS_DENOM + (vault.config.exit_haircut_bps as u128)) / BPS_DENOM;
+        (
+            (mul_div(payout_n as u128, price::price_scale(), eff)) as u64,
+            (mul_div(protocol_cut as u128, price::price_scale(), eff)) as u64,
+            base,
+        )
+    };
+
+    // All-or-nothing per request; the caller stops at the first head it
+    // cannot fund.
+    if ((payout_units as u128) + (cut_units as u128) > (free_balance_value<P>(vault) as u128)) {
+        return false
+    };
+
+    let WithdrawRequest { key: _, recipient, shares, basis, payout_asset: _, requested_at_ms: _ } =
+        vault.queue.remove(seq);
+    vault.queue_head = seq + 1;
+    let curator_net = gross_fee - protocol_cut;
+    let profit = if (value > basis) { value - basis } else { 0 };
+
+    vault.total_shares = vault.total_shares - shares;
+
+    // Curator fee: mint shares into the current cap's stake at the
+    // batch ratio; the value stays in the vault. Fee shares carry no
+    // fresh lockup — the floor is the curator's binding constraint.
+    let curator_key = StakeKey::Cap(vault.curator_cap_id);
+    let minted = if (curator_net > 0) {
+        let m = mul_div(curator_net as u128, f.ratio_shares + SHARE_OFFSET, f.ratio_nav + 1);
+        if (m > 0) {
+            vault.total_shares = vault.total_shares + m;
+            if (vault.stakes.contains(curator_key)) {
+                let stake = vault.stakes.borrow_mut(curator_key);
+                stake.shares = stake.shares + m;
+                stake.cost_basis = stake.cost_basis + curator_net;
+            } else {
+                vault.stakes.add(
+                    curator_key,
+                    Stake { shares: m, cost_basis: curator_net, locked_until_ms: 0 },
+                );
+            };
+        };
+        m
+    } else { 0 };
+
+    if (cut_units > 0) {
+        treasury::deposit_balance(treasury, take_balance_internal<P>(vault, cut_units));
+    };
+    if (payout_units > 0) {
+        transfer::public_transfer(
+            coin::from_balance(take_balance_internal<P>(vault, payout_units), ctx),
+            recipient,
+        );
+    };
+
+    events::emit_withdraw_fulfilled(
+        object::id(vault),
+        seq,
+        recipient,
+        shares,
+        value,
+        basis,
+        profit,
+        gross_fee,
+        protocol_cut,
+        curator_net,
+        minted,
+        payout_n,
+        p,
+        payout_units,
+        price_used,
+        vault.total_shares,
+    );
+    true
+}
+
+public fun end_fulfillment(vault: &TradingVault, f: Fulfillment) {
+    let Fulfillment { vault_id, ratio_nav: _, ratio_shares: _, prices: _ } = f;
+    assert!(vault_id == object::id(vault), errors::wrong_vault());
+}
+
+/// Convenience batch crank for the common all-accounting case: fulfill
+/// consecutive heads payable in the accounting asset (including aged
+/// heads via the grace fallback) until one can't be paid.
 public fun fulfill_withdrawals<T>(
     vault: &mut TradingVault,
     cfg: &VaultProtocolConfig,
     treasury: &mut Treasury,
     appraisal: Appraisal,
+    clock: &Clock,
     ctx: &mut TxContext,
 ) {
     assert!(
-        type_name::with_defining_ids<T>() == vault.config.deposit_asset,
+        type_name::with_defining_ids<T>() == vault.config.accounting_asset,
         errors::deposit_asset_mismatch(),
     );
-    let nav = consume_appraisal<T>(vault, appraisal);
-    let ratio_nav = nav;
-    let ratio_shares = vault.total_shares;
-    assert!(ratio_shares > 0 || vault.queue_head == vault.queue_tail, errors::vault_dead());
-
-    let curator_key = StakeKey::Cap(vault.curator_cap_id);
-    let protocol_fee_bps = registry::protocol_fee_bps(cfg) as u128;
-    let curator_fee_bps = vault.config.curator_fee_bps as u128;
-    let vault_id = object::id(vault);
-
-    while (vault.queue_head < vault.queue_tail) {
-        let seq = vault.queue_head;
-        let (value, payout, protocol_cut) = {
-            let req = vault.queue.borrow(seq);
-            let value = (mul_div(req.shares, ratio_nav, ratio_shares)) as u64;
-            let profit = if (value > req.basis) { value - req.basis } else { 0 };
-            let gross_fee = ((profit as u128) * curator_fee_bps / BPS_DENOM) as u64;
-            let protocol_cut = ((gross_fee as u128) * protocol_fee_bps / BPS_DENOM) as u64;
-            (value, value - gross_fee, protocol_cut)
-        };
-        // All-or-nothing per request; stop at the first we cannot fund.
-        if ((payout as u128) + (protocol_cut as u128) > (free_balance_value<T>(vault) as u128)) {
-            break
-        };
-
-        let WithdrawRequest { key: _, recipient, shares, basis, requested_at_ms: _ } =
-            vault.queue.remove(seq);
-        vault.queue_head = seq + 1;
-
-        let profit = if (value > basis) { value - basis } else { 0 };
-        let gross_fee = ((profit as u128) * curator_fee_bps / BPS_DENOM) as u64;
-        let curator_net = gross_fee - protocol_cut;
-
-        vault.total_shares = vault.total_shares - shares;
-
-        // Curator fee: mint shares into the current cap's stake at the
-        // batch ratio; the value stays in the vault. Fee shares carry no
-        // fresh lockup — the floor is the curator's binding constraint.
-        let minted = if (curator_net > 0) {
-            let m = mul_div(curator_net as u128, ratio_shares, ratio_nav);
-            if (m > 0) {
-                vault.total_shares = vault.total_shares + m;
-                if (vault.stakes.contains(curator_key)) {
-                    let stake = vault.stakes.borrow_mut(curator_key);
-                    stake.shares = stake.shares + m;
-                    stake.cost_basis = stake.cost_basis + curator_net;
-                } else {
-                    vault.stakes.add(
-                        curator_key,
-                        Stake { shares: m, cost_basis: curator_net, locked_until_ms: 0 },
-                    );
-                };
-            };
-            m
-        } else { 0 };
-
-        if (protocol_cut > 0) {
-            treasury::deposit_balance(treasury, take_balance_internal<T>(vault, protocol_cut));
-        };
-        if (payout > 0) {
-            transfer::public_transfer(
-                coin::from_balance(take_balance_internal<T>(vault, payout), ctx),
-                recipient,
-            );
-        };
-
-        events::emit_withdraw_fulfilled(
-            vault_id,
-            seq,
-            recipient,
-            shares,
-            value,
-            basis,
-            profit,
-            gross_fee,
-            protocol_cut,
-            curator_net,
-            minted,
-            payout,
-            vault.total_shares,
-        );
-    }
+    let mut f = begin_fulfillment(vault, cfg, appraisal, vector[], clock);
+    while (fulfill_next<T>(vault, cfg, treasury, &mut f, clock, ctx)) {};
+    end_fulfillment(vault, f);
 }
 
 // ═══════════════════════════════ sessions ═══════════════════════════════
@@ -808,22 +1074,22 @@ fun store_position_internal<P: key + store>(vault: &mut TradingVault, adapter: T
 /// update after the next release.
 public fun begin_appraisal<T>(vault: &TradingVault): Appraisal {
     assert!(
-        type_name::with_defining_ids<T>() == vault.config.deposit_asset,
+        type_name::with_defining_ids<T>() == vault.config.accounting_asset,
         errors::deposit_asset_mismatch(),
     );
-    let deposit_balance = free_balance_value<T>(vault);
+    let accounting_balance = free_balance_value<T>(vault);
     let mut remaining = vault.asset_types;
-    if (remaining.contains(&vault.config.deposit_asset)) {
-        remaining.remove(&vault.config.deposit_asset);
+    if (remaining.contains(&vault.config.accounting_asset)) {
+        remaining.remove(&vault.config.accounting_asset);
     };
     Appraisal {
         vault_id: object::id(vault),
-        total_value: deposit_balance as u128,
+        total_value: accounting_balance as u128,
         remaining_types: remaining,
         appraised_positions: vec_set::empty(),
         position_total: vault.position_count,
         types_snapshot: vault.asset_types,
-        deposit_balance_snapshot: deposit_balance,
+        mutation_seq_snapshot: vault.mutation_seq,
         external_pending: vault.external.is_some() && vault.external.borrow().exposure > 0,
     }
 }
@@ -841,7 +1107,7 @@ public fun appraise_balance<T>(
     assert!(a.remaining_types.contains(&t), errors::already_appraised());
     assert!(price::asset(&att) == t, errors::price_asset_mismatch());
     assert!(
-        price::quote_asset(&att) == vault.config.deposit_asset,
+        price::quote_asset(&att) == vault.config.accounting_asset,
         errors::price_asset_mismatch(),
     );
     assert_attestation_fresh(cfg, &att, clock);
@@ -873,10 +1139,12 @@ public fun record_position_value<W: drop>(
     events::emit_position_appraised(a.vault_id, *tag, position_id, value);
 }
 
-/// Completeness + staleness gate, returns NAV. `T` is the deposit asset
-/// (both callers assert it) so the balance snapshot can be re-read.
+/// Completeness + staleness gate, returns NAV. Type-free: mid-PTB
+/// movement is detected by the `mutation_seq` snapshot (any free-balance
+/// mutation since begin bumps it), plus the type-set and position-count
+/// checks.
 #[allow(lint(collection_equality))]
-fun consume_appraisal<T>(vault: &TradingVault, a: Appraisal): u128 {
+fun consume_appraisal(vault: &TradingVault, a: Appraisal): u128 {
     let Appraisal {
         vault_id,
         total_value,
@@ -884,7 +1152,7 @@ fun consume_appraisal<T>(vault: &TradingVault, a: Appraisal): u128 {
         appraised_positions,
         position_total,
         types_snapshot,
-        deposit_balance_snapshot,
+        mutation_seq_snapshot,
         external_pending,
     } = a;
     assert!(vault_id == object::id(vault), errors::wrong_vault());
@@ -894,7 +1162,7 @@ fun consume_appraisal<T>(vault: &TradingVault, a: Appraisal): u128 {
     // Nothing may have moved since begin (same-PTB sessions invalidate).
     assert!(position_total == vault.position_count, errors::appraisal_mismatch());
     assert!(types_snapshot == vault.asset_types, errors::appraisal_mismatch());
-    assert!(deposit_balance_snapshot == free_balance_value<T>(vault), errors::appraisal_mismatch());
+    assert!(mutation_seq_snapshot == vault.mutation_seq, errors::appraisal_mismatch());
     events::emit_vault_appraised(vault_id, total_value, position_total);
     total_value
 }
@@ -905,12 +1173,8 @@ fun consume_appraisal<T>(vault: &TradingVault, a: Appraisal): u128 {
 /// Safe for anyone to call: it takes the vault immutably, so it can
 /// neither move value nor skew a snapshot; a stale or skewed appraisal
 /// aborts exactly as it would at deposit/fulfillment.
-public fun crank_appraisal<T>(vault: &TradingVault, appraisal: Appraisal) {
-    assert!(
-        type_name::with_defining_ids<T>() == vault.config.deposit_asset,
-        errors::deposit_asset_mismatch(),
-    );
-    let _ = consume_appraisal<T>(vault, appraisal);
+public fun crank_appraisal(vault: &TradingVault, appraisal: Appraisal) {
+    let _ = consume_appraisal(vault, appraisal);
 }
 
 fun assert_attestation_fresh(cfg: &VaultProtocolConfig, att: &PriceAttestation, clock: &Clock) {
@@ -932,7 +1196,7 @@ public fun check_attestation(
     clock: &Clock,
 ) {
     assert!(
-        price::quote_asset(att) == vault.config.deposit_asset,
+        price::quote_asset(att) == vault.config.accounting_asset,
         errors::price_asset_mismatch(),
     );
     assert_attestation_fresh(cfg, att, clock);
@@ -1069,12 +1333,12 @@ public fun release_external<T>(
     assert_current_cap(vault, cap);
     assert!(vault.state == VaultState::Open, errors::vault_not_open());
     assert!(
-        type_name::with_defining_ids<T>() == vault.config.deposit_asset,
+        type_name::with_defining_ids<T>() == vault.config.accounting_asset,
         errors::deposit_asset_mismatch(),
     );
     assert!(amount > 0, core_errors::zero_amount());
     assert!(vault.external.is_some(), errors::external_not_configured());
-    let nav = consume_appraisal<T>(vault, appraisal);
+    let nav = consume_appraisal(vault, appraisal);
 
     let now = clock.timestamp_ms();
     let (account, exposure_after) = {
@@ -1111,7 +1375,7 @@ public fun release_external<T>(
 public fun return_external<T>(vault: &mut TradingVault, funds: Coin<T>, ctx: &TxContext) {
     assert!(vault.external.is_some(), errors::external_not_configured());
     assert!(
-        type_name::with_defining_ids<T>() == vault.config.deposit_asset,
+        type_name::with_defining_ids<T>() == vault.config.accounting_asset,
         errors::deposit_asset_mismatch(),
     );
     let amount = funds.value();
@@ -1183,7 +1447,7 @@ public fun finalize_close(vault: &mut TradingVault) {
     };
     let n = vault.asset_types.length();
     let clean = n == 0
-        || (n == 1 && vault.asset_types.contains(&vault.config.deposit_asset));
+        || (n == 1 && vault.asset_types.contains(&vault.config.accounting_asset));
     assert!(clean, errors::residual_assets());
     vault.state = VaultState::Closed;
     events::emit_vault_closed(object::id(vault));
@@ -1234,6 +1498,7 @@ fun assert_current_cap(vault: &TradingVault, cap: &CuratorCap) {
 fun put_balance_internal<T>(vault: &mut TradingVault, funds: Balance<T>) {
     let key = BalanceKey<T> {};
     let t = type_name::with_defining_ids<T>();
+    vault.mutation_seq = vault.mutation_seq + 1;
     if (df::exists(&vault.id, key)) {
         let bal: &mut Balance<T> = df::borrow_mut(&mut vault.id, key);
         bal.join(funds);
@@ -1247,6 +1512,7 @@ fun put_balance_internal<T>(vault: &mut TradingVault, funds: Balance<T>) {
 
 fun take_balance_internal<T>(vault: &mut TradingVault, amount: u64): Balance<T> {
     let key = BalanceKey<T> {};
+    vault.mutation_seq = vault.mutation_seq + 1;
     assert!(df::exists(&vault.id, key), errors::insufficient_balance());
     let out = {
         let bal: &mut Balance<T> = df::borrow_mut(&mut vault.id, key);
@@ -1302,7 +1568,32 @@ public fun is_closing(vault: &TradingVault): bool { vault.state == VaultState::C
 
 public fun is_closed(vault: &TradingVault): bool { vault.state == VaultState::Closed }
 
-public fun deposit_asset(vault: &TradingVault): TypeName { vault.config.deposit_asset }
+public fun accounting_asset(vault: &TradingVault): TypeName { vault.config.accounting_asset }
+
+/// Copy of the deposit/payout allowlist (always contains the accounting
+/// asset).
+public fun deposit_assets(vault: &TradingVault): VecSet<TypeName> { vault.config.deposit_assets }
+
+public fun is_deposit_asset(vault: &TradingVault, t: &TypeName): bool {
+    vault.config.deposit_assets.contains(t)
+}
+
+/// (entry_haircut_bps, exit_haircut_bps).
+public fun haircuts(vault: &TradingVault): (u64, u64) {
+    (vault.config.entry_haircut_bps, vault.config.exit_haircut_bps)
+}
+
+/// Fields of the pending request at `seq`: (recipient, shares, basis,
+/// payout_asset, requested_at_ms).
+public fun queue_request(vault: &TradingVault, seq: u64): (address, u128, u64, TypeName, u64) {
+    assert!(vault.queue.contains(seq), errors::request_missing());
+    let r = vault.queue.borrow(seq);
+    (r.recipient, r.shares, r.basis, r.payout_asset, r.requested_at_ms)
+}
+
+public fun queue_head(vault: &TradingVault): u64 { vault.queue_head }
+
+public fun share_offset(): u128 { SHARE_OFFSET }
 
 public fun total_shares(vault: &TradingVault): u128 { vault.total_shares }
 

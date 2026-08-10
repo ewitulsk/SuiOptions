@@ -29,6 +29,9 @@ const DEFAULT_PROTOCOL_FEE_BPS: u64 = 1_000;
 /// Core backstop on attestation age; oracle adapters enforce their own
 /// (usually tighter) staleness policy.
 const DEFAULT_MAX_PRICE_AGE_MS: u64 = 60_000;
+/// Cap on a vault's deposit/payout allowlist — every allowlisted asset
+/// held is a mandatory appraisal leg on every deposit and fulfillment.
+const DEFAULT_MAX_DEPOSIT_ASSETS: u64 = 8;
 
 const BPS_DENOM: u64 = 10_000;
 
@@ -41,6 +44,8 @@ public struct VaultProtocolConfig has key {
     /// Share of the curator's performance fee routed to the treasury.
     protocol_fee_bps: u64,
     max_price_age_ms: u64,
+    /// Cap on per-vault deposit/payout allowlist size (SO-370).
+    max_deposit_assets: u64,
     /// Blocks new deposits protocol-wide; never blocks exits.
     paused: bool,
     /// Ed25519 pubkey of the protocol's external-account registrar
@@ -84,6 +89,7 @@ fun init(ctx: &mut TxContext) {
         max_curator_fee_bps: DEFAULT_MAX_CURATOR_FEE_BPS,
         protocol_fee_bps: DEFAULT_PROTOCOL_FEE_BPS,
         max_price_age_ms: DEFAULT_MAX_PRICE_AGE_MS,
+        max_deposit_assets: DEFAULT_MAX_DEPOSIT_ASSETS,
         paused: false,
         registrar_pubkey: vector[],
     });
@@ -171,6 +177,12 @@ public fun set_max_price_age_ms(_: &AdminCap, cfg: &mut VaultProtocolConfig, ms:
     emit_config(cfg);
 }
 
+public fun set_max_deposit_assets(_: &AdminCap, cfg: &mut VaultProtocolConfig, n: u64) {
+    assert!(n > 0, errors::config_invalid());
+    cfg.max_deposit_assets = n;
+    emit_config(cfg);
+}
+
 public fun set_paused(_: &AdminCap, cfg: &mut VaultProtocolConfig, paused: bool) {
     cfg.paused = paused;
     emit_config(cfg);
@@ -191,6 +203,7 @@ fun emit_config(cfg: &VaultProtocolConfig) {
         cfg.max_curator_fee_bps,
         cfg.protocol_fee_bps,
         cfg.max_price_age_ms,
+        cfg.max_deposit_assets,
         cfg.paused,
     );
 }
@@ -235,6 +248,8 @@ public fun max_curator_fee_bps(cfg: &VaultProtocolConfig): u64 { cfg.max_curator
 public fun protocol_fee_bps(cfg: &VaultProtocolConfig): u64 { cfg.protocol_fee_bps }
 
 public fun max_price_age_ms(cfg: &VaultProtocolConfig): u64 { cfg.max_price_age_ms }
+
+public fun max_deposit_assets(cfg: &VaultProtocolConfig): u64 { cfg.max_deposit_assets }
 
 public fun is_paused(cfg: &VaultProtocolConfig): bool { cfg.paused }
 

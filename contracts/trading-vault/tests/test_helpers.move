@@ -110,11 +110,31 @@ public fun simple_deposit(scenario: &mut Scenario, who: address, amount: u64, cl
         &cfg,
         appraisal,
         sui::coin::from_balance(mint<USDC>(amount), scenario.ctx()),
+        option::none(),
         clock,
         scenario.ctx(),
     );
     ts::return_shared(cfg);
     ts::return_shared(v);
+}
+
+/// Offset-adjusted share mint for `value` accounting units at
+/// (total_shares, nav) — mirrors the vault's formula exactly so tests
+/// document intent instead of hardcoding dust-shifted constants.
+public fun expected_shares(value: u64, total_shares: u128, nav: u128): u128 {
+    (
+        ((value as u256) * ((total_shares + vault::share_offset()) as u256))
+            / ((nav + 1) as u256),
+    ) as u128
+}
+
+/// Offset-adjusted crystallization value of `shares` at (total_shares,
+/// nav).
+public fun expected_value(shares: u128, total_shares: u128, nav: u128): u64 {
+    (
+        ((shares as u256) * ((nav + 1) as u256))
+            / ((total_shares + vault::share_offset()) as u256),
+    ) as u64
 }
 
 /// Simulate strategy P&L: a curator session that returns `amount` of `T`

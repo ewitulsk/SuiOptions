@@ -59,6 +59,7 @@ fun deposit_with_equity(
         &cfg,
         appraisal,
         coin::from_balance(th::mint<USDC>(amount), scenario.ctx()),
+        option::none(),
         clock,
         scenario.ctx(),
     );
@@ -145,10 +146,11 @@ fun equity_leg_prices_deposits_at_true_nav() {
 
     ts::next_tx(&mut scenario, th::bob_addr());
     let v = ts::take_shared<TradingVault>(&scenario);
-    // Bob paid exactly one NAV: shares = 1050 × 1000 / 1050 = 1000.
+    // Bob paid one NAV (offset dust aside): 1050 valued against NAV 1050.
     let (bob_shares, _, _) = vault::stake_of(&v, th::bob_addr());
-    assert!(bob_shares == 1_000, 0);
-    assert!(vault::total_shares(&v) == 2_000, 0);
+    let expected = th::expected_shares(1_050, 1_000_000_000, 1_050);
+    assert!(bob_shares == expected, 0);
+    assert!(vault::total_shares(&v) == 1_000_000_000 + expected, 0);
     ts::return_shared(v);
 
     clock.destroy_for_testing();
@@ -187,9 +189,9 @@ fun unfunded_external_vault_deposits_and_exits_without_equity_leg() {
     ts::next_tx(&mut scenario, th::alice_addr());
     let mut v = ts::take_shared<TradingVault>(&scenario);
     let (shares, _, _) = vault::stake_of(&v, th::alice_addr());
-    assert!(shares == 1_000, 0);
+    assert!(shares == 1_000_000_000, 0);
     clock.set_for_testing(4_000_000); // past lockup
-    vault::request_withdraw(&mut v, 1_000, &clock, scenario.ctx());
+    vault::request_withdraw<USDC>(&mut v, 1_000_000_000, &clock, scenario.ctx());
     ts::return_shared(v);
 
     // Permissionless fulfillment, still leg-less.
@@ -198,7 +200,7 @@ fun unfunded_external_vault_deposits_and_exits_without_equity_leg() {
     let cfg = th::take_protocol_config(&scenario);
     let mut treasury = ts::take_shared<Treasury>(&scenario);
     let appraisal = vault::begin_appraisal<USDC>(&v);
-    vault::fulfill_withdrawals<USDC>(&mut v, &cfg, &mut treasury, appraisal, scenario.ctx());
+    vault::fulfill_withdrawals<USDC>(&mut v, &cfg, &mut treasury, appraisal, &clock, scenario.ctx());
     assert!(vault::pending_withdrawals(&v) == 0, 0);
     assert!(vault::total_shares(&v) == 0, 0);
     ts::return_shared(treasury);
