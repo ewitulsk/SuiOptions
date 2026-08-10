@@ -18,6 +18,9 @@ pricing = { workspace = true }
 
 sui-types = { workspace = true }
 sui-tx = { workspace = true }
+# Hybrid-exchange market/fill types: /v1/markets deserialization + move-type
+# canonicalization for the exchange watcher.
+exchange-types = { workspace = true }
 
 clap = { workspace = true }
 tokio = { workspace = true }

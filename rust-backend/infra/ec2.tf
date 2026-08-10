@@ -121,7 +121,8 @@ resource "aws_instance" "prod_host" {
   root_block_device {
     volume_size           = var.ec2_root_volume_gb
     volume_type           = "gp3"
-    delete_on_termination = true
+    # Keep the prod root volume around if the instance is ever terminated.
+    delete_on_termination = false
     encrypted             = true
   }
 

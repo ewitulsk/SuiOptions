@@ -434,6 +434,7 @@ mod tests {
                 equity_oracle: None,
                 trading_vault_objects: None,
                 quote_signer_id: None,
+                exchange: None,
             },
             tokens: vec![
                 tok(

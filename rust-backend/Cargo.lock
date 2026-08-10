@@ -3167,6 +3167,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "exchange-book"
+version = "0.1.0"
+dependencies = [
+ "exchange-types",
+ "serde",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "exchange-router"
+version = "0.1.0"
+dependencies = [
+ "exchange-types",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "exchange-signing"
+version = "0.1.0"
+dependencies = [
+ "bcs",
+ "blake2",
+ "ed25519-dalek",
+ "exchange-types",
+ "hex",
+ "k256 0.13.4",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "exchange-types"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bcs",
+ "hex",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "eyre"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7140,6 +7188,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "orderbook"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "dashmap 6.1.0",
+ "deployments",
+ "diesel",
+ "diesel_migrations",
+ "exchange-book",
+ "exchange-router",
+ "exchange-signing",
+ "exchange-types",
+ "futures",
+ "hex",
+ "metrics",
+ "move-core-types",
+ "observability",
+ "parking_lot 0.12.5",
+ "runtime-config",
+ "serde",
+ "serde_json",
+ "sui-tx",
+ "sui-types",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower-http 0.6.10",
+ "tracing",
+]
+
+[[package]]
 name = "ordered-multimap"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7735,6 +7817,7 @@ dependencies = [
  "cli-spec",
  "diesel",
  "diesel_migrations",
+ "exchange-types",
  "futures",
  "indexer-graphql",
  "metrics",

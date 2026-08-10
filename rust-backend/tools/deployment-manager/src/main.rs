@@ -24,8 +24,8 @@ use deployment_manager::deploy::{
     publish_test_tokens,
 };
 use deployment_manager::json_store::{
-    CctpBridgeRecord, Deployments, NetworkDeployment, PackageInfo, PackageRecord,
-    TestTokenRecord, TestTokensRecord, TokenSpec, TradingVaultObjectsRecord,
+    CctpBridgeRecord, Deployments, ExchangeRecord, NetworkDeployment, PackageInfo,
+    PackageRecord, TestTokenRecord, TestTokensRecord, TokenSpec, TradingVaultObjectsRecord,
 };
 use deployment_manager::network::Network;
 use deployment_manager::signer::load_signer;
@@ -104,6 +104,74 @@ async fn main() -> Result<()> {
         store.upsert(&env_key, record);
         store.save(&output_path)?;
         tracing::info!(path = %output_path.display(), env = %env_key, "cctpBridge recorded");
+        return Ok(());
+    }
+
+    // --deploy-exchange publishes ONLY the hybrid-exchange settlement
+    // package and records it on the existing env entry — no protocol
+    // republish. Kept out of the default pipeline on purpose: a republish
+    // creates a NEW package while existing market registries (the
+    // order-signature domain) stay bound to the old one, so this is an
+    // explicit, rare ceremony.
+    if cli.deploy_exchange {
+        let exchange_path = contracts_path.join("exchange");
+        let mut record = store
+            .envs
+            .get(&env_key)
+            .cloned()
+            .with_context(|| format!("env {env_key} not found in deployments.json — deploy the protocol first"))?;
+
+        let signer = load_signer(&secrets, network).context("loading signer")?;
+        let client = ChainClient::new(&grpc_url)
+            .with_context(|| format!("building chain client for {network}"))?;
+        let outcome = move_publish::publish_dep_package(
+            &client,
+            &signer.keypair,
+            signer.address,
+            &exchange_path,
+            "exchange",
+            network.as_str(),
+            cli.gas_budget,
+        )
+        .await
+        .with_context(|| format!("publishing exchange to {network}"))?;
+        // exchange::admin's init transfers an AdminCap to the deployer.
+        let admin_cap_id = outcome
+            .created_objects
+            .iter()
+            .find(|(module, name, _)| module == "admin" && name == "AdminCap")
+            .map(|(_, _, id)| *id)
+            .context("exchange publish created no admin::AdminCap")?;
+        tracing::info!(
+            package = %outcome.package_id,
+            admin_cap = %admin_cap_id,
+            "exchange published"
+        );
+
+        let mut exchange = ExchangeRecord {
+            package_id: outcome.package_id.to_string(),
+            upgrade_cap_id: outcome.upgrade_cap_id.to_string(),
+            admin_cap_id: admin_cap_id.to_string(),
+            publish_digest: outcome.digest,
+            deployed_at: chrono::Utc::now().to_rfc3339(),
+            network: network.as_str().to_owned(),
+            markets: std::collections::BTreeMap::new(),
+        };
+        // A fresh package has no markets yet: list every token × TUSDC now
+        // so the publish ceremony ends with a tradeable exchange.
+        deployment_manager::exchange_markets::create_markets(
+            &client,
+            &signer,
+            &mut exchange,
+            &record.token_info,
+            cli.gas_budget,
+        )
+        .await
+        .context("creating exchange markets")?;
+        record.package_info.exchange = Some(exchange);
+        store.upsert(&env_key, record);
+        store.save(&output_path)?;
+        tracing::info!(path = %output_path.display(), env = %env_key, "exchange recorded");
         return Ok(());
     }
 
@@ -210,6 +278,10 @@ async fn main() -> Result<()> {
         .envs
         .get(&env_key)
         .and_then(|d| d.package_info.deepbook.clone());
+    let previous_exchange = store
+        .envs
+        .get(&env_key)
+        .and_then(|d| d.package_info.exchange.clone());
     let previous_cctp = store
         .envs
         .get(&env_key)
@@ -224,6 +296,7 @@ async fn main() -> Result<()> {
         previous_token_info,
         previous_deepbook,
         previous_cctp,
+        previous_exchange,
         deployment_manager::trading_vault_init::registrar_pubkey_for_env(&env_key),
         cli.gas_budget,
         cli.skip_init,
@@ -249,6 +322,10 @@ async fn deploy_one(
     previous_token_info: BTreeMap<String, TokenSpec>,
     previous_deepbook: Option<serde_json::Value>,
     previous_cctp: Option<CctpBridgeRecord>,
+    // Exchange package record from the previous deploy: always carried
+    // forward — the protocol pipeline never republishes it (see
+    // --deploy-exchange).
+    previous_exchange: Option<ExchangeRecord>,
     // Ed25519 pubkey of this env's attestation registrar (SO-308), seeded
     // into the VaultProtocolConfig at activation. `None` leaves the attested
     // registration path disabled.
@@ -524,6 +601,26 @@ async fn deploy_one(
         })
     };
 
+    // Reconcile the exchange market list against the (possibly republished)
+    // token catalog: recreate markets whose token types went stale, drop
+    // markets whose tokens left the catalog. The exchange package itself is
+    // never republished here (see --deploy-exchange).
+    let exchange = match previous_exchange {
+        Some(mut ex) => {
+            deployment_manager::exchange_markets::create_markets(
+                &client,
+                &signer,
+                &mut ex,
+                &token_info,
+                gas_budget,
+            )
+            .await
+            .context("reconciling exchange markets")?;
+            Some(ex)
+        }
+        None => None,
+    };
+
     Ok(NetworkDeployment {
         package_info: PackageInfo {
             package_id: publish.package_id.to_string(),
@@ -549,6 +646,7 @@ async fn deploy_one(
             equity_oracle: Some(record(&equity_oracle_out)),
             trading_vault_objects,
             cctp_bridge: previous_cctp,
+            exchange,
             // Deliberately not carried forward: a republish invalidates the
             // previous deployment's QuoteSigner (package-bound type). The
             // --deploy-mm-collateral pass fills it in.

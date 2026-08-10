@@ -73,6 +73,9 @@ jobs:
           - equity-oracle
           - options-adapter
           - deepbook-adapter
+          # Hybrid exchange settlement package — standalone audit scope
+          # (framework-only deps), published via --deploy-exchange.
+          - exchange
     steps:
       - uses: actions/checkout@v4
 

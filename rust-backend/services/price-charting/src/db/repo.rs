@@ -92,19 +92,28 @@ impl Repo {
         self.pool.get().context("checking out DB connection")
     }
 
-    pub fn load_cursor(&self) -> Result<Option<(String, i64)>> {
+    /// Load one watcher's cursor row. Row 1 is the DeepBook watcher's, row 2
+    /// the exchange watcher's — independent streams, independent recovery
+    /// (clearing one row never touches the other's position).
+    pub fn load_cursor(&self, cursor_id: i16) -> Result<Option<(String, i64)>> {
         let mut conn = self.conn()?;
         let row = watch_cursor::table
-            .find(1i16)
+            .find(cursor_id)
             .first::<CursorRow>(&mut conn)
             .optional()
             .context("loading watch_cursor")?;
         Ok(row.map(|r| (r.cursor_tx, r.cursor_ev)))
     }
 
-    /// Insert a fill batch and advance the global cursor in one transaction.
-    /// Conflicting rows (replays) are skipped; returns how many were new.
-    pub fn insert_trades(&self, trades: &[TradeRow], cursor: (String, i64)) -> Result<usize> {
+    /// Insert a fill batch and advance `cursor_id`'s cursor in one
+    /// transaction. Conflicting rows (replays) are skipped; returns how many
+    /// were new.
+    pub fn insert_trades(
+        &self,
+        trades: &[TradeRow],
+        cursor: (String, i64),
+        cursor_id: i16,
+    ) -> Result<usize> {
         let mut conn = self.conn()?;
         let start = std::time::Instant::now();
         let res = conn.transaction::<_, anyhow::Error, _>(|conn| {
@@ -119,7 +128,7 @@ impl Repo {
             };
             diesel::insert_into(watch_cursor::table)
                 .values(CursorRow {
-                    id: 1,
+                    id: cursor_id,
                     cursor_tx: cursor.0.clone(),
                     cursor_ev: cursor.1,
                     updated_at: Utc::now(),

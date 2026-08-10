@@ -90,6 +90,12 @@ pub struct PackageInfo {
     /// protocol-only redeploys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cctp_bridge: Option<CctpBridgeRecord>,
+    /// Hybrid-exchange settlement package (via `--deploy-exchange`);
+    /// carried forward on protocol-only redeploys. Never republished
+    /// implicitly: market registry object IDs are the order-signature
+    /// domain and stay bound to the package that created them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exchange: Option<ExchangeRecord>,
     /// mm-bot's shared `QuoteSigner` object for this deployment, created
     /// by `--deploy-mm-collateral` right after the core republish. Reset
     /// to None on every fresh protocol publish — the object's Move type
@@ -135,6 +141,38 @@ pub struct CctpBridgeRecord {
     pub publish_digest: String,
     pub deployed_at: String,
     pub network: String,
+}
+
+/// The published hybrid-exchange settlement package (contracts/exchange/)
+/// plus its market registries. `markets` maps a human symbol (e.g.
+/// "SUI/USDC") to the shared SettlementRegistry object id — the id every
+/// order signature is domain-bound to, and the id services must read from
+/// here rather than from hand-maintained config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExchangeRecord {
+    pub package_id: String,
+    pub upgrade_cap_id: String,
+    pub admin_cap_id: String,
+    pub publish_digest: String,
+    pub deployed_at: String,
+    pub network: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub markets: BTreeMap<String, ExchangeMarketRecord>,
+}
+
+/// One created exchange market: the registry id plus the config it was
+/// created with (mirrored off-chain by the orderbook service).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExchangeMarketRecord {
+    pub registry_id: String,
+    pub base: String,
+    pub quote: String,
+    pub tick_size: u64,
+    pub min_size: u64,
+    pub lot_size: u64,
+    pub fee_bps: u64,
 }
 
 /// One published sub-package of the contracts tree.

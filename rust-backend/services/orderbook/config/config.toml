@@ -1,0 +1,14 @@
+# Orderbook service config (staging defaults). Markets and the exchange
+# package id are NOT here — they come from deployments.json (`exchange`
+# block). Endpoint overrides and the relayer key live in secrets.toml.
+
+network = "testnet"
+env = "staging"
+deployments = "deployments.json"
+
+database_url = "postgres://postgres:postgres@localhost:5432/orderbook"
+bind = "0.0.0.0:9014"
+
+# gas budget per match_orders settlement, in MIST
+gas_budget = 50000000
+db_pool_size = 16

@@ -14,6 +14,7 @@ pub mod apy_sampler;
 pub mod bars;
 pub mod config;
 pub mod db;
+pub mod exchange_watcher;
 pub mod mid_sampler;
 pub mod router;
 pub mod state;

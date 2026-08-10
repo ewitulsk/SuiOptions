@@ -58,6 +58,24 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # Hybrid exchange off-chain orderbook (REST/WS on 9014). Markets + the
+  # exchange package come from the baked deployments.json (`exchange` block);
+  # the relayer key + Sui endpoint overrides from
+  # /run/secrets/orderbook.toml (optional — absent file → public endpoints,
+  # open-orderbook mode only, no matched settlement).
+  orderbook:
+    image: ${ECR}/options/orderbook:${ORDERBOOK_TAG}
+    environment:
+      APP_ENV: staging
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      RUST_LOG: info,orderbook=debug
+    volumes:
+      - /opt/options/staging/secrets:/run/secrets:ro
+    restart: unless-stopped
+    networks: [net]
+
   # Single internal Pyth gateway (SO-254): one Hermes SSE subscription + all
   # Pyth caching, fanned out over REST + WS on 9013 (never proxied). Reads the
   # Pyth API key from /run/secrets/oracle-service.toml; discovers feeds from

@@ -62,9 +62,9 @@ variable "staging_ec2_instance_type" {
 }
 
 variable "ec2_root_volume_gb" {
-  description = "EBS gp3 root volume size in GB."
+  description = "EBS gp3 root volume size in GB for the prod host. Grown to 100 after containerd image snapshots filled the original 50 GB volume; EBS volumes can't shrink, so lowering this makes apply fail."
   type        = number
-  default     = 50
+  default     = 100
 }
 
 variable "staging_ec2_root_volume_gb" {

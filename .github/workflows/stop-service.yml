@@ -36,6 +36,7 @@ on:
           - balance-monitor
           - keeper
           - oracle-service
+          - orderbook
           - nginx
 
 permissions:

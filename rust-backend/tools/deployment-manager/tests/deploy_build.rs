@@ -48,6 +48,9 @@ const PUBLISHABLE: &[&str] = &[
     "options-adapter",
     "equity-oracle",
     "mm-collateral",
+    // Hybrid exchange settlement package (standalone audit scope; published
+    // via --deploy-exchange rather than the default protocol pipeline).
+    "exchange",
 ];
 
 fn contracts_root() -> PathBuf {
