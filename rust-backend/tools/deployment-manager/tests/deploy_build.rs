@@ -49,7 +49,7 @@ const PUBLISHABLE: &[&str] = &[
     "equity-oracle",
     "mm-collateral",
     // Hybrid exchange settlement package (standalone audit scope; published
-    // via --deploy-exchange rather than the default protocol pipeline).
+    // by the default protocol pipeline, or alone via --deploy-exchange).
     "exchange",
 ];
 
