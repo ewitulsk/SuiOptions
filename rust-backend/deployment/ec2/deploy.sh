@@ -94,6 +94,7 @@ compose_name_for() {
     cctp-relay)       echo cctp-relay ;;
     twitter-service)  echo twitter-service ;;
     social-bot)       echo social-bot ;;
+    orderbook)        echo orderbook ;;
     *) return 1 ;;
   esac
 }
