@@ -123,6 +123,43 @@ pub async fn build_deposit(
     Ok(())
 }
 
+/// `vault::deposit<A>(vault, cfg, appraisal, coin, option::some(att), clock)`
+/// for a NON-accounting allowlisted asset (SO-370). `att` is the
+/// composer-emitted `PriceAttestation` for `asset_type` (attestations are
+/// `copy`, so the appraisal legs and this option share the same result);
+/// `appraisal` must have been composed with `asset_type` in
+/// `extra_attest` when the vault doesn't hold it yet.
+pub async fn build_deposit_asset(
+    client: &ChainClient,
+    pt: &mut ProgrammableTransactionBuilder,
+    refs: &TradingVaultRefs<'_>,
+    asset_type: &str,
+    appraisal: Argument,
+    funds: Argument,
+    att: Argument,
+) -> Result<()> {
+    let vault = pt.obj(shared_object_arg(client, refs.vault_id, true).await?)?;
+    let cfg = pt.obj(shared_object_arg(client, refs.protocol_config_id, false).await?)?;
+    let some_att = pt.programmable_move_call(
+        ObjectID::from_hex_literal("0x1").unwrap(),
+        Identifier::new("option").unwrap(),
+        Identifier::new("some").unwrap(),
+        vec![refs.attestation_tag()?],
+        vec![att],
+    );
+    let clock = clock_arg(pt)?;
+    let asset_tag = TypeTag::from_str(asset_type)
+        .with_context(|| format!("parsing deposit asset type {asset_type}"))?;
+    vault_call(
+        pt,
+        refs.package,
+        "deposit",
+        vec![asset_tag],
+        vec![vault, cfg, appraisal, funds, some_att, clock],
+    );
+    Ok(())
+}
+
 /// `vault::request_withdraw<P>(vault, shares, clock)` — no appraisal.
 /// `payout_type` is the allowlisted asset the recipient wants to be paid
 /// in (SO-370); the accounting asset is always legal.

@@ -400,7 +400,8 @@ async fn main() -> Result<()> {
     step.ok();
 
     if cli.direct_escrow {
-        run_direct_escrow_leg(&client, &signer, &cli, &ids, net_top, vault_id, cap_id).await?;
+        run_direct_escrow_leg(&client, &signer, &cli, &ids, net_top, live.as_ref(), vault_id, cap_id)
+            .await?;
         return Ok(());
     }
 
@@ -1239,12 +1240,22 @@ async fn compose_with_legs(
         return compose_appraisal(client, pt, refs, holdings, None, option_map, &[]).await;
     }
     // SO-346: with a live descriptor saying Switchboard, build that
-    // provider's legs; otherwise (no --oracle-url, or provider=pyth) the
-    // compiled Pyth path below runs unchanged.
+    // provider's legs (shared composer, SO-375); otherwise (no
+    // --oracle-url, or provider=pyth) the compiled Pyth path below runs
+    // unchanged.
     if let Some(l) = live {
         if l.descriptor.provider == protocol_types::OracleProvider::Switchboard {
-            return compose_switchboard(client, pt, refs, holdings, &needed, option_map, l, extras)
-                .await;
+            return sui_tx::tx::appraisal::compose_switchboard_appraisal(
+                client,
+                pt,
+                refs,
+                holdings,
+                option_map,
+                &l.descriptor,
+                &l.client,
+                extras,
+            )
+            .await;
         }
     }
     let handles = pyth_handles();
@@ -1282,102 +1293,6 @@ async fn compose_with_legs(
             sender,
             gas_budget,
         })),
-        option_map,
-        extras,
-    )
-    .await
-}
-
-/// Switchboard variant of `compose_with_legs` (SO-346): coverage from
-/// the live descriptor, signed payload from oracle-service
-/// `/oracle/legs`. Mirrors the keeper's arm in
-/// `keeper::trading_vault::compose_full_appraisal`.
-#[allow(clippy::too_many_arguments)]
-async fn compose_switchboard(
-    client: &ChainClient,
-    pt: &mut ProgrammableTransactionBuilder,
-    refs: &AppraisalRefs,
-    holdings: &sui_tx::tx::appraisal::VaultHoldings,
-    needed: &std::collections::BTreeSet<String>,
-    option_map: &BTreeMap<String, OptionBucketInfo>,
-    live: &LiveOracle,
-    extras: &[String],
-) -> Result<(
-    sui_types::transaction::Argument,
-    BTreeMap<String, sui_types::transaction::Argument>,
-)> {
-    let d = &live.descriptor;
-    let adapter = d
-        .adapter
-        .as_ref()
-        .ok_or_else(|| anyhow!("live provider {} has no adapter deployed", d.provider))?;
-    let adapter_pkg = ObjectID::from_hex_literal(&adapter.adapter_package_id)
-        .context("parsing descriptor adapter package id")?;
-    let feed_registry_id = ObjectID::from_hex_literal(&adapter.feed_registry_id)
-        .context("parsing descriptor feed registry id")?;
-
-    // Same none-leg posture as the Pyth path; the deposit asset's feed
-    // rides along because `attest<Asset, Dep>` crosses inside one bundle.
-    let mut all: Vec<String> = needed.iter().cloned().collect();
-    all.extend(extras.iter().cloned());
-    all.push(holdings.deposit_type.clone());
-    let mut request: Vec<String> = Vec::new();
-    let mut feed_hashes: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    for t in &all {
-        let Some(hash) = d.feeds.get(t) else {
-            eprintln!("    (no switchboard feed for {t}; passing none leg)");
-            continue;
-        };
-        let bytes = hex::decode(hash.trim().trim_start_matches("0x"))
-            .with_context(|| format!("descriptor feed hash for {t} is not hex"))?;
-        if bytes.len() != 32 {
-            bail!("descriptor feed hash for {t} is {} bytes; expected 32", bytes.len());
-        }
-        feed_hashes.insert(t.clone(), bytes);
-        request.push(t.clone());
-    }
-    if request.is_empty() {
-        bail!("no switchboard feed hash for any priced asset (deposit {})", holdings.deposit_type);
-    }
-    let legs = live.client.legs(&request).await.context("fetching /oracle/legs")?;
-    let oracle_client::OracleLegsResponse::Switchboard(sw) = legs else {
-        bail!("/oracle/legs answered for a different provider than the descriptor");
-    };
-    let q = &sw.quote;
-    let payload = sui_tx::tx::oracle::SwitchboardQuotePayload {
-        feed_ids: q.feed_id_bytes()?,
-        values: q.values_u128()?,
-        values_neg: q.values_neg.clone(),
-        min_oracle_samples: q.min_oracle_samples.clone(),
-        signatures: q.signature_bytes()?,
-        slot: q.slot,
-        timestamp_seconds: q.timestamp_seconds,
-        oracle_ids: q
-            .oracle_ids
-            .iter()
-            .map(|o| {
-                ObjectID::from_hex_literal(o)
-                    .with_context(|| format!("parsing oracle object id {o:?}"))
-            })
-            .collect::<Result<Vec<_>>>()?,
-        queue_id: ObjectID::from_hex_literal(&sw.queue_id).context("parsing queue object id")?,
-    };
-    let switchboard_pkg = ObjectID::from_hex_literal(&sw.switchboard_package_id)
-        .context("parsing on_demand package id")?;
-    compose_appraisal(
-        client,
-        pt,
-        refs,
-        holdings,
-        Some(sui_tx::tx::oracle::OracleLegs::Switchboard(
-            sui_tx::tx::oracle::SwitchboardLegs {
-                adapter_pkg,
-                feed_registry_id,
-                switchboard_pkg,
-                payload: &payload,
-                feed_hashes: &feed_hashes,
-            },
-        )),
         option_map,
         extras,
     )
@@ -1470,6 +1385,7 @@ async fn run_direct_escrow_leg(
     cli: &Cli,
     ids: &Ids,
     net: &deployments::NetworkDeployment,
+    live: Option<&LiveOracle>,
     vault_id: ObjectID,
     cap_id: ObjectID,
 ) -> Result<()> {
@@ -1565,6 +1481,48 @@ async fn run_direct_escrow_leg(
         vec![vault_arg, cap, ireg, bm, custody_arg, delegate],
     );
     submit_ptb(client, signer, pt, cli.gas_budget, "smoke::add_signer").await?;
+    step.ok();
+
+    // ── curator: allowlist every catalog test token for deposits (SO-375).
+    // The staging-mm-bot funding pass deposits faucet-minted base inventory
+    // into this vault, so each `{SYM}/TUSDC` market's base must be
+    // depositable. Depositability is oracle-coverage self-gating at deposit
+    // time; warn early when the live descriptor has no feed.
+    let step = Step("direct escrow: allowlist catalog tokens as deposit assets");
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let vault_arg = pt.obj(shared_object_arg(client, vault_id, true).await?)?;
+    let cap = pt.obj(sui_tx::tx::owned_object_arg(client, cap_id).await?)?;
+    let cfg = pt.obj(shared_object_arg(client, ids.protocol_config_id, false).await?)?;
+    let mut listed = Vec::new();
+    for (bsym, tok) in &tt.tokens {
+        let t = canon(&tok.coin_type);
+        if t == ids.deposit_coin_type {
+            continue;
+        }
+        if let Some(l) = live {
+            if l.descriptor.provider == protocol_types::OracleProvider::Switchboard
+                && !l.descriptor.feeds.contains_key(&t)
+            {
+                println!(
+                    "    WARNING: no live feed for {bsym} ({t}) — deposits will fail until one is seeded"
+                );
+            }
+        }
+        pt.programmable_move_call(
+            ids.trading_vault_pkg,
+            Identifier::new("vault").unwrap(),
+            Identifier::new("add_deposit_asset").unwrap(),
+            vec![TypeTag::from_str(&t)?],
+            vec![vault_arg, cap, cfg],
+        );
+        listed.push(bsym.clone());
+    }
+    if listed.is_empty() {
+        println!("    (no non-accounting test tokens to allowlist)");
+    } else {
+        submit_ptb(client, signer, pt, cli.gas_budget, "smoke::add_deposit_assets").await?;
+        println!("    allowlisted: {}", listed.join(", "));
+    }
     step.ok();
 
     // ── maker order: the vault sells Quote (its accounting asset) for

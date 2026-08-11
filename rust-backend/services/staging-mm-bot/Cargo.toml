@@ -24,6 +24,7 @@ exchange-types   = { workspace = true }
 exchange-signing = { workspace = true }
 
 sui-types = { workspace = true }
+move-core-types = { workspace = true }
 
 tokio = { workspace = true }
 
