@@ -424,7 +424,9 @@ impl From<VaultReceiptRow> for VaultReceiptGql {
 #[derive(SimpleObject)]
 pub struct TradingVaultGql {
     pub vault_id: String,
-    pub deposit_asset: String,
+    /// The vault's unit of account (renamed from deposit_asset in SO-370:
+    /// deposits may arrive in any allowlisted asset).
+    pub accounting_asset: String,
     pub creator: String,
     /// Current curator wallet (updated on TvCuratorRotated).
     pub curator: String,
@@ -439,17 +441,17 @@ pub struct TradingVaultGql {
     pub total_shares_raw: String,
     pub position_count: String,
     pub pending_withdrawals: String,
-    /// Observed deposit-asset-per-share price (1e12-scaled).
+    /// Observed accounting-asset-per-share price (1e12-scaled).
     pub latest_pps_e12_raw: Option<String>,
     pub updated_at_ms: String,
     /// External MM account wallet (SO-299); null when none is set.
     pub external_account: Option<String>,
-    /// Outstanding external exposure (deposit-asset units).
+    /// Outstanding external exposure (accounting-asset units).
     pub external_exposure: String,
     /// Latest keeper-posted account equity (EquityPosted).
     pub latest_external_equity: Option<String>,
     pub external_equity_updated_at_ms: Option<String>,
-    /// NAV from the latest consumed appraisal (deposit-asset units,
+    /// NAV from the latest consumed appraisal (accounting-asset units,
     /// decimal string; SO-304).
     pub latest_nav_raw: Option<String>,
     pub nav_updated_at_ms: Option<String>,
@@ -459,7 +461,7 @@ impl From<TradingVaultRow> for TradingVaultGql {
     fn from(v: TradingVaultRow) -> Self {
         TradingVaultGql {
             vault_id: v.vault_id,
-            deposit_asset: v.deposit_asset,
+            accounting_asset: v.accounting_asset,
             creator: v.creator,
             curator: v.curator,
             curator_cap_id: v.curator_cap_id,
@@ -496,7 +498,7 @@ pub struct TradingVaultPositionGql {
     pub active: bool,
     pub stored_at_ms: String,
     pub removed_at_ms: Option<String>,
-    /// Latest appraisal mark (deposit-asset units, decimal string;
+    /// Latest appraisal mark (accounting-asset units, decimal string;
     /// SO-304). Null until the position is first appraised.
     pub last_value_raw: Option<String>,
     pub last_appraised_at_ms: Option<String>,

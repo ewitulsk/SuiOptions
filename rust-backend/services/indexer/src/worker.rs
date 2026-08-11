@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn dispatch_round_trips_a_bucket_created_event_into_store() {
         let types = EventTypes::for_packages(
-            event_types::PackageIds { core: "0xabc", auction: "0xa1", rfq: "0xf1", vault: Some("0xe1"), trading_vault: None, deepbook_adapter: None, options_adapter: None, equity_oracle: None },
+            event_types::PackageIds { core: "0xabc", auction: "0xa1", rfq: "0xf1", vault: Some("0xe1"), trading_vault: None, deepbook_adapter: None, options_adapter: None, exchange_adapter: None, equity_oracle: None },
             None,
         );
         let store = Store::new();

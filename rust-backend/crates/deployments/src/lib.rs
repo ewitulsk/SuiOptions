@@ -231,6 +231,9 @@ pub struct PackageInfo {
     /// Options RFQ-writer adapter for the trading vault (SO-285).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options_adapter: Option<SubPackageInfo>,
+    /// Hybrid-exchange maker adapter for the trading vault (SO-370).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exchange_adapter: Option<SubPackageInfo>,
     /// Keeper-attested equity oracle for trading-vault external accounts
     /// (SO-299).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -563,6 +566,7 @@ mod tests {
                 oracle_switchboard: None,
                 deepbook_adapter: None,
                 options_adapter: None,
+                exchange_adapter: None,
                 equity_oracle: None,
                 trading_vault_objects: None,
                 quote_signer_id: None,

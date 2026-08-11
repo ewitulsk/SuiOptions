@@ -91,6 +91,7 @@ fun setup(sc: &mut Scenario): Clock {
         &cfg,
         appraisal,
         coin::from_balance(balance::create_for_testing<UND>(1_000_000), sc.ctx()),
+        option::none(),
         &clock,
         sc.ctx(),
     );
@@ -274,6 +275,7 @@ fun setup_bid(sc: &mut Scenario): Clock {
         &cfg,
         appraisal,
         coin::from_balance(balance::create_for_testing<QUOTE>(1_000_000), sc.ctx()),
+        option::none(),
         &clock,
         sc.ctx(),
     );
@@ -666,6 +668,7 @@ fun appraisal_without_bid_ticket_leg_aborts() {
         &cfg,
         appraisal,
         coin::from_balance(balance::create_for_testing<QUOTE>(10), sc.ctx()),
+        option::none(),
         &clock,
         sc.ctx(),
     );
@@ -698,6 +701,7 @@ fun bid_ticket_wins_coupled_rfq_end_to_end() {
             &cfg,
             appraisal,
             coin::from_balance(balance::create_for_testing<QUOTE>(1_000_000), sc.ctx()),
+            option::none(),
             &clock,
             sc.ctx(),
         );

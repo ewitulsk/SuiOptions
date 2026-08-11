@@ -15,11 +15,10 @@ fun deposit_withdraw_lifecycle() {
     let mut s = ts::begin(OWNER);
     bm::new(s.ctx());
 
-    s.next_tx(STRANGER);
+    s.next_tx(OWNER);
     {
-        // anyone may deposit
         let mut m = s.take_shared<BalanceManager>();
-        bm::deposit(&mut m, coin::mint_for_testing<SUI>(1_000, s.ctx()));
+        bm::deposit(&mut m, coin::mint_for_testing<SUI>(1_000, s.ctx()), s.ctx());
         assert!(bm::balance_of<SUI>(&m) == 1_000, 0);
         assert!(bm::owner(&m) == OWNER, 1);
         ts::return_shared(m);
@@ -41,9 +40,14 @@ fun deposit_withdraw_lifecycle() {
 fun stranger_cannot_withdraw() {
     let mut s = ts::begin(OWNER);
     bm::new(s.ctx());
+    s.next_tx(OWNER);
+    {
+        let mut m = s.take_shared<BalanceManager>();
+        bm::deposit(&mut m, coin::mint_for_testing<SUI>(1_000, s.ctx()), s.ctx());
+        ts::return_shared(m);
+    };
     s.next_tx(STRANGER);
     let mut m = s.take_shared<BalanceManager>();
-    bm::deposit(&mut m, coin::mint_for_testing<SUI>(1_000, s.ctx()));
     let c = bm::withdraw<SUI>(&mut m, 1, s.ctx());
     coin::burn_for_testing(c);
     ts::return_shared(m);
@@ -56,7 +60,7 @@ fun overdraw_rejected() {
     bm::new(s.ctx());
     s.next_tx(OWNER);
     let mut m = s.take_shared<BalanceManager>();
-    bm::deposit(&mut m, coin::mint_for_testing<SUI>(100, s.ctx()));
+    bm::deposit(&mut m, coin::mint_for_testing<SUI>(100, s.ctx()), s.ctx());
     let c = bm::withdraw<SUI>(&mut m, 101, s.ctx());
     coin::burn_for_testing(c);
     ts::return_shared(m);
@@ -86,6 +90,77 @@ fun stranger_cannot_add_signer() {
     s.next_tx(STRANGER);
     let mut m = s.take_shared<BalanceManager>();
     bm::add_signer(&mut m, HOT, s.ctx());
+    ts::return_shared(m);
+    s.end();
+}
+
+#[test, expected_failure(abort_code = bm::EDepositRestricted)]
+fun stranger_cannot_deposit() {
+    let mut s = ts::begin(OWNER);
+    bm::new(s.ctx());
+    s.next_tx(STRANGER);
+    let mut m = s.take_shared<BalanceManager>();
+    bm::deposit(&mut m, coin::mint_for_testing<SUI>(1, s.ctx()), s.ctx());
+    ts::return_shared(m);
+    s.end();
+}
+
+#[test]
+fun approved_signer_can_deposit() {
+    let mut s = ts::begin(OWNER);
+    bm::new(s.ctx());
+    s.next_tx(OWNER);
+    {
+        let mut m = s.take_shared<BalanceManager>();
+        bm::add_signer(&mut m, HOT, s.ctx());
+        ts::return_shared(m);
+    };
+    s.next_tx(HOT);
+    {
+        let mut m = s.take_shared<BalanceManager>();
+        bm::deposit(&mut m, coin::mint_for_testing<SUI>(500, s.ctx()), s.ctx());
+        assert!(bm::balance_of<SUI>(&m) == 500, 0);
+        ts::return_shared(m);
+    };
+    s.end();
+}
+
+#[test]
+fun cap_owned_manager_lifecycle() {
+    // A cap-owned manager: object-address owner never signs; the cap
+    // authorizes deposit/withdraw/signer management.
+    let mut s = ts::begin(OWNER);
+    let (_, cap) = bm::new_with_owner_cap(@0xF00D, s.ctx());
+    s.next_tx(STRANGER); // any sender — authority is the cap
+    {
+        let mut m = s.take_shared<BalanceManager>();
+        assert!(bm::owner(&m) == @0xF00D, 0);
+        bm::deposit_with_cap(&mut m, &cap, coin::mint_for_testing<SUI>(1_000, s.ctx()));
+        bm::add_signer_with_cap(&mut m, &cap, HOT);
+        assert!(bm::is_approved_signer(&m, HOT), 1);
+        let c = bm::withdraw_with_cap<SUI>(&mut m, &cap, 400, s.ctx());
+        assert!(c.value() == 400, 2);
+        assert!(bm::balance_of<SUI>(&m) == 600, 3);
+        coin::burn_for_testing(c);
+        bm::remove_signer_with_cap(&mut m, &cap, HOT);
+        assert!(!bm::is_approved_signer(&m, HOT), 4);
+        ts::return_shared(m);
+    };
+    transfer::public_transfer(cap, OWNER);
+    s.end();
+}
+
+#[test, expected_failure(abort_code = bm::EWrongCap)]
+fun foreign_cap_rejected() {
+    let mut s = ts::begin(OWNER);
+    let (_, cap_a) = bm::new_with_owner_cap(@0xF00D, s.ctx());
+    let (bm_b, cap_b) = bm::new_with_owner_cap(@0xBEEF, s.ctx());
+    s.next_tx(STRANGER);
+    let mut m = s.take_shared_by_id<BalanceManager>(bm_b);
+    let c = bm::withdraw_with_cap<SUI>(&mut m, &cap_a, 1, s.ctx());
+    coin::burn_for_testing(c);
+    transfer::public_transfer(cap_a, OWNER);
+    transfer::public_transfer(cap_b, OWNER);
     ts::return_shared(m);
     s.end();
 }

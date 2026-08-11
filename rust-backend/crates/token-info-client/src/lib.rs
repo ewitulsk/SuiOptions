@@ -177,6 +177,11 @@ impl Snapshot {
         self.package_info.options_adapter.as_ref()
     }
 
+    /// Hybrid-exchange adapter for the trading vault (SO-370).
+    pub fn exchange_adapter(&self) -> Option<&SubPackageInfo> {
+        self.package_info.exchange_adapter.as_ref()
+    }
+
     /// Keeper-attested equity oracle for trading-vault external accounts
     /// (SO-299).
     pub fn equity_oracle(&self) -> Option<&SubPackageInfo> {
@@ -431,6 +436,7 @@ mod tests {
                 oracle_switchboard: None,
                 deepbook_adapter: None,
                 options_adapter: None,
+                exchange_adapter: None,
                 equity_oracle: None,
                 trading_vault_objects: None,
                 quote_signer_id: None,

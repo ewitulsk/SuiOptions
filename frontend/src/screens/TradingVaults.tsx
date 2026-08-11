@@ -193,8 +193,9 @@ export function TradingVaults() {
 }
 
 function TradingVaultRow({ vault, onOpen }: { vault: TradingVault; onOpen: () => void }) {
-  const token = tokenForCoinType(vault.depositAsset);
-  const symbol = token?.ticker ?? shortHex(vault.depositAsset.split("::")[0] ?? vault.depositAsset);
+  const token = tokenForCoinType(vault.accountingAsset);
+  const symbol =
+    token?.ticker ?? shortHex(vault.accountingAsset.split("::")[0] ?? vault.accountingAsset);
   const pps = tradingVaultPps(vault);
   const tvl = tradingVaultTvl(vault, token?.decimals ?? null);
   // Tap-vs-drag guard: these rows live inside a horizontal scroller on phones,
@@ -330,7 +331,7 @@ function CreateVaultCard() {
               gap: 10,
             }}
           >
-            <Field label="Deposit asset">
+            <Field label="Accounting asset">
               <select style={curatorFieldStyle} value={coinType} onChange={(e) => setCoinType(e.target.value)}>
                 {tokens.map((t) => (
                   <option key={t.coinType} value={t.coinType}>

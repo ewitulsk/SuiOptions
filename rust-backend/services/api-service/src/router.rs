@@ -69,6 +69,10 @@ pub async fn serve(
             "/trading-vaults/:vault_id/trades",
             get(handlers::trading_vaults::get_trades),
         )
+        .route(
+            "/trading-vaults/:vault_id/pending-requests",
+            get(handlers::trading_vaults::get_pending_requests),
+        )
         // The covered-call vault endpoints (`/vaults`, `/vaults/:id`,
         // `/vaults/:id/{rounds,apy,receipts}`) were unrouted with the product
         // (SO-332). `handlers::vaults` is kept in-tree for reference; nothing

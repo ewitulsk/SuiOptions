@@ -388,6 +388,7 @@ fun exercise_call_coin_partial_then_appraisal_completes() {
         &cfg,
         appraisal,
         coin::mint_for_testing<h::USDC>(1_000, sc.ctx()),
+        option::none(),
         &clock,
         sc.ctx(),
     );
@@ -674,6 +675,7 @@ fun release_coin_to_balances_makes_coin_appraisable_as_balance() {
         &cfg,
         appraisal,
         coin::mint_for_testing<h::USDC>(1_000, sc.ctx()),
+        option::none(),
         &clock,
         sc.ctx(),
     );

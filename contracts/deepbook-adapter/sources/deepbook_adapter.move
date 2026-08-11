@@ -679,7 +679,7 @@ fun value_in_deposit(
     if (amount == 0) {
         return 0
     };
-    if (asset == vault::deposit_asset(vault)) {
+    if (asset == vault::accounting_asset(vault)) {
         return amount as u128
     };
     assert!(att.is_some(), E_MISSING_ATTESTATION);

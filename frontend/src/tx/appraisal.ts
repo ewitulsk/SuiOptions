@@ -128,9 +128,15 @@ export type ExternalEquityPlan = {
 
 export type AppraisalPlan = {
   vaultId: string;
-  /** Canonical deposit coin type. */
-  depositType: string;
-  /** Non-deposit free-balance types needing `appraise_balance` (canonical). */
+  /** Canonical accounting-asset coin type (the unit of account — the quote
+   * leg of every attestation; values itself 1:1). */
+  accountingType: string;
+  /** Canonical coin type being DEPOSITED (SO-370: any allowlisted asset).
+   * Equals `accountingType` unless the plan was made for a non-accounting
+   * deposit, whose `deposit` call carries `some(attestation)` for it. */
+  depositAssetType: string;
+  /** Non-accounting free-balance types needing `appraise_balance`
+   * (canonical). */
   freeBalanceTypes: string[];
   custodies: CustodyPlan[];
   rfqTickets: RfqTicketPlan[];
@@ -139,14 +145,14 @@ export type AppraisalPlan = {
   optionLegs: OptionLegPlan[];
   /** Held option coins custodied as positions. */
   optionCoins: OptionCoinPlan[];
-  /** Non-deposit assets needing one `attest` each (canonical). */
+  /** Non-accounting assets needing one `attest` each (canonical). */
   attestTypes: string[];
   /** The live oracle descriptor the plan was built against (SO-356).
    * Compose + submit follow it — never a compiled provider. */
   oracle: OracleDescriptor;
   /** Canonical coin type → the live provider's feed key (lower-case hex,
-   * no 0x). Includes the deposit asset whenever any attestation is needed
-   * (it's the quote leg). */
+   * no 0x). Includes the accounting asset whenever any attestation is
+   * needed (it's the quote leg). */
   feedIdByType: Record<string, string>;
   /** Feed id → shared `PriceInfoObject` id. Pyth provider only. */
   priceInfoByFeed: Record<string, string>;
@@ -328,6 +334,10 @@ async function optionBucketCatalog(): Promise<Map<string, Omit<OptionLegPlan, "c
 export async function planAppraisal(
   client: SuiGrpcClient,
   vault: TradingVaultDetail,
+  /** Coin type being deposited (SO-370) — defaults to the accounting asset.
+   * A non-accounting asset adds its own attest leg so `deposit`'s
+   * `Option<PriceAttestation>` can be filled from the same attestation. */
+  depositAsset?: string,
 ): Promise<AppraisalPlan> {
   if (!TRADING_VAULT_PACKAGE_ID) {
     throw new Error("No trading-vault deployment on this network");
@@ -336,7 +346,8 @@ export async function planAppraisal(
   // no compiled fallback (SO-356). Unreachable descriptor ⇒ the plan
   // fails with the reason instead of composing a doomed PTB.
   const oracle = await fetchOracleDescriptor();
-  const depositType = canon(vault.depositAsset);
+  const accountingType = canon(vault.accountingAsset);
+  const depositAssetType = depositAsset ? canon(depositAsset) : accountingType;
 
   // 1. The vault object's `asset_types` VecSet<TypeName> — every type with a
   //    non-zero free balance.
@@ -349,7 +360,7 @@ export async function planAppraisal(
     .map(typeNameString)
     .filter((t): t is string => t !== null)
     .map(canon);
-  const freeBalanceTypes = freeTypes.filter((t) => t !== depositType);
+  const freeBalanceTypes = freeTypes.filter((t) => t !== accountingType);
 
   // 1b. External account (SO-299): a vault with OPEN EXPOSURE marks every
   //     appraisal `external_pending` at begin_appraisal, and consumption
@@ -406,27 +417,30 @@ export async function planAppraisal(
   // 3. Every non-deposit asset needing a price: free balances ∪ custody
   //    assets ∪ pool locked legs ∪ option escrow/underlying/settlement.
   const needed = new Set<string>(freeBalanceTypes);
+  // SO-370: a non-accounting deposit carries its own attestation into
+  // `deposit`'s option — plan an attest leg for the deposited asset too.
+  if (depositAssetType !== accountingType) needed.add(depositAssetType);
   const deepCanon = DEEP_COIN_TYPE ? canon(DEEP_COIN_TYPE) : null;
   let anyPools = false;
   for (const c of custodies) {
-    for (const a of c.assets) if (a !== depositType) needed.add(a);
+    for (const a of c.assets) if (a !== accountingType) needed.add(a);
     for (const p of c.pools) {
       anyPools = true;
-      if (p.baseType !== depositType) needed.add(p.baseType);
-      if (p.quoteType !== depositType) needed.add(p.quoteType);
+      if (p.baseType !== accountingType) needed.add(p.baseType);
+      if (p.quoteType !== accountingType) needed.add(p.quoteType);
     }
   }
-  for (const t of rfqTickets) if (t.escrowType !== depositType) needed.add(t.escrowType);
+  for (const t of rfqTickets) if (t.escrowType !== accountingType) needed.add(t.escrowType);
   for (const p of optionPositions) {
     const [u, s] = p.bucketTypeArgs;
-    if (u !== depositType) needed.add(u);
-    if (s !== depositType) needed.add(s);
+    if (u !== accountingType) needed.add(u);
+    if (s !== accountingType) needed.add(s);
   }
 
   // Locked DEEP in active pools: attestable only when DEEP has a served
   // feed. Without one the leg gets `none` — fine while locked DEEP is zero.
   let deepType: string | null = null;
-  if (anyPools && deepCanon && deepCanon !== depositType && feedIdFor(oracle, deepCanon)) {
+  if (anyPools && deepCanon && deepCanon !== accountingType && feedIdFor(oracle, deepCanon)) {
     deepType = deepCanon;
     needed.add(deepCanon);
   }
@@ -444,8 +458,8 @@ export async function planAppraisal(
       if (!leg) continue;
       needed.delete(t);
       optionLegs.push({ ...leg, coinType: t });
-      if (leg.underlying !== depositType) needed.add(leg.underlying);
-      if (leg.settlement !== depositType) needed.add(leg.settlement);
+      if (leg.underlying !== accountingType) needed.add(leg.underlying);
+      if (leg.settlement !== accountingType) needed.add(leg.settlement);
     }
     for (const cp of coinPositions) {
       const leg = catalog.get(cp.coinType);
@@ -455,8 +469,8 @@ export async function planAppraisal(
         );
       }
       optionCoins.push({ ...leg, coinType: cp.coinType, positionId: cp.positionId });
-      if (leg.underlying !== depositType) needed.add(leg.underlying);
-      if (leg.settlement !== depositType) needed.add(leg.settlement);
+      if (leg.underlying !== accountingType) needed.add(leg.underlying);
+      if (leg.settlement !== accountingType) needed.add(leg.settlement);
     }
     if ((optionLegs.length > 0 || optionCoins.length > 0) && !OPTIONS_ADAPTER_PACKAGE_ID) {
       throw new Error("options-adapter package not deployed on this network");
@@ -483,6 +497,19 @@ export async function planAppraisal(
     // else: feedless custody/pool/option leg — composed as `option::none`.
   }
 
+  // SO-370: the deposited asset's attestation is mandatory — a feedless
+  // non-accounting asset cannot be deposited at all.
+  if (
+    depositAssetType !== accountingType &&
+    !attestTypes.includes(depositAssetType) &&
+    !optionLegs.some((l) => l.coinType === depositAssetType)
+  ) {
+    const token = tokenForCoinType(depositAssetType);
+    throw new Error(
+      `No ${oracle.provider} feed for deposit asset ${token?.ticker ?? shortType(depositAssetType)}`,
+    );
+  }
+
   // 4. Feed keys under the live provider (deposit feed included — `attest`
   //    crosses the asset feed with the deposit feed). Pyth additionally
   //    needs each feed's shared `PriceInfoObject`; Switchboard resolves
@@ -503,13 +530,14 @@ export async function planAppraisal(
     if ((rfqTickets.length > 0 || optionPositions.length > 0) && !OPTIONS_ADAPTER_PACKAGE_ID) {
       throw new Error("options-adapter package not deployed on this network");
     }
-    for (const t of [...attestTypes, depositType]) {
+    for (const t of [...attestTypes, accountingType]) {
       const feed = feedFor(t);
       if (!feed) {
-        // Only reachable for the deposit asset — attestTypes are pre-filtered.
+        // Only reachable for the accounting asset — attestTypes are
+        // pre-filtered.
         const token = tokenForCoinType(t);
         throw new Error(
-          `No ${oracle.provider} feed for deposit asset ${token?.ticker ?? shortType(t)}`,
+          `No ${oracle.provider} feed for accounting asset ${token?.ticker ?? shortType(t)}`,
         );
       }
       feedIdByType[t] = feed;
@@ -526,7 +554,8 @@ export async function planAppraisal(
     }
     return {
       vaultId: vault.vaultId,
-      depositType,
+      accountingType,
+      depositAssetType,
       freeBalanceTypes,
       custodies,
       rfqTickets,
@@ -553,7 +582,8 @@ export async function planAppraisal(
   }
   return {
     vaultId: vault.vaultId,
-    depositType,
+    accountingType,
+    depositAssetType,
     freeBalanceTypes,
     custodies,
     rfqTickets,
@@ -584,7 +614,7 @@ export async function planAppraisal(
  */
 async function fetchLegsForPlan(plan: AppraisalPlan): Promise<OracleLegsPayload | null> {
   if (plan.attestTypes.length === 0) return null;
-  const legs = await fetchOracleLegs([...new Set([...plan.attestTypes, plan.depositType])]);
+  const legs = await fetchOracleLegs([...new Set([...plan.attestTypes, plan.accountingType])]);
   if (legs.provider !== plan.oracle.provider) {
     throw new Error(
       `oracle provider switched (planned ${plan.oracle.provider}, serving ${legs.provider}) — retry the deposit`,
@@ -736,14 +766,14 @@ function composePythAttestations(
     arguments: [potato],
   });
 
-  const depositInfo = tx.object(plan.priceInfoByFeed[plan.feedIdByType[plan.depositType]]);
+  const depositInfo = tx.object(plan.priceInfoByFeed[plan.feedIdByType[plan.accountingType]]);
   for (const asset of plan.attestTypes) {
     const info = tx.object(plan.priceInfoByFeed[plan.feedIdByType[asset]]);
     ctx.attestations.set(
       asset,
       tx.moveCall({
         target: ctx.attestTarget,
-        typeArguments: [asset, plan.depositType],
+        typeArguments: [asset, plan.accountingType],
         arguments: [ctx.feedReg, ctx.oracleReg, info, depositInfo, ctx.clock],
       }),
     );
@@ -752,8 +782,11 @@ function composePythAttestations(
 
 /**
  * Emit the full appraisal-leg sequence into `tx` and return the `Appraisal`
- * argument for `vault::deposit`. Synchronous — all discovery lives in
- * `planAppraisal`, all network fetches in `fetchLegsForPlan`.
+ * argument for `vault::deposit`, plus the per-asset attestations (SO-370:
+ * `PriceAttestation` is `copy`, so a non-accounting deposit's option reuses
+ * the same attest result its appraisal legs consumed). Synchronous — all
+ * discovery lives in `planAppraisal`, all network fetches in
+ * `fetchLegsForPlan`.
  *
  * The attest legs target whichever adapter the plan's descriptor says is
  * live (SO-335); there is deliberately NO compiled-provider fallback
@@ -763,7 +796,7 @@ export function composeAppraisal(
   tx: Transaction,
   plan: AppraisalPlan,
   ctx: ComposeContext,
-): TransactionResult {
+): { appraisal: TransactionResult; attestations: Map<string, TransactionResult> } {
   const vaultPkg = requireId(TRADING_VAULT_PACKAGE_ID, "trading-vault package");
   const vault = tx.object(plan.vaultId);
   const cfg = tx.object(ctx.protocolConfigId);
@@ -772,7 +805,7 @@ export function composeAppraisal(
   // 1. begin_appraisal<Dep>
   const appraisal = tx.moveCall({
     target: `${vaultPkg}::vault::begin_appraisal`,
-    typeArguments: [plan.depositType],
+    typeArguments: [plan.accountingType],
     arguments: [vault],
   });
 
@@ -827,7 +860,7 @@ export function composeAppraisal(
           asset,
           tx.moveCall({
             target: attestTarget,
-            typeArguments: [asset, plan.depositType],
+            typeArguments: [asset, plan.accountingType],
             arguments: [feedReg, oracleReg, quotes, clock],
           }),
         );
@@ -859,10 +892,11 @@ export function composeAppraisal(
       typeArguments: [attestationType],
       arguments: [],
     });
-  /** `Option<PriceAttestation>`: some for priced non-deposit assets, none
-   * for the deposit asset (adapters self-value it 1:1) or unpriced DEEP. */
+  /** `Option<PriceAttestation>`: some for priced non-accounting assets,
+   * none for the accounting asset (adapters self-value it 1:1) or unpriced
+   * DEEP. */
   const optAtt = (asset: string): TransactionArgument =>
-    asset === plan.depositType || !attestations.has(asset) ? noneAtt() : someAtt(asset);
+    asset === plan.accountingType || !attestations.has(asset) ? noneAtt() : someAtt(asset);
 
   // 3b. Option-coin attestations: intrinsic via the options oracle, fed by
   // the Pyth legs above (`none` for deposit-asset legs or once expired; a
@@ -877,7 +911,7 @@ export function composeAppraisal(
     for (const leg of plan.optionLegs) {
       const att = tx.moveCall({
         target: `${oa}::options_oracle::${leg.isPut ? "attest_put" : "attest_call"}`,
-        typeArguments: [leg.underlying, leg.settlement, leg.coinType, plan.depositType],
+        typeArguments: [leg.underlying, leg.settlement, leg.coinType, plan.accountingType],
         arguments: [oracleReg, tx.object(leg.bucketId), volBook, optAtt(leg.underlying), optAtt(leg.settlement), clock],
       });
       attestations.set(leg.coinType, att);
@@ -985,7 +1019,7 @@ export function composeAppraisal(
     });
   }
 
-  return appraisal;
+  return { appraisal, attestations };
 }
 
 // ═══════════════════════════ deposit convenience ═══════════════════════════
@@ -999,29 +1033,55 @@ export type AppraisedDepositParams = {
 };
 
 /**
- * The full deposit PTB: appraisal legs (with a fresh Hermes update when any
- * attestation is needed) piped into `vault::deposit<T>`. For a vault holding
- * nothing but its deposit asset this degenerates to the same two-call PTB
- * `buildTradingVaultDepositTx` emits.
+ * The full deposit PTB: appraisal legs (with a fresh oracle update when any
+ * attestation is needed) piped into `vault::deposit<T>`, where `T` is the
+ * plan's `depositAssetType` (SO-370 — any allowlisted asset). Accounting
+ * deposits pass `none`; a non-accounting deposit reuses the SAME attest
+ * result its appraisal composed (attestations are `copy`) wrapped in
+ * `option::some`. For a vault holding nothing but its accounting asset this
+ * degenerates to the same PTB `buildTradingVaultDepositTx` emits.
  */
 export async function buildAppraisedDepositTx(p: AppraisedDepositParams): Promise<Transaction> {
   const vaultPkg = requireId(TRADING_VAULT_PACKAGE_ID, "trading-vault package");
   const legs = await fetchLegsForPlan(p.plan);
 
   const tx = new Transaction();
-  const appraisal = composeAppraisal(tx, p.plan, {
+  const { appraisal, attestations } = composeAppraisal(tx, p.plan, {
     protocolConfigId: p.protocolConfigId,
     legs,
   });
-  const funds = tx.add(coinWithBalance({ balance: p.amountRaw, type: p.plan.depositType }));
+  const depType = p.plan.depositAssetType;
+  const attestationType = `${vaultPkg}::price::PriceAttestation`;
+  let att: TransactionArgument;
+  if (depType === p.plan.accountingType) {
+    att = tx.moveCall({
+      target: "0x1::option::none",
+      typeArguments: [attestationType],
+      arguments: [],
+    });
+  } else {
+    const composed = attestations.get(depType);
+    if (!composed) {
+      throw new Error(
+        `no attestation composed for deposit asset ${shortType(depType)} — re-plan and retry`,
+      );
+    }
+    att = tx.moveCall({
+      target: "0x1::option::some",
+      typeArguments: [attestationType],
+      arguments: [composed],
+    });
+  }
+  const funds = tx.add(coinWithBalance({ balance: p.amountRaw, type: depType }));
   tx.moveCall({
     target: `${vaultPkg}::vault::deposit`,
-    typeArguments: [p.plan.depositType],
+    typeArguments: [depType],
     arguments: [
       tx.object(p.plan.vaultId),
       tx.object(p.protocolConfigId),
       appraisal,
       funds,
+      att,
       tx.object(CLOCK_ID),
     ],
   });
@@ -1036,7 +1096,7 @@ export type ReleaseExternalParams = {
   protocolConfigId: string;
   /** The curator's owned `CuratorCap` object id. */
   curatorCapId: string;
-  /** Release amount in deposit-asset smallest units. */
+  /** Release amount in accounting-asset smallest units. */
   amountRaw: bigint;
 };
 
@@ -1068,13 +1128,13 @@ export async function buildReleaseExternalTx(p: ReleaseExternalParams): Promise<
       ],
     });
   }
-  const appraisal = composeAppraisal(tx, p.plan, {
+  const { appraisal } = composeAppraisal(tx, p.plan, {
     protocolConfigId: p.protocolConfigId,
     legs,
   });
   tx.moveCall({
     target: `${vaultPkg}::vault::release_external`,
-    typeArguments: [p.plan.depositType],
+    typeArguments: [p.plan.accountingType],
     arguments: [
       tx.object(p.plan.vaultId),
       tx.object(p.curatorCapId),

@@ -174,7 +174,7 @@ diesel::table! {
 diesel::table! {
     trading_vaults (vault_id) {
         vault_id            -> Text,
-        deposit_asset       -> Text,
+        accounting_asset    -> Text,
         creator             -> Text,
         curator             -> Text,
         curator_cap_id      -> Text,

@@ -42,7 +42,7 @@ export function SweepBack({
   const [amount, setAmount] = useState("");
   const [digest, setDigest] = useState<string | null>(null);
 
-  const assetSymbol = (tokenForCoinType(vault.depositAsset)?.ticker ?? "USDC").replace(/^t/, "");
+  const assetSymbol = (tokenForCoinType(vault.accountingAsset)?.ticker ?? "USDC").replace(/^t/, "");
 
   const onSweep = async () => {
     if (decimals == null || !account) return;
@@ -94,7 +94,7 @@ export function SweepBack({
         client,
         parentAddress: share.parentAddress,
         vaultId: vault.vaultId,
-        depositCoinType: vault.depositAsset,
+        depositCoinType: vault.accountingAsset,
         amountRaw,
       });
       const sweepSig = await runSignCeremony({

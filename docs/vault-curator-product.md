@@ -303,6 +303,67 @@ the DeepBook adapter are untouched.
   fills the vault's resting bid, deposits and partially fulfills through
   the option legs, and leaves the vault open holding CALL inventory.
 
+## 9c. Multi-asset deposits/withdrawals + exchange maker (SO-370) — decisions
+
+Models: dHEDGE/GLP oracle-valued entry and chosen-asset exit against a
+single ACCOUNTING asset; Morpho-style adapter custody for the exchange;
+OpenZeppelin ERC-4626 virtual offset for inflation defense.
+
+- **Accounting split**: `deposit_asset` → `accounting_asset` (numeraire;
+  NAV/basis/fees/external budgets unchanged in its units) + a
+  curator-managed `deposit_assets` allowlist (one set for deposits AND
+  payouts, protocol-capped via `max_deposit_assets`, default 8 —
+  every allowlisted asset held is a mandatory appraisal leg).
+  Depositability is oracle-coverage self-gating: no allowlisted oracle
+  price path ⇒ the deposit's attestation is unmintable.
+- **Virtual offset** `SHARE_OFFSET = 1e6`: `shares = value×(S+O)/(nav+1)`,
+  `value = shares×(nav+1)/(S+O)`, fee-mint at the same batch ratio
+  (pps-neutrality re-proved and test-locked). Genesis mints value×1e6 —
+  event-side pps derivations rescale by the offset. Reinstates the
+  design doc's original posture because the exchange BM reopened a
+  donation lever; the lever itself is ALSO closed (below). Attack
+  test-locked unprofitable (`donation_inflation_attack_is_unprofitable`).
+- **Entry/exit haircuts**: curator knobs (≤500 bps, default 0) as
+  oracle-arb dampers; primary defenses stay lockup + 60s freshness +
+  provider confidence checks.
+- **Withdrawals**: requests name a payout asset (`request_withdraw<P>`);
+  crystallization stays in numeraire, payout+protocol cut convert at
+  fulfillment-batch prices (protocol cut paid IN the payout asset — a
+  numeraire cut would re-create queue wedging as a second funding
+  condition). Heterogeneous payouts ride a fulfillment hot potato
+  (`begin_fulfillment`/`fulfill_next<P>`/`end_fulfillment`) because Move
+  can't pay mixed coin types from one generic call; `fulfill_next`
+  no-ops (returns false) on wrong-asset/unfundable heads so speculative
+  PTB chains stay safe. Queue liveness: recipient `amend_payout_asset` +
+  grace fallback (head older than `unwind_grace_ms` payable in the
+  accounting asset). Closed-state exits are numeraire-only;
+  `finalize_close` residual rule unchanged.
+- **Appraisal snapshot**: type-free `mutation_seq` (bumped by every
+  free-balance mutation) replaces the accounting-balance re-read —
+  strictly stronger, and required once deposits stopped naming the
+  accounting type as their generic.
+- **Exchange integration is an ADAPTER, not an external account.** The
+  BM must stay shared (fills need `&mut` from takers/relayer), so
+  `ExchangeCustody` holds an `OwnerCap` (new cap-owned BM flavor; owner
+  address = vault ID-as-address for order attribution). NAV reads the
+  shared BM's live `balance_of` — chain truth, no equity oracle, no
+  budgets/exposure ledger. Fund/defund/signers via curator sessions;
+  force sessions get defund-all + signer removal (dead-curator exit);
+  deliberately NO crank-session entries (yanking the book's escrow is
+  disruptive → not griefing-safe). Fills settle without the vault in
+  the transaction; escrow drain doubles as bulk cancel (fills fail
+  late, orderbook prunes) and `cancel_up_to_for_manager` lets approved
+  signers raise the owner's salt watermark.
+- **Donation lever closed at the source**: exchange BM deposits gated to
+  owner/signers/cap. Residual inflow via fills is bounded by the vault's
+  own signed prices. Standing adapter-audit invariant: *no path by which
+  a non-shareholder can increase appraised value*.
+- **Deploy**: exchange publishes before the trading-vault activation;
+  exchange-adapter publishes after the exchange (links it);
+  ExchangeAdapter witness joins the activation allowlist;
+  `exchange_adapter` recorded in deployments.json. Custodies re-init
+  each staging redeploy with the exchange.
+
 ## 10. Known follow-ups (explicitly out of this pass)
 
 1. Premium mark-to-market for option positions (needs a vol-attestation

@@ -62,6 +62,7 @@ fun setup(sc: &mut Scenario): Clock {
         &cfg,
         appraisal,
         coin::from_balance(balance::create_for_testing<USDC>(1_000_000_000), sc.ctx()),
+        option::none(),
         &clock,
         sc.ctx(),
     );

@@ -14,7 +14,7 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 
-import { PPS_E12, type TradingVaultPpsPoint } from "../api/tradingVaults";
+import { PPS_E12, SHARE_OFFSET, type TradingVaultPpsPoint } from "../api/tradingVaults";
 import { useThemeMode } from "../theme";
 
 function cssVar(name: string, fallback: string): string {
@@ -89,7 +89,11 @@ export function TradingVaultPpsChart({ points, loading, symbol }: Props) {
     // the latest) and sort ascending, as the chart library requires.
     const bySecond = new Map<number, number>();
     for (const p of [...usable].sort((a, b) => Number(a.timestampMs) - Number(b.timestampMs))) {
-      bySecond.set(Math.floor(Number(p.timestampMs) / 1000), Number(p.ppsE12) / PPS_E12);
+      // Raw pps carries the SO-370 virtual offset — display = raw × 1e6.
+      bySecond.set(
+        Math.floor(Number(p.timestampMs) / 1000),
+        (Number(p.ppsE12) * SHARE_OFFSET) / PPS_E12,
+      );
     }
     line.setData(
       [...bySecond.entries()].map(([time, value]) => ({ time: time as UTCTimestamp, value })),

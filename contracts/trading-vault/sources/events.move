@@ -10,10 +10,21 @@ public struct VaultCreated has copy, drop {
     vault_id: ID,
     creator: address,
     curator_cap_id: ID,
-    deposit_asset: TypeName,
+    accounting_asset: TypeName,
     lockup_ms: u64,
     curator_fee_bps: u64,
     unwind_grace_ms: u64,
+}
+
+/// Deposit/payout allowlist changes (SO-370).
+public struct DepositAssetAdded has copy, drop { vault_id: ID, asset: TypeName }
+
+public struct DepositAssetRemoved has copy, drop { vault_id: ID, asset: TypeName }
+
+public struct HaircutsSet has copy, drop {
+    vault_id: ID,
+    entry_haircut_bps: u64,
+    exit_haircut_bps: u64,
 }
 
 public struct VaultClosing has copy, drop { vault_id: ID }
@@ -34,11 +45,16 @@ public struct CuratorRotated has copy, drop {
 // ───────────────────────── stakes and the queue ─────────────────────────
 
 /// StakeKey mirror for events: `curator_cap` is none for address stakes.
+/// `asset`/`amount` are the deposited coin; `value` is its
+/// accounting-asset valuation (equal to `amount` for accounting-asset
+/// deposits) — share-price analytics must use `value / shares`.
 public struct Deposited has copy, drop {
     vault_id: ID,
     depositor: address,
     curator_cap: Option<ID>,
+    asset: TypeName,
     amount: u64,
+    value: u64,
     shares: u128,
     total_shares: u128,
     locked_until_ms: u64,
@@ -51,11 +67,22 @@ public struct WithdrawRequested has copy, drop {
     curator_cap: Option<ID>,
     shares: u128,
     basis: u64,
+    payout_asset: TypeName,
     requested_at_ms: u64,
 }
 
+/// A pending request's payout asset was re-pointed by its recipient.
+public struct PayoutAssetAmended has copy, drop {
+    vault_id: ID,
+    seq: u64,
+    payout_asset: TypeName,
+}
+
 /// The crystallization record: everything the dashboard's fee breakdown
-/// needs, per fulfilled request.
+/// needs, per fulfilled request. `value`/`payout` are accounting-asset
+/// units; `payout_asset`/`payout_units` are what was actually paid,
+/// converted at `price` (PRICE_SCALE fixed point; PRICE_SCALE exactly
+/// for accounting-asset payouts).
 public struct WithdrawFulfilled has copy, drop {
     vault_id: ID,
     seq: u64,
@@ -69,6 +96,9 @@ public struct WithdrawFulfilled has copy, drop {
     curator_net: u64,
     curator_shares_minted: u128,
     payout: u64,
+    payout_asset: TypeName,
+    payout_units: u64,
+    price: u128,
     total_shares: u128,
 }
 
@@ -201,6 +231,7 @@ public struct ProtocolConfigUpdated has copy, drop {
     max_curator_fee_bps: u64,
     protocol_fee_bps: u64,
     max_price_age_ms: u64,
+    max_deposit_assets: u64,
     paused: bool,
 }
 
@@ -214,7 +245,7 @@ public(package) fun emit_vault_created(
     vault_id: ID,
     creator: address,
     curator_cap_id: ID,
-    deposit_asset: TypeName,
+    accounting_asset: TypeName,
     lockup_ms: u64,
     curator_fee_bps: u64,
     unwind_grace_ms: u64,
@@ -223,11 +254,27 @@ public(package) fun emit_vault_created(
         vault_id,
         creator,
         curator_cap_id,
-        deposit_asset,
+        accounting_asset,
         lockup_ms,
         curator_fee_bps,
         unwind_grace_ms,
     });
+}
+
+public(package) fun emit_deposit_asset_added(vault_id: ID, asset: TypeName) {
+    event::emit(DepositAssetAdded { vault_id, asset });
+}
+
+public(package) fun emit_deposit_asset_removed(vault_id: ID, asset: TypeName) {
+    event::emit(DepositAssetRemoved { vault_id, asset });
+}
+
+public(package) fun emit_haircuts_set(vault_id: ID, entry_haircut_bps: u64, exit_haircut_bps: u64) {
+    event::emit(HaircutsSet { vault_id, entry_haircut_bps, exit_haircut_bps });
+}
+
+public(package) fun emit_payout_asset_amended(vault_id: ID, seq: u64, payout_asset: TypeName) {
+    event::emit(PayoutAssetAmended { vault_id, seq, payout_asset });
 }
 
 public(package) fun emit_vault_closing(vault_id: ID) {
@@ -259,7 +306,9 @@ public(package) fun emit_deposited(
     vault_id: ID,
     depositor: address,
     curator_cap: Option<ID>,
+    asset: TypeName,
     amount: u64,
+    value: u64,
     shares: u128,
     total_shares: u128,
     locked_until_ms: u64,
@@ -268,7 +317,9 @@ public(package) fun emit_deposited(
         vault_id,
         depositor,
         curator_cap,
+        asset,
         amount,
+        value,
         shares,
         total_shares,
         locked_until_ms,
@@ -282,6 +333,7 @@ public(package) fun emit_withdraw_requested(
     curator_cap: Option<ID>,
     shares: u128,
     basis: u64,
+    payout_asset: TypeName,
     requested_at_ms: u64,
 ) {
     event::emit(WithdrawRequested {
@@ -291,6 +343,7 @@ public(package) fun emit_withdraw_requested(
         curator_cap,
         shares,
         basis,
+        payout_asset,
         requested_at_ms,
     });
 }
@@ -308,6 +361,9 @@ public(package) fun emit_withdraw_fulfilled(
     curator_net: u64,
     curator_shares_minted: u128,
     payout: u64,
+    payout_asset: TypeName,
+    payout_units: u64,
+    price: u128,
     total_shares: u128,
 ) {
     event::emit(WithdrawFulfilled {
@@ -323,6 +379,9 @@ public(package) fun emit_withdraw_fulfilled(
         curator_net,
         curator_shares_minted,
         payout,
+        payout_asset,
+        payout_units,
+        price,
         total_shares,
     });
 }
@@ -494,6 +553,7 @@ public(package) fun emit_protocol_config_updated(
     max_curator_fee_bps: u64,
     protocol_fee_bps: u64,
     max_price_age_ms: u64,
+    max_deposit_assets: u64,
     paused: bool,
 ) {
     event::emit(ProtocolConfigUpdated {
@@ -502,6 +562,7 @@ public(package) fun emit_protocol_config_updated(
         max_curator_fee_bps,
         protocol_fee_bps,
         max_price_age_ms,
+        max_deposit_assets,
         paused,
     });
 }

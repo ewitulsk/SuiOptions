@@ -166,11 +166,12 @@ fun post_within_guardrails_and_appraise() {
         &cfg,
         appraisal,
         coin::from_balance(th::mint<USDC>(1_040), scenario.ctx()),
+        option::none(),
         &clock,
         scenario.ctx(),
     );
     let (bob_shares, _, _) = vault::stake_of(&v, th::bob_addr());
-    assert!(bob_shares == 1_000, 0);
+    assert!(bob_shares == th::expected_shares(1_040, 1_000_000_000, 1_040), 0);
     ts::return_shared(oreg);
     ts::return_shared(book);
     ts::return_shared(cfg);
@@ -315,7 +316,7 @@ fun bootstrap_without_admin_end_to_end() {
     let mut appraisal = vault::begin_appraisal<USDC>(&v);
     eo::record(&v, &book, &oreg, &mut appraisal, &clock);
     assert!(vault::appraisal_value(&appraisal) == 1_010, 0); // 750 cash + 260
-    vault::crank_appraisal<USDC>(&v, appraisal);
+    vault::crank_appraisal(&v, appraisal);
     ts::return_shared(oreg);
     ts::return_shared(book);
     ts::return_shared(v);

@@ -29,7 +29,7 @@ import { curatorFieldStyle } from "./styles";
 /** The venue collateral asset for a vault: matched from Bluefin's asset
  * list by the vault's deposit-asset symbol. */
 function venueAsset(info: BluefinExchangeInfo, vault: TradingVaultDetail) {
-  const token = tokenForCoinType(vault.depositAsset);
+  const token = tokenForCoinType(vault.accountingAsset);
   const symbol = token?.ticker?.replace(/^t/, "") ?? "USDC"; // TUSDC → USDC
   return info.assets.find((a) => a.symbol === symbol) ?? info.assets[0] ?? null;
 }

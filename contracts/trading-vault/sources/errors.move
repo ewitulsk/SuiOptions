@@ -48,3 +48,11 @@ public fun bad_attestation(): u64 { 108 }
 /// (SO-335). Distinct from `oracle_not_allowed`: the adapter is
 /// allowlisted protocol-wide, just not for this asset.
 public fun oracle_not_pinned_for_asset(): u64 { 109 }
+// Multi-asset deposits/withdrawals (SO-370).
+/// The coin type is not on the vault's deposit/payout allowlist.
+public fun asset_not_allowed(): u64 { 110 }
+/// A non-accounting flow needs a PriceAttestation and none was supplied
+/// (deposit valuation or a fulfillment batch price).
+public fun attestation_missing(): u64 { 111 }
+/// No pending request at that queue sequence.
+public fun request_missing(): u64 { 112 }

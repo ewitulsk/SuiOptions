@@ -179,7 +179,9 @@ pub struct VaultRound {
 #[derive(Clone, Debug)]
 pub struct TradingVault {
     pub vault_id: ObjectId,
-    pub deposit_asset: AssetType,
+    /// The vault's unit of account (renamed from deposit_asset in SO-370:
+    /// deposits may arrive in any allowlisted asset).
+    pub accounting_asset: AssetType,
     pub creator: SuiAddress,
     /// Current curator wallet (updated on TvCuratorRotated).
     pub curator: SuiAddress,
@@ -194,17 +196,18 @@ pub struct TradingVault {
     pub total_shares: u128,
     pub position_count: u64,
     pub pending_withdrawals: u64,
-    /// Observed deposit-asset-per-share price (1e12-scaled).
+    /// Observed accounting-asset-per-share price (1e12-scaled,
+    /// SHARE_OFFSET-adjusted).
     pub latest_pps_e12: Option<u128>,
     pub updated_at_ms: u64,
     /// External MM account wallet (SO-299); `None` when none is set.
     pub external_account: Option<SuiAddress>,
-    /// Outstanding external exposure (deposit-asset units).
+    /// Outstanding external exposure (accounting-asset units).
     pub external_exposure: u64,
     /// Latest keeper-posted account equity (EquityPosted).
     pub latest_external_equity: Option<u64>,
     pub external_equity_updated_at_ms: Option<u64>,
-    /// NAV from the latest consumed appraisal (deposit-asset units,
+    /// NAV from the latest consumed appraisal (accounting-asset units,
     /// SO-304); `None` before the first appraisal.
     pub latest_nav: Option<u128>,
     pub nav_updated_at_ms: Option<u64>,
@@ -220,7 +223,7 @@ pub struct TradingVaultPosition {
     pub active: bool,
     pub stored_at_ms: u64,
     pub removed_at_ms: Option<u64>,
-    /// Latest appraisal mark, deposit-asset units (SO-304); `None`
+    /// Latest appraisal mark, accounting-asset units (SO-304); `None`
     /// until the position is first appraised.
     pub last_value: Option<u64>,
     pub last_appraised_at_ms: Option<u64>,
@@ -440,7 +443,7 @@ impl IndexerClient {
 
     /// All curated trading vaults.
     pub async fn trading_vaults(&self) -> Result<Vec<TradingVault>> {
-        const Q: &str = "query{tradingVaults{vaultId depositAsset creator curator curatorCapId \
+        const Q: &str = "query{tradingVaults{vaultId accountingAsset creator curator curatorCapId \
             state lockupMs curatorFeeBps unwindGraceMs \
             depositsPaused mmReleaseEnabled totalSharesRaw positionCount pendingWithdrawals \
             latestPpsE12Raw updatedAtMs externalAccount externalExposure latestExternalEquity \
@@ -1006,7 +1009,7 @@ struct VaultReceiptJson {
 #[serde(rename_all = "camelCase")]
 struct TradingVaultJson {
     vault_id: String,
-    deposit_asset: String,
+    accounting_asset: String,
     creator: String,
     curator: String,
     curator_cap_id: String,
@@ -1251,7 +1254,7 @@ impl TryFrom<TradingVaultJson> for TradingVault {
     fn try_from(v: TradingVaultJson) -> Result<Self> {
         Ok(TradingVault {
             vault_id: parse_object_id(&v.vault_id)?,
-            deposit_asset: AssetType::new(v.deposit_asset),
+            accounting_asset: AssetType::new(v.accounting_asset),
             creator: parse_address(&v.creator)?,
             curator: parse_address(&v.curator)?,
             curator_cap_id: parse_object_id(&v.curator_cap_id)?,

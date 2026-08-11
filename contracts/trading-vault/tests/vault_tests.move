@@ -15,10 +15,16 @@ use trading_vault::registry::{Self, IntegrationRegistry, OracleRegistry};
 use trading_vault::test_helpers as h;
 use trading_vault::vault::{Self, CuratorCap, TradingVault};
 
+// Share numbers below carry the virtual offset: a genesis deposit of V
+// accounting units mints V × SHARE_OFFSET (1e6) shares, and later mints
+// follow shares = value × (S + O) / (nav + 1) — asserted through
+// h::expected_shares / h::expected_value where the dust makes literal
+// constants unreadable.
+
 // ═══════════════════════ shares and deposits ═══════════════════════
 
 #[test]
-fun genesis_deposit_mints_one_to_one() {
+fun genesis_deposit_mints_at_offset() {
     let mut sc = ts::begin(h::admin_addr());
     let clock = h::init_protocol(&mut sc);
     h::new_default_vault(&mut sc);
@@ -27,9 +33,10 @@ fun genesis_deposit_mints_one_to_one() {
     ts::next_tx(&mut sc, h::alice_addr());
     let v = ts::take_shared<TradingVault>(&sc);
     let (shares, basis, _) = vault::stake_of(&v, h::alice_addr());
-    assert!(shares == 1_000_000);
+    // value × (0 + O) / (0 + 1) = 1_000_000 × 1e6.
+    assert!(shares == 1_000_000_000_000);
     assert!(basis == 1_000_000);
-    assert!(vault::total_shares(&v) == 1_000_000);
+    assert!(vault::total_shares(&v) == 1_000_000_000_000);
     assert!(vault::free_balance_of<h::USDC>(&v) == 1_000_000);
     ts::return_shared(v);
 
@@ -43,16 +50,18 @@ fun second_deposit_prices_at_nav() {
     let clock = h::init_protocol(&mut sc);
     h::new_default_vault(&mut sc);
     h::simple_deposit(&mut sc, h::alice_addr(), 1_000_000, &clock);
-    // Strategy gain: NAV 1.5M against 1M shares → pps 1.5.
+    // Strategy gain: NAV 1.5M against 1M-unit genesis stake → pps 1.5.
     h::session_gain<h::USDC>(&mut sc, 500_000);
     h::simple_deposit(&mut sc, h::bob_addr(), 1_500_000, &clock);
 
     ts::next_tx(&mut sc, h::bob_addr());
     let v = ts::take_shared<TradingVault>(&sc);
     let (bob_shares, _, _) = vault::stake_of(&v, h::bob_addr());
-    // 1_500_000 × 1_000_000 / 1_500_000
-    assert!(bob_shares == 1_000_000);
-    assert!(vault::total_shares(&v) == 2_000_000);
+    let expected = h::expected_shares(1_500_000, 1_000_000_000_000, 1_500_000);
+    assert!(bob_shares == expected);
+    // ≈ 1e12 (same value-per-share as Alice), offset dust only.
+    assert!(bob_shares >= 999_999_000_000 && bob_shares <= 1_000_001_000_000);
+    assert!(vault::total_shares(&v) == 1_000_000_000_000 + expected);
     ts::return_shared(v);
 
     clock.destroy_for_testing();
@@ -67,12 +76,13 @@ fun withdraw_with_profit_charges_fees_and_keeps_pps() {
     let mut clock = h::init_protocol(&mut sc);
     h::new_default_vault(&mut sc);
     h::simple_deposit(&mut sc, h::alice_addr(), 1_000_000, &clock);
-    h::session_gain<h::USDC>(&mut sc, 1_000_000); // NAV 2M, 1M shares
+    h::session_gain<h::USDC>(&mut sc, 1_000_000); // NAV 2M
 
+    let s0: u128 = 1_000_000_000_000;
     clock.set_for_testing(4_000_000); // past lockup
     ts::next_tx(&mut sc, h::alice_addr());
     let mut v = ts::take_shared<TradingVault>(&sc);
-    vault::request_withdraw(&mut v, 1_000_000, &clock, sc.ctx());
+    vault::request_withdraw<h::USDC>(&mut v, s0, &clock, sc.ctx());
     ts::return_shared(v);
 
     // Permissionless fulfillment by a stranger.
@@ -81,20 +91,24 @@ fun withdraw_with_profit_charges_fees_and_keeps_pps() {
     let cfg = h::take_protocol_config(&sc);
     let mut treasury = ts::take_shared<Treasury>(&sc);
     let appraisal = vault::begin_appraisal<h::USDC>(&v);
-    vault::fulfill_withdrawals<h::USDC>(&mut v, &cfg, &mut treasury, appraisal, sc.ctx());
+    vault::fulfill_withdrawals<h::USDC>(&mut v, &cfg, &mut treasury, appraisal, &clock, sc.ctx());
 
-    // value 2_000_000, profit 1_000_000, gross fee 100_000 (10%),
-    // protocol cut 10_000 (10% of fee), curator net 90_000,
-    // payout 1_890_000... no: payout = value − gross_fee = 1_900_000.
-    assert!(treasury::balance_of<h::USDC>(&treasury) == 10_000);
-    // Curator fee minted at pps 2.0: 45_000 shares, basis 90_000.
+    // value = 1e12 × (2M+1) / (1e12+1e6) = 1_999_999 (1 unit of offset
+    // dust to the vault); profit 999_999; gross fee 99_999 (10%);
+    // protocol cut 9_999 (10% of fee); curator net 90_000;
+    // payout = value − gross_fee = 1_900_000.
+    let value = h::expected_value(s0, s0, 2_000_000);
+    assert!(value == 1_999_999);
+    assert!(treasury::balance_of<h::USDC>(&treasury) == 9_999);
+    // Curator fee minted at the batch ratio.
     let cap_id = vault::curator_cap_id(&v);
     let (cshares, cbasis, _) = vault::curator_stake_of(&v, cap_id);
-    assert!(cshares == 45_000);
+    let m = h::expected_shares(90_000, s0, 2_000_000);
+    assert!(cshares == m);
     assert!(cbasis == 90_000);
-    assert!(vault::total_shares(&v) == 45_000);
-    // Remaining assets exactly back the curator's stake at pps 2.0.
-    assert!(vault::free_balance_of<h::USDC>(&v) == 90_000);
+    assert!(vault::total_shares(&v) == m);
+    // Remaining assets back the curator's net (+ offset dust).
+    assert!(vault::free_balance_of<h::USDC>(&v) == 2_000_000 - 1_900_000 - 9_999);
     assert!(vault::pending_withdrawals(&v) == 0);
     ts::return_shared(treasury);
     ts::return_shared(cfg);
@@ -121,7 +135,7 @@ fun withdraw_at_loss_charges_no_fee() {
     clock.set_for_testing(4_000_000);
     ts::next_tx(&mut sc, h::alice_addr());
     let mut v = ts::take_shared<TradingVault>(&sc);
-    vault::request_withdraw(&mut v, 1_000_000, &clock, sc.ctx());
+    vault::request_withdraw<h::USDC>(&mut v, 1_000_000_000_000, &clock, sc.ctx());
     ts::return_shared(v);
 
     ts::next_tx(&mut sc, h::bob_addr());
@@ -129,7 +143,7 @@ fun withdraw_at_loss_charges_no_fee() {
     let cfg = h::take_protocol_config(&sc);
     let mut treasury = ts::take_shared<Treasury>(&sc);
     let appraisal = vault::begin_appraisal<h::USDC>(&v);
-    vault::fulfill_withdrawals<h::USDC>(&mut v, &cfg, &mut treasury, appraisal, sc.ctx());
+    vault::fulfill_withdrawals<h::USDC>(&mut v, &cfg, &mut treasury, appraisal, &clock, sc.ctx());
     assert!(treasury::balance_of<h::USDC>(&treasury) == 0);
     assert!(vault::total_shares(&v) == 0);
     ts::return_shared(treasury);
@@ -153,6 +167,7 @@ fun fulfillment_stops_when_value_is_deployed() {
     h::simple_deposit(&mut sc, h::alice_addr(), 1_000_000, &clock);
     h::simple_deposit(&mut sc, h::bob_addr(), 1_000_000, &clock);
 
+    // At pps exactly 1 the offset cancels: Bob also holds 1e12 shares.
     // Curator deploys 1.5M into a position: free 500k, NAV still 2M
     // (position appraises at its cost).
     ts::next_tx(&mut sc, h::curator_addr());
@@ -174,7 +189,7 @@ fun fulfillment_stops_when_value_is_deployed() {
     clock.set_for_testing(4_000_000);
     ts::next_tx(&mut sc, h::alice_addr());
     let mut v = ts::take_shared<TradingVault>(&sc);
-    vault::request_withdraw(&mut v, 1_000_000, &clock, sc.ctx());
+    vault::request_withdraw<h::USDC>(&mut v, 1_000_000_000_000, &clock, sc.ctx());
     ts::return_shared(v);
 
     // The crank cannot fund the head request and leaves it queued.
@@ -184,10 +199,10 @@ fun fulfillment_stops_when_value_is_deployed() {
     let mut treasury = ts::take_shared<Treasury>(&sc);
     let mut appraisal = vault::begin_appraisal<h::USDC>(&v);
     vault::record_position_value(&v, &mut appraisal, h::test_adapter(), pid, 1_500_000);
-    vault::fulfill_withdrawals<h::USDC>(&mut v, &cfg, &mut treasury, appraisal, sc.ctx());
+    vault::fulfill_withdrawals<h::USDC>(&mut v, &cfg, &mut treasury, appraisal, &clock, sc.ctx());
     assert!(vault::pending_withdrawals(&v) == 1);
     assert!(vault::free_balance_of<h::USDC>(&v) == 500_000);
-    assert!(vault::total_shares(&v) == 2_000_000);
+    assert!(vault::total_shares(&v) == 2_000_000_000_000);
     ts::return_shared(treasury);
     ts::return_shared(cfg);
     ts::return_shared(v);
@@ -212,9 +227,9 @@ fun fulfillment_stops_when_value_is_deployed() {
     let cfg = h::take_protocol_config(&sc);
     let mut treasury = ts::take_shared<Treasury>(&sc);
     let appraisal = vault::begin_appraisal<h::USDC>(&v);
-    vault::fulfill_withdrawals<h::USDC>(&mut v, &cfg, &mut treasury, appraisal, sc.ctx());
+    vault::fulfill_withdrawals<h::USDC>(&mut v, &cfg, &mut treasury, appraisal, &clock, sc.ctx());
     assert!(vault::pending_withdrawals(&v) == 0);
-    assert!(vault::total_shares(&v) == 1_000_000);
+    assert!(vault::total_shares(&v) == 1_000_000_000_000);
     ts::return_shared(treasury);
     ts::return_shared(cfg);
     ts::return_shared(v);
@@ -240,7 +255,7 @@ fun withdraw_before_lockup_aborts() {
 
     ts::next_tx(&mut sc, h::alice_addr());
     let mut v = ts::take_shared<TradingVault>(&sc);
-    vault::request_withdraw(&mut v, 1_000_000, &clock, sc.ctx());
+    vault::request_withdraw<h::USDC>(&mut v, 1_000_000, &clock, sc.ctx());
     abort 0
 }
 
@@ -252,7 +267,8 @@ fun curator_below_floor_cannot_withdraw() {
     h::new_default_vault(&mut sc);
     h::simple_deposit(&mut sc, h::alice_addr(), 950_000, &clock);
 
-    // Curator stakes exactly 5%.
+    // Curator stakes exactly 5% (pps is exactly 1, so the offset
+    // cancels: 50_000 × 1e6 shares of 1e12 total).
     ts::next_tx(&mut sc, h::curator_addr());
     let mut v = ts::take_shared<TradingVault>(&sc);
     let cfg = h::take_protocol_config(&sc);
@@ -264,13 +280,21 @@ fun curator_below_floor_cannot_withdraw() {
         &cap,
         appraisal,
         coin::from_balance(h::mint<h::USDC>(50_000), sc.ctx()),
+        option::none(),
         &clock,
         sc.ctx(),
     );
 
     // Any curator withdrawal now breaches the 5% floor.
     clock.set_for_testing(4_000_000);
-    vault::request_withdraw_as_curator(&mut v, &cfg, &cap, 10_000, h::curator_addr(), &clock);
+    vault::request_withdraw_as_curator<h::USDC>(
+        &mut v,
+        &cfg,
+        &cap,
+        10_000,
+        h::curator_addr(),
+        &clock,
+    );
     abort 0
 }
 
@@ -292,6 +316,7 @@ fun curator_can_withdraw_when_floor_disabled() {
         &cap,
         appraisal,
         coin::from_balance(h::mint<h::USDC>(50_000), sc.ctx()),
+        option::none(),
         &clock,
         sc.ctx(),
     );
@@ -312,7 +337,14 @@ fun curator_can_withdraw_when_floor_disabled() {
     let mut v = ts::take_shared<TradingVault>(&sc);
     let cfg = h::take_protocol_config(&sc);
     let cap = ts::take_from_sender<CuratorCap>(&sc);
-    vault::request_withdraw_as_curator(&mut v, &cfg, &cap, 10_000, h::curator_addr(), &clock);
+    vault::request_withdraw_as_curator<h::USDC>(
+        &mut v,
+        &cfg,
+        &cap,
+        10_000,
+        h::curator_addr(),
+        &clock,
+    );
     assert!(vault::pending_withdrawals(&v) == 1);
     ts::return_to_sender(&sc, cap);
     ts::return_shared(cfg);
@@ -362,27 +394,29 @@ fun appraisal_with_attestation_prices_second_asset() {
     // 1.0 BTC (8 decimals) into the vault.
     h::session_gain<h::BTC>(&mut sc, 100_000_000);
 
-    // BTC→USDC: 1 BTC (1e8 raw) = 1_000_000 USDC-raw (i.e. 1 USDC/BTC
-    // whole-unit price of 1e-2... the raw ratio is what matters):
-    // price = value × 1e12 / amount = 1_000_000 × 1e12 / 1e8 = 1e10.
+    // BTC→USDC raw ratio: 1e8 BTC-raw = 1_000_000 USDC-raw, i.e.
+    // price = 1_000_000 × 1e12 / 1e8 = 1e10.
     ts::next_tx(&mut sc, h::bob_addr());
     let mut v = ts::take_shared<TradingVault>(&sc);
     let cfg = h::take_protocol_config(&sc);
     let mut appraisal = vault::begin_appraisal<h::USDC>(&v);
     let att = h::attest<h::BTC, h::USDC>(&sc, 10_000_000_000, clock.timestamp_ms());
     vault::appraise_balance<h::BTC>(&v, &cfg, &mut appraisal, att, &clock);
-    // NAV = 1_000_000 USDC + 1_000_000 (BTC valued) = 2_000_000; Bob's
-    // 1_000_000 buys 500_000 shares.
+    // NAV = 1_000_000 USDC + 1_000_000 (BTC valued) = 2_000_000.
     vault::deposit<h::USDC>(
         &mut v,
         &cfg,
         appraisal,
         coin::from_balance(h::mint<h::USDC>(1_000_000), sc.ctx()),
+        option::none(),
         &clock,
         sc.ctx(),
     );
     let (bob_shares, _, _) = vault::stake_of(&v, h::bob_addr());
-    assert!(bob_shares == 500_000);
+    let expected = h::expected_shares(1_000_000, 1_000_000_000_000, 2_000_000);
+    assert!(bob_shares == expected);
+    // ≈ half of Alice's stake, offset dust only.
+    assert!(bob_shares >= 499_999_000_000 && bob_shares <= 500_001_000_000);
     ts::return_shared(cfg);
     ts::return_shared(v);
 
@@ -414,17 +448,18 @@ fun position_custody_and_valuation() {
     let cfg = h::take_protocol_config(&sc);
     let mut appraisal = vault::begin_appraisal<h::USDC>(&v);
     vault::record_position_value(&v, &mut appraisal, h::test_adapter(), pid, 1_000_000);
-    // NAV 2M over 1M shares → 1M buys 500k shares.
+    // NAV 2M; 1M buys ≈ half of Alice's stake.
     vault::deposit<h::USDC>(
         &mut v,
         &cfg,
         appraisal,
         coin::from_balance(h::mint<h::USDC>(1_000_000), sc.ctx()),
+        option::none(),
         &clock,
         sc.ctx(),
     );
     let (cur_shares, _, _) = vault::stake_of(&v, h::curator_addr());
-    assert!(cur_shares == 500_000);
+    assert!(cur_shares == h::expected_shares(1_000_000, 1_000_000_000_000, 2_000_000));
 
     // Take the position back out through a session.
     let mut s = vault::begin_session(&v, &cap, &ireg, h::test_adapter());
@@ -617,6 +652,7 @@ fun appraisal_emits_position_and_vault_events() {
         &cfg,
         appraisal,
         coin::from_balance(h::mint<h::USDC>(300_000), sc.ctx()),
+        option::none(),
         &clock,
         sc.ctx(),
     );
@@ -668,7 +704,7 @@ fun crank_appraisal_is_permissionless_and_emits() {
     let v = ts::take_shared<TradingVault>(&sc);
     let mut appraisal = vault::begin_appraisal<h::USDC>(&v);
     vault::record_position_value(&v, &mut appraisal, h::test_adapter(), pid, 750_000);
-    vault::crank_appraisal<h::USDC>(&v, appraisal);
+    vault::crank_appraisal(&v, appraisal);
 
     assert!(event::events_by_type<events::PositionAppraised>().length() == 1);
     let nav_events = event::events_by_type<events::VaultAppraised>();
@@ -676,7 +712,7 @@ fun crank_appraisal_is_permissionless_and_emits() {
     let (_, ev_total, ev_positions) = events::vault_appraised_fields(&nav_events[0]);
     assert!(ev_total == 1_750_000);
     assert!(ev_positions == 1);
-    assert!(vault::total_shares(&v) == 1_000_000);
+    assert!(vault::total_shares(&v) == 1_000_000_000_000);
     assert!(vault::free_balance_of<h::USDC>(&v) == 1_000_000);
     ts::return_shared(v);
 
@@ -703,7 +739,7 @@ fun crank_appraisal_rejects_incomplete_appraisal() {
 
     // The position was never appraised — crank must abort like consume.
     let appraisal = vault::begin_appraisal<h::USDC>(&v);
-    vault::crank_appraisal<h::USDC>(&v, appraisal);
+    vault::crank_appraisal(&v, appraisal);
     abort 0
 }
 
@@ -715,7 +751,8 @@ fun crank_appraisal_rejects_skewed_snapshot() {
     h::new_default_vault(&mut sc);
     h::simple_deposit(&mut sc, h::alice_addr(), 1_000_000, &clock);
 
-    // Same-tx session between begin and crank invalidates the snapshot.
+    // Same-tx session between begin and crank invalidates the snapshot
+    // (any balance mutation bumps the vault's mutation_seq).
     ts::next_tx(&mut sc, h::curator_addr());
     let mut v = ts::take_shared<TradingVault>(&sc);
     let ireg = ts::take_shared<IntegrationRegistry>(&sc);
@@ -724,7 +761,7 @@ fun crank_appraisal_rejects_skewed_snapshot() {
     let mut s = vault::begin_session(&v, &cap, &ireg, h::test_adapter());
     vault::put<h::USDC>(&mut v, &mut s, h::mint<h::USDC>(1));
     vault::end_session(&v, s);
-    vault::crank_appraisal<h::USDC>(&v, appraisal);
+    vault::crank_appraisal(&v, appraisal);
     abort 0
 }
 
@@ -754,7 +791,7 @@ fun closure_pays_everyone_out() {
     let mut treasury = ts::take_shared<Treasury>(&sc);
     vault::enqueue_closed_stake(&mut v, h::alice_addr(), &clock);
     let appraisal = vault::begin_appraisal<h::USDC>(&v);
-    vault::fulfill_withdrawals<h::USDC>(&mut v, &cfg, &mut treasury, appraisal, sc.ctx());
+    vault::fulfill_withdrawals<h::USDC>(&mut v, &cfg, &mut treasury, appraisal, &clock, sc.ctx());
     assert!(vault::total_shares(&v) == 0);
     ts::return_shared(treasury);
     ts::return_shared(cfg);
@@ -776,7 +813,7 @@ fun rotation_moves_the_role_not_the_stake() {
     h::new_default_vault(&mut sc);
     h::simple_deposit(&mut sc, h::alice_addr(), 950_000, &clock);
 
-    // Curator stakes 50k.
+    // Curator stakes 50k → exactly 5e10 shares (pps 1, offset cancels).
     ts::next_tx(&mut sc, h::curator_addr());
     let mut v = ts::take_shared<TradingVault>(&sc);
     let cfg = h::take_protocol_config(&sc);
@@ -789,6 +826,7 @@ fun rotation_moves_the_role_not_the_stake() {
         &cap,
         appraisal,
         coin::from_balance(h::mint<h::USDC>(50_000), sc.ctx()),
+        option::none(),
         &clock,
         sc.ctx(),
     );
@@ -805,7 +843,7 @@ fun rotation_moves_the_role_not_the_stake() {
     assert!(vault::curator_cap_id(&v) != old_cap_id);
     // The old cap's stake is intact, keyed by the old cap id.
     let (old_shares, _, _) = vault::curator_stake_of(&v, old_cap_id);
-    assert!(old_shares == 50_000);
+    assert!(old_shares == 50_000_000_000);
     ts::return_shared(v);
 
     // The old cap can still exit its stake — no floor (it's not the
@@ -815,11 +853,11 @@ fun rotation_moves_the_role_not_the_stake() {
     let mut v = ts::take_shared<TradingVault>(&sc);
     let cfg = h::take_protocol_config(&sc);
     let old_cap = ts::take_from_sender<CuratorCap>(&sc);
-    vault::request_withdraw_as_curator(
+    vault::request_withdraw_as_curator<h::USDC>(
         &mut v,
         &cfg,
         &old_cap,
-        50_000,
+        50_000_000_000,
         h::curator_addr(),
         &clock,
     );

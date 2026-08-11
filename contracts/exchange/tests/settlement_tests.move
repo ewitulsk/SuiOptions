@@ -52,7 +52,7 @@ fun new_bm(s: &mut ts::Scenario, owner: address): ID {
 fun fund<T>(s: &mut ts::Scenario, id: ID, owner: address, amount: u64) {
     s.next_tx(owner);
     let mut m = s.take_shared_by_id<BalanceManager>(id);
-    bm::deposit(&mut m, coin::mint_for_testing<T>(amount, s.ctx()));
+    bm::deposit(&mut m, coin::mint_for_testing<T>(amount, s.ctx()), s.ctx());
     ts::return_shared(m);
 }
 
@@ -393,6 +393,47 @@ fun higher_salt_survives_watermark() {
     assert!(got == 19_980, 0);
     clk.destroy_for_testing();
     s.end();
+}
+
+#[test, expected_failure(abort_code = settlement::ESaltVoided)]
+fun signer_watermark_cancel_voids_cap_owner_orders() {
+    // Cap-owned manager: the owner address never signs transactions, so
+    // an approved signer raises the owner's watermark instead.
+    let (mut s, clk) = setup();
+    s.next_tx(MAKER_A);
+    let (bm_id, cap) = bm::new_with_owner_cap(@0xF00D, s.ctx());
+    s.next_tx(MAKER_A);
+    {
+        let mut m = s.take_shared_by_id<BalanceManager>(bm_id);
+        bm::deposit_with_cap(&mut m, &cap, coin::mint_for_testing<SUI>(50_000, s.ctx()));
+        bm::add_signer_with_cap(&mut m, &cap, MAKER_B);
+        ts::return_shared(m);
+    };
+    let ord = ask(@0xF00D, bm_id, 50_000, 100_000, @0x0, @0x0, 5);
+    s.next_tx(MAKER_B); // the signer, not the owner
+    {
+        let m = s.take_shared_by_id<BalanceManager>(bm_id);
+        let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
+        settlement::cancel_up_to_for_manager(&mut reg, &m, 5, s.ctx());
+        ts::return_shared(reg);
+        ts::return_shared(m);
+    };
+    transfer::public_transfer(cap, MAKER_A);
+    fill(&mut s, bm_id, ord, 100_000, 40_000, 0, &clk);
+    abort 99
+}
+
+#[test, expected_failure(abort_code = settlement::ENotMaker)]
+fun non_signer_cannot_watermark_cancel_for_manager() {
+    let (mut s, _clk) = setup();
+    s.next_tx(MAKER_A);
+    let (bm_id, cap) = bm::new_with_owner_cap(@0xF00D, s.ctx());
+    s.next_tx(TAKER);
+    let m = s.take_shared_by_id<BalanceManager>(bm_id);
+    let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
+    settlement::cancel_up_to_for_manager(&mut reg, &m, 5, s.ctx());
+    transfer::public_transfer(cap, MAKER_A);
+    abort 99
 }
 
 #[test, expected_failure(abort_code = settlement::EWatermarkRegression)]

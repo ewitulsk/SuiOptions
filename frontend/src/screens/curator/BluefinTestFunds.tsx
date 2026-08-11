@@ -73,7 +73,7 @@ export function BluefinTestFunds({
         buildTradingVaultDepositTx({
           vaultId: vault.vaultId,
           protocolConfigId: cfgId,
-          depositCoinType: vault.depositAsset,
+          depositCoinType: vault.accountingAsset,
           amountRaw,
         });
       try {

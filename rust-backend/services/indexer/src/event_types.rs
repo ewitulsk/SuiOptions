@@ -36,9 +36,11 @@ use protocol_types::events::{
     VaultRoundFinalized, WithdrawCompleted, WithdrawInitiated, WriteExecuted,
     TvVaultCreated, TvVaultClosing, TvVaultClosed, TvDepositsPaused, TvMmReleaseToggled,
     TvCuratorRotated, TvDeposited, TvWithdrawRequested, TvWithdrawFulfilled, TvSessionSettled,
+    TvDepositAssetAdded, TvDepositAssetRemoved, TvHaircutsSet, TvPayoutAssetAmended,
     TvPositionStored, TvPositionRemoved, TvPositionAppraised, TvVaultAppraised,
     TvAdapterAllowed, TvAdapterDisallowed, TvOracleAllowed,
     TvOracleDisallowed, TvProtocolConfigUpdated, TvCollateralReleased, TvCustodyCreated,
+    TvExchangeCustodyCreated,
     TvPoolAllowed, TvPoolDisallowed, TvRfqOpened, TvRfqSettled, TvPositionRedeemed,
     TvMmCoinExercised, TvMmOffsetClosed, TvMmCoinReleased, TvTakerSwapExecuted,
     TvBidPlaced, TvBidReclaimed, TvBidRedeemed,
@@ -71,6 +73,8 @@ pub struct PackageIds<'a> {
     pub deepbook_adapter: Option<&'a str>,
     /// options_adapter (SO-285), optional like `trading_vault`.
     pub options_adapter: Option<&'a str>,
+    /// exchange_adapter (SO-370), optional like `trading_vault`.
+    pub exchange_adapter: Option<&'a str>,
     /// equity_oracle (SO-299), optional like `trading_vault`.
     pub equity_oracle: Option<&'a str>,
 }
@@ -161,6 +165,11 @@ pub struct EventTypes {
     pub tv_deposited: String,
     pub tv_withdraw_requested: String,
     pub tv_withdraw_fulfilled: String,
+    // Multi-asset deposits/withdrawals (SO-370).
+    pub tv_deposit_asset_added: String,
+    pub tv_deposit_asset_removed: String,
+    pub tv_haircuts_set: String,
+    pub tv_payout_asset_amended: String,
     pub tv_session_settled: String,
     pub tv_position_stored: String,
     pub tv_position_removed: String,
@@ -174,6 +183,8 @@ pub struct EventTypes {
     pub tv_protocol_config_updated: String,
     pub tv_collateral_released: String,
     pub tv_custody_created: String,
+    /// exchange_adapter's CustodyCreated (SO-370).
+    pub tv_exchange_custody_created: String,
     pub tv_pool_allowed: String,
     pub tv_pool_disallowed: String,
     pub tv_rfq_opened: String,
@@ -230,6 +241,10 @@ impl EventTypes {
         let oa = |name: &str| match pkgs.options_adapter {
             Some(pkg) => format!("{pkg}::options_adapter::{name}"),
             None => format!("unset::options_adapter::{name}"),
+        };
+        let ea = |name: &str| match pkgs.exchange_adapter {
+            Some(pkg) => format!("{pkg}::exchange_adapter::{name}"),
+            None => format!("unset::exchange_adapter::{name}"),
         };
         let eo = |name: &str| match pkgs.equity_oracle {
             Some(pkg) => format!("{pkg}::equity_oracle::{name}"),
@@ -307,6 +322,10 @@ impl EventTypes {
             tv_deposited: tv("Deposited"),
             tv_withdraw_requested: tv("WithdrawRequested"),
             tv_withdraw_fulfilled: tv("WithdrawFulfilled"),
+            tv_deposit_asset_added: tv("DepositAssetAdded"),
+            tv_deposit_asset_removed: tv("DepositAssetRemoved"),
+            tv_haircuts_set: tv("HaircutsSet"),
+            tv_payout_asset_amended: tv("PayoutAssetAmended"),
             tv_session_settled: tv("SessionSettled"),
             tv_position_stored: tv("PositionStored"),
             tv_position_removed: tv("PositionRemoved"),
@@ -319,6 +338,7 @@ impl EventTypes {
             tv_protocol_config_updated: tv("ProtocolConfigUpdated"),
             tv_collateral_released: tv_mm("CollateralReleased"),
             tv_custody_created: dba("CustodyCreated"),
+            tv_exchange_custody_created: ea("CustodyCreated"),
             tv_pool_allowed: dba("PoolAllowed"),
             tv_pool_disallowed: dba("PoolDisallowed"),
             tv_rfq_opened: oa("RfqOpened"),
@@ -347,7 +367,7 @@ impl EventTypes {
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 97] {
+    pub fn all_strings(&self) -> [&str; 102] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -412,6 +432,10 @@ impl EventTypes {
             &self.tv_deposited,
             &self.tv_withdraw_requested,
             &self.tv_withdraw_fulfilled,
+            &self.tv_deposit_asset_added,
+            &self.tv_deposit_asset_removed,
+            &self.tv_haircuts_set,
+            &self.tv_payout_asset_amended,
             &self.tv_session_settled,
             &self.tv_position_stored,
             &self.tv_position_removed,
@@ -424,6 +448,7 @@ impl EventTypes {
             &self.tv_protocol_config_updated,
             &self.tv_collateral_released,
             &self.tv_custody_created,
+            &self.tv_exchange_custody_created,
             &self.tv_pool_allowed,
             &self.tv_pool_disallowed,
             &self.tv_rfq_opened,
@@ -600,6 +625,14 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(TvWithdrawRequested, TvWithdrawRequested)
     } else if type_str == types.tv_withdraw_fulfilled {
         decode!(TvWithdrawFulfilled, TvWithdrawFulfilled)
+    } else if type_str == types.tv_deposit_asset_added {
+        decode!(TvDepositAssetAdded, TvDepositAssetAdded)
+    } else if type_str == types.tv_deposit_asset_removed {
+        decode!(TvDepositAssetRemoved, TvDepositAssetRemoved)
+    } else if type_str == types.tv_haircuts_set {
+        decode!(TvHaircutsSet, TvHaircutsSet)
+    } else if type_str == types.tv_payout_asset_amended {
+        decode!(TvPayoutAssetAmended, TvPayoutAssetAmended)
     } else if type_str == types.tv_session_settled {
         decode!(TvSessionSettled, TvSessionSettled)
     } else if type_str == types.tv_position_stored {
@@ -624,6 +657,8 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(TvCollateralReleased, TvCollateralReleased)
     } else if type_str == types.tv_custody_created {
         decode!(TvCustodyCreated, TvCustodyCreated)
+    } else if type_str == types.tv_exchange_custody_created {
+        decode!(TvExchangeCustodyCreated, TvExchangeCustodyCreated)
     } else if type_str == types.tv_pool_allowed {
         decode!(TvPoolAllowed, TvPoolAllowed)
     } else if type_str == types.tv_pool_disallowed {
@@ -863,7 +898,7 @@ mod tests {
         "0xfb28c4cbc6865bd1c897d26aecbe1f8792d1509a20ffec692c800660cbec6982";
 
     fn pkgs() -> PackageIds<'static> {
-        PackageIds { core: PKG, auction: AUCTION_PKG, rfq: RFQ_PKG, vault: Some(VAULT_PKG), trading_vault: Some(TV_PKG), deepbook_adapter: None, options_adapter: None, equity_oracle: Some(EQUITY_ORACLE_PKG) }
+        PackageIds { core: PKG, auction: AUCTION_PKG, rfq: RFQ_PKG, vault: Some(VAULT_PKG), trading_vault: Some(TV_PKG), deepbook_adapter: None, options_adapter: None, exchange_adapter: None, equity_oracle: Some(EQUITY_ORACLE_PKG) }
     }
 
     fn types() -> EventTypes {
@@ -1147,6 +1182,63 @@ mod tests {
         match dispatch(&t, &t.tv_bid_placed, &bytes).unwrap() {
             Some(ChainEvent::TvBidPlaced(decoded)) => assert_eq!(decoded, evt),
             other => panic!("expected TvBidPlaced, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_exchange_adapter_custody_created() {
+        // The exchange-adapter custody event lives in the exchange_adapter
+        // package's module (SO-370), like the deepbook-adapter's.
+        let ea_pkg = "0xea1";
+        let t = EventTypes::for_packages(
+            PackageIds { exchange_adapter: Some(ea_pkg), ..pkgs() },
+            Some(DEEPBOOK_ORIG),
+        );
+        let evt = TvExchangeCustodyCreated {
+            vault_id: ObjectId::new([0xf0; 32]),
+            custody_id: ObjectId::new([0xc1; 32]),
+            balance_manager_id: ObjectId::new([0xb2; 32]),
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        assert_eq!(
+            t.tv_exchange_custody_created,
+            format!("{ea_pkg}::exchange_adapter::CustodyCreated")
+        );
+        match dispatch(&t, &t.tv_exchange_custody_created, &bytes).unwrap() {
+            Some(ChainEvent::TvExchangeCustodyCreated(decoded)) => assert_eq!(decoded, evt),
+            other => panic!("expected TvExchangeCustodyCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_multi_asset_deposit_events() {
+        let t = types();
+        assert_eq!(
+            t.tv_deposit_asset_added,
+            format!("{TV_PKG}::events::DepositAssetAdded")
+        );
+        assert_eq!(
+            t.tv_payout_asset_amended,
+            format!("{TV_PKG}::events::PayoutAssetAmended")
+        );
+        let added = TvDepositAssetAdded {
+            vault_id: ObjectId::new([0xf0; 32]),
+            asset: AssetType::new("9b::tbtc::TBTC"),
+        };
+        let bytes = bcs::to_bytes(&added).unwrap();
+        match dispatch(&t, &t.tv_deposit_asset_added, &bytes).unwrap() {
+            Some(ChainEvent::TvDepositAssetAdded(decoded)) => assert_eq!(decoded, added),
+            other => panic!("expected TvDepositAssetAdded, got {other:?}"),
+        }
+        let amended = TvPayoutAssetAmended {
+            vault_id: ObjectId::new([0xf0; 32]),
+            seq: 3,
+            payout_asset: AssetType::new("9b::tbtc::TBTC"),
+        };
+        let bytes = bcs::to_bytes(&amended).unwrap();
+        match dispatch(&t, &t.tv_payout_asset_amended, &bytes).unwrap() {
+            Some(ChainEvent::TvPayoutAssetAmended(decoded)) => assert_eq!(decoded, amended),
+            other => panic!("expected TvPayoutAssetAmended, got {other:?}"),
         }
     }
 

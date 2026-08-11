@@ -1008,7 +1008,9 @@ pub struct TvVaultCreated {
     pub vault_id: ObjectId,
     pub creator: SuiAddress,
     pub curator_cap_id: ObjectId,
-    pub deposit_asset: AssetType,
+    /// The asset the vault's ledger denominates value in (SO-370: deposits
+    /// may arrive in any allowlisted asset; this is the unit of account).
+    pub accounting_asset: AssetType,
     #[serde(with = "u64_string")]
     pub lockup_ms: u64,
     #[serde(with = "u64_string")]
@@ -1047,13 +1049,19 @@ pub struct TvCuratorRotated {
     pub recipient: SuiAddress,
 }
 
+/// `asset`/`amount` are the deposited coin; `value` is its accounting-asset
+/// valuation (equal to `amount` for accounting-asset deposits, SO-370) —
+/// share-price analytics must use `value / shares`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TvDeposited {
     pub vault_id: ObjectId,
     pub depositor: SuiAddress,
     pub curator_cap: Option<ObjectId>,
+    pub asset: AssetType,
     #[serde(with = "u64_string")]
     pub amount: u64,
+    #[serde(with = "u64_string")]
+    pub value: u64,
     #[serde(with = "u128_string")]
     pub shares: u128,
     #[serde(with = "u128_string")]
@@ -1073,10 +1081,15 @@ pub struct TvWithdrawRequested {
     pub shares: u128,
     #[serde(with = "u64_string")]
     pub basis: u64,
+    /// Asset the recipient asked to be paid in (SO-370).
+    pub payout_asset: AssetType,
     #[serde(with = "u64_string")]
     pub requested_at_ms: u64,
 }
 
+/// `value`/`payout` are accounting-asset units; `payout_asset`/`payout_units`
+/// are what was actually paid, converted at `price` (1e12 fixed point;
+/// exactly 1e12 for accounting-asset payouts, SO-370).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TvWithdrawFulfilled {
     pub vault_id: ObjectId,
@@ -1101,8 +1114,50 @@ pub struct TvWithdrawFulfilled {
     pub curator_shares_minted: u128,
     #[serde(with = "u64_string")]
     pub payout: u64,
+    pub payout_asset: AssetType,
+    #[serde(with = "u64_string")]
+    pub payout_units: u64,
+    #[serde(with = "u128_string")]
+    pub price: u128,
     #[serde(with = "u128_string")]
     pub total_shares: u128,
+}
+
+/// `trading_vault::events::DepositAssetAdded` — an asset joined the vault's
+/// deposit/payout allowlist (SO-370). The accounting asset is implicitly
+/// allowed from creation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvDepositAssetAdded {
+    pub vault_id: ObjectId,
+    pub asset: AssetType,
+}
+
+/// `trading_vault::events::DepositAssetRemoved`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvDepositAssetRemoved {
+    pub vault_id: ObjectId,
+    pub asset: AssetType,
+}
+
+/// `trading_vault::events::HaircutsSet` — entry/exit haircuts applied to
+/// non-accounting-asset deposits/payouts (SO-370).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvHaircutsSet {
+    pub vault_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub entry_haircut_bps: u64,
+    #[serde(with = "u64_string")]
+    pub exit_haircut_bps: u64,
+}
+
+/// `trading_vault::events::PayoutAssetAmended` — a pending request's payout
+/// asset was re-pointed by its recipient (SO-370).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvPayoutAssetAmended {
+    pub vault_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub seq: u64,
+    pub payout_asset: AssetType,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1186,6 +1241,9 @@ pub struct TvProtocolConfigUpdated {
     pub protocol_fee_bps: u64,
     #[serde(with = "u64_string")]
     pub max_price_age_ms: u64,
+    /// Cap on a vault's deposit-asset allowlist size (SO-370).
+    #[serde(with = "u64_string")]
+    pub max_deposit_assets: u64,
     pub paused: bool,
 }
 
@@ -1205,6 +1263,15 @@ pub struct TvCollateralReleased {
 /// `deepbook_adapter::deepbook_adapter::CustodyCreated`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TvCustodyCreated {
+    pub vault_id: ObjectId,
+    pub custody_id: ObjectId,
+    pub balance_manager_id: ObjectId,
+}
+
+/// `exchange_adapter::exchange_adapter::CustodyCreated` (SO-370) — the
+/// vault's authority over its shared exchange BalanceManager.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvExchangeCustodyCreated {
     pub vault_id: ObjectId,
     pub custody_id: ObjectId,
     pub balance_manager_id: ObjectId,
@@ -1498,6 +1565,11 @@ pub enum ChainEvent {
     TvDeposited(TvDeposited),
     TvWithdrawRequested(TvWithdrawRequested),
     TvWithdrawFulfilled(TvWithdrawFulfilled),
+    // multi-asset deposits/withdrawals (SO-370)
+    TvDepositAssetAdded(TvDepositAssetAdded),
+    TvDepositAssetRemoved(TvDepositAssetRemoved),
+    TvHaircutsSet(TvHaircutsSet),
+    TvPayoutAssetAmended(TvPayoutAssetAmended),
     TvSessionSettled(TvSessionSettled),
     TvPositionStored(TvPositionStored),
     TvPositionRemoved(TvPositionRemoved),
@@ -1510,6 +1582,7 @@ pub enum ChainEvent {
     TvProtocolConfigUpdated(TvProtocolConfigUpdated),
     TvCollateralReleased(TvCollateralReleased),
     TvCustodyCreated(TvCustodyCreated),
+    TvExchangeCustodyCreated(TvExchangeCustodyCreated),
     TvPoolAllowed(TvPoolAllowed),
     TvPoolDisallowed(TvPoolDisallowed),
     TvRfqOpened(TvRfqOpened),
