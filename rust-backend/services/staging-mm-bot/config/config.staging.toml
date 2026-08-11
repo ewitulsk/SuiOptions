@@ -23,6 +23,9 @@ ttl_secs = 90
 refresh_secs = 5
 requote_drift_bps = 5
 escrow_utilization = 0.8
+# Batched on-chain cancel_up_to sweep cadence. Replaced orders expire after
+# ttl_secs anyway, so this is a slow belt, not the primary cancel.
+watermark_interval_secs = 3_600
 
 [[quoting.levels]]
 bps = 10

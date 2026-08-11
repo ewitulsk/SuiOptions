@@ -114,3 +114,46 @@ pub async fn cancel_up_to(
     );
     super::submit_ptb(client, signer, pt, gas_budget, "settlement::cancel_up_to").await
 }
+
+/// One market's entry in a batched watermark raise.
+pub struct CancelUpToTarget {
+    pub registry_id: ObjectID,
+    pub base_type: String,
+    pub quote_type: String,
+    pub min_valid_salt: u64,
+}
+
+/// Batched `settlement::cancel_up_to` — one move call per market registry in
+/// a single PTB, so a periodic watermark sweep across every market costs one
+/// transaction.
+pub async fn cancel_up_to_batch(
+    client: &ChainClient,
+    signer: &Signer,
+    exchange_package: ObjectID,
+    targets: &[CancelUpToTarget],
+    gas_budget: u64,
+) -> Result<ExecutedTransaction> {
+    anyhow::ensure!(!targets.is_empty(), "cancel_up_to_batch with no targets");
+    let mut pt = ProgrammableTransactionBuilder::new();
+    for t in targets {
+        info!(
+            registry_id = %t.registry_id,
+            min_valid_salt = t.min_valid_salt,
+            "raising salt watermark (batched cancel_up_to)"
+        );
+        let reg = pt.obj(shared_object_arg(client, t.registry_id, true).await?)?;
+        let salt_arg = pt.pure(t.min_valid_salt)?;
+        let base_tag = TypeTag::from_str(&t.base_type)
+            .with_context(|| format!("parsing base type {}", t.base_type))?;
+        let quote_tag = TypeTag::from_str(&t.quote_type)
+            .with_context(|| format!("parsing quote type {}", t.quote_type))?;
+        pt.programmable_move_call(
+            exchange_package,
+            Identifier::new("settlement").unwrap(),
+            Identifier::new("cancel_up_to").unwrap(),
+            vec![base_tag, quote_tag],
+            vec![reg, salt_arg],
+        );
+    }
+    super::submit_ptb(client, signer, pt, gas_budget, "settlement::cancel_up_to (batched)").await
+}

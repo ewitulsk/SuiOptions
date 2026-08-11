@@ -7,15 +7,17 @@
 //! Steady state, per market: read the oracle mid, build a tick-snapped
 //! bid/ask ladder, sign each level with the wallet key, post to the
 //! orderbook; on drift or approaching expiry, soft-cancel and repost, then
-//! raise the on-chain salt watermark (`cancel_up_to`) so replaced orders
-//! stop being fillable. A funding task keeps per-token escrow at its
-//! configured float.
+//! queue an on-chain salt-watermark raise (`cancel_up_to`) that an hourly
+//! sweep submits for all markets in one PTB — the short order TTL bounds
+//! how long a replaced order stays fillable, so the watermark is a slow
+//! belt, not the primary cancel. A funding task keeps per-token escrow at
+//! its configured float.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -119,6 +121,9 @@ struct QuotingConfig {
     requote_drift_bps: u64,
     /// Fraction of mirrored escrow the ladder may commit per token.
     escrow_utilization: f64,
+    /// Cadence of the batched on-chain watermark sweep. Safe to keep slow:
+    /// replaced orders expire on-chain after `ttl_secs` regardless.
+    watermark_interval_secs: u64,
 }
 
 impl Default for QuotingConfig {
@@ -133,6 +138,7 @@ impl Default for QuotingConfig {
             refresh_secs: 5,
             requote_drift_bps: 5,
             escrow_utilization: 0.8,
+            watermark_interval_secs: 3_600,
         }
     }
 }
@@ -190,6 +196,19 @@ struct MarketCtx {
     quote_decimals: u8,
 }
 
+/// Per-market on-chain watermark bookkeeping for the batched hourly sweep.
+struct MarketWatermark {
+    base: String,
+    quote: String,
+    /// Highest salt queued for the next sweep, if any.
+    pending: Option<u64>,
+    /// Highest watermark we know landed on-chain (reactive or swept). The
+    /// sweep never submits at or below this — the contract aborts with
+    /// `EWatermarkRegression` on a lower value, which would fail the whole
+    /// batch PTB.
+    raised: u64,
+}
+
 /// Shared handles across tasks.
 struct Shared {
     wrap: SuiClientWrapper,
@@ -203,6 +222,7 @@ struct Shared {
     gas_budget: u64,
     cache: PriceCache,
     staleness: Staleness,
+    watermarks: Mutex<HashMap<ObjectID, MarketWatermark>>,
 }
 
 // -- Main ----------------------------------------------------------------
@@ -294,6 +314,7 @@ async fn main() -> Result<()> {
         gas_budget: cli.gas_budget,
         cache,
         staleness,
+        watermarks: Mutex::new(HashMap::new()),
     });
 
     // Seed escrow before quoting so the first ladder doesn't bounce off
@@ -309,6 +330,23 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 funding_pass(&s, &snap).await;
+            }
+        });
+    }
+
+    // Batched watermark sweep: one PTB per interval voids every replaced
+    // batch across all markets, instead of one tx per requote per market.
+    {
+        let s = Arc::clone(&shared);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(
+                s.cfg.quoting.watermark_interval_secs,
+            ));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await; // fires immediately; nothing pending yet
+            loop {
+                tick.tick().await;
+                watermark_sweep(&s).await;
             }
         });
     }
@@ -643,7 +681,8 @@ async fn quote_loop(s: Arc<Shared>, ctx: MarketCtx) {
 
 /// Soft-cancel everything we have resting (frees the mirrored escrow
 /// commitment before the new batch is intaken). Best-effort: the on-chain
-/// watermark raise after the next batch is what actually voids them.
+/// watermark raise is what actually voids them — immediate here, because a
+/// stale-price pull is the dead-man case the watermark exists for.
 async fn pull_quotes(s: &Shared, ctx: &MarketCtx, open: &mut Vec<OpenOrder>) {
     let max_salt = open.iter().map(|o| o.salt).max();
     for o in open.drain(..) {
@@ -657,8 +696,11 @@ async fn pull_quotes(s: &Shared, ctx: &MarketCtx, open: &mut Vec<OpenOrder>) {
     }
 }
 
+/// Immediate single-market watermark raise — the reactive paths only
+/// (stale-price pull, INSUFFICIENT_ESCROW recovery). Steady-state requotes
+/// queue into the batched sweep instead.
 async fn raise_watermark(s: &Shared, ctx: &MarketCtx, min_valid_salt: u64) {
-    if let Err(e) = exchange_tx::cancel_up_to(
+    match exchange_tx::cancel_up_to(
         &s.wrap.client,
         &s.wrap.signer,
         s.exchange_package,
@@ -670,15 +712,100 @@ async fn raise_watermark(s: &Shared, ctx: &MarketCtx, min_valid_salt: u64) {
     )
     .await
     {
-        // A watermark that lags leaves soft-cancelled orders fillable
-        // on-chain — alert, but keep quoting.
-        tracing::error!(
-            alert_id = "tx-failed-staging-mm-bot",
-            market = %ctx.market.symbol,
-            min_valid_salt,
-            error = %format!("{e:#}"),
-            "cancel_up_to failed"
-        );
+        Ok(_) => {
+            let mut map = s.watermarks.lock().unwrap();
+            let w = watermark_entry(&mut map, ctx);
+            w.raised = w.raised.max(min_valid_salt);
+            if w.pending.is_some_and(|p| p <= w.raised) {
+                w.pending = None;
+            }
+        }
+        Err(e) => {
+            // A watermark that lags leaves soft-cancelled orders fillable
+            // on-chain — alert, queue for the sweep to retry, keep quoting.
+            tracing::error!(
+                alert_id = "tx-failed-staging-mm-bot",
+                market = %ctx.market.symbol,
+                min_valid_salt,
+                error = %format!("{e:#}"),
+                "cancel_up_to failed"
+            );
+            record_pending_watermark(s, ctx, min_valid_salt);
+        }
+    }
+}
+
+fn watermark_entry<'a>(
+    map: &'a mut HashMap<ObjectID, MarketWatermark>,
+    ctx: &MarketCtx,
+) -> &'a mut MarketWatermark {
+    map.entry(ctx.registry).or_insert_with(|| MarketWatermark {
+        base: ctx.market.base.clone(),
+        quote: ctx.market.quote.clone(),
+        pending: None,
+        raised: 0,
+    })
+}
+
+/// Queue a watermark raise for the batched sweep, keeping the per-market
+/// max. Values at or below the known on-chain watermark are dropped.
+fn record_pending_watermark(s: &Shared, ctx: &MarketCtx, min_valid_salt: u64) {
+    let mut map = s.watermarks.lock().unwrap();
+    let w = watermark_entry(&mut map, ctx);
+    if min_valid_salt > w.raised {
+        w.pending = Some(w.pending.map_or(min_valid_salt, |p| p.max(min_valid_salt)));
+    }
+}
+
+/// One sweep pass: raise every pending watermark in a single PTB. Nothing
+/// is cleared until the tx lands, so a failed sweep retries next tick; a
+/// reactive raise that overtook a pending value filters it out here.
+async fn watermark_sweep(s: &Shared) {
+    let targets: Vec<exchange_tx::CancelUpToTarget> = {
+        let map = s.watermarks.lock().unwrap();
+        map.iter()
+            .filter_map(|(registry, w)| {
+                let salt = w.pending.filter(|p| *p > w.raised)?;
+                Some(exchange_tx::CancelUpToTarget {
+                    registry_id: *registry,
+                    base_type: w.base.clone(),
+                    quote_type: w.quote.clone(),
+                    min_valid_salt: salt,
+                })
+            })
+            .collect()
+    };
+    if targets.is_empty() {
+        return;
+    }
+    match exchange_tx::cancel_up_to_batch(
+        &s.wrap.client,
+        &s.wrap.signer,
+        s.exchange_package,
+        &targets,
+        s.gas_budget,
+    )
+    .await
+    {
+        Ok(_) => {
+            let mut map = s.watermarks.lock().unwrap();
+            for t in &targets {
+                if let Some(w) = map.get_mut(&t.registry_id) {
+                    w.raised = w.raised.max(t.min_valid_salt);
+                    if w.pending.is_some_and(|p| p <= w.raised) {
+                        w.pending = None;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                alert_id = "tx-failed-staging-mm-bot",
+                markets = targets.len(),
+                error = %format!("{e:#}"),
+                "batched cancel_up_to failed"
+            );
+        }
     }
 }
 
@@ -771,10 +898,11 @@ async fn requote(
         }
     }
 
-    // Void every prior batch on-chain; the new batch's salts sit above the
-    // watermark and stay live.
+    // Queue the void of every prior batch for the batched sweep; the new
+    // batch's salts sit above the pending watermark and stay live. Deferring
+    // is safe because replaced orders expire on-chain within ttl_secs.
     if let Some(min_salt) = batch_min_salt {
-        raise_watermark(s, ctx, min_salt.saturating_sub(1)).await;
+        record_pending_watermark(s, ctx, min_salt.saturating_sub(1));
     }
     Ok(open.len())
 }
