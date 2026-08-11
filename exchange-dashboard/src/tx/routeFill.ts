@@ -9,11 +9,20 @@ import type { TransactionObjectArgument } from "@mysten/sui/transactions";
 import { bcs } from "@mysten/sui/bcs";
 import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
 
-import type { Market, RouteResponse } from "../api/orderbook";
+import type { Market, RouteResponse, SkeletonCommand } from "../api/orderbook";
 import { toBigint } from "../format";
 import { orderBytes, prefixedSignature, publicKeyBytes } from "./orderBcs";
 
 const VecU8 = bcs.vector(bcs.u8());
+
+/** digest → skeleton command, for per-leg fill dispatch (SO-372). */
+function skeletonByDigest(quote: RouteResponse): Map<string, SkeletonCommand> {
+  const map = new Map<string, SkeletonCommand>();
+  for (const cmd of quote.ptbSkeleton ?? []) {
+    if (cmd.digest) map.set(cmd.digest, cmd);
+  }
+  return map;
+}
 
 export function buildRouteFillTx(
   quote: RouteResponse,
@@ -30,6 +39,7 @@ export function buildRouteFillTx(
   const tx = new Transaction();
   tx.setSender(opts.sender);
 
+  const skeleton = skeletonByDigest(quote);
   const pathOutputs: TransactionObjectArgument[] = [];
   // Change/dust coins (input or intermediate types) returned to the sender.
   const residuals: TransactionObjectArgument[] = [];
@@ -53,21 +63,54 @@ export function buildRouteFillTx(
       for (const leg of hop) {
         const order = quote.orders[leg.digest];
         if (!order) throw new Error(`quote is missing the signed order for leg ${leg.digest}`);
-        const res = tx.moveCall({
-          target: `${opts.packageId}::settlement::${forward ? "fill_limit_order" : "fill_limit_order_reverse"}`,
-          typeArguments: [market.base, market.quote],
-          arguments: [
-            tx.object(order.registryId),
-            tx.object(order.makerManagerId),
-            tx.pure(VecU8.serialize(orderBytes(order))),
-            tx.pure(VecU8.serialize(prefixedSignature(order))),
-            tx.pure(VecU8.serialize(publicKeyBytes(order))),
-            takerCoin,
-            tx.pure.u64(toBigint(leg.amountIn)),
-            tx.pure.u64(0n), // intra-route: single strict guard at the end
-            tx.object(SUI_CLOCK_OBJECT_ID),
-          ],
-        });
+        // SO-372: a direct-escrow maker's identity BM holds nothing —
+        // its legs settle from the vault's free balances through the
+        // exchange-adapter entry the server named in the skeleton.
+        const cmd = skeleton.get(leg.digest);
+        const vaultLeg =
+          cmd?.command === "fill_vault_order" || cmd?.command === "fill_vault_order_reverse";
+        let res;
+        if (vaultLeg) {
+          const { vaultId, custodyId, integrationRegistryId, adapterPackageId } = cmd;
+          if (!vaultId || !custodyId || !integrationRegistryId || !adapterPackageId) {
+            throw new Error(`route leg ${leg.digest} is direct-escrow but lacks adapter ids`);
+          }
+          res = tx.moveCall({
+            target: `${adapterPackageId}::exchange_adapter::${cmd.command}`,
+            typeArguments: [market.base, market.quote],
+            arguments: [
+              tx.object(vaultId),
+              tx.object(integrationRegistryId),
+              tx.object(order.registryId),
+              tx.object(order.makerManagerId),
+              tx.pure.id(custodyId),
+              tx.pure(VecU8.serialize(orderBytes(order))),
+              tx.pure(VecU8.serialize(prefixedSignature(order))),
+              tx.pure(VecU8.serialize(publicKeyBytes(order))),
+              takerCoin,
+              tx.pure.u64(toBigint(leg.amountIn)),
+              tx.pure.u64(0n), // intra-route: single strict guard at the end
+              tx.object(SUI_CLOCK_OBJECT_ID),
+            ],
+          });
+        } else {
+          res = tx.moveCall({
+            target: `${opts.packageId}::settlement::${forward ? "fill_limit_order" : "fill_limit_order_reverse"}`,
+            typeArguments: [market.base, market.quote],
+            arguments: [
+              tx.object(order.registryId),
+              tx.object(order.makerManagerId),
+              tx.pure(VecU8.serialize(orderBytes(order))),
+              tx.pure(VecU8.serialize(prefixedSignature(order))),
+              tx.pure(VecU8.serialize(publicKeyBytes(order))),
+              takerCoin,
+              tx.pure.u64(toBigint(leg.amountIn)),
+              tx.pure.u64(0n), // intra-route: single strict guard at the end
+              tx.object(SUI_CLOCK_OBJECT_ID),
+            ],
+          });
+        }
+        // Both entries return (maker-side out, taker-coin change).
         outCoins.push(res[0]);
         // Remaining input funds the next leg; after the last leg it's dust.
         takerCoin = res[1];

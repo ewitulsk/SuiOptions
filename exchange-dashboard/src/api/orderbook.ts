@@ -54,10 +54,38 @@ export type RoutePlan = {
   paths: PathPlan[];
 };
 
+/**
+ * One `ptbSkeleton` entry. Fill legs carry the command the server chose
+ * for the maker's escrow binding (SO-372): plain settlement fills for
+ * wallet makers, `fill_vault_order(_reverse)` + the exchange-adapter ids
+ * for direct-escrow vault makers, whose identity BalanceManager holds
+ * nothing — debiting it aborts, so those legs MUST go through the adapter.
+ */
+export type SkeletonCommand = {
+  command:
+    | "fill_limit_order"
+    | "fill_limit_order_reverse"
+    | "fill_vault_order"
+    | "fill_vault_order_reverse"
+    | "assert_coin_min";
+  digest?: string;
+  market?: string;
+  typeArgs?: string[];
+  amountIn?: string | number;
+  minMakerAmountOut?: string | number;
+  min?: string | number;
+  // fill_vault_order(_reverse) only:
+  vaultId?: string;
+  custodyId?: string;
+  integrationRegistryId?: string;
+  adapterPackageId?: string;
+};
+
 export type RouteResponse = {
   serverTimeMs: number;
   plan: RoutePlan;
   orders: Record<string, SignedOrder>;
+  ptbSkeleton: SkeletonCommand[];
 };
 
 export class OrderbookApiError extends Error {
