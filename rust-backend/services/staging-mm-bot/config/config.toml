@@ -62,3 +62,17 @@ lots = 4
 max_price_age_ms = 5_000
 max_publish_lag_ms = 10_000
 max_conf_bps = 0
+
+# Vault-direct mode (SO-372): quote as a trading vault's delegated signer
+# against its direct-custody identity BalanceManager. The curator must have
+# run exchange_adapter::init_direct_custody, vault::add_quote_adapter, and
+# add_signer(this bot's wallet) first — the bot never creates, funds, or
+# deposits into the BM in this mode, and the [funding] section is ignored.
+# Quote sizing = the vault's live free balance per token, minus buffer_bps,
+# minus outstanding withdrawal-queue obligations when api_url is set.
+#
+# [vault_direct]
+# manager_id = "0x..."   # the vault's identity BM (from CustodyCreated)
+# vault_id = "0x..."
+# api_url = "http://api-service:9010"  # optional pending-requests deduction
+# buffer_bps = 1_000                   # free-balance fraction held back

@@ -40,7 +40,7 @@ use protocol_types::events::{
     TvPositionStored, TvPositionRemoved, TvPositionAppraised, TvVaultAppraised,
     TvAdapterAllowed, TvAdapterDisallowed, TvOracleAllowed,
     TvOracleDisallowed, TvProtocolConfigUpdated, TvCollateralReleased, TvCustodyCreated,
-    TvExchangeCustodyCreated,
+    TvExchangeCustodyCreated, TvVaultQuoteFilled, TvQuoteAdapterAdded, TvQuoteAdapterRemoved,
     TvPoolAllowed, TvPoolDisallowed, TvRfqOpened, TvRfqSettled, TvPositionRedeemed,
     TvMmCoinExercised, TvMmOffsetClosed, TvMmCoinReleased, TvTakerSwapExecuted,
     TvBidPlaced, TvBidReclaimed, TvBidRedeemed,
@@ -185,6 +185,11 @@ pub struct EventTypes {
     pub tv_custody_created: String,
     /// exchange_adapter's CustodyCreated (SO-370).
     pub tv_exchange_custody_created: String,
+    /// exchange_adapter's VaultQuoteFilled (SO-372: direct vault escrow).
+    pub tv_vault_quote_filled: String,
+    /// Curator opt-in/out of quote sessions (SO-372).
+    pub tv_quote_adapter_added: String,
+    pub tv_quote_adapter_removed: String,
     pub tv_pool_allowed: String,
     pub tv_pool_disallowed: String,
     pub tv_rfq_opened: String,
@@ -339,6 +344,9 @@ impl EventTypes {
             tv_collateral_released: tv_mm("CollateralReleased"),
             tv_custody_created: dba("CustodyCreated"),
             tv_exchange_custody_created: ea("CustodyCreated"),
+            tv_vault_quote_filled: ea("VaultQuoteFilled"),
+            tv_quote_adapter_added: tv("QuoteAdapterAdded"),
+            tv_quote_adapter_removed: tv("QuoteAdapterRemoved"),
             tv_pool_allowed: dba("PoolAllowed"),
             tv_pool_disallowed: dba("PoolDisallowed"),
             tv_rfq_opened: oa("RfqOpened"),
@@ -367,7 +375,7 @@ impl EventTypes {
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 102] {
+    pub fn all_strings(&self) -> [&str; 105] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -449,6 +457,9 @@ impl EventTypes {
             &self.tv_collateral_released,
             &self.tv_custody_created,
             &self.tv_exchange_custody_created,
+            &self.tv_vault_quote_filled,
+            &self.tv_quote_adapter_added,
+            &self.tv_quote_adapter_removed,
             &self.tv_pool_allowed,
             &self.tv_pool_disallowed,
             &self.tv_rfq_opened,
@@ -659,6 +670,12 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(TvCustodyCreated, TvCustodyCreated)
     } else if type_str == types.tv_exchange_custody_created {
         decode!(TvExchangeCustodyCreated, TvExchangeCustodyCreated)
+    } else if type_str == types.tv_vault_quote_filled {
+        decode!(TvVaultQuoteFilled, TvVaultQuoteFilled)
+    } else if type_str == types.tv_quote_adapter_added {
+        decode!(TvQuoteAdapterAdded, TvQuoteAdapterAdded)
+    } else if type_str == types.tv_quote_adapter_removed {
+        decode!(TvQuoteAdapterRemoved, TvQuoteAdapterRemoved)
     } else if type_str == types.tv_pool_allowed {
         decode!(TvPoolAllowed, TvPoolAllowed)
     } else if type_str == types.tv_pool_disallowed {
@@ -1198,6 +1215,7 @@ mod tests {
             vault_id: ObjectId::new([0xf0; 32]),
             custody_id: ObjectId::new([0xc1; 32]),
             balance_manager_id: ObjectId::new([0xb2; 32]),
+            direct: true,
         };
         let bytes = bcs::to_bytes(&evt).unwrap();
         assert_eq!(
@@ -1207,6 +1225,52 @@ mod tests {
         match dispatch(&t, &t.tv_exchange_custody_created, &bytes).unwrap() {
             Some(ChainEvent::TvExchangeCustodyCreated(decoded)) => assert_eq!(decoded, evt),
             other => panic!("expected TvExchangeCustodyCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_direct_escrow_events() {
+        // SO-372: the fill event rides in the exchange_adapter module; the
+        // quote-adapter opt-in/out events in trading_vault::events.
+        let ea_pkg = "0xea1";
+        let t = EventTypes::for_packages(
+            PackageIds { exchange_adapter: Some(ea_pkg), ..pkgs() },
+            Some(DEEPBOOK_ORIG),
+        );
+        let filled = TvVaultQuoteFilled {
+            vault_id: ObjectId::new([0xf0; 32]),
+            custody_id: ObjectId::new([0xc1; 32]),
+            balance_manager_id: ObjectId::new([0xb2; 32]),
+            sold_base: true,
+            base_amount: 1_000_000,
+            quote_amount: 2_000_000,
+        };
+        let bytes = bcs::to_bytes(&filled).unwrap();
+        assert_eq!(
+            t.tv_vault_quote_filled,
+            format!("{ea_pkg}::exchange_adapter::VaultQuoteFilled")
+        );
+        match dispatch(&t, &t.tv_vault_quote_filled, &bytes).unwrap() {
+            Some(ChainEvent::TvVaultQuoteFilled(decoded)) => assert_eq!(decoded, filled),
+            other => panic!("expected TvVaultQuoteFilled, got {other:?}"),
+        }
+        let added = TvQuoteAdapterAdded {
+            vault_id: ObjectId::new([0xf0; 32]),
+            adapter: AssetType::new("ea1::exchange_adapter::ExchangeAdapter"),
+        };
+        let bytes = bcs::to_bytes(&added).unwrap();
+        match dispatch(&t, &t.tv_quote_adapter_added, &bytes).unwrap() {
+            Some(ChainEvent::TvQuoteAdapterAdded(decoded)) => assert_eq!(decoded, added),
+            other => panic!("expected TvQuoteAdapterAdded, got {other:?}"),
+        }
+        let removed = TvQuoteAdapterRemoved {
+            vault_id: ObjectId::new([0xf0; 32]),
+            adapter: AssetType::new("ea1::exchange_adapter::ExchangeAdapter"),
+        };
+        let bytes = bcs::to_bytes(&removed).unwrap();
+        match dispatch(&t, &t.tv_quote_adapter_removed, &bytes).unwrap() {
+            Some(ChainEvent::TvQuoteAdapterRemoved(decoded)) => assert_eq!(decoded, removed),
+            other => panic!("expected TvQuoteAdapterRemoved, got {other:?}"),
         }
     }
 

@@ -376,3 +376,26 @@ pub async fn set_mm_release_enabled(
     )
     .await
 }
+
+/// Dev-inspect `vault::free_balance_of<T>` — the vault's free balance in
+/// `coin_type` smallest units (0 when the balance df was pruned). Read
+/// path only; used by direct-escrow quoters sizing against vault capital
+/// (SO-372).
+pub async fn dev_inspect_free_balance(
+    client: &ChainClient,
+    sender: sui_types::base_types::SuiAddress,
+    package: ObjectID,
+    vault_id: ObjectID,
+    coin_type: &str,
+) -> Result<u64> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let vault = pt.obj(shared_object_arg(client, vault_id, false).await?)?;
+    let tag = TypeTag::from_str(coin_type)
+        .with_context(|| format!("parsing coin type {coin_type}"))?;
+    vault_call(&mut pt, package, "free_balance_of", vec![tag], vec![vault]);
+    let res = client
+        .dev_inspect_ptb(sender, pt)
+        .await
+        .context("dev-inspecting free_balance_of")?;
+    crate::chain::decode_return_value::<u64>(&res, 0).context("decoding free_balance_of")
+}

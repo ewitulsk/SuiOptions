@@ -121,6 +121,11 @@ pub struct CancelUpToTarget {
     pub base_type: String,
     pub quote_type: String,
     pub min_valid_salt: u64,
+    /// For cap-owned (vault identity) managers (SO-372): raise the
+    /// MANAGER OWNER's watermark via `cancel_up_to_for_manager` — the
+    /// sender-keyed variant would raise the bot wallet's own. `None` for
+    /// plain wallet makers.
+    pub manager_id: Option<ObjectID>,
 }
 
 /// Batched `settlement::cancel_up_to` — one move call per market registry in
@@ -142,18 +147,33 @@ pub async fn cancel_up_to_batch(
             "raising salt watermark (batched cancel_up_to)"
         );
         let reg = pt.obj(shared_object_arg(client, t.registry_id, true).await?)?;
-        let salt_arg = pt.pure(t.min_valid_salt)?;
         let base_tag = TypeTag::from_str(&t.base_type)
             .with_context(|| format!("parsing base type {}", t.base_type))?;
         let quote_tag = TypeTag::from_str(&t.quote_type)
             .with_context(|| format!("parsing quote type {}", t.quote_type))?;
-        pt.programmable_move_call(
-            exchange_package,
-            Identifier::new("settlement").unwrap(),
-            Identifier::new("cancel_up_to").unwrap(),
-            vec![base_tag, quote_tag],
-            vec![reg, salt_arg],
-        );
+        match t.manager_id {
+            None => {
+                let salt_arg = pt.pure(t.min_valid_salt)?;
+                pt.programmable_move_call(
+                    exchange_package,
+                    Identifier::new("settlement").unwrap(),
+                    Identifier::new("cancel_up_to").unwrap(),
+                    vec![base_tag, quote_tag],
+                    vec![reg, salt_arg],
+                );
+            }
+            Some(manager_id) => {
+                let bm = pt.obj(shared_object_arg(client, manager_id, false).await?)?;
+                let salt_arg = pt.pure(t.min_valid_salt)?;
+                pt.programmable_move_call(
+                    exchange_package,
+                    Identifier::new("settlement").unwrap(),
+                    Identifier::new("cancel_up_to_for_manager").unwrap(),
+                    vec![base_tag, quote_tag],
+                    vec![reg, bm, salt_arg],
+                );
+            }
+        }
     }
     super::submit_ptb(client, signer, pt, gas_budget, "settlement::cancel_up_to (batched)").await
 }

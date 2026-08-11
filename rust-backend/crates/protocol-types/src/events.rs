@@ -1269,12 +1269,45 @@ pub struct TvCustodyCreated {
 }
 
 /// `exchange_adapter::exchange_adapter::CustodyCreated` (SO-370) — the
-/// vault's authority over its shared exchange BalanceManager.
+/// vault's authority over its shared exchange BalanceManager. `direct`
+/// (SO-372) marks an identity-only manager whose orders escrow against the
+/// vault's free balances instead of funded manager balances.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TvExchangeCustodyCreated {
     pub vault_id: ObjectId,
     pub custody_id: ObjectId,
     pub balance_manager_id: ObjectId,
+    pub direct: bool,
+}
+
+/// `exchange_adapter::exchange_adapter::VaultQuoteFilled` (SO-372) — one
+/// vault side of a direct-escrow fill, emitted alongside the exchange's own
+/// FillEvent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvVaultQuoteFilled {
+    pub vault_id: ObjectId,
+    pub custody_id: ObjectId,
+    pub balance_manager_id: ObjectId,
+    pub sold_base: bool,
+    #[serde(with = "u64_string")]
+    pub base_amount: u64,
+    #[serde(with = "u64_string")]
+    pub quote_amount: u64,
+}
+
+/// `trading_vault::events::QuoteAdapterAdded` (SO-372) — curator opt-in to
+/// quote sessions for the adapter witness.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvQuoteAdapterAdded {
+    pub vault_id: ObjectId,
+    pub adapter: AssetType,
+}
+
+/// `trading_vault::events::QuoteAdapterRemoved` (SO-372).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvQuoteAdapterRemoved {
+    pub vault_id: ObjectId,
+    pub adapter: AssetType,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1583,6 +1616,10 @@ pub enum ChainEvent {
     TvCollateralReleased(TvCollateralReleased),
     TvCustodyCreated(TvCustodyCreated),
     TvExchangeCustodyCreated(TvExchangeCustodyCreated),
+    // direct vault escrow (SO-372)
+    TvVaultQuoteFilled(TvVaultQuoteFilled),
+    TvQuoteAdapterAdded(TvQuoteAdapterAdded),
+    TvQuoteAdapterRemoved(TvQuoteAdapterRemoved),
     TvPoolAllowed(TvPoolAllowed),
     TvPoolDisallowed(TvPoolDisallowed),
     TvRfqOpened(TvRfqOpened),

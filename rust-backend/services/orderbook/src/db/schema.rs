@@ -86,6 +86,15 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    exchange_vault_managers (manager_id) {
+        manager_id -> Text,
+        vault_id   -> Text,
+        custody_id -> Text,
+        direct     -> Bool,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     exchange_markets,
     exchange_orders,
@@ -94,4 +103,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     exchange_approved_signers,
     exchange_cursors,
     exchange_salt_watermarks,
+    exchange_vault_managers,
 );

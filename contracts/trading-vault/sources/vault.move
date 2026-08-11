@@ -115,6 +115,10 @@ public struct VaultConfig has copy, drop, store {
     /// `MAX_HAIRCUT_BPS`.
     entry_haircut_bps: u64,
     exit_haircut_bps: u64,
+    /// Adapter witnesses the curator has opted into for QUOTE sessions
+    /// (SO-372) — permissionless, take-capable settlement sessions.
+    /// Default empty; the venue-general sibling of `mm_release_enabled`.
+    quote_adapters: VecSet<TypeName>,
     deposits_paused: bool,
     /// Opt-in for the `vault_mm` release path: signed quotes from the
     /// curator's bot may draw vault collateral. Off by default.
@@ -289,6 +293,7 @@ public fun create_vault<T>(
             unwind_grace_ms,
             entry_haircut_bps: 0,
             exit_haircut_bps: 0,
+            quote_adapters: vec_set::empty(),
             deposits_paused: false,
             mm_release_enabled: false,
         },
@@ -909,6 +914,54 @@ public fun begin_force_session<W: drop>(
     };
     assert!(ready, errors::unwind_not_ready());
     new_session(vault, adapter, true)
+}
+
+/// Permissionless, take-capable QUOTE session (SO-372) — the settlement
+/// path for adapters that let third parties (takers, the relayer) fill
+/// the vault's signed maker quotes directly against vault free balances.
+/// Triple-gated: the adapter must be protocol-allowlisted AND
+/// curator-opted-in via `quote_adapters` AND the vault Open.
+///
+/// Trust model (the vault_mm precedent, generalized): a take through
+/// this session is safe only because the adapter verifies a
+/// curator-authorized signed instruction — for the exchange, a
+/// `FillObligation` minted by settlement after validating an order
+/// signed by a curator-delegated key — and routes all value back into
+/// the vault in the same transaction. That verification is a standing
+/// requirement of the ADAPTER's audit; enabling a quote adapter is the
+/// curator accepting that audit surface. Either kill switch (protocol
+/// delist, curator remove) stops new quote sessions instantly; resting
+/// orders die with the adapter's own cancel machinery.
+public fun begin_quote_session<W: drop>(
+    vault: &TradingVault,
+    reg: &IntegrationRegistry,
+    _witness: W,
+): Session {
+    assert!(vault.state == VaultState::Open, errors::vault_not_open());
+    let adapter = type_name::with_defining_ids<W>();
+    assert!(registry::is_adapter_allowed(reg, &adapter), errors::adapter_not_allowed());
+    assert!(
+        vault.config.quote_adapters.contains(&adapter),
+        errors::quote_adapter_not_enabled(),
+    );
+    new_session(vault, adapter, false)
+}
+
+/// Curator opt-in for quote sessions by adapter witness `W`.
+public fun add_quote_adapter<W>(vault: &mut TradingVault, cap: &CuratorCap) {
+    assert_current_cap(vault, cap);
+    let w = type_name::with_defining_ids<W>();
+    assert!(!vault.config.quote_adapters.contains(&w), errors::config_invalid());
+    vault.config.quote_adapters.insert(w);
+    events::emit_quote_adapter_added(object::id(vault), w);
+}
+
+public fun remove_quote_adapter<W>(vault: &mut TradingVault, cap: &CuratorCap) {
+    assert_current_cap(vault, cap);
+    let w = type_name::with_defining_ids<W>();
+    assert!(vault.config.quote_adapters.contains(&w), errors::config_invalid());
+    vault.config.quote_adapters.remove(&w);
+    events::emit_quote_adapter_removed(object::id(vault), w);
 }
 
 /// Permissionless, always-available session for adapter CRANKS — the
@@ -1576,6 +1629,10 @@ public fun deposit_assets(vault: &TradingVault): VecSet<TypeName> { vault.config
 
 public fun is_deposit_asset(vault: &TradingVault, t: &TypeName): bool {
     vault.config.deposit_assets.contains(t)
+}
+
+public fun is_quote_adapter(vault: &TradingVault, w: &TypeName): bool {
+    vault.config.quote_adapters.contains(w)
 }
 
 /// (entry_haircut_bps, exit_haircut_bps).

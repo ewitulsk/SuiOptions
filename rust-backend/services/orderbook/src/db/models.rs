@@ -1,6 +1,6 @@
 //! Insertable / queryable row types for the exchange schema.
 
-use super::schema::{exchange_fills, exchange_markets, exchange_orders};
+use super::schema::{exchange_fills, exchange_markets, exchange_orders, exchange_vault_managers};
 use diesel::prelude::*;
 use serde::Serialize;
 
@@ -62,6 +62,18 @@ pub struct NewFill {
     pub maker_sold_base: bool,
     pub filled_total: i64,
     pub timestamp_ms: i64,
+}
+
+/// A trading-vault-custodied BalanceManager (SO-372), mirrored from the
+/// exchange_adapter's CustodyCreated events. `direct` marks identity-only
+/// managers whose escrow is the vault's free balances.
+#[derive(Insertable, Queryable, AsChangeset, Clone, Debug)]
+#[diesel(table_name = exchange_vault_managers)]
+pub struct VaultManagerRow {
+    pub manager_id: String,
+    pub vault_id: String,
+    pub custody_id: String,
+    pub direct: bool,
 }
 
 /// A chain-confirmed fill as served by the API.

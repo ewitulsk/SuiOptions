@@ -364,6 +364,51 @@ OpenZeppelin ERC-4626 virtual offset for inflation defense.
   `exchange_adapter` recorded in deployments.json. Custodies re-init
   each staging redeploy with the exchange.
 
+## 9d. Direct vault escrow (SO-372) — decisions
+
+The vault quotes straight from free balances — no sweep — additively to
+9c's funded mode. Modeled on `options_core::collateral`'s
+dependency-inverted pattern, ported to fills.
+
+- **Obligation settlement** (`exchange::settlement`, "the
+  dependency-inverted escrow protocol"): `begin_fill/_reverse/begin_match`
+  do ALL validation/economics/recording and mint an ability-less
+  `FillObligation` with per-leg `{escrow_id, owes, due}` from the SIGNED
+  orders; legs are provided permissionlessly (charity is a donation to
+  the maker, never theft) and collected binding-checked — funded managers
+  by id, external escrows by presenting the manager's `OwnerCap`, Path A
+  takers as bearer; `finish` banks exact fee residues and emits the
+  standard FillEvents. Abort-atomic: no recorded fill without completed
+  movement. Classic one-call paths share `fill_terms`/`match_terms`
+  verbatim — parity test-locked bit-identical. No escrow registry:
+  permissionless implementations, safety is pure binding, exactly as in
+  options core.
+- **Quote sessions** (vault core, 4th flavor): permissionless,
+  take-capable, triple-gated (IntegrationRegistry allowlist ∧ curator
+  `quote_adapters` opt-in ∧ Open). Standing audit rule: entry points
+  reachable from one must verify a curator-authorized signed instruction
+  and route all value home in-tx (the vault_mm trust model,
+  generalized). Either kill switch stops new sessions instantly.
+- **Per-manager mode**: `init_direct_custody` mints an identity-only BM
+  (fund/defund refuse; custody appraisal trivially zero, test-locked
+  no-double-count); funded custodies unchanged; a curator wanting both
+  styles runs both. No Order-struct change — the BM stays the universal
+  identity/signer/cancel object; the abstraction covers funds only.
+- **Vault×vault day one**: `match_vault_vs_vault` = both legs settled by
+  the vault implementation against two vaults; with ≥2 vault makers a
+  relayer that can't settle their crosses leaves the book crossed.
+  Self-crossing forbidden (same vault both sides is untypeable; vault vs
+  its own funded manager rejected E_SELF_CROSS — rebalance via
+  fund/defund fee-free). Starved escrows abort side-tagged
+  (E_INSUFFICIENT_ESCROW_A/_B) so the relayer prunes exactly the right
+  maker.
+- **Accepted costs**: the obligation state machine is new audited
+  surface (mitigated by wrappers-over-shared-core + four-way parity
+  tests + the collateral.move cross-reference); the vault enters the
+  fill hot path (fills serialize with deposits/fulfillments/appraisals —
+  funded mode remains the pressure valve; vault×vault is the heaviest tx
+  shape, congestion aborts expected and retried).
+
 ## 10. Known follow-ups (explicitly out of this pass)
 
 1. Premium mark-to-market for option positions (needs a vol-attestation

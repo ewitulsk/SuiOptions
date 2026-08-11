@@ -56,3 +56,7 @@ public fun asset_not_allowed(): u64 { 110 }
 public fun attestation_missing(): u64 { 111 }
 /// No pending request at that queue sequence.
 public fun request_missing(): u64 { 112 }
+// Direct vault escrow (SO-372).
+/// The adapter witness is not on this vault's curator-managed
+/// quote-session opt-in list.
+public fun quote_adapter_not_enabled(): u64 { 113 }

@@ -20,7 +20,7 @@ use diesel::r2d2::{ConnectionManager, Pool};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use exchange_types::{Digest, Market, Side, SignedOrder, SuiAddress};
 
-pub use models::{FillRow, NewFill};
+pub use models::{FillRow, NewFill, VaultManagerRow};
 pub use repo::{OrderStatus, Repo, StoredOrder};
 
 pub type DbPool = Pool<ConnectionManager<PgConnection>>;
@@ -256,6 +256,18 @@ impl Db {
     ) -> Result<u64, StoreError> {
         let (reg, maker) = (*registry_id, *maker);
         blocking!(self, |r| r.watermark(&reg, &maker))
+    }
+
+    pub async fn upsert_vault_manager(&self, row: VaultManagerRow) -> Result<(), StoreError> {
+        blocking!(self, |r| r.upsert_vault_manager(&row))
+    }
+
+    pub async fn vault_manager(
+        &self,
+        manager_id: &SuiAddress,
+    ) -> Result<Option<VaultManagerRow>, StoreError> {
+        let id = *manager_id;
+        blocking!(self, |r| r.vault_manager(&id))
     }
 
     pub async fn save_cursor(&self, name: &str, cursor: &str) -> Result<(), StoreError> {

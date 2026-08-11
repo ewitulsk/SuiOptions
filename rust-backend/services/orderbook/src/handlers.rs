@@ -72,6 +72,13 @@ pub async fn markets(State(state): State<Arc<AppState>>) -> ApiResult {
     Ok(Json(json!({
         "serverTimeMs": now_ms(),
         "packageId": state.exchange_package,
+        // SO-372: shared ids takers need to build direct-escrow fill PTBs
+        // (`exchange_adapter::fill_vault_order(_reverse)`); null when the
+        // deployment has no exchange_adapter.
+        "directEscrow": state.direct_escrow.as_ref().map(|d| json!({
+            "adapterPackageId": d.adapter_package,
+            "integrationRegistryId": d.integration_registry_id,
+        })),
         "markets": state.markets,
     })))
 }
@@ -136,12 +143,21 @@ pub async fn order_by_digest(
     if stored.signed.registry_id != m.registry_id {
         return Err(ApiError::not_found("order not in this market"));
     }
+    // SO-372: a DIRECT maker's ticket must be filled through the
+    // exchange-adapter entries; ship the vault binding with the ticket.
+    let vault_maker = state
+        .db
+        .vault_manager(&stored.signed.order.maker_manager_id)
+        .await?
+        .filter(|v| v.direct)
+        .map(|v| json!({ "vaultId": v.vault_id, "custodyId": v.custody_id }));
     Ok(Json(json!({
         "serverTimeMs": now_ms(),
         "digest": digest.to_hex(),
         "status": stored.status,
         "filledTaker": stored.filled_taker.to_string(),
         "order": stored.signed,
+        "vaultMaker": vault_maker,
     })))
 }
 
@@ -178,12 +194,20 @@ pub async fn place_order(
         let ask = state.db.get_order(&intent.ask_digest).await?;
         let bid = state.db.get_order(&intent.bid_digest).await?;
         if let (Some(ask), Some(bid)) = (ask, bid) {
+            let ask_vault =
+                crate::settlement::vault_maker_of(&state.db, &ask.signed.order.maker_manager_id)
+                    .await;
+            let bid_vault =
+                crate::settlement::vault_maker_of(&state.db, &bid.signed.order.maker_manager_id)
+                    .await;
             let job = MatchJob {
                 intent: intent.clone(),
                 ask,
                 bid,
                 base_type: market.base.clone(),
                 quote_type: market.quote.clone(),
+                ask_vault,
+                bid_vault,
             };
             if state.match_tx.send(job).await.is_err() {
                 tracing::error!(alert_id = "tx-failed-match-queue", "settlement queue closed");
@@ -385,22 +409,41 @@ pub async fn routes(
                     leg.digest.to_hex(),
                     serde_json::to_value(&stored.signed).unwrap_or(Value::Null),
                 );
+                // SO-372: a DIRECT maker's leg fills through the
+                // exchange-adapter entry (same orientation rule) with the
+                // vault + custody + registry ids in the command.
+                let vault_maker = state
+                    .db
+                    .vault_manager(&stored.signed.order.maker_manager_id)
+                    .await?
+                    .filter(|v| v.direct);
                 // paying quote into an ask => fill_limit_order; paying base
                 // into a bid => fill_limit_order_reverse
-                let function = if hop_from == &m.quote {
-                    "fill_limit_order"
-                } else {
-                    "fill_limit_order_reverse"
+                let selling_base = hop_from == &m.quote;
+                let mut cmd = match (&vault_maker, selling_base) {
+                    (None, true) => json!({ "command": "fill_limit_order" }),
+                    (None, false) => json!({ "command": "fill_limit_order_reverse" }),
+                    (Some(v), selling_base) => {
+                        let d = state.direct_escrow.as_ref().ok_or_else(|| {
+                            ApiError::internal("direct maker but no exchange_adapter deployment")
+                        })?;
+                        json!({
+                            "command": if selling_base { "fill_vault_order" } else { "fill_vault_order_reverse" },
+                            "vaultId": v.vault_id,
+                            "custodyId": v.custody_id,
+                            "integrationRegistryId": d.integration_registry_id,
+                            "adapterPackageId": d.adapter_package,
+                        })
+                    }
                 };
-                skeleton.push(json!({
-                    "command": function,
-                    "market": market_id.to_hex(),
-                    "typeArgs": [m.base, m.quote],
-                    "digest": leg.digest.to_hex(),
-                    "amountIn": leg.amount_in.to_string(),
-                    // intra-route hops use 0; ONE strict guard at the end
-                    "minMakerAmountOut": "0",
-                }));
+                let obj = cmd.as_object_mut().expect("built as object");
+                obj.insert("market".into(), json!(market_id.to_hex()));
+                obj.insert("typeArgs".into(), json!([m.base, m.quote]));
+                obj.insert("digest".into(), json!(leg.digest.to_hex()));
+                obj.insert("amountIn".into(), json!(leg.amount_in.to_string()));
+                // intra-route hops use 0; ONE strict guard at the end
+                obj.insert("minMakerAmountOut".into(), json!("0"));
+                skeleton.push(cmd);
             }
         }
     }
