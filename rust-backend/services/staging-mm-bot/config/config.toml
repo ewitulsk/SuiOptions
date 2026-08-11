@@ -38,6 +38,9 @@ refresh_secs = 5
 requote_drift_bps = 5
 # Fraction of mirrored escrow the ladder may commit per token.
 escrow_utilization = 0.8
+# Cadence of the batched on-chain cancel_up_to sweep (one PTB, all markets).
+# Replaced orders expire after ttl_secs anyway; this is the slow belt.
+watermark_interval_secs = 3_600
 
 # Ladder levels, inner first: half-spread from mid in bps, size in lots
 # (1 lot = one whole base token).
