@@ -203,19 +203,44 @@ async fn ensure_spot_pool(
         );
         return Ok(None);
     }
-    let id = create_pool(
-        &wrap.client,
-        &wrap.signer,
-        &p.handles,
-        &p.deep_coin_type,
-        p.pool_creation_fee,
-        &base.coin_type,
-        &quote.coin_type,
-        base.decimals,
-        quote.decimals,
-        p.cfg.gas_budget,
-    )
-    .await?;
+    // Bounded retry, same shape as the BM-creation loop above: the wallet
+    // is shared by every deployer-keyed service, so a submit can lose a
+    // gas-coin race ("object … unavailable for consumption") transiently —
+    // and with `spot_interval_secs` this slow, an unretried loss costs a
+    // whole pass interval of missing pool.
+    let mut id = None;
+    for attempt in 1..=8u32 {
+        match create_pool(
+            &wrap.client,
+            &wrap.signer,
+            &p.handles,
+            &p.deep_coin_type,
+            p.pool_creation_fee,
+            &base.coin_type,
+            &quote.coin_type,
+            base.decimals,
+            quote.decimals,
+            p.cfg.gas_budget,
+        )
+        .await
+        {
+            Ok(created) => {
+                id = Some(created);
+                break;
+            }
+            Err(e) => {
+                warn!(
+                    attempt,
+                    base = %base.symbol,
+                    quote = %quote.symbol,
+                    error = %format!("{e:#}"),
+                    "[sim] spot pool creation failed; retrying"
+                );
+                tokio::time::sleep(Duration::from_secs(15)).await;
+            }
+        }
+    }
+    let id = id.ok_or_else(|| anyhow!("spot pool creation kept failing for {}", base.symbol))?;
     info!(
         pool = %id,
         base = %base.symbol,
