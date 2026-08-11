@@ -27,6 +27,11 @@ public struct HaircutsSet has copy, drop {
     exit_haircut_bps: u64,
 }
 
+/// Quote-session opt-in changes (SO-372).
+public struct QuoteAdapterAdded has copy, drop { vault_id: ID, adapter: TypeName }
+
+public struct QuoteAdapterRemoved has copy, drop { vault_id: ID, adapter: TypeName }
+
 public struct VaultClosing has copy, drop { vault_id: ID }
 
 public struct VaultClosed has copy, drop { vault_id: ID }
@@ -275,6 +280,14 @@ public(package) fun emit_haircuts_set(vault_id: ID, entry_haircut_bps: u64, exit
 
 public(package) fun emit_payout_asset_amended(vault_id: ID, seq: u64, payout_asset: TypeName) {
     event::emit(PayoutAssetAmended { vault_id, seq, payout_asset });
+}
+
+public(package) fun emit_quote_adapter_added(vault_id: ID, adapter: TypeName) {
+    event::emit(QuoteAdapterAdded { vault_id, adapter });
+}
+
+public(package) fun emit_quote_adapter_removed(vault_id: ID, adapter: TypeName) {
+    event::emit(QuoteAdapterRemoved { vault_id, adapter });
 }
 
 public(package) fun emit_vault_closing(vault_id: ID) {
