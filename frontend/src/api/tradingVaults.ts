@@ -111,7 +111,9 @@ export type TradingVaultDetail = TradingVault & {
  * snake_case (unlike pps-history/stake, which are camelCase). */
 type TradingVaultWire = {
   vault_id: string;
-  deposit_coin_type: string;
+  /** SO-370 rename; api-services predating it send `deposit_coin_type`. */
+  accounting_coin_type?: string;
+  deposit_coin_type?: string;
   creator: string;
   curator: string;
   curator_cap_id: string;
@@ -157,10 +159,13 @@ type TradingVaultPositionWire = {
 };
 
 function mapVault(w: TradingVaultWire): TradingVault {
+  const accountingAsset = w.accounting_coin_type ?? w.deposit_coin_type;
+  if (!accountingAsset) {
+    throw new Error(`vault ${w.vault_id} has no accounting coin type in the API response`);
+  }
   return {
     vaultId: w.vault_id,
-    // Wire name predates the SO-370 accounting-asset rename.
-    accountingAsset: w.deposit_coin_type,
+    accountingAsset,
     creator: w.creator,
     curator: w.curator,
     curatorCapId: w.curator_cap_id,
@@ -353,16 +358,18 @@ export function tokenForCoinType(coinType: string | null | undefined): Supported
  * shares are 1e6× the accounting raw units — so display = raw × 1e6. */
 export function tradingVaultPps(v: TradingVault): number | null {
   if (v.latestPpsE12Raw == null) return null;
-  return (Number(v.latestPpsE12Raw) * SHARE_OFFSET) / PPS_E12;
+  // pps_raw = nav × 1e12 × offset / shares, and a display share carries the
+  // same offset (shares_raw / (10^dec × offset)), so the offsets cancel:
+  // pps_raw / 1e12 IS the accounting-asset price of one display share.
+  return Number(v.latestPpsE12Raw) / PPS_E12;
 }
 
 /**
  * TVL estimate in display units of the accounting asset:
- * totalShares × raw pps / 10^decimals (the SHARE_OFFSET in the displayed
- * pps cancels against the offset carried by raw shares).
+ * display shares (offset divided back out) × display pps.
  */
 export function tradingVaultTvl(v: TradingVault, decimals: number | null): number | null {
   const pps = tradingVaultPps(v);
   if (pps == null || decimals == null) return null;
-  return (Number(v.totalSharesRaw) * pps) / (SHARE_OFFSET * 10 ** decimals);
+  return (Number(v.totalSharesRaw) / (SHARE_OFFSET * 10 ** decimals)) * pps;
 }
