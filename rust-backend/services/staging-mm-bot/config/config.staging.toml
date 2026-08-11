@@ -12,6 +12,8 @@ max_fee_bps = 50
 enabled = true
 check_interval_secs = 60
 
+# Vault-direct mode (below): these are VAULT free-balance floats, topped
+# up by faucet mint + attested deposit (SO-375).
 [funding.targets]
 TUSDC = 1_000_000_000_000 # $1M at 6 decimals
 TBTC = 1_000_000_000      # 10 TBTC at 8 decimals

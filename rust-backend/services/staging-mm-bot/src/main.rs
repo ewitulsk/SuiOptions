@@ -22,8 +22,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
+use move_core_types::identifier::Identifier;
 use serde::Deserialize;
 use sui_types::base_types::ObjectID;
+use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 
 use exchange_types::{canonicalize_move_type, Digest, Market, SuiAddress as ExAddress};
 use pyth_client::{compute_spot_from_cache, PriceCache, PriceFeedId, Staleness};
@@ -249,6 +251,26 @@ struct DirectCtx {
     trading_vault_pkg: ObjectID,
     api_url: Option<String>,
     buffer_bps: u64,
+    /// Funding refs (SO-375); `None` when `[funding]` is disabled or has
+    /// no targets.
+    funding: Option<DirectFundingRefs>,
+}
+
+/// Everything the vault-direct funding pass needs to compose an
+/// attestation-bearing deposit (SO-375), resolved once at boot from
+/// token-info's `tradingVaultObjects` block.
+struct DirectFundingRefs {
+    protocol_config_id: ObjectID,
+    oracle_registry_id: ObjectID,
+    deepbook_adapter_pkg: Option<ObjectID>,
+    options_adapter_pkg: Option<ObjectID>,
+    exchange_adapter_pkg: Option<ObjectID>,
+    equity_oracle_pkg: Option<ObjectID>,
+    equity_book_id: Option<ObjectID>,
+    vol_book_id: Option<ObjectID>,
+    /// oracle-service REST client for `/oracle/descriptor` + `/oracle/legs`
+    /// (the WS price cache is separate and unaffected).
+    oracle: oracle_client::OracleClient,
 }
 
 /// Shared handles across tasks.
@@ -361,11 +383,57 @@ async fn main() -> Result<()> {
                 "vault-direct mode: identity BM adopted; fills escrow against vault free \
                  balances (bot key must be a curator-delegated signer)"
             );
+            // Funding refs (SO-375): the bot LPs into the vault with real
+            // attested deposits, so it needs the appraisal-composer ids.
+            let funding = if cfg.funding.enabled && !cfg.funding.targets.is_empty() {
+                let tvo = snapshot.trading_vault_objects().ok_or_else(|| {
+                    anyhow!(
+                        "[funding] enabled in vault-direct mode but token-info has no \
+                         tradingVaultObjects block"
+                    )
+                })?;
+                Some(DirectFundingRefs {
+                    protocol_config_id: tvo.vault_protocol_config()?,
+                    oracle_registry_id: tvo.oracle_registry()?,
+                    deepbook_adapter_pkg: snapshot
+                        .deepbook_adapter()
+                        .map(|p| p.package())
+                        .transpose()?,
+                    options_adapter_pkg: snapshot
+                        .options_adapter()
+                        .map(|p| p.package())
+                        .transpose()?,
+                    exchange_adapter_pkg: snapshot
+                        .exchange_adapter()
+                        .map(|p| p.package())
+                        .transpose()?,
+                    equity_oracle_pkg: snapshot
+                        .equity_oracle()
+                        .map(|p| p.package())
+                        .transpose()?,
+                    equity_book_id: tvo
+                        .equity_book_id
+                        .as_deref()
+                        .map(ObjectID::from_str)
+                        .transpose()
+                        .context("parsing equityBookId")?,
+                    vol_book_id: tvo
+                        .vol_book_id
+                        .as_deref()
+                        .map(ObjectID::from_str)
+                        .transpose()
+                        .context("parsing volBookId")?,
+                    oracle,
+                })
+            } else {
+                None
+            };
             let direct = DirectCtx {
                 vault,
                 trading_vault_pkg,
                 api_url: vd.api_url.clone(),
                 buffer_bps: vd.buffer_bps,
+                funding,
             };
             (manager_oid, maker, Some(direct))
         }
@@ -403,9 +471,26 @@ async fn main() -> Result<()> {
 
     // Seed escrow before quoting so the first ladder doesn't bounce off
     // INSUFFICIENT_ESCROW, then keep it topped up in the background.
-    // Vault-direct mode never funds: the escrow is the vault's capital.
-    if shared.direct.is_some() {
-        tracing::info!("vault-direct mode: funding pass disabled");
+    // Vault-direct mode (SO-375) funds by DEPOSITING into the vault —
+    // faucet mint + attested `vault::deposit`, shares to this wallet, pps
+    // untouched — the infinite-money LP, never a NAV donation.
+    if let Some(d) = &shared.direct {
+        if d.funding.is_some() {
+            direct_funding_pass(&shared, &snapshot).await;
+            let s = Arc::clone(&shared);
+            let snap = snapshot.clone();
+            tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(Duration::from_secs(s.cfg.funding.check_interval_secs));
+                tick.tick().await; // immediate first tick already ran above
+                loop {
+                    tick.tick().await;
+                    direct_funding_pass(&s, &snap).await;
+                }
+            });
+        } else {
+            tracing::info!("vault-direct mode: funding disabled by config");
+        }
     } else if shared.cfg.funding.enabled {
         funding_pass(&shared, &snapshot).await;
         let s = Arc::clone(&shared);
@@ -707,6 +792,200 @@ async fn funding_pass(s: &Shared, snapshot: &token_info_client::Snapshot) {
             }
         }
     }
+}
+
+/// Vault-direct funding sweep (SO-375): the bot is an LP with an infinite
+/// pocket. For every configured target whose vault free balance fell below
+/// half, faucet-mint the shortfall and DEPOSIT it — a real share-minting
+/// `vault::deposit` valued by a fresh price attestation, so pps stays
+/// honest (never a balance donation). Shares accrue to this wallet and
+/// are never withdrawn. Failures alert but never kill the loop.
+async fn direct_funding_pass(s: &Shared, snapshot: &token_info_client::Snapshot) {
+    let Some(d) = &s.direct else { return };
+    let Some(f) = &d.funding else { return };
+    let tokens = match snapshot.test_tokens() {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "funding: no test tokens in catalog");
+            return;
+        }
+    };
+
+    // Cheap balance reads first; the oracle round-trips only run when
+    // something actually needs topping up.
+    let mut shortfalls: Vec<(String, &token_info_client::TokenInfo, String, u64)> = Vec::new();
+    for (ticker, target) in &s.cfg.funding.targets {
+        let token = match tokens.get(ticker) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(ticker, error = %format!("{e:#}"), "funding: unknown ticker");
+                continue;
+            }
+        };
+        let canonical = match canonicalize_move_type(&token.coin_type) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(ticker, error = %e, "funding: bad coin type");
+                continue;
+            }
+        };
+        let free = match sui_tx::tx::trading_vault::dev_inspect_free_balance(
+            &s.wrap.client,
+            s.wrap.signer.address,
+            d.trading_vault_pkg,
+            d.vault,
+            &canonical,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(ticker, error = %format!("{e:#}"), "funding: free-balance read failed");
+                continue;
+            }
+        };
+        metrics::gauge!("staging_mm_bot_escrow_raw", "ticker" => ticker.clone())
+            .set(free as f64);
+        if free >= target / 2 {
+            continue;
+        }
+        shortfalls.push((ticker.clone(), token, canonical, target - free));
+    }
+    if shortfalls.is_empty() {
+        return;
+    }
+
+    let descriptor = match f.oracle.descriptor().await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "funding: /oracle/descriptor unreachable");
+            return;
+        }
+    };
+    if descriptor.provider != protocol_types::OracleProvider::Switchboard {
+        tracing::error!(
+            provider = %descriptor.provider,
+            "funding: live oracle provider is not Switchboard — vault-direct funding \
+             deposits are Switchboard-only; skipping this pass"
+        );
+        return;
+    }
+
+    for (ticker, token, canonical, amount) in shortfalls {
+        // Holdings per deposit, not per pass: each landed deposit changes
+        // the free-balance set, and the next appraisal must cover it.
+        let holdings =
+            match sui_tx::tx::appraisal::discover_holdings(&s.wrap.client, d.vault).await {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "funding: holdings discovery failed");
+                    return;
+                }
+            };
+        match direct_deposit(s, d, f, &holdings, &descriptor, token, &canonical, amount).await {
+            Ok(_) => {
+                tracing::info!(ticker, amount, "funding: minted and deposited into vault");
+                metrics::counter!("staging_mm_bot_mints_total", "ticker" => ticker.clone())
+                    .increment(1);
+            }
+            Err(e) => {
+                tracing::error!(
+                    alert_id = "tx-failed-staging-mm-bot",
+                    ticker,
+                    amount,
+                    error = %format!("{e:#}"),
+                    "funding: vault deposit failed"
+                );
+            }
+        }
+    }
+}
+
+/// One attested vault deposit (SO-375): compose the full appraisal (all
+/// held assets get legs; the deposited asset rides as `extra_attest` when
+/// it isn't the accounting asset), faucet-mint the shortfall, and
+/// `vault::deposit<T>` it — all in one PTB.
+#[allow(clippy::too_many_arguments)]
+async fn direct_deposit(
+    s: &Shared,
+    d: &DirectCtx,
+    f: &DirectFundingRefs,
+    holdings: &sui_tx::tx::appraisal::VaultHoldings,
+    descriptor: &oracle_client::OracleDescriptor,
+    token: &token_info_client::TokenInfo,
+    canonical: &str,
+    amount: u64,
+) -> Result<()> {
+    let refs = sui_tx::tx::appraisal::AppraisalRefs {
+        trading_vault_pkg: d.trading_vault_pkg,
+        deepbook_adapter_pkg: f.deepbook_adapter_pkg,
+        options_adapter_pkg: f.options_adapter_pkg,
+        exchange_adapter_pkg: f.exchange_adapter_pkg,
+        vault_id: d.vault,
+        protocol_config_id: f.protocol_config_id,
+        oracle_registry_id: f.oracle_registry_id,
+        equity_oracle_pkg: f.equity_oracle_pkg,
+        equity_book_id: f.equity_book_id,
+        vol_book_id: f.vol_book_id,
+    };
+    let accounting = holdings.deposit_type.as_str();
+    let is_accounting = canonical == accounting;
+    let extras: Vec<String> =
+        if is_accounting { Vec::new() } else { vec![canonical.to_string()] };
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let (appraisal, attestations) = sui_tx::tx::appraisal::compose_switchboard_appraisal(
+        &s.wrap.client,
+        &mut pt,
+        &refs,
+        holdings,
+        &std::collections::BTreeMap::new(),
+        descriptor,
+        &f.oracle,
+        &extras,
+    )
+    .await
+    .context("composing appraisal")?;
+
+    // Faucet mint → Coin<T>, deposited in the same PTB.
+    let (tokens_pkg, module) = token.module_path()?;
+    let faucet = pt.obj(sui_tx::tx::shared_object_arg(&s.wrap.client, token.faucet()?, true).await?)?;
+    let amount_arg = pt.pure(amount)?;
+    let coin = pt.programmable_move_call(
+        tokens_pkg,
+        Identifier::new(&*module).map_err(|e| anyhow!("module name {module}: {e}"))?,
+        Identifier::new("mint").unwrap(),
+        vec![],
+        vec![faucet, amount_arg],
+    );
+
+    let tv_refs = sui_tx::tx::trading_vault::TradingVaultRefs {
+        package: d.trading_vault_pkg,
+        vault_id: d.vault,
+        protocol_config_id: f.protocol_config_id,
+        deposit_type: accounting,
+    };
+    if is_accounting {
+        sui_tx::tx::trading_vault::build_deposit(&s.wrap.client, &mut pt, &tv_refs, appraisal, coin)
+            .await?;
+    } else {
+        let att = *attestations.get(canonical).ok_or_else(|| {
+            anyhow!("no attestation composed for {canonical} — descriptor feed missing?")
+        })?;
+        sui_tx::tx::trading_vault::build_deposit_asset(
+            &s.wrap.client,
+            &mut pt,
+            &tv_refs,
+            canonical,
+            appraisal,
+            coin,
+            att,
+        )
+        .await?;
+    }
+    sui_tx::tx::submit_ptb(&s.wrap.client, &s.wrap.signer, pt, s.gas_budget, "vault deposit")
+        .await?;
+    Ok(())
 }
 
 // -- Quoting -------------------------------------------------------------

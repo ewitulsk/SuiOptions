@@ -941,9 +941,167 @@ pub async fn compose_appraisal(
     Ok((appraisal, attestations))
 }
 
+/// Compose the appraisal with Switchboard price legs resolved live from
+/// oracle-service (SO-346): coverage from the caller's `/oracle/descriptor`,
+/// signed quote payload from `/oracle/legs`. One shared body for the
+/// keeper's fulfillment/mark cranks, the smoke's legs, and staging-mm-bot's
+/// vault-direct funding deposits — the leg-building must never drift
+/// between them.
+///
+/// Same none-leg posture as the Pyth path: assets without a descriptor
+/// feed get `option::none` legs and the on-chain checks decide (only a
+/// nonzero unpriced component aborts). `extra_attest` assets hard-error
+/// inside `compose_appraisal` when unpriceable, exactly as documented
+/// there. The descriptor is caller-supplied (the keeper TTL-caches it);
+/// callers must have checked `descriptor.provider == Switchboard`.
+pub async fn compose_switchboard_appraisal(
+    client: &ChainClient,
+    pt: &mut ProgrammableTransactionBuilder,
+    refs: &AppraisalRefs,
+    holdings: &VaultHoldings,
+    option_buckets: &BTreeMap<String, OptionBucketInfo>,
+    descriptor: &oracle_client::OracleDescriptor,
+    oracle: &oracle_client::OracleClient,
+    extra_attest: &[String],
+) -> Result<(Argument, BTreeMap<String, Argument>)> {
+    // Cash-only and nothing extra to attest: no price legs at all (the
+    // keeper and smoke also short-circuit this before provider dispatch).
+    if price_assets_needed(holdings, option_buckets).is_empty() && extra_attest.is_empty() {
+        return compose_appraisal(client, pt, refs, holdings, None, option_buckets, &[]).await;
+    }
+    let adapter = descriptor.adapter.as_ref().ok_or_else(|| {
+        anyhow!(
+            "live provider {} has no adapter deployed on this network — cannot build price legs",
+            descriptor.provider
+        )
+    })?;
+    let adapter_pkg = ObjectID::from_hex_literal(&adapter.adapter_package_id)
+        .context("parsing descriptor adapter package id")?;
+    let feed_registry_id = ObjectID::from_hex_literal(&adapter.feed_registry_id)
+        .context("parsing descriptor feed registry id")?;
+
+    // The deposit asset's feed must ride along: `attest<Asset, Dep>`
+    // crosses each asset against it inside one `Quotes` bundle.
+    let mut all_types: Vec<String> =
+        price_assets_needed(holdings, option_buckets).into_iter().collect();
+    all_types.extend(extra_attest.iter().map(|t| canon(t)));
+    all_types.push(holdings.deposit_type.clone());
+    let mut request: Vec<String> = Vec::new();
+    let mut feed_hashes: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for t in &all_types {
+        if feed_hashes.contains_key(t) {
+            continue;
+        }
+        let Some(hash) = descriptor.feeds.get(t) else {
+            tracing::debug!(vault = %refs.vault_id, asset = %t, "no switchboard feed; passing none leg");
+            continue;
+        };
+        let bytes = hex::decode(hash.trim().trim_start_matches("0x"))
+            .with_context(|| format!("descriptor feed hash for {t} is not hex"))?;
+        if bytes.len() != 32 {
+            bail!("descriptor feed hash for {t} is {} bytes; expected 32", bytes.len());
+        }
+        feed_hashes.insert(t.clone(), bytes);
+        request.push(t.clone());
+    }
+    if request.is_empty() {
+        bail!(
+            "no switchboard feed hash for any priced asset (deposit {})",
+            holdings.deposit_type
+        );
+    }
+    let legs = oracle.legs(&request).await.context("fetching /oracle/legs")?;
+    let oracle_client::OracleLegsResponse::Switchboard(sw) = legs else {
+        bail!(
+            "/oracle/legs answered for a different provider than the descriptor — \
+             provider flipped mid-compose; retry"
+        );
+    };
+    let payload = switchboard_payload(&sw)?;
+    let switchboard_pkg = ObjectID::from_hex_literal(&sw.switchboard_package_id)
+        .context("parsing on_demand package id")?;
+    compose_appraisal(
+        client,
+        pt,
+        refs,
+        holdings,
+        Some(crate::tx::oracle::OracleLegs::Switchboard(crate::tx::oracle::SwitchboardLegs {
+            adapter_pkg,
+            feed_registry_id,
+            switchboard_pkg,
+            payload: &payload,
+            feed_hashes: &feed_hashes,
+        })),
+        option_buckets,
+        extra_attest,
+    )
+    .await
+}
+
+/// `/oracle/legs` wire → the submit shape `run_N` takes. Object ids
+/// parse here (the wire is string-typed for JS safety); arity/shape
+/// checks stay in `SwitchboardQuotePayload::validate` at PTB build time.
+fn switchboard_payload(
+    sw: &oracle_client::SwitchboardLegsPayload,
+) -> Result<crate::tx::oracle::SwitchboardQuotePayload> {
+    let q = &sw.quote;
+    Ok(crate::tx::oracle::SwitchboardQuotePayload {
+        feed_ids: q.feed_id_bytes()?,
+        values: q.values_u128()?,
+        values_neg: q.values_neg.clone(),
+        min_oracle_samples: q.min_oracle_samples.clone(),
+        signatures: q.signature_bytes()?,
+        slot: q.slot,
+        timestamp_seconds: q.timestamp_seconds,
+        oracle_ids: q
+            .oracle_ids
+            .iter()
+            .map(|o| {
+                ObjectID::from_hex_literal(o)
+                    .with_context(|| format!("parsing oracle object id {o:?}"))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        queue_id: ObjectID::from_hex_literal(&sw.queue_id).context("parsing queue object id")?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn switchboard_payload_assembles_the_submit_shape() {
+        use base64::Engine as _;
+        let sw = oracle_client::SwitchboardLegsPayload {
+            switchboard_package_id: "0xea".into(),
+            queue_id: "0xe645d8979dac2fb901fb7c7b0ef3c9fad5dfaaf7ae2b0ce38a0b5ec63b819a99"
+                .into(),
+            feed_hashes: [("0x1::a::A".to_string(), "ab".repeat(32))].into(),
+            quote: oracle_client::SwitchboardQuoteWire {
+                feed_ids: vec!["ab".repeat(32)],
+                values: vec!["63456010000000000000000".into()],
+                values_neg: vec![false],
+                min_oracle_samples: vec![1],
+                signatures_b64: vec![
+                    base64::engine::general_purpose::STANDARD.encode([7u8; 64]),
+                ],
+                slot: 42,
+                timestamp_seconds: 1_785_700_471,
+                oracle_ids: vec!["0x11".into()],
+            },
+        };
+        let p = switchboard_payload(&sw).unwrap();
+        p.validate().unwrap();
+        assert_eq!(p.run_function().unwrap(), "run_1");
+        assert_eq!(p.feed_ids, vec![vec![0xab; 32]]);
+        assert_eq!(p.values, vec![63_456_010_000_000_000_000_000u128]);
+        assert_eq!(p.oracle_ids, vec![ObjectID::from_hex_literal("0x11").unwrap()]);
+
+        // A bad object id is a composition error, not a chain abort.
+        let mut bad = sw.clone();
+        bad.quote.oracle_ids = vec!["not-an-id".into()];
+        assert!(switchboard_payload(&bad).is_err());
+    }
 
     #[test]
     fn type_name_reads_both_renderings() {

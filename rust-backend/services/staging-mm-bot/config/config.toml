@@ -21,9 +21,11 @@ max_fee_bps = 50
 enabled = true
 check_interval_secs = 60
 
-# Escrow float targets in RAW units per ticker. Mirrored escrow below half
-# the target triggers a top-up back to target. Tokens not listed are never
-# minted.
+# Escrow float targets in RAW units per ticker. A balance below half the
+# target triggers a top-up back to target. Tokens not listed are never
+# minted. Funded-BM mode tops up the mirrored escrow; vault-direct mode
+# (SO-375) tops up the VAULT's free balance with a real attested
+# `vault::deposit` (shares to this wallet, pps untouched).
 [funding.targets]
 TUSDC = 1_000_000_000_000 # $1M at 6 decimals
 TBTC = 1_000_000_000      # 10 TBTC at 8 decimals
@@ -67,9 +69,13 @@ max_conf_bps = 0
 # against its direct-custody identity BalanceManager. The curator must have
 # run exchange_adapter::init_direct_custody, vault::add_quote_adapter, and
 # add_signer(this bot's wallet) first — the bot never creates, funds, or
-# deposits into the BM in this mode, and the [funding] section is ignored.
+# deposits into the BM in this mode.
 # Quote sizing = the vault's live free balance per token, minus buffer_bps,
 # minus outstanding withdrawal-queue obligations when api_url is set.
+# [funding] applies here too (SO-375): targets are vault free-balance
+# floats, topped up by faucet-minting + depositing into the vault as a
+# regular LP (each non-accounting token must be on the vault's
+# deposit-asset allowlist — the direct-escrow ceremony does this).
 #
 # [vault_direct]
 # manager_id = "0x..."   # the vault's identity BM (from CustodyCreated)

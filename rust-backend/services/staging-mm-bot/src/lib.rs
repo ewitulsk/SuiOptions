@@ -1,10 +1,12 @@
 //! Library surface for the `staging-mm-bot` binary.
 //!
 //! A staging-only maker bot for the hybrid exchange: mints test tokens from
-//! the permissionless faucet into its own `BalanceManager` escrow and quotes
-//! tick-snapped bid/ask ladders around the oracle-service mid on every
-//! `{SYM}/TUSDC` market the orderbook serves. Pure decisions live in
-//! [`ladder`]; the async loops live in `main.rs`.
+//! the permissionless faucet and quotes tick-snapped bid/ask ladders around
+//! the oracle-service mid on every `{SYM}/TUSDC` market the orderbook
+//! serves. Funded-BM mode escrows the mints in its own `BalanceManager`;
+//! vault-direct mode (SO-372/SO-375) quotes a trading vault's free balances
+//! and tops them up with real attested `vault::deposit`s instead. Pure
+//! decisions live in [`ladder`]; the async loops live in `main.rs`.
 
 use std::path::PathBuf;
 
