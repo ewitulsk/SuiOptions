@@ -32,6 +32,9 @@ pub struct AppraisalRefs {
     pub trading_vault_pkg: ObjectID,
     pub deepbook_adapter_pkg: Option<ObjectID>,
     pub options_adapter_pkg: Option<ObjectID>,
+    /// exchange-adapter package (SO-373), for ExchangeCustody legs.
+    /// `None` where the package isn't deployed.
+    pub exchange_adapter_pkg: Option<ObjectID>,
     pub vault_id: ObjectID,
     pub protocol_config_id: ObjectID,
     pub oracle_registry_id: ObjectID,
@@ -53,6 +56,14 @@ pub enum PositionInfo {
         assets: Vec<String>,
         /// (pool id, base type, quote type)
         pools: Vec<(ObjectID, String, String)>,
+    },
+    /// Exchange-adapter custody (SO-370): authority over a SHARED
+    /// BalanceManager, valued from the manager's live balances. A direct
+    /// custody (SO-372) tracks no assets and values to zero.
+    ExchangeCustody {
+        id: ObjectID,
+        bm_id: ObjectID,
+        assets: Vec<String>,
     },
     RfqTicket {
         id: ObjectID,
@@ -122,6 +133,9 @@ impl VaultHoldings {
                         out.insert(base.clone());
                         out.insert(quote.clone());
                     }
+                }
+                PositionInfo::ExchangeCustody { assets, .. } => {
+                    out.extend(assets.iter().cloned());
                 }
                 PositionInfo::RfqTicket { escrow_type, .. } => {
                     out.insert(escrow_type.clone());
@@ -387,6 +401,16 @@ pub async fn discover_holdings(
                 pools.push((pool_id, base, quote));
             }
             positions.push(PositionInfo::DeepBookCustody { id: pos_id, assets, pools });
+        } else if ty.ends_with("::exchange_adapter::ExchangeCustody") {
+            let fields = object_fields(client, pos_id).await?;
+            let assets = type_name_set(move_field(&fields, "assets")?)?
+                .into_iter()
+                .collect();
+            let bm_id = move_field(&fields, "bm_id")?
+                .as_str()
+                .and_then(|s| ObjectID::from_hex_literal(s).ok())
+                .ok_or_else(|| anyhow!("exchange custody missing bm_id"))?;
+            positions.push(PositionInfo::ExchangeCustody { id: pos_id, bm_id, assets });
         } else if ty.ends_with("::options_adapter::RfqTicket") {
             let fields = object_fields(client, pos_id).await?;
             let escrow_json = move_field(&fields, "escrow_type")?.clone();
@@ -787,6 +811,39 @@ pub async fn compose_appraisal(
                 pt.programmable_move_call(
                     dba,
                     Identifier::new("deepbook_adapter").unwrap(),
+                    Identifier::new("finalize_custody_appraisal").unwrap(),
+                    vec![],
+                    vec![vault_ro, appraisal, ca],
+                );
+            }
+            PositionInfo::ExchangeCustody { id, bm_id, assets } => {
+                let xa = refs
+                    .exchange_adapter_pkg
+                    .ok_or_else(|| anyhow!("exchange adapter package unavailable"))?;
+                let custody_id = pt.pure(id)?;
+                let ca = pt.programmable_move_call(
+                    xa,
+                    Identifier::new("exchange_adapter").unwrap(),
+                    Identifier::new("begin_custody_appraisal").unwrap(),
+                    vec![],
+                    vec![vault_ro, custody_id],
+                );
+                if !assets.is_empty() {
+                    let bm = pt.obj(shared_object_arg(client, *bm_id, false).await?)?;
+                    for asset in assets {
+                        let opt = opt_for(pt, &attestations, asset, &holdings.deposit_type);
+                        pt.programmable_move_call(
+                            xa,
+                            Identifier::new("exchange_adapter").unwrap(),
+                            Identifier::new("value_asset").unwrap(),
+                            vec![TypeTag::from_str(asset)?],
+                            vec![vault_ro, cfg, ca, bm, opt, clock],
+                        );
+                    }
+                }
+                pt.programmable_move_call(
+                    xa,
+                    Identifier::new("exchange_adapter").unwrap(),
                     Identifier::new("finalize_custody_appraisal").unwrap(),
                     vec![],
                     vec![vault_ro, appraisal, ca],

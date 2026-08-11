@@ -23,6 +23,7 @@ import {
 import {
   useAllowlistedPools,
   useAppraisalPlan,
+  useExchangeBm,
   useTradingVault,
   useTradingVaultOnchain,
   useTradingVaultPpsHistory,
@@ -37,6 +38,7 @@ import { useCoinBalance } from "../api/useCoinBalance";
 import { usePythPrices } from "../api/usePythPrice";
 import {
   DEEPBOOK_ADAPTER_PACKAGE_ID,
+  EXCHANGE_ADAPTER_PACKAGE_ID,
   SUPPORTED_TOKENS,
   TRADING_VAULT_PACKAGE_ID,
 } from "../config";
@@ -323,7 +325,7 @@ function CuratorPanel({
   const actions = useTradingVaultActions();
   const cfgQ = useVaultProtocolConfigId();
   const planQ = useAppraisalPlan(vault);
-  const [tab, setTab] = useState<"external" | "spot" | "assets">("external");
+  const [tab, setTab] = useState<"external" | "spot" | "exchange" | "assets">("external");
 
   return (
     <div className="vault-card">
@@ -340,6 +342,12 @@ function CuratorPanel({
           onClick={() => setTab("spot")}
         >
           Spot
+        </button>
+        <button
+          className={"vault-invest__tab" + (tab === "exchange" ? " is-active" : "")}
+          onClick={() => setTab("exchange")}
+        >
+          Exchange
         </button>
         <button
           className={"vault-invest__tab" + (tab === "assets" ? " is-active" : "")}
@@ -360,6 +368,8 @@ function CuratorPanel({
         />
       ) : tab === "spot" ? (
         <SpotPanel vault={vault} actions={actions} />
+      ) : tab === "exchange" ? (
+        <ExchangePanel vault={vault} actions={actions} />
       ) : (
         <AssetsPanel vault={vault} actions={actions} cfgId={cfgQ.data ?? null} />
       )}
@@ -527,6 +537,286 @@ function SpotPanel({
       </button>
       {title && <div className="vault-card__foot vault-prose__muted">{title}</div>}
     </>
+  );
+}
+
+/**
+ * SO-373 exchange custody: swap vault capital in/out of the hybrid
+ * exchange. Creates the vault's cap-owned BalanceManager, funds/defunds it
+ * from vault free balances, and delegates order-signing hot keys. A direct
+ * custody (SO-372) escrows against vault free balances instead — no
+ * funding, signer management only.
+ */
+function ExchangePanel({
+  vault,
+  actions,
+}: {
+  vault: TradingVaultDetailDto;
+  actions: ReturnType<typeof useTradingVaultActions>;
+}) {
+  const holdingsQ = useVaultHoldings(vault);
+
+  if (!EXCHANGE_ADAPTER_PACKAGE_ID) {
+    return (
+      <div className="vault-card__body vault-prose__muted">
+        The exchange-adapter package is not deployed on this network.
+      </div>
+    );
+  }
+  const activeCount = vault.positions.filter((p) => p.active).length;
+  if (activeCount > 0 && !holdingsQ.data) {
+    return (
+      <div className="vault-card__body vault-prose__muted">
+        {holdingsQ.isError
+          ? "Couldn't read the vault's custodied positions just now — retrying."
+          : "Reading custodied positions…"}
+      </div>
+    );
+  }
+
+  const custodies = [...(holdingsQ.data?.entries() ?? [])].flatMap(([id, h]) =>
+    h.kind === "exchangeCustody" ? [{ custodyId: id, ...h }] : [],
+  );
+  const hasFunded = custodies.some((c) => !c.direct);
+
+  return (
+    <>
+      {custodies.map((c) => (
+        <ExchangeCustodyCard key={c.custodyId} vault={vault} custody={c} actions={actions} />
+      ))}
+      {!hasFunded && (
+        <>
+          <div className="vault-invest__bal">
+            {custodies.length === 0
+              ? "No exchange custody yet — create one to market-make on the hybrid exchange with vault capital."
+              : "Only a direct custody exists — a funded custody warehouses working capital in the manager."}
+          </div>
+          <button
+            className="vault-invest__cta"
+            disabled={!!actions.busy}
+            onClick={() =>
+              actions.initExchangeCustody({
+                vaultId: vault.vaultId,
+                curatorCapId: vault.curatorCapId,
+              })
+            }
+          >
+            {actions.busy ? `${actions.busy}…` : "Create exchange custody"}
+          </button>
+        </>
+      )}
+    </>
+  );
+}
+
+function ExchangeCustodyCard({
+  vault,
+  custody,
+  actions,
+}: {
+  vault: TradingVaultDetailDto;
+  custody: { custodyId: string; bmId: string; assets: string[]; direct: boolean };
+  actions: ReturnType<typeof useTradingVaultActions>;
+}) {
+  const bmQ = useExchangeBm(custody.bmId, custody.assets);
+  const [fundType, setFundType] = useState("");
+  const [fundAmount, setFundAmount] = useState("");
+  const [defundType, setDefundType] = useState("");
+  const [defundAmount, setDefundAmount] = useState("");
+  const [signer, setSigner] = useState("");
+
+  const ids = {
+    vaultId: vault.vaultId,
+    curatorCapId: vault.curatorCapId,
+    custodyId: custody.custodyId,
+    bmId: custody.bmId,
+  };
+  // Fund draws on vault free balances; defund returns manager holdings.
+  const fundable = vault.balances.filter((b) => b.decimals !== null && b.amountRaw !== "0");
+  const fund = fundable.find((b) => b.coinType === fundType) ?? fundable[0] ?? null;
+  const defundableTypes = custody.assets.filter((t) => tokenForCoinType(t) != null);
+  const defund = defundableTypes.includes(defundType)
+    ? defundType
+    : defundableTypes[0] ?? null;
+
+  const move = (
+    kind: "fund" | "defund",
+    coinType: string,
+    decimals: number,
+    amount: string,
+  ) => {
+    const n = Number(amount);
+    if (!(n > 0)) return;
+    const params = { ...ids, coinType, amountRaw: BigInt(Math.round(n * 10 ** decimals)) };
+    if (kind === "fund") actions.exchangeFund(params);
+    else actions.exchangeDefund(params);
+  };
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div className="vault-kv" style={{ marginBottom: 10 }}>
+        <div className="vault-kv__row">
+          <span>Balance manager</span>
+          <Address value={custody.bmId} label="Balance manager" />
+        </div>
+        {custody.direct ? (
+          <div className="vault-kv__row">
+            <span>Mode</span>
+            <span>direct escrow — orders settle against vault free balances</span>
+          </div>
+        ) : custody.assets.length > 0 ? (
+          custody.assets.map((t) => (
+            <div className="vault-kv__row" key={t}>
+              <span title={t}>{symbolFor(t)} in manager</span>
+              <span>
+                {(() => {
+                  const raw = bmQ.data?.balances[t];
+                  const dec = tokenForCoinType(t)?.decimals;
+                  return raw != null && dec != null ? rawToDecimalString(raw, dec) : "—";
+                })()}
+              </span>
+            </div>
+          ))
+        ) : (
+          <div className="vault-kv__row">
+            <span>Manager holdings</span>
+            <span>empty</span>
+          </div>
+        )}
+      </div>
+      {!custody.direct && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+            gap: 10,
+            marginBottom: 10,
+          }}
+        >
+          <CuratorField label="Fund with">
+            <select
+              style={curatorFieldStyle}
+              value={fund?.coinType ?? ""}
+              onChange={(e) => setFundType(e.target.value)}
+              disabled={fundable.length === 0}
+            >
+              {fundable.map((b) => (
+                <option key={b.coinType} value={b.coinType}>
+                  {b.symbol} — {b.decimals != null ? rawToDecimalString(b.amountRaw, b.decimals) : b.amountRaw} free
+                </option>
+              ))}
+            </select>
+          </CuratorField>
+          <CuratorField label="Amount">
+            <input
+              style={curatorFieldStyle}
+              type="number"
+              min="0"
+              placeholder="0.0"
+              value={fundAmount}
+              onChange={(e) => setFundAmount(e.target.value)}
+            />
+          </CuratorField>
+          <button
+            className="vault-invest__cta"
+            style={{ alignSelf: "end" }}
+            disabled={!!actions.busy || !fund || !(Number(fundAmount) > 0)}
+            onClick={() => {
+              if (!fund || fund.decimals == null) return;
+              move("fund", fund.coinType, fund.decimals, fundAmount);
+              setFundAmount("");
+            }}
+          >
+            Fund
+          </button>
+          <CuratorField label="Defund asset">
+            <select
+              style={curatorFieldStyle}
+              value={defund ?? ""}
+              onChange={(e) => setDefundType(e.target.value)}
+              disabled={defundableTypes.length === 0}
+            >
+              {defundableTypes.map((t) => (
+                <option key={t} value={t}>
+                  {symbolFor(t)}
+                </option>
+              ))}
+            </select>
+          </CuratorField>
+          <CuratorField label="Amount">
+            <input
+              style={curatorFieldStyle}
+              type="number"
+              min="0"
+              placeholder="0.0"
+              value={defundAmount}
+              onChange={(e) => setDefundAmount(e.target.value)}
+            />
+          </CuratorField>
+          <button
+            className="vault-invest__cta"
+            style={{ alignSelf: "end" }}
+            disabled={!!actions.busy || !defund || !(Number(defundAmount) > 0)}
+            onClick={() => {
+              const dec = defund ? tokenForCoinType(defund)?.decimals : null;
+              if (!defund || dec == null) return;
+              move("defund", defund, dec, defundAmount);
+              setDefundAmount("");
+            }}
+          >
+            Defund
+          </button>
+        </div>
+      )}
+      <div className="vault-kv" style={{ marginBottom: 10 }}>
+        {(bmQ.data?.signers ?? []).map((s) => (
+          <div className="vault-kv__row" key={s}>
+            <Address value={s} label="Order signer" />
+            <button
+              className="vault-invest__tab"
+              disabled={!!actions.busy}
+              onClick={() => actions.exchangeRemoveSigner({ ...ids, signer: s })}
+            >
+              Remove
+            </button>
+          </div>
+        ))}
+      </div>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+          gap: 10,
+          marginBottom: 10,
+        }}
+      >
+        <CuratorField label="Delegate order signer">
+          <input
+            style={curatorFieldStyle}
+            type="text"
+            placeholder="0x…"
+            value={signer}
+            onChange={(e) => setSigner(e.target.value)}
+          />
+        </CuratorField>
+        <button
+          className="vault-invest__cta"
+          style={{ alignSelf: "end" }}
+          disabled={!!actions.busy || !/^0x[0-9a-fA-F]{1,64}$/.test(signer.trim())}
+          onClick={() => {
+            actions.exchangeAddSigner({ ...ids, signer: signer.trim() });
+            setSigner("");
+          }}
+        >
+          Add signer
+        </button>
+      </div>
+      <div className="vault-invest__bal">
+        {custody.direct
+          ? "Delegated keys sign maker orders escrowed by vault free balances; removing a key voids its resting orders."
+          : "Funded capital backs maker orders signed by delegated keys; defunding to zero voids the book's resting orders at fill time."}
+      </div>
+    </div>
   );
 }
 
@@ -788,6 +1078,20 @@ function HoldingSummary({
         />
       );
     }
+    case "exchangeCustody":
+      return (
+        <HoldingLabel
+          title={p.positionId}
+          main="Exchange custody"
+          sub={
+            holding.direct
+              ? "direct escrow"
+              : holding.assets.length > 0
+                ? `holds ${holding.assets.map(symbolFor).join(", ")}`
+                : "no tracked assets"
+          }
+        />
+      );
     case "rfq":
       return (
         <HoldingLabel

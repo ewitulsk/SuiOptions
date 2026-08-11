@@ -15,6 +15,16 @@ import {
   type ReleaseExternalParams,
 } from "../tx/appraisal";
 import {
+  buildExchangeAddSignerTx,
+  buildExchangeDefundTx,
+  buildExchangeFundTx,
+  buildExchangeRemoveSignerTx,
+  buildInitExchangeCustodyTx,
+  type ExchangeCustodyMoveParams,
+  type ExchangeSignerParams,
+  type InitExchangeCustodyParams,
+} from "../tx/exchangeAdapter";
+import {
   buildAddDepositAssetTx,
   buildAmendPayoutAssetTx,
   buildCreateTradingVaultTx,
@@ -55,6 +65,9 @@ export function useTradingVaultActions() {
     qc.invalidateQueries({ queryKey: ["trading-vault"] });
     // Allowlist + pending withdrawal queue, read from chain (SO-370).
     qc.invalidateQueries({ queryKey: ["trading-vault-onchain"] });
+    // Custodied positions + exchange BM state (SO-373).
+    qc.invalidateQueries({ queryKey: ["trading-vault-holdings"] });
+    qc.invalidateQueries({ queryKey: ["trading-vault-exchange-bm"] });
     qc.invalidateQueries({ queryKey: ["coin-balance"] });
   }
 
@@ -172,6 +185,48 @@ export function useTradingVaultActions() {
         "setting haircuts",
         "Entry/exit haircuts updated.",
         () => buildSetHaircutsTx(params),
+        { sponsor: false },
+      ),
+
+    // SO-373 exchange custody (curator, wallet-paid): create the cap-owned
+    // BalanceManager, swap capital in/out, delegate order signers.
+    initExchangeCustody: (params: InitExchangeCustodyParams) =>
+      run(
+        "creating custody",
+        "Exchange custody created.",
+        () => buildInitExchangeCustodyTx(params),
+        { sponsor: false },
+      ),
+
+    exchangeFund: (params: ExchangeCustodyMoveParams) =>
+      run(
+        "funding",
+        "Moved into the exchange balance manager.",
+        () => buildExchangeFundTx(params),
+        { sponsor: false },
+      ),
+
+    exchangeDefund: (params: ExchangeCustodyMoveParams) =>
+      run(
+        "defunding",
+        "Moved back into vault free balances.",
+        () => buildExchangeDefundTx(params),
+        { sponsor: false },
+      ),
+
+    exchangeAddSigner: (params: ExchangeSignerParams) =>
+      run(
+        "adding signer",
+        "Order signer delegated.",
+        () => buildExchangeAddSignerTx(params),
+        { sponsor: false },
+      ),
+
+    exchangeRemoveSigner: (params: ExchangeSignerParams) =>
+      run(
+        "removing signer",
+        "Order signer removed — its resting orders are void.",
+        () => buildExchangeRemoveSignerTx(params),
         { sponsor: false },
       ),
   };

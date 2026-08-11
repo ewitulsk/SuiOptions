@@ -67,6 +67,7 @@ pub struct TradingVaultCtx {
     pub oracle_pyth_pkg: ObjectID,
     pub deepbook_adapter_pkg: Option<ObjectID>,
     pub options_adapter_pkg: Option<ObjectID>,
+    pub exchange_adapter_pkg: Option<ObjectID>,
     pub core_pkg: ObjectID,
     pub protocol_config_id: ObjectID,
     pub integration_registry_id: ObjectID,
@@ -439,6 +440,7 @@ fn refs_for(ctx: &TradingVaultCtx, vault_id: ObjectID) -> AppraisalRefs {
         trading_vault_pkg: ctx.trading_vault_pkg,
         deepbook_adapter_pkg: ctx.deepbook_adapter_pkg,
         options_adapter_pkg: ctx.options_adapter_pkg,
+        exchange_adapter_pkg: ctx.exchange_adapter_pkg,
         vault_id,
         protocol_config_id: ctx.protocol_config_id,
         oracle_registry_id: ctx.oracle_registry_id,
@@ -1889,6 +1891,10 @@ pub async fn build_ctx(
             .transpose()?,
         options_adapter_pkg: snapshot
             .options_adapter()
+            .map(|p| p.package())
+            .transpose()?,
+        exchange_adapter_pkg: snapshot
+            .exchange_adapter()
             .map(|p| p.package())
             .transpose()?,
         core_pkg: snapshot.package().context("core package id")?,
