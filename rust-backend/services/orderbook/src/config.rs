@@ -77,6 +77,18 @@ fn default_pool_size() -> u32 {
     16
 }
 
+/// Ids the direct-vault-escrow paths need (SO-372), from the same
+/// deployments record as the markets. Absent (older records, or no
+/// trading-vault deploy) ⇒ direct escrow is disabled and every manager is
+/// treated as a plain wallet BM.
+#[derive(Debug, Clone)]
+pub struct DirectEscrowIds {
+    /// exchange_adapter package id, `0x`-hex.
+    pub adapter_package: String,
+    /// Shared trading-vault `IntegrationRegistry` (read-only in fill PTBs).
+    pub integration_registry_id: String,
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         runtime_config::config_load::load_toml(path)
@@ -119,5 +131,23 @@ impl Config {
             });
         }
         Ok((exchange, markets))
+    }
+
+    /// Direct-escrow ids from the deployments record (SO-372). `None` when
+    /// the record has no exchange_adapter or trading-vault-objects block.
+    pub fn load_direct_escrow(&self) -> Result<Option<DirectEscrowIds>> {
+        let all = deployments::Deployments::load(Path::new(&self.deployments))
+            .with_context(|| format!("loading {}", self.deployments))?;
+        let dep = all
+            .for_env(&self.env)
+            .with_context(|| format!("env {} in {}", self.env, self.deployments))?;
+        let pi = &dep.package_info;
+        Ok(match (&pi.exchange_adapter, &pi.trading_vault_objects) {
+            (Some(ea), Some(objs)) => Some(DirectEscrowIds {
+                adapter_package: ea.package_id.clone(),
+                integration_registry_id: objs.integration_registry_id.clone(),
+            }),
+            _ => None,
+        })
     }
 }

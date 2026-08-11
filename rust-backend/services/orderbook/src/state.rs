@@ -1,6 +1,7 @@
 use dashmap::DashMap;
 use exchange_book::Book;
 use exchange_types::{Market, SuiAddress};
+use crate::config::DirectEscrowIds;
 use crate::settlement::MatchJob;
 use crate::db::Db;
 use parking_lot::Mutex;
@@ -47,6 +48,10 @@ pub struct AppState {
     /// Global WS fanout.
     pub ws_tx: broadcast::Sender<WsMsg>,
     pub intake: IntakeConfig,
+    /// Direct-vault-escrow ids (SO-372): the exchange_adapter package and
+    /// the trading-vault IntegrationRegistry, advertised to takers building
+    /// `fill_vault_order(_reverse)` PTBs. `None` disables direct escrow.
+    pub direct_escrow: Option<DirectEscrowIds>,
 }
 
 impl AppState {

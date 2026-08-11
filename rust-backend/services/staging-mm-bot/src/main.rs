@@ -65,6 +65,12 @@ struct BotConfig {
     /// Price staleness gates applied to the oracle WS cache.
     #[serde(default)]
     pyth: PythConfig,
+
+    /// Vault-direct mode (SO-372): quote as a trading vault's delegated
+    /// signer against its direct-custody identity BM. Absent ⇒ the classic
+    /// funded-BM mode (create/adopt + faucet funding) runs unchanged.
+    #[serde(default)]
+    vault_direct: Option<VaultDirectConfig>,
 }
 
 fn default_max_fee_bps() -> u64 {
@@ -87,8 +93,36 @@ impl BotConfig {
             // Intake's floor is 30s; below ~60s the requote loop churns.
             bail!("[quoting].ttl_secs must be >= 60");
         }
+        if let Some(vd) = &self.vault_direct {
+            if vd.buffer_bps >= 10_000 {
+                bail!("[vault_direct].buffer_bps must be < 10000");
+            }
+        }
         Ok(())
     }
+}
+
+/// Vault-direct mode config (SO-372). The curator must have created the
+/// direct custody, enabled the quote adapter, and delegated THIS bot's key
+/// as an approved signer on the manager — the bot never deposits into or
+/// creates the BM in this mode.
+#[derive(Debug, Clone, Deserialize)]
+struct VaultDirectConfig {
+    /// The vault's direct-custody identity BalanceManager id.
+    manager_id: String,
+    /// The trading vault whose free balances escrow the quotes.
+    vault_id: String,
+    /// api-service base URL for the pending-withdrawals deduction
+    /// (`GET /trading-vaults/:id/pending-requests`). Absent ⇒ skip it.
+    #[serde(default)]
+    api_url: Option<String>,
+    /// Fraction of the vault's free balance held back from quoting, bps.
+    #[serde(default = "default_buffer_bps")]
+    buffer_bps: u64,
+}
+
+fn default_buffer_bps() -> u64 {
+    1_000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -209,11 +243,22 @@ struct MarketWatermark {
     raised: u64,
 }
 
+/// Vault-direct runtime context (SO-372), resolved at boot.
+struct DirectCtx {
+    vault: ObjectID,
+    trading_vault_pkg: ObjectID,
+    api_url: Option<String>,
+    buffer_bps: u64,
+}
+
 /// Shared handles across tasks.
 struct Shared {
     wrap: SuiClientWrapper,
     ob: OrderbookClient,
     signer: OrderSigner,
+    /// The order's `maker` field: the wallet in funded mode, the vault's
+    /// id-as-address in vault-direct mode (the identity BM's owner).
+    maker: ExAddress,
     manager: ExAddress,
     manager_oid: ObjectID,
     exchange_package: ObjectID,
@@ -223,6 +268,8 @@ struct Shared {
     cache: PriceCache,
     staleness: Staleness,
     watermarks: Mutex<HashMap<ObjectID, MarketWatermark>>,
+    /// `Some` in vault-direct mode.
+    direct: Option<DirectCtx>,
 }
 
 // -- Main ----------------------------------------------------------------
@@ -287,15 +334,50 @@ async fn main() -> Result<()> {
     feeds.dedup();
     wait_for_first_prices(&cache, &feeds, Duration::from_secs(30)).await?;
 
-    // BalanceManager: rediscover the one this wallet already created under
-    // the CURRENT exchange package, else create one. Zero config: a
-    // contract redeploy changes the package (and therefore the manager
-    // type), so discovery scopes itself to the live deployment and a fresh
-    // manager appears on the first boot after each redeploy.
-    let manager_oid = resolve_balance_manager(&wrap, exchange_package, cli.gas_budget).await?;
+    // BalanceManager. Vault-direct mode (SO-372): the identity BM comes
+    // from config, the curator already delegated our key, and there is
+    // nothing to create or fund. Funded mode: rediscover the one this
+    // wallet already created under the CURRENT exchange package, else
+    // create one. Zero config there: a contract redeploy changes the
+    // package (and therefore the manager type), so discovery scopes itself
+    // to the live deployment and a fresh manager appears on the first boot
+    // after each redeploy.
+    let (manager_oid, maker, direct) = match &cfg.vault_direct {
+        Some(vd) => {
+            let manager_oid = ObjectID::from_str(&vd.manager_id)
+                .context("parsing [vault_direct].manager_id")?;
+            let vault = ObjectID::from_str(&vd.vault_id)
+                .context("parsing [vault_direct].vault_id")?;
+            let trading_vault_pkg = snapshot
+                .trading_vault()
+                .ok_or_else(|| anyhow!("vault-direct mode but token-info has no tradingVault package"))?
+                .package()?;
+            verify_direct_manager(&wrap, manager_oid, vault).await?;
+            let maker = ExAddress::parse(&vault.to_string())
+                .map_err(|e| anyhow!("vault id hex: {e}"))?;
+            tracing::info!(
+                manager = %manager_oid,
+                vault = %vault,
+                "vault-direct mode: identity BM adopted; fills escrow against vault free \
+                 balances (bot key must be a curator-delegated signer)"
+            );
+            let direct = DirectCtx {
+                vault,
+                trading_vault_pkg,
+                api_url: vd.api_url.clone(),
+                buffer_bps: vd.buffer_bps,
+            };
+            (manager_oid, maker, Some(direct))
+        }
+        None => {
+            let manager_oid =
+                resolve_balance_manager(&wrap, exchange_package, cli.gas_budget).await?;
+            tracing::info!(manager = %manager_oid, "BalanceManager ready");
+            (manager_oid, signer.address(), None)
+        }
+    };
     let manager = ExAddress::parse(&manager_oid.to_string())
         .map_err(|e| anyhow!("manager id hex: {e}"))?;
-    tracing::info!(manager = %manager_oid, "BalanceManager ready");
 
     let staleness = Staleness {
         max_price_age: Duration::from_millis(cfg.pyth.max_price_age_ms),
@@ -306,6 +388,7 @@ async fn main() -> Result<()> {
         wrap,
         ob,
         signer,
+        maker,
         manager,
         manager_oid,
         exchange_package,
@@ -315,11 +398,15 @@ async fn main() -> Result<()> {
         cache,
         staleness,
         watermarks: Mutex::new(HashMap::new()),
+        direct,
     });
 
     // Seed escrow before quoting so the first ladder doesn't bounce off
     // INSUFFICIENT_ESCROW, then keep it topped up in the background.
-    if shared.cfg.funding.enabled {
+    // Vault-direct mode never funds: the escrow is the vault's capital.
+    if shared.direct.is_some() {
+        tracing::info!("vault-direct mode: funding pass disabled");
+    } else if shared.cfg.funding.enabled {
         funding_pass(&shared, &snapshot).await;
         let s = Arc::clone(&shared);
         let snap = snapshot.clone();
@@ -483,6 +570,31 @@ async fn resolve_balance_manager(
 }
 
 async fn verify_manager(wrap: &SuiClientWrapper, id: ObjectID) -> Result<()> {
+    let owner = manager_owner(wrap, id).await?;
+    if owner.to_lowercase() != wrap.signer.address.to_string().to_lowercase() {
+        bail!("owned by {owner}, not our wallet {}", wrap.signer.address);
+    }
+    Ok(())
+}
+
+/// Vault-direct mode (SO-372): the configured manager must be a
+/// BalanceManager whose order-attribution owner is the VAULT's
+/// id-as-address — the identity BM the curator's `init_direct_custody`
+/// created. Signer delegation can't be read off the object JSON cheaply;
+/// a missing delegation surfaces as BAD_SIGNATURE at intake.
+async fn verify_direct_manager(
+    wrap: &SuiClientWrapper,
+    id: ObjectID,
+    vault: ObjectID,
+) -> Result<()> {
+    let owner = manager_owner(wrap, id).await?;
+    if owner.to_lowercase() != vault.to_string().to_lowercase() {
+        bail!("manager {id} owned by {owner}, not vault {vault} — not its identity BM");
+    }
+    Ok(())
+}
+
+async fn manager_owner(wrap: &SuiClientWrapper, id: ObjectID) -> Result<String> {
     let (obj, json) = wrap
         .client
         .get_object_json(id)
@@ -495,15 +607,11 @@ async fn verify_manager(wrap: &SuiClientWrapper, id: ObjectID) -> Result<()> {
     if !type_ok {
         bail!("{id} is not a BalanceManager");
     }
-    let owner = json
-        .as_ref()
+    json.as_ref()
         .and_then(|j| j.get("owner"))
         .and_then(|o| o.as_str())
-        .ok_or_else(|| anyhow!("BalanceManager {id} JSON missing owner"))?;
-    if owner.to_lowercase() != wrap.signer.address.to_string().to_lowercase() {
-        bail!("owned by {owner}, not our wallet {}", wrap.signer.address);
-    }
-    Ok(())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("BalanceManager {id} JSON missing owner"))
 }
 
 // -- Funding -------------------------------------------------------------
@@ -700,14 +808,22 @@ async fn pull_quotes(s: &Shared, ctx: &MarketCtx, open: &mut Vec<OpenOrder>) {
 /// (stale-price pull, INSUFFICIENT_ESCROW recovery). Steady-state requotes
 /// queue into the batched sweep instead.
 async fn raise_watermark(s: &Shared, ctx: &MarketCtx, min_valid_salt: u64) {
-    match exchange_tx::cancel_up_to(
+    // Vault-direct mode: the maker (watermark key) is the vault's address,
+    // which can never be a tx sender — the manager-keyed target routes
+    // through `cancel_up_to_for_manager`, raising the OWNER's watermark
+    // instead of the bot wallet's.
+    let target = exchange_tx::CancelUpToTarget {
+        registry_id: ctx.registry,
+        base_type: ctx.market.base.clone(),
+        quote_type: ctx.market.quote.clone(),
+        min_valid_salt,
+        manager_id: s.direct.as_ref().map(|_| s.manager_oid),
+    };
+    match exchange_tx::cancel_up_to_batch(
         &s.wrap.client,
         &s.wrap.signer,
         s.exchange_package,
-        ctx.registry,
-        &ctx.market.base,
-        &ctx.market.quote,
-        min_valid_salt,
+        std::slice::from_ref(&target),
         s.gas_budget,
     )
     .await
@@ -759,8 +875,10 @@ fn record_pending_watermark(s: &Shared, ctx: &MarketCtx, min_valid_salt: u64) {
 
 /// One sweep pass: raise every pending watermark in a single PTB. Nothing
 /// is cleared until the tx lands, so a failed sweep retries next tick; a
-/// reactive raise that overtook a pending value filters it out here.
+/// reactive raise that overtook a pending value filters it out here. In
+/// vault-direct mode every target is manager-keyed (SO-372).
 async fn watermark_sweep(s: &Shared) {
+    let manager_id = s.direct.as_ref().map(|_| s.manager_oid);
     let targets: Vec<exchange_tx::CancelUpToTarget> = {
         let map = s.watermarks.lock().unwrap();
         map.iter()
@@ -771,6 +889,7 @@ async fn watermark_sweep(s: &Shared) {
                     base_type: w.base.clone(),
                     quote_type: w.quote.clone(),
                     min_valid_salt: salt,
+                    manager_id,
                 })
             })
             .collect()
@@ -809,6 +928,97 @@ async fn watermark_sweep(s: &Shared) {
     }
 }
 
+/// Per-token quote budget. Funded mode: the orderbook-mirrored escrow,
+/// scaled by `escrow_utilization` (the same mirror intake checks). Direct
+/// mode (SO-372): the vault's live free balance minus the configured
+/// buffer, minus outstanding withdrawal-queue obligations when api-service
+/// is configured. Markets share the vault's balance, so the buffer also
+/// absorbs cross-market overcommit (funded mode has the same sharing).
+async fn quote_budget(s: &Shared, ctx: &MarketCtx) -> Result<HashMap<String, u64>> {
+    let Some(d) = &s.direct else {
+        let balances = s.ob.balances(&s.manager).await.context("reading escrow")?;
+        return Ok(balances
+            .iter()
+            .filter_map(|b| {
+                canonicalize_move_type(&b.token).ok().map(|t| {
+                    (t, (b.amount_raw() as f64 * s.cfg.quoting.escrow_utilization) as u64)
+                })
+            })
+            .collect());
+    };
+    let mut budget = HashMap::new();
+    for token in [&ctx.market.base, &ctx.market.quote] {
+        let free = sui_tx::tx::trading_vault::dev_inspect_free_balance(
+            &s.wrap.client,
+            s.wrap.signer.address,
+            d.trading_vault_pkg,
+            d.vault,
+            token,
+        )
+        .await
+        .with_context(|| format!("reading vault free balance of {token}"))?;
+        let held_back = ((free as u128) * (d.buffer_bps as u128) / 10_000) as u64;
+        budget.insert(token.clone(), free.saturating_sub(held_back));
+    }
+    if let Some(api) = &d.api_url {
+        match pending_obligations(api, &d.vault).await {
+            Ok(pending) => {
+                for (token, amount) in pending {
+                    if let Some(b) = budget.get_mut(&token) {
+                        *b = b.saturating_sub(amount);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    "pending-requests read failed; quoting without the deduction"
+                );
+            }
+        }
+    }
+    Ok(budget)
+}
+
+/// Outstanding withdrawal-queue obligations by payout coin type, from
+/// api-service `GET /trading-vaults/:id/pending-requests`. Estimated at
+/// `basis` (accounting-asset units) — exact payout units are only fixed at
+/// fulfillment, so this is the cheap conservative stand-in.
+async fn pending_obligations(api: &str, vault: &ObjectID) -> Result<HashMap<String, u64>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Req {
+        basis_raw: String,
+        payout_coin_type: String,
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        requests: Vec<Req>,
+    }
+    let url = format!(
+        "{}/trading-vaults/{}/pending-requests",
+        api.trim_end_matches('/'),
+        vault
+    );
+    let resp: Resp = reqwest::get(&url)
+        .await
+        .context("GET pending-requests")?
+        .error_for_status()
+        .context("pending-requests status")?
+        .json()
+        .await
+        .context("decoding pending-requests")?;
+    let mut out: HashMap<String, u64> = HashMap::new();
+    for r in resp.requests {
+        let token =
+            canonicalize_move_type(&r.payout_coin_type).unwrap_or(r.payout_coin_type);
+        let amount = r.basis_raw.parse::<u64>().unwrap_or(0);
+        let entry = out.entry(token).or_insert(0);
+        *entry = entry.saturating_add(amount);
+    }
+    Ok(out)
+}
+
 /// Cancel-replace one market's ladder around `mid`. Returns how many orders
 /// now rest.
 async fn requote(
@@ -817,16 +1027,7 @@ async fn requote(
     open: &mut Vec<OpenOrder>,
     mid: u64,
 ) -> Result<usize> {
-    // Escrow budget per maker token, from the same mirror intake checks.
-    let balances = s.ob.balances(&s.manager).await.context("reading escrow")?;
-    let mut budget: HashMap<String, u64> = balances
-        .iter()
-        .filter_map(|b| {
-            canonicalize_move_type(&b.token).ok().map(|t| {
-                (t, (b.amount_raw() as f64 * s.cfg.quoting.escrow_utilization) as u64)
-            })
-        })
-        .collect();
+    let mut budget = quote_budget(s, ctx).await?;
 
     // Free our own resting commitment first.
     if !open.is_empty() {
@@ -846,7 +1047,7 @@ async fn requote(
         let Some(order) = ladder::make_order(
             &level,
             &ctx.market,
-            s.signer.address(),
+            s.maker,
             s.manager,
             s.cfg.max_fee_bps,
             expiry_ms,

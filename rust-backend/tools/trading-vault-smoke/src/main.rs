@@ -61,6 +61,15 @@ struct Cli {
     /// (for pointing a vault-mode mm-bot at it). Prints the ids to keep.
     #[arg(long, default_value_t = false)]
     keep_open: bool,
+    /// Direct-escrow leg (SO-372), replacing the DeepBook/drain legs:
+    /// curator init_direct_custody + add_quote_adapter + add_signer, a
+    /// maker order signed with the delegated key against the identity BM,
+    /// taker-filled through exchange_adapter::fill_vault_order_reverse;
+    /// asserts vault balances moved and the identity BM held nothing.
+    /// Leaves the vault open. Opt-in (unlike --skip-*) because it needs
+    /// the SO-372 exchange + exchange_adapter contracts deployed.
+    #[arg(long, default_value_t = false)]
+    direct_escrow: bool,
     /// Fill the vault's resting bid with self-written calls (SO-297): the
     /// custody ends up holding a nonzero option-coin balance, the deposit
     /// and a partial fulfillment run through `options_oracle` legs, and
@@ -386,6 +395,11 @@ async fn main() -> Result<()> {
     );
     submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::deposit").await?;
     step.ok();
+
+    if cli.direct_escrow {
+        run_direct_escrow_leg(&client, &signer, &cli, &ids, net_top, vault_id, cap_id).await?;
+        return Ok(());
+    }
 
     let mut custody: Option<(ObjectID, ObjectID, String, String)> = None;
     if !cli.skip_deepbook {
@@ -1377,7 +1391,6 @@ async fn custody_coin_balance(
     custody_id: ObjectID,
     coin_type: &str,
 ) -> Result<u64> {
-    use sui_types::transaction::TransactionKind;
     let mut pt = ProgrammableTransactionBuilder::new();
     let vault = pt.obj(shared_object_arg(client, vault_id, false).await?)?;
     let custody_arg = pt.pure(custody_id)?;
@@ -1438,4 +1451,270 @@ async fn read_total_shares(client: &ChainClient, vault_id: ObjectID) -> Result<u
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("vault has no total_shares field"))?;
     raw.parse().context("parsing total_shares")
+}
+
+// ═══════════════════ direct vault escrow leg (SO-372) ═══════════════════
+
+/// Curator wires the vault for direct quoting (identity BM custody +
+/// quote-adapter opt-in + delegated signer), then this wallet taker-fills a
+/// signed maker order through `exchange_adapter::fill_vault_order_reverse`
+/// (the vault sells its accounting-asset free balance for a faucet-minted
+/// base). Verifies value moved vault↔taker with the identity BM holding
+/// nothing, and leaves the vault open.
+async fn run_direct_escrow_leg(
+    client: &ChainClient,
+    signer: &Signer,
+    cli: &Cli,
+    ids: &Ids,
+    net: &deployments::NetworkDeployment,
+    vault_id: ObjectID,
+    cap_id: ObjectID,
+) -> Result<()> {
+    let canon = protocol_types::asset::canonicalize_move_type;
+    let pi = &net.package_info;
+    let ea_pkg = pi
+        .exchange_adapter
+        .as_ref()
+        .ok_or_else(|| anyhow!("no exchangeAdapter record — is SO-372 deployed?"))?
+        .package()?;
+    let ex = net.exchange()?;
+    let ex_pkg = ex.package()?;
+    let tt = pi.test_tokens.as_ref().ok_or_else(|| anyhow!("no testTokens record"))?;
+
+    // Pick a market quoted in the vault's accounting asset whose base is a
+    // faucet-mintable test token (the taker's payment).
+    let mut picked = None;
+    for (sym, m) in &ex.markets {
+        if canon(&m.quote) != ids.deposit_coin_type {
+            continue;
+        }
+        let base = canon(&m.base);
+        if let Some((bsym, tok)) =
+            tt.tokens.iter().find(|(_, t)| canon(&t.coin_type) == base)
+        {
+            picked = Some((sym.clone(), m.clone(), base, bsym.to_lowercase(), tok.faucet()?));
+            break;
+        }
+    }
+    let (sym, market, base_type, base_module, base_faucet) = picked.ok_or_else(|| {
+        anyhow!(
+            "no exchange market quoted in {} with a faucet-mintable base",
+            ids.deposit_coin_type
+        )
+    })?;
+    let base_tag = TypeTag::from_str(&base_type)?;
+    let quote_tag = TypeTag::from_str(&ids.deposit_coin_type)?;
+    println!("    market {sym} (registry {})", market.registry_id);
+
+    // ── curator: direct custody + quote-adapter opt-in, one PTB.
+    let step = Step("direct escrow: init_direct_custody + add_quote_adapter");
+    let witness_tag =
+        TypeTag::from_str(&format!("{ea_pkg}::exchange_adapter::ExchangeAdapter"))?;
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let vault_arg = pt.obj(shared_object_arg(client, vault_id, true).await?)?;
+    let cap = pt.obj(sui_tx::tx::owned_object_arg(client, cap_id).await?)?;
+    let ireg = pt.obj(shared_object_arg(client, ids.integration_registry_id, false).await?)?;
+    pt.programmable_move_call(
+        ea_pkg,
+        Identifier::new("exchange_adapter").unwrap(),
+        Identifier::new("init_direct_custody").unwrap(),
+        vec![],
+        vec![vault_arg, cap, ireg],
+    );
+    pt.programmable_move_call(
+        ids.trading_vault_pkg,
+        Identifier::new("vault").unwrap(),
+        Identifier::new("add_quote_adapter").unwrap(),
+        vec![witness_tag],
+        vec![vault_arg, cap],
+    );
+    let resp =
+        submit_ptb(client, signer, pt, cli.gas_budget, "smoke::init_direct_custody").await?;
+    let (mut custody_id, mut bm_id) = (None, None);
+    for c in created_objects(&resp) {
+        let Ok(tag) = sui_types::parse_sui_struct_tag(&c.object_type) else { continue };
+        match tag.name.as_str() {
+            "ExchangeCustody" => custody_id = Some(c.object_id),
+            "BalanceManager" => bm_id = Some(c.object_id),
+            _ => {}
+        }
+    }
+    let custody_id = custody_id.ok_or_else(|| anyhow!("no ExchangeCustody created"))?;
+    let bm_id = bm_id.ok_or_else(|| anyhow!("no identity BalanceManager created"))?;
+    client.await_object(bm_id, 6).await.context("waiting for the identity BM")?;
+    step.ok();
+    println!("    custody {custody_id}\n    identity BM {bm_id}");
+
+    // ── curator: delegate this wallet as the order-signing hot key.
+    let step = Step("direct escrow: add_signer (delegate this wallet)");
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let vault_arg = pt.obj(shared_object_arg(client, vault_id, true).await?)?;
+    let cap = pt.obj(sui_tx::tx::owned_object_arg(client, cap_id).await?)?;
+    let ireg = pt.obj(shared_object_arg(client, ids.integration_registry_id, false).await?)?;
+    let bm = pt.obj(shared_object_arg(client, bm_id, true).await?)?;
+    let custody_arg = pt.pure(custody_id)?;
+    let delegate = pt.pure(signer.address)?;
+    pt.programmable_move_call(
+        ea_pkg,
+        Identifier::new("exchange_adapter").unwrap(),
+        Identifier::new("add_signer").unwrap(),
+        vec![],
+        vec![vault_arg, cap, ireg, bm, custody_arg, delegate],
+    );
+    submit_ptb(client, signer, pt, cli.gas_budget, "smoke::add_signer").await?;
+    step.ok();
+
+    // ── maker order: the vault sells Quote (its accounting asset) for
+    // Base, signed with the delegated key against the identity BM.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_millis() as u64;
+    let sell_amount = cli.deposit_amount / 2; // quote out of the vault
+    let buy_amount = cli.deposit_amount / 2; // base the taker pays in full
+    let registry = exchange_types::SuiAddress::parse(&market.registry_id)
+        .map_err(|e| anyhow!("registry hex: {e}"))?;
+    let ex_addr = |id: &ObjectID| {
+        exchange_types::SuiAddress::parse(&id.to_string())
+            .map_err(|e| anyhow!("address hex: {e}"))
+    };
+    let order = exchange_types::Order {
+        maker_token: ids.deposit_coin_type.clone(),
+        taker_token: base_type.clone(),
+        maker_amount: sell_amount,
+        taker_amount: buy_amount,
+        max_fee_bps: 50,
+        maker: ex_addr(&vault_id)?,
+        maker_manager_id: ex_addr(&bm_id)?,
+        taker: exchange_types::SuiAddress::ZERO,
+        sender: exchange_types::SuiAddress::ZERO,
+        expiry_ms: now_ms + 3_600_000,
+        salt: now_ms,
+    };
+    let kp = order_keypair(&signer.keypair)?;
+    let digest = exchange_signing::order_digest(&order, &registry);
+    let signed = exchange_types::order::SignedOrder {
+        signature: kp.sign_personal_message(&digest.0),
+        public_key: kp.public_key(),
+        scheme: exchange_types::order::SignatureScheme::Ed25519,
+        order: order.clone(),
+        registry_id: registry,
+    };
+
+    // ── taker fill: mint the base payment and settle through the adapter.
+    let step = Step("direct escrow: taker fill via fill_vault_order_reverse");
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let faucet = pt.obj(shared_object_arg(client, base_faucet, true).await?)?;
+    let amount = pt.pure(buy_amount)?;
+    let taker_coin = pt.programmable_move_call(
+        ids.tokens_pkg,
+        Identifier::new(&*base_module).unwrap(),
+        Identifier::new("mint").unwrap(),
+        vec![],
+        vec![faucet, amount],
+    );
+    let vault_arg = pt.obj(shared_object_arg(client, vault_id, true).await?)?;
+    let vreg = pt.obj(shared_object_arg(client, ids.integration_registry_id, false).await?)?;
+    let reg = pt.obj(shared_object_arg(client, market.registry()?, true).await?)?;
+    let bm = pt.obj(shared_object_arg(client, bm_id, false).await?)?;
+    let custody_arg = pt.pure(custody_id)?;
+    let order_bytes = pt.pure(order.to_bcs())?;
+    let sig = pt.pure(signed.prefixed_signature())?;
+    let pk = pt.pure(signed.public_key.clone())?;
+    let fill_amount = pt.pure(buy_amount)?;
+    let min_out = pt.pure(0u64)?;
+    let clock = clock_arg(&mut pt)?;
+    let out = pt.programmable_move_call(
+        ea_pkg,
+        Identifier::new("exchange_adapter").unwrap(),
+        Identifier::new("fill_vault_order_reverse").unwrap(),
+        vec![base_tag, quote_tag],
+        vec![
+            vault_arg, vreg, reg, bm, custody_arg, order_bytes, sig, pk, taker_coin,
+            fill_amount, min_out, clock,
+        ],
+    );
+    let sui_types::transaction::Argument::Result(i) = out else {
+        bail!("unexpected fill_vault_order_reverse result shape");
+    };
+    pt.transfer_arg(signer.address, sui_types::transaction::Argument::NestedResult(i, 0));
+    pt.transfer_arg(signer.address, sui_types::transaction::Argument::NestedResult(i, 1));
+    submit_ptb(client, signer, pt, cli.gas_budget, "smoke::fill_vault_order_reverse").await?;
+    step.ok();
+
+    // ── verify: quote left the vault, base arrived, the identity BM is a
+    // pure pass-through (held nothing).
+    let step = Step("direct escrow: vault balances moved, identity BM empty");
+    let quote_after = vault_free_balance(
+        client,
+        signer.address,
+        ids.trading_vault_pkg,
+        vault_id,
+        &ids.deposit_coin_type,
+    )
+    .await?;
+    let base_after =
+        vault_free_balance(client, signer.address, ids.trading_vault_pkg, vault_id, &base_type)
+            .await?;
+    if quote_after >= cli.deposit_amount {
+        bail!("vault quote balance {quote_after} did not decrease from {}", cli.deposit_amount);
+    }
+    if base_after == 0 {
+        bail!("vault gained no {base_type} from the fill");
+    }
+    for t in [&ids.deposit_coin_type, &base_type] {
+        let held = bm_balance_of(client, signer.address, ex_pkg, bm_id, t).await?;
+        if held != 0 {
+            bail!("identity BM holds {held} of {t} — direct escrow leaked into the manager");
+        }
+    }
+    step.ok();
+    println!(
+        "    vault sold {} quote units, gained {base_after} base units",
+        cli.deposit_amount - quote_after
+    );
+    println!("\nDIRECT-ESCROW SMOKE PASSED — vault {vault_id} left open with direct quoting on");
+    Ok(())
+}
+
+/// Dev-inspect `balance_manager::balance_of<T>` on the exchange package.
+async fn bm_balance_of(
+    client: &ChainClient,
+    sender: SuiAddress,
+    exchange_pkg: ObjectID,
+    bm_id: ObjectID,
+    coin_type: &str,
+) -> Result<u64> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let bm = pt.obj(shared_object_arg(client, bm_id, false).await?)?;
+    pt.programmable_move_call(
+        exchange_pkg,
+        Identifier::new("balance_manager").unwrap(),
+        Identifier::new("balance_of").unwrap(),
+        vec![TypeTag::from_str(coin_type)?],
+        vec![bm],
+    );
+    let res = client
+        .dev_inspect_ptb(sender, pt)
+        .await
+        .context("dev-inspecting balance_of")?;
+    sui_tx::chain::decode_return_value::<u64>(&res, 0).context("decoding balance_of")
+}
+
+/// The exchange-signing keypair for this wallet's ed25519 key — the smoke
+/// signs maker orders with the same key that pays gas (delegated to the
+/// identity BM via `add_signer`). Same flag‖seed extraction as the
+/// staging-mm-bot's OrderSigner.
+fn order_keypair(kp: &SuiKeyPair) -> Result<exchange_signing::keys::Ed25519Keypair> {
+    use base64::Engine;
+    use sui_types::crypto::EncodeDecodeBase64;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(kp.encode_base64())
+        .context("decoding keypair bytes")?;
+    if bytes.len() != 33 || bytes[0] != 0x00 {
+        bail!("--direct-escrow requires an ed25519 signer key");
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&bytes[1..33]);
+    Ok(exchange_signing::keys::Ed25519Keypair::from_seed(seed))
 }

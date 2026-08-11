@@ -18,6 +18,9 @@ pyth-client = { workspace = true }
 oracle-client = { workspace = true }
 sui-tx = { workspace = true }
 hex = { workspace = true }
+base64 = { workspace = true }
+exchange-types = { workspace = true }
+exchange-signing = { workspace = true }
 
 move-core-types = { workspace = true }
 sui-types = { workspace = true }

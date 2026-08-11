@@ -141,6 +141,11 @@ pub struct TradingVaultDetailResponse {
     /// unknown rather than genuinely empty. Callers must not render an empty
     /// `balances` as "holds nothing" while this is set.
     pub balances_stale: bool,
+    /// Whether the curator has direct exchange quoting enabled (SO-372):
+    /// the exchange_adapter witness is in the vault's quote-adapter set,
+    /// replayed from TvQuoteAdapterAdded/Removed events. Null when the
+    /// deployment has no exchange_adapter package or the replay failed.
+    pub direct_quoting_enabled: Option<bool>,
 }
 
 pub async fn list_trading_vaults(
@@ -198,6 +203,34 @@ pub async fn get_trading_vault(
             None
         }
     };
+    // SO-372: "direct quoting enabled" = the exchange_adapter's witness is
+    // currently in the vault's quote-adapter set. The set isn't materialised
+    // (same posture as the SO-370 deposit-asset allowlist), so replay the
+    // add/remove events like the other JIT reads in this handler.
+    let direct_quoting_enabled = match &state.exchange_adapter_package {
+        Some(pkg) => {
+            let witness = protocol_types::asset::AssetType::new(format!(
+                "{pkg}::exchange_adapter::ExchangeAdapter"
+            ))
+            .to_canonical();
+            match state
+                .indexer
+                .recent_events_with_payload(
+                    &["TvQuoteAdapterAdded", "TvQuoteAdapterRemoved"],
+                    json!({ "vault_id": id.to_hex() }),
+                    EVENT_SCAN_CAP,
+                )
+                .await
+            {
+                Ok(events) => Some(quote_adapter_enabled(events, &witness)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "indexer quote-adapter events query failed");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
     let balances_stale = balances.is_none();
     let balances = balances
         .unwrap_or_default()
@@ -218,6 +251,7 @@ pub async fn get_trading_vault(
         vault: trading_vault_dto(&state, &vault),
         balances,
         balances_stale,
+        direct_quoting_enabled,
         positions: positions
             .into_iter()
             .map(|p| TradingVaultPositionDto {
@@ -594,6 +628,29 @@ fn pending_requests(
         }
     }
     open.into_values().collect()
+}
+
+/// Replay the quote-adapter set for one witness: the latest add/remove wins.
+/// `witness` is the canonical type string of the adapter.
+fn quote_adapter_enabled(
+    mut events: Vec<protocol_types::events::IndexedEvent>,
+    witness: &str,
+) -> bool {
+    // The scan serves newest-first; the replay needs chain order.
+    events.sort_by_key(|e| e.sequence);
+    let mut enabled = false;
+    for ev in events {
+        match ev.event {
+            ChainEvent::TvQuoteAdapterAdded(a) if a.adapter.to_canonical() == witness => {
+                enabled = true;
+            }
+            ChainEvent::TvQuoteAdapterRemoved(r) if r.adapter.to_canonical() == witness => {
+                enabled = false;
+            }
+            _ => {}
+        }
+    }
+    enabled
 }
 
 fn trading_vault_dto(state: &AppState, v: &TradingVault) -> TradingVaultDto {

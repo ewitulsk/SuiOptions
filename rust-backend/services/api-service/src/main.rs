@@ -32,6 +32,7 @@ async fn main() -> Result<()> {
         cfg.derived_metrics_url.clone(),
         cfg.sui_graphql_url.clone(),
         cfg.price_charting_url.clone(),
+        snapshot.exchange_adapter().map(|p| p.package_id.clone()),
     ));
 
     router::serve(cfg.bind_addr, state, &cfg.allowed_origins).await

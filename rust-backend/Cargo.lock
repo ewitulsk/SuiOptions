@@ -12322,9 +12322,12 @@ name = "trading-vault-smoke"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bcs",
  "clap",
  "deployments",
+ "exchange-signing",
+ "exchange-types",
  "hex",
  "move-core-types",
  "oracle-client",

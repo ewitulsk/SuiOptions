@@ -2,10 +2,10 @@
 //! surface the handlers use lives in [`super::Db`], which runs these on the
 //! blocking pool.
 
-use super::models::{FillRow, NewFill, NewMarket, NewOrder, OrderRow};
+use super::models::{FillRow, NewFill, NewMarket, NewOrder, OrderRow, VaultManagerRow};
 use super::schema::{
     exchange_approved_signers, exchange_balances, exchange_cursors, exchange_fills,
-    exchange_markets, exchange_orders, exchange_salt_watermarks,
+    exchange_markets, exchange_orders, exchange_salt_watermarks, exchange_vault_managers,
 };
 use super::{ArcPool, StoreError};
 use diesel::prelude::*;
@@ -456,6 +456,28 @@ impl Repo {
             .first(&mut self.conn()?)
             .optional()?;
         Ok(found.is_some())
+    }
+
+    // === Vault-custodied managers (SO-372) ===
+
+    pub fn upsert_vault_manager(&self, row: &VaultManagerRow) -> Result<(), StoreError> {
+        diesel::insert_into(exchange_vault_managers::table)
+            .values(row)
+            .on_conflict(exchange_vault_managers::manager_id)
+            .do_update()
+            .set(row)
+            .execute(&mut self.conn()?)?;
+        Ok(())
+    }
+
+    pub fn vault_manager(
+        &self,
+        manager_id: &SuiAddress,
+    ) -> Result<Option<VaultManagerRow>, StoreError> {
+        Ok(exchange_vault_managers::table
+            .find(manager_id.to_hex())
+            .first(&mut self.conn()?)
+            .optional()?)
     }
 
     /// Monotonic: keeps the max of the stored and supplied watermark.

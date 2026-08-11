@@ -15,7 +15,10 @@ use exchange_book::{Book, MatchIntent};
 use exchange_types::SuiAddress;
 use orderbook::config::{Cli, Config};
 use orderbook::db::{establish_pool, run_migrations, Db, OrderStatus};
-use orderbook::settlement::{DeadReason, MatchJob, SettleOutcome, Submitter};
+use orderbook::settlement::{
+    vault_maker_of, DeadReason, DirectEscrow, MatchJob, SettleOutcome, Submitter,
+};
+use sui_types::base_types::ObjectID;
 use orderbook::state::{now_ms, AppState, IntakeConfig, WsMsg};
 use orderbook::sync::{EventIngestor, ExchangeEvent};
 use parking_lot::Mutex;
@@ -59,6 +62,14 @@ async fn main() -> Result<()> {
         markets = deployed_markets.len(),
         "loaded exchange deployment"
     );
+    // SO-372: direct vault escrow needs the exchange_adapter package + the
+    // trading-vault IntegrationRegistry from the same record. Optional —
+    // without them every manager is treated as a plain wallet BM.
+    let direct_escrow = cfg.load_direct_escrow()?;
+    match &direct_escrow {
+        Some(d) => info!(adapter = %d.adapter_package, "direct vault escrow enabled"),
+        None => warn!("no exchange_adapter in deployments — direct vault escrow disabled"),
+    }
     if deployed_markets.is_empty() {
         warn!("no markets in deployments.json exchange block — nothing to serve");
     }
@@ -119,6 +130,7 @@ async fn main() -> Result<()> {
         match_tx,
         ws_tx,
         intake: IntakeConfig::default(),
+        direct_escrow: direct_escrow.clone(),
     });
 
     // Chain sync: ingest package events, mirror to store, prune books.
@@ -126,6 +138,7 @@ async fn main() -> Result<()> {
         EventClient::new(&graphql_url),
         db.clone(),
         exchange_info.package_id.clone(),
+        direct_escrow.as_ref().map(|d| d.adapter_package.clone()),
     ));
     let mut sync_rx = ingestor.subscribe();
     {
@@ -153,8 +166,21 @@ async fn main() -> Result<()> {
             info!(relayer = %signer.address, "matched-mode settlement enabled");
             let chain = ChainClient::new(&grpc_url)
                 .with_context(|| format!("building chain client for {grpc_url}"))?;
+            let direct = direct_escrow
+                .as_ref()
+                .map(|d| -> anyhow::Result<DirectEscrow> {
+                    Ok(DirectEscrow {
+                        adapter_package: ObjectID::from_hex_literal(&d.adapter_package)
+                            .context("parsing exchange_adapter package id")?,
+                        integration_registry: ObjectID::from_hex_literal(
+                            &d.integration_registry_id,
+                        )
+                        .context("parsing integrationRegistryId")?,
+                    })
+                })
+                .transpose()?;
             let submitter =
-                Submitter::new(chain, signer, exchange_info.package()?, cfg.gas_budget);
+                Submitter::new(chain, signer, exchange_info.package()?, direct, cfg.gas_budget);
             let state = state.clone();
             tokio::spawn(settlement_worker(state, submitter, match_rx));
         }
@@ -244,7 +270,11 @@ async fn handle_sync_event(state: &Arc<AppState>, ev: ExchangeEvent) {
             // that key against this manager
             prune_orders_signed_by(state, &manager, &signer).await;
         }
-        ExchangeEvent::Deposit { .. } | ExchangeEvent::SignerAdded { .. } => {}
+        // Custody mapping is mirrored by the ingestor; nothing to prune —
+        // a fresh custody has no resting orders yet.
+        ExchangeEvent::Deposit { .. }
+        | ExchangeEvent::SignerAdded { .. }
+        | ExchangeEvent::VaultCustody { .. } => {}
     }
 }
 
@@ -297,6 +327,28 @@ async fn prune_uncovered(state: &Arc<AppState>, manager: &SuiAddress, token: &st
         let paid_out =
             exchange_types::math::muldiv_floor(stored.filled_taker, o.maker_amount, o.taker_amount.max(1));
         committed = committed.saturating_sub(o.maker_amount.saturating_sub(paid_out));
+    }
+}
+
+/// Prune a manager's open orders — all of them, or only those selling
+/// `token` (SO-372: vault free balances aren't mirrored, so a starved or
+/// disabled direct maker is pruned wholesale rather than downsized).
+async fn prune_manager_orders(
+    state: &Arc<AppState>,
+    manager: &SuiAddress,
+    token: Option<&str>,
+    reason: &str,
+) {
+    let Ok(open) = state.db.open_orders_by_manager(manager).await else { return };
+    for stored in open {
+        if token.is_some_and(|t| stored.signed.order.maker_token != t) {
+            continue;
+        }
+        if let Some(book) = state.book(&stored.signed.registry_id) {
+            book.lock().remove(&stored.digest);
+        }
+        let _ = state.db.set_order_status(&stored.digest, OrderStatus::Pruned).await;
+        notify_prune(state, &stored.signed.order.maker, &stored.digest, reason);
     }
 }
 
@@ -397,6 +449,52 @@ async fn handle_settle_outcome(state: &Arc<AppState>, job: &MatchJob, outcome: S
                 rematch_and_enqueue(state, &intent.market, d).await;
             }
         }
+        SettleOutcome::VaultEscrowInsufficient { ask_side } => {
+            // SO-372: the abort names the starved side. The vault's free
+            // balance isn't mirrored, so prune ALL of that maker's orders
+            // in the starved token; the survivor re-matches.
+            book.lock().settle_failed(intent, &[]);
+            let side = if ask_side { &job.ask } else { &job.bid };
+            let o = &side.signed.order;
+            prune_manager_orders(
+                state,
+                &o.maker_manager_id,
+                Some(&o.maker_token),
+                "vault escrow no longer covers order",
+            )
+            .await;
+            let survivor = if ask_side { intent.bid_digest } else { intent.ask_digest };
+            rematch_and_enqueue(state, &intent.market, survivor).await;
+        }
+        SettleOutcome::VaultQuotingDisabled => {
+            // The maker's direct quoting is off (vault closed, adapter
+            // delisted, or curator opt-out): every order of the involved
+            // direct manager(s) is unfillable — prune them all.
+            book.lock().settle_failed(intent, &[]);
+            for (side, vault) in [(&job.ask, &job.ask_vault), (&job.bid, &job.bid_vault)] {
+                if vault.is_some() {
+                    prune_manager_orders(
+                        state,
+                        &side.signed.order.maker_manager_id,
+                        None,
+                        "direct quoting disabled",
+                    )
+                    .await;
+                }
+            }
+            for d in [intent.ask_digest, intent.bid_digest] {
+                rematch_and_enqueue(state, &intent.market, d).await;
+            }
+        }
+        SettleOutcome::Congested => {
+            // Shared-object congestion cancelled execution (nothing was
+            // recorded): retryable, never prune-worthy. Restore both and
+            // re-match — the intents re-enqueue with backoff-by-queue.
+            book.lock().settle_failed(intent, &[]);
+            for d in [intent.ask_digest, intent.bid_digest] {
+                rematch_and_enqueue(state, &intent.market, d).await;
+            }
+        }
         SettleOutcome::Stale => {
             // someone raced us (external fill); restore, let chain sync's
             // fill events shrink remaining, then re-match
@@ -433,12 +531,16 @@ async fn rematch_and_enqueue(
         let ask = state.db.get_order(&intent.ask_digest).await.ok().flatten();
         let bid = state.db.get_order(&intent.bid_digest).await.ok().flatten();
         if let (Some(ask), Some(bid)) = (ask, bid) {
+            let ask_vault = vault_maker_of(&state.db, &ask.signed.order.maker_manager_id).await;
+            let bid_vault = vault_maker_of(&state.db, &bid.signed.order.maker_manager_id).await;
             let job = MatchJob {
                 intent,
                 ask,
                 bid,
                 base_type: market.base.clone(),
                 quote_type: market.quote.clone(),
+                ask_vault,
+                bid_vault,
             };
             // try_send: this can run inside the settlement worker itself, and
             // awaiting on the queue it drains would self-deadlock when full

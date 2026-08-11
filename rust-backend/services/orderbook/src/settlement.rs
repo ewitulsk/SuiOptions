@@ -18,11 +18,50 @@ use sui_tx::tx::{clock_arg, submit_ptb_rebuilding, tx_digest};
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 
-use crate::db::StoredOrder;
+use crate::db::{Db, StoredOrder};
+
+/// Shared trading-vault objects the direct-escrow entries need (SO-372),
+/// resolved once at boot. `None` ⇒ direct escrow disabled.
+#[derive(Clone, Debug)]
+pub struct DirectEscrow {
+    pub adapter_package: ObjectID,
+    pub integration_registry: ObjectID,
+}
+
+/// A DIRECT maker's vault binding, from the manager-mode map: its manager
+/// is identity-only, so fills/matches must go through the exchange-adapter
+/// entries with the vault + custody in the PTB.
+#[derive(Clone, Debug)]
+pub struct VaultMaker {
+    pub vault_id: ObjectID,
+    pub custody_id: ObjectID,
+}
+
+/// Look up a maker manager in the manager-mode map. `Some` only for DIRECT
+/// custodies — funded custody managers settle through the classic entries
+/// like plain wallet BMs. Lookup failures degrade to the classic path.
+pub async fn vault_maker_of(
+    db: &Db,
+    manager: &exchange_types::SuiAddress,
+) -> Option<VaultMaker> {
+    match db.vault_manager(manager).await {
+        Ok(Some(row)) if row.direct => {
+            let vault_id = ObjectID::from_hex_literal(&row.vault_id).ok()?;
+            let custody_id = ObjectID::from_hex_literal(&row.custody_id).ok()?;
+            Some(VaultMaker { vault_id, custody_id })
+        }
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(manager = %manager, error = %e, "vault-manager lookup failed; assuming classic BM");
+            None
+        }
+    }
+}
 
 /// Everything needed to settle one match on-chain. The service layer
 /// resolves the intent's digests into stored signed orders; `ask` is always
-/// the Base-selling order (`order_a` on-chain).
+/// the Base-selling order (`order_a` on-chain). The `*_vault` bindings are
+/// `Some` for direct-escrow makers (SO-372).
 #[derive(Clone, Debug)]
 pub struct MatchJob {
     pub intent: MatchIntent,
@@ -31,6 +70,8 @@ pub struct MatchJob {
     /// Canonical type strings of the market pair.
     pub base_type: String,
     pub quote_type: String,
+    pub ask_vault: Option<VaultMaker>,
+    pub bid_vault: Option<VaultMaker>,
 }
 
 /// Decoded settlement outcome. The abort mapping mirrors the Move modules'
@@ -43,6 +84,15 @@ pub enum SettleOutcome {
     OrderDead { digest: Digest, reason: DeadReason },
     /// Maker escrow can't cover: prune/downsize that maker's orders.
     InsufficientEscrow,
+    /// A DIRECT maker's vault free balance can't cover its leg (SO-372).
+    /// Side-tagged by the abort: `ask_side` ⇒ the base-selling maker.
+    VaultEscrowInsufficient { ask_side: bool },
+    /// A direct maker's quoting is off (vault not open / adapter delisted /
+    /// curator opt-out): prune all of that manager's orders.
+    VaultQuotingDisabled,
+    /// Shared-object congestion cancelled execution (nothing recorded);
+    /// restore and re-match — retryable, never prune-worthy.
+    Congested,
     /// Stale fill state (someone raced us): restore both, refresh, re-match.
     Stale,
     /// Transport/gas failure.
@@ -69,6 +119,13 @@ const E_LIMIT_VIOLATED: u64 = 16;
 const E_OVERFILL: u64 = 3;
 // balance_manager.move
 const E_INSUFFICIENT_ESCROW: u64 = 2;
+// exchange_adapter.move (SO-372 direct escrow)
+const EA_INSUFFICIENT_ESCROW_A: u64 = 9;
+const EA_INSUFFICIENT_ESCROW_B: u64 = 10;
+// trading_vault vault.move quote-session gates (module name "vault")
+const TV_VAULT_NOT_OPEN: u64 = 72;
+const TV_ADAPTER_NOT_ALLOWED: u64 = 75;
+const TV_QUOTE_ADAPTER_NOT_ENABLED: u64 = 113;
 
 /// A decoded Move abort: (module name, abort code).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,12 +162,20 @@ pub struct Submitter {
     chain: ChainClient,
     signer: Signer,
     package: ObjectID,
+    /// Direct-escrow ids (SO-372); `None` disables the adapter targets.
+    direct: Option<DirectEscrow>,
     gas_budget: u64,
 }
 
 impl Submitter {
-    pub fn new(chain: ChainClient, signer: Signer, package: ObjectID, gas_budget: u64) -> Self {
-        Submitter { chain, signer, package, gas_budget }
+    pub fn new(
+        chain: ChainClient,
+        signer: Signer,
+        package: ObjectID,
+        direct: Option<DirectEscrow>,
+        gas_budget: u64,
+    ) -> Self {
+        Submitter { chain, signer, package, direct, gas_budget }
     }
 
     pub fn relayer_address(&self) -> sui_types::base_types::SuiAddress {
@@ -126,11 +191,28 @@ impl Submitter {
             Ok(resp) => SettleOutcome::Confirmed { tx_digest: tx_digest(&resp).to_string() },
             Err(e) => {
                 let msg = format!("{e:#}");
+                // Vault-involved fills touch more shared objects (vault(s) +
+                // registry mutably) and see more congestion; a cancelled
+                // execution records nothing, so re-matching is safe.
+                if is_congestion_cancellation(&msg) {
+                    return SettleOutcome::Congested;
+                }
                 match parse_move_abort(&msg) {
                     Some(abort) => decode_abort(&abort, job, &msg),
                     None => SettleOutcome::Failed { error: msg },
                 }
             }
+        }
+    }
+
+    /// The Move target for a job, by which sides are direct-escrow makers
+    /// (SO-372): classic `settlement::match_orders` when neither is.
+    fn label(job: &MatchJob) -> &'static str {
+        match (&job.ask_vault, &job.bid_vault) {
+            (None, None) => "exchange settlement::match_orders",
+            (Some(_), None) => "exchange_adapter::match_vault_vs_bm",
+            (None, Some(_)) => "exchange_adapter::match_bm_vs_vault",
+            (Some(_), Some(_)) => "exchange_adapter::match_vault_vs_vault",
         }
     }
 
@@ -144,19 +226,20 @@ impl Submitter {
         let registry = ObjectID::new(job.ask.signed.registry_id.0);
         let bm_a = ObjectID::new(job.ask.signed.order.maker_manager_id.0);
         let bm_b = ObjectID::new(job.bid.signed.order.maker_manager_id.0);
+        if (job.ask_vault.is_some() || job.bid_vault.is_some()) && self.direct.is_none() {
+            anyhow::bail!("direct-escrow maker but no exchange_adapter deployment configured");
+        }
 
         submit_ptb_rebuilding(
             &self.chain,
             &self.signer,
             self.gas_budget,
-            "exchange settlement::match_orders",
+            Self::label(job),
             || {
                 let type_args = type_args.clone();
                 async move {
                     let mut pt = ProgrammableTransactionBuilder::new();
-                    let reg_arg = pt.obj(self.chain.shared_object_arg(registry, true).await?)?;
-                    let bm_a_arg = pt.obj(self.chain.shared_object_arg(bm_a, true).await?)?;
-                    let bm_b_arg = pt.obj(self.chain.shared_object_arg(bm_b, true).await?)?;
+                    // Pure inputs are shared by every target shape.
                     let a_bytes = pt.pure(job.ask.signed.order.to_bcs())?;
                     let a_sig = pt.pure(job.ask.signed.prefixed_signature())?;
                     let a_pk = pt.pure(job.ask.signed.public_key.clone())?;
@@ -164,23 +247,129 @@ impl Submitter {
                     let b_sig = pt.pure(job.bid.signed.prefixed_signature())?;
                     let b_pk = pt.pure(job.bid.signed.public_key.clone())?;
                     let fill = pt.pure(job.intent.fill_base_amount)?;
-                    let clock = clock_arg(&mut pt)?;
-                    pt.programmable_move_call(
-                        self.package,
-                        Identifier::new("settlement")?,
-                        Identifier::new("match_orders")?,
-                        type_args,
-                        vec![
-                            reg_arg, bm_a_arg, bm_b_arg, a_bytes, a_sig, a_pk, b_bytes,
-                            b_sig, b_pk, fill, clock,
-                        ],
-                    );
+                    let orders = [a_bytes, a_sig, a_pk, b_bytes, b_sig, b_pk];
+                    let reg_arg = pt.obj(self.chain.shared_object_arg(registry, true).await?)?;
+
+                    match (&job.ask_vault, &job.bid_vault) {
+                        // Classic path: both makers funded — unchanged.
+                        (None, None) => {
+                            let bm_a_arg =
+                                pt.obj(self.chain.shared_object_arg(bm_a, true).await?)?;
+                            let bm_b_arg =
+                                pt.obj(self.chain.shared_object_arg(bm_b, true).await?)?;
+                            let clock = clock_arg(&mut pt)?;
+                            pt.programmable_move_call(
+                                self.package,
+                                Identifier::new("settlement")?,
+                                Identifier::new("match_orders")?,
+                                type_args,
+                                vec![
+                                    reg_arg, bm_a_arg, bm_b_arg, orders[0], orders[1], orders[2],
+                                    orders[3], orders[4], orders[5], fill, clock,
+                                ],
+                            );
+                        }
+                        // Vault sells Base against a funded maker.
+                        (Some(av), None) => {
+                            let d = self.direct.as_ref().expect("checked above");
+                            let vault =
+                                pt.obj(self.chain.shared_object_arg(av.vault_id, true).await?)?;
+                            let vreg = pt.obj(
+                                self.chain
+                                    .shared_object_arg(d.integration_registry, false)
+                                    .await?,
+                            )?;
+                            let bm_a_arg =
+                                pt.obj(self.chain.shared_object_arg(bm_a, false).await?)?;
+                            let custody = pt.pure(av.custody_id)?;
+                            let bm_b_arg =
+                                pt.obj(self.chain.shared_object_arg(bm_b, true).await?)?;
+                            let clock = clock_arg(&mut pt)?;
+                            pt.programmable_move_call(
+                                d.adapter_package,
+                                Identifier::new("exchange_adapter")?,
+                                Identifier::new("match_vault_vs_bm")?,
+                                type_args,
+                                vec![
+                                    vault, vreg, reg_arg, bm_a_arg, custody, bm_b_arg, orders[0],
+                                    orders[1], orders[2], orders[3], orders[4], orders[5], fill,
+                                    clock,
+                                ],
+                            );
+                        }
+                        // Funded maker sells Base against the vault's Quote.
+                        (None, Some(bv)) => {
+                            let d = self.direct.as_ref().expect("checked above");
+                            let vault =
+                                pt.obj(self.chain.shared_object_arg(bv.vault_id, true).await?)?;
+                            let vreg = pt.obj(
+                                self.chain
+                                    .shared_object_arg(d.integration_registry, false)
+                                    .await?,
+                            )?;
+                            let bm_a_arg =
+                                pt.obj(self.chain.shared_object_arg(bm_a, true).await?)?;
+                            let bm_b_arg =
+                                pt.obj(self.chain.shared_object_arg(bm_b, false).await?)?;
+                            let custody = pt.pure(bv.custody_id)?;
+                            let clock = clock_arg(&mut pt)?;
+                            pt.programmable_move_call(
+                                d.adapter_package,
+                                Identifier::new("exchange_adapter")?,
+                                Identifier::new("match_bm_vs_vault")?,
+                                type_args,
+                                vec![
+                                    vault, vreg, reg_arg, bm_a_arg, bm_b_arg, custody, orders[0],
+                                    orders[1], orders[2], orders[3], orders[4], orders[5], fill,
+                                    clock,
+                                ],
+                            );
+                        }
+                        // Both sides vaults.
+                        (Some(av), Some(bv)) => {
+                            let d = self.direct.as_ref().expect("checked above");
+                            let vault_a =
+                                pt.obj(self.chain.shared_object_arg(av.vault_id, true).await?)?;
+                            let custody_a = pt.pure(av.custody_id)?;
+                            let bm_a_arg =
+                                pt.obj(self.chain.shared_object_arg(bm_a, false).await?)?;
+                            let vault_b =
+                                pt.obj(self.chain.shared_object_arg(bv.vault_id, true).await?)?;
+                            let custody_b = pt.pure(bv.custody_id)?;
+                            let bm_b_arg =
+                                pt.obj(self.chain.shared_object_arg(bm_b, false).await?)?;
+                            let vreg = pt.obj(
+                                self.chain
+                                    .shared_object_arg(d.integration_registry, false)
+                                    .await?,
+                            )?;
+                            let clock = clock_arg(&mut pt)?;
+                            pt.programmable_move_call(
+                                d.adapter_package,
+                                Identifier::new("exchange_adapter")?,
+                                Identifier::new("match_vault_vs_vault")?,
+                                type_args,
+                                vec![
+                                    vault_a, custody_a, bm_a_arg, vault_b, custody_b, bm_b_arg,
+                                    vreg, reg_arg, orders[0], orders[1], orders[2], orders[3],
+                                    orders[4], orders[5], fill, clock,
+                                ],
+                            );
+                        }
+                    }
                     Ok(pt.finish())
                 }
             },
         )
         .await
     }
+}
+
+/// Sui cancels (never partially applies) transactions that lose shared-object
+/// congestion control; the fill is not recorded, so re-matching is safe.
+/// Matched on the effects-status Debug string, like `parse_move_abort`.
+pub fn is_congestion_cancellation(error: &str) -> bool {
+    error.contains("SharedObjectCongestion") || error.contains("CongestedObjects")
 }
 
 /// Map an on-chain abort to the submitter's reaction (spec §5.6).
@@ -192,6 +381,19 @@ impl Submitter {
 pub fn decode_abort(abort: &MoveAbort, job: &MatchJob, raw: &str) -> SettleOutcome {
     match (abort.module.as_str(), abort.code) {
         ("balance_manager", E_INSUFFICIENT_ESCROW) => SettleOutcome::InsufficientEscrow,
+        // SO-372: the adapter side-tags starved vault escrow so exactly the
+        // starved maker's orders get pruned (A = base seller = the ask).
+        ("exchange_adapter", EA_INSUFFICIENT_ESCROW_A) => {
+            SettleOutcome::VaultEscrowInsufficient { ask_side: true }
+        }
+        ("exchange_adapter", EA_INSUFFICIENT_ESCROW_B) => {
+            SettleOutcome::VaultEscrowInsufficient { ask_side: false }
+        }
+        // trading_vault quote-session gates: the maker's direct quoting is
+        // off (vault not open / adapter delisted / curator opt-out).
+        ("vault", TV_VAULT_NOT_OPEN)
+        | ("vault", TV_ADAPTER_NOT_ALLOWED)
+        | ("vault", TV_QUOTE_ADAPTER_NOT_ENABLED) => SettleOutcome::VaultQuotingDisabled,
         ("registry", E_OVERFILL) => SettleOutcome::Stale,
         ("settlement", E_ALREADY_FILLED)
         | ("settlement", E_NOT_CROSSING)
@@ -266,6 +468,8 @@ mod tests {
             bid: stored(2),
             base_type: "B".into(),
             quote_type: "Q".into(),
+            ask_vault: None,
+            bid_vault: None,
         }
     }
 
@@ -305,5 +509,36 @@ mod tests {
             decode("settlement", 99),
             SettleOutcome::Failed { .. }
         ));
+    }
+
+    /// SO-372: adapter escrow aborts are side-tagged; trading-vault quote
+    /// gates prune the maker; congestion cancellations are retryable.
+    #[test]
+    fn decode_direct_escrow_reactions() {
+        let j = job();
+        let decode = |m: &str, c: u64| {
+            let msg = abort_msg(m, c);
+            decode_abort(&parse_move_abort(&msg).unwrap(), &j, &msg)
+        };
+        assert_eq!(
+            decode("exchange_adapter", 9),
+            SettleOutcome::VaultEscrowInsufficient { ask_side: true }
+        );
+        assert_eq!(
+            decode("exchange_adapter", 10),
+            SettleOutcome::VaultEscrowInsufficient { ask_side: false }
+        );
+        assert_eq!(decode("vault", 113), SettleOutcome::VaultQuotingDisabled);
+        assert_eq!(decode("vault", 72), SettleOutcome::VaultQuotingDisabled);
+        assert_eq!(decode("vault", 75), SettleOutcome::VaultQuotingDisabled);
+        // Unknown adapter/vault aborts stay loud.
+        assert!(matches!(decode("exchange_adapter", 12), SettleOutcome::Failed { .. }));
+
+        assert!(is_congestion_cancellation(
+            "exchange_adapter::match_vault_vs_vault reverted: Failure { error: \
+             ExecutionCancelledDueToSharedObjectCongestion { congested_objects: \
+             CongestedObjects([0xfe]) }, command: None }"
+        ));
+        assert!(!is_congestion_cancellation("InsufficientGas"));
     }
 }

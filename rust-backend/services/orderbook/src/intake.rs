@@ -156,22 +156,33 @@ pub async fn intake_order(
         }
     }
 
-    // §5.4 step 4: uncommitted escrow must cover the new order
-    let balance = state
+    // §5.4 step 4: uncommitted escrow must cover the new order. DIRECT
+    // vault managers (SO-372) are exempt: their manager is identity-only
+    // and the escrow is the vault's free balance, enforced per fill
+    // on-chain with side-tagged aborts the settlement worker prunes on.
+    let direct = state
         .db
-        .balance(&o.maker_manager_id, &o.maker_token)
+        .vault_manager(&o.maker_manager_id)
         .await
-        .map_err(|e| reject(IntakeErrorCode::Internal, e.to_string()))?;
-    let committed = state
-        .db
-        .open_commitment(&o.maker_manager_id, &o.maker_token)
-        .await
-        .map_err(|e| reject(IntakeErrorCode::Internal, e.to_string()))?;
-    if balance < committed.saturating_add(o.maker_amount) {
-        return Err(reject(
-            IntakeErrorCode::InsufficientEscrow,
-            format!("escrow {balance} < committed {committed} + {}", o.maker_amount),
-        ));
+        .map_err(|e| reject(IntakeErrorCode::Internal, e.to_string()))?
+        .is_some_and(|v| v.direct);
+    if !direct {
+        let balance = state
+            .db
+            .balance(&o.maker_manager_id, &o.maker_token)
+            .await
+            .map_err(|e| reject(IntakeErrorCode::Internal, e.to_string()))?;
+        let committed = state
+            .db
+            .open_commitment(&o.maker_manager_id, &o.maker_token)
+            .await
+            .map_err(|e| reject(IntakeErrorCode::Internal, e.to_string()))?;
+        if balance < committed.saturating_add(o.maker_amount) {
+            return Err(reject(
+                IntakeErrorCode::InsufficientEscrow,
+                format!("escrow {balance} < committed {committed} + {}", o.maker_amount),
+            ));
+        }
     }
 
     // §5.4 step 5: write-ahead persist (status OPEN)

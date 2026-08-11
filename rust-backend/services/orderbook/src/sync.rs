@@ -19,10 +19,16 @@ use serde_json::Value;
 use sui_tx::events::{ChainEvent, EventClient};
 use tokio::sync::broadcast;
 
-use crate::db::{Db, NewFill, StoreError};
+use crate::db::{Db, NewFill, StoreError, VaultManagerRow};
 
 /// The exchange modules that emit events.
 const MODULES: [&str; 3] = ["settlement", "balance_manager", "registry"];
+
+/// The exchange_adapter module (a different package: the trading-vault
+/// adapter, SO-372). Its CustodyCreated events are the manager-mode map —
+/// which BMs belong to a vault, and whether they are direct (identity-only)
+/// managers whose escrow is the vault's free balances.
+const ADAPTER_MODULE: &str = "exchange_adapter";
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -75,6 +81,15 @@ pub enum ExchangeEvent {
     SignerRemoved {
         manager: SuiAddress,
         signer: SuiAddress,
+    },
+    /// exchange_adapter::CustodyCreated (SO-372): a trading vault custodied
+    /// a BalanceManager. `direct` managers settle through the adapter's
+    /// fill/match entries against vault free balances.
+    VaultCustody {
+        vault: SuiAddress,
+        custody: SuiAddress,
+        manager: SuiAddress,
+        direct: bool,
     },
 }
 
@@ -157,6 +172,15 @@ pub fn parse_event(ev: &ChainEvent) -> Option<ExchangeEvent> {
             manager: get_addr(j, "manager")?,
             signer: get_addr(j, "signer")?,
         }),
+        // exchange_adapter (SO-372). VaultQuoteFilled is deliberately not
+        // parsed: the exchange emits its normal FillEvent alongside, which
+        // is already the fill's source of truth here.
+        "CustodyCreated" => Some(ExchangeEvent::VaultCustody {
+            vault: get_addr(j, "vault_id")?,
+            custody: get_addr(j, "custody_id")?,
+            manager: get_addr(j, "balance_manager_id")?,
+            direct: j.get("direct")?.as_bool()?,
+        }),
         _ => None,
     }
 }
@@ -166,24 +190,51 @@ pub struct EventIngestor {
     db: Db,
     /// Exchange package id, `0x`-hex.
     package: String,
+    /// exchange_adapter package id (SO-372), `0x`-hex. `None` on
+    /// deployments without the trading-vault adapter — the adapter stream
+    /// simply doesn't subscribe.
+    adapter_package: Option<String>,
     poll_interval: Duration,
     page_size: u32,
     tx: broadcast::Sender<ExchangeEvent>,
 }
 
 impl EventIngestor {
-    pub fn new(events: EventClient, db: Db, package: String) -> Self {
+    pub fn new(
+        events: EventClient,
+        db: Db,
+        package: String,
+        adapter_package: Option<String>,
+    ) -> Self {
         let (tx, _) = broadcast::channel(4096);
         EventIngestor {
             events,
             db,
             package,
+            adapter_package,
             poll_interval: Duration::from_millis(500),
             // The GraphQL events query caps page size at 50 (observed live:
             // "Page size is too large: 100 > 50" — every poll failed).
             page_size: 50,
             tx,
         }
+    }
+
+    /// The module streams to poll: the exchange package's three modules
+    /// plus, when deployed, the exchange_adapter's. Each advances its own
+    /// persisted cursor.
+    fn streams(&self) -> Vec<(String, String)> {
+        let mut streams: Vec<(String, String)> = MODULES
+            .iter()
+            .map(|m| (format!("exchange-events:{m}"), format!("{}::{m}", self.package)))
+            .collect();
+        if let Some(pkg) = &self.adapter_package {
+            streams.push((
+                format!("exchange-adapter-events:{ADAPTER_MODULE}"),
+                format!("{pkg}::{ADAPTER_MODULE}"),
+            ));
+        }
+        streams
     }
 
     /// Subscribe to the typed event feed (book pruning, WS fanout, …).
@@ -194,10 +245,11 @@ impl EventIngestor {
     /// Run forever: poll each module stream from its persisted cursor,
     /// apply, publish, advance.
     pub async fn run(&self) {
+        let streams = self.streams();
         loop {
             let mut drained = true;
-            for module in MODULES {
-                match self.poll_module(module).await {
+            for (cursor_name, module) in &streams {
+                match self.poll_module(cursor_name, module).await {
                     Ok(has_more) => drained &= !has_more,
                     Err(e) => {
                         tracing::warn!(module, error = %e, "event poll failed; backing off");
@@ -212,17 +264,15 @@ impl EventIngestor {
     }
 
     /// One page of one module's stream; returns whether more pages remain.
-    pub async fn poll_module(&self, module: &str) -> Result<bool, SyncError> {
-        let cursor_name = format!("exchange-events:{module}");
-        let cursor = self.db.load_cursor(&cursor_name).await?;
+    pub async fn poll_module(
+        &self,
+        cursor_name: &str,
+        module: &str,
+    ) -> Result<bool, SyncError> {
+        let cursor = self.db.load_cursor(cursor_name).await?;
         let page = self
             .events
-            .query_by_module(
-                &format!("{}::{module}", self.package),
-                cursor.as_deref(),
-                self.page_size,
-                false,
-            )
+            .query_by_module(module, cursor.as_deref(), self.page_size, false)
             .await
             .map_err(|e| SyncError::Events(format!("{e:#}")))?;
         for ev in &page.data {
@@ -232,7 +282,7 @@ impl EventIngestor {
             }
         }
         if let Some(next) = &page.next_cursor {
-            self.db.save_cursor(&cursor_name, next).await?;
+            self.db.save_cursor(cursor_name, next).await?;
         }
         Ok(page.has_next_page)
     }
@@ -272,10 +322,20 @@ impl EventIngestor {
                 let inserted = self.db.apply_fill(fill).await?;
                 // Mirror the maker's escrow deltas when we know the manager
                 // (the stored order pins it). Net of the maker's own fee.
+                // Direct vault managers hold nothing — their escrow is the
+                // vault's free balances, which the mirror does not track.
                 if inserted {
                     if let Some(stored) = self.db.get_order(digest).await? {
                         let o = &stored.signed.order;
                         let manager = o.maker_manager_id;
+                        if self
+                            .db
+                            .vault_manager(&manager)
+                            .await?
+                            .is_some_and(|v| v.direct)
+                        {
+                            return Ok(());
+                        }
                         let (out_amt, in_amt) = if *maker_sold_base {
                             (*base_amount, quote_amount.saturating_sub(*maker_fee))
                         } else {
@@ -313,6 +373,16 @@ impl EventIngestor {
             }
             ExchangeEvent::SignerRemoved { manager, signer } => {
                 self.db.set_signer(manager, signer, false).await?;
+            }
+            ExchangeEvent::VaultCustody { vault, custody, manager, direct } => {
+                self.db
+                    .upsert_vault_manager(VaultManagerRow {
+                        manager_id: manager.to_hex(),
+                        vault_id: vault.to_hex(),
+                        custody_id: custody.to_hex(),
+                        direct: *direct,
+                    })
+                    .await?;
             }
         }
         Ok(())
@@ -390,6 +460,26 @@ mod tests {
             serde_json::json!({ "manager": "0x71", "owner": "0xa1", "signer": "0xcc" }),
         );
         assert!(matches!(parse_event(&e).unwrap(), ExchangeEvent::SignerRemoved { .. }));
+    }
+
+    #[test]
+    fn parses_adapter_custody_created() {
+        let e = ev(
+            "0xea::exchange_adapter::CustodyCreated",
+            serde_json::json!({
+                "vault_id": "0xf0",
+                "custody_id": "0xc1",
+                "balance_manager_id": "0xb2",
+                "direct": true,
+            }),
+        );
+        match parse_event(&e).unwrap() {
+            ExchangeEvent::VaultCustody { direct, manager, .. } => {
+                assert!(direct);
+                assert_eq!(manager, SuiAddress::parse("0xb2").unwrap());
+            }
+            other => panic!("wrong parse: {other:?}"),
+        }
     }
 
     #[test]

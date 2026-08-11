@@ -709,6 +709,9 @@ fn collect_participants(
         | ChainEvent::TvHaircutsSet(_)
         | ChainEvent::TvPayoutAssetAmended(_)
         | ChainEvent::TvExchangeCustodyCreated(_)
+        | ChainEvent::TvVaultQuoteFilled(_)
+        | ChainEvent::TvQuoteAdapterAdded(_)
+        | ChainEvent::TvQuoteAdapterRemoved(_)
         | ChainEvent::TvVaultClosing(_)
         | ChainEvent::TvVaultClosed(_)
         | ChainEvent::TvDepositsPaused(_)
@@ -1071,6 +1074,9 @@ fn stage_event_into_batch(
         | ChainEvent::TvHaircutsSet(_)
         | ChainEvent::TvPayoutAssetAmended(_)
         | ChainEvent::TvExchangeCustodyCreated(_)
+        | ChainEvent::TvVaultQuoteFilled(_)
+        | ChainEvent::TvQuoteAdapterAdded(_)
+        | ChainEvent::TvQuoteAdapterRemoved(_)
         | ChainEvent::TvAdapterAllowed(_)
         | ChainEvent::TvAdapterDisallowed(_)
         | ChainEvent::TvOracleAllowed(_)
@@ -2041,13 +2047,17 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
         }
         // Log-only trading-vault events: no materialised view — consumers
         // read them from the generic event feed (SO-370's allowlist /
-        // haircut / payout-amend events included).
+        // haircut / payout-amend events included; SO-372's quote-adapter
+        // set and direct-escrow fills follow the same posture).
         ChainEvent::TvSessionSettled(_)
         | ChainEvent::TvDepositAssetAdded(_)
         | ChainEvent::TvDepositAssetRemoved(_)
         | ChainEvent::TvHaircutsSet(_)
         | ChainEvent::TvPayoutAssetAmended(_)
         | ChainEvent::TvExchangeCustodyCreated(_)
+        | ChainEvent::TvVaultQuoteFilled(_)
+        | ChainEvent::TvQuoteAdapterAdded(_)
+        | ChainEvent::TvQuoteAdapterRemoved(_)
         | ChainEvent::TvAdapterAllowed(_)
         | ChainEvent::TvAdapterDisallowed(_)
         | ChainEvent::TvOracleAllowed(_)
