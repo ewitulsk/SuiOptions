@@ -43,3 +43,16 @@ lots = 4
 max_price_age_ms = 5_000
 max_publish_lag_ms = 10_000
 max_conf_bps = 0
+
+# ── Vault-direct escrow (SO-372) ────────────────────────────────────────
+# Quote as the direct-escrow vault's delegated signer: orders name the
+# identity BM below and settle from the vault's free balances per fill.
+# Ceremony ran 2026-08-11 (trading-vault-smoke --direct-escrow): custody
+# 0xff60855337b5cc45fe6eda2dde1decf94a3649cd6d9afd0495e2cba65271b4e8,
+# quote adapter enabled, this bot's wallet delegated as signer. Remove
+# this section to fall back to the funded-BM mode.
+[vault_direct]
+manager_id = "0xc719bb4cd8819ab03a0efe356cc2398af692425a6f9bd0d298f568b7bae60373"
+vault_id = "0xf3f228542d94d8cb9ceaf70da892f156acfadeeacac0cdbf733059aec84bd9d3"
+api_url = "http://api-service:9003"
+buffer_bps = 1_000
