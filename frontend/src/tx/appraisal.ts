@@ -51,6 +51,7 @@ import {
   typeNameString,
   vecSetItems,
   type CustodyPlan,
+  type ExchangeCustodyPlan,
   type OptionPositionPlan,
   type RfqTicketPlan,
 } from "../api/vaultHoldings";
@@ -60,6 +61,7 @@ import {
   ENV,
   EQUITY_ORACLE_PACKAGE_ID,
   EQUITY_ORACLE_PUBLISH_DIGEST,
+  EXCHANGE_ADAPTER_PACKAGE_ID,
   OPTIONS_ADAPTER_PACKAGE_ID,
   PYTH_PRICE_INFO_TABLE_IDS,
   TRADING_VAULT_OBJECTS,
@@ -139,6 +141,9 @@ export type AppraisalPlan = {
    * (canonical). */
   freeBalanceTypes: string[];
   custodies: CustodyPlan[];
+  /** Exchange-adapter custodies (SO-370) — valued from the shared BM's
+   * live balances; a direct custody has no assets and values to zero. */
+  exchangeCustodies: ExchangeCustodyPlan[];
   rfqTickets: RfqTicketPlan[];
   optionPositions: OptionPositionPlan[];
   /** Option-coin types priced via the options oracle (not Pyth). */
@@ -411,7 +416,7 @@ export async function planAppraisal(
   // 2. Classify every active custodied position via its object type (shared
   //    with the positions UI; strict mode throws the human-readable reason).
   const active = vault.positions.filter((p) => p.active);
-  const { custodies, rfqTickets, optionPositions, coinPositions } =
+  const { custodies, exchangeCustodies, rfqTickets, optionPositions, coinPositions } =
     await classifyVaultPositions(client, active);
 
   // 3. Every non-deposit asset needing a price: free balances ∪ custody
@@ -429,6 +434,9 @@ export async function planAppraisal(
       if (p.baseType !== accountingType) needed.add(p.baseType);
       if (p.quoteType !== accountingType) needed.add(p.quoteType);
     }
+  }
+  for (const xc of exchangeCustodies) {
+    for (const a of xc.assets) if (a !== accountingType) needed.add(a);
   }
   for (const t of rfqTickets) if (t.escrowType !== accountingType) needed.add(t.escrowType);
   for (const p of optionPositions) {
@@ -527,6 +535,9 @@ export async function planAppraisal(
     if (custodies.length > 0 && !DEEPBOOK_ADAPTER_PACKAGE_ID) {
       throw new Error("deepbook-adapter package not deployed on this network");
     }
+    if (exchangeCustodies.length > 0 && !EXCHANGE_ADAPTER_PACKAGE_ID) {
+      throw new Error("exchange-adapter package not deployed on this network");
+    }
     if ((rfqTickets.length > 0 || optionPositions.length > 0) && !OPTIONS_ADAPTER_PACKAGE_ID) {
       throw new Error("options-adapter package not deployed on this network");
     }
@@ -558,6 +569,7 @@ export async function planAppraisal(
       depositAssetType,
       freeBalanceTypes,
       custodies,
+      exchangeCustodies,
       rfqTickets,
       optionPositions,
       optionLegs,
@@ -577,6 +589,9 @@ export async function planAppraisal(
   if (custodies.length > 0 && !DEEPBOOK_ADAPTER_PACKAGE_ID) {
     throw new Error("deepbook-adapter package not deployed on this network");
   }
+  if (exchangeCustodies.length > 0 && !EXCHANGE_ADAPTER_PACKAGE_ID) {
+    throw new Error("exchange-adapter package not deployed on this network");
+  }
   if ((rfqTickets.length > 0 || optionPositions.length > 0) && !OPTIONS_ADAPTER_PACKAGE_ID) {
     throw new Error("options-adapter package not deployed on this network");
   }
@@ -586,6 +601,7 @@ export async function planAppraisal(
     depositAssetType,
     freeBalanceTypes,
     custodies,
+    exchangeCustodies,
     rfqTickets,
     optionPositions,
     optionLegs,
@@ -962,6 +978,30 @@ export function composeAppraisal(
       }
       tx.moveCall({
         target: `${adapterPkg}::deepbook_adapter::finalize_custody_appraisal`,
+        arguments: [vault, appraisal, ca],
+      });
+    }
+  }
+
+  // 5b. Exchange custodies (SO-370): valued from the SHARED manager's live
+  // balances. A direct custody (SO-372) tracks no assets — begin/finalize
+  // alone record zero.
+  if (plan.exchangeCustodies.length > 0) {
+    const adapterPkg = requireId(EXCHANGE_ADAPTER_PACKAGE_ID, "exchange-adapter package");
+    for (const custody of plan.exchangeCustodies) {
+      const ca = tx.moveCall({
+        target: `${adapterPkg}::exchange_adapter::begin_custody_appraisal`,
+        arguments: [vault, tx.pure.id(custody.custodyId)],
+      });
+      for (const asset of custody.assets) {
+        tx.moveCall({
+          target: `${adapterPkg}::exchange_adapter::value_asset`,
+          typeArguments: [asset],
+          arguments: [vault, cfg, ca, tx.object(custody.bmId), optAtt(asset), clock],
+        });
+      }
+      tx.moveCall({
+        target: `${adapterPkg}::exchange_adapter::finalize_custody_appraisal`,
         arguments: [vault, appraisal, ca],
       });
     }

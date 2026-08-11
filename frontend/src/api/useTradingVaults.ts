@@ -184,6 +184,75 @@ export function useAppraisalPlan(vault: TradingVaultDetail | null, depositAsset?
   });
 }
 
+/** Live state of one exchange custody's shared `BalanceManager` (SO-373):
+ * delegated order signers plus the manager's balance per tracked asset. */
+export type ExchangeBmState = {
+  signers: string[];
+  /** Canonical asset type → raw balance (decimal string); null when that
+   * balance field couldn't be read (shown as unknown, not zero). */
+  balances: Record<string, string | null>;
+};
+
+/**
+ * Read an exchange BalanceManager's approved signers and its balances for
+ * the custody's tracked assets. Balances live as `TypeName -> Balance<T>`
+ * dynamic fields on the manager — field ids derive client-side (chain
+ * `TypeName`s are full-width without the `0x`), the same posture as the
+ * queue-table reads below.
+ */
+export function useExchangeBm(bmId: string | null, assets: string[]) {
+  const client = useSuiGrpcClient();
+  return useQuery<ExchangeBmState, Error>({
+    queryKey: ["trading-vault-exchange-bm", bmId, assets.join(",")],
+    enabled: bmId !== null,
+    refetchInterval: 15_000,
+    queryFn: async () => {
+      const { object } = await client.core.getObject({
+        objectId: bmId as string,
+        include: { json: true },
+      });
+      const fields = structFields(object.json) ?? asRecord(object.json);
+      const signers = vecSetItems(fields?.approved_signers).filter(
+        (s): s is string => typeof s === "string",
+      );
+      const balances: Record<string, string | null> = {};
+      if (assets.length > 0) {
+        const fieldIds = assets.map((t) =>
+          deriveDynamicFieldID(
+            bmId as string,
+            "0x1::type_name::TypeName",
+            bcs.string().serialize(canon(t).replace(/^0x/, "")).toBytes(),
+          ),
+        );
+        const { objects } = await client.core.getObjects({
+          objectIds: fieldIds,
+          include: { json: true },
+        });
+        for (let i = 0; i < assets.length; i++) {
+          const entry = objects[i];
+          if (entry instanceof Error) {
+            balances[assets[i]] = null;
+            continue;
+          }
+          // `Balance<T>` renders either bare or as `{ value }`.
+          const v = structFields(entry.json)?.value;
+          const raw =
+            typeof v === "string" || typeof v === "number"
+              ? String(v)
+              : (() => {
+                  const inner = structFields(v)?.value;
+                  return typeof inner === "string" || typeof inner === "number"
+                    ? String(inner)
+                    : null;
+                })();
+          balances[assets[i]] = raw;
+        }
+      }
+      return { signers, balances };
+    },
+  });
+}
+
 /** One pending withdrawal-queue entry, read from the vault object (SO-370). */
 export type PendingWithdrawRequest = {
   /** Queue sequence number — `amend_payout_asset`'s handle. */

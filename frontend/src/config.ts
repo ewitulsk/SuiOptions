@@ -98,6 +98,8 @@ export let TRADING_VAULT_PUBLISH_DIGEST: string | undefined;
 export let ORACLE_PYTH_PACKAGE_ID: string | undefined;
 export let DEEPBOOK_ADAPTER_PACKAGE_ID: string | undefined;
 export let OPTIONS_ADAPTER_PACKAGE_ID: string | undefined;
+/** Hybrid-exchange maker adapter for the trading vault (SO-370). */
+export let EXCHANGE_ADAPTER_PACKAGE_ID: string | undefined;
 
 // Keeper-attested equity oracle for trading-vault external accounts
 // (SO-299). The publish digest resolves the shared `EquityBook` client-side
@@ -213,6 +215,7 @@ type PackageInfoDto = {
   oraclePyth?: { packageId: string } | null;
   deepbookAdapter?: { packageId: string } | null;
   optionsAdapter?: { packageId: string } | null;
+  exchangeAdapter?: { packageId: string } | null;
   equityOracle?: { packageId: string; publishDigest: string } | null;
   tradingVaultObjects?: {
     vaultProtocolConfigId: string;
@@ -260,6 +263,7 @@ export async function initConfig(): Promise<void> {
   ORACLE_PYTH_PACKAGE_ID = info.oraclePyth?.packageId;
   DEEPBOOK_ADAPTER_PACKAGE_ID = info.deepbookAdapter?.packageId;
   OPTIONS_ADAPTER_PACKAGE_ID = info.optionsAdapter?.packageId;
+  EXCHANGE_ADAPTER_PACKAGE_ID = info.exchangeAdapter?.packageId;
   EQUITY_ORACLE_PACKAGE_ID = info.equityOracle?.packageId;
   EQUITY_ORACLE_PUBLISH_DIGEST = info.equityOracle?.publishDigest;
   TRADING_VAULT_OBJECTS = info.tradingVaultObjects ?? undefined;

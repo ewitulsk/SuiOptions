@@ -85,6 +85,18 @@ export type CustodyPlan = {
   pools: PoolLegPlan[];
 };
 
+/** Exchange-adapter custody (SO-370): authority over a SHARED exchange
+ * `BalanceManager`, valued from the manager's live balances. */
+export type ExchangeCustodyPlan = {
+  custodyId: string;
+  /** Shared exchange `BalanceManager` the custody's OwnerCap controls. */
+  bmId: string;
+  /** Tracked manager assets (canonical); empty on a direct custody. */
+  assets: string[];
+  /** SO-372 direct-escrow mode: identity-only manager — fund/defund refuse. */
+  direct: boolean;
+};
+
 export type RfqTicketPlan = {
   ticketId: string;
   /** Canonical escrow coin type — the `E` type arg. */
@@ -111,6 +123,7 @@ export type CoinPositionPlan = {
 
 export type ClassifiedPositions = {
   custodies: CustodyPlan[];
+  exchangeCustodies: ExchangeCustodyPlan[];
   rfqTickets: RfqTicketPlan[];
   optionPositions: OptionPositionPlan[];
   coinPositions: CoinPositionPlan[];
@@ -133,12 +146,13 @@ export async function classifyVaultPositions(
 ): Promise<ClassifiedPositions> {
   const tolerant = opts?.tolerant ?? false;
   const custodies: CustodyPlan[] = [];
+  const exchangeCustodies: ExchangeCustodyPlan[] = [];
   const rfqTickets: RfqTicketPlan[] = [];
   const optionPositions: OptionPositionPlan[] = [];
   const coinPositions: CoinPositionPlan[] = [];
   const unclassified: string[] = [];
   if (positions.length === 0) {
-    return { custodies, rfqTickets, optionPositions, coinPositions, unclassified };
+    return { custodies, exchangeCustodies, rfqTickets, optionPositions, coinPositions, unclassified };
   }
 
   const { objects } = await client.core.getObjects({
@@ -180,6 +194,19 @@ export async function classifyVaultPositions(
           }
         }
         custodies.push({ custodyId: obj.objectId, assets, pools });
+      } else if (type.endsWith("::exchange_adapter::ExchangeCustody")) {
+        const bmId = idString(fields.bm_id);
+        if (!bmId) throw new Error(`Exchange custody ${obj.objectId} has no bm_id`);
+        const assets = vecSetItems(fields.assets)
+          .map(typeNameString)
+          .filter((t): t is string => t !== null)
+          .map(canon);
+        exchangeCustodies.push({
+          custodyId: obj.objectId,
+          bmId,
+          assets,
+          direct: fields.direct === true,
+        });
       } else if (type.endsWith("::options_adapter::RfqTicket")) {
         const escrow = typeNameString(fields.escrow_type);
         if (!escrow) throw new Error(`RFQ ticket ${obj.objectId} has no escrow_type`);
@@ -237,7 +264,7 @@ export async function classifyVaultPositions(
       }
     }
   }
-  return { custodies, rfqTickets, optionPositions, coinPositions, unclassified };
+  return { custodies, exchangeCustodies, rfqTickets, optionPositions, coinPositions, unclassified };
 }
 
 // ═══════════════════════════ UI holdings hook ═══════════════════════════
@@ -253,6 +280,7 @@ export type OptionBucketInfo = {
 
 export type VaultHolding =
   | { kind: "custody"; assets: string[]; pools: PoolLegPlan[] }
+  | { kind: "exchangeCustody"; bmId: string; assets: string[]; direct: boolean }
   | { kind: "rfq"; escrowType: string }
   | {
       kind: "option";
@@ -313,6 +341,14 @@ export function useVaultHoldings(vault: TradingVaultDetail | null) {
       const map = new Map<string, VaultHolding>();
       for (const cu of c.custodies) {
         map.set(cu.custodyId, { kind: "custody", assets: cu.assets, pools: cu.pools });
+      }
+      for (const xc of c.exchangeCustodies) {
+        map.set(xc.custodyId, {
+          kind: "exchangeCustody",
+          bmId: xc.bmId,
+          assets: xc.assets,
+          direct: xc.direct,
+        });
       }
       for (const t of c.rfqTickets) {
         map.set(t.ticketId, { kind: "rfq", escrowType: t.escrowType });
