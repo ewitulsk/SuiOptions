@@ -1,136 +1,74 @@
 # SuiOptions
 
-On-chain **American-style covered-call options** on the Sui blockchain, plus the automated **covered-call vaults** built on top of them and an experimental **wallet-rooted session-key** layer. This monorepo holds the Move contracts, the Rust off-chain services, the React frontend, and the AWS/Terraform infrastructure that runs it all.
+On-chain **American-style covered-call options** on the Sui blockchain: a pooled-bucket options primitive with FIFO exercise assignment, quoted off-chain over an RFQ WebSocket and settled on-chain. This repo holds the Move contracts, the Rust off-chain services that route and index the protocol, and the React frontend.
 
-The project is layered:
+📄 **Full design spec: [`docs/options-protocol-spec.md`](./docs/options-protocol-spec.md)**
 
-1. **Options Protocol** — the primary project. A pooled-bucket options primitive with FIFO exercise assignment via a monotonic cursor, quoted off-chain over an RFQ WebSocket and settled on-chain.
-2. **Covered-Call Vaults** — a secondary project built on the protocol. Ribbon-style weekly vaults that sell ~0.10-delta calls through an on-chain RFQ auction, cranked permissionlessly.
-3. **Session Tokens** — an experimental feature. Sign-In-With-Solana / Sign-In-With-Ethereum session keys that let a user drive the dApp without holding SUI or signing every transaction.
+## The core mechanism
 
----
+The protocol's defining characteristic is its **pooled-bucket model with FIFO exercise assignment via a monotonic cursor**. All writers of the same `(asset, expiry, strike, settlement)` contract share a single `Bucket` shared object with two monotonic counters, `total_written` and `exercise_cursor`. Each write occupies a contiguous range `[start, end)` on an unbounded number line; each exercise advances the cursor in O(1) without touching any position. At redemption, a position's outcome is determined entirely by where its range falls relative to the final cursor — mathematically equivalent to FIFO assignment, with O(1) state changes per exercise.
 
-## 1. Options Protocol (primary)
+This preserves the protocol's core economic property: early writers (who received lower premiums, when the option was less in-the-money) face exercise first; late writers (higher premiums) sit deeper in the queue. Exercise exposure corresponds to premium received.
 
-📄 **Full design spec: [`options-protocol-spec.md`](./options-protocol-spec.md)**
+Each option is a fungible **`Coin<Call>`** whose One-Time-Witness currency is generated per roll, with the bucket holding the sole `TreasuryCap` — so outstanding coin supply always equals outstanding options, and bucket isolation is a type-system guarantee rather than a runtime check. Holders get native coin semantics (wallet balances, `split`/`join`) for free.
 
-The defining characteristic is its **pooled-bucket model with FIFO exercise assignment via a monotonic cursor**. All writers of the same `(asset, expiry, strike, settlement)` contract share a single `Bucket` shared object. Exercises advance an `exercise_cursor` in O(1); each writer's outcome is determined by where their write-range `[start, end)` falls relative to the cursor at expiry. Each option is a fungible `Coin<Call>` whose currency is generated per roll, with the bucket holding the sole `TreasuryCap` — so coin supply always equals outstanding options and bucket isolation is a type-system guarantee.
+Two symmetric RFQ flows serve retail on both sides — writers selling covered calls to trader MMs, and traders buying covered calls from writer MMs — through a single unified on-chain entry point driven by MM-signed quotes (Ed25519 over BCS, nonce-tracked, TTL-bounded). Cash-secured puts (`put_bucket`) mirror the covered-call design with cash collateral.
 
-### On-chain (Sui Move) — [`contracts/`](./contracts)
+## On-chain contracts (Sui Move) — [`contracts/`](./contracts)
+
+The protocol ships as Move packages with one-way boundaries. The primary package is **`core`** (`options_core`, zero third-party deps):
 
 | Module | Responsibility |
 |--------|----------------|
-| [`bucket.move`](./contracts/sources/bucket.move) | Bucket shared object, cursor logic, `execute_write` / `exercise` / `redeem` / cleanup |
-| [`account.move`](./contracts/sources/account.move) | Per-user `Account` custody (asset-agnostic balances + signing key + nonces) |
-| [`quote.move`](./contracts/sources/quote.move) | Signed-quote struct + Ed25519/secp signature verification + nonce tracking |
-| [`position.move`](./contracts/sources/position.move) | `Position` object + redemption math |
-| [`admin.move`](./contracts/sources/admin.move) · [`treasury.move`](./contracts/sources/treasury.move) | AdminCap, protocol config, fee treasury |
-| [`events.move`](./contracts/sources/events.move) · [`errors.move`](./contracts/sources/errors.move) | Event types and error codes |
-| [`rfq.move`](./contracts/sources/rfq.move) · [`swap_auction.move`](./contracts/sources/swap_auction.move) | On-chain RFQ auction + Pyth-bounded proceeds swap (used by the vault) |
-| [`vault.move`](./contracts/sources/vault.move) · [`oracle.move`](./contracts/sources/oracle.move) | Vault rounds/shares/fees + Pyth oracle guardrails |
-| `session_*.move` | `_with_session` twins of every user-facing entrypoint (see §3) |
+| [`bucket.move`](./contracts/core/sources/bucket.move) | `Bucket` shared object, cursor logic, write / exercise / redeem / cleanup |
+| [`put_bucket.move`](./contracts/core/sources/put_bucket.move) | Cash-secured-put twin of `bucket.move` |
+| [`position.move`](./contracts/core/sources/position.move) | `Position` object (write-range `[start, end)`) + redemption math |
+| [`quote.move`](./contracts/core/sources/quote.move) | `Quote` struct + Ed25519 signature verification + nonce tracking |
+| [`quote_signer.move`](./contracts/core/sources/quote_signer.move) | `QuoteSigner` (signing key + nonces; v0.3 collateral abstraction) |
+| [`collateral.move`](./contracts/core/sources/collateral.move) | `CollateralRequest` hot-potato flow routing collateral release to external packages |
+| [`admin.move`](./contracts/core/sources/admin.move) · [`treasury.move`](./contracts/core/sources/treasury.move) | `AdminCap`, protocol config, fee treasury |
+| [`events.move`](./contracts/core/sources/events.move) · [`errors.move`](./contracts/core/sources/errors.move) | Event types and error codes |
+
+Quote-driven collateral custody lives outside core (v0.3): the signed `Quote` carries `collateral_source` / `release_package` / `release_module` fields that route collateral release to any package implementing the standardized `release<T>` interface — the first-party implementation is [`contracts/mm-collateral`](./contracts/mm-collateral). Historical packages that no longer ship live under [`contracts/.deprecated/`](./contracts/.deprecated).
 
 ```
-cd contracts && sui move test && sui move build
+cd contracts/core && sui move test && sui move build
 ```
 
----
+## Off-chain services (Rust) — [`rust-backend/`](./rust-backend)
 
-## 2. Covered-Call Vaults (secondary)
+The spec defines two off-chain deliverables, both under [`rust-backend/services/`](./rust-backend/services):
 
-📄 **Full implementation guide: [`docs/vault-implementation-guide/`](./docs/vault-implementation-guide/README.md)**
+- **quoting-service** — a stateful WebSocket RFQ router between retail frontends and MM bots. Authenticates MMs by a signing-key challenge, broadcasts RFQs to the opposite side, validates returned signed quotes (signature, expiry, balance feasibility), and returns them to retail sorted by price. **Holds no funds and signs nothing** — it is a routing and bookkeeping layer; the on-chain revert is always the safety net.
+- **indexer** — tails the chain's event stream for the protocol package, persists every event, materializes derived views (per-account balances, per-bucket cursor state, per-position status), and fans events out to the quoting service and frontends. Read-only with respect to the chain; kept separate so indexing load never touches quoting latency.
 
-Per-asset (SUI/USDC, wBTC/USDC) weekly covered-call vaults aligned to the option-scheduler's bucket families. Users deposit underlying; at each roll the vault sells calls at the bucket nearest a 0.10-delta strike through the **on-chain RFQ**; at expiry it redeems positions and converts exercised proceeds back to underlying through an **on-chain swap auction**. Because the vault writes at bucket creation it sits at the front of the FIFO queue `[0, Q)`, so its worst case is exactly the textbook covered call — every protocol feature only improves on it. The whole round lifecycle is a **permissionless crank**.
-
-Guide chapters:
-
-- [01 — Contract modularization](./docs/vault-implementation-guide/01-contract-modularization.md)
-- [02 — On-chain RFQ](./docs/vault-implementation-guide/02-onchain-rfq.md)
-- [03 — Vault contract](./docs/vault-implementation-guide/03-vault-contract.md)
-- [04 — Vault keeper](./docs/vault-implementation-guide/04-vault-keeper.md)
-- [05 — Off-chain service changes](./docs/vault-implementation-guide/05-offchain-services.md)
-- [06 — Backtesting engine (`vault-sim`)](./docs/vault-implementation-guide/06-vault-sim.md)
-- [07 — Testing and rollout](./docs/vault-implementation-guide/07-testing-and-rollout.md)
-
----
-
-## 3. Session Tokens (experimental)
-
-📄 **Overview: [`session-tokens/README.md`](./session-tokens/README.md)** · Full design: [`sui-siws-session-key-spec.md`](./session-tokens/sui-siws-session-key-spec.md)
-
-Wallet-rooted session keys for Sui. A user signs in **once** with a Solana (SIWS) or Ethereum (SIWE / EIP-4361) wallet, minting a scoped, expiring, revocable on-chain `SessionCap` to a browser-generated ephemeral key. That key then acts within enforced limits, with a sponsor paying gas, **without prompting for a signature on every transaction** — differentiated for the cross-chain-identity case (drive a Sui dApp without ever holding SUI).
-
-Now **integrated into the options protocol**: `contracts/` defines `_with_session` twins of every user-facing entrypoint, the gas station sponsors the session PTB shapes, and the frontend's account dropdown owns the full session lifecycle. The TypeScript browser SDK lives at [`frontend/siws-session-sdk/`](./frontend/siws-session-sdk) (consumed from source so the app's single `npm install` resolves it). The highest-risk seam is the canonical signed message, which the Move package and SDK serialize byte-for-byte identically and pin against shared test vectors.
-
----
-
-## 4. Backend services (Rust) — [`rust-backend/`](./rust-backend/README.md)
-
-📄 **Detailed README: [`rust-backend/README.md`](./rust-backend/README.md)** (covers the core services, the `control-panel` TUI, and operator CLIs in depth)
-
-Long-running services under [`rust-backend/services/`](./rust-backend/services):
-
-| Service | What it does |
-|---------|--------------|
-| **indexer** | Tails Sui checkpoints, BCS-decodes protocol events, materializes per-account/bucket/position views, serves a GraphQL query API |
-| **quoting-service** | Stateful WebSocket RFQ router between retail frontends and MM bots; authenticates MMs, validates signed quotes, tracks reservations + reputation. Holds no funds, signs nothing |
-| **mm-bot** | Market-maker bot — bootstraps an Account, prices RFQs with Black-Scholes, signs and ships quotes (and bids the on-chain vault RFQ) |
-| **option-scheduler** | Bucket-creation lifecycle bot; rolls a fresh vol-aware strike-grid family weekly. Holds AdminCap |
-| **keeper** | Permissionless **vault keeper** — cranks the vault state machine (select strike → open/settle RFQ → redeem → swap proceeds → finalize round). Holds only a gas wallet |
-| **api-service** | HTTP read layer over the indexer's GraphQL (buckets, positions, dashboard, metrics) for the frontend |
-| **token-info** | Single source of truth for the supported-token catalog + on-chain deployment ids; all other services read it via `token-info-client` |
-| **oracle-service** | Single internal Pyth gateway — one Hermes subscription, caches live prices + realized vol, re-broadcasts over REST + WS |
-| **gas-station** | Sponsors frontend (and session) transactions: accepts PTBs, injects sponsor signature against protocol-specific templates |
-| **auth-service** | JWT auth for admin access; validates signed personal-messages from configured admin wallets |
-| **price-charting** | Charts DeepBook execution history into Postgres and samples vault APY metrics |
-| **balance-monitor** | Watches service-wallet balances and alerts below configurable thresholds |
-
-Supporting [`crates/`](./rust-backend/crates) (libraries): `protocol-types` (canonical BCS/JSON wire types), `sui-tx` (RPC + PTB builders + quote signing), `pricing` (Black-Scholes + greeks), `pyth-client` / `oracle-client`, `deployments` / `token-info-client` / `runtime-config` (config + on-chain id loaders), `indexer-graphql`, `api-service-client`, `auth-client`, `observability` (logs/metrics/traces), `cli-spec`, and `vault-sim` (the vault backtesting engine).
-
-Operator [`tools/`](./rust-backend/tools): `deployment-manager` (publishes the Move package, writes `deployments.json`), `exchange` (admin CLI), `control-panel` (TUI to run/edit/tail every binary), `writer` / `trader` / `mm-quote` (test clients), `backtester` (vault Monte Carlo), `rfq-monitor`, `deepbook-pool-test`.
+The canonical quote format shared by the services and the chain is the BCS encoding of the `Quote` struct, transmitted over WebSocket as JSON with numeric fields as decimal strings (see spec §4).
 
 ```
 cd rust-backend && cargo check --workspace && cargo test --workspace
-cargo run -p control-panel   # TUI to run everything from one screen
 ```
 
----
+## Frontend — [`frontend/`](./frontend)
 
-## 5. Frontend — [`frontend/`](./frontend/README.md)
-
-Vite + React 18 + TypeScript dApp (Sui dapp-kit), deployed on **Vercel**, with PostHog product analytics and an "aqua"-themed CSS design system. Major areas: **Composer** (quote builder + live MM pricing), **Dashboard** (on-chain positions, exercise/claim), **Vault** (covered-call vault management), **Activity** (indexer event log), **Admin**, and **Faucet**. The session-key lifecycle (sign-in / restore / fund / withdraw / revoke) lives in `src/session/` and the account dropdown, backed by [`siws-session-sdk/`](./frontend/siws-session-sdk).
+React dApp implementing the spec's retail flows: browse buckets (populated from the indexer, with live queue-position display from bucket cursor updates), request quotes over the RFQ WebSocket, execute the chosen signed quote in a PTB, and manage positions (exercise before expiry, redeem after). MM bots are not part of the deliverables — the spec defines only their interface.
 
 ```
 cd frontend && npm install && npm run dev
 ```
 
----
-
-## 6. Infrastructure & deployment — [`rust-backend/infra/`](./rust-backend/infra/README.md)
-
-📄 [`infra/README.md`](./rust-backend/infra/README.md) · [`infra/COST.md`](./rust-backend/infra/COST.md)
-
-**AWS, Terraform-provisioned.** All services run as **docker-compose** on EC2 hosts (separate `staging` and `prod` hosts), fronted by an ALB (HTTPS via ACM/Route 53) that routes `/{env}/{service}` path prefixes, with nginx reverse-proxying on the host. State lives in **RDS Postgres 16**; price-charting uses an external TimescaleDB. The EC2 host doubles as a **Tailscale subnet router** for team-direct DB access. Observability is a containerized stack on the host — **Prometheus / Grafana / Tempo / Loki** — wired by the `observability` crate's `alert_id` convention.
-
-Deploys ([`rust-backend/deployment/`](./rust-backend/deployment)): GitHub Actions runs `affected.py` to find changed services, `bake.hcl` builds per-service Docker images and pushes them to **ECR**, then `ec2/deploy.sh` pulls the affected images and runs `docker compose` on the host. `deployments.json` is bind-mounted (not baked in), so a contract redeploy doesn't require rebuilding images.
-
-> Team VPN / Tailscale access notes: [`VPN.md`](./VPN.md).
-
----
-
 ## Repository map
 
 ```
-options-2/
-├── contracts/                  # Sui Move package (options protocol + vault + RFQ + session twins)
-├── options-protocol-spec.md    # Protocol design spec (primary project)
-├── docs/vault-implementation-guide/   # Covered-call vault design + build guide (secondary)
-├── session-tokens/             # Experimental SIWS/SIWE session keys (Move + SDK + demo)
+options/
+├── docs/options-protocol-spec.md   # The protocol design spec
+├── contracts/
+│   ├── core/                       # options_core — the protocol package
+│   ├── mm-collateral/              # first-party collateral-release implementation
+│   └── .deprecated/                # retired packages, kept for history
 ├── rust-backend/
-│   ├── services/               # indexer, quoting, mm-bot, scheduler, keeper, api, oracle, …
-│   ├── crates/                 # shared libraries (protocol-types, sui-tx, pricing, vault-sim, …)
-│   ├── tools/                  # deployment-manager, exchange, control-panel, test clients
-│   ├── infra/                  # Terraform (AWS: EC2, ALB, RDS, ECR, Tailscale, observability)
-│   └── deployment/             # docker-compose, bake, deploy scripts, nginx, monitoring
-└── frontend/                   # Vite + React dApp (Vercel) + siws-session-sdk/
+│   └── services/
+│       ├── quoting-service/        # WebSocket RFQ router (spec §5)
+│       └── indexer/                # event indexer + fanout (spec §6)
+├── frontend/                       # React dApp (spec §7)
+└── .deprecated/                    # retired top-level projects
 ```

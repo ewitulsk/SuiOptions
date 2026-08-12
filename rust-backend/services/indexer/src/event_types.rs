@@ -51,16 +51,19 @@ use protocol_types::ids::{ObjectId, SuiAddress};
 const EVENTS_MODULE: &str = "events";
 
 /// The published package ids the protocol's events resolve to. `core`,
-/// `auction` and `rfq` are required — `main.rs` fails at boot when token-info
-/// is missing one; the rest are optional and simply don't subscribe.
+/// Only `core` is required; the rest are optional and simply don't
+/// subscribe when absent.
 #[derive(Debug, Clone, Copy)]
 pub struct PackageIds<'a> {
     /// options_core.
     pub core: &'a str,
-    /// Generic auction venue.
-    pub auction: &'a str,
-    /// options_rfq adapter.
-    pub rfq: &'a str,
+    /// Generic auction venue. Optional since the venue's retirement: the
+    /// package is no longer published (see contracts/.deprecated/auction),
+    /// so its event families simply don't subscribe.
+    pub auction: Option<&'a str>,
+    /// options_rfq adapter. Optional, retired with the auction venue
+    /// (see contracts/.deprecated/rfq).
+    pub rfq: Option<&'a str>,
     /// options_vault. Optional since SO-332: the covered-call vault product
     /// is deprecated and the package is no longer published, so its event
     /// families simply don't subscribe (same posture as `trading_vault`).
@@ -220,8 +223,17 @@ pub struct EventTypes {
 impl EventTypes {
     pub fn for_packages(pkgs: PackageIds<'_>, deepbook_original_package_id: Option<&str>) -> Self {
         let core = |name: &str| format!("{}::{EVENTS_MODULE}::{name}", pkgs.core);
-        let auction = |name: &str| format!("{}::{EVENTS_MODULE}::{name}", pkgs.auction);
-        let rfq = |name: &str| format!("{}::{EVENTS_MODULE}::{name}", pkgs.rfq);
+        // Retired auction/options_rfq venue: same "unset" placeholder the
+        // deprecated-vault families use — it never matches a real on-chain
+        // type, so the variants stay in `dispatch` but can never fire.
+        let auction = |name: &str| match pkgs.auction {
+            Some(pkg) => format!("{pkg}::{EVENTS_MODULE}::{name}"),
+            None => format!("unset::{EVENTS_MODULE}::{name}"),
+        };
+        let rfq = |name: &str| match pkgs.rfq {
+            Some(pkg) => format!("{pkg}::{EVENTS_MODULE}::{name}"),
+            None => format!("unset::{EVENTS_MODULE}::{name}"),
+        };
         // Deprecated covered-call vault (SO-332): same "unset" placeholder the
         // trading-vault families use — it never matches a real on-chain type,
         // so the variants stay in `dispatch` but can never fire.
@@ -915,7 +927,7 @@ mod tests {
         "0xfb28c4cbc6865bd1c897d26aecbe1f8792d1509a20ffec692c800660cbec6982";
 
     fn pkgs() -> PackageIds<'static> {
-        PackageIds { core: PKG, auction: AUCTION_PKG, rfq: RFQ_PKG, vault: Some(VAULT_PKG), trading_vault: Some(TV_PKG), deepbook_adapter: None, options_adapter: None, exchange_adapter: None, equity_oracle: Some(EQUITY_ORACLE_PKG) }
+        PackageIds { core: PKG, auction: Some(AUCTION_PKG), rfq: Some(RFQ_PKG), vault: Some(VAULT_PKG), trading_vault: Some(TV_PKG), deepbook_adapter: None, options_adapter: None, exchange_adapter: None, equity_oracle: Some(EQUITY_ORACLE_PKG) }
     }
 
     fn types() -> EventTypes {

@@ -38,9 +38,9 @@ use sui_move_build::BuildConfig;
 /// Keep in lockstep with the publish sequence in `main.rs`. A package
 /// that ships but is missing here is exactly the gap this test closes.
 const PUBLISHABLE: &[&str] = &[
-    "auction",
+    // `auction` and `rfq` are retired (contracts/.deprecated/) and no
+    // longer published, so they are deliberately absent here.
     "core",
-    "rfq",
     "trading-vault",
     "oracle-pyth",
     "oracle-switchboard",
@@ -51,6 +51,7 @@ const PUBLISHABLE: &[&str] = &[
     // Hybrid exchange settlement package (standalone audit scope; published
     // by the default protocol pipeline, or alone via --deploy-exchange).
     "exchange",
+    "exchange-adapter",
 ];
 
 fn contracts_root() -> PathBuf {

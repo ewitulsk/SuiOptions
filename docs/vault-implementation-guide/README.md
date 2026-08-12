@@ -19,7 +19,7 @@
 the existing options protocol — on-chain RFQ, contract modularization, the vault itself, a
 permissionless keeper, off-chain service changes, and the backtesting engine (`vault-sim`).
 
-The companion protocol spec is [`options-protocol-spec.md`](../../options-protocol-spec.md).
+The companion protocol spec is [`options-protocol-spec.md`](../options-protocol-spec.md).
 This guide assumes the protocol as **implemented** (per-bucket fungible `Coin<Call>`,
 `strike/strike_scale` ratio model), not as originally spec'd.
 

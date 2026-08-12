@@ -81,8 +81,10 @@ pub enum InitialBidPolicy {
     Max,
 }
 
-/// `[desk.auctions]` section. Enabled by default when the desk runs —
-/// the auctions are the vault slices' primary exit.
+/// `[desk.auctions]` section. RETIRED: the on-chain auction venue is
+/// deprecated — `options_adapter::bid_on_auction` no longer exists in
+/// fresh deployments (see contracts/.deprecated/auction). Disabled by
+/// default; do not enable against a post-retirement deployment.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AuctionsConfig {
@@ -103,7 +105,7 @@ pub struct AuctionsConfig {
 impl Default for AuctionsConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             poll_secs: default_poll_secs(),
             initial_bid: InitialBidPolicy::ReservePlus,
             shade_bps: default_shade_bps(),

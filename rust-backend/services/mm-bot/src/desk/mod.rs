@@ -698,8 +698,11 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         });
     }
 
-    // On-chain auction channel: bids escrow from VAULT balances via
-    // `options_adapter::bid_on_auction` (BidTicket custody).
+    // RETIRED on-chain auction channel (bids escrowed from VAULT
+    // balances via `options_adapter::bid_on_auction`): the auction venue
+    // is deprecated and the entry function no longer exists in fresh
+    // deployments, so this stays off unless explicitly re-enabled
+    // against a pre-retirement deployment.
     if p.cfg.auctions.enabled {
         match (p.options_adapter_package, curator_refs) {
             (Some(options_adapter_package), Some(curator)) => {

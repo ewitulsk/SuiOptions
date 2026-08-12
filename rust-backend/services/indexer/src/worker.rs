@@ -46,8 +46,8 @@ impl ProtocolEventWorker {
         let types = EventTypes::for_packages(packages, deepbook_original_package_id);
         info!(
             core = packages.core,
-            auction = packages.auction,
-            rfq = packages.rfq,
+            auction = packages.auction.unwrap_or("<retired>"),
+            rfq = packages.rfq.unwrap_or("<retired>"),
             vault = packages.vault.unwrap_or("<deprecated, SO-332>"),
             "indexer worker listening for events"
         );
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn dispatch_round_trips_a_bucket_created_event_into_store() {
         let types = EventTypes::for_packages(
-            event_types::PackageIds { core: "0xabc", auction: "0xa1", rfq: "0xf1", vault: Some("0xe1"), trading_vault: None, deepbook_adapter: None, options_adapter: None, exchange_adapter: None, equity_oracle: None },
+            event_types::PackageIds { core: "0xabc", auction: Some("0xa1"), rfq: Some("0xf1"), vault: Some("0xe1"), trading_vault: None, deepbook_adapter: None, options_adapter: None, exchange_adapter: None, equity_oracle: None },
             None,
         );
         let store = Store::new();

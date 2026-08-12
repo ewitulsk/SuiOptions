@@ -195,9 +195,9 @@ pub enum ErrorClass {
 
 /// Move abort codes that mean "the state changed between read and
 /// submit". Vault + oracle codes keep their historical values in
-/// `contracts/vault/sources/errors.move`; core codes live in
-/// `contracts/core/sources/errors.move`; 3/4 come from the generic
-/// auction venue (`contracts/auction/sources/errors.move`).
+/// `contracts/.deprecated/vault/sources/errors.move`; core codes live in
+/// `contracts/core/sources/errors.move`; 3/4 come from the retired
+/// generic auction venue (`contracts/.deprecated/auction/sources/errors.move`).
 const BENIGN_ABORTS: &[u64] = &[
     3,  // auction_closed
     4,  // auction_not_closed (deadline got sniped out)
