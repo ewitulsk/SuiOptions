@@ -55,20 +55,12 @@ async fn main() -> Result<()> {
             format!("fetching package_id from token-info at {}", cfg.token_info_url)
         })?;
     let core_package_id = snapshot.package_info.package_id.clone();
-    // Four-package layout: the auction / options_rfq ids are required — a
-    // deployment record missing one predates the split and can't be indexed,
-    // so fail at boot rather than silently dropping their events.
-    let auction_package_id = snapshot
-        .auction()
-        .map(|p| p.package_id.clone())
-        .ok_or_else(|| anyhow::anyhow!("token-info package_info is missing the auction package id"))?;
-    let rfq_package_id = snapshot
-        .rfq()
-        .map(|p| p.package_id.clone())
-        .ok_or_else(|| anyhow::anyhow!("token-info package_info is missing the rfq package id"))?;
-    // options_vault is the exception: the covered-call vault product is
-    // deprecated (SO-332) and the package is no longer published, so its
-    // absence is expected and its 17 event families just don't subscribe.
+    // auction / options_rfq are retired along with options_vault (SO-332):
+    // the packages are no longer published (see contracts/.deprecated/), so
+    // their absence is expected and their event families just don't
+    // subscribe.
+    let auction_package_id = snapshot.auction().map(|p| p.package_id.clone());
+    let rfq_package_id = snapshot.rfq().map(|p| p.package_id.clone());
     let vault_package_id = snapshot.vault().map(|p| p.package_id.clone());
     // DeepBook PoolCreated events resolve to the ORIGINAL package id (SO-152).
     // Absent on networks without a DeepBook deployment — ingestion of pool
@@ -87,8 +79,8 @@ async fn main() -> Result<()> {
     info!(
         network = %cfg.network,
         core_package_id = %core_package_id,
-        auction_package_id = %auction_package_id,
-        rfq_package_id = %rfq_package_id,
+        auction_package_id = %auction_package_id.as_deref().unwrap_or("<retired>"),
+        rfq_package_id = %rfq_package_id.as_deref().unwrap_or("<retired>"),
         vault_package_id = %vault_package_id.as_deref().unwrap_or("<deprecated, SO-332>"),
         deepbook_original = %deepbook_original.as_deref().unwrap_or("<none>"),
         trading_vault_package_id = %trading_vault_package_id.as_deref().unwrap_or("<none>"),
@@ -212,8 +204,8 @@ async fn main() -> Result<()> {
         repo.clone(),
         indexer::event_types::PackageIds {
             core: &core_package_id,
-            auction: &auction_package_id,
-            rfq: &rfq_package_id,
+            auction: auction_package_id.as_deref(),
+            rfq: rfq_package_id.as_deref(),
             vault: vault_package_id.as_deref(),
             trading_vault: trading_vault_package_id.as_deref(),
             deepbook_adapter: deepbook_adapter_package_id.as_deref(),

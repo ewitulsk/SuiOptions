@@ -16,17 +16,11 @@ use_environment = "testnet"
 manifest_digest = "7AFB66695545775FBFBB2D3078ADFD084244D5002392E837FDE21D9EA1C6D01C"
 deps = { MoveStdlib = "MoveStdlib" }
 
-[pinned.testnet.auction]
-source = { local = "../auction" }
-use_environment = "testnet"
-manifest_digest = "5745706258F61D6CE210904B3E6AE87A73CE9D31A6F93BE4718C442529332A87"
-deps = { std = "MoveStdlib", sui = "Sui" }
-
 [pinned.testnet.options_adapter]
 source = { root = true }
 use_environment = "testnet"
-manifest_digest = "80F995220C0755D37EA3F32B536BB973C665629B86FB2B46B7AF8A63958E2271"
-deps = { auction = "auction", options_core = "options_core", std = "MoveStdlib", sui = "Sui", trading_vault = "trading_vault" }
+manifest_digest = "8E8378D89E3DE4BD82A4D68AD26064EF861BE01843373163BEE7AF703076931C"
+deps = { options_core = "options_core", std = "MoveStdlib", sui = "Sui", trading_vault = "trading_vault" }
 
 [pinned.testnet.options_core]
 source = { local = "../core" }

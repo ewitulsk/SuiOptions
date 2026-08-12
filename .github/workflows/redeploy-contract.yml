@@ -679,11 +679,12 @@ jobs:
           git add "rust-backend/services/indexer/config/config.${ENV}.toml"
           # Each package publish rewrites its Published.toml to the fresh id;
           # keep the repo's record in sync with what's live.
-          # contracts/vault is not in this list: options_vault is deprecated
-          # and no longer published (SO-332), so its Published.toml is stale
-          # by design and must not be re-stamped.
-          git add contracts/core/Published.toml contracts/auction/Published.toml \
-                  contracts/rfq/Published.toml contracts/exchange/Published.toml
+          # The contracts/.deprecated/ packages (vault, auction, rfq) are not
+          # in this list: they are no longer published, so their
+          # Published.toml files are stale by design and must not be
+          # re-stamped.
+          git add contracts/core/Published.toml \
+                  contracts/exchange/Published.toml
           # mm-bot collateral routing for the fresh core (absent when this
           # env has no mm-bot). Ships to the host in the deploy bundle.
           git add rust-backend/services/mm-bot/config/collateral.*.toml || true

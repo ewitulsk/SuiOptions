@@ -94,8 +94,9 @@ slippage_bps        = 5
 funding_rate_annual = 0.05
 
 # ── Testnet counterparty sim (SO-299) ──────────────────────────────────
-# Retail stand-in: opens covered-call RFQ auctions (the desk's auction
-# channel is the intended bidder) + redeems expired wallet Positions.
+# Retail stand-in: redeems expired wallet Positions + faucet funding.
+# (Its RFQ-auction opener is retired with the options_rfq package and
+# idles now that token-info carries no rfq id.)
 [sim]
 enabled = true
 

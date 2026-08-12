@@ -1,7 +1,7 @@
 # rust-backend
 
 Off-chain services for the Sui covered-call options protocol (see
-`../options-protocol-spec.md`).
+`../docs/options-protocol-spec.md`).
 
 Organized into three buckets:
 

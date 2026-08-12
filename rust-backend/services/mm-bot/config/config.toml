@@ -177,13 +177,11 @@ enabled            = false
 # slippage_bps = 5.0          # default: paper_slippage_bps
 # funding_rate_annual = 0.0   # default: paper_funding_rate_annual
 
-# [desk.auctions]             # on-chain RFQ channel (calls + puts)
-# Bids escrow from VAULT balances (options_adapter::bid_on_auction →
-# BidTicket custody; keeper cranks burn tickets back into the vault).
-# enabled = true
-# poll_secs = 10
-# initial_bid = "reserve_plus"
-# max_concurrent_escrow = 5_000_000_000  # cap on total live-ticket cost
+# [desk.auctions]             # RETIRED on-chain RFQ channel
+# The auction venue is deprecated (contracts/.deprecated/auction):
+# `options_adapter::bid_on_auction` no longer exists in fresh
+# deployments. Disabled by default; do not enable.
+# enabled = false
 
 # [desk.exits]
 # enabled = true
@@ -216,14 +214,10 @@ enabled            = false
 # naked_vega_cap_nav_per_volpt = 0.001
 
 # ── Testnet counterparty sim (SO-299) ──────────────────────────────────
-# The desk's test counterparty: opens covered-call RFQ auctions as a
-# retail stand-in (faucet-minted underlying → rfq::create_call_auction)
-# and redeems expired wallet Positions. Hard-gated: testnet + faucets
-# only; never raises alert_ids.
+# The desk's test counterparty: redeems expired wallet Positions and
+# funds via faucets. Hard-gated: testnet + faucets only; never raises
+# alert_ids. (Its auction opener is retired with the options_rfq
+# package — the opener idles when token-info carries no rfq id.)
 # [sim]
 # enabled = true
 # fund_interval_secs = 120
-# auction_amount = 100_000_000
-# auction_reserve_bps = 50    # reserve = 0.5% of slice spot notional
-# auction_duration_secs = 600
-# max_open_auctions = 3

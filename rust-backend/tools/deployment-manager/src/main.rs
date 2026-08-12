@@ -342,12 +342,6 @@ async fn deploy_one(
 
     // Publish the tree in dependency order; each publish stamps its
     // Published.toml so the next build resolves the fresh id.
-    let auction_out =
-        publish_dep_package(&client, &signer, &contracts_root.join("auction"), "auction", env, gas_budget)
-            .await
-            .with_context(|| format!("publishing auction to {network}"))?;
-    tracing::info!(package = %auction_out.package_id, "auction published");
-
     let publish = publish_package(&client, &signer, &contracts_root.join("core"), env, gas_budget)
         .await
         .with_context(|| format!("publishing options_core to {network}"))?;
@@ -359,18 +353,14 @@ async fn deploy_one(
         "options_core published"
     );
 
-    let rfq_out =
-        publish_dep_package(&client, &signer, &contracts_root.join("rfq"), "options_rfq", env, gas_budget)
-            .await
-            .with_context(|| format!("publishing options_rfq to {network}"))?;
-    tracing::info!(package = %rfq_out.package_id, "options_rfq published");
-
     // `vault` (options_vault) is NOT published: the covered-call vault product
-    // is deprecated (SO-332). The package still builds — see
-    // contracts/vault/DEPRECATED.md — it just never reaches chain, so fresh
-    // deployment records carry no `vault` block. Every consumer treats it as
-    // optional; do not reinstate this step without also re-enabling the
-    // product's off-chain surface.
+    // is deprecated (SO-332). Neither are `auction` and `options_rfq`: the
+    // on-chain RFQ/auction venue is retired (the desk writes through the
+    // VaultMm quote path). All three live under contracts/.deprecated/ —
+    // see their DEPRECATED.md files. Fresh deployment records carry no
+    // `auction` / `rfq` / `vault` blocks; every consumer treats them as
+    // optional. Do not reinstate a publish step without also re-enabling
+    // the product's off-chain surface.
     let trading_vault_out = publish_dep_package(
         &client,
         &signer,
@@ -449,8 +439,9 @@ async fn deploy_one(
     .with_context(|| format!("publishing equity_oracle to {network}"))?;
     tracing::info!(package = %equity_oracle_out.package_id, "equity_oracle published");
 
-    // `vault: None` — options_vault is no longer published (SO-332).
-    let (auction, rfq, vault) = (Some(record(&auction_out)), Some(record(&rfq_out)), None);
+    // All `None` — options_vault (SO-332) and the auction/options_rfq venue
+    // are no longer published; see contracts/.deprecated/.
+    let (auction, rfq, vault) = (None, None, None);
     let (trading_vault, oracle_pyth) =
         (Some(record(&trading_vault_out)), Some(record(&oracle_pyth_out)));
     let oracle_switchboard = Some(record(&oracle_switchboard_out));

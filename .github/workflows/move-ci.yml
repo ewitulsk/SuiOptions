@@ -58,14 +58,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every package `deployment-manager` publishes. `vault`
-        # (options_vault) is absent because it is deprecated and no longer
-        # published (SO-332) — see contracts/vault/DEPRECATED.md; its
-        # sources and tests stay in-tree but are not built here.
+        # Every package `deployment-manager` publishes. The
+        # contracts/.deprecated/ packages (vault SO-332, auction, rfq) are
+        # absent because they are no longer published — see each package's
+        # DEPRECATED.md; their sources stay in-tree but are not built here.
         package:
           - core
-          - auction
-          - rfq
           - mm-collateral
           - trading-vault
           - oracle-pyth
