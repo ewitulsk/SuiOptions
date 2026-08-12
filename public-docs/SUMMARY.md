@@ -1,18 +1,37 @@
 # Table of contents
 
 * [Pismo Protocol](README.md)
+* [Capital Efficiency](capital-efficiency.md)
 
-## Concepts
+## Pismo Options
 
-* [Options & Buckets](concepts/options-and-buckets.md)
-* [Writing & Trading Options](concepts/writing-and-trading.md)
-* [Covered-Call Vaults](concepts/vaults.md)
+* [Overview](options/overview.md)
+* [Buckets & Assignment](options/buckets-and-assignment.md)
+* [Trading Options](options/trading.md)
+* [Market Making](options/market-making.md)
+* [Limitations & Trust](options/limitations-and-trust.md)
 
-## Guides
+## Pismo Exchange
 
-* [Getting Started](guides/getting-started.md)
+* [Overview](exchange/overview.md)
+* [How It Works](exchange/how-it-works.md)
+* [vs. On-Chain Order Books](exchange/vs-onchain-orderbooks.md)
+* [Limitations & Trust](exchange/limitations-and-trust.md)
+
+## Pismo Vaults
+
+* [Overview](vaults/overview.md)
+* [How Vaults Work](vaults/how-vaults-work.md)
+* [The Curator Security Model](vaults/curator-security-model.md)
+* [Venues](vaults/venues.md)
+* [For Depositors](vaults/for-depositors.md)
+* [Limitations & Trust](vaults/limitations-and-trust.md)
+
+## Protocol Infrastructure
+
+* [Architecture](infrastructure/architecture.md)
+* [Oracles & Attestations](infrastructure/oracles.md)
 
 ## Reference
 
-* [Security & Trust Model](security.md)
 * [FAQ](faq.md)
