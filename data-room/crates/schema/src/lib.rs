@@ -329,14 +329,20 @@ pub fn write_parquet(batch: &RecordBatch) -> anyhow::Result<Vec<u8>> {
 /// deterministic file. Exists so a dense day (2M+ perp trades) never
 /// needs all its rows in memory at once; peak usage is one chunk.
 pub struct TradesWriter {
-    w: ArrowWriter<Vec<u8>>,
+    w: ArrowWriter<std::fs::File>,
+    tmp: tempfile::NamedTempFile,
     rows: usize,
 }
 
 impl TradesWriter {
+    /// Output accumulates in a TEMP FILE, not memory: a dense month holds
+    /// 30+ concurrent day writers, and their combined compressed output
+    /// (1.5 GB+ for 2023-01 BTCUSDT) OOM'd the 2 GB host when buffered.
     pub fn new() -> anyhow::Result<Self> {
-        let w = ArrowWriter::try_new(Vec::new(), Arc::new(trades_schema()), Some(writer_props()))?;
-        Ok(Self { w, rows: 0 })
+        let tmp = tempfile::NamedTempFile::new()?;
+        let file = tmp.reopen()?;
+        let w = ArrowWriter::try_new(file, Arc::new(trades_schema()), Some(writer_props()))?;
+        Ok(Self { w, tmp, rows: 0 })
     }
 
     /// Chunk rows MUST already be in cross-chunk sorted order; each chunk
@@ -354,8 +360,11 @@ impl TradesWriter {
         self.rows
     }
 
-    pub fn finish(self) -> anyhow::Result<Vec<u8>> {
-        Ok(self.w.into_inner()?)
+    /// Close the parquet stream; the finished file lives at the returned
+    /// temp path until dropped.
+    pub fn finish(self) -> anyhow::Result<tempfile::NamedTempFile> {
+        self.w.close()?;
+        Ok(self.tmp)
     }
 }
 

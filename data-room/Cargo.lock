@@ -2231,6 +2231,7 @@ dependencies = [
  "parquet",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
