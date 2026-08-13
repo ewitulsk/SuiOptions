@@ -3,6 +3,8 @@
 // non-admins hitting `/admin` directly are redirected to `/earn`.
 //
 // Surfaces every admin-gated contract entrypoint:
+//   - access control: ingress whitelist + big red button   (standalone
+//     whitelist.move + trading-vault/exchange registry.move pause legs)
 //   - per-bucket invalidate / revalidate / cleanup        (bucket.move)
 //   - set protocol fee (set_fee_bps)                       (admin.move)
 //   - withdraw treasury fees / (re)create the treasury     (treasury.move)
@@ -11,22 +13,37 @@ import { useMemo, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 import type { Transaction } from "@mysten/sui/transactions";
+import { isValidSuiAddress, normalizeSuiAddress } from "@mysten/sui/utils";
 import { useSubmitTransaction } from "../tx/submit";
 
 import { Toast } from "../components/Toast";
 import { TokenManager } from "../components/TokenManager";
 import { useBuckets } from "../api/useBuckets";
 import { useAdminCap } from "../api/useAdminCap";
+import { useWhitelist } from "../api/useWhitelist";
 import type { Bucket, Series } from "../api/client";
 import {
   buildCleanupBucketTx,
   buildCreateTreasuryTx,
   buildInvalidateBucketTx,
+  buildPauseIngressTx,
   buildRevalidateBucketTx,
   buildSetFeeBpsTx,
+  buildSetWhitelistEnabledTx,
+  buildUnpauseIngressTx,
+  buildWhitelistAddTx,
+  buildWhitelistRemoveTx,
   buildWithdrawTx,
+  type IngressPauseParams,
+  type IngressWhitelistParams,
 } from "../tx/admin";
-import { PROTOCOL_CONFIG_ID, TREASURY_ID } from "../config";
+import {
+  EXCHANGE_MARKETS,
+  PROTOCOL_CONFIG_ID,
+  TRADING_VAULT_OBJECTS,
+  TREASURY_ID,
+  WHITELIST_ID,
+} from "../config";
 
 function scaleRaw(raw: string, decimals: number | null): string {
   if (decimals === null) return raw;
@@ -45,6 +62,7 @@ export function Admin() {
   const wallet = account?.address ?? null;
   const adminCap = useAdminCap(wallet);
   const buckets = useBuckets();
+  const whitelist = useWhitelist();
   const submitTx = useSubmitTransaction();
 
   const [toast, setToast] = useState<string | null>(null);
@@ -78,6 +96,8 @@ export function Admin() {
     return <Navigate to="/earn" replace />;
   }
   const adminCapId = adminCap.data.adminCapId;
+  const exchangeAdminCapId = adminCap.data.exchangeAdminCapId;
+  const whitelistAdminCapId = adminCap.data.whitelistAdminCapId;
 
   const flash = (msg: string) => {
     setToast(msg);
@@ -85,17 +105,21 @@ export function Admin() {
   };
 
   // Sign + execute one PTB, tracking a `busy` key so individual buttons can
-  // show their own pending state and disable while in flight.
-  const run = async (key: string, build: () => Transaction, ok: string) => {
+  // show their own pending state and disable while in flight. Returns
+  // whether the submit succeeded (access control clears its input on it).
+  const run = async (key: string, build: () => Transaction, ok: string): Promise<boolean> => {
     setBusy(key);
     try {
       const tx = build();
       await submitTx(tx);
       flash(`✓ ${ok}`);
       buckets.refetch();
+      whitelist.refetch();
+      return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       flash(`failed · ${message}`);
+      return false;
     } finally {
       setBusy(null);
     }
@@ -111,6 +135,16 @@ export function Admin() {
             cap {adminCapId.slice(0, 6)}…{adminCapId.slice(-4)}
           </div>
         </div>
+
+        {/* ── Access control ──────────────────────────────────────── */}
+        <AccessControl
+          busy={busy}
+          run={run}
+          adminCapId={adminCapId}
+          exchangeAdminCapId={exchangeAdminCapId}
+          whitelistAdminCapId={whitelistAdminCapId}
+          whitelist={whitelist}
+        />
 
         {/* ── Buckets ─────────────────────────────────────────────── */}
         <section className="admin-section">
@@ -284,6 +318,240 @@ export function Admin() {
 
       {toast && <Toast message={toast} />}
     </div>
+  );
+}
+
+// ── Access control (guarded launch) ────────────────────────────────────
+//
+// ONE standalone whitelist package (`whitelist::whitelist`): one shared
+// `Whitelist` object gating ingress across core / trading-vault / exchange,
+// mutated with its own `whitelist::AdminCap`. The big-red-button pause
+// additionally flips the trading-vault and per-market exchange registry
+// pause flags (core / exchange caps) in the same PTB.
+
+const memberGrid = { gridTemplateColumns: "3.2fr 0.8fr" };
+
+const MSG_GO_PUBLIC =
+  "Disable whitelist enforcement (go public)?\n\n" +
+  "Anyone will be able to deposit, write, and fill — protocol-wide. " +
+  "Membership is retained on-chain, so re-enabling restores the current cohort.";
+const MSG_ENFORCE =
+  "Enforce the whitelist?\n\n" +
+  "Only listed members will be able to deposit, write, and fill — protocol-wide. " +
+  "Exits (withdrawals, cancels, exercises) are never gated.";
+const MSG_PAUSE =
+  "PAUSE ALL INGRESS?\n\n" +
+  "This blocks ALL deposits, writes, and fills protocol-wide: the ingress whitelist, " +
+  "the trading vaults, and every exchange market. " +
+  "Exits (withdrawals, cancels, exercises) stay open — nobody is stranded.";
+const MSG_UNPAUSE =
+  "Unpause ingress?\n\n" +
+  "Deposits, writes, and fills resume protocol-wide (the whitelist, the trading vaults, " +
+  "and every exchange market), subject to whitelist enforcement.";
+
+function AccessControl({
+  busy,
+  run,
+  adminCapId,
+  exchangeAdminCapId,
+  whitelistAdminCapId,
+  whitelist,
+}: {
+  busy: string | null;
+  run: (key: string, build: () => Transaction, ok: string) => Promise<boolean>;
+  adminCapId: string;
+  exchangeAdminCapId: string | null;
+  whitelistAdminCapId: string | null;
+  whitelist: ReturnType<typeof useWhitelist>;
+}) {
+  const [addr, setAddr] = useState("");
+
+  const wl = whitelist.data ?? null;
+  const configMissing = !WHITELIST_ID;
+  const missingCap = !configMissing && !whitelistAdminCapId;
+  const canMutate = !configMissing && !missingCap && wl != null;
+
+  const ids = (): IngressWhitelistParams => ({
+    whitelistAdminCapId: whitelistAdminCapId as string,
+    whitelistId: WHITELIST_ID as string,
+  });
+  const pauseIds = (): IngressPauseParams => ({
+    ...ids(),
+    coreAdminCapId: adminCapId,
+    vaultProtocolConfigId: TRADING_VAULT_OBJECTS?.vaultProtocolConfigId ?? null,
+    exchangeAdminCapId,
+    markets: EXCHANGE_MARKETS,
+  });
+
+  const members = [...(wl?.members ?? [])].sort((a, b) => a.localeCompare(b));
+
+  const trimmed = addr.trim();
+  const addrValid =
+    /^0x[0-9a-fA-F]{1,64}$/.test(trimmed) && isValidSuiAddress(normalizeSuiAddress(trimmed));
+  const normalized = addrValid ? normalizeSuiAddress(trimmed) : null;
+  // VecSet insert aborts on duplicates — block re-adding an existing member.
+  const addable = normalized !== null && !members.includes(normalized);
+
+  const paused = !!wl?.ingressPaused;
+  const enforced = !!wl?.whitelistEnabled;
+  const status = paused ? "PAUSED" : enforced ? "GATED" : "OPEN";
+  const statusClass =
+    status === "PAUSED"
+      ? "admin-tag--danger"
+      : status === "GATED"
+        ? "admin-tag--ok"
+        : "admin-tag--mute";
+
+  const addMember = async () => {
+    if (!normalized || !addable) return;
+    const ok = await run(
+      "wl-add",
+      () => buildWhitelistAddTx(ids(), normalized),
+      "member added",
+    );
+    if (ok) setAddr("");
+  };
+
+  return (
+    <section className="admin-section">
+      <div className="admin-section__head">
+        <h2 className="admin-section__title">Access control</h2>
+        <div className="admin-section__sub">
+          guarded-launch ingress whitelist · one list gates the whole protocol ·
+          exits are never gated
+        </div>
+      </div>
+
+      {/* status banner */}
+      <div className="admin-actions-row" style={{ alignItems: "center", marginBottom: 14 }}>
+        <span className={`admin-tag ${statusClass}`}>{status}</span>
+        {whitelist.isLoading && <span className="admin-cell__dim">loading whitelist state…</span>}
+        {whitelist.error && (
+          <span className="admin-cell__dim">
+            failed to read whitelist · {whitelist.error.message}
+          </span>
+        )}
+        {paused && (
+          <span className="admin-cell__dim">
+            all deposits/writes/fills blocked · exits stay open
+          </span>
+        )}
+      </div>
+
+      {configMissing && (
+        <div className="admin-empty">
+          No whitelist is deployed for this environment — cannot target the
+          shared <code>Whitelist</code>.
+        </div>
+      )}
+      {missingCap && (
+        <div className="admin-empty">
+          This wallet does not hold the <code>whitelist::AdminCap</code> —
+          access-control changes are disabled.
+        </div>
+      )}
+
+      {/* member table */}
+      {!whitelist.isLoading && members.length === 0 && (
+        <div className="admin-empty">no whitelisted members yet.</div>
+      )}
+      {members.length > 0 && (
+        <div className="admin-table">
+          <div className="admin-table__head admin-table__row" style={memberGrid}>
+            <span>Member</span>
+            <span>Actions</span>
+          </div>
+          {members.map((member) => (
+            <div className="admin-table__row" style={memberGrid} key={member}>
+              <code className="admin-cell__id" style={{ fontSize: 12 }}>
+                {member}
+              </code>
+              <span className="admin-cell__actions">
+                <button
+                  className="admin-btn admin-btn--danger"
+                  disabled={!canMutate || busy !== null}
+                  onClick={() =>
+                    run(
+                      `wl-rm-${member}`,
+                      () => buildWhitelistRemoveTx(ids(), member),
+                      "member removed",
+                    )
+                  }
+                >
+                  {busy === `wl-rm-${member}` ? "…" : "Remove"}
+                </button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* add member */}
+      <div className="admin-grid" style={{ marginTop: 12 }}>
+        <Field label="Add address">
+          <input
+            className="admin-field__input"
+            placeholder="0x…"
+            value={addr}
+            onChange={(e) => setAddr(e.target.value)}
+          />
+        </Field>
+      </div>
+      <div className="admin-actions-row">
+        <button
+          className="admin-btn admin-btn--primary"
+          disabled={!canMutate || busy !== null || !addable}
+          title={
+            trimmed && !addrValid
+              ? "not a valid 0x address"
+              : normalized && !addable
+                ? "already a member"
+                : undefined
+          }
+          onClick={addMember}
+        >
+          {busy === "wl-add" ? "adding…" : "Add member"}
+        </button>
+      </div>
+
+      {/* levers */}
+      <div className="admin-actions-row" style={{ marginTop: 18 }}>
+        <button
+          className="admin-btn"
+          disabled={!canMutate || busy !== null}
+          title="Go-public lever: flips whitelist enforcement"
+          onClick={() => {
+            if (!window.confirm(enforced ? MSG_GO_PUBLIC : MSG_ENFORCE)) return;
+            run(
+              "wl-enabled",
+              () => buildSetWhitelistEnabledTx(ids(), !enforced),
+              enforced ? "whitelist disabled — protocol is public" : "whitelist enforced",
+            );
+          }}
+        >
+          {busy === "wl-enabled"
+            ? "…"
+            : enforced
+              ? "Disable whitelist (go public)"
+              : "Enforce whitelist"}
+        </button>
+        <button
+          className={paused ? "admin-btn" : "admin-btn admin-btn--danger"}
+          disabled={!canMutate || busy !== null}
+          title="Big red button: pauses all ingress protocol-wide; exits stay open"
+          onClick={() => {
+            if (!window.confirm(paused ? MSG_UNPAUSE : MSG_PAUSE)) return;
+            run(
+              "wl-paused",
+              () => (paused ? buildUnpauseIngressTx(pauseIds()) : buildPauseIngressTx(pauseIds())),
+              paused ? "ingress unpaused" : "ingress paused protocol-wide",
+            );
+          }}
+        >
+          {busy === "wl-paused" ? "…" : paused ? "Unpause ingress" : "Pause all ingress"}
+        </button>
+      </div>
+    </section>
   );
 }
 
