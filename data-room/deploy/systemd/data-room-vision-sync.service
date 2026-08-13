@@ -17,3 +17,4 @@ Type=oneshot
 WorkingDirectory=/opt/data-room
 # since last synced month).
 ExecStart=/usr/bin/docker compose run --rm batch vision-sync
+ExecStart=/usr/bin/docker compose run --rm batch vision-sync --market um --symbols BTCUSDT --kinds trades,aggTrades,fundingRate

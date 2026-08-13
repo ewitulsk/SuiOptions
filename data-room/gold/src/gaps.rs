@@ -51,6 +51,10 @@ fn intervals(mut markers: Vec<(i64, String)>, day_end_ns: i64) -> Vec<(i64, i64)
     out
 }
 
+/// Exchanges whose bronze markers are audited. Extend when a venue
+/// gains a live collector connection.
+const EXCHANGES: &[&str] = &["coinbase", "hyperliquid"];
+
 pub async fn compute_day(store: &Store, date: &str) -> anyhow::Result<usize> {
     let day = NaiveDate::parse_from_str(date, "%Y-%m-%d")?;
     let day_end_ns = (day + chrono::Duration::days(1))
@@ -60,15 +64,26 @@ pub async fn compute_day(store: &Store, date: &str) -> anyhow::Result<usize> {
         .timestamp_nanos_opt()
         .unwrap();
 
-    // marker lines per stream from every bronze file of the day.
-    let keys = read::list_keys(store, "bronze/v1/exchange=coinbase/").await?;
-    let mut per_stream: BTreeMap<String, Vec<(i64, String)>> = BTreeMap::new();
+    // marker lines per (exchange, stream) from every bronze file of
+    // the day, across all collected exchanges.
+    let mut keys: Vec<String> = Vec::new();
+    for ex in EXCHANGES {
+        keys.extend(read::list_keys(store, &format!("bronze/v1/exchange={ex}/")).await?);
+    }
+    let mut per_stream: BTreeMap<(String, String), Vec<(i64, String)>> = BTreeMap::new();
     for key in keys
         .iter()
         .filter(|k| k.contains(&format!("/date={date}/")))
     {
         let Some(stream) = key
             .split("/stream=")
+            .nth(1)
+            .and_then(|s| s.split('/').next())
+        else {
+            continue;
+        };
+        let Some(exchange) = key
+            .split("/exchange=")
             .nth(1)
             .and_then(|s| s.split('/').next())
         else {
@@ -85,7 +100,7 @@ pub async fn compute_day(store: &Store, date: &str) -> anyhow::Result<usize> {
             if let Ok(bl) = serde_json::from_str::<BronzeLine>(line) {
                 if let Some(m) = bl.marker {
                     per_stream
-                        .entry(stream.to_string())
+                        .entry((exchange.to_string(), stream.to_string()))
                         .or_default()
                         .push((bl.ts_recv_ns, m));
                 }
@@ -93,10 +108,10 @@ pub async fn compute_day(store: &Store, date: &str) -> anyhow::Result<usize> {
         }
     }
 
-    let mut rows: Vec<(String, i64, i64)> = Vec::new();
-    for (stream, markers) in per_stream {
+    let mut rows: Vec<(String, String, i64, i64)> = Vec::new();
+    for ((exchange, stream), markers) in per_stream {
         for (start, end) in intervals(markers, day_end_ns) {
-            rows.push((stream.clone(), start, end));
+            rows.push((exchange.clone(), stream.clone(), start, end));
         }
     }
 
@@ -105,16 +120,16 @@ pub async fn compute_day(store: &Store, date: &str) -> anyhow::Result<usize> {
         Arc::new(gaps_schema()),
         vec![
             Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|_| "coinbase"),
+                rows.iter().map(|(e, _, _, _)| e.as_str()),
             )),
             Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|(s, _, _)| s.as_str()),
+                rows.iter().map(|(_, s, _, _)| s.as_str()),
             )),
             Arc::new(Int64Array::from_iter_values(
-                rows.iter().map(|(_, s, _)| *s),
+                rows.iter().map(|(_, _, s, _)| *s),
             )),
             Arc::new(Int64Array::from_iter_values(
-                rows.iter().map(|(_, _, e)| *e),
+                rows.iter().map(|(_, _, _, e)| *e),
             )),
             Arc::new(StringArray::from_iter_values(
                 rows.iter().map(|_| "disconnect"),
@@ -124,9 +139,7 @@ pub async fn compute_day(store: &Store, date: &str) -> anyhow::Result<usize> {
     let bytes = schema::write_parquet(&batch)?;
     store
         .put(
-            &object_store::path::Path::from(format!(
-                "gold/v1/gaps/exchange=coinbase/date={date}/part-00.parquet"
-            )),
+            &object_store::path::Path::from(format!("gold/v1/gaps/date={date}/part-00.parquet")),
             bytes.into(),
         )
         .await?;

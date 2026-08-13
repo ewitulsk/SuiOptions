@@ -26,6 +26,7 @@ pub use instrument::Instrument;
 pub enum CanonicalEvent {
     Trade(Trade),
     BookTop(BookTop),
+    Funding(FundingRate),
     /// Collector lifecycle marker (connect/disconnect) — consumed by the
     /// gold `gaps` job, never normalized into silver tables.
     Marker(Marker),
@@ -58,6 +59,23 @@ pub struct BookTop {
     pub bid_sz: f64,
     pub ask_px: f64,
     pub ask_sz: f64,
+    pub src_file: String,
+    pub src_line: i32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FundingRate {
+    pub ts_event: Option<i64>,
+    pub ts_recv: Option<i64>,
+    pub exchange: String,
+    pub instrument_id: String,
+    /// Per-interval rate as the venue quotes it.
+    pub rate: f64,
+    pub interval_hours: f64,
+    /// "predicted" (streamed live estimate) | "settled" (finalized).
+    pub kind: String,
+    pub mark_price: Option<f64>,
+    pub index_price: Option<f64>,
     pub src_file: String,
     pub src_line: i32,
 }
@@ -211,6 +229,75 @@ pub fn book_top_batch(mut rows: Vec<BookTop>) -> anyhow::Result<RecordBatch> {
         ],
     )?;
     Ok(batch)
+}
+
+pub fn funding_rates_schema() -> Schema {
+    let mut f = vec![
+        Field::new("ts_event", DataType::Int64, true),
+        Field::new("ts_recv", DataType::Int64, true),
+        Field::new("exchange", DataType::Utf8, false),
+        Field::new("instrument_id", DataType::Utf8, false),
+        Field::new("rate", DataType::Float64, false),
+        Field::new("interval_hours", DataType::Float64, false),
+        Field::new("kind", DataType::Utf8, false),
+        Field::new("mark_price", DataType::Float64, true),
+        Field::new("index_price", DataType::Float64, true),
+    ];
+    f.extend(lineage_fields());
+    Schema::new(f)
+}
+
+pub fn funding_rates_batch(mut rows: Vec<FundingRate>) -> anyhow::Result<RecordBatch> {
+    rows.sort_by(|a, b| {
+        sort_key(a.ts_recv, a.ts_event, &a.src_file, a.src_line).cmp(&sort_key(
+            b.ts_recv,
+            b.ts_event,
+            &b.src_file,
+            b.src_line,
+        ))
+    });
+    let batch = RecordBatch::try_new(
+        Arc::new(funding_rates_schema()),
+        vec![
+            opt_i64(rows.iter().map(|r| r.ts_event)),
+            opt_i64(rows.iter().map(|r| r.ts_recv)),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.exchange.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.instrument_id.as_str()),
+            )),
+            Arc::new(Float64Array::from_iter_values(rows.iter().map(|r| r.rate))),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|r| r.interval_hours),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.kind.as_str()),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.mark_price).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.index_price).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.src_file.as_str()),
+            )),
+            Arc::new(Int32Array::from_iter_values(
+                rows.iter().map(|r| r.src_line),
+            )),
+        ],
+    )?;
+    Ok(batch)
+}
+
+/// funding_rates partitions split by row kind so the live (predicted)
+/// normalizer and the settled backfill job overwrite independently:
+/// `part-predicted.parquet` / `part-settled.parquet` in one partition dir.
+pub fn funding_silver_key(exchange: &str, symbol: &str, date: &str, kind: &str) -> String {
+    format!(
+        "silver/v1/funding_rates/exchange={exchange}/symbol={symbol}/date={date}/part-{kind}.parquet"
+    )
 }
 
 // -- Deterministic parquet writing --------------------------------------

@@ -49,9 +49,12 @@ docker compose run --rm batch gold --date 2026-08-12 rv
 ## One-shot full Binance backfill (R3)
 
 ```bash
-docker compose run --rm batch vision-sync            # everything, ~5 GB, minutes
+docker compose run --rm batch vision-sync            # spot: everything, ~5 GB
 docker compose run --rm batch vision-sync --since 2024-01   # or bounded
-docker compose run --rm batch normalizer vision      # zips → silver (per-day)
+docker compose run --rm batch vision-sync --market um --symbols BTCUSDT --kinds trades,aggTrades,fundingRate   # perps
+docker compose run --rm batch normalizer vision      # spot zips → silver
+docker compose run --rm batch normalizer vision --market um --symbols BTCUSDT   # perp zips → silver (incl. funding)
+docker compose run --rm batch normalizer funding-settled --coins BTC --from 2023-01-01   # hyperliquid settled backfill
 ```
 
 Reconcile: row counts per day vs the dump line counts; spot-check a month

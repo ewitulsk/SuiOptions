@@ -39,6 +39,28 @@ pub fn instrument_id(native: &str) -> Option<String> {
     ))
 }
 
+/// Perp instrument id for a um-futures symbol: "BTCUSDT" →
+/// "btc-usdt-perp.binance". Dated futures ("BTCUSDT_240628") are not
+/// perps and return None.
+pub fn perp_instrument_id(native: &str) -> Option<String> {
+    if native.contains('_') {
+        return None;
+    }
+    let (base, quote) = split_symbol(native)?;
+    Some(format!(
+        "{}-{}-perp.{}",
+        base.to_lowercase(),
+        quote.to_lowercase(),
+        EXCHANGE
+    ))
+}
+
+/// Silver `symbol=` partition for a perp: "BTC-USDT-PERP".
+pub fn perp_partition_symbol(native: &str) -> Option<String> {
+    let (base, quote) = split_symbol(native)?;
+    Some(format!("{base}-{quote}-PERP"))
+}
+
 /// Epoch of unknown resolution → nanoseconds. Dumps have used ms (13
 /// digits) and µs (16 digits); accept seconds and ns too for robustness.
 fn epoch_to_ns(v: i64) -> i64 {
@@ -67,11 +89,13 @@ pub fn parse_trades_csv<R: Read>(
     native_symbol: &str,
     src_file: &str,
 ) -> Result<(Vec<Trade>, Vec<Reject>), anyhow::Error> {
+    let instrument = instrument_id(native_symbol)
+        .ok_or_else(|| anyhow::anyhow!("cannot split symbol {native_symbol}"))?;
     let mut out = Vec::new();
     let mut rejects = Vec::new();
     for_each_trade(
         reader,
-        native_symbol,
+        &instrument,
         src_file,
         |t| out.push(t),
         |r| rejects.push(r),
@@ -84,13 +108,12 @@ pub fn parse_trades_csv<R: Read>(
 /// trade-id / time ordered).
 pub fn for_each_trade<R: Read>(
     reader: R,
-    native_symbol: &str,
+    instrument: &str,
     src_file: &str,
     mut on_trade: impl FnMut(Trade),
     mut on_reject: impl FnMut(Reject),
 ) -> Result<(), anyhow::Error> {
-    let instrument = instrument_id(native_symbol)
-        .ok_or_else(|| anyhow::anyhow!("cannot split symbol {native_symbol}"))?;
+    let instrument = instrument.to_string();
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
@@ -142,6 +165,66 @@ pub fn for_each_trade<R: Read>(
         }
     }
     Ok(())
+}
+
+/// Parse a um-futures `fundingRate` CSV (header:
+/// `calc_time,funding_interval_hours,last_funding_rate`, ms epochs).
+/// Rows are settled rates; `ts_recv` is None (archive-sourced).
+pub fn parse_funding_csv<R: Read>(
+    reader: R,
+    native_symbol: &str,
+    src_file: &str,
+) -> Result<(Vec<schema::FundingRate>, Vec<Reject>), anyhow::Error> {
+    let instrument = perp_instrument_id(native_symbol)
+        .ok_or_else(|| anyhow::anyhow!("not a perp symbol: {native_symbol}"))?;
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(reader);
+
+    let mut out = Vec::new();
+    let mut rejects = Vec::new();
+    for (i, rec) in rdr.records().enumerate() {
+        let line = i as i32;
+        let rec = match rec {
+            Ok(r) => r,
+            Err(e) => {
+                rejects.push(Reject {
+                    src_file: src_file.into(),
+                    src_line: line,
+                    reason: e.to_string(),
+                });
+                continue;
+            }
+        };
+        if i == 0 && rec.get(0) == Some("calc_time") {
+            continue;
+        }
+        let parsed = (|| -> Option<schema::FundingRate> {
+            Some(schema::FundingRate {
+                ts_event: Some(epoch_to_ns(rec.get(0)?.parse().ok()?)),
+                ts_recv: None,
+                exchange: EXCHANGE.into(),
+                instrument_id: instrument.clone(),
+                rate: rec.get(2)?.parse().ok()?,
+                interval_hours: rec.get(1)?.parse().ok()?,
+                kind: "settled".into(),
+                mark_price: None,
+                index_price: None,
+                src_file: src_file.into(),
+                src_line: line,
+            })
+        })();
+        match parsed {
+            Some(f) => out.push(f),
+            None => rejects.push(Reject {
+                src_file: src_file.into(),
+                src_line: line,
+                reason: format!("bad funding record: {rec:?}"),
+            }),
+        }
+    }
+    Ok((out, rejects))
 }
 
 #[cfg(test)]
@@ -203,6 +286,48 @@ mod tests {
         let (rows, rejects) = parse_trades_csv(csv.as_bytes(), "BTCUSDC", "f").unwrap();
         assert!(rejects.is_empty());
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn perp_ids_and_dated_futures_guard() {
+        assert_eq!(
+            perp_instrument_id("BTCUSDT").as_deref(),
+            Some("btc-usdt-perp.binance")
+        );
+        assert_eq!(
+            perp_partition_symbol("BTCUSDT").as_deref(),
+            Some("BTC-USDT-PERP")
+        );
+        assert_eq!(perp_instrument_id("BTCUSDT_240628"), None);
+    }
+
+    #[test]
+    fn real_funding_fixture_parses() {
+        let zip_bytes = include_bytes!("../fixtures/BTCUSDT-fundingRate-2020-01.zip");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes.as_slice())).unwrap();
+        let file = archive.by_index(0).unwrap();
+        let (rows, rejects) = parse_funding_csv(file, "BTCUSDT", "fixture.zip").unwrap();
+        assert!(rejects.is_empty(), "rejects: {rejects:?}");
+        // Jan 2020, 8h interval → ~93 settlements.
+        assert!((85..=96).contains(&rows.len()), "got {}", rows.len());
+        let r = &rows[0];
+        assert_eq!(r.ts_event, Some(1_577_836_800_000_000_000)); // 2020-01-01T00:00Z
+        assert_eq!(r.rate, -0.00012359);
+        assert_eq!(r.interval_hours, 8.0);
+        assert_eq!(r.kind, "settled");
+        assert_eq!(r.instrument_id, "btc-usdt-perp.binance");
+    }
+
+    #[test]
+    fn futures_trades_header_and_lowercase_bools_parse() {
+        // Real um-futures format: header row + lowercase true/false, 6 cols.
+        let csv = "id,price,qty,quote_qty,time,is_buyer_maker\n\
+                   7962217185,64867.8,0.013,843.2814,1786320000011,true\n";
+        let (rows, rejects) = parse_trades_csv(csv.as_bytes(), "BTCUSDT", "f").unwrap();
+        assert!(rejects.is_empty());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].side.as_deref(), Some("sell"));
+        assert_eq!(rows[0].ts_event, Some(1_786_320_000_011_000_000));
     }
 
     #[test]

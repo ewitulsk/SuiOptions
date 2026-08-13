@@ -9,3 +9,9 @@ exchange = "coinbase"
 url = "wss://ws-feed.exchange.coinbase.com"
 products = ["BTC-USD"]
 channels = ["matches", "ticker", "heartbeat"]
+
+[[connections]]
+exchange = "hyperliquid"
+url = "wss://api.hyperliquid.xyz/ws"
+products = ["BTC"]
+channels = ["trades", "bbo", "activeAssetCtx"]
