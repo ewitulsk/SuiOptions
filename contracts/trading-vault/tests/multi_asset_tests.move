@@ -9,7 +9,7 @@ use sui::clock::Clock;
 use sui::coin::{Self, Coin};
 use sui::test_scenario::{Self as ts, Scenario};
 
-use options_core::admin::ProtocolConfig as CoreProtocolConfig;
+use whitelist::whitelist::Whitelist;
 use options_core::treasury::Treasury;
 
 use trading_vault::test_helpers as h;
@@ -45,20 +45,20 @@ fun btc_deposit(sc: &mut Scenario, who: address, amount: u64, clock: &Clock) {
     ts::next_tx(sc, who);
     let mut v = ts::take_shared<TradingVault>(sc);
     let cfg = h::take_protocol_config(sc);
-    let core_cfg = ts::take_shared<CoreProtocolConfig>(sc);
+    let wl = ts::take_shared<Whitelist>(sc);
     let appraisal = vault::begin_appraisal<h::USDC>(&v);
     let att = h::attest<h::BTC, h::USDC>(sc, BTC_PRICE, clock.timestamp_ms());
     vault::deposit<h::BTC>(
         &mut v,
         &cfg,
-        &core_cfg,
+        &wl,
         appraisal,
         coin::from_balance(h::mint<h::BTC>(amount), sc.ctx()),
         option::some(att),
         clock,
         sc.ctx(),
     );
-    ts::return_shared(core_cfg);
+    ts::return_shared(wl);
     ts::return_shared(cfg);
     ts::return_shared(v);
 }
@@ -86,12 +86,12 @@ fun non_accounting_deposit_without_attestation_aborts() {
     ts::next_tx(&mut sc, h::alice_addr());
     let mut v = ts::take_shared<TradingVault>(&sc);
     let cfg = h::take_protocol_config(&sc);
-    let core_cfg = ts::take_shared<CoreProtocolConfig>(&sc);
+    let wl = ts::take_shared<Whitelist>(&sc);
     let appraisal = vault::begin_appraisal<h::USDC>(&v);
     vault::deposit<h::BTC>(
         &mut v,
         &cfg,
-        &core_cfg,
+        &wl,
         appraisal,
         coin::from_balance(h::mint<h::BTC>(500_000), sc.ctx()),
         option::none(),
@@ -113,13 +113,13 @@ fun stale_attestation_aborts_deposit() {
     ts::next_tx(&mut sc, h::alice_addr());
     let mut v = ts::take_shared<TradingVault>(&sc);
     let cfg = h::take_protocol_config(&sc);
-    let core_cfg = ts::take_shared<CoreProtocolConfig>(&sc);
+    let wl = ts::take_shared<Whitelist>(&sc);
     let appraisal = vault::begin_appraisal<h::USDC>(&v);
     let att = h::attest<h::BTC, h::USDC>(&sc, BTC_PRICE, 0);
     vault::deposit<h::BTC>(
         &mut v,
         &cfg,
-        &core_cfg,
+        &wl,
         appraisal,
         coin::from_balance(h::mint<h::BTC>(500_000), sc.ctx()),
         option::some(att),

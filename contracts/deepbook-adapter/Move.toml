@@ -8,4 +8,5 @@ deepbook = { local = "../vendor/deepbook" }
 token = { local = "../vendor/token" }
 trading_vault = { local = "../trading-vault" }
 options_core = { local = "../core" }
+whitelist = { local = "../whitelist" }
 

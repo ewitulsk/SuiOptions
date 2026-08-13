@@ -85,9 +85,9 @@ fun setup(sc: &mut Scenario): Clock {
     // UND-denominated vault, Alice seeds 1_000_000.
     ts::next_tx(sc, CURATOR);
     let cfg = ts::take_shared<VaultProtocolConfig>(sc);
-    let core_cfg = ts::take_shared<CoreProtocolConfig>(sc);
-    vault::create_vault<UND>(&cfg, &core_cfg, 0, 1_000, 3_600_000, sc.ctx());
-    ts::return_shared(core_cfg);
+    let wl = ts::take_shared<Whitelist>(sc);
+    vault::create_vault<UND>(&cfg, &wl, 0, 1_000, 3_600_000, sc.ctx());
+    ts::return_shared(wl);
     ts::return_shared(cfg);
 
     ts::next_tx(sc, ADMIN);
@@ -96,19 +96,19 @@ fun setup(sc: &mut Scenario): Clock {
     ts::next_tx(sc, ALICE);
     let mut v = ts::take_shared<TradingVault>(sc);
     let cfg = ts::take_shared<VaultProtocolConfig>(sc);
-    let core_cfg = ts::take_shared<CoreProtocolConfig>(sc);
+    let wl = ts::take_shared<Whitelist>(sc);
     let appraisal = vault::begin_appraisal<UND>(&v);
     vault::deposit<UND>(
         &mut v,
         &cfg,
-        &core_cfg,
+        &wl,
         appraisal,
         coin::from_balance(balance::create_for_testing<UND>(1_000_000), sc.ctx()),
         option::none(),
         &clock,
         sc.ctx(),
     );
-    ts::return_shared(core_cfg);
+    ts::return_shared(wl);
     ts::return_shared(cfg);
     ts::return_shared(v);
     clock

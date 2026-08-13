@@ -387,18 +387,18 @@ fun exercise_call_coin_partial_then_appraisal_completes() {
         &clock,
     );
     assert!(vault::appraisal_value(&appraisal) == 920_000 + 120_000 + 60_000);
-    let core_cfg = ts::take_shared<CoreProtocolConfig>(&sc);
+    let wl = ts::take_shared<Whitelist>(&sc);
     vault::deposit<h::USDC>(
         &mut v,
         &cfg,
-        &core_cfg,
+        &wl,
         appraisal,
         coin::mint_for_testing<h::USDC>(1_000, sc.ctx()),
         option::none(),
         &clock,
         sc.ctx(),
     );
-    ts::return_shared(core_cfg);
+    ts::return_shared(wl);
     ts::return_shared(bucket);
     ts::return_shared(cfg);
     ts::return_shared(v);
@@ -683,18 +683,18 @@ fun release_coin_to_balances_makes_coin_appraisable_as_balance() {
         &clock,
     );
     assert!(vault::appraisal_value(&appraisal) == 1_000_000 + 50_000);
-    let core_cfg = ts::take_shared<CoreProtocolConfig>(&sc);
+    let wl = ts::take_shared<Whitelist>(&sc);
     vault::deposit<h::USDC>(
         &mut v,
         &cfg,
-        &core_cfg,
+        &wl,
         appraisal,
         coin::mint_for_testing<h::USDC>(1_000, sc.ctx()),
         option::none(),
         &clock,
         sc.ctx(),
     );
-    ts::return_shared(core_cfg);
+    ts::return_shared(wl);
     ts::return_shared(cfg);
     ts::return_shared(v);
 

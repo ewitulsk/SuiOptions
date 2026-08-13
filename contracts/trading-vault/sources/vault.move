@@ -51,7 +51,8 @@ use sui::transfer::Receiving;
 use sui::vec_map::{Self, VecMap};
 use sui::vec_set::{Self, VecSet};
 
-use options_core::admin::{Self as core_admin, AdminCap, ProtocolConfig as CoreProtocolConfig};
+use options_core::admin::AdminCap;
+use whitelist::whitelist::{Self, Whitelist};
 use options_core::errors as core_errors;
 use options_core::treasury::{Self, Treasury};
 
@@ -270,7 +271,7 @@ const EXTERNAL_REG_DOMAIN: vector<u8> = b"tv_external_reg_v1";
 /// attack has no lever.
 public fun create_vault<T>(
     cfg: &VaultProtocolConfig,
-    core_cfg: &CoreProtocolConfig,
+    wl: &Whitelist,
     lockup_ms: u64,
     curator_fee_bps: u64,
     unwind_grace_ms: u64,
@@ -278,7 +279,7 @@ public fun create_vault<T>(
 ): ID {
     // Ingress gate: an ungated create_vault would let a non-member mint a
     // CuratorCap and self-deposit around the whitelist.
-    core_admin::assert_ingress_allowed(core_cfg, ctx.sender());
+    whitelist::assert_ingress_allowed(wl, ctx.sender());
     assert!(curator_fee_bps <= registry::max_curator_fee_bps(cfg), errors::fee_too_high());
 
     let accounting = type_name::with_defining_ids<T>();
@@ -340,7 +341,7 @@ public fun create_vault<T>(
 public fun deposit<T>(
     vault: &mut TradingVault,
     cfg: &VaultProtocolConfig,
-    core_cfg: &CoreProtocolConfig,
+    wl: &Whitelist,
     appraisal: Appraisal,
     funds: Coin<T>,
     att: Option<PriceAttestation>,
@@ -351,7 +352,7 @@ public fun deposit<T>(
     deposit_internal<T>(
         vault,
         cfg,
-        core_cfg,
+        wl,
         appraisal,
         funds,
         att,
@@ -366,7 +367,7 @@ public fun deposit<T>(
 public fun deposit_as_curator<T>(
     vault: &mut TradingVault,
     cfg: &VaultProtocolConfig,
-    core_cfg: &CoreProtocolConfig,
+    wl: &Whitelist,
     cap: &CuratorCap,
     appraisal: Appraisal,
     funds: Coin<T>,
@@ -379,7 +380,7 @@ public fun deposit_as_curator<T>(
     deposit_internal<T>(
         vault,
         cfg,
-        core_cfg,
+        wl,
         appraisal,
         funds,
         att,
@@ -393,7 +394,7 @@ public fun deposit_as_curator<T>(
 fun deposit_internal<T>(
     vault: &mut TradingVault,
     cfg: &VaultProtocolConfig,
-    core_cfg: &CoreProtocolConfig,
+    wl: &Whitelist,
     appraisal: Appraisal,
     funds: Coin<T>,
     att: Option<PriceAttestation>,
@@ -404,7 +405,7 @@ fun deposit_internal<T>(
 ) {
     // Ingress gate (whitelist + pause) — the one choke point both deposit
     // paths route through. Exits never check this.
-    core_admin::assert_ingress_allowed(core_cfg, ctx.sender());
+    whitelist::assert_ingress_allowed(wl, ctx.sender());
     assert!(!registry::is_paused(cfg), errors::protocol_paused());
     assert!(vault.state == VaultState::Open, errors::vault_not_open());
     assert!(!vault.config.deposits_paused, errors::deposits_paused());

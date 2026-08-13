@@ -94,16 +94,16 @@ public fun init_protocol(scenario: &mut Scenario): Clock {
 public fun new_default_vault(scenario: &mut Scenario): ID {
     ts::next_tx(scenario, curator_addr());
     let cfg = take_protocol_config(scenario);
-    let core_cfg = ts::take_shared<CoreProtocolConfig>(scenario);
+    let wl = take_whitelist(scenario);
     let id = vault::create_vault<USDC>(
         &cfg,
-        &core_cfg,
+        &wl,
         3_600_000, // lockup
         1_000, // curator fee bps
         3_600_000, // unwind grace
         scenario.ctx(),
     );
-    ts::return_shared(core_cfg);
+    ts::return_shared(wl);
     ts::return_shared(cfg);
     id
 }
@@ -118,19 +118,19 @@ public fun simple_deposit(scenario: &mut Scenario, who: address, amount: u64, cl
     ts::next_tx(scenario, who);
     let mut v = ts::take_shared<TradingVault>(scenario);
     let cfg = take_protocol_config(scenario);
-    let core_cfg = ts::take_shared<CoreProtocolConfig>(scenario);
+    let wl = take_whitelist(scenario);
     let appraisal = vault::begin_appraisal<USDC>(&v);
     vault::deposit<USDC>(
         &mut v,
         &cfg,
-        &core_cfg,
+        &wl,
         appraisal,
         sui::coin::from_balance(mint<USDC>(amount), scenario.ctx()),
         option::none(),
         clock,
         scenario.ctx(),
     );
-    ts::return_shared(core_cfg);
+    ts::return_shared(wl);
     ts::return_shared(cfg);
     ts::return_shared(v);
 }
@@ -206,6 +206,19 @@ public fun attest<Asset, Quote>(
 
 public fun take_protocol_config(scenario: &Scenario): VaultProtocolConfig {
     ts::take_shared<VaultProtocolConfig>(scenario)
+}
+
+public fun take_whitelist(scenario: &Scenario): Whitelist {
+    ts::take_shared<Whitelist>(scenario)
+}
+
+public fun take_wl_admin_cap(scenario: &Scenario): WlAdminCap {
+    ts::take_from_address<WlAdminCap>(scenario, admin_addr())
+}
+
+public fun return_wl_admin_cap(scenario: &Scenario, cap: WlAdminCap) {
+    ts::return_to_address(admin_addr(), cap);
+    let _ = scenario;
 }
 
 public fun take_admin_cap(scenario: &Scenario): AdminCap {
