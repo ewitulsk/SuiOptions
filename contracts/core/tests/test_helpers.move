@@ -79,7 +79,8 @@ public fun pubkey_b(): vector<u8> {
 }
 
 /// Initialize protocol: AdminCap to admin_addr, ProtocolConfig shared, Treasury shared.
-/// Returns a fresh test Clock.
+/// Whitelists every named test actor EXCEPT `stranger_addr` (the negative
+/// fixture for ingress-gate tests). Returns a fresh test Clock.
 public fun init_protocol(scenario: &mut Scenario): Clock {
     ts::next_tx(scenario, admin_addr());
     admin::init_for_testing(scenario.ctx());
@@ -87,6 +88,17 @@ public fun init_protocol(scenario: &mut Scenario): Clock {
     ts::next_tx(scenario, admin_addr());
     let admin_cap = ts::take_from_sender<AdminCap>(scenario);
     treasury::create_and_share(&admin_cap, scenario.ctx());
+    ts::return_to_sender(scenario, admin_cap);
+
+    ts::next_tx(scenario, admin_addr());
+    let admin_cap = ts::take_from_sender<AdminCap>(scenario);
+    let mut config = take_config(scenario);
+    admin::add_member(&admin_cap, &mut config, admin_addr());
+    admin::add_member(&admin_cap, &mut config, writer_addr());
+    admin::add_member(&admin_cap, &mut config, trader_mm_addr());
+    admin::add_member(&admin_cap, &mut config, trader_addr());
+    admin::add_member(&admin_cap, &mut config, writer_mm_addr());
+    ts::return_shared(config);
     ts::return_to_sender(scenario, admin_cap);
 
     ts::next_tx(scenario, admin_addr());

@@ -45,3 +45,6 @@ public fun spread_bucket_mismatch(): u64 { 67 }
 public fun spread_position(): u64 { 68 }
 public fun put_spread_exercise_required(): u64 { 69 }
 public fun put_spread_not_at_cursor(): u64 { 70 }
+// Guarded-launch ingress gate (whitelist + pause).
+public fun ingress_restricted(): u64 { 71 }
+public fun ingress_paused(): u64 { 72 }

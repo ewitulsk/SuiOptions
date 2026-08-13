@@ -207,6 +207,22 @@ public struct FeeUpdated has copy, drop {
     new_bps: u64,
 }
 
+public struct MemberAdded has copy, drop {
+    member: address,
+}
+
+public struct MemberRemoved has copy, drop {
+    member: address,
+}
+
+public struct WhitelistEnabledSet has copy, drop {
+    enabled: bool,
+}
+
+public struct IngressPauseSet has copy, drop {
+    paused: bool,
+}
+
 public struct TreasuryWithdrawn has copy, drop {
     asset_type: TypeName,
     amount: u64,
@@ -363,6 +379,22 @@ public(package) fun emit_signing_key_rotated(
 
 public(package) fun emit_fee_updated(old_bps: u64, new_bps: u64) {
     event::emit(FeeUpdated { old_bps, new_bps });
+}
+
+public(package) fun emit_member_added(member: address) {
+    event::emit(MemberAdded { member });
+}
+
+public(package) fun emit_member_removed(member: address) {
+    event::emit(MemberRemoved { member });
+}
+
+public(package) fun emit_whitelist_enabled_set(enabled: bool) {
+    event::emit(WhitelistEnabledSet { enabled });
+}
+
+public(package) fun emit_ingress_pause_set(paused: bool) {
+    event::emit(IngressPauseSet { paused });
 }
 
 public(package) fun emit_treasury_withdrawn(

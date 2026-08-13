@@ -55,7 +55,7 @@ fun setup_protocol_with_bucket(scenario: &mut Scenario) {
 // Cast
 //   trader_mm_addr  — Trader MM (signs quotes; receives call tokens)
 //   writer_addr     — Retail writer #1 (first writer; range [0,100))
-//   stranger_addr   — Retail writer #2 (second writer; range [100,150))
+//   writer_mm_addr   — Retail writer #2 (second writer; range [100,150))
 //
 // Numbers
 //   write1: 100 BTC for premium 5_000_000 → fee 25_000, net 4_975_000
@@ -134,13 +134,13 @@ fun test_e2e_writer_flow_full_lifecycle() {
         ts::return_to_sender(&scenario, p);
     };
 
-    // ---- Write #2: stranger_addr writes 50 BTC. Premium 3_000_000, nonce 2.
+    // ---- Write #2: writer_mm_addr writes 50 BTC. Premium 3_000_000, nonce 2.
     let write2_amount: u64 = 50;
     let write2_premium: u64 = 3_000_000;
     let write2_fee = bps(write2_premium);
     let write2_net = write2_premium - write2_fee;
     {
-        ts::next_tx(&mut scenario, th::stranger_addr());
+        ts::next_tx(&mut scenario, th::writer_mm_addr());
         let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let config = th::take_config(&scenario);
         let mut treas = th::take_treasury(&scenario);
@@ -166,7 +166,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
             req,
             coin::mint_for_testing<USDC>(write2_premium, scenario.ctx()).into_balance(),
             coin::mint_for_testing<BTC>(write2_amount, scenario.ctx()),
-            th::stranger_addr(),
+            th::writer_mm_addr(),
             &clock,
             scenario.ctx(),
         );
@@ -182,7 +182,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
         ts::return_shared(signer);
     };
 
-    ts::next_tx(&mut scenario, th::stranger_addr());
+    ts::next_tx(&mut scenario, th::writer_mm_addr());
     {
         let net = ts::take_from_sender<Coin<USDC>>(&scenario);
         assert!(net.value() == write2_net, 0);
@@ -247,7 +247,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
     };
 
     // ---- Redeem writer #2's position (range [100,150), cursor=120 → 20 exercised, 30 unexercised).
-    ts::next_tx(&mut scenario, th::stranger_addr());
+    ts::next_tx(&mut scenario, th::writer_mm_addr());
     {
         let p = ts::take_from_sender<Position>(&scenario);
         let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
@@ -308,7 +308,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
 // Cast
 //   writer_mm_addr  — Writer MM (signs quotes; receives Positions + net premium)
 //   trader_addr     — Retail trader #1 (first buyer; underlying range [0,100))
-//   stranger_addr   — Retail trader #2 (second buyer; underlying range [100,180))
+//   trader_mm_addr   — Retail trader #2 (second buyer; underlying range [100,180))
 //
 // Numbers
 //   buy1: 100 BTC for premium 6_000_000 → fee 30_000, net 5_970_000 to MM
@@ -385,13 +385,13 @@ fun test_e2e_trader_flow_full_lifecycle() {
         coin::burn_for_testing(net);
     };
 
-    // ---- Buy #2: stranger_addr buys 80 BTC option. Premium 5_000_000, nonce 2.
+    // ---- Buy #2: trader_mm_addr buys 80 BTC option. Premium 5_000_000, nonce 2.
     let buy2_amount: u64 = 80;
     let buy2_premium: u64 = 5_000_000;
     let buy2_fee = bps(buy2_premium);
     let buy2_net = buy2_premium - buy2_fee;
     {
-        ts::next_tx(&mut scenario, th::stranger_addr());
+        ts::next_tx(&mut scenario, th::trader_mm_addr());
         let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let config = th::take_config(&scenario);
         let mut treas = th::take_treasury(&scenario);
@@ -417,7 +417,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
             req,
             coin::mint_for_testing<BTC>(buy2_amount, scenario.ctx()).into_balance(),
             coin::mint_for_testing<USDC>(buy2_premium, scenario.ctx()),
-            th::stranger_addr(),
+            th::trader_mm_addr(),
             &clock,
             scenario.ctx(),
         );
@@ -458,14 +458,14 @@ fun test_e2e_trader_flow_full_lifecycle() {
     };
 
     // ---- Trader #2 splits their 80 call into [30, 50] and exercises 30. Cursor → 130.
-    ts::next_tx(&mut scenario, th::stranger_addr());
+    ts::next_tx(&mut scenario, th::trader_mm_addr());
     let exercise_30: Coin<CALL>;
     {
         let mut call = ts::take_from_sender<Coin<CALL>>(&scenario);
         exercise_30 = coin::split(&mut call, 30, scenario.ctx());
-        ts::return_to_sender(&scenario, call); // remaining 50 stays with stranger for later burn
+        ts::return_to_sender(&scenario, call); // remaining 50 stays with trader #2 for later burn
     };
-    ts::next_tx(&mut scenario, th::stranger_addr());
+    ts::next_tx(&mut scenario, th::trader_mm_addr());
     {
         let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let payment = coin::mint_for_testing<USDC>((((30u64 as u128) * STRIKE) as u64), scenario.ctx());
@@ -483,7 +483,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
     clock.set_for_testing(EXPIRY_MS + 1);
 
     // ---- Stranger burns their leftover 50 unexercised call tokens.
-    ts::next_tx(&mut scenario, th::stranger_addr());
+    ts::next_tx(&mut scenario, th::trader_mm_addr());
     {
         let leftover = ts::take_from_sender<Coin<CALL>>(&scenario);
         assert!(leftover.value() == 50, 0);

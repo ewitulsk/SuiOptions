@@ -838,10 +838,12 @@ fun test_write_collateralized_self_write() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
+    let config = th::take_config(&scenario);
     let collateral = coin::mint_for_testing<USDC>(70 * (STRIKE as u64), scenario.ctx());
     let (pos, put) = put_bucket::write_collateralized<BTC, USDC, PUT>(
-        &mut b, collateral, 70, &clock, scenario.ctx(),
+        &mut b, &config, collateral, 70, &clock, scenario.ctx(),
     );
+    ts::return_shared(config);
     assert!(position::range_end(&pos) == 70, 0);
     assert!(put.value() == 70, 0);
     assert!(put_bucket::settlement_balance(&b) == 70 * (STRIKE as u64), 0);
