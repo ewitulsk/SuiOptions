@@ -16,6 +16,7 @@ use exchange::balance_manager::{Self as bm, BalanceManager};
 use exchange::order;
 use exchange::registry::{Self as ereg, SettlementRegistry};
 use exchange::settlement;
+use exchange::whitelist;
 
 use trading_vault::events as tv_events;
 use trading_vault::registry::{Self as vreg, IntegrationRegistry};
@@ -73,15 +74,17 @@ fun init_custody(sc: &mut Scenario): (ID, ID) {
 
 fun fund_usdc(sc: &mut Scenario, custody_id: ID, bm_id: ID, amount: u64) {
     ts::next_tx(sc, th::curator_addr());
+    let wl = whitelist::new_open_for_testing(sc.ctx());
     let mut v = ts::take_shared<TradingVault>(sc);
     let ireg = ts::take_shared<IntegrationRegistry>(sc);
     let cap = ts::take_from_sender<CuratorCap>(sc);
     let mut m = ts::take_shared_by_id<BalanceManager>(sc, bm_id);
-    adapter::fund<th::USDC>(&mut v, &cap, &ireg, &mut m, custody_id, amount, sc.ctx());
+    adapter::fund<th::USDC>(&mut v, &cap, &ireg, &wl, &mut m, custody_id, amount, sc.ctx());
     ts::return_shared(m);
     ts::return_to_sender(sc, cap);
     ts::return_shared(ireg);
     ts::return_shared(v);
+    whitelist::destroy_for_testing(wl);
 }
 
 #[test]
@@ -186,6 +189,7 @@ fun fill_credits_manager_and_appraisal_reflects() {
     // A taker fills it against the SHARED manager — no vault in the tx.
     ts::next_tx(&mut sc, TAKER);
     {
+        let wl = whitelist::new_open_for_testing(sc.ctx());
         let mut reg = ts::take_shared<SettlementRegistry<SUI, th::USDC>>(&sc);
         let mut m = ts::take_shared_by_id<BalanceManager>(&sc, bm_id);
         let (quote_out, base_change) = settlement::fill_limit_order_reverse_for_testing<
@@ -193,6 +197,7 @@ fun fill_credits_manager_and_appraisal_reflects() {
             th::USDC,
         >(
             &mut reg,
+            &wl,
             &mut m,
             order_bytes,
             coin::mint_for_testing<SUI>(50_000, sc.ctx()),
@@ -209,6 +214,7 @@ fun fill_credits_manager_and_appraisal_reflects() {
         assert!(bm::balance_of<SUI>(&m) == 50_000);
         ts::return_shared(m);
         ts::return_shared(reg);
+        whitelist::destroy_for_testing(wl);
     };
 
     // NAV picks the fill up from chain state: 500k free + 400k USDC +
@@ -246,8 +252,9 @@ fun stranger_deposit_into_vault_bm_aborts() {
     let (_, bm_id) = init_custody(&mut sc);
 
     ts::next_tx(&mut sc, STRANGER);
+    let wl = whitelist::new_open_for_testing(sc.ctx());
     let mut m = ts::take_shared_by_id<BalanceManager>(&sc, bm_id);
-    bm::deposit(&mut m, coin::mint_for_testing<th::USDC>(1_000_000, sc.ctx()), sc.ctx());
+    bm::deposit(&mut m, &wl, coin::mint_for_testing<th::USDC>(1_000_000, sc.ctx()), sc.ctx());
     clk.destroy_for_testing();
     abort 0
 }
@@ -319,11 +326,12 @@ fun fund_through_wrong_manager_aborts() {
     let foreign_bm = bm::new(sc.ctx());
 
     ts::next_tx(&mut sc, th::curator_addr());
+    let wl = whitelist::new_open_for_testing(sc.ctx());
     let mut v = ts::take_shared<TradingVault>(&sc);
     let ireg = ts::take_shared<IntegrationRegistry>(&sc);
     let cap = ts::take_from_sender<CuratorCap>(&sc);
     let mut m = ts::take_shared_by_id<BalanceManager>(&sc, foreign_bm);
-    adapter::fund<th::USDC>(&mut v, &cap, &ireg, &mut m, custody_id, 1, sc.ctx());
+    adapter::fund<th::USDC>(&mut v, &cap, &ireg, &wl, &mut m, custody_id, 1, sc.ctx());
     clk.destroy_for_testing();
     abort 0
 }
@@ -398,6 +406,7 @@ fun direct_taker_fill_settles_from_vault_free_balances() {
 
     ts::next_tx(&mut sc, TAKER);
     {
+        let wl = whitelist::new_open_for_testing(sc.ctx());
         let mut v = ts::take_shared_by_id<TradingVault>(&sc, vault_id);
         let ireg = ts::take_shared<IntegrationRegistry>(&sc);
         let mut reg = ts::take_shared<SettlementRegistry<SUI, th::USDC>>(&sc);
@@ -409,6 +418,7 @@ fun direct_taker_fill_settles_from_vault_free_balances() {
             &mut v,
             &ireg,
             &mut reg,
+            &wl,
             &m,
             custody_id,
             ord,
@@ -433,6 +443,7 @@ fun direct_taker_fill_settles_from_vault_free_balances() {
         ts::return_shared(reg);
         ts::return_shared(ireg);
         ts::return_shared(v);
+        whitelist::destroy_for_testing(wl);
     };
 
     clk.destroy_for_testing();
@@ -455,12 +466,13 @@ fun direct_fill_refused_without_quote_opt_in() {
     let ord = bid_order(vault_id.to_address(), bm_id, 100_000, 50_000, 1);
 
     ts::next_tx(&mut sc, TAKER);
+    let wl = whitelist::new_open_for_testing(sc.ctx());
     let mut v = ts::take_shared_by_id<TradingVault>(&sc, vault_id);
     let ireg = ts::take_shared<IntegrationRegistry>(&sc);
     let mut reg = ts::take_shared<SettlementRegistry<SUI, th::USDC>>(&sc);
     let m = ts::take_shared_by_id<BalanceManager>(&sc, bm_id);
     let (a, b) = adapter::fill_vault_order_reverse_for_testing<SUI, th::USDC>(
-        &mut v, &ireg, &mut reg, &m, custody_id, ord,
+        &mut v, &ireg, &mut reg, &wl, &m, custody_id, ord,
         coin::mint_for_testing<SUI>(50_000, sc.ctx()), 50_000, 0, &clk, sc.ctx(),
     );
     coin::burn_for_testing(a);
@@ -482,11 +494,12 @@ fun fund_refused_on_direct_custody() {
     let (custody_id, bm_id) = init_direct(&mut sc, vault_id);
 
     ts::next_tx(&mut sc, th::curator_addr());
+    let wl = whitelist::new_open_for_testing(sc.ctx());
     let mut v = ts::take_shared_by_id<TradingVault>(&sc, vault_id);
     let ireg = ts::take_shared<IntegrationRegistry>(&sc);
     let cap = ts::take_from_sender_by_id<CuratorCap>(&sc, vault::curator_cap_id(&v));
     let mut m = ts::take_shared_by_id<BalanceManager>(&sc, bm_id);
-    adapter::fund<th::USDC>(&mut v, &cap, &ireg, &mut m, custody_id, 1, sc.ctx());
+    adapter::fund<th::USDC>(&mut v, &cap, &ireg, &wl, &mut m, custody_id, 1, sc.ctx());
     clk.destroy_for_testing();
     abort 0
 }
@@ -509,12 +522,13 @@ fun starved_base_escrow_aborts_side_tagged() {
     let ord = ask_order(vault_id.to_address(), bm_id, 50_000, 100_000, 1);
 
     ts::next_tx(&mut sc, TAKER);
+    let wl = whitelist::new_open_for_testing(sc.ctx());
     let mut v = ts::take_shared_by_id<TradingVault>(&sc, vault_id);
     let ireg = ts::take_shared<IntegrationRegistry>(&sc);
     let mut reg = ts::take_shared<SettlementRegistry<SUI, th::USDC>>(&sc);
     let m = ts::take_shared_by_id<BalanceManager>(&sc, bm_id);
     let (a, b) = adapter::fill_vault_order_for_testing<SUI, th::USDC>(
-        &mut v, &ireg, &mut reg, &m, custody_id, ord,
+        &mut v, &ireg, &mut reg, &wl, &m, custody_id, ord,
         coin::mint_for_testing<th::USDC>(100_000, sc.ctx()), 100_000, 0, &clk, sc.ctx(),
     );
     coin::burn_for_testing(a);
@@ -543,13 +557,14 @@ fun self_cross_via_own_funded_manager_rejected() {
     let ord_b = bid_order(vault_id.to_address(), funded_bm, 105_000, 50_000, 2);
 
     ts::next_tx(&mut sc, TAKER);
+    let wl = whitelist::new_open_for_testing(sc.ctx());
     let mut v = ts::take_shared_by_id<TradingVault>(&sc, vault_id);
     let ireg = ts::take_shared<IntegrationRegistry>(&sc);
     let mut reg = ts::take_shared<SettlementRegistry<SUI, th::USDC>>(&sc);
     let ma = ts::take_shared_by_id<BalanceManager>(&sc, direct_bm);
     let mut mb = ts::take_shared_by_id<BalanceManager>(&sc, funded_bm);
     adapter::match_vault_vs_bm_for_testing<SUI, th::USDC>(
-        &mut v, &ireg, &mut reg, &ma, direct_custody, &mut mb,
+        &mut v, &ireg, &mut reg, &wl, &ma, direct_custody, &mut mb,
         ord_a, ord_b, 50_000, &clk, sc.ctx(),
     );
     abort 0
@@ -615,6 +630,7 @@ fun vault_vs_vault_match_settles_both_sides() {
 
     ts::next_tx(&mut sc, RELAYER);
     {
+        let wl = whitelist::new_open_for_testing(sc.ctx());
         let mut va = ts::take_shared_by_id<TradingVault>(&sc, vault_a);
         let mut vb = ts::take_shared_by_id<TradingVault>(&sc, vault_b);
         let ireg = ts::take_shared<IntegrationRegistry>(&sc);
@@ -623,7 +639,7 @@ fun vault_vs_vault_match_settles_both_sides() {
         let mb = ts::take_shared_by_id<BalanceManager>(&sc, bm_b);
         adapter::match_vault_vs_vault_for_testing<SUI, th::USDC>(
             &mut va, custody_a, &ma, &mut vb, custody_b, &mb,
-            &ireg, &mut reg, ord_a, ord_b, 50_000, &clk, sc.ctx(),
+            &ireg, &mut reg, &wl, ord_a, ord_b, 50_000, &clk, sc.ctx(),
         );
         // A: −50_000 SUI, +100_000 USDC. B: −100_000 USDC, +50_000 SUI.
         assert!(vault::free_balance_of<SUI>(&va) == 0);
@@ -641,6 +657,7 @@ fun vault_vs_vault_match_settles_both_sides() {
         ts::return_shared(ireg);
         ts::return_shared(vb);
         ts::return_shared(va);
+        whitelist::destroy_for_testing(wl);
     };
 
     clk.destroy_for_testing();

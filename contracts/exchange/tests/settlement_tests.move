@@ -18,6 +18,7 @@ use exchange::fees;
 use exchange::order;
 use exchange::registry::{Self, SettlementRegistry};
 use exchange::settlement;
+use exchange::whitelist;
 
 /// Test quote coin.
 public struct USDC has drop {}
@@ -51,9 +52,11 @@ fun new_bm(s: &mut ts::Scenario, owner: address): ID {
 
 fun fund<T>(s: &mut ts::Scenario, id: ID, owner: address, amount: u64) {
     s.next_tx(owner);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let mut m = s.take_shared_by_id<BalanceManager>(id);
-    bm::deposit(&mut m, coin::mint_for_testing<T>(amount, s.ctx()), s.ctx());
+    bm::deposit(&mut m, &wl, coin::mint_for_testing<T>(amount, s.ctx()), s.ctx());
     ts::return_shared(m);
+    whitelist::destroy_for_testing(wl);
 }
 
 /// Maker sells `maker_amount` SUI (base) for `taker_amount` USDC (quote).
@@ -116,11 +119,12 @@ fun fill(
     clk: &Clock,
 ): (u64, u64) {
     s.next_tx(TAKER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
     let mut m = s.take_shared_by_id<BalanceManager>(bm_id);
     let pay = coin::mint_for_testing<USDC>(quote_in, s.ctx());
     let (got, change) = settlement::fill_limit_order_for_testing(
-        &mut reg, &mut m, order_bytes, pay, taker_fill_amount, min_out, clk, s.ctx(),
+        &mut reg, &wl, &mut m, order_bytes, pay, taker_fill_amount, min_out, clk, s.ctx(),
     );
     let got_value = got.value();
     let change_value = change.value();
@@ -128,6 +132,7 @@ fun fill(
     coin::burn_for_testing(change);
     ts::return_shared(m);
     ts::return_shared(reg);
+    whitelist::destroy_for_testing(wl);
     (got_value, change_value)
 }
 
@@ -183,11 +188,12 @@ fun reverse_fill() {
     let ord = bid(MAKER_B, b, 100_000, 50_000, @0x0, @0x0, 1);
 
     s.next_tx(TAKER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
     let mut m = s.take_shared_by_id<BalanceManager>(b);
     let pay = coin::mint_for_testing<SUI>(10_000, s.ctx());
     let (got, change) = settlement::fill_limit_order_reverse_for_testing(
-        &mut reg, &mut m, ord, pay, 10_000, 19_980, &clk, s.ctx(),
+        &mut reg, &wl, &mut m, ord, pay, 10_000, 19_980, &clk, s.ctx(),
     );
     // 10k base -> 20k quote gross; taker fee 10bps of 20k = 20
     assert!(got.value() == 19_980, 0);
@@ -201,6 +207,7 @@ fun reverse_fill() {
     coin::burn_for_testing(change);
     ts::return_shared(m);
     ts::return_shared(reg);
+    whitelist::destroy_for_testing(wl);
     clk.destroy_for_testing();
     s.end();
 }
@@ -217,12 +224,13 @@ fun cannot_overfill_via_match_after_fills() {
     let ob = bid(MAKER_B, b, 120_000, 60_000, @0x0, @0x0, 2);
 
     s.next_tx(RELAYER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
     let mut ma = s.take_shared_by_id<BalanceManager>(a);
     let mut mb = s.take_shared_by_id<BalanceManager>(b);
     // 60k base at price 2.0 = 120k quote > a's 100k taker_amount cap
     settlement::match_orders_for_testing(
-        &mut reg, &mut ma, &mut mb, oa, ob, 60_000, &clk, s.ctx(),
+        &mut reg, &wl, &mut ma, &mut mb, oa, ob, 60_000, &clk, s.ctx(),
     );
     abort 99
 }
@@ -401,11 +409,12 @@ fun signer_watermark_cancel_voids_cap_owner_orders() {
     // an approved signer raises the owner's watermark instead.
     let (mut s, clk) = setup();
     s.next_tx(MAKER_A);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let (bm_id, cap) = bm::new_with_owner_cap(@0xF00D, s.ctx());
     s.next_tx(MAKER_A);
     {
         let mut m = s.take_shared_by_id<BalanceManager>(bm_id);
-        bm::deposit_with_cap(&mut m, &cap, coin::mint_for_testing<SUI>(50_000, s.ctx()));
+        bm::deposit_with_cap(&mut m, &wl, &cap, coin::mint_for_testing<SUI>(50_000, s.ctx()), s.ctx());
         bm::add_signer_with_cap(&mut m, &cap, MAKER_B);
         ts::return_shared(m);
     };
@@ -463,12 +472,13 @@ fun match_at_resting_price_with_improvement() {
     let ob = bid(MAKER_B, b, 63_000, 30_000, @0x0, RELAYER, 2);
 
     s.next_tx(RELAYER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     {
         let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
         let mut ma = s.take_shared_by_id<BalanceManager>(a);
         let mut mb = s.take_shared_by_id<BalanceManager>(b);
         settlement::match_orders_for_testing(
-            &mut reg, &mut ma, &mut mb, oa, ob, 30_000, &clk, s.ctx(),
+            &mut reg, &wl, &mut ma, &mut mb, oa, ob, 30_000, &clk, s.ctx(),
         );
         // executes at the RESTING price 2.0, not B's 2.1: q = 60_000.
         // fees 10bps: A pays 60 quote, B pays 30 base.
@@ -487,6 +497,7 @@ fun match_at_resting_price_with_improvement() {
         ts::return_shared(ma);
         ts::return_shared(reg);
     };
+    whitelist::destroy_for_testing(wl);
     clk.destroy_for_testing();
     s.end();
 }
@@ -502,11 +513,12 @@ fun non_crossing_orders_rejected() {
     let oa = ask(MAKER_A, a, 50_000, 100_000, @0x0, @0x0, 1);
     let ob = bid(MAKER_B, b, 57_000, 30_000, @0x0, @0x0, 2);
     s.next_tx(RELAYER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
     let mut ma = s.take_shared_by_id<BalanceManager>(a);
     let mut mb = s.take_shared_by_id<BalanceManager>(b);
     settlement::match_orders_for_testing(
-        &mut reg, &mut ma, &mut mb, oa, ob, 30_000, &clk, s.ctx(),
+        &mut reg, &wl, &mut ma, &mut mb, oa, ob, 30_000, &clk, s.ctx(),
     );
     abort 99
 }
@@ -521,11 +533,12 @@ fun matched_orders_pinned_to_relayer() {
     let oa = ask(MAKER_A, a, 50_000, 100_000, @0x0, RELAYER, 1);
     let ob = bid(MAKER_B, b, 63_000, 30_000, @0x0, RELAYER, 2);
     s.next_tx(TAKER); // not the pinned relayer
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
     let mut ma = s.take_shared_by_id<BalanceManager>(a);
     let mut mb = s.take_shared_by_id<BalanceManager>(b);
     settlement::match_orders_for_testing(
-        &mut reg, &mut ma, &mut mb, oa, ob, 30_000, &clk, s.ctx(),
+        &mut reg, &wl, &mut ma, &mut mb, oa, ob, 30_000, &clk, s.ctx(),
     );
     abort 99
 }

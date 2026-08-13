@@ -11,6 +11,7 @@ use sui::event;
 use exchange::balance_manager::{Self, BalanceManager, OwnerCap};
 use exchange::order::{Self, Order};
 use exchange::registry::{Self, SettlementRegistry};
+use exchange::whitelist::{Self, Whitelist};
 
 // === Errors (one per check, in check order — the relayer decodes these) ===
 
@@ -85,6 +86,7 @@ public struct SaltWatermarkEvent has copy, drop {
 /// `Coin<Quote>` and receives `(maker tokens bought, taker coin change)`.
 public fun fill_limit_order<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     maker_bm: &mut BalanceManager,
     order_bytes: vector<u8>,
     signature: vector<u8>,
@@ -96,7 +98,7 @@ public fun fill_limit_order<Base, Quote>(
     ctx: &mut TxContext,
 ): (Coin<Base>, Coin<Quote>) {
     fill_impl(
-        reg, maker_bm, order_bytes, &signature, &public_key, taker_coin,
+        reg, wl, maker_bm, order_bytes, &signature, &public_key, taker_coin,
         taker_fill_amount, min_maker_amount_out, true, clock, ctx,
     )
 }
@@ -104,6 +106,7 @@ public fun fill_limit_order<Base, Quote>(
 /// Mirror fill for a maker order that sells Quote for Base.
 public fun fill_limit_order_reverse<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     maker_bm: &mut BalanceManager,
     order_bytes: vector<u8>,
     signature: vector<u8>,
@@ -115,7 +118,7 @@ public fun fill_limit_order_reverse<Base, Quote>(
     ctx: &mut TxContext,
 ): (Coin<Quote>, Coin<Base>) {
     fill_impl_reverse(
-        reg, maker_bm, order_bytes, &signature, &public_key, taker_coin,
+        reg, wl, maker_bm, order_bytes, &signature, &public_key, taker_coin,
         taker_fill_amount, min_maker_amount_out, true, clock, ctx,
     )
 }
@@ -128,6 +131,7 @@ public fun fill_limit_order_reverse<Base, Quote>(
 /// order — and both signed limits are enforced regardless.
 public fun match_orders<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     bm_a: &mut BalanceManager,
     bm_b: &mut BalanceManager,
     order_a_bytes: vector<u8>,
@@ -141,7 +145,7 @@ public fun match_orders<Base, Quote>(
     ctx: &mut TxContext,
 ) {
     match_impl(
-        reg, bm_a, bm_b, order_a_bytes, &sig_a, &pk_a, order_b_bytes, &sig_b, &pk_b,
+        reg, wl, bm_a, bm_b, order_a_bytes, &sig_a, &pk_a, order_b_bytes, &sig_b, &pk_b,
         fill_base_amount, true, clock, ctx,
     )
 }
@@ -291,6 +295,7 @@ public struct FillObligation<phantom Base, phantom Quote> {
 /// this one share `validate` + `fill_terms`.
 public fun begin_fill<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     maker_bm: &BalanceManager,
     order_bytes: vector<u8>,
     signature: vector<u8>,
@@ -301,7 +306,7 @@ public fun begin_fill<Base, Quote>(
     ctx: &TxContext,
 ): FillObligation<Base, Quote> {
     begin_fill_impl(
-        reg, maker_bm, order_bytes, &signature, &public_key, taker_fill_amount,
+        reg, wl, maker_bm, order_bytes, &signature, &public_key, taker_fill_amount,
         min_maker_amount_out, true, true, clock, ctx,
     )
 }
@@ -309,6 +314,7 @@ public fun begin_fill<Base, Quote>(
 /// Mirror for a maker selling Quote (bearer base leg).
 public fun begin_fill_reverse<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     maker_bm: &BalanceManager,
     order_bytes: vector<u8>,
     signature: vector<u8>,
@@ -319,13 +325,14 @@ public fun begin_fill_reverse<Base, Quote>(
     ctx: &TxContext,
 ): FillObligation<Base, Quote> {
     begin_fill_impl(
-        reg, maker_bm, order_bytes, &signature, &public_key, taker_fill_amount,
+        reg, wl, maker_bm, order_bytes, &signature, &public_key, taker_fill_amount,
         min_maker_amount_out, false, true, clock, ctx,
     )
 }
 
 fun begin_fill_impl<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     maker_bm: &BalanceManager,
     order_bytes: vector<u8>,
     signature: &vector<u8>,
@@ -339,7 +346,7 @@ fun begin_fill_impl<Base, Quote>(
 ): FillObligation<Base, Quote> {
     let sender = ctx.sender();
     let (ord, digest) = validate(
-        reg, maker_bm, order_bytes, signature, public_key,
+        reg, wl, maker_bm, order_bytes, signature, public_key,
         maker_sells_base, sender, sender, verify_sig, clock,
     );
     let (fill_t, fill_m, maker_fee_bps, taker_fee_bps, maker_fee, taker_fee) =
@@ -402,6 +409,7 @@ fun begin_fill_impl<Base, Quote>(
 /// as `match_orders` via `validate` + `match_terms`.
 public fun begin_match<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     bm_a: &BalanceManager,
     bm_b: &BalanceManager,
     order_a_bytes: vector<u8>,
@@ -415,13 +423,14 @@ public fun begin_match<Base, Quote>(
     ctx: &TxContext,
 ): FillObligation<Base, Quote> {
     begin_match_impl(
-        reg, bm_a, bm_b, order_a_bytes, &sig_a, &pk_a, order_b_bytes, &sig_b, &pk_b,
+        reg, wl, bm_a, bm_b, order_a_bytes, &sig_a, &pk_a, order_b_bytes, &sig_b, &pk_b,
         fill_base_amount, true, clock, ctx,
     )
 }
 
 fun begin_match_impl<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     bm_a: &BalanceManager,
     bm_b: &BalanceManager,
     order_a_bytes: vector<u8>,
@@ -444,11 +453,11 @@ fun begin_match_impl<Base, Quote>(
     let maker_b = order::from_bytes(order_b_bytes).maker();
 
     let (ord_a, digest_a) = validate(
-        reg, bm_a, order_a_bytes, sig_a, pk_a,
+        reg, wl, bm_a, order_a_bytes, sig_a, pk_a,
         /* maker_sells_base */ true, maker_b, relayer, verify_sig, clock,
     );
     let (ord_b, digest_b) = validate(
-        reg, bm_b, order_b_bytes, sig_b, pk_b,
+        reg, wl, bm_b, order_b_bytes, sig_b, pk_b,
         /* maker_sells_base */ false, maker_a, relayer, verify_sig, clock,
     );
 
@@ -710,6 +719,7 @@ public fun quote_leg_manager<Base, Quote>(ob: &FillObligation<Base, Quote>): ID 
 /// full signed path is covered by the cross-language conformance suite.
 fun validate<Base, Quote>(
     reg: &SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     maker_bm: &BalanceManager,
     order_bytes: vector<u8>,
     signature: &vector<u8>,
@@ -722,6 +732,15 @@ fun validate<Base, Quote>(
 ): (Order, vector<u8>) {
     // 1. pause
     assert!(!registry::is_paused(reg), EPaused);
+    // 1b. guarded-launch ingress gate on the tx sender. This is what
+    // closes the taker-wallet-coin path (fills can move raw coins that
+    // never touched a gated BalanceManager deposit). For match_orders the
+    // sender is the relayer, so the relayer wallet must be a member;
+    // makers' funds were already gated at BM deposit. FillObligation has
+    // no abilities, so every provide_*/collect_* call is stuck inside a
+    // tx whose sender passed this gate — the obligation legs need no
+    // separate assert.
+    whitelist::assert_ingress_allowed(wl, tx_sender);
     // 2. decode + token orientation
     let ord = order::from_bytes(order_bytes);
     let base_str = order::canonical_type<Base>();
@@ -767,6 +786,7 @@ fun validate<Base, Quote>(
 
 fun fill_impl<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     maker_bm: &mut BalanceManager,
     order_bytes: vector<u8>,
     signature: &vector<u8>,
@@ -780,7 +800,7 @@ fun fill_impl<Base, Quote>(
 ): (Coin<Base>, Coin<Quote>) {
     let sender = ctx.sender();
     let (ord, digest) = validate(
-        reg, maker_bm, order_bytes, signature, public_key,
+        reg, wl, maker_bm, order_bytes, signature, public_key,
         /* maker_sells_base */ true, sender, sender, verify_sig, clock,
     );
 
@@ -820,6 +840,7 @@ fun fill_impl<Base, Quote>(
 
 fun fill_impl_reverse<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     maker_bm: &mut BalanceManager,
     order_bytes: vector<u8>,
     signature: &vector<u8>,
@@ -833,7 +854,7 @@ fun fill_impl_reverse<Base, Quote>(
 ): (Coin<Quote>, Coin<Base>) {
     let sender = ctx.sender();
     let (ord, digest) = validate(
-        reg, maker_bm, order_bytes, signature, public_key,
+        reg, wl, maker_bm, order_bytes, signature, public_key,
         /* maker_sells_base */ false, sender, sender, verify_sig, clock,
     );
 
@@ -871,6 +892,7 @@ fun fill_impl_reverse<Base, Quote>(
 
 fun match_impl<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     bm_a: &mut BalanceManager,
     bm_b: &mut BalanceManager,
     order_a_bytes: vector<u8>,
@@ -891,11 +913,11 @@ fun match_impl<Base, Quote>(
     let maker_b = order::from_bytes(order_b_bytes).maker();
 
     let (ord_a, digest_a) = validate(
-        reg, bm_a, order_a_bytes, sig_a, pk_a,
+        reg, wl, bm_a, order_a_bytes, sig_a, pk_a,
         /* maker_sells_base */ true, maker_b, relayer, verify_sig, clock,
     );
     let (ord_b, digest_b) = validate(
-        reg, bm_b, order_b_bytes, sig_b, pk_b,
+        reg, wl, bm_b, order_b_bytes, sig_b, pk_b,
         /* maker_sells_base */ false, maker_a, relayer, verify_sig, clock,
     );
 
@@ -1047,6 +1069,7 @@ fun muldiv_ceil(a: u64, b: u64, c: u64): u64 {
 #[test_only]
 public fun fill_limit_order_for_testing<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     maker_bm: &mut BalanceManager,
     order_bytes: vector<u8>,
     taker_coin: Coin<Quote>,
@@ -1056,7 +1079,7 @@ public fun fill_limit_order_for_testing<Base, Quote>(
     ctx: &mut TxContext,
 ): (Coin<Base>, Coin<Quote>) {
     fill_impl(
-        reg, maker_bm, order_bytes, &vector[], &vector[], taker_coin,
+        reg, wl, maker_bm, order_bytes, &vector[], &vector[], taker_coin,
         taker_fill_amount, min_maker_amount_out, false, clock, ctx,
     )
 }
@@ -1064,6 +1087,7 @@ public fun fill_limit_order_for_testing<Base, Quote>(
 #[test_only]
 public fun fill_limit_order_reverse_for_testing<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     maker_bm: &mut BalanceManager,
     order_bytes: vector<u8>,
     taker_coin: Coin<Base>,
@@ -1073,7 +1097,7 @@ public fun fill_limit_order_reverse_for_testing<Base, Quote>(
     ctx: &mut TxContext,
 ): (Coin<Quote>, Coin<Base>) {
     fill_impl_reverse(
-        reg, maker_bm, order_bytes, &vector[], &vector[], taker_coin,
+        reg, wl, maker_bm, order_bytes, &vector[], &vector[], taker_coin,
         taker_fill_amount, min_maker_amount_out, false, clock, ctx,
     )
 }
@@ -1100,6 +1124,7 @@ public fun fill_event_fields(
 #[test_only]
 public fun begin_fill_for_testing<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     maker_bm: &BalanceManager,
     order_bytes: vector<u8>,
     taker_fill_amount: u64,
@@ -1108,7 +1133,7 @@ public fun begin_fill_for_testing<Base, Quote>(
     ctx: &TxContext,
 ): FillObligation<Base, Quote> {
     begin_fill_impl(
-        reg, maker_bm, order_bytes, &vector[], &vector[], taker_fill_amount,
+        reg, wl, maker_bm, order_bytes, &vector[], &vector[], taker_fill_amount,
         min_maker_amount_out, true, false, clock, ctx,
     )
 }
@@ -1116,6 +1141,7 @@ public fun begin_fill_for_testing<Base, Quote>(
 #[test_only]
 public fun begin_fill_reverse_for_testing<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     maker_bm: &BalanceManager,
     order_bytes: vector<u8>,
     taker_fill_amount: u64,
@@ -1124,7 +1150,7 @@ public fun begin_fill_reverse_for_testing<Base, Quote>(
     ctx: &TxContext,
 ): FillObligation<Base, Quote> {
     begin_fill_impl(
-        reg, maker_bm, order_bytes, &vector[], &vector[], taker_fill_amount,
+        reg, wl, maker_bm, order_bytes, &vector[], &vector[], taker_fill_amount,
         min_maker_amount_out, false, false, clock, ctx,
     )
 }
@@ -1132,6 +1158,7 @@ public fun begin_fill_reverse_for_testing<Base, Quote>(
 #[test_only]
 public fun begin_match_for_testing<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     bm_a: &BalanceManager,
     bm_b: &BalanceManager,
     order_a_bytes: vector<u8>,
@@ -1141,7 +1168,7 @@ public fun begin_match_for_testing<Base, Quote>(
     ctx: &TxContext,
 ): FillObligation<Base, Quote> {
     begin_match_impl(
-        reg, bm_a, bm_b, order_a_bytes, &vector[], &vector[], order_b_bytes,
+        reg, wl, bm_a, bm_b, order_a_bytes, &vector[], &vector[], order_b_bytes,
         &vector[], &vector[], fill_base_amount, false, clock, ctx,
     )
 }
@@ -1149,6 +1176,7 @@ public fun begin_match_for_testing<Base, Quote>(
 #[test_only]
 public fun match_orders_for_testing<Base, Quote>(
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     bm_a: &mut BalanceManager,
     bm_b: &mut BalanceManager,
     order_a_bytes: vector<u8>,
@@ -1158,7 +1186,7 @@ public fun match_orders_for_testing<Base, Quote>(
     ctx: &mut TxContext,
 ) {
     match_impl(
-        reg, bm_a, bm_b, order_a_bytes, &vector[], &vector[], order_b_bytes,
+        reg, wl, bm_a, bm_b, order_a_bytes, &vector[], &vector[], order_b_bytes,
         &vector[], &vector[], fill_base_amount, false, clock, ctx,
     )
 }
