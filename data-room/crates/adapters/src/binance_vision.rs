@@ -58,14 +58,37 @@ fn parse_bool(s: &str) -> Option<bool> {
     }
 }
 
-/// Parse a whole `trades` CSV (one dump file's contents). `src_file` is
-/// the bronze object key for lineage. Returns rows + rejects; `ts_recv`
-/// is None throughout — we never observed these live (spec §5 / §6.6).
+/// Parse a whole `trades` CSV into memory. Fine for daily files and
+/// tests; for multi-GB monthly dumps use [`for_each_trade`], which is
+/// what the normalizer streams through (a 2 GB host cannot hold a whole
+/// 2026 month of rows).
 pub fn parse_trades_csv<R: Read>(
     reader: R,
     native_symbol: &str,
     src_file: &str,
 ) -> Result<(Vec<Trade>, Vec<Reject>), anyhow::Error> {
+    let mut out = Vec::new();
+    let mut rejects = Vec::new();
+    for_each_trade(
+        reader,
+        native_symbol,
+        src_file,
+        |t| out.push(t),
+        |r| rejects.push(r),
+    )?;
+    Ok((out, rejects))
+}
+
+/// Streaming variant: invoke `on_trade` / `on_reject` per row without
+/// buffering the file. Row order is the file's order (dumps are
+/// trade-id / time ordered).
+pub fn for_each_trade<R: Read>(
+    reader: R,
+    native_symbol: &str,
+    src_file: &str,
+    mut on_trade: impl FnMut(Trade),
+    mut on_reject: impl FnMut(Reject),
+) -> Result<(), anyhow::Error> {
     let instrument = instrument_id(native_symbol)
         .ok_or_else(|| anyhow::anyhow!("cannot split symbol {native_symbol}"))?;
     let mut rdr = csv::ReaderBuilder::new()
@@ -73,12 +96,10 @@ pub fn parse_trades_csv<R: Read>(
         .flexible(true)
         .from_reader(reader);
 
-    let mut out = Vec::new();
-    let mut rejects = Vec::new();
     for (i, rec) in rdr.records().enumerate() {
         let line = i as i32;
         let mut reject = |reason: String| {
-            rejects.push(Reject {
+            on_reject(Reject {
                 src_file: src_file.into(),
                 src_line: line,
                 reason,
@@ -116,11 +137,11 @@ pub fn parse_trades_csv<R: Read>(
             })
         })();
         match parsed {
-            Some(t) => out.push(t),
+            Some(t) => on_trade(t),
             None => reject(format!("bad record: {rec:?}")),
         }
     }
-    Ok((out, rejects))
+    Ok(())
 }
 
 #[cfg(test)]
