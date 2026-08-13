@@ -72,6 +72,9 @@ pub async fn markets(State(state): State<Arc<AppState>>) -> ApiResult {
     Ok(Json(json!({
         "serverTimeMs": now_ms(),
         "packageId": state.exchange_package,
+        // SO-384: shared ingress Whitelist every fill/match entry takes
+        // right after the registry; null on pre-whitelist records.
+        "whitelistId": state.whitelist_id,
         // SO-372: shared ids takers need to build direct-escrow fill PTBs
         // (`exchange_adapter::fill_vault_order(_reverse)`); null when the
         // deployment has no exchange_adapter.
@@ -437,6 +440,9 @@ pub async fn routes(
                     }
                 };
                 let obj = cmd.as_object_mut().expect("built as object");
+                // SO-384: the fill entries take the ingress Whitelist
+                // right after the registry.
+                obj.insert("whitelistId".into(), json!(state.whitelist_id));
                 obj.insert("market".into(), json!(market_id.to_hex()));
                 obj.insert("typeArgs".into(), json!([m.base, m.quote]));
                 obj.insert("digest".into(), json!(leg.digest.to_hex()));

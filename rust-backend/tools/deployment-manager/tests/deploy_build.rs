@@ -40,6 +40,10 @@ use sui_move_build::BuildConfig;
 const PUBLISHABLE: &[&str] = &[
     // `auction` and `rfq` are retired (contracts/.deprecated/) and no
     // longer published, so they are deliberately absent here.
+    // The standalone ingress whitelist publishes FIRST: every gated
+    // package (core, trading-vault, exchange, exchange-adapter) links
+    // against it.
+    "whitelist",
     "core",
     "trading-vault",
     "oracle-pyth",

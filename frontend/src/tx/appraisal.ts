@@ -66,6 +66,7 @@ import {
   PYTH_PRICE_INFO_TABLE_IDS,
   TRADING_VAULT_OBJECTS,
   TRADING_VAULT_PACKAGE_ID,
+  WHITELIST_ID,
 } from "../config";
 
 const CLOCK_ID = "0x6";
@@ -1113,12 +1114,15 @@ export async function buildAppraisedDepositTx(p: AppraisedDepositParams): Promis
     });
   }
   const funds = tx.add(coinWithBalance({ balance: p.amountRaw, type: depType }));
+  // Shared whitelist::Whitelist — the ingress gate (SO-383).
+  const whitelistId = requireId(WHITELIST_ID, "whitelistId");
   tx.moveCall({
     target: `${vaultPkg}::vault::deposit`,
     typeArguments: [depType],
     arguments: [
       tx.object(p.plan.vaultId),
       tx.object(p.protocolConfigId),
+      tx.object(whitelistId),
       appraisal,
       funds,
       att,

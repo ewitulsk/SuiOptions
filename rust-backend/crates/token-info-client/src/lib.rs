@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use sui_types::base_types::{ObjectID, SuiAddress};
 use tracing::{info, warn};
 
-pub use deployments::{TradingVaultObjectsInfo, DeepBookInfo, PackageInfo, SubPackageInfo, TestTokens, TokenInfo};
+pub use deployments::{TradingVaultObjectsInfo, DeepBookInfo, PackageInfo, SubPackageInfo, TestTokens, TokenInfo, WhitelistInfo};
 
 /// One supported-token catalog entry as served by `GET /tokens`.
 ///
@@ -192,6 +192,41 @@ impl Snapshot {
     /// allowlist) recorded by the deploy-time activation step (SO-292).
     pub fn trading_vault_objects(&self) -> Option<&TradingVaultObjectsInfo> {
         self.package_info.trading_vault_objects.as_ref()
+    }
+
+    /// The standalone ingress whitelist record (guarded launch). `None`
+    /// on records predating the standalone whitelist package.
+    pub fn whitelist(&self) -> Option<&WhitelistInfo> {
+        self.package_info.whitelist.as_ref()
+    }
+
+    /// Shared `Whitelist` object id — the ONE gate arg every ingress
+    /// entry across core / trading-vault / exchange takes. `None` on
+    /// records predating the standalone whitelist package.
+    pub fn whitelist_object(&self) -> Result<Option<ObjectID>> {
+        self.package_info
+            .whitelist
+            .as_ref()
+            .map(|w| ObjectID::from_str_checked(&w.whitelist_id, "whitelist whitelist_id"))
+            .transpose()
+    }
+
+    /// The whitelist package id (admin PTBs target its `whitelist` module).
+    pub fn whitelist_package(&self) -> Result<Option<ObjectID>> {
+        self.package_info
+            .whitelist
+            .as_ref()
+            .map(|w| ObjectID::from_str_checked(&w.package_id, "whitelist package_id"))
+            .transpose()
+    }
+
+    /// The whitelist `AdminCap` id (deployer-owned).
+    pub fn whitelist_admin_cap(&self) -> Result<Option<ObjectID>> {
+        self.package_info
+            .whitelist
+            .as_ref()
+            .map(|w| ObjectID::from_str_checked(&w.admin_cap_id, "whitelist admin_cap_id"))
+            .transpose()
     }
 
     /// mm-bot's `QuoteSigner` object for this deployment, recorded by the
@@ -441,6 +476,7 @@ mod tests {
                 trading_vault_objects: None,
                 quote_signer_id: None,
                 exchange: None,
+                whitelist: None,
             },
             tokens: vec![
                 tok(

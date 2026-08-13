@@ -54,6 +54,10 @@ async fn main() -> Result<()> {
 
     let package = snapshot.package()?;
     let protocol_config = snapshot.protocol_config()?;
+    // Shared whitelist::Whitelist — the execute entries' ingress gate.
+    let whitelist = snapshot
+        .whitelist_object()?
+        .context("no whitelist block in token-info — redeploy the protocol")?;
     let treasury = snapshot.treasury().context("treasury_id missing from token-info")?;
 
     // Coin types from the /tokens catalog; the underlying faucet (which the
@@ -157,6 +161,7 @@ async fn main() -> Result<()> {
                 underlying_faucet_id: underlying_faucet.faucet()?,
                 bucket_id: cli.bucket,
                 protocol_config_id: protocol_config,
+                whitelist_id: whitelist,
                 treasury_id: treasury,
                 routing: QuoteRouting {
                     quote_signer_id,
@@ -195,6 +200,7 @@ async fn main() -> Result<()> {
                 settlement_faucet_id: settlement_faucet.faucet()?,
                 bucket_id: cli.bucket,
                 protocol_config_id: protocol_config,
+                whitelist_id: whitelist,
                 treasury_id: treasury,
                 routing: QuoteRouting {
                     quote_signer_id,

@@ -105,6 +105,7 @@ export function SwapScreen() {
         toType: to,
         minOut,
         packageId,
+        whitelistId: exchangeQuery.data?.whitelistId ?? undefined,
       });
       const digest = await submit(tx);
       setResult({ ok: true, message: "Swap submitted", digest });

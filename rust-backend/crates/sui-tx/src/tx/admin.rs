@@ -97,6 +97,201 @@ pub async fn set_fee_bps(
     .await
 }
 
+/// The ONE ingress whitelist of a deployment (guarded launch): the
+/// standalone `whitelist` package, its shared `Whitelist` object, and the
+/// `AdminCap` that gates every mutation. Every gated package (core,
+/// trading-vault, exchange, exchange-adapter) checks this same object, so
+/// admin tooling mutates exactly one list.
+pub struct IngressWhitelist {
+    /// The standalone whitelist package id.
+    pub package: ObjectID,
+    /// Owned `whitelist::AdminCap`.
+    pub admin_cap: ObjectID,
+    /// Shared `whitelist::Whitelist` object.
+    pub whitelist: ObjectID,
+}
+
+/// The cap + shared list resolved into a PTB's inputs.
+struct ResolvedWhitelist {
+    admin: Argument,
+    whitelist: Argument,
+}
+
+impl IngressWhitelist {
+    async fn resolve(
+        &self,
+        client: &ChainClient,
+        pt: &mut ProgrammableTransactionBuilder,
+    ) -> Result<ResolvedWhitelist> {
+        Ok(ResolvedWhitelist {
+            admin: pt.obj(
+                client
+                    .object_arg(self.admin_cap, false)
+                    .await
+                    .context("resolving whitelist AdminCap")?,
+            )?,
+            whitelist: pt.obj(
+                client
+                    .object_arg(self.whitelist, true)
+                    .await
+                    .context("resolving shared Whitelist")?,
+            )?,
+        })
+    }
+}
+
+/// One PTB: `whitelist::<function>(cap, wl, member)`.
+async fn whitelist_member_op(
+    client: &ChainClient,
+    signer: &Signer,
+    wl: &IngressWhitelist,
+    member: SuiAddress,
+    function: &'static str,
+    gas_budget: u64,
+) -> Result<ExecutedTransaction> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let r = wl.resolve(client, &mut pt).await?;
+    let addr = pt.pure(member)?;
+    pt.programmable_move_call(
+        wl.package,
+        Identifier::new("whitelist")?,
+        Identifier::new(function)?,
+        vec![],
+        vec![r.admin, r.whitelist, addr],
+    );
+    submit_ptb(client, signer, pt, gas_budget, &format!("ingress whitelist {function}")).await
+}
+
+/// Adds `member` to the ingress whitelist.
+pub async fn whitelist_add_member(
+    client: &ChainClient,
+    signer: &Signer,
+    wl: &IngressWhitelist,
+    member: SuiAddress,
+    gas_budget: u64,
+) -> Result<ExecutedTransaction> {
+    whitelist_member_op(client, signer, wl, member, "add_member", gas_budget).await
+}
+
+/// Removes `member` from the ingress whitelist.
+pub async fn whitelist_remove_member(
+    client: &ChainClient,
+    signer: &Signer,
+    wl: &IngressWhitelist,
+    member: SuiAddress,
+    gas_budget: u64,
+) -> Result<ExecutedTransaction> {
+    whitelist_member_op(client, signer, wl, member, "remove_member", gas_budget).await
+}
+
+/// `whitelist::set_whitelist_enabled` — the go-public lever. Membership is
+/// retained on-chain, so re-enabling restores the prior cohort.
+pub async fn set_whitelist_enabled(
+    client: &ChainClient,
+    signer: &Signer,
+    wl: &IngressWhitelist,
+    enabled: bool,
+    gas_budget: u64,
+) -> Result<ExecutedTransaction> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let r = wl.resolve(client, &mut pt).await?;
+    let flag = pt.pure(enabled)?;
+    pt.programmable_move_call(
+        wl.package,
+        Identifier::new("whitelist")?,
+        Identifier::new("set_whitelist_enabled")?,
+        vec![],
+        vec![r.admin, r.whitelist, flag],
+    );
+    submit_ptb(client, signer, pt, gas_budget, "ingress set_whitelist_enabled").await
+}
+
+/// One exchange market's pause target: the shared SettlementRegistry plus
+/// the Base/Quote type args its `set_paused<Base, Quote>` call needs.
+pub struct MarketPauseTarget {
+    pub registry: ObjectID,
+    pub base: String,
+    pub quote: String,
+}
+
+/// The big red button, ONE PTB: `whitelist::set_ingress_paused` on the
+/// shared Whitelist (whitelist AdminCap), trading-vault
+/// `registry::set_paused` on the VaultProtocolConfig (still gated by the
+/// CORE AdminCap), and exchange `registry::set_paused<Base, Quote>` on
+/// every market (EXCHANGE AdminCap) — three caps total. Exits
+/// (withdrawals/cancels) are never gated on-chain, so flipping this
+/// strands nobody.
+#[allow(clippy::too_many_arguments)]
+pub async fn set_ingress_paused(
+    client: &ChainClient,
+    signer: &Signer,
+    wl: &IngressWhitelist,
+    core_admin_cap: ObjectID,
+    trading_vault_package: ObjectID,
+    vault_protocol_config: ObjectID,
+    exchange_package: ObjectID,
+    exchange_admin_cap: ObjectID,
+    markets: &[MarketPauseTarget],
+    paused: bool,
+    gas_budget: u64,
+) -> Result<ExecutedTransaction> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let r = wl.resolve(client, &mut pt).await?;
+    let flag = pt.pure(paused)?;
+    pt.programmable_move_call(
+        wl.package,
+        Identifier::new("whitelist")?,
+        Identifier::new("set_ingress_paused")?,
+        vec![],
+        vec![r.admin, r.whitelist, flag],
+    );
+    let core_admin = pt.obj(
+        client
+            .object_arg(core_admin_cap, false)
+            .await
+            .context("resolving core AdminCap")?,
+    )?;
+    let vault_cfg = pt.obj(
+        client
+            .object_arg(vault_protocol_config, true)
+            .await
+            .context("resolving VaultProtocolConfig")?,
+    )?;
+    pt.programmable_move_call(
+        trading_vault_package,
+        Identifier::new("registry")?,
+        Identifier::new("set_paused")?,
+        vec![],
+        vec![core_admin, vault_cfg, flag],
+    );
+    let exchange_admin = pt.obj(
+        client
+            .object_arg(exchange_admin_cap, false)
+            .await
+            .context("resolving exchange AdminCap")?,
+    )?;
+    for m in markets {
+        let base = TypeTag::from_str(&m.base)
+            .with_context(|| format!("parsing market base type {}", m.base))?;
+        let quote = TypeTag::from_str(&m.quote)
+            .with_context(|| format!("parsing market quote type {}", m.quote))?;
+        let reg = pt.obj(
+            client
+                .object_arg(m.registry, true)
+                .await
+                .with_context(|| format!("resolving market registry {}", m.registry))?,
+        )?;
+        pt.programmable_move_call(
+            exchange_package,
+            Identifier::new("registry")?,
+            Identifier::new("set_paused")?,
+            vec![base, quote],
+            vec![exchange_admin, reg, flag],
+        );
+    }
+    submit_ptb(client, signer, pt, gas_budget, "ingress set_ingress_paused").await
+}
+
 /// Calls `treasury::withdraw<T>(&AdminCap, &mut Treasury, amount, recipient,
 /// ctx)`.
 pub async fn withdraw_treasury(

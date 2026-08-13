@@ -101,6 +101,12 @@ export let OPTIONS_ADAPTER_PACKAGE_ID: string | undefined;
 /** Hybrid-exchange maker adapter for the trading vault (SO-370). */
 export let EXCHANGE_ADAPTER_PACKAGE_ID: string | undefined;
 
+/** The ONE shared ingress `Whitelist` of the standalone whitelist package
+ * (guarded launch): the gate arg every ingress entry across core /
+ * trading-vault / exchange takes. `undefined` on records predating the
+ * standalone package. */
+export let WHITELIST_ID: string | undefined;
+
 // Keeper-attested equity oracle for trading-vault external accounts
 // (SO-299). The publish digest resolves the shared `EquityBook` client-side
 // (token-info doesn't serve it), mirroring the publish-digest fallback below.
@@ -216,6 +222,16 @@ type PackageInfoDto = {
   deepbookAdapter?: { packageId: string } | null;
   optionsAdapter?: { packageId: string } | null;
   exchangeAdapter?: { packageId: string } | null;
+  exchange?: {
+    packageId: string;
+  } | null;
+  /** Standalone ingress whitelist package (guarded launch). Absent on
+   * records predating the standalone package. */
+  whitelist?: {
+    packageId: string;
+    whitelistId: string;
+    adminCapId: string;
+  } | null;
   equityOracle?: { packageId: string; publishDigest: string } | null;
   tradingVaultObjects?: {
     vaultProtocolConfigId: string;
@@ -264,6 +280,7 @@ export async function initConfig(): Promise<void> {
   DEEPBOOK_ADAPTER_PACKAGE_ID = info.deepbookAdapter?.packageId;
   OPTIONS_ADAPTER_PACKAGE_ID = info.optionsAdapter?.packageId;
   EXCHANGE_ADAPTER_PACKAGE_ID = info.exchangeAdapter?.packageId;
+  WHITELIST_ID = info.whitelist?.whitelistId ?? undefined;
   EQUITY_ORACLE_PACKAGE_ID = info.equityOracle?.packageId;
   EQUITY_ORACLE_PUBLISH_DIGEST = info.equityOracle?.publishDigest;
   TRADING_VAULT_OBJECTS = info.tradingVaultObjects ?? undefined;

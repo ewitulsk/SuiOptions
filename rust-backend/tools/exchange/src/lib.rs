@@ -110,6 +110,30 @@ pub enum Command {
         #[arg(long)]
         recipient: SuiAddress,
     },
+    /// Add an address to BOTH ingress whitelists (core `ProtocolConfig` +
+    /// exchange `Whitelist`) in one PTB.
+    WhitelistAdd {
+        #[arg(long)]
+        address: SuiAddress,
+    },
+    /// Remove an address from BOTH ingress whitelists in one PTB.
+    WhitelistRemove {
+        #[arg(long)]
+        address: SuiAddress,
+    },
+    /// Print both whitelist objects' members + enabled/paused flags.
+    WhitelistList,
+    /// Turn the member check ON for both lists (guarded-launch mode).
+    WhitelistEnable,
+    /// Turn the member check OFF for both lists — the go-public lever.
+    /// Membership is retained on-chain; re-enabling restores the cohort.
+    WhitelistDisable,
+    /// Big red button, one PTB: pause all ingress (both whitelists), the
+    /// trading-vault registry, and every exchange market registry. Exits
+    /// (withdrawals/cancels) are never gated.
+    PauseIngress,
+    /// Reverse of `pause-ingress`, one PTB.
+    UnpauseIngress,
     /// Print every id resolvable from `deployments.json`.
     Info,
 }

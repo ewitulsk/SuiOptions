@@ -11,7 +11,7 @@
 //!    config, sq, clock)                                     -> CollateralRequest
 //! 5. {release_package}::{release_module}::release<T>(
 //!    collateral_account, &request, ctx)                     -> Balance<T>
-//! 6. bucket::execute_writer_flow<U,S,C>(bucket, config,
+//! 6. bucket::execute_writer_flow<U,S,C>(bucket, config, wl,
 //!    treasury, request, funds, coin, recipient, clock)
 //! ```
 //!
@@ -71,6 +71,9 @@ pub struct ExecuteWriteParams<'a> {
     // Shared protocol objects.
     pub bucket_id: ObjectID,
     pub protocol_config_id: ObjectID,
+    /// Shared `whitelist::Whitelist` — the ingress gate the execute
+    /// entries take between the config and the treasury (SO-382).
+    pub whitelist_id: ObjectID,
     pub treasury_id: ObjectID,
 
     /// Signer + collateral routing, all derived from the signed quote.
@@ -112,6 +115,9 @@ pub struct ExecuteTraderParams<'a> {
     // Shared protocol objects.
     pub bucket_id: ObjectID,
     pub protocol_config_id: ObjectID,
+    /// Shared `whitelist::Whitelist` — the ingress gate the execute
+    /// entries take between the config and the treasury (SO-382).
+    pub whitelist_id: ObjectID,
     pub treasury_id: ObjectID,
 
     /// Signer + collateral routing, all derived from the signed quote.
@@ -274,6 +280,7 @@ pub async fn execute_writer_flow(
     // Shared object args.
     let bucket = pt.obj(shared_object_arg(client, p.bucket_id, true).await?)?;
     let config = pt.obj(shared_object_arg(client, p.protocol_config_id, false).await?)?;
+    let wl = pt.obj(shared_object_arg(client, p.whitelist_id, false).await?)?;
     let treasury = pt.obj(shared_object_arg(client, p.treasury_id, true).await?)?;
     let faucet = pt.obj(shared_object_arg(client, p.underlying_faucet_id, true).await?)?;
     let clock = clock_arg(&mut pt)?;
@@ -335,6 +342,7 @@ pub async fn execute_writer_flow(
         vec![
             bucket,
             config,
+            wl,
             treasury,
             request,
             funds,
@@ -374,6 +382,7 @@ pub async fn execute_trader_flow(
     // Shared object args.
     let bucket = pt.obj(shared_object_arg(client, p.bucket_id, true).await?)?;
     let config = pt.obj(shared_object_arg(client, p.protocol_config_id, false).await?)?;
+    let wl = pt.obj(shared_object_arg(client, p.whitelist_id, false).await?)?;
     let treasury = pt.obj(shared_object_arg(client, p.treasury_id, true).await?)?;
     let faucet = pt.obj(shared_object_arg(client, p.settlement_faucet_id, true).await?)?;
     let clock = clock_arg(&mut pt)?;
@@ -435,6 +444,7 @@ pub async fn execute_trader_flow(
         vec![
             bucket,
             config,
+            wl,
             treasury,
             request,
             funds,

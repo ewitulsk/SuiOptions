@@ -8,7 +8,11 @@
 
 import { Transaction } from "@mysten/sui/transactions";
 
-import { EXCHANGE_ADAPTER_PACKAGE_ID, TRADING_VAULT_OBJECTS } from "../config";
+import {
+  EXCHANGE_ADAPTER_PACKAGE_ID,
+  WHITELIST_ID,
+  TRADING_VAULT_OBJECTS,
+} from "../config";
 
 function requireRefs(): { pkg: string; integrationRegistryId: string } {
   if (!EXCHANGE_ADAPTER_PACKAGE_ID) {
@@ -77,6 +81,18 @@ export function buildExchangeDefundTx(p: ExchangeCustodyMoveParams): Transaction
 function custodyMoveTx(fn: "fund" | "defund", p: ExchangeCustodyMoveParams): Transaction {
   const { pkg, integrationRegistryId } = requireRefs();
   const tx = new Transaction();
+  // `fund` deposits into the exchange BalanceManager, which is
+  // ingress-gated by the shared Whitelist (SO-384). `defund`
+  // moves value OUT and stays ungated.
+  const wl: string[] = [];
+  if (fn === "fund") {
+    if (!WHITELIST_ID) {
+      throw new Error(
+        "deployment record has no whitelist block — cannot fund an exchange custody (SO-384)",
+      );
+    }
+    wl.push(WHITELIST_ID);
+  }
   tx.moveCall({
     target: `${pkg}::exchange_adapter::${fn}`,
     typeArguments: [p.coinType],
@@ -84,6 +100,7 @@ function custodyMoveTx(fn: "fund" | "defund", p: ExchangeCustodyMoveParams): Tra
       tx.object(p.vaultId),
       tx.object(p.curatorCapId),
       tx.object(integrationRegistryId),
+      ...wl.map((id) => tx.object(id)),
       tx.object(p.bmId),
       tx.pure.id(p.custodyId),
       tx.pure.u64(p.amountRaw),

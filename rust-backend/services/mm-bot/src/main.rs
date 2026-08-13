@@ -734,6 +734,12 @@ async fn main() -> Result<()> {
             core_package: snapshot.package()?,
             trading_vault_package,
             vault_protocol_config,
+            whitelist: snapshot.whitelist_object()?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "token-info has no whitelist block — vault provisioning is \
+                     ingress-gated (SO-383); redeploy the protocol"
+                )
+            })?,
             testnet_seed,
             options_adapter_package,
             deepbook_adapter_package,

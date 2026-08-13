@@ -37,6 +37,11 @@ pub struct AppState {
     /// consumers can build the `settlement::FillEvent` event filter without
     /// reading deployments themselves.
     pub exchange_package: String,
+    /// Shared ingress `Whitelist` id (guarded launch, SO-384) from the
+    /// standalone whitelist package, served on `/v1/markets` and in route
+    /// skeletons so takers can build fill PTBs. `None` on records
+    /// predating the standalone package.
+    pub whitelist_id: Option<String>,
     pub markets: Vec<Market>,
     /// Per-market books, keyed by registry ID. A `Mutex<Book>` per market is
     /// the v1 stand-in for the single-writer task; contention stays

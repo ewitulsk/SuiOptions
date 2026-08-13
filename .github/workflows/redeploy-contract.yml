@@ -341,6 +341,7 @@ jobs:
           ENV: ${{ inputs.environment }}
           GRPC_URL: ${{ inputs.grpc_url }}
           GAS_BUDGET: ${{ inputs.gas_budget }}
+          INGRESS_MEMBERS: ${{ vars.INGRESS_MEMBERS_STAGING }}
         run: |
           ARGS=(
             --env        "$ENV"
@@ -360,6 +361,16 @@ jobs:
           fi
           if [ -n "$GRPC_URL" ]; then
             ARGS+=(--grpc "$GRPC_URL")
+          fi
+          # Ingress whitelist members (guarded launch): comma-separated
+          # addresses in the INGRESS_MEMBERS_STAGING repo variable, kept
+          # out of the workflow file so service-wallet changes don't need
+          # a commit. The deployer is always seeded automatically.
+          if [ -n "$INGRESS_MEMBERS" ]; then
+            IFS=',' read -ra MEMBERS <<< "$INGRESS_MEMBERS"
+            for member in "${MEMBERS[@]}"; do
+              ARGS+=(--ingress-member "$member")
+            done
           fi
           ./target/release/deploy "${ARGS[@]}"
 

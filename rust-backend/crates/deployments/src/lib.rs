@@ -249,6 +249,40 @@ pub struct PackageInfo {
     /// Hybrid-exchange settlement package (via `--deploy-exchange`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exchange: Option<ExchangeInfo>,
+    /// Standalone ingress whitelist package (guarded launch): the shared
+    /// `Whitelist` every gated entry takes plus the `AdminCap` that
+    /// mutates it. Absent on records predating the standalone package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whitelist: Option<WhitelistInfo>,
+}
+
+/// The standalone whitelist package and the two objects its `init`
+/// creates: the ONE shared ingress `Whitelist` (the gate arg every
+/// ingress entry across core / trading-vault / exchange takes) and the
+/// deployer-owned `AdminCap` gating every mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhitelistInfo {
+    pub package_id: String,
+    pub upgrade_cap_id: String,
+    /// Shared `Whitelist` object id.
+    pub whitelist_id: String,
+    /// Owned `whitelist::AdminCap` id (deployer wallet).
+    pub admin_cap_id: String,
+    pub publish_digest: String,
+    pub deployed_at: String,
+}
+
+impl WhitelistInfo {
+    pub fn package(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.package_id).context("parsing whitelist packageId")
+    }
+    pub fn whitelist_object(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.whitelist_id).context("parsing whitelistId")
+    }
+    pub fn admin_cap(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.admin_cap_id).context("parsing whitelist adminCapId")
+    }
 }
 
 /// Shared governance objects the trading-vault family's inits create,
@@ -441,6 +475,24 @@ impl NetworkDeployment {
             .as_ref()
             .ok_or_else(|| anyhow!("no exchange block in deployments.json — run --deploy-exchange"))
     }
+    /// The standalone ingress whitelist record. Errors on records
+    /// predating the standalone package — everything gated needs it.
+    pub fn whitelist(&self) -> Result<&WhitelistInfo> {
+        self.package_info
+            .whitelist
+            .as_ref()
+            .ok_or_else(|| anyhow!("no whitelist block in deployments.json — redeploy the protocol"))
+    }
+    /// Shared `Whitelist` object id — the gate arg every ingress entry takes.
+    pub fn whitelist_object(&self) -> Result<ObjectID> {
+        self.whitelist()?.whitelist_object()
+    }
+    pub fn whitelist_package(&self) -> Result<ObjectID> {
+        self.whitelist()?.package()
+    }
+    pub fn whitelist_admin_cap(&self) -> Result<ObjectID> {
+        self.whitelist()?.admin_cap()
+    }
     pub fn protocol_config(&self) -> Result<ObjectID> {
         ObjectID::from_str(&self.package_info.protocol_config_id)
             .context("parsing protocol_config_id")
@@ -571,6 +623,7 @@ mod tests {
                 trading_vault_objects: None,
                 quote_signer_id: None,
                 exchange: None,
+                whitelist: None,
             },
             token_info: BTreeMap::new(),
         };

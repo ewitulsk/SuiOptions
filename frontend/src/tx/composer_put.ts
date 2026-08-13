@@ -18,7 +18,7 @@
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
 
-import { ENV, PACKAGE_ID, PROTOCOL_CONFIG_ID, TREASURY_ID } from "../config";
+import { ENV, PACKAGE_ID, PROTOCOL_CONFIG_ID, TREASURY_ID, WHITELIST_ID } from "../config";
 import type { RfqQuoteEntry } from "../api/quoting";
 import { addRelease, addSignedQuote } from "./composer";
 
@@ -71,9 +71,9 @@ export type WritePutParams = {
  */
 export function buildWritePutTx(p: WritePutParams): Transaction {
   const pkg = requirePackage();
-  if (!PROTOCOL_CONFIG_ID || !TREASURY_ID) {
+  if (!PROTOCOL_CONFIG_ID || !TREASURY_ID || !WHITELIST_ID) {
     throw new Error(
-      `Missing protocolConfigId/treasuryId for VITE_ENVIRONMENT="${ENV}" — cannot build the put write PTB`,
+      `Missing protocolConfigId/treasuryId/whitelistId for VITE_ENVIRONMENT="${ENV}" — cannot build the put write PTB`,
     );
   }
   const q = p.entry.quote;
@@ -117,6 +117,7 @@ export function buildWritePutTx(p: WritePutParams): Transaction {
     arguments: [
       tx.object(q.bucket_id),
       tx.object(PROTOCOL_CONFIG_ID),
+      tx.object(WHITELIST_ID),
       tx.object(TREASURY_ID),
       request,
       premiumFunds,
@@ -152,9 +153,9 @@ export type BuyPutParams = {
  */
 export function buildBuyPutTx(p: BuyPutParams): Transaction {
   const pkg = requirePackage();
-  if (!PROTOCOL_CONFIG_ID || !TREASURY_ID) {
+  if (!PROTOCOL_CONFIG_ID || !TREASURY_ID || !WHITELIST_ID) {
     throw new Error(
-      `Missing protocolConfigId/treasuryId for VITE_ENVIRONMENT="${ENV}" — cannot build the put buy PTB`,
+      `Missing protocolConfigId/treasuryId/whitelistId for VITE_ENVIRONMENT="${ENV}" — cannot build the put buy PTB`,
     );
   }
   const q = p.entry.quote;
@@ -194,6 +195,7 @@ export function buildBuyPutTx(p: BuyPutParams): Transaction {
     arguments: [
       tx.object(q.bucket_id),
       tx.object(PROTOCOL_CONFIG_ID),
+      tx.object(WHITELIST_ID),
       tx.object(TREASURY_ID),
       request,
       collateralFunds,

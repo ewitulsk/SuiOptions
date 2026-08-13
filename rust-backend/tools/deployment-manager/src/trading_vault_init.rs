@@ -69,6 +69,25 @@ pub fn registrar_pubkey_for_env(env: &str) -> Option<&'static str> {
         .map(|(_, key)| *key)
 }
 
+/// Addresses seeded into the shared ingress `Whitelist` right after the
+/// whitelist package publish, per deployments.json env slot. The deployer
+/// is always seeded automatically and does not need an entry. Service
+/// wallets that push funds into the protocol — orderbook relayer /
+/// staging-mm-bot / mm-bot — should be listed here (or passed via
+/// `--ingress-member`) once their addresses are settled.
+///
+/// prod stays empty on purpose: its service wallets aren't finalized —
+/// never guess an address here.
+const INGRESS_MEMBERS: &[(&str, &[&str])] = &[];
+
+pub fn ingress_members_for_env(env: &str) -> &'static [&'static str] {
+    INGRESS_MEMBERS
+        .iter()
+        .find(|(e, _)| *e == env)
+        .map(|(_, members)| *members)
+        .unwrap_or(&[])
+}
+
 /// Index one publish outcome's init-created objects by `module::name`.
 ///
 /// Sourced from the publish RESPONSE (`DepPublishOutcome::created_objects`),

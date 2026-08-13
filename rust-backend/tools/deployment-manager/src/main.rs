@@ -4,13 +4,14 @@
 //!
 //! Pipeline per network, in dependency order (each publish stamps the
 //! package's `Published.toml` so the next build links the fresh id):
-//!   1. Publish `auction` (generic venue, no deps)
+//!   1. Publish `whitelist` (standalone ingress whitelist — every gated
+//!      package links against it), capture its AdminCap + shared
+//!      Whitelist, and seed the member list (deployer ∪ configured)
 //!   2. Publish `core` (options_core) and parse object_changes for:
 //!      package_id, AdminCap, ProtocolConfig, UpgradeCap
-//!   3. Publish `rfq` (options_rfq: deps core + auction)
-//!   4. Publish the trading-vault family and its adapters/oracles
-//!   5. Call `treasury::create_and_share(&AdminCap)` and capture the Treasury ID
-//!   6. Merge into `deployments.json`, replacing only the targeted env's entry
+//!   3. Publish the trading-vault family and its adapters/oracles
+//!   4. Call `treasury::create_and_share(&AdminCap)` and capture the Treasury ID
+//!   5. Merge into `deployments.json`, replacing only the targeted env's entry
 //!
 //! `vault` (options_vault) is deliberately absent: the covered-call vault
 //! product is deprecated (SO-332) and is no longer published.
@@ -21,17 +22,20 @@ use sui_tx::chain::ChainClient;
 
 use deployment_manager::deploy::{
     create_and_share_treasury, publish_cctp_package, publish_dep_package, publish_package,
-    publish_test_tokens,
+    publish_test_tokens, seed_whitelist,
 };
 use deployment_manager::json_store::{
     CctpBridgeRecord, Deployments, ExchangeRecord, NetworkDeployment, PackageInfo,
     PackageRecord, TestTokenRecord, TestTokensRecord, TokenSpec, TradingVaultObjectsRecord,
+    WhitelistRecord,
 };
 use deployment_manager::network::Network;
 use deployment_manager::signer::load_signer;
 use deployment_manager::Cli;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::str::FromStr;
+use sui_types::base_types::SuiAddress;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -71,6 +75,22 @@ async fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| secrets.resolve_grpc_url(network.grpc_url()));
     let env_key = cli.env.to_ascii_lowercase();
+
+    // Ingress whitelist members: the env's baked-in list merged with any
+    // --ingress-member flags, deduped, parsed up front so a typo fails the
+    // run before anything publishes. The deployer is seeded automatically.
+    let mut ingress_members: Vec<SuiAddress> = Vec::new();
+    for raw in deployment_manager::trading_vault_init::ingress_members_for_env(&env_key)
+        .iter()
+        .copied()
+        .chain(cli.ingress_member.iter().map(String::as_str))
+    {
+        let addr = SuiAddress::from_str(raw)
+            .with_context(|| format!("parsing ingress member address {raw}"))?;
+        if !ingress_members.contains(&addr) {
+            ingress_members.push(addr);
+        }
+    }
 
     let mut store = Deployments::load_or_default(&output_path)?;
 
@@ -156,7 +176,9 @@ async fn main() -> Result<()> {
             markets: std::collections::BTreeMap::new(),
         };
         // A fresh package has no markets yet: list every token × TUSDC now
-        // so the publish ceremony ends with a tradeable exchange.
+        // so the publish ceremony ends with a tradeable exchange. The
+        // exchange no longer carries its own whitelist — it links against
+        // the standalone whitelist package the full deploy publishes.
         deployment_manager::exchange_markets::create_markets(
             &client,
             &signer,
@@ -291,6 +313,7 @@ async fn main() -> Result<()> {
         previous_deepbook,
         previous_cctp,
         deployment_manager::trading_vault_init::registrar_pubkey_for_env(&env_key),
+        &ingress_members,
         cli.gas_budget,
         cli.skip_init,
     )
@@ -319,6 +342,9 @@ async fn deploy_one(
     // into the VaultProtocolConfig at activation. `None` leaves the attested
     // registration path disabled.
     registrar_pubkey: Option<&str>,
+    // Extra addresses seeded into the shared ingress Whitelist alongside
+    // the deployer, right after the whitelist package publish.
+    ingress_members: &[SuiAddress],
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
@@ -342,6 +368,59 @@ async fn deploy_one(
 
     // Publish the tree in dependency order; each publish stamps its
     // Published.toml so the next build resolves the fresh id.
+    //
+    // The standalone whitelist package goes FIRST: core (and every other
+    // gated package) links against it. Its init transfers an AdminCap to
+    // the deployer and shares the one ingress Whitelist.
+    let whitelist_out = publish_dep_package(
+        &client,
+        &signer,
+        &contracts_root.join("whitelist"),
+        "whitelist",
+        env,
+        gas_budget,
+    )
+    .await
+    .with_context(|| format!("publishing whitelist to {network}"))?;
+    let whitelist_admin_cap_id = whitelist_out
+        .created_objects
+        .iter()
+        .find(|(module, name, _)| module == "whitelist" && name == "AdminCap")
+        .map(|(_, _, id)| *id)
+        .context("whitelist publish created no whitelist::AdminCap")?;
+    let whitelist_object_id = whitelist_out
+        .created_objects
+        .iter()
+        .find(|(module, name, _)| module == "whitelist" && name == "Whitelist")
+        .map(|(_, _, id)| *id)
+        .context("whitelist publish created no whitelist::Whitelist")?;
+    tracing::info!(
+        package = %whitelist_out.package_id,
+        admin_cap = %whitelist_admin_cap_id,
+        whitelist = %whitelist_object_id,
+        "whitelist published"
+    );
+    // Seed ONCE, right here: the deployer ∪ configured members, deduped.
+    seed_whitelist(
+        &client,
+        &signer,
+        whitelist_out.package_id,
+        whitelist_admin_cap_id,
+        whitelist_object_id,
+        ingress_members,
+        gas_budget,
+    )
+    .await
+    .context("seeding the ingress whitelist")?;
+    let whitelist = Some(WhitelistRecord {
+        package_id: whitelist_out.package_id.to_string(),
+        upgrade_cap_id: whitelist_out.upgrade_cap_id.to_string(),
+        whitelist_id: whitelist_object_id.to_string(),
+        admin_cap_id: whitelist_admin_cap_id.to_string(),
+        publish_digest: whitelist_out.digest.clone(),
+        deployed_at: chrono::Utc::now().to_rfc3339(),
+    });
+
     let publish = publish_package(&client, &signer, &contracts_root.join("core"), env, gas_budget)
         .await
         .with_context(|| format!("publishing options_core to {network}"))?;
@@ -553,13 +632,19 @@ async fn deploy_one(
         .await
         .with_context(|| format!("publishing exchange to {network}"))?;
         // exchange::admin's init transfers an AdminCap to the deployer.
+        // The exchange no longer creates a whitelist of its own — its
+        // gates take the standalone package's shared Whitelist.
         let admin_cap_id = out
             .created_objects
             .iter()
             .find(|(module, name, _)| module == "admin" && name == "AdminCap")
             .map(|(_, _, id)| *id)
             .context("exchange publish created no admin::AdminCap")?;
-        tracing::info!(package = %out.package_id, admin_cap = %admin_cap_id, "exchange published");
+        tracing::info!(
+            package = %out.package_id,
+            admin_cap = %admin_cap_id,
+            "exchange published"
+        );
         let mut ex = ExchangeRecord {
             package_id: out.package_id.to_string(),
             upgrade_cap_id: out.upgrade_cap_id.to_string(),
@@ -670,6 +755,7 @@ async fn deploy_one(
             equity_oracle: Some(record(&equity_oracle_out)),
             trading_vault_objects,
             cctp_bridge: previous_cctp,
+            whitelist,
             exchange,
             // Deliberately not carried forward: a republish invalidates the
             // previous deployment's QuoteSigner (package-bound type). The

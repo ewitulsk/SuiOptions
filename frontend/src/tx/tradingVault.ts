@@ -17,6 +17,7 @@ import {
   EQUITY_ORACLE_PACKAGE_ID,
   TRADING_VAULT_OBJECTS,
   TRADING_VAULT_PACKAGE_ID,
+  WHITELIST_ID,
 } from "../config";
 
 const CLOCK_ID = "0x6";
@@ -28,6 +29,17 @@ function requirePackage(): string {
     );
   }
   return TRADING_VAULT_PACKAGE_ID;
+}
+
+/** The shared `whitelist::Whitelist` — `create_vault` / `deposit`'s ingress
+ * gate (SO-383). */
+function requireWhitelist(): string {
+  if (!WHITELIST_ID) {
+    throw new Error(
+      `No whitelistId for VITE_ENVIRONMENT="${ENV}" — cannot build trading-vault PTBs`,
+    );
+  }
+  return WHITELIST_ID;
 }
 
 export type CreateTradingVaultParams = {
@@ -53,6 +65,7 @@ export function buildCreateTradingVaultTx(p: CreateTradingVaultParams): Transact
     typeArguments: [p.depositCoinType],
     arguments: [
       tx.object(p.protocolConfigId),
+      tx.object(requireWhitelist()),
       tx.pure.u64(p.lockupMs),
       tx.pure.u64(p.curatorFeeBps),
       tx.pure.u64(p.unwindGraceMs),
@@ -103,6 +116,7 @@ export function buildTradingVaultDepositTx(p: TradingVaultDepositParams): Transa
     arguments: [
       tx.object(p.vaultId),
       tx.object(p.protocolConfigId),
+      tx.object(requireWhitelist()),
       appraisal,
       funds,
       noAtt,

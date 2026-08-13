@@ -133,6 +133,18 @@ impl Config {
         Ok((exchange, markets))
     }
 
+    /// The standalone ingress whitelist record (SO-384): the shared
+    /// `Whitelist` object every fill/match entry takes right after the
+    /// registry. `None` on records predating the standalone package.
+    pub fn load_whitelist(&self) -> Result<Option<deployments::WhitelistInfo>> {
+        let all = deployments::Deployments::load(Path::new(&self.deployments))
+            .with_context(|| format!("loading {}", self.deployments))?;
+        let dep = all
+            .for_env(&self.env)
+            .with_context(|| format!("env {} in {}", self.env, self.deployments))?;
+        Ok(dep.package_info.whitelist.clone())
+    }
+
     /// Direct-escrow ids from the deployments record (SO-372). `None` when
     /// the record has no exchange_adapter or trading-vault-objects block.
     pub fn load_direct_escrow(&self) -> Result<Option<DirectEscrowIds>> {

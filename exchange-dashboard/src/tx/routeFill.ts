@@ -34,6 +34,9 @@ export function buildRouteFillTx(
     /** User's slippage floor — replaces the server's zero-tolerance min. */
     minOut: bigint;
     packageId: string;
+    /** Shared exchange ingress `Whitelist` (SO-384) — every fill entry
+     * takes it right after the registry. Skeleton commands may override. */
+    whitelistId?: string;
   },
 ): Transaction {
   const tx = new Transaction();
@@ -69,6 +72,14 @@ export function buildRouteFillTx(
         const cmd = skeleton.get(leg.digest);
         const vaultLeg =
           cmd?.command === "fill_vault_order" || cmd?.command === "fill_vault_order_reverse";
+        // SO-384: every fill entry takes the shared ingress Whitelist
+        // right after the registry.
+        const whitelistId = cmd?.whitelistId ?? opts.whitelistId;
+        if (!whitelistId) {
+          throw new Error(
+            `route leg ${leg.digest} lacks the exchange whitelistId (SO-384) — is the orderbook/deployment up to date?`,
+          );
+        }
         let res;
         if (vaultLeg) {
           const { vaultId, custodyId, integrationRegistryId, adapterPackageId } = cmd;
@@ -82,6 +93,7 @@ export function buildRouteFillTx(
               tx.object(vaultId),
               tx.object(integrationRegistryId),
               tx.object(order.registryId),
+              tx.object(whitelistId),
               tx.object(order.makerManagerId),
               tx.pure.id(custodyId),
               tx.pure(VecU8.serialize(orderBytes(order))),
@@ -99,6 +111,7 @@ export function buildRouteFillTx(
             typeArguments: [market.base, market.quote],
             arguments: [
               tx.object(order.registryId),
+              tx.object(whitelistId),
               tx.object(order.makerManagerId),
               tx.pure(VecU8.serialize(orderBytes(order))),
               tx.pure(VecU8.serialize(prefixedSignature(order))),

@@ -476,6 +476,9 @@ pub struct DeskParams {
     /// Shared `VaultProtocolConfig` (token-info `trading_vault_objects`).
     /// Needed to create a vault and to deposit into one.
     pub vault_protocol_config: ObjectID,
+    /// Shared `whitelist::Whitelist` — the ingress gate on `create_vault`
+    /// / `vault::deposit` (SO-383).
+    pub whitelist: ObjectID,
     /// `[testnet]` faucet seed for a vault this bot provisions. `Some`
     /// only on testnet with `mint_and_deposit_liquidity = true`.
     pub testnet_seed: Option<provision::TestnetSeed>,
@@ -528,6 +531,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         allow_mm_release_toggle: p.cfg.mm_release_enabled,
         trading_vault_package: p.trading_vault_package,
         vault_protocol_config: p.vault_protocol_config,
+        whitelist: p.whitelist,
         settlement_coin_type: &p.settlement_coin_type,
         testnet_seed: p.testnet_seed.as_ref(),
     })
