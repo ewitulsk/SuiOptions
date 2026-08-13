@@ -23,6 +23,8 @@ pub async fn serve(
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/analytics/catalog", get(crate::analytics::catalog))
+        .route("/analytics/series", get(crate::analytics::series))
         .route("/buckets", get(handlers::buckets::list_buckets))
         .route("/buckets/:bucket_id", get(handlers::buckets::get_bucket))
         .route("/positions", get(handlers::positions::list_positions))
@@ -45,10 +47,7 @@ pub async fn serve(
             get(handlers::option_metrics::option_metrics),
         )
         .route("/rfqs", get(handlers::rfqs::list_rfqs))
-        .route(
-            "/rfqs/:rfq_id/bids",
-            get(handlers::rfqs::list_rfq_bids),
-        )
+        .route("/rfqs/:rfq_id/bids", get(handlers::rfqs::list_rfq_bids))
         .route(
             "/trading-vaults",
             get(handlers::trading_vaults::list_trading_vaults),

@@ -88,6 +88,9 @@ exchange-router  = { path = "crates/exchange-router" }
 tokio = { version = "=1.49.0", features = ["full"] }
 tokio-tungstenite = { version = "0.24" }
 futures = "0.3"
+object_store = { version = "0.12", features = ["aws"] }
+arrow = "56"
+parquet = { version = "56", features = ["arrow", "zstd"] }
 futures-util = "0.3"
 async-trait = "0.1"
 

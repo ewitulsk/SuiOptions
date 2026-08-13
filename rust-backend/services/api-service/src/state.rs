@@ -26,6 +26,9 @@ pub struct AppState {
     /// Names the direct-quoting adapter witness on trading-vault views;
     /// `None` on deployments without the adapter.
     pub exchange_adapter_package: Option<String>,
+    /// Data-room gold reader for /analytics/* (SO-389). `None` when
+    /// `data_room_url` is unset or failed to parse — endpoints then 503.
+    pub analytics: Option<std::sync::Arc<crate::analytics::lake::Lake>>,
     /// Shared HTTP client for composing the worker's read API + the RPC read.
     pub http: reqwest::Client,
 }
@@ -38,6 +41,7 @@ impl AppState {
         sui_graphql_url: String,
         price_charting_url: Option<String>,
         exchange_adapter_package: Option<String>,
+        analytics: Option<std::sync::Arc<crate::analytics::lake::Lake>>,
     ) -> Self {
         Self {
             catalog,
@@ -46,6 +50,7 @@ impl AppState {
             sui_graphql_url,
             price_charting_url: price_charting_url.map(|u| u.trim_end_matches('/').to_string()),
             exchange_adapter_package,
+            analytics,
             http: reqwest::Client::new(),
         }
     }

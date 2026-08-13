@@ -28,3 +28,7 @@ derived_metrics_url = "http://price-charting:9011"
 # Sui GraphQL RPC for the live-vault read in GET /vaults/:id (staging is
 # testnet). A read failure degrades to omitting live round state, never a 5xx.
 sui_graphql_url = "https://graphql.testnet.sui.io/graphql"
+
+# Data-room gold lake for /analytics/* (SO-389). Read-only via the host
+# IAM role; unset disables analytics endpoints (503).
+data_room_url = "s3://options-data-room-20260813122351104900000001"
