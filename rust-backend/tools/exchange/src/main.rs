@@ -23,7 +23,10 @@ use clap::Parser;
 
 use token_info_client::{Snapshot, TokenInfoClient};
 use sui_tx::sui_client::SuiClientWrapper;
-use sui_tx::tx::admin::{set_fee_bps, withdraw_treasury};
+use sui_tx::tx::admin::{
+    set_fee_bps, set_ingress_paused, set_whitelist_enabled, whitelist_add_member,
+    whitelist_remove_member, withdraw_treasury, IngressWhitelists, MarketPauseTarget,
+};
 use sui_tx::tx::test_tokens::{mint_and_deposit_into_collateral, mint_to_sender};
 
 use option_scheduler::roller::{self, ProductType, RollPlan};
@@ -40,6 +43,27 @@ fn resolve_coin_type(snapshot: &Snapshot, input: &str) -> Result<String> {
         return Ok(input.to_owned());
     }
     Ok(snapshot.token_spec(input)?.coin_type.clone())
+}
+
+/// Both ingress whitelists' ids out of the token-info snapshot. Errors when
+/// the deployment predates the whitelist rollout — every whitelist command
+/// needs all six ids.
+fn ingress_whitelists(snapshot: &Snapshot) -> Result<IngressWhitelists> {
+    let exchange = snapshot
+        .package_info
+        .exchange
+        .as_ref()
+        .context("no exchange block in token-info snapshot")?;
+    Ok(IngressWhitelists {
+        core_package: snapshot.package()?,
+        core_admin_cap: snapshot.admin_cap()?,
+        core_config: snapshot.protocol_config()?,
+        exchange_package: exchange.package()?,
+        exchange_admin_cap: exchange.admin_cap()?,
+        exchange_whitelist: snapshot
+            .exchange_whitelist()?
+            .context("exchange record has no whitelistId — redeploy the exchange")?,
+    })
 }
 
 #[tokio::main]
@@ -66,7 +90,16 @@ async fn main() -> Result<()> {
 
     let needs_admin = matches!(
         cli.cmd,
-        Command::CreateBuckets { .. } | Command::SetFee { .. } | Command::WithdrawTreasury { .. }
+        Command::CreateBuckets { .. }
+            | Command::SetFee { .. }
+            | Command::WithdrawTreasury { .. }
+            | Command::WhitelistAdd { .. }
+            | Command::WhitelistRemove { .. }
+            | Command::WhitelistList
+            | Command::WhitelistEnable
+            | Command::WhitelistDisable
+            | Command::PauseIngress
+            | Command::UnpauseIngress
     );
     if needs_admin && wrap.signer.address != snapshot.deployer_address()? {
         return Err(anyhow!(
@@ -208,6 +241,113 @@ async fn main() -> Result<()> {
             )
             .await?;
             println!("✓ withdraw-treasury digest: {}", sui_tx::tx::tx_digest(&resp));
+        }
+        Command::WhitelistAdd { address } => {
+            let wl = ingress_whitelists(&snapshot)?;
+            let resp =
+                whitelist_add_member(&wrap.client, &wrap.signer, &wl, address, cli.gas_budget)
+                    .await?;
+            println!("✓ whitelist-add {address} digest: {}", sui_tx::tx::tx_digest(&resp));
+        }
+        Command::WhitelistRemove { address } => {
+            let wl = ingress_whitelists(&snapshot)?;
+            let resp =
+                whitelist_remove_member(&wrap.client, &wrap.signer, &wl, address, cli.gas_budget)
+                    .await?;
+            println!("✓ whitelist-remove {address} digest: {}", sui_tx::tx::tx_digest(&resp));
+        }
+        Command::WhitelistList => {
+            let wl = ingress_whitelists(&snapshot)?;
+            for (label, id) in [
+                ("core ProtocolConfig", wl.core_config),
+                ("exchange Whitelist", wl.exchange_whitelist),
+            ] {
+                let (_, json) = wrap
+                    .client
+                    .get_object_json(id)
+                    .await
+                    .with_context(|| format!("fetching {label} {id}"))?;
+                println!("{label} ({id})");
+                match json {
+                    Some(v) => {
+                        // VecSet<address> renders as { "contents": [...] }.
+                        let enabled = v.pointer("/whitelist_enabled").and_then(|b| b.as_bool());
+                        let paused = v.pointer("/ingress_paused").and_then(|b| b.as_bool());
+                        let members = v.pointer("/members/contents").and_then(|m| m.as_array());
+                        match (enabled, paused, members) {
+                            (Some(enabled), Some(paused), Some(members)) => {
+                                println!("  whitelist_enabled: {enabled}");
+                                println!("  ingress_paused   : {paused}");
+                                println!("  members          : {}", members.len());
+                                for m in members {
+                                    println!("    {}", m.as_str().unwrap_or_default());
+                                }
+                            }
+                            // Unexpected JSON rendering — dump it raw
+                            // rather than guessing at the shape.
+                            _ => println!("  {v}"),
+                        }
+                    }
+                    None => println!("  (node returned no JSON rendering for this object)"),
+                }
+            }
+        }
+        Command::WhitelistEnable | Command::WhitelistDisable => {
+            let enabled = matches!(cli.cmd, Command::WhitelistEnable);
+            let wl = ingress_whitelists(&snapshot)?;
+            let resp =
+                set_whitelist_enabled(&wrap.client, &wrap.signer, &wl, enabled, cli.gas_budget)
+                    .await?;
+            println!(
+                "✓ whitelist_enabled={enabled} on both lists digest: {}",
+                sui_tx::tx::tx_digest(&resp)
+            );
+        }
+        Command::PauseIngress | Command::UnpauseIngress => {
+            let paused = matches!(cli.cmd, Command::PauseIngress);
+            let wl = ingress_whitelists(&snapshot)?;
+            let trading_vault = snapshot
+                .trading_vault()
+                .context("no tradingVault block in token-info snapshot")?
+                .package()?;
+            let vault_config = snapshot
+                .trading_vault_objects()
+                .context("no tradingVaultObjects block in token-info snapshot")?
+                .vault_protocol_config()?;
+            let exchange = snapshot
+                .package_info
+                .exchange
+                .as_ref()
+                .context("no exchange block in token-info snapshot")?;
+            let markets = exchange
+                .markets
+                .iter()
+                .map(|(sym, m)| {
+                    Ok(MarketPauseTarget {
+                        registry: m
+                            .registry()
+                            .with_context(|| format!("parsing registry id for {sym}"))?,
+                        base: m.base.clone(),
+                        quote: m.quote.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let resp = set_ingress_paused(
+                &wrap.client,
+                &wrap.signer,
+                &wl,
+                trading_vault,
+                vault_config,
+                &markets,
+                paused,
+                cli.gas_budget,
+            )
+            .await?;
+            println!(
+                "✓ ingress_paused={paused} (whitelists + vault registry + {} markets) digest: {}",
+                markets.len(),
+                sui_tx::tx::tx_digest(&resp)
+            );
         }
         Command::Info => {
             let protocol_id_bytes = snapshot.protocol_id_bytes()?;

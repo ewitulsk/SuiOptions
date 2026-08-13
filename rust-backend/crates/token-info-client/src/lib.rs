@@ -194,6 +194,18 @@ impl Snapshot {
         self.package_info.trading_vault_objects.as_ref()
     }
 
+    /// Shared ingress `Whitelist` of the hybrid exchange (guarded launch).
+    /// `None` when no exchange is recorded or the record predates the
+    /// whitelist module.
+    pub fn exchange_whitelist(&self) -> Result<Option<ObjectID>> {
+        self.package_info
+            .exchange
+            .as_ref()
+            .and_then(|e| e.whitelist_id.as_deref())
+            .map(|s| ObjectID::from_str_checked(s, "exchange whitelist_id"))
+            .transpose()
+    }
+
     /// mm-bot's `QuoteSigner` object for this deployment, recorded by the
     /// redeploy ceremony's mm-collateral pass. `None` on records written
     /// before that step; consumers verify it against chain state before

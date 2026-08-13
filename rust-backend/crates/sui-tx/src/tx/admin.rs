@@ -97,6 +97,222 @@ pub async fn set_fee_bps(
     .await
 }
 
+/// The two ingress whitelists of one deployment (guarded launch): the core
+/// `ProtocolConfig` member list (module `admin`) and the exchange's shared
+/// `Whitelist` (module `whitelist`). The exchange package deliberately has
+/// no dependency on options_core, so it carries its own copy under its own
+/// AdminCap — admin tooling treats the two as ONE logical list, and every
+/// mutation here rides a single PTB touching both.
+pub struct IngressWhitelists {
+    pub core_package: ObjectID,
+    pub core_admin_cap: ObjectID,
+    pub core_config: ObjectID,
+    pub exchange_package: ObjectID,
+    pub exchange_admin_cap: ObjectID,
+    pub exchange_whitelist: ObjectID,
+}
+
+/// The caps + shared lists resolved into a PTB's inputs.
+struct ResolvedWhitelists {
+    core_admin: Argument,
+    core_config: Argument,
+    exchange_admin: Argument,
+    exchange_whitelist: Argument,
+}
+
+impl IngressWhitelists {
+    async fn resolve(
+        &self,
+        client: &ChainClient,
+        pt: &mut ProgrammableTransactionBuilder,
+    ) -> Result<ResolvedWhitelists> {
+        Ok(ResolvedWhitelists {
+            core_admin: pt.obj(
+                client
+                    .object_arg(self.core_admin_cap, false)
+                    .await
+                    .context("resolving core AdminCap")?,
+            )?,
+            core_config: pt.obj(
+                client
+                    .object_arg(self.core_config, true)
+                    .await
+                    .context("resolving core ProtocolConfig")?,
+            )?,
+            exchange_admin: pt.obj(
+                client
+                    .object_arg(self.exchange_admin_cap, false)
+                    .await
+                    .context("resolving exchange AdminCap")?,
+            )?,
+            exchange_whitelist: pt.obj(
+                client
+                    .object_arg(self.exchange_whitelist, true)
+                    .await
+                    .context("resolving exchange Whitelist")?,
+            )?,
+        })
+    }
+}
+
+/// One PTB: `admin::add_member` / `remove_member` on the core
+/// ProtocolConfig AND `whitelist::<function>` on the exchange Whitelist.
+async fn whitelist_member_op(
+    client: &ChainClient,
+    signer: &Signer,
+    whitelists: &IngressWhitelists,
+    member: SuiAddress,
+    function: &'static str,
+    gas_budget: u64,
+) -> Result<ExecutedTransaction> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let r = whitelists.resolve(client, &mut pt).await?;
+    let addr = pt.pure(member)?;
+    pt.programmable_move_call(
+        whitelists.core_package,
+        Identifier::new("admin")?,
+        Identifier::new(function)?,
+        vec![],
+        vec![r.core_admin, r.core_config, addr],
+    );
+    pt.programmable_move_call(
+        whitelists.exchange_package,
+        Identifier::new("whitelist")?,
+        Identifier::new(function)?,
+        vec![],
+        vec![r.exchange_admin, r.exchange_whitelist, addr],
+    );
+    submit_ptb(client, signer, pt, gas_budget, &format!("ingress whitelist {function}")).await
+}
+
+/// Adds `member` to BOTH ingress whitelists in one PTB.
+pub async fn whitelist_add_member(
+    client: &ChainClient,
+    signer: &Signer,
+    whitelists: &IngressWhitelists,
+    member: SuiAddress,
+    gas_budget: u64,
+) -> Result<ExecutedTransaction> {
+    whitelist_member_op(client, signer, whitelists, member, "add_member", gas_budget).await
+}
+
+/// Removes `member` from BOTH ingress whitelists in one PTB.
+pub async fn whitelist_remove_member(
+    client: &ChainClient,
+    signer: &Signer,
+    whitelists: &IngressWhitelists,
+    member: SuiAddress,
+    gas_budget: u64,
+) -> Result<ExecutedTransaction> {
+    whitelist_member_op(client, signer, whitelists, member, "remove_member", gas_budget).await
+}
+
+/// One PTB flipping `set_whitelist_enabled` on both lists — the go-public
+/// lever. Membership is retained on-chain, so re-enabling restores the
+/// prior cohort.
+pub async fn set_whitelist_enabled(
+    client: &ChainClient,
+    signer: &Signer,
+    whitelists: &IngressWhitelists,
+    enabled: bool,
+    gas_budget: u64,
+) -> Result<ExecutedTransaction> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let r = whitelists.resolve(client, &mut pt).await?;
+    let flag = pt.pure(enabled)?;
+    pt.programmable_move_call(
+        whitelists.core_package,
+        Identifier::new("admin")?,
+        Identifier::new("set_whitelist_enabled")?,
+        vec![],
+        vec![r.core_admin, r.core_config, flag],
+    );
+    pt.programmable_move_call(
+        whitelists.exchange_package,
+        Identifier::new("whitelist")?,
+        Identifier::new("set_whitelist_enabled")?,
+        vec![],
+        vec![r.exchange_admin, r.exchange_whitelist, flag],
+    );
+    submit_ptb(client, signer, pt, gas_budget, "ingress set_whitelist_enabled").await
+}
+
+/// One exchange market's pause target: the shared SettlementRegistry plus
+/// the Base/Quote type args its `set_paused<Base, Quote>` call needs.
+pub struct MarketPauseTarget {
+    pub registry: ObjectID,
+    pub base: String,
+    pub quote: String,
+}
+
+/// The big red button, ONE PTB: `set_ingress_paused` on both whitelists,
+/// trading-vault `registry::set_paused` on the VaultProtocolConfig (gated
+/// by the CORE AdminCap), and exchange `registry::set_paused<Base, Quote>`
+/// on every market. Exits (withdrawals/cancels) are never gated on-chain,
+/// so flipping this strands nobody.
+#[allow(clippy::too_many_arguments)]
+pub async fn set_ingress_paused(
+    client: &ChainClient,
+    signer: &Signer,
+    whitelists: &IngressWhitelists,
+    trading_vault_package: ObjectID,
+    vault_protocol_config: ObjectID,
+    markets: &[MarketPauseTarget],
+    paused: bool,
+    gas_budget: u64,
+) -> Result<ExecutedTransaction> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let r = whitelists.resolve(client, &mut pt).await?;
+    let flag = pt.pure(paused)?;
+    pt.programmable_move_call(
+        whitelists.core_package,
+        Identifier::new("admin")?,
+        Identifier::new("set_ingress_paused")?,
+        vec![],
+        vec![r.core_admin, r.core_config, flag],
+    );
+    pt.programmable_move_call(
+        whitelists.exchange_package,
+        Identifier::new("whitelist")?,
+        Identifier::new("set_ingress_paused")?,
+        vec![],
+        vec![r.exchange_admin, r.exchange_whitelist, flag],
+    );
+    let vault_cfg = pt.obj(
+        client
+            .object_arg(vault_protocol_config, true)
+            .await
+            .context("resolving VaultProtocolConfig")?,
+    )?;
+    pt.programmable_move_call(
+        trading_vault_package,
+        Identifier::new("registry")?,
+        Identifier::new("set_paused")?,
+        vec![],
+        vec![r.core_admin, vault_cfg, flag],
+    );
+    for m in markets {
+        let base = TypeTag::from_str(&m.base)
+            .with_context(|| format!("parsing market base type {}", m.base))?;
+        let quote = TypeTag::from_str(&m.quote)
+            .with_context(|| format!("parsing market quote type {}", m.quote))?;
+        let reg = pt.obj(
+            client
+                .object_arg(m.registry, true)
+                .await
+                .with_context(|| format!("resolving market registry {}", m.registry))?,
+        )?;
+        pt.programmable_move_call(
+            whitelists.exchange_package,
+            Identifier::new("registry")?,
+            Identifier::new("set_paused")?,
+            vec![base, quote],
+            vec![r.exchange_admin, reg, flag],
+        );
+    }
+    submit_ptb(client, signer, pt, gas_budget, "ingress set_ingress_paused").await
+}
+
 /// Calls `treasury::withdraw<T>(&AdminCap, &mut Treasury, amount, recipient,
 /// ctx)`.
 pub async fn withdraw_treasury(

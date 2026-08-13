@@ -162,6 +162,9 @@ pub struct Submitter {
     chain: ChainClient,
     signer: Signer,
     package: ObjectID,
+    /// Shared exchange ingress `Whitelist` (guarded launch, SO-384) —
+    /// every settlement entry takes it right after the registry.
+    whitelist: ObjectID,
     /// Direct-escrow ids (SO-372); `None` disables the adapter targets.
     direct: Option<DirectEscrow>,
     gas_budget: u64,
@@ -172,10 +175,11 @@ impl Submitter {
         chain: ChainClient,
         signer: Signer,
         package: ObjectID,
+        whitelist: ObjectID,
         direct: Option<DirectEscrow>,
         gas_budget: u64,
     ) -> Self {
-        Submitter { chain, signer, package, direct, gas_budget }
+        Submitter { chain, signer, package, whitelist, direct, gas_budget }
     }
 
     pub fn relayer_address(&self) -> sui_types::base_types::SuiAddress {
@@ -249,6 +253,10 @@ impl Submitter {
                     let fill = pt.pure(job.intent.fill_base_amount)?;
                     let orders = [a_bytes, a_sig, a_pk, b_bytes, b_sig, b_pk];
                     let reg_arg = pt.obj(self.chain.shared_object_arg(registry, true).await?)?;
+                    // Ingress whitelist (SO-384): immutable shared ref,
+                    // immediately after the registry in every entry.
+                    let wl_arg =
+                        pt.obj(self.chain.shared_object_arg(self.whitelist, false).await?)?;
 
                     match (&job.ask_vault, &job.bid_vault) {
                         // Classic path: both makers funded — unchanged.
@@ -264,8 +272,8 @@ impl Submitter {
                                 Identifier::new("match_orders")?,
                                 type_args,
                                 vec![
-                                    reg_arg, bm_a_arg, bm_b_arg, orders[0], orders[1], orders[2],
-                                    orders[3], orders[4], orders[5], fill, clock,
+                                    reg_arg, wl_arg, bm_a_arg, bm_b_arg, orders[0], orders[1],
+                                    orders[2], orders[3], orders[4], orders[5], fill, clock,
                                 ],
                             );
                         }
@@ -291,9 +299,9 @@ impl Submitter {
                                 Identifier::new("match_vault_vs_bm")?,
                                 type_args,
                                 vec![
-                                    vault, vreg, reg_arg, bm_a_arg, custody, bm_b_arg, orders[0],
-                                    orders[1], orders[2], orders[3], orders[4], orders[5], fill,
-                                    clock,
+                                    vault, vreg, reg_arg, wl_arg, bm_a_arg, custody, bm_b_arg,
+                                    orders[0], orders[1], orders[2], orders[3], orders[4],
+                                    orders[5], fill, clock,
                                 ],
                             );
                         }
@@ -319,9 +327,9 @@ impl Submitter {
                                 Identifier::new("match_bm_vs_vault")?,
                                 type_args,
                                 vec![
-                                    vault, vreg, reg_arg, bm_a_arg, bm_b_arg, custody, orders[0],
-                                    orders[1], orders[2], orders[3], orders[4], orders[5], fill,
-                                    clock,
+                                    vault, vreg, reg_arg, wl_arg, bm_a_arg, bm_b_arg, custody,
+                                    orders[0], orders[1], orders[2], orders[3], orders[4],
+                                    orders[5], fill, clock,
                                 ],
                             );
                         }
@@ -351,8 +359,8 @@ impl Submitter {
                                 type_args,
                                 vec![
                                     vault_a, custody_a, bm_a_arg, vault_b, custody_b, bm_b_arg,
-                                    vreg, reg_arg, orders[0], orders[1], orders[2], orders[3],
-                                    orders[4], orders[5], fill, clock,
+                                    vreg, reg_arg, wl_arg, orders[0], orders[1], orders[2],
+                                    orders[3], orders[4], orders[5], fill, clock,
                                 ],
                             );
                         }

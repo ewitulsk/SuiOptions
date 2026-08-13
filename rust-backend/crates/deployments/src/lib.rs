@@ -385,6 +385,11 @@ pub struct ExchangeInfo {
     pub package_id: String,
     pub upgrade_cap_id: String,
     pub admin_cap_id: String,
+    /// Shared ingress `Whitelist` object the exchange publish's init
+    /// created (guarded launch). Absent on records written before the
+    /// whitelist module existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whitelist_id: Option<String>,
     pub publish_digest: String,
     pub deployed_at: String,
     pub network: String,
@@ -398,6 +403,12 @@ impl ExchangeInfo {
     }
     pub fn admin_cap(&self) -> Result<ObjectID> {
         ObjectID::from_str(&self.admin_cap_id).context("parsing exchange admin_cap_id")
+    }
+    pub fn whitelist(&self) -> Result<Option<ObjectID>> {
+        self.whitelist_id
+            .as_deref()
+            .map(|s| ObjectID::from_str(s).context("parsing exchange whitelistId"))
+            .transpose()
     }
 }
 

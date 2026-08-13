@@ -734,6 +734,7 @@ async fn main() -> Result<()> {
             core_package: snapshot.package()?,
             trading_vault_package,
             vault_protocol_config,
+            core_protocol_config: snapshot.protocol_config()?,
             testnet_seed,
             options_adapter_package,
             deepbook_adapter_package,

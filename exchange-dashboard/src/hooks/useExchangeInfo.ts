@@ -6,6 +6,9 @@ import { TOKEN_INFO_URL } from "../config";
 export interface ExchangeInfo {
   packageId: string;
   adminCapId: string;
+  /** Shared ingress `Whitelist` (guarded launch, SO-384). `null` on records
+   * predating the whitelist module — fills can't be built without it. */
+  whitelistId: string | null;
 }
 
 /**
@@ -22,7 +25,13 @@ export function useExchangeInfo() {
       if (!res.ok) throw new Error(`token-info /package-info: HTTP ${res.status}`);
       const body = await res.json();
       const ex = body?.exchange;
-      return ex ? { packageId: ex.packageId, adminCapId: ex.adminCapId } : null;
+      return ex
+        ? {
+            packageId: ex.packageId,
+            adminCapId: ex.adminCapId,
+            whitelistId: ex.whitelistId ?? null,
+          }
+        : null;
     },
     staleTime: Infinity,
     retry: 1,

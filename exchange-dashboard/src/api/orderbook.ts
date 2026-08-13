@@ -74,6 +74,9 @@ export type SkeletonCommand = {
   amountIn?: string | number;
   minMakerAmountOut?: string | number;
   min?: string | number;
+  // fill legs (SO-384): the shared ingress Whitelist every fill entry
+  // takes right after the registry; null on pre-whitelist deployments.
+  whitelistId?: string | null;
   // fill_vault_order(_reverse) only:
   vaultId?: string;
   custodyId?: string;

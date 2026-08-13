@@ -121,6 +121,12 @@ pub struct Cli {
     #[arg(long, default_value = "../test-tokens")]
     pub test_tokens: PathBuf,
 
+    /// Extra address to seed into the ingress whitelists (core
+    /// ProtocolConfig + exchange Whitelist) during the ceremony.
+    /// Repeatable; merged (deduped) with the env's baked-in
+    /// INGRESS_MEMBERS list. The deployer is always seeded automatically.
+    #[arg(long = "ingress-member")]
+    pub ingress_member: Vec<String>,
 }
 
 cli_spec::define_program! {

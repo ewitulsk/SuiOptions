@@ -85,6 +85,9 @@ pub struct ResolveParams<'a> {
     pub allow_mm_release_toggle: bool,
     pub trading_vault_package: ObjectID,
     pub vault_protocol_config: ObjectID,
+    /// options_core `ProtocolConfig` — the ingress whitelist gate on
+    /// `create_vault` and `vault::deposit` (SO-383).
+    pub core_protocol_config: ObjectID,
     /// The desk's settlement coin type — a vault denominated in anything
     /// else would put the book, NAV and every limit against the wrong asset.
     pub settlement_coin_type: &'a str,
@@ -170,6 +173,7 @@ async fn provision(p: &ResolveParams<'_>) -> Result<ResolvedVault> {
         &p.wrap.signer,
         p.trading_vault_package,
         p.vault_protocol_config,
+        p.core_protocol_config,
         p.settlement_coin_type,
         &CreateVaultSpec {
             lockup_ms: p.cfg.lockup_ms,
@@ -237,6 +241,7 @@ async fn seed(p: &ResolveParams<'_>, vault_id: ObjectID) -> Result<bool> {
         &seed.module,
         seed.faucet_id,
         &refs,
+        p.core_protocol_config,
         seed.amount,
         p.cfg.gas_budget,
     )

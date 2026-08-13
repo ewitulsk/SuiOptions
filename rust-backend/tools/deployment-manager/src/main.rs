@@ -32,6 +32,8 @@ use deployment_manager::signer::load_signer;
 use deployment_manager::Cli;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::str::FromStr;
+use sui_types::base_types::SuiAddress;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -71,6 +73,22 @@ async fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| secrets.resolve_grpc_url(network.grpc_url()));
     let env_key = cli.env.to_ascii_lowercase();
+
+    // Ingress whitelist members: the env's baked-in list merged with any
+    // --ingress-member flags, deduped, parsed up front so a typo fails the
+    // run before anything publishes. The deployer is seeded automatically.
+    let mut ingress_members: Vec<SuiAddress> = Vec::new();
+    for raw in deployment_manager::trading_vault_init::ingress_members_for_env(&env_key)
+        .iter()
+        .copied()
+        .chain(cli.ingress_member.iter().map(String::as_str))
+    {
+        let addr = SuiAddress::from_str(raw)
+            .with_context(|| format!("parsing ingress member address {raw}"))?;
+        if !ingress_members.contains(&addr) {
+            ingress_members.push(addr);
+        }
+    }
 
     let mut store = Deployments::load_or_default(&output_path)?;
 
@@ -140,9 +158,17 @@ async fn main() -> Result<()> {
             .find(|(module, name, _)| module == "admin" && name == "AdminCap")
             .map(|(_, _, id)| *id)
             .context("exchange publish created no admin::AdminCap")?;
+        // exchange::whitelist's init shares the ingress Whitelist.
+        let whitelist_id = outcome
+            .created_objects
+            .iter()
+            .find(|(module, name, _)| module == "whitelist" && name == "Whitelist")
+            .map(|(_, _, id)| *id)
+            .context("exchange publish created no whitelist::Whitelist")?;
         tracing::info!(
             package = %outcome.package_id,
             admin_cap = %admin_cap_id,
+            whitelist = %whitelist_id,
             "exchange published"
         );
 
@@ -150,6 +176,7 @@ async fn main() -> Result<()> {
             package_id: outcome.package_id.to_string(),
             upgrade_cap_id: outcome.upgrade_cap_id.to_string(),
             admin_cap_id: admin_cap_id.to_string(),
+            whitelist_id: Some(whitelist_id.to_string()),
             publish_digest: outcome.digest,
             deployed_at: chrono::Utc::now().to_rfc3339(),
             network: network.as_str().to_owned(),
@@ -166,6 +193,15 @@ async fn main() -> Result<()> {
         )
         .await
         .context("creating exchange markets")?;
+        deployment_manager::exchange_markets::seed_whitelist(
+            &client,
+            &signer,
+            &exchange,
+            &ingress_members,
+            cli.gas_budget,
+        )
+        .await
+        .context("seeding exchange whitelist")?;
         record.package_info.exchange = Some(exchange);
         store.upsert(&env_key, record);
         store.save(&output_path)?;
@@ -291,6 +327,7 @@ async fn main() -> Result<()> {
         previous_deepbook,
         previous_cctp,
         deployment_manager::trading_vault_init::registrar_pubkey_for_env(&env_key),
+        &ingress_members,
         cli.gas_budget,
         cli.skip_init,
     )
@@ -319,6 +356,9 @@ async fn deploy_one(
     // into the VaultProtocolConfig at activation. `None` leaves the attested
     // registration path disabled.
     registrar_pubkey: Option<&str>,
+    // Extra addresses seeded into the ingress whitelists (core
+    // ProtocolConfig + exchange Whitelist) alongside the deployer.
+    ingress_members: &[SuiAddress],
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
@@ -559,11 +599,24 @@ async fn deploy_one(
             .find(|(module, name, _)| module == "admin" && name == "AdminCap")
             .map(|(_, _, id)| *id)
             .context("exchange publish created no admin::AdminCap")?;
-        tracing::info!(package = %out.package_id, admin_cap = %admin_cap_id, "exchange published");
+        // exchange::whitelist's init shares the ingress Whitelist.
+        let whitelist_id = out
+            .created_objects
+            .iter()
+            .find(|(module, name, _)| module == "whitelist" && name == "Whitelist")
+            .map(|(_, _, id)| *id)
+            .context("exchange publish created no whitelist::Whitelist")?;
+        tracing::info!(
+            package = %out.package_id,
+            admin_cap = %admin_cap_id,
+            whitelist = %whitelist_id,
+            "exchange published"
+        );
         let mut ex = ExchangeRecord {
             package_id: out.package_id.to_string(),
             upgrade_cap_id: out.upgrade_cap_id.to_string(),
             admin_cap_id: admin_cap_id.to_string(),
+            whitelist_id: Some(whitelist_id.to_string()),
             publish_digest: out.digest,
             deployed_at: chrono::Utc::now().to_rfc3339(),
             network: network.as_str().to_owned(),
@@ -578,6 +631,15 @@ async fn deploy_one(
         )
         .await
         .context("creating exchange markets")?;
+        deployment_manager::exchange_markets::seed_whitelist(
+            &client,
+            &signer,
+            &ex,
+            ingress_members,
+            gas_budget,
+        )
+        .await
+        .context("seeding exchange whitelist")?;
         Some(ex)
     };
 
@@ -614,6 +676,9 @@ async fn deploy_one(
             &signer,
             &objects,
             publish.admin_cap_id,
+            publish.package_id,
+            publish.protocol_config_id,
+            ingress_members,
             trading_vault_out.package_id,
             oracle_pyth_out.package_id,
             oracle_switchboard_out.package_id,

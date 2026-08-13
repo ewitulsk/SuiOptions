@@ -63,6 +63,7 @@ import {
   EQUITY_ORACLE_PUBLISH_DIGEST,
   EXCHANGE_ADAPTER_PACKAGE_ID,
   OPTIONS_ADAPTER_PACKAGE_ID,
+  PROTOCOL_CONFIG_ID,
   PYTH_PRICE_INFO_TABLE_IDS,
   TRADING_VAULT_OBJECTS,
   TRADING_VAULT_PACKAGE_ID,
@@ -1113,12 +1114,15 @@ export async function buildAppraisedDepositTx(p: AppraisedDepositParams): Promis
     });
   }
   const funds = tx.add(coinWithBalance({ balance: p.amountRaw, type: depType }));
+  // options_core ProtocolConfig — the ingress whitelist gate (SO-383).
+  const coreConfigId = requireId(PROTOCOL_CONFIG_ID, "core protocolConfigId");
   tx.moveCall({
     target: `${vaultPkg}::vault::deposit`,
     typeArguments: [depType],
     arguments: [
       tx.object(p.plan.vaultId),
       tx.object(p.protocolConfigId),
+      tx.object(coreConfigId),
       appraisal,
       funds,
       att,

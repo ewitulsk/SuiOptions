@@ -15,6 +15,7 @@ import {
   DEEPBOOK_ADAPTER_PACKAGE_ID,
   ENV,
   EQUITY_ORACLE_PACKAGE_ID,
+  PROTOCOL_CONFIG_ID,
   TRADING_VAULT_OBJECTS,
   TRADING_VAULT_PACKAGE_ID,
 } from "../config";
@@ -28,6 +29,17 @@ function requirePackage(): string {
     );
   }
   return TRADING_VAULT_PACKAGE_ID;
+}
+
+/** The options_core `ProtocolConfig` — `create_vault` / `deposit`'s ingress
+ * whitelist gate (SO-383). */
+function requireCoreConfig(): string {
+  if (!PROTOCOL_CONFIG_ID) {
+    throw new Error(
+      `No core protocolConfigId for VITE_ENVIRONMENT="${ENV}" — cannot build trading-vault PTBs`,
+    );
+  }
+  return PROTOCOL_CONFIG_ID;
 }
 
 export type CreateTradingVaultParams = {
@@ -53,6 +65,7 @@ export function buildCreateTradingVaultTx(p: CreateTradingVaultParams): Transact
     typeArguments: [p.depositCoinType],
     arguments: [
       tx.object(p.protocolConfigId),
+      tx.object(requireCoreConfig()),
       tx.pure.u64(p.lockupMs),
       tx.pure.u64(p.curatorFeeBps),
       tx.pure.u64(p.unwindGraceMs),
@@ -103,6 +116,7 @@ export function buildTradingVaultDepositTx(p: TradingVaultDepositParams): Transa
     arguments: [
       tx.object(p.vaultId),
       tx.object(p.protocolConfigId),
+      tx.object(requireCoreConfig()),
       appraisal,
       funds,
       noAtt,

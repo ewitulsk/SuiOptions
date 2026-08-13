@@ -120,6 +120,9 @@ struct Ids {
     exchange_adapter_pkg: Option<ObjectID>,
     tokens_pkg: ObjectID,
     protocol_config_id: ObjectID,
+    /// options_core `ProtocolConfig` — the ingress whitelist gate on
+    /// writes, `create_vault` and `vault::deposit` (SO-382/383).
+    core_protocol_config_id: ObjectID,
     integration_registry_id: ObjectID,
     oracle_registry_id: ObjectID,
     pyth_feed_registry_id: ObjectID,
@@ -185,6 +188,7 @@ async fn resolve_ids(client: &ChainClient, cli: &Cli) -> Result<Ids> {
         exchange_adapter_pkg: pi.exchange_adapter.as_ref().map(|p| p.package()).transpose()?,
         tokens_pkg: ObjectID::from_hex_literal(&tt.package_id)?,
         protocol_config_id: pc,
+        core_protocol_config_id: net.protocol_config()?,
         integration_registry_id: ireg,
         oracle_registry_id: oreg,
         pyth_feed_registry_id: freg,
@@ -314,6 +318,8 @@ async fn main() -> Result<()> {
     let step = Step("create_vault");
     let mut pt = ProgrammableTransactionBuilder::new();
     let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
+    let core_cfg =
+        pt.obj(shared_object_arg(&client, ids.core_protocol_config_id, false).await?)?;
     let a0 = pt.pure(0u64)?; // lockup
     let a1 = pt.pure(1_000u64)?; // curator fee bps
     let a2 = pt.pure(3_600_000u64)?; // unwind grace
@@ -323,7 +329,7 @@ async fn main() -> Result<()> {
         Identifier::new("vault").unwrap(),
         Identifier::new("create_vault").unwrap(),
         vec![deposit_tag.clone()],
-        vec![cfg, a0, a1, a2],
+        vec![cfg, core_cfg, a0, a1, a2],
     );
     let resp = submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::create_vault").await?;
     let (mut vault_id, mut cap_id) = (None, None);
@@ -387,6 +393,8 @@ async fn main() -> Result<()> {
     );
     let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
     let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
+    let core_cfg =
+        pt.obj(shared_object_arg(&client, ids.core_protocol_config_id, false).await?)?;
     let att = opt_attestation(&mut pt, ids.trading_vault_pkg, None)?;
     let clock = clock_arg(&mut pt)?;
     pt.programmable_move_call(
@@ -394,7 +402,7 @@ async fn main() -> Result<()> {
         Identifier::new("vault").unwrap(),
         Identifier::new("deposit").unwrap(),
         vec![deposit_tag.clone()],
-        vec![vault_arg, cfg, appraisal, coin, att, clock],
+        vec![vault_arg, cfg, core_cfg, appraisal, coin, att, clock],
     );
     submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::deposit").await?;
     step.ok();
@@ -590,6 +598,8 @@ async fn main() -> Result<()> {
                 vec![faucet, amount],
             );
             let bucket = pt.obj(shared_object_arg(&client, bref.bucket_id, true).await?)?;
+            let core_cfg = pt
+                .obj(shared_object_arg(&client, ids.core_protocol_config_id, false).await?)?;
             let clock = clock_arg(&mut pt)?;
             let tags = vec![
                 TypeTag::from_str(&bref.underlying)?,
@@ -601,7 +611,7 @@ async fn main() -> Result<()> {
                 Identifier::new("bucket").unwrap(),
                 Identifier::new("write_collateralized").unwrap(),
                 tags,
-                vec![bucket, minted, clock],
+                vec![bucket, core_cfg, minted, clock],
             );
             let sui_types::transaction::Argument::Result(wi) = write_out else {
                 bail!("unexpected write_collateralized result shape");
@@ -965,6 +975,8 @@ async fn main() -> Result<()> {
         );
         let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
         let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
+        let core_cfg =
+            pt.obj(shared_object_arg(&client, ids.core_protocol_config_id, false).await?)?;
         let att = opt_attestation(&mut pt, ids.trading_vault_pkg, Some(tbtc_att))?;
         let clock = clock_arg(&mut pt)?;
         pt.programmable_move_call(
@@ -972,7 +984,7 @@ async fn main() -> Result<()> {
             Identifier::new("vault").unwrap(),
             Identifier::new("deposit").unwrap(),
             vec![tbtc_tag.clone()],
-            vec![vault_arg, cfg, appraisal, coin, att, clock],
+            vec![vault_arg, cfg, core_cfg, appraisal, coin, att, clock],
         );
         submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::deposit_tbtc").await?;
         let deposited =
@@ -1577,6 +1589,11 @@ async fn run_direct_escrow_leg(
     let vault_arg = pt.obj(shared_object_arg(client, vault_id, true).await?)?;
     let vreg = pt.obj(shared_object_arg(client, ids.integration_registry_id, false).await?)?;
     let reg = pt.obj(shared_object_arg(client, market.registry()?, true).await?)?;
+    // Ingress whitelist (SO-384): required by every fill entry.
+    let whitelist_id = ex.whitelist()?.ok_or_else(|| {
+        anyhow!("exchange record has no whitelistId — republish with the whitelist module")
+    })?;
+    let wl = pt.obj(shared_object_arg(client, whitelist_id, false).await?)?;
     let bm = pt.obj(shared_object_arg(client, bm_id, false).await?)?;
     let custody_arg = pt.pure(custody_id)?;
     let order_bytes = pt.pure(order.to_bcs())?;
@@ -1591,7 +1608,7 @@ async fn run_direct_escrow_leg(
         Identifier::new("fill_vault_order_reverse").unwrap(),
         vec![base_tag, quote_tag],
         vec![
-            vault_arg, vreg, reg, bm, custody_arg, order_bytes, sig, pk, taker_coin,
+            vault_arg, vreg, reg, wl, bm, custody_arg, order_bytes, sig, pk, taker_coin,
             fill_amount, min_out, clock,
         ],
     );

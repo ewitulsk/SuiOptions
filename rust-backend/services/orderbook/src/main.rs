@@ -124,6 +124,7 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState {
         exchange_package: exchange_info.package_id.clone(),
+        whitelist_id: exchange_info.whitelist_id.clone(),
         markets: markets.clone(),
         books,
         db: db.clone(),
@@ -179,8 +180,23 @@ async fn main() -> Result<()> {
                     })
                 })
                 .transpose()?;
-            let submitter =
-                Submitter::new(chain, signer, exchange_info.package()?, direct, cfg.gas_budget);
+            // The whitelist is a hard settlement dependency (SO-384):
+            // every settlement entry takes it, so a record without one
+            // cannot settle at all.
+            let whitelist = exchange_info.whitelist()?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "exchange record has no whitelistId — republish the exchange with the \
+                     whitelist-enabled deployment-manager before enabling settlement"
+                )
+            })?;
+            let submitter = Submitter::new(
+                chain,
+                signer,
+                exchange_info.package()?,
+                whitelist,
+                direct,
+                cfg.gas_budget,
+            );
             let state = state.clone();
             tokio::spawn(settlement_worker(state, submitter, match_rx));
         }

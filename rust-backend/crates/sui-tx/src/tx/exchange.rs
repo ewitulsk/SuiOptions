@@ -50,6 +50,7 @@ pub async fn mint_and_deposit_into_balance_manager(
     module: &str,
     faucet_id: ObjectID,
     exchange_package: ObjectID,
+    whitelist_id: ObjectID,
     manager_id: ObjectID,
     coin_type: &str,
     amount: u64,
@@ -69,8 +70,9 @@ pub async fn mint_and_deposit_into_balance_manager(
         vec![faucet, amount_arg],
     );
 
-    // balance_manager::deposit<T>(&mut BalanceManager, Coin<T>)
+    // balance_manager::deposit<T>(&mut BalanceManager, &Whitelist, Coin<T>)
     let bm = pt.obj(shared_object_arg(client, manager_id, true).await?)?;
+    let wl = pt.obj(shared_object_arg(client, whitelist_id, false).await?)?;
     let coin_tag = TypeTag::from_str(coin_type)
         .with_context(|| format!("parsing coin type {coin_type}"))?;
     pt.programmable_move_call(
@@ -78,7 +80,7 @@ pub async fn mint_and_deposit_into_balance_manager(
         Identifier::new("balance_manager").unwrap(),
         Identifier::new("deposit").unwrap(),
         vec![coin_tag],
-        vec![bm, coin],
+        vec![bm, wl, coin],
     );
 
     super::submit_ptb(client, signer, pt, gas_budget, "mint+deposit into BalanceManager").await

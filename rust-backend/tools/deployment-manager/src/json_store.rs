@@ -157,6 +157,11 @@ pub struct ExchangeRecord {
     pub package_id: String,
     pub upgrade_cap_id: String,
     pub admin_cap_id: String,
+    /// Shared ingress `Whitelist` object the exchange publish's init created
+    /// (guarded launch). Optional only for READING records written before
+    /// the whitelist module existed; every fresh publish records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whitelist_id: Option<String>,
     pub publish_digest: String,
     pub deployed_at: String,
     pub network: String,

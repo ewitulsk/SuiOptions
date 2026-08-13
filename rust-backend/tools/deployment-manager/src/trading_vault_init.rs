@@ -18,7 +18,7 @@ use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
 use sui_tx::chain::ChainClient;
-use sui_types::base_types::ObjectID;
+use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::ObjectArg;
 
@@ -67,6 +67,25 @@ pub fn registrar_pubkey_for_env(env: &str) -> Option<&'static str> {
         .iter()
         .find(|(e, _)| *e == env)
         .map(|(_, key)| *key)
+}
+
+/// Addresses seeded into the ingress whitelists (core `ProtocolConfig` +
+/// exchange `Whitelist`) at activation, per deployments.json env slot. The
+/// deployer is always seeded automatically and does not need an entry.
+/// Service wallets that push funds into the protocol — orderbook relayer /
+/// staging-mm-bot / mm-bot — should be listed here (or passed via
+/// `--ingress-member`) once their addresses are settled.
+///
+/// prod stays empty on purpose: its service wallets aren't finalized —
+/// never guess an address here.
+const INGRESS_MEMBERS: &[(&str, &[&str])] = &[];
+
+pub fn ingress_members_for_env(env: &str) -> &'static [&'static str] {
+    INGRESS_MEMBERS
+        .iter()
+        .find(|(e, _)| *e == env)
+        .map(|(_, members)| *members)
+        .unwrap_or(&[])
 }
 
 /// Index one publish outcome's init-created objects by `module::name`.
@@ -127,6 +146,9 @@ pub async fn activate(
     signer: &Signer,
     objects: &TradingVaultObjects,
     admin_cap_id: ObjectID,
+    core_pkg: ObjectID,
+    core_protocol_config_id: ObjectID,
+    ingress_members: &[SuiAddress],
     trading_vault_pkg: ObjectID,
     oracle_pyth_pkg: ObjectID,
     oracle_switchboard_pkg: ObjectID,
@@ -296,6 +318,28 @@ pub async fn activate(
         vec![],
         vec![admin, vol_book, poster],
     );
+
+    // Ingress whitelist (guarded launch): seed the core ProtocolConfig's
+    // member list. The deployer is always a member — the ceremony and every
+    // deployer-signed service tx must pass the gate — plus any configured
+    // extras (INGRESS_MEMBERS / --ingress-member), deduped.
+    let core_cfg = pt.obj(shared_mut_arg(client, core_protocol_config_id).await?)?;
+    let mut members = vec![signer.address];
+    for m in ingress_members {
+        if !members.contains(m) {
+            members.push(*m);
+        }
+    }
+    for member in &members {
+        let addr = pt.pure(*member)?;
+        pt.programmable_move_call(
+            core_pkg,
+            Identifier::new("admin")?,
+            Identifier::new("add_member")?,
+            vec![],
+            vec![admin, core_cfg, addr],
+        );
+    }
 
     tracing::info!(
         pyth_feeds = seeded,
