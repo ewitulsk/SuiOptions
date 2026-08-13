@@ -5,6 +5,7 @@ import { Dashboard } from "./screens/Dashboard";
 import { TradingVaults } from "./screens/TradingVaults";
 import { TradingVaultDetailScreen } from "./screens/TradingVaultDetail";
 import { Activity } from "./screens/Activity";
+import { Analytics } from "./screens/Analytics";
 import { Bridge } from "./screens/Bridge";
 import { Admin } from "./screens/Admin";
 import { Debug } from "./screens/Debug";
@@ -31,6 +32,8 @@ export function App() {
         <Route path="/vaults/:vaultId" element={<TradingVaultDetailScreen />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/activity" element={<Activity />} />
+        {/* Spot + realized-vol analytics chart (SO-390). */}
+        <Route path="/analytics" element={<Analytics />} />
         <Route path="/bridge" element={<Bridge />} />
         {/* Admin self-gates on AdminCap and redirects non-admins to /earn. */}
         <Route path="/admin" element={<Admin />} />
