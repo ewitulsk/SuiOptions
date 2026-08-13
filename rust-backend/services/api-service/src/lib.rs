@@ -5,6 +5,7 @@
 //! strictly a read/query layer. (One exception: a read-only Sui GraphQL
 //! object query for live vault round state; see [`sui_rpc`].)
 
+pub mod analytics;
 pub mod bucket;
 pub mod catalog;
 pub mod config;

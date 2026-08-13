@@ -31,6 +31,12 @@ pub struct Config {
     /// 5xx. Defaults to the public testnet endpoint (staging/prod are testnet).
     #[serde(default = "default_sui_graphql_url")]
     pub sui_graphql_url: String,
+
+    /// Data-room lake root for /analytics/* (SO-389), e.g. `s3://<bucket>`.
+    /// Optional: unset disables analytics (endpoints return 503). Reads use
+    /// the host's IAM role; no reads happen at boot.
+    #[serde(default)]
+    pub data_room_url: Option<String>,
     /// price-charting read-API base URL (e.g. `http://price-charting:9013`).
     /// When set, the FIFO PnL ledger marks exercises at the option-pool price
     /// at exercise time (SO-209); when unset, exercises are left unpriced.
@@ -77,7 +83,10 @@ token_info_url      = "http://127.0.0.1:9005"
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.bind_addr.to_string(), "127.0.0.1:9003");
         assert_eq!(cfg.indexer_graphql_url, "http://127.0.0.1:9002/graphql");
-        assert_eq!(cfg.allowed_origins, vec!["http://localhost:5173".to_string()]);
+        assert_eq!(
+            cfg.allowed_origins,
+            vec!["http://localhost:5173".to_string()]
+        );
         assert_eq!(cfg.token_info_url, "http://127.0.0.1:9005");
         std::fs::remove_file(&path).ok();
     }

@@ -26,6 +26,18 @@ async fn main() -> Result<()> {
         .with_context(|| format!("fetching catalog from token-info at {}", cfg.token_info_url))?;
     let catalog = TokenCatalog::from_tokens(snapshot.tokens());
 
+    // Data-room lake for /analytics/* — construction is offline (no S3
+    // calls); a bad URL degrades to disabled analytics, never a crash.
+    let analytics = cfg.data_room_url.as_deref().and_then(|u| {
+        match api_service::analytics::lake::Lake::open(u) {
+            Ok(l) => Some(Arc::new(l)),
+            Err(e) => {
+                tracing::warn!("analytics disabled: {e:#}");
+                None
+            }
+        }
+    });
+
     let state = Arc::new(AppState::new(
         catalog,
         cfg.indexer_graphql_url.clone(),
@@ -33,6 +45,7 @@ async fn main() -> Result<()> {
         cfg.sui_graphql_url.clone(),
         cfg.price_charting_url.clone(),
         snapshot.exchange_adapter().map(|p| p.package_id.clone()),
+        analytics,
     ));
 
     router::serve(cfg.bind_addr, state, &cfg.allowed_origins).await

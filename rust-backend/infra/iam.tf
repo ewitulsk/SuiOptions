@@ -51,6 +51,18 @@ data "aws_iam_policy_document" "ec2_inline" {
       "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:options/*",
     ]
   }
+
+  # Data-room lake, READ ONLY (SO-389): api-service serves /analytics/*
+  # from gold parquet. One-way coupling — protocol hosts can read the
+  # lake, never write it.
+  statement {
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.data_room.arn]
+  }
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.data_room.arn}/*"]
+  }
 }
 
 resource "aws_iam_role_policy" "ec2_inline" {
