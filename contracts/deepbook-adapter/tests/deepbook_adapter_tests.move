@@ -12,7 +12,7 @@ use deepbook::constants;
 use deepbook::pool::{Self, Pool};
 use deepbook::registry::{Self, Registry};
 
-use options_core::admin::{Self, AdminCap};
+use options_core::admin::{Self, AdminCap, ProtocolConfig as CoreProtocolConfig};
 
 use trading_vault::registry as tv_registry;
 use trading_vault::registry::{IntegrationRegistry, VaultProtocolConfig};
@@ -42,12 +42,20 @@ fun setup(sc: &mut Scenario): Clock {
         type_name::with_defining_ids<adapter::DeepBookAdapter>(),
     );
     ts::return_shared(ireg);
+    // Core ingress whitelist: every named test actor is a member.
+    let mut core_cfg = ts::take_shared<CoreProtocolConfig>(sc);
+    admin::add_member(&admin_cap, &mut core_cfg, ADMIN);
+    admin::add_member(&admin_cap, &mut core_cfg, CURATOR);
+    admin::add_member(&admin_cap, &mut core_cfg, ALICE);
+    ts::return_shared(core_cfg);
     ts::return_to_sender(sc, admin_cap);
 
     // Vault + genesis deposit + custody.
     ts::next_tx(sc, CURATOR);
     let cfg = ts::take_shared<VaultProtocolConfig>(sc);
-    vault::create_vault<USDC>(&cfg, 0, 1_000, 3_600_000, sc.ctx());
+    let core_cfg = ts::take_shared<CoreProtocolConfig>(sc);
+    vault::create_vault<USDC>(&cfg, &core_cfg, 0, 1_000, 3_600_000, sc.ctx());
+    ts::return_shared(core_cfg);
     ts::return_shared(cfg);
 
     ts::next_tx(sc, ADMIN);
@@ -56,16 +64,19 @@ fun setup(sc: &mut Scenario): Clock {
     ts::next_tx(sc, ALICE);
     let mut v = ts::take_shared<TradingVault>(sc);
     let cfg = ts::take_shared<VaultProtocolConfig>(sc);
+    let core_cfg = ts::take_shared<CoreProtocolConfig>(sc);
     let appraisal = vault::begin_appraisal<USDC>(&v);
     vault::deposit<USDC>(
         &mut v,
         &cfg,
+        &core_cfg,
         appraisal,
         coin::from_balance(balance::create_for_testing<USDC>(1_000_000_000), sc.ctx()),
         option::none(),
         &clock,
         sc.ctx(),
     );
+    ts::return_shared(core_cfg);
     ts::return_shared(cfg);
     ts::return_shared(v);
     clock

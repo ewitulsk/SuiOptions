@@ -8,6 +8,7 @@ use sui::test_scenario as ts;
 
 use sui::event;
 
+use options_core::admin::ProtocolConfig as CoreProtocolConfig;
 use options_core::treasury::{Self, Treasury};
 
 use trading_vault::events;
@@ -273,10 +274,12 @@ fun curator_below_floor_cannot_withdraw() {
     let mut v = ts::take_shared<TradingVault>(&sc);
     let cfg = h::take_protocol_config(&sc);
     let cap = ts::take_from_sender<CuratorCap>(&sc);
+    let core_cfg = ts::take_shared<CoreProtocolConfig>(&sc);
     let appraisal = vault::begin_appraisal<h::USDC>(&v);
     vault::deposit_as_curator<h::USDC>(
         &mut v,
         &cfg,
+        &core_cfg,
         &cap,
         appraisal,
         coin::from_balance(h::mint<h::USDC>(50_000), sc.ctx()),
@@ -284,6 +287,7 @@ fun curator_below_floor_cannot_withdraw() {
         &clock,
         sc.ctx(),
     );
+    ts::return_shared(core_cfg);
 
     // Any curator withdrawal now breaches the 5% floor.
     clock.set_for_testing(4_000_000);
@@ -309,10 +313,12 @@ fun curator_can_withdraw_when_floor_disabled() {
     let mut v = ts::take_shared<TradingVault>(&sc);
     let cfg = h::take_protocol_config(&sc);
     let cap = ts::take_from_sender<CuratorCap>(&sc);
+    let core_cfg = ts::take_shared<CoreProtocolConfig>(&sc);
     let appraisal = vault::begin_appraisal<h::USDC>(&v);
     vault::deposit_as_curator<h::USDC>(
         &mut v,
         &cfg,
+        &core_cfg,
         &cap,
         appraisal,
         coin::from_balance(h::mint<h::USDC>(50_000), sc.ctx()),
@@ -320,6 +326,7 @@ fun curator_can_withdraw_when_floor_disabled() {
         &clock,
         sc.ctx(),
     );
+    ts::return_shared(core_cfg);
     ts::return_to_sender(&sc, cap);
     ts::return_shared(cfg);
     ts::return_shared(v);
@@ -399,6 +406,7 @@ fun appraisal_with_attestation_prices_second_asset() {
     ts::next_tx(&mut sc, h::bob_addr());
     let mut v = ts::take_shared<TradingVault>(&sc);
     let cfg = h::take_protocol_config(&sc);
+    let core_cfg = ts::take_shared<CoreProtocolConfig>(&sc);
     let mut appraisal = vault::begin_appraisal<h::USDC>(&v);
     let att = h::attest<h::BTC, h::USDC>(&sc, 10_000_000_000, clock.timestamp_ms());
     vault::appraise_balance<h::BTC>(&v, &cfg, &mut appraisal, att, &clock);
@@ -406,6 +414,7 @@ fun appraisal_with_attestation_prices_second_asset() {
     vault::deposit<h::USDC>(
         &mut v,
         &cfg,
+        &core_cfg,
         appraisal,
         coin::from_balance(h::mint<h::USDC>(1_000_000), sc.ctx()),
         option::none(),
@@ -417,6 +426,7 @@ fun appraisal_with_attestation_prices_second_asset() {
     assert!(bob_shares == expected);
     // ≈ half of Alice's stake, offset dust only.
     assert!(bob_shares >= 499_999_000_000 && bob_shares <= 500_001_000_000);
+    ts::return_shared(core_cfg);
     ts::return_shared(cfg);
     ts::return_shared(v);
 
@@ -446,18 +456,21 @@ fun position_custody_and_valuation() {
 
     // Deposit prices the position via record_position_value.
     let cfg = h::take_protocol_config(&sc);
+    let core_cfg = ts::take_shared<CoreProtocolConfig>(&sc);
     let mut appraisal = vault::begin_appraisal<h::USDC>(&v);
     vault::record_position_value(&v, &mut appraisal, h::test_adapter(), pid, 1_000_000);
     // NAV 2M; 1M buys ≈ half of Alice's stake.
     vault::deposit<h::USDC>(
         &mut v,
         &cfg,
+        &core_cfg,
         appraisal,
         coin::from_balance(h::mint<h::USDC>(1_000_000), sc.ctx()),
         option::none(),
         &clock,
         sc.ctx(),
     );
+    ts::return_shared(core_cfg);
     let (cur_shares, _, _) = vault::stake_of(&v, h::curator_addr());
     assert!(cur_shares == h::expected_shares(1_000_000, 1_000_000_000_000, 2_000_000));
 
@@ -645,17 +658,20 @@ fun appraisal_emits_position_and_vault_events() {
     let mut v = ts::take_shared<TradingVault>(&sc);
     let vault_id = object::id(&v);
     let cfg = h::take_protocol_config(&sc);
+    let core_cfg = ts::take_shared<CoreProtocolConfig>(&sc);
     let mut appraisal = vault::begin_appraisal<h::USDC>(&v);
     vault::record_position_value(&v, &mut appraisal, h::test_adapter(), pid, 500_000);
     vault::deposit<h::USDC>(
         &mut v,
         &cfg,
+        &core_cfg,
         appraisal,
         coin::from_balance(h::mint<h::USDC>(300_000), sc.ctx()),
         option::none(),
         &clock,
         sc.ctx(),
     );
+    ts::return_shared(core_cfg);
 
     let pos_events = event::events_by_type<events::PositionAppraised>();
     assert!(pos_events.length() == 1);
@@ -819,10 +835,12 @@ fun rotation_moves_the_role_not_the_stake() {
     let cfg = h::take_protocol_config(&sc);
     let cap = ts::take_from_sender<CuratorCap>(&sc);
     let old_cap_id = object::id(&cap);
+    let core_cfg = ts::take_shared<CoreProtocolConfig>(&sc);
     let appraisal = vault::begin_appraisal<h::USDC>(&v);
     vault::deposit_as_curator<h::USDC>(
         &mut v,
         &cfg,
+        &core_cfg,
         &cap,
         appraisal,
         coin::from_balance(h::mint<h::USDC>(50_000), sc.ctx()),
@@ -830,6 +848,7 @@ fun rotation_moves_the_role_not_the_stake() {
         &clock,
         sc.ctx(),
     );
+    ts::return_shared(core_cfg);
     ts::return_to_sender(&sc, cap);
     ts::return_shared(cfg);
     ts::return_shared(v);

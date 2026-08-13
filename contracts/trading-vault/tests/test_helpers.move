@@ -94,13 +94,16 @@ public fun init_protocol(scenario: &mut Scenario): Clock {
 public fun new_default_vault(scenario: &mut Scenario): ID {
     ts::next_tx(scenario, curator_addr());
     let cfg = take_protocol_config(scenario);
+    let core_cfg = ts::take_shared<CoreProtocolConfig>(scenario);
     let id = vault::create_vault<USDC>(
         &cfg,
+        &core_cfg,
         3_600_000, // lockup
         1_000, // curator fee bps
         3_600_000, // unwind grace
         scenario.ctx(),
     );
+    ts::return_shared(core_cfg);
     ts::return_shared(cfg);
     id
 }
@@ -115,16 +118,19 @@ public fun simple_deposit(scenario: &mut Scenario, who: address, amount: u64, cl
     ts::next_tx(scenario, who);
     let mut v = ts::take_shared<TradingVault>(scenario);
     let cfg = take_protocol_config(scenario);
+    let core_cfg = ts::take_shared<CoreProtocolConfig>(scenario);
     let appraisal = vault::begin_appraisal<USDC>(&v);
     vault::deposit<USDC>(
         &mut v,
         &cfg,
+        &core_cfg,
         appraisal,
         sui::coin::from_balance(mint<USDC>(amount), scenario.ctx()),
         option::none(),
         clock,
         scenario.ctx(),
     );
+    ts::return_shared(core_cfg);
     ts::return_shared(cfg);
     ts::return_shared(v);
 }
