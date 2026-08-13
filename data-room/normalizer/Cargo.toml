@@ -20,6 +20,7 @@ reqwest = { workspace = true }
 object_store = { workspace = true }
 flate2 = { workspace = true }
 zip = { workspace = true }
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"

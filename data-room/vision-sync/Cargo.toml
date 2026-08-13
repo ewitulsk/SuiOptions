@@ -16,3 +16,5 @@ reqwest = { workspace = true }
 object_store = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+tempfile = "3"
+bytes = "1"
