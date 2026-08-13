@@ -324,6 +324,41 @@ pub fn write_parquet(batch: &RecordBatch) -> anyhow::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Incremental trades-parquet writer: accepts row chunks (already in
+/// final order — callers feed time-ordered streams) and produces one
+/// deterministic file. Exists so a dense day (2M+ perp trades) never
+/// needs all its rows in memory at once; peak usage is one chunk.
+pub struct TradesWriter {
+    w: ArrowWriter<Vec<u8>>,
+    rows: usize,
+}
+
+impl TradesWriter {
+    pub fn new() -> anyhow::Result<Self> {
+        let w = ArrowWriter::try_new(Vec::new(), Arc::new(trades_schema()), Some(writer_props()))?;
+        Ok(Self { w, rows: 0 })
+    }
+
+    /// Chunk rows MUST already be in cross-chunk sorted order; each chunk
+    /// is order-normalized internally by `trades_batch`.
+    pub fn write_chunk(&mut self, rows: Vec<Trade>) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        self.rows += rows.len();
+        self.w.write(&trades_batch(rows)?)?;
+        Ok(())
+    }
+
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn finish(self) -> anyhow::Result<Vec<u8>> {
+        Ok(self.w.into_inner()?)
+    }
+}
+
 // -- Layout helpers ------------------------------------------------------
 
 /// silver partition key for a table, e.g.
