@@ -7,7 +7,7 @@ name: Deploy data-room
 # collector". Batch jobs pick up the new tag on their next timer firing.
 # Rollback = re-dispatch with the previous tag.
 #
-# The ECR repos (data-room-collector, data-room-batch) and the host come
+# The ECR repos (options/data-room-collector, options/data-room-batch) and the host come
 # from Terraform (rust-backend/infra) — repos must exist before first push
 # or the push 403s (ecr.tf lesson).
 
@@ -88,7 +88,7 @@ jobs:
           docker buildx build data-room \
             --file "data-room/Dockerfile.${{ matrix.image }}" \
             --platform linux/amd64 \
-            --tag "$ECR/data-room-${{ matrix.image }}:$IMAGE_TAG" \
+            --tag "$ECR/options/data-room-${{ matrix.image }}:$IMAGE_TAG" \
             --cache-from "type=gha,scope=data-room-${{ matrix.image }}" \
             --cache-to "type=gha,mode=max,scope=data-room-${{ matrix.image }}" \
             --push
@@ -152,7 +152,7 @@ jobs:
                 # Rewrite only TAG + ECR; operator-set lines survive.
                 "sed -i \"/^TAG=/d;/^ECR=/d\" /opt/data-room/.env",
                 "echo TAG=\($tag) >> /opt/data-room/.env",
-                "echo ECR=\($ecr) >> /opt/data-room/.env",
+                "echo ECR=\($ecr)/options >> /opt/data-room/.env",
                 "aws ecr get-login-password --region \($region) | docker login --username AWS --password-stdin \($ecr)",
                 "cd /opt/data-room",
                 # Pull both images (batch rides the same TAG for the next
