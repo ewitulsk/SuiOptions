@@ -34,6 +34,7 @@ use sui::vec_set::{Self, VecSet};
 use exchange::balance_manager::{Self, BalanceManager, OwnerCap};
 use exchange::registry::SettlementRegistry;
 use exchange::settlement::{Self, FillObligation};
+use whitelist::whitelist::Whitelist;
 use trading_vault::price::{Self, PriceAttestation};
 use trading_vault::registry::{IntegrationRegistry, VaultProtocolConfig};
 use trading_vault::vault::{Self, Appraisal, CuratorCap, Session, TradingVault};
@@ -166,6 +167,7 @@ public fun fund<T>(
     vault: &mut TradingVault,
     cap: &CuratorCap,
     reg: &IntegrationRegistry,
+    wl: &Whitelist,
     bm: &mut BalanceManager,
     custody_id: ID,
     amount: u64,
@@ -175,7 +177,13 @@ public fun fund<T>(
     let mut custody = take_custody(vault, &mut s, custody_id, bm);
     assert!(!custody.direct, E_DIRECT_CUSTODY);
     let funds = vault::take<T>(vault, &mut s, amount);
-    balance_manager::deposit_with_cap<T>(bm, &custody.owner_cap, coin::from_balance(funds, ctx));
+    balance_manager::deposit_with_cap<T>(
+        bm,
+        wl,
+        &custody.owner_cap,
+        coin::from_balance(funds, ctx),
+        ctx,
+    );
     track<T>(&mut custody);
     vault::put_position(vault, &mut s, custody);
     vault::end_session(vault, s);
@@ -332,6 +340,7 @@ public fun fill_vault_order<Base, Quote>(
     vault: &mut TradingVault,
     vreg: &IntegrationRegistry,
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     bm: &BalanceManager,
     custody_id: ID,
     order_bytes: vector<u8>,
@@ -345,7 +354,7 @@ public fun fill_vault_order<Base, Quote>(
 ): (Coin<Base>, Coin<Quote>) {
     assert_direct_custody(vault, custody_id, bm);
     let ob = settlement::begin_fill(
-        reg, bm, order_bytes, signature, public_key, taker_fill_amount,
+        reg, wl, bm, order_bytes, signature, public_key, taker_fill_amount,
         min_maker_amount_out, clock, ctx,
     );
     fill_a_flow(vault, vreg, reg, custody_id, ob, taker_coin, ctx)
@@ -357,6 +366,7 @@ public fun fill_vault_order_reverse<Base, Quote>(
     vault: &mut TradingVault,
     vreg: &IntegrationRegistry,
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     bm: &BalanceManager,
     custody_id: ID,
     order_bytes: vector<u8>,
@@ -370,7 +380,7 @@ public fun fill_vault_order_reverse<Base, Quote>(
 ): (Coin<Quote>, Coin<Base>) {
     assert_direct_custody(vault, custody_id, bm);
     let ob = settlement::begin_fill_reverse(
-        reg, bm, order_bytes, signature, public_key, taker_fill_amount,
+        reg, wl, bm, order_bytes, signature, public_key, taker_fill_amount,
         min_maker_amount_out, clock, ctx,
     );
     fill_b_flow(vault, vreg, reg, custody_id, ob, taker_coin, ctx)
@@ -382,6 +392,7 @@ public fun match_vault_vs_bm<Base, Quote>(
     vault: &mut TradingVault,
     vreg: &IntegrationRegistry,
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     bm_a: &BalanceManager,
     custody_id: ID,
     bm_b: &mut BalanceManager,
@@ -398,7 +409,7 @@ public fun match_vault_vs_bm<Base, Quote>(
     assert_direct_custody(vault, custody_id, bm_a);
     assert_not_self_cross(vault, bm_b);
     let mut ob = settlement::begin_match(
-        reg, bm_a, bm_b, order_a_bytes, sig_a, pk_a, order_b_bytes, sig_b, pk_b,
+        reg, wl, bm_a, bm_b, order_a_bytes, sig_a, pk_a, order_b_bytes, sig_b, pk_b,
         fill_base_amount, clock, ctx,
     );
     let mut s = vault::begin_quote_session(vault, vreg, ExchangeAdapter {});
@@ -417,6 +428,7 @@ public fun match_bm_vs_vault<Base, Quote>(
     vault: &mut TradingVault,
     vreg: &IntegrationRegistry,
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     bm_a: &mut BalanceManager,
     bm_b: &BalanceManager,
     custody_id: ID,
@@ -433,7 +445,7 @@ public fun match_bm_vs_vault<Base, Quote>(
     assert_direct_custody(vault, custody_id, bm_b);
     assert_not_self_cross(vault, bm_a);
     let mut ob = settlement::begin_match(
-        reg, bm_a, bm_b, order_a_bytes, sig_a, pk_a, order_b_bytes, sig_b, pk_b,
+        reg, wl, bm_a, bm_b, order_a_bytes, sig_a, pk_a, order_b_bytes, sig_b, pk_b,
         fill_base_amount, clock, ctx,
     );
     let mut s = vault::begin_quote_session(vault, vreg, ExchangeAdapter {});
@@ -459,6 +471,7 @@ public fun match_vault_vs_vault<Base, Quote>(
     bm_b: &BalanceManager,
     vreg: &IntegrationRegistry,
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     order_a_bytes: vector<u8>,
     sig_a: vector<u8>,
     pk_a: vector<u8>,
@@ -472,7 +485,7 @@ public fun match_vault_vs_vault<Base, Quote>(
     assert_direct_custody(vault_a, custody_a, bm_a);
     assert_direct_custody(vault_b, custody_b, bm_b);
     let ob = settlement::begin_match(
-        reg, bm_a, bm_b, order_a_bytes, sig_a, pk_a, order_b_bytes, sig_b, pk_b,
+        reg, wl, bm_a, bm_b, order_a_bytes, sig_a, pk_a, order_b_bytes, sig_b, pk_b,
         fill_base_amount, clock, ctx,
     );
     match_vaults_flow(vault_a, custody_a, vault_b, custody_b, vreg, reg, ob)
@@ -621,6 +634,7 @@ public fun fill_vault_order_for_testing<Base, Quote>(
     vault: &mut TradingVault,
     vreg: &IntegrationRegistry,
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     bm: &BalanceManager,
     custody_id: ID,
     order_bytes: vector<u8>,
@@ -632,7 +646,7 @@ public fun fill_vault_order_for_testing<Base, Quote>(
 ): (Coin<Base>, Coin<Quote>) {
     assert_direct_custody(vault, custody_id, bm);
     let ob = settlement::begin_fill_for_testing(
-        reg, bm, order_bytes, taker_fill_amount, min_maker_amount_out, clock, ctx,
+        reg, wl, bm, order_bytes, taker_fill_amount, min_maker_amount_out, clock, ctx,
     );
     fill_a_flow(vault, vreg, reg, custody_id, ob, taker_coin, ctx)
 }
@@ -642,6 +656,7 @@ public fun fill_vault_order_reverse_for_testing<Base, Quote>(
     vault: &mut TradingVault,
     vreg: &IntegrationRegistry,
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     bm: &BalanceManager,
     custody_id: ID,
     order_bytes: vector<u8>,
@@ -653,7 +668,7 @@ public fun fill_vault_order_reverse_for_testing<Base, Quote>(
 ): (Coin<Quote>, Coin<Base>) {
     assert_direct_custody(vault, custody_id, bm);
     let ob = settlement::begin_fill_reverse_for_testing(
-        reg, bm, order_bytes, taker_fill_amount, min_maker_amount_out, clock, ctx,
+        reg, wl, bm, order_bytes, taker_fill_amount, min_maker_amount_out, clock, ctx,
     );
     fill_b_flow(vault, vreg, reg, custody_id, ob, taker_coin, ctx)
 }
@@ -663,6 +678,7 @@ public fun match_vault_vs_bm_for_testing<Base, Quote>(
     vault: &mut TradingVault,
     vreg: &IntegrationRegistry,
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     bm_a: &BalanceManager,
     custody_id: ID,
     bm_b: &mut BalanceManager,
@@ -675,7 +691,7 @@ public fun match_vault_vs_bm_for_testing<Base, Quote>(
     assert_direct_custody(vault, custody_id, bm_a);
     assert_not_self_cross(vault, bm_b);
     let mut ob = settlement::begin_match_for_testing(
-        reg, bm_a, bm_b, order_a_bytes, order_b_bytes, fill_base_amount, clock, ctx,
+        reg, wl, bm_a, bm_b, order_a_bytes, order_b_bytes, fill_base_amount, clock, ctx,
     );
     let mut s = vault::begin_quote_session(vault, vreg, ExchangeAdapter {});
     provide_base_from_vault(vault, &mut s, &mut ob);
@@ -697,6 +713,7 @@ public fun match_vault_vs_vault_for_testing<Base, Quote>(
     bm_b: &BalanceManager,
     vreg: &IntegrationRegistry,
     reg: &mut SettlementRegistry<Base, Quote>,
+    wl: &Whitelist,
     order_a_bytes: vector<u8>,
     order_b_bytes: vector<u8>,
     fill_base_amount: u64,
@@ -706,7 +723,7 @@ public fun match_vault_vs_vault_for_testing<Base, Quote>(
     assert_direct_custody(vault_a, custody_a, bm_a);
     assert_direct_custody(vault_b, custody_b, bm_b);
     let ob = settlement::begin_match_for_testing(
-        reg, bm_a, bm_b, order_a_bytes, order_b_bytes, fill_base_amount, clock, ctx,
+        reg, wl, bm_a, bm_b, order_a_bytes, order_b_bytes, fill_base_amount, clock, ctx,
     );
     match_vaults_flow(vault_a, custody_a, vault_b, custody_b, vreg, reg, ob)
 }

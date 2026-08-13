@@ -15,6 +15,7 @@ use exchange::balance_manager::{Self as bm, BalanceManager};
 use exchange::order;
 use exchange::registry::{Self, SettlementRegistry};
 use exchange::settlement::{Self, FillEvent};
+use whitelist::whitelist;
 
 public struct USDC has drop {}
 
@@ -45,9 +46,11 @@ fun new_bm(s: &mut ts::Scenario, owner: address): ID {
 
 fun fund<T>(s: &mut ts::Scenario, id: ID, owner: address, amount: u64) {
     s.next_tx(owner);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let mut m = s.take_shared_by_id<BalanceManager>(id);
-    bm::deposit(&mut m, coin::mint_for_testing<T>(amount, s.ctx()), s.ctx());
+    bm::deposit(&mut m, &wl, coin::mint_for_testing<T>(amount, s.ctx()), s.ctx());
     ts::return_shared(m);
+    whitelist::destroy_for_testing(wl);
 }
 
 /// Maker sells `maker_amount` SUI (base) for `taker_amount` USDC.
@@ -97,11 +100,13 @@ fun obligation_fill_matches_classic_exactly() {
     // Classic fill: 40_000 quote in. Events are per-transaction in
     // test_scenario, so capture this fill's event fields here.
     s.next_tx(TAKER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let (classic_base, classic_quote_bm, mk1, tk1, b1, q1, mf1, tf1, sold1, tot1) = {
         let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
         let mut m = s.take_shared_by_id<BalanceManager>(a);
         let (got, change) = settlement::fill_limit_order_for_testing<SUI, USDC>(
             &mut reg,
+            &wl,
             &mut m,
             ord1,
             coin::mint_for_testing<USDC>(40_000, s.ctx()),
@@ -128,7 +133,7 @@ fun obligation_fill_matches_classic_exactly() {
         let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
         let mut m = s.take_shared_by_id<BalanceManager>(a);
         let mut ob = settlement::begin_fill_for_testing<SUI, USDC>(
-            &mut reg, &m, ord2, 40_000, 0, &clk, s.ctx(),
+            &mut reg, &wl, &m, ord2, 40_000, 0, &clk, s.ctx(),
         );
         settlement::provide_quote(&mut ob, balance::create_for_testing<USDC>(40_000));
         settlement::provide_base_from_manager(&mut ob, &mut m);
@@ -158,6 +163,7 @@ fun obligation_fill_matches_classic_exactly() {
         assert!(sold1 == sold2 && tot1 == tot2, 9);
     };
 
+    whitelist::destroy_for_testing(wl);
     clk.destroy_for_testing();
     s.end();
 }
@@ -171,11 +177,13 @@ fun obligation_reverse_fill_matches_classic_exactly() {
     let ord2 = bid(MAKER_A, a, 100_000, 50_000, 2);
 
     s.next_tx(TAKER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let classic_quote = {
         let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
         let mut m = s.take_shared_by_id<BalanceManager>(a);
         let (got, change) = settlement::fill_limit_order_reverse_for_testing<SUI, USDC>(
             &mut reg,
+            &wl,
             &mut m,
             ord1,
             coin::mint_for_testing<SUI>(20_000, s.ctx()),
@@ -197,7 +205,7 @@ fun obligation_reverse_fill_matches_classic_exactly() {
         let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
         let mut m = s.take_shared_by_id<BalanceManager>(a);
         let mut ob = settlement::begin_fill_reverse_for_testing<SUI, USDC>(
-            &mut reg, &m, ord2, 20_000, 0, &clk, s.ctx(),
+            &mut reg, &wl, &m, ord2, 20_000, 0, &clk, s.ctx(),
         );
         settlement::provide_base(&mut ob, balance::create_for_testing<SUI>(20_000));
         settlement::provide_quote_from_manager(&mut ob, &mut m);
@@ -210,6 +218,7 @@ fun obligation_reverse_fill_matches_classic_exactly() {
         ts::return_shared(reg);
     };
 
+    whitelist::destroy_for_testing(wl);
     clk.destroy_for_testing();
     s.end();
 }
@@ -237,12 +246,13 @@ fun obligation_match_matches_classic_exactly() {
     let ord_b2 = bid(MAKER_B, b2, 105_000, 50_000, 4);
 
     s.next_tx(RELAYER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let (b_1, q_1, mf_1, tf_1) = {
         let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
         let mut ma = s.take_shared_by_id<BalanceManager>(a1);
         let mut mb = s.take_shared_by_id<BalanceManager>(b1);
         settlement::match_orders_for_testing<SUI, USDC>(
-            &mut reg, &mut ma, &mut mb, ord_a1, ord_b1, 50_000, &clk, s.ctx(),
+            &mut reg, &wl, &mut ma, &mut mb, ord_a1, ord_b1, 50_000, &clk, s.ctx(),
         );
         ts::return_shared(mb);
         ts::return_shared(ma);
@@ -259,7 +269,7 @@ fun obligation_match_matches_classic_exactly() {
         let mut ma = s.take_shared_by_id<BalanceManager>(a2);
         let mut mb = s.take_shared_by_id<BalanceManager>(b2);
         let mut ob = settlement::begin_match_for_testing<SUI, USDC>(
-            &mut reg, &ma, &mb, ord_a2, ord_b2, 50_000, &clk, s.ctx(),
+            &mut reg, &wl, &ma, &mb, ord_a2, ord_b2, 50_000, &clk, s.ctx(),
         );
         settlement::provide_base_from_manager(&mut ob, &mut ma);
         settlement::provide_quote_from_manager(&mut ob, &mut mb);
@@ -289,6 +299,7 @@ fun obligation_match_matches_classic_exactly() {
         assert!(b_1 == b_3 && q_1 == q_3 && mf_1 == mf_3 && tf_1 == tf_3, 5);
     };
 
+    whitelist::destroy_for_testing(wl);
     clk.destroy_for_testing();
     s.end();
 }
@@ -305,11 +316,12 @@ fun external_leg_settles_via_owner_cap_with_empty_manager() {
     let ord = ask(@0xF00D, bm_id, 50_000, 100_000, 1);
 
     s.next_tx(TAKER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     {
         let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
         let m = s.take_shared_by_id<BalanceManager>(bm_id);
         let mut ob = settlement::begin_fill_for_testing<SUI, USDC>(
-            &mut reg, &m, ord, 40_000, 0, &clk, s.ctx(),
+            &mut reg, &wl, &m, ord, 40_000, 0, &clk, s.ctx(),
         );
         // External provision (simulating the vault's quote session).
         settlement::provide_base(&mut ob, balance::create_for_testing<SUI>(20_000));
@@ -333,6 +345,7 @@ fun external_leg_settles_via_owner_cap_with_empty_manager() {
     };
     transfer::public_transfer(cap, MAKER_A);
 
+    whitelist::destroy_for_testing(wl);
     clk.destroy_for_testing();
     s.end();
 }
@@ -348,10 +361,11 @@ fun foreign_cap_cannot_collect() {
     let ord = ask(@0xF00D, bm_id, 50_000, 100_000, 1);
 
     s.next_tx(TAKER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
     let m = s.take_shared_by_id<BalanceManager>(bm_id);
     let mut ob = settlement::begin_fill_for_testing<SUI, USDC>(
-        &mut reg, &m, ord, 40_000, 0, &clk, s.ctx(),
+        &mut reg, &wl, &m, ord, 40_000, 0, &clk, s.ctx(),
     );
     settlement::provide_base(&mut ob, balance::create_for_testing<SUI>(20_000));
     settlement::provide_quote(&mut ob, balance::create_for_testing<USDC>(40_000));
@@ -370,10 +384,11 @@ fun short_provision_rejected() {
     let ord = ask(MAKER_A, a, 50_000, 100_000, 1);
 
     s.next_tx(TAKER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
     let m = s.take_shared_by_id<BalanceManager>(a);
     let mut ob = settlement::begin_fill_for_testing<SUI, USDC>(
-        &mut reg, &m, ord, 40_000, 0, &clk, s.ctx(),
+        &mut reg, &wl, &m, ord, 40_000, 0, &clk, s.ctx(),
     );
     settlement::provide_base(&mut ob, balance::create_for_testing<SUI>(19_999));
     abort 99
@@ -387,10 +402,11 @@ fun double_provision_rejected() {
     let ord = ask(MAKER_A, a, 50_000, 100_000, 1);
 
     s.next_tx(TAKER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
     let mut m = s.take_shared_by_id<BalanceManager>(a);
     let mut ob = settlement::begin_fill_for_testing<SUI, USDC>(
-        &mut reg, &m, ord, 40_000, 0, &clk, s.ctx(),
+        &mut reg, &wl, &m, ord, 40_000, 0, &clk, s.ctx(),
     );
     settlement::provide_base_from_manager(&mut ob, &mut m);
     settlement::provide_base(&mut ob, balance::create_for_testing<SUI>(20_000));
@@ -405,10 +421,11 @@ fun collect_before_counterparty_provision_rejected() {
     let ord = ask(MAKER_A, a, 50_000, 100_000, 1);
 
     s.next_tx(TAKER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
     let mut m = s.take_shared_by_id<BalanceManager>(a);
     let mut ob = settlement::begin_fill_for_testing<SUI, USDC>(
-        &mut reg, &m, ord, 40_000, 0, &clk, s.ctx(),
+        &mut reg, &wl, &m, ord, 40_000, 0, &clk, s.ctx(),
     );
     // The maker's due comes from the taker's (quote) pool — not funded.
     settlement::provide_base_from_manager(&mut ob, &mut m);
@@ -424,10 +441,11 @@ fun finish_with_uncollected_leg_rejected() {
     let ord = ask(MAKER_A, a, 50_000, 100_000, 1);
 
     s.next_tx(TAKER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
     let mut m = s.take_shared_by_id<BalanceManager>(a);
     let mut ob = settlement::begin_fill_for_testing<SUI, USDC>(
-        &mut reg, &m, ord, 40_000, 0, &clk, s.ctx(),
+        &mut reg, &wl, &m, ord, 40_000, 0, &clk, s.ctx(),
     );
     settlement::provide_base_from_manager(&mut ob, &mut m);
     settlement::provide_quote(&mut ob, balance::create_for_testing<USDC>(40_000));
@@ -447,10 +465,11 @@ fun self_match_rejected() {
     let ord_b = bid(MAKER_A, a, 105_000, 50_000, 2);
 
     s.next_tx(RELAYER);
+    let wl = whitelist::new_open_for_testing(s.ctx());
     let mut reg = s.take_shared<SettlementRegistry<SUI, USDC>>();
     let m = s.take_shared_by_id<BalanceManager>(a);
     let _ob = settlement::begin_match_for_testing<SUI, USDC>(
-        &mut reg, &m, &m, ord_a, ord_b, 50_000, &clk, s.ctx(),
+        &mut reg, &wl, &m, &m, ord_a, ord_b, 50_000, &clk, s.ctx(),
     );
     abort 99
 }

@@ -28,6 +28,8 @@ use std::type_name;
 use sui::balance::Balance;
 use sui::coin::{Self, Coin};
 use sui::dynamic_field as df;
+
+use whitelist::whitelist::{Self, Whitelist};
 use sui::event;
 use sui::vec_set::{Self, VecSet};
 use exchange::order;
@@ -125,9 +127,11 @@ public fun new_with_owner_cap(owner: address, ctx: &mut TxContext): (ID, OwnerCa
 
 /// Owner or approved signers only (see the module doc: third-party
 /// deposits are a donation lever into vault NAV). Cap holders use
-/// `deposit_with_cap`.
-public fun deposit<T>(bm: &mut BalanceManager, c: Coin<T>, ctx: &TxContext) {
+/// `deposit_with_cap`. Ingress-gated on the guarded-launch whitelist;
+/// withdrawals are not.
+public fun deposit<T>(bm: &mut BalanceManager, wl: &Whitelist, c: Coin<T>, ctx: &TxContext) {
     let sender = ctx.sender();
+    whitelist::assert_ingress_allowed(wl, sender);
     assert!(
         sender == bm.owner || bm.approved_signers.contains(&sender),
         EDepositRestricted,
@@ -135,7 +139,14 @@ public fun deposit<T>(bm: &mut BalanceManager, c: Coin<T>, ctx: &TxContext) {
     deposit_internal(bm, c);
 }
 
-public fun deposit_with_cap<T>(bm: &mut BalanceManager, cap: &OwnerCap, c: Coin<T>) {
+public fun deposit_with_cap<T>(
+    bm: &mut BalanceManager,
+    wl: &Whitelist,
+    cap: &OwnerCap,
+    c: Coin<T>,
+    ctx: &TxContext,
+) {
+    whitelist::assert_ingress_allowed(wl, ctx.sender());
     assert!(cap.bm_id == object::id(bm), EWrongCap);
     deposit_internal(bm, c);
 }
