@@ -3,8 +3,11 @@ name = "options_core"
 version = "0.0.1"
 edition = "2024.beta"
 
-# Deliberately dependency-free (Sui framework only): the core protocol —
-# buckets, cursor math, accounts, quotes, treasury — is the deepest audit
-# scope and carries no third-party code. Oracle (pyth) lives in
-# options_vault; auction mechanics live in the auction package.
+# Deliberately dependency-light: the core protocol — buckets, cursor math,
+# accounts, quotes, treasury — is the deepest audit scope and carries no
+# third-party code. The single local dep is the ~100-line `whitelist` leaf
+# (guarded-launch ingress gate) shared with the exchange and trading-vault.
+# Oracle (pyth) lives in options_vault; auction mechanics live in the
+# auction package.
 [dependencies]
+whitelist = { local = "../whitelist" }

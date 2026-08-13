@@ -63,6 +63,7 @@ use sui::coin::{Self, Coin, TreasuryCap};
 use sui::dynamic_field as df;
 
 use options_core::admin::{AdminCap, ProtocolConfig};
+use whitelist::whitelist::{Self, Whitelist};
 use options_core::bucket;
 use options_core::collateral::{Self, CollateralRequest};
 use options_core::errors;
@@ -261,6 +262,7 @@ fun assert_quote_bucket<Underlying, Settlement, Put>(
 public fun execute_writer_flow<Underlying, Settlement, Put>(
     bucket: &mut PutBucket<Underlying, Settlement, Put>,
     config: &ProtocolConfig,
+    wl: &Whitelist,
     treasury: &mut Treasury,
     request: CollateralRequest<Settlement>,
     premium_funds: Balance<Settlement>,
@@ -269,6 +271,7 @@ public fun execute_writer_flow<Underlying, Settlement, Put>(
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
+    whitelist::assert_ingress_allowed(wl, ctx.sender());
     let (q, amount, is_writer) = collateral::destroy(request);
     assert!(is_writer, errors::request_flow_mismatch());
     let bucket_id = object::id(bucket);
@@ -319,6 +322,7 @@ public fun execute_writer_flow<Underlying, Settlement, Put>(
 public fun execute_trader_flow<Underlying, Settlement, Put>(
     bucket: &mut PutBucket<Underlying, Settlement, Put>,
     config: &ProtocolConfig,
+    wl: &Whitelist,
     treasury: &mut Treasury,
     request: CollateralRequest<Settlement>,
     collateral_funds: Balance<Settlement>,
@@ -327,6 +331,7 @@ public fun execute_trader_flow<Underlying, Settlement, Put>(
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
+    whitelist::assert_ingress_allowed(wl, ctx.sender());
     let (q, amount, is_writer) = collateral::destroy(request);
     assert!(!is_writer, errors::request_flow_mismatch());
     let bucket_id = object::id(bucket);
@@ -420,12 +425,20 @@ public fun request_trader_flow_for_testing<Underlying, Settlement, Put>(
 /// both sides until they part with the put coin.
 public fun write_collateralized<Underlying, Settlement, Put>(
     bucket: &mut PutBucket<Underlying, Settlement, Put>,
+    wl: &Whitelist,
     collateral_in: Coin<Settlement>,
     write_amount: u64,
     clock: &Clock,
     ctx: &mut TxContext,
 ): (Position, Coin<Put>) {
-    write_collateralized_balance(bucket, collateral_in.into_balance(), write_amount, clock, ctx)
+    write_collateralized_balance(
+        bucket,
+        wl,
+        collateral_in.into_balance(),
+        write_amount,
+        clock,
+        ctx,
+    )
 }
 
 /// `Balance`-accepting sibling for venues (the put RFQ) whose escrow lives
@@ -433,11 +446,13 @@ public fun write_collateralized<Underlying, Settlement, Put>(
 /// collateral is required in, `Position` + put coin out — no premium leg.
 public fun write_collateralized_balance<Underlying, Settlement, Put>(
     bucket: &mut PutBucket<Underlying, Settlement, Put>,
+    wl: &Whitelist,
     collateral: Balance<Settlement>,
     write_amount: u64,
     clock: &Clock,
     ctx: &mut TxContext,
 ): (Position, Coin<Put>) {
+    whitelist::assert_ingress_allowed(wl, ctx.sender());
     assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
     assert!(!bucket.invalidated, errors::bucket_invalidated());
     assert!(write_amount > 0, errors::zero_amount());
@@ -776,12 +791,14 @@ fun spread_cash_need(a: u128, strike: u128, scale: u8, l_strike: u128, l_scale: 
 /// strike is equal-or-higher).
 public fun write_spread<Underlying, Settlement, Put, LongPut>(
     bucket: &mut PutBucket<Underlying, Settlement, Put>,
+    wl: &Whitelist,
     long_bucket: &PutBucket<Underlying, Settlement, LongPut>,
     long: Coin<LongPut>,
     top_up: Coin<Settlement>,
     clock: &Clock,
     ctx: &mut TxContext,
 ): (Position, Coin<Put>) {
+    whitelist::assert_ingress_allowed(wl, ctx.sender());
     assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
     assert!(!bucket.invalidated, errors::bucket_invalidated());
     let amount = long.value();

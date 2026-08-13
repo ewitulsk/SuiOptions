@@ -8,6 +8,7 @@ use sui::coin;
 use sui::test_scenario::{Self as ts, Scenario};
 
 use options_core::admin::{Self, AdminCap};
+use whitelist::whitelist::{Self, AdminCap as WlAdminCap, Whitelist};
 use options_core::bucket::{Self, Bucket};
 
 use trading_vault::price as tv_price;
@@ -39,6 +40,7 @@ const EXPIRY_MS: u64 = 10_000_000;
 fun setup(sc: &mut Scenario): Clock {
     ts::next_tx(sc, ADMIN);
     admin::init_for_testing(sc.ctx());
+    whitelist::init_for_testing(sc.ctx());
     tv_registry::init_for_testing(sc.ctx());
 
     ts::next_tx(sc, ADMIN);
@@ -58,6 +60,15 @@ fun setup(sc: &mut Scenario): Clock {
     let mut oreg = ts::take_shared<OracleRegistry>(sc);
     tv_registry::allow_oracle(&admin_cap, &mut oreg, type_name::with_defining_ids<TestOracle>());
     ts::return_shared(oreg);
+    // Core ingress whitelist: every named test actor is a member.
+    let wl_cap = ts::take_from_sender<WlAdminCap>(sc);
+    let mut wl = ts::take_shared<Whitelist>(sc);
+    whitelist::add_member(&wl_cap, &mut wl, ADMIN);
+    whitelist::add_member(&wl_cap, &mut wl, CURATOR);
+    whitelist::add_member(&wl_cap, &mut wl, ALICE);
+    whitelist::add_member(&wl_cap, &mut wl, MM);
+    ts::return_shared(wl);
+    ts::return_to_sender(sc, wl_cap);
 
     // Bucket: strike 2.0 QUOTE per UND (scale 12), expiry 10_000s.
     let tcap = coin::create_treasury_cap_for_testing<CALL>(sc.ctx());
@@ -104,12 +115,15 @@ fun setup(sc: &mut Scenario): Clock {
 fun custody_written_position(sc: &mut Scenario, clock: &Clock): ID {
     ts::next_tx(sc, MM);
     let mut bucket = ts::take_shared<Bucket<UND, QUOTE, CALL>>(sc);
+    let wl = ts::take_shared<Whitelist>(sc);
     let (pos, call_coins) = bucket::write_collateralized<UND, QUOTE, CALL>(
         &mut bucket,
+        &wl,
         coin::from_balance(balance::create_for_testing<UND>(WRITE), sc.ctx()),
         clock,
         sc.ctx(),
     );
+    ts::return_shared(wl);
     transfer::public_transfer(call_coins, MM);
     let pos_id = object::id(&pos);
     transfer::public_transfer(pos, CURATOR);
@@ -233,14 +247,17 @@ fun setup_spread(sc: &mut Scenario): (Clock, ID) {
     ts::next_tx(sc, MM);
     let mut long_bucket = ts::take_shared<Bucket<UND, QUOTE, LCALL>>(sc);
     let mut short_bucket = ts::take_shared<Bucket<UND, QUOTE, CALL>>(sc);
+    let wl = ts::take_shared<Whitelist>(sc);
     let (long_pos, long_coins) = bucket::write_collateralized<UND, QUOTE, LCALL>(
         &mut long_bucket,
+        &wl,
         coin::from_balance(balance::create_for_testing<UND>(100_000), sc.ctx()),
         &clock,
         sc.ctx(),
     );
     let (spread_pos, short_coins) = bucket::write_spread<UND, QUOTE, CALL, LCALL>(
         &mut short_bucket,
+        &wl,
         &long_bucket,
         long_coins,
         // Exactly required_settlement(long_bucket, 100k) = 100k QUOTE.
@@ -248,6 +265,7 @@ fun setup_spread(sc: &mut Scenario): (Clock, ID) {
         &clock,
         sc.ctx(),
     );
+    ts::return_shared(wl);
     transfer::public_transfer(long_pos, MM);
     transfer::public_transfer(short_coins, MM);
     let v = ts::take_shared<TradingVault>(sc);

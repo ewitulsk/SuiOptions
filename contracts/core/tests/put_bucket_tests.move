@@ -31,6 +31,7 @@ fun write_put_writer(
     ts::next_tx(scenario, th::writer_addr());
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(scenario);
     let config = th::take_config(scenario);
+    let wl = th::take_whitelist(scenario);
     let mut treasury = th::take_treasury(scenario);
     let mut signer = th::take_signer(scenario);
 
@@ -56,6 +57,7 @@ fun write_put_writer(
     put_bucket::execute_writer_flow<BTC, USDC, PUT>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         premium_funds,
@@ -67,6 +69,7 @@ fun write_put_writer(
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
 }
@@ -189,6 +192,7 @@ fun test_writer_flow_wrong_collateral_aborts() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
@@ -213,6 +217,7 @@ fun test_writer_flow_wrong_collateral_aborts() {
     put_bucket::execute_writer_flow<BTC, USDC, PUT>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         coin::mint_for_testing<USDC>(premium, scenario.ctx()).into_balance(),
@@ -224,6 +229,7 @@ fun test_writer_flow_wrong_collateral_aborts() {
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
     clock.destroy_for_testing();
@@ -246,6 +252,7 @@ fun test_trader_flow_happy_path() {
     ts::next_tx(&mut scenario, th::trader_addr());
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
@@ -267,6 +274,7 @@ fun test_trader_flow_happy_path() {
     put_bucket::execute_trader_flow<BTC, USDC, PUT>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         // The MM's released cash write collateral (Balance stand-in).
@@ -282,6 +290,7 @@ fun test_trader_flow_happy_path() {
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
 
@@ -319,6 +328,7 @@ fun test_writer_request_into_trader_execute_aborts() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
@@ -340,6 +350,7 @@ fun test_writer_request_into_trader_execute_aborts() {
     put_bucket::execute_trader_flow<BTC, USDC, PUT>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         coin::mint_for_testing<USDC>(premium, scenario.ctx()).into_balance(),
@@ -351,6 +362,7 @@ fun test_writer_request_into_trader_execute_aborts() {
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
     clock.destroy_for_testing();
@@ -368,6 +380,7 @@ fun test_trader_request_into_writer_execute_aborts() {
     ts::next_tx(&mut scenario, th::trader_addr());
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
@@ -391,6 +404,7 @@ fun test_trader_request_into_writer_execute_aborts() {
     put_bucket::execute_writer_flow<BTC, USDC, PUT>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         coin::mint_for_testing<USDC>(premium, scenario.ctx()).into_balance(),
@@ -402,6 +416,7 @@ fun test_trader_request_into_writer_execute_aborts() {
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
     clock.destroy_for_testing();
@@ -648,6 +663,7 @@ fun test_solvency_fractional_strike_with_dust_sweep() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
     let collateral_amount = put_bucket::required_collateral(&b, 21);
@@ -667,7 +683,7 @@ fun test_solvency_fractional_strike_with_dust_sweep() {
         &b, &mut signer, &config, sq, &clock,
     );
     put_bucket::execute_writer_flow<BTC, USDC, PUT>(
-        &mut b, &config, &mut treasury, req,
+        &mut b, &config, &wl, &mut treasury, req,
         coin::mint_for_testing<USDC>(1_000, scenario.ctx()).into_balance(),
         coin::mint_for_testing<USDC>(collateral_amount, scenario.ctx()),
         th::writer_addr(),
@@ -675,6 +691,7 @@ fun test_solvency_fractional_strike_with_dust_sweep() {
     );
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
 
@@ -838,10 +855,12 @@ fun test_write_collateralized_self_write() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let collateral = coin::mint_for_testing<USDC>(70 * (STRIKE as u64), scenario.ctx());
     let (pos, put) = put_bucket::write_collateralized<BTC, USDC, PUT>(
-        &mut b, collateral, 70, &clock, scenario.ctx(),
+        &mut b, &wl, collateral, 70, &clock, scenario.ctx(),
     );
+    ts::return_shared(wl);
     assert!(position::range_end(&pos) == 70, 0);
     assert!(put.value() == 70, 0);
     assert!(put_bucket::settlement_balance(&b) == 70 * (STRIKE as u64), 0);

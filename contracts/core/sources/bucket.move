@@ -7,6 +7,7 @@ use sui::coin::{Self, Coin, TreasuryCap};
 use sui::dynamic_field as df;
 
 use options_core::admin::{Self, AdminCap, ProtocolConfig};
+use whitelist::whitelist::{Self, Whitelist};
 use options_core::collateral::{Self, CollateralRequest};
 use options_core::errors;
 use options_core::events;
@@ -223,6 +224,7 @@ fun assert_quote_bucket<Underlying, Settlement, Call>(
 public fun execute_writer_flow<Underlying, Settlement, Call>(
     bucket: &mut Bucket<Underlying, Settlement, Call>,
     config: &ProtocolConfig,
+    wl: &Whitelist,
     treasury: &mut Treasury,
     request: CollateralRequest<Settlement>,
     premium_funds: Balance<Settlement>,
@@ -231,6 +233,7 @@ public fun execute_writer_flow<Underlying, Settlement, Call>(
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
+    whitelist::assert_ingress_allowed(wl, ctx.sender());
     let (q, amount, is_writer) = collateral::destroy(request);
     assert!(is_writer, errors::request_flow_mismatch());
     let bucket_id = object::id(bucket);
@@ -279,6 +282,7 @@ public fun execute_writer_flow<Underlying, Settlement, Call>(
 public fun execute_trader_flow<Underlying, Settlement, Call>(
     bucket: &mut Bucket<Underlying, Settlement, Call>,
     config: &ProtocolConfig,
+    wl: &Whitelist,
     treasury: &mut Treasury,
     request: CollateralRequest<Underlying>,
     underlying_funds: Balance<Underlying>,
@@ -287,6 +291,7 @@ public fun execute_trader_flow<Underlying, Settlement, Call>(
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
+    whitelist::assert_ingress_allowed(wl, ctx.sender());
     let (q, amount, is_writer) = collateral::destroy(request);
     assert!(!is_writer, errors::request_flow_mismatch());
     let bucket_id = object::id(bucket);
@@ -383,11 +388,12 @@ public fun request_trader_flow_for_testing<Underlying, Settlement, Call>(
 /// a venue (auction, AMM listing, OTC) on top of the protocol.
 public fun write_collateralized<Underlying, Settlement, Call>(
     bucket: &mut Bucket<Underlying, Settlement, Call>,
+    wl: &Whitelist,
     underlying_in: Coin<Underlying>,
     clock: &Clock,
     ctx: &mut TxContext,
 ): (Position, Coin<Call>) {
-    write_collateralized_balance(bucket, underlying_in.into_balance(), clock, ctx)
+    write_collateralized_balance(bucket, wl, underlying_in.into_balance(), clock, ctx)
 }
 
 /// `Balance`-accepting sibling of `write_collateralized`, for venues (e.g.
@@ -398,10 +404,12 @@ public fun write_collateralized<Underlying, Settlement, Call>(
 /// exposes the identical capability for `Coin` callers.)
 public fun write_collateralized_balance<Underlying, Settlement, Call>(
     bucket: &mut Bucket<Underlying, Settlement, Call>,
+    wl: &Whitelist,
     underlying: Balance<Underlying>,
     clock: &Clock,
     ctx: &mut TxContext,
 ): (Position, Coin<Call>) {
+    whitelist::assert_ingress_allowed(wl, ctx.sender());
     assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
     assert!(!bucket.invalidated, errors::bucket_invalidated());
     let amount = underlying.value();
@@ -719,12 +727,14 @@ public fun close_offset<Underlying, Settlement, Call>(
 /// `required_settlement(long_bucket, amount)`.
 public fun write_spread<Underlying, Settlement, Call, LongCall>(
     bucket: &mut Bucket<Underlying, Settlement, Call>,
+    wl: &Whitelist,
     long_bucket: &Bucket<Underlying, Settlement, LongCall>,
     long: Coin<LongCall>,
     exercise_cash: Coin<Settlement>,
     clock: &Clock,
     ctx: &mut TxContext,
 ): (Position, Coin<Call>) {
+    whitelist::assert_ingress_allowed(wl, ctx.sender());
     assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
     assert!(!bucket.invalidated, errors::bucket_invalidated());
     let amount = long.value();

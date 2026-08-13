@@ -63,6 +63,8 @@ jobs:
         # absent because they are no longer published — see each package's
         # DEPRECATED.md; their sources stay in-tree but are not built here.
         package:
+          # Guarded-launch ingress gate — leaf dep of core/trading-vault/exchange.
+          - whitelist
           - core
           - mm-collateral
           - trading-vault

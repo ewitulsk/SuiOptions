@@ -160,6 +160,7 @@ fun test_writer_flow_happy_path() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
@@ -187,6 +188,7 @@ fun test_writer_flow_happy_path() {
     bucket::execute_writer_flow<BTC, USDC, CALL>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         premium_funds,
@@ -204,6 +206,7 @@ fun test_writer_flow_happy_path() {
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
 
@@ -247,6 +250,7 @@ fun test_writer_flow_with_fee_skim() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
@@ -273,6 +277,7 @@ fun test_writer_flow_with_fee_skim() {
     bucket::execute_writer_flow<BTC, USDC, CALL>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         coin::mint_for_testing<USDC>(premium, scenario.ctx()).into_balance(),
@@ -284,6 +289,7 @@ fun test_writer_flow_with_fee_skim() {
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
 
@@ -313,6 +319,7 @@ fun test_trader_flow_happy_path() {
     ts::next_tx(&mut scenario, th::trader_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
@@ -337,6 +344,7 @@ fun test_trader_flow_happy_path() {
     bucket::execute_trader_flow<BTC, USDC, CALL>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         // The MM's released underlying write collateral (Balance stand-in).
@@ -353,6 +361,7 @@ fun test_trader_flow_happy_path() {
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
 
@@ -391,6 +400,7 @@ fun test_execute_write_after_expiry_aborts() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
@@ -411,6 +421,7 @@ fun test_execute_write_after_expiry_aborts() {
     bucket::execute_writer_flow<BTC, USDC, CALL>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         coin::mint_for_testing<USDC>(1_000, scenario.ctx()).into_balance(),
@@ -422,6 +433,7 @@ fun test_execute_write_after_expiry_aborts() {
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
     clock.destroy_for_testing();
@@ -439,6 +451,7 @@ fun test_execute_write_bucket_mismatch_aborts() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
@@ -459,6 +472,7 @@ fun test_execute_write_bucket_mismatch_aborts() {
     bucket::execute_writer_flow<BTC, USDC, CALL>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         coin::mint_for_testing<USDC>(1_000, scenario.ctx()).into_balance(),
@@ -470,6 +484,7 @@ fun test_execute_write_bucket_mismatch_aborts() {
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
     clock.destroy_for_testing();
@@ -487,6 +502,7 @@ fun test_writer_flow_amount_mismatch_aborts() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
@@ -507,6 +523,7 @@ fun test_writer_flow_amount_mismatch_aborts() {
     bucket::execute_writer_flow<BTC, USDC, CALL>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         coin::mint_for_testing<USDC>(1_000, scenario.ctx()).into_balance(),
@@ -518,6 +535,7 @@ fun test_writer_flow_amount_mismatch_aborts() {
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
     clock.destroy_for_testing();
@@ -538,6 +556,7 @@ fun test_writer_request_into_trader_execute_aborts() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<USDC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
@@ -558,6 +577,7 @@ fun test_writer_request_into_trader_execute_aborts() {
     bucket::execute_trader_flow<USDC, USDC, CALL>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         coin::mint_for_testing<USDC>(1_000, scenario.ctx()).into_balance(),
@@ -569,6 +589,7 @@ fun test_writer_request_into_trader_execute_aborts() {
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
     clock.destroy_for_testing();
@@ -586,6 +607,7 @@ fun test_trader_request_into_writer_execute_aborts() {
     ts::next_tx(&mut scenario, th::trader_addr());
     let mut b = ts::take_shared<Bucket<USDC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
@@ -606,6 +628,7 @@ fun test_trader_request_into_writer_execute_aborts() {
     bucket::execute_writer_flow<USDC, USDC, CALL>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         coin::mint_for_testing<USDC>(50, scenario.ctx()).into_balance(),
@@ -617,6 +640,7 @@ fun test_trader_request_into_writer_execute_aborts() {
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
     clock.destroy_for_testing();
@@ -635,6 +659,7 @@ fun write_via_helper(
     ts::next_tx(scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(scenario);
     let config = th::take_config(scenario);
+    let wl = th::take_whitelist(scenario);
     let mut treasury = th::take_treasury(scenario);
     let mut signer = th::take_signer(scenario);
 
@@ -655,6 +680,7 @@ fun write_via_helper(
     bucket::execute_writer_flow<BTC, USDC, CALL>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         coin::mint_for_testing<USDC>(premium, scenario.ctx()).into_balance(),
@@ -666,6 +692,7 @@ fun write_via_helper(
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
 }
@@ -1190,16 +1217,19 @@ fun test_write_collateralized_happy_path() {
     let clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
 
-    ts::next_tx(&mut scenario, th::stranger_addr());
+    ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let underlying = coin::mint_for_testing<BTC>(100, scenario.ctx());
 
     let (pos, call) = bucket::write_collateralized<BTC, USDC, CALL>(
         &mut b,
+        &wl,
         underlying,
         &clock,
         scenario.ctx(),
     );
+    ts::return_shared(wl);
 
     // Cursor advanced, escrow held, supply == outstanding.
     assert!(bucket::total_written(&b) == 100, 0);
@@ -1218,15 +1248,15 @@ fun test_write_collateralized_happy_path() {
     assert!(emitted.length() == 1, 0);
     let expected = options_core::events::new_collateralized_write_for_testing(
         object::id(&b),
-        th::stranger_addr(),
+        th::writer_addr(),
         100,
         0,
         100,
     );
     assert!(emitted[0] == expected, 0);
 
-    transfer::public_transfer(pos, th::stranger_addr());
-    transfer::public_transfer(call, th::stranger_addr());
+    transfer::public_transfer(pos, th::writer_addr());
+    transfer::public_transfer(call, th::writer_addr());
     ts::return_shared(b);
 
     clock.destroy_for_testing();
@@ -1244,14 +1274,17 @@ fun test_write_collateralized_self_write_round_trip_conservation() {
     let mut clock = th::init_protocol(&mut scenario);
     th::new_bucket<BTC, USDC, CALL2>(&mut scenario, EXPIRY_MS, 75, 1);
 
-    ts::next_tx(&mut scenario, th::stranger_addr());
+    ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL2>>(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (pos, mut call) = bucket::write_collateralized<BTC, USDC, CALL2>(
         &mut b,
+        &wl,
         coin::mint_for_testing<BTC>(10, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
+    ts::return_shared(wl);
 
     // Exercise 3 of the 10: required settlement = round_half_up(3 × 7.5) = 23.
     let chunk = coin::split(&mut call, 3, scenario.ctx());
@@ -1297,16 +1330,19 @@ fun test_write_collateralized_after_expiry_aborts() {
 
     clock.set_for_testing(EXPIRY_MS);
 
-    ts::next_tx(&mut scenario, th::stranger_addr());
+    ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (pos, call) = bucket::write_collateralized<BTC, USDC, CALL>(
         &mut b,
+        &wl,
         coin::mint_for_testing<BTC>(1, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
-    transfer::public_transfer(pos, th::stranger_addr());
-    transfer::public_transfer(call, th::stranger_addr());
+    ts::return_shared(wl);
+    transfer::public_transfer(pos, th::writer_addr());
+    transfer::public_transfer(call, th::writer_addr());
     ts::return_shared(b);
 
     clock.destroy_for_testing();
@@ -1322,16 +1358,19 @@ fun test_write_collateralized_on_invalidated_bucket_aborts() {
 
     invalidate(&mut scenario, &clock, b"halt writes");
 
-    ts::next_tx(&mut scenario, th::stranger_addr());
+    ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (pos, call) = bucket::write_collateralized<BTC, USDC, CALL>(
         &mut b,
+        &wl,
         coin::mint_for_testing<BTC>(1, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
-    transfer::public_transfer(pos, th::stranger_addr());
-    transfer::public_transfer(call, th::stranger_addr());
+    ts::return_shared(wl);
+    transfer::public_transfer(pos, th::writer_addr());
+    transfer::public_transfer(call, th::writer_addr());
     ts::return_shared(b);
 
     clock.destroy_for_testing();
@@ -1345,16 +1384,19 @@ fun test_write_collateralized_zero_amount_aborts() {
     let clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
 
-    ts::next_tx(&mut scenario, th::stranger_addr());
+    ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (pos, call) = bucket::write_collateralized<BTC, USDC, CALL>(
         &mut b,
+        &wl,
         coin::zero<BTC>(scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
-    transfer::public_transfer(pos, th::stranger_addr());
-    transfer::public_transfer(call, th::stranger_addr());
+    ts::return_shared(wl);
+    transfer::public_transfer(pos, th::writer_addr());
+    transfer::public_transfer(call, th::writer_addr());
     ts::return_shared(b);
 
     clock.destroy_for_testing();
@@ -1383,6 +1425,7 @@ fun test_write_executed_event_fields_unchanged_by_refactor() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
@@ -1404,6 +1447,7 @@ fun test_write_executed_event_fields_unchanged_by_refactor() {
     bucket::execute_writer_flow<BTC, USDC, CALL>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         coin::mint_for_testing<USDC>(1_000_000, scenario.ctx()).into_balance(),
@@ -1437,6 +1481,7 @@ fun test_write_executed_event_fields_unchanged_by_refactor() {
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
 
@@ -1465,15 +1510,18 @@ fun test_interleaved_venues_share_cursor_and_redeem_exactly() {
     // Write 1 (signed quote): [0, 100), position → writer, call → trader MM.
     write_via_helper(&mut scenario, &clock, 100, 1_000, 1);
 
-    // Write 2 (collateralized): [100, 150), both legs stay with the stranger.
-    ts::next_tx(&mut scenario, th::stranger_addr());
+    // Write 2 (collateralized): [100, 150), both legs stay with the writer.
+    ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    let wl2 = th::take_whitelist(&scenario);
     let (pos2, call2) = bucket::write_collateralized<BTC, USDC, CALL>(
         &mut b,
+        &wl2,
         coin::mint_for_testing<BTC>(50, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
+    ts::return_shared(wl2);
     assert!(position::range_start(&pos2) == 100, 0);
     assert!(position::range_end(&pos2) == 150, 0);
     ts::return_shared(b);
@@ -1482,6 +1530,7 @@ fun test_interleaved_venues_share_cursor_and_redeem_exactly() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
     let q = th::new_test_quote(
@@ -1501,6 +1550,7 @@ fun test_interleaved_venues_share_cursor_and_redeem_exactly() {
     bucket::execute_writer_flow<BTC, USDC, CALL>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         coin::mint_for_testing<USDC>(1_000, scenario.ctx()).into_balance(),
@@ -1511,6 +1561,7 @@ fun test_interleaved_venues_share_cursor_and_redeem_exactly() {
     );
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
 
@@ -1522,8 +1573,8 @@ fun test_interleaved_venues_share_cursor_and_redeem_exactly() {
     assert!(bucket::underlying_balance(&b) == 175, 0);
 
     // Exercises consume the FIFO front regardless of venue: trader MM
-    // exercises its 100 (covers write 1), the stranger exercises 20 of its
-    // own 50 (eats into write 2). Cursor ends at 120.
+    // exercises its 100 (covers write 1), the stranger exercises 20 of
+    // write 2's 50 (exits stay open to non-members). Cursor ends at 120.
     ts::next_tx(&mut scenario, th::trader_mm_addr());
     // The MM holds two call coins (100 from write 1, 25 from write 3);
     // merge and carve out exactly 100 to exercise.
