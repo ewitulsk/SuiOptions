@@ -215,14 +215,13 @@ pub async fn normalize_zip(
     if let Some(e) = stream_err {
         return Err(e);
     }
-    let mut outputs: Vec<(String, Vec<u8>)> = Vec::new();
+    // Finish + upload one day at a time: each finished parquet sits on
+    // disk, and only the day currently uploading is read into memory.
+    let days = days_acc.len();
     for (day, mut acc) in days_acc {
         acc.writer.write_chunk(std::mem::take(&mut acc.chunk))?;
-        outputs.push((day, acc.writer.finish()?));
-    }
-
-    let days = outputs.len();
-    for (day, bytes) in outputs {
+        let tmp = acc.writer.finish()?;
+        let bytes = std::fs::read(tmp.path())?;
         put_bytes(
             store,
             &schema::silver_key("trades", "binance", &partition_symbol, &day),
