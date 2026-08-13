@@ -101,11 +101,30 @@ export let OPTIONS_ADAPTER_PACKAGE_ID: string | undefined;
 /** Hybrid-exchange maker adapter for the trading vault (SO-370). */
 export let EXCHANGE_ADAPTER_PACKAGE_ID: string | undefined;
 
+/** Hybrid-exchange settlement package. `undefined` where no exchange is
+ * deployed. Per-market pause admin PTBs target this package with its own
+ * `exchange::admin::AdminCap` (separate from the core cap). */
+export let EXCHANGE_PACKAGE_ID: string | undefined;
+
 /** The ONE shared ingress `Whitelist` of the standalone whitelist package
  * (guarded launch): the gate arg every ingress entry across core /
  * trading-vault / exchange takes. `undefined` on records predating the
  * standalone package. */
 export let WHITELIST_ID: string | undefined;
+
+/** Standalone whitelist package id + its AdminCap (admin PTBs). */
+export let WHITELIST_PACKAGE_ID: string | undefined;
+export let WHITELIST_ADMIN_CAP_ID: string | undefined;
+
+/** One created exchange market: the shared `SettlementRegistry` id plus the
+ * `Base`/`Quote` coin types its `registry::set_paused<Base, Quote>` call
+ * needs (the big-red-button pauses every market). */
+export type ExchangeMarket = {
+  registryId: string;
+  base: string;
+  quote: string;
+};
+export let EXCHANGE_MARKETS: ExchangeMarket[] = [];
 
 // Keeper-attested equity oracle for trading-vault external accounts
 // (SO-299). The publish digest resolves the shared `EquityBook` client-side
@@ -224,6 +243,8 @@ type PackageInfoDto = {
   exchangeAdapter?: { packageId: string } | null;
   exchange?: {
     packageId: string;
+    /** Created markets keyed by symbol (e.g. `TBTC/TUSDC`). */
+    markets?: Record<string, { registryId: string; base: string; quote: string }>;
   } | null;
   /** Standalone ingress whitelist package (guarded launch). Absent on
    * records predating the standalone package. */
@@ -280,7 +301,15 @@ export async function initConfig(): Promise<void> {
   DEEPBOOK_ADAPTER_PACKAGE_ID = info.deepbookAdapter?.packageId;
   OPTIONS_ADAPTER_PACKAGE_ID = info.optionsAdapter?.packageId;
   EXCHANGE_ADAPTER_PACKAGE_ID = info.exchangeAdapter?.packageId;
+  EXCHANGE_PACKAGE_ID = info.exchange?.packageId;
+  EXCHANGE_MARKETS = Object.values(info.exchange?.markets ?? {}).map((m) => ({
+    registryId: m.registryId,
+    base: m.base,
+    quote: m.quote,
+  }));
   WHITELIST_ID = info.whitelist?.whitelistId ?? undefined;
+  WHITELIST_PACKAGE_ID = info.whitelist?.packageId;
+  WHITELIST_ADMIN_CAP_ID = info.whitelist?.adminCapId;
   EQUITY_ORACLE_PACKAGE_ID = info.equityOracle?.packageId;
   EQUITY_ORACLE_PUBLISH_DIGEST = info.equityOracle?.publishDigest;
   TRADING_VAULT_OBJECTS = info.tradingVaultObjects ?? undefined;
