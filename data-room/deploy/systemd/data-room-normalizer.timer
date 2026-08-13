@@ -1,0 +1,9 @@
+[Unit]
+Description=data-room: daily normalizer @ 00:30 UTC
+
+[Timer]
+OnCalendar=*-*-* 00:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,15 @@
+# Daily gold jobs, after the normalizer (spec §8): gaps ledger first (rv
+# consumes its coverage), then bars, then rv. Sequential ExecStart lines —
+# a failure aborts the rest and fails the unit loudly.
+
+[Unit]
+Description=data-room: daily gold jobs (gaps, bars, rv)
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/data-room
+ExecStart=/usr/bin/docker compose run --rm batch gold gaps
+ExecStart=/usr/bin/docker compose run --rm batch gold bars
+ExecStart=/usr/bin/docker compose run --rm batch gold rv

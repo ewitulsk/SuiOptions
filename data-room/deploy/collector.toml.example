@@ -1,0 +1,11 @@
+# Copy to /opt/data-room/collector.toml. store_url comes from the
+# Terraform output `data_room_bucket`.
+store_url = "s3://REPLACE_WITH_DATA_ROOM_BUCKET"
+spool_dir = "/var/spool/data-room"
+metrics_listen = "0.0.0.0:9100"
+
+[[connections]]
+exchange = "coinbase"
+url = "wss://ws-feed.exchange.coinbase.com"
+products = ["BTC-USD"]
+channels = ["matches", "ticker", "heartbeat"]

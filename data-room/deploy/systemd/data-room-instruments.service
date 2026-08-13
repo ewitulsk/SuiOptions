@@ -1,0 +1,15 @@
+# Daily instruments-fetcher run (spec §10.3). Driven by
+# data-room-instruments.timer.
+#
+# Install (all units): cp deploy/systemd/* /etc/systemd/system/ &&
+#   systemctl daemon-reload && systemctl enable --now data-room-{instruments,normalizer,gold,vision-sync}.timer
+
+[Unit]
+Description=data-room: fetch instrument reference data into silver/instruments
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/data-room
+ExecStart=/usr/bin/docker compose run --rm batch normalizer instruments

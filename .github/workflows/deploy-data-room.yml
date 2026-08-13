@@ -1,0 +1,200 @@
+name: Deploy data-room
+
+# Build + push the two data-room images (data-room-collector,
+# data-room-batch) and roll data-room-host. Deliberately SEPARATE from
+# _deploy.yml (spec §10.1): no health-check-gated rollback choreography —
+# the deploy is "advance TAG in /opt/data-room/.env, compose pull, up -d
+# collector". Batch jobs pick up the new tag on their next timer firing.
+# Rollback = re-dispatch with the previous tag.
+#
+# The ECR repos (data-room-collector, data-room-batch) and the host come
+# from Terraform (rust-backend/infra) — repos must exist before first push
+# or the push 403s (ecr.tf lesson).
+
+on:
+  push:
+    branches: [staging]
+    paths:
+      - 'data-room/**'
+      - '.github/workflows/deploy-data-room.yml'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to deploy. Empty = build HEAD and deploy its 12-char sha tag. Non-empty = skip build and roll the given tag (rollback path; must already exist in ECR).'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  id-token: write   # OIDC to AWS
+
+env:
+  AWS_REGION:        ${{ vars.AWS_REGION }}
+  ECR_REGISTRY:      ${{ vars.ECR_REGISTRY }}
+  DEPLOY_ROLE_ARN:   ${{ vars.DEPLOY_ROLE_ARN }}
+  SSM_OUTPUT_BUCKET: ${{ vars.SSM_OUTPUT_BUCKET }}
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag:        ${{ steps.tag.outputs.tag }}
+      skip_build: ${{ steps.tag.outputs.skip_build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: tag
+        env:
+          OVERRIDE_TAG: ${{ inputs.tag }}
+        run: |
+          if [ -n "$OVERRIDE_TAG" ]; then
+            echo "tag=$OVERRIDE_TAG" >> "$GITHUB_OUTPUT"
+            echo "skip_build=true" >> "$GITHUB_OUTPUT"
+            echo "tag override → skipping build, deploying $OVERRIDE_TAG"
+          else
+            echo "tag=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: tag
+    if: needs.tag.outputs.skip_build == 'false'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [collector, batch]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Context is data-room/ (its own workspace), not the repo root.
+      # linux/amd64 native on the x86 runner — same platform stance as
+      # deployment/bake.hcl; per-image gha cache scopes.
+      - name: Build & push data-room-${{ matrix.image }}
+        env:
+          ECR: ${{ env.ECR_REGISTRY }}
+          IMAGE_TAG: ${{ needs.tag.outputs.tag }}
+        run: |
+          docker buildx build data-room \
+            --file "data-room/Dockerfile.${{ matrix.image }}" \
+            --platform linux/amd64 \
+            --tag "$ECR/data-room-${{ matrix.image }}:$IMAGE_TAG" \
+            --cache-from "type=gha,scope=data-room-${{ matrix.image }}" \
+            --cache-to "type=gha,mode=max,scope=data-room-${{ matrix.image }}" \
+            --push
+
+  deploy:
+    needs: [tag, build]
+    if: |
+      always()
+      && needs.tag.result == 'success'
+      && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-data-room
+      cancel-in-progress: false
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Resolve by Name tag, mirroring .github/actions/resolve-ec2 (that
+      # action hardcodes the options host names, so inlined here).
+      # NOTE: options-data-room-host is created by rust-backend/infra/data-room.tf (apply pending) — Terraform R0 (spec §10.5)
+      # must create it with tag Name=options-data-room-host before this can run.
+      - name: Resolve data-room-host
+        run: |
+          ID=$(aws ec2 describe-instances \
+            --region "$AWS_REGION" \
+            --filters "Name=tag:Name,Values=options-data-room-host" \
+                      "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].InstanceId' --output text)
+          if [ -z "$ID" ] || [ "$ID" = "None" ]; then
+            echo "::error::No running EC2 instance tagged Name=options-data-room-host found"
+            exit 1
+          fi
+          if [ "$(printf '%s' "$ID" | wc -w)" -ne 1 ]; then
+            echo "::error::Expected exactly one running options-data-room-host, got: $ID"
+            exit 1
+          fi
+          echo "EC2_INSTANCE_ID=$ID" >> "$GITHUB_ENV"
+          echo "Resolved data-room-host → $ID"
+
+      # compose.yml + collector.toml + the systemd units are provisioned on
+      # the host out-of-band (cloud-init / by hand, from data-room/deploy/);
+      # this workflow only moves the tag — spec §10.3.
+      # AWS-RunShellScript runs under /bin/sh (dash) — keep `set -eu`,
+      # no pipefail (same constraint as _deploy.yml).
+      - name: SSM deploy
+        env:
+          TAG: ${{ needs.tag.outputs.tag }}
+        run: |
+          jq -nc \
+            --arg region "$AWS_REGION" \
+            --arg ecr "$ECR_REGISTRY" \
+            --arg tag "$TAG" '
+            {
+              commands: [
+                "set -eu",
+                "mkdir -p /opt/data-room",
+                "touch /opt/data-room/.env",
+                # Rewrite only TAG + ECR; operator-set lines survive.
+                "sed -i \"/^TAG=/d;/^ECR=/d\" /opt/data-room/.env",
+                "echo TAG=\($tag) >> /opt/data-room/.env",
+                "echo ECR=\($ecr) >> /opt/data-room/.env",
+                "aws ecr get-login-password --region \($region) | docker login --username AWS --password-stdin \($ecr)",
+                "cd /opt/data-room",
+                # Pull both images (batch rides the same TAG for the next
+                # timer firing); only the collector is a long-lived service.
+                "docker compose --profile batch pull",
+                "docker compose up -d collector"
+              ]
+            }' > /tmp/ssm-params.json
+
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy data-room @ $TAG" \
+            --parameters file:///tmp/ssm-params.json \
+            --output-s3-bucket-name "$SSM_OUTPUT_BUCKET" \
+            --query Command.CommandId --output text)
+          echo "ssm command: $CMD_ID"
+
+          # Poll to a terminal state (built-in `aws ssm wait` caps at ~100s,
+          # shorter than the image pulls — same trap as _deploy.yml).
+          STATUS=Pending
+          for _ in $(seq 1 120); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --query Status --output text 2>/dev/null || echo Pending)
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 5
+          done
+          echo "ssm status: $STATUS"
+
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --query StandardOutputContent --output text
+
+          if [ "$STATUS" != "Success" ]; then
+            aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --query StandardErrorContent --output text
+            exit 1
+          fi
