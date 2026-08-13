@@ -52,3 +52,54 @@ async fn vision_normalize_is_deterministic_and_complete() {
         "fixture row count preserved through chunked path"
     );
 }
+
+#[tokio::test]
+async fn duplicate_internal_entry_zip_uses_top_level_csv() {
+    // Real-world quirk (BTCUSDC-trades-2021-04.zip): the CSV appears twice,
+    // once bare and once under an internal fsx-data/ path.
+    let dir = tempfile::tempdir().unwrap();
+    let store = store::open(&format!("file://{}", dir.path().display())).unwrap();
+
+    let csv = "0,100.0,1.0,100.0,1617235200000,True,True\n";
+    let mut buf = Vec::new();
+    {
+        use std::io::Write;
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let opts: zip::write::SimpleFileOptions = Default::default();
+        zw.start_file("BTCUSDC-trades-2021-04.csv", opts).unwrap();
+        zw.write_all(csv.as_bytes()).unwrap();
+        zw.start_file("fsx-data/collector_data/BTCUSDC-trades-2021-04.csv", opts)
+            .unwrap();
+        zw.write_all(csv.as_bytes()).unwrap();
+        zw.finish().unwrap();
+    }
+    store
+        .put(
+            &object_store::path::Path::from(
+                "bronze/v1/exchange=binance/source=vision/market=spot/kind=trades/symbol=BTCUSDC/BTCUSDC-trades-2021-04.zip",
+            ),
+            bytes::Bytes::from(buf).into(),
+        )
+        .await
+        .unwrap();
+
+    let n = normalizer::vision::normalize_pending(&store, "spot", "BTCUSDC")
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    let got = store
+        .get(&object_store::path::Path::from(
+            "silver/v1/trades/exchange=binance/symbol=BTC-USDC/date=2021-04-01/part-00.parquet",
+        ))
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(got)
+        .unwrap()
+        .build()
+        .unwrap();
+    let rows: usize = reader.map(|b| b.unwrap().num_rows()).sum();
+    assert_eq!(rows, 1, "one row from the top-level csv, duplicate ignored");
+}
