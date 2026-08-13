@@ -29,7 +29,9 @@ export function useExchangeInfo() {
         ? {
             packageId: ex.packageId,
             adminCapId: ex.adminCapId,
-            whitelistId: ex.whitelistId ?? null,
+            // SO-384: the shared ingress Whitelist moved to the record's
+            // top-level standalone whitelist block.
+            whitelistId: body?.whitelist?.whitelistId ?? null,
           }
         : null;
     },

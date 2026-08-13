@@ -261,9 +261,9 @@ struct DirectCtx {
 /// token-info's `tradingVaultObjects` block.
 struct DirectFundingRefs {
     protocol_config_id: ObjectID,
-    /// options_core `ProtocolConfig` — `vault::deposit`'s ingress
-    /// whitelist gate (SO-383).
-    core_protocol_config_id: ObjectID,
+    /// Shared `whitelist::Whitelist` — `vault::deposit`'s ingress gate
+    /// (SO-383).
+    whitelist_id: ObjectID,
     oracle_registry_id: ObjectID,
     deepbook_adapter_pkg: Option<ObjectID>,
     options_adapter_pkg: Option<ObjectID>,
@@ -287,9 +287,9 @@ struct Shared {
     manager: ExAddress,
     manager_oid: ObjectID,
     exchange_package: ObjectID,
-    /// Shared exchange ingress `Whitelist` (SO-384). `None` on records
-    /// predating the whitelist module — BM deposits then fail loudly.
-    exchange_whitelist: Option<ObjectID>,
+    /// Shared ingress `Whitelist` (standalone whitelist package, SO-384).
+    /// `None` on records predating it — BM deposits then fail loudly.
+    whitelist: Option<ObjectID>,
     salts: SaltSource,
     cfg: BotConfig,
     gas_budget: u64,
@@ -337,9 +337,9 @@ async fn main() -> Result<()> {
     let markets_resp = wait_for_markets(&ob, 60, Duration::from_secs(5)).await?;
     let exchange_package = ObjectID::from_str(&markets_resp.package_id)
         .context("parsing exchange packageId from /v1/markets")?;
-    // Ingress whitelist (SO-384) for BM deposits, from the same
-    // deployment record token-info serves.
-    let exchange_whitelist = snapshot.exchange_whitelist()?;
+    // Ingress whitelist (SO-384) for BM deposits, from the standalone
+    // whitelist block of the record token-info serves.
+    let whitelist = snapshot.whitelist_object()?;
 
     let mut market_ctxs = Vec::new();
     for m in markets_resp.markets {
@@ -403,7 +403,12 @@ async fn main() -> Result<()> {
                 })?;
                 Some(DirectFundingRefs {
                     protocol_config_id: tvo.vault_protocol_config()?,
-                    core_protocol_config_id: snapshot.protocol_config()?,
+                    whitelist_id: snapshot.whitelist_object()?.ok_or_else(|| {
+                        anyhow!(
+                            "[funding] enabled but token-info has no whitelist block — \
+                             vault deposits are ingress-gated (SO-383)"
+                        )
+                    })?,
                     oracle_registry_id: tvo.oracle_registry()?,
                     deepbook_adapter_pkg: snapshot
                         .deepbook_adapter()
@@ -470,7 +475,7 @@ async fn main() -> Result<()> {
         manager,
         manager_oid,
         exchange_package,
-        exchange_whitelist,
+        whitelist,
         salts: SaltSource::new(),
         cfg,
         gas_budget: cli.gas_budget,
@@ -718,10 +723,10 @@ async fn manager_owner(wrap: &SuiClientWrapper, id: ObjectID) -> Result<String> 
 async fn funding_pass(s: &Shared, snapshot: &token_info_client::Snapshot) {
     // balance_manager::deposit is whitelist-gated (SO-384); without the
     // object id there is nothing this pass can do.
-    let Some(whitelist) = s.exchange_whitelist else {
+    let Some(whitelist) = s.whitelist else {
         tracing::error!(
-            "funding: exchange record has no whitelistId — BM deposits are ingress-gated \
-             (SO-384); redeploy the exchange record"
+            "funding: deployments record has no whitelist block — BM deposits are \
+             ingress-gated (SO-384); redeploy the protocol"
         );
         return;
     };
@@ -991,7 +996,7 @@ async fn direct_deposit(
             &s.wrap.client,
             &mut pt,
             &tv_refs,
-            f.core_protocol_config_id,
+            f.whitelist_id,
             appraisal,
             coin,
         )
@@ -1004,7 +1009,7 @@ async fn direct_deposit(
             &s.wrap.client,
             &mut pt,
             &tv_refs,
-            f.core_protocol_config_id,
+            f.whitelist_id,
             canonical,
             appraisal,
             coin,

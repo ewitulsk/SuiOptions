@@ -93,6 +93,13 @@ pub struct PackageInfo {
     /// protocol-only redeploys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cctp_bridge: Option<CctpBridgeRecord>,
+    /// Standalone ingress whitelist package (guarded launch): published
+    /// FIRST — every gated package (core, trading-vault, exchange,
+    /// exchange-adapter) links against it — with its shared `Whitelist`
+    /// object and owned `AdminCap`. The one whitelist, the one admin
+    /// surface, for the whole protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whitelist: Option<WhitelistRecord>,
     /// Hybrid-exchange settlement package (via `--deploy-exchange`);
     /// carried forward on protocol-only redeploys. Never republished
     /// implicitly: market registry object IDs are the order-signature
@@ -146,6 +153,22 @@ pub struct CctpBridgeRecord {
     pub network: String,
 }
 
+/// The published standalone whitelist package (contracts/whitelist/) plus
+/// the two objects its `init` creates: the shared ingress `Whitelist` and
+/// the deployer-owned `AdminCap` that gates every mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhitelistRecord {
+    pub package_id: String,
+    pub upgrade_cap_id: String,
+    /// Shared `Whitelist` object — the gate arg every ingress entry takes.
+    pub whitelist_id: String,
+    /// Owned `whitelist::AdminCap` (deployer wallet).
+    pub admin_cap_id: String,
+    pub publish_digest: String,
+    pub deployed_at: String,
+}
+
 /// The published hybrid-exchange settlement package (contracts/exchange/)
 /// plus its market registries. `markets` maps a human symbol (e.g.
 /// "SUI/USDC") to the shared SettlementRegistry object id — the id every
@@ -157,11 +180,6 @@ pub struct ExchangeRecord {
     pub package_id: String,
     pub upgrade_cap_id: String,
     pub admin_cap_id: String,
-    /// Shared ingress `Whitelist` object the exchange publish's init created
-    /// (guarded launch). Optional only for READING records written before
-    /// the whitelist module existed; every fresh publish records it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub whitelist_id: Option<String>,
     pub publish_digest: String,
     pub deployed_at: String,
     pub network: String,

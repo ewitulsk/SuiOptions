@@ -22,7 +22,7 @@
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID, fromHex } from "@mysten/sui/utils";
 
-import { ENV, PACKAGE_ID, PROTOCOL_CONFIG_ID, TREASURY_ID } from "../config";
+import { ENV, PACKAGE_ID, PROTOCOL_CONFIG_ID, TREASURY_ID, WHITELIST_ID } from "../config";
 import type { Quote, RfqQuoteEntry } from "../api/quoting";
 
 function requirePackage(): string {
@@ -114,9 +114,9 @@ export type WriteParams = {
  */
 export function buildWriteTx(p: WriteParams): Transaction {
   const pkg = requirePackage();
-  if (!PROTOCOL_CONFIG_ID || !TREASURY_ID) {
+  if (!PROTOCOL_CONFIG_ID || !TREASURY_ID || !WHITELIST_ID) {
     throw new Error(
-      `Missing protocolConfigId/treasuryId for VITE_ENVIRONMENT="${ENV}" — cannot build the write PTB`,
+      `Missing protocolConfigId/treasuryId/whitelistId for VITE_ENVIRONMENT="${ENV}" — cannot build the write PTB`,
     );
   }
   const q = p.entry.quote;
@@ -155,6 +155,7 @@ export function buildWriteTx(p: WriteParams): Transaction {
     arguments: [
       tx.object(q.bucket_id),
       tx.object(PROTOCOL_CONFIG_ID),
+      tx.object(WHITELIST_ID),
       tx.object(TREASURY_ID),
       request,
       premiumFunds,
@@ -190,9 +191,9 @@ export type BuyParams = {
  */
 export function buildBuyTx(p: BuyParams): Transaction {
   const pkg = requirePackage();
-  if (!PROTOCOL_CONFIG_ID || !TREASURY_ID) {
+  if (!PROTOCOL_CONFIG_ID || !TREASURY_ID || !WHITELIST_ID) {
     throw new Error(
-      `Missing protocolConfigId/treasuryId for VITE_ENVIRONMENT="${ENV}" — cannot build the buy PTB`,
+      `Missing protocolConfigId/treasuryId/whitelistId for VITE_ENVIRONMENT="${ENV}" — cannot build the buy PTB`,
     );
   }
   const q = p.entry.quote;
@@ -231,6 +232,7 @@ export function buildBuyTx(p: BuyParams): Transaction {
     arguments: [
       tx.object(q.bucket_id),
       tx.object(PROTOCOL_CONFIG_ID),
+      tx.object(WHITELIST_ID),
       tx.object(TREASURY_ID),
       request,
       underlyingFunds,

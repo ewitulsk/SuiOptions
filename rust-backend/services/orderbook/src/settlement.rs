@@ -162,8 +162,8 @@ pub struct Submitter {
     chain: ChainClient,
     signer: Signer,
     package: ObjectID,
-    /// Shared exchange ingress `Whitelist` (guarded launch, SO-384) —
-    /// every settlement entry takes it right after the registry.
+    /// Shared ingress `Whitelist` (standalone whitelist package, SO-384)
+    /// — every settlement entry takes it right after the registry.
     whitelist: ObjectID,
     /// Direct-escrow ids (SO-372); `None` disables the adapter targets.
     direct: Option<DirectEscrow>,

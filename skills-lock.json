@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "skills": {
+    "build-integration": {
+      "source": "GitbookIO/gitbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/build-integration/SKILL.md",
+      "computedHash": "1163fe6cad37d35a5af3733d6215161db2ede91e5d9916b7a81ab9ba7b4ae165"
+    },
+    "configure-site": {
+      "source": "GitbookIO/gitbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/configure-site/SKILL.md",
+      "computedHash": "5776f641293d5391505bb36941012f2be099e974213327d9fe395515e51c1e11"
+    },
+    "cr-create": {
+      "source": "GitbookIO/gitbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/cr-create/SKILL.md",
+      "computedHash": "5be7df131777aec78f04671e9cc8ffb81615c7994c0c468450d03cda32b0f16c"
+    },
+    "cr-review": {
+      "source": "GitbookIO/gitbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/cr-review/SKILL.md",
+      "computedHash": "8ea89a48bc7d5ee3b8430a47ad0fbcf6b0f1e8ccc72609da2a2fdeaab0d0a61f"
+    },
+    "write-docs": {
+      "source": "GitbookIO/gitbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/write-docs/SKILL.md",
+      "computedHash": "b74be252e3faa3838326bb8267864f9c0fc1ea917c003beb9af26bfe2cd7abe9"
+    },
+    "write-openapi": {
+      "source": "GitbookIO/gitbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/write-openapi/SKILL.md",
+      "computedHash": "76584c99669810d391897964a55fe4f8d958a15d4eb4c85b6dc56c2c531d3e50"
+    }
+  }
+}

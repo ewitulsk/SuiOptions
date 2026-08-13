@@ -20,7 +20,7 @@ use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
 use sui_tx::chain::{created_objects, ChainClient};
-use sui_types::base_types::{ObjectID, SuiAddress};
+use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 
 use crate::json_store::{ExchangeMarketRecord, ExchangeRecord, TokenSpec};
@@ -206,68 +206,6 @@ pub async fn create_markets(
     }
     tracing::info!(total = markets.len(), "exchange markets recorded");
     exchange.markets = markets;
-    Ok(())
-}
-
-/// Seed the exchange ingress `Whitelist` (guarded launch): one PTB calling
-/// `whitelist::add_member` for the deployer + configured members, deduped.
-/// Mirrors the core ProtocolConfig seeding in the activation PTB — the two
-/// lists are one logical list and must start with the same cohort.
-pub async fn seed_whitelist(
-    client: &ChainClient,
-    signer: &Signer,
-    exchange: &ExchangeRecord,
-    ingress_members: &[SuiAddress],
-    gas_budget: u64,
-) -> Result<()> {
-    let whitelist = ObjectID::from_hex_literal(
-        exchange
-            .whitelist_id
-            .as_deref()
-            .ok_or_else(|| anyhow!("exchange record has no whitelistId"))?,
-    )
-    .context("parsing exchange whitelistId")?;
-    let package = ObjectID::from_hex_literal(&exchange.package_id)
-        .context("parsing exchange package_id")?;
-    let admin_cap = ObjectID::from_hex_literal(&exchange.admin_cap_id)
-        .context("parsing exchange admin_cap_id")?;
-
-    let mut pt = ProgrammableTransactionBuilder::new();
-    let admin = pt.obj(
-        client
-            .owned_object_arg(admin_cap)
-            .await
-            .context("fetching exchange AdminCap")?,
-    )?;
-    let wl = pt.obj(
-        client
-            .shared_object_arg(whitelist, /* mutable */ true)
-            .await
-            .context("fetching exchange Whitelist")?,
-    )?;
-    let mut members = vec![signer.address];
-    for m in ingress_members {
-        if !members.contains(m) {
-            members.push(*m);
-        }
-    }
-    for member in &members {
-        let addr = pt.pure(*member)?;
-        pt.programmable_move_call(
-            package,
-            Identifier::new("whitelist")?,
-            Identifier::new("add_member")?,
-            vec![],
-            vec![admin, wl, addr],
-        );
-    }
-    let resp =
-        sui_tx::tx::submit_ptb(client, signer, pt, gas_budget, "exchange whitelist seed").await?;
-    tracing::info!(
-        members = members.len(),
-        digest = %sui_tx::tx::tx_digest(&resp),
-        "exchange whitelist seeded"
-    );
     Ok(())
 }
 

@@ -101,10 +101,11 @@ export let OPTIONS_ADAPTER_PACKAGE_ID: string | undefined;
 /** Hybrid-exchange maker adapter for the trading vault (SO-370). */
 export let EXCHANGE_ADAPTER_PACKAGE_ID: string | undefined;
 
-/** Shared ingress `Whitelist` of the hybrid-exchange settlement package
- * (guarded launch). `undefined` where no exchange is deployed or the
- * record predates the whitelist module. */
-export let EXCHANGE_WHITELIST_ID: string | undefined;
+/** The ONE shared ingress `Whitelist` of the standalone whitelist package
+ * (guarded launch): the gate arg every ingress entry across core /
+ * trading-vault / exchange takes. `undefined` on records predating the
+ * standalone package. */
+export let WHITELIST_ID: string | undefined;
 
 // Keeper-attested equity oracle for trading-vault external accounts
 // (SO-299). The publish digest resolves the shared `EquityBook` client-side
@@ -223,9 +224,13 @@ type PackageInfoDto = {
   exchangeAdapter?: { packageId: string } | null;
   exchange?: {
     packageId: string;
-    /** Shared ingress `Whitelist` object (guarded launch). Absent on
-     * records predating the whitelist module. */
-    whitelistId?: string | null;
+  } | null;
+  /** Standalone ingress whitelist package (guarded launch). Absent on
+   * records predating the standalone package. */
+  whitelist?: {
+    packageId: string;
+    whitelistId: string;
+    adminCapId: string;
   } | null;
   equityOracle?: { packageId: string; publishDigest: string } | null;
   tradingVaultObjects?: {
@@ -275,7 +280,7 @@ export async function initConfig(): Promise<void> {
   DEEPBOOK_ADAPTER_PACKAGE_ID = info.deepbookAdapter?.packageId;
   OPTIONS_ADAPTER_PACKAGE_ID = info.optionsAdapter?.packageId;
   EXCHANGE_ADAPTER_PACKAGE_ID = info.exchangeAdapter?.packageId;
-  EXCHANGE_WHITELIST_ID = info.exchange?.whitelistId ?? undefined;
+  WHITELIST_ID = info.whitelist?.whitelistId ?? undefined;
   EQUITY_ORACLE_PACKAGE_ID = info.equityOracle?.packageId;
   EQUITY_ORACLE_PUBLISH_DIGEST = info.equityOracle?.publishDigest;
   TRADING_VAULT_OBJECTS = info.tradingVaultObjects ?? undefined;

@@ -62,6 +62,9 @@ async fn main() -> Result<()> {
         markets = deployed_markets.len(),
         "loaded exchange deployment"
     );
+    // SO-384: the shared ingress Whitelist now lives in the record's
+    // top-level whitelist block (one list for the whole protocol).
+    let whitelist_info = cfg.load_whitelist()?;
     // SO-372: direct vault escrow needs the exchange_adapter package + the
     // trading-vault IntegrationRegistry from the same record. Optional —
     // without them every manager is treated as a plain wallet BM.
@@ -124,7 +127,7 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState {
         exchange_package: exchange_info.package_id.clone(),
-        whitelist_id: exchange_info.whitelist_id.clone(),
+        whitelist_id: whitelist_info.as_ref().map(|w| w.whitelist_id.clone()),
         markets: markets.clone(),
         books,
         db: db.clone(),
@@ -183,12 +186,15 @@ async fn main() -> Result<()> {
             // The whitelist is a hard settlement dependency (SO-384):
             // every settlement entry takes it, so a record without one
             // cannot settle at all.
-            let whitelist = exchange_info.whitelist()?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "exchange record has no whitelistId — republish the exchange with the \
-                     whitelist-enabled deployment-manager before enabling settlement"
-                )
-            })?;
+            let whitelist = whitelist_info
+                .as_ref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "deployments record has no whitelist block — redeploy the protocol with \
+                         the whitelist-enabled deployment-manager before enabling settlement"
+                    )
+                })?
+                .whitelist_object()?;
             let submitter = Submitter::new(
                 chain,
                 signer,

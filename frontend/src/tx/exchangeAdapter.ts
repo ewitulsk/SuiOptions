@@ -10,7 +10,7 @@ import { Transaction } from "@mysten/sui/transactions";
 
 import {
   EXCHANGE_ADAPTER_PACKAGE_ID,
-  EXCHANGE_WHITELIST_ID,
+  WHITELIST_ID,
   TRADING_VAULT_OBJECTS,
 } from "../config";
 
@@ -82,16 +82,16 @@ function custodyMoveTx(fn: "fund" | "defund", p: ExchangeCustodyMoveParams): Tra
   const { pkg, integrationRegistryId } = requireRefs();
   const tx = new Transaction();
   // `fund` deposits into the exchange BalanceManager, which is
-  // ingress-gated by the shared exchange Whitelist (SO-384). `defund`
+  // ingress-gated by the shared Whitelist (SO-384). `defund`
   // moves value OUT and stays ungated.
   const wl: string[] = [];
   if (fn === "fund") {
-    if (!EXCHANGE_WHITELIST_ID) {
+    if (!WHITELIST_ID) {
       throw new Error(
-        "exchange record has no whitelistId — cannot fund an exchange custody (SO-384)",
+        "deployment record has no whitelist block — cannot fund an exchange custody (SO-384)",
       );
     }
-    wl.push(EXCHANGE_WHITELIST_ID);
+    wl.push(WHITELIST_ID);
   }
   tx.moveCall({
     target: `${pkg}::exchange_adapter::${fn}`,

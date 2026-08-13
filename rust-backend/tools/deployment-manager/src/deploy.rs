@@ -252,6 +252,60 @@ pub async fn publish_dep_package(
     .await
 }
 
+/// Seed the standalone ingress `Whitelist` right after its publish: one
+/// PTB calling `whitelist::add_member` for the deployer + configured
+/// members, deduped. The deployer is always a member — the ceremony and
+/// every deployer-signed service tx must pass the gate.
+pub async fn seed_whitelist(
+    client: &ChainClient,
+    signer: &Signer,
+    whitelist_pkg: ObjectID,
+    admin_cap_id: ObjectID,
+    whitelist_id: ObjectID,
+    ingress_members: &[sui_types::base_types::SuiAddress],
+    gas_budget: u64,
+) -> Result<()> {
+    // Let the fullnode index the freshly created AdminCap + shared object.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let admin = pt.obj(
+        client
+            .owned_object_arg(admin_cap_id)
+            .await
+            .context("fetching whitelist AdminCap")?,
+    )?;
+    let wl = pt.obj(
+        client
+            .shared_object_arg(whitelist_id, /* mutable */ true)
+            .await
+            .context("fetching shared Whitelist")?,
+    )?;
+    let mut members = vec![signer.address];
+    for m in ingress_members {
+        if !members.contains(m) {
+            members.push(*m);
+        }
+    }
+    for member in &members {
+        let addr = pt.pure(*member)?;
+        pt.programmable_move_call(
+            whitelist_pkg,
+            Identifier::new("whitelist")?,
+            Identifier::new("add_member")?,
+            vec![],
+            vec![admin, wl, addr],
+        );
+    }
+    let resp = sui_tx::tx::submit_ptb(client, signer, pt, gas_budget, "whitelist seed").await?;
+    tracing::info!(
+        members = members.len(),
+        digest = %sui_tx::tx::tx_digest(&resp),
+        "ingress whitelist seeded"
+    );
+    Ok(())
+}
+
 /// Symbol → (module name, decimals). Hardcoded because Move modules name
 /// their OTW after the module in uppercase, so module="tusdc" implies
 /// type="TUSDC". Decimals match the real-world tokens they shadow.

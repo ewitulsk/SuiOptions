@@ -115,7 +115,7 @@ pub async fn mint_and_deposit_into_vault(
     module: &str,
     faucet_id: ObjectID,
     refs: &crate::tx::trading_vault::TradingVaultRefs<'_>,
-    core_config_id: ObjectID,
+    whitelist_id: ObjectID,
     amount: u64,
     gas_budget: u64,
 ) -> Result<ExecutedTransaction> {
@@ -142,7 +142,7 @@ pub async fn mint_and_deposit_into_vault(
     // begin_appraisal -> deposit. Both take the vault as a shared input;
     // the builder unions the mutability, so the mutable deposit leg wins.
     let appraisal = crate::tx::trading_vault::build_begin_appraisal(client, &mut pt, refs).await?;
-    crate::tx::trading_vault::build_deposit(client, &mut pt, refs, core_config_id, appraisal, coin)
+    crate::tx::trading_vault::build_deposit(client, &mut pt, refs, whitelist_id, appraisal, coin)
         .await?;
 
     submit(client, signer, pt, gas_budget).await
