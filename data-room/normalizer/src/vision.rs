@@ -121,12 +121,6 @@ fn day_of(ns: i64) -> String {
         .to_string()
 }
 
-/// One UTC day of rows → deterministic parquet bytes (sync, so it can
-/// run inside the streaming callback).
-fn day_to_parquet(rows: Vec<schema::Trade>) -> anyhow::Result<Vec<u8>> {
-    schema::write_parquet(&schema::trades_batch(rows)?)
-}
-
 pub async fn normalize_zip(
     store: &Store,
     key: &str,
@@ -147,12 +141,16 @@ pub async fn normalize_zip(
 
     let (instrument, partition_symbol) = market_ids(market, symbol)?;
 
-    // Stream rows; when the UTC day advances, compress the finished day
-    // to parquet immediately and drop its rows. Dumps are time-ordered;
-    // an out-of-order day would clobber an already-serialized partition,
-    // so it is a hard error (bronze stays intact, nothing written).
+    // Stream rows; a dense day is written INCREMENTALLY in fixed-size
+    // chunks through a per-day parquet writer (a 2M-trade day of Trade
+    // structs alone OOMs a 2 GB host — SO-391). When the UTC day
+    // advances, the writer closes into its output bytes. Dumps are
+    // time-ordered; an out-of-order day would clobber an already-closed
+    // partition, so it is a hard error (bronze intact, nothing written).
+    const CHUNK_ROWS: usize = 100_000;
     let mut current_day: Option<String> = None;
-    let mut day_rows: Vec<schema::Trade> = Vec::new();
+    let mut chunk: Vec<schema::Trade> = Vec::new();
+    let mut writer: Option<schema::TradesWriter> = None;
     let mut outputs: Vec<(String, Vec<u8>)> = Vec::new();
     let mut rejects = Vec::new();
     let mut total_rows = 0usize;
@@ -169,28 +167,52 @@ pub async fn normalize_zip(
                     return;
                 }
                 let day = day_of(t.ts_event.expect("vision rows always carry ts_event"));
-                match &current_day {
-                    Some(d) if *d == day => {}
-                    Some(d) if *d < day => {
-                        total_rows += day_rows.len();
-                        match day_to_parquet(std::mem::take(&mut day_rows)) {
-                            Ok(bytes) => outputs.push((d.clone(), bytes)),
-                            Err(e) => {
-                                stream_err = Some(e);
-                                return;
-                            }
-                        }
-                        current_day = Some(day);
-                    }
+                let advance = match &current_day {
+                    Some(d) if *d == day => false,
+                    Some(d) if *d < day => true,
                     Some(d) => {
                         stream_err = Some(anyhow::anyhow!(
                             "out-of-order timestamps in {key}: {day} after {d}"
                         ));
                         return;
                     }
-                    None => current_day = Some(day),
+                    None => {
+                        current_day = Some(day.clone());
+                        writer = schema::TradesWriter::new().ok();
+                        false
+                    }
+                };
+                let close_day = |writer: &mut Option<schema::TradesWriter>,
+                                 chunk: &mut Vec<schema::Trade>,
+                                 d: &str,
+                                 outputs: &mut Vec<(String, Vec<u8>)>|
+                 -> anyhow::Result<usize> {
+                    let mut w = writer.take().ok_or_else(|| anyhow::anyhow!("no writer"))?;
+                    w.write_chunk(std::mem::take(chunk))?;
+                    let n = w.rows();
+                    outputs.push((d.to_string(), w.finish()?));
+                    Ok(n)
+                };
+                if advance {
+                    let prev = current_day.clone().unwrap();
+                    match close_day(&mut writer, &mut chunk, &prev, &mut outputs) {
+                        Ok(n) => total_rows += n,
+                        Err(e) => {
+                            stream_err = Some(e);
+                            return;
+                        }
+                    }
+                    current_day = Some(day);
+                    writer = schema::TradesWriter::new().ok();
                 }
-                day_rows.push(t);
+                chunk.push(t);
+                if chunk.len() >= CHUNK_ROWS {
+                    if let Some(w) = writer.as_mut() {
+                        if let Err(e) = w.write_chunk(std::mem::take(&mut chunk)) {
+                            stream_err = Some(e);
+                        }
+                    }
+                }
             },
             |r| rejects.push(r),
         )?;
@@ -198,9 +220,10 @@ pub async fn normalize_zip(
     if let Some(e) = stream_err {
         return Err(e);
     }
-    if let Some(d) = current_day.take() {
-        total_rows += day_rows.len();
-        outputs.push((d, day_to_parquet(std::mem::take(&mut day_rows))?));
+    if let (Some(d), Some(mut w)) = (current_day.take(), writer.take()) {
+        w.write_chunk(std::mem::take(&mut chunk))?;
+        total_rows += w.rows();
+        outputs.push((d, w.finish()?));
     }
 
     let days = outputs.len();
