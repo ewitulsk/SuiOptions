@@ -585,16 +585,19 @@ fun vault_vs_vault_match_settles_both_sides() {
     {
         let mut v = ts::take_shared_by_id<TradingVault>(&sc, vault_b);
         let cfg = th::take_protocol_config(&sc);
+        let wl = th::take_whitelist(&sc);
         let appraisal = vault::begin_appraisal<th::USDC>(&v);
         vault::deposit<th::USDC>(
             &mut v,
             &cfg,
+            &wl,
             appraisal,
             coin::from_balance(th::mint<th::USDC>(105_000), sc.ctx()),
             option::none(),
             &clk,
             sc.ctx(),
         );
+        ts::return_shared(wl);
         ts::return_shared(cfg);
         ts::return_shared(v);
     };
@@ -661,18 +664,21 @@ fun direct_custody_appraises_empty_and_deposits_still_work() {
     ts::next_tx(&mut sc, th::alice_addr());
     let mut v = ts::take_shared_by_id<TradingVault>(&sc, vault_id);
     let cfg = th::take_protocol_config(&sc);
+    let wl = th::take_whitelist(&sc);
     let mut appraisal = vault::begin_appraisal<th::USDC>(&v);
     let ca = adapter::begin_custody_appraisal(&v, custody_id);
     adapter::finalize_custody_appraisal(&v, &mut appraisal, ca);
     vault::deposit<th::USDC>(
         &mut v,
         &cfg,
+        &wl,
         appraisal,
         coin::from_balance(th::mint<th::USDC>(500_000), sc.ctx()),
         option::none(),
         &clk,
         sc.ctx(),
     );
+    ts::return_shared(wl);
     // NAV was exactly the 1M free balance: the new stake matches the
     // genesis stake 1:2 in value.
     let (shares, _, _) = vault::stake_of(&v, th::alice_addr());

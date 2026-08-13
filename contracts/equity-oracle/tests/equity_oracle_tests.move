@@ -6,6 +6,7 @@ use sui::clock::Clock;
 use sui::coin::{Self, Coin};
 use sui::test_scenario::{Self as ts, Scenario};
 
+
 use trading_vault::registry::{Self as tv_registry, OracleRegistry};
 use trading_vault::test_helpers::{Self as th, USDC};
 use trading_vault::vault::{Self, CuratorCap, TradingVault};
@@ -158,18 +159,21 @@ fun post_within_guardrails_and_appraise() {
     let cfg = th::take_protocol_config(&scenario);
     let book = ts::take_shared<EquityBook>(&scenario);
     let oreg = ts::take_shared<OracleRegistry>(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut appraisal = vault::begin_appraisal<USDC>(&v);
     eo::record(&v, &book, &oreg, &mut appraisal, &clock);
     assert!(vault::appraisal_value(&appraisal) == 1_040, 0);
     vault::deposit<USDC>(
         &mut v,
         &cfg,
+        &wl,
         appraisal,
         coin::from_balance(th::mint<USDC>(1_040), scenario.ctx()),
         option::none(),
         &clock,
         scenario.ctx(),
     );
+    ts::return_shared(wl);
     let (bob_shares, _, _) = vault::stake_of(&v, th::bob_addr());
     assert!(bob_shares == th::expected_shares(1_040, 1_000_000_000, 1_040), 0);
     ts::return_shared(oreg);

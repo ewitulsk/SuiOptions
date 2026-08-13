@@ -19,11 +19,17 @@ deps = { MoveStdlib = "MoveStdlib" }
 [pinned.testnet.options_core]
 source = { local = "../core" }
 use_environment = "testnet"
-manifest_digest = "5745706258F61D6CE210904B3E6AE87A73CE9D31A6F93BE4718C442529332A87"
-deps = { std = "MoveStdlib", sui = "Sui" }
+manifest_digest = "1DF9C5CAF9F13F77ECAC184E03B479F99FB5FBB218F3973C652B67ED095B6AA9"
+deps = { std = "MoveStdlib", sui = "Sui", whitelist = "whitelist" }
 
 [pinned.testnet.trading_vault]
 source = { root = true }
 use_environment = "testnet"
-manifest_digest = "86BB80A84ABF632A5F75C7BD3932D2FDD16B7068B5ED587CBD194C1D3D8CFC03"
-deps = { options_core = "options_core", std = "MoveStdlib", sui = "Sui" }
+manifest_digest = "13941CD9F2F270FD528D82A4B324C920D176EDA6CC9F420078F88C6FA344E501"
+deps = { options_core = "options_core", std = "MoveStdlib", sui = "Sui", whitelist = "whitelist" }
+
+[pinned.testnet.whitelist]
+source = { local = "../whitelist" }
+use_environment = "testnet"
+manifest_digest = "5745706258F61D6CE210904B3E6AE87A73CE9D31A6F93BE4718C442529332A87"
+deps = { std = "MoveStdlib", sui = "Sui" }

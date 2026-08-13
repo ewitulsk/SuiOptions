@@ -9,6 +9,7 @@ use sui::clock::Clock;
 use sui::coin::{Self, Coin};
 use sui::test_scenario::{Self as ts, Scenario};
 
+use whitelist::whitelist::Whitelist;
 use options_core::treasury::Treasury;
 
 use trading_vault::test_helpers::{Self as th, USDC, TestOracle, RogueOracle};
@@ -52,17 +53,20 @@ fun deposit_with_equity(
     let mut v = ts::take_shared<TradingVault>(scenario);
     let cfg = th::take_protocol_config(scenario);
     let oreg = ts::take_shared<OracleRegistry>(scenario);
+    let wl = ts::take_shared<Whitelist>(scenario);
     let mut appraisal = vault::begin_appraisal<USDC>(&v);
     vault::record_external_equity<TestOracle>(&v, &oreg, &mut appraisal, th::test_oracle(), equity);
     vault::deposit<USDC>(
         &mut v,
         &cfg,
+        &wl,
         appraisal,
         coin::from_balance(th::mint<USDC>(amount), scenario.ctx()),
         option::none(),
         clock,
         scenario.ctx(),
     );
+    ts::return_shared(wl);
     ts::return_shared(oreg);
     ts::return_shared(cfg);
     ts::return_shared(v);

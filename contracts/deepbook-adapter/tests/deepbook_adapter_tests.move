@@ -14,6 +14,8 @@ use deepbook::registry::{Self, Registry};
 
 use options_core::admin::{Self, AdminCap};
 
+use whitelist::whitelist::{Self, AdminCap as WlAdminCap, Whitelist};
+
 use trading_vault::registry as tv_registry;
 use trading_vault::registry::{IntegrationRegistry, VaultProtocolConfig};
 use trading_vault::vault::{Self, CuratorCap, TradingVault};
@@ -30,6 +32,7 @@ const ALICE: address = @0xD4;
 fun setup(sc: &mut Scenario): Clock {
     ts::next_tx(sc, ADMIN);
     admin::init_for_testing(sc.ctx());
+    whitelist::init_for_testing(sc.ctx());
     tv_registry::init_for_testing(sc.ctx());
     adapter::init_for_testing(sc.ctx());
 
@@ -42,12 +45,22 @@ fun setup(sc: &mut Scenario): Clock {
         type_name::with_defining_ids<adapter::DeepBookAdapter>(),
     );
     ts::return_shared(ireg);
+    // Ingress whitelist: every named test actor is a member.
+    let wl_cap = ts::take_from_sender<WlAdminCap>(sc);
+    let mut wl = ts::take_shared<Whitelist>(sc);
+    whitelist::add_member(&wl_cap, &mut wl, ADMIN);
+    whitelist::add_member(&wl_cap, &mut wl, CURATOR);
+    whitelist::add_member(&wl_cap, &mut wl, ALICE);
+    ts::return_shared(wl);
+    ts::return_to_sender(sc, wl_cap);
     ts::return_to_sender(sc, admin_cap);
 
     // Vault + genesis deposit + custody.
     ts::next_tx(sc, CURATOR);
     let cfg = ts::take_shared<VaultProtocolConfig>(sc);
-    vault::create_vault<USDC>(&cfg, 0, 1_000, 3_600_000, sc.ctx());
+    let wl = ts::take_shared<Whitelist>(sc);
+    vault::create_vault<USDC>(&cfg, &wl, 0, 1_000, 3_600_000, sc.ctx());
+    ts::return_shared(wl);
     ts::return_shared(cfg);
 
     ts::next_tx(sc, ADMIN);
@@ -56,16 +69,19 @@ fun setup(sc: &mut Scenario): Clock {
     ts::next_tx(sc, ALICE);
     let mut v = ts::take_shared<TradingVault>(sc);
     let cfg = ts::take_shared<VaultProtocolConfig>(sc);
+    let wl = ts::take_shared<Whitelist>(sc);
     let appraisal = vault::begin_appraisal<USDC>(&v);
     vault::deposit<USDC>(
         &mut v,
         &cfg,
+        &wl,
         appraisal,
         coin::from_balance(balance::create_for_testing<USDC>(1_000_000_000), sc.ctx()),
         option::none(),
         &clock,
         sc.ctx(),
     );
+    ts::return_shared(wl);
     ts::return_shared(cfg);
     ts::return_shared(v);
     clock
