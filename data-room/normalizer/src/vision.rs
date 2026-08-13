@@ -160,17 +160,17 @@ pub async fn normalize_zip(
 
     let (instrument, partition_symbol) = market_ids(market, symbol)?;
 
-    // Stream rows; a dense day is written INCREMENTALLY in fixed-size
-    // chunks through a per-day parquet writer (a 2M-trade day of Trade
-    // structs alone OOMs a 2 GB host — SO-391). When the UTC day
-    // advances, the writer closes into its output bytes. Dumps are
-    // time-ordered; an out-of-order day would clobber an already-closed
-    // partition, so it is a hard error (bronze intact, nothing written).
+    // Stream rows through PER-DAY incremental writers. Dumps are mostly
+    // time-ordered but not always (BTCUSDT-trades-2023-01.zip interleaves
+    // late-January rows before January 1st), so no ordering is assumed:
+    // each UTC day owns a chunked parquet writer, and a day's memory
+    // footprint is one chunk of rows plus its compressed output buffer.
     const CHUNK_ROWS: usize = 100_000;
-    let mut current_day: Option<String> = None;
-    let mut chunk: Vec<schema::Trade> = Vec::new();
-    let mut writer: Option<schema::TradesWriter> = None;
-    let mut outputs: Vec<(String, Vec<u8>)> = Vec::new();
+    struct DayAcc {
+        writer: schema::TradesWriter,
+        chunk: Vec<schema::Trade>,
+    }
+    let mut days_acc: std::collections::BTreeMap<String, DayAcc> = Default::default();
     let mut rejects = Vec::new();
     let mut total_rows = 0usize;
     let mut stream_err: Option<anyhow::Error> = None;
@@ -186,50 +186,26 @@ pub async fn normalize_zip(
                     return;
                 }
                 let day = day_of(t.ts_event.expect("vision rows always carry ts_event"));
-                let advance = match &current_day {
-                    Some(d) if *d == day => false,
-                    Some(d) if *d < day => true,
-                    Some(d) => {
-                        stream_err = Some(anyhow::anyhow!(
-                            "out-of-order timestamps in {key}: {day} after {d}"
-                        ));
-                        return;
-                    }
-                    None => {
-                        current_day = Some(day.clone());
-                        writer = schema::TradesWriter::new().ok();
-                        false
-                    }
-                };
-                let close_day = |writer: &mut Option<schema::TradesWriter>,
-                                 chunk: &mut Vec<schema::Trade>,
-                                 d: &str,
-                                 outputs: &mut Vec<(String, Vec<u8>)>|
-                 -> anyhow::Result<usize> {
-                    let mut w = writer.take().ok_or_else(|| anyhow::anyhow!("no writer"))?;
-                    w.write_chunk(std::mem::take(chunk))?;
-                    let n = w.rows();
-                    outputs.push((d.to_string(), w.finish()?));
-                    Ok(n)
-                };
-                if advance {
-                    let prev = current_day.clone().unwrap();
-                    match close_day(&mut writer, &mut chunk, &prev, &mut outputs) {
-                        Ok(n) => total_rows += n,
-                        Err(e) => {
-                            stream_err = Some(e);
-                            return;
+                let acc = match days_acc.entry(day) {
+                    std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(v) => {
+                        match schema::TradesWriter::new() {
+                            Ok(w) => v.insert(DayAcc {
+                                writer: w,
+                                chunk: Vec::new(),
+                            }),
+                            Err(e) => {
+                                stream_err = Some(e);
+                                return;
+                            }
                         }
                     }
-                    current_day = Some(day);
-                    writer = schema::TradesWriter::new().ok();
-                }
-                chunk.push(t);
-                if chunk.len() >= CHUNK_ROWS {
-                    if let Some(w) = writer.as_mut() {
-                        if let Err(e) = w.write_chunk(std::mem::take(&mut chunk)) {
-                            stream_err = Some(e);
-                        }
+                };
+                acc.chunk.push(t);
+                total_rows += 1;
+                if acc.chunk.len() >= CHUNK_ROWS {
+                    if let Err(e) = acc.writer.write_chunk(std::mem::take(&mut acc.chunk)) {
+                        stream_err = Some(e);
                     }
                 }
             },
@@ -239,10 +215,10 @@ pub async fn normalize_zip(
     if let Some(e) = stream_err {
         return Err(e);
     }
-    if let (Some(d), Some(mut w)) = (current_day.take(), writer.take()) {
-        w.write_chunk(std::mem::take(&mut chunk))?;
-        total_rows += w.rows();
-        outputs.push((d, w.finish()?));
+    let mut outputs: Vec<(String, Vec<u8>)> = Vec::new();
+    for (day, mut acc) in days_acc {
+        acc.writer.write_chunk(std::mem::take(&mut acc.chunk))?;
+        outputs.push((day, acc.writer.finish()?));
     }
 
     let days = outputs.len();
