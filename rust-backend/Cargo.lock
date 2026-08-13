@@ -1254,8 +1254,10 @@ dependencies = [
  "observability",
  "runtime-config",
  "serde",
+ "serde_json",
  "sui-tx",
  "sui-types",
+ "token-info-client",
  "tokio",
  "tracing",
 ]

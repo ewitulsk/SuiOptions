@@ -17,6 +17,7 @@
 //! lands on this host, e.g. the future keeper).
 
 pub mod config;
+pub mod protocol_watch;
 
 pub use config::Config;
 
@@ -43,6 +44,12 @@ pub struct Cli {
     /// unreadable file falls back to the public RPC for the configured network.
     #[arg(long)]
     pub secrets: Option<PathBuf>,
+
+    /// token-info base URL. When set, enables the admin-change watch on the
+    /// core ProtocolConfig + exchange Whitelist (ids resolved from the
+    /// snapshot). Unset (e.g. dev) skips the watch.
+    #[arg(long, env = "TOKEN_INFO_URL")]
+    pub token_info_url: Option<String>,
 }
 
 cli_spec::define_program! {

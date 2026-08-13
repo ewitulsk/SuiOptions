@@ -22,3 +22,8 @@ low_balance_sui = 2.0
 name = "mm-bot"
 secrets_file = "/run/secrets/mm-bot.toml"
 low_balance_sui = 2.0
+
+# ── Protocol watches (SO-387) ───────────────────────────────────────────
+# Admin-change watch enabled via TOKEN_INFO_URL in the compose env.
+# Drain watches: see config.staging.toml for the shape and the top-level-
+# field limitation; seed the current roll's buckets after each redeploy.

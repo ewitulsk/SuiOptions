@@ -27,3 +27,21 @@ low_balance_sui = 2.0
 
 # Keeper (SO-177 follow-up): add its watch here once it has a wallet —
 # either a secrets_file like the above or an explicit `address = "0x..."`.
+
+# ── Protocol watches (SO-387) ───────────────────────────────────────────
+# The admin-change watch (whitelist membership / pause-flag tampering
+# tripwire) is enabled by TOKEN_INFO_URL in the compose env — no config here.
+#
+# Drain watches poll a shared object's TOP-LEVEL balance fields and fire
+# `drain-suspected-<name>` when the sum drops more than drop_bps below the
+# window max. Buckets work (flat Balance fields); vault/BM holdings live in
+# dynamic fields and need the auto-discovery follow-up. Bucket ids rotate
+# every scheduler roll, so entries here go stale at each roll — add the
+# current roll's high-value buckets after a redeploy, e.g.:
+#
+# [[drain_watch]]
+# name = "call-bucket-btc"
+# object_id = "0x…"
+# fields = ["underlying_balance", "settlement_balance"]
+# drop_bps = 2_000      # 20% drop inside the window pages
+# window_secs = 3_600
