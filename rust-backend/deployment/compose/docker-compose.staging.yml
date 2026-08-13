@@ -178,9 +178,6 @@ services:
     environment:
       APP_ENV: staging
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
-      # object_store reads region from env; creds come from the host IAM
-      # role via IMDS (analytics lake reads, SO-389).
-      AWS_REGION: ${AWS_REGION:-us-east-1}
       RUST_LOG: info,api_service=debug
     depends_on: [indexer, token-info]
     restart: unless-stopped
@@ -271,6 +268,8 @@ services:
       APP_ENV: staging
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       RUST_LOG: info,balance_monitor=debug
+      # Enables the SO-387 admin-change watch (whitelist/pause tripwire).
+      TOKEN_INFO_URL: http://token-info:9005
     volumes:
       - /opt/options/staging/secrets:/run/secrets:ro
     restart: unless-stopped

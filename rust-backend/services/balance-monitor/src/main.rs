@@ -8,6 +8,7 @@ use sui_types::base_types::SuiAddress;
 use sui_types::crypto::SuiKeyPair;
 use tracing::{error, info, warn};
 
+use balance_monitor::protocol_watch::{AdminWatch, DrainWatchState};
 use balance_monitor::{config::Watch, Cli, Config};
 
 const MIST_PER_SUI: f64 = 1_000_000_000.0;
@@ -69,6 +70,38 @@ async fn main() -> Result<()> {
         anyhow::bail!("no watchable wallets resolved");
     }
 
+    // Admin-change watch (SO-387): whitelist/pause tampering tripwire.
+    // token-info is the id source; configured-but-unreachable is fatal like
+    // every other token-info consumer (hard cutover convention).
+    let mut admin_watch = match cli.token_info_url.as_deref() {
+        Some(url) => {
+            let snapshot = token_info_client::TokenInfoClient::new(url)
+                .fetch_blocking_until_ready(30, Duration::from_secs(2))
+                .await
+                .with_context(|| format!("fetching snapshot from token-info at {url}"))?;
+            let wl = snapshot
+                .whitelist_object()
+                .context("whitelist object id")?
+                .context("deployment has no whitelist record — redeploy with the whitelist package before enabling the admin-change watch")?;
+            info!(whitelist = %wl, "admin-change watch enabled");
+            Some(AdminWatch::new(wl))
+        }
+        None => {
+            info!("no token-info url configured — admin-change watch disabled");
+            None
+        }
+    };
+
+    let mut drain_watches: Vec<DrainWatchState> = cfg
+        .drain_watches
+        .iter()
+        .cloned()
+        .map(DrainWatchState::new)
+        .collect::<Result<_>>()?;
+    for d in &cfg.drain_watches {
+        info!(watch = %d.name, object = %d.object_id, drop_bps = d.drop_bps, "drain watch armed");
+    }
+
     info!(
         environment = %cfg.environment,
         network = %cfg.network,
@@ -89,6 +122,12 @@ async fn main() -> Result<()> {
         tick.tick().await;
         for (watch, addr) in &targets {
             poll_wallet(&sui, watch, *addr).await;
+        }
+        if let Some(w) = admin_watch.as_mut() {
+            w.poll(&sui).await;
+        }
+        for d in &mut drain_watches {
+            d.poll(&sui).await;
         }
     }
 }

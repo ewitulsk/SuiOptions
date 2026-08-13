@@ -229,6 +229,8 @@ services:
       APP_ENV: prod
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       RUST_LOG: info,balance_monitor=debug
+      # Enables the SO-387 admin-change watch (whitelist/pause tripwire).
+      TOKEN_INFO_URL: http://token-info:9005
     volumes:
       - /opt/options/prod/secrets:/run/secrets:ro
     restart: unless-stopped

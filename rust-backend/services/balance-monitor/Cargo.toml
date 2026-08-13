@@ -21,7 +21,9 @@ clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }
 
 sui-types = { workspace = true }
+token-info-client = { workspace = true }

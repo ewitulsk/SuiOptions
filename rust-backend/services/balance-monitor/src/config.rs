@@ -23,6 +23,12 @@ pub struct Config {
 
     #[serde(rename = "watch")]
     pub watches: Vec<Watch>,
+
+    /// Protocol-holdings drain watches (SO-387). Optional; see
+    /// `protocol_watch.rs` for what the fields mean and the top-level-field
+    /// limitation.
+    #[serde(default, rename = "drain_watch")]
+    pub drain_watches: Vec<DrainWatch>,
 }
 
 /// One watched wallet. Exactly one of `secrets_file` / `address` must be
@@ -41,8 +47,28 @@ pub struct Watch {
     pub low_balance_sui: f64,
 }
 
+/// One watched protocol object: alert when the summed balance fields drop
+/// more than `drop_bps` below the window's max.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DrainWatch {
+    /// Label used in metrics and the `drain-suspected-<name>` alert_id.
+    pub name: String,
+    pub object_id: String,
+    /// Top-level JSON fields summed into the watched total (e.g. a bucket's
+    /// `underlying_balance`, `settlement_balance`).
+    pub fields: Vec<String>,
+    /// Basis-point drop from the in-window max that trips the alert.
+    pub drop_bps: u64,
+    #[serde(default = "default_drain_window")]
+    pub window_secs: u64,
+}
+
 fn default_poll_interval() -> u64 {
     60
+}
+
+fn default_drain_window() -> u64 {
+    3_600
 }
 
 impl Config {
@@ -57,6 +83,14 @@ impl Config {
                     "watch '{}' must set exactly one of secrets_file / address",
                     w.name
                 );
+            }
+        }
+        for d in &cfg.drain_watches {
+            if d.fields.is_empty() {
+                bail!("drain watch '{}' has no fields", d.name);
+            }
+            if d.drop_bps == 0 || d.drop_bps > 10_000 {
+                bail!("drain watch '{}': drop_bps must be 1..=10000", d.name);
             }
         }
         Ok(cfg)
