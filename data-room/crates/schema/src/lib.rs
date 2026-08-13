@@ -353,6 +353,12 @@ impl TradesWriter {
         }
         self.rows += rows.len();
         self.w.write(&trades_batch(rows)?)?;
+        // Force the row group to disk NOW: with 30+ concurrent day
+        // writers (out-of-order months), rows buffered toward the 1M-row
+        // group threshold sum to >1.5 GB of arrow memory across writers.
+        // One row group per chunk trades a little file-size overhead for
+        // a hard memory bound.
+        self.w.flush()?;
         Ok(())
     }
 
