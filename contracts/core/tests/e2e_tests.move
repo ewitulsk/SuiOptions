@@ -82,6 +82,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
         ts::next_tx(&mut scenario, th::writer_addr());
         let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let config = th::take_config(&scenario);
+        let wl = th::take_whitelist(&scenario);
         let mut treas = th::take_treasury(&scenario);
         let mut signer = th::take_signer(&scenario);
         bucket_id = object::id(&b);
@@ -102,6 +103,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
         bucket::execute_writer_flow<BTC, USDC, CALL>(
             &mut b,
             &config,
+            &wl,
             &mut treas,
             req,
             coin::mint_for_testing<USDC>(write1_premium, scenario.ctx()).into_balance(),
@@ -119,6 +121,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
 
         ts::return_shared(b);
         ts::return_shared(config);
+        ts::return_shared(wl);
         ts::return_shared(treas);
         ts::return_shared(signer);
     };
@@ -143,6 +146,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
         ts::next_tx(&mut scenario, th::writer_mm_addr());
         let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let config = th::take_config(&scenario);
+        let wl = th::take_whitelist(&scenario);
         let mut treas = th::take_treasury(&scenario);
         let mut signer = th::take_signer(&scenario);
 
@@ -162,6 +166,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
         bucket::execute_writer_flow<BTC, USDC, CALL>(
             &mut b,
             &config,
+            &wl,
             &mut treas,
             req,
             coin::mint_for_testing<USDC>(write2_premium, scenario.ctx()).into_balance(),
@@ -178,6 +183,7 @@ fun test_e2e_writer_flow_full_lifecycle() {
 
         ts::return_shared(b);
         ts::return_shared(config);
+        ts::return_shared(wl);
         ts::return_shared(treas);
         ts::return_shared(signer);
     };
@@ -337,6 +343,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
         ts::next_tx(&mut scenario, th::trader_addr());
         let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let config = th::take_config(&scenario);
+        let wl = th::take_whitelist(&scenario);
         let mut treas = th::take_treasury(&scenario);
         let mut signer = th::take_signer(&scenario);
         bucket_id = object::id(&b);
@@ -357,6 +364,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
         bucket::execute_trader_flow<BTC, USDC, CALL>(
             &mut b,
             &config,
+            &wl,
             &mut treas,
             req,
             coin::mint_for_testing<BTC>(buy1_amount, scenario.ctx()).into_balance(),
@@ -373,6 +381,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
 
         ts::return_shared(b);
         ts::return_shared(config);
+        ts::return_shared(wl);
         ts::return_shared(treas);
         ts::return_shared(signer);
     };
@@ -394,6 +403,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
         ts::next_tx(&mut scenario, th::trader_mm_addr());
         let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
         let config = th::take_config(&scenario);
+        let wl = th::take_whitelist(&scenario);
         let mut treas = th::take_treasury(&scenario);
         let mut signer = th::take_signer(&scenario);
 
@@ -413,6 +423,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
         bucket::execute_trader_flow<BTC, USDC, CALL>(
             &mut b,
             &config,
+            &wl,
             &mut treas,
             req,
             coin::mint_for_testing<BTC>(buy2_amount, scenario.ctx()).into_balance(),
@@ -429,6 +440,7 @@ fun test_e2e_trader_flow_full_lifecycle() {
 
         ts::return_shared(b);
         ts::return_shared(config);
+        ts::return_shared(wl);
         ts::return_shared(treas);
         ts::return_shared(signer);
     };

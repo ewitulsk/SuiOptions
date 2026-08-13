@@ -5,3 +5,4 @@ edition = "2024.beta"
 
 [dependencies]
 options_core = { local = "../core" }
+whitelist = { local = "../whitelist" }

@@ -1,0 +1,11 @@
+[package]
+name = "whitelist"
+version = "0.0.1"
+edition = "2024.beta"
+
+# Deliberately a leaf (Sui framework only): every gated package — core,
+# trading-vault, exchange — depends on THIS, never on each other through
+# it. That keeps the exchange's isolation from options_core intact while
+# giving the whole protocol one whitelist, one admin surface, one set of
+# levers.
+[dependencies]

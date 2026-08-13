@@ -1,7 +1,10 @@
 /// Guarded-launch ingress gate: whitelist membership, the go-public lever
-/// (`whitelist_enabled = false`), and the ingress pause. Ingress (writes) is
+/// (`whitelist_enabled = false`), and the ingress pause — enforced by the
+/// standalone `whitelist` package's shared `Whitelist`. Ingress (writes) is
 /// gated; exits (exercise, redeem, close_offset) must keep working for
-/// non-members and while paused.
+/// non-members and while paused. The whitelist's own mutator/event semantics
+/// are covered by the whitelist package's unit tests; these tests focus on
+/// the gated core entry points.
 #[test_only]
 module options_core::ingress_gate_tests;
 
@@ -13,32 +16,33 @@ use options_core::bucket::{Self, Bucket};
 use options_core::put_bucket::{Self, PutBucket};
 use options_core::quote;
 use options_core::test_helpers::{Self as th, BTC, USDC, CALL, CALL2, PUT};
+use whitelist::whitelist as wl_mod;
 
 const STRIKE: u128 = 6;
 const EXPIRY_MS: u64 = 1_000_000;
 
 fun set_whitelist_enabled(scenario: &mut ts::Scenario, enabled: bool) {
     ts::next_tx(scenario, th::admin_addr());
-    let cap = th::take_admin_cap(scenario);
-    let mut config = th::take_config(scenario);
-    admin::set_whitelist_enabled(&cap, &mut config, enabled);
-    ts::return_shared(config);
-    th::return_admin_cap(scenario, cap);
+    let cap = th::take_wl_admin_cap(scenario);
+    let mut wl = th::take_whitelist(scenario);
+    wl_mod::set_whitelist_enabled(&cap, &mut wl, enabled);
+    ts::return_shared(wl);
+    th::return_wl_admin_cap(scenario, cap);
 }
 
 fun set_ingress_paused(scenario: &mut ts::Scenario, paused: bool) {
     ts::next_tx(scenario, th::admin_addr());
-    let cap = th::take_admin_cap(scenario);
-    let mut config = th::take_config(scenario);
-    admin::set_ingress_paused(&cap, &mut config, paused);
-    ts::return_shared(config);
-    th::return_admin_cap(scenario, cap);
+    let cap = th::take_wl_admin_cap(scenario);
+    let mut wl = th::take_whitelist(scenario);
+    wl_mod::set_ingress_paused(&cap, &mut wl, paused);
+    ts::return_shared(wl);
+    th::return_wl_admin_cap(scenario, cap);
 }
 
 // ─────────────────────────── membership gate ───────────────────────────
 
 #[test]
-#[expected_failure(abort_code = 71, location = options_core::admin)] // ingress_restricted
+#[expected_failure(abort_code = 1, location = whitelist::whitelist)] // EIngressRestricted
 fun test_non_member_write_collateralized_aborts() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
@@ -46,24 +50,24 @@ fun test_non_member_write_collateralized_aborts() {
 
     ts::next_tx(&mut scenario, th::stranger_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (pos, call) = bucket::write_collateralized<BTC, USDC, CALL>(
         &mut b,
-        &config,
+        &wl,
         coin::mint_for_testing<BTC>(10, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
     transfer::public_transfer(pos, th::stranger_addr());
     transfer::public_transfer(call, th::stranger_addr());
-    ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(b);
     clock.destroy_for_testing();
     ts::end(scenario);
 }
 
 #[test]
-#[expected_failure(abort_code = 71, location = options_core::admin)] // ingress_restricted
+#[expected_failure(abort_code = 1, location = whitelist::whitelist)] // EIngressRestricted
 fun test_non_member_put_write_collateralized_aborts() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
@@ -71,10 +75,10 @@ fun test_non_member_put_write_collateralized_aborts() {
 
     ts::next_tx(&mut scenario, th::stranger_addr());
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (pos, put) = put_bucket::write_collateralized<BTC, USDC, PUT>(
         &mut b,
-        &config,
+        &wl,
         coin::mint_for_testing<USDC>(10 * (STRIKE as u64), scenario.ctx()),
         10,
         &clock,
@@ -82,14 +86,14 @@ fun test_non_member_put_write_collateralized_aborts() {
     );
     transfer::public_transfer(pos, th::stranger_addr());
     transfer::public_transfer(put, th::stranger_addr());
-    ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(b);
     clock.destroy_for_testing();
     ts::end(scenario);
 }
 
 #[test]
-#[expected_failure(abort_code = 71, location = options_core::admin)] // ingress_restricted
+#[expected_failure(abort_code = 1, location = whitelist::whitelist)] // EIngressRestricted
 fun test_non_member_write_spread_aborts() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
@@ -99,27 +103,27 @@ fun test_non_member_write_spread_aborts() {
     // A member writes the long leg, then hands the coins to the stranger.
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut long_b = ts::take_shared<Bucket<BTC, USDC, CALL2>>(&scenario);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (long_pos, long_call) = bucket::write_collateralized<BTC, USDC, CALL2>(
         &mut long_b,
-        &config,
+        &wl,
         coin::mint_for_testing<BTC>(10, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
     transfer::public_transfer(long_pos, th::writer_addr());
     transfer::public_transfer(long_call, th::stranger_addr());
-    ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(long_b);
 
     ts::next_tx(&mut scenario, th::stranger_addr());
     let mut short_b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let long_b = ts::take_shared<Bucket<BTC, USDC, CALL2>>(&scenario);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let long_call = ts::take_from_sender<coin::Coin<CALL2>>(&scenario);
     let (p, c) = bucket::write_spread<BTC, USDC, CALL, CALL2>(
         &mut short_b,
-        &config,
+        &wl,
         &long_b,
         long_call,
         coin::mint_for_testing<USDC>(10 * 5, scenario.ctx()),
@@ -128,7 +132,7 @@ fun test_non_member_write_spread_aborts() {
     );
     transfer::public_transfer(p, th::stranger_addr());
     transfer::public_transfer(c, th::stranger_addr());
-    ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(short_b);
     ts::return_shared(long_b);
     clock.destroy_for_testing();
@@ -136,7 +140,7 @@ fun test_non_member_write_spread_aborts() {
 }
 
 #[test]
-#[expected_failure(abort_code = 71, location = options_core::admin)] // ingress_restricted
+#[expected_failure(abort_code = 1, location = whitelist::whitelist)] // EIngressRestricted
 fun test_non_member_execute_writer_flow_aborts() {
     // A signed quote is a bearer instrument; the ingress gate is what stops
     // a non-member from executing one they obtained.
@@ -148,6 +152,7 @@ fun test_non_member_execute_writer_flow_aborts() {
     ts::next_tx(&mut scenario, th::stranger_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
@@ -167,6 +172,7 @@ fun test_non_member_execute_writer_flow_aborts() {
     bucket::execute_writer_flow<BTC, USDC, CALL>(
         &mut b,
         &config,
+        &wl,
         &mut treasury,
         req,
         coin::mint_for_testing<USDC>(1_000, scenario.ctx()).into_balance(),
@@ -178,6 +184,7 @@ fun test_non_member_execute_writer_flow_aborts() {
 
     ts::return_shared(b);
     ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(treasury);
     ts::return_shared(signer);
     clock.destroy_for_testing();
@@ -196,26 +203,26 @@ fun test_whitelist_disabled_lets_non_member_write() {
 
     ts::next_tx(&mut scenario, th::stranger_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
-    assert!(!admin::is_member(&config, th::stranger_addr()), 0);
+    let wl = th::take_whitelist(&scenario);
+    assert!(!wl_mod::is_member(&wl, th::stranger_addr()), 0);
     let (pos, call) = bucket::write_collateralized<BTC, USDC, CALL>(
         &mut b,
-        &config,
+        &wl,
         coin::mint_for_testing<BTC>(10, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
-    ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(b);
 
     // Re-enabling restores the gate with membership intact.
     set_whitelist_enabled(&mut scenario, true);
     ts::next_tx(&mut scenario, th::admin_addr());
-    let config = th::take_config(&scenario);
-    assert!(admin::whitelist_enabled(&config), 0);
-    assert!(admin::is_member(&config, th::writer_addr()), 0);
-    assert!(!admin::is_member(&config, th::stranger_addr()), 0);
-    ts::return_shared(config);
+    let wl = th::take_whitelist(&scenario);
+    assert!(wl_mod::whitelist_enabled(&wl), 0);
+    assert!(wl_mod::is_member(&wl, th::writer_addr()), 0);
+    assert!(!wl_mod::is_member(&wl, th::stranger_addr()), 0);
+    ts::return_shared(wl);
 
     transfer::public_transfer(pos, th::stranger_addr());
     transfer::public_transfer(call, th::stranger_addr());
@@ -226,7 +233,7 @@ fun test_whitelist_disabled_lets_non_member_write() {
 // ─────────────────────────── ingress pause ───────────────────────────
 
 #[test]
-#[expected_failure(abort_code = 72, location = options_core::admin)] // ingress_paused
+#[expected_failure(abort_code = 2, location = whitelist::whitelist)] // EIngressPaused
 fun test_ingress_pause_blocks_member_write() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
@@ -236,24 +243,24 @@ fun test_ingress_pause_blocks_member_write() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (pos, call) = bucket::write_collateralized<BTC, USDC, CALL>(
         &mut b,
-        &config,
+        &wl,
         coin::mint_for_testing<BTC>(10, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
     transfer::public_transfer(pos, th::writer_addr());
     transfer::public_transfer(call, th::writer_addr());
-    ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(b);
     clock.destroy_for_testing();
     ts::end(scenario);
 }
 
 #[test]
-#[expected_failure(abort_code = 72, location = options_core::admin)] // ingress_paused
+#[expected_failure(abort_code = 2, location = whitelist::whitelist)] // EIngressPaused
 fun test_ingress_pause_blocks_even_with_whitelist_disabled() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
@@ -264,17 +271,17 @@ fun test_ingress_pause_blocks_even_with_whitelist_disabled() {
 
     ts::next_tx(&mut scenario, th::stranger_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (pos, call) = bucket::write_collateralized<BTC, USDC, CALL>(
         &mut b,
-        &config,
+        &wl,
         coin::mint_for_testing<BTC>(10, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
     transfer::public_transfer(pos, th::stranger_addr());
     transfer::public_transfer(call, th::stranger_addr());
-    ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(b);
     clock.destroy_for_testing();
     ts::end(scenario);
@@ -290,26 +297,26 @@ fun test_pause_and_removal_never_block_exits() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (pos, mut call) = bucket::write_collateralized<BTC, USDC, CALL>(
         &mut b,
-        &config,
+        &wl,
         coin::mint_for_testing<BTC>(10, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
-    ts::return_shared(config);
+    ts::return_shared(wl);
     ts::return_shared(b);
 
     // Remove the writer from the whitelist and slam the pause.
     ts::next_tx(&mut scenario, th::admin_addr());
-    let cap = th::take_admin_cap(&scenario);
-    let mut config = th::take_config(&scenario);
-    admin::remove_member(&cap, &mut config, th::writer_addr());
-    admin::set_ingress_paused(&cap, &mut config, true);
-    assert!(!admin::is_member(&config, th::writer_addr()), 0);
-    ts::return_shared(config);
-    th::return_admin_cap(&scenario, cap);
+    let cap = th::take_wl_admin_cap(&scenario);
+    let mut wl = th::take_whitelist(&scenario);
+    wl_mod::remove_member(&cap, &mut wl, th::writer_addr());
+    wl_mod::set_ingress_paused(&cap, &mut wl, true);
+    assert!(!wl_mod::is_member(&wl, th::writer_addr()), 0);
+    ts::return_shared(wl);
+    th::return_wl_admin_cap(&scenario, cap);
 
     // Exercise 4 of 10 as the now-removed writer.
     ts::next_tx(&mut scenario, th::writer_addr());
@@ -335,36 +342,6 @@ fun test_pause_and_removal_never_block_exits() {
     coin::burn_for_testing(ru);
     coin::burn_for_testing(rs);
     ts::return_shared(b);
-    clock.destroy_for_testing();
-    ts::end(scenario);
-}
-
-// ─────────────────────────── admin events ───────────────────────────
-
-#[test]
-fun test_whitelist_admin_events_emitted() {
-    let mut scenario = ts::begin(th::admin_addr());
-    let clock = th::init_protocol(&mut scenario);
-
-    ts::next_tx(&mut scenario, th::admin_addr());
-    let cap = th::take_admin_cap(&scenario);
-    let mut config = th::take_config(&scenario);
-    admin::add_member(&cap, &mut config, th::stranger_addr());
-    admin::remove_member(&cap, &mut config, th::stranger_addr());
-    admin::set_whitelist_enabled(&cap, &mut config, false);
-    admin::set_ingress_paused(&cap, &mut config, true);
-    ts::return_shared(config);
-    th::return_admin_cap(&scenario, cap);
-
-    let added = sui::event::events_by_type<options_core::events::MemberAdded>();
-    let removed = sui::event::events_by_type<options_core::events::MemberRemoved>();
-    let enabled = sui::event::events_by_type<options_core::events::WhitelistEnabledSet>();
-    let paused = sui::event::events_by_type<options_core::events::IngressPauseSet>();
-    assert!(added.length() == 1, 0);
-    assert!(removed.length() == 1, 0);
-    assert!(enabled.length() == 1, 0);
-    assert!(paused.length() == 1, 0);
-
     clock.destroy_for_testing();
     ts::end(scenario);
 }

@@ -8,7 +8,7 @@ use sui::test_scenario as ts;
 
 use std::type_name;
 
-use options_core::admin::ProtocolConfig as CoreProtocolConfig;
+use whitelist::whitelist::Whitelist;
 use options_core::bucket::{Self, Bucket};
 use options_core::collateral::{Self, CollateralRequest};
 use options_core::position::{Self, Position};
@@ -290,15 +290,15 @@ fun write_calls_to_vault(
 ): (ID, ID) {
     ts::next_tx(sc, h::bob_addr());
     let mut bucket = ts::take_shared<Bucket<h::BTC, h::USDC, CALLX>>(sc);
-    let core_cfg = ts::take_shared<CoreProtocolConfig>(sc);
+    let wl = ts::take_shared<Whitelist>(sc);
     let (pos, call) = bucket::write_collateralized(
         &mut bucket,
-        &core_cfg,
+        &wl,
         coin::mint_for_testing<h::BTC>(amount, sc.ctx()),
         clock,
         sc.ctx(),
     );
-    ts::return_shared(core_cfg);
+    ts::return_shared(wl);
     let position_id = object::id(&pos);
     let coin_id = object::id(&call);
     transfer::public_transfer(call, vault_id.to_address());
@@ -450,16 +450,16 @@ fun exercise_put_coin_delivers_underlying_and_collects_payout() {
     // the put coins.
     ts::next_tx(&mut sc, h::bob_addr());
     let mut bucket = ts::take_shared<PutBucket<h::BTC, h::USDC, PUTX>>(&sc);
-    let core_cfg = ts::take_shared<CoreProtocolConfig>(&sc);
+    let wl = ts::take_shared<Whitelist>(&sc);
     let (pos, put) = put_bucket::write_collateralized(
         &mut bucket,
-        &core_cfg,
+        &wl,
         coin::mint_for_testing<h::USDC>(200_000, sc.ctx()),
         100_000,
         &clock,
         sc.ctx(),
     );
-    ts::return_shared(core_cfg);
+    ts::return_shared(wl);
     let coin_id = object::id(&put);
     transfer::public_transfer(put, vault_id.to_address());
     transfer::public_transfer(pos, h::bob_addr());
@@ -576,16 +576,16 @@ fun close_offset_put_position_returns_cash_collateral() {
 
     ts::next_tx(&mut sc, h::bob_addr());
     let mut bucket = ts::take_shared<PutBucket<h::BTC, h::USDC, PUTX>>(&sc);
-    let core_cfg = ts::take_shared<CoreProtocolConfig>(&sc);
+    let wl = ts::take_shared<Whitelist>(&sc);
     let (pos, put) = put_bucket::write_collateralized(
         &mut bucket,
-        &core_cfg,
+        &wl,
         coin::mint_for_testing<h::USDC>(200_000, sc.ctx()),
         100_000,
         &clock,
         sc.ctx(),
     );
-    ts::return_shared(core_cfg);
+    ts::return_shared(wl);
     let pos_id = object::id(&pos);
     let coin_id = object::id(&put);
     transfer::public_transfer(put, vault_id.to_address());

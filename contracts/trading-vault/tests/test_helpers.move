@@ -6,8 +6,9 @@ use sui::balance::{Self, Balance};
 use sui::clock::{Self, Clock};
 use sui::test_scenario::{Self as ts, Scenario};
 
-use options_core::admin::{Self, AdminCap, ProtocolConfig as CoreProtocolConfig};
+use options_core::admin::{Self, AdminCap};
 use options_core::treasury;
+use whitelist::whitelist::{Self, AdminCap as WlAdminCap, Whitelist};
 
 use trading_vault::price::{Self, PriceAttestation};
 use trading_vault::registry::{Self, IntegrationRegistry, OracleRegistry, VaultProtocolConfig};
@@ -61,6 +62,7 @@ public fun destroy_position(p: TestPosition) {
 public fun init_protocol(scenario: &mut Scenario): Clock {
     ts::next_tx(scenario, admin_addr());
     admin::init_for_testing(scenario.ctx());
+    whitelist::init_for_testing(scenario.ctx());
     registry::init_for_testing(scenario.ctx());
 
     ts::next_tx(scenario, admin_addr());
@@ -73,12 +75,14 @@ public fun init_protocol(scenario: &mut Scenario): Clock {
     registry::allow_oracle(&admin_cap, &mut oreg, type_name::with_defining_ids<TestOracle>());
     ts::return_shared(oreg);
     // Core ingress whitelist: every named test actor is a member.
-    let mut core_cfg = ts::take_shared<CoreProtocolConfig>(scenario);
-    admin::add_member(&admin_cap, &mut core_cfg, admin_addr());
-    admin::add_member(&admin_cap, &mut core_cfg, curator_addr());
-    admin::add_member(&admin_cap, &mut core_cfg, alice_addr());
-    admin::add_member(&admin_cap, &mut core_cfg, bob_addr());
-    ts::return_shared(core_cfg);
+    let wl_cap = ts::take_from_sender<WlAdminCap>(scenario);
+    let mut wl = ts::take_shared<Whitelist>(scenario);
+    whitelist::add_member(&wl_cap, &mut wl, admin_addr());
+    whitelist::add_member(&wl_cap, &mut wl, curator_addr());
+    whitelist::add_member(&wl_cap, &mut wl, alice_addr());
+    whitelist::add_member(&wl_cap, &mut wl, bob_addr());
+    ts::return_shared(wl);
+    ts::return_to_sender(scenario, wl_cap);
     ts::return_to_sender(scenario, admin_cap);
 
     ts::next_tx(scenario, admin_addr());

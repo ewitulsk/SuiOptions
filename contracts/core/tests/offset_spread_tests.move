@@ -27,13 +27,13 @@ fun setup_long_bucket(scenario: &mut Scenario) {
 fun self_write(
     scenario: &mut Scenario,
     b: &mut Bucket<BTC, USDC, CALL>,
-    config: &options_core::admin::ProtocolConfig,
+    wl: &whitelist::whitelist::Whitelist,
     amount: u64,
     clock: &sui::clock::Clock,
 ): (Position, Coin<CALL>) {
     bucket::write_collateralized<BTC, USDC, CALL>(
         b,
-        config,
+        wl,
         coin::mint_for_testing<BTC>(amount, scenario.ctx()),
         clock,
         scenario.ctx(),
@@ -50,9 +50,9 @@ fun test_close_offset_full_frees_all_collateral() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
-    let (mut pos, call) = self_write(&mut scenario, &mut b, &config, 100, &clock);
-    ts::return_shared(config);
+    let wl = th::take_whitelist(&scenario);
+    let (mut pos, call) = self_write(&mut scenario, &mut b, &wl, 100, &clock);
+    ts::return_shared(wl);
     assert!(bucket::underlying_balance(&b) == 100, 0);
     assert!(bucket::call_supply(&b) == 100, 0);
 
@@ -83,10 +83,10 @@ fun test_close_offset_partial_then_exercise_skips_tombstone() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
-    let (pos_a, call_a) = self_write(&mut scenario, &mut b, &config, 50, &clock);
-    let (mut pos_b, mut call_b) = self_write(&mut scenario, &mut b, &config, 50, &clock);
-    ts::return_shared(config);
+    let wl = th::take_whitelist(&scenario);
+    let (pos_a, call_a) = self_write(&mut scenario, &mut b, &wl, 50, &clock);
+    let (mut pos_b, mut call_b) = self_write(&mut scenario, &mut b, &wl, 50, &clock);
+    ts::return_shared(wl);
 
     let close_chunk = coin::split(&mut call_b, 30, scenario.ctx());
     let freed = bucket::close_offset<BTC, USDC, CALL>(
@@ -138,9 +138,9 @@ fun test_close_offset_adjacent_tombstones_merge_and_cursor_jumps() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
-    let (mut pos, mut call) = self_write(&mut scenario, &mut b, &config, 100, &clock);
-    ts::return_shared(config);
+    let wl = th::take_whitelist(&scenario);
+    let (mut pos, mut call) = self_write(&mut scenario, &mut b, &wl, 100, &clock);
+    ts::return_shared(wl);
 
     let c1 = coin::split(&mut call, 30, scenario.ctx());
     let f1 = bucket::close_offset<BTC, USDC, CALL>(&mut b, &mut pos, c1, &clock, scenario.ctx());
@@ -176,10 +176,10 @@ fun test_close_offset_more_than_position_aborts() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
-    let (mut pos_small, _call_small) = self_write(&mut scenario, &mut b, &config, 10, &clock);
-    let (pos_big, call_big) = self_write(&mut scenario, &mut b, &config, 50, &clock);
-    ts::return_shared(config);
+    let wl = th::take_whitelist(&scenario);
+    let (mut pos_small, _call_small) = self_write(&mut scenario, &mut b, &wl, 10, &clock);
+    let (pos_big, call_big) = self_write(&mut scenario, &mut b, &wl, 50, &clock);
+    ts::return_shared(wl);
     // 50 coins against the 10-unit position.
     let freed = bucket::close_offset<BTC, USDC, CALL>(
         &mut b, &mut pos_small, call_big, &clock, scenario.ctx(),
@@ -202,11 +202,11 @@ fun test_close_offset_exercised_range_aborts() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
-    let (mut pos_a, mut call_a) = self_write(&mut scenario, &mut b, &config, 100, &clock);
+    let wl = th::take_whitelist(&scenario);
+    let (mut pos_a, mut call_a) = self_write(&mut scenario, &mut b, &wl, 100, &clock);
     // Second write for extra fungible coins ([100,200)).
-    let (pos_b, call_b) = self_write(&mut scenario, &mut b, &config, 100, &clock);
-    ts::return_shared(config);
+    let (pos_b, call_b) = self_write(&mut scenario, &mut b, &wl, 100, &clock);
+    ts::return_shared(wl);
 
     // Exercise 50 → cursor 50; closing 60 of pos_a cuts at 40 < cursor.
     let chunk = coin::split(&mut call_a, 50, scenario.ctx());
@@ -239,9 +239,9 @@ fun test_close_offset_after_expiry_aborts() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
-    let (mut pos, call) = self_write(&mut scenario, &mut b, &config, 10, &clock);
-    ts::return_shared(config);
+    let wl = th::take_whitelist(&scenario);
+    let (mut pos, call) = self_write(&mut scenario, &mut b, &wl, 10, &clock);
+    ts::return_shared(wl);
     clock.set_for_testing(EXPIRY_MS + 1);
     let freed = bucket::close_offset<BTC, USDC, CALL>(
         &mut b, &mut pos, call, &clock, scenario.ctx(),
@@ -266,16 +266,16 @@ fun test_put_close_offset_full_lifecycle_and_cleanup() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (mut pos, mut put) = put_bucket::write_collateralized<BTC, USDC, PUT>(
         &mut b,
-        &config,
+        &wl,
         coin::mint_for_testing<USDC>(600, scenario.ctx()),
         100,
         &clock,
         scenario.ctx(),
     );
-    ts::return_shared(config);
+    ts::return_shared(wl);
     assert!(put_bucket::settlement_balance(&b) == 600, 0);
 
     let close_chunk = coin::split(&mut put, 40, scenario.ctx());
@@ -333,16 +333,16 @@ fun test_put_close_offset_fractional_strike_rounds_down() {
 
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut b = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (mut pos, put) = put_bucket::write_collateralized<BTC, USDC, PUT>(
         &mut b,
-        &config,
+        &wl,
         coin::mint_for_testing<USDC>(5, scenario.ctx()), // ceil(7 × 0.6) = 5
         7,
         &clock,
         scenario.ctx(),
     );
-    ts::return_shared(config);
+    ts::return_shared(wl);
     let refund = put_bucket::close_offset<BTC, USDC, PUT>(
         &mut b, &mut pos, put, &clock, scenario.ctx(),
     );
@@ -371,24 +371,24 @@ fun setup_spread(
     let mut long_b = ts::take_shared<Bucket<BTC, USDC, CALL2>>(scenario);
     let mut short_b = ts::take_shared<Bucket<BTC, USDC, CALL>>(scenario);
 
-    let config = th::take_config(scenario);
+    let wl = th::take_whitelist(scenario);
     let (long_pos, long_call) = bucket::write_collateralized<BTC, USDC, CALL2>(
         &mut long_b,
-        &config,
+        &wl,
         coin::mint_for_testing<BTC>(100, scenario.ctx()),
         clock,
         scenario.ctx(),
     );
     let (short_pos, short_call) = bucket::write_spread<BTC, USDC, CALL, CALL2>(
         &mut short_b,
-        &config,
+        &wl,
         &long_b,
         long_call,
         coin::mint_for_testing<USDC>(100 * (LONG_STRIKE as u64), scenario.ctx()),
         clock,
         scenario.ctx(),
     );
-    ts::return_shared(config);
+    ts::return_shared(wl);
     assert!(bucket::underlying_balance(&short_b) == 0, 0);
     assert!(bucket::spread_count(&short_b) == 1, 0);
     assert!(bucket::call_supply(&short_b) == 100, 0);
@@ -490,11 +490,11 @@ fun test_spread_partial_exercise_below_spread_range_ok() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut long_b = ts::take_shared<Bucket<BTC, USDC, CALL2>>(&scenario);
     let mut short_b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     // Physical write [0,40).
     let (phys_pos, phys_call) = bucket::write_collateralized<BTC, USDC, CALL>(
         &mut short_b,
-        &config,
+        &wl,
         coin::mint_for_testing<BTC>(40, scenario.ctx()),
         &clock,
         scenario.ctx(),
@@ -502,21 +502,21 @@ fun test_spread_partial_exercise_below_spread_range_ok() {
     // Spread write [40,140).
     let (long_pos, long_call) = bucket::write_collateralized<BTC, USDC, CALL2>(
         &mut long_b,
-        &config,
+        &wl,
         coin::mint_for_testing<BTC>(100, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
     let (spread_pos, spread_call) = bucket::write_spread<BTC, USDC, CALL, CALL2>(
         &mut short_b,
-        &config,
+        &wl,
         &long_b,
         long_call,
         coin::mint_for_testing<USDC>(100 * (LONG_STRIKE as u64), scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
-    ts::return_shared(config);
+    ts::return_shared(wl);
 
     // Exercising 40 stops exactly at the spread boundary.
     let payment = coin::mint_for_testing<USDC>(40 * (STRIKE as u64), scenario.ctx());
@@ -640,24 +640,24 @@ fun test_write_spread_long_strike_above_short_aborts() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut long_b = ts::take_shared<Bucket<BTC, USDC, CALL2>>(&scenario);
     let mut short_b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (long_pos, long_call) = bucket::write_collateralized<BTC, USDC, CALL2>(
         &mut long_b,
-        &config,
+        &wl,
         coin::mint_for_testing<BTC>(10, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
     let (p, c) = bucket::write_spread<BTC, USDC, CALL, CALL2>(
         &mut short_b,
-        &config,
+        &wl,
         &long_b,
         long_call,
         coin::mint_for_testing<USDC>(10 * (STRIKE as u64), scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
-    ts::return_shared(config);
+    ts::return_shared(wl);
     coin::burn_for_testing(c);
     transfer::public_transfer(p, th::writer_addr());
     transfer::public_transfer(long_pos, th::writer_addr());
@@ -678,24 +678,24 @@ fun test_write_spread_long_expires_earlier_aborts() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut long_b = ts::take_shared<Bucket<BTC, USDC, CALL2>>(&scenario);
     let mut short_b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (long_pos, long_call) = bucket::write_collateralized<BTC, USDC, CALL2>(
         &mut long_b,
-        &config,
+        &wl,
         coin::mint_for_testing<BTC>(10, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
     let (p, c) = bucket::write_spread<BTC, USDC, CALL, CALL2>(
         &mut short_b,
-        &config,
+        &wl,
         &long_b,
         long_call,
         coin::mint_for_testing<USDC>(10 * (LONG_STRIKE as u64), scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
-    ts::return_shared(config);
+    ts::return_shared(wl);
     coin::burn_for_testing(c);
     transfer::public_transfer(p, th::writer_addr());
     transfer::public_transfer(long_pos, th::writer_addr());
@@ -716,24 +716,24 @@ fun test_write_spread_wrong_cash_aborts() {
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut long_b = ts::take_shared<Bucket<BTC, USDC, CALL2>>(&scenario);
     let mut short_b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (long_pos, long_call) = bucket::write_collateralized<BTC, USDC, CALL2>(
         &mut long_b,
-        &config,
+        &wl,
         coin::mint_for_testing<BTC>(10, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
     let (p, c) = bucket::write_spread<BTC, USDC, CALL, CALL2>(
         &mut short_b,
-        &config,
+        &wl,
         &long_b,
         long_call,
         coin::mint_for_testing<USDC>(10 * (LONG_STRIKE as u64) - 1, scenario.ctx()),
         &clock,
         scenario.ctx(),
     );
-    ts::return_shared(config);
+    ts::return_shared(wl);
     coin::burn_for_testing(c);
     transfer::public_transfer(p, th::writer_addr());
     transfer::public_transfer(long_pos, th::writer_addr());
@@ -782,11 +782,11 @@ fun put_spread_write(
     amount: u64,
     clock: &sui::clock::Clock,
 ): (Position, Coin<PUT>) {
-    let config = th::take_config(scenario);
+    let wl = th::take_whitelist(scenario);
     let long_collateral = put_bucket::required_collateral(long_b, amount);
     let (long_pos, long_coins) = put_bucket::write_collateralized<BTC, USDC, PUT2>(
         long_b,
-        &config,
+        &wl,
         coin::mint_for_testing<USDC>(long_collateral, scenario.ctx()),
         amount,
         clock,
@@ -796,14 +796,14 @@ fun put_spread_write(
     let top_up = put_bucket::required_spread_top_up(short_b, long_b, amount);
     let (pos, puts) = put_bucket::write_spread<BTC, USDC, PUT, PUT2>(
         short_b,
-        &config,
+        &wl,
         long_b,
         long_coins,
         coin::mint_for_testing<USDC>(top_up, scenario.ctx()),
         clock,
         scenario.ctx(),
     );
-    ts::return_shared(config);
+    ts::return_shared(wl);
     (pos, puts)
 }
 
@@ -920,16 +920,16 @@ fun test_put_spread_partial_assign_close_and_continue() {
     // exercises across the tombstone.
     ts::next_tx(&mut scenario, th::writer_addr());
     let phys_collateral = put_bucket::required_collateral(&sb, 50);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (pos2, puts2) = put_bucket::write_collateralized<BTC, USDC, PUT>(
         &mut sb,
-        &config,
+        &wl,
         coin::mint_for_testing<USDC>(phys_collateral, scenario.ctx()),
         50,
         &clock,
         scenario.ctx(),
     );
-    ts::return_shared(config);
+    ts::return_shared(wl);
     ts::next_tx(&mut scenario, th::trader_addr());
     let pay2 = put_bucket::exercise<BTC, USDC, PUT>(
         &mut sb,
@@ -1092,22 +1092,22 @@ fun test_put_spread_exercise_before_cursor_reaches_it_aborts() {
     let mut sb = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
     let mut lb = ts::take_shared<PutBucket<BTC, USDC, PUT2>>(&scenario);
     let phys_collateral = put_bucket::required_collateral(&sb, 20);
-    let config = th::take_config(&scenario);
+    let wl = th::take_whitelist(&scenario);
     let (pos0, puts0) = put_bucket::write_collateralized<BTC, USDC, PUT>(
         &mut sb,
-        &config,
+        &wl,
         coin::mint_for_testing<USDC>(phys_collateral, scenario.ctx()),
         20,
         &clock,
         scenario.ctx(),
     );
-    ts::return_shared(config);
+    ts::return_shared(wl);
     transfer::public_transfer(pos0, th::writer_addr());
     transfer::public_transfer(puts0, th::writer_addr());
     ts::return_shared(sb);
     ts::return_shared(lb);
 
-    // New tx so put_spread_write can re-take the shared config.
+    // New tx so put_spread_write can re-take the shared wl.
     ts::next_tx(&mut scenario, th::writer_addr());
     let mut sb = ts::take_shared<PutBucket<BTC, USDC, PUT>>(&scenario);
     let mut lb = ts::take_shared<PutBucket<BTC, USDC, PUT2>>(&scenario);

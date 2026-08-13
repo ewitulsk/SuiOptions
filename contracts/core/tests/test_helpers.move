@@ -8,6 +8,7 @@ use sui::test_scenario::{Self as ts, Scenario};
 
 use options_core::admin::{Self, AdminCap, ProtocolConfig};
 use options_core::bucket;
+use whitelist::whitelist::{Self, AdminCap as WlAdminCap, Whitelist};
 use options_core::put_bucket;
 use options_core::quote::{Self, Quote};
 use options_core::quote_signer::{Self, QuoteSigner};
@@ -78,12 +79,14 @@ public fun pubkey_b(): vector<u8> {
     x"3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
 }
 
-/// Initialize protocol: AdminCap to admin_addr, ProtocolConfig shared, Treasury shared.
+/// Initialize protocol: AdminCap to admin_addr, ProtocolConfig shared, Treasury
+/// shared, `Whitelist` shared (with its own whitelist AdminCap to admin_addr).
 /// Whitelists every named test actor EXCEPT `stranger_addr` (the negative
 /// fixture for ingress-gate tests). Returns a fresh test Clock.
 public fun init_protocol(scenario: &mut Scenario): Clock {
     ts::next_tx(scenario, admin_addr());
     admin::init_for_testing(scenario.ctx());
+    whitelist::init_for_testing(scenario.ctx());
 
     ts::next_tx(scenario, admin_addr());
     let admin_cap = ts::take_from_sender<AdminCap>(scenario);
@@ -91,15 +94,15 @@ public fun init_protocol(scenario: &mut Scenario): Clock {
     ts::return_to_sender(scenario, admin_cap);
 
     ts::next_tx(scenario, admin_addr());
-    let admin_cap = ts::take_from_sender<AdminCap>(scenario);
-    let mut config = take_config(scenario);
-    admin::add_member(&admin_cap, &mut config, admin_addr());
-    admin::add_member(&admin_cap, &mut config, writer_addr());
-    admin::add_member(&admin_cap, &mut config, trader_mm_addr());
-    admin::add_member(&admin_cap, &mut config, trader_addr());
-    admin::add_member(&admin_cap, &mut config, writer_mm_addr());
-    ts::return_shared(config);
-    ts::return_to_sender(scenario, admin_cap);
+    let wl_cap = ts::take_from_sender<WlAdminCap>(scenario);
+    let mut wl = take_whitelist(scenario);
+    whitelist::add_member(&wl_cap, &mut wl, admin_addr());
+    whitelist::add_member(&wl_cap, &mut wl, writer_addr());
+    whitelist::add_member(&wl_cap, &mut wl, trader_mm_addr());
+    whitelist::add_member(&wl_cap, &mut wl, trader_addr());
+    whitelist::add_member(&wl_cap, &mut wl, writer_mm_addr());
+    ts::return_shared(wl);
+    ts::return_to_sender(scenario, wl_cap);
 
     ts::next_tx(scenario, admin_addr());
     clock::create_for_testing(scenario.ctx())
@@ -167,6 +170,19 @@ public fun return_admin_cap(scenario: &Scenario, cap: AdminCap) {
 
 public fun take_config(scenario: &Scenario): ProtocolConfig {
     ts::take_shared<ProtocolConfig>(scenario)
+}
+
+public fun take_whitelist(scenario: &Scenario): Whitelist {
+    ts::take_shared<Whitelist>(scenario)
+}
+
+public fun take_wl_admin_cap(scenario: &Scenario): WlAdminCap {
+    ts::take_from_address<WlAdminCap>(scenario, admin_addr())
+}
+
+public fun return_wl_admin_cap(scenario: &Scenario, cap: WlAdminCap) {
+    ts::return_to_address(admin_addr(), cap);
+    let _ = scenario;
 }
 
 public fun take_treasury(scenario: &Scenario): Treasury {
