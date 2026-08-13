@@ -136,7 +136,7 @@ data "aws_iam_policy_document" "gh_actions_inline" {
     condition {
       test     = "StringEquals"
       variable = "ssm:resourceTag/Name"
-      values   = ["${var.project}-host", "${var.project}-prod-host"]
+      values   = ["${var.project}-host", "${var.project}-prod-host", "${var.project}-data-room-host"]
     }
   }
   statement {

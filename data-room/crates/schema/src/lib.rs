@@ -1,0 +1,297 @@
+//! Canonical event types, Arrow schemas, and layout conventions for the
+//! data room (docs/data-room-spec.md §5).
+//!
+//! Conventions enforced here:
+//! - timestamps are i64 nanoseconds UTC; `ts_recv` is null only for
+//!   bulk-archive-sourced rows (§6.6), never for live capture.
+//! - prices/sizes are f64 in normalized human units.
+//! - rows are sorted by (`ts_recv` else `ts_event`, tiebreak `src_line`)
+//!   before writing, and the parquet writer settings are fixed, so the
+//!   same input always produces byte-identical silver (§7 determinism).
+
+use std::sync::Arc;
+
+use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray};
+use arrow::datatypes::{DataType, Field, Schema};
+use parquet::arrow::ArrowWriter;
+use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
+
+pub mod instrument;
+
+pub use instrument::Instrument;
+
+/// One canonical market-data event, produced by an exchange adapter.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CanonicalEvent {
+    Trade(Trade),
+    BookTop(BookTop),
+    /// Collector lifecycle marker (connect/disconnect) — consumed by the
+    /// gold `gaps` job, never normalized into silver tables.
+    Marker(Marker),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Trade {
+    pub ts_event: Option<i64>,
+    /// None for bulk-archive rows (vision dumps).
+    pub ts_recv: Option<i64>,
+    pub exchange: String,
+    pub instrument_id: String,
+    pub price: f64,
+    pub size: f64,
+    /// Aggressor side: "buy" / "sell" when known.
+    pub side: Option<String>,
+    pub trade_id: String,
+    pub src_file: String,
+    pub src_line: i32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BookTop {
+    pub ts_event: Option<i64>,
+    pub ts_recv: Option<i64>,
+    pub exchange: String,
+    pub instrument_id: String,
+    pub update_id: i64,
+    pub bid_px: f64,
+    pub bid_sz: f64,
+    pub ask_px: f64,
+    pub ask_sz: f64,
+    pub src_file: String,
+    pub src_line: i32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Marker {
+    pub ts_recv: i64,
+    pub exchange: String,
+    pub stream: String,
+    /// "connect" | "disconnect"
+    pub event: String,
+}
+
+// -- Arrow schemas ------------------------------------------------------
+
+fn lineage_fields() -> Vec<Field> {
+    vec![
+        Field::new("src_file", DataType::Utf8, false),
+        Field::new("src_line", DataType::Int32, false),
+    ]
+}
+
+pub fn trades_schema() -> Schema {
+    let mut f = vec![
+        Field::new("ts_event", DataType::Int64, true),
+        Field::new("ts_recv", DataType::Int64, true),
+        Field::new("exchange", DataType::Utf8, false),
+        Field::new("instrument_id", DataType::Utf8, false),
+        Field::new("price", DataType::Float64, false),
+        Field::new("size", DataType::Float64, false),
+        Field::new("side", DataType::Utf8, true),
+        Field::new("trade_id", DataType::Utf8, false),
+    ];
+    f.extend(lineage_fields());
+    Schema::new(f)
+}
+
+pub fn book_top_schema() -> Schema {
+    let mut f = vec![
+        Field::new("ts_event", DataType::Int64, true),
+        Field::new("ts_recv", DataType::Int64, true),
+        Field::new("exchange", DataType::Utf8, false),
+        Field::new("instrument_id", DataType::Utf8, false),
+        Field::new("update_id", DataType::Int64, false),
+        Field::new("bid_px", DataType::Float64, false),
+        Field::new("bid_sz", DataType::Float64, false),
+        Field::new("ask_px", DataType::Float64, false),
+        Field::new("ask_sz", DataType::Float64, false),
+    ];
+    f.extend(lineage_fields());
+    Schema::new(f)
+}
+
+// -- RecordBatch builders ----------------------------------------------
+
+fn opt_i64(vals: impl Iterator<Item = Option<i64>>) -> ArrayRef {
+    Arc::new(Int64Array::from(vals.collect::<Vec<_>>()))
+}
+
+/// Sort key shared by the batch builders: capture time when we have it,
+/// else event time, tiebroken by lineage so ordering is total and stable.
+fn sort_key(
+    ts_recv: Option<i64>,
+    ts_event: Option<i64>,
+    src_file: &str,
+    src_line: i32,
+) -> (i64, &str, i32) {
+    (ts_recv.or(ts_event).unwrap_or(0), src_file, src_line)
+}
+
+pub fn trades_batch(mut rows: Vec<Trade>) -> anyhow::Result<RecordBatch> {
+    rows.sort_by(|a, b| {
+        sort_key(a.ts_recv, a.ts_event, &a.src_file, a.src_line).cmp(&sort_key(
+            b.ts_recv,
+            b.ts_event,
+            &b.src_file,
+            b.src_line,
+        ))
+    });
+    let batch = RecordBatch::try_new(
+        Arc::new(trades_schema()),
+        vec![
+            opt_i64(rows.iter().map(|r| r.ts_event)),
+            opt_i64(rows.iter().map(|r| r.ts_recv)),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.exchange.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.instrument_id.as_str()),
+            )),
+            Arc::new(Float64Array::from_iter_values(rows.iter().map(|r| r.price))),
+            Arc::new(Float64Array::from_iter_values(rows.iter().map(|r| r.size))),
+            Arc::new(StringArray::from_iter(
+                rows.iter().map(|r| r.side.as_deref()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.trade_id.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.src_file.as_str()),
+            )),
+            Arc::new(Int32Array::from_iter_values(
+                rows.iter().map(|r| r.src_line),
+            )),
+        ],
+    )?;
+    Ok(batch)
+}
+
+pub fn book_top_batch(mut rows: Vec<BookTop>) -> anyhow::Result<RecordBatch> {
+    rows.sort_by(|a, b| {
+        sort_key(a.ts_recv, a.ts_event, &a.src_file, a.src_line).cmp(&sort_key(
+            b.ts_recv,
+            b.ts_event,
+            &b.src_file,
+            b.src_line,
+        ))
+    });
+    let batch = RecordBatch::try_new(
+        Arc::new(book_top_schema()),
+        vec![
+            opt_i64(rows.iter().map(|r| r.ts_event)),
+            opt_i64(rows.iter().map(|r| r.ts_recv)),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.exchange.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.instrument_id.as_str()),
+            )),
+            Arc::new(Int64Array::from_iter_values(
+                rows.iter().map(|r| r.update_id),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|r| r.bid_px),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|r| r.bid_sz),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|r| r.ask_px),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|r| r.ask_sz),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.src_file.as_str()),
+            )),
+            Arc::new(Int32Array::from_iter_values(
+                rows.iter().map(|r| r.src_line),
+            )),
+        ],
+    )?;
+    Ok(batch)
+}
+
+// -- Deterministic parquet writing --------------------------------------
+
+/// Fixed writer settings: same rows in → byte-identical file out. Do not
+/// add anything time- or environment-dependent (no created_by drift, no
+/// multi-threaded row-group splits).
+pub fn writer_props() -> WriterProperties {
+    WriterProperties::builder()
+        .set_writer_version(WriterVersion::PARQUET_2_0)
+        .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+        .set_statistics_enabled(EnabledStatistics::Chunk)
+        .set_max_row_group_size(1_048_576)
+        .set_created_by("data-room".to_string())
+        .build()
+}
+
+/// Serialize one batch to an in-memory parquet file with the fixed props.
+pub fn write_parquet(batch: &RecordBatch) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut w = ArrowWriter::try_new(&mut buf, batch.schema(), Some(writer_props()))?;
+    w.write(batch)?;
+    w.close()?;
+    Ok(buf)
+}
+
+// -- Layout helpers ------------------------------------------------------
+
+/// silver partition key for a table, e.g.
+/// `silver/v1/trades/exchange=coinbase/symbol=BTC-USD/date=2026-08-13/part-00.parquet`
+pub fn silver_key(table: &str, exchange: &str, symbol: &str, date: &str) -> String {
+    format!("silver/v1/{table}/exchange={exchange}/symbol={symbol}/date={date}/part-00.parquet")
+}
+
+pub fn bronze_ws_prefix(exchange: &str, stream: &str, date: &str) -> String {
+    format!("bronze/v1/exchange={exchange}/stream={stream}/date={date}/")
+}
+
+pub fn bronze_vision_prefix(market: &str, kind: &str, symbol: &str) -> String {
+    format!("bronze/v1/exchange=binance/source=vision/market={market}/kind={kind}/symbol={symbol}/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(recv: Option<i64>, id: &str) -> Trade {
+        Trade {
+            ts_event: Some(1),
+            ts_recv: recv,
+            exchange: "coinbase".into(),
+            instrument_id: "btc-usd.coinbase".into(),
+            price: 100.0,
+            size: 1.0,
+            side: Some("buy".into()),
+            trade_id: id.into(),
+            src_file: "f".into(),
+            src_line: 0,
+        }
+    }
+
+    #[test]
+    fn trades_batch_sorts_by_recv() {
+        let b = trades_batch(vec![t(Some(20), "b"), t(Some(10), "a")]).unwrap();
+        let ids: Vec<_> = b
+            .column_by_name("trade_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .iter()
+            .map(|s| s.unwrap().to_string())
+            .collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parquet_write_is_deterministic() {
+        let rows = vec![t(Some(10), "a"), t(Some(20), "b")];
+        let b1 = write_parquet(&trades_batch(rows.clone()).unwrap()).unwrap();
+        let b2 = write_parquet(&trades_batch(rows).unwrap()).unwrap();
+        assert_eq!(b1, b2, "same rows must produce byte-identical parquet");
+    }
+}

@@ -1,0 +1,19 @@
+# Monthly incremental Binance Vision dump sync (spec §6.6). During the
+# pre-live-capture seam, run daily instead by editing the timer's
+# OnCalendar to `*-*-* 02:00:00 UTC`.
+#
+# One-shot FULL backfill (run manually, once, from /opt/data-room —
+# expect hours of unzip churn; the spool volume is why this host has
+# 100 GB):
+#   docker compose run --rm batch vision-sync            # full mirror = default (add --since to bound)
+
+[Unit]
+Description=data-room: sync Binance Vision archives into bronze
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/data-room
+# since last synced month).
+ExecStart=/usr/bin/docker compose run --rm batch vision-sync

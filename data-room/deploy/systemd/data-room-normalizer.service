@@ -1,0 +1,13 @@
+# Daily bronze → silver normalization: yesterday's partition plus a 3-day
+# lookback catch-up scan (idempotent — partitions are overwritten, never
+# appended, spec §7). Driven by data-room-normalizer.timer.
+
+[Unit]
+Description=data-room: normalize bronze to silver (yesterday + 3-day lookback)
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/data-room
+ExecStart=/usr/bin/docker compose run --rm batch normalizer coinbase --lookback-days 3

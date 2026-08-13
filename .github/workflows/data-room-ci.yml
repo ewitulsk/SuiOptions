@@ -1,0 +1,46 @@
+name: Data Room CI
+
+# fmt + clippy + tests for the data-room/ Cargo workspace. It is a separate
+# workspace from rust-backend (spec §3), so rust-backend CI never covers it.
+# Toolchain setup mirrors redeploy-contract.yml's build path
+# (dtolnay/rust-toolchain@stable + Swatinem/rust-cache).
+
+on:
+  push:
+    branches: [staging, main]
+    paths:
+      - 'data-room/**'
+      - '.github/workflows/data-room-ci.yml'
+  pull_request:
+    paths:
+      - 'data-room/**'
+      - '.github/workflows/data-room-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: data-room
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: data-room
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace

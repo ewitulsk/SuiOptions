@@ -1,0 +1,9 @@
+[Unit]
+Description=data-room: daily gold jobs @ 01:30 UTC (after normalizer)
+
+[Timer]
+OnCalendar=*-*-* 01:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

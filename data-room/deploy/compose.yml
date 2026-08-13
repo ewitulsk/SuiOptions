@@ -1,0 +1,41 @@
+# Compose stack for data-room-host. Single environment — no staging/prod
+# split (spec §10.3); the bucket is the product. Deliberately OUTSIDE the
+# protocol deploy set: not in either options host's compose, not in the
+# Deploy workflows' force lists.
+#
+# Lives at /opt/data-room/compose.yml on the host, next to collector.toml
+# and .env (see .env.example). TAG is advanced by deploy-data-room.yml;
+# batch jobs pick up a new tag on their next timer firing.
+#
+# S3 access rides the host's instance profile — no static keys, nothing
+# rendered into secrets.
+
+name: data-room
+
+services:
+  # Long-lived capture daemon: exchange websockets → bronze spool → S3.
+  # The spool is the only host state worth keeping; losing it loses at
+  # most the unuploaded window (spec §6.4).
+  collector:
+    image: ${ECR}/data-room-collector:${TAG}
+    restart: always
+    environment:
+      COLLECTOR_CONFIG: /app/collector.toml
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "9100:9100"   # /metrics — scraped by the monitoring host's Prometheus
+    volumes:
+      - /var/spool/data-room:/var/spool/data-room
+      - ./collector.toml:/app/collector.toml:ro
+
+  # One-shot batch template — never `up`'d (profiles gate it out of
+  # `docker compose up -d`). Invoked by the systemd timers as
+  # `docker compose run --rm batch <binary> <args>` (deploy/systemd/);
+  # naming the service in `run` activates the profile automatically.
+  batch:
+    image: ${ECR}/data-room-batch:${TAG}
+    profiles: ["batch"]
+    restart: "no"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      STORE_URL: ${STORE_URL}

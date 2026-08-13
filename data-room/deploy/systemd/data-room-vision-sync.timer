@@ -1,0 +1,9 @@
+[Unit]
+Description=data-room: monthly vision-sync @ 02:00 UTC on the 1st
+
+[Timer]
+OnCalendar=*-*-01 02:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
