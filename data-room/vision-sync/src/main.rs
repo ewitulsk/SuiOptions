@@ -18,6 +18,7 @@ struct Cli {
     /// s3://bucket or file:///path lake root.
     #[arg(long, env = "STORE_URL")]
     store_url: String,
+    /// "spot" or "um" (USDⓈ-margined futures — perps).
     #[arg(long, default_value = "spot")]
     market: String,
     /// Binance native symbols, comma-separated.
@@ -29,7 +30,7 @@ struct Cli {
     kinds: Vec<String>,
     /// Also mirror daily files (the seam between the last monthly dump
     /// and live capture).
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     daily: bool,
     /// Only mirror files whose date part is >= this ISO prefix
     /// (e.g. "2024-01" or "2026-08-01"). Default: everything.
@@ -61,8 +62,16 @@ async fn main() -> anyhow::Result<()> {
                 periods.push("daily");
             }
             for period in periods {
-                let src_prefix = format!("data/{}/{}/{}/{}/", cli.market, period, kind, symbol);
-                let dst_prefix = schema::bronze_vision_prefix(&cli.market, kind, symbol);
+                // Vision path vs partition label: futures live under
+                // "data/futures/um/…" but partition values cannot carry
+                // a slash, so the market label is "um-futures".
+                let (src_market, market_label) = match cli.market.as_str() {
+                    "spot" => ("spot".to_string(), "spot"),
+                    "um" => ("futures/um".to_string(), "um-futures"),
+                    other => anyhow::bail!("unsupported market {other} (want spot|um)"),
+                };
+                let src_prefix = format!("data/{}/{}/{}/{}/", src_market, period, kind, symbol);
+                let dst_prefix = schema::bronze_vision_prefix(market_label, kind, symbol);
 
                 let remote = list_vision(&http, &src_prefix).await?;
                 let have = list_ours(&store, &dst_prefix).await?;

@@ -142,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
     // One capture task per connection.
     let mut capture_tasks = Vec::new();
     for conn in cfg.connections.clone() {
-        if conn.exchange != "coinbase" {
+        if !matches!(conn.exchange.as_str(), "coinbase" | "hyperliquid") {
             anyhow::bail!("unsupported exchange {}", conn.exchange);
         }
         let spool = spool.clone();
@@ -194,14 +194,64 @@ fn marker_streams(conn: &Connection) -> Vec<String> {
     let mut out = Vec::new();
     for p in &conn.products {
         for c in &conn.channels {
-            match c.as_str() {
-                "matches" => out.push(format!("matches.{p}")),
-                "ticker" => out.push(format!("ticker.{p}")),
+            match (conn.exchange.as_str(), c.as_str()) {
+                ("coinbase", "matches") => out.push(format!("matches.{p}")),
+                ("coinbase", "ticker") => out.push(format!("ticker.{p}")),
+                ("hyperliquid", "trades") => out.push(format!("trades.{p}")),
+                ("hyperliquid", "bbo") => out.push(format!("bbo.{p}")),
+                ("hyperliquid", "activeAssetCtx") => out.push(format!("ctx.{p}")),
                 _ => {}
             }
         }
     }
     out
+}
+
+/// Subscribe frames for a connection. Coinbase takes one message for all
+/// products/channels; Hyperliquid takes one per (channel, coin).
+fn subscribe_msgs(conn: &Connection) -> Vec<String> {
+    match conn.exchange.as_str() {
+        "hyperliquid" => {
+            let mut out = Vec::new();
+            for c in &conn.channels {
+                for p in &conn.products {
+                    out.push(
+                        serde_json::json!({
+                            "method": "subscribe",
+                            "subscription": { "type": c, "coin": p },
+                        })
+                        .to_string(),
+                    );
+                }
+            }
+            out
+        }
+        _ => vec![serde_json::json!({
+            "type": "subscribe",
+            "product_ids": conn.products,
+            "channels": conn.channels,
+        })
+        .to_string()],
+    }
+}
+
+fn route_payload(exchange: &str, payload: &str) -> Option<String> {
+    match exchange {
+        "hyperliquid" => adapters::hyperliquid::route(payload),
+        _ => adapters::coinbase::route(payload),
+    }
+}
+
+/// App-level keepalive: Hyperliquid drops quiet connections, so a ping
+/// frame goes out every 30 s. Coinbase needs none (heartbeat channel).
+fn keepalive(exchange: &str) -> Option<(Duration, String)> {
+    match exchange {
+        "hyperliquid" => Some((
+            Duration::from_secs(30),
+            serde_json::json!({ "method": "ping" }).to_string(),
+        )),
+        _ => None,
+    }
 }
 
 async fn run_connection(
@@ -256,12 +306,9 @@ async fn capture_once(
     stall: Duration,
 ) -> anyhow::Result<()> {
     let (mut ws, _) = tokio_tungstenite::connect_async(&conn.url).await?;
-    let sub = serde_json::json!({
-        "type": "subscribe",
-        "product_ids": conn.products,
-        "channels": conn.channels,
-    });
-    ws.send(Message::Text(sub.to_string())).await?;
+    for sub in subscribe_msgs(conn) {
+        ws.send(Message::Text(sub)).await?;
+    }
     info!(
         exchange = conn.exchange,
         url = conn.url,
@@ -269,8 +316,26 @@ async fn capture_once(
     );
     write_markers(conn, spool, upload_tx, seq, "connect");
 
+    let ping = keepalive(&conn.exchange);
+    let mut ping_tick = tokio::time::interval(
+        ping.as_ref()
+            .map(|(d, _)| *d)
+            .unwrap_or(Duration::from_secs(3600)),
+    );
+    ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ping_tick.tick().await; // interval fires immediately; consume it
+
     loop {
-        let msg = match tokio::time::timeout(stall, ws.next()).await {
+        let next = tokio::select! {
+            m = tokio::time::timeout(stall, ws.next()) => m,
+            _ = ping_tick.tick() => {
+                if let Some((_, msg)) = &ping {
+                    ws.send(Message::Text(msg.clone())).await?;
+                }
+                continue;
+            }
+        };
+        let msg = match next {
             Err(_) => anyhow::bail!("stalled: no traffic for {stall:?}"),
             Ok(None) => return Ok(()), // clean close
             Ok(Some(m)) => m?,
@@ -278,7 +343,7 @@ async fn capture_once(
         match msg {
             Message::Text(payload) => {
                 let ts = now_ns();
-                let stream = adapters::coinbase::route(&payload)
+                let stream = route_payload(&conn.exchange, &payload)
                     .unwrap_or_else(|| format!("control.{}", conn.exchange));
                 let n = seq.fetch_add(1, Ordering::Relaxed);
                 metrics::counter!("dataroom_collector_messages_total",

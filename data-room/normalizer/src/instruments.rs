@@ -57,10 +57,41 @@ pub fn binance_static(native: &str) -> anyhow::Result<Instrument> {
     })
 }
 
+pub fn binance_perp_static(native: &str) -> anyhow::Result<Instrument> {
+    let (base, quote) = adapters::binance_vision::split_symbol(native)
+        .ok_or_else(|| anyhow::anyhow!("bad binance symbol {native}"))?;
+    Ok(Instrument {
+        instrument_id: adapters::binance_vision::perp_instrument_id(native)
+            .ok_or_else(|| anyhow::anyhow!("not a perp symbol {native}"))?,
+        exchange: "binance".into(),
+        native_symbol: native.into(),
+        asset_class: "perp".into(),
+        base,
+        quote,
+        tick_size: None,
+        lot_size: None,
+    })
+}
+
+pub fn hyperliquid_static(coin: &str) -> Instrument {
+    Instrument {
+        instrument_id: adapters::hyperliquid::instrument_id(coin),
+        exchange: "hyperliquid".into(),
+        native_symbol: coin.into(),
+        asset_class: "perp".into(),
+        base: coin.to_uppercase(),
+        quote: "USD".into(),
+        tick_size: None,
+        lot_size: None,
+    }
+}
+
 pub async fn snapshot(
     store: &Store,
     coinbase_products: &[String],
     binance_symbols: &[String],
+    binance_perp_symbols: &[String],
+    hyperliquid_coins: &[String],
     snapshot_date: &str,
 ) -> anyhow::Result<usize> {
     let mut rows = Vec::new();
@@ -69,6 +100,12 @@ pub async fn snapshot(
     }
     for s in binance_symbols {
         rows.push(binance_static(s)?);
+    }
+    for s in binance_perp_symbols {
+        rows.push(binance_perp_static(s)?);
+    }
+    for c in hyperliquid_coins {
+        rows.push(hyperliquid_static(c));
     }
     let n = rows.len();
     let bytes = schema::write_parquet(&instruments_batch(rows)?)?;

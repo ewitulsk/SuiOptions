@@ -22,8 +22,29 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         lookback_days: u32,
     },
+    /// Normalize Hyperliquid websocket bronze (trades/bbo/ctx) for a UTC
+    /// day (default: yesterday).
+    Hyperliquid {
+        #[arg(long)]
+        date: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        lookback_days: u32,
+    },
+    /// Fetch settled Hyperliquid funding via REST into part-settled
+    /// partitions (idempotent; capture gaps self-heal).
+    FundingSettled {
+        #[arg(long, value_delimiter = ',', default_value = "BTC")]
+        coins: Vec<String>,
+        /// Days back from today (inclusive) to refresh.
+        #[arg(long, default_value_t = 3)]
+        days: u32,
+        /// Optional explicit start date YYYY-MM-DD (backfill mode).
+        #[arg(long)]
+        from: Option<String>,
+    },
     /// Normalize any vision dump zips without a .done state marker.
     Vision {
+        /// "spot" or "um" (USDⓈ-margined futures — perps).
         #[arg(long, default_value = "spot")]
         market: String,
         #[arg(long, value_delimiter = ',', default_value = "BTCUSDC")]
@@ -35,7 +56,27 @@ enum Cmd {
         coinbase_products: Vec<String>,
         #[arg(long, value_delimiter = ',', default_value = "BTCUSDC")]
         binance_symbols: Vec<String>,
+        #[arg(long, value_delimiter = ',', default_value = "BTCUSDT")]
+        binance_perp_symbols: Vec<String>,
+        #[arg(long, value_delimiter = ',', default_value = "BTC")]
+        hyperliquid_coins: Vec<String>,
     },
+}
+
+fn ws_days(date: Option<String>, lookback_days: u32) -> anyhow::Result<Vec<String>> {
+    let end = date.unwrap_or_else(|| {
+        (Utc::now() - Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string()
+    });
+    let end_day = chrono::NaiveDate::parse_from_str(&end, "%Y-%m-%d")?;
+    Ok((0..=lookback_days)
+        .map(|b| {
+            (end_day - Duration::days(b as i64))
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .collect())
 }
 
 #[tokio::main]
@@ -55,33 +96,55 @@ async fn main() -> anyhow::Result<()> {
             date,
             lookback_days,
         } => {
-            let end = date.unwrap_or_else(|| {
-                (Utc::now() - Duration::days(1))
-                    .format("%Y-%m-%d")
-                    .to_string()
-            });
-            let end_day = chrono::NaiveDate::parse_from_str(&end, "%Y-%m-%d")?;
-            for back in 0..=lookback_days {
-                let day = (end_day - Duration::days(back as i64))
-                    .format("%Y-%m-%d")
-                    .to_string();
-                let n = normalizer::coinbase::normalize_day(&store, &day).await?;
+            for day in ws_days(date, lookback_days)? {
+                let n = normalizer::ws::normalize_day(&store, "coinbase", &day).await?;
                 tracing::info!(day, streams = n, "coinbase day normalized");
             }
         }
+        Cmd::Hyperliquid {
+            date,
+            lookback_days,
+        } => {
+            for day in ws_days(date, lookback_days)? {
+                let n = normalizer::ws::normalize_day(&store, "hyperliquid", &day).await?;
+                tracing::info!(day, streams = n, "hyperliquid day normalized");
+            }
+        }
+        Cmd::FundingSettled { coins, days, from } => {
+            let to = Utc::now().date_naive();
+            let from = match from {
+                Some(f) => chrono::NaiveDate::parse_from_str(&f, "%Y-%m-%d")?,
+                None => to - Duration::days(days as i64),
+            };
+            normalizer::funding::hyperliquid_settled(&store, &coins, from, to).await?;
+        }
         Cmd::Vision { market, symbols } => {
+            let label = match market.as_str() {
+                "spot" => "spot",
+                "um" => "um-futures",
+                other => anyhow::bail!("unsupported market {other} (want spot|um)"),
+            };
             for s in &symbols {
-                let n = normalizer::vision::normalize_pending(&store, &market, s).await?;
+                let n = normalizer::vision::normalize_pending(&store, label, s).await?;
                 tracing::info!(symbol = s, zips = n, "vision normalized");
             }
         }
         Cmd::Instruments {
             coinbase_products,
             binance_symbols,
+            binance_perp_symbols,
+            hyperliquid_coins,
         } => {
             let today = Utc::now().format("%Y-%m-%d").to_string();
-            normalizer::instruments::snapshot(&store, &coinbase_products, &binance_symbols, &today)
-                .await?;
+            normalizer::instruments::snapshot(
+                &store,
+                &coinbase_products,
+                &binance_symbols,
+                &binance_perp_symbols,
+                &hyperliquid_coins,
+                &today,
+            )
+            .await?;
         }
     }
     Ok(())

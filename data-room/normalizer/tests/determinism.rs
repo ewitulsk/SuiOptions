@@ -52,7 +52,7 @@ async fn seed_and_normalize(root: &std::path::Path) -> Vec<u8> {
         .await
         .unwrap();
 
-    let n = normalizer::coinbase::normalize_day(&store, "2026-08-12")
+    let n = normalizer::ws::normalize_day(&store, "coinbase", "2026-08-12")
         .await
         .unwrap();
     assert_eq!(n, 1, "one stream discovered");
@@ -81,7 +81,7 @@ async fn normalize_twice_is_byte_identical_and_dedups() {
     // Re-running over the SAME store must also produce identical bytes
     // (overwrite-partition idempotency).
     let store = store::open(&format!("file://{}", dir1.path().display())).unwrap();
-    normalizer::coinbase::normalize_day(&store, "2026-08-12")
+    normalizer::ws::normalize_day(&store, "coinbase", "2026-08-12")
         .await
         .unwrap();
     let again = store
