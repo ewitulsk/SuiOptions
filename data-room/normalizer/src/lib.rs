@@ -40,6 +40,30 @@ pub async fn get_bytes(store: &Store, key: &str) -> anyhow::Result<Vec<u8>> {
         .to_vec())
 }
 
+/// Stream an object to a temp file — for multi-GB zips that must not
+/// sit in RAM (the host has 2 GB). Returns None if the key is missing.
+pub async fn get_to_tempfile(
+    store: &Store,
+    key: &str,
+) -> anyhow::Result<Option<tempfile::NamedTempFile>> {
+    use futures::TryStreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let result = match store.get(&object_store::path::Path::from(key)).await {
+        Ok(r) => r,
+        Err(object_store::Error::NotFound { .. }) => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("get {key}")),
+    };
+    let tmp = tempfile::NamedTempFile::new()?;
+    let mut file = tokio::fs::File::create(tmp.path()).await?;
+    let mut stream = result.into_stream();
+    while let Some(chunk) = stream.try_next().await? {
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await?;
+    Ok(Some(tmp))
+}
+
 pub async fn put_bytes(store: &Store, key: &str, bytes: Vec<u8>) -> anyhow::Result<()> {
     store
         .put(&object_store::path::Path::from(key), bytes.into())

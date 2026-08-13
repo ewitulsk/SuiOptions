@@ -12,7 +12,7 @@
 use chrono::DateTime;
 use tracing::info;
 
-use crate::{get_bytes, handle_rejects, list_keys, put_bytes, Store};
+use crate::{handle_rejects, list_keys, put_bytes, Store};
 
 fn done_key(zip_name: &str) -> String {
     format!("silver/v1/_state/vision/{zip_name}.done")
@@ -81,8 +81,10 @@ pub async fn normalize_funding_zip(
     symbol: &str,
 ) -> anyhow::Result<()> {
     let (_, partition_symbol) = market_ids(market, symbol)?;
-    let zip_bytes = get_bytes(store, key).await?;
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))?;
+    let tmp = crate::get_to_tempfile(store, key)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing zip {key}"))?;
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(tmp.path())?)?;
     anyhow::ensure!(archive.len() == 1, "expected single-entry zip");
     let mut csv = Vec::new();
     std::io::Read::read_to_end(&mut archive.by_index(0)?, &mut csv)?;
@@ -131,8 +133,12 @@ pub async fn normalize_zip(
     market: &str,
     symbol: &str,
 ) -> anyhow::Result<()> {
-    let zip_bytes = get_bytes(store, key).await?;
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))?;
+    // Spool the zip to disk: perp monthlies are multi-GB and the zip
+    // reader needs a Seek source anyway.
+    let tmp = crate::get_to_tempfile(store, key)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing zip {key}"))?;
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(tmp.path())?)?;
     anyhow::ensure!(
         archive.len() == 1,
         "expected single-entry zip, got {}",

@@ -2919,6 +2919,7 @@ name = "vision-sync"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "futures",
  "hex",
@@ -2927,6 +2928,7 @@ dependencies = [
  "schema",
  "sha2",
  "store",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

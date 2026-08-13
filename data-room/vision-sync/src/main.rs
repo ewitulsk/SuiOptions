@@ -168,21 +168,34 @@ async fn list_ours(
     Ok(names)
 }
 
-/// Download one dump file, verify its published sha256, upload verbatim.
+/// Download one dump file (streamed to a temp file — perp monthlies run
+/// multi-GB and must never sit in RAM on a 2 GB host), verify its
+/// published sha256, then multipart-upload verbatim in bounded chunks.
 async fn mirror_one(
     http: &reqwest::Client,
     store: &std::sync::Arc<dyn object_store::ObjectStore>,
     vision_key: &str,
     dst_key: &str,
 ) -> anyhow::Result<usize> {
-    let body = http
-        .get(format!("{VISION_GET}/{vision_key}"))
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await
-        .context("download")?;
+    use tokio::io::AsyncWriteExt;
+
+    let tmp = tempfile::NamedTempFile::new().context("tmp file")?;
+    let mut hasher = Sha256::new();
+    let mut n = 0usize;
+    {
+        let mut file = tokio::fs::File::create(tmp.path()).await?;
+        let mut resp = http
+            .get(format!("{VISION_GET}/{vision_key}"))
+            .send()
+            .await?
+            .error_for_status()?;
+        while let Some(chunk) = resp.chunk().await.context("download")? {
+            hasher.update(&chunk);
+            file.write_all(&chunk).await?;
+            n += chunk.len();
+        }
+        file.flush().await?;
+    }
 
     // CHECKSUM sidecar: "<sha256hex>  <filename>"
     let sidecar = http
@@ -196,17 +209,39 @@ async fn mirror_one(
         .split_whitespace()
         .next()
         .context("empty CHECKSUM")?;
-    let actual = hex::encode(Sha256::digest(&body));
+    let actual = hex::encode(hasher.finalize());
     anyhow::ensure!(
         actual == expected,
         "checksum mismatch: {actual} != {expected}"
     );
 
-    let n = body.len();
-    store
-        .put(&object_store::path::Path::from(dst_key), body.into())
-        .await
-        .context("upload")?;
+    // Multipart upload in 16 MB parts, reading back from the temp file.
+    const PART: usize = 16 * 1024 * 1024;
+    let path = object_store::path::Path::from(dst_key);
+    let mut upload = store.put_multipart(&path).await.context("start upload")?;
+    {
+        use tokio::io::AsyncReadExt;
+        let mut file = tokio::fs::File::open(tmp.path()).await?;
+        let mut buf = vec![0u8; PART];
+        loop {
+            let mut filled = 0;
+            while filled < PART {
+                let r = file.read(&mut buf[filled..]).await?;
+                if r == 0 {
+                    break;
+                }
+                filled += r;
+            }
+            if filled == 0 {
+                break;
+            }
+            upload
+                .put_part(bytes::Bytes::copy_from_slice(&buf[..filled]).into())
+                .await
+                .context("put part")?;
+        }
+    }
+    upload.complete().await.context("complete upload")?;
     Ok(n)
 }
 
