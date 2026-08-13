@@ -11,7 +11,7 @@ use sui::event;
 use exchange::balance_manager::{Self, BalanceManager, OwnerCap};
 use exchange::order::{Self, Order};
 use exchange::registry::{Self, SettlementRegistry};
-use exchange::whitelist::{Self, Whitelist};
+use whitelist::whitelist::{Self, Whitelist};
 
 // === Errors (one per check, in check order — the relayer decodes these) ===
 

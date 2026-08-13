@@ -12,7 +12,8 @@ use exchange::balance_manager::{Self as bm, BalanceManager};
 use exchange::order;
 use exchange::registry::{Self, SettlementRegistry};
 use exchange::settlement;
-use exchange::whitelist::{Self, Whitelist};
+use whitelist::whitelist as wl_mod;
+use whitelist::whitelist::Whitelist;
 
 public struct BASE has drop {}
 public struct QUOTE has drop {}
@@ -27,11 +28,11 @@ const EXPIRY_MS: u64 = 10_000;
 
 /// Enabled whitelist with the given members (owned test value).
 fun members_wl(members: vector<address>, ctx: &mut TxContext): Whitelist {
-    let mut wl = whitelist::new_open_for_testing(ctx);
-    whitelist::set_enabled_for_testing(&mut wl, true);
+    let mut wl = wl_mod::new_open_for_testing(ctx);
+    wl_mod::set_enabled_for_testing(&mut wl, true);
     let mut i = 0;
     while (i < members.length()) {
-        whitelist::add_member_for_testing(&mut wl, members[i]);
+        wl_mod::add_member_for_testing(&mut wl, members[i]);
         i = i + 1;
     };
     wl
@@ -75,7 +76,7 @@ fun setup_market_and_maker(
 // ─────────────────────────── deposit gate ───────────────────────────
 
 #[test]
-#[expected_failure(abort_code = 1, location = exchange::whitelist)] // EIngressRestricted
+#[expected_failure(abort_code = 1, location = whitelist::whitelist)] // EIngressRestricted
 fun non_member_deposit_aborts() {
     let mut sc = ts::begin(STRANGER);
     let wl = members_wl(vector[MAKER], sc.ctx());
@@ -84,22 +85,22 @@ fun non_member_deposit_aborts() {
     let mut mgr = ts::take_shared<BalanceManager>(&sc);
     bm::deposit(&mut mgr, &wl, coin::mint_for_testing<QUOTE>(1_000, sc.ctx()), sc.ctx());
     ts::return_shared(mgr);
-    whitelist::destroy_for_testing(wl);
+    wl_mod::destroy_for_testing(wl);
     sc.end();
 }
 
 #[test]
-#[expected_failure(abort_code = 2, location = exchange::whitelist)] // EIngressPaused
+#[expected_failure(abort_code = 2, location = whitelist::whitelist)] // EIngressPaused
 fun paused_deposit_aborts_even_for_member() {
     let mut sc = ts::begin(MAKER);
     let mut wl = members_wl(vector[MAKER], sc.ctx());
-    whitelist::set_paused_for_testing(&mut wl, true);
+    wl_mod::set_paused_for_testing(&mut wl, true);
     bm::new(sc.ctx());
     ts::next_tx(&mut sc, MAKER);
     let mut mgr = ts::take_shared<BalanceManager>(&sc);
     bm::deposit(&mut mgr, &wl, coin::mint_for_testing<QUOTE>(1_000, sc.ctx()), sc.ctx());
     ts::return_shared(mgr);
-    whitelist::destroy_for_testing(wl);
+    wl_mod::destroy_for_testing(wl);
     sc.end();
 }
 
@@ -113,19 +114,19 @@ fun withdraw_works_while_paused_and_delisted() {
     bm::deposit(&mut mgr, &wl, coin::mint_for_testing<QUOTE>(1_000, sc.ctx()), sc.ctx());
 
     // Delist the owner and slam the pause: exit still works in full.
-    whitelist::set_paused_for_testing(&mut wl, true);
+    wl_mod::set_paused_for_testing(&mut wl, true);
     let out = bm::withdraw<QUOTE>(&mut mgr, 1_000, sc.ctx());
     assert!(out.value() == 1_000);
     coin::burn_for_testing(out);
     ts::return_shared(mgr);
-    whitelist::destroy_for_testing(wl);
+    wl_mod::destroy_for_testing(wl);
     sc.end();
 }
 
 // ─────────────────────────── fill gate ───────────────────────────
 
 #[test]
-#[expected_failure(abort_code = 1, location = exchange::whitelist)] // EIngressRestricted
+#[expected_failure(abort_code = 1, location = whitelist::whitelist)] // EIngressRestricted
 fun non_member_taker_fill_aborts() {
     let mut sc = ts::begin(ADMIN);
     let wl = members_wl(vector[MAKER], sc.ctx());
@@ -151,7 +152,7 @@ fun non_member_taker_fill_aborts() {
     clock.destroy_for_testing();
     ts::return_shared(mgr);
     ts::return_shared(reg);
-    whitelist::destroy_for_testing(wl);
+    wl_mod::destroy_for_testing(wl);
     sc.end();
 }
 
@@ -182,7 +183,7 @@ fun member_taker_fill_succeeds_and_open_mode_admits_anyone() {
     coin::burn_for_testing(change);
 
     // Go public: a stranger can fill the rest.
-    whitelist::set_enabled_for_testing(&mut wl, false);
+    wl_mod::set_enabled_for_testing(&mut wl, false);
     ts::next_tx(&mut sc, STRANGER);
     let (got, change) = settlement::fill_limit_order_for_testing<BASE, QUOTE>(
         &mut reg,
@@ -202,12 +203,12 @@ fun member_taker_fill_succeeds_and_open_mode_admits_anyone() {
     clock.destroy_for_testing();
     ts::return_shared(mgr);
     ts::return_shared(reg);
-    whitelist::destroy_for_testing(wl);
+    wl_mod::destroy_for_testing(wl);
     sc.end();
 }
 
 #[test]
-#[expected_failure(abort_code = 1, location = exchange::whitelist)] // EIngressRestricted
+#[expected_failure(abort_code = 1, location = whitelist::whitelist)] // EIngressRestricted
 fun non_member_relayer_match_aborts() {
     // Both makers are members with funded BMs; the RELAYER submitting the
     // match is not — the match must abort (the relayer wallet has to be
@@ -258,37 +259,7 @@ fun non_member_relayer_match_aborts() {
     ts::return_shared(bm_a);
     ts::return_shared(bm_b);
     ts::return_shared(reg);
-    whitelist::destroy_for_testing(wl);
+    wl_mod::destroy_for_testing(wl);
     sc.end();
 }
 
-// ─────────────────────────── admin surface ───────────────────────────
-
-#[test]
-fun admin_mutators_and_events() {
-    let mut sc = ts::begin(ADMIN);
-    whitelist::share_for_testing(sc.ctx());
-    ts::next_tx(&mut sc, ADMIN);
-    let cap = admin::mint_for_testing(sc.ctx());
-    let mut wl = ts::take_shared<Whitelist>(&sc);
-    assert!(whitelist::whitelist_enabled(&wl));
-    assert!(!whitelist::ingress_paused(&wl));
-
-    whitelist::add_member(&cap, &mut wl, MAKER);
-    assert!(whitelist::is_member(&wl, MAKER));
-    whitelist::remove_member(&cap, &mut wl, MAKER);
-    assert!(!whitelist::is_member(&wl, MAKER));
-    whitelist::set_whitelist_enabled(&cap, &mut wl, false);
-    assert!(!whitelist::whitelist_enabled(&wl));
-    whitelist::set_ingress_paused(&cap, &mut wl, true);
-    assert!(whitelist::ingress_paused(&wl));
-
-    assert!(sui::event::events_by_type<exchange::whitelist::MemberAdded>().length() == 1);
-    assert!(sui::event::events_by_type<exchange::whitelist::MemberRemoved>().length() == 1);
-    assert!(sui::event::events_by_type<exchange::whitelist::WhitelistEnabledSet>().length() == 1);
-    assert!(sui::event::events_by_type<exchange::whitelist::IngressPauseSet>().length() == 1);
-
-    ts::return_shared(wl);
-    admin::burn_for_testing(cap);
-    sc.end();
-}

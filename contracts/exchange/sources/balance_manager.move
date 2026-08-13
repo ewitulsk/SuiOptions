@@ -29,7 +29,7 @@ use sui::balance::Balance;
 use sui::coin::{Self, Coin};
 use sui::dynamic_field as df;
 
-use exchange::whitelist::{Self, Whitelist};
+use whitelist::whitelist::{Self, Whitelist};
 use sui::event;
 use sui::vec_set::{Self, VecSet};
 use exchange::order;

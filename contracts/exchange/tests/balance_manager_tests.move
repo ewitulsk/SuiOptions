@@ -5,7 +5,7 @@ use sui::coin;
 use sui::sui::SUI;
 use sui::test_scenario as ts;
 use exchange::balance_manager::{Self as bm, BalanceManager};
-use exchange::whitelist;
+use whitelist::whitelist;
 
 const OWNER: address = @0xA1;
 const STRANGER: address = @0xB1;

@@ -16,7 +16,7 @@ use exchange::balance_manager::{Self as bm, BalanceManager};
 use exchange::order;
 use exchange::registry::{Self as ereg, SettlementRegistry};
 use exchange::settlement;
-use exchange::whitelist;
+use whitelist::whitelist;
 
 use trading_vault::events as tv_events;
 use trading_vault::registry::{Self as vreg, IntegrationRegistry};

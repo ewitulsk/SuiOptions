@@ -15,7 +15,7 @@ use exchange::balance_manager::{Self as bm, BalanceManager};
 use exchange::order;
 use exchange::registry::{Self, SettlementRegistry};
 use exchange::settlement::{Self, FillEvent};
-use exchange::whitelist;
+use whitelist::whitelist;
 
 public struct USDC has drop {}
 

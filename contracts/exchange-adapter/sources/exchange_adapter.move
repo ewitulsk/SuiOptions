@@ -34,7 +34,7 @@ use sui::vec_set::{Self, VecSet};
 use exchange::balance_manager::{Self, BalanceManager, OwnerCap};
 use exchange::registry::SettlementRegistry;
 use exchange::settlement::{Self, FillObligation};
-use exchange::whitelist::Whitelist;
+use whitelist::whitelist::Whitelist;
 use trading_vault::price::{Self, PriceAttestation};
 use trading_vault::registry::{IntegrationRegistry, VaultProtocolConfig};
 use trading_vault::vault::{Self, Appraisal, CuratorCap, Session, TradingVault};

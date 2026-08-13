@@ -18,7 +18,7 @@ use exchange::fees;
 use exchange::order;
 use exchange::registry::{Self, SettlementRegistry};
 use exchange::settlement;
-use exchange::whitelist;
+use whitelist::whitelist;
 
 /// Test quote coin.
 public struct USDC has drop {}

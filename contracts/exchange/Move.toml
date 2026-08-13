@@ -6,3 +6,4 @@ edition = "2024.beta"
 # Sui framework only — the settlement package is the sole custodian logic and
 # carries no third-party code (audit scope, spec §7.11).
 [dependencies]
+whitelist = { local = "../whitelist" }
