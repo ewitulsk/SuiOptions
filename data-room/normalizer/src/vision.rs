@@ -85,9 +85,9 @@ pub async fn normalize_funding_zip(
         .await?
         .ok_or_else(|| anyhow::anyhow!("missing zip {key}"))?;
     let mut archive = zip::ZipArchive::new(std::fs::File::open(tmp.path())?)?;
-    anyhow::ensure!(archive.len() == 1, "expected single-entry zip");
+    let entry = csv_entry_index(&mut archive, key)?;
     let mut csv = Vec::new();
-    std::io::Read::read_to_end(&mut archive.by_index(0)?, &mut csv)?;
+    std::io::Read::read_to_end(&mut archive.by_index(entry)?, &mut csv)?;
 
     let (rows, rejects) = adapters::binance_vision::parse_funding_csv(&csv[..], symbol, key)?;
     let total = rows.len() + rejects.len();
@@ -121,6 +121,29 @@ fn day_of(ns: i64) -> String {
         .to_string()
 }
 
+/// Index of the canonical CSV entry: top-level (no directory) `.csv`.
+/// Some vision zips ship a duplicate of the CSV under an internal
+/// `fsx-data/…` path (e.g. BTCUSDC-trades-2021-04.zip) — pick the bare
+/// entry, error if that isn't unambiguous.
+fn csv_entry_index<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    key: &str,
+) -> anyhow::Result<usize> {
+    let mut hits = Vec::new();
+    for i in 0..archive.len() {
+        let name = archive.by_index(i)?.name().to_string();
+        if !name.contains('/') && name.ends_with(".csv") {
+            hits.push(i);
+        }
+    }
+    anyhow::ensure!(
+        hits.len() == 1,
+        "expected exactly one top-level csv in {key}, found {}",
+        hits.len()
+    );
+    Ok(hits[0])
+}
+
 pub async fn normalize_zip(
     store: &Store,
     key: &str,
@@ -133,11 +156,7 @@ pub async fn normalize_zip(
         .await?
         .ok_or_else(|| anyhow::anyhow!("missing zip {key}"))?;
     let mut archive = zip::ZipArchive::new(std::fs::File::open(tmp.path())?)?;
-    anyhow::ensure!(
-        archive.len() == 1,
-        "expected single-entry zip, got {}",
-        archive.len()
-    );
+    let entry = csv_entry_index(&mut archive, key)?;
 
     let (instrument, partition_symbol) = market_ids(market, symbol)?;
 
@@ -157,7 +176,7 @@ pub async fn normalize_zip(
     let mut stream_err: Option<anyhow::Error> = None;
 
     {
-        let reader = archive.by_index(0)?;
+        let reader = archive.by_index(entry)?;
         adapters::binance_vision::for_each_trade(
             reader,
             &instrument,

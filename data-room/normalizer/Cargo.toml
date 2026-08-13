@@ -24,5 +24,6 @@ tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"
+zip = { workspace = true }
 parquet = { workspace = true }
 bytes = "1"
