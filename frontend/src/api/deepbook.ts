@@ -9,6 +9,7 @@
 // DEEPBOOK-FINDINGS.md §D). That event query goes through the Sui GraphQL
 // RPC (gRPC has no historical event filter). localStorage is just a cache
 // over that query, so a fresh browser profile recovers the same BM.
+import { optionCoinType } from "./client";
 
 import { useQuery } from "@tanstack/react-query";
 import { bcs } from "@mysten/sui/bcs";
@@ -161,7 +162,7 @@ export function poolRefFor(bucket: Bucket, series: Series): PoolRef | null {
   if (!bucket.deepbook_pool_id) return null;
   return {
     poolId: bucket.deepbook_pool_id,
-    baseCoinType: bucket.call_coin_type,
+    baseCoinType: optionCoinType(bucket),
     quoteCoinType: series.settlement_coin_type,
     baseDecimals: series.asset_decimals ?? 8,
     quoteDecimals: series.settlement_decimals ?? 6,

@@ -6,6 +6,7 @@
 // proceeds and cancelled funds accumulate as BM balances and "Withdraw all"
 // drains both assets back to the wallet. Taker fees are paid in the input
 // token (pay_with_deep=false, 1.25× penalty — no DEEP needed, ever).
+import { optionCoinType } from "../api/client";
 
 import { useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -62,7 +63,7 @@ export function TradePanel({ bucket, series }: Props) {
   const pool: PoolRef | null = bucket.deepbook_pool_id
     ? {
         poolId: bucket.deepbook_pool_id,
-        baseCoinType: bucket.call_coin_type,
+        baseCoinType: optionCoinType(bucket),
         quoteCoinType: series.settlement_coin_type,
         baseDecimals: baseDec,
         quoteDecimals: quoteDec,
@@ -75,7 +76,7 @@ export function TradePanel({ bucket, series }: Props) {
   const book = useOrderBook(pool, addr);
   const bmBalances = useBmBalances(pool, bm.data ?? null, addr);
   const walletQuote = useCoinBalance(addr, series.settlement_coin_type);
-  const walletBase = useCoinBalance(addr, bucket.call_coin_type);
+  const walletBase = useCoinBalance(addr, optionCoinType(bucket));
   const ownQuote = walletQuote.data ?? "0";
   const ownBase = walletBase.data ?? "0";
 

@@ -35,21 +35,58 @@ export function shortId(id: string): string {
   return id.length > 14 ? `${id.slice(0, 8)}…${id.slice(-6)}` : id;
 }
 
-const TYPE_RE = /^0x([0-9a-fA-F]{1,64})::([A-Za-z_][A-Za-z0-9_]*)::([A-Za-z_][A-Za-z0-9_]*)$/;
+const ATOM_RE = /^(0x)?([0-9a-fA-F]{1,64})::([A-Za-z_][A-Za-z0-9_]*)::([A-Za-z_][A-Za-z0-9_]*)$/;
 
 /**
- * "0x2::sui::SUI" → the canonical "0x" + 64-hex form the contracts and
- * deployments.json use. Returns null for anything that isn't a plain
- * (non-generic) struct type.
+ * Canonical "0x" + 64-hex form the contracts and deployments.json use — at
+ * EVERY nesting depth. Any-strike option coins are generic instantiations
+ * (`0x…::option_coin::OptionCall<0x…::tbtc::TBTC,…>`), so the old
+ * flat-only regex rejected exactly the markets this dashboard now needs.
+ * Returns null when any struct atom is malformed; primitives (`u64`,
+ * `vector`) pass through.
  */
 export function canonicalizeType(s: string): string | null {
-  const m = TYPE_RE.exec(s.trim());
-  if (!m) return null;
-  return `0x${m[1].toLowerCase().padStart(64, "0")}::${m[2]}::${m[3]}`;
+  let out = "";
+  let atom = "";
+  const flush = (): boolean => {
+    if (!atom) return true;
+    const trimmed = atom.trim();
+    if (!trimmed) {
+      atom = "";
+      return true;
+    }
+    if (trimmed.includes("::")) {
+      const m = ATOM_RE.exec(trimmed);
+      if (!m) return false;
+      out += `0x${m[2].toLowerCase().padStart(64, "0")}::${m[3]}::${m[4]}`;
+    } else {
+      out += trimmed; // primitive / vector keyword
+    }
+    atom = "";
+    return true;
+  };
+  for (const c of s.trim()) {
+    if (c === "<" || c === ">" || c === ",") {
+      if (!flush()) return null;
+      out += c;
+    } else if (/\s/.test(c)) {
+      if (!flush()) return null;
+    } else {
+      atom += c;
+    }
+  }
+  if (!flush()) return null;
+  return out || null;
 }
 
-/** Last path segment of a Move type ("0x…::usdc::USDC" → "USDC"). */
+/**
+ * Display name of a Move type: the ROOT struct's name, generic args
+ * stripped ("0x…::usdc::USDC" → "USDC";
+ * "0x…::option_coin::OptionCall<…>" → "OptionCall"). The old
+ * split("::").pop() walked into the generic args and produced garbage for
+ * nested types.
+ */
 export function typeName(moveType: string): string {
-  const seg = moveType.split("::").pop() ?? moveType;
-  return seg.split("<")[0];
+  const root = moveType.split("<")[0];
+  return root.split("::").pop() ?? moveType;
 }

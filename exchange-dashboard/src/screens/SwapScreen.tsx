@@ -7,7 +7,7 @@ import { formatUnits, parseUnits, toBigint, typeName } from "../format";
 import { useExchangeInfo } from "../hooks/useExchangeInfo";
 import { marketsById, tokenUniverse, useMarkets } from "../hooks/useMarkets";
 import { useCoinMetadataMap } from "../hooks/useCoinMetadata";
-import { useWalletBalances } from "../hooks/useCoinBalance";
+import { balanceKey, useWalletBalances } from "../hooks/useCoinBalance";
 import { useDebounced, useRouteQuote } from "../hooks/useRouteQuote";
 import { buildRouteFillTx } from "../tx/routeFill";
 import { useSubmitTransaction } from "../tx/submit";
@@ -67,7 +67,7 @@ export function SwapScreen() {
   const routedIn = quote ? toBigint(quote.plan.input) : null;
   const minOut = expectedOut !== null ? (expectedOut * (10_000n - slippageBps)) / 10_000n : null;
 
-  const balance = from && balances ? (balances.get(from) ?? 0n) : null;
+  const balance = from && balances ? (balances.get(balanceKey(from)) ?? 0n) : null;
   const insufficient =
     balance !== null && debouncedRaw !== null && account ? balance < debouncedRaw : false;
 

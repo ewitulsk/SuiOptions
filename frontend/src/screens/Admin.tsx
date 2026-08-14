@@ -8,6 +8,7 @@
 //   - per-bucket invalidate / revalidate / cleanup        (bucket.move)
 //   - set protocol fee (set_fee_bps)                       (admin.move)
 //   - withdraw treasury fees / (re)create the treasury     (treasury.move)
+import { optionCoinType } from "../api/client";
 
 import { useMemo, useState } from "react";
 import { Navigate } from "react-router-dom";
@@ -229,7 +230,7 @@ export function Admin() {
                                   bucketId: bucket.bucket_id,
                                   underlyingCoinType: series.asset_coin_type,
                                   settlementCoinType: series.settlement_coin_type,
-                                  callCoinType: bucket.call_coin_type,
+                                  callCoinType: optionCoinType(bucket),
                                   reason,
                                 }),
                               "bucket invalidated",
@@ -252,7 +253,7 @@ export function Admin() {
                                   bucketId: bucket.bucket_id,
                                   underlyingCoinType: series.asset_coin_type,
                                   settlementCoinType: series.settlement_coin_type,
-                                  callCoinType: bucket.call_coin_type,
+                                  callCoinType: optionCoinType(bucket),
                                   reason,
                                 }),
                               "bucket revalidated",
@@ -276,7 +277,7 @@ export function Admin() {
                                   bucketId: bucket.bucket_id,
                                   underlyingCoinType: series.asset_coin_type,
                                   settlementCoinType: series.settlement_coin_type,
-                                  callCoinType: bucket.call_coin_type,
+                                  callCoinType: optionCoinType(bucket),
                                 }),
                               "bucket cleaned up",
                             )
