@@ -203,7 +203,7 @@ resource "aws_security_group" "data_room" {
 variable "data_room_instance_type" {
   description = "EC2 instance type for the data-room host. t3.small is enough: the collector is IO-light and batch jobs are bounded; isolation from the protocol hosts is the point, not headroom."
   type        = string
-  default     = "t3.small"
+  default     = "t3.medium"
 }
 
 variable "data_room_root_volume_gb" {
