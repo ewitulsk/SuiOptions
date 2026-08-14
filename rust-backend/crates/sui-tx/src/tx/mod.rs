@@ -23,6 +23,7 @@ pub mod execute_write;
 pub mod execute_write_put;
 pub mod funding;
 pub mod mm_collateral;
+pub mod option_coin;
 pub mod oracle;
 pub mod pyth_update;
 pub mod signer;

@@ -497,4 +497,51 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
     }
+
+    /// The any-strike variant of the 0x-prefix regression: nested generic
+    /// coin types (`OptionCall<…>`) carry addresses at EVERY depth, so an
+    /// outer-only canonicalization leaves the inner addresses unequal and
+    /// the pool is silently dropped again. Guards the recursive
+    /// `canonicalize_move_type` (SO-394).
+    #[test]
+    fn deepbook_pool_resolves_for_nested_generic_call_types() {
+        let pkg = "93c0cc25b8a167a537e3f116cdc339a61e7dd25355cc3c6f640362f41d0f6d78";
+        let tok = "9b72409a9f38a8784420d17577aa6dbe5aa2ab4224cd04c44d8b515f6c97ba86";
+        let call_chain = format!(
+            "{pkg}::option_coin::OptionCall<{tok}::tbtc::TBTC,{tok}::tusdc::TUSDC,\
+{pkg}::enc0::B02,{pkg}::enc1::BFA,{pkg}::enc1::BF0,{pkg}::enc1::B80,{pkg}::enc0::B00,\
+{pkg}::enc0::B00,{pkg}::enc0::B00,{pkg}::enc0::B0A,{pkg}::enc0::B0B,{pkg}::enc0::B02>"
+        );
+        let usdc_chain = format!("{tok}::tusdc::TUSDC");
+        // Event-side rendering: 0x at every depth.
+        let call_0x = format!(
+            "0x{pkg}::option_coin::OptionCall<0x{tok}::tbtc::TBTC,0x{tok}::tusdc::TUSDC,\
+0x{pkg}::enc0::B02,0x{pkg}::enc1::BFA,0x{pkg}::enc1::BF0,0x{pkg}::enc1::B80,0x{pkg}::enc0::B00,\
+0x{pkg}::enc0::B00,0x{pkg}::enc0::B00,0x{pkg}::enc0::B0A,0x{pkg}::enc0::B0B,0x{pkg}::enc0::B02>"
+        );
+        let usdc_0x = format!("0x{usdc_chain}");
+
+        let store = Store::new();
+        store.ingest(
+            protocol_types::events::ChainEvent::BucketCreated(BucketCreated {
+                bucket_id: ObjectId::new([0x44; 32]),
+                asset_type: AssetType::new("tbtc"),
+                settlement_type: AssetType::new(usdc_chain),
+                call_type: AssetType::new(call_chain),
+                expiry_ms: 1,
+                strike: 1,
+                strike_scale: 0,
+            }),
+            1,
+        );
+        let local = Default::default();
+        let ev = resolve_deepbook_pool(&store, &local, partial(&call_0x, &usdc_0x))
+            .expect("nested generic pool must resolve");
+        match ev {
+            protocol_types::events::ChainEvent::DeepBookPoolCreated(p) => {
+                assert_eq!(p.bucket_id, ObjectId::new([0x44; 32]));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
 }

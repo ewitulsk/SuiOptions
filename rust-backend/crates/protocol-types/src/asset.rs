@@ -34,19 +34,58 @@ impl AssetType {
     }
 }
 
-/// `0x`-prefix + lowercase + 64-pad the address segment of a Move type
-/// string. See [`AssetType::to_canonical`]. Free-standing so callers
-/// holding a bare `&str` coin type can canonicalize without wrapping.
+/// `0x`-prefix + lowercase + 64-pad EVERY address segment of a Move type
+/// string — at any nesting depth. See [`AssetType::to_canonical`].
+/// Free-standing so callers holding a bare `&str` coin type can
+/// canonicalize without wrapping.
 ///
-/// Returns the input unchanged if it has no `::` (defensive — shouldn't
-/// happen for a real coin type).
+/// Generic instantiations matter since any-strike option coins
+/// (`0x…::option_coin::OptionCall<0x…::tbtc::TBTC, …>`): chain `TypeName`s
+/// arrive with bare addresses at every depth while event/RPC strings carry
+/// `0x` at every depth — an outer-only canonicalization makes the two
+/// forms unequal and silently breaks every map keyed on coin types
+/// (DeepBook pool resolution, appraisal legs, wallet-holdings matching).
+/// Whitespace is dropped (", "-separated display forms normalize to the
+/// same bytes as the chain's space-less rendering).
+///
+/// Non-type atoms (primitives, `vector`) and anything that doesn't look
+/// like `addr::module::Name` pass through unchanged.
 pub fn canonicalize_move_type(s: &str) -> String {
-    match s.split_once("::") {
-        Some((addr, rest)) => {
-            let hex = addr.strip_prefix("0x").unwrap_or(addr).to_ascii_lowercase();
-            format!("0x{hex:0>64}::{rest}")
+    fn flush(atom: &mut String, out: &mut String) {
+        if atom.is_empty() {
+            return;
         }
-        None => s.to_string(),
+        out.push_str(&canonicalize_atom(atom));
+        atom.clear();
+    }
+    let mut out = String::with_capacity(s.len() + 64);
+    let mut atom = String::new();
+    for c in s.chars() {
+        match c {
+            '<' | '>' | ',' => {
+                flush(&mut atom, &mut out);
+                out.push(c);
+            }
+            c if c.is_whitespace() => flush(&mut atom, &mut out),
+            _ => atom.push(c),
+        }
+    }
+    flush(&mut atom, &mut out);
+    out
+}
+
+/// Canonicalize one `addr::module::Name` atom; pass through anything else.
+fn canonicalize_atom(atom: &str) -> String {
+    match atom.split_once("::") {
+        Some((addr, rest)) if !addr.is_empty() => {
+            let hex = addr.strip_prefix("0x").unwrap_or(addr);
+            if hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                format!("0x{:0>64}::{rest}", hex.to_ascii_lowercase())
+            } else {
+                atom.to_string()
+            }
+        }
+        _ => atom.to_string(),
     }
 }
 
@@ -101,5 +140,38 @@ mod tests {
     fn canonical_is_idempotent() {
         let once = canonicalize_move_type("0x2::sui::SUI");
         assert_eq!(canonicalize_move_type(&once), once);
+    }
+
+    #[test]
+    fn canonical_recurses_into_generic_type_args() {
+        // Chain-TypeName form: bare addresses at EVERY depth.
+        let pkg = "ab".repeat(32);
+        let tok = "9b72409a9f38a8784420d17577aa6dbe5aa2ab4224cd04c44d8b515f6c97ba86";
+        let chain = format!(
+            "{pkg}::option_coin::OptionCall<{tok}::tbtc::TBTC,2::sui::SUI,{pkg}::enc0::B02>"
+        );
+        // Event/RPC form: 0x-prefixed at every depth, possibly ", "-spaced.
+        let rpc = format!(
+            "0x{pkg}::option_coin::OptionCall<0x{tok}::tbtc::TBTC, 0x{:0>64}::sui::SUI, 0x{pkg}::enc0::B02>",
+            "2"
+        );
+        let want = format!(
+            "0x{pkg}::option_coin::OptionCall<0x{tok}::tbtc::TBTC,0x{:0>64}::sui::SUI,0x{pkg}::enc0::B02>",
+            "2"
+        );
+        // The SO-163 regression class: both forms must collapse to the
+        // same canonical bytes or every coin-type map lookup goes dark.
+        assert_eq!(canonicalize_move_type(&chain), want);
+        assert_eq!(canonicalize_move_type(&rpc), want);
+        assert_eq!(canonicalize_move_type(&want), want);
+    }
+
+    #[test]
+    fn canonical_passes_primitives_and_vectors_through() {
+        assert_eq!(canonicalize_move_type("u64"), "u64");
+        assert_eq!(
+            canonicalize_move_type("vector<0x2::sui::SUI>"),
+            format!("vector<0x{:0>64}::sui::SUI>", "2")
+        );
     }
 }

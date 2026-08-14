@@ -127,8 +127,8 @@ async fn main() -> Result<()> {
                 .token_spec(&settlement)
                 .map(|s| s.decimals)
                 .unwrap_or(9);
-            // Drive the same per-roll codegen→publish→create_bucket pipeline
-            // the scheduler uses, so manual buckets get per-bucket option coins.
+            // Drive the same publish-free any-strike create path the
+            // scheduler uses (runtime currencies via coin_registry).
             let grid = StrikeGrid {
                 start_strike,
                 strike_interval,
@@ -154,8 +154,14 @@ async fn main() -> Result<()> {
             };
             // The manual tool rolls buckets only; pool creation stays with
             // the scheduler (pass None).
-            let out =
-                roller::submit(&wrap, package, admin_cap, &plan, None, None, cli.gas_budget).await?;
+            let roll_ctx = sui_tx::tx::coin_pkg::AnyStrikeContext {
+                package,
+                bucket_registry: snapshot.bucket_registry()?,
+                whitelist: snapshot
+                    .whitelist_object()?
+                    .context("whitelist missing from token-info")?,
+            };
+            let out = roller::submit(&wrap, &roll_ctx, &plan, None, None, cli.gas_budget).await?;
             println!("✓ create-buckets digest: {}", out.digest);
             for id in &out.bucket_ids {
                 println!("  bucket: {id}");

@@ -365,7 +365,7 @@ async fn redeem_pass(p: &SimParams, wrap: &SuiClientWrapper) -> Result<()> {
         }
         let inner = ty
             .split_once('<')
-            .map(|(_, r)| r.trim_end_matches('>'))
+            .and_then(|(_, r)| r.strip_suffix('>'))
             .unwrap_or_default();
         let parts: Vec<&str> = split_top(inner);
         if parts.len() != 3 {

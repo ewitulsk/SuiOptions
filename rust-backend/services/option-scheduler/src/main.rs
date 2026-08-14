@@ -78,6 +78,15 @@ async fn main() -> Result<()> {
     // `[vault_template]` already leaves it.
     let vault_package = snapshot.vault().map(|v| v.package()).transpose()?;
     let admin_cap = snapshot.admin_cap()?;
+    // Any-strike creation context (SO-394): rolls are permissionless PTBs
+    // against the shared registries; no AdminCap on the bucket path.
+    let roll_ctx = sui_tx::tx::coin_pkg::AnyStrikeContext {
+        package,
+        bucket_registry: snapshot.bucket_registry()?,
+        whitelist: snapshot
+            .whitelist_object()?
+            .ok_or_else(|| anyhow!("whitelist missing from token-info — rolls are ingress-gated"))?,
+    };
     let wrap = SuiClientWrapper::connect(&secrets, cli.network).await?;
 
     // AdminCap belongs to the deployer only — exchange enforces the same check
@@ -360,8 +369,7 @@ async fn main() -> Result<()> {
             &pair_meta,
             &oracle,
             &wrap,
-            package,
-            admin_cap,
+            &roll_ctx,
             &db_pool,
             deepbook_cfg.as_ref(),
             vault_allowlist.as_ref(),
@@ -592,8 +600,7 @@ async fn tick_once(
     pairs: &[PairMeta],
     oracle: &oracle_client::OracleClient,
     wrap: &SuiClientWrapper,
-    package: sui_types::base_types::ObjectID,
-    admin_cap: sui_types::base_types::ObjectID,
+    roll_ctx: &sui_tx::tx::coin_pkg::AnyStrikeContext,
     db_pool: &db::DbPool,
     deepbook: Option<&DeepBookPoolCfg>,
     vault_allowlist: Option<&roller::VaultAllowlist>,
@@ -777,8 +784,7 @@ async fn tick_once(
         // ── Phase 2 step 3: submit + classify ──────────────────────
         match roller::submit(
             wrap,
-            package,
-            admin_cap,
+            roll_ctx,
             &plan,
             pool_creation.as_ref(),
             vault_allowlist,

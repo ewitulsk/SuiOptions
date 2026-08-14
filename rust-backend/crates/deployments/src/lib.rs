@@ -254,6 +254,10 @@ pub struct PackageInfo {
     /// mutates it. Absent on records predating the standalone package.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub whitelist: Option<WhitelistInfo>,
+    /// Shared `bucket_registry::BucketRegistry` (any-strike derived bucket
+    /// UIDs, SO-393). Absent on records predating the any-strike overhaul.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_registry_id: Option<String>,
 }
 
 /// The standalone whitelist package and the two objects its `init`
@@ -475,6 +479,16 @@ impl NetworkDeployment {
             .as_ref()
             .ok_or_else(|| anyhow!("no exchange block in deployments.json — run --deploy-exchange"))
     }
+    /// Shared BucketRegistry for any-strike creation. Errors on records
+    /// predating the overhaul — rolls need it.
+    pub fn bucket_registry(&self) -> Result<ObjectID> {
+        let id = self
+            .package_info
+            .bucket_registry_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("bucketRegistryId missing from deployments.json — redeploy"))?;
+        ObjectID::from_str(id).context("parsing bucketRegistryId")
+    }
     /// The standalone ingress whitelist record. Errors on records
     /// predating the standalone package — everything gated needs it.
     pub fn whitelist(&self) -> Result<&WhitelistInfo> {
@@ -624,6 +638,7 @@ mod tests {
                 quote_signer_id: None,
                 exchange: None,
                 whitelist: None,
+            bucket_registry_id: None,
             },
             token_info: BTreeMap::new(),
         };

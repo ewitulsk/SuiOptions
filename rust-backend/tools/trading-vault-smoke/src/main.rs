@@ -486,7 +486,7 @@ async fn main() -> Result<()> {
                 .map(|t| t.to_canonical_string(/* with_prefix */ true))
                 .unwrap_or_default();
             if let Some((_, inner)) = t.split_once('<') {
-                let inner = inner.trim_end_matches('>');
+                let inner = inner.strip_suffix('>').unwrap_or(inner);
                 let parts: Vec<&str> = inner.splitn(2, ',').map(str::trim).collect();
                 if parts.len() != 2
                     || protocol_types::asset::canonicalize_move_type(parts[1])

@@ -1,27 +1,24 @@
 //! Bucket-roll executor.
 //!
-//! A roll now publishes a fresh option-coin package and creates one bucket per
-//! strike, each backed by its own fungible `Coin<Call>`:
+//! A roll is now a single publish-free PTB (SO-393/SO-394): for every
+//! strike, `bucket::create_bucket_any_strike<U, S, D0..D9>` registers the
+//! option coin's currency at runtime via `sui::coin_registry` (no OTW coin
+//! package, no codegen, no in-process compile, no TreasuryCap harvesting)
+//! and shares the bucket; pool creation rides in the same PTB. The
+//! scheduler is now just the first — not the only — bucket creator: users
+//! create arbitrary strikes through the same permissionless entry point,
+//! and the grid demotes to a liquidity-seeding policy.
 //!
-//!   1. codegen N One-Time-Witness coin modules for the strike grid,
-//!   2. compile the package in-process (`sui-move-build`),
-//!   3. publish it and harvest the `TreasuryCap`s its inits minted,
-//!   4. `bucket::create_bucket<U, S, Call_i>` once per cap in a single PTB,
-//!   5. pull every created bucket id out of `ObjectChanges` so we can log them.
-//!
-//! Honors `--dry-run`: the caller logs the args it *would* have sent and never
-//! reaches `submit`.
+//! Honors `--dry-run`: the caller logs the args it *would* have sent and
+//! never reaches `submit`.
 
 use anyhow::{Context, Result};
 use sui_tx::chain::{created_objects, ChangedObject, ExecutedTransaction};
-use sui_move_build::BuildConfig;
 use sui_types::base_types::ObjectID;
 use tracing::{debug, info, warn};
 
 use sui_tx::sui_client::SuiClientWrapper;
-use sui_tx::tx::coin_pkg::{self, CreateBucketSpec};
-
-use crate::codegen;
+use sui_tx::tx::coin_pkg::{self, AnyStrikeSpec};
 
 /// Which option product a roll creates. Calls publish `call_<i>` coin modules
 /// and `bucket::create_bucket`; puts publish `put_<i>` modules and
@@ -152,16 +149,15 @@ pub struct VaultAllowlist {
 
 pub async fn submit(
     wrap: &SuiClientWrapper,
-    package: ObjectID,
-    admin_cap: ObjectID,
+    ctx: &coin_pkg::AnyStrikeContext,
     plan: &RollPlan,
     pools: Option<&coin_pkg::PoolCreation>,
     vault_allowlist: Option<&VaultAllowlist>,
     gas_budget: u64,
 ) -> Result<RollOutcome> {
     debug!(
-        %package,
-        %admin_cap,
+        package = %ctx.package,
+        bucket_registry = %ctx.bucket_registry,
         underlying = %plan.underlying_type,
         settlement = %plan.settlement_type,
         expiry_ms = plan.expiry_ms,
@@ -170,78 +166,30 @@ pub async fn submit(
         "submitting roll"
     );
 
-    // 1. codegen + 2. compile the per-roll option-coin package.
-    let label = format!(
-        "{}-{}@{}",
-        plan.underlying_symbol, plan.settlement_symbol, plan.expiry_ms
-    );
-    let pkg = match plan.product_type {
-        ProductType::Call => {
-            codegen::generate(plan.strikes.len() as u64, plan.underlying_decimals, &label)
-        }
-        ProductType::Put => {
-            codegen::generate_puts(plan.strikes.len() as u64, plan.underlying_decimals, &label)
-        }
-    }
-    .context("generating coin package")?;
-    let compiled = BuildConfig::new_for_testing()
-        .build(&pkg.dir)
-        .with_context(|| {
-            format!("compiling generated coin package at {}", pkg.dir.display())
-        });
-    // Always clean the temp dir, success or failure.
-    let compiled = match compiled {
-        Ok(c) => c,
-        Err(e) => {
-            pkg.cleanup();
-            return Err(e);
-        }
-    };
-    let modules = compiled.get_package_bytes(/* with_unpublished_deps */ false);
-    let deps = compiled.get_dependency_storage_package_ids();
-    pkg.cleanup();
-
-    // 3. publish + harvest the TreasuryCaps.
-    let published =
-        coin_pkg::publish_coin_package(&wrap.client, &wrap.signer, modules, deps, gas_budget)
-            .await
-            .context("publishing coin package")?;
-    info!(
-        coin_package = %published.package_id,
-        digest = %published.digest,
-        caps = published.caps.len(),
-        "coin package published"
-    );
-
-    // 4. pair each cap to its strike, then create the buckets and (when a
-    //    DeepBook deployment is configured) their pools in one atomic PTB.
-    let specs = pair_caps_to_strikes(plan, &published.caps)?;
-    let resp = match plan.product_type {
-        ProductType::Call => {
-            coin_pkg::create_buckets_and_pools(
-                &wrap.client,
-                &wrap.signer,
-                package,
-                admin_cap,
-                &specs,
-                pools,
-                gas_budget,
-            )
-            .await
-        }
-        ProductType::Put => {
-            coin_pkg::create_put_buckets_and_pools(
-                &wrap.client,
-                &wrap.signer,
-                package,
-                admin_cap,
-                &specs,
-                pools,
-                gas_budget,
-            )
-            .await
-        }
-    }
+    // One publish-free PTB: create + share every strike's bucket (currency
+    // registered at runtime inside the call), plus pools when configured.
+    let specs: Vec<AnyStrikeSpec> = plan
+        .strikes
+        .iter()
+        .map(|&strike| AnyStrikeSpec {
+            underlying_type: plan.underlying_type.clone(),
+            settlement_type: plan.settlement_type.clone(),
+            expiry_ms: plan.expiry_ms,
+            strike,
+            strike_scale: plan.strike_scale,
+            decimals: plan.underlying_decimals,
+            is_put: plan.product_type == ProductType::Put,
+        })
+        .collect();
+    let resp = coin_pkg::create_any_strike_buckets(
+        &wrap.client,
+        &wrap.signer,
+        ctx,
+        &specs,
+        pools,
+        gas_budget,
+    )
+    .await
     .context("creating buckets")?;
 
     let digest = sui_tx::tx::tx_digest(&resp).to_string();
@@ -313,56 +261,15 @@ async fn allowlist_pools(
     .await
 }
 
-/// Pair each harvested `TreasuryCap` to the strike its module was generated
-/// for. The cap's call type encodes the module index (`…::call_<i>::CALL_<I>`),
-/// which maps to `strikes[i]`.
-fn pair_caps_to_strikes(
-    plan: &RollPlan,
-    caps: &[coin_pkg::HarvestedCap],
-) -> Result<Vec<CreateBucketSpec>> {
-    if caps.len() != plan.strikes.len() {
-        anyhow::bail!(
-            "harvested {} treasury caps but grid wanted {} buckets",
-            caps.len(),
-            plan.strikes.len()
-        );
-    }
-    // Calls encode the strike index as `…::call_<i>::CALL_<I>`; puts as
-    // `…::put_<i>::PUT_<I>`. Pick the matching parser for the plan's product.
-    let index_of: fn(&str) -> Result<u64> = match plan.product_type {
-        ProductType::Call => codegen::call_index,
-        ProductType::Put => codegen::put_index,
-    };
-    let mut specs = Vec::with_capacity(caps.len());
-    for cap in caps {
-        let i = index_of(&cap.call_type)
-            .with_context(|| format!("indexing cap {}", cap.call_type))?;
-        if i as usize >= plan.strikes.len() {
-            anyhow::bail!(
-                "cap index {i} out of range for grid count {}",
-                plan.strikes.len()
-            );
-        }
-        specs.push(CreateBucketSpec {
-            underlying_type: plan.underlying_type.clone(),
-            settlement_type: plan.settlement_type.clone(),
-            call_type: cap.call_type.clone(),
-            cap_ref: cap.cap_ref,
-            expiry_ms: plan.expiry_ms,
-            strike: plan.strikes[i as usize],
-            strike_scale: plan.strike_scale,
-        });
-    }
-    Ok(specs)
-}
-
 /// Pull `bucket::Bucket` ObjectIDs out of a tx's ObjectChanges, in the
 /// order they appear. The chain emits one Created per strike for a
 /// successful `new_call_option`, so the result lines up with the strike
 /// grid the planner submitted.
 pub(crate) fn extract_bucket_ids(resp: &ExecutedTransaction) -> Vec<ObjectID> {
     debug!("extracting bucket ids from object changes");
-    created_of(&created_objects(resp), "bucket", "Bucket")
+    let mut ids = created_of(&created_objects(resp), "bucket", "Bucket");
+    ids.extend(created_of(&created_objects(resp), "put_bucket", "PutBucket"));
+    ids
 }
 
 #[cfg(test)]

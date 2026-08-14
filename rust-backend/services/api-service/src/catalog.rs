@@ -53,6 +53,15 @@ impl TokenCatalog {
     pub fn lookup(&self, coin_type: &str) -> Option<&TokenMeta> {
         self.by_coin_type.get(&normalize_coin_type(coin_type))
     }
+
+    /// Reverse lookup for the spec endpoint: catalog symbol → chain-form
+    /// coin type. Case-insensitive on the ticker.
+    pub fn by_symbol(&self, symbol: &str) -> Option<&str> {
+        self.by_coin_type
+            .iter()
+            .find(|(_, m)| m.symbol.eq_ignore_ascii_case(symbol))
+            .map(|(k, _)| k.as_str())
+    }
 }
 
 /// Normalize a Move type string so address-format differences don't break

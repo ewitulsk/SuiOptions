@@ -104,6 +104,146 @@ fn parse_publish(resp: &ExecutedTransaction) -> Result<CoinPackagePublish> {
     Ok(CoinPackagePublish { package_id, digest, caps })
 }
 
+/// Shared objects every any-strike creation references (SO-394).
+pub struct AnyStrikeContext {
+    /// The options_core package (targets `bucket` / `put_bucket`).
+    pub package: ObjectID,
+    /// Shared `bucket_registry::BucketRegistry` (derived bucket UIDs).
+    pub bucket_registry: ObjectID,
+    /// Shared `whitelist::Whitelist` (ingress gate).
+    pub whitelist: ObjectID,
+}
+
+/// One any-strike bucket to create — no treasury cap, no coin package: the
+/// currency registers at runtime inside `create_*_any_strike`.
+pub struct AnyStrikeSpec {
+    pub underlying_type: String,
+    pub settlement_type: String,
+    pub expiry_ms: u64,
+    pub strike: u128,
+    pub strike_scale: u8,
+    /// Option-coin display decimals (the underlying's).
+    pub decimals: u8,
+    pub is_put: bool,
+}
+
+impl AnyStrikeSpec {
+    /// The coin type this spec's bucket will mint — computable before the
+    /// bucket exists (as is its derived bucket ID).
+    pub fn option_coin_tag(&self, package: ObjectID) -> Result<TypeTag> {
+        let u = TypeTag::from_str(&self.underlying_type)
+            .with_context(|| format!("parsing underlying {}", self.underlying_type))?;
+        let s = TypeTag::from_str(&self.settlement_type)
+            .with_context(|| format!("parsing settlement {}", self.settlement_type))?;
+        let minutes = super::option_coin::expiry_minutes(self.expiry_ms)?;
+        let (sig, exp) = super::option_coin::normalize_strike(self.strike, self.strike_scale)?;
+        super::option_coin::option_coin_tag(package, self.is_put, &u, &s, minutes, sig, exp)
+    }
+}
+
+/// Create every spec's bucket (and, when `pools` is set, a DeepBook pool per
+/// CALL bucket) in one publish-free PTB: per spec —
+/// `create_*_any_strike<U, S, D0..D9>` → `share_*` (+ pool). Permissionless
+/// on-chain: no AdminCap, no TreasuryCap harvesting, no prior transaction.
+pub async fn create_any_strike_buckets(
+    client: &ChainClient,
+    signer: &Signer,
+    ctx: &AnyStrikeContext,
+    specs: &[AnyStrikeSpec],
+    pools: Option<&PoolCreation>,
+    gas_budget: u64,
+) -> Result<ExecutedTransaction> {
+    use super::option_coin as oc;
+    if specs.is_empty() {
+        return Err(anyhow!("create_any_strike_buckets called with no specs"));
+    }
+    info!(
+        package = %ctx.package,
+        buckets = specs.len(),
+        pools = pools.is_some(),
+        "building any-strike create PTB"
+    );
+    let mut pt = ProgrammableTransactionBuilder::new();
+
+    let breg = pt.obj(shared_object_arg(client, ctx.bucket_registry, true).await?)?;
+    let creg = pt.obj(
+        shared_object_arg(client, ObjectID::from_str(oc::COIN_REGISTRY_OBJECT)?, true).await?,
+    )?;
+    let wl = pt.obj(shared_object_arg(client, ctx.whitelist, false).await?)?;
+    let clock =
+        pt.obj(shared_object_arg(client, ObjectID::from_str(oc::CLOCK_OBJECT)?, false).await?)?;
+
+    let pool_ctx = match pools {
+        Some(p) => {
+            let registry = pt.obj(shared_object_arg(client, p.registry, true).await?)?;
+            let tick = pt.pure(&p.tick)?;
+            let lot = pt.pure(&p.lot)?;
+            let min = pt.pure(&p.min)?;
+            let fee_coins =
+                split_deep_fees(client, signer, &mut pt, &p.deep_coin_type, p.fee, specs.len())
+                    .await?;
+            Some((p.deepbook_package, registry, tick, lot, min, fee_coins))
+        }
+        None => None,
+    };
+
+    let pool_module = Identifier::new("pool").unwrap();
+    let create_pool_fn = Identifier::new("create_permissionless_pool").unwrap();
+
+    for (i, spec) in specs.iter().enumerate() {
+        let u_tag = TypeTag::from_str(&spec.underlying_type)
+            .with_context(|| format!("parsing underlying type {}", spec.underlying_type))?;
+        let s_tag = TypeTag::from_str(&spec.settlement_type)
+            .with_context(|| format!("parsing settlement type {}", spec.settlement_type))?;
+        let minutes = oc::expiry_minutes(spec.expiry_ms)?;
+        let (sig, exp) = oc::normalize_strike(spec.strike, spec.strike_scale)?;
+
+        let mut create_targs = vec![u_tag.clone(), s_tag.clone()];
+        create_targs.extend(oc::marker_type_tags(ctx.package, minutes, sig, exp)?);
+        let call_tag =
+            oc::option_coin_tag(ctx.package, spec.is_put, &u_tag, &s_tag, minutes, sig, exp)?;
+
+        let (module, create_fn, share_fn) = if spec.is_put {
+            ("put_bucket", "create_put_bucket_any_strike", "share_put_bucket")
+        } else {
+            ("bucket", "create_bucket_any_strike", "share_bucket")
+        };
+        let expiry_arg = pt.pure(&spec.expiry_ms)?;
+        let strike_arg = pt.pure(&spec.strike)?;
+        let scale_arg = pt.pure(&spec.strike_scale)?;
+        let decimals_arg = pt.pure(&spec.decimals)?;
+
+        let bucket = pt.programmable_move_call(
+            ctx.package,
+            Identifier::new(module).unwrap(),
+            Identifier::new(create_fn).unwrap(),
+            create_targs,
+            vec![breg, creg, wl, expiry_arg, strike_arg, scale_arg, decimals_arg, clock],
+        );
+        pt.programmable_move_call(
+            ctx.package,
+            Identifier::new(module).unwrap(),
+            Identifier::new(share_fn).unwrap(),
+            vec![u_tag, s_tag.clone(), call_tag.clone()],
+            vec![bucket],
+        );
+
+        if let Some((db_pkg, registry, tick, lot, min, fee_coins)) = &pool_ctx {
+            pt.programmable_move_call(
+                *db_pkg,
+                pool_module.clone(),
+                create_pool_fn.clone(),
+                vec![call_tag, s_tag],
+                vec![*registry, *tick, *lot, *min, fee_coins[i]],
+            );
+        }
+    }
+
+    let resp = submit_ptb(client, signer, pt, gas_budget, "create_any_strike_buckets").await?;
+    debug!(digest = %super::tx_digest(&resp), "create_any_strike_buckets succeeded");
+    Ok(resp)
+}
+
 /// One bucket to create: its asset triple, the cap that backs its option
 /// coin, and its on-chain parameters.
 pub struct CreateBucketSpec {

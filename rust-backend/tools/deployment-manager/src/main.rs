@@ -734,6 +734,7 @@ async fn deploy_one(
             package_id: publish.package_id.to_string(),
             admin_cap_id: publish.admin_cap_id.to_string(),
             protocol_config_id: publish.protocol_config_id.to_string(),
+            bucket_registry_id: Some(publish.bucket_registry_id.to_string()),
             upgrade_cap_id: publish.upgrade_cap_id.to_string(),
             treasury_id,
             publish_digest: publish.digest,

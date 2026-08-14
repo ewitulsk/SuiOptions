@@ -15,7 +15,11 @@
 //!   backfill_pools --network testnet \
 //!     --token-info-url https://sui-options.com/staging/token-info \
 //!     --settlement TUSDC --base-decimals 8 \
-//!     --call-types 0x..::call_0::CALL_0,0x..::call_3::CALL_3
+//!     --call-types '0x..::option_coin::OptionCall<..>' \
+//!     --call-types '0x..::option_coin::OptionCall<..>'
+//!
+//! (`--call-types` is repeatable, not comma-separated: any-strike coin
+//! types contain commas.)
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -58,7 +62,9 @@ struct Cli {
     base_decimals: u8,
 
     /// Comma-separated Call coin types to create pools for.
-    #[arg(long, value_delimiter = ',')]
+    /// Repeatable (`--call-types A --call-types B`): generic any-strike coin
+    /// types contain commas, so a comma delimiter would split them apart.
+    #[arg(long)]
     call_types: Vec<String>,
 }
 

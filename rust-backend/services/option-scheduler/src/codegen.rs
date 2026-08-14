@@ -1,16 +1,11 @@
-//! Per-roll option-coin package codegen.
+//! Vault-share coin package codegen.
 //!
-//! Every bucket set gets its own freshly-published Move package containing one
-//! One-Time-Witness coin module per strike (`call_0..call_{count-1}`). Each
-//! module's `init` registers a fungible currency via `coin::create_currency`
-//! and hands the resulting `TreasuryCap` to the publisher (the scheduler),
-//! which then wires it into a bucket via `bucket::create_bucket`.
-//!
-//! Choosing to publish a package per roll is what lets us drop Sui's
-//! pre-deployed "marker" registry entirely: we mint genuine OTW coin types at
-//! runtime by compiling and publishing on the fly. The OTW rule (struct name ==
-//! MODULE uppercased, created only in `init`) is satisfied by the generated
-//! `CALL_<i>` struct in module `call_<i>`.
+//! The per-roll CALL/PUT coin packages this module used to generate are
+//! RETIRED (SO-393/SO-394): option coins are now runtime currencies
+//! registered through `sui::coin_registry` inside
+//! `bucket::create_bucket_any_strike` — no publish, no OTW, no caps to
+//! harvest. What remains is the vault-share (`vshare::VSHARE`) OTW package,
+//! which is still a genuine one-coin-per-vault publish at `create_vault`.
 
 use std::fs;
 use std::path::PathBuf;
@@ -35,68 +30,6 @@ impl GeneratedPackage {
     pub fn cleanup(&self) {
         let _ = fs::remove_dir_all(&self.dir);
     }
-}
-
-/// Generate a coin package with `count` OTW modules under a fresh temp dir.
-///
-/// `decimals` is the option coin's display decimals — set to the underlying's
-/// decimals so one option-coin smallest-unit maps to one underlying
-/// smallest-unit (matching the on-chain `write_amount` semantics). `label` is
-/// a human tag woven into the coin name (e.g. `"BTC-USDC@1750000000000"`).
-pub fn generate(count: u64, decimals: u8, label: &str) -> Result<GeneratedPackage> {
-    assert!(count > 0, "coin package codegen requires count > 0");
-    let unique = format!(
-        "opt-coinpkg-{}-{}",
-        std::process::id(),
-        DIR_SEQ.fetch_add(1, Ordering::Relaxed)
-    );
-    let dir = std::env::temp_dir().join(unique);
-    let sources = dir.join("sources");
-    fs::create_dir_all(&sources)
-        .with_context(|| format!("creating coin-package dir {}", sources.display()))?;
-
-    fs::write(dir.join("Move.toml"), move_toml())
-        .with_context(|| format!("writing Move.toml in {}", dir.display()))?;
-
-    let safe_label = sanitize_label(label);
-    for i in 0..count {
-        let src = module_source(i, decimals, &safe_label);
-        let path = sources.join(format!("call_{i}.move"));
-        fs::write(&path, src)
-            .with_context(|| format!("writing module {}", path.display()))?;
-    }
-
-    Ok(GeneratedPackage { dir })
-}
-
-/// Cash-secured-put twin of [`generate`]: emits `put_<i>/PUT_<i>` OTW coin
-/// modules (symbol `oPUT<i>`) instead of the `call_<i>` grid. Same on-disk
-/// shape and `decimals`/`label` semantics; paired back to strikes via
-/// [`put_index`].
-pub fn generate_puts(count: u64, decimals: u8, label: &str) -> Result<GeneratedPackage> {
-    assert!(count > 0, "coin package codegen requires count > 0");
-    let unique = format!(
-        "opt-putpkg-{}-{}",
-        std::process::id(),
-        DIR_SEQ.fetch_add(1, Ordering::Relaxed)
-    );
-    let dir = std::env::temp_dir().join(unique);
-    let sources = dir.join("sources");
-    fs::create_dir_all(&sources)
-        .with_context(|| format!("creating put-package dir {}", sources.display()))?;
-
-    fs::write(dir.join("Move.toml"), move_toml())
-        .with_context(|| format!("writing Move.toml in {}", dir.display()))?;
-
-    let safe_label = sanitize_label(label);
-    for i in 0..count {
-        let src = put_module_source(i, decimals, &safe_label);
-        let path = sources.join(format!("put_{i}.move"));
-        fs::write(&path, src)
-            .with_context(|| format!("writing module {}", path.display()))?;
-    }
-
-    Ok(GeneratedPackage { dir })
 }
 
 /// Generate a single-module share-coin package for a vault's `VShare` type.
@@ -173,63 +106,6 @@ gen_coin = "0x0"
     )
 }
 
-/// One OTW coin module. The struct name is the module name uppercased, which
-/// is exactly what `sui::types::is_one_time_witness` (checked inside
-/// `coin::create_currency`) requires.
-fn module_source(i: u64, decimals: u8, label: &str) -> String {
-    let symbol = format!("oCALL{i}");
-    let name = format!("Option Call {i} {label}");
-    format!(
-        r#"#[allow(deprecated_usage, lint(self_transfer))]
-module gen_coin::call_{i};
-
-public struct CALL_{i} has drop {{}}
-
-fun init(witness: CALL_{i}, ctx: &mut TxContext) {{
-    let (treasury, metadata) = sui::coin::create_currency(
-        witness,
-        {decimals},
-        b"{symbol}",
-        b"{name}",
-        b"Tokenized covered-call option (auto-generated per roll)",
-        std::option::none(),
-        ctx,
-    );
-    sui::transfer::public_freeze_object(metadata);
-    sui::transfer::public_transfer(treasury, ctx.sender());
-}}
-"#
-    )
-}
-
-/// One OTW put-coin module, mirroring [`module_source`] with `put_<i>/PUT_<i>`
-/// and the `oPUT` symbol.
-fn put_module_source(i: u64, decimals: u8, label: &str) -> String {
-    let symbol = format!("oPUT{i}");
-    let name = format!("Option Put {i} {label}");
-    format!(
-        r#"#[allow(deprecated_usage, lint(self_transfer))]
-module gen_coin::put_{i};
-
-public struct PUT_{i} has drop {{}}
-
-fun init(witness: PUT_{i}, ctx: &mut TxContext) {{
-    let (treasury, metadata) = sui::coin::create_currency(
-        witness,
-        {decimals},
-        b"{symbol}",
-        b"{name}",
-        b"Tokenized cash-secured put option (auto-generated per roll)",
-        std::option::none(),
-        ctx,
-    );
-    sui::transfer::public_freeze_object(metadata);
-    sui::transfer::public_transfer(treasury, ctx.sender());
-}}
-"#
-    )
-}
-
 /// Keep only characters safe inside a Move `b"..."` byte-string literal:
 /// ASCII alphanumerics plus a few separators. Everything else becomes `-`.
 fn sanitize_label(label: &str) -> String {
@@ -247,71 +123,14 @@ fn sanitize_label(label: &str) -> String {
     s.chars().take(48).collect()
 }
 
-/// Parse the strike index out of a generated call type string, i.e. the `3`
-/// from `0x…::call_3::CALL_3`. Used to pair a harvested `TreasuryCap` back to
-/// the strike its module was generated for.
-pub fn call_index(call_type: &str) -> Result<u64> {
-    let module = call_type
-        .split("::")
-        .nth(1)
-        .with_context(|| format!("call type missing module segment: {call_type}"))?;
-    let idx = module
-        .strip_prefix("call_")
-        .with_context(|| format!("call type module not `call_<i>`: {call_type}"))?;
-    idx.parse::<u64>()
-        .with_context(|| format!("call type index not a number: {call_type}"))
-}
-
-/// Put twin of [`call_index`]: parse the strike index out of a generated put
-/// type string, i.e. the `3` from `0x…::put_3::PUT_3`.
-pub fn put_index(put_type: &str) -> Result<u64> {
-    let module = put_type
-        .split("::")
-        .nth(1)
-        .with_context(|| format!("put type missing module segment: {put_type}"))?;
-    let idx = module
-        .strip_prefix("put_")
-        .with_context(|| format!("put type module not `put_<i>`: {put_type}"))?;
-    idx.parse::<u64>()
-        .with_context(|| format!("put type index not a number: {put_type}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn call_index_parses_module_segment() {
-        assert_eq!(
-            call_index("0x0000000000000000000000000000000000000000000000000000000000000abc::call_0::CALL_0").unwrap(),
-            0
-        );
-        assert_eq!(call_index("0xabc::call_7::CALL_7").unwrap(), 7);
-        assert!(call_index("0xabc::bucket::Bucket").is_err());
-    }
-
-    #[test]
     fn sanitize_strips_unsafe_chars() {
         assert_eq!(sanitize_label("BTC/USDC@123"), "BTC/USDC-123");
         assert_eq!(sanitize_label("a\"b\\c"), "a-b-c");
-    }
-
-    #[test]
-    fn generates_count_modules_and_compiles_shape() {
-        // Hermetic: assert the files are written with the right names and the
-        // OTW struct matches the module. (A full `sui-move-build` compile is
-        // exercised by the localnet E2E, which has the framework dep cached.)
-        let pkg = generate(3, 8, "BTC-USDC@1").unwrap();
-        for i in 0..3 {
-            let src = std::fs::read_to_string(pkg.dir.join(format!("sources/call_{i}.move")))
-                .unwrap();
-            assert!(src.contains(&format!("module gen_coin::call_{i};")));
-            assert!(src.contains(&format!("public struct CALL_{i} has drop")));
-            assert!(src.contains(&format!("fun init(witness: CALL_{i}")));
-        }
-        assert!(pkg.dir.join("Move.toml").exists());
-        pkg.cleanup();
-        assert!(!pkg.dir.exists());
     }
 
     #[test]
