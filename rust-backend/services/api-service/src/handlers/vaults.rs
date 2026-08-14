@@ -223,9 +223,7 @@ pub async fn list_vault_rounds(
             round: r.round as i64,
             bucket_id: r.bucket_id.map(|b| b.to_hex()),
             strike: match (r.strike, r.strike_scale, decimals) {
-                (Some(k), Some(scale), Some((u, s))) => {
-                    Some(strike_raw_to_usd(k, scale, u, s))
-                }
+                (Some(k), Some(scale), Some((u, s))) => Some(strike_raw_to_usd(k, scale, u, s)),
                 _ => None,
             },
             strike_raw: r.strike.map(|k| k.to_string()),
@@ -385,14 +383,10 @@ pub async fn list_vault_receipts(
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    let receipts = state
-        .indexer
-        .vault_receipts(id, owner)
-        .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, "indexer vault_receipts query failed");
-            StatusCode::BAD_GATEWAY
-        })?;
+    let receipts = state.indexer.vault_receipts(id, owner).await.map_err(|e| {
+        tracing::warn!(error = %e, "indexer vault_receipts query failed");
+        StatusCode::BAD_GATEWAY
+    })?;
     let receipts = receipts
         .into_iter()
         .map(|r| {
@@ -569,7 +563,10 @@ mod tests {
     fn apy_annualizes_weekly_pps_growth() {
         const WEEK: u64 = 7 * 86_400_000;
         // +0.2% per week ≈ (1.002)^52.14 − 1 ≈ 10.97%.
-        let rounds = vec![round(1, 1_000_000_000_000, 0), round(2, 1_002_000_000_000, WEEK)];
+        let rounds = vec![
+            round(1, 1_000_000_000_000, 0),
+            round(2, 1_002_000_000_000, WEEK),
+        ];
         let apy = apy_from_rounds(&rounds).unwrap();
         assert!((apy - 0.1097).abs() < 0.002, "apy {apy}");
     }

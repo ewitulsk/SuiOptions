@@ -104,6 +104,7 @@ pub async fn catalog(
             "sample_intervals_s": RV_INTERVALS_S,
             "estimators": RV_ESTIMATORS,
         },
+        "iv": { "indices": ["dvol"] },
     });
     let instruments: Vec<CatalogInstrument> = by_pair
         .into_iter()
@@ -238,6 +239,35 @@ pub async fn series(
                 }),
                 "annualized_vol",
             )
+        }
+        "iv" => {
+            // Venue-computed implied vol index (Deribit DVOL), matched by
+            // the instrument's base: btc-… → BTC-DVOL. Served as an
+            // annualized FRACTION for axis parity with rv.
+            let base = q
+                .instrument_id
+                .split(['-', '.'])
+                .next()
+                .unwrap_or_default()
+                .to_uppercase();
+            if base.is_empty() {
+                return Err(bad_request("bad instrument_id"));
+            }
+            let symbol = format!("{base}-DVOL");
+            let pts = lake
+                .vol_index_series("deribit", &symbol, &dates)
+                .await
+                .map_err(|e| {
+                    tracing::warn!("analytics iv read failed: {e:#}");
+                    unavailable()
+                })?;
+            if pts.is_empty() {
+                // Distinguish "no index for this base" from a quiet range:
+                // either way the client hides the line; empty points is
+                // fine and 400 is reserved for unmappable ids.
+            }
+            let pts = pts.into_iter().map(|(ts, pct)| (ts, pct / 100.0)).collect();
+            (pts, json!({ "index": symbol }), "annualized_vol")
         }
         other => return Err(bad_request(format!("unknown metric {other}"))),
     };

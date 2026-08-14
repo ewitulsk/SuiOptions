@@ -355,8 +355,12 @@ fn field<'a>(v: &'a Value, name: &str) -> Result<&'a Value> {
 /// u64 fields cross the wire as decimal strings; tolerate a JSON number.
 fn u64_field(v: &Value, name: &str) -> Result<u64> {
     match field(v, name)? {
-        Value::String(s) => s.parse().with_context(|| format!("field {name}: u64 {s:?}")),
-        Value::Number(n) => n.as_u64().ok_or_else(|| anyhow!("field {name}: non-u64 {n}")),
+        Value::String(s) => s
+            .parse()
+            .with_context(|| format!("field {name}: u64 {s:?}")),
+        Value::Number(n) => n
+            .as_u64()
+            .ok_or_else(|| anyhow!("field {name}: non-u64 {n}")),
         other => Err(anyhow!("field {name}: expected u64, got {other}")),
     }
 }
@@ -404,7 +408,10 @@ mod tests {
 
     #[test]
     fn maps_settling_phase() {
-        assert_eq!(parse_vault_live(&vault_json("Settling")).unwrap().phase, "settling");
+        assert_eq!(
+            parse_vault_live(&vault_json("Settling")).unwrap().phase,
+            "settling"
+        );
     }
 
     #[test]
@@ -417,7 +424,8 @@ mod tests {
     // ── free-balance walk (SO-313) ──────────────────────────────────────
 
     /// Unprefixed, exactly as a chain `TypeName` renders inside `asset_types`.
-    const TBTC: &str = "95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::tbtc::TBTC";
+    const TBTC: &str =
+        "95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::tbtc::TBTC";
     const TUSDC: &str =
         "95f83a70fc0d15e13c9517ed346022c4d26a90427f86eebedb564111f8512cf9::tusdc::TUSDC";
 
@@ -475,7 +483,10 @@ mod tests {
     fn tolerates_struct_shaped_balance() {
         let types = vec![format!("0x{TBTC}")];
         let fields = json!({ "b0": { "value": { "json": { "value": "153000" } } } });
-        assert_eq!(parse_balance_keys(&fields, &types).unwrap()[0].amount, 153_000);
+        assert_eq!(
+            parse_balance_keys(&fields, &types).unwrap()[0].amount,
+            153_000
+        );
     }
 
     /// A type listed with no field on chain means zero, so it drops out of the

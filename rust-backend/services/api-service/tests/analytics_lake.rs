@@ -145,3 +145,48 @@ async fn spot_and_rv_series_read_fixture_lake() {
     let keys = lake.list("gold/v1/bars/freq=3600s/").await.unwrap();
     assert_eq!(keys.len(), 2);
 }
+
+fn vol_index_batch(rows: &[(i64, f64)]) -> RecordBatch {
+    let schema = Schema::new(vec![
+        Field::new("ts", DataType::Int64, false),
+        Field::new("open", DataType::Float64, false),
+        Field::new("high", DataType::Float64, false),
+        Field::new("low", DataType::Float64, false),
+        Field::new("close", DataType::Float64, false),
+    ]);
+    RecordBatch::try_new(
+        Arc::new(schema),
+        vec![
+            Arc::new(Int64Array::from_iter_values(rows.iter().map(|r| r.0))),
+            Arc::new(Float64Array::from_iter_values(rows.iter().map(|r| r.1))),
+            Arc::new(Float64Array::from_iter_values(rows.iter().map(|r| r.1))),
+            Arc::new(Float64Array::from_iter_values(rows.iter().map(|r| r.1))),
+            Arc::new(Float64Array::from_iter_values(rows.iter().map(|r| r.1))),
+        ],
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn vol_index_series_reads_dvol_partitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_parquet(
+        &root.join(
+            "silver/v1/vol_index/exchange=deribit/symbol=BTC-DVOL/date=2026-08-10/part-00.parquet",
+        ),
+        &vol_index_batch(&[(3_600 * NS, 42.5), (7_200 * NS, 43.1)]),
+    );
+    let lake = Lake::open(&format!("file://{}", root.display())).unwrap();
+    let dates: Vec<String> = ["2026-08-10", "2026-08-11"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let pts = lake
+        .vol_index_series("deribit", "BTC-DVOL", &dates)
+        .await
+        .unwrap();
+    assert_eq!(pts.len(), 2);
+    assert_eq!(pts[0], (3_600 * NS / 1_000_000, 42.5));
+    // Missing 2026-08-11 partition skipped, no error.
+}

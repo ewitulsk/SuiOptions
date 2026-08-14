@@ -54,7 +54,13 @@ pub async fn option_metrics(Query(q): Query<MetricsQuery>) -> Json<MetricsRespon
     // mark) fall back to sigma=0 so the row still renders (greeks collapse to
     // the deterministic case).
     let sigma = iv.unwrap_or(0.0);
-    let inputs = CallInputs { spot: q.spot, strike: q.strike, t_years: q.t_years, r, sigma };
+    let inputs = CallInputs {
+        spot: q.spot,
+        strike: q.strike,
+        t_years: q.t_years,
+        r,
+        sigma,
+    };
     let g = call_greeks(inputs);
     let fair_value = iv.map(|s| call_price_per_unit(CallInputs { sigma: s, ..inputs }));
 
