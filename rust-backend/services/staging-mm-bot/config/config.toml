@@ -66,19 +66,27 @@ max_publish_lag_ms = 10_000
 max_conf_bps = 0
 
 # Vault-direct mode (SO-372): quote as a trading vault's delegated signer
-# against its direct-custody identity BalanceManager. The curator must have
-# run exchange_adapter::init_direct_custody, vault::add_quote_adapter, and
-# add_signer(this bot's wallet) first — the bot never creates, funds, or
-# deposits into the BM in this mode.
+# against its direct-custody identity BalanceManager. The vault is resolved
+# at boot with zero ids in config: adopt the pinned vault_id if set, else a
+# vault this wallet created (wired > largest stake > lowest id), else —
+# with [vault_direct.provision] enabled — create one and wire it
+# (init_direct_custody + add_quote_adapter + add_signer + deposit-asset
+# allowlist). The identity BM always comes from the indexer's
+# ExchangeCustodyCreated view, never from config, so a contract redeploy
+# needs no re-pin.
 # Quote sizing = the vault's live free balance per token, minus buffer_bps,
 # minus outstanding withdrawal-queue obligations when api_url is set.
 # [funding] applies here too (SO-375): targets are vault free-balance
 # floats, topped up by faucet-minting + depositing into the vault as a
-# regular LP (each non-accounting token must be on the vault's
-# deposit-asset allowlist — the direct-escrow ceremony does this).
+# regular LP; the bot allowlists each target as a deposit asset when it
+# holds the CuratorCap.
 #
 # [vault_direct]
-# manager_id = "0x..."   # the vault's identity BM (from CustodyCreated)
-# vault_id = "0x..."
+# vault_id = "0x..."   # optional pin: adopt a human-provisioned vault
 # api_url = "http://api-service:9010"  # optional pending-requests deduction
 # buffer_bps = 1_000                   # free-balance fraction held back
+#
+# [vault_direct.provision]
+# enabled = true        # create + wire a vault when none of ours exists
+# lockup_ms = 0
+# curator_fee_bps = 0

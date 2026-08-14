@@ -10496,6 +10496,7 @@ dependencies = [
  "exchange-book",
  "exchange-signing",
  "exchange-types",
+ "indexer-graphql",
  "metrics",
  "move-core-types",
  "observability",

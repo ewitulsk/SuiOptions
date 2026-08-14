@@ -22,6 +22,7 @@ oracle-client  = { workspace = true }
 token-info-client = { workspace = true }
 exchange-types   = { workspace = true }
 exchange-signing = { workspace = true }
+indexer-graphql  = { workspace = true }
 
 sui-types = { workspace = true }
 move-core-types = { workspace = true }

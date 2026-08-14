@@ -16,6 +16,7 @@ pub mod client;
 pub mod ladder;
 pub mod server;
 pub mod signing;
+pub mod vault;
 
 #[derive(Parser, Debug)]
 #[command(name = "staging-mm-bot", about = "Faucet-funded maker bot for the hybrid exchange (staging)")]
@@ -41,6 +42,16 @@ pub struct Cli {
     /// Base URL of the oracle-service: live prices over its WS fanout.
     #[arg(long, env = "ORACLE_URL", default_value = "http://127.0.0.1:9013")]
     pub oracle_url: String,
+
+    /// Indexer GraphQL endpoint. Vault-direct mode resolves its vault
+    /// (self-created discovery, custody wiring state) from here; unused in
+    /// funded-BM mode.
+    #[arg(
+        long,
+        env = "INDEXER_GRAPHQL_URL",
+        default_value = "http://127.0.0.1:9002/graphql"
+    )]
+    pub indexer_graphql_url: String,
 
     #[arg(long, default_value_t = 200_000_000)]
     pub gas_budget: u64,
