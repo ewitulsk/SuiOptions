@@ -47,15 +47,18 @@ max_publish_lag_ms = 10_000
 max_conf_bps = 0
 
 # ── Vault-direct escrow (SO-372) ────────────────────────────────────────
-# Quote as the direct-escrow vault's delegated signer: orders name the
-# identity BM below and settle from the vault's free balances per fill.
-# Ceremony re-ran 2026-08-14 (trading-vault-smoke --direct-escrow, post
-# whitelist-gate redeploy): custody
-# 0x72f5cf25a349f41e5050e65de0997e59cd9b0d3fa3dc5f2ec63adef724aaed24,
-# quote adapter enabled, this bot's wallet delegated as signer. Remove
-# this section to fall back to the funded-BM mode.
+# Quote as a direct-escrow vault's delegated signer: orders name the
+# vault's identity BM and settle from its free balances per fill.
+# vault_id is deliberately UNSET: a contract redeploy invalidates any pin,
+# and the bot now resolves its vault itself — adopt a vault this wallet
+# created (wired for direct escrow > largest stake), or provision + wire a
+# fresh one (custody, quote adapter, signer delegation, deposit-asset
+# allowlist; the SO-375 funding pass then seeds it). Pin vault_id only to
+# adopt a vault someone else provisioned. Remove this section to fall back
+# to the funded-BM mode.
 [vault_direct]
-manager_id = "0x482a249589de166fee58960819de3d37c40c4acb2445abd8a6385359bb5f154d"
-vault_id = "0xc05fc8ce915aac732a6361513f41bf714c211e3f5b2755671f1510521d96b568"
 api_url = "http://api-service:9003"
 buffer_bps = 1_000
+
+[vault_direct.provision]
+enabled = true

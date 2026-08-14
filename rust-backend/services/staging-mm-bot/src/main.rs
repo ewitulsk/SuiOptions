@@ -2,7 +2,10 @@
 //!
 //! Boot: config + secrets (hard-gated to testnet), token-info catalog,
 //! orderbook market discovery, oracle-service WS price cache, then a
-//! BalanceManager (adopt-or-create) funded from the test-token faucets.
+//! BalanceManager (adopt-or-create) funded from the test-token faucets —
+//! or, in vault-direct mode, a trading vault resolved by the `vault`
+//! module (adopted or self-provisioned + wired), so a contract redeploy
+//! needs no manual re-pin.
 //!
 //! Steady state, per market: read the oracle mid, build a tick-snapped
 //! bid/ask ladder, sign each level with the wallet key, post to the
@@ -104,15 +107,17 @@ impl BotConfig {
     }
 }
 
-/// Vault-direct mode config (SO-372). The curator must have created the
-/// direct custody, enabled the quote adapter, and delegated THIS bot's key
-/// as an approved signer on the manager — the bot never deposits into or
-/// creates the BM in this mode.
+/// Vault-direct mode config (SO-372). The vault and its identity BM are
+/// resolved at boot — adopted from chain/indexer state, or provisioned and
+/// wired by the bot itself (see [`staging_mm_bot::vault`]) — so nothing
+/// here needs re-pinning after a contract redeploy.
 #[derive(Debug, Clone, Deserialize)]
 struct VaultDirectConfig {
-    /// The vault's direct-custody identity BalanceManager id.
-    manager_id: String,
-    /// The trading vault whose free balances escrow the quotes.
+    /// Optional pin: adopt this vault whatever its provenance (the
+    /// operator's escape hatch for a human-provisioned vault). Verified
+    /// against chain state, never trusted. Empty ⇒ adopt a self-created
+    /// vault or provision one.
+    #[serde(default)]
     vault_id: String,
     /// api-service base URL for the pending-withdrawals deduction
     /// (`GET /trading-vaults/:id/pending-requests`). Absent ⇒ skip it.
@@ -121,6 +126,9 @@ struct VaultDirectConfig {
     /// Fraction of the vault's free balance held back from quoting, bps.
     #[serde(default = "default_buffer_bps")]
     buffer_bps: u64,
+    /// Self-provisioning when discovery finds no vault of ours.
+    #[serde(default)]
+    provision: staging_mm_bot::vault::ProvisionConfig,
 }
 
 fn default_buffer_bps() -> u64 {
@@ -365,32 +373,83 @@ async fn main() -> Result<()> {
     feeds.dedup();
     wait_for_first_prices(&cache, &feeds, Duration::from_secs(30)).await?;
 
-    // BalanceManager. Vault-direct mode (SO-372): the identity BM comes
-    // from config, the curator already delegated our key, and there is
-    // nothing to create or fund. Funded mode: rediscover the one this
-    // wallet already created under the CURRENT exchange package, else
-    // create one. Zero config there: a contract redeploy changes the
-    // package (and therefore the manager type), so discovery scopes itself
-    // to the live deployment and a fresh manager appears on the first boot
-    // after each redeploy.
+    // BalanceManager. Vault-direct mode (SO-372): resolve the vault —
+    // adopt a pinned or self-created one, or provision and wire a fresh
+    // vault (custody + adapter + signer delegation + deposit allowlist) —
+    // so a contract redeploy needs no manual re-pin. Funded mode:
+    // rediscover the BM this wallet already created under the CURRENT
+    // exchange package, else create one. Zero config either way: a
+    // redeploy changes the packages, discovery scopes itself to the live
+    // deployment, and fresh objects appear on the first boot after it.
     let (manager_oid, maker, direct) = match &cfg.vault_direct {
         Some(vd) => {
-            let manager_oid = ObjectID::from_str(&vd.manager_id)
-                .context("parsing [vault_direct].manager_id")?;
-            let vault = ObjectID::from_str(&vd.vault_id)
-                .context("parsing [vault_direct].vault_id")?;
             let trading_vault_pkg = snapshot
                 .trading_vault()
                 .ok_or_else(|| anyhow!("vault-direct mode but token-info has no tradingVault package"))?
                 .package()?;
-            verify_direct_manager(&wrap, manager_oid, vault).await?;
+            let exchange_adapter_pkg = snapshot
+                .exchange_adapter()
+                .ok_or_else(|| {
+                    anyhow!("vault-direct mode but token-info has no exchangeAdapter package")
+                })?
+                .package()?;
+            let tvo_boot = snapshot.trading_vault_objects().ok_or_else(|| {
+                anyhow!("vault-direct mode but token-info has no tradingVaultObjects block")
+            })?;
+            let whitelist_id = whitelist.ok_or_else(|| {
+                anyhow!(
+                    "vault-direct mode but token-info has no whitelist block — vault \
+                     creation and deposits are ingress-gated (SO-383)"
+                )
+            })?;
+            // The vault's accounting asset is the one quote asset every
+            // market shares; the funding targets are what must be
+            // depositable into it.
+            let accounting = staging_mm_bot::vault::unique_accounting(
+                &market_ctxs.iter().map(|c| c.market.quote.clone()).collect::<Vec<_>>(),
+            )?;
+            let deposit_types: Vec<String> = match snapshot.test_tokens() {
+                Ok(tokens) => cfg
+                    .funding
+                    .targets
+                    .keys()
+                    .filter_map(|ticker| match tokens.get(ticker) {
+                        Ok(t) => canonicalize_move_type(&t.coin_type).ok(),
+                        Err(e) => {
+                            tracing::warn!(ticker, error = %format!("{e:#}"), "unknown funding ticker");
+                            None
+                        }
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            let indexer =
+                indexer_graphql::IndexerClient::new(cli.indexer_graphql_url.clone());
+            let resolved = staging_mm_bot::vault::resolve(staging_mm_bot::vault::ResolveParams {
+                wrap: &wrap,
+                indexer: &indexer,
+                cfg: &vd.provision,
+                pinned_vault_id: vd.vault_id.trim(),
+                trading_vault_package: trading_vault_pkg,
+                exchange_adapter_package: exchange_adapter_pkg,
+                exchange_package,
+                integration_registry: tvo_boot.integration_registry()?,
+                vault_protocol_config: tvo_boot.vault_protocol_config()?,
+                whitelist: whitelist_id,
+                accounting_coin_type: &accounting,
+                deposit_asset_types: &deposit_types,
+            })
+            .await
+            .inspect_err(staging_mm_bot::vault::report_unusable)?;
+            let manager_oid = resolved.manager_id;
+            let vault = resolved.vault_id;
             let maker = ExAddress::parse(&vault.to_string())
                 .map_err(|e| anyhow!("vault id hex: {e}"))?;
             tracing::info!(
                 manager = %manager_oid,
                 vault = %vault,
-                "vault-direct mode: identity BM adopted; fills escrow against vault free \
-                 balances (bot key must be a curator-delegated signer)"
+                provisioned = resolved.provisioned,
+                "vault-direct mode: vault resolved; fills escrow against vault free balances"
             );
             // Funding refs (SO-375): the bot LPs into the vault with real
             // attested deposits, so it needs the appraisal-composer ids.
@@ -671,48 +730,11 @@ async fn resolve_balance_manager(
 }
 
 async fn verify_manager(wrap: &SuiClientWrapper, id: ObjectID) -> Result<()> {
-    let owner = manager_owner(wrap, id).await?;
+    let owner = staging_mm_bot::vault::manager_owner(&wrap.client, id).await?;
     if owner.to_lowercase() != wrap.signer.address.to_string().to_lowercase() {
         bail!("owned by {owner}, not our wallet {}", wrap.signer.address);
     }
     Ok(())
-}
-
-/// Vault-direct mode (SO-372): the configured manager must be a
-/// BalanceManager whose order-attribution owner is the VAULT's
-/// id-as-address — the identity BM the curator's `init_direct_custody`
-/// created. Signer delegation can't be read off the object JSON cheaply;
-/// a missing delegation surfaces as BAD_SIGNATURE at intake.
-async fn verify_direct_manager(
-    wrap: &SuiClientWrapper,
-    id: ObjectID,
-    vault: ObjectID,
-) -> Result<()> {
-    let owner = manager_owner(wrap, id).await?;
-    if owner.to_lowercase() != vault.to_string().to_lowercase() {
-        bail!("manager {id} owned by {owner}, not vault {vault} — not its identity BM");
-    }
-    Ok(())
-}
-
-async fn manager_owner(wrap: &SuiClientWrapper, id: ObjectID) -> Result<String> {
-    let (obj, json) = wrap
-        .client
-        .get_object_json(id)
-        .await
-        .with_context(|| format!("reading BalanceManager {id}"))?;
-    let type_ok = obj
-        .type_()
-        .map(|t| t.to_string().ends_with("::balance_manager::BalanceManager"))
-        .unwrap_or(false);
-    if !type_ok {
-        bail!("{id} is not a BalanceManager");
-    }
-    json.as_ref()
-        .and_then(|j| j.get("owner"))
-        .and_then(|o| o.as_str())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("BalanceManager {id} JSON missing owner"))
 }
 
 // -- Funding -------------------------------------------------------------
@@ -1419,4 +1441,22 @@ async fn requote(
         record_pending_watermark(s, ctx, min_salt.saturating_sub(1));
     }
     Ok(open.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped configs must deserialize into `BotConfig` — schema
+    /// drift (like the SO-372 pin fields this file used to require) fails
+    /// here instead of at deploy.
+    #[test]
+    fn shipped_configs_parse() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("config");
+        let staging = load_config(&dir.join("config.staging.toml")).unwrap();
+        let vd = staging.vault_direct.expect("staging runs vault-direct");
+        assert!(vd.vault_id.is_empty(), "staging must not pin a vault");
+        assert!(vd.provision.enabled, "staging must self-provision");
+        load_config(&dir.join("config.toml")).unwrap();
+    }
 }

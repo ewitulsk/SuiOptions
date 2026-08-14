@@ -148,10 +148,13 @@ services:
       ORDERBOOK_URL: http://orderbook:9014
       TOKEN_INFO_URL: http://token-info:9005
       ORACLE_URL: http://oracle-service:9013
+      # Vault-direct mode resolves its vault (self-created discovery,
+      # custody wiring) from the indexer.
+      INDEXER_GRAPHQL_URL: http://indexer:9002/graphql
       RUST_LOG: info,staging_mm_bot=debug
     volumes:
       - /opt/options/staging/secrets:/run/secrets:ro
-    depends_on: [orderbook, token-info, oracle-service]
+    depends_on: [orderbook, token-info, oracle-service, indexer]
     restart: unless-stopped
     networks: [net]
 
