@@ -2756,6 +2756,7 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 }
 [data-theme="aqua"] .ana-legend__swatch--spot { border-top-color: var(--aqua-accent, #2f81f7); }
 [data-theme="aqua"] .ana-legend__swatch--rv { border-top-color: var(--aqua-up, #1fbf75); }
+[data-theme="aqua"] .ana-legend__swatch--iv { border-top-color: var(--aqua-coral, #FF7A6E); }
 [data-theme="aqua"] .ana-legend__val {
   font-family: "JetBrains Mono", monospace; font-size: 12px; color: var(--aqua-ink-1);
 }
