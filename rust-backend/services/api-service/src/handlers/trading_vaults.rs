@@ -156,7 +156,10 @@ pub async fn list_trading_vaults(
         StatusCode::BAD_GATEWAY
     })?;
     Ok(Json(TradingVaultsResponse {
-        vaults: vaults.iter().map(|v| trading_vault_dto(&state, v)).collect(),
+        vaults: vaults
+            .iter()
+            .map(|v| trading_vault_dto(&state, v))
+            .collect(),
     }))
 }
 
@@ -177,19 +180,19 @@ pub async fn get_trading_vault(
         .into_iter()
         .find(|v| v.vault_id == id)
         .ok_or(StatusCode::NOT_FOUND)?;
-    let positions = state.indexer.trading_vault_positions(id).await.map_err(|e| {
-        tracing::warn!(error = %e, "indexer trading_vault_positions query failed");
-        StatusCode::BAD_GATEWAY
-    })?;
+    let positions = state
+        .indexer
+        .trading_vault_positions(id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "indexer trading_vault_positions query failed");
+            StatusCode::BAD_GATEWAY
+        })?;
     // Free balances are a live object read (SO-313): no event states them, so
     // the indexer can't. Degrade to `balances_stale` rather than a 5xx, the
     // same way `GET /vaults/:id` degrades its live round state.
-    let balances = match sui_rpc::fetch_vault_balances(
-        &state.http,
-        &state.sui_graphql_url,
-        &id,
-    )
-    .await
+    let balances = match sui_rpc::fetch_vault_balances(&state.http, &state.sui_graphql_url, &id)
+        .await
     {
         Ok(Some(b)) => Some(b),
         // An unknown object means the vault the indexer knows is gone from the
@@ -312,7 +315,9 @@ pub async fn get_pps_history(
             tracing::warn!(error = %e, "indexer trading-vault events query failed");
             StatusCode::BAD_GATEWAY
         })?;
-    Ok(Json(PpsHistoryResponse { points: pps_points(events) }))
+    Ok(Json(PpsHistoryResponse {
+        points: pps_points(events),
+    }))
 }
 
 fn pps_points(mut events: Vec<protocol_types::events::IndexedEvent>) -> Vec<PpsPointDto> {
@@ -329,14 +334,20 @@ fn pps_points(mut events: Vec<protocol_types::events::IndexedEvent>) -> Vec<PpsP
                 if d.shares == 0 {
                     continue;
                 }
-                (d.value as u128 * PPS_E12 * SHARE_OFFSET / d.shares, "deposit")
+                (
+                    d.value as u128 * PPS_E12 * SHARE_OFFSET / d.shares,
+                    "deposit",
+                )
             }
             ChainEvent::TvWithdrawFulfilled(f) => {
                 supply = f.total_shares;
                 if f.shares == 0 || f.value == 0 {
                     continue;
                 }
-                (f.value as u128 * PPS_E12 * SHARE_OFFSET / f.shares, "fulfillment")
+                (
+                    f.value as u128 * PPS_E12 * SHARE_OFFSET / f.shares,
+                    "fulfillment",
+                )
             }
             // An appraisal consumed by a deposit/fulfillment is emitted
             // before that event's mint/burn, so the pre-event supply is the
@@ -553,7 +564,11 @@ pub async fn get_pending_requests(
     let events = state
         .indexer
         .recent_events_with_payload(
-            &["TvWithdrawRequested", "TvPayoutAssetAmended", "TvWithdrawFulfilled"],
+            &[
+                "TvWithdrawRequested",
+                "TvPayoutAssetAmended",
+                "TvWithdrawFulfilled",
+            ],
             json!({ "vault_id": id.to_hex() }),
             EVENT_SCAN_CAP,
         )
@@ -595,12 +610,11 @@ struct PendingRequest {
 /// Replay the withdraw queue: a request enters at TvWithdrawRequested, its
 /// payout asset follows the latest TvPayoutAssetAmended, and it leaves at
 /// TvWithdrawFulfilled. Returns the survivors, ascending by seq.
-fn pending_requests(
-    mut events: Vec<protocol_types::events::IndexedEvent>,
-) -> Vec<PendingRequest> {
+fn pending_requests(mut events: Vec<protocol_types::events::IndexedEvent>) -> Vec<PendingRequest> {
     // The scan serves newest-first; the replay needs chain order.
     events.sort_by_key(|e| e.sequence);
-    let mut open: std::collections::BTreeMap<u64, PendingRequest> = std::collections::BTreeMap::new();
+    let mut open: std::collections::BTreeMap<u64, PendingRequest> =
+        std::collections::BTreeMap::new();
     for ev in events {
         match ev.event {
             ChainEvent::TvWithdrawRequested(w) => {
@@ -698,7 +712,11 @@ mod tests {
     }
 
     fn ev(sequence: u64, event: ChainEvent) -> IndexedEvent {
-        IndexedEvent { sequence, timestamp_ms: 1_000 + sequence, event }
+        IndexedEvent {
+            sequence,
+            timestamp_ms: 1_000 + sequence,
+            event,
+        }
     }
 
     /// Newest-first input (the scan's order) must come back as an ascending
@@ -752,12 +770,18 @@ mod tests {
             position_total: 0,
         });
 
-        let newest_first =
-            vec![ev(3, fulfilled), ev(2, appraised), ev(1, deposit), ev(0, orphan)];
+        let newest_first = vec![
+            ev(3, fulfilled),
+            ev(2, appraised),
+            ev(1, deposit),
+            ev(0, orphan),
+        ];
         let points = pps_points(newest_first);
 
-        let got: Vec<(&str, &str)> =
-            points.iter().map(|p| (p.source.as_str(), p.pps_e12.as_str())).collect();
+        let got: Vec<(&str, &str)> = points
+            .iter()
+            .map(|p| (p.source.as_str(), p.pps_e12.as_str()))
+            .collect();
         assert_eq!(
             got,
             vec![

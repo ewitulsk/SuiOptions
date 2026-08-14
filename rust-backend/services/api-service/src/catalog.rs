@@ -130,7 +130,9 @@ mod tests {
             8,
         )]);
         let a = cat
-            .lookup("0x0b756179b7ae9efea2fdfb805308443bab763605459b92947616e0a04136d843::tbtc::TBTC")
+            .lookup(
+                "0x0b756179b7ae9efea2fdfb805308443bab763605459b92947616e0a04136d843::tbtc::TBTC",
+            )
             .expect("0x-prefixed lookup");
         let b = cat
             .lookup("0b756179b7ae9efea2fdfb805308443bab763605459b92947616e0a04136d843::tbtc::TBTC")

@@ -212,9 +212,12 @@ fn enrich(
     let asset_decimals = asset_meta.map(|m| m.decimals);
 
     let strike = match (bucket, asset_meta, settle_meta) {
-        (Some(b), Some(a), Some(s)) => {
-            Some(strike_raw_to_usd(b.strike, b.strike_scale, a.decimals, s.decimals))
-        }
+        (Some(b), Some(a), Some(s)) => Some(strike_raw_to_usd(
+            b.strike,
+            b.strike_scale,
+            a.decimals,
+            s.decimals,
+        )),
         _ => None,
     };
     let amount = match (row.underlying_amount, asset_decimals) {
@@ -300,5 +303,4 @@ mod tests {
         // An unrelated wallet sees nothing.
         assert!(rows_for(&we, &SuiAddress::new([0x99; 32])).is_empty());
     }
-
 }

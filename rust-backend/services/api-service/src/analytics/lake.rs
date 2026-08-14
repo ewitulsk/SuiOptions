@@ -209,6 +209,54 @@ impl Lake {
         Ok(out)
     }
 
+    /// Vol-index closes (e.g. Deribit DVOL) over `dates`. Points are
+    /// (unix ms, close as venue-reported percent), ascending.
+    pub async fn vol_index_series(
+        &self,
+        exchange: &str,
+        symbol: &str,
+        dates: &[String],
+    ) -> anyhow::Result<Vec<(i64, f64)>> {
+        let keys: Vec<String> = dates
+            .iter()
+            .map(|d| {
+                format!(
+                    "silver/v1/vol_index/exchange={exchange}/symbol={symbol}/date={d}/part-00.parquet"
+                )
+            })
+            .collect();
+        let parts = futures::stream::iter(keys.into_iter())
+            .map(|k| async move { self.vol_index_partition(&k).await })
+            .buffered(FETCH_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        let mut out = Vec::new();
+        for p in parts {
+            out.extend(p?.iter().map(|(ts, close)| (ts / 1_000_000, *close)));
+        }
+        Ok(out)
+    }
+
+    async fn vol_index_partition(&self, key: &str) -> anyhow::Result<Arc<Vec<(i64, f64)>>> {
+        if let Some(Decoded::Bars(v)) = self.cache_get(key) {
+            return Ok(v);
+        }
+        let mut rows = Vec::new();
+        if let Some(bytes) = self.get_bytes(key).await? {
+            for batch in ParquetRecordBatchReaderBuilder::try_new(bytes)?.build()? {
+                let b = batch?;
+                let ts = col_i64(&b, "ts")?;
+                let close = col_f64(&b, "close")?;
+                for i in 0..b.num_rows() {
+                    rows.push((ts.value(i), close.value(i)));
+                }
+            }
+        }
+        let arc = Arc::new(rows);
+        self.cache_put(key.to_string(), Decoded::Bars(arc.clone()));
+        Ok(arc)
+    }
+
     /// RV series for one (instrument, window, interval, estimator) over
     /// `dates`. Points are (unix ms, annualized sigma), ascending.
     pub async fn rv_series(

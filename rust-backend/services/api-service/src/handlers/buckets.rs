@@ -430,9 +430,7 @@ pub async fn bucket_spec(
         })?;
     let hit = candidates.into_iter().find(|b| {
         let kind_matches = (b.option_kind == "put") == is_put;
-        kind_matches
-            && !b.cleaned
-            && normalize_strike(b.strike, b.strike_scale) == Some((sig, exp))
+        kind_matches && !b.cleaned && normalize_strike(b.strike, b.strike_scale) == Some((sig, exp))
     });
 
     let option_coin_type = state
@@ -478,7 +476,10 @@ fn option_coin_type_str(
     exp: u8,
 ) -> String {
     let pkg = protocol_types::asset::canonicalize_move_type(&format!("{package}::x::X"));
-    let pkg = pkg.split_once("::").map(|(a, _)| a.to_string()).unwrap_or_else(|| package.into());
+    let pkg = pkg
+        .split_once("::")
+        .map(|(a, _)| a.to_string())
+        .unwrap_or_else(|| package.into());
     let minutes = (expiry_ms / 60_000) as u32;
     let mut bytes = minutes.to_be_bytes().to_vec();
     bytes.extend_from_slice(&sig.to_be_bytes()[3..]);
@@ -491,7 +492,10 @@ fn option_coin_type_str(
         })
         .collect();
     let root = if is_put { "OptionPut" } else { "OptionCall" };
-    format!("{pkg}::option_coin::{root}<{u_type},{s_type},{}>", markers.join(","))
+    format!(
+        "{pkg}::option_coin::{root}<{u_type},{s_type},{}>",
+        markers.join(",")
+    )
 }
 
 /// Map the JIT client's bucket into the local `(id, Bucket)` shape that the
@@ -740,7 +744,10 @@ mod tests {
         assert_eq!(call.buckets.len(), 1);
         assert_eq!(put.buckets.len(), 1);
         // option_coin_type is emitted alongside the legacy call_coin_type.
-        assert_eq!(call.buckets[0].option_coin_type, call.buckets[0].call_coin_type);
+        assert_eq!(
+            call.buckets[0].option_coin_type,
+            call.buckets[0].call_coin_type
+        );
     }
 
     #[test]
@@ -937,7 +944,11 @@ mod tests {
         // Defensive: an inconsistent indexer read where cursor > written
         // must clamp to 0, not underflow-panic the poller.
         let cat = fixture_catalog();
-        let dto = detail_dto_from(&mk_idx_bucket(ObjectId::new([0xbb; 32]), 1, 5), &cat, NOW_MS);
+        let dto = detail_dto_from(
+            &mk_idx_bucket(ObjectId::new([0xbb; 32]), 1, 5),
+            &cat,
+            NOW_MS,
+        );
         assert_eq!(dto.queued_ahead_raw, "0");
         assert_eq!(dto.queued_ahead, Some(0.0));
     }
@@ -970,7 +981,7 @@ mod tests {
         assert!(!is_tradeable(false, false, expiry, NOW_MS)); // no pool
         assert!(!is_tradeable(true, true, expiry, NOW_MS)); // cleaned
         assert!(!is_tradeable(true, false, 1_000, NOW_MS)); // expired
-        // invalidated intentionally not part of the gate (mint freeze only).
+                                                            // invalidated intentionally not part of the gate (mint freeze only).
     }
 
     #[test]
