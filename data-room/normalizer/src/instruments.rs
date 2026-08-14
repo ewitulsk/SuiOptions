@@ -37,6 +37,9 @@ pub async fn fetch_coinbase(product_id: &str) -> anyhow::Result<Instrument> {
         quote: p.quote_currency,
         tick_size: p.quote_increment.parse().ok(),
         lot_size: p.base_increment.parse().ok(),
+        strike: None,
+        expiry: None,
+        opt_type: None,
     })
 }
 
@@ -54,6 +57,9 @@ pub fn binance_static(native: &str) -> anyhow::Result<Instrument> {
         // from exchangeInfo dumps.
         tick_size: None,
         lot_size: None,
+        strike: None,
+        expiry: None,
+        opt_type: None,
     })
 }
 
@@ -70,6 +76,9 @@ pub fn binance_perp_static(native: &str) -> anyhow::Result<Instrument> {
         quote,
         tick_size: None,
         lot_size: None,
+        strike: None,
+        expiry: None,
+        opt_type: None,
     })
 }
 
@@ -83,6 +92,9 @@ pub fn hyperliquid_static(coin: &str) -> Instrument {
         quote: "USD".into(),
         tick_size: None,
         lot_size: None,
+        strike: None,
+        expiry: None,
+        opt_type: None,
     }
 }
 
@@ -92,6 +104,7 @@ pub async fn snapshot(
     binance_symbols: &[String],
     binance_perp_symbols: &[String],
     hyperliquid_coins: &[String],
+    deribit_currencies: &[String],
     snapshot_date: &str,
 ) -> anyhow::Result<usize> {
     let mut rows = Vec::new();
@@ -106,6 +119,9 @@ pub async fn snapshot(
     }
     for c in hyperliquid_coins {
         rows.push(hyperliquid_static(c));
+    }
+    for c in deribit_currencies {
+        rows.extend(crate::deribit::fetch_instruments(c).await?);
     }
     let n = rows.len();
     let bytes = schema::write_parquet(&instruments_batch(rows)?)?;

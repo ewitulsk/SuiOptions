@@ -18,6 +18,7 @@ tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 tokio-tungstenite = { workspace = true }
+reqwest = { workspace = true }
 object_store = { workspace = true }
 url = { workspace = true }
 flate2 = { workspace = true }

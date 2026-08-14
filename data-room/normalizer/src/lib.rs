@@ -2,6 +2,7 @@
 //! (stream, UTC day) partition; re-running a partition overwrites it
 //! exactly (idempotent), and output is deterministic byte-for-byte.
 
+pub mod deribit;
 pub mod funding;
 pub mod instruments;
 pub mod vision;

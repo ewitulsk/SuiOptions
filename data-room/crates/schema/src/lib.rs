@@ -27,6 +27,7 @@ pub enum CanonicalEvent {
     Trade(Trade),
     BookTop(BookTop),
     Funding(FundingRate),
+    OptionQuote(OptionsQuote),
     /// Collector lifecycle marker (connect/disconnect) — consumed by the
     /// gold `gaps` job, never normalized into silver tables.
     Marker(Marker),
@@ -76,6 +77,26 @@ pub struct FundingRate {
     pub kind: String,
     pub mark_price: Option<f64>,
     pub index_price: Option<f64>,
+    pub src_file: String,
+    pub src_line: i32,
+}
+
+/// One option contract's state within a chain snapshot (spec §5.4).
+/// Prices are venue-native units (Deribit quotes options in the base
+/// coin, e.g. BTC per contract); `mark_iv` is percent-annualized as the
+/// venue reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OptionsQuote {
+    pub ts_event: Option<i64>,
+    pub ts_recv: Option<i64>,
+    pub exchange: String,
+    pub instrument_id: String,
+    pub bid: Option<f64>,
+    pub ask: Option<f64>,
+    pub mark_price: Option<f64>,
+    pub mark_iv: Option<f64>,
+    pub underlying_price: Option<f64>,
+    pub open_interest: Option<f64>,
     pub src_file: String,
     pub src_line: i32,
 }
@@ -289,6 +310,97 @@ pub fn funding_rates_batch(mut rows: Vec<FundingRate>) -> anyhow::Result<RecordB
         ],
     )?;
     Ok(batch)
+}
+
+pub fn options_quotes_schema() -> Schema {
+    let mut f = vec![
+        Field::new("ts_event", DataType::Int64, true),
+        Field::new("ts_recv", DataType::Int64, true),
+        Field::new("exchange", DataType::Utf8, false),
+        Field::new("instrument_id", DataType::Utf8, false),
+        Field::new("bid", DataType::Float64, true),
+        Field::new("ask", DataType::Float64, true),
+        Field::new("mark_price", DataType::Float64, true),
+        Field::new("mark_iv", DataType::Float64, true),
+        Field::new("underlying_price", DataType::Float64, true),
+        Field::new("open_interest", DataType::Float64, true),
+    ];
+    f.extend(lineage_fields());
+    Schema::new(f)
+}
+
+pub fn options_quotes_batch(mut rows: Vec<OptionsQuote>) -> anyhow::Result<RecordBatch> {
+    rows.sort_by(|a, b| {
+        sort_key(a.ts_recv, a.ts_event, &a.src_file, a.src_line).cmp(&sort_key(
+            b.ts_recv,
+            b.ts_event,
+            &b.src_file,
+            b.src_line,
+        ))
+    });
+    let batch = RecordBatch::try_new(
+        Arc::new(options_quotes_schema()),
+        vec![
+            opt_i64(rows.iter().map(|r| r.ts_event)),
+            opt_i64(rows.iter().map(|r| r.ts_recv)),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.exchange.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.instrument_id.as_str()),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.bid).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.ask).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.mark_price).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.mark_iv).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.underlying_price).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.open_interest).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.src_file.as_str()),
+            )),
+            Arc::new(Int32Array::from_iter_values(
+                rows.iter().map(|r| r.src_line),
+            )),
+        ],
+    )?;
+    Ok(batch)
+}
+
+/// options_quotes partitions by UNDERLYING, never per contract (spec §4:
+/// a chain is hundreds of instruments — per-contract files would be the
+/// classic small-files problem).
+pub fn options_silver_key(exchange: &str, underlying: &str, date: &str) -> String {
+    format!(
+        "silver/v1/options_quotes/exchange={exchange}/underlying={underlying}/date={date}/part-00.parquet"
+    )
+}
+
+/// Volatility-index candles (e.g. Deribit DVOL): index value is
+/// percent-annualized implied vol.
+pub fn vol_index_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("ts", DataType::Int64, false),
+        Field::new("open", DataType::Float64, false),
+        Field::new("high", DataType::Float64, false),
+        Field::new("low", DataType::Float64, false),
+        Field::new("close", DataType::Float64, false),
+    ])
+}
+
+pub fn vol_index_key(exchange: &str, symbol: &str, date: &str) -> String {
+    format!("silver/v1/vol_index/exchange={exchange}/symbol={symbol}/date={date}/part-00.parquet")
 }
 
 /// funding_rates partitions split by row kind so the live (predicted)
