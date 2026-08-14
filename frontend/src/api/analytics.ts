@@ -28,6 +28,9 @@ export type AnalyticsInstrument = {
       sample_intervals_s: number[];
       estimators: string[];
     };
+    /** Present when the instrument's base has a vol index (e.g. `["dvol"]`).
+     * Optional during catalog rollout — absence doesn't mean unavailable. */
+    iv?: { indices: string[] };
   };
   /** ISO dates (`YYYY-MM-DD`) bounding the available history. */
   first_date: string;
@@ -38,9 +41,9 @@ export type AnalyticsCatalog = { instruments: AnalyticsInstrument[] };
 
 export type AnalyticsSeries = {
   instrument_id: string;
-  metric: "spot" | "rv";
+  metric: "spot" | "rv" | "iv";
   params: Record<string, unknown>;
-  /** `[unix_ms, value]` pairs, ascending. RV values are annualized vol
+  /** `[unix_ms, value]` pairs, ascending. RV/IV values are annualized vol
    * fractions (multiply by 100 for percent); spot is in quote units. */
   points: [number, number][];
   meta: { units: string; points_dropped: number };
@@ -51,6 +54,16 @@ export class AnalyticsUnavailableError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "AnalyticsUnavailableError";
+  }
+}
+
+/** Non-503 error response from /analytics/*, carrying the HTTP status. */
+export class AnalyticsRequestError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "AnalyticsRequestError";
+    this.status = status;
   }
 }
 
@@ -65,7 +78,7 @@ async function fetchAnalytics<T>(path: string): Promise<T> {
       // non-JSON error body; keep the status text
     }
     if (res.status === 503) throw new AnalyticsUnavailableError(msg);
-    throw new Error(`GET ${path.split("?")[0]} failed: ${msg}`);
+    throw new AnalyticsRequestError(`GET ${path.split("?")[0]} failed: ${msg}`, res.status);
   }
   return (await res.json()) as T;
 }
@@ -107,6 +120,37 @@ export function useSpotSeries(p: SpotSeriesParams | null) {
         to: p!.to,
       });
       return fetchAnalytics<AnalyticsSeries>(`/analytics/series?${qs}`);
+    },
+    enabled: p !== null,
+    retry: 1,
+  });
+}
+
+export type IvSeriesParams = {
+  instrument_id: string;
+  /** ISO date `YYYY-MM-DD`. */
+  from: string;
+  to: string;
+};
+
+/** Implied vol (vol index, e.g. DVOL). Resolves `null` when the instrument's
+ * base has no vol index (400) — the caller hides the line quietly. */
+export function useIvSeries(p: IvSeriesParams | null) {
+  return useQuery<AnalyticsSeries | null, Error>({
+    queryKey: ["analytics-series", "iv", p],
+    queryFn: async () => {
+      const qs = new URLSearchParams({
+        instrument_id: p!.instrument_id,
+        metric: "iv",
+        from: p!.from,
+        to: p!.to,
+      });
+      try {
+        return await fetchAnalytics<AnalyticsSeries>(`/analytics/series?${qs}`);
+      } catch (e) {
+        if (e instanceof AnalyticsRequestError && e.status === 400) return null;
+        throw e;
+      }
     },
     enabled: p !== null,
     retry: 1,

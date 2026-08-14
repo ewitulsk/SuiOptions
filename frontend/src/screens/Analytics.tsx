@@ -1,17 +1,19 @@
-// Analytics page (SO-390): one dual-axis chart of exchange spot price and
-// annualized realized volatility for a catalog instrument, fed by the
-// api-service /analytics endpoints (api/analytics.ts).
+// Analytics page (SO-390/SO-397): one dual-axis chart of exchange spot price
+// plus annualized realized and implied vol for a catalog instrument, fed by
+// the api-service /analytics endpoints (api/analytics.ts).
 //
-// The spot and RV series fetch in parallel and fail independently — either
-// line renders without the other, with a per-series status note below the
+// The three series fetch in parallel and fail independently — each line
+// renders without the others, with a per-series status note below the
 // chart. A 503 (lake unreachable) shows the friendly "temporarily
-// unavailable" copy instead of an error string.
+// unavailable" copy instead of an error string. IV 400s (no vol index for
+// the base) hide the line quietly.
 
 import { useEffect, useRef, useState } from "react";
 
 import {
   AnalyticsUnavailableError,
   useAnalyticsCatalog,
+  useIvSeries,
   useRvSeries,
   useSpotSeries,
   type AnalyticsInstrument,
@@ -188,7 +190,7 @@ function RvAdvanced({
 /** Per-series status line under the chart; null when the series is healthy. */
 function seriesNote(
   label: string,
-  q: UseQueryResult<AnalyticsSeries, Error>,
+  q: UseQueryResult<AnalyticsSeries | null, Error>,
 ): { text: string; kind: "loading" | "unavailable" | "error" | "empty" } | null {
   if (q.isLoading) return { text: `loading ${label}…`, kind: "loading" };
   if (q.error) {
@@ -247,7 +249,7 @@ export function Analytics() {
   );
   const effEstimator = clamp(rvMeta?.estimators, estimator, DEFAULT_ESTIMATOR);
 
-  // The two series fetch in parallel; each carries its own error/empty state.
+  // The three series fetch in parallel; each carries its own error/empty state.
   const spotQ = useSpotSeries(
     inst && inst.metrics.spot
       ? { instrument_id: inst.instrument_id, freq, from, to }
@@ -265,16 +267,24 @@ export function Analytics() {
         }
       : null,
   );
+  // Attempted even when the catalog lacks `metrics.iv` (rollout may lag) —
+  // a 400 resolves to `null` and the line hides quietly.
+  const ivQ = useIvSeries(inst ? { instrument_id: inst.instrument_id, from, to } : null);
 
   const spotPoints = spotQ.data?.points ?? [];
   const rvPoints = rvQ.data?.points ?? [];
-  const loading = spotQ.isLoading || rvQ.isLoading;
-  const bothUnavailable =
+  const ivPoints = ivQ.data?.points ?? [];
+  const loading = spotQ.isLoading || rvQ.isLoading || ivQ.isLoading;
+  // iv isn't consulted here: when the overlay shows it's either also 503 or
+  // quietly absent (400/empty), and either way the copy below is right.
+  const allUnavailable =
     spotQ.error instanceof AnalyticsUnavailableError &&
     rvQ.error instanceof AnalyticsUnavailableError;
-  const notes = [seriesNote("spot", spotQ), seriesNote("realized vol", rvQ)].filter(
-    (n): n is NonNullable<typeof n> => n !== null,
-  );
+  const notes = [
+    seriesNote("spot", spotQ),
+    seriesNote("realized vol", rvQ),
+    seriesNote("implied vol", ivQ),
+  ].filter((n): n is NonNullable<typeof n> => n !== null);
 
   const quoteSymbol = inst?.symbol.split("-")[1] ?? "quote";
 
@@ -282,7 +292,7 @@ export function Analytics() {
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
       <div className="app__wrap">
         <div className="dash-hero">
-          <div className="dash-hero__eyebrow">exchange data · spot & realized vol</div>
+          <div className="dash-hero__eyebrow">exchange data · spot, realized & implied vol</div>
           <h1 className="dash-hero__title">Analytics</h1>
           <div className="dash-hero__addr">
             {inst
@@ -334,25 +344,33 @@ export function Analytics() {
 
             <div className="panel">
               <div className="panel__head">
-                {inst.symbol} · spot ({quoteSymbol}) vs realized vol (
-                {formatWindow(effWindowS)} window, annualized)
+                {inst.symbol} · spot ({quoteSymbol}) vs realized (
+                {formatWindow(effWindowS)} window) & implied vol, annualized
               </div>
               <div className="ana-chart__holder">
-                <AnalyticsChart spot={spotPoints} rv={rvPoints} quoteSymbol={quoteSymbol} />
-                {!loading && spotPoints.length === 0 && rvPoints.length === 0 && (
-                  <div className="ana-chart__empty">
-                    <div className="ana-chart__empty-title">
-                      {bothUnavailable
-                        ? "analytics temporarily unavailable"
-                        : "no data for this range"}
+                <AnalyticsChart
+                  spot={spotPoints}
+                  rv={rvPoints}
+                  iv={ivPoints}
+                  quoteSymbol={quoteSymbol}
+                />
+                {!loading &&
+                  spotPoints.length === 0 &&
+                  rvPoints.length === 0 &&
+                  ivPoints.length === 0 && (
+                    <div className="ana-chart__empty">
+                      <div className="ana-chart__empty-title">
+                        {allUnavailable
+                          ? "analytics temporarily unavailable"
+                          : "no data for this range"}
+                      </div>
+                      <div className="ana-chart__empty-sub">
+                        {allUnavailable
+                          ? "The data lake is unreachable right now — try again in a bit."
+                          : "Try a wider range or another instrument."}
+                      </div>
                     </div>
-                    <div className="ana-chart__empty-sub">
-                      {bothUnavailable
-                        ? "The data lake is unreachable right now — try again in a bit."
-                        : "Try a wider range or another instrument."}
-                    </div>
-                  </div>
-                )}
+                  )}
               </div>
               {notes.length > 0 && (
                 <div className="panel__sub">
