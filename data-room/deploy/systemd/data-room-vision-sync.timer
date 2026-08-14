@@ -1,8 +1,8 @@
 [Unit]
-Description=data-room: monthly vision-sync @ 02:00 UTC on the 1st
+Description=data-room: daily vision-sync @ 00:15 UTC (Binance has no live feed; dailies are its ongoing supply)
 
 [Timer]
-OnCalendar=*-*-01 02:00:00 UTC
+OnCalendar=*-*-* 00:15:00 UTC
 Persistent=true
 
 [Install]
