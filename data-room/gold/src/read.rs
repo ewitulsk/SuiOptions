@@ -1,12 +1,25 @@
-//! Silver readers: (ts, price) series out of trades / book_top
-//! partitions. Timestamp is `ts_event` when present, else `ts_recv` —
-//! vision rows only carry event time, live rows carry both.
+//! Silver readers with BOUNDED memory: a dense day holds 20M+ trades
+//! (May 2021, 2024+), and 8-day RV windows over such days OOM'd the 2 GB
+//! host when loaded as row vectors. Rows now stream batch-by-batch into
+//! per-row callbacks; series consumers get a 200 ms slot-reduced price
+//! series (exact for every RV grid we compute — all grid offsets are
+//! multiples of 200 ms) instead of raw rows.
+//!
+//! Timestamp is `ts_event` when present, else `ts_recv` — vision rows
+//! only carry event time, live rows carry both (book_top prefers
+//! `ts_recv`, its capture axis).
 
 use arrow::array::{Array, Float64Array, Int64Array};
 use futures::TryStreamExt;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::Store;
+
+/// Slot width of the reduced price series. Every RV sampling grid
+/// (intervals {1..300}s, subsample offsets j*interval/5) lands on
+/// multiples of this, so last-observation reduction at this granularity
+/// is exact for LOCF sampling at any grid point.
+pub const REDUCE_SLOT_MS: i64 = 200;
 
 pub async fn list_keys(store: &Store, prefix: &str) -> anyhow::Result<Vec<String>> {
     let path = object_store::path::Path::from(prefix.trim_end_matches('/'));
@@ -17,19 +30,6 @@ pub async fn list_keys(store: &Store, prefix: &str) -> anyhow::Result<Vec<String
         .await?;
     keys.sort();
     Ok(keys)
-}
-
-async fn read_partition(
-    store: &Store,
-    key: &str,
-) -> anyhow::Result<Vec<arrow::array::RecordBatch>> {
-    let bytes = match store.get(&object_store::path::Path::from(key)).await {
-        Ok(r) => r.bytes().await?,
-        Err(object_store::Error::NotFound { .. }) => return Ok(vec![]),
-        Err(e) => return Err(e.into()),
-    };
-    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)?.build()?;
-    Ok(reader.collect::<Result<_, _>>()?)
 }
 
 fn col_i64(b: &arrow::array::RecordBatch, name: &str) -> anyhow::Result<Int64Array> {
@@ -50,16 +50,27 @@ fn col_f64(b: &arrow::array::RecordBatch, name: &str) -> anyhow::Result<Float64A
         .clone())
 }
 
-/// Trade (ts, price, size) rows for one (exchange, symbol, date).
-pub async fn trades(
+/// Stream one partition's trades as (ts ns, price, size) — one batch in
+/// memory at a time. Missing partition = no-op.
+pub async fn stream_trades(
     store: &Store,
     exchange: &str,
     symbol: &str,
     date: &str,
-) -> anyhow::Result<Vec<(i64, f64, f64)>> {
+    mut f: impl FnMut(i64, f64, f64),
+) -> anyhow::Result<()> {
     let key = schema::silver_key("trades", exchange, symbol, date);
-    let mut out = Vec::new();
-    for b in read_partition(store, &key).await? {
+    let bytes = match store
+        .get(&object_store::path::Path::from(key.as_str()))
+        .await
+    {
+        Ok(r) => r.bytes().await?,
+        Err(object_store::Error::NotFound { .. }) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)?.build()?;
+    for batch in reader {
+        let b = batch?;
         let ts_event = col_i64(&b, "ts_event")?;
         let ts_recv = col_i64(&b, "ts_recv")?;
         let price = col_f64(&b, "price")?;
@@ -72,22 +83,32 @@ pub async fn trades(
             } else {
                 continue;
             };
-            out.push((ts, price.value(i), size.value(i)));
+            f(ts, price.value(i), size.value(i));
         }
     }
-    Ok(out)
+    Ok(())
 }
 
-/// Mid-quote (ts, mid) rows for one (exchange, symbol, date).
-pub async fn mids(
+/// Stream one partition's book_top as (ts ns, mid).
+pub async fn stream_mids(
     store: &Store,
     exchange: &str,
     symbol: &str,
     date: &str,
-) -> anyhow::Result<Vec<(i64, f64)>> {
+    mut f: impl FnMut(i64, f64),
+) -> anyhow::Result<()> {
     let key = schema::silver_key("book_top", exchange, symbol, date);
-    let mut out = Vec::new();
-    for b in read_partition(store, &key).await? {
+    let bytes = match store
+        .get(&object_store::path::Path::from(key.as_str()))
+        .await
+    {
+        Ok(r) => r.bytes().await?,
+        Err(object_store::Error::NotFound { .. }) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)?.build()?;
+    for batch in reader {
+        let b = batch?;
         let ts_event = col_i64(&b, "ts_event")?;
         let ts_recv = col_i64(&b, "ts_recv")?;
         let bid = col_f64(&b, "bid_px")?;
@@ -100,33 +121,51 @@ pub async fn mids(
             } else {
                 continue;
             };
-            out.push((ts, (bid.value(i) + ask.value(i)) / 2.0));
+            f(ts, (bid.value(i) + ask.value(i)) / 2.0);
         }
     }
-    Ok(out)
+    Ok(())
 }
 
-/// (ts, price) over a date range (inclusive), sorted by ts.
-pub async fn price_series(
+/// (ts ns, price) series over a date range, reduced to the last
+/// observation per 200 ms slot, ascending and bounded in memory by the
+/// span (≤ ~84 MB for an 8-day RV window) regardless of row count.
+/// Rows outside [span_start_ns, span_end_ns) are dropped at reduce time.
+pub async fn reduced_price_series(
     store: &Store,
     exchange: &str,
     symbol: &str,
     source: &str,
     dates: &[String],
+    span_start_ns: i64,
+    span_end_ns: i64,
 ) -> anyhow::Result<Vec<(i64, f64)>> {
-    let mut out = Vec::new();
-    for d in dates {
-        match source {
-            "trades" => out.extend(
-                trades(store, exchange, symbol, d)
-                    .await?
-                    .into_iter()
-                    .map(|(t, p, _)| (t, p)),
-            ),
-            "mid" => out.extend(mids(store, exchange, symbol, d).await?),
-            other => anyhow::bail!("unknown source {other}"),
+    let slot_ns = REDUCE_SLOT_MS * 1_000_000;
+    let slots = ((span_end_ns - span_start_ns) / slot_ns + 1) as usize;
+    // (last ts seen in slot, its price); ts=i64::MIN = empty.
+    let mut reduced: Vec<(i64, f64)> = vec![(i64::MIN, 0.0); slots];
+    {
+        let mut visit = |ts: i64, px: f64| {
+            if ts < span_start_ns || ts >= span_end_ns {
+                return;
+            }
+            let slot = ((ts - span_start_ns) / slot_ns) as usize;
+            if ts >= reduced[slot].0 {
+                reduced[slot] = (ts, px);
+            }
+        };
+        for d in dates {
+            match source {
+                "trades" => {
+                    stream_trades(store, exchange, symbol, d, |ts, px, _| visit(ts, px)).await?
+                }
+                "mid" => stream_mids(store, exchange, symbol, d, &mut visit).await?,
+                other => anyhow::bail!("unknown source {other}"),
+            }
         }
     }
-    out.sort_by_key(|(t, _)| *t);
-    Ok(out)
+    Ok(reduced
+        .into_iter()
+        .filter(|(ts, _)| *ts != i64::MIN)
+        .collect())
 }
