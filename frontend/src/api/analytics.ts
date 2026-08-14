@@ -31,6 +31,10 @@ export type AnalyticsInstrument = {
     /** Present when the instrument's base has a vol index (e.g. `["dvol"]`).
      * Optional during catalog rollout — absence doesn't mean unavailable. */
     iv?: { indices: string[] };
+    /** Perp instruments only (SO-397). Optional during rollout — the UI
+     * attempts the fetch for any `-perp` instrument regardless. */
+    funding?: { kinds: string[] };
+    basis?: Record<string, unknown>;
   };
   /** ISO dates (`YYYY-MM-DD`) bounding the available history. */
   first_date: string;
@@ -41,12 +45,14 @@ export type AnalyticsCatalog = { instruments: AnalyticsInstrument[] };
 
 export type AnalyticsSeries = {
   instrument_id: string;
-  metric: "spot" | "rv" | "iv";
+  metric: "spot" | "rv" | "iv" | "funding" | "basis";
   params: Record<string, unknown>;
   /** `[unix_ms, value]` pairs, ascending. RV/IV values are annualized vol
-   * fractions (multiply by 100 for percent); spot is in quote units. */
+   * fractions (multiply by 100 for percent); spot is in quote units.
+   * Funding is an annualized rate fraction, basis a raw premium fraction —
+   * both can be negative. */
   points: [number, number][];
-  meta: { units: string; points_dropped: number };
+  meta: { units: string; points_dropped?: number };
 };
 
 /** 503 from /analytics/* — the lake behind api-service is unreachable. */
@@ -133,15 +139,15 @@ export type IvSeriesParams = {
   to: string;
 };
 
-/** Implied vol (vol index, e.g. DVOL). Resolves `null` when the instrument's
- * base has no vol index (400) — the caller hides the line quietly. */
-export function useIvSeries(p: IvSeriesParams | null) {
+/** Metrics taking only (instrument_id, from, to) that may not exist for the
+ * instrument: a 400 resolves to `null` and the caller hides the line quietly. */
+function useOptionalSeries(metric: "iv" | "funding" | "basis", p: IvSeriesParams | null) {
   return useQuery<AnalyticsSeries | null, Error>({
-    queryKey: ["analytics-series", "iv", p],
+    queryKey: ["analytics-series", metric, p],
     queryFn: async () => {
       const qs = new URLSearchParams({
         instrument_id: p!.instrument_id,
-        metric: "iv",
+        metric,
         from: p!.from,
         to: p!.to,
       });
@@ -155,6 +161,21 @@ export function useIvSeries(p: IvSeriesParams | null) {
     enabled: p !== null,
     retry: 1,
   });
+}
+
+/** Implied vol (vol index, e.g. DVOL). */
+export function useIvSeries(p: IvSeriesParams | null) {
+  return useOptionalSeries("iv", p);
+}
+
+/** Settled funding, annualized rate fraction (perps only, SO-397). */
+export function useFundingSeries(p: IvSeriesParams | null) {
+  return useOptionalSeries("funding", p);
+}
+
+/** Perp basis (premium fraction, ~±0.3%; perps only, SO-397). */
+export function useBasisSeries(p: IvSeriesParams | null) {
+  return useOptionalSeries("basis", p);
 }
 
 export function useRvSeries(p: RvSeriesParams | null) {
