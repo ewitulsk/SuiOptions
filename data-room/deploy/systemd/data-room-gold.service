@@ -10,6 +10,6 @@ After=network-online.target docker.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/data-room
-ExecStart=/usr/bin/docker compose run --rm batch gold gaps
-ExecStart=/usr/bin/docker compose run --rm batch gold bars
-ExecStart=/usr/bin/docker compose run --rm batch gold rv
+# 2-day lookback: a failed night self-heals on the next run instead of
+# leaving a permanent hole (partitions are overwrite-idempotent).
+ExecStart=/usr/bin/docker compose run --rm batch sh -c 'for b in 2 1; do d=$(date -u -d "$b days ago" +%%F); gold --date $d gaps && gold --date $d bars && gold --date $d rv; done'
