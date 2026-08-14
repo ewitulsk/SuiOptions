@@ -38,7 +38,25 @@ struct Config {
     /// Reconnect if no websocket traffic for this long.
     #[serde(default = "default_stall_secs")]
     stall_secs: u64,
+    #[serde(default)]
     connections: Vec<Connection>,
+    /// REST snapshot pollers (e.g. Deribit chain summaries).
+    #[serde(default)]
+    pollers: Vec<Poller>,
+}
+
+#[derive(Deserialize, Clone)]
+struct Poller {
+    exchange: String,
+    url: String,
+    /// bronze stream name, e.g. "chain.BTC".
+    stream: String,
+    #[serde(default = "default_poll_secs")]
+    interval_secs: u64,
+}
+
+fn default_poll_secs() -> u64 {
+    60
 }
 
 #[derive(Deserialize, Clone)]
@@ -139,8 +157,78 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // One capture task per connection.
+    // REST snapshot pollers: one line per poll into the poller's stream.
     let mut capture_tasks = Vec::new();
+    for poller in cfg.pollers.clone() {
+        let spool = spool.clone();
+        let upload_tx = upload_tx.clone();
+        capture_tasks.push(tokio::spawn(async move {
+            let http = match reqwest::Client::builder()
+                .user_agent("data-room-collector")
+                .timeout(Duration::from_secs(30))
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("poller http client: {e:#}");
+                    return;
+                }
+            };
+            let seq = AtomicU64::new(0);
+            let mut tick = tokio::time::interval(Duration::from_secs(poller.interval_secs));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let payload = match http.get(&poller.url).send().await {
+                    Ok(r) => match r.error_for_status() {
+                        Ok(r) => match r.text().await {
+                            Ok(t) => t,
+                            Err(e) => {
+                                warn!(exchange = poller.exchange, "poll body: {e:#}");
+                                continue;
+                            }
+                        },
+                        Err(e) => {
+                            warn!(exchange = poller.exchange, "poll status: {e:#}");
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        warn!(exchange = poller.exchange, "poll send: {e:#}");
+                        continue;
+                    }
+                };
+                let ts = now_ns();
+                let n = seq.fetch_add(1, Ordering::Relaxed);
+                metrics::counter!("dataroom_collector_messages_total",
+                    "exchange" => poller.exchange.clone(), "stream" => poller.stream.clone())
+                .increment(1);
+                metrics::gauge!("dataroom_collector_last_message_unix_seconds",
+                    "exchange" => poller.exchange.clone())
+                .set(ts as f64 / 1e9);
+                let closed = {
+                    let mut s = spool.lock().unwrap();
+                    s.write(
+                        &poller.exchange,
+                        &poller.stream,
+                        ts,
+                        n,
+                        Some(&payload),
+                        None,
+                    )
+                };
+                match closed {
+                    Ok(Some(f)) => {
+                        let _ = upload_tx.send(f);
+                    }
+                    Ok(None) => {}
+                    Err(e) => error!("poller spool write: {e:#}"),
+                }
+            }
+        }));
+    }
+
+    // One capture task per connection.
     for conn in cfg.connections.clone() {
         if !matches!(conn.exchange.as_str(), "coinbase" | "hyperliquid") {
             anyhow::bail!("unsupported exchange {}", conn.exchange);

@@ -30,6 +30,23 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         lookback_days: u32,
     },
+    /// Normalize Deribit chain-snapshot bronze for a UTC day.
+    Deribit {
+        #[arg(long)]
+        date: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        lookback_days: u32,
+    },
+    /// Fetch Deribit DVOL hourly candles into vol_index partitions
+    /// (full history is free; re-runs repair gaps).
+    Dvol {
+        #[arg(long, value_delimiter = ',', default_value = "BTC")]
+        currencies: Vec<String>,
+        #[arg(long, default_value_t = 3)]
+        days: u32,
+        #[arg(long)]
+        from: Option<String>,
+    },
     /// Fetch settled Hyperliquid funding via REST into part-settled
     /// partitions (idempotent; capture gaps self-heal).
     FundingSettled {
@@ -60,6 +77,8 @@ enum Cmd {
         binance_perp_symbols: Vec<String>,
         #[arg(long, value_delimiter = ',', default_value = "BTC")]
         hyperliquid_coins: Vec<String>,
+        #[arg(long, value_delimiter = ',', default_value = "BTC")]
+        deribit_currencies: Vec<String>,
     },
 }
 
@@ -110,6 +129,27 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!(day, streams = n, "hyperliquid day normalized");
             }
         }
+        Cmd::Deribit {
+            date,
+            lookback_days,
+        } => {
+            for day in ws_days(date, lookback_days)? {
+                let n = normalizer::deribit::normalize_day(&store, &day).await?;
+                tracing::info!(day, streams = n, "deribit day normalized");
+            }
+        }
+        Cmd::Dvol {
+            currencies,
+            days,
+            from,
+        } => {
+            let to = Utc::now().date_naive();
+            let from = match from {
+                Some(f) => chrono::NaiveDate::parse_from_str(&f, "%Y-%m-%d")?,
+                None => to - Duration::days(days as i64),
+            };
+            normalizer::deribit::dvol(&store, &currencies, from, to).await?;
+        }
         Cmd::FundingSettled { coins, days, from } => {
             let to = Utc::now().date_naive();
             let from = match from {
@@ -134,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
             binance_symbols,
             binance_perp_symbols,
             hyperliquid_coins,
+            deribit_currencies,
         } => {
             let today = Utc::now().format("%Y-%m-%d").to_string();
             normalizer::instruments::snapshot(
@@ -142,6 +183,7 @@ async fn main() -> anyhow::Result<()> {
                 &binance_symbols,
                 &binance_perp_symbols,
                 &hyperliquid_coins,
+                &deribit_currencies,
                 &today,
             )
             .await?;

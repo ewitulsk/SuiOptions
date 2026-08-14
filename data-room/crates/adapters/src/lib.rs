@@ -4,6 +4,7 @@
 
 pub mod binance_vision;
 pub mod coinbase;
+pub mod deribit;
 pub mod hyperliquid;
 
 /// A parse failure carrying enough context for the rejects file.

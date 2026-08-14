@@ -19,6 +19,11 @@ pub struct Instrument {
     pub quote: String,
     pub tick_size: Option<f64>,
     pub lot_size: Option<f64>,
+    pub strike: Option<f64>,
+    /// ns epoch of expiry (options/futures).
+    pub expiry: Option<i64>,
+    /// "call" | "put".
+    pub opt_type: Option<String>,
 }
 
 impl Instrument {
@@ -48,6 +53,9 @@ pub fn instruments_schema() -> Schema {
         Field::new("quote", DataType::Utf8, false),
         Field::new("tick_size", DataType::Float64, true),
         Field::new("lot_size", DataType::Float64, true),
+        Field::new("strike", DataType::Float64, true),
+        Field::new("expiry", DataType::Int64, true),
+        Field::new("opt_type", DataType::Utf8, true),
     ])
 }
 
@@ -79,6 +87,15 @@ pub fn instruments_batch(mut rows: Vec<Instrument>) -> anyhow::Result<RecordBatc
             )),
             Arc::new(Float64Array::from(
                 rows.iter().map(|r| r.lot_size).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.strike).collect::<Vec<_>>(),
+            )),
+            Arc::new(arrow::array::Int64Array::from(
+                rows.iter().map(|r| r.expiry).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from_iter(
+                rows.iter().map(|r| r.opt_type.as_deref()),
             )),
         ],
     )?;

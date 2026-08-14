@@ -15,3 +15,9 @@ exchange = "hyperliquid"
 url = "wss://api.hyperliquid.xyz/ws"
 products = ["BTC"]
 channels = ["trades", "bbo", "activeAssetCtx"]
+
+[[pollers]]
+exchange = "deribit"
+url = "https://www.deribit.com/api/v2/public/get_book_summary_by_currency?currency=BTC&kind=option"
+stream = "chain.BTC"
+interval_secs = 60
