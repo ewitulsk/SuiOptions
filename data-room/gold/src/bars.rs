@@ -35,33 +35,56 @@ struct Bar {
     close: f64,
     volume: f64,
     n: i64,
+    /// ts of the first/last trade seen for this bucket — open/close are
+    /// tracked by timestamp so out-of-order silver rows aggregate right.
+    first_ts: i64,
+    last_ts: i64,
 }
 
-fn build_bars(trades: &[(i64, f64, f64)], day_start_ns: i64, freq_ns: i64) -> Vec<Bar> {
-    let mut out: Vec<Bar> = Vec::new();
-    for &(ts, px, sz) in trades {
-        let bucket = (ts - day_start_ns).div_euclid(freq_ns);
-        let ts_open = day_start_ns + bucket * freq_ns;
-        match out.last_mut() {
-            Some(b) if b.ts_open == ts_open => {
-                b.high = b.high.max(px);
-                b.low = b.low.min(px);
-                b.close = px;
-                b.volume += sz;
-                b.n += 1;
-            }
-            _ => out.push(Bar {
-                ts_open,
-                open: px,
-                high: px,
-                low: px,
-                close: px,
-                volume: sz,
-                n: 1,
-            }),
+/// Order-independent OHLCV aggregation keyed by bucket start.
+#[derive(Default)]
+struct BarMap {
+    freq_ns: i64,
+    day_start_ns: i64,
+    map: std::collections::BTreeMap<i64, Bar>,
+}
+
+impl BarMap {
+    fn new(day_start_ns: i64, freq_ns: i64) -> Self {
+        Self {
+            freq_ns,
+            day_start_ns,
+            map: Default::default(),
         }
     }
-    out
+
+    fn add(&mut self, ts: i64, px: f64, sz: f64) {
+        let bucket = (ts - self.day_start_ns).div_euclid(self.freq_ns);
+        let ts_open = self.day_start_ns + bucket * self.freq_ns;
+        let b = self.map.entry(ts_open).or_insert(Bar {
+            ts_open,
+            open: px,
+            high: px,
+            low: px,
+            close: px,
+            volume: 0.0,
+            n: 0,
+            first_ts: ts,
+            last_ts: ts,
+        });
+        if ts < b.first_ts {
+            b.first_ts = ts;
+            b.open = px;
+        }
+        if ts >= b.last_ts {
+            b.last_ts = ts;
+            b.close = px;
+        }
+        b.high = b.high.max(px);
+        b.low = b.low.min(px);
+        b.volume += sz;
+        b.n += 1;
+    }
 }
 
 pub async fn compute_day(store: &Store, date: &str) -> anyhow::Result<usize> {
@@ -75,14 +98,25 @@ pub async fn compute_day(store: &Store, date: &str) -> anyhow::Result<usize> {
 
     let mut files = 0usize;
     for (exchange, symbol) in crate::pairs_for_date(store, date).await? {
-        let mut trades = read::trades(store, &exchange, &symbol, date).await?;
-        trades.sort_by_key(|(t, _, _)| *t);
-        if trades.is_empty() {
+        // One streaming pass fills all frequencies; memory = bucket maps
+        // (≤ ~90k entries), never the day's rows.
+        let mut maps: Vec<BarMap> = FREQS_S
+            .iter()
+            .map(|f| BarMap::new(day_start_ns, f * 1_000_000_000))
+            .collect();
+        read::stream_trades(store, &exchange, &symbol, date, |ts, px, sz| {
+            for m in maps.iter_mut() {
+                m.add(ts, px, sz);
+            }
+        })
+        .await?;
+        if maps[0].map.is_empty() {
             continue;
         }
         let instrument = crate::instrument_id(&exchange, &symbol);
-        for &freq_s in FREQS_S {
-            let bars = build_bars(&trades, day_start_ns, freq_s * 1_000_000_000);
+        for (i, m) in maps.into_iter().enumerate() {
+            let freq_s = FREQS_S[i];
+            let bars: Vec<Bar> = m.map.into_values().collect();
             if bars.is_empty() {
                 continue;
             }
@@ -128,18 +162,41 @@ mod tests {
     #[test]
     fn bars_aggregate_ohlcv() {
         let ns = 1_000_000_000i64;
-        let trades = vec![
+        let mut m = BarMap::new(0, ns);
+        for (ts, px, sz) in [
             (10 * ns, 100.0, 1.0),
             (10 * ns + 1, 105.0, 2.0),
             (10 * ns + 2, 95.0, 1.0),
             (11 * ns, 96.0, 1.0), // next 1s bucket
-        ];
-        let bars = build_bars(&trades, 0, ns);
+        ] {
+            m.add(ts, px, sz);
+        }
+        let bars: Vec<&Bar> = m.map.values().collect();
         assert_eq!(bars.len(), 2);
-        let b = &bars[0];
+        let b = bars[0];
         assert_eq!((b.open, b.high, b.low, b.close), (100.0, 105.0, 95.0, 95.0));
         assert_eq!(b.volume, 4.0);
         assert_eq!(b.n, 3);
         assert_eq!(bars[1].open, 96.0);
+    }
+
+    #[test]
+    fn bars_are_order_independent() {
+        // Out-of-order silver (the 2023-01 dump quirk) must aggregate the
+        // same as sorted input: open/close keyed by timestamp, not arrival.
+        let ns = 1_000_000_000i64;
+        let mut m = BarMap::new(0, 60 * ns);
+        for (ts, px) in [
+            (30 * ns, 101.0),
+            (5 * ns, 99.0),
+            (55 * ns, 103.0),
+            (12 * ns, 100.0),
+        ] {
+            m.add(ts, px, 1.0);
+        }
+        let b = m.map.values().next().unwrap();
+        assert_eq!(b.open, 99.0, "open = earliest ts, not first arrival");
+        assert_eq!(b.close, 103.0, "close = latest ts");
+        assert_eq!((b.high, b.low), (103.0, 99.0));
     }
 }

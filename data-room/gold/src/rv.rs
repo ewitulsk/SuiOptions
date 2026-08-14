@@ -161,10 +161,25 @@ pub async fn compute_day(store: &Store, date: &str) -> anyhow::Result<usize> {
         .map(|b| (day - Duration::days(b)).format("%Y-%m-%d").to_string())
         .collect();
 
+    // Span for the reduced series: earliest window start (first hour end
+    // minus the longest window) through the last hour end.
+    let span_start_ns =
+        day_start_ns + 3_600 * 1_000_000_000 - WINDOWS_S.last().unwrap() * 1_000_000_000;
+    let span_end_ns = day_start_ns + 24 * 3_600 * 1_000_000_000 + 1;
+
     let mut rows: Vec<Row> = Vec::new();
     for (exchange, symbol) in crate::pairs_for_date(store, date).await? {
         for source in ["trades", "mid"] {
-            let points = read::price_series(store, &exchange, &symbol, source, &dates).await?;
+            let points = read::reduced_price_series(
+                store,
+                &exchange,
+                &symbol,
+                source,
+                &dates,
+                span_start_ns,
+                span_end_ns,
+            )
+            .await?;
             if points.is_empty() {
                 continue;
             }
