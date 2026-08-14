@@ -7458,6 +7458,7 @@ name = "option-scheduler"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "cli-spec",

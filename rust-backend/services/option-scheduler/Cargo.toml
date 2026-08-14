@@ -56,3 +56,5 @@ move-core-types = { workspace = true }
 # Localnet E2E (tests/localnet_e2e.rs, #[ignore]): publish the protocol,
 # drive a real roll, read buckets back.
 shared-crypto = { workspace = true }
+# anystrike_localnet.rs: decode `sui move build --dump-bytecode-as-base64`.
+base64 = "0.22"

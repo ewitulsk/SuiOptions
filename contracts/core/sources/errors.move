@@ -45,3 +45,7 @@ public fun spread_bucket_mismatch(): u64 { 67 }
 public fun spread_position(): u64 { 68 }
 public fun put_spread_exercise_required(): u64 { 69 }
 public fun put_spread_not_at_cursor(): u64 { 70 }
+// Any-strike buckets (runtime option-coin currencies via coin_registry).
+public fun encoding_mismatch(): u64 { 71 }
+public fun strike_not_representable(): u64 { 72 }
+public fun expiry_not_aligned(): u64 { 73 }

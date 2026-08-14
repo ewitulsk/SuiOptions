@@ -6,7 +6,11 @@ use sui::clock::Clock;
 use sui::coin::{Self, Coin, TreasuryCap};
 use sui::dynamic_field as df;
 
+use sui::coin_registry::CoinRegistry;
+
 use options_core::admin::{Self, AdminCap, ProtocolConfig};
+use options_core::bucket_registry::{Self, BucketRegistry};
+use options_core::option_coin::{Self, OptionCall};
 use whitelist::whitelist::{Self, Whitelist};
 use options_core::collateral::{Self, CollateralRequest};
 use options_core::errors;
@@ -171,6 +175,84 @@ public fun create_bucket<Underlying, Settlement, Call>(
         strike,
         strike_scale,
     );
+    transfer::share_object(bucket);
+}
+
+/// Any-strike permissionless creation: register this instantiation's coin
+/// currency at runtime (`option_coin::register_call` — aborts unless the
+/// marker parameters spell exactly the normalized economics, and aborts if
+/// the currency already exists), claim the bucket's `UID` from the derived
+/// registry (deterministic ID, second dedup guard), and return the bucket
+/// BY VALUE. The bucket has `key` only, and this module exposes no other
+/// consumer — so the creating transaction MUST end with `share_bucket`,
+/// letting the same PTB thread the fresh bucket through quote/write calls
+/// first. Ingress-gated like every write venue.
+public fun create_bucket_any_strike<U, S, D0, D1, D2, D3, D4, D5, D6, D7, D8, D9>(
+    registry: &mut BucketRegistry,
+    coin_registry: &mut CoinRegistry,
+    wl: &Whitelist,
+    expiry_ms: u64,
+    strike: u128,
+    strike_scale: u8,
+    coin_decimals: u8,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): Bucket<U, S, OptionCall<U, S, D0, D1, D2, D3, D4, D5, D6, D7, D8, D9>> {
+    whitelist::assert_ingress_allowed(wl, ctx.sender());
+    assert!(clock.timestamp_ms() < expiry_ms, errors::bucket_expired());
+    // Minute-aligned expiries keep the u32-minutes type encoding injective.
+    assert!(expiry_ms % 60_000 == 0, errors::expiry_not_aligned());
+    let expiry_minutes = expiry_ms / 60_000;
+    assert!(expiry_minutes <= (std::u32::max_value!() as u64), errors::expiry_not_aligned());
+    assert!(strike_scale <= MAX_STRIKE_SCALE, errors::strike_scale_too_large());
+    let (sig, exp) = option_coin::normalize_strike(strike, strike_scale);
+
+    let asset_type = type_name::with_defining_ids<U>();
+    let settlement_type = type_name::with_defining_ids<S>();
+    let id = sui::derived_object::claim(
+        bucket_registry::uid_mut(registry),
+        bucket_registry::key(asset_type, settlement_type, expiry_ms, sig, exp, /* is_put */ false),
+    );
+    let call_treasury = option_coin::register_call<U, S, D0, D1, D2, D3, D4, D5, D6, D7, D8, D9>(coin_registry, expiry_minutes as u32, sig, exp, coin_decimals, ctx);
+
+    let call_type = type_name::with_defining_ids<
+        OptionCall<U, S, D0, D1, D2, D3, D4, D5, D6, D7, D8, D9>,
+    >();
+    let bucket = Bucket<U, S, OptionCall<U, S, D0, D1, D2, D3, D4, D5, D6, D7, D8, D9>> {
+        id,
+        asset_type,
+        settlement_type,
+        call_type,
+        expiry_ms,
+        // Stored normalized: identical economics to the raw input, and the
+        // bucket's on-chain identity matches its coin-type encoding.
+        strike: sig as u128,
+        strike_scale: exp,
+        total_written: 0,
+        exercise_cursor: 0,
+        underlying_balance: balance::zero<U>(),
+        settlement_balance: balance::zero<S>(),
+        call_treasury,
+        invalidated: false,
+        closed: vector[],
+        closed_pending: 0,
+        spreads: vector[],
+    };
+    events::emit_bucket_created(
+        object::id(&bucket),
+        asset_type,
+        settlement_type,
+        call_type,
+        expiry_ms,
+        sig as u128,
+        exp,
+    );
+    bucket
+}
+
+/// Terminal command of every `create_bucket_any_strike` transaction.
+#[allow(lint(share_owned))]
+public fun share_bucket<U, S, C>(bucket: Bucket<U, S, C>) {
     transfer::share_object(bucket);
 }
 

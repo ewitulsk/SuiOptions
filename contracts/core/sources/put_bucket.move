@@ -62,9 +62,13 @@ use sui::coin::{Self, Coin, TreasuryCap};
 
 use sui::dynamic_field as df;
 
+use sui::coin_registry::CoinRegistry;
+
 use options_core::admin::{AdminCap, ProtocolConfig};
 use whitelist::whitelist::{Self, Whitelist};
 use options_core::bucket;
+use options_core::bucket_registry::{Self, BucketRegistry};
+use options_core::option_coin::{Self, OptionPut};
 use options_core::collateral::{Self, CollateralRequest};
 use options_core::errors;
 use options_core::events;
@@ -205,6 +209,77 @@ public fun create_put_bucket<Underlying, Settlement, Put>(
         strike,
         strike_scale,
     );
+    transfer::share_object(bucket);
+}
+
+/// Put twin of `bucket::create_bucket_any_strike`: runtime currency via
+/// `option_coin::register_put`, derived `UID` (keyed `is_put = true`),
+/// bucket returned by value for same-PTB use, shared via
+/// `share_put_bucket` as the transaction's terminal command.
+public fun create_put_bucket_any_strike<U, S, D0, D1, D2, D3, D4, D5, D6, D7, D8, D9>(
+    registry: &mut BucketRegistry,
+    coin_registry: &mut CoinRegistry,
+    wl: &Whitelist,
+    expiry_ms: u64,
+    strike: u128,
+    strike_scale: u8,
+    coin_decimals: u8,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): PutBucket<U, S, OptionPut<U, S, D0, D1, D2, D3, D4, D5, D6, D7, D8, D9>> {
+    whitelist::assert_ingress_allowed(wl, ctx.sender());
+    assert!(clock.timestamp_ms() < expiry_ms, errors::bucket_expired());
+    assert!(expiry_ms % 60_000 == 0, errors::expiry_not_aligned());
+    let expiry_minutes = expiry_ms / 60_000;
+    assert!(expiry_minutes <= (std::u32::max_value!() as u64), errors::expiry_not_aligned());
+    assert!(strike_scale <= MAX_STRIKE_SCALE, errors::strike_scale_too_large());
+    let (sig, exp) = option_coin::normalize_strike(strike, strike_scale);
+
+    let asset_type = type_name::with_defining_ids<U>();
+    let settlement_type = type_name::with_defining_ids<S>();
+    let id = sui::derived_object::claim(
+        bucket_registry::uid_mut(registry),
+        bucket_registry::key(asset_type, settlement_type, expiry_ms, sig, exp, /* is_put */ true),
+    );
+    let put_treasury = option_coin::register_put<U, S, D0, D1, D2, D3, D4, D5, D6, D7, D8, D9>(coin_registry, expiry_minutes as u32, sig, exp, coin_decimals, ctx);
+
+    let put_type = type_name::with_defining_ids<
+        OptionPut<U, S, D0, D1, D2, D3, D4, D5, D6, D7, D8, D9>,
+    >();
+    let bucket = PutBucket<U, S, OptionPut<U, S, D0, D1, D2, D3, D4, D5, D6, D7, D8, D9>> {
+        id,
+        asset_type,
+        settlement_type,
+        put_type,
+        expiry_ms,
+        strike: sig as u128,
+        strike_scale: exp,
+        total_written: 0,
+        exercise_cursor: 0,
+        total_redeemed: 0,
+        underlying_balance: balance::zero<U>(),
+        settlement_balance: balance::zero<S>(),
+        put_treasury,
+        invalidated: false,
+        closed: vector[],
+        closed_pending: 0,
+        spreads: vector[],
+    };
+    events::emit_put_bucket_created(
+        object::id(&bucket),
+        asset_type,
+        settlement_type,
+        put_type,
+        expiry_ms,
+        sig as u128,
+        exp,
+    );
+    bucket
+}
+
+/// Terminal command of every `create_put_bucket_any_strike` transaction.
+#[allow(lint(share_owned))]
+public fun share_put_bucket<U, S, P>(bucket: PutBucket<U, S, P>) {
     transfer::share_object(bucket);
 }
 
