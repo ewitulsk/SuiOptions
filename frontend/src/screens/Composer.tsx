@@ -143,7 +143,9 @@ export function Composer({ initialView }: Props) {
       <div className="composer-status">loading strikes from indexer…</div>
     ) : s.bucketsEmpty ? (
       <div className="composer-status">
-        no buckets yet — the option-scheduler hasn't created any for this series
+        {s.canCreateStrikes
+          ? "no strikes yet for this series — writers can create one from the Earn tab"
+          : "no buckets yet — the option-scheduler hasn't created any for this series"}
       </div>
     ) : (
       <ChainTable
@@ -270,7 +272,9 @@ export function Composer({ initialView }: Props) {
           <div className="composer-status">loading strikes from indexer…</div>
         ) : s.bucketsEmpty ? (
           <div className="composer-status">
-            no buckets available yet — the option-scheduler hasn't created any for this series
+            {s.canCreateStrikes
+              ? "no strikes yet for this series — create the first one below"
+              : "no buckets available yet — the option-scheduler hasn't created any for this series"}
           </div>
         ) : (
           <StrikeTiles
@@ -279,6 +283,31 @@ export function Composer({ initialView }: Props) {
             onSelect={s.setSelectedIdx}
             view={s.view}
           />
+        )}
+        {s.canCreateStrikes && (
+          <form
+            className="custom-strike"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void s.createCustomStrike();
+            }}
+          >
+            <input
+              className="custom-strike__input"
+              placeholder="custom strike (USD)"
+              inputMode="decimal"
+              value={s.customStrike}
+              onChange={(e) => s.setCustomStrike(e.target.value)}
+              disabled={s.creatingBucket}
+            />
+            <button
+              className="custom-strike__btn"
+              type="submit"
+              disabled={s.creatingBucket || !s.customStrike.trim()}
+            >
+              {s.creatingBucket ? "creating…" : "create strike"}
+            </button>
+          </form>
         )}
 
         <AmountInput

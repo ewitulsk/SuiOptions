@@ -60,7 +60,25 @@ export type Bucket = {
    * UI; `invalidated` does NOT affect it (mint freeze only).
    */
   tradeable: boolean;
+  /**
+   * Write/RFQ liveness (SO-394): not cleaned, not expired, not
+   * invalidated. Pool-less any-strike buckets are RFQ-tradeable from
+   * birth. Backend-optional during rollout — read via `rfqTradeable()`.
+   */
+  rfq_tradeable?: boolean;
+  /** Kind-aware alias of `tradeable` (pool gate). Backend-optional. */
+  pool_tradeable?: boolean;
 };
+
+/** Write/RFQ liveness with rollout fallback to the legacy pool gate. */
+export function rfqTradeable(b: Bucket): boolean {
+  return b.rfq_tradeable ?? b.tradeable;
+}
+
+/** Pool (DeepBook panel) gate with rollout fallback. */
+export function poolTradeable(b: Bucket): boolean {
+  return b.pool_tradeable ?? b.tradeable;
+}
 
 /**
  * A series is the set of buckets that share `(asset, settlement, expiry)`.
@@ -358,4 +376,40 @@ export async function fetchActivity(wallet: string): Promise<EventDto[]> {
   }
   const body: EventsResponse = await res.json();
   return body.events;
+}
+
+/** `GET /buckets/spec` — resolve an economic spec to its (maybe
+ * not-yet-created) bucket. Drives the custom-strike flow (SO-395). */
+export type BucketSpec = {
+  exists: boolean;
+  bucket_id: string | null;
+  option_coin_type: string | null;
+  normalized_sig: string;
+  normalized_exp: number;
+  expiry_aligned: boolean;
+  underlying_coin_type: string;
+  settlement_coin_type: string;
+};
+
+export async function fetchBucketSpec(q: {
+  underlying: string;
+  settlement: string;
+  expiryMs: number;
+  strikeRaw: string;
+  strikeScale: number;
+  optionType: "call" | "put";
+}): Promise<BucketSpec> {
+  const params = new URLSearchParams({
+    underlying: q.underlying,
+    settlement: q.settlement,
+    expiry_ms: String(q.expiryMs),
+    strike_raw: q.strikeRaw,
+    strike_scale: String(q.strikeScale),
+    option_type: q.optionType,
+  });
+  const res = await fetch(`${API_BASE_URL}/buckets/spec?${params}`);
+  if (!res.ok) {
+    throw new Error(`GET /buckets/spec failed: ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as BucketSpec;
 }

@@ -1,6 +1,7 @@
 // Open orders for a bucket's DeepBook pool (SO-236). Lifted out of TradePanel so
 // it can live as the "orders" tab in BuyDetailTabs. Self-contained: it owns the
 // BalanceManager / open-order reads and the cancel / withdraw PTBs.
+import { optionCoinType } from "../api/client";
 
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -46,7 +47,7 @@ export function OpenOrdersSection({ bucket, series }: Props) {
   const pool: PoolRef | null = bucket.deepbook_pool_id
     ? {
         poolId: bucket.deepbook_pool_id,
-        baseCoinType: bucket.call_coin_type,
+        baseCoinType: optionCoinType(bucket),
         quoteCoinType: series.settlement_coin_type,
         baseDecimals: baseDec,
         quoteDecimals: quoteDec,

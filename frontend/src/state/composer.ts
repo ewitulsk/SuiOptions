@@ -18,7 +18,13 @@ import { useBulkView } from "../api/useBulkView";
 import { buildBuyTx, buildWriteTx } from "../tx/composer";
 import { buildBuyPutTx, buildWritePutTx } from "../tx/composer_put";
 import { formatPrice } from "../format";
-import { optionCoinType, seriesOptionType } from "../api/client";
+import { fetchBucketSpec, optionCoinType, rfqTradeable, seriesOptionType } from "../api/client";
+import {
+  buildCreateBucketTx,
+  normalizeStrike,
+  strikeDisplayToRaw,
+} from "../tx/anystrike";
+import { BUCKET_REGISTRY_ID } from "../config";
 import type { ToastState } from "../components/Toast";
 import type { Bucket as ApiBucket, Series } from "../api/client";
 import type { RfqQuoteEntry, Side as ProtocolSide } from "../api/quoting";
@@ -181,6 +187,14 @@ export type ComposerState = {
   bucketsLoading: boolean;
   /** Resolved /buckets fetch returned zero series. */
   bucketsEmpty: boolean;
+  /** Any-strike creation (SO-395): free strike input + sponsored create. */
+  customStrike: string;
+  setCustomStrike: (v: string) => void;
+  /** Non-null while a create tx is in flight / awaiting the indexer. */
+  creatingBucket: boolean;
+  /** Whether this deployment supports any-strike creation. */
+  canCreateStrikes: boolean;
+  createCustomStrike: () => Promise<void>;
   /** Distinct assets across all returned series, sorted by symbol. */
   assets: AssetOption[];
   /** Currently selected asset symbol, or null until the first series arrives. */
@@ -440,6 +454,122 @@ export function useComposerState({
   const bucketsLoading = bucketsQuery.isLoading;
   const bucketsEmpty = !bucketsLoading && strikes.length === 0;
 
+  // ── Any-strike creation (SO-395) ─────────────────────────────────────
+  // Two-step v1: sponsored create-bucket PTB, then the 5s /buckets poll
+  // surfaces the new bucket and we auto-select it; RFQ + write proceed as
+  // for any other strike. (Single-tx create+quote+write is SO-396.)
+  const [customStrike, setCustomStrike] = useState("");
+  const [creatingBucket, setCreatingBucket] = useState(false);
+  const pendingSpec = useRef<{ sig: string; exp: number; expiryMs: number } | null>(null);
+  const canCreateStrikes = Boolean(BUCKET_REGISTRY_ID);
+
+  // Auto-select the created bucket once the poll surfaces it.
+  useEffect(() => {
+    const pending = pendingSpec.current;
+    if (!pending || !series || series.expiry_ms !== pending.expiryMs) return;
+    const idx = seriesBuckets.findIndex((b) => {
+      const n = normalizeStrike(BigInt(b.strike_raw), b.strike_scale);
+      return n !== null && n.sig.toString() === pending.sig && n.exp === pending.exp;
+    });
+    if (idx >= 0) {
+      pendingSpec.current = null;
+      setCreatingBucket(false);
+      setSelectedIdx(idx);
+      setToast({ message: "strike created · quotes incoming", variant: "info" });
+      setTimeout(() => setToast(null), 4000);
+    }
+  }, [seriesBuckets, series]);
+
+  const createCustomStrike = async () => {
+    if (!series || creatingBucket) return;
+    const underDec = series.asset_decimals;
+    const settleDec = series.settlement_decimals;
+    if (underDec == null || settleDec == null) {
+      setToast({ message: "token decimals unknown for this pair", variant: "error" });
+      setTimeout(() => setToast(null), 4000);
+      return;
+    }
+    const raw = strikeDisplayToRaw(customStrike, underDec, settleDec);
+    const norm = raw && normalizeStrike(raw.strikeRaw, raw.strikeScale);
+    if (!raw || !norm) {
+      setToast({
+        message: "enter a valid strike (max 13 significant digits)",
+        variant: "error",
+      });
+      setTimeout(() => setToast(null), 4000);
+      return;
+    }
+    // Already listed? Select it instead of creating.
+    const existingIdx = seriesBuckets.findIndex((b) => {
+      const n = normalizeStrike(BigInt(b.strike_raw), b.strike_scale);
+      return n !== null && n.sig === norm.sig && n.exp === norm.exp;
+    });
+    if (existingIdx >= 0) {
+      setSelectedIdx(existingIdx);
+      setCustomStrike("");
+      return;
+    }
+    if (!canCreateStrikes) {
+      setToast({
+        message: "this deployment doesn't support custom strikes yet",
+        variant: "error",
+      });
+      setTimeout(() => setToast(null), 4000);
+      return;
+    }
+    setCreatingBucket(true);
+    try {
+      // Cross-check against the api-service in case the local list is
+      // stale (someone else created this strike since the last poll).
+      const spec = await fetchBucketSpec({
+        underlying: series.asset_coin_type,
+        settlement: series.settlement_coin_type,
+        expiryMs: series.expiry_ms,
+        strikeRaw: raw.strikeRaw.toString(),
+        strikeScale: raw.strikeScale,
+        optionType,
+      }).catch(() => null);
+      if (spec?.exists) {
+        pendingSpec.current = {
+          sig: norm.sig.toString(),
+          exp: norm.exp,
+          expiryMs: series.expiry_ms,
+        };
+        await bucketsQuery.refetch();
+        return;
+      }
+      const tx = buildCreateBucketTx({
+        underlyingCoinType: series.asset_coin_type,
+        settlementCoinType: series.settlement_coin_type,
+        expiryMs: series.expiry_ms,
+        strikeRaw: raw.strikeRaw,
+        strikeScale: raw.strikeScale,
+        coinDecimals: underDec,
+        isPut: optionType === "put",
+      });
+      const digest = await submitTx(tx);
+      posthog.capture("bucket_create_submitted", {
+        digest,
+        strike: customStrike,
+        expiry_ms: series.expiry_ms,
+        option_type: optionType,
+      });
+      pendingSpec.current = {
+        sig: norm.sig.toString(),
+        exp: norm.exp,
+        expiryMs: series.expiry_ms,
+      };
+      setCustomStrike("");
+      setToast({ message: "creating strike on-chain…", variant: "info" });
+      setTimeout(() => setToast(null), 4000);
+    } catch (e) {
+      setCreatingBucket(false);
+      const msg = e instanceof Error ? e.message : String(e);
+      setToast({ message: msg, variant: "error" });
+      setTimeout(() => setToast(null), 6000);
+    }
+  };
+
   // Insufficiency uses real balances. A CALL writer supplies the underlying
   // (`amount`); a PUT writer supplies settlement cash collateral
   // (≈ amount * strike). Every buyer (call or put) pays the live premium.
@@ -479,10 +609,10 @@ export function useComposerState({
   // landed), surface it as an error toast rather than silently hiding the
   // chart + trade panel. Keyed on primitives so it fires once per strike, not
   // on every /buckets poll.
-  const selectedTradeable = apiBucket?.tradeable ?? true;
+  const selectedTradeable = apiBucket ? rfqTradeable(apiBucket) : true;
   useEffect(() => {
     if (view !== "trader" || selectedBucketId == null || selectedTradeable) return;
-    setToast({ message: "this strike isn't tradeable right now", variant: "error" });
+    setToast({ message: "this strike isn't quotable right now", variant: "error" });
     const t = setTimeout(() => setToast(null), 5000);
     return () => clearTimeout(t);
   }, [view, selectedBucketId, selectedTradeable]);
@@ -656,6 +786,11 @@ export function useComposerState({
     series,
     bucketsLoading,
     bucketsEmpty,
+    customStrike,
+    setCustomStrike,
+    creatingBucket,
+    canCreateStrikes,
+    createCustomStrike,
     assets,
     selectedAsset,
     selectAsset: setSelectedAsset,

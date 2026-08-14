@@ -86,6 +86,24 @@ html[data-mode="dark"] .db-markets__market[open] > .db-markets__row { background
 }
 html[data-mode="dark"] .composer-status { border-color: rgba(255, 255, 255, 0.15); }
 
+/* Any-strike creation (SO-395): custom strike input under the tiles. */
+.custom-strike { display: flex; gap: 8px; margin: 10px 0 2px; }
+.custom-strike__input {
+  flex: 1; min-width: 0; padding: 9px 12px; font: inherit; font-size: 13px;
+  border: 1px dashed rgba(0, 0, 0, 0.2); border-radius: 10px;
+  background: transparent; color: inherit;
+}
+.custom-strike__input:focus { outline: 2px solid rgba(0, 0, 0, 0.25); outline-offset: 1px; }
+.custom-strike__btn {
+  padding: 9px 14px; border-radius: 10px; border: 1px solid rgba(0, 0, 0, 0.2);
+  background: transparent; color: inherit; font: inherit; font-size: 13px;
+  font-weight: 600; cursor: pointer; white-space: nowrap;
+}
+.custom-strike__btn:disabled { opacity: 0.45; cursor: default; }
+html[data-mode="dark"] .custom-strike__input,
+html[data-mode="dark"] .custom-strike__btn { border-color: rgba(255, 255, 255, 0.2); }
+html[data-mode="dark"] .custom-strike__input:focus { outline-color: rgba(255, 255, 255, 0.3); }
+
 /* --- Bridge page (CCTP) --- */
 
 .bridge-form { display: flex; flex-direction: column; gap: 14px; max-width: 520px; }

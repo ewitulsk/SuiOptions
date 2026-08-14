@@ -112,6 +112,11 @@ export let EXCHANGE_PACKAGE_ID: string | undefined;
  * standalone package. */
 export let WHITELIST_ID: string | undefined;
 
+/** Shared `BucketRegistry` for any-strike bucket creation (SO-395).
+ * `undefined` on deployments predating the overhaul — the custom-strike UI
+ * then stays hidden. */
+export let BUCKET_REGISTRY_ID: string | undefined;
+
 /** Standalone whitelist package id + its AdminCap (admin PTBs). */
 export let WHITELIST_PACKAGE_ID: string | undefined;
 export let WHITELIST_ADMIN_CAP_ID: string | undefined;
@@ -253,6 +258,9 @@ type PackageInfoDto = {
     whitelistId: string;
     adminCapId: string;
   } | null;
+  /** Shared `bucket_registry::BucketRegistry` (any-strike derived bucket
+   * UIDs, SO-393). Absent on records predating the overhaul. */
+  bucketRegistryId?: string | null;
   equityOracle?: { packageId: string; publishDigest: string } | null;
   tradingVaultObjects?: {
     vaultProtocolConfigId: string;
@@ -308,6 +316,7 @@ export async function initConfig(): Promise<void> {
     quote: m.quote,
   }));
   WHITELIST_ID = info.whitelist?.whitelistId ?? undefined;
+  BUCKET_REGISTRY_ID = info.bucketRegistryId ?? undefined;
   WHITELIST_PACKAGE_ID = info.whitelist?.packageId;
   WHITELIST_ADMIN_CAP_ID = info.whitelist?.adminCapId;
   EQUITY_ORACLE_PACKAGE_ID = info.equityOracle?.packageId;
