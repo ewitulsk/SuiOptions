@@ -414,13 +414,17 @@ pub async fn bucket_spec(
     let s_type = protocol_types::asset::canonicalize_move_type(&resolve(&q.settlement));
 
     // Narrow indexer query: same pair + expiry, then match normalized strike
-    // + kind locally.
+    // + kind locally. The indexer stores chain-form `TypeName`s (bare
+    // addresses) and its filters string-match verbatim — so the filter args
+    // must be chain-form, NOT the canonical 0x-form we emit to clients
+    // (the /buckets/spec `exists:false`-for-existing-bucket bug).
+    let chain_form = |t: &str| t.strip_prefix("0x").unwrap_or(t).to_string();
     let candidates = state
         .indexer
         .buckets(
             /* active_only */ false,
-            Some(&protocol_types::asset::AssetType::new(u_type.clone())),
-            Some(&protocol_types::asset::AssetType::new(s_type.clone())),
+            Some(&protocol_types::asset::AssetType::new(chain_form(&u_type))),
+            Some(&protocol_types::asset::AssetType::new(chain_form(&s_type))),
             Some(q.expiry_ms),
         )
         .await
