@@ -108,13 +108,20 @@ pub async fn catalog(
     });
     let instruments: Vec<CatalogInstrument> = by_pair
         .into_iter()
-        .map(|((exchange, symbol), (first, last))| CatalogInstrument {
-            instrument_id: format!("{}.{exchange}", symbol.to_lowercase()),
-            exchange,
-            symbol,
-            metrics: metrics.clone(),
-            first_date: first,
-            last_date: last,
+        .map(|((exchange, symbol), (first, last))| {
+            let mut m = metrics.clone();
+            if symbol.ends_with("-PERP") {
+                m["funding"] = json!({ "kinds": ["settled"] });
+                m["basis"] = json!({});
+            }
+            CatalogInstrument {
+                instrument_id: format!("{}.{exchange}", symbol.to_lowercase()),
+                exchange,
+                symbol,
+                metrics: m,
+                first_date: first,
+                last_date: last,
+            }
         })
         .collect();
     Ok(Json(json!({ "instruments": instruments })))
@@ -268,6 +275,88 @@ pub async fn series(
             }
             let pts = pts.into_iter().map(|(ts, pct)| (ts, pct / 100.0)).collect();
             (pts, json!({ "index": symbol }), "annualized_vol")
+        }
+        "funding" => {
+            // Settled funding, annualized: rate × (24/interval) × 365.
+            let rows = lake
+                .funding_series(&exchange, &symbol, "settled", &dates)
+                .await
+                .map_err(|e| {
+                    tracing::warn!("analytics funding read failed: {e:#}");
+                    unavailable()
+                })?;
+            let interval = rows.first().map(|r| r.interval_hours).unwrap_or(8.0);
+            let pts: Vec<(i64, f64)> = rows
+                .iter()
+                .map(|r| (r.ts / 1_000_000, r.rate * (24.0 / r.interval_hours) * 365.0))
+                .collect();
+            (
+                pts,
+                json!({ "kind": "settled", "interval_hours": interval }),
+                "annualized_rate",
+            )
+        }
+        "basis" => {
+            // Perp premium as a raw fraction. Venue-native where possible:
+            // Hyperliquid streams mark+oracle in its ctx frames; Binance
+            // joins perp vs USDC-spot hourly bars (USDT/USDC cross is
+            // bps-level noise — the legs are named in params).
+            if exchange == "hyperliquid" {
+                let rows = lake
+                    .funding_series(&exchange, &symbol, "predicted", &dates)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!("analytics basis read failed: {e:#}");
+                        unavailable()
+                    })?;
+                let pts: Vec<(i64, f64)> = rows
+                    .iter()
+                    .filter_map(|r| match (r.mark_price, r.index_price) {
+                        (Some(m), Some(ix)) if ix > 0.0 => Some((r.ts / 1_000_000, (m - ix) / ix)),
+                        _ => None,
+                    })
+                    .collect();
+                (pts, json!({ "method": "mark_index" }), "fraction")
+            } else {
+                let base = symbol
+                    .trim_end_matches("-PERP")
+                    .split('-')
+                    .next()
+                    .unwrap_or_default();
+                if base.is_empty() {
+                    return Err(bad_request("bad perp symbol"));
+                }
+                let spot_symbol = format!("{base}-USDC");
+                let perp = lake
+                    .spot_series(&exchange, &symbol, 3_600, &dates)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!("analytics basis perp read failed: {e:#}");
+                        unavailable()
+                    })?;
+                let spot = lake
+                    .spot_series(&exchange, &spot_symbol, 3_600, &dates)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!("analytics basis spot read failed: {e:#}");
+                        unavailable()
+                    })?;
+                let spot_by_ts: std::collections::HashMap<i64, f64> = spot.into_iter().collect();
+                let pts: Vec<(i64, f64)> = perp
+                    .into_iter()
+                    .filter_map(|(ts, p)| {
+                        spot_by_ts
+                            .get(&ts)
+                            .filter(|s| **s > 0.0)
+                            .map(|s| (ts, (p - s) / s))
+                    })
+                    .collect();
+                (
+                    pts,
+                    json!({ "method": "bars", "legs": format!("{symbol}/{spot_symbol}") }),
+                    "fraction",
+                )
+            }
         }
         other => return Err(bad_request(format!("unknown metric {other}"))),
     };

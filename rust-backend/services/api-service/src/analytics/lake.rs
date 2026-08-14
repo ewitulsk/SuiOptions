@@ -30,6 +30,18 @@ enum Decoded {
     Rv(Arc<Vec<RvRow>>),
     /// Sorted object keys under a listed prefix.
     Listing(Arc<Vec<String>>),
+    /// funding partition rows: (ts ns, per-interval rate, interval hours,
+    /// mark price, index price).
+    Funding(Arc<Vec<FundingRow>>),
+}
+
+#[derive(Clone, Copy)]
+pub struct FundingRow {
+    pub ts: i64,
+    pub rate: f64,
+    pub interval_hours: f64,
+    pub mark_price: Option<f64>,
+    pub index_price: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -205,6 +217,71 @@ impl Lake {
         let mut out = Vec::new();
         for p in parts {
             out.extend(p?.iter().map(|(ts, close)| (ts / 1_000_000, *close)));
+        }
+        Ok(out)
+    }
+
+    async fn funding_partition(&self, key: &str) -> anyhow::Result<Arc<Vec<FundingRow>>> {
+        if let Some(Decoded::Funding(v)) = self.cache_get(key) {
+            return Ok(v);
+        }
+        let mut rows = Vec::new();
+        if let Some(bytes) = self.get_bytes(key).await? {
+            for batch in ParquetRecordBatchReaderBuilder::try_new(bytes)?.build()? {
+                let b = batch?;
+                let ts_event = col_i64(&b, "ts_event")?;
+                let ts_recv = col_i64(&b, "ts_recv")?;
+                let rate = col_f64(&b, "rate")?;
+                let interval = col_f64(&b, "interval_hours")?;
+                let mark = col_f64(&b, "mark_price")?;
+                let index = col_f64(&b, "index_price")?;
+                for i in 0..b.num_rows() {
+                    let ts = if ts_event.is_valid(i) {
+                        ts_event.value(i)
+                    } else if ts_recv.is_valid(i) {
+                        ts_recv.value(i)
+                    } else {
+                        continue;
+                    };
+                    rows.push(FundingRow {
+                        ts,
+                        rate: rate.value(i),
+                        interval_hours: interval.value(i),
+                        mark_price: mark.is_valid(i).then(|| mark.value(i)),
+                        index_price: index.is_valid(i).then(|| index.value(i)),
+                    });
+                }
+            }
+        }
+        let arc = Arc::new(rows);
+        self.cache_put(key.to_string(), Decoded::Funding(arc.clone()));
+        Ok(arc)
+    }
+
+    /// Funding rows of one kind ("settled" | "predicted") over `dates`.
+    pub async fn funding_series(
+        &self,
+        exchange: &str,
+        symbol: &str,
+        kind: &str,
+        dates: &[String],
+    ) -> anyhow::Result<Vec<FundingRow>> {
+        let keys: Vec<String> = dates
+            .iter()
+            .map(|d| {
+                format!(
+                    "silver/v1/funding_rates/exchange={exchange}/symbol={symbol}/date={d}/part-{kind}.parquet"
+                )
+            })
+            .collect();
+        let parts = futures::stream::iter(keys.into_iter())
+            .map(|k| async move { self.funding_partition(&k).await })
+            .buffered(FETCH_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        let mut out = Vec::new();
+        for p in parts {
+            out.extend(p?.iter().copied());
         }
         Ok(out)
     }

@@ -190,3 +190,73 @@ async fn vol_index_series_reads_dvol_partitions() {
     assert_eq!(pts[0], (3_600 * NS / 1_000_000, 42.5));
     // Missing 2026-08-11 partition skipped, no error.
 }
+
+#[allow(clippy::type_complexity)]
+fn funding_batch(rows: &[(i64, f64, f64, Option<f64>, Option<f64>)]) -> RecordBatch {
+    let schema = Schema::new(vec![
+        Field::new("ts_event", DataType::Int64, true),
+        Field::new("ts_recv", DataType::Int64, true),
+        Field::new("rate", DataType::Float64, false),
+        Field::new("interval_hours", DataType::Float64, false),
+        Field::new("mark_price", DataType::Float64, true),
+        Field::new("index_price", DataType::Float64, true),
+    ]);
+    RecordBatch::try_new(
+        Arc::new(schema),
+        vec![
+            Arc::new(Int64Array::from(
+                rows.iter().map(|r| Some(r.0)).collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                rows.iter().map(|_| None::<i64>).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from_iter_values(rows.iter().map(|r| r.1))),
+            Arc::new(Float64Array::from_iter_values(rows.iter().map(|r| r.2))),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.3).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.4).collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn funding_series_reads_settled_and_predicted_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_parquet(
+        &root.join("silver/v1/funding_rates/exchange=binance/symbol=BTC-USDT-PERP/date=2026-08-10/part-settled.parquet"),
+        &funding_batch(&[(3_600 * NS, 0.0001, 8.0, None, None)]),
+    );
+    write_parquet(
+        &root.join("silver/v1/funding_rates/exchange=hyperliquid/symbol=BTC-PERP/date=2026-08-10/part-predicted.parquet"),
+        &funding_batch(&[(7_200 * NS, 0.0000125, 1.0, Some(63_700.0), Some(63_730.0))]),
+    );
+    let lake = Lake::open(&format!("file://{}", root.display())).unwrap();
+    let dates = vec!["2026-08-10".to_string()];
+
+    let settled = lake
+        .funding_series("binance", "BTC-USDT-PERP", "settled", &dates)
+        .await
+        .unwrap();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].rate, 0.0001);
+    assert_eq!(settled[0].interval_hours, 8.0);
+
+    let predicted = lake
+        .funding_series("hyperliquid", "BTC-PERP", "predicted", &dates)
+        .await
+        .unwrap();
+    assert_eq!(predicted.len(), 1);
+    assert_eq!(predicted[0].mark_price, Some(63_700.0));
+
+    // Wrong kind for a partition = missing file = empty, not an error.
+    let none = lake
+        .funding_series("binance", "BTC-USDT-PERP", "predicted", &dates)
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+}
