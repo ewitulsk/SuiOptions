@@ -1,8 +1,10 @@
 // Analytics page (SO-390/SO-397): one dual-axis chart of exchange spot price
 // plus annualized realized and implied vol for a catalog instrument, fed by
-// the api-service /analytics endpoints (api/analytics.ts).
+// the api-service /analytics endpoints (api/analytics.ts). Perp instruments
+// (`-perp` in the id) add funding and basis series, toggleable via the
+// legend.
 //
-// The three series fetch in parallel and fail independently — each line
+// The series fetch in parallel and fail independently — each line
 // renders without the others, with a per-series status note below the
 // chart. A 503 (lake unreachable) shows the friendly "temporarily
 // unavailable" copy instead of an error string. IV 400s (no vol index for
@@ -13,13 +15,15 @@ import { useEffect, useRef, useState } from "react";
 import {
   AnalyticsUnavailableError,
   useAnalyticsCatalog,
+  useBasisSeries,
+  useFundingSeries,
   useIvSeries,
   useRvSeries,
   useSpotSeries,
   type AnalyticsInstrument,
   type AnalyticsSeries,
 } from "../api/analytics";
-import { AnalyticsChart } from "../components/AnalyticsChart";
+import { AnalyticsChart, type AnalyticsSeriesKey } from "../components/AnalyticsChart";
 import { useSegmentPill } from "../lib/useSegmentPill";
 
 import type { UseQueryResult } from "@tanstack/react-query";
@@ -214,6 +218,15 @@ export function Analytics() {
   const [windowS, setWindowS] = useState(DEFAULT_WINDOW_S);
   const [sampleIntervalS, setSampleIntervalS] = useState(DEFAULT_SAMPLE_INTERVAL_S);
   const [estimator, setEstimator] = useState(DEFAULT_ESTIMATOR);
+  // Legend toggles. Basis is off by default — it's a much smaller magnitude
+  // and only makes sense when explicitly asked for.
+  const [visible, setVisible] = useState<Record<AnalyticsSeriesKey, boolean>>({
+    spot: true,
+    rv: true,
+    iv: true,
+    funding: true,
+    basis: false,
+  });
 
   const inst: AnalyticsInstrument | null =
     instruments.find((i) => i.instrument_id === instrumentId) ??
@@ -270,13 +283,28 @@ export function Analytics() {
   // Attempted even when the catalog lacks `metrics.iv` (rollout may lag) —
   // a 400 resolves to `null` and the line hides quietly.
   const ivQ = useIvSeries(inst ? { instrument_id: inst.instrument_id, from, to } : null);
+  // Funding/basis are perp-only (SO-397). Same rollout stance as iv: fetched
+  // for any `-perp` instrument regardless of the catalog's metrics object,
+  // hidden quietly on 400.
+  const isPerp = inst?.instrument_id.includes("-perp") ?? false;
+  const fundingQ = useFundingSeries(
+    inst && isPerp ? { instrument_id: inst.instrument_id, from, to } : null,
+  );
+  const basisQ = useBasisSeries(
+    inst && isPerp ? { instrument_id: inst.instrument_id, from, to } : null,
+  );
 
   const spotPoints = spotQ.data?.points ?? [];
   const rvPoints = rvQ.data?.points ?? [];
   const ivPoints = ivQ.data?.points ?? [];
-  const loading = spotQ.isLoading || rvQ.isLoading || ivQ.isLoading;
-  // iv isn't consulted here: when the overlay shows it's either also 503 or
-  // quietly absent (400/empty), and either way the copy below is right.
+  // Empty for non-perps: the queries above are disabled.
+  const fundingPoints = fundingQ.data?.points ?? [];
+  const basisPoints = basisQ.data?.points ?? [];
+  const loading =
+    spotQ.isLoading || rvQ.isLoading || ivQ.isLoading || fundingQ.isLoading || basisQ.isLoading;
+  // iv/funding/basis aren't consulted here: when the overlay shows they're
+  // either also 503 or quietly absent (400/empty), and either way the copy
+  // below is right.
   const allUnavailable =
     spotQ.error instanceof AnalyticsUnavailableError &&
     rvQ.error instanceof AnalyticsUnavailableError;
@@ -284,6 +312,7 @@ export function Analytics() {
     seriesNote("spot", spotQ),
     seriesNote("realized vol", rvQ),
     seriesNote("implied vol", ivQ),
+    ...(isPerp ? [seriesNote("funding", fundingQ), seriesNote("basis", basisQ)] : []),
   ].filter((n): n is NonNullable<typeof n> => n !== null);
 
   const quoteSymbol = inst?.symbol.split("-")[1] ?? "quote";
@@ -352,12 +381,19 @@ export function Analytics() {
                   spot={spotPoints}
                   rv={rvPoints}
                   iv={ivPoints}
+                  funding={fundingPoints}
+                  basis={basisPoints}
+                  perp={isPerp}
+                  visible={visible}
+                  onToggleSeries={(k) => setVisible((v) => ({ ...v, [k]: !v[k] }))}
                   quoteSymbol={quoteSymbol}
                 />
                 {!loading &&
                   spotPoints.length === 0 &&
                   rvPoints.length === 0 &&
-                  ivPoints.length === 0 && (
+                  ivPoints.length === 0 &&
+                  fundingPoints.length === 0 &&
+                  basisPoints.length === 0 && (
                     <div className="ana-chart__empty">
                       <div className="ana-chart__empty-title">
                         {allUnavailable
