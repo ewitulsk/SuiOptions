@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
         cfg.sui_graphql_url.clone(),
         cfg.price_charting_url.clone(),
         snapshot.exchange_adapter().map(|p| p.package_id.clone()),
+        Some(snapshot.package_info.package_id.clone()),
         analytics,
     ));
 

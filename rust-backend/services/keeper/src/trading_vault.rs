@@ -944,7 +944,7 @@ async fn sweep_vault_address(wrap: &SuiClientWrapper, ctx: &TradingVaultCtx, vau
                 .or_else(|| t.split_once("::coin::Coin<").map(|(_, r)| r))
             {
                 let coin_type =
-                    protocol_types::asset::canonicalize_move_type(inner.trim_end_matches('>'));
+                    protocol_types::asset::canonicalize_move_type(inner.strip_suffix('>').unwrap_or(inner));
                 let tag = TypeTag::from_str(&coin_type)?;
                 let function = if ctx.feeds.contains_key(&coin_type)
                     || coin_type == holdings_deposit_hint()
@@ -1636,7 +1636,7 @@ async fn object_type_of(client: &ChainClient, id: ObjectID) -> Result<String> {
 fn bucket_type_args(bucket_ty: &str) -> Result<Vec<TypeTag>> {
     let inner = bucket_ty
         .split_once('<')
-        .map(|(_, rest)| rest.trim_end_matches('>'))
+        .and_then(|(_, rest)| rest.strip_suffix('>'))
         .ok_or_else(|| anyhow!("unparseable bucket type {bucket_ty}"))?;
     let mut out = Vec::new();
     let mut depth = 0usize;

@@ -359,9 +359,26 @@ pub fn protocol_templates(
     // own collateral object, so it cannot touch sponsor or executor assets;
     // a pathological `release` that burns compute is bounded by the existing
     // `max_gas_budget_mist` cap. The sponsor risks gas alone, as today.
+    // Any-strike creation legs (SO-394): a write/buy PTB may PREPEND
+    // `create_*_any_strike` (12 type args: U, S + 10 byte markers) and
+    // APPEND the mandatory `share_*` — creating the bucket atomically with
+    // the first write at a fresh strike. Allowed, never required, so plain
+    // writes against existing buckets still match the same template. The
+    // creation entry is permissionless + ingress-gated on-chain and mints
+    // nothing to anyone; the sponsor's exposure stays gas-only.
+    let create_legs = |module: &str| {
+        let (create_fn, share_fn) = if module == "put_bucket" {
+            ("create_put_bucket_any_strike", "share_put_bucket")
+        } else {
+            ("create_bucket_any_strike", "share_bucket")
+        };
+        (t(module, create_fn), t(module, share_fn))
+    };
+
     let execute_flow = |name: &str, request_fn: &str, execute_fn: &str, module: &str| {
         let request = t(module, request_fn);
         let execute = t(module, execute_fn);
+        let (create, share) = create_legs(module);
         let matchers = vec![
             TargetMatcher::Exact(t("quote", "new_quote")),
             TargetMatcher::Exact(t("quote", "new_signed_quote")),
@@ -369,12 +386,28 @@ pub fn protocol_templates(
             TargetMatcher::AnyRelease,
             TargetMatcher::Exact(execute.clone()),
         ];
+        let mut allowed = matchers.clone();
+        allowed.push(TargetMatcher::Exact(create.clone()));
+        allowed.push(TargetMatcher::Exact(share.clone()));
         PtbTemplate {
             name: name.to_owned(),
-            required: matchers.clone(),
-            allowed: matchers,
-            arities: vec![(request, 3), (execute, 3)],
+            required: matchers,
+            allowed,
+            arities: vec![(request, 3), (execute, 3), (create, 12), (share, 3)],
         }
+    };
+
+    // Standalone bucket creation (create → share, nothing else): the
+    // two-step frontend flow creates first, then quotes against the derived
+    // bucket id.
+    let create_only = |name: &str, module: &str| {
+        let (create, share) = create_legs(module);
+        PtbTemplate::exact_only(
+            name.to_owned(),
+            vec![create.clone(), share.clone()],
+            vec![create.clone(), share.clone()],
+            vec![(create, 12), (share, 3)],
+        )
     };
 
     // Single-anchor wallet flow (exercise / redeem) for either option module.
@@ -400,6 +433,8 @@ pub fn protocol_templates(
         execute_flow("put_buy", "request_trader_flow", "execute_trader_flow", "put_bucket"),
         single_call("put_exercise", "put_bucket", "exercise"),
         single_call("put_redeem", "put_bucket", "redeem_position"),
+        create_only("create_bucket", "bucket"),
+        create_only("put_create_bucket", "put_bucket"),
     ];
 
     // Wallet-facing covered-call vault flows (doc 03). Each is a single call
@@ -839,6 +874,52 @@ mod tests {
         assert_eq!(match_any(&templates(), &ex), Some("put_exercise"));
         let rd = build(&[(target("put_bucket", "redeem_position"), 3)], false);
         assert_eq!(match_any(&templates(), &rd), Some("put_redeem"));
+    }
+
+    #[test]
+    fn create_and_write_flow_matches() {
+        // Any-strike genesis write: create (12 targs) prepended, share (3)
+        // appended around the standard write shape — still the `write`
+        // template (creation legs are allowed, not required).
+        let mut calls = vec![(target("bucket", "create_bucket_any_strike"), 12)];
+        calls.extend(flow_calls("bucket", "request_writer_flow", "execute_writer_flow"));
+        calls.push((target("bucket", "share_bucket"), 3));
+        let pt = build(&calls, true);
+        assert_eq!(match_any(&templates(), &pt), Some("write"));
+    }
+
+    #[test]
+    fn create_only_flow_matches() {
+        let pt = build(
+            &[
+                (target("bucket", "create_bucket_any_strike"), 12),
+                (target("bucket", "share_bucket"), 3),
+            ],
+            true,
+        );
+        assert_eq!(match_any(&templates(), &pt), Some("create_bucket"));
+        let put = build(
+            &[
+                (target("put_bucket", "create_put_bucket_any_strike"), 12),
+                (target("put_bucket", "share_put_bucket"), 3),
+            ],
+            true,
+        );
+        assert_eq!(match_any(&templates(), &put), Some("put_create_bucket"));
+    }
+
+    #[test]
+    fn create_with_wrong_arity_rejected() {
+        // A creation leg with the wrong type-arg count fails the pinned
+        // arity check in every template.
+        let pt = build(
+            &[
+                (target("bucket", "create_bucket_any_strike"), 3),
+                (target("bucket", "share_bucket"), 3),
+            ],
+            true,
+        );
+        assert_eq!(match_any(&templates(), &pt), None);
     }
 
     #[test]

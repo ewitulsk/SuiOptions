@@ -18,6 +18,9 @@ pub struct PublishOutcome {
     pub package_id: ObjectID,
     pub admin_cap_id: ObjectID,
     pub protocol_config_id: ObjectID,
+    /// Shared `bucket_registry::BucketRegistry` (any-strike derived bucket
+    /// UIDs, SO-393) — created by the package's own init.
+    pub bucket_registry_id: ObjectID,
     pub upgrade_cap_id: ObjectID,
     pub digest: String,
 }
@@ -140,6 +143,7 @@ fn extract_publish_outcome(resp: &ExecutedTransaction) -> Result<PublishOutcome>
 
     let mut admin_cap_id: Option<ObjectID> = None;
     let mut protocol_config_id: Option<ObjectID> = None;
+    let mut bucket_registry_id: Option<ObjectID> = None;
     let mut upgrade_cap_id: Option<ObjectID> = None;
 
     for change in created_objects(resp) {
@@ -159,6 +163,7 @@ fn extract_publish_outcome(resp: &ExecutedTransaction) -> Result<PublishOutcome>
         match (tag.module.as_str(), tag.name.as_str()) {
             ("admin", "AdminCap") => admin_cap_id = Some(change.object_id),
             ("admin", "ProtocolConfig") => protocol_config_id = Some(change.object_id),
+            ("bucket_registry", "BucketRegistry") => bucket_registry_id = Some(change.object_id),
             _ => {}
         }
     }
@@ -170,6 +175,8 @@ fn extract_publish_outcome(resp: &ExecutedTransaction) -> Result<PublishOutcome>
             .ok_or_else(|| anyhow!("AdminCap not found in object_changes"))?,
         protocol_config_id: protocol_config_id
             .ok_or_else(|| anyhow!("ProtocolConfig not found in object_changes"))?,
+        bucket_registry_id: bucket_registry_id
+            .ok_or_else(|| anyhow!("BucketRegistry not found in object_changes"))?,
         upgrade_cap_id: upgrade_cap_id
             .ok_or_else(|| anyhow!("UpgradeCap not found in object_changes"))?,
         digest,

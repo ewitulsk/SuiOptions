@@ -26,6 +26,7 @@ pub async fn serve(
         .route("/analytics/catalog", get(crate::analytics::catalog))
         .route("/analytics/series", get(crate::analytics::series))
         .route("/buckets", get(handlers::buckets::list_buckets))
+        .route("/buckets/spec", get(handlers::buckets::bucket_spec))
         .route("/buckets/:bucket_id", get(handlers::buckets::get_bucket))
         .route("/positions", get(handlers::positions::list_positions))
         .route(

@@ -119,6 +119,13 @@ pub struct BucketDto {
     /// bucket isn't cleaned, and it hasn't expired. `invalidated` does NOT
     /// gate this — invalidation freezes new mints, not secondary trading.
     pub tradeable: bool,
+    /// Write/RFQ liveness (SO-394): not cleaned, not expired, not
+    /// invalidated. A pool-less any-strike bucket is RFQ-tradeable from
+    /// birth — pools are a graduation, not a birthright.
+    pub rfq_tradeable: bool,
+    /// Alias of `tradeable` under the kind-aware split; prefer this in new
+    /// consumers.
+    pub pool_tradeable: bool,
 }
 
 #[derive(Serialize)]
@@ -253,6 +260,10 @@ pub struct BucketDetailDto {
     pub deepbook_pool_id: Option<String>,
     /// Pool exists, bucket not cleaned, not expired (see `/buckets`).
     pub tradeable: bool,
+    /// See `/buckets`: write/RFQ liveness (pool-less buckets included).
+    pub rfq_tradeable: bool,
+    /// Alias of `tradeable` (kind-aware split).
+    pub pool_tradeable: bool,
 }
 
 pub async fn get_bucket(
@@ -323,6 +334,8 @@ fn detail_dto_from(b: &IndexerBucket, catalog: &TokenCatalog, now_ms: i64) -> Bu
         option_kind: b.option_kind.clone(),
         deepbook_pool_id: b.deepbook_pool_id.as_ref().map(|p| p.to_hex()),
         tradeable: is_tradeable(b.deepbook_pool_id.is_some(), b.cleaned, b.expiry_ms, now_ms),
+        rfq_tradeable: is_rfq_tradeable(b.cleaned, b.invalidated, b.expiry_ms, now_ms),
+        pool_tradeable: is_tradeable(b.deepbook_pool_id.is_some(), b.cleaned, b.expiry_ms, now_ms),
     }
 }
 
@@ -330,6 +343,155 @@ fn detail_dto_from(b: &IndexerBucket, catalog: &TokenCatalog, now_ms: i64) -> Bu
 /// new mints, not secondary-market transfers of already-minted coins.
 fn is_tradeable(has_pool: bool, cleaned: bool, expiry_ms: u64, now_ms: i64) -> bool {
     has_pool && !cleaned && (expiry_ms as i64) > now_ms
+}
+
+/// Write/RFQ liveness (SO-394): the mint path is open — no pool required.
+fn is_rfq_tradeable(cleaned: bool, invalidated: bool, expiry_ms: u64, now_ms: i64) -> bool {
+    !cleaned && !invalidated && (expiry_ms as i64) > now_ms
+}
+
+// ─────────────────────────── /buckets/spec ───────────────────────────
+
+#[derive(Deserialize)]
+pub struct SpecQuery {
+    /// Catalog symbol (`TBTC`) or full coin type.
+    pub underlying: String,
+    pub settlement: String,
+    pub expiry_ms: u64,
+    /// Raw u128 strike (scaled by `strike_scale`), decimal string.
+    pub strike_raw: String,
+    pub strike_scale: u8,
+    /// `"call"` (default) | `"put"`.
+    #[serde(default)]
+    pub option_type: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct SpecDto {
+    /// Whether a bucket for this normalized spec already exists on-chain
+    /// (per the indexer). `false` ⇒ the frontend prepends the sponsored
+    /// `create_bucket_any_strike` leg (or runs the create-first two-step).
+    pub exists: bool,
+    pub bucket_id: Option<String>,
+    /// The spec's option coin type — a pure function of the spec
+    /// (`OptionCall<U, S, D0..D9>` under the byte-marker encoding), valid
+    /// whether or not the bucket exists yet. `null` when the options
+    /// package id is unknown to this deployment.
+    pub option_coin_type: Option<String>,
+    /// Canonical strike: `sig / 10^exp` (trailing zeros stripped).
+    pub normalized_sig: String,
+    pub normalized_exp: u8,
+    /// Creation requires minute-aligned expiries.
+    pub expiry_aligned: bool,
+    pub underlying_coin_type: String,
+    pub settlement_coin_type: String,
+}
+
+/// Resolve an economic spec to its (maybe not-yet-created) bucket: the
+/// any-strike UI asks this before deciding between write-to-existing and
+/// create-on-write.
+pub async fn bucket_spec(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SpecQuery>,
+) -> Result<Json<SpecDto>, StatusCode> {
+    let is_put = match q.option_type.as_deref() {
+        None | Some("call") => false,
+        Some("put") => true,
+        Some(_) => return Err(StatusCode::BAD_REQUEST),
+    };
+    let strike: u128 = q.strike_raw.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let (sig, exp) = normalize_strike(strike, q.strike_scale).ok_or(StatusCode::BAD_REQUEST)?;
+    let expiry_aligned = q.expiry_ms % 60_000 == 0 && q.expiry_ms / 60_000 <= u32::MAX as u64;
+
+    let resolve = |input: &str| -> String {
+        state
+            .catalog
+            .by_symbol(input)
+            .map(str::to_string)
+            .unwrap_or_else(|| input.to_string())
+    };
+    let u_type = protocol_types::asset::canonicalize_move_type(&resolve(&q.underlying));
+    let s_type = protocol_types::asset::canonicalize_move_type(&resolve(&q.settlement));
+
+    // Narrow indexer query: same pair + expiry, then match normalized strike
+    // + kind locally.
+    let candidates = state
+        .indexer
+        .buckets(
+            /* active_only */ false,
+            Some(&protocol_types::asset::AssetType::new(u_type.clone())),
+            Some(&protocol_types::asset::AssetType::new(s_type.clone())),
+            Some(q.expiry_ms),
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "indexer spec query failed");
+            StatusCode::BAD_GATEWAY
+        })?;
+    let hit = candidates.into_iter().find(|b| {
+        let kind_matches = (b.option_kind == "put") == is_put;
+        kind_matches
+            && !b.cleaned
+            && normalize_strike(b.strike, b.strike_scale) == Some((sig, exp))
+    });
+
+    let option_coin_type = state
+        .options_package
+        .as_deref()
+        .map(|pkg| option_coin_type_str(pkg, is_put, &u_type, &s_type, q.expiry_ms, sig, exp));
+    Ok(Json(SpecDto {
+        exists: hit.is_some(),
+        bucket_id: hit.map(|b| b.bucket_id.to_hex()),
+        option_coin_type,
+        normalized_sig: sig.to_string(),
+        normalized_exp: exp,
+        expiry_aligned,
+        underlying_coin_type: u_type,
+        settlement_coin_type: s_type,
+    }))
+}
+
+/// Mirror of `option_coin::normalize_strike`: strip trailing zeros; the
+/// significand must fit the encoding's u40 field.
+fn normalize_strike(strike: u128, strike_scale: u8) -> Option<(u64, u8)> {
+    if strike == 0 {
+        return None;
+    }
+    let (mut sig, mut exp) = (strike, strike_scale);
+    while sig % 10 == 0 && exp > 0 {
+        sig /= 10;
+        exp -= 1;
+    }
+    (sig <= 0xFF_FFFF_FFFF).then_some((sig as u64, exp))
+}
+
+/// Canonical `OptionCall<U, S, D0..D9>` (or put) type literal for a spec —
+/// byte-compatible with `sui_tx::tx::option_coin` and the on-chain builder:
+/// minutes u32 ‖ sig u40 ‖ exp u8 as byte markers from `enc0`/`enc1`.
+fn option_coin_type_str(
+    package: &str,
+    is_put: bool,
+    u_type: &str,
+    s_type: &str,
+    expiry_ms: u64,
+    sig: u64,
+    exp: u8,
+) -> String {
+    let pkg = protocol_types::asset::canonicalize_move_type(&format!("{package}::x::X"));
+    let pkg = pkg.split_once("::").map(|(a, _)| a.to_string()).unwrap_or_else(|| package.into());
+    let minutes = (expiry_ms / 60_000) as u32;
+    let mut bytes = minutes.to_be_bytes().to_vec();
+    bytes.extend_from_slice(&sig.to_be_bytes()[3..]);
+    bytes.push(exp);
+    let markers: Vec<String> = bytes
+        .iter()
+        .map(|b| {
+            let module = if *b < 0x80 { "enc0" } else { "enc1" };
+            format!("{pkg}::{module}::B{b:02X}")
+        })
+        .collect();
+    let root = if is_put { "OptionPut" } else { "OptionCall" };
+    format!("{pkg}::option_coin::{root}<{u_type},{s_type},{}>", markers.join(","))
 }
 
 /// Map the JIT client's bucket into the local `(id, Bucket)` shape that the
@@ -453,6 +615,8 @@ fn dto_from(
         invalidated: b.invalidated,
         deepbook_pool_id: b.deepbook_pool_id.clone(),
         tradeable: is_tradeable(b.deepbook_pool_id.is_some(), b.cleaned, b.expiry_ms, now_ms),
+        rfq_tradeable: is_rfq_tradeable(b.cleaned, b.invalidated, b.expiry_ms, now_ms),
+        pool_tradeable: is_tradeable(b.deepbook_pool_id.is_some(), b.cleaned, b.expiry_ms, now_ms),
     }
 }
 
@@ -798,6 +962,11 @@ mod tests {
     fn tradeable_gate_matrix() {
         let expiry = 1_782_345_600_000u64; // after NOW_MS
         assert!(is_tradeable(true, false, expiry, NOW_MS));
+        // RFQ gate: pool-less any-strike buckets are live; invalidation kills.
+        assert!(is_rfq_tradeable(false, false, expiry, NOW_MS));
+        assert!(!is_rfq_tradeable(true, false, expiry, NOW_MS)); // cleaned
+        assert!(!is_rfq_tradeable(false, true, expiry, NOW_MS)); // invalidated
+        assert!(!is_rfq_tradeable(false, false, 1_000, NOW_MS)); // expired
         assert!(!is_tradeable(false, false, expiry, NOW_MS)); // no pool
         assert!(!is_tradeable(true, true, expiry, NOW_MS)); // cleaned
         assert!(!is_tradeable(true, false, 1_000, NOW_MS)); // expired
@@ -831,5 +1000,40 @@ mod tests {
         // The handler's 404-on-unknown path keys off `ObjectId::from_hex`
         // rejecting garbage before any indexer round-trip.
         assert!(ObjectId::from_hex("not-a-real-object-id").is_err());
+    }
+
+    #[test]
+    fn spec_normalize_matches_onchain_rules() {
+        assert_eq!(normalize_strike(257100, 4), Some((2571, 2)));
+        assert_eq!(normalize_strike(1500, 1), Some((150, 0)));
+        assert_eq!(normalize_strike(0, 0), None);
+        assert_eq!(normalize_strike(0x1_00_0000_0000u128, 0), None); // > u40
+    }
+
+    #[test]
+    fn spec_option_coin_type_matches_encoding() {
+        // Cross-checked with sui_tx::tx::option_coin::tests and the Move
+        // builder: minutes 50_000_000 = 0x02FAF080, sig 2571 = 0x…0A0B,
+        // exp 2 — markers B02,BFA,BF0,B80,B00,B00,B00,B0A,B0B,B02 with the
+        // high-bit bytes in enc1.
+        let t = option_coin_type_str(
+            "0xabc",
+            false,
+            "0xU::tbtc::TBTC",
+            "0xS::tusdc::TUSDC",
+            50_000_000u64 * 60_000,
+            2571,
+            2,
+        );
+        let pkg = format!("0x{:0>64}", "abc");
+        assert_eq!(
+            t,
+            format!(
+                "{pkg}::option_coin::OptionCall<0xU::tbtc::TBTC,0xS::tusdc::TUSDC,\
+{pkg}::enc0::B02,{pkg}::enc1::BFA,{pkg}::enc1::BF0,{pkg}::enc1::B80,\
+{pkg}::enc0::B00,{pkg}::enc0::B00,{pkg}::enc0::B00,{pkg}::enc0::B0A,\
+{pkg}::enc0::B0B,{pkg}::enc0::B02>"
+            )
+        );
     }
 }

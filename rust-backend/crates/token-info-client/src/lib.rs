@@ -99,6 +99,14 @@ impl Snapshot {
     pub fn admin_cap(&self) -> Result<ObjectID> {
         ObjectID::from_str_checked(&self.package_info.admin_cap_id, "admin_cap_id")
     }
+    pub fn bucket_registry(&self) -> Result<ObjectID> {
+        let id = self
+            .package_info
+            .bucket_registry_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("bucketRegistryId missing from token-info package_info"))?;
+        ObjectID::from_str_checked(id, "bucket_registry_id")
+    }
     pub fn protocol_config(&self) -> Result<ObjectID> {
         ObjectID::from_str_checked(&self.package_info.protocol_config_id, "protocol_config_id")
     }
@@ -477,6 +485,7 @@ mod tests {
                 quote_signer_id: None,
                 exchange: None,
                 whitelist: None,
+            bucket_registry_id: None,
             },
             tokens: vec![
                 tok(

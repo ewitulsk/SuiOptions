@@ -10,6 +10,10 @@
 //!     coin minted to the sender in the same transaction;
 //!  3. a second create at the same normalized spec aborts.
 //!
+//! Also covers the scheduler's publish-free grid roll (`roller::submit`),
+//! which replaced the retired codegen→publish→harvest pipeline (and the old
+//! `localnet_e2e.rs` harness with it).
+//!
 //! `#[ignore]` — needs a running localnet with the coin registry object
 //! (`0xc`), i.e. any current `sui start --force-regenesis --with-faucet`.
 //! Run with:
@@ -52,7 +56,14 @@ fn stage_contracts() -> PathBuf {
         .join("../../../contracts")
         .canonicalize()
         .expect("contracts dir");
-    let stage = std::env::temp_dir().join(format!("anystrike-e2e-{}", std::process::id()));
+    // Unique per call: the two localnet tests run in parallel and must not
+    // clobber each other's staging copy mid-compile.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let stage = std::env::temp_dir().join(format!(
+        "anystrike-e2e-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_dir_all(&stage);
     for pkg in ["core", "whitelist"] {
         let dst = stage.join(pkg);
@@ -372,5 +383,99 @@ async fn localnet_any_strike_atomic_create_write() -> Result<()> {
     let dup = submit_ptb(&client, &signer, pt, GAS, "duplicate create (must fail)").await;
     assert!(dup.is_err(), "duplicate normalized spec unexpectedly succeeded");
     eprintln!("✓ duplicate spec rejected");
+    Ok(())
+}
+
+
+/// The scheduler's grid roll: one publish-free PTB, N buckets + N distinct
+/// runtime currencies. Mirrors production `tick_once` → `roller::submit`.
+#[tokio::test]
+#[ignore = "requires a running sui localnet (sui start --force-regenesis --with-faucet)"]
+async fn localnet_roller_grid_roll() -> Result<()> {
+    use option_scheduler::roller::{self, ProductType, RollPlan};
+    use option_scheduler::strike_grid::StrikeGrid;
+    use sui_tx::sui_client::{Network, SuiClientWrapper};
+
+    let rpc = std::env::var("SUI_E2E_RPC").unwrap_or_else(|_| "http://127.0.0.1:9000".into());
+    let faucet =
+        std::env::var("SUI_E2E_FAUCET").unwrap_or_else(|_| "http://127.0.0.1:9123".into());
+
+    let (address, kp): (SuiAddress, AccountKeyPair) = get_key_pair();
+    let signer = Signer { keypair: SuiKeyPair::Ed25519(kp), address };
+    let client = ChainClient::new(&rpc)?;
+    for _ in 0..3 {
+        fund(&faucet, address).await?;
+    }
+    wait_for_gas(&client, address).await?;
+
+    let d = publish_protocol(&client, &signer, &stage_contracts()).await?;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // Whitelist the roller (creation is ingress-gated).
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let cap = pt.obj(owned_object_arg(&client, d.wl_admin_cap).await?)?;
+    let wl = pt.obj(shared_object_arg(&client, d.whitelist, true).await?)?;
+    let member = pt.pure(&address)?;
+    pt.programmable_move_call(
+        d.package,
+        Identifier::new("whitelist").unwrap(),
+        Identifier::new("add_member").unwrap(),
+        vec![],
+        vec![cap, wl, member],
+    );
+    submit_ptb(&client, &signer, pt, GAS, "whitelist roller").await?;
+
+    let plan = RollPlan {
+        underlying_symbol: "SUI".into(),
+        settlement_symbol: "SUI".into(),
+        underlying_type: "0x2::sui::SUI".into(),
+        settlement_type: "0x2::sui::SUI".into(),
+        underlying_decimals: 9,
+        settlement_decimals: 9,
+        expiry_ms: EXPIRY_MS + 60_000, // distinct family from the other test
+        strikes: StrikeGrid {
+            start_strike: 50_000,
+            strike_interval: 1_000,
+            count: 2,
+            strike_scale: 0,
+        }
+        .strikes(),
+        strike_scale: 0,
+        product_type: ProductType::Call,
+    };
+    let wrap = SuiClientWrapper {
+        client,
+        events: sui_tx::events::EventClient::new(Network::Devnet.graphql_url()),
+        signer,
+        network: Network::Devnet,
+    };
+    let roll_ctx = sui_tx::tx::coin_pkg::AnyStrikeContext {
+        package: d.package,
+        bucket_registry: d.bucket_registry,
+        whitelist: d.whitelist,
+    };
+    let out = roller::submit(&wrap, &roll_ctx, &plan, None, None, GAS).await?;
+    assert_eq!(out.bucket_ids.len(), 2, "expected two buckets");
+    // Fresh objects can lag the fullnode's read path by a beat.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let mut call_types = Vec::new();
+    for bid in &out.bucket_ids {
+        let obj = wrap.client.get_object(*bid).await?;
+        let tag = obj
+            .struct_tag()
+            .ok_or_else(|| anyhow!("bucket {bid} has no struct type"))?;
+        assert_eq!(tag.type_params.len(), 3, "Bucket should have 3 type params");
+        let call = tag.type_params[2].to_canonical_string(true);
+        assert!(
+            call.contains("::option_coin::OptionCall<"),
+            "3rd type param should be a runtime option-coin currency, got {call}"
+        );
+        call_types.push(call);
+    }
+    call_types.sort();
+    call_types.dedup();
+    assert_eq!(call_types.len(), 2, "each bucket must have a distinct coin type");
+    eprintln!("✓ publish-free grid roll created 2 buckets: {call_types:?}");
     Ok(())
 }

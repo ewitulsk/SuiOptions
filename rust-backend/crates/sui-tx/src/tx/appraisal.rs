@@ -390,7 +390,7 @@ pub async fn discover_holdings(
                 let pool_ty = object_type(client, pool_id).await?;
                 let inner = pool_ty
                     .split_once('<')
-                    .map(|(_, rest)| rest.trim_end_matches('>'))
+                    .and_then(|(_, rest)| rest.strip_suffix('>'))
                     .ok_or_else(|| anyhow!("unparseable pool type {pool_ty}"))?;
                 let mut parts = split_type_args(inner);
                 if parts.len() != 2 {
@@ -475,7 +475,7 @@ pub async fn discover_holdings(
             let is_put = bucket_ty.contains("::put_bucket::PutBucket");
             let inner = bucket_ty
                 .split_once('<')
-                .map(|(_, rest)| rest.trim_end_matches('>'))
+                .and_then(|(_, rest)| rest.strip_suffix('>'))
                 .ok_or_else(|| anyhow!("unparseable bucket type {bucket_ty}"))?;
             let parts = split_type_args(inner);
             if parts.len() != 3 {
@@ -493,7 +493,7 @@ pub async fn discover_holdings(
         } else if ty.starts_with("0x2::coin::Coin<") || ty.contains("::coin::Coin<") {
             let inner = ty
                 .split_once('<')
-                .map(|(_, rest)| rest.trim_end_matches('>'))
+                .and_then(|(_, rest)| rest.strip_suffix('>'))
                 .unwrap_or_default();
             positions.push(PositionInfo::OptionCoin { id: pos_id, call_type: canon(inner) });
         } else {

@@ -289,7 +289,7 @@ async fn verify_on_chain(
                         .ok_or_else(|| anyhow!("pool {pid} has no type"))?;
                     let inner = t
                         .split_once('<')
-                        .map(|(_, i)| i.trim_end_matches('>'))
+                        .and_then(|(_, i)| i.strip_suffix('>'))
                         .ok_or_else(|| anyhow!("pool {pid} type has no generics"))?;
                     let parts: Vec<&str> = inner.splitn(2, ',').map(str::trim).collect();
                     if parts.len() != 2 {

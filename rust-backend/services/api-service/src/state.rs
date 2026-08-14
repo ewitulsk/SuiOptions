@@ -26,6 +26,10 @@ pub struct AppState {
     /// Names the direct-quoting adapter witness on trading-vault views;
     /// `None` on deployments without the adapter.
     pub exchange_adapter_package: Option<String>,
+    /// options_core package id (SO-394): names the `option_coin` types the
+    /// `/buckets/spec` endpoint derives. `None` before the any-strike
+    /// redeploy — the endpoint then omits `option_coin_type`.
+    pub options_package: Option<String>,
     /// Data-room gold reader for /analytics/* (SO-389). `None` when
     /// `data_room_url` is unset or failed to parse — endpoints then 503.
     pub analytics: Option<std::sync::Arc<crate::analytics::lake::Lake>>,
@@ -41,6 +45,7 @@ impl AppState {
         sui_graphql_url: String,
         price_charting_url: Option<String>,
         exchange_adapter_package: Option<String>,
+        options_package: Option<String>,
         analytics: Option<std::sync::Arc<crate::analytics::lake::Lake>>,
     ) -> Self {
         Self {
@@ -50,6 +55,7 @@ impl AppState {
             sui_graphql_url,
             price_charting_url: price_charting_url.map(|u| u.trim_end_matches('/').to_string()),
             exchange_adapter_package,
+            options_package,
             analytics,
             http: reqwest::Client::new(),
         }

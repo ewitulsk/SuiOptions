@@ -33,6 +33,9 @@ pub struct PackageInfo {
     pub package_id: String,
     pub admin_cap_id: String,
     pub protocol_config_id: String,
+    /// Shared `BucketRegistry` (any-strike derived bucket UIDs, SO-393).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_registry_id: Option<String>,
     pub upgrade_cap_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub treasury_id: Option<String>,
