@@ -486,6 +486,49 @@ impl TradesWriter {
     }
 }
 
+/// Same chunked, temp-file-backed writer as [`TradesWriter`], for
+/// `book_top`. Needed for `bookTicker` dumps, which are far denser than
+/// trades — a single SUIUSDT day is ~1.9M quotes and a busy month is
+/// >100M — so buffering a day's rows is not an option.
+pub struct BookTopWriter {
+    w: ArrowWriter<std::fs::File>,
+    tmp: tempfile::NamedTempFile,
+    rows: usize,
+}
+
+impl BookTopWriter {
+    pub fn new() -> anyhow::Result<Self> {
+        let tmp = tempfile::NamedTempFile::new()?;
+        let file = tmp.reopen()?;
+        let w = ArrowWriter::try_new(file, Arc::new(book_top_schema()), Some(writer_props()))?;
+        Ok(Self { w, tmp, rows: 0 })
+    }
+
+    /// Chunk rows MUST already be in cross-chunk sorted order; each chunk
+    /// is order-normalized internally by `book_top_batch`.
+    pub fn write_chunk(&mut self, rows: Vec<BookTop>) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        self.rows += rows.len();
+        self.w.write(&book_top_batch(rows)?)?;
+        // Same hard memory bound as TradesWriter: flush the row group now
+        // rather than letting arrow buffer toward its 1M-row threshold
+        // across 30+ concurrent day writers.
+        self.w.flush()?;
+        Ok(())
+    }
+
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn finish(self) -> anyhow::Result<tempfile::NamedTempFile> {
+        self.w.close()?;
+        Ok(self.tmp)
+    }
+}
+
 // -- Layout helpers ------------------------------------------------------
 
 /// silver partition key for a table, e.g.
