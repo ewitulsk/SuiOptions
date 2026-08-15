@@ -167,6 +167,108 @@ pub fn for_each_trade<R: Read>(
     Ok(())
 }
 
+/// Parse a um-futures `bookTicker` CSV whole. Convenient for tests and
+/// daily files; monthly dumps must use [`for_each_book_ticker`] — a busy
+/// month is >100M rows and will not fit in memory.
+pub fn parse_book_ticker_csv<R: Read>(
+    reader: R,
+    native_symbol: &str,
+    src_file: &str,
+) -> Result<(Vec<schema::BookTop>, Vec<Reject>), anyhow::Error> {
+    let instrument = perp_instrument_id(native_symbol)
+        .ok_or_else(|| anyhow::anyhow!("not a perp symbol: {native_symbol}"))?;
+    let mut out = Vec::new();
+    let mut rejects = Vec::new();
+    for_each_book_ticker(
+        reader,
+        &instrument,
+        src_file,
+        |b| out.push(b),
+        |r| rejects.push(r),
+    )?;
+    Ok((out, rejects))
+}
+
+/// Streaming `bookTicker` parse — the only historical quote data that
+/// exists for SUI (2023-05-16 -> 2024-03-30, then Binance discontinued the
+/// dump). Header:
+/// `update_id,best_bid_price,best_bid_qty,best_ask_price,best_ask_qty,transaction_time,event_time`
+///
+/// `ts_event` is `transaction_time` (when the book changed), not
+/// `event_time` (when Binance published it); `ts_recv` stays None because
+/// archive rows have no capture clock — the spec is explicit that
+/// archive-only backtests must model latency rather than inherit a
+/// latency-free one.
+///
+/// Rows with a crossed or zero book are rejected rather than dropped: at
+/// this cadence a crossed quote is a data defect worth counting, and the
+/// rejects file is where the spec puts those.
+pub fn for_each_book_ticker<R: Read>(
+    reader: R,
+    instrument: &str,
+    src_file: &str,
+    mut on_row: impl FnMut(schema::BookTop),
+    mut on_reject: impl FnMut(Reject),
+) -> Result<(), anyhow::Error> {
+    let instrument = instrument.to_string();
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(reader);
+
+    for (i, rec) in rdr.records().enumerate() {
+        let line = i as i32;
+        let mut reject = |reason: String| {
+            on_reject(Reject {
+                src_file: src_file.into(),
+                src_line: line,
+                reason,
+            })
+        };
+        let rec = match rec {
+            Ok(r) => r,
+            Err(e) => {
+                reject(e.to_string());
+                continue;
+            }
+        };
+        // Futures dumps carry a header row.
+        if i == 0 && rec.get(0) == Some("update_id") {
+            continue;
+        }
+        let parsed = (|| -> Option<schema::BookTop> {
+            let update_id: i64 = rec.get(0)?.parse().ok()?;
+            let bid_px: f64 = rec.get(1)?.parse().ok()?;
+            let bid_sz: f64 = rec.get(2)?.parse().ok()?;
+            let ask_px: f64 = rec.get(3)?.parse().ok()?;
+            let ask_sz: f64 = rec.get(4)?.parse().ok()?;
+            let transaction_time: i64 = rec.get(5)?.parse().ok()?;
+            Some(schema::BookTop {
+                ts_event: Some(epoch_to_ns(transaction_time)),
+                ts_recv: None,
+                exchange: EXCHANGE.into(),
+                instrument_id: instrument.clone(),
+                update_id,
+                bid_px,
+                bid_sz,
+                ask_px,
+                ask_sz,
+                src_file: src_file.into(),
+                src_line: line,
+            })
+        })();
+        match parsed {
+            Some(b) if b.bid_px <= 0.0 || b.ask_px <= 0.0 => {
+                reject(format!("non-positive quote: {rec:?}"))
+            }
+            Some(b) if b.bid_px >= b.ask_px => reject(format!("crossed book: {rec:?}")),
+            Some(b) => on_row(b),
+            None => reject(format!("bad record: {rec:?}")),
+        }
+    }
+    Ok(())
+}
+
 /// Parse a um-futures `fundingRate` CSV (header:
 /// `calc_time,funding_interval_hours,last_funding_rate`, ms epochs).
 /// Rows are settled rates; `ts_recv` is None (archive-sourced).
@@ -230,6 +332,53 @@ pub fn parse_funding_csv<R: Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const BOOK_TICKER: &str = include_str!("../fixtures/SUIUSDT-bookTicker-head.csv");
+
+    /// Real head of `SUIUSDT-bookTicker-2024-03-30.zip`, header included.
+    #[test]
+    fn real_book_ticker_csv_parses() {
+        let (rows, rejects) =
+            parse_book_ticker_csv(BOOK_TICKER.as_bytes(), "SUIUSDT", "f").unwrap();
+        assert!(rejects.is_empty(), "unexpected rejects: {rejects:?}");
+        assert_eq!(rows.len(), 5, "header must be skipped");
+
+        let r = &rows[0];
+        assert_eq!(r.instrument_id, "sui-usdt-perp.binance");
+        assert_eq!(r.exchange, "binance");
+        assert_eq!(r.update_id, 4_307_082_984_787);
+        assert_eq!(r.bid_px, 1.9056);
+        assert_eq!(r.bid_sz, 33.7);
+        assert_eq!(r.ask_px, 1.9057);
+        assert_eq!(r.ask_sz, 511.0);
+        // transaction_time (ms) -> ns, NOT event_time.
+        assert_eq!(r.ts_event, Some(1_711_756_800_059 * 1_000_000));
+        // Archive rows have no capture clock.
+        assert_eq!(r.ts_recv, None);
+        assert_eq!(r.src_line, 1);
+
+        assert!(rows.iter().all(|b| b.bid_px < b.ask_px));
+        let ids: Vec<i64> = rows.iter().map(|b| b.update_id).collect();
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "update_id monotonic");
+    }
+
+    #[test]
+    fn book_ticker_rejects_bad_books_rather_than_dropping_them() {
+        let csv = "update_id,best_bid_price,best_bid_qty,best_ask_price,best_ask_qty,transaction_time,event_time\n\
+                   1,2.0,1.0,1.0,1.0,1711756800000,1711756800001\n\
+                   2,0,1.0,1.0,1.0,1711756800000,1711756800001\n\
+                   3,1.0,1.0,2.0,1.0,1711756800000,1711756800001\n";
+        let (rows, rejects) = parse_book_ticker_csv(csv.as_bytes(), "SUIUSDT", "f").unwrap();
+        assert_eq!(rows.len(), 1, "only the sane row survives");
+        assert_eq!(rejects.len(), 2);
+        assert!(rejects[0].reason.contains("crossed"));
+        assert!(rejects[1].reason.contains("non-positive"));
+    }
+
+    #[test]
+    fn book_ticker_needs_a_perp_symbol() {
+        assert!(parse_book_ticker_csv(BOOK_TICKER.as_bytes(), "SUIUSDT_240628", "f").is_err());
+    }
 
     #[test]
     fn splits_known_quotes() {
