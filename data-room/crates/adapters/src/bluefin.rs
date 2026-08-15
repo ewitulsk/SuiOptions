@@ -64,11 +64,10 @@ mod tests {
     /// Captured off the live mainnet socket.
     const BOOK: &str = include_str!("../fixtures/bluefin-diffdepth.json");
     const TICKER: &str = include_str!("../fixtures/bluefin-ticker.json");
-    /// Real venue trade objects (from `GET /v1/exchange/trades`) wrapped in
-    /// the documented `RecentTradesUpdates` envelope. SUI-PERP prints only
-    /// every few minutes at ~$1–10 a clip, so waiting for one on the socket
-    /// was not worth blocking on — replace with a socket capture the first
-    /// time bronze records one.
+    /// Captured off the live socket too, from production bronze. SUI-PERP
+    /// is quiet enough that this took ~1.7 h of capture to record a single
+    /// print — one 12-SUI fill — which is itself the answer to doc 07
+    /// open question #2.
     const TRADES: &str = include_str!("../fixtures/bluefin-trades.json");
 
     #[test]
