@@ -50,14 +50,13 @@ COMPOSE_FILE="docker-compose.${ENV}.yml"
 # Canonical service set + their .env tag-variable names + the compose
 # service name (mostly identical to the cargo crate name, except
 # quoting-service is referenced as `quoting` in compose).
-ALL_SERVICES=(indexer quoting-service mm-bot option-scheduler api-service token-info auth-service gas-station hedge-signer market-sim price-charting balance-monitor keeper oracle-service cctp-relay twitter-service social-bot orderbook staging-mm-bot)
+ALL_SERVICES=(indexer quoting-service mm-bot api-service token-info auth-service gas-station hedge-signer market-sim price-charting balance-monitor keeper oracle-service cctp-relay twitter-service social-bot orderbook staging-mm-bot)
 
 tag_var_for() {
   case "$1" in
     indexer)          echo INDEXER_TAG ;;
     quoting-service)  echo QUOTING_TAG ;;
     mm-bot)           echo MM_BOT_TAG ;;
-    option-scheduler) echo SCHEDULER_TAG ;;
     api-service)      echo API_SERVICE_TAG ;;
     token-info)       echo TOKEN_INFO_TAG ;;
     auth-service)     echo AUTH_SERVICE_TAG ;;
@@ -81,7 +80,6 @@ compose_name_for() {
     indexer)          echo indexer ;;
     quoting-service)  echo quoting ;;
     mm-bot)           echo mm-bot ;;
-    option-scheduler) echo option-scheduler ;;
     api-service)      echo api-service ;;
     token-info)       echo token-info ;;
     auth-service)     echo auth-service ;;
@@ -278,7 +276,6 @@ health_path_for() {
     quoting-service)  echo "/$ENV/quoting/health" ;;
     api-service)      echo "/$ENV/api/health" ;;
     indexer)          echo "/$ENV/indexer/health" ;;
-    option-scheduler) echo "/$ENV/scheduler/health" ;;
     mm-bot)           echo "/$ENV/mm-bot/health" ;;
     token-info)       echo "/$ENV/token-info/health" ;;
     auth-service)     echo "/$ENV/auth/health" ;;
@@ -296,17 +293,16 @@ health_path_for() {
 
 # Per-service health-probe budget, in attempts (each attempt is followed by a
 # 2s sleep). Most services answer /health within seconds, so 30 (~60s) is
-# plenty. option-scheduler is the exception on a contract redeploy: its DB is
-# wiped, so on first boot it creates DeepBook pools + vaults + rolls on-chain
-# before it settles, which can take a few minutes. Give it a wider window so a
-# redeploy doesn't roll the whole stack back on a near-miss timeout.
+# plenty. The bots are the exception on a contract redeploy: they submit
+# on-chain setup transactions before they settle, which can take a few
+# minutes. Give them a wider window so a redeploy doesn't roll the whole
+# stack back on a near-miss timeout.
 health_attempts_for() {
   case "$1" in
-    option-scheduler) echo 150 ;;  # ~5 min
     # mm-bot's first boot against a freshly published package must CREATE its
     # on-chain Account (submit + finality) before /health goes green — 60s is
     # a near-miss on every contract redeploy (it rolled back the whole stack
-    # on 2026-07-15). Same window as the scheduler.
+    # on 2026-07-15).
     mm-bot)           echo 150 ;;  # ~5 min
     # staging-mm-bot's first boot creates its BalanceManager and runs the
     # initial faucet mint+deposit sweep (several finalized txs) before

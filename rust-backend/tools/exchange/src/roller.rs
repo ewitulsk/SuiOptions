@@ -1,4 +1,8 @@
-//! Bucket-roll executor.
+//! Bucket-create executor for the `exchange create-buckets` admin command.
+//!
+//! Lifted out of the option-scheduler when bucket rolling was removed from
+//! that service (buckets are created on demand now, not pre-rolled into
+//! families); this tool is the remaining programmatic creator.
 //!
 //! A roll is now a single publish-free PTB (SO-393/SO-394): for every
 //! strike, `bucket::create_bucket_any_strike<U, S, D0..D9>` registers the
@@ -37,29 +41,13 @@ impl Default for ProductType {
     }
 }
 
-impl ProductType {
-    /// Lowercase wire/DB tag (`"call"` / `"put"`).
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Call => "call",
-            Self::Put => "put",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct RollPlan {
-    pub underlying_symbol: String,
-    pub settlement_symbol: String,
     pub underlying_type: String,
     pub settlement_type: String,
     /// Underlying decimals — the option coin mints with the same decimals so
     /// one option smallest-unit == one underlying smallest-unit.
     pub underlying_decimals: u8,
-    /// Settlement decimals — the DeepBook pool's quote side. Paired with the
-    /// call coin (base, which inherits `underlying_decimals`) to derive the
-    /// pool's tick/lot/min grid.
-    pub settlement_decimals: u8,
     pub expiry_ms: u64,
     /// Explicit per-bucket strikes, ascending, in scaled chain units. The
     /// percent grid expands via `StrikeGrid::strikes()`; the z-ladder is
@@ -72,70 +60,9 @@ pub struct RollPlan {
     pub product_type: ProductType,
 }
 
-impl RollPlan {
-    pub fn log_intent(&self, dry_run: bool) {
-        info!(
-            pair = %format!("{}/{}", self.underlying_symbol, self.settlement_symbol),
-            expiry_ms = self.expiry_ms,
-            strikes = ?self.strikes,
-            count = self.strikes.len(),
-            strike_scale = self.strike_scale,
-            dry_run,
-            "rolling new bucket family"
-        );
-    }
-}
-
 pub struct RollOutcome {
     pub digest: String,
     pub bucket_ids: Vec<ObjectID>,
-}
-
-/// Classification of a submit error for the local-rolls retry policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorClass {
-    /// Build, sign, preflight, or gas-stale: the tx never reached
-    /// consensus. Safe to delete the pending row and retry on next tick.
-    DefinitelyNotSent,
-    /// RPC timeout, transport error after transmit, unknown: the tx may
-    /// or may not have been accepted. Must go to `needs_reconciliation`.
-    Ambiguous,
-}
-
-/// Inspect an `anyhow::Error` from `submit` and decide whether the tx
-/// definitely never reached consensus or might have.
-pub fn classify_error(err: &anyhow::Error) -> ErrorClass {
-    // Validators refuse to admit a transaction built on a stale gas
-    // reference, so nothing executed. `submit_ptb` already retries this with
-    // a fresh reference; reaching here means the retry budget ran out, and
-    // the slot must be released so the next tick can re-roll rather than
-    // parking a family that provably never landed (SO-344).
-    if sui_tx::tx::is_stale_gas_rejection(err) {
-        return ErrorClass::DefinitelyNotSent;
-    }
-    let msg = format!("{err:#}").to_lowercase();
-    // Build/sign/preflight errors — the tx was never transmitted.
-    let definitely_not_sent = [
-        "building",
-        "parsing type tag",
-        "signature",
-        "gas price",
-        "gas budget",
-        "insufficient gas",
-        "not enough coins",
-        "reverted",
-        "object not found",
-        "invalid object",
-        "building bucket::new_call_option tx",
-        "building put_bucket::create_put_bucket tx",
-    ];
-    for pat in &definitely_not_sent {
-        if msg.contains(pat) {
-            return ErrorClass::DefinitelyNotSent;
-        }
-    }
-    // Everything else (timeout, transport, unknown) is ambiguous.
-    ErrorClass::Ambiguous
 }
 
 /// Trading-vault pool-allowlisting context (SO-292): when configured,
@@ -278,8 +205,6 @@ mod tests {
 
     use move_core_types::language_storage::StructTag;
     use move_core_types::{account_address::AccountAddress, identifier::Identifier};
-    use sui_types::base_types::{ObjectDigest, SequenceNumber, SuiAddress};
-    use sui_types::object::Owner;
 
     // Sentinel package address used in every constructed StructTag. The
     // value doesn't matter — `extract_bucket_ids` only looks at the
@@ -371,55 +296,4 @@ mod tests {
 
     // ── ErrorClass tests ────────────────────────────────────────────
 
-    #[test]
-    fn classify_build_error_as_definitely_not_sent() {
-        let err = anyhow::anyhow!("building bucket::new_call_option tx: object not found");
-        assert_eq!(classify_error(&err), ErrorClass::DefinitelyNotSent);
-    }
-
-    #[test]
-    fn classify_gas_error_as_definitely_not_sent() {
-        let err = anyhow::anyhow!("insufficient gas: balance 0, needed 10000");
-        assert_eq!(classify_error(&err), ErrorClass::DefinitelyNotSent);
-    }
-
-    #[test]
-    fn classify_signature_error_as_definitely_not_sent() {
-        let err = anyhow::anyhow!("signature verification failed");
-        assert_eq!(classify_error(&err), ErrorClass::DefinitelyNotSent);
-    }
-
-    #[test]
-    fn classify_revert_as_definitely_not_sent() {
-        let err = anyhow::anyhow!("bucket::new_call_option reverted: MoveAbort(...)");
-        assert_eq!(classify_error(&err), ErrorClass::DefinitelyNotSent);
-    }
-
-    #[test]
-    fn classify_timeout_as_ambiguous() {
-        let err = anyhow::anyhow!("submitting bucket::new_call_option tx: connection timed out");
-        assert_eq!(classify_error(&err), ErrorClass::Ambiguous);
-    }
-
-    #[test]
-    fn classify_unknown_error_as_ambiguous() {
-        let err = anyhow::anyhow!("something completely unexpected happened");
-        assert_eq!(classify_error(&err), ErrorClass::Ambiguous);
-    }
-
-    // Verbatim from the rejection that stranded staging: parking this as
-    // ambiguous held the roll slot, and the held slot suppressed every
-    // later tick for nine days (SO-344).
-    #[test]
-    fn classify_stale_gas_rejection_as_definitely_not_sent() {
-        let err = anyhow::anyhow!(
-            "creating buckets: submitting create_buckets tx: gRPC ExecuteTransaction: \
-             code: 'Client specified an invalid argument', message: \"Transaction is rejected \
-             as invalid by more than 1/3 of validators by stake (non-retriable). \
-             Non-retriable errors: [Transaction needs to be rebuilt because object \
-             0x49f13ae2 version 0x396fa526 is unavailable for consumption, \
-             current version: 0x396fa527]\""
-        );
-        assert_eq!(classify_error(&err), ErrorClass::DefinitelyNotSent);
-    }
 }

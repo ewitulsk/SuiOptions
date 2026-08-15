@@ -18,11 +18,6 @@ Organized into three buckets:
     updates from the indexer; signs no transactions and holds no funds.
   - **`mm-bot`** — basic market-maker bot (auto-bootstraps an Account,
     prices RFQs with Black-Scholes, signs and ships Quotes).
-  - **`option-scheduler`** — bucket-creation lifecycle bot. Tracks live
-    bucket families per `(underlying, settlement)` pair via the indexer
-    and rolls a fresh family (`bucket::new_call_option`) when the latest
-    is within a configurable roll-threshold of expiry. Holds AdminCap;
-    replaces manually running `exchange create-buckets` on a cadence.
 
 - **`tools/`** — one-shot operator binaries.
   - **`deployment-manager`** (`deploy` binary) — compiles and publishes the
@@ -55,8 +50,7 @@ rust-backend/
 ├── services/
 │   ├── indexer/          config/{config.toml}
 │   ├── quoting-service/  config/{config.toml}
-│   ├── mm-bot/           config/{config.toml, secrets.toml}
-│   └── option-scheduler/ config/{config.toml, secrets.toml}
+│   └── mm-bot/           config/{config.toml, secrets.toml}
 ├── tools/
 │   ├── deployment-manager/  config/{secrets.toml}
 │   ├── exchange/            config/{secrets.toml}
@@ -86,7 +80,6 @@ Each binary picks up its own config:
 | `indexer` | `services/indexer/config/config.toml` | — (read-only on chain) |
 | `quoting-service` | `services/quoting-service/config/config.toml` | — (signs nothing) |
 | `mm-bot` | `services/mm-bot/config/config.toml` | `services/mm-bot/config/secrets.toml` |
-| `option-scheduler` | `services/option-scheduler/config/config.toml` | `services/option-scheduler/config/secrets.toml` |
 | `deploy` | (CLI flags only) | `tools/deployment-manager/config/secrets.toml` |
 | `exchange` | (CLI flags only) | `tools/exchange/config/secrets.toml` |
 | `writer` | (CLI flags only) | `tools/writer/config/secrets.toml` |
@@ -498,118 +491,6 @@ The bot logs its account id on bootstrap; that's what the quoting service
 and the writer will see in `RFQResponse.quotes[].mm_id`.
 
 ---
-
-### `option-scheduler` — bucket-creation lifecycle bot
-
-Owns the protocol's bucket-creation cadence. For every configured
-`(underlying, settlement)` pair, the scheduler tracks which bucket
-families (a family = N strikes sharing one `expiry_ms`) currently exist
-on chain, and submits `bucket::new_call_option<U, S>` when the latest
-family is closer than `roll_threshold_ms` to its expiry. The `exchange
-create-buckets` subcommand stays as the manual/break-glass tool; the
-scheduler replaces the human cron job behind it.
-
-**Boot flow:**
-
-1. Loads `deployments.json` + `secrets.toml`. Refuses to start if the
-   configured signer is not the deployer recorded in `deployments.json`
-   — only that address holds AdminCap, so any other signer would just
-   make the chain revert every tick.
-2. Connects to the indexer's WS fanout (`indexer_url`) with
-   `Subscribe { after_sequence: 0 }`. The snapshot rebuilds the
-   in-memory family registry; from then on the bot follows the live
-   stream forever. Buckets it submits itself flow back through the
-   indexer the same way, so the registry stays single-sourced.
-3. Starts a tick loop (`tick_secs`, default 60s).
-
-**Tick (per pair):**
-
-- If the latest family's expiry is more than `roll_threshold_ms` away, do
-  nothing.
-- Otherwise compute `next_expiry = latest_expiry + expiry_interval_ms`
-  (cold start aligns to the next epoch-aligned multiple of
-  `expiry_interval_ms`).
-- Compute the strike grid from the configured spot, `strikes_below`,
-  `strikes_above`, `interval_pct`. The grid is converted to chain
-  units using the same `spot × 10^settlement_decimals /
-  10^underlying_decimals` rule the MM bot uses (see the "Strike units"
-  note in the `exchange create-buckets` section).
-- Call `shared::tx::admin::new_call_option<U, S>(...)`. Log the digest
-  and every `Bucket` id from `ObjectChanges`. Don't touch the registry
-  directly — wait for the indexer's `BucketCreated` events to land.
-
-**`--dry-run`:** logs the exact `NewCallOptionArgs` it would submit and
-skips `execute_transaction_block`. Run this on the first deployment to
-eyeball the strike grid before letting the bot near AdminCap.
-
-**Config** (`services/option-scheduler/config/config.toml`):
-
-```toml
-indexer_url       = "ws://127.0.0.1:9001/"
-tick_secs         = 60
-roll_threshold_ms = 604_800_000        # 1 week
-
-[pyth]
-hermes_url = "https://hermes.pyth.network"
-
-[[pairs]]
-underlying          = "TBTC"
-settlement          = "TUSDC"
-expiry_interval_ms  = 604_800_000      # weekly cadence
-strikes_below       = 4
-strikes_above       = 4
-interval_pct        = 5.0
-  [pairs.spot]
-  source             = "pyth"
-  max_publish_lag_ms = 30_000
-  max_conf_bps       = 100
-```
-
-**Spot sources.** Two `[pairs.spot].source` variants ship today:
-
-- `static` — hardcoded `usd` value. Use for tests, dry-runs, and any ticker
-  without a real-world price feed. Every token in `token_info` currently
-  carries a `pythFeedId`, so nothing ships on `static` today.
-- `pyth` — live cross of two USD prices pulled from Pyth Hermes at roll
-  time. Feed ids resolve from `deployments.json::token_info.<sym>.
-  pythFeedId` (the same source `mm-bot` uses); both the underlying and
-  settlement legs must carry a feed id or the scheduler refuses to
-  start. `max_publish_lag_ms` and `max_conf_bps` are guards — the roll
-  is skipped (not failed) on either, and the 1-week `roll_threshold_ms`
-  gives plenty of slack for a transient Hermes outage.
-
-**Run:**
-
-```bash
-# Dry-run first to inspect the registry and the strike grid for each
-# pair near roll-threshold. No on-chain calls.
-cargo run --release -p option-scheduler -- --dry-run
-
-# Live:
-cargo run --release -p option-scheduler
-```
-
-**Security note.** The scheduler runs with AdminCap — the most
-privileged key in the protocol (§9.1 of the spec: "Compromise of
-AdminCap is catastrophic for new bucket creation and fee setting but
-cannot directly drain user funds"). Mitigations baked into MVP:
-
-- Per-binary `secrets.toml`, gitignored, no env-var fallback.
-- The scheduler only calls one AdminCap-gated entrypoint:
-  `new_call_option`. `set_fee_bps` and `withdraw_treasury` are *not*
-  exposed; use the `exchange` CLI for those.
-- Pre-mainnet: rotate AdminCap to a multisig and re-run the scheduler
-  with a co-signer flow (out of scope here — file as a follow-up).
-
-**Out of scope (file follow-ups):**
-
-- `cleanup_bucket` automation for drained, post-expiry buckets — needs
-  a new `shared::tx::admin::cleanup_bucket` builder first.
-- Pyth Benchmarks-driven strike-grid backtesting.
-- Volatility-driven strike spacing (would couple the scheduler to the
-  mm-bot's vol estimate).
-- Non-test-token underlyings (production CoinType plumbed in directly
-  by fully-qualified Move type instead of a symbol lookup).
 
 ---
 

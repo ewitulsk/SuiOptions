@@ -27,8 +27,6 @@ scrape_configs:
         labels: { env: staging, service: gas-station }
       - targets: ["price-charting:9011"]
         labels: { env: staging, service: price-charting }
-      - targets: ["option-scheduler:8083"]
-        labels: { env: staging, service: option-scheduler }
       - targets: ["mm-bot:8084"]
         labels: { env: staging, service: mm-bot }
       - targets: ["staging-mm-bot:8085"]

@@ -216,7 +216,7 @@ pub async fn create_pool(
 
 /// Vet pools for trading-vault curators (SO-292): one PTB of
 /// `deepbook_adapter::allow_pool` calls, AdminCap-gated. Used by the
-/// option-scheduler after each roll so the allowlist never goes stale.
+/// whoever creates a pool, so the allowlist never goes stale.
 pub async fn allow_pools_for_vault(
     client: &ChainClient,
     signer: &Signer,

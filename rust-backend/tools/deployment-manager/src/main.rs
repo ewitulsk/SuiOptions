@@ -614,7 +614,7 @@ async fn deploy_one(
     // testnet redeploy invalidates open orders by definition, so the
     // settlement package republishes fresh every run and its markets are
     // recreated against the current token catalog. (The orderbook DB is
-    // wiped by the redeploy workflow alongside indexer/scheduler, and its
+    // wiped by the redeploy workflow alongside the indexer, and its
     // whitelist sync disables the previous deployment's market rows.)
     //
     // Published BEFORE the trading-vault activation because the
@@ -683,7 +683,7 @@ async fn deploy_one(
     // Activate the trading-vault family (SO-292): allowlist witnesses,
     // seed each provider's feeds from the catalog, and record the governance object
     // ids so services stop re-deriving them from publish digests. Pools
-    // are allowlisted per roll by the option-scheduler, not here.
+    // are allowlisted by whoever creates them, not here.
     let trading_vault_objects = {
         let objects = deployment_manager::trading_vault_init::resolve_objects(
             &trading_vault_out.created_objects,

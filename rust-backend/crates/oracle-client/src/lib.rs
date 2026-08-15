@@ -10,7 +10,7 @@
 //! ## Two read paths
 //!
 //! - **REST** ([`OracleClient::prices`], [`OracleClient::realized_vol`], …) for
-//!   per-tick pollers (option-scheduler strike selection, price-charting APY).
+//!   per-tick pollers (api-service strike ladder, price-charting APY).
 //! - **WS fanout** ([`OracleClient::subscribe`]) returns a push-fed
 //!   [`PriceCache`] (the same `pyth-client` type) so a latency-sensitive
 //!   consumer (mm-bot's per-RFQ hot path) reads spot locally with the exact

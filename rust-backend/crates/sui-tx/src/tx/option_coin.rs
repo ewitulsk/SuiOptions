@@ -12,7 +12,7 @@
 //! on-chain registration validates the encoding against the value
 //! arguments, so this builder MUST stay byte-compatible with
 //! `option_coin::expected_type_bytes` — the localnet E2E
-//! (`option-scheduler/tests/anystrike_localnet.rs`) pins the equivalence.
+//! (`tools/exchange/tests/anystrike_localnet.rs`) pins the equivalence.
 
 use std::str::FromStr;
 

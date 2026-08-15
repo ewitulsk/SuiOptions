@@ -54,7 +54,8 @@ function scaleRaw(raw: string, decimals: number | null): string {
 
 type FlatBucket = {
   series: Series;
-  bucket: Bucket;
+  /** Always a created bucket — admin actions all take an object id. */
+  bucket: Bucket & { bucket_id: string };
   expired: boolean;
 };
 
@@ -62,7 +63,10 @@ export function Admin() {
   const account = useCurrentAccount();
   const wallet = account?.address ?? null;
   const adminCap = useAdminCap(wallet);
-  const buckets = useBuckets();
+  // Admin is the monitoring surface: it wants every bucket ever created, not
+  // the listed board, and never the not-yet-created strikes the board adds
+  // (SO-400) — there is nothing to invalidate or clean on those.
+  const buckets = useBuckets({ all: true });
   const whitelist = useWhitelist();
   const submitTx = useSubmitTransaction();
 
@@ -75,7 +79,12 @@ export function Admin() {
     const out: FlatBucket[] = [];
     for (const series of buckets.data ?? []) {
       for (const bucket of series.buckets) {
-        out.push({ series, bucket, expired: series.expiry_ms < now });
+        if (bucket.bucket_id === null) continue;
+        out.push({
+          series,
+          bucket: bucket as Bucket & { bucket_id: string },
+          expired: series.expiry_ms < now,
+        });
       }
     }
     return out;

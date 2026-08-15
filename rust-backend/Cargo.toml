@@ -25,7 +25,6 @@ members = [
     "services/keeper",
     "services/quoting-service",
     "services/mm-bot",
-    "services/option-scheduler",
     "services/api-service",
     "services/token-info",
     "services/auth-service",

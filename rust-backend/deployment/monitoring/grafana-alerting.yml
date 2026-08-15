@@ -86,42 +86,6 @@ groups:
                   query: { params: [A] }
                   reducer: { type: last, params: [] }
 
-      - uid: scheduler-roll-stuck
-        title: Scheduler roll stuck in reconciliation
-        condition: B
-        # A roll that never landed clears within a reconciler tick or two; one
-        # that is still parked after an hour is holding its expiry slot and
-        # silently suppressing every later roll for that pair (SO-344).
-        for: 1h
-        noDataState: NoData
-        execErrState: Error
-        annotations:
-          summary: 'option-scheduler ({{ $labels.env }}) has {{ $value }} roll(s) stuck in needs_reconciliation — the expiry slot is held and rolls are suppressed'
-        labels:
-          source: option_scheduler
-        data:
-          - refId: A
-            relativeTimeRange: { from: 300, to: 0 }
-            datasourceUid: prometheus
-            model:
-              expr: 'max by (env) (scheduler_rolls_needs_reconciliation) > 0'
-              instant: true
-              intervalMs: 15000
-              maxDataPoints: 43200
-              refId: A
-          - refId: B
-            relativeTimeRange: { from: 0, to: 0 }
-            datasourceUid: __expr__
-            model:
-              type: threshold
-              expression: A
-              refId: B
-              conditions:
-                - evaluator: { type: gt, params: [0] }
-                  operator: { type: and }
-                  query: { params: [A] }
-                  reducer: { type: last, params: [] }
-
       - uid: scrape-target-down
         title: Service metrics target down
         condition: B

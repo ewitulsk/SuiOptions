@@ -68,14 +68,6 @@ endpoints:
       - "[STATUS] == 200"
       - "[BODY] == ok"
 
-  - name: Option Scheduler
-    group: staging
-    url: http://options-staging-option-scheduler-1:8083/health
-    interval: 30s
-    conditions:
-      - "[STATUS] == 200"
-      - "[BODY] == ok"
-
   - name: Vault Keeper
     group: staging
     url: http://options-staging-keeper-1:8086/health

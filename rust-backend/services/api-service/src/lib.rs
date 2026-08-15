@@ -10,6 +10,7 @@ pub mod bucket;
 pub mod catalog;
 pub mod config;
 pub mod handlers;
+pub mod ladder;
 pub mod router;
 pub mod state;
 pub mod sui_rpc;

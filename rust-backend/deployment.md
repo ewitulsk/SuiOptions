@@ -488,20 +488,12 @@ Done once per AWS account. Not in CI.
    CREATE USER indexer_prod    WITH PASSWORD '<from-secrets-manager>';
    GRANT ALL PRIVILEGES ON DATABASE indexer_staging TO indexer_staging;
    GRANT ALL PRIVILEGES ON DATABASE indexer_prod    TO indexer_prod;
-
-   -- option-scheduler rolls DB (mandatory — the scheduler fails fast at
-   -- boot if it can't connect). One logical DB + user per env, same
-   -- pattern as the indexer. The user password reuses the env's
-   -- ${DB_PASSWORD} secret (same value the indexer user uses).
-   CREATE DATABASE scheduler_staging;
-   CREATE DATABASE scheduler_prod;
-   CREATE USER scheduler_staging WITH PASSWORD '<from-secrets-manager>';
-   CREATE USER scheduler_prod    WITH PASSWORD '<from-secrets-manager>';
-   GRANT ALL PRIVILEGES ON DATABASE scheduler_staging TO scheduler_staging;
-   GRANT ALL PRIVILEGES ON DATABASE scheduler_prod    TO scheduler_prod;
    ```
-   Migrations are embedded in both the indexer and option-scheduler
-   binaries and run on first connect.
+   Migrations are embedded in the service binaries and run on first connect.
+
+   > The `scheduler_staging` / `scheduler_prod` databases belonged to the
+   > decommissioned option-scheduler. Nothing reads them; drop them at your
+   > convenience.
 4. **ECR.** Create the three repos. Set lifecycle policy to keep last 20.
 5. **Secrets Manager.** Create the secrets listed in §4.
 6. **ACM.** Request a public cert for `api.<domain>`, validate via DNS.
@@ -940,7 +932,7 @@ central Tempo's VPC address on the prod host).
   `indexer_db_query_duration_seconds{query}` histogram — open any slow
   GraphQL trace in Tempo to see exactly which query burned the time.
 - **Wallet balances**: the `balance-monitor` service polls the gas-station /
-  scheduler / mm-bot wallets (addresses derived from the same rendered
+  deployer / mm-bot wallets (addresses derived from the same rendered
   secrets the services mount; keeper = one more `[[watch]]` in its config)
   and exports `sui_balance_sui` / `sui_balance_low`; the "Low SUI balance"
   rule alerts on the latter.

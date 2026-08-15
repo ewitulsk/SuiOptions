@@ -1,6 +1,6 @@
 //! Realized-vol estimate from Pyth Benchmarks daily closes — annualized
 //! σ over a trailing window, one sample per day. Shared by the
-//! option-scheduler's z-ladder grid and the vault-keeper's IV estimate
+//! api-service's `/buckets` ladder and the vault-keeper's IV estimate
 //! (doc 05 §4.2 / doc 04 §9); call volume is one request per day of the
 //! window per roll, so the public endpoint's rate cap is plenty.
 

@@ -27,8 +27,6 @@ scrape_configs:
         labels: { service: gas-station }
       - targets: ["price-charting:9011"]
         labels: { service: price-charting }
-      - targets: ["option-scheduler:8083"]
-        labels: { service: option-scheduler }
       - targets: ["mm-bot:8084"]
         labels: { service: mm-bot }
       - targets: ["balance-monitor:9012"]

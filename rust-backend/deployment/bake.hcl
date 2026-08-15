@@ -5,7 +5,7 @@
 # family + AMI filter in infra/ to t4g.* + arm64-server.
 #
 # Typical invocation (CI): `docker buildx bake --push <target>` where
-# <target> is one of indexer / quoting-service / mm-bot / option-scheduler.
+# <target> is one of indexer / quoting-service / mm-bot / api-service.
 # The selective-deploy workflow names exactly the affected targets; the
 # `default` group below is the "build everything" fallback for
 # workflow_dispatch with `force_all=true` and for local one-off builds.
@@ -63,14 +63,6 @@ target "staging-mm-bot" {
   tags       = ["${ECR}/options/staging-mm-bot:${IMAGE_TAG}"]
   cache-from = [{ type = "gha", scope = "staging-mm-bot" }]
   cache-to   = [{ type = "gha", mode = "max", scope = "staging-mm-bot" }]
-}
-
-target "option-scheduler" {
-  inherits   = ["_common"]
-  dockerfile = "Dockerfile.scheduler"
-  tags       = ["${ECR}/options/option-scheduler:${IMAGE_TAG}"]
-  cache-from = [{ type = "gha", scope = "option-scheduler" }]
-  cache-to   = [{ type = "gha", mode = "max", scope = "option-scheduler" }]
 }
 
 target "api-service" {
@@ -178,5 +170,5 @@ target "market-sim" {
 }
 
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook", "staging-mm-bot"]
+  targets = ["indexer", "quoting-service", "mm-bot", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook", "staging-mm-bot"]
 }

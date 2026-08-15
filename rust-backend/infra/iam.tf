@@ -187,8 +187,9 @@ data "aws_iam_policy_document" "gh_actions_inline" {
   }
 
   # Secrets Manager: read options/<env>/* JSON entries. The redeploy-contract
-  # workflow assembles secrets.toml on the runner (scheduler deployer key) and
-  # reads the DB password, so it needs the same read access the EC2 role has.
+  # workflow assembles secrets.toml on the runner (the deployer key, stored
+  # under the historical `options/<env>/scheduler` name) and reads the DB
+  # password, so it needs the same read access the EC2 role has.
   statement {
     actions = ["secretsmanager:GetSecretValue"]
     resources = [

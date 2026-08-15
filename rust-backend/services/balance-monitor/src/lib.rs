@@ -1,7 +1,7 @@
 //! balance-monitor (SO-180).
 //!
 //! Watches the SUI balance of the operational wallets (gas-station sponsor,
-//! option-scheduler deployer, mm-bot wallet — keeper later) and exports them
+//! deployer wallet, mm-bot wallet — keeper later) and exports them
 //! as Prometheus gauges:
 //!
 //! - `sui_balance_sui{service, address}` — current balance in whole SUI

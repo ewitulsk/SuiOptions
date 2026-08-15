@@ -29,8 +29,8 @@ use sui_tx::tx::admin::{
 };
 use sui_tx::tx::test_tokens::{mint_and_deposit_into_collateral, mint_to_sender};
 
-use option_scheduler::roller::{self, ProductType, RollPlan};
-use option_scheduler::strike_grid::StrikeGrid;
+use exchange::roller::{self, ProductType, RollPlan};
+use exchange::strike_grid::StrikeGrid;
 
 use exchange::{Cli, Command, Product};
 
@@ -120,40 +120,30 @@ async fn main() -> Result<()> {
                 .token_spec(&underlying)
                 .with_context(|| format!("underlying {underlying} not in token-info catalog"))?;
             let s_type = resolve_coin_type(&snapshot, &settlement)?;
-            // Settlement decimals feed the DeepBook pool grid; catalog
-            // tokens carry them, raw coin-type inputs fall back to the
-            // 9-decimal Sui convention.
-            let settlement_decimals = snapshot
-                .token_spec(&settlement)
-                .map(|s| s.decimals)
-                .unwrap_or(9);
-            // Drive the same publish-free any-strike create path the
-            // scheduler uses (runtime currencies via coin_registry).
+            // Publish-free any-strike create path (runtime currencies via
+            // coin_registry) — the same one the frontend's create-bucket PTB
+            // uses, driven here from an explicit strike grid.
             let grid = StrikeGrid {
                 start_strike,
                 strike_interval,
                 count,
                 strike_scale,
             };
-            // Route to the call/put codegen + create path inside the roller.
+            // Route to the call/put create path inside the roller.
             let product_type = match product {
                 Product::Call => ProductType::Call,
                 Product::Put => ProductType::Put,
             };
             let plan = RollPlan {
-                underlying_symbol: underlying.clone(),
-                settlement_symbol: settlement.clone(),
                 underlying_type: u_spec.coin_type.clone(),
                 settlement_type: s_type,
                 underlying_decimals: u_spec.decimals,
-                settlement_decimals,
                 expiry_ms,
                 strikes: grid.strikes(),
                 strike_scale,
                 product_type,
             };
-            // The manual tool rolls buckets only; pool creation stays with
-            // the scheduler (pass None).
+            // Buckets only — no DeepBook pool is created here (pass None).
             let roll_ctx = sui_tx::tx::coin_pkg::AnyStrikeContext {
                 package,
                 bucket_registry: snapshot.bucket_registry()?,

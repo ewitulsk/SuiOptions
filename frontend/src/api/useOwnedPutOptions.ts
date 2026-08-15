@@ -27,7 +27,8 @@ export function useOwnedPutOptions(
     if (seriesOptionType(s) !== "put") continue;
     for (const b of s.buckets) {
       const ct = optionCoinType(b);
-      if (ct) putTypeToBucket.set(normalizeStructTag(ct), b.bucket_id);
+      // Uncreated strikes have no bucket object to own coins against.
+      if (ct && b.bucket_id) putTypeToBucket.set(normalizeStructTag(ct), b.bucket_id);
     }
   }
   const typesKey = Array.from(putTypeToBucket.keys()).sort().join(",");

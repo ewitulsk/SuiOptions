@@ -158,31 +158,13 @@ services:
     restart: unless-stopped
     networks: [net]
 
-  option-scheduler:
-    image: ${ECR}/options/option-scheduler:${SCHEDULER_TAG}
-    environment:
-      APP_ENV: staging
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
-      # Mandatory: the scheduler refuses to start without its rolls DB.
-      # Expanded into scheduler_database_url in config.staging.toml.
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_HOST: ${DB_HOST}
-      TOKEN_INFO_URL: http://token-info:9005
-      ORACLE_URL: http://oracle-service:9013
-      RUST_LOG: info,option_scheduler=debug
-    volumes:
-      - /opt/options/staging/secrets:/run/secrets:ro
-    depends_on: [indexer, token-info, oracle-service]
-    restart: unless-stopped
-    networks: [net]
-
   api-service:
     image: ${ECR}/options/api-service:${API_SERVICE_TAG}
     environment:
       APP_ENV: staging
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       RUST_LOG: info,api_service=debug
-    depends_on: [indexer, token-info]
+    depends_on: [indexer, token-info, oracle-service]
     restart: unless-stopped
     networks: [net]
 
@@ -345,7 +327,7 @@ services:
     restart: unless-stopped
     networks: [net]
 
-  # Single public entrypoint per env. Strips the /staging/{quoting,api,indexer,scheduler,mm-bot}
+  # Single public entrypoint per env. Strips the /staging/{quoting,api,indexer,mm-bot}
   # prefix before forwarding. depends_on is start-order only; nginx
   # tolerates backends being briefly unreachable on first boot.
   nginx:
@@ -361,7 +343,7 @@ services:
     volumes:
       - /opt/options/staging/nginx/:/etc/nginx/options/:ro
     command: ["nginx", "-c", "/etc/nginx/options/nginx.conf", "-g", "daemon off;"]
-    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, hedge-signer, market-sim, keeper, crossbar]
+    depends_on: [quoting, api-service, indexer, mm-bot, token-info, auth-service, gas-station, hedge-signer, market-sim, keeper, crossbar]
     restart: unless-stopped
     networks: [net]
 

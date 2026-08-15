@@ -1,10 +1,10 @@
 //! `vault::create_vault` PTB builder.
 //!
 //! A vault needs a fresh per-vault share coin (`TreasuryCap<VShare>`, zero
-//! supply) the same way a bucket needs its `Call` coin. The options-scheduler
-//! publishes a one-module `vshare` coin package (see `option-scheduler`'s
-//! `codegen::generate_share` + [`super::coin_pkg::publish_coin_package`]),
-//! harvests the cap, then calls this builder.
+//! supply) the same way a bucket needs its `Call` coin. The caller publishes
+//! a one-module `vshare` coin package (see
+//! [`super::coin_pkg::publish_coin_package`]), harvests the cap, then calls
+//! this builder.
 //!
 //! One PTB, two commands: `vault::new_config(...)` assembles the `VaultConfig`
 //! from its plain fields, then `vault::create_vault<U, S, VShare>` consumes
@@ -27,7 +27,7 @@ use crate::chain::{created_objects, ChainClient, ChangedObject};
 
 /// Plain `VaultConfig` fields, in `vault::new_config` argument order. The
 /// per-asset oracle pins (`*_feed_id`, `*_decimals`) come from token-info; the
-/// rest is the scheduler's vault policy template.
+/// rest is the caller's vault policy template.
 pub struct VaultConfigArgs {
     pub mgmt_fee_bps_annual: u64,
     pub perf_fee_bps: u64,

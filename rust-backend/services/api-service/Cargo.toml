@@ -18,6 +18,7 @@ observability  = { workspace = true, features = ["axum"] }
 cli-spec       = { workspace = true }
 indexer-graphql = { workspace = true }
 token-info-client = { workspace = true }
+oracle-client  = { workspace = true }
 pricing        = { workspace = true }
 
 config = { version = "0.14", features = ["toml"] }

@@ -27,3 +27,38 @@ derived_metrics_url = "http://price-charting:9011"
 # on testnet (the deployed vault package lives there); point at mainnet only
 # once it does. A read failure degrades to omitting live state, not a 5xx.
 sui_graphql_url = "https://graphql.testnet.sui.io/graphql"
+
+# oracle-service — spot + realized vol for the `/buckets` strike ladder
+# (SO-400). Unset would degrade `/buckets` to existing buckets only.
+oracle_url = "http://oracle-service:9013"
+
+# Series families the board lists. `tick_pct` sizes the strike lattice: the
+# tick is the largest {1,2,2.5,5}x10^n at or below `tick_pct * spot`, so
+# strikes land on absolute board levels rather than stepping a percentage
+# off spot.
+[[ladder_pairs]]
+underlying = "TBTC"
+settlement = "TUSDC"
+tick_pct   = 0.025
+
+[[ladder_pairs]]
+underlying = "TWAL"
+settlement = "TUSDC"
+tick_pct   = 0.05
+
+[[ladder_pairs]]
+underlying = "TSUI"
+settlement = "TUSDC"
+tick_pct   = 0.05
+
+[[ladder_pairs]]
+underlying  = "TBTC"
+settlement  = "TUSDC"
+option_type = "put"
+tick_pct    = 0.025
+
+[[ladder_pairs]]
+underlying  = "TSUI"
+settlement  = "TUSDC"
+option_type = "put"
+tick_pct    = 0.05

@@ -56,7 +56,7 @@ variable "ec2_instance_type" {
 }
 
 variable "staging_ec2_instance_type" {
-  description = "EC2 instance type for the shared staging host. Bumped to t3a.medium (4 GiB) — t3.small (2 GiB, no swap) was OOM-killing services (indexer, option-scheduler, derived-metric-worker). Still x86/amd64, so the pinned AMI and native GH-runner builds are unaffected."
+  description = "EC2 instance type for the shared staging host. Bumped to t3a.medium (4 GiB) — t3.small (2 GiB, no swap) was OOM-killing services (indexer, derived-metric-worker). Still x86/amd64, so the pinned AMI and native GH-runner builds are unaffected."
   type        = string
   default     = "t3a.medium"
 }

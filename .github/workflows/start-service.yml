@@ -5,7 +5,7 @@ name: Start service
 # (halted) container is brought back without a full image pull or recreate.
 # To create a missing container instead, run a deploy.
 #
-# The service list is the union across envs (e.g. mm-bot/option-scheduler
+# The service list is the union across envs (e.g. mm-bot
 # are staging-only); the chosen service is validated against the target
 # env's compose file on the host before starting.
 
@@ -29,7 +29,6 @@ on:
           - indexer
           - quoting
           - mm-bot
-          - option-scheduler
           - api-service
           - price-charting
           - gas-station

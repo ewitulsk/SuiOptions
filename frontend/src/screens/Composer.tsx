@@ -50,13 +50,21 @@ export function Composer({ initialView }: Props) {
   // around the strike grid (the panel is keyed per-bucket and remounts).
   const [detailTab, setDetailTab] = useState<DetailTab>("greeks");
 
+  // A strike the board lists but which has no bucket yet (SO-400) can't be
+  // quoted, so the writer CTA becomes "create it" — the same sponsored
+  // create-bucket tx the free-text strike input submits. Once the indexer
+  // surfaces the new bucket the tile re-selects itself and quoting resumes.
   const writerCtaLabel = !s.connected
     ? "Connect to write"
-    : s.insufficient
-      ? "Insufficient balance"
-      : s.quotes.length === 0
-        ? "Waiting on MMs…"
-        : `Earn ${formatPrice(s.bestPremium)} USDC upfront →`;
+    : s.selectedUncreated
+      ? s.creatingBucket
+        ? "Creating strike…"
+        : "Create this strike →"
+      : s.insufficient
+        ? "Insufficient balance"
+        : s.quotes.length === 0
+          ? "Waiting on MMs…"
+          : `Earn ${formatPrice(s.bestPremium)} USDC upfront →`;
 
   const traderCtaLabel = !s.connected
     ? "Connect to buy"
@@ -66,14 +74,20 @@ export function Composer({ initialView }: Props) {
         ? "Waiting on MMs…"
         : `Buy ${s.optionType} · pay ${formatPrice(s.bestPremium)} USDC →`;
 
-  const ctaDisabled =
-    !s.connected ||
-    s.insufficient ||
-    s.quotes.length === 0 ||
-    s.bucketsLoading ||
-    s.bucketsEmpty ||
-    s.confirmStage === "signing" ||
-    s.confirmStage === "broadcast";
+  // The create path has no quote and no balance requirement of its own, so it
+  // gates only on a connected wallet and an in-flight create.
+  const createGate = s.view === "writer" && s.selectedUncreated;
+  const ctaDisabled = createGate
+    ? !s.connected || s.creatingBucket || !s.canCreateStrikes
+    : !s.connected ||
+      s.insufficient ||
+      s.quotes.length === 0 ||
+      s.bucketsLoading ||
+      s.bucketsEmpty ||
+      s.confirmStage === "signing" ||
+      s.confirmStage === "broadcast";
+
+  const onCta = createGate ? s.createSelectedStrike : s.submit;
 
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
@@ -145,7 +159,7 @@ export function Composer({ initialView }: Props) {
       <div className="composer-status">
         {s.canCreateStrikes
           ? "no strikes yet for this series — writers can create one from the Earn tab"
-          : "no buckets yet — the option-scheduler hasn't created any for this series"}
+          : "no strikes listed for this series yet"}
       </div>
     ) : (
       <ChainTable
@@ -274,7 +288,7 @@ export function Composer({ initialView }: Props) {
           <div className="composer-status">
             {s.canCreateStrikes
               ? "no strikes yet for this series — create the first one below"
-              : "no buckets available yet — the option-scheduler hasn't created any for this series"}
+              : "no strikes listed for this series yet"}
           </div>
         ) : (
           <StrikeTiles
@@ -342,7 +356,7 @@ export function Composer({ initialView }: Props) {
           expiryLabel={expiryLabel(s)}
         />
 
-        <button className="cta" onClick={s.submit} disabled={ctaDisabled}>
+        <button className="cta" onClick={onCta} disabled={ctaDisabled}>
           {writerCtaLabel}
         </button>
       </>

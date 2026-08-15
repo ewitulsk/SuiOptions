@@ -70,15 +70,6 @@
         { "refId": "A", "expr": "sum (rate(mm_bot_quotes_signed_total{env=\"$env\"}[5m]))", "legendFormat": "signed" },
         { "refId": "B", "expr": "sum by (reason) (rate(mm_bot_quote_failures_total{env=\"$env\"}[5m]))", "legendFormat": "fail {{reason}}" }
       ]
-    },
-    {
-      "id": 8, "type": "timeseries", "title": "Scheduler jobs / tx outcomes",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "refId": "A", "expr": "sum by (job) (rate(scheduler_runs_total{env=\"$env\"}[1h]))", "legendFormat": "runs {{job}}" },
-        { "refId": "B", "expr": "sum by (outcome) (rate(scheduler_tx_total{env=\"$env\"}[1h]))", "legendFormat": "tx {{outcome}}" }
-      ]
     }
   ]
 }
