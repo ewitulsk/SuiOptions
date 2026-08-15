@@ -10,9 +10,10 @@ name: Sync monitoring stack
 #   - Drops the updated config files in place (datasources, alerting,
 #     prometheus.yml, tempo-config.yml, gatus config, compose file).
 #   - Brings up prometheus + tempo + gatus (new containers / config).
-#   - RESTARTS grafana so it re-reads the bind-mounted provisioning files.
-#     (`restart`, not `up -d` — the compose spec is unchanged, so `up -d`
-#     alone won't reload the changed datasources.yml.)
+#   - RESTARTS prometheus and grafana so they re-read their bind-mounted
+#     config/provisioning files. (`restart`, not `up -d` — the compose spec
+#     is unchanged, so `up -d` alone won't reload a changed prometheus.yml
+#     or datasources.yml; a scrape-config edit would silently never apply.)
 #
 # Then pushes the repo's dashboards (deployment/monitoring/dashboards/*.json)
 # into Grafana via the HTTP API (push-dashboards.sh) — dashboards are NOT
@@ -110,8 +111,12 @@ jobs:
                 "docker compose -f docker-compose.monitoring.yml pull prometheus tempo gatus",
                 "echo Bringing up prometheus + tempo + gatus...",
                 "docker compose -f docker-compose.monitoring.yml up -d prometheus tempo gatus",
-                "echo Restarting grafana to re-read provisioning...",
-                "docker compose -f docker-compose.monitoring.yml restart grafana",
+                "echo Restarting prometheus + grafana to re-read bind-mounted config...",
+                # `up -d` above no-ops when the compose spec is unchanged, so a
+                # prometheus.yml edit alone never reaches the running process —
+                # the scrape config silently stays stale (SO-407). Same reason
+                # grafana is restarted for its provisioning files.
+                "docker compose -f docker-compose.monitoring.yml restart prometheus grafana",
                 "echo Waiting for grafana /api/health ...",
                 "ok=0; for i in $(seq 1 20); do if curl -fsS http://localhost:3000/api/health >/dev/null 2>&1; then ok=1; break; fi; sleep 2; done",
                 "if [ \"$ok\" -ne 1 ]; then echo \"grafana health probe failed\" >&2; exit 1; fi",
