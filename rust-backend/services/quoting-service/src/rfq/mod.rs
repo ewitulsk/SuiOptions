@@ -17,6 +17,7 @@
 
 pub mod bulk_view;
 mod matcher;
+pub mod resolve;
 
 pub use matcher::{collect_with_deadline, MatcherInput, MatcherOutput};
 
@@ -30,7 +31,11 @@ use protocol_types::ids::{ObjectId, SuiAddress};
 use protocol_types::messages::{MmQuotePayload, RfqQuoteEntry};
 use protocol_types::sides::Side;
 
-use indexer_graphql::{Account, Bucket};
+use protocol_types::bucket_spec::BucketSpec;
+
+use indexer_graphql::Account;
+
+use self::resolve::Resolved;
 
 use crate::state::{AppState, InsertOutcome};
 
@@ -39,7 +44,13 @@ use crate::state::{AppState, InsertOutcome};
 #[derive(Debug, PartialEq, Eq)]
 pub enum QuoteRejection {
     ProtocolMismatch,
-    BucketMismatch,
+    /// The quote's signed spec is not the spec that was asked for. On chain
+    /// this would abort `quote_spec_mismatch`.
+    SpecMismatch,
+    /// The quote's `max_total_written` is already exceeded by the bucket, so
+    /// the fill would abort `quote_queue_exceeded`. Rejected here so retail
+    /// is never shown a quote that cannot execute.
+    QueueExceeded,
     WriteAmountMismatch,
     Expired,
     SignatureInvalid,
@@ -62,7 +73,7 @@ impl From<ProtocolError> for QuoteRejection {
             ProtocolError::QuoteExpired => Self::Expired,
             ProtocolError::QuoteSignatureInvalid => Self::SignatureInvalid,
             ProtocolError::QuoteProtocolMismatch => Self::ProtocolMismatch,
-            ProtocolError::QuoteBucketMismatch => Self::BucketMismatch,
+            ProtocolError::QuoteBucketMismatch => Self::SpecMismatch,
             ProtocolError::QuoteAccountMismatch => Self::SignatureInvalid,
             _ => Self::SignatureInvalid,
         }
@@ -78,7 +89,8 @@ impl From<ProtocolError> for QuoteRejection {
 /// synchronous function: no indexer round-trips happen here.
 pub fn validate_quote(
     state: &AppState,
-    bucket: &Bucket,
+    spec: &BucketSpec,
+    resolved: &Resolved,
     account: &Account,
     write_amount: u64,
     payload: &MmQuotePayload,
@@ -87,13 +99,21 @@ pub fn validate_quote(
     now_ms: u64,
 ) -> Result<RfqQuoteEntry, QuoteRejection> {
     let quote = &payload.quote;
-    trace!(mm = %mm_signer_id, bucket = %bucket.bucket_id, nonce = quote.nonce, premium = quote.premium, "validating quote");
+    trace!(mm = %mm_signer_id, sig = spec.sig, nonce = quote.nonce, premium = quote.premium, "validating quote");
     // Cheap structural checks first.
     if quote.protocol_id != protocol_id {
         return Err(QuoteRejection::ProtocolMismatch);
     }
-    if quote.bucket_id != bucket.bucket_id {
-        return Err(QuoteRejection::BucketMismatch);
+    // The MM must have priced the spec we asked about, byte for byte — this
+    // mirrors the on-chain `quote_spec_mismatch` assert, including its
+    // chain-form type strings.
+    if quote.spec != *spec {
+        return Err(QuoteRejection::SpecMismatch);
+    }
+    // A quote whose queue bound is already blown would abort on chain, so
+    // don't offer it. Zero written for a bucket that doesn't exist yet.
+    if resolved.total_written() > quote.max_total_written {
+        return Err(QuoteRejection::QueueExceeded);
     }
     if quote.write_amount != write_amount {
         return Err(QuoteRejection::WriteAmountMismatch);
@@ -123,8 +143,9 @@ pub fn validate_quote(
         .verify(scheme, &account.signing_pubkey, protocol_id, mm_signer_id, now_ms)
         .map_err(QuoteRejection::from)?;
 
-    // Bucket sanity.
-    if bucket.invalidated {
+    // Bucket sanity — only meaningful once the bucket exists. A spec with no
+    // bucket yet can be neither invalidated nor unknown.
+    if resolved.bucket().is_some_and(|b| b.invalidated) {
         return Err(QuoteRejection::BucketInvalidated);
     }
 
@@ -176,21 +197,20 @@ pub fn sort_best_first(side: Side, quotes: &mut [RfqQuoteEntry]) {
 pub async fn orchestrate(
     state: Arc<AppState>,
     side: Side,
-    bucket: Bucket,
+    spec: BucketSpec,
+    resolved: Resolved,
     write_amount: u64,
     request_id: String,
     rfq_window: Duration,
     protocol_id: Vec<u8>,
     now_ms: u64,
 ) -> Vec<RfqQuoteEntry> {
-    let bucket_id = bucket.bucket_id;
     let deadline_ms = now_ms.saturating_add(rfq_window.as_millis() as u64);
 
-    // The bucket is fetched JIT by the caller (retail.rs) so the broadcast can
-    // include its strike + expiry — MMs price against these instead of
-    // guessing. Defense-in-depth against direct callers: refuse invalidated.
-    if bucket.invalidated {
-        debug!(%bucket_id, "rfq for invalidated bucket — returning empty");
+    // Defense-in-depth against direct callers: an existing-but-invalidated
+    // bucket can never be written to, so don't spend an RFQ window on it.
+    if resolved.bucket().is_some_and(|b| b.invalidated) {
+        debug!(sig = spec.sig, "rfq for invalidated bucket — returning empty");
         return Vec::new();
     }
 
@@ -217,10 +237,9 @@ pub async fn orchestrate(
         let frame = protocol_types::messages::ServiceToMm::RFQBroadcast {
             request_id: request_id.clone(),
             payload: protocol_types::messages::RfqBroadcastPayload {
-                // Only the bucket address travels — the MM resolves the
-                // strike/expiry/coin-types itself from api-service so it never
-                // trusts pricing inputs delivered over the wire.
-                bucket_id,
+                // The spec travels, not an address: the bucket may not exist
+                // yet, and the MM binds its quote to these economics on chain.
+                spec: spec.clone(),
                 write_amount,
                 side,
                 deadline_ms,
@@ -276,7 +295,8 @@ pub async fn orchestrate(
         match validate_span.in_scope(|| {
             validate_quote(
                 &state,
-                &bucket,
+                &spec,
+                &resolved,
                 &account,
                 write_amount,
                 &payload,
@@ -302,7 +322,10 @@ pub async fn orchestrate(
         request_id = %request_id,
         accepted = accepted.len(),
         ?side,
-        %bucket_id,
+        sig = spec.sig,
+        exp = spec.exp,
+        is_put = spec.is_put,
+        pending = resolved.bucket().is_none(),
         "rfq orchestration complete"
     );
     accepted
@@ -335,28 +358,34 @@ mod tests {
         }
     }
 
-    fn mk_bucket() -> Bucket {
-        Bucket {
+    fn mk_spec() -> BucketSpec {
+        BucketSpec::new("0x9::btc::BTC", "0x9::usdc::USDC", 1_020_000, 50, 0, false).unwrap()
+    }
+
+    /// A resolved bucket matching `mk_spec`, with `written` already queued.
+    fn mk_resolved(written: u128, invalidated: bool) -> Resolved {
+        let spec = mk_spec();
+        Resolved::Exists(Box::new(indexer_graphql::Bucket {
             bucket_id: ObjectId::new([0x99; 32]),
-            asset_type: AssetType::new("BTC"),
-            settlement_type: AssetType::new("USDC"),
+            asset_type: AssetType::new(spec.asset.clone()),
+            settlement_type: AssetType::new(spec.settlement.clone()),
             call_type: AssetType::new("0x9::call_0::CALL_0"),
             strike: 50,
             strike_scale: 0,
-            expiry_ms: 1_000_000,
-            total_written: 0,
+            expiry_ms: spec.expiry_ms,
+            total_written: written,
             exercise_cursor: 0,
             cleaned: false,
-            invalidated: false,
+            invalidated,
             deepbook_pool_id: None,
             option_kind: "call".into(),
-        }
+        }))
     }
 
     fn quote_with_routing(
         mm_signer: ObjectId,
         protocol_id: Vec<u8>,
-        bucket: ObjectId,
+        spec: BucketSpec,
         write_amount: u64,
         premium: u64,
         nonce: u64,
@@ -368,7 +397,8 @@ mod tests {
             release_package: SuiAddress::new([0xd0; 32]),
             release_module: "mm_collateral".into(),
             signer_token_recipient: SuiAddress::ZERO,
-            bucket_id: bucket,
+            spec,
+            max_total_written: u128::MAX,
             write_amount,
             premium,
             valid_until_ms: 999_999,
@@ -380,12 +410,17 @@ mod tests {
         sk: &SigningKey,
         protocol_id: Vec<u8>,
         mm_signer: ObjectId,
-        bucket: ObjectId,
+        spec: BucketSpec,
         write_amount: u64,
         premium: u64,
         nonce: u64,
     ) -> MmQuotePayload {
-        let q = quote_with_routing(mm_signer, protocol_id, bucket, write_amount, premium, nonce);
+        let q = quote_with_routing(mm_signer, protocol_id, spec, write_amount, premium, nonce);
+        let sig = sk.sign(&q.to_bcs_bytes().unwrap()).to_bytes().to_vec();
+        MmQuotePayload { quote: q, signature: sig }
+    }
+
+    fn sign(sk: &SigningKey, q: Quote) -> MmQuotePayload {
         let sig = sk.sign(&q.to_bcs_bytes().unwrap()).to_bytes().to_vec();
         MmQuotePayload { quote: q, signature: sig }
     }
@@ -396,10 +431,11 @@ mod tests {
         let mm = ObjectId::new([0x01; 32]);
         let state = test_state();
         let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec());
-        let bucket = mk_bucket();
-        let p = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 500, 1);
+        let spec = mk_spec();
+        let resolved = mk_resolved(0, false);
+        let p = signed_quote(&sk, b"P".to_vec(), mm, spec.clone(), 100, 500, 1);
 
-        let entry = validate_quote(&state, &bucket, &account, 100, &p, mm, b"P", 0).unwrap();
+        let entry = validate_quote(&state, &spec, &resolved, &account, 100, &p, mm, b"P", 0).unwrap();
         assert_eq!(entry.mm_id, mm);
         assert_eq!(entry.quote.premium, 500);
         assert_eq!(state.nonces.len(), 1);
@@ -411,12 +447,13 @@ mod tests {
         let mm = ObjectId::new([0x01; 32]);
         let state = test_state();
         let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec());
-        let bucket = mk_bucket();
-        let p1 = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 500, 7);
-        let p2 = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 600, 7);
-        validate_quote(&state, &bucket, &account, 100, &p1, mm, b"P", 0).unwrap();
+        let spec = mk_spec();
+        let resolved = mk_resolved(0, false);
+        let p1 = signed_quote(&sk, b"P".to_vec(), mm, spec.clone(), 100, 500, 7);
+        let p2 = signed_quote(&sk, b"P".to_vec(), mm, spec.clone(), 100, 600, 7);
+        validate_quote(&state, &spec, &resolved, &account, 100, &p1, mm, b"P", 0).unwrap();
         assert_eq!(
-            validate_quote(&state, &bucket, &account, 100, &p2, mm, b"P", 0).unwrap_err(),
+            validate_quote(&state, &spec, &resolved, &account, 100, &p2, mm, b"P", 0).unwrap_err(),
             QuoteRejection::DuplicateNonce,
         );
     }
@@ -427,10 +464,11 @@ mod tests {
         let mm = ObjectId::new([0x01; 32]);
         let state = test_state();
         let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec());
-        let bucket = mk_bucket();
-        let p = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 500, 1);
+        let spec = mk_spec();
+        let resolved = mk_resolved(0, false);
+        let p = signed_quote(&sk, b"P".to_vec(), mm, spec.clone(), 100, 500, 1);
         let rej =
-            validate_quote(&state, &bucket, &account, 100, &p, mm, b"P", 1_000_000).unwrap_err();
+            validate_quote(&state, &spec, &resolved, &account, 100, &p, mm, b"P", 1_000_000).unwrap_err();
         assert_eq!(rej, QuoteRejection::Expired);
     }
 
@@ -440,11 +478,12 @@ mod tests {
         let mm = ObjectId::new([0x01; 32]);
         let state = test_state();
         let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec());
-        let bucket = mk_bucket();
-        let mut p = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 500, 1);
+        let spec = mk_spec();
+        let resolved = mk_resolved(0, false);
+        let mut p = signed_quote(&sk, b"P".to_vec(), mm, spec.clone(), 100, 500, 1);
         p.quote.premium = 9_999; // tamper after signing
         assert_eq!(
-            validate_quote(&state, &bucket, &account, 100, &p, mm, b"P", 0).unwrap_err(),
+            validate_quote(&state, &spec, &resolved, &account, 100, &p, mm, b"P", 0).unwrap_err(),
             QuoteRejection::SignatureInvalid,
         );
     }
@@ -457,11 +496,12 @@ mod tests {
         let mm = ObjectId::new([0x01; 32]);
         let state = test_state();
         let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec());
-        let bucket = mk_bucket();
-        let mut p = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 500, 1);
+        let spec = mk_spec();
+        let resolved = mk_resolved(0, false);
+        let mut p = signed_quote(&sk, b"P".to_vec(), mm, spec.clone(), 100, 500, 1);
         p.quote.collateral_source = ObjectId::new([0xee; 32]);
         assert_eq!(
-            validate_quote(&state, &bucket, &account, 100, &p, mm, b"P", 0).unwrap_err(),
+            validate_quote(&state, &spec, &resolved, &account, 100, &p, mm, b"P", 0).unwrap_err(),
             QuoteRejection::SignatureInvalid,
         );
     }
@@ -472,31 +512,94 @@ mod tests {
         let mm = ObjectId::new([0x01; 32]);
         let state = test_state();
         let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec());
-        let bucket = mk_bucket();
+        let spec = mk_spec();
+        let resolved = mk_resolved(0, false);
         // Sign a quote whose routing fields are zero/empty — structurally
         // valid JSON, but it could never execute.
         let mut q =
-            quote_with_routing(mm, b"P".to_vec(), bucket.bucket_id, 100, 500, 1);
+            quote_with_routing(mm, b"P".to_vec(), spec.clone(), 100, 500, 1);
         q.collateral_source = ObjectId::ZERO;
         let sig = sk.sign(&q.to_bcs_bytes().unwrap()).to_bytes().to_vec();
         let p = MmQuotePayload { quote: q, signature: sig };
         assert_eq!(
-            validate_quote(&state, &bucket, &account, 100, &p, mm, b"P", 0).unwrap_err(),
+            validate_quote(&state, &spec, &resolved, &account, 100, &p, mm, b"P", 0).unwrap_err(),
             QuoteRejection::MissingRouting,
         );
     }
 
+    /// The MM signed a queue bound the bucket has already blown past. On
+    /// chain this aborts `quote_queue_exceeded`, so retail must never be
+    /// shown the quote — it would fail at execution.
     #[test]
-    fn rejects_bucket_mismatch() {
+    fn rejects_a_blown_queue_bound() {
         let sk = SigningKey::generate(&mut OsRng);
         let mm = ObjectId::new([0x01; 32]);
         let state = test_state();
         let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec());
-        let bucket = mk_bucket();
-        let p = signed_quote(&sk, b"P".to_vec(), mm, ObjectId::new([0xaa; 32]), 100, 500, 1);
+        let spec = mk_spec();
+
+        let mut q = quote_with_routing(mm, b"P".to_vec(), spec.clone(), 100, 500, 1);
+        q.max_total_written = 40;
+        let p = sign(&sk, q);
+
+        // 50 already written > the signed bound of 40.
         assert_eq!(
-            validate_quote(&state, &bucket, &account, 100, &p, mm, b"P", 0).unwrap_err(),
-            QuoteRejection::BucketMismatch,
+            validate_quote(&state, &spec, &mk_resolved(50, false), &account, 100, &p, mm, b"P", 0)
+                .unwrap_err(),
+            QuoteRejection::QueueExceeded,
+        );
+        // Exactly at the bound is admissible, matching the on-chain `<=`.
+        assert!(validate_quote(
+            &state,
+            &spec,
+            &mk_resolved(40, false),
+            &account,
+            100,
+            &p,
+            mm,
+            b"P",
+            0
+        )
+        .is_ok());
+    }
+
+    /// A spec whose bucket does not exist yet has nothing queued ahead, so
+    /// even a zero bound passes. This is the case that made the whole change
+    /// necessary: quoting a strike before anybody has created it.
+    #[test]
+    fn a_pending_bucket_has_an_empty_queue() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let mm = ObjectId::new([0x01; 32]);
+        let state = test_state();
+        let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec());
+        let spec = mk_spec();
+
+        let mut q = quote_with_routing(mm, b"P".to_vec(), spec.clone(), 100, 500, 1);
+        q.max_total_written = 0;
+        let p = sign(&sk, q);
+
+        let entry =
+            validate_quote(&state, &spec, &Resolved::Pending, &account, 100, &p, mm, b"P", 0)
+                .unwrap();
+        assert_eq!(entry.quote.premium, 500);
+    }
+
+    #[test]
+    fn rejects_spec_mismatch() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let mm = ObjectId::new([0x01; 32]);
+        let state = test_state();
+        let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec());
+        let spec = mk_spec();
+        let resolved = mk_resolved(0, false);
+        // Same pair and expiry, different strike: the MM priced something we
+        // did not ask for. On chain this is `quote_spec_mismatch`.
+        let other = BucketSpec::new("0x9::btc::BTC", "0x9::usdc::USDC", 1_020_000, 51, 0, false)
+            .unwrap();
+        let p = signed_quote(&sk, b"P".to_vec(), mm, other, 100, 500, 1);
+        assert_eq!(
+            validate_quote(&state, &spec, &resolved, &account, 100, &p, mm, b"P", 0).unwrap_err(),
+            QuoteRejection::SpecMismatch,
         );
     }
 
@@ -509,11 +612,11 @@ mod tests {
         let mm = ObjectId::new([0x01; 32]);
         let state = test_state();
         let account = mk_account(mm, sk.verifying_key().to_bytes().to_vec());
-        let mut bucket = mk_bucket();
-        bucket.invalidated = true;
-        let p = signed_quote(&sk, b"P".to_vec(), mm, bucket.bucket_id, 100, 500, 1);
+        let spec = mk_spec();
+        let resolved = mk_resolved(0, /* invalidated */ true);
+        let p = signed_quote(&sk, b"P".to_vec(), mm, spec.clone(), 100, 500, 1);
         assert_eq!(
-            validate_quote(&state, &bucket, &account, 100, &p, mm, b"P", 0).unwrap_err(),
+            validate_quote(&state, &spec, &resolved, &account, 100, &p, mm, b"P", 0).unwrap_err(),
             QuoteRejection::BucketInvalidated,
         );
         assert_eq!(state.nonces.len(), 0);
@@ -522,7 +625,7 @@ mod tests {
     #[test]
     fn writer_side_sorts_highest_premium_first() {
         let mk = |premium: u64, rep: f64| RfqQuoteEntry {
-            quote: quote_with_routing(ObjectId::ZERO, vec![], ObjectId::ZERO, 100, premium, 0),
+            quote: quote_with_routing(ObjectId::ZERO, vec![], mk_spec(), 100, premium, 0),
             signature: vec![],
             mm_id: ObjectId::ZERO,
             mm_reputation: rep,
@@ -539,7 +642,7 @@ mod tests {
     #[test]
     fn trader_side_sorts_lowest_premium_first() {
         let mk = |premium: u64| RfqQuoteEntry {
-            quote: quote_with_routing(ObjectId::ZERO, vec![], ObjectId::ZERO, 100, premium, 0),
+            quote: quote_with_routing(ObjectId::ZERO, vec![], mk_spec(), 100, premium, 0),
             signature: vec![],
             mm_id: ObjectId::ZERO,
             mm_reputation: 0.0,
@@ -563,7 +666,6 @@ mod tests {
         use tokio::sync::mpsc;
 
         let mm = ObjectId::new([0x01; 32]);
-        let bucket = mk_bucket();
         let state = Arc::new(test_state());
 
         // Register an MM whose outbound channel is full and never drained.
@@ -586,12 +688,13 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..64 {
             let st = Arc::clone(&state);
-            let bkt = bucket.clone();
+            let spec = mk_spec();
             handles.push(tokio::spawn(async move {
                 orchestrate(
                     st,
                     Side::Writer,
-                    bkt,
+                    spec,
+                    Resolved::Pending,
                     100,
                     format!("req-{i}"),
                     std::time::Duration::from_millis(50),

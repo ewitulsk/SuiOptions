@@ -12,19 +12,39 @@
 //! release_package:        address (32 bytes)   // package holding release()
 //! release_module:         String               // ULEB128 len + utf8 bytes
 //! signer_token_recipient: address (32 bytes)
-//! bucket_id:              ID (32 bytes)
+//! spec.asset:             TypeName             // ULEB128 len + ascii bytes
+//! spec.settlement:        TypeName             // ULEB128 len + ascii bytes
+//! spec.expiry_ms:         u64 (little-endian)
+//! spec.sig:               u64 (little-endian)
+//! spec.exp:               u8
+//! spec.is_put:            bool (1 byte)
+//! max_total_written:      u128 (little-endian)
 //! write_amount:           u64 (little-endian)
 //! premium:                u64 (little-endian)
 //! valid_until_ms:         u64 (little-endian)
 //! nonce:                  u64 (little-endian)
 //! ```
 //!
+//! `spec` is a nested struct; BCS concatenates its fields inline with no tag
+//! or length prefix for the struct itself. Its `TypeName`s must be in CHAIN
+//! form — see [`crate::bucket_spec`], which is why `BucketSpec::new` is the
+//! only constructor that belongs on a signing path.
+//!
+//! # Why a spec and not a bucket id
+//!
+//! Buckets are created just-in-time, so the transaction that fills a quote is
+//! often the one that creates its bucket. Binding an object id would make a
+//! fresh strike unquotable until somebody had paid to create it. Binding the
+//! economics is safe because `bucket_registry` admits exactly one bucket per
+//! spec, and it is what lets an MM price a strike that does not exist yet.
+//!
 //! JSON encoding (§4.3) is the human-readable variant: hex for byte arrays,
 //! decimal strings for u64, plain strings for the module name.
 
 use serde::{Deserialize, Serialize};
 
-use super::coding::{bytes_hex, u64_string};
+use super::bucket_spec::BucketSpec;
+use super::coding::{bytes_hex, u128_string, u64_string};
 use super::errors::ProtocolError;
 use super::ids::{ObjectId, SuiAddress};
 
@@ -41,7 +61,13 @@ pub struct Quote {
     pub release_package: SuiAddress,
     pub release_module: String,
     pub signer_token_recipient: SuiAddress,
-    pub bucket_id: ObjectId,
+    /// The bucket's economic identity — what this quote is actually a price
+    /// for. Verified on chain against the bucket's own fields.
+    pub spec: BucketSpec,
+    /// Assignment-risk bound: the fill is refused if the bucket already has
+    /// more than this written ahead of it. `u128::MAX` opts out.
+    #[serde(with = "u128_string")]
+    pub max_total_written: u128,
     #[serde(with = "u64_string")]
     pub write_amount: u64,
     #[serde(with = "u64_string")]
@@ -114,7 +140,16 @@ mod tests {
             release_package: SuiAddress::new([0x55; 32]),
             release_module: "mm_collateral".to_string(),
             signer_token_recipient: SuiAddress::new([0x22; 32]),
-            bucket_id: ObjectId::new([0x33; 32]),
+            spec: BucketSpec::new(
+                "0x9::tbtc::TBTC",
+                "0x9::tusdc::TUSDC",
+                1_782_345_600_000,
+                85_000,
+                0,
+                false,
+            )
+            .unwrap(),
+            max_total_written: u128::MAX,
             write_amount: 10_000_000,
             premium: 50_000_000,
             valid_until_ms: 1_748_534_400_000,
@@ -144,8 +179,24 @@ mod tests {
         expected.extend_from_slice(b"mm_collateral");
         // signer_token_recipient: 32 bytes
         expected.extend_from_slice(&[0x22; 32]);
-        // bucket_id: 32 bytes
-        expected.extend_from_slice(&[0x33; 32]);
+        // spec.asset: ULEB128 len + ascii bytes, CHAIN FORM (no 0x, 64-padded)
+        let asset = format!("{:0>64}::tbtc::TBTC", "9");
+        expected.push(asset.len() as u8);
+        expected.extend_from_slice(asset.as_bytes());
+        // spec.settlement: same
+        let settlement = format!("{:0>64}::tusdc::TUSDC", "9");
+        expected.push(settlement.len() as u8);
+        expected.extend_from_slice(settlement.as_bytes());
+        // spec.expiry_ms: u64 LE
+        expected.extend_from_slice(&1_782_345_600_000u64.to_le_bytes());
+        // spec.sig: u64 LE (normalized significand)
+        expected.extend_from_slice(&85_000u64.to_le_bytes());
+        // spec.exp: u8
+        expected.push(0);
+        // spec.is_put: bool
+        expected.push(0);
+        // max_total_written: u128 LE
+        expected.extend_from_slice(&u128::MAX.to_le_bytes());
         // write_amount: u64 LE
         expected.extend_from_slice(&10_000_000u64.to_le_bytes());
         // premium: u64 LE
@@ -170,7 +221,15 @@ mod tests {
             "5555555555555555555555555555555555555555555555555555555555555555",
             "0d6d6d5f636f6c6c61746572616c",
             "2222222222222222222222222222222222222222222222222222222222222222",
-            "3333333333333333333333333333333333333333333333333333333333333333",
+            // spec.asset: ULEB(76) + chain-form type (no 0x, 64-padded)
+            "4c303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030393a3a746274633a3a54425443",
+            // spec.settlement: ULEB(78) + chain-form type
+            "4e303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030393a3a74757364633a3a5455534443",
+            "008c13fc9e010000", // spec.expiry_ms
+            "084c010000000000", // spec.sig (normalized significand)
+            "00",                 // spec.exp
+            "00",                 // spec.is_put
+            "ffffffffffffffffffffffffffffffff", // max_total_written
             "8096980000000000",
             "80f0fa0200000000",
             "0094c51c97010000",
@@ -189,10 +248,16 @@ mod tests {
         assert_eq!(v["valid_until_ms"], "1748534400000");
         assert_eq!(v["nonce"], "42");
         assert_eq!(v["release_module"], "mm_collateral");
+        assert_eq!(v["max_total_written"], u128::MAX.to_string());
+        // The spec's types travel in CHAIN form — no 0x — because that is
+        // what the signed bytes carry.
+        let asset = v["spec"]["asset"].as_str().unwrap();
+        assert!(!asset.starts_with("0x"), "{asset}");
+        assert!(asset.ends_with("::tbtc::TBTC"));
+        assert_eq!(v["spec"]["sig"], "85000");
+        assert_eq!(v["spec"]["exp"], 0);
+        assert_eq!(v["spec"]["is_put"], false);
         // ids are 0x-prefixed hex strings of 64 hex chars.
-        let bucket = v["bucket_id"].as_str().unwrap();
-        assert_eq!(bucket.len(), 66);
-        assert!(bucket.starts_with("0x33"));
         let source = v["collateral_source"].as_str().unwrap();
         assert!(source.starts_with("0x44"));
         let pkg = v["release_package"].as_str().unwrap();

@@ -19,7 +19,8 @@ import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
 
 import { ENV, PACKAGE_ID, PROTOCOL_CONFIG_ID, TREASURY_ID, WHITELIST_ID } from "../config";
-import type { RfqQuoteEntry } from "../api/quoting";
+import { addCreateBucket, addShareBucket } from "./anystrike";
+import type { Quote, RfqQuoteEntry } from "../api/quoting";
 import { addRelease, addSignedQuote } from "./composer";
 
 function requirePackage(): string {
@@ -45,6 +46,46 @@ function putCollateralRaw(
   return (writeAmountRaw * strikeRaw + denom - 1n) / denom;
 }
 
+/**
+ * The bucket the PTB writes into, and the create/share legs when it does not
+ * exist yet.
+ *
+ * A listed strike is a strike nobody has created — the board advertises a
+ * ladder, and a bucket becomes an object the first time someone writes at it.
+ * So the fill IS the creation: `create_*_any_strike` is prepended and the
+ * mandatory `share_*` appended, both permitted by the gas-station write
+ * template, which is why this needs no sponsorship change.
+ */
+function addBucketArg(
+  tx: Transaction,
+  q: Quote,
+  p: {
+    bucketId: string | null;
+    underlyingCoinType: string;
+    settlementCoinType: string;
+    coinDecimals: number;
+  },
+): {
+  bucket: ReturnType<Transaction["moveCall"]> | ReturnType<Transaction["object"]>;
+  created: { coinType: string } | null;
+} {
+  if (p.bucketId !== null) {
+    return { bucket: tx.object(p.bucketId), created: null };
+  }
+  const { bucket, coinType } = addCreateBucket(tx, {
+    underlyingCoinType: p.underlyingCoinType,
+    settlementCoinType: p.settlementCoinType,
+    expiryMs: Number(q.spec.expiry_ms),
+    // The spec carries the NORMALIZED strike, and creation re-normalizes, so
+    // (sig, exp) is a valid raw (strike, scale) pair for the same bucket.
+    strikeRaw: BigInt(q.spec.sig),
+    strikeScale: q.spec.exp,
+    coinDecimals: p.coinDecimals,
+    isPut: q.spec.is_put,
+  });
+  return { bucket, created: { coinType } };
+}
+
 export type WritePutParams = {
   /** Chosen MM quote (default: the best, `quotes[0]`). */
   entry: RfqQuoteEntry;
@@ -58,6 +99,10 @@ export type WritePutParams = {
   strikeRaw: string;
   /** Bucket `strike_scale`. */
   strikeScale: number;
+  /** The bucket's object id, or null when this transaction creates it. */
+  bucketId: string | null;
+  /** Option-coin display decimals for the create leg — the underlying's. */
+  coinDecimals: number;
   /** Connected wallet; receives the Position Object and net premium. */
   writer: string;
 };
@@ -80,14 +125,17 @@ export function buildWritePutTx(p: WritePutParams): Transaction {
   const tx = new Transaction();
   const typeArgs = [p.underlyingCoinType, p.settlementCoinType, p.putCoinType];
 
-  const signedQuote = addSignedQuote(tx, pkg, p.entry);
+  // Create-if-absent FIRST: the write template permits the create leg only
+  // as a prefix, and the bucket argument has to exist before the request.
+  const { bucket: bucketArg, created } = addBucketArg(tx, q, p);
+  const signedQuote = addSignedQuote(tx, pkg, p.entry, p.underlyingCoinType, p.settlementCoinType);
 
   // Verify the quote (consuming its nonce) and mint the premium demand.
   const request = tx.moveCall({
     target: `${pkg}::put_bucket::request_writer_flow`,
     typeArguments: typeArgs,
     arguments: [
-      tx.object(q.bucket_id),
+      bucketArg,
       tx.object(q.signer_id), // MM QuoteSigner (shared, mutable)
       tx.object(PROTOCOL_CONFIG_ID),
       signedQuote,
@@ -115,7 +163,7 @@ export function buildWritePutTx(p: WritePutParams): Transaction {
     target: `${pkg}::put_bucket::execute_writer_flow`,
     typeArguments: typeArgs,
     arguments: [
-      tx.object(q.bucket_id),
+      bucketArg,
       tx.object(PROTOCOL_CONFIG_ID),
       tx.object(WHITELIST_ID),
       tx.object(TREASURY_ID),
@@ -126,6 +174,11 @@ export function buildWritePutTx(p: WritePutParams): Transaction {
       tx.object(SUI_CLOCK_OBJECT_ID),
     ],
   });
+
+  if (created !== null) {
+    // Terminal command of any transaction that creates a bucket.
+    addShareBucket(tx, { ...p, isPut: q.spec.is_put }, bucketArg as never, created.coinType);
+  }
 
   return tx;
 }
@@ -139,6 +192,10 @@ export type BuyPutParams = {
   settlementCoinType: string;
   /** The bucket's per-bucket option coin type (`Put` type arg). */
   putCoinType: string;
+  /** The bucket's object id, or null when this transaction creates it. */
+  bucketId: string | null;
+  /** Option-coin display decimals for the create leg — the underlying's. */
+  coinDecimals: number;
   /** Connected wallet; pays the premium and receives the PutOption. */
   trader: string;
 };
@@ -162,7 +219,10 @@ export function buildBuyPutTx(p: BuyPutParams): Transaction {
   const tx = new Transaction();
   const typeArgs = [p.underlyingCoinType, p.settlementCoinType, p.putCoinType];
 
-  const signedQuote = addSignedQuote(tx, pkg, p.entry);
+  // Create-if-absent FIRST: the write template permits the create leg only
+  // as a prefix, and the bucket argument has to exist before the request.
+  const { bucket: bucketArg, created } = addBucketArg(tx, q, p);
+  const signedQuote = addSignedQuote(tx, pkg, p.entry, p.underlyingCoinType, p.settlementCoinType);
 
   // Verify the quote (consuming its nonce) and mint the cash-collateral
   // demand (required_collateral(bucket, write_amount)).
@@ -170,7 +230,7 @@ export function buildBuyPutTx(p: BuyPutParams): Transaction {
     target: `${pkg}::put_bucket::request_trader_flow`,
     typeArguments: typeArgs,
     arguments: [
-      tx.object(q.bucket_id),
+      bucketArg,
       tx.object(q.signer_id), // MM QuoteSigner (shared, mutable)
       tx.object(PROTOCOL_CONFIG_ID),
       signedQuote,
@@ -193,7 +253,7 @@ export function buildBuyPutTx(p: BuyPutParams): Transaction {
     target: `${pkg}::put_bucket::execute_trader_flow`,
     typeArguments: typeArgs,
     arguments: [
-      tx.object(q.bucket_id),
+      bucketArg,
       tx.object(PROTOCOL_CONFIG_ID),
       tx.object(WHITELIST_ID),
       tx.object(TREASURY_ID),
@@ -204,6 +264,11 @@ export function buildBuyPutTx(p: BuyPutParams): Transaction {
       tx.object(SUI_CLOCK_OBJECT_ID),
     ],
   });
+
+  if (created !== null) {
+    // Terminal command of any transaction that creates a bucket.
+    addShareBucket(tx, { ...p, isPut: q.spec.is_put }, bucketArg as never, created.coinType);
+  }
 
   return tx;
 }

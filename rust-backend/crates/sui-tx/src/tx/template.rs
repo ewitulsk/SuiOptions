@@ -393,7 +393,16 @@ pub fn protocol_templates(
             name: name.to_owned(),
             required: matchers,
             allowed,
-            arities: vec![(request, 3), (execute, 3), (create, 12), (share, 3)],
+            // `new_quote<U, S>` carries the pair as type args (SO-408), so its
+            // arity is pinned too — an unpinned call would let a sponsored PTB
+            // name any pair in the signed payload.
+            arities: vec![
+                (t("quote", "new_quote"), 2),
+                (request, 3),
+                (execute, 3),
+                (create, 12),
+                (share, 3),
+            ],
         }
     };
 
@@ -791,7 +800,7 @@ mod tests {
     /// The 5-call quote→request→release→execute shape for one flow.
     fn flow_calls(module: &str, request_fn: &str, execute_fn: &str) -> Vec<(MoveTarget, usize)> {
         vec![
-            (target("quote", "new_quote"), 0),
+            (target("quote", "new_quote"), 2),
             (target("quote", "new_signed_quote"), 0),
             (target(module, request_fn), 3),
             (mm_release(), 1),
@@ -956,7 +965,7 @@ mod tests {
         // pinned call (and two release calls are refused anyway).
         let pt = build(
             &[
-                (target("quote", "new_quote"), 0),
+                (target("quote", "new_quote"), 2),
                 (target("quote", "new_signed_quote"), 0),
                 (mm_release(), 1),
                 (target("bucket", "execute_writer_flow"), 3),
@@ -1375,7 +1384,7 @@ mod tests {
         assert_eq!(with.len() - without.len(), 5);
         let write = build(
             &[
-                (target("quote", "new_quote"), 0),
+                (target("quote", "new_quote"), 2),
                 (target("quote", "new_signed_quote"), 0),
                 (target("bucket", "request_writer_flow"), 3),
                 (MoveTarget::new(ObjectID::random(), "mm", "release"), 1),

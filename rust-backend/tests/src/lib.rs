@@ -15,6 +15,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
+use protocol_types::BucketSpec;
 use protocol_types::asset::AssetType;
 use protocol_types::events::{BucketCreated, ChainEvent, IndexedEvent, SignerCreated};
 use protocol_types::ids::{ObjectId, SuiAddress};
@@ -33,6 +34,9 @@ pub struct Harness {
     pub mm_account: ObjectId,
     pub mm_sk: SigningKey,
     pub bucket: ObjectId,
+    /// The economics the RFQ names. Under spec-bound quoting this — not
+    /// `bucket` — is what travels and what the MM signs.
+    pub spec: BucketSpec,
     pub protocol_id: Vec<u8>,
 }
 
@@ -44,6 +48,11 @@ impl Harness {
         let mm_account = ObjectId::new([0x11; 32]);
         let mm_sk = SigningKey::generate(&mut rand::rngs::OsRng);
         let bucket = ObjectId::new([0x22; 32]);
+        // Minute-aligned: creation requires it, so a spec that isn't is
+        // refused before it ever reaches an MM.
+        let expiry_ms: u64 = 9_999_999_960_000;
+        let spec = BucketSpec::new("BTC", "USDC", expiry_ms, 50_000_000, 0, false)
+            .expect("harness spec");
 
         // Pre-seed: the MM's QuoteSigner registration, plus the bucket
         // (there is no balance state to seed — collateral custody lives
@@ -66,7 +75,7 @@ impl Harness {
                     asset_type: AssetType::new("BTC"),
                     settlement_type: AssetType::new("USDC"),
                     call_type: AssetType::new("0x9::call_0::CALL_0"),
-                    expiry_ms: 9_999_999_999_999,
+                    expiry_ms,
                     strike: 50_000_000,
                     strike_scale: 0,
                 }),
@@ -82,6 +91,7 @@ impl Harness {
 
         // Quoting service.
         let cfg = Arc::new(quoting_service::Config {
+            max_bulk_view_specs: 120,
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             indexer_graphql_url: format!("http://{}/graphql", graphql_addr),
             rfq_window: Duration::from_millis(400),
@@ -122,6 +132,7 @@ impl Harness {
             mm_account,
             mm_sk,
             bucket,
+            spec,
             protocol_id: cfg.protocol_id.clone(),
         })
     }
@@ -157,7 +168,31 @@ async fn spawn_mock_indexer_graphql(
             let node = acct.map(|a| account_json(id, &a)).unwrap_or(Value::Null);
             return Json(json!({ "data": { "account": node } }));
         }
-        if query.contains("bucket(") && !query.contains("buckets(") {
+        // Filtered bucket list — how the quoting service resolves an RFQ spec
+        // to a bucket (or to "no bucket yet, which is fine"). Must be checked
+        // before the singular `bucket(` branch.
+        if query.contains("buckets(") {
+            let want = |k: &str| vars.get(k).and_then(|v| v.as_str()).map(str::to_string);
+            let (asset, settlement) = (want("u"), want("s"));
+            let expiry = vars.get("e").and_then(|v| v.as_str()).map(str::to_string);
+            let nodes: Vec<Value> = st
+                .store
+                .all_buckets()
+                .into_iter()
+                .filter(|(_, b)| {
+                    asset.as_deref().is_none_or(|a| b.asset_type.as_str() == a)
+                        && settlement
+                            .as_deref()
+                            .is_none_or(|x| b.settlement_type.as_str() == x)
+                        && expiry
+                            .as_deref()
+                            .is_none_or(|e| b.expiry_ms.to_string() == e)
+                })
+                .map(|(id, b)| bucket_json(&id.to_hex(), &b))
+                .collect();
+            return Json(json!({ "data": { "buckets": nodes } }));
+        }
+        if query.contains("bucket(") {
             let id = vars.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let bkt = ObjectId::from_hex(id).ok().and_then(|o| st.store.bucket(&o));
             let node = bkt.map(|b| bucket_json(id, &b)).unwrap_or(Value::Null);
@@ -327,7 +362,20 @@ pub async fn connect_mm(
     Ok(ws)
 }
 
+/// How long a test waits for a frame before declaring the flow broken.
+///
+/// Without a bound, a service that decides not to answer — an RFQ rejected
+/// before the broadcast, say — hangs the suite instead of failing it, and a
+/// hang tells you nothing about where it stopped.
+const FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub async fn next_text(ws: &mut WsClient) -> Result<String> {
+    tokio::time::timeout(FRAME_TIMEOUT, next_text_inner(ws))
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out after {FRAME_TIMEOUT:?} waiting for a ws frame"))?
+}
+
+async fn next_text_inner(ws: &mut WsClient) -> Result<String> {
     loop {
         let frame = ws
             .next()
@@ -345,14 +393,14 @@ pub async fn next_text(ws: &mut WsClient) -> Result<String> {
 pub async fn send_rfq(
     ws: &mut WsClient,
     request_id: &str,
-    bucket: ObjectId,
+    spec: BucketSpec,
     write_amount: u64,
     side: Side,
 ) -> Result<()> {
     let req = RetailToService::RFQRequest {
         request_id: request_id.into(),
         payload: RfqRequestPayload {
-            bucket_id: bucket,
+            spec,
             write_amount,
             side,
         },
@@ -365,7 +413,7 @@ pub fn build_signed_quote(
     sk: &SigningKey,
     protocol_id: Vec<u8>,
     mm_account: ObjectId,
-    bucket: ObjectId,
+    spec: BucketSpec,
     write_amount: u64,
     premium: u64,
     nonce: u64,
@@ -378,7 +426,8 @@ pub fn build_signed_quote(
         release_package: SuiAddress::new([0xd0; 32]),
         release_module: "mm_collateral".into(),
         signer_token_recipient: SuiAddress::ZERO,
-        bucket_id: bucket,
+        spec,
+        max_total_written: u128::MAX,
         write_amount,
         premium,
         valid_until_ms,

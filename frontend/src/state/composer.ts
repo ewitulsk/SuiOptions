@@ -14,26 +14,21 @@ import { useCoinBalance } from "../api/useCoinBalance";
 import { usePythPrice } from "../api/usePythPrice";
 import { resolveFeedId } from "../api/pyth";
 import { useRfq } from "../api/useRfq";
-import { useBulkView } from "../api/useBulkView";
+import { specKeyOf, useBulkView } from "../api/useBulkView";
 import { buildBuyTx, buildWriteTx } from "../tx/composer";
 import { buildBuyPutTx, buildWritePutTx } from "../tx/composer_put";
 import { formatPrice } from "../format";
 import {
-  fetchBucketSpec,
   isUncreated,
   optionCoinType,
   rfqTradeable,
   seriesOptionType,
 } from "../api/client";
-import {
-  buildCreateBucketTx,
-  normalizeStrike,
-  strikeDisplayToRaw,
-} from "../tx/anystrike";
+import { bucketSpecFor, normalizeStrike, strikeDisplayToRaw } from "../tx/anystrike";
 import { BUCKET_REGISTRY_ID } from "../config";
 import type { ToastState } from "../components/Toast";
 import type { Bucket as ApiBucket, Series } from "../api/client";
-import type { RfqQuoteEntry, Side as ProtocolSide } from "../api/quoting";
+import type { BucketSpec, RfqQuoteEntry, Side as ProtocolSide } from "../api/quoting";
 import type {
   Bucket,
   ConfirmStage,
@@ -197,7 +192,6 @@ export type ComposerState = {
   customStrike: string;
   setCustomStrike: (v: string) => void;
   /** Non-null while a create tx is in flight / awaiting the indexer. */
-  creatingBucket: boolean;
   /** Whether this deployment supports any-strike creation. */
   canCreateStrikes: boolean;
   createCustomStrike: () => Promise<void>;
@@ -207,7 +201,6 @@ export type ComposerState = {
    */
   selectedUncreated: boolean;
   /** Create the selected listed strike, so it can then be written. */
-  createSelectedStrike: () => Promise<void>;
   /** Distinct assets across all returned series, sorted by symbol. */
   assets: AssetOption[];
   /** Currently selected asset symbol, or null until the first series arrives. */
@@ -257,14 +250,9 @@ export function useComposerState({
       // Show only the series matching the selected option type (call vs put).
       // Series without an `option_type` are treated as calls.
       .filter((s) => seriesOptionType(s) === optionType);
-    if (view !== "writer") {
-      // Trader (Buy) side: a strike the board merely *lists* (SO-400) has no
-      // bucket, so no option coins exist and there is nothing to buy. Only
-      // the writer side can bring one into existence.
-      return raw
-        .map((s) => ({ ...s, buckets: s.buckets.filter((b) => !isUncreated(b)) }))
-        .filter((s) => s.buckets.length > 0);
-    }
+    // Both sides list uncreated strikes now: the buy PTB creates the bucket
+    // and mints against it in the same transaction, so "no object yet" is no
+    // longer a reason to hide a strike from the trader side.
     return raw
       .map((s) => ({ ...s, buckets: s.buckets.filter((b) => !b.invalidated) }))
       .filter((s) => s.buckets.length > 0);
@@ -379,15 +367,31 @@ export function useComposerState({
   // every strike at the current amount, averaged across opted-in MMs and
   // cached server-side (stale-while-revalidate). Served by Trader MMs on the
   // writer (Earn) side and Writer MMs on the trader (Buy) side.
-  // Only created buckets can be quoted: the bulk view prices real objects, so
-  // the listed-but-uncreated strikes (SO-400) are filtered out here and simply
-  // show no indicative premium until someone creates them.
-  const bulkBucketIds = useMemo(
-    () => seriesBuckets.map((b) => b.bucket_id).filter((id): id is string => id !== null),
-    [seriesBuckets],
+  // Every tile is quotable, created or not: a quote binds the bucket's
+  // economics, and the transaction that fills it creates the bucket if
+  // nobody has yet. So the listed ladder strikes get real premiums too.
+  const bucketSpecs = useMemo(
+    () =>
+      series === null
+        ? []
+        : seriesBuckets.map((b) =>
+            bucketSpecFor({
+              underlyingCoinType: series.asset_coin_type,
+              settlementCoinType: series.settlement_coin_type,
+              expiryMs: series.expiry_ms,
+              strikeRaw: BigInt(b.strike_raw),
+              strikeScale: b.strike_scale,
+              isPut: optionType === "put",
+            }),
+          ),
+    [seriesBuckets, series, optionType],
+  );
+  const bulkSpecs = useMemo(
+    () => bucketSpecs.filter((s): s is BucketSpec => s !== null),
+    [bucketSpecs],
   );
   const { premiums: bulkPremiums } = useBulkView({
-    bucketIds: bulkBucketIds,
+    specs: bulkSpecs,
     writeAmountRaw,
     side: view,
     enabled: !bucketsQuery.isLoading,
@@ -403,10 +407,13 @@ export function useComposerState({
     () => seriesBuckets[selectedIdx]?.bucket_id ?? null,
     [seriesBuckets, selectedIdx],
   );
+  // What the RFQ actually names. Indexes the tile array rather than matching
+  // on an id, because an uncreated tile has none.
+  const selectedSpec: BucketSpec | null = bucketSpecs[selectedIdx] ?? null;
 
   const rfqSide: ProtocolSide = view; // View ⊂ Side at the value level.
   const { quotes: rfqEntries, status: rfqStatus, refresh: refreshRfq } = useRfq({
-    bucketId: selectedBucketId,
+    spec: selectedSpec,
     writeAmountRaw,
     side: rfqSide,
     enabled: !bucketsQuery.isLoading,
@@ -435,12 +442,11 @@ export function useComposerState({
   const strikes = useMemo<Strike[]>(() => {
     const scale =
       series?.settlement_decimals != null ? 10 ** series.settlement_decimals : 1;
-    return seriesBuckets.map((b) => {
-      const entry = b.bucket_id ? bulkPremiums.get(b.bucket_id) : undefined;
+    return seriesBuckets.map((b, i) => {
+      const spec = bucketSpecs[i] ?? null;
+      const entry = spec ? bulkPremiums.get(specKeyOf(spec)) : undefined;
       const indicative = entry ? Number(entry.premium) / scale : null;
-      const value =
-        (b.bucket_id === selectedBucketId ? realSelectedPremium : null) ??
-        indicative;
+      const value = (i === selectedIdx ? realSelectedPremium : null) ?? indicative;
       return {
         strike: b.strike as number,
         perUnit: 0,
@@ -482,33 +488,10 @@ export function useComposerState({
   // surfaces the new bucket and we auto-select it; RFQ + write proceed as
   // for any other strike. (Single-tx create+quote+write is SO-396.)
   const [customStrike, setCustomStrike] = useState("");
-  const [creatingBucket, setCreatingBucket] = useState(false);
-  const pendingSpec = useRef<{ sig: string; exp: number; expiryMs: number } | null>(null);
   const canCreateStrikes = Boolean(BUCKET_REGISTRY_ID);
 
-  // Auto-select the created bucket once the poll surfaces it.
-  useEffect(() => {
-    const pending = pendingSpec.current;
-    if (!pending || !series || series.expiry_ms !== pending.expiryMs) return;
-    const idx = seriesBuckets.findIndex((b) => {
-      // The board lists this strike before it exists (SO-400), so match only
-      // *created* buckets — otherwise the synthetic tile would satisfy the
-      // wait immediately and we'd report success before the tx landed.
-      if (isUncreated(b)) return false;
-      const n = normalizeStrike(BigInt(b.strike_raw), b.strike_scale);
-      return n !== null && n.sig.toString() === pending.sig && n.exp === pending.exp;
-    });
-    if (idx >= 0) {
-      pendingSpec.current = null;
-      setCreatingBucket(false);
-      setSelectedIdx(idx);
-      setToast({ message: "strike created · quotes incoming", variant: "info" });
-      setTimeout(() => setToast(null), 4000);
-    }
-  }, [seriesBuckets, series]);
-
   const createCustomStrike = async () => {
-    if (!series || creatingBucket) return;
+    if (!series) return;
     const underDec = series.asset_decimals;
     const settleDec = series.settlement_decimals;
     if (underDec == null || settleDec == null) {
@@ -529,46 +512,18 @@ export function useComposerState({
     await createStrike(raw, norm, underDec);
   };
 
-  /**
-   * Bring the *selected* listed strike into existence (SO-400). The board
-   * advertises the ladder around spot, so the strike the user picked may not
-   * have a bucket yet; this runs the same sponsored create the free-text
-   * input does, reusing the strike already encoded in the tile.
-   */
-  const createSelectedStrike = async () => {
-    if (!series || creatingBucket) return;
-    const b = seriesBuckets[selectedIdx];
-    if (!b || !isUncreated(b)) return;
-    const underDec = series.asset_decimals;
-    if (underDec == null) {
-      setToast({ message: "token decimals unknown for this pair", variant: "error" });
-      setTimeout(() => setToast(null), 4000);
-      return;
-    }
-    const strikeRaw = BigInt(b.strike_raw);
-    const norm = normalizeStrike(strikeRaw, b.strike_scale);
-    if (!norm) return;
-    await createStrike({ strikeRaw, strikeScale: b.strike_scale }, norm, underDec);
-  };
-
-  /** Shared create path for both the free-text input and a listed tile. */
   const createStrike = async (
     raw: { strikeRaw: bigint; strikeScale: number },
     norm: { sig: bigint; exp: number },
-    underDec: number,
+    _underDec: number,
   ) => {
     if (!series) return;
-    // Already *created*? Select it instead of creating a second time.
-    // Uncreated board strikes (SO-400) are deliberately excluded: they share
-    // the strike we're about to create, so matching them would short-circuit
-    // straight back to the tile and the bucket would never come into being.
-    const existingIdx = seriesBuckets.findIndex((b) => {
-      if (isUncreated(b)) return false;
+    const idx = seriesBuckets.findIndex((b) => {
       const n = normalizeStrike(BigInt(b.strike_raw), b.strike_scale);
       return n !== null && n.sig === norm.sig && n.exp === norm.exp;
     });
-    if (existingIdx >= 0) {
-      setSelectedIdx(existingIdx);
+    if (idx >= 0) {
+      setSelectedIdx(idx);
       setCustomStrike("");
       return;
     }
@@ -580,59 +535,35 @@ export function useComposerState({
       setTimeout(() => setToast(null), 4000);
       return;
     }
-    setCreatingBucket(true);
-    try {
-      // Cross-check against the api-service in case the local list is
-      // stale (someone else created this strike since the last poll).
-      const spec = await fetchBucketSpec({
-        underlying: series.asset_coin_type,
-        settlement: series.settlement_coin_type,
-        expiryMs: series.expiry_ms,
-        strikeRaw: raw.strikeRaw.toString(),
-        strikeScale: raw.strikeScale,
-        optionType,
-      }).catch(() => null);
-      if (spec?.exists) {
-        pendingSpec.current = {
-          sig: norm.sig.toString(),
-          exp: norm.exp,
-          expiryMs: series.expiry_ms,
-        };
-        await bucketsQuery.refetch();
-        return;
-      }
-      const tx = buildCreateBucketTx({
-        underlyingCoinType: series.asset_coin_type,
-        settlementCoinType: series.settlement_coin_type,
-        expiryMs: series.expiry_ms,
-        strikeRaw: raw.strikeRaw,
-        strikeScale: raw.strikeScale,
-        coinDecimals: underDec,
-        isPut: optionType === "put",
+    // A strike off the listed ladder: check that it is a strike the protocol
+    // can represent, then let the RFQ price it directly.
+    const spec = bucketSpecFor({
+      underlyingCoinType: series.asset_coin_type,
+      settlementCoinType: series.settlement_coin_type,
+      expiryMs: series.expiry_ms,
+      strikeRaw: raw.strikeRaw,
+      strikeScale: raw.strikeScale,
+      isPut: optionType === "put",
+    });
+    if (spec === null) {
+      setToast({
+        message: "strike has too many significant digits (max 13)",
+        variant: "error",
       });
-      const digest = await submitTx(tx);
-      posthog.capture("bucket_create_submitted", {
-        digest,
-        // Normalized, so both entry points report the same strike (the
-        // free-text field is empty when a listed tile drove the create).
-        strike: `${norm.sig}e-${norm.exp}`,
-        expiry_ms: series.expiry_ms,
-        option_type: optionType,
-      });
-      pendingSpec.current = {
-        sig: norm.sig.toString(),
-        exp: norm.exp,
-        expiryMs: series.expiry_ms,
-      };
-      setCustomStrike("");
-      setToast({ message: "creating strike on-chain…", variant: "info" });
       setTimeout(() => setToast(null), 4000);
-    } catch (e) {
-      setCreatingBucket(false);
-      const msg = e instanceof Error ? e.message : String(e);
-      setToast({ message: msg, variant: "error" });
-      setTimeout(() => setToast(null), 6000);
+      return;
     }
+    setCustomStrike("");
+    posthog.capture("custom_strike_selected", {
+      strike: `${norm.sig}e-${norm.exp}`,
+      expiry_ms: series.expiry_ms,
+      option_type: optionType,
+    });
+    setToast({
+      message: "off-ladder strikes are quotable — pick an amount",
+      variant: "info",
+    });
+    setTimeout(() => setToast(null), 4000);
   };
 
   // Insufficiency uses real balances. A CALL writer supplies the underlying
@@ -710,16 +641,23 @@ export function useComposerState({
 
     setConfirmStage("signing");
     try {
-      const quoteBucket = series.buckets.find(
-        (b) => b.bucket_id === entry.quote.bucket_id,
-      );
+      // Match the quote back to its tile by SPEC — an uncreated tile has no
+      // object id to match on, and the quote no longer carries one.
+      const quoteKey = specKeyOf(entry.quote.spec);
+      const idx = bucketSpecs.findIndex((s) => s !== null && specKeyOf(s) === quoteKey);
+      const quoteBucket = idx >= 0 ? seriesBuckets[idx] : undefined;
       const coinType = quoteBucket ? optionCoinType(quoteBucket) : undefined;
-      if (!quoteBucket || !coinType) {
+      const underDec = series.asset_decimals;
+      if (!quoteBucket || !coinType || underDec == null) {
         setConfirmStage(null);
         setToast({ message: "bucket metadata not loaded · try again", variant: "info" });
         setTimeout(() => setToast(null), 4000);
         return;
       }
+      // Null when the strike is listed but has no object: the write PTB then
+      // creates the bucket in the same transaction that fills the quote.
+      const bucketId = quoteBucket.bucket_id;
+      const coinDecimals = underDec;
       setConfirmStage("broadcast");
       const isPut = optionType === "put";
       let tx;
@@ -728,6 +666,8 @@ export function useComposerState({
           view === "trader"
             ? buildBuyPutTx({
                 entry,
+                bucketId,
+                coinDecimals,
                 underlyingCoinType: series.asset_coin_type,
                 settlementCoinType: series.settlement_coin_type,
                 putCoinType: coinType,
@@ -735,6 +675,8 @@ export function useComposerState({
               })
             : buildWritePutTx({
                 entry,
+                bucketId,
+                coinDecimals,
                 underlyingCoinType: series.asset_coin_type,
                 settlementCoinType: series.settlement_coin_type,
                 putCoinType: coinType,
@@ -747,6 +689,8 @@ export function useComposerState({
           view === "trader"
             ? buildBuyTx({
                 entry,
+                bucketId,
+                coinDecimals,
                 underlyingCoinType: series.asset_coin_type,
                 settlementCoinType: series.settlement_coin_type,
                 callCoinType: coinType,
@@ -754,6 +698,8 @@ export function useComposerState({
               })
             : buildWriteTx({
                 entry,
+                bucketId,
+                coinDecimals,
                 underlyingCoinType: series.asset_coin_type,
                 settlementCoinType: series.settlement_coin_type,
                 callCoinType: coinType,
@@ -857,11 +803,9 @@ export function useComposerState({
     bucketsEmpty,
     customStrike,
     setCustomStrike,
-    creatingBucket,
     canCreateStrikes,
     createCustomStrike,
     selectedUncreated,
-    createSelectedStrike,
     assets,
     selectedAsset,
     selectAsset: setSelectedAsset,

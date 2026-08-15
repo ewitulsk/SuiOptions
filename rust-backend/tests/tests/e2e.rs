@@ -42,17 +42,17 @@ async fn rfq_round_trip() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Fire the RFQ.
-    send_rfq(&mut retail, "req-1", h.bucket, 10_000, Side::Writer)
+    send_rfq(&mut retail, "req-1", h.spec.clone(), 10_000, Side::Writer)
         .await
         .unwrap();
 
     // MM should see an RFQBroadcast.
     let broadcast_text = next_text(&mut mm).await.unwrap();
     let broadcast: ServiceToMm = serde_json::from_str(&broadcast_text).unwrap();
-    let (req_id, bucket_id, write_amount, side, deadline_ms) = match broadcast {
+    let (req_id, spec, write_amount, side, deadline_ms) = match broadcast {
         ServiceToMm::RFQBroadcast { request_id, payload } => (
             request_id,
-            payload.bucket_id,
+            payload.spec,
             payload.write_amount,
             payload.side,
             payload.deadline_ms,
@@ -60,7 +60,8 @@ async fn rfq_round_trip() {
         other => panic!("expected RFQBroadcast, got {:?}", other),
     };
     assert_eq!(req_id, "req-1");
-    assert_eq!(bucket_id, h.bucket);
+    // The broadcast names economics, not an object.
+    assert_eq!(spec, h.spec);
     assert_eq!(write_amount, 10_000);
     assert_eq!(side, Side::Writer);
     assert!(deadline_ms > 0);
@@ -70,7 +71,7 @@ async fn rfq_round_trip() {
         &h.mm_sk,
         h.protocol_id.clone(),
         h.mm_account,
-        h.bucket,
+        h.spec.clone(),
         10_000,
         500_000,
         1,
@@ -90,7 +91,10 @@ async fn rfq_round_trip() {
     match parsed {
         ServiceToRetail::RFQResponse { request_id, payload } => {
             assert_eq!(request_id, "req-1");
-            assert_eq!(payload.bucket_id, h.bucket);
+            assert_eq!(payload.spec, h.spec);
+            // The bucket exists in the harness, so its id rides along as
+            // information — the quotes still bind the spec.
+            assert_eq!(payload.bucket_id, Some(h.bucket));
             assert_eq!(payload.write_amount, 10_000);
             assert_eq!(payload.quotes.len(), 1);
             assert_eq!(payload.quotes[0].quote.premium, 500_000);
@@ -116,7 +120,7 @@ async fn tampered_quote_is_filtered_out() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    send_rfq(&mut retail, "req-tamper", h.bucket, 10_000, Side::Writer)
+    send_rfq(&mut retail, "req-tamper", h.spec.clone(), 10_000, Side::Writer)
         .await
         .unwrap();
 
@@ -133,7 +137,7 @@ async fn tampered_quote_is_filtered_out() {
         &h.mm_sk,
         h.protocol_id.clone(),
         h.mm_account,
-        h.bucket,
+        h.spec.clone(),
         10_000,
         500_000,
         2,

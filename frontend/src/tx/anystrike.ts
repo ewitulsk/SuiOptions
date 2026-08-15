@@ -15,7 +15,9 @@
 // Markers `B00..B7F` live in module `enc0`, `B80..BFF` in `enc1`.
 
 import { Transaction } from "@mysten/sui/transactions";
-import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
+import { normalizeStructTag, SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
+
+import type { BucketSpec } from "../api/quoting";
 
 import { BUCKET_REGISTRY_ID, ENV, PACKAGE_ID, WHITELIST_ID } from "../config";
 
@@ -68,6 +70,38 @@ export function optionCoinTypeFor(
   const root = isPut ? "OptionPut" : "OptionCall";
   const args = [underlying, settlement, ...markerTypes(pkg, minutes, sig, exp)];
   return `${pkg}::option_coin::${root}<${args.join(",")}>`;
+}
+
+/** Chain form: canonical Move type with the `0x` stripped from every address
+ *  segment. This is what `type_name::with_defining_ids` produces and therefore
+ *  what a `TypeName` BCS-encodes to — so it is the form a SIGNED payload must
+ *  carry. Everything else in the app uses the `0x` form. */
+export function chainFormType(t: string): string {
+  return normalizeStructTag(t).replaceAll("0x", "");
+}
+
+/** Build the wire spec for a strike. The single place a `BucketSpec` should
+ *  come from: it normalizes the strike and chain-forms both coin types, which
+ *  is what keeps the frontend's bytes identical to the MM's and the chain's.
+ *  Returns null for a strike the encoding cannot represent. */
+export function bucketSpecFor(p: {
+  underlyingCoinType: string;
+  settlementCoinType: string;
+  expiryMs: number;
+  strikeRaw: bigint;
+  strikeScale: number;
+  isPut: boolean;
+}): BucketSpec | null {
+  const norm = normalizeStrike(p.strikeRaw, p.strikeScale);
+  if (norm === null) return null;
+  return {
+    asset: chainFormType(p.underlyingCoinType),
+    settlement: chainFormType(p.settlementCoinType),
+    expiry_ms: String(p.expiryMs),
+    sig: norm.sig.toString(),
+    exp: norm.exp,
+    is_put: p.isPut,
+  };
 }
 
 /**
@@ -131,10 +165,45 @@ export function buildCreateBucketTx(p: CreateBucketParams): Transaction {
   if (!norm) {
     throw new Error("strike has too many significant digits (max 13)");
   }
+  const coinType = optionCoinTypeFor(
+    PACKAGE_ID,
+    p.isPut,
+    p.underlyingCoinType,
+    p.settlementCoinType,
+    p.expiryMs / 60_000,
+    norm.sig,
+    norm.exp,
+  );
+
+  const tx = new Transaction();
+  const { bucket } = addCreateBucket(tx, p);
+  addShareBucket(tx, p, bucket, coinType);
+  return tx;
+}
+
+/** The create leg on its own, so a write PTB can prepend it and bring the
+ *  bucket into existence in the same transaction that fills a quote against
+ *  it. Returns the bucket BY VALUE — the caller MUST end with
+ *  {@link addShareBucket}, which is the transaction's terminal command. */
+export function addCreateBucket(
+  tx: Transaction,
+  p: CreateBucketParams,
+): { bucket: ReturnType<Transaction["moveCall"]>; coinType: string } {
+  if (!PACKAGE_ID || !WHITELIST_ID || !BUCKET_REGISTRY_ID) {
+    throw new Error(
+      `Missing packageId/whitelistId/bucketRegistryId for VITE_ENVIRONMENT="${ENV}" — this deployment predates any-strike creation`,
+    );
+  }
+  if (p.expiryMs % 60_000 !== 0) {
+    throw new Error("bucket expiries must be minute-aligned");
+  }
+  const norm = normalizeStrike(p.strikeRaw, p.strikeScale);
+  if (!norm) {
+    throw new Error("strike has too many significant digits (max 13)");
+  }
   const minutes = p.expiryMs / 60_000;
   const module = p.isPut ? "put_bucket" : "bucket";
   const createFn = p.isPut ? "create_put_bucket_any_strike" : "create_bucket_any_strike";
-  const shareFn = p.isPut ? "share_put_bucket" : "share_bucket";
   const coinType = optionCoinTypeFor(
     PACKAGE_ID,
     p.isPut,
@@ -144,8 +213,6 @@ export function buildCreateBucketTx(p: CreateBucketParams): Transaction {
     norm.sig,
     norm.exp,
   );
-
-  const tx = new Transaction();
   const bucket = tx.moveCall({
     target: `${PACKAGE_ID}::${module}::${createFn}`,
     typeArguments: [
@@ -164,10 +231,28 @@ export function buildCreateBucketTx(p: CreateBucketParams): Transaction {
       tx.object(SUI_CLOCK_OBJECT_ID),
     ],
   });
+  return { bucket, coinType };
+}
+
+/** The mandatory terminal command of any transaction that creates a bucket. */
+export function addShareBucket(
+  tx: Transaction,
+  p: Pick<CreateBucketParams, "underlyingCoinType" | "settlementCoinType" | "isPut">,
+  bucket: ReturnType<Transaction["moveCall"]>,
+  coinType: string,
+): void {
+  const module = p.isPut ? "put_bucket" : "bucket";
+  const shareFn = p.isPut ? "share_put_bucket" : "share_bucket";
   tx.moveCall({
-    target: `${PACKAGE_ID}::${module}::${shareFn}`,
+    target: `${requirePackageId()}::${module}::${shareFn}`,
     typeArguments: [p.underlyingCoinType, p.settlementCoinType, coinType],
     arguments: [bucket],
   });
-  return tx;
+}
+
+function requirePackageId(): string {
+  if (!PACKAGE_ID) {
+    throw new Error(`Missing packageId for VITE_ENVIRONMENT="${ENV}"`);
+  }
+  return PACKAGE_ID;
 }

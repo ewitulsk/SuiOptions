@@ -49,6 +49,11 @@ pub struct Config {
     /// Max concurrent in-flight RFQ orchestrations across all retail
     /// connections. Backstop for the per-session limit.
     pub max_inflight_rfqs_global: usize,
+    /// Max specs one bulk-view request may ask about. The board is a
+    /// synthetic ladder now (SO-400), so a client can name far more strikes
+    /// than exist; without a cap one request fans out unboundedly to every
+    /// opted-in MM.
+    pub max_bulk_view_specs: usize,
 }
 
 /// On-disk TOML shape. Kept separate from [`Config`] so the public type can
@@ -70,6 +75,12 @@ struct FileConfig {
     max_inflight_rfqs_per_session: usize,
     #[serde(default = "default_max_inflight_global")]
     max_inflight_rfqs_global: usize,
+    #[serde(default = "default_max_bulk_view_specs")]
+    max_bulk_view_specs: usize,
+}
+
+fn default_max_bulk_view_specs() -> usize {
+    120
 }
 
 fn default_ping_interval_secs() -> u64 {
@@ -112,6 +123,7 @@ impl Config {
             ping_interval: Duration::from_secs(file.ping_interval_secs),
             token_info_url: file.token_info_url,
             protocol_id,
+            max_bulk_view_specs: file.max_bulk_view_specs,
             max_inflight_rfqs_per_session: file.max_inflight_rfqs_per_session,
             max_inflight_rfqs_global: file.max_inflight_rfqs_global,
         })

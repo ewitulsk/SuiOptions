@@ -14,6 +14,7 @@
 //! between the two via `serde`'s `is_human_readable` flag.
 
 pub mod asset;
+pub mod bucket_spec;
 pub mod coding;
 pub mod errors;
 pub mod events;
@@ -26,6 +27,7 @@ pub mod sides;
 pub mod signing_scheme;
 
 pub use asset::AssetType;
+pub use bucket_spec::BucketSpec;
 pub use errors::ProtocolError;
 pub use ids::{ObjectId, SuiAddress};
 pub use oracle_provider::OracleProvider;

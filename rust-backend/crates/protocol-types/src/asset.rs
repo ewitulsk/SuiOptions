@@ -74,6 +74,17 @@ pub fn canonicalize_move_type(s: &str) -> String {
     out
 }
 
+/// **Chain form**: canonical, but with `0x` stripped from every address
+/// segment — `0000…0002::sui::SUI`. This is what Move's
+/// `type_name::with_defining_ids` produces, and therefore what a `TypeName`
+/// BCS-encodes to, so it is the form any SIGNED payload must carry (see
+/// `crate::bucket_spec`). It is also the form the indexer stores, which is
+/// why its string-matching filters must be fed chain form rather than the
+/// `0x` form we emit to clients — the SO-163 / #479 trap, in its two guises.
+pub fn chain_form_move_type(s: &str) -> String {
+    canonicalize_move_type(s).replace("0x", "")
+}
+
 /// Canonicalize one `addr::module::Name` atom; pass through anything else.
 fn canonicalize_atom(atom: &str) -> String {
     match atom.split_once("::") {

@@ -22,6 +22,8 @@ use sui_types::transaction::{ObjectArg, SharedObjectMutability};
 use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION};
 use tracing::info;
 
+use protocol_types::bucket_spec::BucketSpec;
+
 use crate::sui_client::Signer;
 use crate::tx::execute_write::{build_request_and_release, FlowPrelude, QuoteRouting};
 use crate::tx::{shared_object_arg, submit_ptb};
@@ -57,6 +59,11 @@ pub struct ExecutePutWriterParams<'a> {
     // Quote fields the MM signed over (BCS-canonical).
     pub protocol_id: Vec<u8>,
     pub signer_token_recipient: SuiAddress,
+    /// The bucket's economics — what the MM signed. `bucket_id` above is the
+    /// object the PTB references; this is the agreement it is checked against.
+    pub spec: BucketSpec,
+    /// Signed queue bound; `u128::MAX` opts out.
+    pub max_total_written: u128,
     pub write_amount: u64,
     pub premium: u64,
     pub valid_until_ms: u64,
@@ -97,6 +104,11 @@ pub struct ExecutePutTraderParams<'a> {
 
     pub protocol_id: Vec<u8>,
     pub signer_token_recipient: SuiAddress,
+    /// The bucket's economics — what the MM signed. `bucket_id` above is the
+    /// object the PTB references; this is the agreement it is checked against.
+    pub spec: BucketSpec,
+    /// Signed queue bound; `u128::MAX` opts out.
+    pub max_total_written: u128,
     pub write_amount: u64,
     pub premium: u64,
     pub valid_until_ms: u64,
@@ -174,7 +186,8 @@ pub async fn execute_put_writer_flow(
             routing: &p.routing,
             protocol_id: &p.protocol_id,
             signer_token_recipient: p.signer_token_recipient,
-            bucket_id: p.bucket_id,
+            spec: &p.spec,
+            max_total_written: p.max_total_written,
             write_amount: p.write_amount,
             premium: p.premium,
             valid_until_ms: p.valid_until_ms,
@@ -257,7 +270,8 @@ pub async fn execute_put_trader_flow(
             routing: &p.routing,
             protocol_id: &p.protocol_id,
             signer_token_recipient: p.signer_token_recipient,
-            bucket_id: p.bucket_id,
+            spec: &p.spec,
+            max_total_written: p.max_total_written,
             write_amount: p.write_amount,
             premium: p.premium,
             valid_until_ms: p.valid_until_ms,

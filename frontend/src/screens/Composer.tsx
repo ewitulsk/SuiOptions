@@ -50,17 +50,12 @@ export function Composer({ initialView }: Props) {
   // around the strike grid (the panel is keyed per-bucket and remounts).
   const [detailTab, setDetailTab] = useState<DetailTab>("greeks");
 
-  // A strike the board lists but which has no bucket yet (SO-400) can't be
-  // quoted, so the writer CTA becomes "create it" — the same sponsored
-  // create-bucket tx the free-text strike input submits. Once the indexer
-  // surfaces the new bucket the tile re-selects itself and quoting resumes.
+  // A strike the board lists but has no bucket for yet quotes and fills like
+  // any other: the write PTB creates the bucket in the same transaction. So
+  // there is no separate "create" CTA any more.
   const writerCtaLabel = !s.connected
     ? "Connect to write"
-    : s.selectedUncreated
-      ? s.creatingBucket
-        ? "Creating strike…"
-        : "Create this strike →"
-      : s.insufficient
+    : s.insufficient
         ? "Insufficient balance"
         : s.quotes.length === 0
           ? "Waiting on MMs…"
@@ -74,20 +69,16 @@ export function Composer({ initialView }: Props) {
         ? "Waiting on MMs…"
         : `Buy ${s.optionType} · pay ${formatPrice(s.bestPremium)} USDC →`;
 
-  // The create path has no quote and no balance requirement of its own, so it
-  // gates only on a connected wallet and an in-flight create.
-  const createGate = s.view === "writer" && s.selectedUncreated;
-  const ctaDisabled = createGate
-    ? !s.connected || s.creatingBucket || !s.canCreateStrikes
-    : !s.connected ||
-      s.insufficient ||
-      s.quotes.length === 0 ||
-      s.bucketsLoading ||
-      s.bucketsEmpty ||
-      s.confirmStage === "signing" ||
-      s.confirmStage === "broadcast";
+  const ctaDisabled =
+    !s.connected ||
+    s.insufficient ||
+    s.quotes.length === 0 ||
+    s.bucketsLoading ||
+    s.bucketsEmpty ||
+    s.confirmStage === "signing" ||
+    s.confirmStage === "broadcast";
 
-  const onCta = createGate ? s.createSelectedStrike : s.submit;
+  const onCta = s.submit;
 
   return (
     <div data-theme="aqua" style={{ position: "relative", minHeight: "100%" }}>
@@ -158,7 +149,7 @@ export function Composer({ initialView }: Props) {
     ) : s.bucketsEmpty ? (
       <div className="composer-status">
         {s.canCreateStrikes
-          ? "no strikes yet for this series — writers can create one from the Earn tab"
+          ? "no strikes listed for this series — name one from the Earn tab"
           : "no strikes listed for this series yet"}
       </div>
     ) : (
@@ -287,7 +278,7 @@ export function Composer({ initialView }: Props) {
         ) : s.bucketsEmpty ? (
           <div className="composer-status">
             {s.canCreateStrikes
-              ? "no strikes yet for this series — create the first one below"
+              ? "no strikes listed for this series — name one below"
               : "no strikes listed for this series yet"}
           </div>
         ) : (
@@ -312,14 +303,13 @@ export function Composer({ initialView }: Props) {
               inputMode="decimal"
               value={s.customStrike}
               onChange={(e) => s.setCustomStrike(e.target.value)}
-              disabled={s.creatingBucket}
             />
             <button
               className="custom-strike__btn"
               type="submit"
-              disabled={s.creatingBucket || !s.customStrike.trim()}
+              disabled={!s.customStrike.trim()}
             >
-              {s.creatingBucket ? "creating…" : "create strike"}
+              select strike
             </button>
           </form>
         )}

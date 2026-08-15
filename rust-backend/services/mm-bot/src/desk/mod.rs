@@ -11,6 +11,7 @@
 pub mod auctions;
 pub mod book;
 pub mod exits;
+pub mod guards;
 pub mod hedge;
 pub mod history;
 pub mod limits;
@@ -382,6 +383,13 @@ impl Desk {
     /// V2 trader flow). With `reserve`, a writer-flow quote reserves its
     /// premium for the quote TTL (pass false for indicative bulk views —
     /// nothing is signed there).
+    /// The model's vol for one market at a point on the surface — the input
+    /// the moneyness guard sizes its band from, so the band widens and
+    /// narrows with the same surface the pricing uses.
+    pub fn model_sigma(&self, model_index: usize, spot: f64, strike: f64, t_years: f64) -> f64 {
+        self.models[model_index].sigma(spot, strike, t_years).0
+    }
+
     pub async fn price_ws_rfq(
         &self,
         side: Side,
@@ -571,6 +579,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         vault_id,
         settlement_coin_type: p.settlement_coin_type.clone(),
         pnl_path: Some(std::path::PathBuf::from(&p.cfg.pnl_jsonl_path)),
+        options_package: Some(p.core_package.to_hex_literal()),
     })
     .await
     .context("reconstructing the desk book from vault custody")?;
@@ -666,6 +675,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         settlement_feed: p.settlement_feed,
         settlement_decimals: p.settlement_decimals,
         staleness: p.staleness,
+        options_package: Some(p.core_package.to_hex_literal()),
     });
 
     // Fill detection → spread-line P&L attribution, resumed from the
@@ -845,6 +855,7 @@ struct RefresherParams {
     settlement_feed: PriceFeedId,
     settlement_decimals: u8,
     staleness: Staleness,
+    options_package: Option<String>,
 }
 
 fn spawn_book_refresher(p: RefresherParams) {
@@ -871,6 +882,7 @@ fn spawn_book_refresher(p: RefresherParams) {
                     &p.api,
                     p.trading_vault_package,
                     p.vault_id,
+                    p.options_package.as_deref(),
                 )
                 .await;
                 let written =

@@ -25,13 +25,11 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{debug, trace};
 
-use protocol_types::ids::ObjectId;
+use protocol_types::bucket_spec::BucketSpec;
 use protocol_types::messages::{
     BulkViewPremium, BulkViewRfqBroadcastPayload, ServiceToMm,
 };
 use protocol_types::sides::Side;
-
-use indexer_graphql::Bucket;
 
 use crate::state::{AppState, BulkViewCacheEntry, MmResponse};
 
@@ -53,23 +51,23 @@ pub fn mean_premium(premiums: &[u64]) -> u64 {
 pub async fn orchestrate_bulk_view(
     state: Arc<AppState>,
     side: Side,
-    buckets: Vec<Bucket>,
+    specs: Vec<BucketSpec>,
     write_amount: u64,
     rfq_window: Duration,
     cache_ttl: Duration,
     now_ms: u64,
 ) -> Vec<BulkViewPremium> {
     let ttl_ms = cache_ttl.as_millis() as u64;
-    let requested: Vec<ObjectId> = buckets.iter().map(|b| b.bucket_id).collect();
+    let requested: Vec<BucketSpec> = specs.clone();
 
     // Partition against the cache.
-    let mut cold: Vec<Bucket> = Vec::new();
-    let mut stale: Vec<Bucket> = Vec::new();
-    for b in &buckets {
-        match state.bulk_view_cache.get(&(b.bucket_id, write_amount)) {
+    let mut cold: Vec<BucketSpec> = Vec::new();
+    let mut stale: Vec<BucketSpec> = Vec::new();
+    for sp in &specs {
+        match state.bulk_view_cache.get(&(sp.clone(), write_amount)) {
             Some(e) if now_ms.saturating_sub(e.cached_at_ms) < ttl_ms => { /* fresh */ }
-            Some(_) => stale.push(b.clone()),
-            None => cold.push(b.clone()),
+            Some(_) => stale.push(sp.clone()),
+            None => cold.push(sp.clone()),
         }
     }
 
@@ -105,17 +103,17 @@ pub async fn orchestrate_bulk_view(
 /// entry are omitted (their tile shows the placeholder).
 fn build_response(
     state: &AppState,
-    requested: &[ObjectId],
+    requested: &[BucketSpec],
     write_amount: u64,
     now_ms: u64,
     ttl_ms: u64,
 ) -> Vec<BulkViewPremium> {
     let mut out = Vec::with_capacity(requested.len());
-    for bucket_id in requested {
-        if let Some(e) = state.bulk_view_cache.get(&(*bucket_id, write_amount)) {
+    for spec in requested {
+        if let Some(e) = state.bulk_view_cache.get(&(spec.clone(), write_amount)) {
             let age = now_ms.saturating_sub(e.cached_at_ms);
             out.push(BulkViewPremium {
-                bucket_id: *bucket_id,
+                spec: spec.clone(),
                 premium: e.premium,
                 mm_count: e.mm_count,
                 stale: age >= ttl_ms,
@@ -133,16 +131,16 @@ fn build_response(
 async fn refresh_buckets(
     state: Arc<AppState>,
     side: Side,
-    buckets: Vec<Bucket>,
+    specs: Vec<BucketSpec>,
     write_amount: u64,
     window: Duration,
     now_ms: u64,
 ) {
     // Claim single-flight slots; only refresh the ones we win.
-    let mut claimed: Vec<Bucket> = Vec::with_capacity(buckets.len());
-    for b in buckets {
-        if state.try_claim_bulk_view_refresh((b.bucket_id, write_amount)) {
-            claimed.push(b);
+    let mut claimed: Vec<BucketSpec> = Vec::with_capacity(specs.len());
+    for sp in specs {
+        if state.try_claim_bulk_view_refresh((sp.clone(), write_amount)) {
+            claimed.push(sp);
         }
     }
     if claimed.is_empty() {
@@ -152,7 +150,7 @@ async fn refresh_buckets(
     // Release every claim on the way out, whatever happens.
     let _guard = ClaimGuard {
         state: Arc::clone(&state),
-        keys: claimed.iter().map(|b| (b.bucket_id, write_amount)).collect(),
+        keys: claimed.iter().map(|s| (s.clone(), write_amount)).collect(),
     };
 
     let mms = state.mms.all_for_bulk_view(side.counterparty_mm());
@@ -162,9 +160,9 @@ async fn refresh_buckets(
     }
 
     let deadline_ms = now_ms.saturating_add(window.as_millis() as u64);
-    // Only the addresses travel; the MM resolves each bucket's pricing inputs
-    // from api-service itself.
-    let bucket_ids: Vec<ObjectId> = claimed.iter().map(|b| b.bucket_id).collect();
+    // Specs travel, not addresses — a listed strike with no bucket yet is
+    // exactly what the tile display needs a premium for.
+    let specs_out: Vec<BucketSpec> = claimed.clone();
 
     // Route MM responses through the shared pending_rfqs table under a fresh
     // routing id (independent of any retail request_id).
@@ -180,7 +178,7 @@ async fn refresh_buckets(
                 write_amount,
                 side,
                 deadline_ms,
-                bucket_ids: bucket_ids.clone(),
+                specs: specs_out.clone(),
             },
         };
         match mm.tx.try_send(frame) {
@@ -192,7 +190,7 @@ async fn refresh_buckets(
     }
 
     // Collect until every expected MM answered or the window elapses.
-    let mut by_bucket: HashMap<ObjectId, Vec<u64>> = HashMap::new();
+    let mut by_spec: HashMap<BucketSpec, Vec<u64>> = HashMap::new();
     if expected > 0 {
         let mut remaining = expected;
         let _ = timeout(window, async {
@@ -200,7 +198,7 @@ async fn refresh_buckets(
                 if let MmResponse::BulkView(mm, payload) = r {
                     trace!(mm = %mm, premiums = payload.premiums.len(), "bulk-view response");
                     for p in payload.premiums {
-                        by_bucket.entry(p.bucket_id).or_default().push(p.premium);
+                        by_spec.entry(p.spec).or_default().push(p.premium);
                     }
                     remaining -= 1;
                     if remaining == 0 {
@@ -216,11 +214,11 @@ async fn refresh_buckets(
     // Average and cache. A bucket no MM priced is left untouched so the next
     // request retries it rather than caching a misleading zero.
     let mut cached = 0usize;
-    for b in &claimed {
-        if let Some(premiums) = by_bucket.get(&b.bucket_id) {
+    for sp in &claimed {
+        if let Some(premiums) = by_spec.get(sp) {
             if !premiums.is_empty() {
                 state.bulk_view_cache.insert(
-                    (b.bucket_id, write_amount),
+                    (sp.clone(), write_amount),
                     BulkViewCacheEntry {
                         premium: mean_premium(premiums),
                         mm_count: premiums.len() as u32,
@@ -237,13 +235,13 @@ async fn refresh_buckets(
 /// Releases the single-flight claims for a refresh batch on drop.
 struct ClaimGuard {
     state: Arc<AppState>,
-    keys: Vec<(ObjectId, u64)>,
+    keys: Vec<(BucketSpec, u64)>,
 }
 
 impl Drop for ClaimGuard {
     fn drop(&mut self) {
         for k in &self.keys {
-            self.state.release_bulk_view_refresh(*k);
+            self.state.release_bulk_view_refresh(k);
         }
     }
 }
@@ -252,31 +250,23 @@ impl Drop for ClaimGuard {
 mod tests {
     use super::*;
 
-    use protocol_types::asset::AssetType;
-
-    fn test_state() -> Arc<AppState> {
+        fn test_state() -> Arc<AppState> {
         Arc::new(AppState::with_global_rfq_cap(
             256,
             "http://127.0.0.1:1/graphql".into(),
         ))
     }
 
-    fn mk_bucket(tag: u8) -> Bucket {
-        Bucket {
-            bucket_id: ObjectId::new([tag; 32]),
-            asset_type: AssetType::new("BTC"),
-            settlement_type: AssetType::new("USDC"),
-            call_type: AssetType::new("0x9::call_0::CALL_0"),
-            strike: 50,
-            strike_scale: 0,
-            expiry_ms: 1_000_000,
-            total_written: 0,
-            exercise_cursor: 0,
-            cleaned: false,
-            invalidated: false,
-            deepbook_pool_id: None,
-            option_kind: "call".into(),
-        }
+    fn mk_spec(tag: u8) -> BucketSpec {
+        BucketSpec::new(
+            "0x9::btc::BTC",
+            "0x9::usdc::USDC",
+            1_020_000,
+            50 + tag as u128,
+            0,
+            false,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -294,10 +284,10 @@ mod tests {
     #[tokio::test]
     async fn fresh_cache_hit_returns_without_mms() {
         let state = test_state();
-        let b = mk_bucket(0x01);
+        let sp = mk_spec(0x01);
         let now = 1_000_000;
         state.bulk_view_cache.insert(
-            (b.bucket_id, 100),
+            (sp.clone(), 100),
             BulkViewCacheEntry {
                 premium: 4242,
                 mm_count: 2,
@@ -308,7 +298,7 @@ mod tests {
         let out = orchestrate_bulk_view(
             Arc::clone(&state),
             Side::Writer,
-            vec![b.clone()],
+            vec![sp.clone()],
             100,
             Duration::from_millis(50),
             Duration::from_secs(30),
@@ -324,12 +314,12 @@ mod tests {
     #[tokio::test]
     async fn cold_bucket_with_no_mms_is_omitted_and_does_not_block() {
         let state = test_state();
-        let b = mk_bucket(0x02);
+        let sp = mk_spec(0x02);
         let start = std::time::Instant::now();
         let out = orchestrate_bulk_view(
             Arc::clone(&state),
             Side::Writer,
-            vec![b],
+            vec![sp],
             100,
             Duration::from_millis(50),
             Duration::from_secs(30),
@@ -344,10 +334,10 @@ mod tests {
     #[tokio::test]
     async fn stale_entry_served_immediately_and_flagged() {
         let state = test_state();
-        let b = mk_bucket(0x03);
+        let sp = mk_spec(0x03);
         let cached_at = 1_000_000;
         state.bulk_view_cache.insert(
-            (b.bucket_id, 100),
+            (sp.clone(), 100),
             BulkViewCacheEntry {
                 premium: 999,
                 mm_count: 1,
@@ -359,7 +349,7 @@ mod tests {
         let out = orchestrate_bulk_view(
             Arc::clone(&state),
             Side::Writer,
-            vec![b],
+            vec![sp],
             100,
             Duration::from_millis(50),
             Duration::from_secs(30),

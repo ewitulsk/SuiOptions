@@ -8,6 +8,7 @@
 // — keep this file's frame shapes (in `./quoting.ts`) in sync.
 
 import type {
+  BucketSpec,
   BulkViewPremium,
   RetailRole,
   RetailToService,
@@ -76,7 +77,7 @@ class QuotingClient {
   }
 
   async sendRfq(args: {
-    bucketId: string;
+    spec: BucketSpec;
     writeAmount: string;
     side: Side;
     requestId?: string;
@@ -91,7 +92,7 @@ class QuotingClient {
       type: "RFQRequest",
       request_id: requestId,
       payload: {
-        bucket_id: args.bucketId,
+        spec: args.spec,
         write_amount: args.writeAmount,
         side: args.side,
       },
@@ -119,7 +120,7 @@ class QuotingClient {
    * MM balance or produces a signable quote.
    */
   async sendBulkView(args: {
-    bucketIds: string[];
+    specs: BucketSpec[];
     writeAmount: string;
     side: Side;
     requestId?: string;
@@ -134,7 +135,7 @@ class QuotingClient {
       type: "BulkViewRFQRequest",
       request_id: requestId,
       payload: {
-        bucket_ids: args.bucketIds,
+        specs: args.specs,
         write_amount: args.writeAmount,
         side: args.side,
       },
