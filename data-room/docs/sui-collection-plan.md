@@ -239,6 +239,29 @@ variants at 10 ms / 200 ms / 500 ms, plus trades, tickers and candles.
 **Take the 200 ms diff depth.** 10 ms is ~20× the bronze volume for no
 analytical gain at our decision horizon.
 
+> **Measured while wiring this up, 2026-08-15 — read before trusting doc
+> 07 §6.2's depth argument.** The Bluefin Pro API reports SUI-PERP at
+> **$99k of 24h quote volume** and **73 SUI (~$50) at top of book**,
+> against a whole-venue total of roughly $0.7–2.0M/day. Doc 07 §6.2
+> picked Bluefin over Aftermath partly on "Depth — $40–70M/day, $40B
+> cumulative"; the cumulative figure checks out ($14.4B on the current
+> product plus $55.5B legacy), but the **daily** figure is off by more
+> than an order of magnitude against what this venue reports today.
+>
+> The book is better than the touch suggests — the REST depth endpoint
+> shows **$530k of total visible bid**, comparable to DeepBook spot — so
+> this is "thin at the touch, adequate in aggregate", not "empty". But a
+> passive ladder resting on 73 SUI of top-of-book is a very different
+> instrument from one resting on $40M/day of flow. No trade printed on
+> the socket in 40 s, nor via REST in the preceding ~18 minutes.
+>
+> This is doc 07 open question #2, and it now has a partial answer that
+> points the wrong way. It does not change what to build — if anything it
+> raises the value of capturing the series — but someone should reconcile
+> it against §6.2 before the hedging design hardens. Possible innocent
+> explanation: §6.2's number may describe Bluefin's older/spot product
+> rather than the Pro perp venue this API serves.
+
 > **Confirm before coding:** I did not verify the websocket URL or exact
 > subscribe frame shape — only that the public streams exist and their
 > message-type names. The repo already pins the Bluefin Pro REST hosts in

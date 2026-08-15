@@ -53,7 +53,7 @@ fn intervals(mut markers: Vec<(i64, String)>, day_end_ns: i64) -> Vec<(i64, i64)
 
 /// Exchanges whose bronze markers are audited. Extend when a venue
 /// gains a live collector connection.
-const EXCHANGES: &[&str] = &["coinbase", "hyperliquid"];
+const EXCHANGES: &[&str] = &["coinbase", "hyperliquid", "bluefin"];
 
 pub async fn compute_day(store: &Store, date: &str) -> anyhow::Result<usize> {
     let day = NaiveDate::parse_from_str(date, "%Y-%m-%d")?;

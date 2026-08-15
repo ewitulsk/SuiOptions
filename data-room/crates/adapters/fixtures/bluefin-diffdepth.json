@@ -1,0 +1,1 @@
+{"event":"OrderbookDiffDepthUpdate","payload":{"updatedAtMillis":1786822333604,"symbol":"SUI-PERP","bidsE9":[["678700000","2000000000"]],"asksE9":[],"firstUpdateId":16837928,"lastUpdateId":16837928}}
