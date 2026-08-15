@@ -12,4 +12,6 @@ After=network-online.target docker.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/data-room
-ExecStart=/usr/bin/docker compose run --rm batch normalizer instruments
+# All five lists default to BTC-only, so every new underlying has to be
+# named here or it never reaches the instrument master (SO-406).
+ExecStart=/usr/bin/docker compose run --rm batch normalizer instruments --coinbase-products BTC-USD,SUI-USD --binance-symbols BTCUSDC,SUIUSDT,SUIUSDC --binance-perp-symbols BTCUSDT,SUIUSDT --hyperliquid-coins BTC,SUI --deribit-currencies BTC

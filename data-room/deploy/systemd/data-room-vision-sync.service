@@ -16,5 +16,9 @@ After=network-online.target docker.service
 Type=oneshot
 WorkingDirectory=/opt/data-room
 # since last synced month).
-ExecStart=/usr/bin/docker compose run --rm batch vision-sync
-ExecStart=/usr/bin/docker compose run --rm batch vision-sync --market um --symbols BTCUSDT --kinds trades,aggTrades,fundingRate
+# Symbols are explicit rather than defaulted: the default is BTCUSDC only,
+# so a new underlying is invisible here until someone adds it (SO-406).
+# bookTicker is deliberately absent — Binance stopped publishing it on
+# 2024-03-30, so it is a one-shot backfill, not an ongoing feed.
+ExecStart=/usr/bin/docker compose run --rm batch vision-sync --symbols BTCUSDC,SUIUSDT,SUIUSDC --kinds trades,aggTrades
+ExecStart=/usr/bin/docker compose run --rm batch vision-sync --market um --symbols BTCUSDT,SUIUSDT --kinds trades,aggTrades,fundingRate
