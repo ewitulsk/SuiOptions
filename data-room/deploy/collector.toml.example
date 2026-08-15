@@ -1,5 +1,11 @@
 # Copy to /opt/data-room/collector.toml. store_url comes from the
 # Terraform output `data_room_bucket`.
+#
+# NOTE: this file is NOT deployed by any workflow — deploy-data-room.yml
+# only moves TAG/ECR. Edit the real file on the host over SSM, then
+# `docker compose restart collector` (NOT `up -d`: the compose spec is
+# unchanged, so it will not reload a bind-mounted file), then mirror the
+# change back here. See data-room/docs/sui-collection-plan.md §0.2.
 store_url = "s3://REPLACE_WITH_DATA_ROOM_BUCKET"
 spool_dir = "/var/spool/data-room"
 metrics_listen = "0.0.0.0:9100"
@@ -7,13 +13,13 @@ metrics_listen = "0.0.0.0:9100"
 [[connections]]
 exchange = "coinbase"
 url = "wss://ws-feed.exchange.coinbase.com"
-products = ["BTC-USD"]
+products = ["BTC-USD", "SUI-USD"]
 channels = ["matches", "ticker", "heartbeat"]
 
 [[connections]]
 exchange = "hyperliquid"
 url = "wss://api.hyperliquid.xyz/ws"
-products = ["BTC"]
+products = ["BTC", "SUI"]
 channels = ["trades", "bbo", "activeAssetCtx"]
 
 [[pollers]]
@@ -21,3 +27,76 @@ exchange = "deribit"
 url = "https://www.deribit.com/api/v2/public/get_book_summary_by_currency?currency=BTC&kind=option"
 stream = "chain.BTC"
 interval_secs = 60
+
+# --- SUI (SO-403) -----------------------------------------------------
+# DeepBook L2 depth. Both `level` and `depth` are required; depth=100 is
+# the practical max (50 levels/side) and depth=200 errors.
+[[pollers]]
+exchange = "deepbook"
+url = "https://deepbook-indexer.mainnet.mystenlabs.com/orderbook/SUI_USDC?level=2&depth=100"
+stream = "book.SUI_USDC"
+interval_secs = 30
+
+# DEEP_SUI: the DEEP-fee source.
+[[pollers]]
+exchange = "deepbook"
+url = "https://deepbook-indexer.mainnet.mystenlabs.com/orderbook/DEEP_SUI?level=2&depth=100"
+stream = "book.DEEP_SUI"
+interval_secs = 30
+
+# /ticker takes no pool argument — one poll returns all 26 pools, so this
+# single line covers venue-wide volume rather than one poller per pool.
+[[pollers]]
+exchange = "deepbook"
+url = "https://deepbook-indexer.mainnet.mystenlabs.com/ticker"
+stream = "ticker.all"
+interval_secs = 60
+
+# --- Aftermath router quote ladder (SO-403) ---------------------------
+# The series that actually binds: above ~$25k the router, not DeepBook,
+# is the realistic execution path (see sui-collection-plan.md §0.1).
+# POST with a JSON body, which is why `Poller` grew method/body.
+#
+# Amounts are FIXED SUI (9 decimals), not fixed USD — so the USD notional
+# of each rung drifts with spot. That is the right primitive for a depth
+# series (rescale at analysis time); do not read the stream names as
+# constant dollar sizes. At ~$0.68 they are ~$10k/$50k/$100k/$500k/$1M.
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinOutType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinInAmount":"14700000000000"}'
+stream = "route.SUI-USDC.14700"
+interval_secs = 300
+
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinOutType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinInAmount":"73500000000000"}'
+stream = "route.SUI-USDC.73500"
+interval_secs = 300
+
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinOutType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinInAmount":"147000000000000"}'
+stream = "route.SUI-USDC.147000"
+interval_secs = 300
+
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinOutType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinInAmount":"735000000000000"}'
+stream = "route.SUI-USDC.735000"
+interval_secs = 300
+
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinOutType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinInAmount":"1470000000000000"}'
+stream = "route.SUI-USDC.1470000"
+interval_secs = 300
