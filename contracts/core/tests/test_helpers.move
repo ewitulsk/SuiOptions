@@ -8,6 +8,7 @@ use sui::test_scenario::{Self as ts, Scenario};
 
 use options_core::admin::{Self, AdminCap, ProtocolConfig};
 use options_core::bucket;
+use options_core::option_coin;
 use whitelist::whitelist::{Self, AdminCap as WlAdminCap, Whitelist};
 use options_core::put_bucket;
 use options_core::quote::{Self, Quote};
@@ -41,10 +42,10 @@ public fun new_bucket<U, S, C>(
     strike_scale: u8,
 ) {
     ts::next_tx(scenario, admin_addr());
-    let cap = take_admin_cap(scenario);
     let tcap = coin::create_treasury_cap_for_testing<C>(scenario.ctx());
-    bucket::create_bucket<U, S, C>(&cap, tcap, expiry_ms, strike, strike_scale, scenario.ctx());
-    return_admin_cap(scenario, cap);
+    bucket::create_bucket_for_testing<U, S, C>(
+        tcap, expiry_ms, strike, strike_scale, scenario.ctx(),
+    );
 }
 
 /// Create and share a cash-secured-put bucket for `(U, S, P)` with a fresh
@@ -56,12 +57,10 @@ public fun new_put_bucket<U, S, P>(
     strike_scale: u8,
 ) {
     ts::next_tx(scenario, admin_addr());
-    let cap = take_admin_cap(scenario);
     let tcap = coin::create_treasury_cap_for_testing<P>(scenario.ctx());
-    put_bucket::create_put_bucket<U, S, P>(
-        &cap, tcap, expiry_ms, strike, strike_scale, scenario.ctx(),
+    put_bucket::create_put_bucket_for_testing<U, S, P>(
+        tcap, expiry_ms, strike, strike_scale, scenario.ctx(),
     );
-    return_admin_cap(scenario, cap);
 }
 
 public fun admin_addr(): address { @0xA1 }
@@ -130,28 +129,124 @@ public fun create_signer_with_scheme(
     quote_signer::create_and_share_signer(scheme, pubkey, scenario.ctx());
 }
 
-/// Build a Quote from the pre-collateral-abstraction 8 params, filling the
-/// three new routing fields with test dummies: `collateral_source` = the
-/// signer's own id (the released funds are minted inline in core tests, so
-/// the source is never dereferenced) and a placeholder release package/module.
-public fun new_test_quote(
+/// Build a Quote against an explicit spec, filling the routing fields with
+/// test dummies: `collateral_source` = the signer's own id (released funds
+/// are minted inline in core tests, so the source is never dereferenced) and
+/// a placeholder release package/module. `max_total_written` is unbounded —
+/// use `new_test_quote_bounded` to exercise the queue gate.
+public fun new_test_quote_spec<U, S>(
     protocol_id: vector<u8>,
     signer_id: ID,
     signer_token_recipient: address,
-    bucket_id: ID,
+    expiry_ms: u64,
+    strike_sig: u64,
+    strike_exp: u8,
+    is_put: bool,
+    max_total_written: u128,
     write_amount: u64,
     premium: u64,
     valid_until_ms: u64,
     nonce: u64,
 ): Quote {
-    quote::new_quote(
+    quote::new_quote<U, S>(
         protocol_id,
         signer_id,
         signer_id, // collateral_source dummy
         @0x0,
         string::utf8(b"mm_collateral"),
         signer_token_recipient,
-        bucket_id,
+        expiry_ms,
+        strike_sig,
+        strike_exp,
+        is_put,
+        max_total_written,
+        write_amount,
+        premium,
+        valid_until_ms,
+        nonce,
+    )
+}
+
+/// A quote whose spec matches `bucket` exactly, with no queue bound.
+public fun new_test_quote<U, S, C>(
+    protocol_id: vector<u8>,
+    signer_id: ID,
+    signer_token_recipient: address,
+    bucket: &bucket::Bucket<U, S, C>,
+    write_amount: u64,
+    premium: u64,
+    valid_until_ms: u64,
+    nonce: u64,
+): Quote {
+    new_test_quote_bounded<U, S, C>(
+        protocol_id,
+        signer_id,
+        signer_token_recipient,
+        bucket,
+        std::u128::max_value!(),
+        write_amount,
+        premium,
+        valid_until_ms,
+        nonce,
+    )
+}
+
+/// As `new_test_quote`, with an explicit `max_total_written` queue bound.
+public fun new_test_quote_bounded<U, S, C>(
+    protocol_id: vector<u8>,
+    signer_id: ID,
+    signer_token_recipient: address,
+    bucket: &bucket::Bucket<U, S, C>,
+    max_total_written: u128,
+    write_amount: u64,
+    premium: u64,
+    valid_until_ms: u64,
+    nonce: u64,
+): Quote {
+    let (sig, exp) = option_coin::normalize_strike_for_testing(
+        bucket::strike(bucket),
+        bucket::strike_scale(bucket),
+    );
+    new_test_quote_spec<U, S>(
+        protocol_id,
+        signer_id,
+        signer_token_recipient,
+        bucket::expiry_ms(bucket),
+        sig,
+        exp,
+        /* is_put */ false,
+        max_total_written,
+        write_amount,
+        premium,
+        valid_until_ms,
+        nonce,
+    )
+}
+
+/// Put twin of `new_test_quote`.
+public fun new_test_quote_put<U, S, P>(
+    protocol_id: vector<u8>,
+    signer_id: ID,
+    signer_token_recipient: address,
+    bucket: &put_bucket::PutBucket<U, S, P>,
+    write_amount: u64,
+    premium: u64,
+    valid_until_ms: u64,
+    nonce: u64,
+): Quote {
+    let (sig, exp) = option_coin::normalize_strike_for_testing(
+        put_bucket::strike(bucket),
+        put_bucket::strike_scale(bucket),
+    );
+    new_test_quote_spec<U, S>(
+        protocol_id,
+        signer_id,
+        signer_token_recipient,
+        put_bucket::expiry_ms(bucket),
+        sig,
+        exp,
+        /* is_put */ true,
+        std::u128::max_value!(),
         write_amount,
         premium,
         valid_until_ms,

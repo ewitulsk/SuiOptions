@@ -28,20 +28,25 @@ fun request_for(
     recipient: address,
     amount: u64,
 ): CollateralRequest<h::USDC> {
-    let q = quote::new_quote(
+    // `release` only checks `source`; the quote's bucket spec is inert here.
+    let q = quote::new_quote<h::BTC, h::USDC>(
         b"proto",
         object::id(vault), // signer id (unused here)
         source,
         @0x0,
         string::utf8(b"vault_mm"),
         recipient,
-        object::id(vault), // bucket id placeholder
+        1_700_000_000_000, // expiry_ms
+        50_000,            // strike significand
+        0,                 // strike exponent
+        false,             // is_put
+        std::u128::max_value!(), // max_total_written
         amount,
         0,
         0,
         1,
     );
-    collateral::new_request_for_testing<h::USDC>(q, amount, false)
+    collateral::new_request_for_testing<h::USDC>(q, amount, false, object::id(vault))
 }
 
 #[test]
@@ -159,14 +164,12 @@ fun held_put_coin_appraises_at_intrinsic_then_zero_after_expiry() {
     );
     ts::return_shared(ireg);
     let tcap = coin::create_treasury_cap_for_testing<PUTX>(sc.ctx());
-    put_bucket::create_put_bucket<h::BTC, h::USDC, PUTX>(
-        &admin_cap,
+    put_bucket::create_put_bucket_for_testing<h::BTC, h::USDC, PUTX>(
         tcap,
         10_000_000,
         2_000_000_000_000,
         12,
-        sc.ctx(),
-    );
+        sc.ctx());
     h::return_admin_cap(&sc, admin_cap);
 
     // 100_000 put units land at the vault address (writer-flow shape) and
@@ -252,14 +255,12 @@ fun create_call_bucket(sc: &mut ts::Scenario) {
     ts::next_tx(sc, h::admin_addr());
     let admin_cap = h::take_admin_cap(sc);
     let tcap = coin::create_treasury_cap_for_testing<CALLX>(sc.ctx());
-    bucket::create_bucket<h::BTC, h::USDC, CALLX>(
-        &admin_cap,
+    bucket::create_bucket_for_testing<h::BTC, h::USDC, CALLX>(
         tcap,
         10_000_000,
         2_000_000_000_000,
         12,
-        sc.ctx(),
-    );
+        sc.ctx());
     h::return_admin_cap(sc, admin_cap);
 }
 
@@ -268,14 +269,12 @@ fun create_put_bucket(sc: &mut ts::Scenario) {
     ts::next_tx(sc, h::admin_addr());
     let admin_cap = h::take_admin_cap(sc);
     let tcap = coin::create_treasury_cap_for_testing<PUTX>(sc.ctx());
-    put_bucket::create_put_bucket<h::BTC, h::USDC, PUTX>(
-        &admin_cap,
+    put_bucket::create_put_bucket_for_testing<h::BTC, h::USDC, PUTX>(
         tcap,
         10_000_000,
         2_000_000_000_000,
         12,
-        sc.ctx(),
-    );
+        sc.ctx());
     h::return_admin_cap(sc, admin_cap);
 }
 

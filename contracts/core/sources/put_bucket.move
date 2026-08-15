@@ -162,12 +162,13 @@ public fun exercise_payout<U, S, P>(bucket: &PutBucket<U, S, P>, amount: u64): u
     apply_strike_floor(amount as u128, bucket.strike, bucket.strike_scale)
 }
 
-/// Create one put bucket for the (Underlying, Settlement, Put) triple, taking
-/// ownership of the put coin's fresh (zero-supply) `TreasuryCap`. Mirrors
-/// `bucket::create_bucket`; the off-chain scheduler harvests the cap from a
-/// per-roll OTW coin package exactly as it does for calls.
-public fun create_put_bucket<Underlying, Settlement, Put>(
-    _: &AdminCap,
+/// Put buckets are created only through the permissionless any-strike path
+/// below; the AdminCap creator was removed with SO-408. See the note in
+/// `bucket.move` — spec-bound quotes require exactly one bucket per spec.
+
+#[test_only]
+/// Put twin of `bucket::create_bucket_for_testing` — see the note there.
+public fun create_put_bucket_for_testing<Underlying, Settlement, Put>(
     put_treasury: TreasuryCap<Put>,
     expiry_ms: u64,
     strike: u128,
@@ -199,9 +200,8 @@ public fun create_put_bucket<Underlying, Settlement, Put>(
         closed_pending: 0,
         spreads: vector[],
     };
-    let bucket_id = object::id(&bucket);
     events::emit_put_bucket_created(
-        bucket_id,
+        object::id(&bucket),
         asset_type,
         settlement_type,
         put_type,
@@ -295,7 +295,8 @@ public fun request_writer_flow<Underlying, Settlement, Put>(
 ): CollateralRequest<Settlement> {
     let q = quote::verify_and_consume_quote(signer, config, &signed_quote, clock);
     assert_quote_bucket(bucket, &q, clock);
-    collateral::new_writer_request<Settlement>(q, quote::premium(&q))
+    let premium = quote::premium(&q);
+    collateral::new_writer_request<Settlement>(q, premium, object::id(bucket))
 }
 
 /// Trader flow, step 1: the signer is the writer MM (the put SELLER).
@@ -312,21 +313,47 @@ public fun request_trader_flow<Underlying, Settlement, Put>(
 ): CollateralRequest<Settlement> {
     let q = quote::verify_and_consume_quote(signer, config, &signed_quote, clock);
     assert_quote_bucket(bucket, &q, clock);
-    collateral::new_trader_request<Settlement>(
-        q,
-        required_collateral(bucket, quote::write_amount(&q)),
-    )
+    let collateral_amount = required_collateral(bucket, quote::write_amount(&q));
+    collateral::new_trader_request<Settlement>(q, collateral_amount, object::id(bucket))
 }
 
+/// See `bucket::assert_quote_bucket` — the call-side twin, with the same
+/// rebuild-the-registry-key rationale.
 fun assert_quote_bucket<Underlying, Settlement, Put>(
     bucket: &PutBucket<Underlying, Settlement, Put>,
     q: &Quote,
     clock: &Clock,
 ) {
-    assert!(quote::bucket_id(q) == object::id(bucket), errors::quote_bucket_mismatch());
+    assert_quote_spec(bucket, q);
     assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
     assert!(!bucket.invalidated, errors::bucket_invalidated());
     assert!(quote::write_amount(q) > 0, errors::zero_amount());
+}
+
+/// Spec + queue-bound check, shared by the request and execute legs.
+///
+/// `is_put: true` is what stops a quote priced for a call being spent here:
+/// without it a put and a call at the same pair/expiry/strike would present
+/// identical specs, and a deep-ITM call quote could be filled with a nearly
+/// worthless OTM put.
+fun assert_quote_spec<Underlying, Settlement, Put>(
+    bucket: &PutBucket<Underlying, Settlement, Put>,
+    q: &Quote,
+) {
+    let (sig, exp) = option_coin::normalize_strike(bucket.strike, bucket.strike_scale);
+    let expected = bucket_registry::key(
+        bucket.asset_type,
+        bucket.settlement_type,
+        bucket.expiry_ms,
+        sig,
+        exp,
+        /* is_put */ true,
+    );
+    assert!(*quote::spec(q) == expected, errors::quote_spec_mismatch());
+    assert!(
+        bucket.total_written <= quote::max_total_written(q),
+        errors::quote_queue_exceeded(),
+    );
 }
 
 /// Writer flow, step 2: the executor (the retail put writer, tx sender)
@@ -350,7 +377,7 @@ public fun execute_writer_flow<Underlying, Settlement, Put>(
     let (q, amount, is_writer) = collateral::destroy(request);
     assert!(is_writer, errors::request_flow_mismatch());
     let bucket_id = object::id(bucket);
-    assert!(quote::bucket_id(&q) == bucket_id, errors::quote_bucket_mismatch());
+    assert_quote_spec(bucket, &q);
     assert!(premium_funds.value() == amount, errors::amount_mismatch());
 
     let write_amount = quote::write_amount(&q);
@@ -410,7 +437,7 @@ public fun execute_trader_flow<Underlying, Settlement, Put>(
     let (q, amount, is_writer) = collateral::destroy(request);
     assert!(!is_writer, errors::request_flow_mismatch());
     let bucket_id = object::id(bucket);
-    assert!(quote::bucket_id(&q) == bucket_id, errors::quote_bucket_mismatch());
+    assert_quote_spec(bucket, &q);
     assert!(collateral_funds.value() == amount, errors::amount_mismatch());
 
     let write_amount = quote::write_amount(&q);
@@ -474,7 +501,8 @@ public fun request_writer_flow_for_testing<Underlying, Settlement, Put>(
 ): CollateralRequest<Settlement> {
     let q = quote::verify_skip_sig(signer, config, &signed_quote, clock);
     assert_quote_bucket(bucket, &q, clock);
-    collateral::new_writer_request<Settlement>(q, quote::premium(&q))
+    let premium = quote::premium(&q);
+    collateral::new_writer_request<Settlement>(q, premium, object::id(bucket))
 }
 
 #[test_only]
@@ -487,10 +515,8 @@ public fun request_trader_flow_for_testing<Underlying, Settlement, Put>(
 ): CollateralRequest<Settlement> {
     let q = quote::verify_skip_sig(signer, config, &signed_quote, clock);
     assert_quote_bucket(bucket, &q, clock);
-    collateral::new_trader_request<Settlement>(
-        q,
-        required_collateral(bucket, quote::write_amount(&q)),
-    )
+    let collateral_amount = required_collateral(bucket, quote::write_amount(&q));
+    collateral::new_trader_request<Settlement>(q, collateral_amount, object::id(bucket))
 }
 
 /// Core cash-secured write: escrow `collateral_in` cash in the bucket and

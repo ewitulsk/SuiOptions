@@ -8,19 +8,26 @@ use options_core::quote;
 use options_core::quote_signer;
 use options_core::test_helpers as th;
 
+const EXPIRY_MS: u64 = 1_700_000_000_000;
+
+/// These exercise signature / nonce / expiry verification only, which is
+/// bucket-independent, so the spec is an arbitrary well-formed one.
 fun build_signed_quote(
     protocol_id: vector<u8>,
     signer_id: ID,
-    bucket_id: ID,
     valid_until_ms: u64,
     nonce: u64,
     sig: vector<u8>,
 ): quote::SignedQuote {
-    let q = th::new_test_quote(
+    let q = th::new_test_quote_spec<th::BTC, th::USDC>(
         protocol_id,
         signer_id,
         @0xC3,
-        bucket_id,
+        EXPIRY_MS,
+        50_000,
+        0,
+        /* is_put */ false,
+        std::u128::max_value!(),
         100,
         50_000,
         valid_until_ms,
@@ -42,7 +49,6 @@ fun test_verify_skip_sig_consumes_nonce() {
     let sq = build_signed_quote(
         *admin::protocol_id(&config),
         object::id(&signer),
-        object::id_from_address(@0xAA),
         1_000_000,
         42,
         x"",
@@ -72,7 +78,6 @@ fun test_verify_expired_quote_aborts() {
     let sq = build_signed_quote(
         *admin::protocol_id(&config),
         object::id(&signer),
-        object::id_from_address(@0xAA),
         1_000,
         1,
         x"",
@@ -100,7 +105,6 @@ fun test_verify_replay_nonce_aborts() {
     let sq = build_signed_quote(
         *admin::protocol_id(&config),
         object::id(&signer),
-        object::id_from_address(@0xAA),
         1_000_000,
         7,
         x"",
@@ -129,7 +133,6 @@ fun test_verify_protocol_mismatch_aborts() {
     let sq = build_signed_quote(
         x"deadbeef",
         object::id(&signer),
-        object::id_from_address(@0xAA),
         1_000_000,
         1,
         x"",
@@ -157,7 +160,6 @@ fun test_verify_signer_mismatch_aborts() {
     let sq = build_signed_quote(
         *admin::protocol_id(&config),
         bogus_signer_id,
-        object::id_from_address(@0xAA),
         1_000_000,
         1,
         x"",
@@ -184,7 +186,6 @@ fun test_verify_real_invalid_signature_aborts() {
     let sq = build_signed_quote(
         *admin::protocol_id(&config),
         object::id(&signer),
-        object::id_from_address(@0xAA),
         1_000_000,
         1,
         x"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",

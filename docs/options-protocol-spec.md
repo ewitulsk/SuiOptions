@@ -227,11 +227,15 @@ Because it is an ordinary `Coin<Call>`, the option inherits native coin semantic
 ```move
 /// The structured payload signed by the MM's hot signing key.
 /// BCS-encoded for canonical bytes.
-public struct Quote has copy, drop {
+public struct Quote has copy, drop, store {
     protocol_id: vector<u8>,         // matches ProtocolConfig.protocol_id
-    signer_account_id: ID,           // signer's Account
+    signer_id: ID,                   // signer's QuoteSigner
+    collateral_source: ID,           // object release() debits
+    release_package: address,        // package holding release()
+    release_module: String,          // module holding release()
     signer_token_recipient: address, // address receiving signer's minted token
-    bucket_id: ID,
+    spec: BucketKey,                 // the bucket's economics (§3.2.9)
+    max_total_written: u128,         // queue bound; u128::MAX opts out
     write_amount: u64,
     premium: u64,                    // gross, in settlement-asset smallest-units
     valid_until_ms: u64,
@@ -239,13 +243,62 @@ public struct Quote has copy, drop {
 }
 
 /// Submitted to execute_write alongside the signature.
-public struct SignedQuote has copy, drop {
+public struct SignedQuote has copy, drop, store {
     quote: Quote,
-    signature: vector<u8>,           // Ed25519 over BCS(quote)
+    signature: vector<u8>,           // over BCS(quote); scheme per QuoteSigner
 }
 ```
 
-#### 3.2.8 `Treasury` (shared)
+**A quote names economics, not an object.** Buckets are created just-in-time —
+the transaction that fills a quote is often the one that brings its bucket into
+existence — so binding an object id would make a fresh strike unquotable until
+somebody had paid to create it. Binding the spec instead is sound because
+`bucket_registry` admits exactly one bucket per `BucketKey` (§3.2.9), so one
+spec designates one object.
+
+Every field of `BucketKey` must appear in the signed spec, and the check
+rebuilds the key through the same `bucket_registry::key` constructor the
+registry derives addresses from. A field present in the key but missing from
+the quote is a redirect: omitting `is_put`, for instance, would let a quote
+priced for a deep-ITM call be filled with a near-worthless OTM put at the same
+pair, expiry and strike.
+
+`max_total_written` is deliberately **outside** the spec — it constrains the
+fill, not the bucket's identity. The exercise cursor walks `total_written` in
+write order (§2.2), so a signer's assignment probability is a function of how
+much size sits ahead of it; the bound lets the quote say "I will write these
+economics as long as no more than X is queued ahead of me" instead of implying
+it through an object id. The check is `bucket.total_written <= max_total_written`,
+evaluated on both the request and the execute leg.
+
+There is no `Call`/`Put` coin type in the spec and none is needed:
+`create_*_any_strike` pins the coin type to `(U, S, expiry, sig, exp)` through
+`option_coin::register_*`'s encoding assert (§3.4), so a matching spec
+determines the coin type.
+
+#### 3.2.9 `BucketKey`
+
+```move
+/// A bucket's full economic identity. `sig`/`exp` are the NORMALIZED strike
+/// (trailing zeros stripped; real ratio = sig / 10^exp), so equivalent raw
+/// encodings of one strike collapse to a single key.
+public struct BucketKey has copy, drop, store {
+    asset: TypeName,
+    settlement: TypeName,
+    expiry_ms: u64,
+    sig: u64,
+    exp: u8,
+    is_put: bool,
+}
+```
+
+Buckets claim their `UID` from `derived_object::claim` under the shared
+`BucketRegistry`, keyed by this struct. Two consequences: a bucket's address is
+computable off-chain before it exists, and a second claim on the same key
+aborts — **one bucket per spec**. That uniqueness is what spec-bound quoting
+rests on, which is why there is no other on-chain creation path (§3.3.1).
+
+#### 3.2.10 `Treasury` (shared)
 
 ```move
 public struct Treasury has key {
@@ -258,21 +311,42 @@ public struct Treasury has key {
 
 All functions live in their respective modules and emit events on success (see §3.5).
 
-#### 3.3.1 Admin
+#### 3.3.1 Bucket creation (permissionless)
 
 ```move
-public fun create_bucket<Underlying, Settlement, Call>(
-    _: &AdminCap,
-    call_treasury: TreasuryCap<Call>,   // fresh (zero-supply) cap for this bucket's option coin
+public fun create_bucket_any_strike<U, S, D0, D1, D2, D3, D4, D5, D6, D7, D8, D9>(
+    registry: &mut BucketRegistry,
+    coin_registry: &mut CoinRegistry,
+    wl: &Whitelist,
     expiry_ms: u64,
-    strike: u64,
+    strike: u128,
+    strike_scale: u8,
+    coin_decimals: u8,
+    clock: &Clock,
     ctx: &mut TxContext,
-)
+): Bucket<U, S, OptionCall<U, S, D0, …, D9>>
 ```
 
-Creates one bucket for the `(Underlying, Settlement, Call)` triple, taking ownership of the option coin's `TreasuryCap<Call>` (asserted fresh — zero supply — so the supply == outstanding-options invariant holds from genesis). Mints the bucket as a shared object and emits `BucketCreated`.
+Registers this instantiation's option-coin currency at runtime through
+`sui::coin_registry` (no publish step), claims the bucket's `UID` from the
+derived registry keyed by its `BucketKey` (§3.2.9), and returns the bucket **by
+value**. The bucket has `key` only and the module exposes no other consumer, so
+the creating transaction MUST end with `share_bucket` — which lets the same PTB
+thread the fresh bucket through the quote and write calls first. Ingress-gated
+like every write venue. `create_put_bucket_any_strike` is the put twin.
 
-One bucket per call (rather than a `count` loop) because each bucket needs a **distinct** `Call` coin type, and a generic function is monomorphic in its type arguments per invocation. The option-scheduler fans a strike grid out off-chain: it publishes one package containing N One-Time-Witness coin modules, harvests the N `TreasuryCap`s their `init`s mint, then issues N `create_bucket` calls in a single PTB — one per cap. See §3.4 for the per-roll coin-generation pattern.
+The ten `D` type parameters are byte markers spelling the bucket's economics
+(§3.4); `option_coin::register_*` aborts unless they match the value arguments,
+so the encoding cannot lie about the bucket it backs.
+
+**This is the only creation path.** The AdminCap creator that used to live here
+— taking a pre-published `TreasuryCap<Call>` and a raw, un-normalized strike —
+was removed with SO-408. Spec-bound quoting (§3.2.7) is sound only while one
+`BucketKey` designates one object; a second creation path could mint a
+duplicate with the same economics and an independent exercise queue, and a
+signed quote would match both.
+
+#### 3.3.1a Admin
 
 ```move
 public fun set_fee_bps(_: &AdminCap, config: &mut ProtocolConfig, new_bps: u64)
@@ -338,7 +412,7 @@ public fun execute_write<Underlying, Settlement, Call>(
 Logic (in order):
 
 1. **Verify quote**: call `verify_and_consume_quote(signer_account, config, &signed_quote, clock)` → `quote`.
-2. **Validate quote-bucket match**: `quote.bucket_id == object::id(bucket)` and `quote.write_amount == coin::value(&underlying_in) || coin::value(&premium_in)` depending on which side the signer is on (see step 3).
+2. **Validate quote-bucket match**: rebuild the bucket's `BucketKey` from its own fields (re-normalizing the stored strike, so the check does not depend on how the bucket was created) and assert it equals `quote.spec`; assert `bucket.total_written <= quote.max_total_written`; and assert `quote.write_amount == coin::value(&underlying_in) || coin::value(&premium_in)` depending on which side the signer is on (see step 3). The spec and queue checks run on the request leg AND again here — the collateral potato proves a quote was verified, not which bucket it is being spent against.
 3. **Determine flow direction**: Inspect which of `underlying_in` or `premium_in` matches `quote.write_amount` vs `quote.premium`. The signer's side comes from `signer_account`; the executor's side comes from the passed coin.
    - **Writer flow**: signer is Trader MM; `signer_account` provides premium (debit `quote.premium` from account's Settlement balance); executor provides `underlying_in` (must equal `quote.write_amount`); `premium_in` must be empty (or refunded).
    - **Trader flow**: signer is Writer MM; `signer_account` provides underlying (debit `quote.write_amount` from account's Underlying balance); executor provides `premium_in` (must equal `quote.premium`); `underlying_in` must be empty (or refunded).
@@ -578,7 +652,8 @@ A non-exhaustive enumeration:
 | `E_QUOTE_NONCE_USED` | Nonce already consumed for this Account |
 | `E_QUOTE_SIGNATURE_INVALID` | Ed25519 verification failed |
 | `E_QUOTE_PROTOCOL_MISMATCH` | `protocol_id` doesn't match |
-| `E_QUOTE_BUCKET_MISMATCH` | Quote's `bucket_id` ≠ provided bucket |
+| `E_QUOTE_SPEC_MISMATCH` | Quote's signed `spec` ≠ the provided bucket's `BucketKey` (code 5, formerly `E_QUOTE_BUCKET_MISMATCH`) |
+| `E_QUOTE_QUEUE_EXCEEDED` | `bucket.total_written` > quote's `max_total_written` |
 | `E_QUOTE_ACCOUNT_MISMATCH` | Quote's `signer_account_id` ≠ provided account |
 | `E_BUCKET_EXPIRED` | Operation requires `now < expiry` but `now ≥ expiry` |
 | `E_BUCKET_NOT_EXPIRED` | Operation requires `now ≥ expiry` but `now < expiry` |
@@ -598,22 +673,46 @@ This is the canonical structure exchanged between the Quoting Service, MMs, and 
 
 ### 4.1 Canonical bytes
 
-The signed payload is the BCS encoding of the `Quote` struct (§3.2.7). Field order:
+The signed payload is the BCS encoding of the `Quote` struct (§3.2.7). Field
+order is NORMATIVE for off-chain signers:
 
 ```
-protocol_id:            vector<u8>
-signer_account_id:      ID (32 bytes)
+protocol_id:            vector<u8>          // ULEB128 len + bytes
+signer_id:              ID (32 bytes)       // the QuoteSigner object
+collateral_source:      ID (32 bytes)       // object release() debits
+release_package:        address (32 bytes)  // package holding release()
+release_module:         String              // ULEB128 len + utf8 bytes
 signer_token_recipient: address (32 bytes)
-bucket_id:              ID (32 bytes)
+spec.asset:             TypeName            // ULEB128 len + ascii bytes
+spec.settlement:        TypeName            // ULEB128 len + ascii bytes
+spec.expiry_ms:         u64 (little-endian)
+spec.sig:               u64 (little-endian) // normalized strike significand
+spec.exp:               u8                  // normalized strike exponent
+spec.is_put:            bool (1 byte)
+max_total_written:      u128 (little-endian)
 write_amount:           u64 (little-endian)
 premium:                u64 (little-endian)
 valid_until_ms:         u64 (little-endian)
 nonce:                  u64 (little-endian)
 ```
 
+`BucketKey` is a nested struct, so BCS simply concatenates its fields inline —
+there is no length prefix or tag for the struct itself.
+
+**`TypeName` encodes in chain form**, i.e. the canonical type string *without*
+a `0x` prefix and with the address zero-padded to 64 hex characters
+(`0000…0002::sui::SUI`). This is the form `type_name::with_defining_ids`
+produces, and it is NOT the `0x`-prefixed canonical form services emit to
+clients. An off-chain signer that uses the client-facing form produces
+different bytes and every signature fails verification.
+
+The strike must be pre-normalized (trailing zeros stripped) to the same
+`(sig, exp)` the bucket stores; on-chain the bucket's strike is re-normalized
+before comparison, so equivalent raw encodings agree.
+
 ### 4.2 Signature
 
-Ed25519 over the BCS bytes. Signed by the Account's registered `signing_pubkey`. Verified on-chain via `sui::ed25519::ed25519_verify`.
+Signed by the `QuoteSigner`'s registered `signing_pubkey` under its registered scheme: Ed25519 over the raw BCS bytes, or secp256k1 / secp256r1 over their SHA-256 hash. Verified on-chain via `sui::ed25519::ed25519_verify`, `sui::ecdsa_k1::secp256k1_verify`, or `sui::ecdsa_r1::secp256r1_verify`.
 
 ### 4.3 Wire format
 
@@ -623,9 +722,20 @@ When transmitted over WebSocket (between Quoting Service and clients) the quote 
 {
   "quote": {
     "protocol_id": "0x...",
-    "signer_account_id": "0x...",
+    "signer_id": "0x...",
+    "collateral_source": "0x...",
+    "release_package": "0x...",
+    "release_module": "mm_collateral",
     "signer_token_recipient": "0x...",
-    "bucket_id": "0x...",
+    "spec": {
+      "asset": "0000...0002::tbtc::TBTC",
+      "settlement": "0000...0002::tusdc::TUSDC",
+      "expiry_ms": "1782345600000",
+      "sig": "85000",
+      "exp": 0,
+      "is_put": false
+    },
+    "max_total_written": "340282366920938463463374607431768211455",
     "write_amount": "10000000",
     "premium": "50000000",
     "valid_until_ms": "1748534400000",
@@ -635,7 +745,15 @@ When transmitted over WebSocket (between Quoting Service and clients) the quote 
 }
 ```
 
-Numeric fields (write_amount, premium, valid_until_ms, nonce) are serialized as decimal strings to avoid JS precision loss. The Quoting Service re-encodes via BCS for on-chain submission and signature verification.
+Numeric fields are serialized as decimal strings to avoid JS precision loss.
+`spec.exp` and `spec.is_put` are small enough to ride as native JSON. The
+Quoting Service re-encodes via BCS for on-chain submission and signature
+verification.
+
+Note there is no `bucket_id` anywhere in the quoting protocol — not in the
+request, the broadcast, or the quote. A bucket's object id is resolved by the
+taker when building the PTB (from the indexer when it exists, as a command
+result when the same transaction creates it) and reported in events.
 
 ### 4.4 TTL
 

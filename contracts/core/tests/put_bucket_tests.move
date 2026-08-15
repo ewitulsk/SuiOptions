@@ -36,11 +36,11 @@ fun write_put_writer(
     let mut signer = th::take_signer(scenario);
 
     let collateral_amount = put_bucket::required_collateral(&b, write_amount);
-    let q = th::new_test_quote(
+    let q = th::new_test_quote_put(
         *admin::protocol_id(&config),
         object::id(&signer),
         th::trader_mm_addr(), // signer (buyer) recipient == put token recipient
-        object::id(&b),
+        &b,
         write_amount,
         premium,
         EXPIRY_MS,
@@ -103,15 +103,13 @@ fun test_create_put_bucket_rejects_nonfresh_cap() {
     let clock = th::init_protocol(&mut scenario);
 
     ts::next_tx(&mut scenario, th::admin_addr());
-    let cap = th::take_admin_cap(&scenario);
     let mut tcap = coin::create_treasury_cap_for_testing<PUT>(scenario.ctx());
     // Pre-mint so the cap is no longer zero-supply.
     let minted = coin::mint(&mut tcap, 1, scenario.ctx());
-    put_bucket::create_put_bucket<BTC, USDC, PUT>(
-        &cap, tcap, EXPIRY_MS, STRIKE, STRIKE_SCALE, scenario.ctx(),
+    put_bucket::create_put_bucket_for_testing<BTC, USDC, PUT>(
+        tcap, EXPIRY_MS, STRIKE, STRIKE_SCALE, scenario.ctx(),
     );
     coin::burn_for_testing(minted);
-    th::return_admin_cap(&scenario, cap);
 
     clock.destroy_for_testing();
     ts::end(scenario);
@@ -197,11 +195,11 @@ fun test_writer_flow_wrong_collateral_aborts() {
     let mut signer = th::take_signer(&scenario);
 
     let premium: u64 = 1_000_000;
-    let q = th::new_test_quote(
+    let q = th::new_test_quote_put(
         *admin::protocol_id(&config),
         object::id(&signer),
         th::trader_mm_addr(),
-        object::id(&b),
+        &b,
         100,
         premium,
         EXPIRY_MS,
@@ -256,11 +254,11 @@ fun test_trader_flow_happy_path() {
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
-    let q = th::new_test_quote(
+    let q = th::new_test_quote_put(
         *admin::protocol_id(&config),
         object::id(&signer),
         th::writer_mm_addr(), // signer (writer MM) recipient == position recipient
-        object::id(&b),
+        &b,
         write_amount,
         premium,
         EXPIRY_MS,
@@ -333,11 +331,11 @@ fun test_writer_request_into_trader_execute_aborts() {
     let mut signer = th::take_signer(&scenario);
 
     let premium: u64 = 1_000_000;
-    let q = th::new_test_quote(
+    let q = th::new_test_quote_put(
         *admin::protocol_id(&config),
         object::id(&signer),
         th::trader_mm_addr(),
-        object::id(&b),
+        &b,
         100,
         premium,
         EXPIRY_MS,
@@ -387,11 +385,11 @@ fun test_trader_request_into_writer_execute_aborts() {
     let write_amount: u64 = 80;
     let premium: u64 = 2_000_000;
     let collateral = put_bucket::required_collateral(&b, write_amount);
-    let q = th::new_test_quote(
+    let q = th::new_test_quote_put(
         *admin::protocol_id(&config),
         object::id(&signer),
         th::writer_mm_addr(),
-        object::id(&b),
+        &b,
         write_amount,
         premium,
         EXPIRY_MS,
@@ -668,11 +666,11 @@ fun test_solvency_fractional_strike_with_dust_sweep() {
     let mut signer = th::take_signer(&scenario);
     let collateral_amount = put_bucket::required_collateral(&b, 21);
     assert!(collateral_amount == 4, 0);
-    let q = th::new_test_quote(
+    let q = th::new_test_quote_put(
         *admin::protocol_id(&config),
         object::id(&signer),
         th::trader_mm_addr(),
-        object::id(&b),
+        &b,
         21,
         1_000,
         EXPIRY_MS,

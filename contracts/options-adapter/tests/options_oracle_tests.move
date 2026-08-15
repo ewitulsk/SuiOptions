@@ -55,9 +55,11 @@ fun setup(sc: &mut Scenario): Clock {
     ts::return_shared(oreg);
 
     let call_tcap = coin::create_treasury_cap_for_testing<CALL>(sc.ctx());
-    bucket::create_bucket<UND, QUOTE, CALL>(&admin_cap, call_tcap, EXPIRY_MS, STRIKE, 12, sc.ctx());
+    bucket::create_bucket_for_testing<UND, QUOTE, CALL>(call_tcap, EXPIRY_MS, STRIKE, 12, sc.ctx());
     let put_tcap = coin::create_treasury_cap_for_testing<PUT>(sc.ctx());
-    put_bucket::create_put_bucket<UND, QUOTE, PUT>(&admin_cap, put_tcap, EXPIRY_MS, STRIKE, 12, sc.ctx());
+    put_bucket::create_put_bucket_for_testing<UND, QUOTE, PUT>(
+        put_tcap, EXPIRY_MS, STRIKE, 12, sc.ctx(),
+    );
     ts::return_to_sender(sc, admin_cap);
 
     ts::next_tx(sc, ADMIN);
@@ -335,14 +337,12 @@ fun call_mark_capped_at_spot() {
     ts::next_tx(&mut sc, ADMIN);
     let admin_cap = ts::take_from_sender<AdminCap>(&sc);
     let tcap = coin::create_treasury_cap_for_testing<FARCALL>(sc.ctx());
-    bucket::create_bucket<UND, QUOTE, FARCALL>(
-        &admin_cap,
+    bucket::create_bucket_for_testing<UND, QUOTE, FARCALL>(
         tcap,
         YEAR_MS + 5_000,
         STRIKE,
         12,
-        sc.ctx(),
-    );
+        sc.ctx());
     ts::return_to_sender(&sc, admin_cap);
 
     ts::next_tx(&mut sc, ADMIN);

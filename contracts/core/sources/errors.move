@@ -4,7 +4,10 @@ public fun quote_expired(): u64 { 1 }
 public fun quote_nonce_used(): u64 { 2 }
 public fun quote_signature_invalid(): u64 { 3 }
 public fun quote_protocol_mismatch(): u64 { 4 }
-public fun quote_bucket_mismatch(): u64 { 5 }
+/// The quote's signed `BucketKey` spec does not describe the bucket it was
+/// presented against. Code kept at 5 (was `quote_bucket_mismatch`, when the
+/// quote bound an object id) so off-chain abort triage keeps working.
+public fun quote_spec_mismatch(): u64 { 5 }
 public fun quote_account_mismatch(): u64 { 6 }
 public fun quote_recipient_mismatch(): u64 { 7 }
 public fun bucket_expired(): u64 { 8 }
@@ -49,3 +52,7 @@ public fun put_spread_not_at_cursor(): u64 { 70 }
 public fun encoding_mismatch(): u64 { 71 }
 public fun strike_not_representable(): u64 { 72 }
 public fun expiry_not_aligned(): u64 { 73 }
+/// The bucket's `total_written` already exceeds the quote's signed
+/// `max_total_written` — more size is queued ahead of this write than the
+/// signer priced assignment risk for.
+public fun quote_queue_exceeded(): u64 { 74 }

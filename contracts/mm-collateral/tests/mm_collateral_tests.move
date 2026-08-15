@@ -16,14 +16,20 @@ const MM: address = @0xA11CE;
 const STRANGER: address = @0xB0B;
 
 fun test_quote(source: ID, premium: u64): quote::Quote {
-    quote::new_quote(
+    // The bucket the quote names is irrelevant to `release`, which only
+    // checks `source`; any well-formed spec does.
+    quote::new_quote<USDC, USDC>(
         b"test-protocol",
         object::id_from_address(@0x51),
         source,
         @0xFACADE,
         string::utf8(b"mm_collateral"),
         MM,
-        object::id_from_address(@0xB0C4),
+        1_700_000_000_000, // expiry_ms
+        50_000,            // strike significand
+        0,                 // strike exponent
+        false,             // is_put
+        std::u128::max_value!(), // max_total_written
         10,
         premium,
         1_000_000,
@@ -51,6 +57,7 @@ fun test_release_exact_amount_against_own_request() {
         test_quote(object::id(&acct), 250_000),
         250_000,
         true,
+        object::id_from_address(@0xB0C4),
     );
     let funds = mmc::release(&mut acct, &request, scenario.ctx());
     assert!(funds.value() == 250_000);
@@ -77,6 +84,7 @@ fun test_release_foreign_request_aborts() {
         test_quote(object::id_from_address(@0xDEAD), 250_000),
         250_000,
         true,
+        object::id_from_address(@0xB0C4),
     );
     let _funds = mmc::release(&mut acct, &request, scenario.ctx());
     abort 0
@@ -94,6 +102,7 @@ fun test_release_beyond_balance_aborts() {
         test_quote(object::id(&acct), 2_000_000),
         2_000_000,
         true,
+        object::id_from_address(@0xB0C4),
     );
     let _funds = mmc::release(&mut acct, &request, scenario.ctx());
     abort 0
