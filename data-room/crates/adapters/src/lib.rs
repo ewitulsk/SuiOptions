@@ -3,6 +3,7 @@
 //! fixtures pin every venue format in unit tests.
 
 pub mod binance_vision;
+pub mod bluefin;
 pub mod coinbase;
 pub mod deribit;
 pub mod hyperliquid;

@@ -265,7 +265,10 @@ async fn main() -> anyhow::Result<()> {
 
     // One capture task per connection.
     for conn in cfg.connections.clone() {
-        if !matches!(conn.exchange.as_str(), "coinbase" | "hyperliquid") {
+        if !matches!(
+            conn.exchange.as_str(),
+            "coinbase" | "hyperliquid" | "bluefin"
+        ) {
             anyhow::bail!("unsupported exchange {}", conn.exchange);
         }
         let spool = spool.clone();
@@ -323,6 +326,11 @@ fn marker_streams(conn: &Connection) -> Vec<String> {
                 ("hyperliquid", "trades") => out.push(format!("trades.{p}")),
                 ("hyperliquid", "bbo") => out.push(format!("bbo.{p}")),
                 ("hyperliquid", "activeAssetCtx") => out.push(format!("ctx.{p}")),
+                // Bluefin channels are the SDK's MarketDataStreamName values
+                // verbatim; keep the mapping in one place with route().
+                ("bluefin", "Diff_Depth_200_ms") => out.push(format!("book.{p}")),
+                ("bluefin", "Recent_Trade") => out.push(format!("trades.{p}")),
+                ("bluefin", "Ticker") => out.push(format!("ticker.{p}")),
                 _ => {}
             }
         }
@@ -349,6 +357,16 @@ fn subscribe_msgs(conn: &Connection) -> Vec<String> {
             }
             out
         }
+        // One frame carrying every (symbol x streams) pair.
+        "bluefin" => vec![serde_json::json!({
+            "method": "Subscribe",
+            "dataStreams": conn
+                .products
+                .iter()
+                .map(|p| serde_json::json!({ "symbol": p, "streams": conn.channels }))
+                .collect::<Vec<_>>(),
+        })
+        .to_string()],
         _ => vec![serde_json::json!({
             "type": "subscribe",
             "product_ids": conn.products,
@@ -361,12 +379,16 @@ fn subscribe_msgs(conn: &Connection) -> Vec<String> {
 fn route_payload(exchange: &str, payload: &str) -> Option<String> {
     match exchange {
         "hyperliquid" => adapters::hyperliquid::route(payload),
+        "bluefin" => adapters::bluefin::route(payload),
         _ => adapters::coinbase::route(payload),
     }
 }
 
 /// App-level keepalive: Hyperliquid drops quiet connections, so a ping
-/// frame goes out every 30 s. Coinbase needs none (heartbeat channel).
+/// frame goes out every 30 s. Coinbase needs none (heartbeat channel), and
+/// neither does Bluefin — the server pings and `capture_once` already
+/// answers with a pong, which is exactly what the vendor SDK does (its own
+/// client-side ping loop ships commented out).
 fn keepalive(exchange: &str) -> Option<(Duration, String)> {
     match exchange {
         "hyperliquid" => Some((
