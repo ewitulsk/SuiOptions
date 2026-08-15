@@ -261,6 +261,59 @@ impl ApiServiceClient {
         Ok(out)
     }
 
+    /// Every bucket the mint path is open on — `GET /buckets?all=true`
+    /// filtered on `rfq_tradeable`.
+    ///
+    /// Distinct from [`tradeable_buckets`](Self::tradeable_buckets), which
+    /// requires a DeepBook pool. Any-strike buckets never have one, and the
+    /// default board is a spot-anchored ladder that drops series off it — so
+    /// a pool-gated, board-gated scan is blind to exactly the buckets the
+    /// desk now writes into.
+    pub async fn writable_buckets(&self) -> Result<Vec<TradeableBucket>> {
+        let url = format!("{}/buckets?all=true", self.base_url);
+        let wire: BucketsWire =
+            observability::client::instrumented("api-service", "GET /buckets?all=true", |h| {
+                self.http.get(&url).headers(h).send()
+            })
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("GET {url} returned an error status"))?
+            .json()
+            .await
+            .with_context(|| format!("decoding buckets from {url}"))?;
+
+        let mut out = Vec::new();
+        for series in wire.series {
+            for b in series.buckets {
+                if !b.rfq_tradeable {
+                    continue;
+                }
+                // A listed-but-uncreated ladder strike has no object and no
+                // balance; there is nothing to hold in it yet.
+                let Some(bucket_id) = b.bucket_id else { continue };
+                out.push(TradeableBucket {
+                    bucket_id: ObjectId::from_hex(&bucket_id)
+                        .map_err(|e| anyhow::anyhow!("bucket_id {bucket_id}: {e}"))?,
+                    pool_id: b.deepbook_pool_id.unwrap_or_default(),
+                    call_coin_type: canonicalize_move_type(&b.call_coin_type),
+                    asset_coin_type: canonicalize_move_type(&series.asset_coin_type),
+                    settlement_coin_type: canonicalize_move_type(&series.settlement_coin_type),
+                    asset_decimals: series.asset_decimals,
+                    settlement_decimals: series.settlement_decimals,
+                    strike_raw: b
+                        .strike_raw
+                        .parse::<u128>()
+                        .with_context(|| format!("parsing strike_raw {:?}", b.strike_raw))?,
+                    strike_scale: b.strike_scale,
+                    expiry_ms: series.expiry_ms.max(0) as u64,
+                    invalidated: b.invalidated,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// Vault ids with deposits paused on-chain, fresh from
     /// `GET /trading-vaults`. The mm-bot treats a paused vault as
     /// decommissioned (hard cutover) and skips its RFQ and swap auctions.
@@ -388,6 +441,9 @@ struct SeriesBucketWire {
     deepbook_pool_id: Option<String>,
     #[serde(default)]
     tradeable: bool,
+    /// Write/RFQ liveness (SO-394): open mint path, no pool required.
+    #[serde(default)]
+    rfq_tradeable: bool,
 }
 
 #[cfg(test)]

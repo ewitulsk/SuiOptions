@@ -373,6 +373,9 @@ pub struct ReconstructParams<'a> {
     pub vault_id: ObjectID,
     pub settlement_coin_type: String,
     pub pnl_path: Option<PathBuf>,
+    /// Options package id — lets a holding be reconstructed from its
+    /// option-coin type when the bucket catalog does not list it.
+    pub options_package: Option<String>,
 }
 
 /// Reconstruct the book from vault custody (module docs describe the
@@ -405,7 +408,15 @@ pub async fn reconstruct(p: ReconstructParams<'_>) -> Result<Book> {
 
     let mut book = Book::new(nav, p.pnl_path);
     book.holdings =
-        fetch_holdings(p.wrap, p.indexer, p.api, p.trading_vault_package, p.vault_id).await?;
+        fetch_holdings(
+            p.wrap,
+            p.indexer,
+            p.api,
+            p.trading_vault_package,
+            p.vault_id,
+            p.options_package.as_deref(),
+        )
+        .await?;
     book.written = fetch_written(p.wrap, p.indexer, p.api, p.vault_id).await?;
     book.recompute_covered();
     tracing::info!(
@@ -428,9 +439,15 @@ pub async fn fetch_holdings(
     api: &api_service_client::ApiServiceClient,
     trading_vault_package: ObjectID,
     vault_id: ObjectID,
+    // Options package id, for decoding option-coin types the catalog omits.
+    options_package: Option<&str>,
 ) -> Result<Vec<Holding>> {
     let mut holdings = Vec::new();
-    let buckets = api.tradeable_buckets().await.context("tradeable buckets")?;
+    // Pool-less buckets count. `tradeable_buckets` requires a DeepBook pool
+    // and the default board drops off-ladder series, so scanning it left the
+    // desk blind to any-strike inventory — understating NAV, net vega and the
+    // cover available to a V2 write, silently.
+    let buckets = api.writable_buckets().await.context("writable buckets")?;
     // VaultMm coin-custody positions (writer-flow sweeps store option
     // coins AS positions), keyed by the canonical option-coin type.
     let mut coin_positions = fetch_coin_positions(wrap, indexer, vault_id).await?;
@@ -479,6 +496,46 @@ pub async fn fetch_holdings(
             coin_positions: positions,
             pool_id: (!b.pool_id.is_empty()).then(|| b.pool_id.clone()),
         });
+    }
+
+    // Anything still in `coin_positions` is custody the catalog does not know
+    // about — a bucket at an expiry the board has since dropped, say. The
+    // option-coin type encodes its own spec, so the line is reconstructable
+    // without any catalog at all; losing it would understate the book.
+    if !coin_positions.is_empty() {
+        for (coin_type, positions) in std::mem::take(&mut coin_positions) {
+            let Some(spec) = options_package
+                .and_then(|pkg| protocol_types::bucket_spec::decode_option_coin_type(pkg, &coin_type))
+            else {
+                tracing::warn!(
+                    %coin_type,
+                    "vault holds a coin that is not a decodable option coin; excluded from the book"
+                );
+                continue;
+            };
+            let amount: u64 = positions.iter().map(|p| p.amount).sum();
+            tracing::info!(
+                %coin_type,
+                amount,
+                "recovered a holding the bucket catalog omitted (decoded from the coin type)"
+            );
+            holdings.push(Holding {
+                bucket_id: ObjectId::ZERO,
+                option_coin_type: coin_type.clone(),
+                asset_coin_type: protocol_types::asset::canonicalize_move_type(&spec.asset),
+                settlement_coin_type: protocol_types::asset::canonicalize_move_type(
+                    &spec.settlement,
+                ),
+                is_put: spec.is_put,
+                strike: spec.sig as u128,
+                strike_scale: spec.exp,
+                expiry_ms: spec.expiry_ms,
+                amount_vault: 0,
+                amount_wallet: 0,
+                coin_positions: positions,
+                pool_id: None,
+            });
+        }
     }
     Ok(holdings)
 }

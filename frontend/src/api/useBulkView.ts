@@ -7,7 +7,13 @@
 
 import { useEffect, useState } from "react";
 import { quotingClient } from "./quotingClient";
-import type { BulkViewPremium, Side } from "./quoting";
+import type { BucketSpec, BulkViewPremium, Side } from "./quoting";
+
+/** Stable map key for a spec. Specs are the identity now — a listed strike
+ *  has no object id until someone writes at it. */
+export function specKeyOf(s: BucketSpec): string {
+  return `${s.asset}|${s.settlement}|${s.expiry_ms}|${s.sig}|${s.exp}|${s.is_put}`;
+}
 
 const DEBOUNCE_MS = 300;
 // Re-request cadence. Slightly under the server's 30s cache TTL so an idle
@@ -17,19 +23,19 @@ const REFRESH_INTERVAL_MS = 20_000;
 export type BulkViewStatus = "idle" | "pending" | "ready" | "error";
 
 export type UseBulkViewResult = {
-  /** bucket_id → averaged indicative premium entry. */
+  /** `specKeyOf(spec)` → averaged indicative premium entry. */
   premiums: Map<string, BulkViewPremium>;
   status: BulkViewStatus;
 };
 
 export function useBulkView(opts: {
-  bucketIds: string[];
+  specs: BucketSpec[];
   /** u64 string of underlying smallest-units, or null to disable. */
   writeAmountRaw: string | null;
   side: Side;
   enabled: boolean;
 }): UseBulkViewResult {
-  const { bucketIds, writeAmountRaw, side, enabled } = opts;
+  const { specs, writeAmountRaw, side, enabled } = opts;
   const [premiums, setPremiums] = useState<Map<string, BulkViewPremium>>(
     () => new Map(),
   );
@@ -37,9 +43,9 @@ export function useBulkView(opts: {
   // Bumped on an interval to re-fire the request with the same inputs.
   const [tick, setTick] = useState(0);
 
-  // Stable key so re-renders that produce an equal id list don't re-fire.
+  // Stable key so re-renders that produce an equal spec list don't re-fire.
   // Sorted so a reordered-but-equal list is treated as unchanged.
-  const idsKey = [...bucketIds].sort().join(",");
+  const specsKey = specs.map(specKeyOf).sort().join(",");
 
   useEffect(() => {
     if (!enabled) return;
@@ -50,7 +56,7 @@ export function useBulkView(opts: {
   useEffect(() => {
     if (
       !enabled ||
-      idsKey === "" ||
+      specsKey === "" ||
       writeAmountRaw === null ||
       writeAmountRaw === "0"
     ) {
@@ -59,14 +65,13 @@ export function useBulkView(opts: {
     }
     let cancelled = false;
     setStatus("pending");
-    const ids = idsKey.split(",");
     const handle = setTimeout(() => {
       quotingClient
-        .sendBulkView({ bucketIds: ids, writeAmount: writeAmountRaw, side })
+        .sendBulkView({ specs, writeAmount: writeAmountRaw, side })
         .then((entries) => {
           if (cancelled) return;
           const m = new Map<string, BulkViewPremium>();
-          for (const e of entries) m.set(e.bucket_id, e);
+          for (const e of entries) m.set(specKeyOf(e.spec), e);
           setPremiums(m);
           setStatus("ready");
         })
@@ -83,7 +88,7 @@ export function useBulkView(opts: {
       cancelled = true;
       clearTimeout(handle);
     };
-  }, [enabled, idsKey, writeAmountRaw, side, tick]);
+  }, [enabled, specsKey, writeAmountRaw, side, tick]);
 
   return { premiums, status };
 }

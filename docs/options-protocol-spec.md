@@ -750,10 +750,13 @@ Numeric fields are serialized as decimal strings to avoid JS precision loss.
 Quoting Service re-encodes via BCS for on-chain submission and signature
 verification.
 
-Note there is no `bucket_id` anywhere in the quoting protocol — not in the
-request, the broadcast, or the quote. A bucket's object id is resolved by the
-taker when building the PTB (from the indexer when it exists, as a command
-result when the same transaction creates it) and reported in events.
+No object id appears in the quote, the RFQ request, or the RFQ broadcast. A
+bucket's id is resolved by the taker when building the PTB — from the indexer
+when the bucket exists, as a command result when the same transaction creates
+it — and reported in events. `RFQResponse` echoes it purely as information
+(`null` when the bucket does not exist yet), and `SubscribeBuckets` /
+`BucketUpdate` keep using it because they report the live state of a bucket
+that definitely exists.
 
 ### 4.4 TTL
 
@@ -863,12 +866,25 @@ Every message is a JSON object with a `type` discriminator and a payload:
   "type": "RFQRequest",
   "request_id": "req-abc",
   "payload": {
-    "bucket_id": "0x...",
+    "spec": {
+      "asset": "0000...0009::tbtc::TBTC",
+      "settlement": "0000...0009::tusdc::TUSDC",
+      "expiry_ms": "1782345600000",
+      "sig": "85000",
+      "exp": 0,
+      "is_put": false
+    },
     "write_amount": "10000000",
     "side": "writer"   // "writer" = retail wants to write; "trader" = retail wants to buy
   }
 }
 ```
+
+**The request names economics, not an object.** The board advertises a strike
+ladder (§3.3.1) and a bucket only becomes an object when someone writes at that
+strike, so requiring a `bucket_id` would make every freshly-listed strike
+unquotable until somebody had paid to create it. A spec with no bucket yet is a
+normal, quotable state — not an error — and the `unknown_bucket` error is gone.
 
 The service broadcasts to MMs of the opposite side, collects responses for a configurable window (default 2 seconds), and returns aggregated quotes to the retail client.
 
@@ -897,7 +913,8 @@ The service broadcasts to MMs of the opposite side, collects responses for a con
   "type": "RFQResponse",
   "request_id": "req-abc",
   "payload": {
-    "bucket_id": "0x...",
+    "spec": { /* the requested spec, echoed */ },
+    "bucket_id": "0x...",   // null while the taker's own tx will create it
     "write_amount": "10000000",
     "quotes": [
       {
@@ -958,13 +975,23 @@ MMs may also send unsolicited `Quote` messages bound to a `subscription_id` if t
   "type": "RFQBroadcast",
   "request_id": "req-abc",
   "payload": {
-    "bucket_id": "0x...",
+    "spec": { /* the bucket's economics — see §3.2.9 */ },
     "write_amount": "10000000",
     "side": "writer",
     "deadline_ms": "1748534400000"   // service-imposed response deadline
   }
 }
 ```
+
+The spec IS the pricing input; no bucket address travels. That reads like a
+weakening of the old boundary — where only an address rode the wire and the MM
+re-resolved it from the read model — but it is stronger. The MM signs the spec
+it priced, and on chain that quote can only be spent against a bucket with
+exactly those economics, so a lying upstream gets a quote priced for the lie
+and executable only against the lie. The MM still checks the pair against its
+own configured markets before pricing, and applies its own admissibility gates
+(expiry horizon, moneyness band, per-spec rate limit) — a permissionless spec
+surface is a risk surface, not just new plumbing.
 
 **`AccountStateUpdate`** — pushed when the MM's on-chain Account balance changes (from indexer).
 
@@ -1040,14 +1067,14 @@ The Quoting Service does NOT read state directly from the chain on the hot path;
 
 When a retail writer sends `RFQRequest`:
 
-1. Service validates `bucket_id` exists and is not expired.
+1. Service resolves the `spec`: it must be creatable (minute-aligned expiry, strike inside the u40 significand field) and, if a bucket already exists for it, not invalidated. A spec with no bucket is quotable — the taker's own transaction will create it.
 2. Service generates `RFQBroadcast` with a `deadline_ms = now + 2000ms`.
 3. Service identifies all currently-connected Trader MMs (writer-flow MMs are trader-side counterparties).
 4. Service broadcasts to those MMs.
 5. Service collects `Quote` responses until `deadline_ms`.
 6. For each received `Quote`:
    - Validate signature against the MM's known pubkey.
-   - Validate `quote.bucket_id`, `quote.write_amount`, `quote.valid_until_ms`.
+   - Validate `quote.spec` equals the requested spec, `quote.max_total_written ≥` the bucket's current `total_written` (zero when it does not exist yet), `quote.write_amount`, and `quote.valid_until_ms`.
    - Check `available_balance[USDC] ≥ quote.premium` for the MM's Account.
    - If valid: record reservation; mark quote as eligible.
    - If invalid: drop, log reason, increment MM's invalid-quote counter.

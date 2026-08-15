@@ -101,7 +101,11 @@ mod tests {
                 release_package: SuiAddress::ZERO,
                 release_module: "mm_collateral".into(),
                 signer_token_recipient: SuiAddress::ZERO,
-                bucket_id: ObjectId::ZERO,
+                spec: protocol_types::bucket_spec::BucketSpec::new(
+                    "0x9::a::A", "0x9::b::B", 60_000, 1, 0, false,
+                )
+                .unwrap(),
+                max_total_written: u128::MAX,
                 write_amount: 1,
                 premium,
                 valid_until_ms: 999,

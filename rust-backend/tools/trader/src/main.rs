@@ -95,13 +95,13 @@ async fn main() -> Result<()> {
 
     // -- RFQ --------------------------------------------------------------
     let request_id = uuid::Uuid::new_v4().to_string();
-    let bucket_pt = pt_object_id_from_sui(cli.bucket);
+    let rfq_spec = bucket_spec_of(&wrap.client, cli.bucket, package).await?;
     ws_client::send_json(
         &mut ws,
         &RetailToService::RFQRequest {
             request_id: request_id.clone(),
             payload: RfqRequestPayload {
-                bucket_id: bucket_pt,
+                spec: rfq_spec.clone(),
                 write_amount: cli.write_amount,
                 side: Side::Trader,
             },
@@ -172,6 +172,8 @@ async fn main() -> Result<()> {
                 },
                 protocol_id: best.quote.protocol_id.clone(),
                 signer_token_recipient,
+                spec: best.quote.spec.clone(),
+                max_total_written: best.quote.max_total_written,
                 write_amount: best.quote.write_amount,
                 premium: best.quote.premium,
                 valid_until_ms: best.quote.valid_until_ms,
@@ -208,6 +210,8 @@ async fn main() -> Result<()> {
                 },
                 protocol_id: best.quote.protocol_id.clone(),
                 signer_token_recipient,
+                spec: best.quote.spec.clone(),
+                max_total_written: best.quote.max_total_written,
                 write_amount: best.quote.write_amount,
                 premium: best.quote.premium,
                 valid_until_ms: best.quote.valid_until_ms,
@@ -227,6 +231,21 @@ async fn main() -> Result<()> {
 
 /// Read the bucket's option-coin type (the `Call` in `Bucket<U, S, Call>`)
 /// straight off the on-chain object's type parameters.
+/// The bucket's economic spec, read straight off its own type.
+///
+/// A bucket's `Call`/`Put` type parameter IS its spec under the byte-marker
+/// encoding, so no extra lookup is needed — and the same decode works for a
+/// bucket no catalog lists.
+async fn bucket_spec_of(
+    client: &sui_tx::chain::ChainClient,
+    bucket: ObjectID,
+    package: ObjectID,
+) -> Result<protocol_types::bucket_spec::BucketSpec> {
+    let option_type = bucket_call_type(client, bucket).await?;
+    protocol_types::bucket_spec::decode_option_coin_type(&package.to_hex_literal(), &option_type)
+        .ok_or_else(|| anyhow!("bucket {bucket} option type is not a decodable spec: {option_type}"))
+}
+
 async fn bucket_call_type(client: &sui_tx::chain::ChainClient, bucket: ObjectID) -> Result<String> {
     let tag = client
         .get_object(bucket)
@@ -242,11 +261,6 @@ async fn bucket_call_type(client: &sui_tx::chain::ChainClient, bucket: ObjectID)
 
 // -- protocol-types ↔ sui-types id bridges -------------------------------
 
-fn pt_object_id_from_sui(id: ObjectID) -> PtObjectId {
-    let mut bytes = [0u8; 32];
-    bytes.copy_from_slice(id.into_bytes().as_ref());
-    PtObjectId::new(bytes)
-}
 
 fn sui_object_id_from_pt(id: PtObjectId) -> Result<ObjectID> {
     ObjectID::from_str(&id.to_hex()).context("converting ObjectId to sui ObjectID")

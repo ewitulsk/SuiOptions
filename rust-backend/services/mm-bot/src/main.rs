@@ -50,6 +50,7 @@ use sui_tx::ws_client;
 use token_info_client::{Snapshot, TokenInfoClient};
 
 use mm_bot::collateral;
+use mm_bot::desk::guards;
 use mm_bot::desk::quote::{Decision, RfqInputs};
 use mm_bot::liquidity::{FaucetLiquiditySource, LiquiditySource};
 use mm_bot::pricing::{compute_spot_from_cache, serves_pair, Staleness};
@@ -126,6 +127,20 @@ struct BotConfig {
     rate: f64,
     #[serde(default = "default_quote_ttl_ms")]
     quote_ttl_ms: u64,
+
+    /// Absolute ceiling on a bucket's `total_written` at fill time, signed
+    /// into every quote. The exercise cursor walks `total_written` in write
+    /// order, so this bounds how much size can sit ahead of the desk's write —
+    /// i.e. its assignment risk. Defaults to unbounded, which reproduces the
+    /// pre-SO-408 behaviour where the quote said nothing about the queue.
+    #[serde(default = "default_max_queue_ahead_units")]
+    max_queue_ahead_units: u128,
+
+    /// Admissibility gates applied to every incoming spec before the model
+    /// is consulted. See `desk::guards` — the spec surface is permissionless
+    /// now, so this is a risk control, not tidying.
+    #[serde(default)]
+    guards: mm_bot::desk::guards::GuardConfig,
 
     /// Roles advertised to the quoting service.
     roles: Vec<MmRole>,
@@ -269,6 +284,10 @@ fn default_underlying_refresh_secs() -> u64 {
 fn default_settlement() -> String {
     "TUSDC".into()
 }
+fn default_max_queue_ahead_units() -> u128 {
+    u128::MAX
+}
+
 fn default_quote_ttl_ms() -> u64 {
     30_000
 }
@@ -847,6 +866,10 @@ async fn main() -> Result<()> {
 
     // nonce is monotonic for the bot's lifetime — keep it across reconnects.
     let mut nonce_counter = now_ms();
+    // Spec admissibility + per-spec rate budget, shared by the signed-RFQ and
+    // bulk-view paths so a caller cannot dodge the limit by alternating.
+    let guard_cfg = cfg.guards.clone();
+    let spec_limiter = guards::SpecRateLimiter::new(&guard_cfg);
 
     // Connect → authenticate → serve, reconnecting with capped exponential
     // backoff (transient auth rejections are expected right after a
@@ -954,7 +977,10 @@ async fn main() -> Result<()> {
                 } => {
                     tracing::debug!(
                         ?request_id,
-                        bucket_id = %payload.bucket_id,
+                        sig = payload.spec.sig,
+                        exp = payload.spec.exp,
+                        is_put = payload.spec.is_put,
+                        expiry_ms = payload.spec.expiry_ms,
                         write_amount = payload.write_amount,
                         "received rfq broadcast"
                     );
@@ -976,40 +1002,31 @@ async fn main() -> Result<()> {
                         continue 'serve;
                     };
 
-                    // Resolve the bucket's true pricing inputs from api-service
-                    // by address — never trust the broadcast.
-                    let bucket = match api.bucket_pricing(payload.bucket_id).await {
-                        Ok(Some(b)) => b,
-                        not_found_or_err => {
-                            let reason = match not_found_or_err {
-                                Ok(None) => "unknown or settled bucket".to_string(),
-                                Err(e) => format!("bucket lookup failed: {e:#}"),
-                                Ok(Some(_)) => unreachable!(),
-                            };
-                            metrics::counter!("mm_bot_quote_failures_total", "reason" => "bucket_lookup")
-                                .increment(1);
-                            tracing::debug!(?request_id, %reason, "declining");
-                            if let Err(e) = ws_client::send_json(&mut ws, &decline(reason)).await {
-                                tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
-                                break 'serve;
-                            }
-                            continue 'serve;
-                        }
-                    };
+                    // The spec IS the pricing input. There is no bucket to
+                    // resolve — it may not exist until the taker's own
+                    // transaction creates it — and no lookup to trust or
+                    // distrust: the bot signs the spec it priced, and on chain
+                    // that quote can only ever be spent against a bucket with
+                    // exactly these economics.
+                    let spec = &payload.spec;
+                    let (asset_ct, settlement_ct) = (
+                        protocol_types::asset::canonicalize_move_type(&spec.asset),
+                        protocol_types::asset::canonicalize_move_type(&spec.settlement),
+                    );
 
-                    // Pick the market whose pair this bucket belongs to.
+                    // Pick the market whose pair this spec belongs to. This is
+                    // the check that keeps a spoofed spec harmless: the bot
+                    // prices only pairs it configured.
                     let Some(mi) = markets.iter().position(|m| {
                         serves_pair(
-                            &bucket.asset_coin_type,
-                            &bucket.settlement_coin_type,
+                            &asset_ct,
+                            &settlement_ct,
                             &m.coin_type,
                             &settlement_coin_type,
                         )
                     }) else {
-                        let reason = format!(
-                            "pair not served: {}/{}",
-                            bucket.asset_coin_type, bucket.settlement_coin_type
-                        );
+                        let reason =
+                            format!("pair not served: {asset_ct}/{settlement_ct}");
                         metrics::counter!("mm_bot_quote_failures_total", "reason" => "pair_not_served")
                             .increment(1);
                         tracing::debug!(?request_id, %reason, "declining");
@@ -1047,12 +1064,44 @@ async fn main() -> Result<()> {
                         }
                     };
 
+                    // Admissibility BEFORE the model. A permissionless spec
+                    // surface is a new risk surface, not just new plumbing —
+                    // see `desk::guards`.
+                    let tau = (spec.expiry_ms.saturating_sub(now)) as f64
+                        / (1000.0 * 86_400.0 * 365.0);
+                    let sigma = desk_ref.model_sigma(mi, spot, spec.strike_scaled(), tau);
+                    if let Err(refusal) = guards::admissible(&guard_cfg, spec, spot, sigma, now) {
+                        metrics::counter!("mm_bot_quote_failures_total", "reason" => refusal.label())
+                            .increment(1);
+                        tracing::debug!(?request_id, refusal = refusal.label(), "declining");
+                        if let Err(e) =
+                            ws_client::send_json(&mut ws, &decline(refusal.reason())).await
+                        {
+                            tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
+                            break 'serve;
+                        }
+                        continue 'serve;
+                    }
+                    if !spec_limiter.allow(spec) {
+                        let refusal = guards::Refusal::RateLimited;
+                        metrics::counter!("mm_bot_quote_failures_total", "reason" => refusal.label())
+                            .increment(1);
+                        tracing::debug!(?request_id, "declining: spec rate limit");
+                        if let Err(e) =
+                            ws_client::send_json(&mut ws, &decline(refusal.reason())).await
+                        {
+                            tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
+                            break 'serve;
+                        }
+                        continue 'serve;
+                    }
+
                     let inputs = RfqInputs {
                         write_amount: payload.write_amount,
-                        is_put: bucket.is_put,
-                        strike: bucket.strike,
-                        strike_scale: bucket.strike_scale,
-                        expiry_ms: bucket.expiry_ms,
+                        is_put: spec.is_put,
+                        strike: spec.sig as u128,
+                        strike_scale: spec.exp,
+                        expiry_ms: spec.expiry_ms,
                     };
                     match desk_ref
                         .price_ws_rfq(payload.side, mi, inputs, spot, true, now)
@@ -1069,7 +1118,14 @@ async fn main() -> Result<()> {
                                 release_package: routing.release_package,
                                 release_module: routing.release_module.clone(),
                                 signer_token_recipient: routing.signer_token_recipient,
-                                bucket_id: payload.bucket_id,
+                                spec: spec.clone(),
+                                // Absolute queue ceiling: refuse the fill if
+                                // this much is already written ahead of us.
+                                // The exercise cursor walks total_written in
+                                // write order, so this is the assignment risk
+                                // the desk actually cares about — the bucket
+                                // id never expressed it.
+                                max_total_written: cfg.max_queue_ahead_units,
                                 write_amount: payload.write_amount,
                                 premium,
                                 valid_until_ms: now.saturating_add(cfg.quote_ttl_ms),
@@ -1127,12 +1183,12 @@ async fn main() -> Result<()> {
                 } => {
                     tracing::debug!(
                         ?request_id,
-                        buckets = payload.bucket_ids.len(),
+                        specs = payload.specs.len(),
                         write_amount = payload.write_amount,
                         "received bulk-view rfq broadcast"
                     );
                     let now = now_ms();
-                    let mut premiums = Vec::with_capacity(payload.bucket_ids.len());
+                    let mut premiums = Vec::with_capacity(payload.specs.len());
                     if let Some(desk_ref) = &desk {
                         // One spot read per market for the whole batch; `None`
                         // where that market's feed is currently stale.
@@ -1150,21 +1206,17 @@ async fn main() -> Result<()> {
                                 .ok()
                             })
                             .collect();
-                        for bucket_id in &payload.bucket_ids {
-                            let bucket = match api.bucket_pricing(*bucket_id).await {
-                                Ok(Some(b)) => b,
-                                Ok(None) => continue,
-                                Err(e) => {
-                                    tracing::debug!(bucket_id = %bucket_id, error = %format!("{e:#}"), "bulk-view: bucket lookup failed; skipping");
-                                    continue;
-                                }
-                            };
+                        for spec in &payload.specs {
+                            let asset_ct =
+                                protocol_types::asset::canonicalize_move_type(&spec.asset);
+                            let settlement_ct =
+                                protocol_types::asset::canonicalize_move_type(&spec.settlement);
                             let Some((mi, spot)) = markets
                                 .iter()
                                 .position(|m| {
                                     serves_pair(
-                                        &bucket.asset_coin_type,
-                                        &bucket.settlement_coin_type,
+                                        &asset_ct,
+                                        &settlement_ct,
                                         &m.coin_type,
                                         &settlement_coin_type,
                                     )
@@ -1173,12 +1225,24 @@ async fn main() -> Result<()> {
                             else {
                                 continue;
                             };
+                            // The same admissibility gate as a signed RFQ.
+                            // A tile the desk would refuse to trade should not
+                            // display a premium as if it would — and the
+                            // display path is the cheaper one to walk, so it
+                            // is the one a spec-scanner would use.
+                            let tau = (spec.expiry_ms.saturating_sub(now)) as f64
+                                / (1000.0 * 86_400.0 * 365.0);
+                            let sigma =
+                                desk_ref.model_sigma(mi, spot, spec.strike_scaled(), tau);
+                            if guards::admissible(&guard_cfg, spec, spot, sigma, now).is_err() {
+                                continue;
+                            }
                             let inputs = RfqInputs {
                                 write_amount: payload.write_amount,
-                                is_put: bucket.is_put,
-                                strike: bucket.strike,
-                                strike_scale: bucket.strike_scale,
-                                expiry_ms: bucket.expiry_ms,
+                                is_put: spec.is_put,
+                                strike: spec.sig as u128,
+                                strike_scale: spec.exp,
+                                expiry_ms: spec.expiry_ms,
                             };
                             // Indicative only: nothing is signed, no nonce is
                             // burned, no premium is reserved.
@@ -1187,7 +1251,7 @@ async fn main() -> Result<()> {
                                 .await
                             {
                                 premiums.push(BulkViewMmPremium {
-                                    bucket_id: *bucket_id,
+                                    spec: spec.clone(),
                                     premium,
                                 });
                             }

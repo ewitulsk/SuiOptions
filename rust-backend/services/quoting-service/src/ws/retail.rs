@@ -119,7 +119,9 @@ pub async fn handle(
                 info!(
                     request_id = %request_id,
                     ?payload.side,
-                    %payload.bucket_id,
+                    sig = payload.spec.sig,
+                    exp = payload.spec.exp,
+                    is_put = payload.spec.is_put,
                     write_amount = payload.write_amount,
                     "retail rfq request"
                 );
@@ -130,7 +132,8 @@ pub async fn handle(
                 let rfq_span = tracing::info_span!(
                     "rfq",
                     request_id = %request_id,
-                    bucket_id = %payload.bucket_id,
+                    strike_sig = payload.spec.sig,
+                    expiry_ms = payload.spec.expiry_ms,
                     trace_id = tracing::field::Empty,
                 );
                 let trace_id = {
@@ -149,31 +152,33 @@ pub async fn handle(
                 let _ = state.rfq_observers.send(RfqObservation {
                     timestamp_ms: now_ms(),
                     request_id: request_id.clone(),
-                    bucket_id: payload.bucket_id,
+                    spec: payload.spec.clone(),
                     write_amount: payload.write_amount,
                     side: payload.side,
                 });
-                // Resolve the bucket JIT. This both feeds the orchestrator
-                // (strike/expiry for the broadcast) and lets us short-circuit
-                // invalidated/unknown buckets with an explicit error instead
-                // of a generic "no quotes" timeout. See SO-69.
-                let bucket = match state.indexer.bucket(payload.bucket_id).await {
-                    Ok(Some(b)) => b,
-                    Ok(None) => {
-                        debug!(request_id = %request_id, %payload.bucket_id, "rfq for unknown bucket");
-                        let _ = out_tx
-                            .send(ServiceToRetail::Error {
-                                request_id: Some(request_id),
-                                payload: ErrorPayload {
-                                    code: "unknown_bucket".into(),
-                                    message: "bucket is not known to the indexer".into(),
-                                },
-                            })
-                            .await;
-                        continue;
-                    }
+                // Resolve the SPEC. A spec with no bucket yet is the normal
+                // case on a freshly-listed strike, not an error — the taker's
+                // own transaction creates it — so only a malformed spec or an
+                // unreachable indexer stops the RFQ here.
+                if !payload.spec.is_creatable() {
+                    debug!(request_id = %request_id, "rfq for an uncreatable spec");
+                    let _ = out_tx
+                        .send(ServiceToRetail::Error {
+                            request_id: Some(request_id),
+                            payload: ErrorPayload {
+                                code: "invalid_spec".into(),
+                                message: "expiry must be minute-aligned and the strike \
+                                          representable in 13 significant digits"
+                                    .into(),
+                            },
+                        })
+                        .await;
+                    continue;
+                }
+                let resolved = match state.specs.resolve(&state.indexer, &payload.spec).await {
+                    Ok(r) => r,
                     Err(e) => {
-                        warn!(request_id = %request_id, %payload.bucket_id, error = %e, "indexer bucket lookup failed");
+                        warn!(request_id = %request_id, error = %e, "indexer spec lookup failed");
                         let _ = out_tx
                             .send(ServiceToRetail::Error {
                                 request_id: Some(request_id),
@@ -187,8 +192,8 @@ pub async fn handle(
                         continue;
                     }
                 };
-                if bucket.invalidated {
-                    debug!(request_id = %request_id, %payload.bucket_id, "rfq for invalidated bucket");
+                if resolved.bucket().is_some_and(|b| b.invalidated) {
+                    debug!(request_id = %request_id, "rfq for invalidated bucket");
                     let _ = out_tx
                         .send(ServiceToRetail::Error {
                             request_id: Some(request_id),
@@ -252,10 +257,12 @@ pub async fn handle(
                     let _session_permit = session_permit;
                     let _global_permit = global_permit;
                     let now = now_ms();
+                    let bucket_id = resolved.bucket().map(|b| b.bucket_id);
                     let quotes = rfq::orchestrate(
                         Arc::clone(&state),
                         payload.side,
-                        bucket,
+                        payload.spec.clone(),
+                        resolved,
                         payload.write_amount,
                         request_id.clone(),
                         cfg.rfq_window,
@@ -281,7 +288,8 @@ pub async fn handle(
                         .send(ServiceToRetail::RFQResponse {
                             request_id,
                             payload: RfqResponsePayload {
-                                bucket_id: payload.bucket_id,
+                                spec: payload.spec,
+                                bucket_id,
                                 write_amount: payload.write_amount,
                                 quotes,
                             },
@@ -295,20 +303,36 @@ pub async fn handle(
                 debug!(
                     request_id = %request_id,
                     ?payload.side,
-                    buckets = payload.bucket_ids.len(),
+                    specs = payload.specs.len(),
                     write_amount = payload.write_amount,
                     "retail bulk-view rfq request"
                 );
-                // Resolve each bucket JIT, dropping unknown/invalidated ones —
-                // a quote against those would never execute, so they shouldn't
-                // show an indicative premium either.
-                let mut buckets = Vec::with_capacity(payload.bucket_ids.len());
-                for id in &payload.bucket_ids {
-                    match state.indexer.bucket(*id).await {
-                        Ok(Some(b)) if !b.invalidated => buckets.push(b),
+                // The board is now a synthetic ladder — up to ~40 strikes per
+                // expiry per side — so a client could ask for an unbounded
+                // fan-out. Cap it, and say so rather than truncating silently.
+                let mut specs: Vec<_> = payload.specs;
+                if specs.len() > cfg.max_bulk_view_specs {
+                    warn!(
+                        request_id = %request_id,
+                        asked = specs.len(),
+                        cap = cfg.max_bulk_view_specs,
+                        "bulk-view request over the per-request cap; dropping the tail"
+                    );
+                    specs.truncate(cfg.max_bulk_view_specs);
+                }
+                // Drop malformed specs and ones whose bucket exists but is
+                // invalidated — neither can ever be written, so neither should
+                // show an indicative premium.
+                let mut wanted = Vec::with_capacity(specs.len());
+                for sp in specs {
+                    if !sp.is_creatable() {
+                        continue;
+                    }
+                    match state.specs.resolve(&state.indexer, &sp).await {
+                        Ok(r) if !r.bucket().is_some_and(|b| b.invalidated) => wanted.push(sp),
                         Ok(_) => {}
                         Err(e) => {
-                            debug!(request_id = %request_id, bucket = %id, error = %e, "bulk-view bucket lookup failed; skipping");
+                            debug!(request_id = %request_id, error = %e, "bulk-view spec lookup failed; skipping");
                         }
                     }
                 }
@@ -338,7 +362,7 @@ pub async fn handle(
                     let premiums = rfq::bulk_view::orchestrate_bulk_view(
                         Arc::clone(&state),
                         payload.side,
-                        buckets,
+                        wanted,
                         payload.write_amount,
                         cfg.rfq_window,
                         cfg.bulk_view_cache_ttl,

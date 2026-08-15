@@ -7,6 +7,27 @@
 export type RetailRole = "writer" | "trader" | "account";
 export type Side = "writer" | "trader";
 
+/** A bucket's full economic identity — the mirror of Move's
+ *  `bucket_registry::BucketKey` and of `protocol_types::bucket_spec`.
+ *
+ *  `asset` and `settlement` are CHAIN-FORM type strings: address zero-padded
+ *  to 64 hex chars with NO `0x` prefix, which is what a Move `TypeName`
+ *  BCS-encodes to. That is not the form the rest of the frontend passes
+ *  around, so build specs with `bucketSpecFor` rather than by hand — a
+ *  `0x`-prefixed type here produces different signed bytes and the MM's
+ *  signature stops verifying. */
+export type BucketSpec = {
+  asset: string;
+  settlement: string;
+  /** u64 decimal string, minute-aligned. */
+  expiry_ms: string;
+  /** u64 decimal string — normalized strike significand. */
+  sig: string;
+  /** Normalized strike exponent; real strike = sig / 10^exp. */
+  exp: number;
+  is_put: boolean;
+};
+
 export type Quote = {
   /** Hex-encoded protocol domain separator. */
   protocol_id: string;
@@ -19,7 +40,14 @@ export type Quote = {
   release_package: string;
   release_module: string;
   signer_token_recipient: string;
-  bucket_id: string;
+  /** The bucket's economic identity — what the MM actually priced and what
+   *  the chain verifies against the bucket's own fields. A quote binds this
+   *  rather than an object id, because the bucket may not exist until the
+   *  transaction that fills the quote creates it. */
+  spec: BucketSpec;
+  /** u128 decimal string. The fill is refused if the bucket already has more
+   *  than this written ahead of it; `2^128-1` opts out. */
+  max_total_written: string;
   /** u64 raw smallest-units of the underlying. */
   write_amount: string;
   /** u64 raw smallest-units of the settlement asset. */
@@ -39,7 +67,11 @@ export type RfqQuoteEntry = {
 };
 
 export type RfqResponsePayload = {
-  bucket_id: string;
+  spec: BucketSpec;
+  /** Present only once the bucket exists on chain; `null` while the taker's
+   *  own transaction is what will create it. Informational — the quotes bind
+   *  the spec. */
+  bucket_id: string | null;
   write_amount: string;
   /** Already sorted best-price-first for the retail side. */
   quotes: RfqQuoteEntry[];
@@ -54,7 +86,7 @@ export type ErrorPayload = {
 
 /** One averaged indicative premium for a bucket. */
 export type BulkViewPremium = {
-  bucket_id: string;
+  spec: BucketSpec;
   /** u64 raw settlement smallest-units — mean of responding MMs. */
   premium: string;
   /** How many MMs contributed to the average. */
@@ -101,11 +133,11 @@ export type RetailToService =
   | {
       type: "RFQRequest";
       request_id: string;
-      payload: { bucket_id: string; write_amount: string; side: Side };
+      payload: { spec: BucketSpec; write_amount: string; side: Side };
     }
   | {
       type: "BulkViewRFQRequest";
       request_id: string;
-      payload: { bucket_ids: string[]; write_amount: string; side: Side };
+      payload: { specs: BucketSpec[]; write_amount: string; side: Side };
     }
   | { type: "Pong" };

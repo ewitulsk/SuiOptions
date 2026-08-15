@@ -34,6 +34,9 @@ use sui_types::transaction::{
 use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION};
 use tracing::{debug, info};
 
+use protocol_types::asset::canonicalize_move_type;
+use protocol_types::bucket_spec::BucketSpec;
+
 use crate::sui_client::Signer;
 use crate::tx::shared_object_arg;
 use crate::chain::{ChainClient, ExecutedTransaction};
@@ -82,6 +85,11 @@ pub struct ExecuteWriteParams<'a> {
     // Quote fields the MM signed over (BCS-canonical).
     pub protocol_id: Vec<u8>,
     pub signer_token_recipient: SuiAddress,
+    /// The bucket's economics — what the MM signed. `bucket_id` above is the
+    /// object the PTB references; this is the agreement it is checked against.
+    pub spec: BucketSpec,
+    /// Signed queue bound; `u128::MAX` opts out.
+    pub max_total_written: u128,
     pub write_amount: u64,
     pub premium: u64,
     pub valid_until_ms: u64,
@@ -126,6 +134,11 @@ pub struct ExecuteTraderParams<'a> {
     // Quote fields the MM signed over (BCS-canonical).
     pub protocol_id: Vec<u8>,
     pub signer_token_recipient: SuiAddress,
+    /// The bucket's economics — what the MM signed. `bucket_id` above is the
+    /// object the PTB references; this is the agreement it is checked against.
+    pub spec: BucketSpec,
+    /// Signed queue bound; `u128::MAX` opts out.
+    pub max_total_written: u128,
     pub write_amount: u64,
     pub premium: u64,
     pub valid_until_ms: u64,
@@ -155,7 +168,11 @@ pub(crate) struct FlowPrelude<'a> {
     pub routing: &'a QuoteRouting<'a>,
     pub protocol_id: &'a [u8],
     pub signer_token_recipient: SuiAddress,
-    pub bucket_id: ObjectID,
+    /// The bucket's economics — what the MM signed. `new_quote` is generic in
+    /// `<U, S>` and derives the spec's `TypeName`s from those type arguments,
+    /// so the pair travels as type args rather than pure bytes.
+    pub spec: &'a BucketSpec,
+    pub max_total_written: u128,
     pub write_amount: u64,
     pub premium: u64,
     pub valid_until_ms: u64,
@@ -190,19 +207,30 @@ pub(crate) async fn build_request_and_release(
     let arg_release_package = pt.pure(&p.routing.release_package)?;
     let arg_release_module = pt.pure(p.routing.release_module)?;
     let arg_signer_token_recipient = pt.pure(&p.signer_token_recipient)?;
-    let arg_bucket_id = pt.pure(&p.bucket_id)?;
+    let arg_expiry_ms = pt.pure(&p.spec.expiry_ms)?;
+    let arg_strike_sig = pt.pure(&p.spec.sig)?;
+    let arg_strike_exp = pt.pure(&p.spec.exp)?;
+    let arg_is_put = pt.pure(&p.spec.is_put)?;
+    let arg_max_total_written = pt.pure(&p.max_total_written)?;
     let arg_write_amount = pt.pure(&p.write_amount)?;
     let arg_premium = pt.pure(&p.premium)?;
     let arg_valid_until_ms = pt.pure(&p.valid_until_ms)?;
     let arg_nonce = pt.pure(&p.nonce)?;
     let arg_signature = pt.pure(p.signature)?;
 
-    // quote::new_quote(...)
+    // quote::new_quote<U, S>(...) — the pair enters as TYPE arguments; the
+    // spec's TypeNames are derived on chain from them, so a caller who passes
+    // a different pair than the MM signed simply fails verification.
     let quote_val = pt.programmable_move_call(
         p.package,
         Identifier::new("quote").unwrap(),
         Identifier::new("new_quote").unwrap(),
-        vec![],
+        vec![
+            TypeTag::from_str(&canonicalize_move_type(&p.spec.asset))
+                .map_err(|e| anyhow!("quote spec asset type: {e}"))?,
+            TypeTag::from_str(&canonicalize_move_type(&p.spec.settlement))
+                .map_err(|e| anyhow!("quote spec settlement type: {e}"))?,
+        ],
         vec![
             arg_protocol_id,
             arg_signer_id,
@@ -210,7 +238,11 @@ pub(crate) async fn build_request_and_release(
             arg_release_package,
             arg_release_module,
             arg_signer_token_recipient,
-            arg_bucket_id,
+            arg_expiry_ms,
+            arg_strike_sig,
+            arg_strike_exp,
+            arg_is_put,
+            arg_max_total_written,
             arg_write_amount,
             arg_premium,
             arg_valid_until_ms,
@@ -320,7 +352,8 @@ pub async fn execute_writer_flow(
             routing: &p.routing,
             protocol_id: &p.protocol_id,
             signer_token_recipient: p.signer_token_recipient,
-            bucket_id: p.bucket_id,
+            spec: &p.spec,
+            max_total_written: p.max_total_written,
             write_amount: p.write_amount,
             premium: p.premium,
             valid_until_ms: p.valid_until_ms,
@@ -422,7 +455,8 @@ pub async fn execute_trader_flow(
             routing: &p.routing,
             protocol_id: &p.protocol_id,
             signer_token_recipient: p.signer_token_recipient,
-            bucket_id: p.bucket_id,
+            spec: &p.spec,
+            max_total_written: p.max_total_written,
             write_amount: p.write_amount,
             premium: p.premium,
             valid_until_ms: p.valid_until_ms,

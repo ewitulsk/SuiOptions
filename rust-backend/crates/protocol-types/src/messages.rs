@@ -18,6 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::bucket_spec::BucketSpec;
 use super::coding::{u128_string, u64_string};
 use super::ids::ObjectId;
 use super::quote::{Quote, SignedQuote};
@@ -61,9 +62,15 @@ pub struct SubscribeBucketsPayload {
     pub bucket_ids: Vec<ObjectId>,
 }
 
+/// Retail → service: price this SPEC, not this object.
+///
+/// The bucket may not exist yet — the board advertises a strike ladder and a
+/// bucket only becomes an object when someone writes at that strike — so the
+/// request names the economics. `bucket_registry` admits one bucket per spec,
+/// so this is not ambiguous.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RfqRequestPayload {
-    pub bucket_id: ObjectId,
+    pub spec: BucketSpec,
     #[serde(with = "u64_string")]
     pub write_amount: u64,
     pub side: Side,
@@ -112,7 +119,11 @@ pub struct BucketUpdatePayload {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RfqResponsePayload {
-    pub bucket_id: ObjectId,
+    pub spec: BucketSpec,
+    /// The bucket's object id when it already exists, `None` when the taker's
+    /// own transaction will create it. Informational — the quotes bind the
+    /// spec, not this.
+    pub bucket_id: Option<ObjectId>,
     #[serde(with = "u64_string")]
     pub write_amount: u64,
     /// Already sorted best-price-first for the retail user (highest premium
@@ -250,15 +261,20 @@ pub struct AuthAckPayload {
     pub session_id: String,
 }
 
-/// Service → MM: a quote is wanted on `bucket_id` for `write_amount` on the
-/// given `side`. The payload carries **only the bucket address** — never its
-/// strike, expiry, or coin types. The MM resolves those itself from the
-/// api-service (its own trust boundary) so a malicious or buggy upstream can't
-/// hand it spoofed pricing inputs (e.g. a TWAL strike tagged as TBTC). The
-/// remaining fields are request parameters, not bucket attributes.
+/// Service → MM: a quote is wanted on `spec` for `write_amount` on the given
+/// `side`.
+///
+/// The spec IS the pricing input, and no bucket address travels. That reads
+/// like a weakening of the old trust boundary (where only an address rode the
+/// wire and the MM re-resolved it from api-service), but it is stronger: the
+/// MM signs the spec it priced, and on chain a quote can only ever be spent
+/// against a bucket with exactly those economics. A lying upstream gets a
+/// quote priced for the lie and executable only against the lie — which no
+/// honest bucket matches. The MM still checks the pair against its own
+/// configured markets before pricing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RfqBroadcastPayload {
-    pub bucket_id: ObjectId,
+    pub spec: BucketSpec,
     #[serde(with = "u64_string")]
     pub write_amount: u64,
     pub side: Side,
@@ -276,7 +292,7 @@ pub struct RfqBroadcastPayload {
 /// balance or consumes a nonce.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BulkViewRfqRequestPayload {
-    pub bucket_ids: Vec<ObjectId>,
+    pub specs: Vec<BucketSpec>,
     #[serde(with = "u64_string")]
     pub write_amount: u64,
     pub side: Side,
@@ -293,7 +309,7 @@ pub struct BulkViewRfqResponsePayload {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BulkViewPremium {
-    pub bucket_id: ObjectId,
+    pub spec: BucketSpec,
     /// Mean of the responding MMs' premiums, settlement smallest-units.
     #[serde(with = "u64_string")]
     pub premium: u64,
@@ -307,10 +323,9 @@ pub struct BulkViewPremium {
     pub cache_age_ms: u64,
 }
 
-/// Service → MM: price these buckets at `write_amount`, no signing. Sent only
+/// Service → MM: price these specs at `write_amount`, no signing. Sent only
 /// to MMs that advertised `bulk_view = true` in their Hello. Like
-/// [`RfqBroadcastPayload`], it carries only bucket **addresses** — the MM
-/// resolves each bucket's pricing inputs from the api-service itself.
+/// [`RfqBroadcastPayload`], specs travel rather than addresses.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BulkViewRfqBroadcastPayload {
     #[serde(with = "u64_string")]
@@ -318,7 +333,7 @@ pub struct BulkViewRfqBroadcastPayload {
     pub side: Side,
     #[serde(with = "u64_string")]
     pub deadline_ms: u64,
-    pub bucket_ids: Vec<ObjectId>,
+    pub specs: Vec<BucketSpec>,
 }
 
 /// MM → service: indicative premiums for the requested buckets. Unsigned; no
@@ -330,7 +345,7 @@ pub struct BulkViewQuotePayload {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BulkViewMmPremium {
-    pub bucket_id: ObjectId,
+    pub spec: BucketSpec,
     #[serde(with = "u64_string")]
     pub premium: u64,
 }
@@ -339,12 +354,17 @@ pub struct BulkViewMmPremium {
 mod tests {
     use super::*;
 
+    fn spec() -> BucketSpec {
+        BucketSpec::new("0x9::tbtc::TBTC", "0x9::tusdc::TUSDC", 1_782_345_600_000, 85_000, 0, false)
+            .unwrap()
+    }
+
     #[test]
     fn rfq_request_round_trips() {
         let msg = RetailToService::RFQRequest {
             request_id: "req-abc".into(),
             payload: RfqRequestPayload {
-                bucket_id: ObjectId::new([0x01; 32]),
+                spec: spec(),
                 write_amount: 10_000_000,
                 side: Side::Writer,
             },
@@ -380,13 +400,13 @@ mod tests {
     }
 
     #[test]
-    fn rfq_broadcast_carries_only_bucket_address_and_request_params() {
-        // The MM resolves strike/expiry/coin-types itself; the broadcast must
-        // not leak any bucket attribute beyond the address.
+    fn rfq_broadcast_carries_the_spec_and_no_bucket_address() {
+        // The spec IS the pricing input now; no object id travels, because the
+        // bucket may not exist yet.
         let msg = ServiceToMm::RFQBroadcast {
             request_id: "req-1".into(),
             payload: RfqBroadcastPayload {
-                bucket_id: ObjectId::new([0x0a; 32]),
+                spec: spec(),
                 write_amount: 5,
                 side: Side::Writer,
                 deadline_ms: 1_748_534_400_000,
@@ -395,10 +415,10 @@ mod tests {
         let s = serde_json::to_string(&msg).unwrap();
         assert!(s.contains("\"deadline_ms\":\"1748534400000\""));
         assert!(s.contains("\"write_amount\":\"5\""));
-        // No bucket attributes ride along.
-        assert!(!s.contains("strike"));
-        assert!(!s.contains("expiry"));
-        assert!(!s.contains("asset_type"));
+        assert!(s.contains("\"sig\":\"85000\""));
+        assert!(!s.contains("bucket_id"));
+        // Types travel in chain form — the same bytes the signature covers.
+        assert!(!s.contains("\"0x"));
         let back: ServiceToMm = serde_json::from_str(&s).unwrap();
         assert_eq!(back, msg);
     }
@@ -419,7 +439,7 @@ mod tests {
         let msg = RetailToService::BulkViewRFQRequest {
             request_id: "bv-1".into(),
             payload: BulkViewRfqRequestPayload {
-                bucket_ids: vec![ObjectId::new([0x01; 32]), ObjectId::new([0x02; 32])],
+                specs: vec![spec()],
                 write_amount: 5_000_000,
                 side: Side::Writer,
             },
@@ -440,7 +460,7 @@ mod tests {
                 write_amount: 100,
                 side: Side::Writer,
                 deadline_ms: 1_748_534_400_000,
-                bucket_ids: vec![ObjectId::new([0x0a; 32]), ObjectId::new([0x0b; 32])],
+                specs: vec![spec()],
             },
         };
         let s = serde_json::to_string(&bc).unwrap();
@@ -453,7 +473,7 @@ mod tests {
             request_id: "bv-1".into(),
             payload: BulkViewQuotePayload {
                 premiums: vec![BulkViewMmPremium {
-                    bucket_id: ObjectId::new([0x0a; 32]),
+                    spec: spec(),
                     premium: 4242,
                 }],
             },
@@ -471,7 +491,7 @@ mod tests {
             payload: BulkViewRfqResponsePayload {
                 write_amount: 100,
                 premiums: vec![BulkViewPremium {
-                    bucket_id: ObjectId::new([0x0a; 32]),
+                    spec: spec(),
                     premium: 4242,
                     mm_count: 3,
                     stale: true,

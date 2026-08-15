@@ -69,6 +69,11 @@ use chrono::{TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use protocol_types::ids::ObjectId;
+// Strike normalization and the option-coin type encoding live in
+// `protocol_types::bucket_spec` — the same module the signing path uses, so
+// the read model and the signed payload cannot disagree about what a strike
+// or a coin type is.
+use protocol_types::bucket_spec::{normalize_strike, option_coin_type};
 
 use crate::bucket::Bucket;
 use crate::catalog::TokenCatalog;
@@ -400,6 +405,13 @@ pub struct SpecDto {
     pub expiry_aligned: bool,
     pub underlying_coin_type: String,
     pub settlement_coin_type: String,
+    /// Written size already queued ahead of a new write, raw units as a
+    /// string. `"0"` when the bucket does not exist yet — nothing is ahead of
+    /// the first write. This is what an MM prices assignment risk against and
+    /// what it bounds with the quote's `max_total_written`; the bucket id
+    /// never expressed it.
+    pub total_written_raw: String,
+    pub exercise_cursor_raw: String,
 }
 
 /// Resolve an economic spec to its (maybe not-yet-created) bucket: the
@@ -415,7 +427,7 @@ pub async fn bucket_spec(
         Some(_) => return Err(StatusCode::BAD_REQUEST),
     };
     let strike: u128 = q.strike_raw.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let (sig, exp) = normalize_strike(strike, q.strike_scale).ok_or(StatusCode::BAD_REQUEST)?;
+    let (sig, exp) = normalize_strike(strike, q.strike_scale).map_err(|_| StatusCode::BAD_REQUEST)?;
     let expiry_aligned = q.expiry_ms % 60_000 == 0 && q.expiry_ms / 60_000 <= u32::MAX as u64;
 
     let resolve = |input: &str| -> String {
@@ -449,13 +461,29 @@ pub async fn bucket_spec(
         })?;
     let hit = candidates.into_iter().find(|b| {
         let kind_matches = (b.option_kind == "put") == is_put;
-        kind_matches && !b.cleaned && normalize_strike(b.strike, b.strike_scale) == Some((sig, exp))
+        kind_matches
+            && !b.cleaned
+            && normalize_strike(b.strike, b.strike_scale).ok() == Some((sig, exp))
     });
+    let (total_written, exercise_cursor) = hit
+        .as_ref()
+        .map(|b| (b.total_written, b.exercise_cursor))
+        .unwrap_or((0, 0));
 
     let option_coin_type = state
         .options_package
         .as_deref()
-        .map(|pkg| option_coin_type_str(pkg, is_put, &u_type, &s_type, q.expiry_ms, sig, exp));
+        .and_then(|pkg| {
+            let spec = protocol_types::bucket_spec::BucketSpec {
+                asset: protocol_types::asset::chain_form_move_type(&u_type),
+                settlement: protocol_types::asset::chain_form_move_type(&s_type),
+                expiry_ms: q.expiry_ms,
+                sig,
+                exp,
+                is_put,
+            };
+            option_coin_type(pkg, &spec).ok()
+        });
     Ok(Json(SpecDto {
         exists: hit.is_some(),
         bucket_id: hit.map(|b| b.bucket_id.to_hex()),
@@ -465,57 +493,12 @@ pub async fn bucket_spec(
         expiry_aligned,
         underlying_coin_type: u_type,
         settlement_coin_type: s_type,
+        total_written_raw: total_written.to_string(),
+        exercise_cursor_raw: exercise_cursor.to_string(),
     }))
 }
 
-/// Mirror of `option_coin::normalize_strike`: strip trailing zeros; the
-/// significand must fit the encoding's u40 field.
-fn normalize_strike(strike: u128, strike_scale: u8) -> Option<(u64, u8)> {
-    if strike == 0 {
-        return None;
-    }
-    let (mut sig, mut exp) = (strike, strike_scale);
-    while sig % 10 == 0 && exp > 0 {
-        sig /= 10;
-        exp -= 1;
-    }
-    (sig <= 0xFF_FFFF_FFFF).then_some((sig as u64, exp))
-}
 
-/// Canonical `OptionCall<U, S, D0..D9>` (or put) type literal for a spec —
-/// byte-compatible with `sui_tx::tx::option_coin` and the on-chain builder:
-/// minutes u32 ‖ sig u40 ‖ exp u8 as byte markers from `enc0`/`enc1`.
-fn option_coin_type_str(
-    package: &str,
-    is_put: bool,
-    u_type: &str,
-    s_type: &str,
-    expiry_ms: u64,
-    sig: u64,
-    exp: u8,
-) -> String {
-    let pkg = protocol_types::asset::canonicalize_move_type(&format!("{package}::x::X"));
-    let pkg = pkg
-        .split_once("::")
-        .map(|(a, _)| a.to_string())
-        .unwrap_or_else(|| package.into());
-    let minutes = (expiry_ms / 60_000) as u32;
-    let mut bytes = minutes.to_be_bytes().to_vec();
-    bytes.extend_from_slice(&sig.to_be_bytes()[3..]);
-    bytes.push(exp);
-    let markers: Vec<String> = bytes
-        .iter()
-        .map(|b| {
-            let module = if *b < 0x80 { "enc0" } else { "enc1" };
-            format!("{pkg}::{module}::B{b:02X}")
-        })
-        .collect();
-    let root = if is_put { "OptionPut" } else { "OptionCall" };
-    format!(
-        "{pkg}::option_coin::{root}<{u_type},{s_type},{}>",
-        markers.join(",")
-    )
-}
 
 // ─────────────────────────── strike ladder (SO-400) ───────────────────────────
 
@@ -704,7 +687,7 @@ fn append_synthetic_strikes(
         .iter()
         .filter_map(|b| {
             let raw = b.strike_raw.parse::<u128>().ok()?;
-            normalize_strike(raw, b.strike_scale)
+            normalize_strike(raw, b.strike_scale).ok()
         })
         .collect();
 
@@ -716,21 +699,23 @@ fn append_synthetic_strikes(
         ) else {
             continue;
         };
-        let Some((sig, exp)) = normalize_strike(raw, scale) else {
+        let Ok((sig, exp)) = normalize_strike(raw, scale) else {
             continue;
         };
         if existing.contains(&(sig, exp)) {
             continue;
         }
-        let coin_type = option_coin_type_str(
-            package,
-            pair.is_put(),
-            &protocol_types::asset::canonicalize_move_type(&inputs.asset_ct),
-            &protocol_types::asset::canonicalize_move_type(&inputs.settlement_ct),
+        let spec = protocol_types::bucket_spec::BucketSpec {
+            asset: protocol_types::asset::chain_form_move_type(&inputs.asset_ct),
+            settlement: protocol_types::asset::chain_form_move_type(&inputs.settlement_ct),
             expiry_ms,
             sig,
             exp,
-        );
+            is_put: pair.is_put(),
+        };
+        let Ok(coin_type) = option_coin_type(package, &spec) else {
+            continue;
+        };
         series.buckets.push(BucketDto {
             bucket_id: None,
             strike: Some(*strike),
@@ -1286,10 +1271,10 @@ mod tests {
 
     #[test]
     fn spec_normalize_matches_onchain_rules() {
-        assert_eq!(normalize_strike(257100, 4), Some((2571, 2)));
-        assert_eq!(normalize_strike(1500, 1), Some((150, 0)));
-        assert_eq!(normalize_strike(0, 0), None);
-        assert_eq!(normalize_strike(0x1_00_0000_0000u128, 0), None); // > u40
+        assert_eq!(normalize_strike(257100, 4).ok(), Some((2571, 2)));
+        assert_eq!(normalize_strike(1500, 1).ok(), Some((150, 0)));
+        assert!(normalize_strike(0, 0).is_err());
+        assert!(normalize_strike(0x1_00_0000_0000u128, 0).is_err()); // > u40
     }
 
     #[test]
@@ -1298,20 +1283,23 @@ mod tests {
         // builder: minutes 50_000_000 = 0x02FAF080, sig 2571 = 0x…0A0B,
         // exp 2 — markers B02,BFA,BF0,B80,B00,B00,B00,B0A,B0B,B02 with the
         // high-bit bytes in enc1.
-        let t = option_coin_type_str(
-            "0xabc",
-            false,
-            "0xU::tbtc::TBTC",
-            "0xS::tusdc::TUSDC",
+        let spec = protocol_types::bucket_spec::BucketSpec::new(
+            "0x11::tbtc::TBTC",
+            "0x22::tusdc::TUSDC",
             50_000_000u64 * 60_000,
             2571,
             2,
-        );
+            false,
+        )
+        .unwrap();
+        let t = option_coin_type("0xabc", &spec).unwrap();
         let pkg = format!("0x{:0>64}", "abc");
+        let u = format!("0x{:0>64}", "11");
+        let se = format!("0x{:0>64}", "22");
         assert_eq!(
             t,
             format!(
-                "{pkg}::option_coin::OptionCall<0xU::tbtc::TBTC,0xS::tusdc::TUSDC,\
+                "{pkg}::option_coin::OptionCall<{u}::tbtc::TBTC,{se}::tusdc::TUSDC,\
 {pkg}::enc0::B02,{pkg}::enc1::BFA,{pkg}::enc1::BF0,{pkg}::enc1::B80,\
 {pkg}::enc0::B00,{pkg}::enc0::B00,{pkg}::enc0::B00,{pkg}::enc0::B0A,\
 {pkg}::enc0::B0B,{pkg}::enc0::B02>"
@@ -1472,15 +1460,15 @@ mod tests {
         append_synthetic_strikes(&mut s, &[63_000.0], &inputs, &pair, "0xopt", EXPIRY);
 
         let (sig, exp) = normalize_strike(63_000, 2).unwrap();
-        let expected = option_coin_type_str(
-            "0xopt",
-            false,
-            &protocol_types::asset::canonicalize_move_type("0xpkg::tbtc::TBTC"),
-            &protocol_types::asset::canonicalize_move_type("0xpkg::tusdc::TUSDC"),
-            EXPIRY,
+        let spec = protocol_types::bucket_spec::BucketSpec {
+            asset: protocol_types::asset::chain_form_move_type("0xpkg::tbtc::TBTC"),
+            settlement: protocol_types::asset::chain_form_move_type("0xpkg::tusdc::TUSDC"),
+            expiry_ms: EXPIRY,
             sig,
             exp,
-        );
+            is_put: false,
+        };
+        let expected = option_coin_type("0xopt", &spec).unwrap();
         assert_eq!(s.buckets[0].option_coin_type, expected);
         assert_eq!(s.buckets[0].call_coin_type, expected);
     }

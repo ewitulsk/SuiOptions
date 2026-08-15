@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from "react";
 import { quotingClient } from "./quotingClient";
-import type { RfqQuoteEntry, Side } from "./quoting";
+import type { BucketSpec, RfqQuoteEntry, Side } from "./quoting";
 
 const DEBOUNCE_MS = 300;
 
@@ -22,13 +22,18 @@ export type UseRfqResult = {
 };
 
 export function useRfq(opts: {
-  bucketId: string | null;
+  /** The economics to price. Null disables the hook. A strike whose bucket
+   *  does not exist yet is perfectly quotable — that is the point. */
+  spec: BucketSpec | null;
   /** u64 string of underlying smallest-units, or null to disable. */
   writeAmountRaw: string | null;
   side: Side;
   enabled: boolean;
 }): UseRfqResult {
-  const { bucketId, writeAmountRaw, side, enabled } = opts;
+  const { spec, writeAmountRaw, side, enabled } = opts;
+  // Stable identity for the effect: a fresh object every render would re-fire
+  // the RFQ on every keystroke.
+  const specKey = spec === null ? null : JSON.stringify(spec);
   const [quotes, setQuotes] = useState<RfqQuoteEntry[]>([]);
   const [status, setStatus] = useState<RfqStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +43,7 @@ export function useRfq(opts: {
   useEffect(() => {
     if (
       !enabled ||
-      bucketId === null ||
+      spec === null ||
       writeAmountRaw === null ||
       writeAmountRaw === "0"
     ) {
@@ -53,11 +58,11 @@ export function useRfq(opts: {
     setError(null);
     const handle = setTimeout(() => {
       quotingClient
-        .sendRfq({ bucketId, writeAmount: writeAmountRaw, side })
+        .sendRfq({ spec, writeAmount: writeAmountRaw, side })
         .then((entries) => {
           if (cancelled) return;
           console.log("[useRfq] rfq response", {
-            bucketId,
+            spec,
             writeAmountRaw,
             side,
             count: entries.length,
@@ -79,7 +84,8 @@ export function useRfq(opts: {
       cancelled = true;
       clearTimeout(handle);
     };
-  }, [enabled, bucketId, writeAmountRaw, side, refreshTick]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, specKey, writeAmountRaw, side, refreshTick]);
 
   return { quotes, status, error, refresh: () => setRefreshTick((n) => n + 1) };
 }

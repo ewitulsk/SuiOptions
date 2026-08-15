@@ -21,6 +21,7 @@ use dashmap::DashMap;
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, Semaphore};
 
+use protocol_types::bucket_spec::BucketSpec;
 use protocol_types::ids::ObjectId;
 use protocol_types::sides::Side;
 
@@ -57,7 +58,10 @@ pub struct BulkViewCacheEntry {
 pub struct RfqObservation {
     pub timestamp_ms: u64,
     pub request_id: String,
-    pub bucket_id: ObjectId,
+    /// What was asked about. An RFQ names economics, not an object, so the
+    /// observer feed reports the spec — including for strikes whose bucket
+    /// does not exist yet, which are exactly the ones worth watching.
+    pub spec: BucketSpec,
     pub write_amount: u64,
     pub side: Side,
 }
@@ -80,12 +84,15 @@ pub struct AppState {
     /// Cached bulk-view premiums keyed by `(bucket_id, write_amount)`. Served
     /// stale-while-revalidate: a hit older than the TTL is returned
     /// immediately while a background refresh re-broadcasts to MMs.
-    pub bulk_view_cache: DashMap<(ObjectId, u64), BulkViewCacheEntry>,
+    pub bulk_view_cache: DashMap<(BucketSpec, u64), BulkViewCacheEntry>,
+    /// Spec → bucket resolution, cached. Buckets are created just-in-time, so
+    /// a spec with no bucket is a normal, quotable state rather than an error.
+    pub specs: crate::rfq::resolve::SpecResolver,
     /// In-flight bulk-view refreshes, keyed the same as the cache. Presence
     /// means some task is already re-broadcasting that key, so others skip it
     /// (single-flight — "only send to MMs if a new request came in AND no
     /// refresh is already running").
-    bulk_view_refreshing: DashMap<(ObjectId, u64), ()>,
+    bulk_view_refreshing: DashMap<(BucketSpec, u64), ()>,
     /// Global cap on concurrent RFQ orchestrations across all retail
     /// connections. Acquired by `retail.rs` with `try_acquire_owned`;
     /// a saturated permit count means we reject the RFQ with
@@ -108,6 +115,7 @@ impl AppState {
             reconcile_cursors: DashMap::new(),
             pending_rfqs: DashMap::new(),
             bulk_view_cache: DashMap::new(),
+            specs: crate::rfq::resolve::SpecResolver::new(),
             bulk_view_refreshing: DashMap::new(),
             rfq_global_inflight: Arc::new(Semaphore::new(cap)),
             rfq_observers,
@@ -118,12 +126,12 @@ impl AppState {
     /// key. Returns true if this caller now owns the refresh (must call
     /// [`release_bulk_view_refresh`](Self::release_bulk_view_refresh) when
     /// done); false if another task already holds it.
-    pub fn try_claim_bulk_view_refresh(&self, key: (ObjectId, u64)) -> bool {
+    pub fn try_claim_bulk_view_refresh(&self, key: (BucketSpec, u64)) -> bool {
         self.bulk_view_refreshing.insert(key, ()).is_none()
     }
 
-    pub fn release_bulk_view_refresh(&self, key: (ObjectId, u64)) {
-        self.bulk_view_refreshing.remove(&key);
+    pub fn release_bulk_view_refresh(&self, key: &(BucketSpec, u64)) {
+        self.bulk_view_refreshing.remove(key);
     }
 
     /// Record each of this signer's `WriteExecuted` fills the indexer now
