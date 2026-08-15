@@ -38,6 +38,22 @@ scrape_configs:
       - targets: ["cctp-relay:9015"] # bridge relay; cctp_bridge_duration_seconds lives here
         labels: { env: staging, service: cctp-relay }
 
+  # data-room-host is a separate EC2 instance in the same VPC, not on
+  # options-staging_net, so it is scraped by private IP rather than by
+  # container name. The data-room SG already allows 9100 from the shared
+  # host's SG. The IP is static in practice (the instance is long-lived:
+  # delete_on_termination=false, user_data_replace_on_change=false); it is
+  # exposed as the `data_room_private_ip` terraform output, so re-derive it
+  # from there if the host is ever replaced.
+  #
+  # job_name is deliberately `services-*` so the existing
+  # `scrape-target-down` Grafana rule (job=~"services-.*") covers it with
+  # no new rule.
+  - job_name: services-data-room
+    static_configs:
+      - targets: ["10.40.1.62:9100"]
+        labels: { env: data-room, service: data-room-collector }
+
   # The monitoring stack watches itself.
   - job_name: monitoring
     static_configs:

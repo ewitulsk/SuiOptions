@@ -353,3 +353,8 @@ output "data_room_instance_id" {
   description = "data-room-host instance ID, for the Deploy data-room workflow's SSM RunCommand."
   value       = aws_instance.data_room_host.id
 }
+
+output "data_room_private_ip" {
+  description = "data-room-host private IP. Central Prometheus scrapes :9100 by IP (the host is not on options-staging_net) — see the services-data-room job in deployment/monitoring/prometheus.yml, and update it here if the instance is ever replaced."
+  value       = aws_instance.data_room_host.private_ip
+}

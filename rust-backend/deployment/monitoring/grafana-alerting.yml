@@ -1,11 +1,13 @@
 # Grafana alert-rule provisioning (SO-180).
 #
-# Three rules:
+# Four rules:
 #  1. alert-id-errors — ANY error!() log carrying an `alert_id` field, in any
 #     service, fires within a minute, grouped by alert_id. Adding a new alert
 #     is purely `error!(alert_id = "stable-id", ...)` in code — no infra.
 #  2. low-sui-balance — balance-monitor's `sui_balance_low` gauge.
 #  3. scrape-target-down — Prometheus `up == 0` for any service.
+#  4. dataroom-collector-stalled — a data-room capture feed that has gone
+#     quiet while the process is still up (SO-402).
 #
 # Contact points / notification policies are NOT provisioned — configure
 # them in the Grafana UI (they persist in the grafana data volume); these
@@ -115,6 +117,46 @@ groups:
               refId: B
               conditions:
                 - evaluator: { type: lt, params: [1] }
+                  operator: { type: and }
+                  query: { params: [A] }
+                  reducer: { type: last, params: [] }
+
+      # A feed that has gone quiet while the collector process is still up.
+      # `up == 0` (scrape-target-down) covers the process dying; this covers
+      # the nastier case where the daemon lives but one exchange's socket or
+      # poller has stopped producing. Threshold is 10m: the slowest poller in
+      # collector.toml runs at 60s, so 10m is ~10 missed cycles and will not
+      # flap. noDataState is OK deliberately — a vanished target is
+      # scrape-target-down's job, not this rule's.
+      - uid: dataroom-collector-stalled
+        title: data-room collector feed stalled
+        condition: B
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: 'data-room capture from {{ $labels.exchange }} has produced no messages for >10m'
+        labels:
+          source: dataroom_collector
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'time() - max by (exchange) (dataroom_collector_last_message_unix_seconds) > 600'
+              instant: true
+              intervalMs: 15000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
                   operator: { type: and }
                   query: { params: [A] }
                   reducer: { type: last, params: [] }
