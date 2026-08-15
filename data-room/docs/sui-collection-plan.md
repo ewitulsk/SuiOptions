@@ -1,8 +1,21 @@
 # SUI data collection plan
 
-Status: **PLANNED, not started. Revised 2026-08-15** after verifying every
-claim in it against the code and re-probing every endpoint. Written to be
-picked up and executed by someone who has not been part of the analysis
+Status: **S0–S4 EXECUTED 2026-08-15.** Every claim below was verified
+against the code and re-probed against the live endpoint before being
+acted on; corrections are folded in. S5 (P4 `book_deltas`) is the only
+step not done — see §6.
+
+| Step | State | Shipped as |
+|---|---|---|
+| S0 telemetry | **live** | SO-402 (#488) |
+| S1 DeepBook + Coinbase/HL SUI | **live, capturing** | SO-403 (#489) |
+| S1b Aftermath router ladder | **live, capturing** | SO-403 (#489) |
+| S2 Bluefin SUI-PERP | **merged** | SO-404 (#490) |
+| S3 Vision backfill + timers | **backfill running, timers live** | SO-406 (#492) |
+| S4 bookTicker adapter | **merged** | SO-405 (#491) |
+| S5 P4 `book_deltas` | not started | — |
+
+Written to be picked up by someone who has not been part of the analysis
 behind it.
 
 **Why this exists:** SUI is the launch underlying for the mm-bot V2 desk.
@@ -498,15 +511,19 @@ the meantime. The expensive, irreversible thing is not recording.
 
 | Step | Work | Gate before proceeding |
 |---|---|---|
-| **S0** | Prometheus scrape of the data-room host + `dataroom-collector-stalled` rule (§4.1) | alert fires and resolves on a deliberate collector stop |
-| **S1** | DeepBook poller (1.1) + router quote ladder (1.1b) + Coinbase/Hyperliquid SUI config (§2) | bronze landing for all streams; existing pollers unchanged by the GET/POST extension |
-| **S2** | Bluefin bronze capture (1.2), incl. the allowlist, markers and `gaps.rs` | bronze landing; fixture committed; reconnect drill passes with marker **and** gaps rows |
-| **S3** | Vision SUI backfill (3.1) **and the three systemd units** | row counts reconcile; 2023-05 → now queryable via `catalog.sql`; next timer firing picks up a daily unattended |
-| **S4** | `parse_book_ticker_csv` + normalizer arm (3.2) | dry-run on 2023-05 fits in RAM/disk; golden test green; `book_top` populated for 2023-05 → 2024-04 |
+| **S0** ✅ | Prometheus scrape + `dataroom-collector-stalled` rule (§4.1) | Prometheus container reaches `:9100` and sees 14 `dataroom_collector` series |
+| **S1** ✅ | DeepBook pollers (1.1) + Coinbase/Hyperliquid SUI config (§2) | nine new streams producing; bronze in S3 parses with monotonic capture **and** venue clocks, contiguous `seq` |
+| **S1b** ✅ | `Poller` method/body + router quote ladder (1.1b) | all five rungs landing with real routed responses (Bluefin/Cetus) |
+| **S2** ✅ | Bluefin bronze capture (1.3), incl. the allowlist, markers and `gaps.rs` | three streams landing; ack → `control.bluefin`; reconnect drill gives alternating markers **and** 12 gaps rows |
+| **S3** ✅ | Vision SUI backfill (3.1) **and the three systemd units** | backfill mirroring; units installed and timers armed for 00:10/00:15/00:30 UTC |
+| **S4** ✅ | `for_each_book_ticker` + `BookTopWriter` + normalizer arm (3.2) | 1,909,374 rows from the real 2024-03-30 dump — CSV lines minus header, zero rejects — at 224 MB peak RSS |
 | **S5** | P4 `book_deltas` schema + Bluefin/DeepBook normalizers | replay S2's accumulated bronze; determinism test green |
 
-S1 and S2 are the urgent ones. S3–S5 can happen whenever. S0 is cheap and
-makes all of the rest observable.
+S5 is the only step left, and it is the one that **cannot be rushed**: its
+gate is a replay of accumulated Bluefin bronze, and that bronze started
+accumulating on 2026-08-15. The spec also marks P4 "explicitly out of
+v1". Bronze-is-sacred means waiting costs nothing — every frame recorded
+in the meantime replays whenever the schema lands (§5).
 
 **Host-capacity note, before S2 and again before S4.** The host is a
 t3.medium / 100 GB (92 GB free as of 2026-08-15) sized for a few MB/day
@@ -516,7 +533,9 @@ plus one Deribit chain poll.
   than anything currently collected — estimate the daily volume against
   the 100 GB volume and the S3 lifecycle rules (`bronze` → IA at 30d,
   Glacier IR at 180d) before turning it on.
-- *S4:* ~9.7 GB compressed of bookTicker, several times that unzipped,
+- *S4:* **measured, not estimated** — one day normalizes in 24 s at
+  224 MB peak RSS, so the chunked writer holds. The disk side still
+  stands: ~9.7 GB compressed of bookTicker, several times that unzipped,
   plus a one-day in-memory row buffer. This is the tighter of the two,
   and the plan's original draft flagged capacity only for S2.
 
