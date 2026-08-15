@@ -384,8 +384,27 @@ Coverage verified against the Vision bucket 2026-08-15:
 | SUIUSDT fundingRate | 2023-05 → 2026-07 | 39 monthly |
 | SUIUSDC spot trades | 2024-01 → 2026-07 | 31 monthly |
 
-Prefer **SUIUSDC** where both exist — it is the USDC-quoted book, closer
-to our settlement asset, at the cost of 8 fewer months.
+**Do not blindly prefer SUIUSDC.** The first draft of this plan said to,
+on the reasoning that it is the USDC-quoted book and therefore closer to
+our settlement asset, "at the cost of 8 fewer months". Measured against
+the dumps 2026-08-15, the real cost is much larger than 8 months:
+
+| period | SUIUSDT vs SUIUSDC monthly dump size |
+|---|---|
+| 2024-01 → 2024-04 | **137–396× larger** |
+| 2024-05 → 2025-02 | 10–52× larger |
+| 2025-03 | 4× larger |
+| **2025-04 → 2026-07** | **~2–4× larger** |
+
+SUIUSDC's first month is 0.4 MB against SUIUSDT's 155.8 MB. Normalizing
+it gives ~2.2k trades/day, and the first two prints of 2024-01 are 1.1438
+then 1.7805 — a 55% jump between consecutive trades. That is not a book
+you can measure microstructure on; it is a book with almost nothing in it.
+
+So: **use SUIUSDT before ~2025-04 and SUIUSDC after**, or just use
+SUIUSDT throughout and accept the quote-asset mismatch. Both are
+mirrored, so this is an analysis-time choice, not a collection-time one —
+which is the argument for having pulled both.
 
 Standing Vision gotchas (all have regression tests, see the memory and
 `normalizer/src/vision.rs`): duplicate CSVs under `fsx-data/…` in some
