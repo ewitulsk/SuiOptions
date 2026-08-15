@@ -307,6 +307,30 @@ Aftermath's rebate is paid on *fills*; its gas is charged on *attempts*.
 For a passive strategy with a low fill-to-attempt ratio, that is the
 wrong side of the trade.
 
+> **Measured 2026-08-15, after this section was written (SO-404).** The
+> depth row above needs revisiting. Bluefin Pro's own API reports
+> **SUI-PERP at ~$99k of 24h quote volume** and **73 SUI (~$50) at top of
+> book**, with the whole venue at roughly $0.7–2.0M/day across 8 markets.
+> The *cumulative* figure holds up ($14.4B on the current product plus
+> $55.5B legacy ≈ the "$40B" claimed); the ***daily*** figure is off by
+> more than an order of magnitude against what this venue reports today.
+> Its full book is healthier than the touch suggests — $530k of total
+> visible bid, comparable to DeepBook spot — so read it as "thin at the
+> touch, adequate in aggregate", not "empty". No trade printed on the
+> socket in 40 s, nor via REST in the preceding ~18 minutes.
+>
+> This does not automatically flip the decision: free repricing and
+> counterparty history are unaffected, and a passive ladder cares more
+> about book shape than about flow. But "Depth" was one of three rows
+> favouring Bluefin, and on today's numbers it is the weakest of them.
+> Worth re-deciding deliberately rather than inheriting. The Bluefin
+> SUI-PERP collector (SO-404) is now recording the series that settles
+> it — this is doc §12 open question #2, and the answer is arriving.
+>
+> Possible innocent explanation, not yet checked: the $40–70M/day figure
+> may describe Bluefin's older/spot product rather than the Pro perp
+> venue this API serves.
+
 **Decision (2026-08-15):** trust properties are not a constraint while
 this runs on prop capital, and Bluefin is already wired. **Bluefin for
 the hedging loop.** The exercise loop pulls the other way (§9.3) but the
@@ -491,6 +515,32 @@ laddering across the expiry window and letting depth replenish raises
 capacity materially (`00-plan.md` already calls for laddering big size).
 And it is one snapshot of one book — the shape is trustworthy, the
 specific basis points are not.
+
+> **That second caveat is much stronger than it sounds. Measured
+> 2026-08-15 (SO-403).** The $1M rung was re-quoted through the same
+> endpoint, same size, same direction, over a few hours:
+>
+> | time (UTC) | fill px | vs spot |
+> |---|---|---|
+> | ~18:55 | 0.67956 | **41 bp** |
+> | ~19:24 | 0.66384 | **243 bp** |
+> | ~19:40 | 0.58912 | **1,346 bp** |
+> | ~19:58 | 0.61775 | **926 bp** (first production capture) |
+>
+> The 1,346 bp reading is three identical consecutive probes, so it is a
+> real state of the book, not jitter. The 238 bp in the table above sits
+> mid-range rather than being *the* number.
+>
+> **Read the $1M row as a distribution, not a point.** At 41 bp the
+> exercise flow is a rounding error against the 1.72% edge; at 1,346 bp a
+> single unwind is ~8× the entire round-trip edge. Both were true on the
+> same afternoon. Any capacity statement derived from one snapshot —
+> including the "somewhere past $1M" above — is under-determined, and
+> sizing the vault on one is sizing it on noise.
+>
+> The router quote ladder (SO-403) now records all five rungs every
+> 5 minutes precisely so this becomes a measured distribution instead of
+> an argument. Revisit this table once there is a week of it.
 
 The structural point stands: we borrow and swap ~100% of notional to
 harvest ~2.9% of notional. Break-even swap cost is ~870 bps against
