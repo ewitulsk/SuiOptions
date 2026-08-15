@@ -41,18 +41,31 @@ public struct CollateralRequest<phantom T> {
     quote: Quote,
     amount: u64,
     flow: Flow,
+    /// The demanding bucket's object id, resolved from the bucket the
+    /// request was minted against — NOT from the quote, which binds the
+    /// bucket's spec rather than its address (see `quote::Quote`). Purely
+    /// informational for release implementations; nothing authorizes on it.
+    bucket_id: ID,
 }
 
-public(package) fun new_writer_request<T>(quote: Quote, amount: u64): CollateralRequest<T> {
-    CollateralRequest { quote, amount, flow: Flow::Writer }
+public(package) fun new_writer_request<T>(
+    quote: Quote,
+    amount: u64,
+    bucket_id: ID,
+): CollateralRequest<T> {
+    CollateralRequest { quote, amount, flow: Flow::Writer, bucket_id }
 }
 
-public(package) fun new_trader_request<T>(quote: Quote, amount: u64): CollateralRequest<T> {
-    CollateralRequest { quote, amount, flow: Flow::Trader }
+public(package) fun new_trader_request<T>(
+    quote: Quote,
+    amount: u64,
+    bucket_id: ID,
+): CollateralRequest<T> {
+    CollateralRequest { quote, amount, flow: Flow::Trader, bucket_id }
 }
 
 public(package) fun destroy<T>(request: CollateralRequest<T>): (Quote, u64, bool) {
-    let CollateralRequest { quote, amount, flow } = request;
+    let CollateralRequest { quote, amount, flow, bucket_id: _ } = request;
     let is_writer = match (flow) {
         Flow::Writer => true,
         Flow::Trader => false,
@@ -73,7 +86,7 @@ public fun source<T>(request: &CollateralRequest<T>): ID {
 
 /// The demanding bucket, for implementation-side bookkeeping.
 public fun bucket_id<T>(request: &CollateralRequest<T>): ID {
-    quote::bucket_id(&request.quote)
+    request.bucket_id
 }
 
 /// The consumed quote nonce, for implementation-side bookkeeping.
@@ -106,11 +119,12 @@ public fun new_request_for_testing<T>(
     quote: Quote,
     amount: u64,
     writer_flow: bool,
+    bucket_id: ID,
 ): CollateralRequest<T> {
     if (writer_flow) {
-        new_writer_request(quote, amount)
+        new_writer_request(quote, amount, bucket_id)
     } else {
-        new_trader_request(quote, amount)
+        new_trader_request(quote, amount, bucket_id)
     }
 }
 

@@ -119,28 +119,28 @@ fun apply_strike(amount: u128, strike: u128, strike_scale: u8): u64 {
     ((numerator + half) / divisor) as u64
 }
 
-/// Create a single bucket for the (Underlying, Settlement, Call) triple,
-/// taking ownership of the option coin's `TreasuryCap`.
-///
-/// One bucket per call (rather than the old `count` loop) because each
-/// bucket needs a *distinct* `Call` coin type, and a generic function is
-/// monomorphic in its type arguments per invocation. The options-scheduler
-/// fans a bucket set out off-chain: it publishes one package containing N
-/// One-Time-Witness coin modules, then issues N `create_bucket` calls in a
-/// single PTB, one per freshly-minted `TreasuryCap`.
-///
-/// The cap must be fresh (zero supply) so the supply==outstanding-options
-/// invariant holds from genesis.
-public fun create_bucket<Underlying, Settlement, Call>(
-    _: &AdminCap,
+/// Buckets are created only through the permissionless any-strike path
+/// below. The AdminCap creator that used to live here — which took a
+/// pre-published `TreasuryCap<Call>` and a raw, UN-normalized strike — was
+/// removed with SO-408: quotes now bind a bucket's spec rather than its
+/// object id, which is only sound while `bucket_registry` admits exactly one
+/// bucket per spec. A second creation path could mint a duplicate with the
+/// same economics and a different exercise queue, and a signed quote would
+/// match both.
+
+#[test_only]
+/// Share a bucket for an arbitrary `(U, S, Call)` triple, bypassing the
+/// coin-registry machinery so the suite can keep using plain marker coin
+/// types. Test-only on purpose: `create_bucket_any_strike` is the sole
+/// on-chain creation path, which is what makes one-bucket-per-spec — and so
+/// spec-bound quoting — sound.
+public fun create_bucket_for_testing<Underlying, Settlement, Call>(
     call_treasury: TreasuryCap<Call>,
     expiry_ms: u64,
     strike: u128,
     strike_scale: u8,
     ctx: &mut TxContext,
 ) {
-    // Fail at creation rather than at the first exercise/redeem if the
-    // scheduler ever hands us an out-of-range scale.
     assert!(strike_scale <= MAX_STRIKE_SCALE, errors::strike_scale_too_large());
     assert!(coin::total_supply(&call_treasury) == 0, errors::treasury_cap_not_fresh());
 
@@ -165,9 +165,8 @@ public fun create_bucket<Underlying, Settlement, Call>(
         closed_pending: 0,
         spreads: vector[],
     };
-    let bucket_id = object::id(&bucket);
     events::emit_bucket_created(
-        bucket_id,
+        object::id(&bucket),
         asset_type,
         settlement_type,
         call_type,
@@ -270,7 +269,8 @@ public fun request_writer_flow<Underlying, Settlement, Call>(
 ): CollateralRequest<Settlement> {
     let q = quote::verify_and_consume_quote(signer, config, &signed_quote, clock);
     assert_quote_bucket(bucket, &q, clock);
-    collateral::new_writer_request<Settlement>(q, quote::premium(&q))
+    let premium = quote::premium(&q);
+    collateral::new_writer_request<Settlement>(q, premium, object::id(bucket))
 }
 
 /// Trader flow, step 1: the signer is the writer MM (the seller). Demands
@@ -284,18 +284,49 @@ public fun request_trader_flow<Underlying, Settlement, Call>(
 ): CollateralRequest<Underlying> {
     let q = quote::verify_and_consume_quote(signer, config, &signed_quote, clock);
     assert_quote_bucket(bucket, &q, clock);
-    collateral::new_trader_request<Underlying>(q, quote::write_amount(&q))
+    let amount = quote::write_amount(&q);
+    collateral::new_trader_request<Underlying>(q, amount, object::id(bucket))
 }
 
+/// The quote's signed spec must describe THIS bucket.
+///
+/// Rebuilding the expected key through `bucket_registry::key` — the same
+/// constructor the registry derives the bucket's address from — is what keeps
+/// the two from drifting: if `BucketKey` ever gains a field, this check picks
+/// it up and any quote that does not carry it stops compiling.
+///
+/// The strike is re-normalized rather than compared raw so the check does not
+/// depend on how the bucket was created.
 fun assert_quote_bucket<Underlying, Settlement, Call>(
     bucket: &Bucket<Underlying, Settlement, Call>,
     q: &Quote,
     clock: &Clock,
 ) {
-    assert!(quote::bucket_id(q) == object::id(bucket), errors::quote_bucket_mismatch());
+    assert_quote_spec(bucket, q);
     assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
     assert!(!bucket.invalidated, errors::bucket_invalidated());
     assert!(quote::write_amount(q) > 0, errors::zero_amount());
+}
+
+/// Spec + queue-bound check, shared by the request and execute legs.
+fun assert_quote_spec<Underlying, Settlement, Call>(
+    bucket: &Bucket<Underlying, Settlement, Call>,
+    q: &Quote,
+) {
+    let (sig, exp) = option_coin::normalize_strike(bucket.strike, bucket.strike_scale);
+    let expected = bucket_registry::key(
+        bucket.asset_type,
+        bucket.settlement_type,
+        bucket.expiry_ms,
+        sig,
+        exp,
+        /* is_put */ false,
+    );
+    assert!(*quote::spec(q) == expected, errors::quote_spec_mismatch());
+    assert!(
+        bucket.total_written <= quote::max_total_written(q),
+        errors::quote_queue_exceeded(),
+    );
 }
 
 /// Writer flow, step 2: consume the potato + the released premium and
@@ -319,7 +350,9 @@ public fun execute_writer_flow<Underlying, Settlement, Call>(
     let (q, amount, is_writer) = collateral::destroy(request);
     assert!(is_writer, errors::request_flow_mismatch());
     let bucket_id = object::id(bucket);
-    assert!(quote::bucket_id(&q) == bucket_id, errors::quote_bucket_mismatch());
+    // Re-checked here, not just at request time: the potato only proves a
+    // quote was verified, not which bucket it is being spent against.
+    assert_quote_spec(bucket, &q);
     assert!(premium_funds.value() == amount, errors::amount_mismatch());
 
     let write_amount = quote::write_amount(&q);
@@ -377,7 +410,8 @@ public fun execute_trader_flow<Underlying, Settlement, Call>(
     let (q, amount, is_writer) = collateral::destroy(request);
     assert!(!is_writer, errors::request_flow_mismatch());
     let bucket_id = object::id(bucket);
-    assert!(quote::bucket_id(&q) == bucket_id, errors::quote_bucket_mismatch());
+    // See the writer-flow twin: the potato does not name a bucket.
+    assert_quote_spec(bucket, &q);
     assert!(underlying_funds.value() == amount, errors::amount_mismatch());
 
     let write_amount = quote::write_amount(&q);
@@ -443,7 +477,8 @@ public fun request_writer_flow_for_testing<Underlying, Settlement, Call>(
 ): CollateralRequest<Settlement> {
     let q = quote::verify_skip_sig(signer, config, &signed_quote, clock);
     assert_quote_bucket(bucket, &q, clock);
-    collateral::new_writer_request<Settlement>(q, quote::premium(&q))
+    let premium = quote::premium(&q);
+    collateral::new_writer_request<Settlement>(q, premium, object::id(bucket))
 }
 
 #[test_only]
@@ -456,7 +491,8 @@ public fun request_trader_flow_for_testing<Underlying, Settlement, Call>(
 ): CollateralRequest<Underlying> {
     let q = quote::verify_skip_sig(signer, config, &signed_quote, clock);
     assert_quote_bucket(bucket, &q, clock);
-    collateral::new_trader_request<Underlying>(q, quote::write_amount(&q))
+    let amount = quote::write_amount(&q);
+    collateral::new_trader_request<Underlying>(q, amount, object::id(bucket))
 }
 
 /// Core covered-write: escrow `underlying_in` in the bucket and mint the

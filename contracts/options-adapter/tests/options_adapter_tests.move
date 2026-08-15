@@ -72,14 +72,12 @@ fun setup(sc: &mut Scenario): Clock {
 
     // Bucket: strike 2.0 QUOTE per UND (scale 12), expiry 10_000s.
     let tcap = coin::create_treasury_cap_for_testing<CALL>(sc.ctx());
-    bucket::create_bucket<UND, QUOTE, CALL>(
-        &admin_cap,
+    bucket::create_bucket_for_testing<UND, QUOTE, CALL>(
         tcap,
         EXPIRY_MS,
         2_000_000_000_000,
         12,
-        sc.ctx(),
-    );
+        sc.ctx());
     ts::return_to_sender(sc, admin_cap);
 
     // UND-denominated vault, Alice seeds 1_000_000.
@@ -239,14 +237,12 @@ fun setup_spread(sc: &mut Scenario): (Clock, ID) {
     ts::next_tx(sc, ADMIN);
     let admin_cap = ts::take_from_sender<AdminCap>(sc);
     let tcap = coin::create_treasury_cap_for_testing<LCALL>(sc.ctx());
-    bucket::create_bucket<UND, QUOTE, LCALL>(
-        &admin_cap,
+    bucket::create_bucket_for_testing<UND, QUOTE, LCALL>(
         tcap,
         EXPIRY_MS,
         1_000_000_000_000, // strike 1.0 QUOTE per UND
         12,
-        sc.ctx(),
-    );
+        sc.ctx());
     ts::return_to_sender(sc, admin_cap);
 
     ts::next_tx(sc, MM);
@@ -400,14 +396,12 @@ fun spread_appraisal_wrong_long_bucket_aborts() {
     ts::next_tx(&mut sc, ADMIN);
     let admin_cap = ts::take_from_sender<AdminCap>(&sc);
     let tcap = coin::create_treasury_cap_for_testing<LCALL>(sc.ctx());
-    bucket::create_bucket<UND, QUOTE, LCALL>(
-        &admin_cap,
+    bucket::create_bucket_for_testing<UND, QUOTE, LCALL>(
         tcap,
         EXPIRY_MS,
         1_000_000_000_000,
         12,
-        sc.ctx(),
-    );
+        sc.ctx());
     ts::return_to_sender(&sc, admin_cap);
 
     ts::next_tx(&mut sc, ALICE);

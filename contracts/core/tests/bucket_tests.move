@@ -171,7 +171,7 @@ fun test_writer_flow_happy_path() {
         *admin::protocol_id(&config),
         object::id(&signer),
         th::trader_mm_addr(),
-        object::id(&b),
+        &b,
         write_amount,
         premium,
         EXPIRY_MS,
@@ -263,7 +263,7 @@ fun test_writer_flow_with_fee_skim() {
         *admin::protocol_id(&config),
         object::id(&signer),
         th::trader_mm_addr(),
-        object::id(&b),
+        &b,
         write_amount,
         premium,
         EXPIRY_MS,
@@ -330,7 +330,7 @@ fun test_trader_flow_happy_path() {
         *admin::protocol_id(&config),
         object::id(&signer),
         th::writer_mm_addr(),    // signer (writer MM) gets the position Object + net premium
-        object::id(&b),
+        &b,
         write_amount,
         premium,
         EXPIRY_MS,
@@ -408,7 +408,7 @@ fun test_execute_write_after_expiry_aborts() {
         *admin::protocol_id(&config),
         object::id(&signer),
         th::trader_mm_addr(),
-        object::id(&b),
+        &b,
         50,
         1_000,
         EXPIRY_MS + 10_000,
@@ -441,8 +441,8 @@ fun test_execute_write_after_expiry_aborts() {
 }
 
 #[test]
-#[expected_failure(abort_code = 5, location = options_core::bucket)] // quote_bucket_mismatch
-fun test_execute_write_bucket_mismatch_aborts() {
+#[expected_failure(abort_code = 5, location = options_core::bucket)] // quote_spec_mismatch
+fun test_execute_write_spec_mismatch_aborts() {
     let mut scenario = ts::begin(th::admin_addr());
     let clock = th::init_protocol(&mut scenario);
     setup_bucket(&mut scenario);
@@ -455,11 +455,17 @@ fun test_execute_write_bucket_mismatch_aborts() {
     let mut treasury = th::take_treasury(&scenario);
     let mut signer = th::take_signer(&scenario);
 
-    let q = th::new_test_quote(
+    // Right pair and expiry, wrong strike: the spec no longer describes this
+    // bucket, so the quote cannot be spent against it.
+    let q = th::new_test_quote_spec<BTC, USDC>(
         *admin::protocol_id(&config),
         object::id(&signer),
         th::trader_mm_addr(),
-        object::id_from_address(@0xDEAD), // wrong bucket
+        EXPIRY_MS,
+        ((STRIKE as u64) + 1), // wrong strike
+        STRIKE_SCALE,
+        /* is_put */ false,
+        std::u128::max_value!(),
         50,
         1_000,
         EXPIRY_MS,
@@ -510,7 +516,7 @@ fun test_writer_flow_amount_mismatch_aborts() {
         *admin::protocol_id(&config),
         object::id(&signer),
         th::trader_mm_addr(),
-        object::id(&b),
+        &b,
         50,
         1_000,
         EXPIRY_MS,
@@ -564,7 +570,7 @@ fun test_writer_request_into_trader_execute_aborts() {
         *admin::protocol_id(&config),
         object::id(&signer),
         th::trader_mm_addr(),
-        object::id(&b),
+        &b,
         50,
         1_000,
         EXPIRY_MS,
@@ -615,7 +621,7 @@ fun test_trader_request_into_writer_execute_aborts() {
         *admin::protocol_id(&config),
         object::id(&signer),
         th::writer_mm_addr(),
-        object::id(&b),
+        &b,
         50,
         1_000,
         EXPIRY_MS,
@@ -667,7 +673,7 @@ fun write_via_helper(
         *admin::protocol_id(&config),
         object::id(&signer),
         th::trader_mm_addr(),
-        object::id(&b),
+        &b,
         amount,
         premium,
         EXPIRY_MS,
@@ -1433,7 +1439,7 @@ fun test_write_executed_event_fields_unchanged_by_refactor() {
         *admin::protocol_id(&config),
         object::id(&signer),
         th::trader_mm_addr(),
-        object::id(&b),
+        &b,
         100,
         1_000_000,
         EXPIRY_MS,
@@ -1537,7 +1543,7 @@ fun test_interleaved_venues_share_cursor_and_redeem_exactly() {
         *admin::protocol_id(&config),
         object::id(&signer),
         th::trader_mm_addr(),
-        object::id(&b),
+        &b,
         25,
         1_000,
         EXPIRY_MS,

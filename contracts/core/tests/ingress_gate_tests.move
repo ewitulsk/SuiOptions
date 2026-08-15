@@ -160,7 +160,7 @@ fun test_non_member_execute_writer_flow_aborts() {
         *admin::protocol_id(&config),
         object::id(&signer),
         th::trader_mm_addr(),
-        object::id(&b),
+        &b,
         10,
         1_000,
         EXPIRY_MS,
