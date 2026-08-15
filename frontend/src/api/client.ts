@@ -21,7 +21,14 @@ const API_BASE_URL: string =
  *   string to preserve u64/u128 precision. Use these when building a tx.
  */
 export type Bucket = {
-  bucket_id: string;
+  /**
+   * `null` for a **listed but not-yet-created** strike (SO-400). The board
+   * advertises the ladder around spot; the bucket object only exists once
+   * someone writes at that strike, so a null id means "create it first"
+   * (`buildCreateBucketTx`), not "broken". Anything that needs an object —
+   * RFQs, the DeepBook panel, `/buckets/:id` — must skip these.
+   */
+  bucket_id: string | null;
   strike: number | null;
   strike_raw: string;
   /**
@@ -125,8 +132,35 @@ export function seriesOptionType(s: Series): "call" | "put" {
   return s.option_type ?? "call";
 }
 
-export async function fetchBuckets(opts?: { excludeExpired?: boolean }): Promise<Series[]> {
-  const qs = opts?.excludeExpired ? "?exclude_expired=true" : "";
+/**
+ * Stable identity for a listed strike, whether or not its bucket exists yet.
+ *
+ * The object id is the natural key but a synthetic strike has none, so we
+ * fall back to the option coin type — a pure function of
+ * `(underlying, settlement, expiry, strike, kind)`, so it identifies the same
+ * economic strike before and after creation. Use it for React keys and tile
+ * selection; use `bucket_id` itself only where a real object is required.
+ */
+export function strikeKey(b: Bucket): string {
+  return b.bucket_id ?? optionCoinType(b);
+}
+
+/** A strike the board lists but which has no bucket on chain yet. */
+export function isUncreated(b: Bucket): boolean {
+  return b.bucket_id === null;
+}
+
+export async function fetchBuckets(opts?: {
+  excludeExpired?: boolean;
+  all?: boolean;
+}): Promise<Series[]> {
+  const params = new URLSearchParams();
+  if (opts?.excludeExpired) params.set("exclude_expired", "true");
+  // `all=true` opts out of the listed board (SO-400) and returns every bucket
+  // the indexer has, synthetic strikes excluded. Admin/monitoring views need
+  // it; the trade surfaces deliberately don't.
+  if (opts?.all) params.set("all", "true");
+  const qs = params.size > 0 ? `?${params}` : "";
   const res = await fetch(`${API_BASE_URL}/buckets${qs}`);
   if (!res.ok) {
     throw new Error(`GET /buckets failed: ${res.status} ${res.statusText}`);

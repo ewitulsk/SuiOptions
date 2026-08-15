@@ -24,7 +24,6 @@ const OUR_CRATES: &[&str] = &[
     "indexer",
     "quoting_service",
     "mm_bot",
-    "option_scheduler",
     "api_service",
     "token_info",
     "token_info_client",

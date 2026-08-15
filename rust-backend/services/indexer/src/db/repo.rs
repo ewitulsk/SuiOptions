@@ -773,8 +773,7 @@ impl Repo {
 
     /// JIT list query over the bucket view. All filters are ANDed; `None`
     /// means "don't constrain". `active_only` drops cleaned buckets. Backs
-    /// the GraphQL `buckets(...)` query (api-service catalog + option-scheduler
-    /// roll-confirmation lookups).
+    /// the GraphQL `buckets(...)` query behind api-service's bucket catalog.
     /// bucket_id → DeepBook pool_id for the given buckets (SO-152). Buckets
     /// without a venue are simply absent from the map.
     pub fn deepbook_pool_ids(

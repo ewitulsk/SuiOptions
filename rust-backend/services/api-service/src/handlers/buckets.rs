@@ -76,7 +76,12 @@ use crate::state::{AppState, IndexerBucket};
 
 #[derive(Serialize)]
 pub struct BucketDto {
-    pub bucket_id: String,
+    /// `null` for a **listed but not-yet-created** strike (SO-400): the board
+    /// advertises the ladder around spot, and a bucket only becomes a real
+    /// object when someone writes at that strike. Consumers that need an
+    /// object id (PTB inputs, `/buckets/:id`) must skip these; the frontend
+    /// routes them through `create_bucket_any_strike` first.
+    pub bucket_id: Option<String>,
     /// Strike in USD-equivalent whole units. `null` if either decimals
     /// lookup failed. Post-SO-55: real ratio is
     /// `strike_raw / 10^strike_scale × 10^(under_dec − settle_dec)` —
@@ -170,6 +175,13 @@ pub struct ListBucketsParams {
     /// frozen strikes server-side rather than filtering client-side.
     #[serde(default)]
     pub exclude_invalidated: bool,
+    /// Serve the **full historical catalog** instead of the listed board
+    /// (SO-400). By default `/buckets` returns only the board expiries —
+    /// active week, next week, next two month-ends — plus the ladder around
+    /// spot; admin and monitoring views that need every bucket ever created
+    /// pass `?all=true` and get the pre-ladder behaviour verbatim.
+    #[serde(default)]
+    pub all: bool,
 }
 
 pub async fn list_buckets(
@@ -190,6 +202,9 @@ pub async fn list_buckets(
     let active = active.into_iter().map(into_local_bucket).collect();
     let now_ms = Utc::now().timestamp_millis();
     let mut series = group_into_series(active, &state.catalog, now_ms);
+    if !params.all {
+        series = build_board(&state, series, now_ms).await;
+    }
     if params.exclude_expired {
         series.retain(|s| s.expiry_ms > now_ms);
     }
@@ -502,6 +517,258 @@ fn option_coin_type_str(
     )
 }
 
+// ─────────────────────────── strike ladder (SO-400) ───────────────────────────
+
+/// Spot + σ for one configured pair, resolved once and reused across every
+/// expiry on the board.
+struct LadderInputs {
+    asset_ct: String,
+    settlement_ct: String,
+    asset_symbol: String,
+    settlement_symbol: String,
+    asset_decimals: u8,
+    settlement_decimals: u8,
+    /// Settlement-per-underlying cross, not the raw USD price: a series
+    /// settles in TUSDC, so the strike axis is denominated in it.
+    spot: f64,
+    sigma: f64,
+}
+
+/// Resolve a configured pair against the catalog and oracle-service.
+///
+/// Returns `None` when the pair can't be listed at all (unknown token, no
+/// spot). A missing *vol* is not fatal — the pair's `fallback_sigma` keeps
+/// the board up through an oracle vol outage.
+async fn ladder_inputs(state: &AppState, pair: &crate::ladder::LadderPair) -> Option<LadderInputs> {
+    let oracle = state.oracle.as_ref()?;
+    let asset_ct = state.catalog.by_symbol(&pair.underlying)?.to_string();
+    let settlement_ct = state.catalog.by_symbol(&pair.settlement)?.to_string();
+    let asset_meta = state.catalog.lookup(&asset_ct)?.clone();
+    let settle_meta = state.catalog.lookup(&settlement_ct)?.clone();
+
+    // Cross = underlying/USD ÷ settlement/USD. For a stablecoin settlement
+    // this is within a few bps of the raw USD price, but taking the ratio
+    // keeps the ladder honest if the settlement asset ever depegs.
+    let under_px = oracle.price_for_asset(&asset_ct).await.ok()?;
+    let settle_px = oracle.price_for_asset(&settlement_ct).await.ok()?;
+    if !(settle_px.price.is_finite() && settle_px.price > 0.0) {
+        return None;
+    }
+    let spot = under_px.price / settle_px.price;
+
+    let sigma = match asset_meta.pyth_feed_id.as_deref() {
+        Some(hex) => match protocol_types::PriceFeedId::from_hex(hex) {
+            Ok(feed) => oracle
+                .realized_vol(feed, pair.vol_window_days)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        pair = %pair.underlying,
+                        error = %e,
+                        "realized vol unavailable; using fallback sigma"
+                    );
+                    pair.fallback_sigma
+                }),
+            Err(_) => pair.fallback_sigma,
+        },
+        None => pair.fallback_sigma,
+    };
+
+    Some(LadderInputs {
+        asset_ct,
+        settlement_ct,
+        asset_symbol: asset_meta.symbol,
+        settlement_symbol: settle_meta.symbol,
+        asset_decimals: asset_meta.decimals,
+        settlement_decimals: settle_meta.decimals,
+        spot,
+        sigma: if sigma.is_finite() && sigma > 0.0 {
+            sigma
+        } else {
+            pair.fallback_sigma
+        },
+    })
+}
+
+/// Build the listed board: the configured pairs × [`crate::ladder::expiry_board`],
+/// with every real bucket on those expiries merged in.
+///
+/// Real buckets always win: a strike that exists on-chain is emitted with its
+/// object id and true written/cursor state even when it sits off the lattice
+/// (the manually-created any-strike buckets are exactly this case), and the
+/// synthetic entry for that strike is suppressed so a strike never appears
+/// twice.
+///
+/// Real series *off* the board are dropped — that's the point of the board,
+/// and `?all=true` is the escape hatch for admin and monitoring views.
+async fn build_board(
+    state: &AppState,
+    real: Vec<SeriesDto>,
+    now_ms: i64,
+) -> Vec<SeriesDto> {
+    let board = crate::ladder::expiry_board(now_ms);
+    // Index the real series so each board slot can claim its own.
+    let mut by_key: BTreeMap<SeriesKey, SeriesDto> = real
+        .into_iter()
+        .map(|s| {
+            let key = (
+                strip_0x(&s.asset_coin_type),
+                strip_0x(&s.settlement_coin_type),
+                s.expiry_ms.max(0) as u64,
+                s.option_type.clone(),
+            );
+            (key, s)
+        })
+        .collect();
+
+    let Some(package) = state.options_package.as_deref() else {
+        // No options package ⇒ we can't name the option coin of a strike that
+        // doesn't exist yet, so there is nothing to synthesize.
+        return by_key.into_values().collect();
+    };
+
+    let mut out: Vec<SeriesDto> = Vec::new();
+    for pair in &state.ladder_pairs {
+        let Some(inputs) = ladder_inputs(state, pair).await else {
+            tracing::warn!(
+                underlying = %pair.underlying,
+                settlement = %pair.settlement,
+                "ladder inputs unavailable; listing existing buckets only"
+            );
+            continue;
+        };
+        let option_type = if pair.is_put() { "put" } else { "call" };
+
+        for expiry_ms in &board {
+            let expiry = *expiry_ms as u64;
+            let key = (
+                strip_0x(&inputs.asset_ct),
+                strip_0x(&inputs.settlement_ct),
+                expiry,
+                option_type.to_string(),
+            );
+            let mut series = by_key.remove(&key).unwrap_or_else(|| SeriesDto {
+                asset_symbol: inputs.asset_symbol.clone(),
+                asset_decimals: Some(inputs.asset_decimals),
+                asset_coin_type: protocol_types::asset::canonicalize_move_type(&inputs.asset_ct),
+                settlement_symbol: inputs.settlement_symbol.clone(),
+                settlement_decimals: Some(inputs.settlement_decimals),
+                settlement_coin_type: protocol_types::asset::canonicalize_move_type(
+                    &inputs.settlement_ct,
+                ),
+                option_type: option_type.to_string(),
+                expiry_ms: *expiry_ms,
+                expiry_iso: iso_millis(*expiry_ms),
+                buckets: Vec::new(),
+            });
+
+            let tau = crate::ladder::tau_years(now_ms, *expiry_ms);
+            let strikes = crate::ladder::ladder_strikes(pair, inputs.spot, inputs.sigma, tau);
+            append_synthetic_strikes(&mut series, &strikes, &inputs, pair, package, expiry);
+            sort_by_strike(&mut series.buckets);
+            out.push(series);
+        }
+    }
+
+    // Real series that landed on a board expiry but whose pair isn't
+    // configured still belong on the board — dropping them would hide live
+    // open interest behind a config omission.
+    for (_, s) in by_key {
+        if board.contains(&s.expiry_ms) {
+            out.push(s);
+        }
+    }
+    out.sort_by(|a, b| {
+        (&a.asset_symbol, a.expiry_ms, &a.option_type).cmp(&(
+            &b.asset_symbol,
+            b.expiry_ms,
+            &b.option_type,
+        ))
+    });
+    out
+}
+
+/// Push a synthetic [`BucketDto`] for every ladder strike the series doesn't
+/// already carry, matching on the *normalized* strike so the two encodings of
+/// one economic strike can't both be listed.
+fn append_synthetic_strikes(
+    series: &mut SeriesDto,
+    strikes: &[f64],
+    inputs: &LadderInputs,
+    pair: &crate::ladder::LadderPair,
+    package: &str,
+    expiry_ms: u64,
+) {
+    let existing: std::collections::HashSet<(u64, u8)> = series
+        .buckets
+        .iter()
+        .filter_map(|b| {
+            let raw = b.strike_raw.parse::<u128>().ok()?;
+            normalize_strike(raw, b.strike_scale)
+        })
+        .collect();
+
+    for strike in strikes {
+        let Some((raw, scale)) = crate::ladder::strike_to_raw(
+            *strike,
+            inputs.asset_decimals,
+            inputs.settlement_decimals,
+        ) else {
+            continue;
+        };
+        let Some((sig, exp)) = normalize_strike(raw, scale) else {
+            continue;
+        };
+        if existing.contains(&(sig, exp)) {
+            continue;
+        }
+        let coin_type = option_coin_type_str(
+            package,
+            pair.is_put(),
+            &protocol_types::asset::canonicalize_move_type(&inputs.asset_ct),
+            &protocol_types::asset::canonicalize_move_type(&inputs.settlement_ct),
+            expiry_ms,
+            sig,
+            exp,
+        );
+        series.buckets.push(BucketDto {
+            bucket_id: None,
+            strike: Some(*strike),
+            strike_raw: raw.to_string(),
+            call_coin_type: coin_type.clone(),
+            option_coin_type: coin_type,
+            strike_scale: scale,
+            total_written: Some(0.0),
+            total_written_raw: "0".to_string(),
+            exercise_cursor: Some(0.0),
+            exercise_cursor_raw: "0".to_string(),
+            fill_pct: Some(0.0),
+            invalidated: false,
+            deepbook_pool_id: None,
+            // A strike that doesn't exist yet has no pool and no secondary
+            // market, but the mint path is open the moment it's created —
+            // which is exactly what `rfq_tradeable` gates.
+            tradeable: false,
+            rfq_tradeable: true,
+            pool_tradeable: false,
+        });
+    }
+}
+
+fn sort_by_strike(buckets: &mut [BucketDto]) {
+    buckets.sort_by(|a, b| {
+        a.strike
+            .partial_cmp(&b.strike)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+/// Series keys are compared in chain form (bare address, no `0x`) because
+/// that's what the indexer stores; the DTOs carry the canonical `0x` form.
+fn strip_0x(t: &str) -> String {
+    t.strip_prefix("0x").unwrap_or(t).to_string()
+}
+
 /// Map the JIT client's bucket into the local `(id, Bucket)` shape that the
 /// pure `group_into_series` helper (and its tests) work against.
 fn into_local_bucket(b: indexer_graphql::Bucket) -> (protocol_types::ids::ObjectId, Bucket) {
@@ -609,7 +876,7 @@ fn dto_from(
         _ => None,
     };
     BucketDto {
-        bucket_id,
+        bucket_id: Some(bucket_id),
         strike,
         strike_raw: b.strike.to_string(),
         call_coin_type: protocol_types::asset::canonicalize_move_type(b.call_type.as_str()),
@@ -633,8 +900,8 @@ fn scale_u128(raw: u128, decimals: u8) -> f64 {
 }
 
 /// Convert an on-chain strike (`raw / 10^strike_scale` settlement-
-/// smallest-units per underlying-smallest-unit) into USD. Mirrors the
-/// bucket-creation math in `option-scheduler/src/strike_grid.rs`.
+/// smallest-units per underlying-smallest-unit) into USD. Inverse of
+/// `crate::ladder::strike_to_raw`.
 pub(crate) fn strike_raw_to_usd(raw: u128, strike_scale: u8, under_dec: u8, settle_dec: u8) -> f64 {
     raw as f64 * 10f64.powi(under_dec as i32 - settle_dec as i32 - strike_scale as i32)
 }
@@ -759,8 +1026,8 @@ mod tests {
         // Regression for SO-49: api-service was dividing the on-chain
         // strike by 10^settlement_decimals only, dropping a factor of
         // 10^under_dec. For TBTC(8)/TUSDC(6) that mapped a real
-        // strike_raw=769 (the centre strike at ~$77k BTC the scheduler
-        // produces today) into 0.000769 USD. Pin the conversion so the
+        // strike_raw=769 (a centre strike at ~$77k BTC) into
+        // 0.000769 USD. Pin the conversion so the
         // regression can't sneak back in.
         let cat = fixture_catalog();
         let buckets = vec![(ObjectId::new([0xee; 32]), mk_bucket(769, 0, 0, 0))];
@@ -804,7 +1071,7 @@ mod tests {
     fn strike_scale_lets_sub_dollar_round_trip_through_dto() {
         // Regression for SO-55 — a sub-dollar asset at $0.15 against a
         // same-decimals stablecoin (TMICRO is a 6-dec stand-in, not a real
-        // token). Scheduler picks strike_scale=5 → strike_raw=15_000.
+        // token) at strike_scale=5 → strike_raw=15_000.
         // The api-service formula has to consume the scale; without it
         // the displayed strike collapses by 10^5.
         let cat = TokenCatalog::from_tokens(&[
@@ -1050,5 +1317,171 @@ mod tests {
 {pkg}::enc0::B0B,{pkg}::enc0::B02>"
             )
         );
+    }
+
+    // ─────────────────────── strike ladder (SO-400) ───────────────────────
+
+    fn ladder_pair() -> crate::ladder::LadderPair {
+        crate::ladder::LadderPair {
+            underlying: "TBTC".into(),
+            settlement: "TUSDC".into(),
+            option_type: "call".into(),
+            tick_pct: 0.025,
+            z_width: 2.5,
+            vol_window_days: 30,
+            fallback_sigma: 0.6,
+        }
+    }
+
+    fn ladder_inputs_fixture() -> LadderInputs {
+        LadderInputs {
+            asset_ct: "0xpkg::tbtc::TBTC".into(),
+            settlement_ct: "0xpkg::tusdc::TUSDC".into(),
+            asset_symbol: "TBTC".into(),
+            settlement_symbol: "TUSDC".into(),
+            asset_decimals: 8,
+            settlement_decimals: 6,
+            spot: 63_090.2,
+            sigma: 0.35,
+        }
+    }
+
+    fn empty_series() -> SeriesDto {
+        SeriesDto {
+            asset_symbol: "TBTC".into(),
+            asset_decimals: Some(8),
+            asset_coin_type: "0xpkg::tbtc::TBTC".into(),
+            settlement_symbol: "TUSDC".into(),
+            settlement_decimals: Some(6),
+            settlement_coin_type: "0xpkg::tusdc::TUSDC".into(),
+            option_type: "call".into(),
+            expiry_ms: 1_782_345_600_000,
+            expiry_iso: iso_millis(1_782_345_600_000),
+            buckets: Vec::new(),
+        }
+    }
+
+    const EXPIRY: u64 = 1_782_345_600_000;
+
+    #[test]
+    fn synthetic_strikes_are_listed_without_an_object_id() {
+        let mut s = empty_series();
+        let inputs = ladder_inputs_fixture();
+        let pair = ladder_pair();
+        let strikes = crate::ladder::ladder_strikes(&pair, inputs.spot, inputs.sigma, 7.0 / 365.0);
+        append_synthetic_strikes(&mut s, &strikes, &inputs, &pair, "0xopt", EXPIRY);
+
+        assert!(!s.buckets.is_empty());
+        for b in &s.buckets {
+            assert!(b.bucket_id.is_none(), "synthetic strike carries an id");
+            assert!(b.rfq_tradeable, "a listed strike must be writable");
+            assert!(!b.pool_tradeable, "a strike with no bucket has no pool");
+            assert_eq!(b.total_written_raw, "0");
+            assert!(b.option_coin_type.contains("OptionCall"));
+        }
+    }
+
+    /// The core merge rule: a strike that already exists on-chain keeps its
+    /// object id and real state, and must not also appear as a synthetic
+    /// entry — even though the lattice lists that same strike.
+    #[test]
+    fn real_bucket_suppresses_the_synthetic_entry_for_its_strike() {
+        let mut s = empty_series();
+        // 63 000 encodes as (63000, 2) → normalized (630, 0).
+        let (raw, scale) = crate::ladder::strike_to_raw(63_000.0, 8, 6).unwrap();
+        s.buckets.push(dto_from(
+            "0xreal".into(),
+            &mk_bucket(raw, scale, 500, 0),
+            Some(8),
+            Some(6),
+            NOW_MS,
+        ));
+
+        let inputs = ladder_inputs_fixture();
+        let pair = ladder_pair();
+        let strikes = crate::ladder::ladder_strikes(&pair, inputs.spot, inputs.sigma, 7.0 / 365.0);
+        assert!(strikes.contains(&63_000.0), "fixture assumes 63000 is on-lattice");
+        append_synthetic_strikes(&mut s, &strikes, &inputs, &pair, "0xopt", EXPIRY);
+
+        let at_63k: Vec<&BucketDto> = s
+            .buckets
+            .iter()
+            .filter(|b| b.strike.map(|k| (k - 63_000.0).abs() < 1e-6).unwrap_or(false))
+            .collect();
+        assert_eq!(at_63k.len(), 1, "63000 listed twice");
+        assert_eq!(at_63k[0].bucket_id.as_deref(), Some("0xreal"));
+        assert_eq!(at_63k[0].total_written_raw, "500");
+    }
+
+    /// An off-lattice bucket (the manually-created any-strike case) survives
+    /// the merge — dropping it would strand real open interest.
+    #[test]
+    fn off_lattice_real_bucket_is_preserved() {
+        let mut s = empty_series();
+        let (raw, scale) = crate::ladder::strike_to_raw(98_765.43, 8, 6).unwrap();
+        s.buckets.push(dto_from(
+            "0xodd".into(),
+            &mk_bucket(raw, scale, 42, 0),
+            Some(8),
+            Some(6),
+            NOW_MS,
+        ));
+
+        let inputs = ladder_inputs_fixture();
+        let pair = ladder_pair();
+        let strikes = crate::ladder::ladder_strikes(&pair, inputs.spot, inputs.sigma, 7.0 / 365.0);
+        assert!(!strikes.contains(&98_765.43), "fixture assumes it is off-lattice");
+        append_synthetic_strikes(&mut s, &strikes, &inputs, &pair, "0xopt", EXPIRY);
+        sort_by_strike(&mut s.buckets);
+
+        let odd = s
+            .buckets
+            .iter()
+            .find(|b| b.bucket_id.as_deref() == Some("0xodd"))
+            .expect("off-lattice bucket dropped");
+        assert_eq!(odd.total_written_raw, "42");
+    }
+
+    /// Two encodings of one strike normalize to the same spec; matching on
+    /// the raw pair instead would list the strike twice.
+    #[test]
+    fn dedup_matches_on_the_normalized_strike_not_the_raw_pair() {
+        let mut s = empty_series();
+        // (6_300_000, 4) is 63 000 written at a deeper scale than the
+        // ladder's own (63_000, 2) encoding — same economics.
+        s.buckets.push(dto_from(
+            "0xdeep".into(),
+            &mk_bucket(6_300_000, 4, 1, 0),
+            Some(8),
+            Some(6),
+            NOW_MS,
+        ));
+
+        let inputs = ladder_inputs_fixture();
+        let pair = ladder_pair();
+        append_synthetic_strikes(&mut s, &[63_000.0], &inputs, &pair, "0xopt", EXPIRY);
+        assert_eq!(s.buckets.len(), 1, "same strike listed twice: {:?}", s.buckets.iter().map(|b| b.strike).collect::<Vec<_>>());
+        assert_eq!(s.buckets[0].bucket_id.as_deref(), Some("0xdeep"));
+    }
+
+    #[test]
+    fn synthetic_option_coin_type_matches_the_spec_endpoint() {
+        let mut s = empty_series();
+        let inputs = ladder_inputs_fixture();
+        let pair = ladder_pair();
+        append_synthetic_strikes(&mut s, &[63_000.0], &inputs, &pair, "0xopt", EXPIRY);
+
+        let (sig, exp) = normalize_strike(63_000, 2).unwrap();
+        let expected = option_coin_type_str(
+            "0xopt",
+            false,
+            &protocol_types::asset::canonicalize_move_type("0xpkg::tbtc::TBTC"),
+            &protocol_types::asset::canonicalize_move_type("0xpkg::tusdc::TUSDC"),
+            EXPIRY,
+            sig,
+            exp,
+        );
+        assert_eq!(s.buckets[0].option_coin_type, expected);
+        assert_eq!(s.buckets[0].call_coin_type, expected);
     }
 }

@@ -11,7 +11,7 @@
 //!
 //! ## Keyed by the PYTH feed id, on purpose
 //!
-//! Every WS/cache consumer (mm-bot, market-sim, option-scheduler, keeper,
+//! Every WS/cache consumer (mm-bot, market-sim, api-service, keeper,
 //! price-charting) resolves its subscription keys from the catalog's
 //! `pyth_feed_id`. Publishing under each token's pyth id — via the
 //! `switchboard_hash → pyth_feed_id` alias map built at boot — means zero

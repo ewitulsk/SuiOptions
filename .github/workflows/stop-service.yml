@@ -5,7 +5,7 @@ name: Stop service
 # halted but not removed — a subsequent deploy (or `docker compose up -d`)
 # will bring it back without needing a full image pull.
 #
-# The service list is the union across envs (e.g. mm-bot/option-scheduler
+# The service list is the union across envs (e.g. mm-bot
 # are staging-only); the chosen service is validated against the target
 # env's compose file on the host before stopping.
 
@@ -29,7 +29,6 @@ on:
           - indexer
           - quoting
           - mm-bot
-          - option-scheduler
           - api-service
           - price-charting
           - gas-station

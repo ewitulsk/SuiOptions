@@ -475,7 +475,7 @@ impl IndexerClient {
 
     /// Highest persisted sequence (0 if the log is empty). This is the JIT
     /// equivalent of the fanout `last_sequence` high-water mark — used by the
-    /// option-scheduler reconciler to tell whether the indexer has caught up.
+    /// callers to tell whether the indexer has caught up.
     pub async fn head_sequence(&self) -> Result<u64> {
         const Q: &str =
             "query{events(order:SEQUENCE_DESC,limit:1){nodes{sequence timestampMs payload}}}";

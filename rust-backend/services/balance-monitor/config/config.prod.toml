@@ -12,8 +12,8 @@ secrets_file = "/run/secrets/gas-station.toml"
 low_balance_sui = 5.0
 
 [[watch]]
-name = "option-scheduler"
-secrets_file = "/run/secrets/scheduler.toml"
+name = "deployer"
+secrets_file = "/run/secrets/deployer.toml"
 low_balance_sui = 2.0
 
 # mm-bot is optional in prod (render-secrets.sh skips absent secrets); the

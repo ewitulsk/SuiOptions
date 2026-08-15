@@ -325,6 +325,7 @@ dependencies = [
  "indexer-graphql",
  "object_store 0.12.5",
  "observability",
+ "oracle-client",
  "parquet",
  "pricing",
  "protocol-types",
@@ -2243,7 +2244,6 @@ dependencies = [
  "futures-util",
  "indexer",
  "mm-bot",
- "option-scheduler",
  "quoting-service",
  "ratatui",
  "rfq-monitor",
@@ -3377,14 +3377,17 @@ name = "exchange"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "cli-spec",
  "hex",
- "option-scheduler",
+ "move-core-types",
  "protocol-types",
+ "reqwest",
  "runtime-config",
  "serde",
  "serde_json",
+ "shared-crypto",
  "sui-tx",
  "sui-types",
  "token-info-client",
@@ -7451,41 +7454,6 @@ dependencies = [
  "rand 0.9.4",
  "serde_json",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "option-scheduler"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "chrono",
- "clap",
- "cli-spec",
- "config",
- "diesel",
- "diesel_migrations",
- "indexer-graphql",
- "metrics",
- "move-core-types",
- "observability",
- "oracle-client",
- "pricing",
- "protocol-types",
- "r2d2",
- "reqwest",
- "runtime-config",
- "serde",
- "serde_json",
- "shared-crypto",
- "sui-move-build",
- "sui-tx",
- "sui-types",
- "thiserror 1.0.69",
- "token-info-client",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -40,7 +40,9 @@ export function useOwnedCallOptions(
   const callTypeToBucket = new Map<string, string>();
   for (const s of series ?? []) {
     for (const b of s.buckets) {
-      if (b.call_coin_type) {
+      // A listed-but-uncreated strike (SO-400) has no bucket object and so
+      // can never back an owned coin — skip it rather than map to null.
+      if (b.call_coin_type && b.bucket_id) {
         callTypeToBucket.set(normalizeStructTag(b.call_coin_type), b.bucket_id);
       }
     }

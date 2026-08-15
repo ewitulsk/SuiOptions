@@ -1,8 +1,12 @@
 //! Library surface for the `exchange` binary.
 //!
 //! Hosts the clap [`Cli`] / [`Command`] enum so the control-panel TUI can
-//! introspect every subcommand and its flags. Business logic lives in
-//! `main.rs`.
+//! introspect every subcommand and its flags, plus the bucket-create
+//! executor (moved here from the option-scheduler when bucket rolling was
+//! removed from that service). Business logic lives in `main.rs`.
+
+pub mod roller;
+pub mod strike_grid;
 
 use std::path::PathBuf;
 
@@ -11,8 +15,8 @@ use sui_types::base_types::{ObjectID, SuiAddress};
 
 use sui_tx::sui_client::Network;
 
-/// Option product selector for bucket creation. Mirrors the scheduler's
-/// `roller::ProductType`; `call` is the default so existing behaviour is
+/// Option product selector for bucket creation. Mirrors
+/// [`roller::ProductType`]; `call` is the default so existing behaviour is
 /// unchanged.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Product {

@@ -156,9 +156,9 @@ class TestRegressionPins(unittest.TestCase):
                 "api-service",
                 "keeper",
                 "mm-bot",
-                "option-scheduler",
                 "price-charting",
                 "quoting-service",
+                "staging-mm-bot",
             ],
         )
 
@@ -170,13 +170,12 @@ class TestRegressionPins(unittest.TestCase):
         got = affected.affected_services(
             ["rust-backend/crates/token-info-client/src/lib.rs"]
         )
-        # The six that were silently skipped before SO-315.
+        # Those that were silently skipped before SO-315.
         for svc in (
             "api-service",
             "gas-station",
             "indexer",
             "mm-bot",
-            "option-scheduler",
             "quoting-service",
         ):
             with self.subTest(service=svc):

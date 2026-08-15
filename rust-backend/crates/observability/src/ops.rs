@@ -1,7 +1,7 @@
 //! Minimal HTTP server for `/health` + `/metrics`.
 //!
 //! The health/metrics server for services that have no axum stack (indexer
-//! ingest, mm-bot, option-scheduler, keeper, market-sim, balance-monitor): a
+//! ingest, mm-bot, keeper, market-sim, balance-monitor): a
 //! tiny TCP loop plus the Prometheus scrape endpoint. axum services should
 //! mount [`crate::middleware::metrics_route`] instead.
 //!

@@ -319,6 +319,8 @@ async function optionBucketCatalog(): Promise<Map<string, Omit<OptionLegPlan, "c
   const map = new Map<string, Omit<OptionLegPlan, "coinType">>();
   for (const s of series) {
     for (const b of s.buckets) {
+      // Only created buckets can appear in an appraisal leg.
+      if (b.bucket_id === null) continue;
       map.set(canon(optionCoinType(b)), {
         bucketId: b.bucket_id,
         underlying: canon(s.asset_coin_type),

@@ -17,11 +17,6 @@ runtime-config = { workspace = true }
 cli-spec       = { workspace = true }
 sui-tx         = { workspace = true }
 token-info-client = { workspace = true }
-# Reuse the scheduler's codegen→publish→create_bucket roll pipeline so the
-# manual `create-buckets` admin command mints per-bucket option coins the same
-# way the scheduler does.
-option-scheduler = { path = "../../services/option-scheduler" }
-
 sui-types = { workspace = true }
 
 tokio = { workspace = true }
@@ -35,3 +30,15 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# StructTag fixtures in roller tests; the binary only pattern-matches against
+# ObjectChange, so move-core-types stays out of the runtime dep tree.
+move-core-types = { workspace = true }
+# anystrike_localnet.rs (#[ignore], needs a live localnet): publish the
+# protocol, drive a real create-buckets, read buckets back.
+shared-crypto = { workspace = true }
+# Decode `sui move build --dump-bytecode-as-base64`.
+base64 = "0.22"
+# Faucet calls in the localnet harness.
+reqwest = { workspace = true }

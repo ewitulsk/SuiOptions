@@ -6,9 +6,8 @@
 //! (empty registries), which previously required manual PTBs after every
 //! redeploy.
 //!
-//! Pool allowlisting is deliberately NOT done here: pools are created by
-//! the option-scheduler per roll (and a redeploy wipes + re-rolls them),
-//! so the scheduler allowlists each pool as it creates it.
+//! Pool allowlisting is deliberately NOT done here: pools are created
+//! on demand, so whoever creates one allowlists it at the same time.
 
 use std::collections::BTreeMap;
 use std::str::FromStr;

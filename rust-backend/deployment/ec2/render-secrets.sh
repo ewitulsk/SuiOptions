@@ -8,8 +8,10 @@
 #   options/<env>/indexer    -> {"db_password": "..."}
 #   options/<env>/mm-bot     -> {"sui_key": "suiprivkey1...", "quote_key": "..."}
 #   options/<env>/scheduler  -> {"sui_key": "suiprivkey1..."}  (deployer key,
-#                                holds AdminCap; absent if scheduler isn't
-#                                deployed in this env)
+#                                holds AdminCap. Named `scheduler` for
+#                                historical reasons — the service of that
+#                                name is gone; the key itself is still the
+#                                canonical publish/admin signer.)
 #   options/<env>/cctp-relay -> {"sui_key": "...", "solana_key": "...",
 #                                "grpc_url": "..."} (grpc_url is REQUIRED and
 #                                must match the relay's configured [sui]
@@ -17,7 +19,8 @@
 #
 # Outputs (consumed by docker-compose):
 #   /opt/options/<env>/secrets/mm-bot.toml       (read by mm-bot)
-#   /opt/options/<env>/secrets/scheduler.toml    (read by option-scheduler)
+#   /opt/options/<env>/secrets/deployer.toml     (deployer wallet; watched by
+#                                                 balance-monitor)
 #   /opt/options/<env>/secrets/.db_password      (sourced into .env by deploy.sh)
 #
 # Idempotent: re-running overwrites the rendered files. Services whose
@@ -152,17 +155,19 @@ $RPC_LINE
 EOF
 fi
 
-# ---- option-scheduler secret -> rendered TOML ----------------------------
-# The scheduler signs with the deployer key (AdminCap holder). One Sui
-# key per env; no quote key (scheduler doesn't sign quotes).
-if SCH_JSON=$(fetch scheduler 2>/dev/null); then
-  SUI_KEY=$(echo "$SCH_JSON" | jq -r '.sui_key')
+# ---- deployer key -> rendered TOML ---------------------------------------
+# The deployer wallet (AdminCap holder) is the canonical publish/admin signer.
+# No service reads this file any more — balance-monitor watches it so the
+# wallet that funds every redeploy doesn't run dry unnoticed. The AWS secret
+# keeps its historical `scheduler` name.
+if DEPLOYER_JSON=$(fetch scheduler 2>/dev/null); then
+  SUI_KEY=$(echo "$DEPLOYER_JSON" | jq -r '.sui_key')
   if [ -z "$SUI_KEY" ] || [ "$SUI_KEY" = "null" ]; then
     echo "missing sui_key in options/$ENV/scheduler" >&2
     exit 1
   fi
   umask 077
-  cat > "$DIR/scheduler.toml" <<EOF
+  cat > "$DIR/deployer.toml" <<EOF
 [sui]
 $NETWORK = "$SUI_KEY"
 $RPC_LINE

@@ -118,10 +118,18 @@ function indexBucketSeries(buckets: Series[] | undefined): Map<
   string,
   { series: Series; bucket: Series["buckets"][number] }
 > {
-  const m = new Map<string, { series: Series; bucket: Series["buckets"][number] }>();
+  const m = new Map<
+    string,
+    { series: Series; bucket: Series["buckets"][number] & { bucket_id: string } }
+  >();
   if (!buckets) return m;
   for (const s of buckets) {
-    for (const b of s.buckets) m.set(b.bucket_id, { series: s, bucket: b });
+    for (const b of s.buckets) {
+      // A listed-but-uncreated strike (SO-400) has no object id and can never
+      // back a holding — it has no place in a by-bucket-id index.
+      if (b.bucket_id === null) continue;
+      m.set(b.bucket_id, { series: s, bucket: b as typeof b & { bucket_id: string } });
+    }
   }
   return m;
 }
@@ -468,7 +476,9 @@ export function useDashboardState(): DashboardState {
       const ot = seriesOptionType(s);
       for (const b of s.buckets) {
         const ct = optionCoinType(b);
-        if (ct) optionTypeMeta.set(normalizeStructTag(ct), { bucketId: b.bucket_id, optionType: ot });
+        if (ct && b.bucket_id) {
+          optionTypeMeta.set(normalizeStructTag(ct), { bucketId: b.bucket_id, optionType: ot });
+        }
       }
     }
 
@@ -618,6 +628,7 @@ export function useDashboardState(): DashboardState {
         const norm = normalizeStructTag(p.id);
         const bucketInfo = (buckets.data ?? [])
           .flatMap((s) => s.buckets.map((b) => ({ series: s, b })))
+          .filter((x): x is typeof x & { b: { bucket_id: string } } => x.b.bucket_id !== null)
           .find((x) => normalizeStructTag(optionCoinType(x.b)) === norm);
         if (!bucketInfo) {
           throw new Error("missing on-chain reference for exercise");

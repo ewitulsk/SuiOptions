@@ -205,7 +205,6 @@ Services EC2
 │  indexer           (staging / prod)      │
 │  quoting                  "              │
 │  mm-bot                   "              │
-│  option-scheduler         "              │
 │  api-service              "              │
 │  nginx (reverse proxy)    "              │
 │                                          │
@@ -278,7 +277,7 @@ Promtail auto-discovers Docker containers and applies these labels:
 | Label | Source | Example |
 |---|---|---|
 | `env` | Compose project name (`options-<env>`) | `staging`, `prod`, `monitoring` |
-| `service` | Compose service name | `indexer`, `quoting`, `mm-bot`, `option-scheduler`, `api-service`, `nginx` |
+| `service` | Compose service name | `indexer`, `quoting`, `mm-bot`, `api-service`, `nginx` |
 | `container` | Docker container name | `options-staging-indexer-1` |
 | `level` | Parsed from JSON log lines | `INFO`, `ERROR`, `DEBUG` |
 
@@ -297,8 +296,8 @@ Promtail auto-discovers Docker containers and applies these labels:
 # mm-bot errors in staging:
 {env="staging", service="mm-bot"} | json | level = "ERROR"
 
-# option-scheduler across all envs:
-{service="option-scheduler"}
+# api-service across all envs:
+{service="api-service"}
 
 # nginx access logs for prod:
 {env="prod", service="nginx"}

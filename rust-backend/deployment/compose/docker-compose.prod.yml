@@ -3,7 +3,7 @@
 # deploy.sh. Runs on the dedicated prod EC2 host (options-prod-host).
 #
 # Full service stack — mirrors docker-compose.staging.yml so redeploy-contract
-# brings prod up identically (option-scheduler re-rolls buckets for a fresh
+# brings prod up identically (buckets are created on demand for a fresh
 # contract, mm-bot quotes against it). When deploy.sh is asked to roll a
 # service that isn't declared here it logs and skips, so a per-env opt-out is
 # just omitting the block.
@@ -134,31 +134,13 @@ services:
     restart: unless-stopped
     networks: [net]
 
-  option-scheduler:
-    image: ${ECR}/options/option-scheduler:${SCHEDULER_TAG}
-    environment:
-      APP_ENV: prod
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
-      # Mandatory: the scheduler refuses to start without its rolls DB.
-      # Expanded into scheduler_database_url in config.prod.toml.
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_HOST: ${DB_HOST}
-      TOKEN_INFO_URL: http://token-info:9005
-      ORACLE_URL: http://oracle-service:9013
-      RUST_LOG: info,option_scheduler=info
-    volumes:
-      - /opt/options/prod/secrets:/run/secrets:ro
-    depends_on: [indexer, token-info, oracle-service]
-    restart: unless-stopped
-    networks: [net]
-
   api-service:
     image: ${ECR}/options/api-service:${API_SERVICE_TAG}
     environment:
       APP_ENV: prod
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       RUST_LOG: info,api_service=info
-    depends_on: [indexer, token-info]
+    depends_on: [indexer, token-info, oracle-service]
     restart: unless-stopped
     networks: [net]
 
@@ -278,7 +260,7 @@ services:
     restart: unless-stopped
     networks: [net]
 
-  # Single public entrypoint per env. Strips the /prod/{quoting,api,indexer,scheduler,mm-bot}
+  # Single public entrypoint per env. Strips the /prod/{quoting,api,indexer,mm-bot}
   # prefix before forwarding. depends_on is start-order only; nginx
   # tolerates backends being briefly unreachable on first boot.
   nginx:
@@ -290,7 +272,7 @@ services:
     volumes:
       - /opt/options/prod/nginx/:/etc/nginx/options/:ro
     command: ["nginx", "-c", "/etc/nginx/options/nginx.conf", "-g", "daemon off;"]
-    depends_on: [quoting, api-service, indexer, option-scheduler, mm-bot, token-info, auth-service, gas-station, hedge-signer, keeper, crossbar]
+    depends_on: [quoting, api-service, indexer, mm-bot, token-info, auth-service, gas-station, hedge-signer, keeper, crossbar]
     restart: unless-stopped
     networks: [net]
 

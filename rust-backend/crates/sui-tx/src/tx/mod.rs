@@ -153,7 +153,7 @@ const GAS_REF_ATTEMPTS: u32 = 4;
 /// transaction was rejected on every boot (SO-343).
 ///
 /// Public because callers that own durable state past the retry budget need
-/// the same answer: the option-scheduler classifies a submit failure to decide
+/// the same answer: callers classify a submit failure to decide
 /// whether its claimed roll slot can be released (SO-344).
 pub fn is_stale_gas_rejection(err: &anyhow::Error) -> bool {
     // Matched on the message because the gRPC status is flattened into an
@@ -200,7 +200,7 @@ pub async fn submit_ptb(
 /// it embeds, so a retry picks up the current version of the AdminCap (or any
 /// other owned input) as well as the gas coin. Rebuilding is what makes the
 /// retry meaningful: re-selecting gas alone leaves the stale input in place,
-/// which is how the option-scheduler's post-roll `allow_pool` call failed on
+/// which is how a post-create `allow_pool` call failed on
 /// all four attempts — the roll's own `create_buckets` had just bumped the
 /// AdminCap it was still referencing (SO-344).
 ///

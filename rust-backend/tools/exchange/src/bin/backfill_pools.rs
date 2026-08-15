@@ -1,10 +1,10 @@
 //! One-off admin tool (SO-171): create DeepBook permissionless pools for
 //! buckets that lack one.
 //!
-//! The scheduler now creates a pool for every NEW roll; this backfills
-//! pre-existing buckets (and any pool a roll failed to create). Pool creation
-//! is idempotent at the contract level — a pool that already exists reverts at
-//! dry-run and is reported as a skip, not a hard failure.
+//! Nothing creates pools automatically any more, so this backfills any bucket
+//! that needs one. Pool creation is idempotent at the contract level — a pool
+//! that already exists reverts at dry-run and is reported as a skip, not a
+//! hard failure.
 //!
 //! The base side of each pool is the bucket's Call coin (which inherits the
 //! underlying's decimals); the quote side is the shared settlement asset. Pass
@@ -41,7 +41,7 @@ struct Cli {
     #[arg(
         short = 's',
         long,
-        default_value = "services/option-scheduler/config/secrets.toml"
+        default_value = "tools/exchange/config/secrets.toml"
     )]
     secrets: std::path::PathBuf,
 

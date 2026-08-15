@@ -8,7 +8,12 @@ locals {
   # retired. Removing it here destroys the repo on apply — if it still holds
   # images, run `terraform state rm 'aws_ecr_repository.svc["derived-metric-worker"]'`
   # and delete the repo by hand (or set force_delete) to avoid a destroy error.
-  service_repos = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook", "staging-mm-bot", "data-room-collector", "data-room-batch"]
+  # option-scheduler was decommissioned (buckets are created on demand now);
+  # same hazard applies — before the next apply run
+  #   terraform state rm 'aws_ecr_repository.svc["option-scheduler"]'
+  # and delete options/option-scheduler by hand, or the apply fails on a
+  # non-empty repository.
+  service_repos = ["indexer", "quoting-service", "mm-bot", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook", "staging-mm-bot", "data-room-collector", "data-room-batch"]
 }
 
 resource "aws_ecr_repository" "svc" {

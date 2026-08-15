@@ -237,10 +237,11 @@ impl ApiServiceClient {
                 if !b.tradeable {
                     continue;
                 }
+                let Some(bucket_id) = b.bucket_id else { continue };
                 let Some(pool_id) = b.deepbook_pool_id else { continue };
                 out.push(TradeableBucket {
-                    bucket_id: ObjectId::from_hex(&b.bucket_id)
-                        .map_err(|e| anyhow::anyhow!("bucket_id {}: {e}", b.bucket_id))?,
+                    bucket_id: ObjectId::from_hex(&bucket_id)
+                        .map_err(|e| anyhow::anyhow!("bucket_id {bucket_id}: {e}"))?,
                     pool_id,
                     call_coin_type: canonicalize_move_type(&b.call_coin_type),
                     asset_coin_type: canonicalize_move_type(&series.asset_coin_type),
@@ -371,7 +372,12 @@ struct SeriesWire {
 
 #[derive(Deserialize)]
 struct SeriesBucketWire {
-    bucket_id: String,
+    /// `null` for a listed-but-not-yet-created strike (SO-400). Optional here
+    /// so the ladder can't fail the whole response to parse — these entries
+    /// are filtered out below, since a bucket with no object id is neither
+    /// tradeable nor referenceable in a PTB.
+    #[serde(default)]
+    bucket_id: Option<String>,
     call_coin_type: String,
     strike_raw: String,
     strike_scale: u8,
@@ -423,5 +429,46 @@ mod tests {
         assert_eq!(p.strike, 31_473);
         assert_eq!(p.strike_scale, 9);
         assert_eq!(p.expiry_ms, 1_781_740_800_000);
+    }
+
+    /// A `/buckets` response carrying the SO-400 strike ladder must parse:
+    /// synthetic entries have a null `bucket_id`, and a non-optional field
+    /// here would fail the *entire* response — taking mm-bot's and
+    /// price-charting's view of the real buckets down with it.
+    #[test]
+    fn buckets_wire_tolerates_null_bucket_ids_from_the_ladder() {
+        let raw = r#"{
+          "series": [{
+            "asset_coin_type": "0x9b72::twal::TWAL",
+            "settlement_coin_type": "0x9b72::tusdc::TUSDC",
+            "asset_decimals": 9,
+            "settlement_decimals": 6,
+            "expiry_ms": 1781740800000,
+            "buckets": [
+              {
+                "bucket_id": null,
+                "call_coin_type": "0x9b72::option_coin::OptionCall",
+                "strike_raw": "31473",
+                "strike_scale": 9,
+                "invalidated": false,
+                "deepbook_pool_id": null,
+                "tradeable": false
+              },
+              {
+                "bucket_id": "0x0a",
+                "call_coin_type": "0x9b72::option_coin::OptionCall",
+                "strike_raw": "31473",
+                "strike_scale": 9,
+                "invalidated": false,
+                "deepbook_pool_id": "0x0b",
+                "tradeable": true
+              }
+            ]
+          }]
+        }"#;
+        let wire: BucketsWire = serde_json::from_str(raw).expect("ladder response must parse");
+        assert_eq!(wire.series[0].buckets.len(), 2);
+        assert!(wire.series[0].buckets[0].bucket_id.is_none());
+        assert_eq!(wire.series[0].buckets[1].bucket_id.as_deref(), Some("0x0a"));
     }
 }

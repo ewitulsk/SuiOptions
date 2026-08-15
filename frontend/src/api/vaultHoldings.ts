@@ -329,7 +329,7 @@ export function useVaultHoldings(vault: TradingVaultDetail | null) {
                 expiryMs: s.expiry_ms,
                 isPut: seriesOptionType(s) === "put",
               };
-              byBucketId.set(b.bucket_id, info);
+              if (b.bucket_id) byBucketId.set(b.bucket_id, info);
               byCoinType.set(canon(optionCoinType(b)), info);
             }
           }

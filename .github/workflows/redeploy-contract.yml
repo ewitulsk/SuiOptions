@@ -11,10 +11,9 @@
 #      on-chain and writes the new IDs to deployments.json.
 #   2. Query the Sui GraphQL RPC to resolve the deployment checkpoint.
 #   3. Update the indexer config's start_checkpoint to checkpoint − 1.
-#   4. Stop the indexer + option-scheduler on EC2 and wipe + provision the
-#      indexer_<env> AND scheduler_<env> databases via the shared
-#      wipe-provision-db.sh script (prod-guarded). Wiping the scheduler DB
-#      is required so it re-rolls buckets for the new contract.
+#   4. Stop the indexer + orderbook on EC2 and wipe + provision the
+#      indexer_<env> and orderbook_<env> databases via the shared
+#      wipe-provision-db.sh script (prod-guarded).
 #      (The mm-bot needs no reset — it resolves its Account from chain state
 #      for the current package on boot, bootstrapping a fresh one if none.)
 #   5. Commit the updated deployments.json + indexer config to git.
@@ -26,7 +25,7 @@
 #        - latest-build-token-info  : roll the stack on latest images, then
 #                                     rebuild + roll only token-info.
 #      deploy.sh pulls + up -d + runs migrations + health checks, bringing the
-#      stopped indexer/scheduler back up on the wiped DBs.
+#      stopped indexer/orderbook back up on the wiped DBs.
 #
 # prod is a testnet deployment, so it IS a valid target here (it publishes
 # to testnet and wipes the prod testnet DBs). What stays EXPLICITLY BLOCKED
@@ -297,8 +296,9 @@ jobs:
           ENV: ${{ inputs.environment }}
           NETWORK: ${{ steps.net.outputs.network }}
         run: |
-          # The scheduler secret holds the deployer key (AdminCap
-          # owner). This is the canonical signing key for publishes.
+          # Holds the deployer key (AdminCap owner) — the canonical signing
+          # key for publishes. The secret is still named `scheduler` for
+          # historical reasons; the service of that name is gone.
           SCHEDULER_JSON=$(aws secretsmanager get-secret-value \
             --secret-id "options/$ENV/scheduler" \
             --query SecretString --output text)
@@ -534,7 +534,7 @@ jobs:
 
           echo "key=$BUNDLE_KEY" >> "$GITHUB_OUTPUT"
 
-      # ── 11. SSM: stop indexer/scheduler, wipe DBs ──────────────────
+      # ── 11. SSM: stop indexer/orderbook, wipe DBs ──────────────────
       # Does NOT restart anything — the deploy job rebuilds + rolls out the
       # whole stack afterward.
       - name: Reset databases on EC2
@@ -592,8 +592,8 @@ jobs:
                 "COMPOSE_FILE=\"docker-compose.\($env).yml\"",
 
                 "# ── 1. Stop the services whose DBs we wipe ──",
-                "docker compose -f \"$COMPOSE_FILE\" stop indexer option-scheduler orderbook || true",
-                "echo \"indexer + option-scheduler + orderbook stopped\"",
+                "docker compose -f \"$COMPOSE_FILE\" stop indexer orderbook || true",
+                "echo \"indexer + orderbook stopped\"",
 
                 "# ── 2. Download updated files + provisioning script from S3 ──",
                 "aws s3 cp \"s3://\($bucket)/\($bundle_key)\" /tmp/redeploy-bundle.tgz --region \($region)",
@@ -606,20 +606,18 @@ jobs:
                 "# which wipe-provision-db.sh reads for the per-env role password.",
                 "/tmp/redeploy/render-secrets.sh \($env | @sh)",
 
-                "# ── 4. Wipe + provision the indexer and scheduler DBs ──",
-                "# A freshly published contract has no buckets; the scheduler only re-rolls",
-                "# when its rolls DB is also wiped (it is DB-authoritative — see SO-80).",
+                "# ── 4. Wipe + provision the indexer and orderbook DBs ──",
                 "# Vault-APY rows now live in the price-charting Timescale DB keyed by the",
                 "# new vault ids; old-vault rows simply orphan (harmless), so there is no",
                 "# APY DB to wipe here anymore (folded out of derived-metric-worker).",
                 "# orderbook included: the exchange package republishes every",
                 "# redeploy, so resting orders/fills reference dead registries.",
-                "for svc in indexer scheduler orderbook; do DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/redeploy/wipe-provision-db.sh \($env | @sh) \"$svc\"; done",
+                "for svc in indexer orderbook; do DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/redeploy/wipe-provision-db.sh \($env | @sh) \"$svc\"; done",
 
                 "# The mm-bot needs no reset — it resolves its Account from",
                 "# chain state for the current package on boot, bootstrapping a",
                 "# fresh one if none exists yet.",
-                "# indexer + option-scheduler are left STOPPED on purpose — the",
+                "# indexer + orderbook are left STOPPED on purpose — the",
                 "# deploy job rolls the whole stack (rebuilding or pulling the",
                 "# latest images per build_strategy, and dropping the new",
                 "# deployments.json on the host) and `docker compose up -d`s it,",

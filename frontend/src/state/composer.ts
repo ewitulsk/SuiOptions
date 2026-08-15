@@ -18,7 +18,13 @@ import { useBulkView } from "../api/useBulkView";
 import { buildBuyTx, buildWriteTx } from "../tx/composer";
 import { buildBuyPutTx, buildWritePutTx } from "../tx/composer_put";
 import { formatPrice } from "../format";
-import { fetchBucketSpec, optionCoinType, rfqTradeable, seriesOptionType } from "../api/client";
+import {
+  fetchBucketSpec,
+  isUncreated,
+  optionCoinType,
+  rfqTradeable,
+  seriesOptionType,
+} from "../api/client";
 import {
   buildCreateBucketTx,
   normalizeStrike,
@@ -195,6 +201,13 @@ export type ComposerState = {
   /** Whether this deployment supports any-strike creation. */
   canCreateStrikes: boolean;
   createCustomStrike: () => Promise<void>;
+  /**
+   * The selected tile is a strike the board *lists* but which has no bucket
+   * yet (SO-400) — there is nothing to quote against until it's created.
+   */
+  selectedUncreated: boolean;
+  /** Create the selected listed strike, so it can then be written. */
+  createSelectedStrike: () => Promise<void>;
   /** Distinct assets across all returned series, sorted by symbol. */
   assets: AssetOption[];
   /** Currently selected asset symbol, or null until the first series arrives. */
@@ -244,7 +257,14 @@ export function useComposerState({
       // Show only the series matching the selected option type (call vs put).
       // Series without an `option_type` are treated as calls.
       .filter((s) => seriesOptionType(s) === optionType);
-    if (view !== "writer") return raw;
+    if (view !== "writer") {
+      // Trader (Buy) side: a strike the board merely *lists* (SO-400) has no
+      // bucket, so no option coins exist and there is nothing to buy. Only
+      // the writer side can bring one into existence.
+      return raw
+        .map((s) => ({ ...s, buckets: s.buckets.filter((b) => !isUncreated(b)) }))
+        .filter((s) => s.buckets.length > 0);
+    }
     return raw
       .map((s) => ({ ...s, buckets: s.buckets.filter((b) => !b.invalidated) }))
       .filter((s) => s.buckets.length > 0);
@@ -359,8 +379,11 @@ export function useComposerState({
   // every strike at the current amount, averaged across opted-in MMs and
   // cached server-side (stale-while-revalidate). Served by Trader MMs on the
   // writer (Earn) side and Writer MMs on the trader (Buy) side.
+  // Only created buckets can be quoted: the bulk view prices real objects, so
+  // the listed-but-uncreated strikes (SO-400) are filtered out here and simply
+  // show no indicative premium until someone creates them.
   const bulkBucketIds = useMemo(
-    () => seriesBuckets.map((b) => b.bucket_id),
+    () => seriesBuckets.map((b) => b.bucket_id).filter((id): id is string => id !== null),
     [seriesBuckets],
   );
   const { premiums: bulkPremiums } = useBulkView({
@@ -413,7 +436,7 @@ export function useComposerState({
     const scale =
       series?.settlement_decimals != null ? 10 ** series.settlement_decimals : 1;
     return seriesBuckets.map((b) => {
-      const entry = bulkPremiums.get(b.bucket_id);
+      const entry = b.bucket_id ? bulkPremiums.get(b.bucket_id) : undefined;
       const indicative = entry ? Number(entry.premium) / scale : null;
       const value =
         (b.bucket_id === selectedBucketId ? realSelectedPremium : null) ??
@@ -468,6 +491,10 @@ export function useComposerState({
     const pending = pendingSpec.current;
     if (!pending || !series || series.expiry_ms !== pending.expiryMs) return;
     const idx = seriesBuckets.findIndex((b) => {
+      // The board lists this strike before it exists (SO-400), so match only
+      // *created* buckets — otherwise the synthetic tile would satisfy the
+      // wait immediately and we'd report success before the tx landed.
+      if (isUncreated(b)) return false;
       const n = normalizeStrike(BigInt(b.strike_raw), b.strike_scale);
       return n !== null && n.sig.toString() === pending.sig && n.exp === pending.exp;
     });
@@ -499,8 +526,44 @@ export function useComposerState({
       setTimeout(() => setToast(null), 4000);
       return;
     }
-    // Already listed? Select it instead of creating.
+    await createStrike(raw, norm, underDec);
+  };
+
+  /**
+   * Bring the *selected* listed strike into existence (SO-400). The board
+   * advertises the ladder around spot, so the strike the user picked may not
+   * have a bucket yet; this runs the same sponsored create the free-text
+   * input does, reusing the strike already encoded in the tile.
+   */
+  const createSelectedStrike = async () => {
+    if (!series || creatingBucket) return;
+    const b = seriesBuckets[selectedIdx];
+    if (!b || !isUncreated(b)) return;
+    const underDec = series.asset_decimals;
+    if (underDec == null) {
+      setToast({ message: "token decimals unknown for this pair", variant: "error" });
+      setTimeout(() => setToast(null), 4000);
+      return;
+    }
+    const strikeRaw = BigInt(b.strike_raw);
+    const norm = normalizeStrike(strikeRaw, b.strike_scale);
+    if (!norm) return;
+    await createStrike({ strikeRaw, strikeScale: b.strike_scale }, norm, underDec);
+  };
+
+  /** Shared create path for both the free-text input and a listed tile. */
+  const createStrike = async (
+    raw: { strikeRaw: bigint; strikeScale: number },
+    norm: { sig: bigint; exp: number },
+    underDec: number,
+  ) => {
+    if (!series) return;
+    // Already *created*? Select it instead of creating a second time.
+    // Uncreated board strikes (SO-400) are deliberately excluded: they share
+    // the strike we're about to create, so matching them would short-circuit
+    // straight back to the tile and the bucket would never come into being.
     const existingIdx = seriesBuckets.findIndex((b) => {
+      if (isUncreated(b)) return false;
       const n = normalizeStrike(BigInt(b.strike_raw), b.strike_scale);
       return n !== null && n.sig === norm.sig && n.exp === norm.exp;
     });
@@ -550,7 +613,9 @@ export function useComposerState({
       const digest = await submitTx(tx);
       posthog.capture("bucket_create_submitted", {
         digest,
-        strike: customStrike,
+        // Normalized, so both entry points report the same strike (the
+        // free-text field is empty when a listed tile drove the create).
+        strike: `${norm.sig}e-${norm.exp}`,
         expiry_ms: series.expiry_ms,
         option_type: optionType,
       });
@@ -588,27 +653,31 @@ export function useComposerState({
   // write so its zone stays visible and the bar never divides by zero.
   const bucket: Bucket = useMemo(() => {
     const dec = series?.asset_decimals ?? null;
-    const b = series?.buckets.find((x) => x.bucket_id === selectedBucketId) ?? null;
+    // Index the tile array rather than matching on `bucket_id`: an uncreated
+    // board strike (SO-400) has a null id, so a `=== selectedBucketId` match
+    // would latch onto whichever synthetic bucket happens to come first.
+    const b = seriesBuckets[selectedIdx] ?? null;
     const cursor = b ? (b.exercise_cursor ?? scaleRaw(b.exercise_cursor_raw, dec)) : 0;
     const totalWritten = b ? (b.total_written ?? scaleRaw(b.total_written_raw, dec)) : 0;
     const queued = Math.max(0, totalWritten - cursor);
     const cap = totalWritten + amount > 0 ? totalWritten + amount : 1;
     return { cursor, queued, cap };
-  }, [series, selectedBucketId, amount]);
+  }, [series, seriesBuckets, selectedIdx, amount]);
 
   // The selected bucket exactly as `/buckets` served it — the trade-venue UI
   // needs its `deepbook_pool_id` / `tradeable` fields verbatim (SO-154).
   const apiBucket: ApiBucket | null = useMemo(
-    () => series?.buckets.find((x) => x.bucket_id === selectedBucketId) ?? null,
-    [series, selectedBucketId],
+    () => seriesBuckets[selectedIdx] ?? null,
+    [seriesBuckets, selectedIdx],
   );
 
-  // Safety net (SO-171): the scheduler creates a DeepBook pool for every bucket
-  // at deploy time, so a live strike is normally tradeable. If the selected
-  // strike is somehow not tradeable (expired/cleaned, or a pool that never
-  // landed), surface it as an error toast rather than silently hiding the
-  // chart + trade panel. Keyed on primitives so it fires once per strike, not
-  // on every /buckets poll.
+  /** The selected strike is listed but has no bucket on chain yet. */
+  const selectedUncreated = apiBucket !== null && isUncreated(apiBucket);
+
+  // Safety net (SO-171): if the selected strike isn't tradeable
+  // (expired/cleaned, or a pool that never landed), surface it as an error
+  // toast rather than silently hiding the chart + trade panel. Keyed on
+  // primitives so it fires once per strike, not on every /buckets poll.
   const selectedTradeable = apiBucket ? rfqTradeable(apiBucket) : true;
   useEffect(() => {
     if (view !== "trader" || selectedBucketId == null || selectedTradeable) return;
@@ -791,6 +860,8 @@ export function useComposerState({
     creatingBucket,
     canCreateStrikes,
     createCustomStrike,
+    selectedUncreated,
+    createSelectedStrike,
     assets,
     selectedAsset,
     selectAsset: setSelectedAsset,

@@ -33,6 +33,12 @@ pub struct AppState {
     /// Data-room gold reader for /analytics/* (SO-389). `None` when
     /// `data_room_url` is unset or failed to parse — endpoints then 503.
     pub analytics: Option<std::sync::Arc<crate::analytics::lake::Lake>>,
+    /// oracle-service reader for the `/buckets` strike ladder (SO-400): spot
+    /// anchors the lattice, realized vol sizes its window. `None` when
+    /// `oracle_url` is unset — `/buckets` then serves existing buckets only.
+    pub oracle: Option<oracle_client::OracleClient>,
+    /// Series families the ladder lists. Empty ⇒ no synthetic strikes.
+    pub ladder_pairs: Vec<crate::ladder::LadderPair>,
     /// Shared HTTP client for composing the worker's read API + the RPC read.
     pub http: reqwest::Client,
 }
@@ -57,7 +63,22 @@ impl AppState {
             exchange_adapter_package,
             options_package,
             analytics,
+            oracle: None,
+            ladder_pairs: Vec::new(),
             http: reqwest::Client::new(),
         }
+    }
+
+    /// Attach the `/buckets` strike ladder (SO-400). Kept off the constructor
+    /// so the feature stays opt-in end to end: no `oracle_url`, or no
+    /// configured pairs, and `/buckets` serves exactly what the indexer has.
+    pub fn with_ladder(
+        mut self,
+        oracle_url: Option<String>,
+        ladder_pairs: Vec<crate::ladder::LadderPair>,
+    ) -> Self {
+        self.oracle = oracle_url.map(|u| oracle_client::OracleClient::new(u.trim_end_matches('/')));
+        self.ladder_pairs = ladder_pairs;
+        self
     }
 }

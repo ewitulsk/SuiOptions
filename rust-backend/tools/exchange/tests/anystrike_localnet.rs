@@ -10,14 +10,15 @@
 //!     coin minted to the sender in the same transaction;
 //!  3. a second create at the same normalized spec aborts.
 //!
-//! Also covers the scheduler's publish-free grid roll (`roller::submit`),
-//! which replaced the retired codegen→publish→harvest pipeline (and the old
-//! `localnet_e2e.rs` harness with it).
+//! Also covers the publish-free grid create (`roller::submit`) behind
+//! `exchange create-buckets`, which replaced the retired
+//! codegen→publish→harvest pipeline (and the old `localnet_e2e.rs` harness
+//! with it).
 //!
 //! `#[ignore]` — needs a running localnet with the coin registry object
 //! (`0xc`), i.e. any current `sui start --force-regenesis --with-faucet`.
 //! Run with:
-//!   cargo test -p option-scheduler --test anystrike_localnet -- --ignored --nocapture
+//!   cargo test -p exchange --test anystrike_localnet -- --ignored --nocapture
 //! RPC/faucet override: SUI_E2E_RPC / SUI_E2E_FAUCET.
 
 use std::path::PathBuf;
@@ -392,8 +393,8 @@ async fn localnet_any_strike_atomic_create_write() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires a running sui localnet (sui start --force-regenesis --with-faucet)"]
 async fn localnet_roller_grid_roll() -> Result<()> {
-    use option_scheduler::roller::{self, ProductType, RollPlan};
-    use option_scheduler::strike_grid::StrikeGrid;
+    use exchange::roller::{self, ProductType, RollPlan};
+    use exchange::strike_grid::StrikeGrid;
     use sui_tx::sui_client::{Network, SuiClientWrapper};
 
     let rpc = std::env::var("SUI_E2E_RPC").unwrap_or_else(|_| "http://127.0.0.1:9000".into());
@@ -426,12 +427,9 @@ async fn localnet_roller_grid_roll() -> Result<()> {
     submit_ptb(&client, &signer, pt, GAS, "whitelist roller").await?;
 
     let plan = RollPlan {
-        underlying_symbol: "SUI".into(),
-        settlement_symbol: "SUI".into(),
         underlying_type: "0x2::sui::SUI".into(),
         settlement_type: "0x2::sui::SUI".into(),
         underlying_decimals: 9,
-        settlement_decimals: 9,
         expiry_ms: EXPIRY_MS + 60_000, // distinct family from the other test
         strikes: StrikeGrid {
             start_strike: 50_000,

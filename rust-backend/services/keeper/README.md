@@ -57,8 +57,7 @@ runs ≥ 2 instances on independent infra.
 
 ## 2. Crate layout
 
-Mirror the option-scheduler's structure (boot → tick loop →
-classify/submit) — it solves the same problem:
+Structure it as boot → tick loop → classify/submit:
 
 ```
 services/keeper/
@@ -163,7 +162,7 @@ let k_star = pricing::strike_for_delta(spot, sigma_iv, tau, 0.0, 0.10);
 // candidates: live buckets of the right pair whose expiry fits the
 // vault's lead window; pick the SMALLEST strike ≥ k_star (snap up ⇒
 // delta ≤ target ⇒ conservative). None ≥ k_star? take the highest
-// in-band strike and log GridCoverageMiss (feeds the scheduler-grid
+// in-band strike and log GridCoverageMiss (feeds the grid-coverage
 // alert, doc 05 §4.4).
 ```
 
@@ -212,7 +211,7 @@ Add this as `sui_tx::tx::pyth_update::prepend(pt, …)` so the mm-bot can
 reuse it later. Object IDs needed in config: `pyth_state_id`,
 `wormhole_state_id`, and the two `price_info_object_id`s per vault
 (discoverable once from the feed ids via Pyth's state table; pin them in
-config like the scheduler pins feeds).
+config).
 
 ## 8. Proceeds conversion (`SwapProceeds`)
 
@@ -236,16 +235,14 @@ from config and must match the vault's pinned `deepbook_pool_id`
 ## 9. Vol source for `iv_ratio`
 
 σ = 30-day realized vol from Pyth Benchmarks daily closes — **reuse
-`option_scheduler::sigma::realized_sigma_from_benchmarks`** (move it to
-`pyth-client` if the dependency feels wrong) — times the configured
+`pyth_client::sigma::realized_sigma_from_benchmarks`** — times the configured
 `iv_ratio`. Calibrated values from the backtester (June 2026): BTC
 DVOL/RV₃₀ median **1.19**, ETH **1.08**; default `iv_ratio = 1.15`
-sits between. Static fallback per asset for benchmark outages, same
-pattern as the scheduler's `sigma_fallback`.
+sits between. Static fallback per asset for benchmark outages.
 
 ## 10. Submission & error classes (`submit.rs`)
 
-Copy `option-scheduler/src/roller.rs::classify_error`'s shape:
+Use this shape:
 
 | Class | Meaning | Examples | Response |
 |---|---|---|---|
@@ -310,8 +307,8 @@ backlog, time-to-finalize per round, grid-coverage misses, per-round
 - **Strike goldens**: (S, σ, τ) → K* vectors shared with
   `vault_sim::strategy`; snap-up; band-edge fallback.
 - **Slicing**: schedule recomputation idempotence under restarts.
-- **E2E (extends `rust-backend/tests`)**: localnet — scheduler creates a
-  z-ladder family → users deposit → keeper (real binary) runs genesis
+- **E2E (extends `rust-backend/tests`)**: localnet — create a bucket
+  family → users deposit → keeper (real binary) runs genesis
   finalize → select → 2 slices → scripted bidder (incl. a snipe; assert
   the deadline extension) → settle → warp past expiry → exercise 40% →
   redeem/fill/finalize → assert PPS, treasury fees, receipt payouts —
@@ -332,4 +329,4 @@ Already done, do not rebuild: the PTB builders
 `open_rfq`, `settle_rfq`, `settle_rfq_expired`, `swap_proceeds`,
 `finalize_round`, plus `PriceInfoRefs`/`VaultRefs`), the strike math
 (`pricing::{strike_for_delta, grid}`), and the vol fetch
-(`option_scheduler::sigma`).
+(`pyth_client::sigma`).

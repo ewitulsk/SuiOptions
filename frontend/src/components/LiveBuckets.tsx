@@ -1,12 +1,14 @@
 import { useBuckets } from "../api/useBuckets";
-import type { Bucket, Series } from "../api/client";
+import { strikeKey, type Bucket, type Series } from "../api/client";
 
 // Live view of on-chain bucket series, fetched from the Rust api-service.
 // Strikes/expiry/written/cursor arrive pre-scaled (api-service joined
 // against deployments.json). See rust-backend/services/api-service/README.md
 // for the full shape.
 export function LiveBuckets() {
-  const { data, isLoading, error } = useBuckets();
+  // Monitoring view: the full historical catalog rather than the listed
+  // board, so it keeps showing every bucket that exists on chain (SO-400).
+  const { data, isLoading, error } = useBuckets({ all: true });
 
   return (
     <section className="live-buckets">
@@ -47,12 +49,14 @@ function SeriesBlock({ series }: { series: Series }) {
         </thead>
         <tbody>
           {series.buckets.map((b) => (
-            <tr key={b.bucket_id}>
+            <tr key={strikeKey(b)}>
               <td>{formatStrike(b, series)}</td>
               <td>{formatAmount(b.total_written, series.asset_symbol)}</td>
               <td>{formatAmount(b.exercise_cursor, series.asset_symbol)}</td>
               <td>{formatPct(b.fill_pct)}</td>
-              <td title={b.bucket_id}>{shortHex(b.bucket_id)}</td>
+              <td title={b.bucket_id ?? undefined}>
+                {b.bucket_id ? shortHex(b.bucket_id) : "—"}
+              </td>
             </tr>
           ))}
         </tbody>

@@ -16,8 +16,8 @@ secrets_file = "/run/secrets/gas-station.toml"
 low_balance_sui = 5.0
 
 [[watch]]
-name = "option-scheduler"
-secrets_file = "/run/secrets/scheduler.toml"
+name = "deployer"
+secrets_file = "/run/secrets/deployer.toml"
 low_balance_sui = 2.0
 
 [[watch]]
@@ -35,9 +35,9 @@ low_balance_sui = 2.0
 # Drain watches poll a shared object's TOP-LEVEL balance fields and fire
 # `drain-suspected-<name>` when the sum drops more than drop_bps below the
 # window max. Buckets work (flat Balance fields); vault/BM holdings live in
-# dynamic fields and need the auto-discovery follow-up. Bucket ids rotate
-# every scheduler roll, so entries here go stale at each roll — add the
-# current roll's high-value buckets after a redeploy, e.g.:
+# dynamic fields and need the auto-discovery follow-up. Bucket ids change
+# with every redeploy, so entries here go stale then — add the current
+# high-value buckets after a redeploy, e.g.:
 #
 # [[drain_watch]]
 # name = "call-bucket-btc"

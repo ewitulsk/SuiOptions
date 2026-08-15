@@ -1,9 +1,9 @@
 // DeepBook v3 PTB builders (SO-154).
 //
-// Pools are created by the option-scheduler when it deploys each call option
-// (SO-171), so the frontend only ever TRADES an existing pool: it enables a
-// per-user BalanceManager and places/cancels orders. Calls target DeepBook's
-// UPGRADED package; only event/struct types resolve to the original publish.
+// The frontend only ever TRADES an existing pool: it enables a per-user
+// BalanceManager and places/cancels orders — it never creates a pool. Calls
+// target DeepBook's UPGRADED package; only event/struct types resolve to the
+// original publish.
 
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";

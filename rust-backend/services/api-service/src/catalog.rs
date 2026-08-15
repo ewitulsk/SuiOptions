@@ -16,6 +16,11 @@ use token_info_client::SupportedToken;
 pub struct TokenMeta {
     pub symbol: String,
     pub decimals: u8,
+    /// Pyth feed id, when token-info carries one. The `/buckets` ladder needs
+    /// it to ask oracle-service for realized vol, which is keyed by Pyth feed
+    /// even on deployments whose *prices* come from Switchboard (SO-346) —
+    /// the vol path resolves through Pyth Benchmarks either way.
+    pub pyth_feed_id: Option<String>,
 }
 
 #[derive(Default, Debug)]
@@ -34,6 +39,7 @@ impl TokenCatalog {
                 TokenMeta {
                     symbol: t.ticker.clone(),
                     decimals: t.decimals,
+                    pyth_feed_id: t.pyth_feed_id.clone(),
                 },
             );
         }

@@ -38,16 +38,19 @@ async fn main() -> Result<()> {
         }
     });
 
-    let state = Arc::new(AppState::new(
-        catalog,
-        cfg.indexer_graphql_url.clone(),
-        cfg.derived_metrics_url.clone(),
-        cfg.sui_graphql_url.clone(),
-        cfg.price_charting_url.clone(),
-        snapshot.exchange_adapter().map(|p| p.package_id.clone()),
-        Some(snapshot.package_info.package_id.clone()),
-        analytics,
-    ));
+    let state = Arc::new(
+        AppState::new(
+            catalog,
+            cfg.indexer_graphql_url.clone(),
+            cfg.derived_metrics_url.clone(),
+            cfg.sui_graphql_url.clone(),
+            cfg.price_charting_url.clone(),
+            snapshot.exchange_adapter().map(|p| p.package_id.clone()),
+            Some(snapshot.package_info.package_id.clone()),
+            analytics,
+        )
+        .with_ladder(cfg.oracle_url.clone(), cfg.ladder_pairs.clone()),
+    );
 
     router::serve(cfg.bind_addr, state, &cfg.allowed_origins).await
 }
