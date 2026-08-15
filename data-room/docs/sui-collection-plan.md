@@ -77,6 +77,27 @@ That is the argument for starting Tier 0 now: not that the number is
 alarming, but that it is a single sample of the quantity that decides how
 large this strategy can get.
 
+**How single a sample, measured 2026-08-15.** The $1M rung was quoted
+three times over roughly one hour while building the collector for it:
+
+| time (UTC) | $1M rung fill | vs spot |
+|---|---|---|
+| ~18:55 | 0.67956 | **41 bp** |
+| ~19:24 | 0.66384 | **243 bp** |
+| ~19:40 | 0.58912 | **1,346 bp** |
+
+Same endpoint, same size, same direction; the last figure is three
+identical consecutive probes, so it is a real state of the book and not
+jitter. Doc 07's 238 bp sits in the middle of that range rather than
+being the number.
+
+This is the finding, and it is stronger than the one this section
+originally made. The top of the ladder does not have a capacity *value*
+— it has a **capacity distribution**, and it spans a factor of thirty
+within an hour. A vault sized on any single snapshot of it is sized on
+noise. Nothing in Tier 2 or Tier 1 can recover this; it exists only if we
+are polling. Start the ladder.
+
 ---
 
 ## 0.2 How configuration actually reaches the host
@@ -526,6 +547,10 @@ person does not have to re-derive them:
   `aftermath.finance`, public and unauthenticated, returns routes plus
   `coinOut.amount`; numeric fields are BigInt-style strings ending in
   `n`. Routes SUI→USDC through Bluefin/Cetus/Obric, not DeepBook.
+- The $1M rung moved 41 bp → 243 bp → 1,346 bp inside one hour on
+  2026-08-15 (§0.1). Treat every single-snapshot depth number in this
+  document, including the ones above, as one draw from a wide
+  distribution.
 - Execution ladder (both venues) per §0.1.
 - Binance Vision SUI coverage per §3.1; `metrics` empty; `bookTicker`
   ends 2024-03-30.

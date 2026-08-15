@@ -53,10 +53,22 @@ struct Poller {
     stream: String,
     #[serde(default = "default_poll_secs")]
     interval_secs: u64,
+    /// "GET" (default) or "POST". Quote APIs that price a specific size —
+    /// the Aftermath router, for one — take the request as a JSON body,
+    /// so a snapshot source is not necessarily a URL.
+    #[serde(default = "default_method")]
+    method: String,
+    /// Request body, sent as application/json when `method = "POST"`.
+    #[serde(default)]
+    body: Option<String>,
 }
 
 fn default_poll_secs() -> u64 {
     60
+}
+
+fn default_method() -> String {
+    "GET".into()
 }
 
 #[derive(Deserialize, Clone)]
@@ -157,6 +169,17 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Fail fast on a typo'd method — the alternative is silently falling
+    // back to GET and capturing an error page for weeks.
+    for p in &cfg.pollers {
+        anyhow::ensure!(
+            matches!(p.method.as_str(), "GET" | "POST"),
+            "poller {} has unsupported method {:?} (want GET or POST)",
+            p.stream,
+            p.method
+        );
+    }
+
     // REST snapshot pollers: one line per poll into the poller's stream.
     let mut capture_tasks = Vec::new();
     for poller in cfg.pollers.clone() {
@@ -179,7 +202,19 @@ async fn main() -> anyhow::Result<()> {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tick.tick().await;
-                let payload = match http.get(&poller.url).send().await {
+                let req = match poller.method.as_str() {
+                    "POST" => {
+                        let r = http.post(&poller.url);
+                        match &poller.body {
+                            Some(b) => r
+                                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                                .body(b.clone()),
+                            None => r,
+                        }
+                    }
+                    _ => http.get(&poller.url),
+                };
+                let payload = match req.send().await {
                     Ok(r) => match r.error_for_status() {
                         Ok(r) => match r.text().await {
                             Ok(t) => t,
