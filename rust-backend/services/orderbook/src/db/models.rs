@@ -15,6 +15,7 @@ pub struct NewMarket {
     pub min_size: i64,
     pub lot_size: i64,
     pub current_fee_bps: i64,
+    pub source: String,
 }
 
 #[derive(Insertable)]

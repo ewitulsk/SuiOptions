@@ -111,6 +111,41 @@ impl Db {
         blocking!(self, |r| r.enabled_market_ids())
     }
 
+    pub async fn insert_discovered_market(&self, m: &Market) -> Result<bool, StoreError> {
+        let m = m.clone();
+        blocking!(self, |r| r.insert_discovered_market(&m))
+    }
+
+    pub async fn enabled_markets(&self) -> Result<Vec<(Market, bool)>, StoreError> {
+        blocking!(self, |r| r.enabled_markets())
+    }
+
+    pub async fn get_enabled_market(
+        &self,
+        registry_id: &str,
+    ) -> Result<Option<(Market, bool)>, StoreError> {
+        let registry_id = registry_id.to_owned();
+        blocking!(self, |r| r.get_enabled_market(&registry_id))
+    }
+
+    pub async fn set_market_paused(
+        &self,
+        registry_id: &str,
+        paused: bool,
+    ) -> Result<(), StoreError> {
+        let registry_id = registry_id.to_owned();
+        blocking!(self, |r| r.set_market_paused(&registry_id, paused))
+    }
+
+    pub async fn set_market_fee(
+        &self,
+        registry_id: &str,
+        fee_bps: u64,
+    ) -> Result<(), StoreError> {
+        let registry_id = registry_id.to_owned();
+        blocking!(self, |r| r.set_market_fee(&registry_id, fee_bps))
+    }
+
     pub async fn insert_order(
         &self,
         digest: &Digest,

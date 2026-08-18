@@ -77,10 +77,20 @@ async fn main() -> Result<()> {
         warn!("no markets in deployments.json exchange block — nothing to serve");
     }
 
-    // Whitelist sync: mirror the deployments set into exchange_markets
-    // (new rows land enabled), disable rows whose registry left the record,
-    // then serve only what the DB says is enabled — an operator delists a
-    // market by flipping its `enabled` off, and that survives restarts.
+    // Discovered-market resolution (SO-416): the core package id decodes
+    // option-coin bases; the token catalog supplies symbols and decimals.
+    let (core_package, catalog) = cfg.load_catalog().unwrap_or_else(|e| {
+        warn!(error = %e, "no token catalog — option-market discovery disabled");
+        (None, Vec::new())
+    });
+    let factory = orderbook::discovery::MarketFactory::new(core_package, catalog);
+
+    // Market set sync: mirror the deployments set into exchange_markets
+    // (new rows land enabled), disable DEPLOYMENTS-sourced rows whose
+    // registry left the record, then serve everything the DB says is
+    // enabled — deployments-mirrored AND runtime-discovered rows. An
+    // operator delists a market by flipping `enabled` off, and that
+    // survives restarts.
     for m in &deployed_markets {
         db.upsert_market(m).await?;
     }
@@ -90,22 +100,14 @@ async fn main() -> Result<()> {
     if stale > 0 {
         info!(disabled = stale, "disabled market rows absent from the deployments record");
     }
-    let enabled: std::collections::HashSet<String> =
-        db.enabled_market_ids().await?.into_iter().collect();
-    let markets: Vec<_> = deployed_markets
-        .into_iter()
-        .filter(|m| {
-            let listed = enabled.contains(&m.registry_id.to_hex());
-            if !listed {
-                warn!(market = %m.symbol, registry = %m.registry_id, "market delisted in DB; not serving");
-            }
-            listed
-        })
-        .collect();
+    let markets = db.enabled_markets().await?;
+    info!(markets = markets.len(), "serving enabled markets (deployments + discovered)");
 
     // Books, rebuilt from OPEN orders (write-ahead guarantee, §5.4).
     let books: DashMap<SuiAddress, Arc<Mutex<Book>>> = DashMap::new();
-    for m in &markets {
+    let market_map: DashMap<SuiAddress, exchange_types::Market> = DashMap::new();
+    let paused_map: DashMap<SuiAddress, ()> = DashMap::new();
+    for (m, paused) in &markets {
         let mut book = Book::new(m.clone());
         for stored in db.open_orders(&m.registry_id).await? {
             if stored.signed.order.expiry_ms <= now_ms() {
@@ -120,6 +122,10 @@ async fn main() -> Result<()> {
             }
         }
         books.insert(m.registry_id, Arc::new(Mutex::new(book)));
+        if *paused {
+            paused_map.insert(m.registry_id, ());
+        }
+        market_map.insert(m.registry_id, m.clone());
     }
 
     let (match_tx, match_rx) = mpsc::channel::<MatchJob>(1024);
@@ -128,7 +134,8 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState {
         exchange_package: exchange_info.package_id.clone(),
         whitelist_id: whitelist_info.as_ref().map(|w| w.whitelist_id.clone()),
-        markets: markets.clone(),
+        markets: market_map,
+        paused: paused_map,
         books,
         db: db.clone(),
         match_tx,
@@ -143,6 +150,7 @@ async fn main() -> Result<()> {
         db.clone(),
         exchange_info.package_id.clone(),
         direct_escrow.as_ref().map(|d| d.adapter_package.clone()),
+        factory,
     ));
     let mut sync_rx = ingestor.subscribe();
     {
@@ -291,6 +299,28 @@ async fn handle_sync_event(state: &Arc<AppState>, ev: ExchangeEvent) {
             // mirror the on-chain void: prune all resting orders signed by
             // that key against this manager
             prune_orders_signed_by(state, &manager, &signer).await;
+        }
+        // SO-416: a market listed at runtime. The ingestor already resolved
+        // and persisted the row (cursor-reliable); re-read it here so a
+        // lagged broadcast can never desync state from the DB.
+        ExchangeEvent::MarketCreated { registry, .. } => {
+            match state.db.get_enabled_market(&registry.to_hex()).await {
+                Ok(Some((market, paused))) => {
+                    state.set_paused(&registry, paused);
+                    if state.add_market(market.clone()) {
+                        info!(symbol = %market.symbol, registry = %registry, "now serving discovered market");
+                    }
+                }
+                Ok(None) => {} // unresolvable base — the ingestor warned
+                Err(e) => warn!(registry = %registry, error = %e, "discovered market re-read failed"),
+            }
+        }
+        ExchangeEvent::MarketPaused { registry, paused } => {
+            state.set_paused(&registry, paused);
+            info!(registry = %registry, paused, "market pause flag mirrored");
+        }
+        ExchangeEvent::MarketFee { registry, fee_bps } => {
+            state.set_market_fee(&registry, fee_bps);
         }
         // Custody mapping is mirrored by the ingestor; nothing to prune —
         // a fresh custody has no resting orders yet.
@@ -508,6 +538,15 @@ async fn handle_settle_outcome(state: &Arc<AppState>, job: &MatchJob, outcome: S
                 rematch_and_enqueue(state, &intent.market, d).await;
             }
         }
+        SettleOutcome::MarketPaused => {
+            // Ops state, not a failure: restore the book, mirror the flag so
+            // intake rejects and matching stops, and do NOT re-match (that
+            // would loop against the pause). The registry stream's
+            // PauseEvent clears the flag when the market resumes.
+            book.lock().settle_failed(intent, &[]);
+            state.set_paused(&intent.market, true);
+            info!(market = %intent.market, "settlement hit paused market; matching suspended");
+        }
         SettleOutcome::Congested => {
             // Shared-object congestion cancelled execution (nothing was
             // recorded): retryable, never prune-worthy. Restore both and
@@ -547,7 +586,7 @@ async fn rematch_and_enqueue(
     digest: exchange_types::Digest,
 ) {
     let Some(book) = state.book(market_id) else { return };
-    let Some(market) = state.market(market_id).cloned() else { return };
+    let Some(market) = state.market(market_id) else { return };
     let intents: Vec<MatchIntent> = book.lock().rematch(&digest);
     for intent in intents {
         let ask = state.db.get_order(&intent.ask_digest).await.ok().flatten();

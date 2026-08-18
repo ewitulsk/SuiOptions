@@ -90,6 +90,9 @@ pub enum SettleOutcome {
     /// A direct maker's quoting is off (vault not open / adapter delisted /
     /// curator opt-out): prune all of that manager's orders.
     VaultQuotingDisabled,
+    /// The market's on-chain pause flag is set (SO-416): restore the book
+    /// and stop matching — an ops state, not a failure, so never alert.
+    MarketPaused,
     /// Shared-object congestion cancelled execution (nothing recorded);
     /// restore and re-match — retryable, never prune-worthy.
     Congested,
@@ -108,6 +111,7 @@ pub enum DeadReason {
 }
 
 // settlement.move abort codes
+const E_PAUSED: u64 = 1;
 const E_EXPIRED: u64 = 3;
 const E_SALT_VOIDED: u64 = 7;
 const E_CANCELLED: u64 = 8;
@@ -402,6 +406,7 @@ pub fn decode_abort(abort: &MoveAbort, job: &MatchJob, raw: &str) -> SettleOutco
         ("vault", TV_VAULT_NOT_OPEN)
         | ("vault", TV_ADAPTER_NOT_ALLOWED)
         | ("vault", TV_QUOTE_ADAPTER_NOT_ENABLED) => SettleOutcome::VaultQuotingDisabled,
+        ("settlement", E_PAUSED) => SettleOutcome::MarketPaused,
         ("registry", E_OVERFILL) => SettleOutcome::Stale,
         ("settlement", E_ALREADY_FILLED)
         | ("settlement", E_NOT_CROSSING)

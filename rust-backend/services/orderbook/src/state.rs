@@ -42,7 +42,13 @@ pub struct AppState {
     /// skeletons so takers can build fill PTBs. `None` on records
     /// predating the standalone package.
     pub whitelist_id: Option<String>,
-    pub markets: Vec<Market>,
+    /// Served markets, keyed by registry ID. Mutable at runtime (SO-416):
+    /// discovered listings are inserted live via `add_market`, so a new
+    /// option series trades without a restart.
+    pub markets: DashMap<SuiAddress, Market>,
+    /// Registries whose on-chain pause flag is set (PauseEvent mirror);
+    /// intake rejects instead of burning settlement attempts.
+    pub paused: DashMap<SuiAddress, ()>,
     /// Per-market books, keyed by registry ID. A `Mutex<Book>` per market is
     /// the v1 stand-in for the single-writer task; contention stays
     /// per-market either way.
@@ -60,12 +66,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn market(&self, registry_id: &SuiAddress) -> Option<&Market> {
-        self.markets.iter().find(|m| m.registry_id == *registry_id)
+    pub fn market(&self, registry_id: &SuiAddress) -> Option<Market> {
+        self.markets.get(registry_id).map(|m| m.clone())
     }
 
     /// Resolve a market by registry hex, or by symbol as a convenience.
-    pub fn resolve_market(&self, key: &str) -> Option<&Market> {
+    pub fn resolve_market(&self, key: &str) -> Option<Market> {
         if let Ok(addr) = SuiAddress::parse(key) {
             if let Some(m) = self.market(&addr) {
                 return Some(m);
@@ -74,6 +80,46 @@ impl AppState {
         self.markets
             .iter()
             .find(|m| m.symbol.eq_ignore_ascii_case(key))
+            .map(|m| m.clone())
+    }
+
+    /// Stable snapshot for `/v1/markets` and route planning.
+    pub fn markets_snapshot(&self) -> Vec<Market> {
+        let mut out: Vec<Market> = self.markets.iter().map(|m| m.clone()).collect();
+        out.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        out
+    }
+
+    /// Serve a market that appeared at runtime (discovered listing): insert
+    /// the market and an empty book. Idempotent — an existing registry is
+    /// left untouched (its book may hold live orders).
+    pub fn add_market(&self, market: Market) -> bool {
+        if self.markets.contains_key(&market.registry_id) {
+            return false;
+        }
+        self.books
+            .entry(market.registry_id)
+            .or_insert_with(|| Arc::new(Mutex::new(Book::new(market.clone()))));
+        self.markets.insert(market.registry_id, market);
+        true
+    }
+
+    pub fn set_paused(&self, registry_id: &SuiAddress, paused: bool) {
+        if paused {
+            self.paused.insert(*registry_id, ());
+        } else {
+            self.paused.remove(registry_id);
+        }
+    }
+
+    pub fn is_paused(&self, registry_id: &SuiAddress) -> bool {
+        self.paused.contains_key(registry_id)
+    }
+
+    pub fn set_market_fee(&self, registry_id: &SuiAddress, fee_bps: u64) {
+        if let Some(mut m) = self.markets.get_mut(registry_id) {
+            m.current_fee_bps = fee_bps;
+        }
     }
 
     pub fn book(&self, registry_id: &SuiAddress) -> Option<Arc<Mutex<Book>>> {

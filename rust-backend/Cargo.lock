@@ -7526,6 +7526,7 @@ dependencies = [
  "move-core-types",
  "observability",
  "parking_lot 0.12.5",
+ "protocol-types",
  "runtime-config",
  "serde",
  "serde_json",

@@ -91,6 +91,29 @@ pub enum ExchangeEvent {
         manager: SuiAddress,
         direct: bool,
     },
+    /// registry::MarketCreatedEvent (SO-416): a market listed at runtime —
+    /// by the admin or permissionlessly through exchange_listing. Base and
+    /// quote arrive exactly as makers must sign them
+    /// (`order::canonical_type` output).
+    MarketCreated {
+        registry: SuiAddress,
+        base: String,
+        quote: String,
+        tick_size: u64,
+        min_size: u64,
+        fee_bps: u64,
+    },
+    /// registry::PauseEvent — mirror so intake can reject instead of
+    /// letting crossing orders burn settlement attempts.
+    MarketPaused {
+        registry: SuiAddress,
+        paused: bool,
+    },
+    /// registry::FeeConfigEvent — keep the served fee live.
+    MarketFee {
+        registry: SuiAddress,
+        fee_bps: u64,
+    },
 }
 
 fn get_str<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
@@ -172,6 +195,22 @@ pub fn parse_event(ev: &ChainEvent) -> Option<ExchangeEvent> {
             manager: get_addr(j, "manager")?,
             signer: get_addr(j, "signer")?,
         }),
+        "MarketCreatedEvent" => Some(ExchangeEvent::MarketCreated {
+            registry: get_addr(j, "registry")?,
+            base: get_str(j, "base")?.to_owned(),
+            quote: get_str(j, "quote")?.to_owned(),
+            tick_size: get_u64(j, "tick_size")?,
+            min_size: get_u64(j, "min_size")?,
+            fee_bps: get_u64(j, "fee_bps")?,
+        }),
+        "PauseEvent" => Some(ExchangeEvent::MarketPaused {
+            registry: get_addr(j, "registry")?,
+            paused: j.get("paused")?.as_bool()?,
+        }),
+        "FeeConfigEvent" => Some(ExchangeEvent::MarketFee {
+            registry: get_addr(j, "registry")?,
+            fee_bps: get_u64(j, "fee_bps")?,
+        }),
         // exchange_adapter (SO-372). VaultQuoteFilled is deliberately not
         // parsed: the exchange emits its normal FillEvent alongside, which
         // is already the fill's source of truth here.
@@ -194,6 +233,9 @@ pub struct EventIngestor {
     /// deployments without the trading-vault adapter — the adapter stream
     /// simply doesn't subscribe.
     adapter_package: Option<String>,
+    /// Resolves discovered MarketCreatedEvents into servable markets
+    /// (symbol + lot size derivation, SO-416).
+    factory: crate::discovery::MarketFactory,
     poll_interval: Duration,
     page_size: u32,
     tx: broadcast::Sender<ExchangeEvent>,
@@ -205,6 +247,7 @@ impl EventIngestor {
         db: Db,
         package: String,
         adapter_package: Option<String>,
+        factory: crate::discovery::MarketFactory,
     ) -> Self {
         let (tx, _) = broadcast::channel(4096);
         EventIngestor {
@@ -212,6 +255,7 @@ impl EventIngestor {
             db,
             package,
             adapter_package,
+            factory,
             poll_interval: Duration::from_millis(500),
             // The GraphQL events query caps page size at 50 (observed live:
             // "Page size is too large: 100 > 50" — every poll failed).
@@ -383,6 +427,36 @@ impl EventIngestor {
                         direct: *direct,
                     })
                     .await?;
+            }
+            // Discovery DB write lives HERE, not in the broadcast consumer:
+            // the cursor only advances after apply, so a market can never be
+            // lost to a lagged consumer — the consumer re-reads the row.
+            ExchangeEvent::MarketCreated {
+                registry,
+                base,
+                quote,
+                tick_size,
+                min_size,
+                fee_bps,
+            } => {
+                if let Some(market) =
+                    self.factory
+                        .build(*registry, base, quote, *tick_size, *min_size, *fee_bps)
+                {
+                    if self.db.insert_discovered_market(&market).await? {
+                        tracing::info!(
+                            symbol = %market.symbol,
+                            registry = %market.registry_id,
+                            "discovered market listed"
+                        );
+                    }
+                }
+            }
+            ExchangeEvent::MarketPaused { registry, paused } => {
+                self.db.set_market_paused(&registry.to_hex(), *paused).await?;
+            }
+            ExchangeEvent::MarketFee { registry, fee_bps } => {
+                self.db.set_market_fee(&registry.to_hex(), *fee_bps).await?;
             }
         }
         Ok(())
