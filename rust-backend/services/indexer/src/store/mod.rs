@@ -2833,6 +2833,60 @@ mod tests {
     }
 
     #[test]
+    fn exchange_market_first_wins_and_stages_one_row() {
+        let store = Store::default();
+        let bucket = ObjectId::new([0x42; 32]);
+        store.ingest(bucket_evt(0x42), 1);
+
+        let listed_evt = |registry: u8| {
+            ChainEvent::OptionMarketListed(protocol_types::events::OptionMarketListed {
+                registry: ObjectId::new([registry; 32]),
+                bucket,
+                base: AssetType::new("0x9::call_0::CALL_0"),
+                quote: AssetType::new("USDC"),
+                tick_size: 1_000,
+                min_size: 10_000,
+                fee_bps: 25,
+                is_put: false,
+            })
+        };
+
+        let staged = store
+            .stage_batch(
+                2,
+                1_000,
+                vec![
+                    (listed_evt(0xa1), "0xd1".to_string(), 0),
+                    // Duplicate market for the same bucket: kept out of both
+                    // the view and the DB batch.
+                    (listed_evt(0xa2), "0xd2".to_string(), 0),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(staged.db_batch.exchange_markets.len(), 1);
+        assert_eq!(
+            staged.db_batch.exchange_markets[0].registry_id,
+            ObjectId::new([0xa1; 32]).to_hex()
+        );
+        let state = store.exchange_market(&bucket).unwrap();
+        assert_eq!(state.registry_id, ObjectId::new([0xa1; 32]));
+        assert!(!state.is_put);
+        // The inverse lookup the worker's fill promotion uses.
+        assert_eq!(
+            store.bucket_by_exchange_registry(&ObjectId::new([0xa1; 32])),
+            Some(bucket)
+        );
+        assert_eq!(
+            store.bucket_by_exchange_registry(&ObjectId::new([0xa2; 32])),
+            None
+        );
+        // Both events still land in the log.
+        assert_eq!(staged.db_batch.events.len(), 2);
+        assert_eq!(staged.db_batch.events[0].event_type, "OptionMarketListed");
+    }
+
+    #[test]
     fn trading_vault_external_account_lifecycle() {
         use protocol_types::events::{
             EquityPosted, TvExternalAccountCleared, TvExternalAccountSet, TvExternalReleased,

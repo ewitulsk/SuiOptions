@@ -215,8 +215,9 @@ impl ApiServiceClient {
             .collect()
     }
 
-    /// All buckets with a live DeepBook venue, fresh from `GET /buckets`
-    /// (never cached — `tradeable` flips with the clock and pool creation;
+    /// All buckets with a live secondary-market venue — an in-house exchange
+    /// market (SO-416) or a legacy DeepBook pool — fresh from `GET /buckets`
+    /// (never cached — `tradeable` flips with the clock and venue creation;
     /// SO-158).
     pub async fn tradeable_buckets(&self) -> Result<Vec<TradeableBucket>> {
         let url = format!("{}/buckets", self.base_url);
@@ -238,11 +239,17 @@ impl ApiServiceClient {
                     continue;
                 }
                 let Some(bucket_id) = b.bucket_id else { continue };
-                let Some(pool_id) = b.deepbook_pool_id else { continue };
+                // A venue is required: exchange market (preferred) or legacy
+                // DeepBook pool. Guards against an api-service predating the
+                // venue-aware `tradeable` flag.
+                if b.exchange_market_id.is_none() && b.deepbook_pool_id.is_none() {
+                    continue;
+                }
                 out.push(TradeableBucket {
                     bucket_id: ObjectId::from_hex(&bucket_id)
                         .map_err(|e| anyhow::anyhow!("bucket_id {bucket_id}: {e}"))?,
-                    pool_id,
+                    pool_id: b.deepbook_pool_id.unwrap_or_default(),
+                    exchange_market_id: b.exchange_market_id,
                     call_coin_type: canonicalize_move_type(&b.call_coin_type),
                     asset_coin_type: canonicalize_move_type(&series.asset_coin_type),
                     settlement_coin_type: canonicalize_move_type(&series.settlement_coin_type),
@@ -296,6 +303,7 @@ impl ApiServiceClient {
                     bucket_id: ObjectId::from_hex(&bucket_id)
                         .map_err(|e| anyhow::anyhow!("bucket_id {bucket_id}: {e}"))?,
                     pool_id: b.deepbook_pool_id.unwrap_or_default(),
+                    exchange_market_id: b.exchange_market_id,
                     call_coin_type: canonicalize_move_type(&b.call_coin_type),
                     asset_coin_type: canonicalize_move_type(&series.asset_coin_type),
                     settlement_coin_type: canonicalize_move_type(&series.settlement_coin_type),
@@ -345,13 +353,17 @@ impl ApiServiceClient {
     }
 }
 
-/// One bucket with a live DeepBook venue, flattened from `GET /buckets`
-/// (SO-158). Only buckets api-service marks `tradeable` are returned —
-/// pool exists, not cleaned, not expired.
+/// One bucket with a live secondary-market venue, flattened from
+/// `GET /buckets` (SO-158). Only buckets api-service marks `tradeable` are
+/// returned — a venue exists (exchange market or DeepBook pool), not
+/// cleaned, not expired.
 #[derive(Clone, Debug)]
 pub struct TradeableBucket {
     pub bucket_id: ObjectId,
+    /// Legacy DeepBook pool id (hex); empty for exchange-only buckets.
     pub pool_id: String,
+    /// In-house exchange market (SettlementRegistry) id, hex (SO-416).
+    pub exchange_market_id: Option<String>,
     pub call_coin_type: String,
     pub asset_coin_type: String,
     pub settlement_coin_type: String,
@@ -439,6 +451,10 @@ struct SeriesBucketWire {
     // predates SO-153.
     #[serde(default)]
     deepbook_pool_id: Option<String>,
+    /// In-house exchange market id (SO-416); serde default keeps this client
+    /// compatible with an api-service that predates the exchange cutover.
+    #[serde(default)]
+    exchange_market_id: Option<String>,
     #[serde(default)]
     tradeable: bool,
     /// Write/RFQ liveness (SO-394): open mint path, no pool required.

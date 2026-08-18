@@ -378,6 +378,7 @@ mod tests {
             cleaned: false,
             invalidated,
             deepbook_pool_id: None,
+            exchange_market_id: None,
             option_kind: "call".into(),
         }))
     }
