@@ -1,0 +1,13 @@
+[package]
+name = "exchange_listing"
+version = "0.0.1"
+edition = "2024.beta"
+
+# The one place that knows both type systems: depends on the exchange (to
+# create markets via the narrow ListingCap) and on options_core (to demand a
+# real bucket as proof of a genuine option currency). The exchange package
+# itself stays framework-only (its spec §7.11 audit scope) — this leaf is the
+# coupling layer, same shape as the other adapter packages.
+[dependencies]
+exchange = { local = "../exchange" }
+options_core = { local = "../core" }
