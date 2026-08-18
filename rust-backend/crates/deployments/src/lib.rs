@@ -672,6 +672,7 @@ mod tests {
                 trading_vault_objects: None,
                 quote_signer_id: None,
                 exchange: None,
+                exchange_listing: None,
                 whitelist: None,
             bucket_registry_id: None,
             },

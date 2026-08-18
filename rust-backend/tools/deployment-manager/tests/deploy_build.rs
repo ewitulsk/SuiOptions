@@ -55,6 +55,9 @@ const PUBLISHABLE: &[&str] = &[
     // Hybrid exchange settlement package (standalone audit scope; published
     // by the default protocol pipeline, or alone via --deploy-exchange).
     "exchange",
+    // Permissionless option-market listing leaf (SO-416); republishes with
+    // the exchange it links against.
+    "exchange-listing",
     "exchange-adapter",
 ];
 
