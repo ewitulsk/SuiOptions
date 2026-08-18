@@ -44,6 +44,7 @@ public struct CollateralizedWrite has copy, drop {
     bucket_id: ID,
     /// Tx sender (the venue or self-writer).
     writer: address,
+    position_id: ID,
     amount: u64,
     range_start: u128,
     range_end: u128,
@@ -135,6 +136,7 @@ public struct PutWriteExecuted has copy, drop {
 public struct PutCollateralizedWrite has copy, drop {
     bucket_id: ID,
     writer: address,
+    position_id: ID,
     write_amount: u64,
     collateral: u64,
     range_start: u128,
@@ -272,11 +274,12 @@ public(package) fun emit_write_executed(
 public(package) fun emit_collateralized_write(
     bucket_id: ID,
     writer: address,
+    position_id: ID,
     amount: u64,
     range_start: u128,
     range_end: u128,
 ) {
-    event::emit(CollateralizedWrite { bucket_id, writer, amount, range_start, range_end });
+    event::emit(CollateralizedWrite { bucket_id, writer, position_id, amount, range_start, range_end });
 }
 
 public(package) fun emit_exercised(
@@ -436,6 +439,7 @@ public(package) fun emit_put_write_executed(
 public(package) fun emit_put_collateralized_write(
     bucket_id: ID,
     writer: address,
+    position_id: ID,
     write_amount: u64,
     collateral: u64,
     range_start: u128,
@@ -444,6 +448,7 @@ public(package) fun emit_put_collateralized_write(
     event::emit(PutCollateralizedWrite {
         bucket_id,
         writer,
+        position_id,
         write_amount,
         collateral,
         range_start,
@@ -562,11 +567,12 @@ public fun write_executed_position_id(e: &WriteExecuted): ID {
 public fun new_collateralized_write_for_testing(
     bucket_id: ID,
     writer: address,
+    position_id: ID,
     amount: u64,
     range_start: u128,
     range_end: u128,
 ): CollateralizedWrite {
-    CollateralizedWrite { bucket_id, writer, amount, range_start, range_end }
+    CollateralizedWrite { bucket_id, writer, position_id, amount, range_start, range_end }
 }
 
 // ───────── exact-offset closure + spread collateral compression ─────────

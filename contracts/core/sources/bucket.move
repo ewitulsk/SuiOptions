@@ -536,6 +536,7 @@ public fun write_collateralized_balance<Underlying, Settlement, Call>(
     events::emit_collateralized_write(
         object::id(bucket),
         ctx.sender(),
+        object::id(&position),
         amount,
         position::range_start(&position),
         position::range_end(&position),

@@ -1255,6 +1255,7 @@ fun test_write_collateralized_happy_path() {
     let expected = options_core::events::new_collateralized_write_for_testing(
         object::id(&b),
         th::writer_addr(),
+        object::id(&pos),
         100,
         0,
         100,
