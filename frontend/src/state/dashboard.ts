@@ -28,13 +28,11 @@ import { useCallTokenLots } from "../api/useCallTokenLots";
 import { useDashboardPnl } from "../api/useDashboardPnl";
 import { useOwnedPositions, type OwnedPositionObj } from "../api/useOwnedPositions";
 import { usePythPrices } from "../api/usePythPrice";
-import { useBalanceManager, useBmCoinBalances } from "../api/deepbook";
 import { fetchEnrichedPositions, optionCoinType, seriesOptionType } from "../api/client";
 import type { BucketPnl, CallTokenLot, EnrichedPosition, Position, Series } from "../api/client";
 import type { OwnedCallOption } from "../api/useOwnedCallOptions";
 import { buildExerciseTx, buildRedeemTx } from "../tx/dashboard";
 import { buildExercisePutTx, buildRedeemPutTx } from "../tx/dashboard_put";
-import { buildWithdrawBaseTx } from "../tx/deepbook";
 import type {
   DashboardModal,
   DashboardSpots,
@@ -179,8 +177,6 @@ function buildOwnedRow(
   bucketIdx: Map<string, { series: Series; bucket: Series["buckets"][number] }>,
   spot: number,
   now: number,
-  /** Portion of `obj.amount_raw` held in the DeepBook trading account (BM). */
-  bmAmountRaw: bigint,
   optionType: OptionType,
 ): OwnedPosition | null {
   const bucketInfo = bucketIdx.get(obj.bucket_id);
@@ -265,7 +261,6 @@ function buildOwnedRow(
     strike,
     expiry: isoDate(series.expiry_ms),
     amount,
-    tradingAccountAmount: scaleU64(bmAmountRaw.toString(), series.asset_decimals),
     premiumPaid: costBasis,
     boughtFrom: provenance ? shortAccount(provenance.seller_account_id) : "—",
     boughtAt: provenance ? isoDate(provenance.timestamp_ms) : "",
@@ -350,13 +345,6 @@ function buildWrittenRow(
 
 // ── the hook ──────────────────────────────────────────────────────────
 
-/** A token balance the user holds in their DeepBook trading account (BM). */
-export type TradingAccountBalance = {
-  coinType: string;
-  symbol: string;
-  amount: number;
-};
-
 export type DashboardState = {
   tab: "owned" | "written";
   setTab: (t: "owned" | "written") => void;
@@ -369,10 +357,6 @@ export type DashboardState = {
   openClaim: (p: WrittenPosition) => void;
   submit: () => Promise<void>;
   closeModal: () => void;
-  /** Settlement tokens the user holds in their DeepBook trading account. */
-  tradingAccountSettlements: TradingAccountBalance[];
-  /** Withdraw a single position token out of the DeepBook trading account. */
-  withdrawFromTradingAccount: (p: OwnedPosition) => void;
   toast: ToastState | null;
   connected: boolean;
   /** Connected wallet address, or null when disconnected. */
@@ -396,24 +380,9 @@ export function useDashboardState(): DashboardState {
   // Per-purchase provenance for owned calls (boughtFrom / premiumPaid / boughtAt).
   const lots = useCallTokenLots(wallet);
 
-  // DeepBook trading account (BM): position tokens and settlement the user left
-  // sitting in their balance manager rather than the wallet.
-  const bmId = useBalanceManager(wallet);
-  // True cost-basis PnL (FIFO lots + realized), attributed to the wallet's BM.
-  const pnl = useDashboardPnl(wallet, bmId.data ?? null);
-  const bmQueryTypes = useMemo<string[]>(() => {
-    const set = new Set<string>();
-    for (const s of buckets.data ?? []) {
-      if (s.settlement_coin_type) set.add(s.settlement_coin_type);
-      // Cover both call and put option coin types (option_coin_type ?? call_coin_type).
-      for (const b of s.buckets) {
-        const ct = optionCoinType(b);
-        if (ct) set.add(ct);
-      }
-    }
-    return Array.from(set);
-  }, [buckets.data]);
-  const bmBalances = useBmCoinBalances(bmId.data ?? null, bmQueryTypes, wallet);
+  // True cost-basis PnL (FIFO lots + realized). No BM attribution any more:
+  // exchange fills settle straight into the wallet (SO-416).
+  const pnl = useDashboardPnl(wallet, null);
 
   const positionIds = useMemo(
     () => (ownedPositions.data ?? []).map((p) => p.object_id).sort(),
@@ -482,25 +451,20 @@ export function useDashboardState(): DashboardState {
       }
     }
 
-    // A holding is wallet balance + trading-account (BM) balance. Union the two
-    // so a position that lives *only* in the BM (e.g. a market buy that never
-    // got withdrawn) still shows up. Calls and puts both contribute here; the
-    // option-type map disambiguates which builder semantics each coin gets.
+    // A holding is the wallet balance — exchange fills settle straight into
+    // the wallet (SO-416), so there is no venue custody to union in. Calls
+    // and puts both contribute here; the option-type map disambiguates which
+    // builder semantics each coin gets.
     const walletByType = new Map<string, bigint>();
     for (const o of [...(owned.data ?? []), ...(ownedPuts.data ?? [])]) {
       walletByType.set(normalizeStructTag(o.coin_type), BigInt(o.amount_raw));
     }
-    const bmByType = bmBalances.data ?? {};
-    const allTypes = new Set<string>([...walletByType.keys(), ...Object.keys(bmByType)]);
 
     const rows: OwnedPosition[] = [];
-    for (const type of allTypes) {
+    for (const [type, total] of walletByType) {
       const meta = optionTypeMeta.get(type);
       if (!meta) continue; // settlement type, or unknown — not a position
       const { bucketId: bucket_id, optionType } = meta;
-      const walletRaw = walletByType.get(type) ?? 0n;
-      const bmRaw = bmByType[type] ?? 0n;
-      const total = walletRaw + bmRaw;
       if (total <= 0n) continue;
       const series = bucketIdx.get(bucket_id)?.series;
       const symbol = displayAsset(series?.asset_symbol ?? "");
@@ -512,35 +476,12 @@ export function useDashboardState(): DashboardState {
         bucketIdx,
         spot,
         now,
-        bmRaw,
         optionType,
       );
       if (row) rows.push(row);
     }
     return rows;
-  }, [owned.data, ownedPuts.data, bmBalances.data, buckets.data, lots.data, pnl.data, spots, now]);
-
-  // Settlement balances sitting in the trading account (BM), for the dashboard
-  // "in DeepBook" section — one entry per distinct settlement token held.
-  const tradingAccountSettlements = useMemo<TradingAccountBalance[]>(() => {
-    const bm = bmBalances.data ?? {};
-    const meta = new Map<string, { symbol: string; decimals: number | null }>();
-    for (const s of buckets.data ?? []) {
-      if (s.settlement_coin_type) {
-        meta.set(normalizeStructTag(s.settlement_coin_type), {
-          symbol: s.settlement_symbol,
-          decimals: s.settlement_decimals,
-        });
-      }
-    }
-    const out: TradingAccountBalance[] = [];
-    for (const [type, m] of meta) {
-      const raw = bm[type] ?? 0n;
-      if (raw <= 0n) continue;
-      out.push({ coinType: type, symbol: m.symbol, amount: scaleU64(raw.toString(), m.decimals) });
-    }
-    return out;
-  }, [bmBalances.data, buckets.data]);
+  }, [owned.data, ownedPuts.data, buckets.data, lots.data, pnl.data, spots, now]);
 
   const writtenRows = useMemo<WrittenPosition[]>(() => {
     const objs = ownedPositions.data ?? [];
@@ -649,18 +590,6 @@ export function useDashboardState(): DashboardState {
         const settlementAmountRaw = (exerciseAmountRaw * strikeRaw) / scale;
 
         setModal({ ...captured, stage: "broadcast" } as DashboardModal);
-        // If part/all of the option coin is in the DeepBook trading account,
-        // withdraw it inline (atomic) so the exercise can consume it.
-        const walletRaw = BigInt(
-          ([...(owned.data ?? []), ...(ownedPuts.data ?? [])].find(
-            (o) => normalizeStructTag(o.coin_type) === norm,
-          )?.amount_raw) ?? "0",
-        );
-        const bmRaw = (bmBalances.data ?? {})[norm] ?? 0n;
-        const bmWithdraw =
-          bmRaw > 0n && bmId.data && bucket.deepbook_pool_id
-            ? { poolId: bucket.deepbook_pool_id, bmId: bmId.data, walletAmountRaw: walletRaw }
-            : undefined;
         const tx = isPut
           ? buildExercisePutTx({
               bucketId: bucket.bucket_id,
@@ -670,7 +599,6 @@ export function useDashboardState(): DashboardState {
               underlyingCoinType: series.asset_coin_type,
               settlementCoinType: series.settlement_coin_type,
               recipient: wallet,
-              bmWithdraw,
             })
           : buildExerciseTx({
               bucketId: bucket.bucket_id,
@@ -680,7 +608,6 @@ export function useDashboardState(): DashboardState {
               underlyingCoinType: series.asset_coin_type,
               settlementCoinType: series.settlement_coin_type,
               recipient: wallet,
-              bmWithdraw,
             });
         await submitTx(tx);
         setModal({ ...captured, stage: "confirmed" } as DashboardModal);
@@ -751,51 +678,6 @@ export function useDashboardState(): DashboardState {
     }
   };
 
-  // Standalone "withdraw this position token from DeepBook" — settles the pool
-  // and drains only the option coin back to the wallet (leaves settlement in
-  // the BM for other trades).
-  const withdrawFromTradingAccount = async (p: OwnedPosition) => {
-    if (!wallet || !bmId.data) return;
-    const norm = normalizeStructTag(p.id);
-    const info = (buckets.data ?? [])
-      .flatMap((s) => s.buckets.map((b) => ({ series: s, b })))
-      .find((x) => normalizeStructTag(optionCoinType(x.b)) === norm);
-    if (!info || !info.b.deepbook_pool_id) {
-      setToast({ message: "failed · no DeepBook pool for this position", variant: "error" });
-      setTimeout(() => setToast(null), 6000);
-      return;
-    }
-    try {
-      const tx = buildWithdrawBaseTx({
-        poolId: info.b.deepbook_pool_id,
-        bmId: bmId.data,
-        baseCoinType: optionCoinType(info.b),
-        quoteCoinType: info.series.settlement_coin_type,
-        recipient: wallet,
-      });
-      await submitTx(tx);
-      setToast({
-        message: `withdrew ${p.tradingAccountAmount.toFixed(p.asset === "BTC" ? 4 : 0)} ${p.asset} call from DeepBook`,
-        variant: "success",
-      });
-      setTimeout(() => setToast(null), 4500);
-      posthog.capture("deepbook_position_withdrawn", {
-        asset: p.asset,
-        amount: p.tradingAccountAmount,
-        pool_id: info.b.deepbook_pool_id,
-        wallet_address: wallet,
-      });
-      owned.refetch();
-      ownedPuts.refetch();
-      bmBalances.refetch();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      posthog.captureException(err, { action: "deepbook_withdraw", wallet_address: wallet });
-      setToast({ message: `failed · ${message}`, variant: "error" });
-      setTimeout(() => setToast(null), 6000);
-    }
-  };
-
   const closeModal = () => {
     if (modal && (modal as { stage?: string }).stage === "confirmed") {
       const k = modal.kind;
@@ -821,7 +703,6 @@ export function useDashboardState(): DashboardState {
     enriched.refetch();
     owned.refetch();
     ownedPuts.refetch();
-    bmBalances.refetch();
   };
 
   return {
@@ -836,8 +717,6 @@ export function useDashboardState(): DashboardState {
     openClaim,
     submit,
     closeModal,
-    tradingAccountSettlements,
-    withdrawFromTradingAccount,
     toast,
     connected,
     address: wallet,

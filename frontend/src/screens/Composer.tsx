@@ -1,7 +1,11 @@
-import { useMemo, useState } from "react";
-import { useCurrentAccount } from "@mysten/dapp-kit";
+import { useState } from "react";
 import { useComposerState } from "../state/composer";
-import { midFromBook, poolRefFor, useOrderBook } from "../api/deepbook";
+import {
+  midFromBook,
+  toDisplayBook,
+  useExchangeBook,
+  useExchangeMarketFor,
+} from "../api/orderbook";
 import { BuyDetailTabs, type DetailTab } from "../components/BuyDetailTabs";
 import { BuyModeToggle, type BuyMode } from "../components/BuyModeToggle";
 import { OptionTypeToggle } from "../components/OptionTypeToggle";
@@ -33,19 +37,24 @@ type Props = {
 
 export function Composer({ initialView }: Props) {
   const s = useComposerState({ initialView });
-  const account = useCurrentAccount();
   // Top-of-book mid (settlement per option), shared one source with the order
-  // book rail (same `["deepbook-book", poolId]` query). Feeds the metrics panel
-  // and `/options/metrics` `mark`. `null` until a strike with a two-sided book.
-  const poolRef = useMemo(
-    () => (s.apiBucket && s.series ? poolRefFor(s.apiBucket, s.series) : null),
-    [s.apiBucket, s.series],
+  // book rail (same `["exchange-book", marketId]` query). Feeds the metrics
+  // panel and `/options/metrics` `mark`. `null` until a strike with a
+  // two-sided book.
+  const { market } = useExchangeMarketFor(s.apiBucket);
+  const bookQ = useExchangeBook(market?.registryId ?? null);
+  const mid = midFromBook(
+    toDisplayBook(
+      bookQ.data,
+      market,
+      s.series?.asset_decimals ?? 8,
+      s.series?.settlement_decimals ?? 6,
+    ),
   );
-  const book = useOrderBook(poolRef, account?.address ?? null);
-  const mid = midFromBook(book.data);
-  // SO-170: on /buy, switch the whole lower area between buying on DeepBook
-  // (chart + order book + trade form) and minting from the market makers (RFQ).
-  const [buyMode, setBuyMode] = useState<BuyMode>("deepbook");
+  // SO-170: on /buy, switch the whole lower area between buying on the
+  // exchange (chart + order book + trade form) and minting from the market
+  // makers (RFQ).
+  const [buyMode, setBuyMode] = useState<BuyMode>("exchange");
   // Lifted out of BuyDetailTabs so the active tab persists as the user clicks
   // around the strike grid (the panel is keyed per-bucket and remounts).
   const [detailTab, setDetailTab] = useState<DetailTab>("greeks");
@@ -140,9 +149,12 @@ export function Composer({ initialView }: Props) {
     </div>
   );
 
-  // ---- Trader (/buy): toggle between DeepBook and Market-Maker buy paths ----
+  // ---- Trader (/buy): toggle between exchange and Market-Maker buy paths ----
   function renderTrader() {
-    const live = s.apiBucket?.deepbook_pool_id && s.series;
+    // A created bucket is enough to show the trade surface: TradePanel offers
+    // the permissionless "List market" action when no exchange market exists
+    // yet (SO-415), and the chart appears once one does.
+    const live = s.apiBucket?.bucket_id && s.series;
 
     const chainInner = s.bucketsLoading ? (
       <div className="composer-status">loading strikes from indexer…</div>
@@ -163,14 +175,16 @@ export function Composer({ initialView }: Props) {
       />
     );
 
-    const chart = live ? (
+    // price-charting keys exchange markets by their registry id (SO-416).
+    const chart = live && market ? (
       <ChartPanel
         key={`chart-${s.apiBucket!.bucket_id}`}
-        poolId={s.apiBucket!.deepbook_pool_id!}
+        poolId={market.registryId}
         strike={s.apiBucket!.strike}
         settlementSymbol={s.series!.settlement_symbol}
       />
     ) : (
+      !live &&
       !s.bucketsLoading &&
       !s.bucketsEmpty && (
         <div className="composer-status">select a strike to see its market</div>
@@ -181,7 +195,7 @@ export function Composer({ initialView }: Props) {
       <>
         <BuyModeToggle mode={buyMode} onChange={setBuyMode} />
 
-        {buyMode === "deepbook" ? (
+        {buyMode === "exchange" ? (
           <div className="buy-grid buy-grid--deepbook">
             <aside className="buy-grid__buckets">
               {chainInner}

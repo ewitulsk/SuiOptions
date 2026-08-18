@@ -1,14 +1,14 @@
-// Binary selector for the Buy screen's two purchase paths (SO-225): DeepBook
-// secondary trading vs. minting from the market makers. Styled as a segmented
-// control with a blue pill that slides between the two options — the same
-// measured-offset animation the header nav uses.
+// Binary selector for the Buy screen's two purchase paths (SO-225): exchange
+// secondary trading (SO-416) vs. minting from the market makers. Styled as a
+// segmented control with a blue pill that slides between the two options —
+// the same measured-offset animation the header nav uses.
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-export type BuyMode = "deepbook" | "mm";
+export type BuyMode = "exchange" | "mm";
 
 const OPTIONS: { id: BuyMode; label: string }[] = [
-  { id: "deepbook", label: "Trade on DeepBook" },
+  { id: "exchange", label: "Trade on Exchange" },
   { id: "mm", label: "Buy from market makers" },
 ];
 

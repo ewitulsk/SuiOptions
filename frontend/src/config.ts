@@ -62,6 +62,14 @@ export const ORACLE_SERVICE_URL: string =
 export const CCTP_URL: string =
   (import.meta.env.VITE_CCTP_URL as string | undefined) ?? "http://127.0.0.1:9015";
 
+// orderbook public base URL (SO-416). REST + WS gateway of the in-house
+// hybrid exchange (rust-backend/services/orderbook): markets, books, signed
+// order intake, cancels, and taker route quotes. Deployed builds set
+// VITE_ORDERBOOK_URL to the env's public route
+// (e.g. https://<host>/<env>/orderbook).
+export const ORDERBOOK_URL: string =
+  (import.meta.env.VITE_ORDERBOOK_URL as string | undefined) ?? "http://127.0.0.1:9014";
+
 // hedge-signer public base URL (SO-305). Drives the curator dashboard's
 // FROST ceremonies (/frost/*) and the allowlisted Bluefin REST relay
 // (/bluefin/*; Bluefin CORS-blocks third-party origins, so the browser
@@ -131,6 +139,16 @@ export type ExchangeMarket = {
 };
 export let EXCHANGE_MARKETS: ExchangeMarket[] = [];
 
+/** Permissionless option-market listing package (SO-415/416): anyone can
+ * list an exchange market for an existing bucket via
+ * `exchange_listing::create_call_market` / `create_put_market`. Both ids
+ * `undefined` when token-info doesn't serve the block yet (or the env has
+ * no listing deployment) — the "List market" UI then stays hidden.
+ * VITE_ overrides let a build point at a listing deploy token-info doesn't
+ * know about yet. */
+export let EXCHANGE_LISTING_PACKAGE_ID: string | undefined;
+export let EXCHANGE_LISTING_AUTHORITY_ID: string | undefined;
+
 // Keeper-attested equity oracle for trading-vault external accounts
 // (SO-299). The publish digest resolves the shared `EquityBook` client-side
 // (token-info doesn't serve it), mirroring the publish-digest fallback below.
@@ -160,17 +178,11 @@ export type TradingVaultObjects = {
 };
 export let TRADING_VAULT_OBJECTS: TradingVaultObjects | undefined;
 
-// DeepBook v3 deployment ids (SO-151), served by token-info alongside the
-// protocol ids. All `undefined` on networks without a DeepBook deployment
-// (devnet) — DeepBook features simply don't render there.
-export let DEEPBOOK_PACKAGE_ID: string | undefined;
-/** Original publish id — event/struct TYPES resolve here (BalanceManager
- * type tag, BalanceManagerEvent queries), while CALLS target the upgraded
- * `DEEPBOOK_PACKAGE_ID`. */
-export let DEEPBOOK_ORIGINAL_PACKAGE_ID: string | undefined;
-export let DEEPBOOK_REGISTRY_ID: string | undefined;
-/** Canonical DEEP coin type of the DeepBook deployment (locked-balance legs
- * in trading-vault custody appraisals are valued in it). */
+// Canonical DEEP coin type of the DeepBook deployment (SO-151), served by
+// token-info. Options secondary trading moved to the in-house exchange
+// (SO-416), but trading-vault custody appraisals still value locked-balance
+// legs in DEEP, so this one id survives the cutover. `undefined` on networks
+// without a DeepBook deployment (devnet).
 export let DEEP_COIN_TYPE: string | undefined;
 
 // Testnet faucet tokens (SO-93). Each is a shared `Faucet` with a public
@@ -251,6 +263,9 @@ type PackageInfoDto = {
     /** Created markets keyed by symbol (e.g. `TBTC/TUSDC`). */
     markets?: Record<string, { registryId: string; base: string; quote: string }>;
   } | null;
+  /** Permissionless option-market listing (SO-415/416). Absent until the
+   * backend serves the block — code defensively. */
+  exchangeListing?: { packageId: string; listingAuthorityId: string } | null;
   /** Standalone ingress whitelist package (guarded launch). Absent on
    * records predating the standalone package. */
   whitelist?: {
@@ -315,6 +330,12 @@ export async function initConfig(): Promise<void> {
     base: m.base,
     quote: m.quote,
   }));
+  EXCHANGE_LISTING_PACKAGE_ID =
+    (import.meta.env.VITE_EXCHANGE_LISTING_PACKAGE_ID as string | undefined) ??
+    info.exchangeListing?.packageId;
+  EXCHANGE_LISTING_AUTHORITY_ID =
+    (import.meta.env.VITE_EXCHANGE_LISTING_AUTHORITY_ID as string | undefined) ??
+    info.exchangeListing?.listingAuthorityId;
   WHITELIST_ID = info.whitelist?.whitelistId ?? undefined;
   BUCKET_REGISTRY_ID = info.bucketRegistryId ?? undefined;
   WHITELIST_PACKAGE_ID = info.whitelist?.packageId;
@@ -323,11 +344,7 @@ export async function initConfig(): Promise<void> {
   EQUITY_ORACLE_PUBLISH_DIGEST = info.equityOracle?.publishDigest;
   TRADING_VAULT_OBJECTS = info.tradingVaultObjects ?? undefined;
 
-  const db = info.deepbook;
-  DEEPBOOK_PACKAGE_ID = db?.packageId;
-  DEEPBOOK_ORIGINAL_PACKAGE_ID = db?.originalPackageId;
-  DEEPBOOK_REGISTRY_ID = db?.registryId;
-  DEEP_COIN_TYPE = db?.deepCoinType;
+  DEEP_COIN_TYPE = info.deepbook?.deepCoinType;
 
   const tt = info.testTokens;
   TEST_TOKENS = tt
