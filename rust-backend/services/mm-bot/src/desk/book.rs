@@ -83,8 +83,6 @@ pub struct Holding {
     /// Units custodied as VaultMm coin POSITIONS (writer-flow sweeps),
     /// per position object.
     pub coin_positions: Vec<CoinPosition>,
-    /// The bucket's DeepBook option pool, when one exists (resale venue).
-    pub pool_id: Option<String>,
 }
 
 impl Holding {
@@ -201,6 +199,10 @@ pub struct Book {
     pub holdings: Vec<Holding>,
     pub written: Vec<Written>,
     reservations: HashMap<u64, Reservation>,
+    /// Units per bucket committed to resting exchange asks (SO-416) —
+    /// the listings engine writes; exits/quoting subtract so the same
+    /// inventory is never double-committed.
+    listed_units: HashMap<ObjectId, u64>,
     next_reservation_id: u64,
     pub pnl: Pnl,
     /// JSONL sink for P&L attribution records (append-only).
@@ -215,6 +217,7 @@ impl Book {
             holdings: Vec::new(),
             written: Vec::new(),
             reservations: HashMap::new(),
+            listed_units: HashMap::new(),
             next_reservation_id: 1,
             pnl: Pnl::default(),
             pnl_path,
@@ -264,6 +267,22 @@ impl Book {
     }
 
     // ── inventory ─────────────────────────────────────────────────────
+
+    /// Record how many of a bucket's units rest as an exchange ask
+    /// (SO-416). One ask per holding, so the value REPLACES any previous
+    /// commitment; 0 clears it.
+    pub fn set_listed_units(&mut self, bucket: ObjectId, units: u64) {
+        if units == 0 {
+            self.listed_units.remove(&bucket);
+        } else {
+            self.listed_units.insert(bucket, units);
+        }
+    }
+
+    /// Units of this bucket currently committed to a resting ask.
+    pub fn listed_units(&self, bucket: &ObjectId) -> u64 {
+        self.listed_units.get(bucket).copied().unwrap_or(0)
+    }
 
     /// Net naked short units across all written lines (V2 budget).
     pub fn naked_written_units(&self) -> u64 {
@@ -494,7 +513,6 @@ pub async fn fetch_holdings(
             amount_vault: vault_held,
             amount_wallet: wallet_held,
             coin_positions: positions,
-            pool_id: (!b.pool_id.is_empty()).then(|| b.pool_id.clone()),
         });
     }
 
@@ -533,7 +551,6 @@ pub async fn fetch_holdings(
                 amount_vault: 0,
                 amount_wallet: 0,
                 coin_positions: positions,
-                pool_id: None,
             });
         }
     }
@@ -915,7 +932,6 @@ mod tests {
             amount_vault: amount,
             amount_wallet: 0,
             coin_positions: Vec::new(),
-            pool_id: None,
         }
     }
 
@@ -975,6 +991,19 @@ mod tests {
         assert!((e200.delta_units - 2.5).abs() < 1e-9);
         assert!((total.delta_units - 5.5).abs() < 1e-9);
         assert!((total.theta_per_day - (-55.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn listed_units_replace_and_clear() {
+        let mut b = Book::new(0, None);
+        assert_eq!(b.listed_units(&oid(1)), 0);
+        b.set_listed_units(oid(1), 500);
+        assert_eq!(b.listed_units(&oid(1)), 500);
+        // One ask per holding: a new value replaces, never accumulates.
+        b.set_listed_units(oid(1), 200);
+        assert_eq!(b.listed_units(&oid(1)), 200);
+        b.set_listed_units(oid(1), 0);
+        assert_eq!(b.listed_units(&oid(1)), 0);
     }
 
     #[test]

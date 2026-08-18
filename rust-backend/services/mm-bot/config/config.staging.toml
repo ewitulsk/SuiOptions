@@ -83,6 +83,12 @@ mm_release_enabled = true
 [desk.provision]
 enabled = true
 
+# Exchange resting-ask exits (SO-416): list option inventory as asks on
+# the in-house exchange; the matching engine executes the resales.
+[desk.listings]
+enabled       = true
+orderbook_url = "http://orderbook:9014"
+
 # Hedge venues: omit for the single legacy paper venue; declare
 # [[desk.hedge.venues]] entries (kind = "paper", name, slippage_bps,
 # funding_rate_annual) for multi-venue monitoring — see config.toml.

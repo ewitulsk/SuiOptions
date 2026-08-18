@@ -25,7 +25,7 @@ const AUCTION_BID_TOO_LOW: u64 = 5;
 /// `… MoveAbort(MoveLocation { … }, 31) in command 2` (mirrors the keeper's
 /// triage parser: the location debug-print nests braces, so scan every
 /// `}, ` for the one followed by `<digits>)`).
-fn extract_abort_code(msg: &str) -> Option<u64> {
+pub(crate) fn extract_abort_code(msg: &str) -> Option<u64> {
     let after = &msg[msg.find("MoveAbort(")? + "MoveAbort(".len()..];
     for (i, _) in after.match_indices("}, ") {
         let rest = &after[i + 3..];

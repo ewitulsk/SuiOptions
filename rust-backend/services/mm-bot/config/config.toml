@@ -187,12 +187,28 @@ enabled            = false
 # enabled = true
 # tick_secs = 300
 # offset_close_enabled = true # step 0: net written vs held (close_offset)
-# concession_volpts = 1.0     # resale accepts fair − 1 vol pt
 # carry_mult = 1.1            # exercise when carry > time value × 1.1
 # near_expiry_hours = 24.0
 # max_slice = 1_000_000_000   # flash-exercise ladder chunk
 # [desk.exits.spot_pools]     # UNDERLYING/SETTLEMENT pools for flash
 # TSUI = "0x..."
+
+# [desk.listings]             # exchange resting-ask exits (SO-416)
+# The desk lists its option inventory as resting ASKS on the in-house
+# exchange (orderbook service); the exchange's matching engine executes
+# resales whenever a bid crosses. Replaces the retired per-option
+# DeepBook taker resale. Requires curator refs + the exchangeAdapter /
+# exchangeListing records in token-info.
+# enabled = false
+# orderbook_url = "http://127.0.0.1:9014"
+# concession_bps = 200        # asks list at mark × (1 + 200 bps)
+# requote_drift_bps = 50      # cancel-replace past this price drift
+# order_ttl_secs = 900        # also bounded by the bucket's expiry
+# max_fraction_bps = 10000    # list all vault units
+# min_list_units = 0
+# max_fee_bps = 50
+# watermark_interval_secs = 3600
+# gas_budget = 200_000_000
 
 # [desk.monitors]
 # interval_secs = 60

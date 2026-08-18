@@ -54,6 +54,11 @@ TWAL = 1.0
 enabled = false
 # vault_id           = "0x..."
 # mm_release_enabled = true
+
+# Exchange resting-ask exits (SO-416): off until the prod desk is live.
+[desk.listings]
+enabled = false
+# orderbook_url = "http://orderbook:9014"
 # Hedge venues: omit for the single legacy paper venue; declare
 # [[desk.hedge.venues]] entries (kind = "paper", name, slippage_bps,
 # funding_rate_annual) for multi-venue monitoring — see config.toml.
