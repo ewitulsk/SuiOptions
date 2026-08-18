@@ -84,6 +84,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    exchange_market_links (bucket_id) {
+        bucket_id      -> Text,
+        registry_id    -> Text,
+        is_put         -> Bool,
+        updated_at_seq -> Int8,
+    }
+}
+
+diesel::table! {
     rfqs (rfq_id) {
         // The generic auction object id (four-package layout); the adapter's
         // Rfq metadata object id rides in `meta_id`.
@@ -223,6 +232,7 @@ diesel::table! {
 
 diesel::joinable!(event_participants -> indexed_events (sequence));
 diesel::joinable!(bucket_deepbook_pools -> buckets (bucket_id));
+diesel::joinable!(exchange_market_links -> buckets (bucket_id));
 diesel::joinable!(rfq_bids -> indexed_events (sequence));
 diesel::allow_tables_to_appear_in_same_query!(
     event_participants,
@@ -232,6 +242,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     buckets,
     positions,
     bucket_deepbook_pools,
+    exchange_market_links,
     rfqs,
     rfq_bids,
     vaults,

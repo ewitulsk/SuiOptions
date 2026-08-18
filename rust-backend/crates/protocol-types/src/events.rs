@@ -1527,6 +1527,60 @@ pub struct EquityPosted {
     pub seeded: bool,
 }
 
+// ─── in-house exchange secondary market (SO-416) ───
+
+/// `{exchange_listing_pkg}::exchange_listing::OptionMarketListed` — a
+/// permissionless option-market listing on the in-house exchange. BCS mirror
+/// of the Move struct; `base`/`quote` are `order::canonical_type` strings
+/// (outer address 0x-prefixed, inner generic args bare) — canonicalize
+/// before comparing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionMarketListed {
+    pub registry: ObjectId,
+    pub bucket: ObjectId,
+    pub base: AssetType,
+    pub quote: AssetType,
+    #[serde(with = "u64_string")]
+    pub tick_size: u64,
+    #[serde(with = "u64_string")]
+    pub min_size: u64,
+    #[serde(with = "u64_string")]
+    pub fee_bps: u64,
+    pub is_put: bool,
+}
+
+/// An in-house exchange `settlement::FillEvent` on one of OUR option
+/// markets, enriched off-chain (SO-416). Like [`DeepBookOrderFilled`] this
+/// is NOT a raw BCS mirror: `bucket_id` is resolved by the indexer
+/// (registry → bucket via `OptionMarketListed`), and only fills on a known
+/// option market are emitted. `maker`/`taker` are wallet addresses — the
+/// exchange has no BalanceManager indirection.
+///
+/// Side semantics: `maker_sold_base` true ⇒ the taker BOUGHT `base_amount`
+/// for `quote_amount`; false ⇒ the taker sold. Fees are charged amounts in
+/// the quote (settlement) coin, withheld from each side's proceeds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExchangeOptionFill {
+    pub registry: ObjectId,
+    /// Resolved off-chain: the bucket the market's registry was listed for.
+    pub bucket_id: ObjectId,
+    /// 0x-hex of the order digest (32 bytes).
+    pub digest: String,
+    pub maker: SuiAddress,
+    pub taker: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub base_amount: u64,
+    #[serde(with = "u64_string")]
+    pub quote_amount: u64,
+    #[serde(with = "u64_string")]
+    pub maker_fee: u64,
+    #[serde(with = "u64_string")]
+    pub taker_fee: u64,
+    pub maker_sold_base: bool,
+    #[serde(with = "u64_string")]
+    pub timestamp_ms: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum ChainEvent {
@@ -1644,6 +1698,9 @@ pub enum ChainEvent {
     TvExternalReturned(TvExternalReturned),
     EquityPosted(EquityPosted),
     VolPosted(VolPosted),
+    // in-house exchange secondary market (SO-416)
+    OptionMarketListed(OptionMarketListed),
+    ExchangeOptionFill(ExchangeOptionFill),
 }
 
 /// An envelope wrapping a `ChainEvent` with the ordering metadata the indexer
@@ -1716,6 +1773,59 @@ mod tests {
         assert_eq!(v["payload"]["equity"], "80000000");
         assert_eq!(v["payload"]["previous"], "75000000");
         assert_eq!(v["payload"]["seeded"], false);
+
+        let back: ChainEvent = serde_json::from_value(v).unwrap();
+        assert_eq!(back, evt);
+    }
+
+    #[test]
+    fn option_market_listed_tagged_envelope() {
+        let evt = ChainEvent::OptionMarketListed(OptionMarketListed {
+            registry: ObjectId::new([0x0a; 32]),
+            bucket: ObjectId::new([0x0b; 32]),
+            base: AssetType::new("0x9::option_coin::OptionCall<0x2::sui::SUI>"),
+            quote: AssetType::new("0x9::tusdc::TUSDC"),
+            tick_size: 1_000,
+            min_size: 10_000,
+            fee_bps: 25,
+            is_put: false,
+        });
+        let v: serde_json::Value = serde_json::to_value(&evt).unwrap();
+        assert_eq!(v["type"], "OptionMarketListed");
+        assert_eq!(v["payload"]["quote"], "0x9::tusdc::TUSDC");
+        assert_eq!(v["payload"]["tick_size"], "1000");
+        assert_eq!(v["payload"]["min_size"], "10000");
+        assert_eq!(v["payload"]["fee_bps"], "25");
+        assert_eq!(v["payload"]["is_put"], false);
+
+        let back: ChainEvent = serde_json::from_value(v).unwrap();
+        assert_eq!(back, evt);
+    }
+
+    #[test]
+    fn exchange_option_fill_tagged_envelope() {
+        let evt = ChainEvent::ExchangeOptionFill(ExchangeOptionFill {
+            registry: ObjectId::new([0x0a; 32]),
+            bucket_id: ObjectId::new([0x0b; 32]),
+            digest: format!("0x{}", "cd".repeat(32)),
+            maker: SuiAddress::new([0x1a; 32]),
+            taker: SuiAddress::new([0x2b; 32]),
+            base_amount: 5_000_000,
+            quote_amount: 1_250_000,
+            maker_fee: 125,
+            taker_fee: 250,
+            maker_sold_base: true,
+            timestamp_ms: 1_748_534_400_000,
+        });
+        let v: serde_json::Value = serde_json::to_value(&evt).unwrap();
+        assert_eq!(v["type"], "ExchangeOptionFill");
+        assert_eq!(v["payload"]["digest"], format!("0x{}", "cd".repeat(32)));
+        assert_eq!(v["payload"]["base_amount"], "5000000");
+        assert_eq!(v["payload"]["quote_amount"], "1250000");
+        assert_eq!(v["payload"]["maker_fee"], "125");
+        assert_eq!(v["payload"]["taker_fee"], "250");
+        assert_eq!(v["payload"]["maker_sold_base"], true);
+        assert_eq!(v["payload"]["timestamp_ms"], "1748534400000");
 
         let back: ChainEvent = serde_json::from_value(v).unwrap();
         assert_eq!(back, evt);

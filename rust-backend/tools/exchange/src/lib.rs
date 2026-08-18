@@ -138,6 +138,19 @@ pub enum Command {
     PauseIngress,
     /// Reverse of `pause-ingress`, one PTB.
     UnpauseIngress,
+    /// SO-416 backfill: list an exchange market for every live bucket that
+    /// doesn't have one yet, via the permissionless exchange-listing
+    /// entries. Safe to re-run — already-listed buckets are skipped
+    /// (locally when the api reports a market, on-chain by the dedup
+    /// abort otherwise).
+    ListMarkets {
+        /// api-service base URL to enumerate buckets from.
+        #[arg(long, default_value = "http://127.0.0.1:9003")]
+        api_url: String,
+        /// Print the plan without submitting.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
     /// Print every id resolvable from `deployments.json`.
     Info,
 }

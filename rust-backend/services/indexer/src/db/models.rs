@@ -15,12 +15,13 @@ use protocol_types::events::ChainEvent;
 use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::store::{
-    AccountState, BucketState, DeepBookPoolState, PositionState, ReceiptState, RfqState,
-    RfqStatus, TradingVaultPositionState, TradingVaultState, VaultRoundState, VaultState,
+    AccountState, BucketState, DeepBookPoolState, ExchangeMarketState, PositionState,
+    ReceiptState, RfqState, RfqStatus, TradingVaultPositionState, TradingVaultState,
+    VaultRoundState, VaultState,
 };
 
 use super::schema::{
-    accounts, bucket_deepbook_pools, buckets, event_participants,
+    accounts, bucket_deepbook_pools, buckets, event_participants, exchange_market_links,
     indexed_events, indexer_progress, positions, rfq_bids, rfqs, trading_vault_positions,
     trading_vaults, vault_rounds, vault_user_receipts, vaults,
 };
@@ -188,6 +189,8 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::PutSpreadClosed(_) => "PutSpreadClosed",
         ChainEvent::PutSpreadRedeemed(_) => "PutSpreadRedeemed",
         ChainEvent::VolPosted(_) => "VolPosted",
+        ChainEvent::OptionMarketListed(_) => "OptionMarketListed",
+        ChainEvent::ExchangeOptionFill(_) => "ExchangeOptionFill",
     }
 }
 
@@ -271,6 +274,31 @@ impl DeepBookPoolRow {
                 maker_fee: self.maker_fee as u64,
             },
         ))
+    }
+}
+
+// ---------- exchange_market_links ----------
+
+/// One bucket's in-house exchange option market (SO-416). Insert-only with
+/// first-listing-wins semantics (`ON CONFLICT DO NOTHING` on both bucket_id
+/// and registry_id).
+#[derive(Queryable, Identifiable, Insertable, Debug, Clone)]
+#[diesel(table_name = exchange_market_links)]
+#[diesel(primary_key(bucket_id))]
+pub struct ExchangeMarketLinkRow {
+    pub bucket_id: String,
+    pub registry_id: String,
+    pub is_put: bool,
+    pub updated_at_seq: i64,
+}
+
+impl ExchangeMarketLinkRow {
+    pub fn into_state(self) -> anyhow::Result<(ObjectId, ExchangeMarketState)> {
+        let bucket = ObjectId::from_hex(&self.bucket_id)
+            .map_err(|e| anyhow::anyhow!("exchange market bucket_id {}: {e}", self.bucket_id))?;
+        let registry = ObjectId::from_hex(&self.registry_id)
+            .map_err(|e| anyhow::anyhow!("exchange market registry_id {}: {e}", self.registry_id))?;
+        Ok((bucket, ExchangeMarketState { registry_id: registry, is_put: self.is_put }))
     }
 }
 

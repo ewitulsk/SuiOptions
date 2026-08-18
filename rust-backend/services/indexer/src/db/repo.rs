@@ -32,18 +32,19 @@ use protocol_types::events::ChainEvent;
 use protocol_types::ids::ObjectId;
 
 use crate::store::{
-    AccountState, BucketState, DeepBookPoolState, PositionState, ReceiptKey, ReceiptState,
-    RfqState, TradingVaultPositionState, TradingVaultState, VaultRoundState, VaultState,
+    AccountState, BucketState, DeepBookPoolState, ExchangeMarketState, PositionState, ReceiptKey,
+    ReceiptState, RfqState, TradingVaultPositionState, TradingVaultState, VaultRoundState,
+    VaultState,
 };
 
 use super::models::{
     account_row_into_state, event_type_tag, AccountRow,
-    BucketRow, DeepBookPoolRow, EventParticipantRow, IndexedEventRow, NewIndexedEventRow,
-    PositionRow, ProgressRow, RfqBidRow, RfqRow, TradingVaultPositionRow, TradingVaultRow,
-    VaultReceiptRow, VaultRoundRow, VaultRow,
+    BucketRow, DeepBookPoolRow, EventParticipantRow, ExchangeMarketLinkRow, IndexedEventRow,
+    NewIndexedEventRow, PositionRow, ProgressRow, RfqBidRow, RfqRow, TradingVaultPositionRow,
+    TradingVaultRow, VaultReceiptRow, VaultRoundRow, VaultRow,
 };
 use super::schema::{
-    accounts, bucket_deepbook_pools, buckets, event_participants,
+    accounts, bucket_deepbook_pools, buckets, event_participants, exchange_market_links,
     indexed_events, indexer_progress, positions, rfq_bids, rfqs, trading_vault_positions,
     trading_vaults, vault_rounds, vault_user_receipts, vaults,
 };
@@ -64,6 +65,9 @@ pub struct CheckpointBatch {
     pub buckets: Vec<BucketRow>,
     /// Bucket → DeepBook venue rows (SO-152). Insert-only, first pool wins.
     pub deepbook_pools: Vec<DeepBookPoolRow>,
+    /// Bucket → exchange option-market rows (SO-416). Insert-only, first
+    /// listing wins.
+    pub exchange_markets: Vec<ExchangeMarketLinkRow>,
     pub position_upserts: Vec<PositionRow>,
     /// Positions to drop (`Redeemed` removes them). Keyed `(bucket_id_hex, range_start)`.
     pub position_deletes: Vec<(String, BigDecimal)>,
@@ -94,6 +98,7 @@ impl CheckpointBatch {
             accounts: Vec::new(),
             buckets: Vec::new(),
             deepbook_pools: Vec::new(),
+            exchange_markets: Vec::new(),
             position_upserts: Vec::new(),
             position_deletes: Vec::new(),
             event_participants: Vec::new(),
@@ -112,6 +117,7 @@ impl CheckpointBatch {
             && self.accounts.is_empty()
             && self.buckets.is_empty()
             && self.deepbook_pools.is_empty()
+            && self.exchange_markets.is_empty()
             && self.position_upserts.is_empty()
             && self.position_deletes.is_empty()
             && self.event_participants.is_empty()
@@ -159,6 +165,7 @@ pub struct HydratedViews {
     pub buckets: BTreeMap<ObjectId, BucketState>,
     pub positions: BTreeMap<(ObjectId, u128), PositionState>,
     pub deepbook_pools: BTreeMap<ObjectId, DeepBookPoolState>,
+    pub exchange_markets: BTreeMap<ObjectId, ExchangeMarketState>,
     pub rfqs: BTreeMap<ObjectId, RfqState>,
     pub vaults: BTreeMap<ObjectId, VaultState>,
     pub vault_rounds: BTreeMap<(ObjectId, u64), VaultRoundState>,
@@ -269,6 +276,18 @@ impl Repo {
                     .on_conflict_do_nothing()
                     .execute(conn)
                     .context("inserting bucket_deepbook_pools")?;
+            }
+
+            if !batch.exchange_markets.is_empty() {
+                // First listing wins: conflicts on bucket_id (duplicate
+                // market) or registry_id (replay) are silently skipped.
+                let _s = tracing::info_span!("db_query", query = "insert_exchange_markets")
+                    .entered();
+                diesel::insert_into(exchange_market_links::table)
+                    .values(&batch.exchange_markets)
+                    .on_conflict_do_nothing()
+                    .execute(conn)
+                    .context("inserting exchange_market_links")?;
             }
 
             if !batch.position_upserts.is_empty() {
@@ -548,6 +567,15 @@ impl Repo {
             deepbook_map.insert(bucket, state);
         }
 
+        let mut exchange_market_map: BTreeMap<ObjectId, ExchangeMarketState> = BTreeMap::new();
+        for row in exchange_market_links::table
+            .load::<ExchangeMarketLinkRow>(&mut conn)
+            .context("loading exchange_market_links")?
+        {
+            let (bucket, state) = row.into_state()?;
+            exchange_market_map.insert(bucket, state);
+        }
+
         let mut rfq_map: BTreeMap<ObjectId, RfqState> = BTreeMap::new();
         for row in rfqs::table.load::<RfqRow>(&mut conn).context("loading rfqs")? {
             let (id, state) = row.into_state()?;
@@ -604,6 +632,7 @@ impl Repo {
             buckets = bucket_map.len(),
             positions = position_map.len(),
             deepbook_pools = deepbook_map.len(),
+            exchange_markets = exchange_market_map.len(),
             rfqs = rfq_map.len(),
             vaults = vault_map.len(),
             trading_vaults = trading_vault_map.len(),
@@ -614,6 +643,7 @@ impl Repo {
             buckets: bucket_map,
             positions: position_map,
             deepbook_pools: deepbook_map,
+            exchange_markets: exchange_market_map,
             rfqs: rfq_map,
             vaults: vault_map,
             vault_rounds: round_map,
@@ -792,6 +822,27 @@ impl Repo {
             ))
             .load(&mut conn)
             .context("loading bucket_deepbook_pools ids")?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// bucket_id → exchange registry_id for the given buckets (SO-416).
+    /// Buckets without a listed market are simply absent from the map.
+    pub fn exchange_market_ids(
+        &self,
+        bucket_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        if bucket_ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let mut conn = self.conn()?;
+        let rows: Vec<(String, String)> = exchange_market_links::table
+            .filter(exchange_market_links::bucket_id.eq_any(bucket_ids))
+            .select((
+                exchange_market_links::bucket_id,
+                exchange_market_links::registry_id,
+            ))
+            .load(&mut conn)
+            .context("loading exchange_market_links ids")?;
         Ok(rows.into_iter().collect())
     }
 

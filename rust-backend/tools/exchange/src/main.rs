@@ -20,6 +20,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
+use std::str::FromStr;
+use sui_types::base_types::ObjectID;
 
 use token_info_client::{Snapshot, TokenInfoClient};
 use sui_tx::sui_client::SuiClientWrapper;
@@ -292,6 +294,72 @@ async fn main() -> Result<()> {
                 "✓ whitelist_enabled={enabled} digest: {}",
                 sui_tx::tx::tx_digest(&resp)
             );
+        }
+        Command::ListMarkets { api_url, dry_run } => {
+            let listing = snapshot
+                .exchange_listing()
+                .context("no exchangeListing block in token-info snapshot — redeploy")?;
+            let listing_pkg = ObjectID::from_str(&listing.package_id)?;
+            let authority = ObjectID::from_str(&listing.listing_authority_id)?;
+            let resp: serde_json::Value = reqwest::get(format!("{api_url}/buckets"))
+                .await
+                .context("fetching /buckets")?
+                .error_for_status()?
+                .json()
+                .await
+                .context("decoding /buckets")?;
+            let series = resp
+                .get("series")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let (mut listed, mut skipped, mut failed) = (0u32, 0u32, 0u32);
+            for s in &series {
+                for b in s.get("buckets").and_then(|v| v.as_array()).into_iter().flatten() {
+                    let Some(bucket_id) = b.get("bucket_id").and_then(|v| v.as_str()) else {
+                        continue; // never created on-chain
+                    };
+                    let Some(coin_type) = b.get("option_coin_type").and_then(|v| v.as_str())
+                    else {
+                        continue;
+                    };
+                    if b.get("exchange_market_id").and_then(|v| v.as_str()).is_some() {
+                        skipped += 1;
+                        continue; // already listed
+                    }
+                    if dry_run {
+                        println!("would list {bucket_id} ({coin_type})");
+                        listed += 1;
+                        continue;
+                    }
+                    match sui_tx::tx::exchange::create_option_market(
+                        &wrap.client,
+                        &wrap.signer,
+                        listing_pkg,
+                        authority,
+                        ObjectID::from_str(bucket_id)?,
+                        coin_type,
+                        cli.gas_budget,
+                    )
+                    .await
+                    {
+                        Ok(resp) => {
+                            listed += 1;
+                            println!(
+                                "listed {bucket_id} digest: {}",
+                                sui_tx::tx::tx_digest(&resp)
+                            );
+                        }
+                        Err(e) => {
+                            // Dedup/expiry aborts are expected on re-runs;
+                            // report and continue.
+                            failed += 1;
+                            eprintln!("skip {bucket_id}: {e:#}");
+                        }
+                    }
+                }
+            }
+            println!("listed {listed}, already-listed {skipped}, failed {failed}");
         }
         Command::PauseIngress | Command::UnpauseIngress => {
             let paused = matches!(cli.cmd, Command::PauseIngress);

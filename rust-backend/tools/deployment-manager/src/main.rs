@@ -25,7 +25,8 @@ use deployment_manager::deploy::{
     publish_test_tokens, seed_whitelist,
 };
 use deployment_manager::json_store::{
-    CctpBridgeRecord, Deployments, ExchangeRecord, NetworkDeployment, PackageInfo,
+    CctpBridgeRecord, Deployments, ExchangeListingRecord, ExchangeRecord, NetworkDeployment,
+    PackageInfo,
     PackageRecord, TestTokenRecord, TestTokensRecord, TokenSpec, TradingVaultObjectsRecord,
     WhitelistRecord,
 };
@@ -160,6 +161,12 @@ async fn main() -> Result<()> {
             .find(|(module, name, _)| module == "admin" && name == "AdminCap")
             .map(|(_, _, id)| *id)
             .context("exchange publish created no admin::AdminCap")?;
+        let listing_cap_id = outcome
+            .created_objects
+            .iter()
+            .find(|(module, name, _)| module == "admin" && name == "ListingCap")
+            .map(|(_, _, id)| *id)
+            .context("exchange publish created no admin::ListingCap")?;
         tracing::info!(
             package = %outcome.package_id,
             admin_cap = %admin_cap_id,
@@ -189,6 +196,39 @@ async fn main() -> Result<()> {
         .await
         .context("creating exchange markets")?;
         record.package_info.exchange = Some(exchange);
+
+        // The listing leaf links against the exchange, so an exchange-only
+        // redeploy must republish it too and re-park the fresh ListingCap.
+        let quote_type = record
+            .token_info
+            .get(deployment_manager::exchange_markets::QUOTE_SYMBOL)
+            .map(|t| t.coin_type.clone())
+            .with_context(|| {
+                format!(
+                    "token catalog has no {} entry for listing quote defaults",
+                    deployment_manager::exchange_markets::QUOTE_SYMBOL
+                )
+            })?;
+        let listing_out = deployment_manager::deploy::deploy_exchange_listing(
+            &client,
+            &signer,
+            &contracts_path.join("exchange-listing"),
+            network.as_str(),
+            listing_cap_id,
+            &quote_type,
+            cli.gas_budget,
+        )
+        .await
+        .with_context(|| format!("deploying exchange_listing to {network}"))?;
+        record.package_info.exchange_listing = Some(ExchangeListingRecord {
+            package_id: listing_out.package_id.to_string(),
+            upgrade_cap_id: listing_out.upgrade_cap_id.to_string(),
+            listing_authority_id: listing_out.listing_authority_id.to_string(),
+            admin_cap_id: listing_out.admin_cap_id.to_string(),
+            publish_digest: listing_out.digest,
+            deployed_at: chrono::Utc::now().to_rfc3339(),
+        });
+
         store.upsert(&env_key, record);
         store.save(&output_path)?;
         tracing::info!(path = %output_path.display(), env = %env_key, "exchange recorded");
@@ -620,7 +660,7 @@ async fn deploy_one(
     // Published BEFORE the trading-vault activation because the
     // exchange-adapter (SO-370) links against it and its witness joins
     // the activation PTB's integration allowlist.
-    let exchange = {
+    let (exchange, exchange_listing_cap_id) = {
         let out = publish_dep_package(
             &client,
             &signer,
@@ -640,6 +680,14 @@ async fn deploy_one(
             .find(|(module, name, _)| module == "admin" && name == "AdminCap")
             .map(|(_, _, id)| *id)
             .context("exchange publish created no admin::AdminCap")?;
+        // The narrow listing delegate (SO-416), minted alongside the
+        // AdminCap; parked in the exchange-listing ceremony below.
+        let listing_cap_id = out
+            .created_objects
+            .iter()
+            .find(|(module, name, _)| module == "admin" && name == "ListingCap")
+            .map(|(_, _, id)| *id)
+            .context("exchange publish created no admin::ListingCap")?;
         tracing::info!(
             package = %out.package_id,
             admin_cap = %admin_cap_id,
@@ -663,7 +711,41 @@ async fn deploy_one(
         )
         .await
         .context("creating exchange markets")?;
-        Some(ex)
+        (Some(ex), listing_cap_id)
+    };
+
+    // Permissionless option-market listing leaf (SO-416): republishes with
+    // the exchange it links against; ceremony parks the fresh ListingCap
+    // and enables the TUSDC quote.
+    let exchange_listing = {
+        let quote_type = token_info
+            .get(deployment_manager::exchange_markets::QUOTE_SYMBOL)
+            .map(|t| t.coin_type.clone())
+            .with_context(|| {
+                format!(
+                    "token catalog has no {} entry for listing quote defaults",
+                    deployment_manager::exchange_markets::QUOTE_SYMBOL
+                )
+            })?;
+        let out = deployment_manager::deploy::deploy_exchange_listing(
+            &client,
+            &signer,
+            &contracts_root.join("exchange-listing"),
+            env,
+            exchange_listing_cap_id,
+            &quote_type,
+            gas_budget,
+        )
+        .await
+        .with_context(|| format!("deploying exchange_listing to {network}"))?;
+        Some(ExchangeListingRecord {
+            package_id: out.package_id.to_string(),
+            upgrade_cap_id: out.upgrade_cap_id.to_string(),
+            listing_authority_id: out.listing_authority_id.to_string(),
+            admin_cap_id: out.admin_cap_id.to_string(),
+            publish_digest: out.digest,
+            deployed_at: chrono::Utc::now().to_rfc3339(),
+        })
     };
 
     // Vault-curator maker adapter for the hybrid exchange (SO-370);
@@ -758,6 +840,7 @@ async fn deploy_one(
             cctp_bridge: previous_cctp,
             whitelist,
             exchange,
+            exchange_listing,
             // Deliberately not carried forward: a republish invalidates the
             // previous deployment's QuoteSigner (package-bound type). The
             // --deploy-mm-collateral pass fills it in.

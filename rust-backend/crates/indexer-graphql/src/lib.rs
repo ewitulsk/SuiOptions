@@ -53,6 +53,9 @@ pub struct Bucket {
     /// DeepBook pool trading this bucket's call coin (SO-152); `None` until
     /// a venue is created.
     pub deepbook_pool_id: Option<ObjectId>,
+    /// In-house exchange market (SettlementRegistry) trading this bucket's
+    /// option coin (SO-416); `None` until a market is listed.
+    pub exchange_market_id: Option<ObjectId>,
 }
 
 /// A QuoteSigner's registered signing key. Core holds no MM funds anymore
@@ -294,7 +297,7 @@ impl IndexerClient {
     pub async fn bucket(&self, bucket_id: ObjectId) -> Result<Option<Bucket>> {
         const Q: &str = "query($id:String!){bucket(id:$id){bucketId assetType settlementType \
             callType strikeRaw strikeScale expiryMs totalWrittenRaw exerciseCursorRaw cleaned \
-            invalidated optionKind deepbookPoolId}}";
+            invalidated optionKind deepbookPoolId exchangeMarketId}}";
         let data: BucketWrap = self
             .gql(Q, json!({ "id": bucket_id.to_hex() }))
             .await?;
@@ -312,7 +315,8 @@ impl IndexerClient {
         const Q: &str = "query($a:Boolean,$u:String,$s:String,$e:String){\
             buckets(activeOnly:$a,assetType:$u,settlementType:$s,expiryMs:$e){\
             bucketId assetType settlementType callType strikeRaw strikeScale expiryMs \
-            totalWrittenRaw exerciseCursorRaw cleaned invalidated optionKind deepbookPoolId}}";
+            totalWrittenRaw exerciseCursorRaw cleaned invalidated optionKind deepbookPoolId \
+            exchangeMarketId}}";
         let vars = json!({
             "a": active_only,
             "u": asset_type.map(|a| a.as_str()),
@@ -585,6 +589,22 @@ impl IndexerClient {
     /// DeepBook cost basis without a BM→owner table.
     pub async fn deepbook_fills_for_bm(&self, bm: ObjectId) -> Result<Vec<IndexedEvent>> {
         let filter = json!({ "participant": bm.to_hex() });
+        self.scan_events(filter, 0).await
+    }
+
+    /// Every `ExchangeOptionFill` touching wallet `addr` (as maker or taker),
+    /// ascending by sequence (SO-416). The exchange has no BalanceManager
+    /// indirection — fills carry wallet addresses directly — so the
+    /// participant filter is combined with the event-type filter (unlike
+    /// [`deepbook_fills_for_bm`], a wallet participates in many event kinds).
+    pub async fn exchange_option_fills_for_address(
+        &self,
+        addr: SuiAddress,
+    ) -> Result<Vec<IndexedEvent>> {
+        let filter = json!({
+            "eventType": ["ExchangeOptionFill"],
+            "participant": addr.to_hex(),
+        });
         self.scan_events(filter, 0).await
     }
 
@@ -873,6 +893,8 @@ struct BucketJson {
     option_kind: String,
     #[serde(default)]
     deepbook_pool_id: Option<String>,
+    #[serde(default)]
+    exchange_market_id: Option<String>,
 }
 
 /// Serde default for `option_kind` — calls are the historical default, so a
@@ -1107,6 +1129,11 @@ impl TryFrom<BucketJson> for Bucket {
             option_kind: b.option_kind,
             deepbook_pool_id: b
                 .deepbook_pool_id
+                .as_deref()
+                .map(parse_object_id)
+                .transpose()?,
+            exchange_market_id: b
+                .exchange_market_id
                 .as_deref()
                 .map(parse_object_id)
                 .transpose()?,

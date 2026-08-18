@@ -179,3 +179,53 @@ pub async fn cancel_up_to_batch(
     }
     super::submit_ptb(client, signer, pt, gas_budget, "settlement::cancel_up_to (batched)").await
 }
+
+/// `exchange_listing::create_call_market` / `create_put_market` (SO-416):
+/// permissionlessly list an exchange market for one option bucket. The 12
+/// type arguments are the option coin's own instantiation, parsed from its
+/// type string; the side comes from the root struct name. Returns the
+/// executed transaction — the created `SettlementRegistry` id arrives via
+/// the `OptionMarketListed` event / market discovery.
+pub async fn create_option_market(
+    client: &ChainClient,
+    signer: &Signer,
+    listing_package: ObjectID,
+    listing_authority: ObjectID,
+    bucket_id: ObjectID,
+    option_coin_type: &str,
+    gas_budget: u64,
+) -> Result<ExecutedTransaction> {
+    // Any input form (chain TypeName, signed exchange form, RPC display) —
+    // the depth-aware canonicalizer yields the 0x-at-every-depth literal
+    // `TypeTag::from_str` accepts.
+    let canonical = protocol_types::asset::canonicalize_move_type(option_coin_type);
+    let tag = TypeTag::from_str(&canonical)
+        .map_err(|e| anyhow!("parsing option coin type {canonical}: {e}"))?;
+    let TypeTag::Struct(st) = tag else {
+        return Err(anyhow!("option coin type is not a struct: {canonical}"));
+    };
+    let entry = match (st.module.as_str(), st.name.as_str()) {
+        ("option_coin", "OptionCall") => "create_call_market",
+        ("option_coin", "OptionPut") => "create_put_market",
+        _ => return Err(anyhow!("not an option coin root: {canonical}")),
+    };
+    if st.type_params.len() != 12 {
+        return Err(anyhow!(
+            "option coin has {} type args, expected 12: {canonical}",
+            st.type_params.len()
+        ));
+    }
+    info!(%bucket_id, entry, "listing option market");
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let auth = pt.obj(shared_object_arg(client, listing_authority, true).await?)?;
+    let bucket = pt.obj(shared_object_arg(client, bucket_id, false).await?)?;
+    let clock = crate::tx::clock_arg(&mut pt)?;
+    pt.programmable_move_call(
+        listing_package,
+        Identifier::new("exchange_listing").unwrap(),
+        Identifier::new(entry).unwrap(),
+        st.type_params.clone(),
+        vec![auth, bucket, clock],
+    );
+    crate::tx::submit_ptb(client, signer, pt, gas_budget, "create option market").await
+}

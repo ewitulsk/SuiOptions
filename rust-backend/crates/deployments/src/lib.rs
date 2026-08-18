@@ -249,6 +249,11 @@ pub struct PackageInfo {
     /// Hybrid-exchange settlement package (via `--deploy-exchange`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exchange: Option<ExchangeInfo>,
+    /// Permissionless option-market listing package (SO-416): the leaf
+    /// that parks the exchange `ListingCap` in its shared
+    /// `ListingAuthority`. Absent on records predating the package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exchange_listing: Option<ExchangeListingInfo>,
     /// Standalone ingress whitelist package (guarded launch): the shared
     /// `Whitelist` every gated entry takes plus the `AdminCap` that
     /// mutates it. Absent on records predating the standalone package.
@@ -275,6 +280,36 @@ pub struct WhitelistInfo {
     pub admin_cap_id: String,
     pub publish_digest: String,
     pub deployed_at: String,
+}
+
+/// exchange-listing package record (SO-416).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExchangeListingInfo {
+    pub package_id: String,
+    pub upgrade_cap_id: String,
+    /// Shared `ListingAuthority` object id (holds the parked ListingCap,
+    /// the market dedup table and the per-quote listing defaults).
+    pub listing_authority_id: String,
+    /// Owned `exchange_listing::AdminCap` id (deployer wallet).
+    pub admin_cap_id: String,
+    pub publish_digest: String,
+    pub deployed_at: String,
+}
+
+impl ExchangeListingInfo {
+    pub fn package(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.package_id).context("parsing exchangeListing packageId")
+    }
+
+    pub fn listing_authority(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.listing_authority_id)
+            .context("parsing exchangeListing listingAuthorityId")
+    }
+
+    pub fn admin_cap(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.admin_cap_id).context("parsing exchangeListing adminCapId")
+    }
 }
 
 impl WhitelistInfo {
