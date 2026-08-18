@@ -11,7 +11,7 @@ use sui::balance::{Self, Balance};
 use sui::clock::Clock;
 use sui::event;
 use sui::table::{Self, Table};
-use exchange::admin::AdminCap;
+use exchange::admin::{AdminCap, ListingCap};
 use exchange::order;
 
 // === Errors ===
@@ -78,10 +78,31 @@ public struct FeeConfigEvent has copy, drop {
     fee_bps: u64,
 }
 
-// === Market listing (admin) ===
+// === Market listing (admin / delegated) ===
 
 public fun create_market<Base, Quote>(
     _: &AdminCap,
+    tick_size: u64,
+    min_size: u64,
+    fee_bps: u64,
+    ctx: &mut TxContext,
+): ID {
+    new_market<Base, Quote>(tick_size, min_size, fee_bps, ctx)
+}
+
+/// Listing-delegate twin of `create_market`: same invariants, gated on the
+/// narrow `ListingCap` so a listing package never needs the full admin cap.
+public fun create_market_listed<Base, Quote>(
+    _: &ListingCap,
+    tick_size: u64,
+    min_size: u64,
+    fee_bps: u64,
+    ctx: &mut TxContext,
+): ID {
+    new_market<Base, Quote>(tick_size, min_size, fee_bps, ctx)
+}
+
+fun new_market<Base, Quote>(
     tick_size: u64,
     min_size: u64,
     fee_bps: u64,
