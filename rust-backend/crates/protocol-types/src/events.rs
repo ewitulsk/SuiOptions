@@ -237,6 +237,8 @@ pub struct DeepBookOrderFilled {
 pub struct CollateralizedWrite {
     pub bucket_id: ObjectId,
     pub writer: SuiAddress,
+    /// `None` for events emitted by packages predating SO-412.
+    pub position_id: Option<ObjectId>,
     #[serde(with = "u64_string")]
     pub amount: u64,
     #[serde(with = "u128_string")]
@@ -686,6 +688,8 @@ pub struct PutWriteExecuted {
 pub struct PutCollateralizedWrite {
     pub bucket_id: ObjectId,
     pub writer: SuiAddress,
+    /// `None` for events emitted by packages predating SO-412.
+    pub position_id: Option<ObjectId>,
     #[serde(with = "u64_string")]
     pub write_amount: u64,
     #[serde(with = "u64_string")]
