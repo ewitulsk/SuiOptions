@@ -278,11 +278,26 @@ fn is_benign_coin_primitive(call: &ProgrammableMoveCall) -> bool {
 /// simply drops the `vault:*` templates.
 /// `test_tokens` is the `(package, module)` of each faucet token (e.g.
 /// `(0xpkg, "tbtc")`), only used when `allow_faucet` is set (dev/staging).
-/// `deepbook` is DeepBook's UPGRADED package id (the one Move calls target,
-/// from token-info); `None` on networks without a DeepBook deployment —
-/// no DeepBook PTBs are sponsored there. `cctp` is Circle's
+/// `exchange` is the hybrid-exchange family (SO-416): the settlement
+/// package plus, when deployed, the exchange-adapter (direct-escrow vault
+/// maker legs) and the exchange-listing leaf (permissionless option-market
+/// listing); `None` drops every exchange template. `cctp` is Circle's
 /// TokenMessengerMinter package — `None` where the bridge isn't configured —
 /// mirroring frontend tx/bridge.ts.
+/// The hybrid-exchange package family (SO-416): the settlement package
+/// plus the optional adapter/listing leaves its sponsored PTBs may target.
+#[derive(Debug, Clone, Copy)]
+pub struct ExchangeSponsorPkgs {
+    /// `exchange` settlement package (fills, escrow, cancels).
+    pub exchange: ObjectID,
+    /// exchange-adapter package (SO-372) — direct-escrow vault-maker fill
+    /// legs. `None` drops those legs from the route-fill allowlist.
+    pub adapter: Option<ObjectID>,
+    /// exchange-listing package (SO-415) — permissionless option-market
+    /// listing. `None` drops the list-market templates.
+    pub listing: Option<ObjectID>,
+}
+
 /// The trading-vault package family (SO-282). All-or-nothing per deploy;
 /// `None` disables its templates.
 #[derive(Debug, Clone, Copy)]
@@ -339,7 +354,7 @@ pub fn protocol_templates(
     vault_pkg: Option<ObjectID>,
     test_tokens: &[(ObjectID, String)],
     allow_faucet: bool,
-    deepbook: Option<ObjectID>,
+    exchange: Option<ExchangeSponsorPkgs>,
     cctp: Option<ObjectID>,
     trading_vault: Option<TradingVaultPkgs>,
 ) -> Vec<PtbTemplate> {
@@ -488,91 +503,96 @@ pub fn protocol_templates(
         }
     }
 
-    // DeepBook PTB shapes (SO-154 venue creation + SO-157 trading). Coin
-    // funding rides in via `coinWithBalance` (benign SplitCoins/MergeCoins
-    // preludes); the sponsor only ever risks gas — every asset moved is the
-    // user's own. Closed `allowed` sets keep other DeepBook functions from
-    // tagging along.
-    if let Some(db) = deepbook {
-        let d = |module: &str, function: &str| MoveTarget::new(db, module, function);
-        let proof = d("balance_manager", "generate_proof_as_owner");
-        let deposit = d("balance_manager", "deposit");
-        let share = MoveTarget::new(framework(), "transfer", "public_share_object");
+    // Hybrid-exchange PTB shapes (SO-416): the options secondary market.
+    // Mirrors frontend `tx/{exchangeFill,exchangeEscrow,exchangeListing}.ts`.
+    // Coin funding rides in via `coinWithBalance` (benign SplitCoins /
+    // MergeCoins / TransferObjects plumbing); every asset moved is the
+    // user's own — the sponsor only ever risks gas. Limit orders and
+    // cancels are personal-message signatures POSTed to the orderbook, not
+    // transactions, so they need no template.
+    if let Some(ex) = exchange {
+        let e = |module: &str, function: &str| MoveTarget::new(ex.exchange, module, function);
 
-        let create = d("pool", "create_permissionless_pool");
-        templates.push(PtbTemplate::exact_only("deepbook_create_pool".to_owned(), vec![create.clone()], vec![create.clone()], vec![(create, 2)]));
+        // Taker route fill: N ≥ 1 fill legs (settlement, or the adapter's
+        // direct-escrow vault-maker variants) closed by ONE strict
+        // `assert_coin_min` slippage guard. The guard anchors the template;
+        // the closed `allowed` set keeps escrow withdraws or anything else
+        // from riding along with a fill.
+        let fill = e("settlement", "fill_limit_order");
+        let fill_rev = e("settlement", "fill_limit_order_reverse");
+        let assert_min = e("settlement", "assert_coin_min");
+        let mut fill_allowed = vec![fill.clone(), fill_rev.clone(), assert_min.clone()];
+        let mut fill_arities = vec![
+            (fill.clone(), 2),
+            (fill_rev.clone(), 2),
+            (assert_min.clone(), 1),
+        ];
+        if let Some(adapter) = ex.adapter {
+            let va = |function: &str| MoveTarget::new(adapter, "exchange_adapter", function);
+            for f in ["fill_vault_order", "fill_vault_order_reverse"] {
+                fill_allowed.push(va(f));
+                fill_arities.push((va(f), 2));
+            }
+        }
+        templates.push(PtbTemplate::exact_only(
+            "exchange_route_fill".to_owned(),
+            vec![assert_min.clone()],
+            fill_allowed,
+            fill_arities,
+        ));
 
-        // Enable trading: new → register (emits the discovery event) → share.
-        let bm_new = d("balance_manager", "new");
-        let bm_register = d("balance_manager", "register_balance_manager");
-        templates.push(PtbTemplate::exact_only("deepbook_bm_create".to_owned(), vec![bm_new.clone(), bm_register.clone(), share.clone()], vec![bm_new, bm_register, share.clone()], vec![(share, 1)]));
+        // Maker escrow lifecycle: `new` shares the BalanceManager itself
+        // (no share command follows); deposit takes the ingress whitelist.
+        let bm_new = e("balance_manager", "new");
+        templates.push(PtbTemplate::exact_only(
+            "exchange_enable_escrow".to_owned(),
+            vec![bm_new.clone()],
+            vec![bm_new.clone()],
+            vec![(bm_new, 0)],
+        ));
+        let deposit = e("balance_manager", "deposit");
+        templates.push(PtbTemplate::exact_only(
+            "exchange_escrow_deposit".to_owned(),
+            vec![deposit.clone()],
+            vec![deposit.clone()],
+            vec![(deposit, 1)],
+        ));
+        let withdraw = e("balance_manager", "withdraw");
+        templates.push(PtbTemplate::exact_only(
+            "exchange_escrow_withdraw".to_owned(),
+            vec![withdraw.clone()],
+            vec![withdraw.clone()],
+            vec![(withdraw, 1)],
+        ));
 
-        // Orders: optional exact-amount deposit, owner proof, place.
-        let place_limit = d("pool", "place_limit_order");
-        templates.push(PtbTemplate::exact_only("deepbook_place_limit".to_owned(), vec![proof.clone(), place_limit.clone()], vec![deposit.clone(), proof.clone(), place_limit.clone()], vec![(place_limit, 2), (deposit.clone(), 1)]));
-        let place_market = d("pool", "place_market_order");
-        templates.push(PtbTemplate::exact_only("deepbook_place_market".to_owned(), vec![proof.clone(), place_market.clone()], vec![deposit.clone(), proof.clone(), place_market.clone()], vec![(place_market.clone(), 2), (deposit.clone(), 1)]));
+        // On-chain salt-watermark cancel (dead-man switch for makers whose
+        // soft cancels the relayer might ignore).
+        let cancel_up_to = e("settlement", "cancel_up_to");
+        templates.push(PtbTemplate::exact_only(
+            "exchange_cancel_up_to".to_owned(),
+            vec![cancel_up_to.clone()],
+            vec![cancel_up_to.clone()],
+            vec![(cancel_up_to, 2)],
+        ));
 
-        // Cancels.
-        let cancel = d("pool", "cancel_order");
-        templates.push(PtbTemplate::exact_only("deepbook_cancel_order".to_owned(), vec![proof.clone(), cancel.clone()], vec![proof.clone(), cancel.clone()], vec![(cancel, 2)]));
-        let cancel_all = d("pool", "cancel_all_orders");
-        templates.push(PtbTemplate::exact_only("deepbook_cancel_all".to_owned(), vec![proof.clone(), cancel_all.clone()], vec![proof.clone(), cancel_all.clone()], vec![(cancel_all, 2)]));
-
-        // Settle + drain assets back to the wallet (TransferObjects is a benign
-        // command). Covers both "withdraw all" (base + quote) and the
-        // single-asset "withdraw this position token" — the latter is the same
-        // shape with one `withdraw_all` instead of two.
-        let settle = d("pool", "withdraw_settled_amounts");
-        let withdraw_all = d("balance_manager", "withdraw_all");
-        templates.push(PtbTemplate::exact_only("deepbook_withdraw".to_owned(), vec![proof.clone(), settle.clone()], vec![proof.clone(), settle.clone(), withdraw_all.clone()], vec![(settle.clone(), 2), (withdraw_all.clone(), 1)]));
-
-        // Market buy/sell that delivers proceeds to the wallet in one PTB
-        // (frontend `buildPlaceMarketOrderTx` with a `recipient`): fills settle
-        // into the BM, so the same tx mints a fresh proof, settles, and drains
-        // both assets back out (proof → place_market → proof → settle →
-        // withdraw_all ×1-2). Every asset moved is the user's own — same
-        // posture as `deepbook_withdraw` — so the sponsor only risks gas.
-        // Kept separate from `deepbook_place_market` so a plain order still
-        // can't smuggle a withdraw.
-        templates.push(PtbTemplate::exact_only("deepbook_place_market_withdraw".to_owned(), vec![
-                proof.clone(),
-                place_market.clone(),
-                settle.clone(),
-                withdraw_all.clone(),
-            ], vec![
-                deposit.clone(),
-                proof.clone(),
-                place_market.clone(),
-                settle.clone(),
-                withdraw_all.clone(),
-            ], vec![
-                (place_market.clone(), 2),
-                (deposit.clone(), 1),
-                (settle.clone(), 2),
-                (withdraw_all.clone(), 1),
-            ]));
-
-        // Exercise an option whose coin the user parked in their DeepBook
-        // trading account: settle + withdraw the option coin out of the BM, then
-        // `bucket::exercise`. This is the one shape that legitimately crosses
-        // the protocol/DeepBook boundary — every asset moved is still the
-        // user's own (their BM coin out, underlying back to them), so the
-        // sponsor only risks gas. The closed `allowed` set keeps anything else
-        // from riding along.
-        let exercise = t("bucket", "exercise");
-        templates.push(PtbTemplate::exact_only("exercise_with_bm_withdraw".to_owned(), vec![proof.clone(), settle.clone(), withdraw_all.clone(), exercise.clone()], vec![proof.clone(), settle.clone(), withdraw_all.clone(), exercise.clone()], vec![(settle.clone(), 2), (withdraw_all.clone(), 1), (exercise, 3)]));
-
-        // Same shape for a cash-secured put parked in the BM (buildExercisePutTx
-        // with bmWithdraw): settle + withdraw the put coin out, then
-        // put_bucket::exercise.
-        let put_exercise = t("put_bucket", "exercise");
-        templates.push(PtbTemplate::exact_only("put_exercise_with_bm_withdraw".to_owned(), vec![
-                proof.clone(),
-                settle.clone(),
-                withdraw_all.clone(),
-                put_exercise.clone(),
-            ], vec![proof, settle.clone(), withdraw_all.clone(), put_exercise.clone()], vec![(settle, 2), (withdraw_all, 1), (put_exercise, 3)]));
+        // Permissionless option-market listing (SO-415): 12 type args — the
+        // option coin's own instantiation (U, S + 10 byte markers). The
+        // entry is permissionless, dedup'd and expiry-gated on-chain, and
+        // mints nothing to anyone; the sponsor's exposure stays gas-only.
+        if let Some(listing) = ex.listing {
+            for (name, function) in [
+                ("exchange_list_call_market", "create_call_market"),
+                ("exchange_list_put_market", "create_put_market"),
+            ] {
+                let target = MoveTarget::new(listing, "exchange_listing", function);
+                templates.push(PtbTemplate::exact_only(
+                    name.to_owned(),
+                    vec![target.clone()],
+                    vec![target.clone()],
+                    vec![(target, 12)],
+                ));
+            }
+        }
     }
 
 
@@ -766,8 +786,24 @@ mod tests {
         b.finish()
     }
 
-    fn deepbook_pkg() -> ObjectID {
+    fn exchange_pkg() -> ObjectID {
         ObjectID::from_hex_literal("0x22be4c").unwrap()
+    }
+
+    fn exchange_adapter_pkg() -> ObjectID {
+        ObjectID::from_hex_literal("0xea1").unwrap()
+    }
+
+    fn listing_pkg() -> ObjectID {
+        ObjectID::from_hex_literal("0x115e").unwrap()
+    }
+
+    fn exchange_pkgs() -> ExchangeSponsorPkgs {
+        ExchangeSponsorPkgs {
+            exchange: exchange_pkg(),
+            adapter: Some(exchange_adapter_pkg()),
+            listing: Some(listing_pkg()),
+        }
     }
 
     fn cctp_tmm_pkg() -> ObjectID {
@@ -781,7 +817,7 @@ mod tests {
             Some(vault_pkg()),
             &[(pkg(), "tbtc".to_owned())],
             true,
-            Some(deepbook_pkg()),
+            Some(exchange_pkgs()),
             Some(cctp_tmm_pkg()),
             None,
         )
@@ -1013,191 +1049,33 @@ mod tests {
     }
 
     #[test]
-    fn deepbook_create_pool_matches_with_coin_prelude() {
-        // Mirrors frontend buildCreateVenueTx: a coinWithBalance prelude
-        // (benign SplitCoins) then create_permissionless_pool<CALL, TUSDC>.
-        let pt = build(
-            &[(
-                MoveTarget::new(deepbook_pkg(), "pool", "create_permissionless_pool"),
-                2,
-            )],
+    fn exchange_route_fill_matches_and_rejects_riders() {
+        let e = |module: &str, function: &str| MoveTarget::new(exchange_pkg(), module, function);
+        // Single settlement leg + slippage guard, coin prep prelude.
+        let single = build(
+            &[(e("settlement", "fill_limit_order"), 2), (e("settlement", "assert_coin_min"), 1)],
             true,
         );
-        assert_eq!(match_any(&templates(), &pt), Some("deepbook_create_pool"));
-    }
-
-    #[test]
-    fn deepbook_trading_templates_match_their_frontend_shapes() {
-        let d = |module: &str, function: &str| MoveTarget::new(deepbook_pkg(), module, function);
-        // Enable trading: new → register → public_share_object<BM>.
-        let bm = build(
+        assert_eq!(match_any(&templates(), &single), Some("exchange_route_fill"));
+        // Multi-leg with a direct-escrow vault-maker leg.
+        let multi = build(
             &[
-                (d("balance_manager", "new"), 0),
-                (d("balance_manager", "register_balance_manager"), 0),
-                (MoveTarget::new(framework(), "transfer", "public_share_object"), 1),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &bm), Some("deepbook_bm_create"));
-
-        // Limit order with a coinWithBalance deposit prelude.
-        let limit = build(
-            &[
-                (d("balance_manager", "deposit"), 1),
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "place_limit_order"), 2),
+                (e("settlement", "fill_limit_order_reverse"), 2),
+                (MoveTarget::new(exchange_adapter_pkg(), "exchange_adapter", "fill_vault_order"), 2),
+                (e("settlement", "assert_coin_min"), 1),
             ],
             true,
         );
-        assert_eq!(match_any(&templates(), &limit), Some("deepbook_place_limit"));
-
-        // Market order without a deposit.
-        let market = build(
-            &[
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "place_market_order"), 2),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &market), Some("deepbook_place_market"));
-
-        // Market buy/sell that settles + drains fills back to the wallet in one
-        // PTB (buildPlaceMarketOrderTx with a recipient): optional deposit →
-        // proof → place_market → fresh proof → settle → withdraw_all ×2
-        // (+ benign TransferObjects). This is the wallet "buy/sell on DeepBook"
-        // shape the gas station was refusing.
-        let market_withdraw = build(
-            &[
-                (d("balance_manager", "deposit"), 1),
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "place_market_order"), 2),
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "withdraw_settled_amounts"), 2),
-                (d("balance_manager", "withdraw_all"), 1),
-                (d("balance_manager", "withdraw_all"), 1),
-            ],
-            false,
-        );
-        assert_eq!(
-            match_any(&templates(), &market_withdraw),
-            Some("deepbook_place_market_withdraw"),
-        );
-
-        // Same without the optional deposit prelude (e.g. a market sell funded
-        // entirely from the BM) still matches.
-        let market_withdraw_no_deposit = build(
-            &[
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "place_market_order"), 2),
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "withdraw_settled_amounts"), 2),
-                (d("balance_manager", "withdraw_all"), 1),
-                (d("balance_manager", "withdraw_all"), 1),
-            ],
-            false,
-        );
-        assert_eq!(
-            match_any(&templates(), &market_withdraw_no_deposit),
-            Some("deepbook_place_market_withdraw"),
-        );
-
-        // Cancels.
-        let cancel = build(
-            &[
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "cancel_order"), 2),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &cancel), Some("deepbook_cancel_order"));
-        let cancel_all = build(
-            &[
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "cancel_all_orders"), 2),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &cancel_all), Some("deepbook_cancel_all"));
-
-        // Withdraw: proof → settle → withdraw_all ×2 (+ benign TransferObjects).
-        let withdraw = build(
-            &[
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "withdraw_settled_amounts"), 2),
-                (d("balance_manager", "withdraw_all"), 1),
-                (d("balance_manager", "withdraw_all"), 1),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &withdraw), Some("deepbook_withdraw"));
-
-        // Single-asset withdraw (buildWithdrawBaseTx): proof → settle →
-        // withdraw_all ×1 — the "withdraw this position token" button. Same
-        // template, one fewer withdraw_all.
-        let withdraw_base = build(
-            &[
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "withdraw_settled_amounts"), 2),
-                (d("balance_manager", "withdraw_all"), 1),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &withdraw_base), Some("deepbook_withdraw"));
-    }
-
-    #[test]
-    fn exercise_with_bm_withdraw_matches_and_rejects_riders() {
-        let d = |module: &str, function: &str| MoveTarget::new(deepbook_pkg(), module, function);
-        // buildExerciseTx with bmWithdraw: settle + withdraw the option coin out
-        // of the BM, then bucket::exercise (+ benign split/merge/transfer).
-        let ex = build(
-            &[
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "withdraw_settled_amounts"), 2),
-                (d("balance_manager", "withdraw_all"), 1),
-                (target("bucket", "exercise"), 3),
-            ],
-            true,
-        );
-        assert_eq!(match_any(&templates(), &ex), Some("exercise_with_bm_withdraw"));
-
-        // A plain exercise (no BM withdraw) still matches the wallet `exercise`
-        // template, not this one.
-        let plain = build(&[(target("bucket", "exercise"), 3)], true);
-        assert_eq!(match_any(&templates(), &plain), Some("exercise"));
-
-        // Same shape for a cash-secured put parked in the BM.
-        let put = build(
-            &[
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "withdraw_settled_amounts"), 2),
-                (d("balance_manager", "withdraw_all"), 1),
-                (target("put_bucket", "exercise"), 3),
-            ],
-            true,
-        );
-        assert_eq!(match_any(&templates(), &put), Some("put_exercise_with_bm_withdraw"));
-
-        // Withdraw without the exercise must NOT match the combined template
-        // (it requires `exercise`); it falls through to `deepbook_withdraw`.
-        let no_exercise = build(
-            &[
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "withdraw_settled_amounts"), 2),
-                (d("balance_manager", "withdraw_all"), 1),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &no_exercise), Some("deepbook_withdraw"));
-
-        // A foreign DeepBook call cannot ride along with the exercise.
+        assert_eq!(match_any(&templates(), &multi), Some("exchange_route_fill"));
+        // No slippage guard => no match (the anchor is required).
+        let unguarded = build(&[(e("settlement", "fill_limit_order"), 2)], true);
+        assert_eq!(match_any(&templates(), &unguarded), None);
+        // An escrow withdraw can never ride along with a fill.
         let rider = build(
             &[
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "withdraw_settled_amounts"), 2),
-                (d("balance_manager", "withdraw_all"), 1),
-                (d("pool", "place_market_order"), 2),
-                (target("bucket", "exercise"), 3),
+                (e("settlement", "fill_limit_order"), 2),
+                (e("settlement", "assert_coin_min"), 1),
+                (e("balance_manager", "withdraw"), 1),
             ],
             false,
         );
@@ -1205,64 +1083,43 @@ mod tests {
     }
 
     #[test]
-    fn deepbook_order_templates_reject_withdraw_riders() {
-        let d = |module: &str, function: &str| MoveTarget::new(deepbook_pkg(), module, function);
-        // A withdraw smuggled into an order PTB matches no template: the
-        // order templates don't allow withdraw_all, and the withdraw
-        // template doesn't allow place_limit_order.
-        let evil = build(
-            &[
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "place_limit_order"), 2),
-                (d("balance_manager", "withdraw_all"), 1),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &evil), None);
-        // Sharing an arbitrary framework object only matches inside the
-        // bm-create sequence — alone it matches nothing.
-        let share_only = build(
-            &[(MoveTarget::new(framework(), "transfer", "public_share_object"), 1)],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &share_only), None);
+    fn exchange_escrow_templates_match_their_frontend_shapes() {
+        let e = |module: &str, function: &str| MoveTarget::new(exchange_pkg(), module, function);
+        let create = build(&[(e("balance_manager", "new"), 0)], false);
+        assert_eq!(match_any(&templates(), &create), Some("exchange_enable_escrow"));
+        let deposit = build(&[(e("balance_manager", "deposit"), 1)], true);
+        assert_eq!(match_any(&templates(), &deposit), Some("exchange_escrow_deposit"));
+        let withdraw = build(&[(e("balance_manager", "withdraw"), 1)], false);
+        assert_eq!(match_any(&templates(), &withdraw), Some("exchange_escrow_withdraw"));
+        let cancel = build(&[(e("settlement", "cancel_up_to"), 2)], false);
+        assert_eq!(match_any(&templates(), &cancel), Some("exchange_cancel_up_to"));
+        // Deposit arity is pinned: a 2-type-arg deposit is refused.
+        let bad = build(&[(e("balance_manager", "deposit"), 2)], false);
+        assert_eq!(match_any(&templates(), &bad), None);
     }
 
     #[test]
-    fn deepbook_create_pool_rejects_riders_arity_and_unconfigured() {
-        // A second DeepBook function riding along is refused.
-        let with_rider = build(
-            &[
-                (
-                    MoveTarget::new(deepbook_pkg(), "pool", "create_permissionless_pool"),
-                    2,
-                ),
-                (MoveTarget::new(deepbook_pkg(), "pool", "place_limit_order"), 2),
-            ],
-            false,
-        );
-        assert_eq!(match_any(&templates(), &with_rider), None);
-
-        // Wrong type-arg arity is refused.
-        let bad_arity = build(
-            &[(
-                MoveTarget::new(deepbook_pkg(), "pool", "create_permissionless_pool"),
-                3,
-            )],
-            false,
-        );
+    fn exchange_list_market_matches_arity_and_unconfigured() {
+        let call = MoveTarget::new(listing_pkg(), "exchange_listing", "create_call_market");
+        let put = MoveTarget::new(listing_pkg(), "exchange_listing", "create_put_market");
+        let list_call = build(&[(call.clone(), 12)], false);
+        assert_eq!(match_any(&templates(), &list_call), Some("exchange_list_call_market"));
+        let list_put = build(&[(put, 12)], false);
+        assert_eq!(match_any(&templates(), &list_put), Some("exchange_list_put_market"));
+        // 12 type args or nothing — an under-instantiated call is refused.
+        let bad_arity = build(&[(call.clone(), 2)], false);
         assert_eq!(match_any(&templates(), &bad_arity), None);
-
-        // No deepbook configured (devnet) → never sponsored.
-        let no_db = protocol_templates(pkg(), Some(vault_pkg()), &[], false, None, None, None);
-        let pt = build(
-            &[(
-                MoveTarget::new(deepbook_pkg(), "pool", "create_permissionless_pool"),
-                2,
-            )],
-            false,
+        // No exchange configured => nothing exchange-shaped sponsors.
+        let none = protocol_templates(pkg(), Some(vault_pkg()), &[], false, None, None, None);
+        assert_eq!(match_any(&none, &list_call), None);
+        let fill = build(
+            &[
+                (MoveTarget::new(exchange_pkg(), "settlement", "fill_limit_order"), 2),
+                (MoveTarget::new(exchange_pkg(), "settlement", "assert_coin_min"), 1),
+            ],
+            true,
         );
-        assert_eq!(match_any(&no_db, &pt), None);
+        assert_eq!(match_any(&none, &fill), None);
     }
 
     #[test]
@@ -1331,20 +1188,20 @@ mod tests {
     #[test]
     fn benign_coin_primitives_skipped_across_templates() {
         let coin = |function: &str| MoveTarget::new(framework(), "coin", function);
-        let d = |module: &str, function: &str| MoveTarget::new(deepbook_pkg(), module, function);
+        let e = |module: &str, function: &str| MoveTarget::new(exchange_pkg(), module, function);
 
-        // `destroy_zero<1>` trailing a DeepBook withdraw — a different template
-        // than `exercise`, proving the skip is universal, not exercise-only.
-        let withdraw = build(
+        // `destroy_zero<1>` trailing an exchange route fill — a different
+        // template than `exercise`, proving the skip is universal, not
+        // exercise-only.
+        let fill = build(
             &[
-                (d("balance_manager", "generate_proof_as_owner"), 0),
-                (d("pool", "withdraw_settled_amounts"), 2),
-                (d("balance_manager", "withdraw_all"), 1),
+                (e("settlement", "fill_limit_order"), 2),
+                (e("settlement", "assert_coin_min"), 1),
                 (coin("destroy_zero"), 1),
             ],
             false,
         );
-        assert_eq!(match_any(&templates(), &withdraw), Some("deepbook_withdraw"));
+        assert_eq!(match_any(&templates(), &fill), Some("exchange_route_fill"));
 
         // `coin::zero<1>` is now skipped everywhere, not just in write/buy: a
         // vault deposit carrying it still matches. Vault flows target the
@@ -1368,7 +1225,7 @@ mod tests {
     #[test]
     fn deprecated_vault_templates_absent_without_package() {
         let without =
-            protocol_templates(pkg(), None, &[(pkg(), "tbtc".to_owned())], true, Some(deepbook_pkg()), Some(cctp_tmm_pkg()), None);
+            protocol_templates(pkg(), None, &[(pkg(), "tbtc".to_owned())], true, Some(exchange_pkgs()), Some(cctp_tmm_pkg()), None);
         assert!(
             !without.iter().any(|t| t.name.starts_with("vault:")),
             "vault templates must not be registered without options_vault"
