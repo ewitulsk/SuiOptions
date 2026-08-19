@@ -45,6 +45,10 @@ use protocol_types::events::{
     TvMmCoinExercised, TvMmOffsetClosed, TvMmCoinReleased, TvTakerSwapExecuted,
     TvBidPlaced, TvBidReclaimed, TvBidRedeemed,
     TvExternalAccountSet, TvExternalAccountCleared, TvExternalReleased, TvExternalReturned,
+    TvPositionMinted, TvPositionSplit, TvPositionMerged, TvWipedPositionBurned,
+    TvCapitalSynced, TvRiskStateChanged, TvJuniorResetProposed, TvJuniorResetCancelled,
+    TvJuniorResetExecuted, TvCommitmentReleased, TvSettlementSnapshot, TvSettlementRedeemed,
+    TvSettlementCuratorFeesClaimed,
 };
 use protocol_types::ids::{ObjectId, SuiAddress};
 
@@ -172,6 +176,22 @@ pub struct EventTypes {
     pub tv_deposited: String,
     pub tv_withdraw_requested: String,
     pub tv_withdraw_fulfilled: String,
+    // Trading-vault v2: position lifecycle, capital state, junior reset,
+    // terminal settlement (SO-418). The `trading_vault` package id now
+    // carries the published vault_v2 package.
+    pub tv_position_minted: String,
+    pub tv_position_split: String,
+    pub tv_position_merged: String,
+    pub tv_wiped_position_burned: String,
+    pub tv_capital_synced: String,
+    pub tv_risk_state_changed: String,
+    pub tv_junior_reset_proposed: String,
+    pub tv_junior_reset_cancelled: String,
+    pub tv_junior_reset_executed: String,
+    pub tv_commitment_released: String,
+    pub tv_settlement_snapshot: String,
+    pub tv_settlement_redeemed: String,
+    pub tv_settlement_curator_fees_claimed: String,
     // Multi-asset deposits/withdrawals (SO-370).
     pub tv_deposit_asset_added: String,
     pub tv_deposit_asset_removed: String,
@@ -357,6 +377,19 @@ impl EventTypes {
             tv_deposited: tv("Deposited"),
             tv_withdraw_requested: tv("WithdrawRequested"),
             tv_withdraw_fulfilled: tv("WithdrawFulfilled"),
+            tv_position_minted: tv("PositionMinted"),
+            tv_position_split: tv("PositionSplit"),
+            tv_position_merged: tv("PositionMerged"),
+            tv_wiped_position_burned: tv("WipedPositionBurned"),
+            tv_capital_synced: tv("CapitalSynced"),
+            tv_risk_state_changed: tv("RiskStateChanged"),
+            tv_junior_reset_proposed: tv("JuniorResetProposed"),
+            tv_junior_reset_cancelled: tv("JuniorResetCancelled"),
+            tv_junior_reset_executed: tv("JuniorResetExecuted"),
+            tv_commitment_released: tv("CommitmentReleased"),
+            tv_settlement_snapshot: tv("SettlementSnapshot"),
+            tv_settlement_redeemed: tv("SettlementRedeemed"),
+            tv_settlement_curator_fees_claimed: tv("SettlementCuratorFeesClaimed"),
             tv_deposit_asset_added: tv("DepositAssetAdded"),
             tv_deposit_asset_removed: tv("DepositAssetRemoved"),
             tv_haircuts_set: tv("HaircutsSet"),
@@ -407,7 +440,7 @@ impl EventTypes {
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 107] {
+    pub fn all_strings(&self) -> [&str; 120] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -472,6 +505,19 @@ impl EventTypes {
             &self.tv_deposited,
             &self.tv_withdraw_requested,
             &self.tv_withdraw_fulfilled,
+            &self.tv_position_minted,
+            &self.tv_position_split,
+            &self.tv_position_merged,
+            &self.tv_wiped_position_burned,
+            &self.tv_capital_synced,
+            &self.tv_risk_state_changed,
+            &self.tv_junior_reset_proposed,
+            &self.tv_junior_reset_cancelled,
+            &self.tv_junior_reset_executed,
+            &self.tv_commitment_released,
+            &self.tv_settlement_snapshot,
+            &self.tv_settlement_redeemed,
+            &self.tv_settlement_curator_fees_claimed,
             &self.tv_deposit_asset_added,
             &self.tv_deposit_asset_removed,
             &self.tv_haircuts_set,
@@ -670,6 +716,32 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(TvWithdrawRequested, TvWithdrawRequested)
     } else if type_str == types.tv_withdraw_fulfilled {
         decode!(TvWithdrawFulfilled, TvWithdrawFulfilled)
+    } else if type_str == types.tv_position_minted {
+        decode!(TvPositionMinted, TvPositionMinted)
+    } else if type_str == types.tv_position_split {
+        decode!(TvPositionSplit, TvPositionSplit)
+    } else if type_str == types.tv_position_merged {
+        decode!(TvPositionMerged, TvPositionMerged)
+    } else if type_str == types.tv_wiped_position_burned {
+        decode!(TvWipedPositionBurned, TvWipedPositionBurned)
+    } else if type_str == types.tv_capital_synced {
+        decode!(TvCapitalSynced, TvCapitalSynced)
+    } else if type_str == types.tv_risk_state_changed {
+        decode!(TvRiskStateChanged, TvRiskStateChanged)
+    } else if type_str == types.tv_junior_reset_proposed {
+        decode!(TvJuniorResetProposed, TvJuniorResetProposed)
+    } else if type_str == types.tv_junior_reset_cancelled {
+        decode!(TvJuniorResetCancelled, TvJuniorResetCancelled)
+    } else if type_str == types.tv_junior_reset_executed {
+        decode!(TvJuniorResetExecuted, TvJuniorResetExecuted)
+    } else if type_str == types.tv_commitment_released {
+        decode!(TvCommitmentReleased, TvCommitmentReleased)
+    } else if type_str == types.tv_settlement_snapshot {
+        decode!(TvSettlementSnapshot, TvSettlementSnapshot)
+    } else if type_str == types.tv_settlement_redeemed {
+        decode!(TvSettlementRedeemed, TvSettlementRedeemed)
+    } else if type_str == types.tv_settlement_curator_fees_claimed {
+        decode!(TvSettlementCuratorFeesClaimed, TvSettlementCuratorFeesClaimed)
     } else if type_str == types.tv_deposit_asset_added {
         decode!(TvDepositAssetAdded, TvDepositAssetAdded)
     } else if type_str == types.tv_deposit_asset_removed {
@@ -1456,6 +1528,74 @@ mod tests {
         match dispatch(&t, &t.equity_posted, &bytes).unwrap() {
             Some(ChainEvent::EquityPosted(decoded)) => assert_eq!(decoded, evt),
             other => panic!("expected EquityPosted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_decodes_trading_vault_v2_events() {
+        // SO-418: the vault_v2 events resolve through the trading_vault
+        // package id's events module, like every other Tv family.
+        let t = types();
+        assert_eq!(t.tv_position_minted, format!("{TV_PKG}::events::PositionMinted"));
+        assert_eq!(t.tv_capital_synced, format!("{TV_PKG}::events::CapitalSynced"));
+        assert_eq!(
+            t.tv_settlement_redeemed,
+            format!("{TV_PKG}::events::SettlementRedeemed")
+        );
+
+        let minted = TvPositionMinted {
+            vault_id: ObjectId::new([0xf0; 32]),
+            position_id: ObjectId::new([0x99; 32]),
+            tranche: 2,
+            shares: 1_000_000_000_000,
+            cost_basis: 1_000_000,
+            locked_until_ms: 1_700_000_000_000,
+            capital_generation: 1,
+        };
+        let bytes = bcs::to_bytes(&minted).unwrap();
+        match dispatch(&t, &t.tv_position_minted, &bytes).unwrap() {
+            Some(ChainEvent::TvPositionMinted(decoded)) => assert_eq!(decoded, minted),
+            other => panic!("expected TvPositionMinted, got {other:?}"),
+        }
+
+        let synced = TvCapitalSynced {
+            vault_id: ObjectId::new([0xf0; 32]),
+            total_nav: 1_000_000,
+            senior_nav: 800_000,
+            junior_nav: 200_000,
+            senior_claim: 800_000,
+            senior_shares: 800_000_000_000,
+            junior_shares: 200_000_000_000,
+            risk_state: 1,
+            active_junior_generation: 0,
+            curator_commitment_breached: false,
+        };
+        let bytes = bcs::to_bytes(&synced).unwrap();
+        match dispatch(&t, &t.tv_capital_synced, &bytes).unwrap() {
+            Some(ChainEvent::TvCapitalSynced(decoded)) => assert_eq!(decoded, synced),
+            other => panic!("expected TvCapitalSynced, got {other:?}"),
+        }
+
+        let redeemed = TvSettlementRedeemed {
+            vault_id: ObjectId::new([0xf0; 32]),
+            position_id: ObjectId::new([0x99; 32]),
+            from_queue: true,
+            global_seq: 7,
+            recipient: SuiAddress::new([0x07; 32]),
+            tranche: 1,
+            capital_generation: 0,
+            shares: 500_000_000_000,
+            entitlement: 500_000,
+            basis: 500_000,
+            gross_fee: 0,
+            protocol_cut: 0,
+            curator_net: 0,
+            payout: 500_000,
+        };
+        let bytes = bcs::to_bytes(&redeemed).unwrap();
+        match dispatch(&t, &t.tv_settlement_redeemed, &bytes).unwrap() {
+            Some(ChainEvent::TvSettlementRedeemed(decoded)) => assert_eq!(decoded, redeemed),
+            other => panic!("expected TvSettlementRedeemed, got {other:?}"),
         }
     }
 

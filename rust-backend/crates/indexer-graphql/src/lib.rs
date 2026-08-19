@@ -214,6 +214,84 @@ pub struct TradingVault {
     /// SO-304); `None` before the first appraisal.
     pub latest_nav: Option<u128>,
     pub nav_updated_at_ms: Option<u64>,
+    // ── trading-vault v2 (SO-418) ──
+    /// 0 = Untranched, 1 = SeniorJunior. Immutable.
+    pub structure_code: u8,
+    pub senior_hurdle_bps_annual: u64,
+    pub target_junior_bps: u64,
+    pub maintenance_junior_bps: u64,
+    pub upside_code: u8,
+    pub residual_participation_bps: u64,
+    pub total_return_cap_bps: u64,
+    pub terms_version: u64,
+    /// 0x-prefixed hex; `None` when absent.
+    pub spec_hash: Option<String>,
+    pub senior_shares: u128,
+    /// Untranched supply lives here (mirrors capital.move).
+    pub junior_shares: u128,
+    pub senior_claim: u128,
+    pub senior_principal_basis: u128,
+    /// Waterfall NAV split from the latest TvCapitalSynced.
+    pub senior_nav: Option<u128>,
+    pub junior_nav: Option<u128>,
+    /// Observed per-tranche pps (1e12-scaled). Untranched vaults keep
+    /// using `latest_pps_e12`.
+    pub latest_senior_pps_e12: Option<u128>,
+    pub latest_junior_pps_e12: Option<u128>,
+    /// 0=Healthy 1=CoverageBreach 2=Impaired 3=ResetPending.
+    pub risk_state: u8,
+    pub curator_commitment_breached: bool,
+    pub impaired_since_ms: Option<u64>,
+    pub active_junior_generation: u64,
+    /// Open junior-reset proposal; all `None` when there is none.
+    pub reset_old_generation: Option<u64>,
+    pub reset_proposed_at_ms: Option<u64>,
+    pub reset_executable_at_ms: Option<u64>,
+    pub reset_recorded_nav: Option<u128>,
+    pub reset_recorded_senior_claim: Option<u128>,
+    pub reset_recorded_required_deposit: Option<u64>,
+    /// Terminal settlement pool (frozen at TvSettlementSnapshot).
+    pub settled: bool,
+    pub settlement_final_nav: Option<u128>,
+    pub senior_pool: Option<u64>,
+    pub senior_supply: Option<u128>,
+    pub junior_pool: Option<u64>,
+    pub junior_supply: Option<u128>,
+    pub settlement_snapshot_at_ms: Option<u64>,
+    /// Cumulative entitlement drawn from the settlement pools.
+    pub settlement_redeemed: u128,
+    /// Per-lane queue cursors: tail = highest requested global_seq + 1,
+    /// head = highest fulfilled/settled global_seq + 1.
+    pub senior_lane_head: u64,
+    pub senior_lane_tail: u64,
+    pub junior_lane_head: u64,
+    pub junior_lane_tail: u64,
+}
+
+/// One `VaultPosition` NFT's lifecycle + lineage (SO-418). Ownership is
+/// NOT indexed (transfers emit no events); resolve current owners JIT
+/// from chain. Rows never delete — consumed/settled/burned stay.
+#[derive(Clone, Debug)]
+pub struct VaultPosition {
+    pub position_id: ObjectId,
+    pub vault_id: ObjectId,
+    /// 0=Untranched 1=Senior 2=Junior.
+    pub tranche: u8,
+    pub capital_generation: u64,
+    pub shares: u128,
+    pub cost_basis: u64,
+    pub locked_until_ms: u64,
+    /// `live` | `queued` | `consumed` | `settled` | `burned`.
+    pub status: String,
+    /// Split lineage: the parent this position was carved out of.
+    pub parent_position_id: Option<ObjectId>,
+    /// Merge lineage: the kept position this one was folded into.
+    pub merged_into: Option<ObjectId>,
+    /// The withdraw request's global_seq once queued (kept after
+    /// consumption as the historical join key).
+    pub queued_global_seq: Option<u64>,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
 }
 
 /// One adapter position held by a trading vault (SO-282). Removed positions
@@ -451,12 +529,45 @@ impl IndexerClient {
             state lockupMs curatorFeeBps unwindGraceMs \
             depositsPaused mmReleaseEnabled totalSharesRaw positionCount pendingWithdrawals \
             latestPpsE12Raw updatedAtMs externalAccount externalExposure latestExternalEquity \
-            externalEquityUpdatedAtMs latestNavRaw navUpdatedAtMs}}";
+            externalEquityUpdatedAtMs latestNavRaw navUpdatedAtMs \
+            structureCode seniorHurdleBpsAnnual targetJuniorBps maintenanceJuniorBps upsideCode \
+            residualParticipationBps totalReturnCapBps termsVersion specHash \
+            seniorSharesRaw juniorSharesRaw seniorClaimRaw seniorPrincipalBasisRaw \
+            seniorNavRaw juniorNavRaw latestSeniorPpsE12Raw latestJuniorPpsE12Raw \
+            riskState curatorCommitmentBreached impairedSinceMs activeJuniorGeneration \
+            resetOldGeneration resetProposedAtMs resetExecutableAtMs resetRecordedNavRaw \
+            resetRecordedSeniorClaimRaw resetRecordedRequiredDepositRaw \
+            settled settlementFinalNavRaw seniorPoolRaw seniorSupplyRaw juniorPoolRaw \
+            juniorSupplyRaw settlementSnapshotAtMs settlementRedeemedRaw \
+            seniorLaneHead seniorLaneTail juniorLaneHead juniorLaneTail}}";
         let data: TradingVaultsWrap = self.gql(Q, json!({})).await?;
         data.trading_vaults
             .into_iter()
             .map(TradingVault::try_from)
             .collect()
+    }
+
+    /// VaultPosition NFT lifecycle rows for one trading vault (SO-418),
+    /// all statuses, ascending by creation time.
+    pub async fn vault_positions(&self, vault_id: ObjectId) -> Result<Vec<VaultPosition>> {
+        const Q: &str = "query($id:String!){vaultPositions(vaultId:$id){positionId vaultId \
+            tranche capitalGeneration sharesRaw costBasisRaw lockedUntilMs status \
+            parentPositionId mergedInto queuedGlobalSeq createdAtMs updatedAtMs}}";
+        let data: VaultPositionsWrap = self.gql(Q, json!({ "id": vault_id.to_hex() })).await?;
+        data.vault_positions
+            .into_iter()
+            .map(VaultPosition::try_from)
+            .collect()
+    }
+
+    /// One VaultPosition lifecycle row by its object id (SO-418), or
+    /// `None` if the indexer doesn't know it.
+    pub async fn vault_position(&self, position_id: ObjectId) -> Result<Option<VaultPosition>> {
+        const Q: &str = "query($id:String!){vaultPosition(positionId:$id){positionId vaultId \
+            tranche capitalGeneration sharesRaw costBasisRaw lockedUntilMs status \
+            parentPositionId mergedInto queuedGlobalSeq createdAtMs updatedAtMs}}";
+        let data: VaultPositionWrap = self.gql(Q, json!({ "id": position_id.to_hex() })).await?;
+        data.vault_position.map(VaultPosition::try_from).transpose()
     }
 
     /// Adapter positions for one trading vault (removed ones included,
@@ -843,6 +954,16 @@ struct TradingVaultsWrap {
 struct TradingVaultPositionsWrap {
     trading_vault_positions: Vec<TradingVaultPositionJson>,
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultPositionsWrap {
+    vault_positions: Vec<VaultPositionJson>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultPositionWrap {
+    vault_position: Option<VaultPositionJson>,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1057,6 +1178,85 @@ struct TradingVaultJson {
     latest_nav_raw: Option<String>,
     #[serde(default)]
     nav_updated_at_ms: Option<String>,
+    // ── trading-vault v2 (SO-418) ──
+    structure_code: i32,
+    senior_hurdle_bps_annual: String,
+    target_junior_bps: String,
+    maintenance_junior_bps: String,
+    upside_code: i32,
+    residual_participation_bps: String,
+    total_return_cap_bps: String,
+    terms_version: String,
+    #[serde(default)]
+    spec_hash: Option<String>,
+    senior_shares_raw: String,
+    junior_shares_raw: String,
+    senior_claim_raw: String,
+    senior_principal_basis_raw: String,
+    #[serde(default)]
+    senior_nav_raw: Option<String>,
+    #[serde(default)]
+    junior_nav_raw: Option<String>,
+    #[serde(default)]
+    latest_senior_pps_e12_raw: Option<String>,
+    #[serde(default)]
+    latest_junior_pps_e12_raw: Option<String>,
+    risk_state: i32,
+    curator_commitment_breached: bool,
+    #[serde(default)]
+    impaired_since_ms: Option<String>,
+    active_junior_generation: String,
+    #[serde(default)]
+    reset_old_generation: Option<String>,
+    #[serde(default)]
+    reset_proposed_at_ms: Option<String>,
+    #[serde(default)]
+    reset_executable_at_ms: Option<String>,
+    #[serde(default)]
+    reset_recorded_nav_raw: Option<String>,
+    #[serde(default)]
+    reset_recorded_senior_claim_raw: Option<String>,
+    #[serde(default)]
+    reset_recorded_required_deposit_raw: Option<String>,
+    settled: bool,
+    #[serde(default)]
+    settlement_final_nav_raw: Option<String>,
+    #[serde(default)]
+    senior_pool_raw: Option<String>,
+    #[serde(default)]
+    senior_supply_raw: Option<String>,
+    #[serde(default)]
+    junior_pool_raw: Option<String>,
+    #[serde(default)]
+    junior_supply_raw: Option<String>,
+    #[serde(default)]
+    settlement_snapshot_at_ms: Option<String>,
+    settlement_redeemed_raw: String,
+    senior_lane_head: String,
+    senior_lane_tail: String,
+    junior_lane_head: String,
+    junior_lane_tail: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultPositionJson {
+    position_id: String,
+    vault_id: String,
+    tranche: i32,
+    capital_generation: String,
+    shares_raw: String,
+    cost_basis_raw: String,
+    locked_until_ms: String,
+    status: String,
+    #[serde(default)]
+    parent_position_id: Option<String>,
+    #[serde(default)]
+    merged_into: Option<String>,
+    #[serde(default)]
+    queued_global_seq: Option<String>,
+    created_at_ms: String,
+    updated_at_ms: String,
 }
 
 #[derive(Deserialize)]
@@ -1310,6 +1510,110 @@ impl TryFrom<TradingVaultJson> for TradingVault {
                 .transpose()?,
             latest_nav: v.latest_nav_raw.as_deref().map(parse_u128).transpose()?,
             nav_updated_at_ms: v.nav_updated_at_ms.as_deref().map(parse_u64).transpose()?,
+            structure_code: parse_u8(v.structure_code)?,
+            senior_hurdle_bps_annual: parse_u64(&v.senior_hurdle_bps_annual)?,
+            target_junior_bps: parse_u64(&v.target_junior_bps)?,
+            maintenance_junior_bps: parse_u64(&v.maintenance_junior_bps)?,
+            upside_code: parse_u8(v.upside_code)?,
+            residual_participation_bps: parse_u64(&v.residual_participation_bps)?,
+            total_return_cap_bps: parse_u64(&v.total_return_cap_bps)?,
+            terms_version: parse_u64(&v.terms_version)?,
+            spec_hash: v.spec_hash,
+            senior_shares: parse_u128(&v.senior_shares_raw)?,
+            junior_shares: parse_u128(&v.junior_shares_raw)?,
+            senior_claim: parse_u128(&v.senior_claim_raw)?,
+            senior_principal_basis: parse_u128(&v.senior_principal_basis_raw)?,
+            senior_nav: v.senior_nav_raw.as_deref().map(parse_u128).transpose()?,
+            junior_nav: v.junior_nav_raw.as_deref().map(parse_u128).transpose()?,
+            latest_senior_pps_e12: v
+                .latest_senior_pps_e12_raw
+                .as_deref()
+                .map(parse_u128)
+                .transpose()?,
+            latest_junior_pps_e12: v
+                .latest_junior_pps_e12_raw
+                .as_deref()
+                .map(parse_u128)
+                .transpose()?,
+            risk_state: parse_u8(v.risk_state)?,
+            curator_commitment_breached: v.curator_commitment_breached,
+            impaired_since_ms: v.impaired_since_ms.as_deref().map(parse_u64).transpose()?,
+            active_junior_generation: parse_u64(&v.active_junior_generation)?,
+            reset_old_generation: v
+                .reset_old_generation
+                .as_deref()
+                .map(parse_u64)
+                .transpose()?,
+            reset_proposed_at_ms: v
+                .reset_proposed_at_ms
+                .as_deref()
+                .map(parse_u64)
+                .transpose()?,
+            reset_executable_at_ms: v
+                .reset_executable_at_ms
+                .as_deref()
+                .map(parse_u64)
+                .transpose()?,
+            reset_recorded_nav: v
+                .reset_recorded_nav_raw
+                .as_deref()
+                .map(parse_u128)
+                .transpose()?,
+            reset_recorded_senior_claim: v
+                .reset_recorded_senior_claim_raw
+                .as_deref()
+                .map(parse_u128)
+                .transpose()?,
+            reset_recorded_required_deposit: v
+                .reset_recorded_required_deposit_raw
+                .as_deref()
+                .map(parse_u64)
+                .transpose()?,
+            settled: v.settled,
+            settlement_final_nav: v
+                .settlement_final_nav_raw
+                .as_deref()
+                .map(parse_u128)
+                .transpose()?,
+            senior_pool: v.senior_pool_raw.as_deref().map(parse_u64).transpose()?,
+            senior_supply: v.senior_supply_raw.as_deref().map(parse_u128).transpose()?,
+            junior_pool: v.junior_pool_raw.as_deref().map(parse_u64).transpose()?,
+            junior_supply: v.junior_supply_raw.as_deref().map(parse_u128).transpose()?,
+            settlement_snapshot_at_ms: v
+                .settlement_snapshot_at_ms
+                .as_deref()
+                .map(parse_u64)
+                .transpose()?,
+            settlement_redeemed: parse_u128(&v.settlement_redeemed_raw)?,
+            senior_lane_head: parse_u64(&v.senior_lane_head)?,
+            senior_lane_tail: parse_u64(&v.senior_lane_tail)?,
+            junior_lane_head: parse_u64(&v.junior_lane_head)?,
+            junior_lane_tail: parse_u64(&v.junior_lane_tail)?,
+        })
+    }
+}
+
+impl TryFrom<VaultPositionJson> for VaultPosition {
+    type Error = anyhow::Error;
+    fn try_from(p: VaultPositionJson) -> Result<Self> {
+        Ok(VaultPosition {
+            position_id: parse_object_id(&p.position_id)?,
+            vault_id: parse_object_id(&p.vault_id)?,
+            tranche: parse_u8(p.tranche)?,
+            capital_generation: parse_u64(&p.capital_generation)?,
+            shares: parse_u128(&p.shares_raw)?,
+            cost_basis: parse_u64(&p.cost_basis_raw)?,
+            locked_until_ms: parse_u64(&p.locked_until_ms)?,
+            status: p.status,
+            parent_position_id: p
+                .parent_position_id
+                .as_deref()
+                .map(parse_object_id)
+                .transpose()?,
+            merged_into: p.merged_into.as_deref().map(parse_object_id).transpose()?,
+            queued_global_seq: p.queued_global_seq.as_deref().map(parse_u64).transpose()?,
+            created_at_ms: parse_u64(&p.created_at_ms)?,
+            updated_at_ms: parse_u64(&p.updated_at_ms)?,
         })
     }
 }
@@ -1375,5 +1679,96 @@ mod tests {
     fn progress_url_derived_from_graphql_url() {
         let c = IndexerClient::new("http://indexer:9002/graphql".to_string());
         assert_eq!(c.progress_url, "http://indexer:9002/progress");
+    }
+
+    /// A full-length (32-byte) hex id from one repeated byte.
+    fn hex32(b: u8) -> String {
+        format!("0x{}", format!("{b:02x}").repeat(32))
+    }
+
+    /// SO-418: the trading-vault wire type decodes the v2 fields the
+    /// server exposes (names must match the indexer's SDL, pinned by the
+    /// server's `schema_exposes_trading_vault_v2_fields` test).
+    #[test]
+    fn trading_vault_json_decodes_v2_fields() {
+        let raw = format!(
+            r#"{{
+            "vaultId": "{v}", "accountingAsset": "9b::tusdc::TUSDC",
+            "creator": "{a}", "curator": "{a}", "curatorCapId": "{c}",
+            "state": "open", "lockupMs": "0", "curatorFeeBps": "100",
+            "unwindGraceMs": "0", "depositsPaused": false,
+            "mmReleaseEnabled": false, "totalSharesRaw": "1000000000000",
+            "positionCount": "0", "pendingWithdrawals": "1",
+            "latestPpsE12Raw": null, "updatedAtMs": "1000",
+            "externalExposure": "0",
+            "structureCode": 1, "seniorHurdleBpsAnnual": "1000",
+            "targetJuniorBps": "2000", "maintenanceJuniorBps": "1000",
+            "upsideCode": 0, "residualParticipationBps": "0",
+            "totalReturnCapBps": "0", "termsVersion": "1",
+            "specHash": "0xabcd",
+            "seniorSharesRaw": "800000000000", "juniorSharesRaw": "200000000000",
+            "seniorClaimRaw": "800000", "seniorPrincipalBasisRaw": "800000",
+            "seniorNavRaw": "800000", "juniorNavRaw": "200000",
+            "latestSeniorPpsE12Raw": "1000000000000",
+            "latestJuniorPpsE12Raw": "1000000000000",
+            "riskState": 2, "curatorCommitmentBreached": true,
+            "impairedSinceMs": "3000", "activeJuniorGeneration": "1",
+            "resetOldGeneration": "0", "resetProposedAtMs": "2000",
+            "resetExecutableAtMs": "10000", "resetRecordedNavRaw": "700000",
+            "resetRecordedSeniorClaimRaw": "800000",
+            "resetRecordedRequiredDepositRaw": "300000",
+            "settled": true, "settlementFinalNavRaw": "900000",
+            "seniorPoolRaw": "800000", "seniorSupplyRaw": "800000000000",
+            "juniorPoolRaw": "100000", "juniorSupplyRaw": "200000000000",
+            "settlementSnapshotAtMs": "7000", "settlementRedeemedRaw": "500",
+            "seniorLaneHead": "1", "seniorLaneTail": "2",
+            "juniorLaneHead": "0", "juniorLaneTail": "0"
+            }}"#,
+            v = hex32(0xf0),
+            a = hex32(0x01),
+            c = hex32(0x03),
+        );
+        let json: TradingVaultJson = serde_json::from_str(&raw).unwrap();
+        let v = TradingVault::try_from(json).unwrap();
+        assert_eq!(v.structure_code, 1);
+        assert_eq!(v.senior_hurdle_bps_annual, 1_000);
+        assert_eq!(v.terms_version, 1);
+        assert_eq!(v.spec_hash.as_deref(), Some("0xabcd"));
+        assert_eq!(v.senior_shares, 800_000_000_000);
+        assert_eq!(v.junior_shares, 200_000_000_000);
+        assert_eq!(v.senior_claim, 800_000);
+        assert_eq!(v.senior_nav, Some(800_000));
+        assert_eq!(v.latest_junior_pps_e12, Some(1_000_000_000_000));
+        assert_eq!(v.risk_state, 2);
+        assert!(v.curator_commitment_breached);
+        assert_eq!(v.impaired_since_ms, Some(3_000));
+        assert_eq!(v.active_junior_generation, 1);
+        assert_eq!(v.reset_recorded_required_deposit, Some(300_000));
+        assert!(v.settled);
+        assert_eq!(v.senior_pool, Some(800_000));
+        assert_eq!(v.settlement_redeemed, 500);
+        assert_eq!(v.senior_lane_head, 1);
+        assert_eq!(v.senior_lane_tail, 2);
+    }
+
+    #[test]
+    fn vault_position_json_decodes() {
+        let raw = serde_json::json!({
+            "positionId": hex32(0x99), "vaultId": hex32(0xf0), "tranche": 2,
+            "capitalGeneration": "1", "sharesRaw": "1000", "costBasisRaw": "500",
+            "lockedUntilMs": "9000", "status": "queued",
+            "parentPositionId": hex32(0xa1), "mergedInto": null,
+            "queuedGlobalSeq": "7", "createdAtMs": "2000", "updatedAtMs": "2600",
+        });
+        let json: VaultPositionJson = serde_json::from_value(raw).unwrap();
+        let p = VaultPosition::try_from(json).unwrap();
+        assert_eq!(p.tranche, 2);
+        assert_eq!(p.capital_generation, 1);
+        assert_eq!(p.shares, 1_000);
+        assert_eq!(p.cost_basis, 500);
+        assert_eq!(p.status, "queued");
+        assert_eq!(p.parent_position_id, Some(parse_object_id(&hex32(0xa1)).unwrap()));
+        assert_eq!(p.merged_into, None);
+        assert_eq!(p.queued_global_seq, Some(7));
     }
 }

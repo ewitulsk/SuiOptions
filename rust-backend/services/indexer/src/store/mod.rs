@@ -309,6 +309,217 @@ pub struct TradingVaultState {
     /// NAV from the latest consumed appraisal (TvVaultAppraised, SO-304).
     pub latest_nav: Option<u128>,
     pub nav_updated_at_ms: Option<u64>,
+    // ── trading-vault v2 (SO-418): capital structure + tranche book ──
+    /// 0 = Untranched, 1 = SeniorJunior. Immutable (TvVaultCreated).
+    pub structure_code: u8,
+    pub senior_hurdle_bps_annual: u64,
+    pub target_junior_bps: u64,
+    pub maintenance_junior_bps: u64,
+    pub upside_code: u8,
+    pub residual_participation_bps: u64,
+    pub total_return_cap_bps: u64,
+    pub terms_version: u64,
+    /// 0x-prefixed hex spec hash; `None` when empty / pre-v2.
+    pub spec_hash: Option<String>,
+    /// Tranche supplies: TvCapitalSynced is authoritative; the tranche-
+    /// tagged deposit/fulfil events carry post-event supplies too.
+    /// Untranched supply lives in `junior_shares` (mirrors capital.move).
+    pub senior_shares: u128,
+    pub junior_shares: u128,
+    pub senior_claim: u128,
+    /// Senior deposits' value in minus withdrawn/settled senior basis.
+    /// Additive — same replay caveat as `pending_withdrawals`.
+    pub senior_principal_basis: u128,
+    /// Waterfall NAV split from the latest TvCapitalSynced.
+    pub senior_nav: Option<u128>,
+    pub junior_nav: Option<u128>,
+    /// Observed per-tranche pps (1e12, SHARE_OFFSET-adjusted). Untranched
+    /// vaults keep using `latest_pps_e12`.
+    pub latest_senior_pps_e12: Option<u128>,
+    pub latest_junior_pps_e12: Option<u128>,
+    /// 0=Healthy 1=CoverageBreach 2=Impaired 3=ResetPending.
+    pub risk_state: u8,
+    pub curator_commitment_breached: bool,
+    /// Set when the vault enters Impaired, cleared when it leaves.
+    pub impaired_since_ms: Option<u64>,
+    pub active_junior_generation: u64,
+    /// Open junior-reset proposal; all `None` when there is none.
+    pub reset_old_generation: Option<u64>,
+    pub reset_proposed_at_ms: Option<u64>,
+    pub reset_executable_at_ms: Option<u64>,
+    pub reset_recorded_nav: Option<u128>,
+    pub reset_recorded_senior_claim: Option<u128>,
+    pub reset_recorded_required_deposit: Option<u64>,
+    // ── terminal settlement pool (TvSettlementSnapshot / Redeemed) ──
+    pub settled: bool,
+    pub settlement_final_nav: Option<u128>,
+    pub senior_pool: Option<u64>,
+    pub senior_supply: Option<u128>,
+    pub junior_pool: Option<u64>,
+    pub junior_supply: Option<u128>,
+    pub settlement_snapshot_at_ms: Option<u64>,
+    /// Cumulative entitlement drawn from the settlement pools.
+    pub settlement_redeemed: u128,
+    // ── per-lane queue cursors observed from events: tail = highest
+    // requested global_seq + 1, head = highest fulfilled/settled + 1 ──
+    pub senior_lane_head: u64,
+    pub senior_lane_tail: u64,
+    pub junior_lane_head: u64,
+    pub junior_lane_tail: u64,
+}
+
+impl TradingVaultState {
+    /// Fresh vault state from a v2 `TvVaultCreated`.
+    fn from_created(v: &protocol_types::events::TvVaultCreated, timestamp_ms: u64) -> Self {
+        TradingVaultState {
+            accounting_asset: v.accounting_asset.clone(),
+            creator: v.creator,
+            // The creator IS the initial curator; rotations update this.
+            curator: v.creator,
+            curator_cap_id: v.curator_cap_id,
+            state: "open".to_string(),
+            lockup_ms: v.lockup_ms,
+            curator_fee_bps: v.curator_fee_bps,
+            unwind_grace_ms: v.unwind_grace_ms,
+            deposits_paused: false,
+            mm_release_enabled: false,
+            total_shares: 0,
+            position_count: 0,
+            pending_withdrawals: 0,
+            latest_pps_e12: None,
+            updated_at_ms: timestamp_ms,
+            external_account: None,
+            external_exposure: 0,
+            latest_external_equity: None,
+            external_equity_updated_at_ms: None,
+            latest_nav: None,
+            nav_updated_at_ms: None,
+            structure_code: v.structure_code,
+            senior_hurdle_bps_annual: v.senior_hurdle_bps_annual,
+            target_junior_bps: v.target_junior_bps,
+            maintenance_junior_bps: v.maintenance_junior_bps,
+            upside_code: v.upside_code,
+            residual_participation_bps: v.residual_participation_bps,
+            total_return_cap_bps: v.total_return_cap_bps,
+            terms_version: v.terms_version,
+            spec_hash: if v.spec_hash.is_empty() {
+                None
+            } else {
+                Some(format!("0x{}", hex_lower(&v.spec_hash)))
+            },
+            senior_shares: 0,
+            junior_shares: 0,
+            senior_claim: 0,
+            senior_principal_basis: 0,
+            senior_nav: None,
+            junior_nav: None,
+            latest_senior_pps_e12: None,
+            latest_junior_pps_e12: None,
+            risk_state: 0,
+            curator_commitment_breached: false,
+            impaired_since_ms: None,
+            active_junior_generation: 0,
+            reset_old_generation: None,
+            reset_proposed_at_ms: None,
+            reset_executable_at_ms: None,
+            reset_recorded_nav: None,
+            reset_recorded_senior_claim: None,
+            reset_recorded_required_deposit: None,
+            settled: false,
+            settlement_final_nav: None,
+            senior_pool: None,
+            senior_supply: None,
+            junior_pool: None,
+            junior_supply: None,
+            settlement_snapshot_at_ms: None,
+            settlement_redeemed: 0,
+            senior_lane_head: 0,
+            senior_lane_tail: 0,
+            junior_lane_head: 0,
+            junior_lane_tail: 0,
+        }
+    }
+
+    /// Update tranche supply + observed pps from a tranche-tagged deposit /
+    /// fulfil: `tranche_shares` is the post-event supply of the touched
+    /// tranche; pps is `value` over SHARE_OFFSET-scaled `shares`.
+    fn observe_tranche_flow(&mut self, tranche: u8, tranche_shares: u128, value: u64, shares: u128) {
+        match tranche {
+            TRANCHE_SENIOR => self.senior_shares = tranche_shares,
+            // Untranched supply lives in junior_shares (capital.move).
+            _ => self.junior_shares = tranche_shares,
+        }
+        self.total_shares = self.senior_shares.saturating_add(self.junior_shares);
+        if value > 0 && shares > 0 {
+            let pps = (value as u128)
+                .saturating_mul(1_000_000_000_000)
+                .saturating_mul(SHARE_OFFSET)
+                / shares;
+            match tranche {
+                TRANCHE_SENIOR => self.latest_senior_pps_e12 = Some(pps),
+                TRANCHE_JUNIOR => self.latest_junior_pps_e12 = Some(pps),
+                _ => self.latest_pps_e12 = Some(pps),
+            }
+        }
+    }
+
+    /// Bump a lane cursor to `global_seq + 1` if that moves it forward.
+    fn bump_lane(cursor: &mut u64, global_seq: u64) {
+        *cursor = (*cursor).max(global_seq.saturating_add(1));
+    }
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Tranche wire codes (0=Untranched 1=Senior 2=Junior) and lane codes
+/// (0=senior 1=junior; untranched uses lane 1).
+pub const TRANCHE_UNTRANCHED: u8 = 0;
+pub const TRANCHE_SENIOR: u8 = 1;
+pub const TRANCHE_JUNIOR: u8 = 2;
+pub const LANE_SENIOR: u8 = 0;
+
+/// Risk-state wire code 2 = Impaired (0=Healthy 1=CoverageBreach
+/// 3=ResetPending).
+pub const RISK_IMPAIRED: u8 = 2;
+
+/// VaultPosition NFT lifecycle statuses (SO-418).
+pub const POSITION_LIVE: &str = "live";
+pub const POSITION_QUEUED: &str = "queued";
+pub const POSITION_CONSUMED: &str = "consumed";
+pub const POSITION_SETTLED: &str = "settled";
+pub const POSITION_BURNED: &str = "burned";
+
+/// One `VaultPosition` NFT's lifecycle + lineage (SO-418), keyed by the
+/// position object id. Rows never delete — consumed/settled/burned stay
+/// for history and supply-conservation checks. Ownership is NOT tracked
+/// (transfers emit no events; api-service resolves owners JIT).
+#[derive(Clone, Debug, PartialEq)]
+pub struct VaultPositionState {
+    pub vault_id: ObjectId,
+    /// 0=Untranched 1=Senior 2=Junior.
+    pub tranche: u8,
+    pub capital_generation: u64,
+    pub shares: u128,
+    pub cost_basis: u64,
+    pub locked_until_ms: u64,
+    /// live | queued | consumed | settled | burned.
+    pub status: String,
+    /// Split lineage: the parent this position was carved out of.
+    pub parent_position_id: Option<ObjectId>,
+    /// Merge lineage: the kept position this one was folded into.
+    pub merged_into: Option<ObjectId>,
+    /// Set while queued: the withdraw request's global_seq (the fulfil
+    /// event carries no position id — this is the join key).
+    pub queued_global_seq: Option<u64>,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
 }
 
 /// One adapter position held by a trading vault, keyed by
@@ -361,6 +572,8 @@ struct Inner {
     trading_vaults: BTreeMap<ObjectId, TradingVaultState>,
     /// (vault_id, position_id) → adapter position (SO-282).
     trading_vault_positions: BTreeMap<(ObjectId, ObjectId), TradingVaultPositionState>,
+    /// position_id → VaultPosition NFT lifecycle (SO-418).
+    vault_positions: BTreeMap<ObjectId, VaultPositionState>,
 }
 
 impl Default for Inner {
@@ -378,6 +591,7 @@ impl Default for Inner {
             vault_receipts: BTreeMap::new(),
             trading_vaults: BTreeMap::new(),
             trading_vault_positions: BTreeMap::new(),
+            vault_positions: BTreeMap::new(),
         }
     }
 }
@@ -498,6 +712,7 @@ impl Store {
         inner.vault_receipts = views.vault_receipts;
         inner.trading_vaults = views.trading_vaults;
         inner.trading_vault_positions = views.trading_vault_positions;
+        inner.vault_positions = views.vault_positions;
         inner.next_sequence = last_sequence + 1;
     }
 
@@ -590,6 +805,16 @@ impl Store {
     /// One vault's headline state (D2).
     pub fn vault(&self, id: &ObjectId) -> Option<VaultState> {
         self.inner.read().vaults.get(id).cloned()
+    }
+
+    /// One curated trading vault's headline state (SO-282/418).
+    pub fn trading_vault(&self, id: &ObjectId) -> Option<TradingVaultState> {
+        self.inner.read().trading_vaults.get(id).cloned()
+    }
+
+    /// One VaultPosition NFT's lifecycle state (SO-418).
+    pub fn vault_position(&self, id: &ObjectId) -> Option<VaultPositionState> {
+        self.inner.read().vault_positions.get(id).cloned()
     }
 
     /// One vault round's track-record entry (D2).
@@ -724,6 +949,9 @@ fn collect_participants(
         ChainEvent::TvWithdrawRequested(w) => push(w.recipient.to_hex(), "withdrawer"),
         ChainEvent::TvWithdrawFulfilled(w) => push(w.recipient.to_hex(), "withdrawer"),
         ChainEvent::TvCuratorRotated(r) => push(r.recipient.to_hex(), "curator"),
+        // ── trading-vault v2 (SO-418) ────────────────────────────────
+        ChainEvent::TvJuniorResetExecuted(r) => push(r.recapitalizer.to_hex(), "recapitalizer"),
+        ChainEvent::TvSettlementRedeemed(r) => push(r.recipient.to_hex(), "redeemer"),
         // ── external MM accounts + equity oracle (SO-299) ────────────
         ChainEvent::TvExternalAccountSet(s) => push(s.account.to_hex(), "external_account"),
         ChainEvent::TvExternalReleased(r) => push(r.account.to_hex(), "external_account"),
@@ -741,7 +969,18 @@ fn collect_participants(
         ChainEvent::PutSpreadRedeemed(r) => push(r.redeemer.to_hex(), "redeemer"),
         ChainEvent::VolPosted(p) => push(p.poster.to_hex(), "poster"),
         // The remaining trading-vault events carry no wallet addresses.
-        ChainEvent::TvExternalAccountCleared(_)
+        ChainEvent::TvPositionMinted(_)
+        | ChainEvent::TvPositionSplit(_)
+        | ChainEvent::TvPositionMerged(_)
+        | ChainEvent::TvWipedPositionBurned(_)
+        | ChainEvent::TvCapitalSynced(_)
+        | ChainEvent::TvRiskStateChanged(_)
+        | ChainEvent::TvJuniorResetProposed(_)
+        | ChainEvent::TvJuniorResetCancelled(_)
+        | ChainEvent::TvCommitmentReleased(_)
+        | ChainEvent::TvSettlementSnapshot(_)
+        | ChainEvent::TvSettlementCuratorFeesClaimed(_)
+        | ChainEvent::TvExternalAccountCleared(_)
         | ChainEvent::TvDepositAssetAdded(_)
         | ChainEvent::TvDepositAssetRemoved(_)
         | ChainEvent::TvHaircutsSet(_)
@@ -1080,9 +1319,59 @@ fn stage_event_into_batch(
         }
         ChainEvent::TvWithdrawRequested(w) => {
             stage_trading_vault(inner, w.vault_id, sequence, batch);
+            stage_vault_position(inner, w.position_id, sequence, batch);
         }
         ChainEvent::TvWithdrawFulfilled(w) => {
             stage_trading_vault(inner, w.vault_id, sequence, batch);
+            // The fulfil resolves its position via the recorded global_seq
+            // (the event carries no position id).
+            let consumed = inner
+                .vault_positions
+                .iter()
+                .find(|(_, p)| {
+                    p.vault_id == w.vault_id && p.queued_global_seq == Some(w.global_seq)
+                })
+                .map(|(id, _)| *id);
+            if let Some(id) = consumed {
+                stage_vault_position(inner, id, sequence, batch);
+            }
+        }
+        // ── trading-vault v2: position lifecycle + capital state ─────
+        ChainEvent::TvPositionMinted(m) => {
+            stage_vault_position(inner, m.position_id, sequence, batch);
+        }
+        ChainEvent::TvPositionSplit(s) => {
+            stage_vault_position(inner, s.parent_id, sequence, batch);
+            stage_vault_position(inner, s.child_id, sequence, batch);
+        }
+        ChainEvent::TvPositionMerged(m) => {
+            stage_vault_position(inner, m.kept_id, sequence, batch);
+            stage_vault_position(inner, m.merged_id, sequence, batch);
+        }
+        ChainEvent::TvWipedPositionBurned(b) => {
+            stage_vault_position(inner, b.position_id, sequence, batch);
+        }
+        ChainEvent::TvCapitalSynced(c) => {
+            stage_trading_vault(inner, c.vault_id, sequence, batch);
+        }
+        ChainEvent::TvRiskStateChanged(r) => {
+            stage_trading_vault(inner, r.vault_id, sequence, batch);
+        }
+        ChainEvent::TvJuniorResetProposed(p) => {
+            stage_trading_vault(inner, p.vault_id, sequence, batch);
+        }
+        ChainEvent::TvJuniorResetCancelled(c) => {
+            stage_trading_vault(inner, c.vault_id, sequence, batch);
+        }
+        ChainEvent::TvJuniorResetExecuted(e) => {
+            stage_trading_vault(inner, e.vault_id, sequence, batch);
+        }
+        ChainEvent::TvSettlementSnapshot(s) => {
+            stage_trading_vault(inner, s.vault_id, sequence, batch);
+        }
+        ChainEvent::TvSettlementRedeemed(r) => {
+            stage_trading_vault(inner, r.vault_id, sequence, batch);
+            stage_vault_position(inner, r.position_id, sequence, batch);
         }
         ChainEvent::TvPositionStored(p) => {
             stage_trading_vault(inner, p.vault_id, sequence, batch);
@@ -1117,8 +1406,11 @@ fn stage_event_into_batch(
         }
         // Non-mutating trading-vault events: served from the generic event
         // feed only (SO-370: the deposit-asset allowlist, haircuts, and
-        // per-request payout assets aren't materialised).
-        ChainEvent::TvSessionSettled(_)
+        // per-request payout assets aren't materialised; SO-418: escrow
+        // release and the curator fee sweep move no indexed state).
+        ChainEvent::TvCommitmentReleased(_)
+        | ChainEvent::TvSettlementCuratorFeesClaimed(_)
+        | ChainEvent::TvSessionSettled(_)
         | ChainEvent::TvDepositAssetAdded(_)
         | ChainEvent::TvDepositAssetRemoved(_)
         | ChainEvent::TvHaircutsSet(_)
@@ -1223,6 +1515,19 @@ fn stage_trading_vault_position(
         batch
             .trading_vault_positions
             .push(trading_vault_position_row(vault_id, position_id, state, sequence));
+    }
+}
+
+fn stage_vault_position(
+    inner: &Inner,
+    position_id: ObjectId,
+    sequence: i64,
+    batch: &mut CheckpointBatch,
+) {
+    if let Some(state) = inner.vault_positions.get(&position_id) {
+        batch
+            .vault_positions
+            .push(vault_position_row(position_id, state, sequence));
     }
 }
 
@@ -1491,6 +1796,68 @@ fn trading_vault_row(id: ObjectId, s: &TradingVaultState, sequence: i64) -> Trad
         external_equity_updated_at_ms: s.external_equity_updated_at_ms.map(|v| v as i64),
         latest_nav: s.latest_nav.map(u128_to_bigdecimal),
         nav_updated_at_ms: s.nav_updated_at_ms.map(|v| v as i64),
+        structure_code: s.structure_code as i16,
+        senior_hurdle_bps_annual: s.senior_hurdle_bps_annual as i64,
+        target_junior_bps: s.target_junior_bps as i64,
+        maintenance_junior_bps: s.maintenance_junior_bps as i64,
+        upside_code: s.upside_code as i16,
+        residual_participation_bps: s.residual_participation_bps as i64,
+        total_return_cap_bps: s.total_return_cap_bps as i64,
+        terms_version: s.terms_version as i64,
+        spec_hash: s.spec_hash.clone(),
+        senior_shares: u128_to_bigdecimal(s.senior_shares),
+        junior_shares: u128_to_bigdecimal(s.junior_shares),
+        senior_claim: u128_to_bigdecimal(s.senior_claim),
+        senior_principal_basis: u128_to_bigdecimal(s.senior_principal_basis),
+        senior_nav: s.senior_nav.map(u128_to_bigdecimal),
+        junior_nav: s.junior_nav.map(u128_to_bigdecimal),
+        latest_senior_pps_e12: s.latest_senior_pps_e12.map(u128_to_bigdecimal),
+        latest_junior_pps_e12: s.latest_junior_pps_e12.map(u128_to_bigdecimal),
+        risk_state: s.risk_state as i16,
+        curator_commitment_breached: s.curator_commitment_breached,
+        impaired_since_ms: s.impaired_since_ms.map(|v| v as i64),
+        active_junior_generation: s.active_junior_generation as i64,
+        reset_old_generation: s.reset_old_generation.map(|v| v as i64),
+        reset_proposed_at_ms: s.reset_proposed_at_ms.map(|v| v as i64),
+        reset_executable_at_ms: s.reset_executable_at_ms.map(|v| v as i64),
+        reset_recorded_nav: s.reset_recorded_nav.map(u128_to_bigdecimal),
+        reset_recorded_senior_claim: s.reset_recorded_senior_claim.map(u128_to_bigdecimal),
+        reset_recorded_required_deposit: s.reset_recorded_required_deposit.map(|v| v as i64),
+        settled: s.settled,
+        settlement_final_nav: s.settlement_final_nav.map(u128_to_bigdecimal),
+        senior_pool: s.senior_pool.map(|v| v as i64),
+        senior_supply: s.senior_supply.map(u128_to_bigdecimal),
+        junior_pool: s.junior_pool.map(|v| v as i64),
+        junior_supply: s.junior_supply.map(u128_to_bigdecimal),
+        settlement_snapshot_at_ms: s.settlement_snapshot_at_ms.map(|v| v as i64),
+        settlement_redeemed: u128_to_bigdecimal(s.settlement_redeemed),
+        senior_lane_head: s.senior_lane_head as i64,
+        senior_lane_tail: s.senior_lane_tail as i64,
+        junior_lane_head: s.junior_lane_head as i64,
+        junior_lane_tail: s.junior_lane_tail as i64,
+    }
+}
+
+fn vault_position_row(
+    position_id: ObjectId,
+    s: &VaultPositionState,
+    sequence: i64,
+) -> crate::db::models::VaultPositionRow {
+    crate::db::models::VaultPositionRow {
+        position_id: position_id.to_hex(),
+        vault_id: s.vault_id.to_hex(),
+        tranche: s.tranche as i16,
+        capital_generation: s.capital_generation as i64,
+        shares: u128_to_bigdecimal(s.shares),
+        cost_basis: u64_to_bigdecimal(s.cost_basis),
+        locked_until_ms: s.locked_until_ms as i64,
+        status: s.status.clone(),
+        parent_position_id: s.parent_position_id.map(|p| p.to_hex()),
+        merged_into: s.merged_into.map(|p| p.to_hex()),
+        queued_global_seq: s.queued_global_seq.map(|v| v as i64),
+        created_at_ms: s.created_at_ms as i64,
+        updated_at_ms: s.updated_at_ms as i64,
+        updated_at_seq: sequence,
     }
 }
 
@@ -1943,35 +2310,11 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
             rfq.auction_kind = AUCTION_KIND_PUT.to_string();
             rfq.status = RfqStatus::ExpiredUnsold;
         }
-        // ── curated trading vaults (SO-282) ─────────────────────────
+        // ── curated trading vaults (SO-282, v2 SO-418) ──────────────
         ChainEvent::TvVaultCreated(v) => {
-            inner.trading_vaults.insert(
-                v.vault_id,
-                TradingVaultState {
-                    accounting_asset: v.accounting_asset.clone(),
-                    creator: v.creator,
-                    // The creator IS the initial curator; rotations update this.
-                    curator: v.creator,
-                    curator_cap_id: v.curator_cap_id,
-                    state: "open".to_string(),
-                    lockup_ms: v.lockup_ms,
-                    curator_fee_bps: v.curator_fee_bps,
-                    unwind_grace_ms: v.unwind_grace_ms,
-                    deposits_paused: false,
-                    mm_release_enabled: false,
-                    total_shares: 0,
-                    position_count: 0,
-                    pending_withdrawals: 0,
-                    latest_pps_e12: None,
-                    updated_at_ms: timestamp_ms,
-                    external_account: None,
-                    external_exposure: 0,
-                    latest_external_equity: None,
-                    external_equity_updated_at_ms: None,
-                    latest_nav: None,
-                    nav_updated_at_ms: None,
-                },
-            );
+            inner
+                .trading_vaults
+                .insert(v.vault_id, TradingVaultState::from_created(v, timestamp_ms));
         }
         ChainEvent::TvVaultClosing(c) => {
             if let Some(v) = inner.trading_vaults.get_mut(&c.vault_id) {
@@ -2006,42 +2349,295 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
         }
         ChainEvent::TvDeposited(d) => {
             if let Some(v) = inner.trading_vaults.get_mut(&d.vault_id) {
-                v.total_shares = d.total_shares;
                 // Observed accounting-asset-per-share price of this deposit:
                 // value (not amount — the deposit may be a non-accounting
-                // asset) over the SHARE_OFFSET-scaled shares it minted.
-                if d.shares > 0 {
-                    v.latest_pps_e12 = Some(
-                        (d.value as u128)
-                            .saturating_mul(1_000_000_000_000)
-                            .saturating_mul(SHARE_OFFSET)
-                            / d.shares,
-                    );
+                // asset) over the SHARE_OFFSET-scaled shares it minted;
+                // `tranche_shares` is the post-deposit supply of the
+                // deposited tranche.
+                v.observe_tranche_flow(d.tranche, d.tranche_shares, d.value, d.shares);
+                if d.tranche == TRANCHE_SENIOR {
+                    v.senior_principal_basis =
+                        v.senior_principal_basis.saturating_add(d.value as u128);
                 }
                 v.updated_at_ms = timestamp_ms;
             }
+            // The position row itself is born from the PositionMinted the
+            // same tx emits (all mints go through vault_position::mint).
         }
         ChainEvent::TvWithdrawRequested(w) => {
             if let Some(v) = inner.trading_vaults.get_mut(&w.vault_id) {
                 v.pending_withdrawals = v.pending_withdrawals.saturating_add(1);
+                let tail = if w.lane == LANE_SENIOR {
+                    &mut v.senior_lane_tail
+                } else {
+                    &mut v.junior_lane_tail
+                };
+                TradingVaultState::bump_lane(tail, w.global_seq);
                 v.updated_at_ms = timestamp_ms;
+            }
+            // The consumed VaultPosition enters the queue.
+            if let Some(p) = inner.vault_positions.get_mut(&w.position_id) {
+                p.status = POSITION_QUEUED.to_string();
+                p.queued_global_seq = Some(w.global_seq);
+                p.updated_at_ms = timestamp_ms;
             }
         }
         ChainEvent::TvWithdrawFulfilled(w) => {
             if let Some(v) = inner.trading_vaults.get_mut(&w.vault_id) {
-                v.total_shares = w.total_shares;
                 v.pending_withdrawals = v.pending_withdrawals.saturating_sub(1);
-                if w.value > 0 && w.shares > 0 {
-                    v.latest_pps_e12 = Some(
-                        (w.value as u128)
-                            .saturating_mul(1_000_000_000_000)
-                            .saturating_mul(SHARE_OFFSET)
-                            / w.shares,
-                    );
+                v.observe_tranche_flow(w.tranche, w.tranche_shares, w.value, w.shares);
+                if w.tranche == TRANCHE_SENIOR {
+                    v.senior_principal_basis =
+                        v.senior_principal_basis.saturating_sub(w.basis as u128);
+                }
+                let head = if w.lane == LANE_SENIOR {
+                    &mut v.senior_lane_head
+                } else {
+                    &mut v.junior_lane_head
+                };
+                TradingVaultState::bump_lane(head, w.global_seq);
+                v.updated_at_ms = timestamp_ms;
+            }
+            // The fulfil carries no position id: resolve the queued
+            // position via its recorded global_seq.
+            if let Some(p) = inner
+                .vault_positions
+                .values_mut()
+                .find(|p| p.vault_id == w.vault_id && p.queued_global_seq == Some(w.global_seq))
+            {
+                p.status = POSITION_CONSUMED.to_string();
+                // queued_global_seq stays set: it's the historical join
+                // key back to the request/fulfil pair.
+                p.updated_at_ms = timestamp_ms;
+            }
+        }
+        // ── trading-vault v2: position lifecycle (SO-418) ────────────
+        ChainEvent::TvPositionMinted(m) => {
+            // All mints (deposit, split child, reset recapitalization,
+            // curator fee shares) flow through vault_position::mint, so
+            // this is the single row-creation source. Upsert keeps
+            // checkpoint replays idempotent.
+            let entry = inner
+                .vault_positions
+                .entry(m.position_id)
+                .or_insert_with(|| VaultPositionState {
+                    vault_id: m.vault_id,
+                    tranche: m.tranche,
+                    capital_generation: m.capital_generation,
+                    shares: m.shares,
+                    cost_basis: m.cost_basis,
+                    locked_until_ms: m.locked_until_ms,
+                    status: POSITION_LIVE.to_string(),
+                    parent_position_id: None,
+                    merged_into: None,
+                    queued_global_seq: None,
+                    created_at_ms: timestamp_ms,
+                    updated_at_ms: timestamp_ms,
+                });
+            entry.tranche = m.tranche;
+            entry.capital_generation = m.capital_generation;
+            entry.shares = m.shares;
+            entry.cost_basis = m.cost_basis;
+            entry.locked_until_ms = m.locked_until_ms;
+            entry.updated_at_ms = timestamp_ms;
+        }
+        ChainEvent::TvPositionSplit(s) => {
+            let (parent_tranche, parent_generation, parent_lock, parent_created) = match inner
+                .vault_positions
+                .get_mut(&s.parent_id)
+            {
+                Some(parent) => {
+                    parent.shares = s.parent_shares;
+                    parent.cost_basis = s.parent_basis;
+                    parent.updated_at_ms = timestamp_ms;
+                    (
+                        parent.tranche,
+                        parent.capital_generation,
+                        parent.locked_until_ms,
+                        parent.created_at_ms,
+                    )
+                }
+                None => (TRANCHE_UNTRANCHED, 0, 0, timestamp_ms),
+            };
+            // The child was minted through vault_position::mint (its own
+            // PositionMinted); here we only record the lineage — but
+            // upsert defensively in case the mint arm hasn't seen it.
+            let child = inner
+                .vault_positions
+                .entry(s.child_id)
+                .or_insert_with(|| VaultPositionState {
+                    vault_id: s.vault_id,
+                    tranche: parent_tranche,
+                    capital_generation: parent_generation,
+                    shares: s.child_shares,
+                    cost_basis: s.child_basis,
+                    locked_until_ms: parent_lock,
+                    status: POSITION_LIVE.to_string(),
+                    parent_position_id: None,
+                    merged_into: None,
+                    queued_global_seq: None,
+                    created_at_ms: parent_created.max(timestamp_ms),
+                    updated_at_ms: timestamp_ms,
+                });
+            child.shares = s.child_shares;
+            child.cost_basis = s.child_basis;
+            child.parent_position_id = Some(s.parent_id);
+            child.updated_at_ms = timestamp_ms;
+        }
+        ChainEvent::TvPositionMerged(m) => {
+            if let Some(kept) = inner.vault_positions.get_mut(&m.kept_id) {
+                kept.shares = m.shares;
+                kept.cost_basis = m.cost_basis;
+                kept.locked_until_ms = m.locked_until_ms;
+                kept.updated_at_ms = timestamp_ms;
+            }
+            if let Some(merged) = inner.vault_positions.get_mut(&m.merged_id) {
+                merged.status = POSITION_CONSUMED.to_string();
+                merged.merged_into = Some(m.kept_id);
+                merged.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvWipedPositionBurned(b) => {
+            if let Some(p) = inner.vault_positions.get_mut(&b.position_id) {
+                p.status = POSITION_BURNED.to_string();
+                p.updated_at_ms = timestamp_ms;
+            }
+        }
+        // ── trading-vault v2: capital state (SO-418) ─────────────────
+        // TvCapitalSynced is the primary state driver: every consumed
+        // appraisal emits the waterfall decomposition + risk state.
+        // Absolute values throughout — replay-safe.
+        ChainEvent::TvCapitalSynced(c) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&c.vault_id) {
+                v.latest_nav = Some(c.total_nav);
+                v.nav_updated_at_ms = Some(timestamp_ms);
+                v.senior_nav = Some(c.senior_nav);
+                v.junior_nav = Some(c.junior_nav);
+                v.senior_claim = c.senior_claim;
+                v.senior_shares = c.senior_shares;
+                v.junior_shares = c.junior_shares;
+                v.total_shares = c.senior_shares.saturating_add(c.junior_shares);
+                if c.risk_state == RISK_IMPAIRED && v.risk_state != RISK_IMPAIRED {
+                    v.impaired_since_ms = Some(timestamp_ms);
+                } else if c.risk_state != RISK_IMPAIRED {
+                    v.impaired_since_ms = None;
+                }
+                v.risk_state = c.risk_state;
+                v.active_junior_generation = c.active_junior_generation;
+                v.curator_commitment_breached = c.curator_commitment_breached;
+                // Synced NAV over supply is the freshest per-tranche pps.
+                let pps = |nav: u128, shares: u128| {
+                    (shares > 0).then(|| {
+                        nav.saturating_mul(1_000_000_000_000).saturating_mul(SHARE_OFFSET) / shares
+                    })
+                };
+                if v.structure_code == 0 {
+                    // Untranched: single supply lives in junior_shares.
+                    if let Some(p) = pps(c.total_nav, c.junior_shares) {
+                        v.latest_pps_e12 = Some(p);
+                    }
+                } else {
+                    if let Some(p) = pps(c.senior_nav, c.senior_shares) {
+                        v.latest_senior_pps_e12 = Some(p);
+                    }
+                    if let Some(p) = pps(c.junior_nav, c.junior_shares) {
+                        v.latest_junior_pps_e12 = Some(p);
+                    }
                 }
                 v.updated_at_ms = timestamp_ms;
             }
         }
+        ChainEvent::TvRiskStateChanged(r) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&r.vault_id) {
+                if r.new_state == RISK_IMPAIRED && v.risk_state != RISK_IMPAIRED {
+                    v.impaired_since_ms = Some(r.timestamp_ms);
+                } else if r.new_state != RISK_IMPAIRED {
+                    v.impaired_since_ms = None;
+                }
+                v.risk_state = r.new_state;
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvJuniorResetProposed(p) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&p.vault_id) {
+                v.reset_old_generation = Some(p.old_generation);
+                v.reset_proposed_at_ms = Some(p.proposed_at_ms);
+                v.reset_executable_at_ms = Some(p.executable_at_ms);
+                v.reset_recorded_nav = Some(p.total_nav);
+                v.reset_recorded_senior_claim = Some(p.senior_claim);
+                v.reset_recorded_required_deposit = Some(p.required_deposit);
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvJuniorResetCancelled(c) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&c.vault_id) {
+                v.reset_old_generation = None;
+                v.reset_proposed_at_ms = None;
+                v.reset_executable_at_ms = None;
+                v.reset_recorded_nav = None;
+                v.reset_recorded_senior_claim = None;
+                v.reset_recorded_required_deposit = None;
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvJuniorResetExecuted(e) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&e.vault_id) {
+                v.active_junior_generation = e.new_generation;
+                v.junior_nav = Some(e.post_junior_nav);
+                // Junior pps re-bases to 1.0 for the new generation; the
+                // next TvCapitalSynced refines it.
+                v.latest_junior_pps_e12 = Some(1_000_000_000_000);
+                v.reset_old_generation = None;
+                v.reset_proposed_at_ms = None;
+                v.reset_executable_at_ms = None;
+                v.reset_recorded_nav = None;
+                v.reset_recorded_senior_claim = None;
+                v.reset_recorded_required_deposit = None;
+                v.updated_at_ms = timestamp_ms;
+            }
+            // The recapitalizer's new junior position is born from its
+            // own PositionMinted in the same tx.
+        }
+        // Informational: the position leaves curator escrow into a wallet.
+        // Its row (born at mint) stays live; ownership isn't tracked.
+        ChainEvent::TvCommitmentReleased(_) => {}
+        // ── trading-vault v2: terminal settlement (SO-418) ───────────
+        ChainEvent::TvSettlementSnapshot(s) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&s.vault_id) {
+                v.settled = true;
+                v.settlement_final_nav = Some(s.final_nav);
+                v.senior_pool = Some(s.senior_pool);
+                v.senior_supply = Some(s.senior_supply);
+                v.junior_pool = Some(s.junior_pool);
+                v.junior_supply = Some(s.junior_supply);
+                v.settlement_snapshot_at_ms = Some(timestamp_ms);
+                v.active_junior_generation = s.active_junior_generation;
+                v.updated_at_ms = timestamp_ms;
+            }
+        }
+        ChainEvent::TvSettlementRedeemed(r) => {
+            if let Some(v) = inner.trading_vaults.get_mut(&r.vault_id) {
+                v.settlement_redeemed = v.settlement_redeemed.saturating_add(r.entitlement as u128);
+                if r.from_queue {
+                    v.pending_withdrawals = v.pending_withdrawals.saturating_sub(1);
+                    // Queue lane derives from the tranche (senior tranche →
+                    // senior lane; junior/untranched → junior lane).
+                    let head = if r.tranche == TRANCHE_SENIOR {
+                        &mut v.senior_lane_head
+                    } else {
+                        &mut v.junior_lane_head
+                    };
+                    TradingVaultState::bump_lane(head, r.global_seq);
+                }
+                v.updated_at_ms = timestamp_ms;
+            }
+            if let Some(p) = inner.vault_positions.get_mut(&r.position_id) {
+                p.status = POSITION_SETTLED.to_string();
+                p.updated_at_ms = timestamp_ms;
+            }
+        }
+        // Log-only: curator fee sweep moves no indexed state.
+        ChainEvent::TvSettlementCuratorFeesClaimed(_) => {}
         ChainEvent::TvPositionStored(p) => {
             if let Some(v) = inner.trading_vaults.get_mut(&p.vault_id) {
                 v.position_count = v.position_count.saturating_add(1);
@@ -2317,6 +2913,29 @@ mod tests {
     use protocol_types::events::{
         BucketCreated, BucketInvalidated, BucketRevalidated, SignerCreated,
     };
+
+    /// A v2 `TvVaultCreated` (structure_code 0 = untranched, 1 =
+    /// senior/junior) with plain terms.
+    fn tv_created_evt(vault: ObjectId, structure_code: u8) -> ChainEvent {
+        ChainEvent::TvVaultCreated(protocol_types::events::TvVaultCreated {
+            vault_id: vault,
+            creator: SuiAddress::new([0x01; 32]),
+            curator_cap_id: ObjectId::new([0x03; 32]),
+            accounting_asset: AssetType::new("9b::tusdc::TUSDC"),
+            lockup_ms: 0,
+            curator_fee_bps: 100,
+            unwind_grace_ms: 0,
+            structure_code,
+            senior_hurdle_bps_annual: 1_000,
+            target_junior_bps: 2_000,
+            maintenance_junior_bps: 1_000,
+            upside_code: 0,
+            residual_participation_bps: 0,
+            total_return_cap_bps: 0,
+            terms_version: 1,
+            spec_hash: vec![0xab, 0xcd],
+        })
+    }
 
     fn bucket_evt(id: u8) -> ChainEvent {
         ChainEvent::BucketCreated(BucketCreated {
@@ -2890,7 +3509,7 @@ mod tests {
     fn trading_vault_external_account_lifecycle() {
         use protocol_types::events::{
             EquityPosted, TvExternalAccountCleared, TvExternalAccountSet, TvExternalReleased,
-            TvExternalReturned, TvVaultCreated,
+            TvExternalReturned,
         };
         let store = Store::default();
         let vault = ObjectId::new([0xf0; 32]);
@@ -2907,21 +3526,16 @@ mod tests {
             staged.db_batch.trading_vaults.into_iter().next().unwrap()
         };
 
-        let row = stage(
-            ChainEvent::TvVaultCreated(TvVaultCreated {
-                vault_id: vault,
-                creator: SuiAddress::new([0x01; 32]),
-                curator_cap_id: ObjectId::new([0x03; 32]),
-                accounting_asset: AssetType::new("9b::tusdc::TUSDC"),
-                lockup_ms: 0,
-                curator_fee_bps: 100,
-                unwind_grace_ms: 0,
-            }),
-            1_000,
-        );
+        let row = stage(tv_created_evt(vault, 0), 1_000);
         assert_eq!(row.external_account, None);
         assert_eq!(row.external_exposure, 0);
         assert_eq!(row.latest_external_equity, None);
+        // v2 capital-structure terms land from creation.
+        assert_eq!(row.structure_code, 0);
+        assert_eq!(row.terms_version, 1);
+        assert_eq!(row.spec_hash.as_deref(), Some("0xabcd"));
+        assert_eq!(row.risk_state, 0);
+        assert!(!row.settled);
 
         let row = stage(
             ChainEvent::TvExternalAccountSet(TvExternalAccountSet {
@@ -3004,14 +3618,17 @@ mod tests {
         assert_eq!(staged.db_batch.events.len(), 1);
     }
 
-    /// SO-370: observed pps comes from `value` (accounting units, not the
-    /// deposited `amount`) over SHARE_OFFSET-scaled shares, so a genesis
-    /// deposit still stores pps = 1e12.
+    /// SO-370/418: observed pps comes from `value` (accounting units, not
+    /// the deposited `amount`) over SHARE_OFFSET-scaled shares, so a
+    /// genesis deposit still stores pps = 1e12. v2: tranche-tagged flows
+    /// update the tranche supply (untranched lives in junior_shares) and
+    /// the position lifecycle rides alongside.
     #[test]
     fn trading_vault_pps_uses_value_and_share_offset() {
-        use protocol_types::events::{TvDeposited, TvVaultCreated, TvWithdrawFulfilled};
+        use protocol_types::events::{TvDeposited, TvWithdrawFulfilled, TvWithdrawRequested};
         let store = Store::default();
         let vault = ObjectId::new([0xf0; 32]);
+        let position = ObjectId::new([0x99; 32]);
         let depositor = SuiAddress::new([0x07; 32]);
         let tusdc = AssetType::new("9b::tusdc::TUSDC");
 
@@ -3024,30 +3641,22 @@ mod tests {
             staged.db_batch.trading_vaults.into_iter().next().unwrap()
         };
 
-        stage(
-            ChainEvent::TvVaultCreated(TvVaultCreated {
-                vault_id: vault,
-                creator: SuiAddress::new([0x01; 32]),
-                curator_cap_id: ObjectId::new([0x03; 32]),
-                accounting_asset: tusdc.clone(),
-                lockup_ms: 0,
-                curator_fee_bps: 100,
-                unwind_grace_ms: 0,
-            }),
-            1_000,
-        );
+        stage(tv_created_evt(vault, 0), 1_000);
         // A TBTC deposit valued at 1_000_000 accounting units minting
         // offset-scaled shares: pps = value × 1e12 × 1e6 / shares = 1e12.
         let row = stage(
             ChainEvent::TvDeposited(TvDeposited {
                 vault_id: vault,
                 depositor,
-                curator_cap: None,
+                commitment_position: None,
+                position_id: position,
+                tranche: 0,
+                capital_generation: 0,
                 asset: AssetType::new("9b::tbtc::TBTC"),
                 amount: 5,
                 value: 1_000_000,
                 shares: 1_000_000 * SHARE_OFFSET,
-                total_shares: 1_000_000 * SHARE_OFFSET,
+                tranche_shares: 1_000_000 * SHARE_OFFSET,
                 locked_until_ms: 0,
             }),
             2_000,
@@ -3056,12 +3665,54 @@ mod tests {
             row.latest_pps_e12,
             Some(u128_to_bigdecimal(1_000_000_000_000))
         );
+        // Untranched supply lives in junior_shares.
+        assert_eq!(row.junior_shares, u128_to_bigdecimal(1_000_000 * SHARE_OFFSET));
+        assert_eq!(row.total_shares, u128_to_bigdecimal(1_000_000 * SHARE_OFFSET));
+
+        // Mint + queue the position that will be withdrawn.
+        store.ingest(
+            ChainEvent::TvPositionMinted(protocol_types::events::TvPositionMinted {
+                vault_id: vault,
+                position_id: position,
+                tranche: 0,
+                shares: 500_000 * SHARE_OFFSET,
+                cost_basis: 500_000,
+                locked_until_ms: 0,
+                capital_generation: 0,
+            }),
+            2_500,
+        );
+        let row = stage(
+            ChainEvent::TvWithdrawRequested(TvWithdrawRequested {
+                vault_id: vault,
+                global_seq: 0,
+                lane: 1,
+                position_id: position,
+                recipient: depositor,
+                tranche: 0,
+                capital_generation: 0,
+                shares: 500_000 * SHARE_OFFSET,
+                basis: 500_000,
+                payout_asset: tusdc.clone(),
+                requested_at_ms: 2_600,
+            }),
+            2_600,
+        );
+        assert_eq!(row.pending_withdrawals, 1);
+        assert_eq!(row.junior_lane_tail, 1);
+        let p = store.vault_position(&position).unwrap();
+        assert_eq!(p.status, POSITION_QUEUED);
+        assert_eq!(p.queued_global_seq, Some(0));
+
         // A fulfilment at a 2% gain: pps = 510_000 × 1e18 / 5e11 = 1.02e12.
         let row = stage(
             ChainEvent::TvWithdrawFulfilled(TvWithdrawFulfilled {
                 vault_id: vault,
-                seq: 0,
+                global_seq: 0,
+                lane: 1,
                 recipient: depositor,
+                tranche: 0,
+                capital_generation: 0,
                 shares: 500_000 * SHARE_OFFSET,
                 value: 510_000,
                 basis: 500_000,
@@ -3074,7 +3725,7 @@ mod tests {
                 payout_asset: tusdc,
                 payout_units: 510_000,
                 price: 1_000_000_000_000,
-                total_shares: 500_000 * SHARE_OFFSET,
+                tranche_shares: 500_000 * SHARE_OFFSET,
             }),
             3_000,
         );
@@ -3083,30 +3734,323 @@ mod tests {
             Some(u128_to_bigdecimal(1_020_000_000_000))
         );
         assert_eq!(row.total_shares, u128_to_bigdecimal(500_000 * SHARE_OFFSET));
+        assert_eq!(row.pending_withdrawals, 0);
+        assert_eq!(row.junior_lane_head, 1);
+        // The fulfil resolved the queued position via its global_seq.
+        let p = store.vault_position(&position).unwrap();
+        assert_eq!(p.status, POSITION_CONSUMED);
+        assert_eq!(p.queued_global_seq, Some(0), "kept as historical join key");
+    }
+
+    /// SO-418: TvCapitalSynced is the primary capital-state driver —
+    /// tranche supplies, waterfall NAVs, claim, risk state, generation,
+    /// commitment flag, and per-tranche pps all land absolutely.
+    #[test]
+    fn trading_vault_capital_sync_drives_tranche_state() {
+        use protocol_types::events::{TvCapitalSynced, TvRiskStateChanged};
+        let store = Store::default();
+        let vault = ObjectId::new([0xf0; 32]);
+
+        let mut checkpoint = 0u64;
+        let mut stage = |ev: ChainEvent, ts: u64| {
+            checkpoint += 1;
+            let staged = store
+                .stage_batch(checkpoint, ts, vec![(ev, "0xd".to_string(), 0)])
+                .unwrap();
+            staged.db_batch.trading_vaults.into_iter().next().unwrap()
+        };
+
+        stage(tv_created_evt(vault, 1), 1_000);
+        let sync = |nav: u128, senior_nav: u128, junior_nav: u128, risk: u8| {
+            ChainEvent::TvCapitalSynced(TvCapitalSynced {
+                vault_id: vault,
+                total_nav: nav,
+                senior_nav,
+                junior_nav,
+                senior_claim: 800_000,
+                senior_shares: 800_000 * SHARE_OFFSET,
+                junior_shares: 200_000 * SHARE_OFFSET,
+                risk_state: risk,
+                active_junior_generation: 0,
+                curator_commitment_breached: false,
+            })
+        };
+
+        let row = stage(sync(1_000_000, 800_000, 200_000, 0), 2_000);
+        assert_eq!(row.latest_nav, Some(u128_to_bigdecimal(1_000_000)));
+        assert_eq!(row.senior_nav, Some(u128_to_bigdecimal(800_000)));
+        assert_eq!(row.junior_nav, Some(u128_to_bigdecimal(200_000)));
+        assert_eq!(row.senior_claim, u128_to_bigdecimal(800_000));
+        assert_eq!(row.senior_shares, u128_to_bigdecimal(800_000 * SHARE_OFFSET));
+        assert_eq!(row.junior_shares, u128_to_bigdecimal(200_000 * SHARE_OFFSET));
+        assert_eq!(row.total_shares, u128_to_bigdecimal(1_000_000 * SHARE_OFFSET));
+        assert_eq!(row.risk_state, 0);
+        assert_eq!(row.impaired_since_ms, None);
+        // Per-tranche pps from the synced NAV split: both at par.
+        assert_eq!(
+            row.latest_senior_pps_e12,
+            Some(u128_to_bigdecimal(1_000_000_000_000))
+        );
+        assert_eq!(
+            row.latest_junior_pps_e12,
+            Some(u128_to_bigdecimal(1_000_000_000_000))
+        );
+
+        // A sync into Impaired records when the impairment began…
+        let row = stage(sync(700_000, 700_000, 0, 2), 3_000);
+        assert_eq!(row.risk_state, 2);
+        assert_eq!(row.impaired_since_ms, Some(3_000));
+        // …and a later Impaired sync doesn't move it.
+        let row = stage(sync(720_000, 720_000, 0, 2), 4_000);
+        assert_eq!(row.impaired_since_ms, Some(3_000));
+
+        // RiskStateChanged out of Impaired clears the marker.
+        let row = stage(
+            ChainEvent::TvRiskStateChanged(TvRiskStateChanged {
+                vault_id: vault,
+                old_state: 2,
+                new_state: 1,
+                timestamp_ms: 5_000,
+            }),
+            5_000,
+        );
+        assert_eq!(row.risk_state, 1);
+        assert_eq!(row.impaired_since_ms, None);
+    }
+
+    /// SO-418: reset proposal columns fill on Proposed, clear on
+    /// Cancelled/Executed; Executed bumps the generation and re-bases
+    /// junior pps to 1.0.
+    #[test]
+    fn trading_vault_junior_reset_lifecycle() {
+        use protocol_types::events::{
+            TvJuniorResetCancelled, TvJuniorResetExecuted, TvJuniorResetProposed,
+        };
+        let store = Store::default();
+        let vault = ObjectId::new([0xf0; 32]);
+
+        let mut checkpoint = 0u64;
+        let mut stage = |ev: ChainEvent, ts: u64| {
+            checkpoint += 1;
+            let staged = store
+                .stage_batch(checkpoint, ts, vec![(ev, "0xd".to_string(), 0)])
+                .unwrap();
+            staged.db_batch.trading_vaults.into_iter().next().unwrap()
+        };
+
+        stage(tv_created_evt(vault, 1), 1_000);
+        let proposed = ChainEvent::TvJuniorResetProposed(TvJuniorResetProposed {
+            vault_id: vault,
+            old_generation: 0,
+            proposed_at_ms: 2_000,
+            executable_at_ms: 10_000,
+            total_nav: 700_000,
+            senior_claim: 800_000,
+            senior_deficit: 100_000,
+            required_deposit: 300_000,
+        });
+        let row = stage(proposed.clone(), 2_000);
+        assert_eq!(row.reset_old_generation, Some(0));
+        assert_eq!(row.reset_proposed_at_ms, Some(2_000));
+        assert_eq!(row.reset_executable_at_ms, Some(10_000));
+        assert_eq!(row.reset_recorded_nav, Some(u128_to_bigdecimal(700_000)));
+        assert_eq!(
+            row.reset_recorded_senior_claim,
+            Some(u128_to_bigdecimal(800_000))
+        );
+        assert_eq!(row.reset_recorded_required_deposit, Some(300_000));
+
+        let row = stage(
+            ChainEvent::TvJuniorResetCancelled(TvJuniorResetCancelled {
+                vault_id: vault,
+                old_generation: 0,
+            }),
+            3_000,
+        );
+        assert_eq!(row.reset_old_generation, None);
+        assert_eq!(row.reset_recorded_nav, None);
+
+        stage(proposed, 4_000);
+        let row = stage(
+            ChainEvent::TvJuniorResetExecuted(TvJuniorResetExecuted {
+                vault_id: vault,
+                old_generation: 0,
+                new_generation: 1,
+                recapitalizer: SuiAddress::new([0x2c; 32]),
+                deposit_value: 300_000,
+                post_junior_nav: 200_000,
+                position_id: ObjectId::new([0x77; 32]),
+            }),
+            11_000,
+        );
+        assert_eq!(row.active_junior_generation, 1);
+        assert_eq!(row.reset_old_generation, None);
+        assert_eq!(row.junior_nav, Some(u128_to_bigdecimal(200_000)));
+        assert_eq!(
+            row.latest_junior_pps_e12,
+            Some(u128_to_bigdecimal(1_000_000_000_000)),
+            "junior pps re-bases to 1.0"
+        );
+    }
+
+    /// SO-418: VaultPosition lifecycle — mint, split lineage, merge,
+    /// wiped-burn — and terminal settlement snapshot + redemption.
+    #[test]
+    fn vault_position_lifecycle_and_settlement() {
+        use protocol_types::events::{
+            TvPositionMerged, TvPositionMinted, TvPositionSplit, TvSettlementRedeemed,
+            TvSettlementSnapshot, TvWipedPositionBurned,
+        };
+        let store = Store::default();
+        let vault = ObjectId::new([0xf0; 32]);
+        let a = ObjectId::new([0xa1; 32]);
+        let b = ObjectId::new([0xb2; 32]);
+        let c = ObjectId::new([0xc3; 32]);
+
+        store.ingest(tv_created_evt(vault, 1), 1_000);
+        let mint = |id: ObjectId, tranche: u8, shares: u128, basis: u64| {
+            ChainEvent::TvPositionMinted(TvPositionMinted {
+                vault_id: vault,
+                position_id: id,
+                tranche,
+                shares,
+                cost_basis: basis,
+                locked_until_ms: 9_000,
+                capital_generation: 0,
+            })
+        };
+        store.ingest(mint(a, 2, 1_000, 500), 2_000);
+
+        // Split: child minted through the same mint path, lineage from
+        // the split event.
+        store.ingest(mint(b, 2, 400, 200), 3_000);
+        store.ingest(
+            ChainEvent::TvPositionSplit(TvPositionSplit {
+                vault_id: vault,
+                parent_id: a,
+                child_id: b,
+                parent_shares: 600,
+                parent_basis: 300,
+                child_shares: 400,
+                child_basis: 200,
+            }),
+            3_000,
+        );
+        let pa = store.vault_position(&a).unwrap();
+        assert_eq!(pa.shares, 600);
+        assert_eq!(pa.cost_basis, 300);
+        assert_eq!(pa.status, POSITION_LIVE);
+        let pb = store.vault_position(&b).unwrap();
+        assert_eq!(pb.parent_position_id, Some(a));
+        assert_eq!(pb.shares, 400);
+
+        // Merge b back into a: a carries the union, b is consumed.
+        store.ingest(
+            ChainEvent::TvPositionMerged(TvPositionMerged {
+                vault_id: vault,
+                kept_id: a,
+                merged_id: b,
+                shares: 1_000,
+                cost_basis: 500,
+                locked_until_ms: 9_000,
+            }),
+            4_000,
+        );
+        let pa = store.vault_position(&a).unwrap();
+        assert_eq!(pa.shares, 1_000);
+        let pb = store.vault_position(&b).unwrap();
+        assert_eq!(pb.status, POSITION_CONSUMED);
+        assert_eq!(pb.merged_into, Some(a));
+
+        // A wiped-generation junior position burns at zero.
+        store.ingest(mint(c, 2, 50, 25), 5_000);
+        store.ingest(
+            ChainEvent::TvWipedPositionBurned(TvWipedPositionBurned {
+                vault_id: vault,
+                position_id: c,
+                capital_generation: 0,
+                shares: 50,
+            }),
+            6_000,
+        );
+        assert_eq!(store.vault_position(&c).unwrap().status, POSITION_BURNED);
+
+        // Terminal settlement: snapshot freezes the pools, redemptions
+        // accumulate and settle positions.
+        let staged = store
+            .stage_batch(
+                1,
+                7_000,
+                vec![(
+                    ChainEvent::TvSettlementSnapshot(TvSettlementSnapshot {
+                        vault_id: vault,
+                        final_nav: 900_000,
+                        senior_pool: 800_000,
+                        senior_supply: 800_000 * SHARE_OFFSET,
+                        junior_pool: 100_000,
+                        junior_supply: 200_000 * SHARE_OFFSET,
+                        active_junior_generation: 1,
+                    }),
+                    "0xd".to_string(),
+                    0,
+                )],
+            )
+            .unwrap();
+        let row = staged.db_batch.trading_vaults.last().unwrap();
+        assert!(row.settled);
+        assert_eq!(row.settlement_final_nav, Some(u128_to_bigdecimal(900_000)));
+        assert_eq!(row.senior_pool, Some(800_000));
+        assert_eq!(row.junior_pool, Some(100_000));
+        assert_eq!(row.settlement_snapshot_at_ms, Some(7_000));
+
+        let staged = store
+            .stage_batch(
+                2,
+                8_000,
+                vec![(
+                    ChainEvent::TvSettlementRedeemed(TvSettlementRedeemed {
+                        vault_id: vault,
+                        position_id: a,
+                        from_queue: false,
+                        global_seq: 0,
+                        recipient: SuiAddress::new([0x07; 32]),
+                        tranche: 2,
+                        capital_generation: 1,
+                        shares: 1_000,
+                        entitlement: 500,
+                        basis: 500,
+                        gross_fee: 0,
+                        protocol_cut: 0,
+                        curator_net: 0,
+                        payout: 500,
+                    }),
+                    "0xd".to_string(),
+                    0,
+                )],
+            )
+            .unwrap();
+        let row = staged.db_batch.trading_vaults.last().unwrap();
+        assert_eq!(row.settlement_redeemed, u128_to_bigdecimal(500));
+        let pos_row = staged.db_batch.vault_positions.last().unwrap();
+        assert_eq!(pos_row.status, POSITION_SETTLED);
+        assert_eq!(store.vault_position(&a).unwrap().status, POSITION_SETTLED);
+        // The redeemer fans out as a participant.
+        assert!(staged
+            .db_batch
+            .event_participants
+            .iter()
+            .any(|p| p.role == "redeemer"));
     }
 
     #[test]
     fn trading_vault_appraisal_marks_are_last_write_wins() {
-        use protocol_types::events::{
-            TvPositionAppraised, TvPositionStored, TvVaultAppraised, TvVaultCreated,
-        };
+        use protocol_types::events::{TvPositionAppraised, TvPositionStored, TvVaultAppraised};
         let store = Store::default();
         let vault = ObjectId::new([0xf0; 32]);
         let position = ObjectId::new([0x99; 32]);
         let adapter = AssetType::new("9b::deepbook_adapter::DeepBookAdapter");
 
-        store.ingest(
-            ChainEvent::TvVaultCreated(TvVaultCreated {
-                vault_id: vault,
-                creator: SuiAddress::new([0x01; 32]),
-                curator_cap_id: ObjectId::new([0x03; 32]),
-                accounting_asset: AssetType::new("9b::tusdc::TUSDC"),
-                lockup_ms: 0,
-                curator_fee_bps: 100,
-                unwind_grace_ms: 0,
-            }),
-            1_000,
-        );
+        store.ingest(tv_created_evt(vault, 0), 1_000);
         store.ingest(
             ChainEvent::TvPositionStored(TvPositionStored {
                 vault_id: vault,
