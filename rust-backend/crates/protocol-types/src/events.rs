@@ -1007,6 +1007,9 @@ pub struct TvTypeAmountMap {
     pub contents: Vec<TvTypeAmount>,
 }
 
+/// `vault_v2::events::VaultCreated` (SO-418) — v2 adds the immutable
+/// capital-structure terms. Tranche/upside/structure codes are u8 wire
+/// codes per the events.move header comment.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TvVaultCreated {
     pub vault_id: ObjectId,
@@ -1021,6 +1024,24 @@ pub struct TvVaultCreated {
     pub curator_fee_bps: u64,
     #[serde(with = "u64_string")]
     pub unwind_grace_ms: u64,
+    /// 0 = Untranched, 1 = SeniorJunior. Immutable.
+    pub structure_code: u8,
+    #[serde(with = "u64_string")]
+    pub senior_hurdle_bps_annual: u64,
+    #[serde(with = "u64_string")]
+    pub target_junior_bps: u64,
+    #[serde(with = "u64_string")]
+    pub maintenance_junior_bps: u64,
+    pub upside_code: u8,
+    #[serde(with = "u64_string")]
+    pub residual_participation_bps: u64,
+    #[serde(with = "u64_string")]
+    pub total_return_cap_bps: u64,
+    /// The exact terms version + spec hash governing issuance (§9.2).
+    #[serde(with = "u64_string")]
+    pub terms_version: u64,
+    #[serde(with = "crate::coding::bytes_hex")]
+    pub spec_hash: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1053,14 +1074,26 @@ pub struct TvCuratorRotated {
     pub recipient: SuiAddress,
 }
 
-/// `asset`/`amount` are the deposited coin; `value` is its accounting-asset
-/// valuation (equal to `amount` for accounting-asset deposits, SO-370) —
-/// share-price analytics must use `value / shares`.
+/// `vault_v2::events::Deposited` (SO-418) — `asset`/`amount` are the
+/// deposited coin; `value` is its accounting-asset valuation (equal to
+/// `amount` for accounting-asset deposits, SO-370) — share-price analytics
+/// must use `value / shares`. v2: every deposit mints a `VaultPosition` NFT
+/// (`position_id`); `tranche_shares` is the tranche's post-deposit supply
+/// (replaces v1 `total_shares`); v1 `curator_cap` is replaced by
+/// `commitment_position` (the escrowed curator commitment position id for
+/// commitment deposits; `None` for ordinary deposits).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TvDeposited {
     pub vault_id: ObjectId,
     pub depositor: SuiAddress,
-    pub curator_cap: Option<ObjectId>,
+    /// Escrowed curator commitment position id for commitment deposits;
+    /// `None` for ordinary deposits.
+    pub commitment_position: Option<ObjectId>,
+    pub position_id: ObjectId,
+    /// 0=Untranched 1=Senior 2=Junior.
+    pub tranche: u8,
+    #[serde(with = "u64_string")]
+    pub capital_generation: u64,
     pub asset: AssetType,
     #[serde(with = "u64_string")]
     pub amount: u64,
@@ -1068,19 +1101,31 @@ pub struct TvDeposited {
     pub value: u64,
     #[serde(with = "u128_string")]
     pub shares: u128,
+    /// Post-deposit share supply of the deposited tranche.
     #[serde(with = "u128_string")]
-    pub total_shares: u128,
+    pub tranche_shares: u128,
     #[serde(with = "u64_string")]
     pub locked_until_ms: u64,
 }
 
+/// `vault_v2::events::WithdrawRequested` (SO-418) — v2: the request
+/// consumes a `VaultPosition` (`position_id`) and is keyed by the
+/// vault-wide `global_seq` under a per-tranche lane (0=senior 1=junior;
+/// untranched vaults use lane 1). Replaces v1 `seq`/`curator_cap`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TvWithdrawRequested {
     pub vault_id: ObjectId,
+    /// The vault-wide global sequence — the request's key.
     #[serde(with = "u64_string")]
-    pub seq: u64,
+    pub global_seq: u64,
+    /// 0=senior 1=junior.
+    pub lane: u8,
+    pub position_id: ObjectId,
     pub recipient: SuiAddress,
-    pub curator_cap: Option<ObjectId>,
+    /// 0=Untranched 1=Senior 2=Junior.
+    pub tranche: u8,
+    #[serde(with = "u64_string")]
+    pub capital_generation: u64,
     #[serde(with = "u128_string")]
     pub shares: u128,
     #[serde(with = "u64_string")]
@@ -1091,15 +1136,24 @@ pub struct TvWithdrawRequested {
     pub requested_at_ms: u64,
 }
 
-/// `value`/`payout` are accounting-asset units; `payout_asset`/`payout_units`
-/// are what was actually paid, converted at `price` (1e12 fixed point;
-/// exactly 1e12 for accounting-asset payouts, SO-370).
+/// `vault_v2::events::WithdrawFulfilled` (SO-418) — `value`/`payout` are
+/// accounting-asset units; `payout_asset`/`payout_units` are what was
+/// actually paid, converted at `price` (1e12 fixed point; exactly 1e12 for
+/// accounting-asset payouts, SO-370). v2: keyed by `global_seq` + `lane`,
+/// carries tranche/generation, and `tranche_shares` is the tranche's
+/// post-fulfillment supply (replaces v1 `total_shares`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TvWithdrawFulfilled {
     pub vault_id: ObjectId,
     #[serde(with = "u64_string")]
-    pub seq: u64,
+    pub global_seq: u64,
+    /// 0=senior 1=junior.
+    pub lane: u8,
     pub recipient: SuiAddress,
+    /// 0=Untranched 1=Senior 2=Junior.
+    pub tranche: u8,
+    #[serde(with = "u64_string")]
+    pub capital_generation: u64,
     #[serde(with = "u128_string")]
     pub shares: u128,
     #[serde(with = "u64_string")]
@@ -1123,8 +1177,238 @@ pub struct TvWithdrawFulfilled {
     pub payout_units: u64,
     #[serde(with = "u128_string")]
     pub price: u128,
+    /// Post-fulfillment share supply of the fulfilled tranche.
     #[serde(with = "u128_string")]
-    pub total_shares: u128,
+    pub tranche_shares: u128,
+}
+
+// ═══════ trading-vault v2: positions, tranches, capital state (SO-418) ═══════
+//
+// Emitted by the `vault_v2` package. Wire codes everywhere: tranche u8
+// 0=Untranched 1=Senior 2=Junior; risk state u8 0=Healthy 1=CoverageBreach
+// 2=Impaired 3=ResetPending; lane u8 0=senior 1=junior.
+
+/// `vault_v2::events::PositionMinted` — a `VaultPosition` NFT minted
+/// (deposit, split child, reset recapitalization, curator fee shares).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvPositionMinted {
+    pub vault_id: ObjectId,
+    pub position_id: ObjectId,
+    /// 0=Untranched 1=Senior 2=Junior.
+    pub tranche: u8,
+    #[serde(with = "u128_string")]
+    pub shares: u128,
+    #[serde(with = "u64_string")]
+    pub cost_basis: u64,
+    #[serde(with = "u64_string")]
+    pub locked_until_ms: u64,
+    #[serde(with = "u64_string")]
+    pub capital_generation: u64,
+}
+
+/// `vault_v2::events::PositionSplit` — shares carved out of `parent_id`
+/// into a new `child_id`; post-split share/basis figures for both.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvPositionSplit {
+    pub vault_id: ObjectId,
+    pub parent_id: ObjectId,
+    pub child_id: ObjectId,
+    #[serde(with = "u128_string")]
+    pub parent_shares: u128,
+    #[serde(with = "u64_string")]
+    pub parent_basis: u64,
+    #[serde(with = "u128_string")]
+    pub child_shares: u128,
+    #[serde(with = "u64_string")]
+    pub child_basis: u64,
+}
+
+/// `vault_v2::events::PositionMerged` — `merged_id` folded into `kept_id`;
+/// `shares`/`cost_basis`/`locked_until_ms` are the kept position's
+/// post-merge state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvPositionMerged {
+    pub vault_id: ObjectId,
+    pub kept_id: ObjectId,
+    pub merged_id: ObjectId,
+    #[serde(with = "u128_string")]
+    pub shares: u128,
+    #[serde(with = "u64_string")]
+    pub cost_basis: u64,
+    #[serde(with = "u64_string")]
+    pub locked_until_ms: u64,
+}
+
+/// `vault_v2::events::WipedPositionBurned` — a wiped-generation junior
+/// position destroyed at zero value (reset cleanup).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvWipedPositionBurned {
+    pub vault_id: ObjectId,
+    pub position_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub capital_generation: u64,
+    #[serde(with = "u128_string")]
+    pub shares: u128,
+}
+
+/// `vault_v2::events::CapitalSynced` — emitted by every consumed-appraisal
+/// capital sync: the waterfall decomposition at that NAV plus the resulting
+/// risk state. This is the event stream behind per-tranche PPS history and
+/// the /waterfall API.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvCapitalSynced {
+    pub vault_id: ObjectId,
+    #[serde(with = "u128_string")]
+    pub total_nav: u128,
+    #[serde(with = "u128_string")]
+    pub senior_nav: u128,
+    #[serde(with = "u128_string")]
+    pub junior_nav: u128,
+    #[serde(with = "u128_string")]
+    pub senior_claim: u128,
+    #[serde(with = "u128_string")]
+    pub senior_shares: u128,
+    #[serde(with = "u128_string")]
+    pub junior_shares: u128,
+    /// 0=Healthy 1=CoverageBreach 2=Impaired 3=ResetPending.
+    pub risk_state: u8,
+    #[serde(with = "u64_string")]
+    pub active_junior_generation: u64,
+    pub curator_commitment_breached: bool,
+}
+
+/// `vault_v2::events::RiskStateChanged` — a capital risk-state transition
+/// (codes as in [`TvCapitalSynced::risk_state`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvRiskStateChanged {
+    pub vault_id: ObjectId,
+    pub old_state: u8,
+    pub new_state: u8,
+    #[serde(with = "u64_string")]
+    pub timestamp_ms: u64,
+}
+
+/// `vault_v2::events::JuniorResetProposed` — a junior generational reset
+/// proposal opened; executable after `executable_at_ms`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvJuniorResetProposed {
+    pub vault_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub old_generation: u64,
+    #[serde(with = "u64_string")]
+    pub proposed_at_ms: u64,
+    #[serde(with = "u64_string")]
+    pub executable_at_ms: u64,
+    #[serde(with = "u128_string")]
+    pub total_nav: u128,
+    #[serde(with = "u128_string")]
+    pub senior_claim: u128,
+    #[serde(with = "u128_string")]
+    pub senior_deficit: u128,
+    #[serde(with = "u64_string")]
+    pub required_deposit: u64,
+}
+
+/// `vault_v2::events::JuniorResetCancelled`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvJuniorResetCancelled {
+    pub vault_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub old_generation: u64,
+}
+
+/// `vault_v2::events::JuniorResetExecuted` — the reset recapitalization:
+/// the wiped generation retires and `position_id` is the recapitalizer's
+/// new-generation junior position.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvJuniorResetExecuted {
+    pub vault_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub old_generation: u64,
+    #[serde(with = "u64_string")]
+    pub new_generation: u64,
+    pub recapitalizer: SuiAddress,
+    #[serde(with = "u64_string")]
+    pub deposit_value: u64,
+    #[serde(with = "u128_string")]
+    pub post_junior_nav: u128,
+    pub position_id: ObjectId,
+}
+
+/// `vault_v2::events::CommitmentReleased` — the curator released shares
+/// from the escrowed commitment position into a wallet-held (freely
+/// transferable) position NFT.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvCommitmentReleased {
+    pub vault_id: ObjectId,
+    pub curator_cap_id: ObjectId,
+    pub position_id: ObjectId,
+    #[serde(with = "u128_string")]
+    pub shares: u128,
+    #[serde(with = "u64_string")]
+    pub basis: u64,
+}
+
+/// `vault_v2::events::SettlementSnapshot` — the one-time terminal
+/// settlement snapshot: the waterfall run once on the final NAV, freezing
+/// each tranche's total entitlement against its outstanding supply (queued
+/// shares included).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvSettlementSnapshot {
+    pub vault_id: ObjectId,
+    #[serde(with = "u128_string")]
+    pub final_nav: u128,
+    #[serde(with = "u64_string")]
+    pub senior_pool: u64,
+    #[serde(with = "u128_string")]
+    pub senior_supply: u128,
+    #[serde(with = "u64_string")]
+    pub junior_pool: u64,
+    #[serde(with = "u128_string")]
+    pub junior_supply: u128,
+    #[serde(with = "u64_string")]
+    pub active_junior_generation: u64,
+}
+
+/// `vault_v2::events::SettlementRedeemed` — a claim redeemed against the
+/// settlement pool: either a wallet-held position (`from_queue == false`,
+/// `global_seq == 0`) or an already-queued request (`from_queue == true`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvSettlementRedeemed {
+    pub vault_id: ObjectId,
+    pub position_id: ObjectId,
+    pub from_queue: bool,
+    #[serde(with = "u64_string")]
+    pub global_seq: u64,
+    pub recipient: SuiAddress,
+    /// 0=Untranched 1=Senior 2=Junior.
+    pub tranche: u8,
+    #[serde(with = "u64_string")]
+    pub capital_generation: u64,
+    #[serde(with = "u128_string")]
+    pub shares: u128,
+    #[serde(with = "u64_string")]
+    pub entitlement: u64,
+    #[serde(with = "u64_string")]
+    pub basis: u64,
+    #[serde(with = "u64_string")]
+    pub gross_fee: u64,
+    #[serde(with = "u64_string")]
+    pub protocol_cut: u64,
+    #[serde(with = "u64_string")]
+    pub curator_net: u64,
+    #[serde(with = "u64_string")]
+    pub payout: u64,
+}
+
+/// `vault_v2::events::SettlementCuratorFeesClaimed` — accrued settlement
+/// curator fees swept by the cap holder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TvSettlementCuratorFeesClaimed {
+    pub vault_id: ObjectId,
+    pub curator_cap_id: ObjectId,
+    #[serde(with = "u64_string")]
+    pub amount: u64,
 }
 
 /// `trading_vault::events::DepositAssetAdded` — an asset joined the vault's
@@ -1234,6 +1518,8 @@ pub struct TvOracleDisallowed {
     pub oracle: AssetType,
 }
 
+/// `vault_v2::events::ProtocolConfigUpdated` (SO-418) — v2 appends the
+/// protocol capital-structure floors/caps.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TvProtocolConfigUpdated {
     #[serde(with = "u64_string")]
@@ -1249,6 +1535,14 @@ pub struct TvProtocolConfigUpdated {
     #[serde(with = "u64_string")]
     pub max_deposit_assets: u64,
     pub paused: bool,
+    #[serde(with = "u64_string")]
+    pub max_senior_hurdle_bps: u64,
+    #[serde(with = "u64_string")]
+    pub min_target_junior_bps: u64,
+    #[serde(with = "u64_string")]
+    pub min_maintenance_junior_bps: u64,
+    #[serde(with = "u64_string")]
+    pub min_curator_commitment_bps: u64,
 }
 
 /// `trading_vault::vault_mm::CollateralReleased`.
@@ -1656,6 +1950,20 @@ pub enum ChainEvent {
     TvDeposited(TvDeposited),
     TvWithdrawRequested(TvWithdrawRequested),
     TvWithdrawFulfilled(TvWithdrawFulfilled),
+    // trading-vault v2: positions, tranches, capital state (SO-418)
+    TvPositionMinted(TvPositionMinted),
+    TvPositionSplit(TvPositionSplit),
+    TvPositionMerged(TvPositionMerged),
+    TvWipedPositionBurned(TvWipedPositionBurned),
+    TvCapitalSynced(TvCapitalSynced),
+    TvRiskStateChanged(TvRiskStateChanged),
+    TvJuniorResetProposed(TvJuniorResetProposed),
+    TvJuniorResetCancelled(TvJuniorResetCancelled),
+    TvJuniorResetExecuted(TvJuniorResetExecuted),
+    TvCommitmentReleased(TvCommitmentReleased),
+    TvSettlementSnapshot(TvSettlementSnapshot),
+    TvSettlementRedeemed(TvSettlementRedeemed),
+    TvSettlementCuratorFeesClaimed(TvSettlementCuratorFeesClaimed),
     // multi-asset deposits/withdrawals (SO-370)
     TvDepositAssetAdded(TvDepositAssetAdded),
     TvDepositAssetRemoved(TvDepositAssetRemoved),
@@ -1856,5 +2164,208 @@ mod tests {
         let j = serde_json::to_string(&env).unwrap();
         let back: IndexedEvent = serde_json::from_str(&j).unwrap();
         assert_eq!(back, env);
+    }
+
+    // ─── trading-vault v2 BCS layout pins (SO-418) ───
+    //
+    // Hand-built expected bytes mirror the Move-side BCS layout of
+    // `contracts/trading-vault-v2/sources/events.move` (field order =
+    // declaration order; ID/address = 32 raw bytes, TypeName = ULEB len +
+    // chain-form string, Option = 0x00/0x01+payload, ints LE). If one of
+    // these breaks, the Rust struct no longer decodes the on-chain event.
+
+    /// Chain-form type string (what a Move `TypeName` BCS-encodes to).
+    const TUSDC: &str = "0000000000000000000000000000000000000000000000000000000000000009::tusdc::TUSDC";
+
+    fn push_type(out: &mut Vec<u8>, ty: &str) {
+        assert!(ty.len() < 128, "single-byte ULEB assumption");
+        out.push(ty.len() as u8);
+        out.extend_from_slice(ty.as_bytes());
+    }
+
+    #[test]
+    fn tv_deposited_bcs_layout_is_byte_exact() {
+        let evt = TvDeposited {
+            vault_id: ObjectId::new([0x01; 32]),
+            depositor: SuiAddress::new([0x02; 32]),
+            commitment_position: Some(ObjectId::new([0x03; 32])),
+            position_id: ObjectId::new([0x04; 32]),
+            tranche: 2,
+            capital_generation: 7,
+            asset: AssetType::new(TUSDC),
+            amount: 1_000_000,
+            value: 999_000,
+            shares: 123_456_789_012_345_678_901u128,
+            tranche_shares: 223_456_789_012_345_678_901u128,
+            locked_until_ms: 1_755_000_000_000,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&[0x01; 32]); // vault_id
+        expected.extend_from_slice(&[0x02; 32]); // depositor
+        expected.push(0x01); // Option::Some
+        expected.extend_from_slice(&[0x03; 32]); // commitment_position
+        expected.extend_from_slice(&[0x04; 32]); // position_id
+        expected.push(2); // tranche
+        expected.extend_from_slice(&7u64.to_le_bytes()); // capital_generation
+        push_type(&mut expected, TUSDC); // asset
+        expected.extend_from_slice(&1_000_000u64.to_le_bytes()); // amount
+        expected.extend_from_slice(&999_000u64.to_le_bytes()); // value
+        expected.extend_from_slice(&123_456_789_012_345_678_901u128.to_le_bytes()); // shares
+        expected.extend_from_slice(&223_456_789_012_345_678_901u128.to_le_bytes()); // tranche_shares
+        expected.extend_from_slice(&1_755_000_000_000u64.to_le_bytes()); // locked_until_ms
+        assert_eq!(bytes, expected);
+        let back: TvDeposited = bcs::from_bytes(&bytes).unwrap();
+        assert_eq!(back, evt);
+
+        // Ordinary deposit: Option::None is a single 0x00 byte.
+        let plain = TvDeposited { commitment_position: None, ..evt };
+        let bytes = bcs::to_bytes(&plain).unwrap();
+        assert_eq!(bytes[64], 0x00);
+        assert_eq!(bytes.len(), expected.len() - 32);
+    }
+
+    #[test]
+    fn tv_capital_synced_bcs_layout_is_byte_exact() {
+        let evt = TvCapitalSynced {
+            vault_id: ObjectId::new([0x0a; 32]),
+            total_nav: 1_000_000_000_000u128,
+            senior_nav: 700_000_000_000u128,
+            junior_nav: 300_000_000_000u128,
+            senior_claim: 690_000_000_000u128,
+            senior_shares: 7_000_000u128,
+            junior_shares: 3_000_000u128,
+            risk_state: 1,
+            active_junior_generation: 3,
+            curator_commitment_breached: true,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&[0x0a; 32]); // vault_id
+        expected.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // total_nav
+        expected.extend_from_slice(&700_000_000_000u128.to_le_bytes()); // senior_nav
+        expected.extend_from_slice(&300_000_000_000u128.to_le_bytes()); // junior_nav
+        expected.extend_from_slice(&690_000_000_000u128.to_le_bytes()); // senior_claim
+        expected.extend_from_slice(&7_000_000u128.to_le_bytes()); // senior_shares
+        expected.extend_from_slice(&3_000_000u128.to_le_bytes()); // junior_shares
+        expected.push(1); // risk_state
+        expected.extend_from_slice(&3u64.to_le_bytes()); // active_junior_generation
+        expected.push(1); // curator_commitment_breached
+        assert_eq!(bytes, expected);
+        let back: TvCapitalSynced = bcs::from_bytes(&bytes).unwrap();
+        assert_eq!(back, evt);
+    }
+
+    #[test]
+    fn tv_withdraw_fulfilled_bcs_layout_is_byte_exact() {
+        let evt = TvWithdrawFulfilled {
+            vault_id: ObjectId::new([0x0b; 32]),
+            global_seq: 17,
+            lane: 1,
+            recipient: SuiAddress::new([0x0c; 32]),
+            tranche: 2,
+            capital_generation: 4,
+            shares: 5_000_000u128,
+            value: 5_500_000,
+            basis: 5_000_000,
+            profit: 500_000,
+            gross_fee: 50_000,
+            protocol_cut: 10_000,
+            curator_net: 40_000,
+            curator_shares_minted: 36_000u128,
+            payout: 5_450_000,
+            payout_asset: AssetType::new(TUSDC),
+            payout_units: 5_450_000,
+            price: 1_000_000_000_000u128,
+            tranche_shares: 95_000_000u128,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&[0x0b; 32]); // vault_id
+        expected.extend_from_slice(&17u64.to_le_bytes()); // global_seq
+        expected.push(1); // lane
+        expected.extend_from_slice(&[0x0c; 32]); // recipient
+        expected.push(2); // tranche
+        expected.extend_from_slice(&4u64.to_le_bytes()); // capital_generation
+        expected.extend_from_slice(&5_000_000u128.to_le_bytes()); // shares
+        expected.extend_from_slice(&5_500_000u64.to_le_bytes()); // value
+        expected.extend_from_slice(&5_000_000u64.to_le_bytes()); // basis
+        expected.extend_from_slice(&500_000u64.to_le_bytes()); // profit
+        expected.extend_from_slice(&50_000u64.to_le_bytes()); // gross_fee
+        expected.extend_from_slice(&10_000u64.to_le_bytes()); // protocol_cut
+        expected.extend_from_slice(&40_000u64.to_le_bytes()); // curator_net
+        expected.extend_from_slice(&36_000u128.to_le_bytes()); // curator_shares_minted
+        expected.extend_from_slice(&5_450_000u64.to_le_bytes()); // payout
+        push_type(&mut expected, TUSDC); // payout_asset
+        expected.extend_from_slice(&5_450_000u64.to_le_bytes()); // payout_units
+        expected.extend_from_slice(&1_000_000_000_000u128.to_le_bytes()); // price
+        expected.extend_from_slice(&95_000_000u128.to_le_bytes()); // tranche_shares
+        assert_eq!(bytes, expected);
+        let back: TvWithdrawFulfilled = bcs::from_bytes(&bytes).unwrap();
+        assert_eq!(back, evt);
+    }
+
+    #[test]
+    fn tv_settlement_redeemed_bcs_layout_is_byte_exact() {
+        let evt = TvSettlementRedeemed {
+            vault_id: ObjectId::new([0x0d; 32]),
+            position_id: ObjectId::new([0x0e; 32]),
+            from_queue: true,
+            global_seq: 9,
+            recipient: SuiAddress::new([0x1f; 32]),
+            tranche: 1,
+            capital_generation: 2,
+            shares: 8_000_000u128,
+            entitlement: 8_800_000,
+            basis: 8_000_000,
+            gross_fee: 80_000,
+            protocol_cut: 16_000,
+            curator_net: 64_000,
+            payout: 8_720_000,
+        };
+        let bytes = bcs::to_bytes(&evt).unwrap();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&[0x0d; 32]); // vault_id
+        expected.extend_from_slice(&[0x0e; 32]); // position_id
+        expected.push(1); // from_queue
+        expected.extend_from_slice(&9u64.to_le_bytes()); // global_seq
+        expected.extend_from_slice(&[0x1f; 32]); // recipient
+        expected.push(1); // tranche
+        expected.extend_from_slice(&2u64.to_le_bytes()); // capital_generation
+        expected.extend_from_slice(&8_000_000u128.to_le_bytes()); // shares
+        expected.extend_from_slice(&8_800_000u64.to_le_bytes()); // entitlement
+        expected.extend_from_slice(&8_000_000u64.to_le_bytes()); // basis
+        expected.extend_from_slice(&80_000u64.to_le_bytes()); // gross_fee
+        expected.extend_from_slice(&16_000u64.to_le_bytes()); // protocol_cut
+        expected.extend_from_slice(&64_000u64.to_le_bytes()); // curator_net
+        expected.extend_from_slice(&8_720_000u64.to_le_bytes()); // payout
+        assert_eq!(bytes, expected);
+        let back: TvSettlementRedeemed = bcs::from_bytes(&bytes).unwrap();
+        assert_eq!(back, evt);
+    }
+
+    #[test]
+    fn tv_v2_tagged_envelope_round_trips() {
+        // JSON envelope sanity for the new variants: u64/u128 as strings,
+        // u8 wire codes as bare numbers.
+        let evt = ChainEvent::TvCapitalSynced(TvCapitalSynced {
+            vault_id: ObjectId::new([0x0a; 32]),
+            total_nav: 1_000_000_000_000,
+            senior_nav: 700_000_000_000,
+            junior_nav: 300_000_000_000,
+            senior_claim: 690_000_000_000,
+            senior_shares: 7_000_000,
+            junior_shares: 3_000_000,
+            risk_state: 2,
+            active_junior_generation: 3,
+            curator_commitment_breached: false,
+        });
+        let v: serde_json::Value = serde_json::to_value(&evt).unwrap();
+        assert_eq!(v["type"], "TvCapitalSynced");
+        assert_eq!(v["payload"]["total_nav"], "1000000000000");
+        assert_eq!(v["payload"]["risk_state"], 2);
+        assert_eq!(v["payload"]["active_junior_generation"], "3");
+        let back: ChainEvent = serde_json::from_value(v).unwrap();
+        assert_eq!(back, evt);
     }
 }

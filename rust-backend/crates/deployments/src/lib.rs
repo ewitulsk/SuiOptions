@@ -347,6 +347,15 @@ pub struct TradingVaultObjectsInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vol_book_id: Option<String>,
     pub activation_digest: String,
+    /// vault_v2 terms version governing issuance (contract plan §9.2), so
+    /// UIs can link the exact terms. Absent on records predating vault_v2
+    /// (SO-418).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms_version: Option<u64>,
+    /// Hex spec hash paired with `terms_version` (SO-418). Absent on
+    /// records predating vault_v2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_hash: Option<String>,
 }
 
 impl TradingVaultObjectsInfo {
@@ -719,6 +728,41 @@ mod tests {
         let back = serde_json::to_string(&db).unwrap();
         assert!(back.contains("originalPackageId"));
         assert!(back.contains("deepCoinType"));
+    }
+
+    #[test]
+    fn trading_vault_objects_terms_fields_are_optional() {
+        // Old records (pre-SO-418) omit termsVersion/specHash: they parse
+        // to None and are not re-serialized.
+        let old: TradingVaultObjectsInfo = serde_json::from_str(
+            r#"{
+                "vaultProtocolConfigId": "0x1", "integrationRegistryId": "0x2",
+                "oracleRegistryId": "0x3", "pythFeedRegistryId": "0x4",
+                "poolAllowlistId": "0x5", "activationDigest": "d"
+            }"#,
+        )
+        .unwrap();
+        assert!(old.terms_version.is_none());
+        assert!(old.spec_hash.is_none());
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(!json.contains("termsVersion"));
+        assert!(!json.contains("specHash"));
+
+        // New records round-trip the camelCase fields.
+        let new: TradingVaultObjectsInfo = serde_json::from_str(
+            r#"{
+                "vaultProtocolConfigId": "0x1", "integrationRegistryId": "0x2",
+                "oracleRegistryId": "0x3", "pythFeedRegistryId": "0x4",
+                "poolAllowlistId": "0x5", "activationDigest": "d",
+                "termsVersion": 2, "specHash": "0xabcd"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(new.terms_version, Some(2));
+        assert_eq!(new.spec_hash.as_deref(), Some("0xabcd"));
+        let back = serde_json::to_string(&new).unwrap();
+        assert!(back.contains("\"termsVersion\":2"));
+        assert!(back.contains("\"specHash\":\"0xabcd\""));
     }
 
     #[test]
